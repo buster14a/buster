@@ -7,10 +7,25 @@
 # Clang backend job per part; a relocatable link joins the parts in order and restores the source unit's original public
 # symbols before the ordinary final link. The code is the single object's, function for function, at the same
 # addresses. No C boundary or private state moves between source units. The Debug configuration compiles them as usual.
+#
+# The Develop configuration (docs/commands/build.md, "Develop"; docs/stage1-build-design.md) splits every main.c unit
+# before the optimizer instead: the unit compiles C to bitcode without any LLVM pass, tools/codegen/presplit.c deals its
+# functions into parts by file, each part's job runs the O3 pipeline and the code generator on its part, and the same
+# relocatable link joins them. A rebuild repeats only the parts whose bitcode changed. Release's commands are unchanged.
 
 # Code parts per unit, besides the part of its global variables: one per job of build.sh's default, a physical core
 # of the 9700X (8). Fourteen, one per hardware thread, ran in two waves there and took 74.0 s against 73.1 s.
 set(BUSTER_CODEGEN_PARTITIONS 8)
+
+# The Develop configuration's code parts of each main.c unit, about 50,000 unoptimized instructions each in the
+# checker's unit (the design's rule 8, the one count measured: 48), a share of that in the others by their size on the
+# 9700X (#2559's record): the backend's two thirds, the front end's a third, the rest 8 each.
+set(BUSTER_DEVELOP_PARTITIONS main_unit_checker=48 main_unit_backend=32 main_unit_frontend=16)
+set(BUSTER_DEVELOP_DEFAULT_PARTITIONS 8)
+# presplit's options, the design's (docs/stage1-build-design.md, "The splitter's rules"): bodies of up to 100
+# unoptimized instructions read where they are called, chunks at one name in 24, single callers' trees up to 150,000
+# instructions, each file's functions over a run of parts sized at half the unit's mean, the tests' functions optnone.
+set(BUSTER_DEVELOP_SPLIT_OPTIONS --import 100 --anchor 24 --cohere 150000 --spread 2 --tests-optnone)
 
 # llvm-config's system libraries (ARGN) as this host links them, into `output`: one it names by a path the host lacks
 # links by its name, from the host's library path. The official release's llvm-config names its build machine's static
@@ -80,7 +95,7 @@ function(buster_codegen_tools available missing)
         set(llvm_libs "")
         foreach(mode link-shared link-static)
             if(llvm_libs STREQUAL "")
-                execute_process(COMMAND "${found_CONFIG}" "--${mode}" --libs core bitreader bitwriter analysis passes
+                execute_process(COMMAND "${found_CONFIG}" "--${mode}" --libs core bitreader bitwriter analysis passes transformutils
                     OUTPUT_VARIABLE libraries RESULT_VARIABLE libraries_status ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE TIMEOUT 30)
                 execute_process(COMMAND "${found_CONFIG}" "--${mode}" --system-libs
                     OUTPUT_VARIABLE system RESULT_VARIABLE system_status ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE TIMEOUT 30)
@@ -130,25 +145,35 @@ function(buster_codegen_tools available missing)
     set(${missing} "${absent}" PARENT_SCOPE)
 endfunction()
 
-# The splitter, built once for every configuration with the LLVM it reads, at configure-time flags llvm-config gives.
+# The splitters, built once for every configuration with the LLVM they read, at configure-time flags llvm-config gives:
+# split (Release's, after the optimizer) and presplit (Develop's, before it), which share split_bitcode.cpp.
 function(buster_codegen_splitter)
     set(directory "${CMAKE_BINARY_DIR}/codegen-tools")
     set(splitter "${directory}/split")
+    set(presplitter "${directory}/presplit")
     get_filename_component(tools "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../tools/codegen" ABSOLUTE)
-    set(sources "${tools}/split.c" "${tools}/split_bitcode.cpp")
-    add_custom_command(OUTPUT "${splitter}"
+    set(link "${BUSTER_CODEGEN_LLVM_ldflags}" "${BUSTER_CODEGEN_LLVM_libs}" "${BUSTER_CODEGEN_LLVM_system_libs}")
+    add_custom_command(OUTPUT "${directory}/split_bitcode.o"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${directory}"
-        COMMAND "${CMAKE_C_COMPILER}" -O2 -Wall -Wextra -Werror ${BUSTER_CODEGEN_LLVM_cflags}
-            -c "${tools}/split.c" -o "${directory}/split.o"
         COMMAND "${BUSTER_CODEGEN_CXX}" -O2 -Wall -Werror ${BUSTER_CODEGEN_LLVM_cxxflags}
             -c "${tools}/split_bitcode.cpp" -o "${directory}/split_bitcode.o"
-        COMMAND "${BUSTER_CODEGEN_CXX}" -o "${splitter}" "${directory}/split.o" "${directory}/split_bitcode.o"
-            ${BUSTER_CODEGEN_LLVM_ldflags} ${BUSTER_CODEGEN_LLVM_libs} ${BUSTER_CODEGEN_LLVM_system_libs}
-        DEPENDS ${sources} "${BUSTER_CODEGEN_CONFIG}"
-        COMMENT "Building the optimized-IR splitter"
+        DEPENDS "${tools}/split_bitcode.cpp" "${BUSTER_CODEGEN_CONFIG}"
+        COMMENT "Building the splitters' LLVM calls"
         VERBATIM)
-    add_custom_target(buster_codegen_splitter DEPENDS "${splitter}")
+    foreach(tool split presplit)
+        add_custom_command(OUTPUT "${directory}/${tool}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${directory}"
+            COMMAND "${CMAKE_C_COMPILER}" -O2 -Wall -Wextra -Werror ${BUSTER_CODEGEN_LLVM_cflags}
+                -c "${tools}/${tool}.c" -o "${directory}/${tool}.o"
+            COMMAND "${BUSTER_CODEGEN_CXX}" -o "${directory}/${tool}" "${directory}/${tool}.o" "${directory}/split_bitcode.o" ${link}
+            DEPENDS "${tools}/${tool}.c" "${directory}/split_bitcode.o" "${BUSTER_CODEGEN_CONFIG}"
+            COMMENT "Building the IR splitter ${tool}"
+            COMMAND_EXPAND_LISTS
+            VERBATIM)
+    endforeach()
+    add_custom_target(buster_codegen_splitter DEPENDS "${splitter}" "${presplitter}")
     set(BUSTER_CODEGEN_SPLIT "${splitter}" PARENT_SCOPE)
+    set(BUSTER_CODEGEN_PRESPLIT "${presplitter}" PARENT_SCOPE)
 endfunction()
 
 function(buster_codegen_split_unit name output)
@@ -159,14 +184,32 @@ function(buster_codegen_split_unit name output)
     endif()
 endfunction()
 
-# The unit's object for the link: in Release, the joined native parts of a split unit.
+# Develop's code parts of unit `name`, into `output`: 0 for a unit Develop compiles whole (the units of their own), or
+# when the Develop configuration isn't built in parts (buster_develop_parts, which CMakeLists.txt sets).
+function(buster_develop_partitions name output)
+    set(parts 0)
+    if(buster_develop_parts AND name MATCHES "^main(_unit_[a-z0-9_]+)?$")
+        set(parts ${BUSTER_DEVELOP_DEFAULT_PARTITIONS})
+        foreach(entry IN LISTS BUSTER_DEVELOP_PARTITIONS)
+            if(entry MATCHES "^${name}=([0-9]+)$")
+                set(parts ${CMAKE_MATCH_1})
+            endif()
+        endforeach()
+    endif()
+    set(${output} ${parts} PARENT_SCOPE)
+endfunction()
+
+# The unit's object for the link: in Release, the joined native parts of a split unit; in Develop, those of a unit split
+# before the optimizer.
 function(buster_native_object output name)
     buster_codegen_split_unit("${name}" split)
+    buster_develop_partitions("${name}" develop)
+    set(object "$<TARGET_OBJECTS:buster_${name}>")
+    if(NOT develop EQUAL 0)
+        set(object "$<IF:$<CONFIG:Develop>,${CMAKE_BINARY_DIR}/Develop/develop/${name}/native.o,${object}>")
+    endif()
     if(split)
-        set(native "${CMAKE_BINARY_DIR}/Release/codegen/${name}/native.o")
-        set(object "$<IF:$<CONFIG:Release>,${native},$<TARGET_OBJECTS:buster_${name}>>")
-    else()
-        set(object "$<TARGET_OBJECTS:buster_${name}>")
+        set(object "$<IF:$<CONFIG:Release>,${CMAKE_BINARY_DIR}/Release/codegen/${name}/native.o,${object}>")
     endif()
     set(${output} "${object}" PARENT_SCOPE)
 endfunction()
@@ -233,6 +276,61 @@ function(buster_codegen_unit name)
         DEPENDS ${objects} "${exports}" "${locals}" "${BUSTER_CODEGEN_LLD}" "${BUSTER_CODEGEN_OBJCOPY}" "${BUSTER_CODEGEN_NM}"
             "${BUSTER_CODEGEN_READELF}" "${scripts}/BusterCodegenMerge.cmake"
         COMMENT "Combining ${name}'s native parts"
+        ${explicit}
+        VERBATIM)
+endfunction()
+
+# Develop's split of unit `name` before the optimizer (tools/codegen/presplit.c), its parts' jobs and their join, into
+# Develop/develop/NAME/: the unit's Develop object is its bitcode before any LLVM pass, with line tables. A part's job
+# runs the unit's -march, Develop's debug information and the O3 pipeline and code generator on its part; it depends on
+# its bitcode alone, which the split rewrites only when it changed (Ninja's restat).
+function(buster_develop_unit name)
+    set(scripts "${CMAKE_CURRENT_FUNCTION_LIST_DIR}")
+    set(explicit "")
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.27)
+        set(explicit DEPENDS_EXPLICIT_ONLY)
+    endif()
+    buster_develop_partitions("${name}" partitions)
+    set(directory "${CMAKE_BINARY_DIR}/$<CONFIG>/develop/${name}")
+    set(parts "")
+    foreach(part RANGE ${partitions})
+        list(APPEND parts "${directory}/part${part}.bc")
+    endforeach()
+    set(exports "${directory}/exports.txt")
+    set(locals "${directory}/locals.txt")
+    set(stamp "${directory}/split.stamp")
+    add_custom_command(OUTPUT "${stamp}"
+        BYPRODUCTS ${parts} "${exports}" "${locals}"
+        COMMAND "${CMAKE_COMMAND}" "-DINPUT=$<TARGET_OBJECTS:buster_${name}>" "-DDIRECTORY=${directory}"
+            "-DSPLIT=${BUSTER_CODEGEN_PRESPLIT}" "-DNM=${BUSTER_CODEGEN_NM}" "-DPARTITIONS=${partitions}"
+            "-DOPTIONS=${BUSTER_DEVELOP_SPLIT_OPTIONS}" -P "${scripts}/BusterCodegenSplit.cmake"
+        DEPENDS "$<TARGET_OBJECTS:buster_${name}>" "${BUSTER_CODEGEN_PRESPLIT}" "${BUSTER_CODEGEN_NM}"
+            "${scripts}/BusterCodegenSplit.cmake"
+        COMMENT "Partitioning ${name}'s IR before the optimizer"
+        ${explicit}
+        VERBATIM)
+    add_custom_target(buster_${name}_develop_split DEPENDS "${stamp}")
+    set(objects "")
+    foreach(part RANGE ${partitions})
+        set(object "${directory}/part${part}.o")
+        add_custom_command(OUTPUT "${object}"
+            COMMAND "${CMAKE_C_COMPILER}" -x ir ${buster_host_flags} ${BUSTER_DEVELOP_CONFIGURATION_DEBUG} -fno-stack-protector
+                ${buster_optimization} -Wall -Werror -Wno-unused-command-line-argument -c "${directory}/part${part}.bc" -o "${object}"
+            DEPENDS "${directory}/part${part}.bc"
+            COMMENT "Optimizing and generating ${name}'s part ${part}"
+            COMMAND_EXPAND_LISTS
+            ${explicit}
+            VERBATIM)
+        list(APPEND objects "${object}")
+    endforeach()
+    set(native "${directory}/native.o")
+    add_custom_command(OUTPUT "${native}"
+        COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${native}" "-DEXPORTS=${exports}" "-DLOCALS=${locals}" "-DOBJECTS=${objects}"
+            "-DLLD=${BUSTER_CODEGEN_LLD}" "-DOBJCOPY=${BUSTER_CODEGEN_OBJCOPY}" "-DNM=${BUSTER_CODEGEN_NM}"
+            "-DREADELF=${BUSTER_CODEGEN_READELF}" -P "${scripts}/BusterCodegenMerge.cmake"
+        DEPENDS ${objects} "${exports}" "${locals}" "${BUSTER_CODEGEN_LLD}" "${BUSTER_CODEGEN_OBJCOPY}" "${BUSTER_CODEGEN_NM}"
+            "${BUSTER_CODEGEN_READELF}" "${scripts}/BusterCodegenMerge.cmake"
+        COMMENT "Combining ${name}'s parts"
         ${explicit}
         VERBATIM)
 endfunction()

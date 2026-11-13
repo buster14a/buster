@@ -2,7 +2,7 @@
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 #
 # Prints the build's description without configuring a build tree, for build.sh's print commands:
-# cmake -DBUSTER_PRINT=WHAT -DBUSTER_PRINT_OUTPUT=FILE -DBUSTER_C_COMPILER=CLANG [-DBUSTER_PRINT_CONFIG=Debug|Release]
+# cmake -DBUSTER_PRINT=WHAT -DBUSTER_PRINT_OUTPUT=FILE -DBUSTER_C_COMPILER=CLANG [-DBUSTER_PRINT_CONFIG=Debug|Release|Develop]
 # [-DBUSTER_<SETTING>=VALUE...] -P BusterPrint.cmake
 #
 # Writes WHAT's arguments to FILE, each on a line of its own (none holds a newline: BusterSettings.cmake rejects
@@ -28,8 +28,8 @@ endif()
 if(NOT DEFINED BUSTER_PRINT_CONFIG)
     set(BUSTER_PRINT_CONFIG Release)
 endif()
-if(NOT BUSTER_PRINT_CONFIG MATCHES "^(Debug|Release)$")
-    message(FATAL_ERROR "buster: the configuration must be Debug or Release")
+if(NOT BUSTER_PRINT_CONFIG MATCHES "^(Debug|Release|Develop)$")
+    message(FATAL_ERROR "buster: the configuration must be Debug, Release or Develop")
 endif()
 
 buster_settings_normalize()
@@ -50,6 +50,8 @@ elseif(BUSTER_PRINT MATCHES "^(compile|sanitizer|assembly)-flags$")
     if(BUSTER_PRINT_CONFIG STREQUAL "Debug")
         set(buster_debug ${BUSTER_DEBUG_CONFIGURATION_DEBUG})
         set(buster_optimization ${BUSTER_DEBUG_CONFIGURATION_OPTIMIZATION})
+    elseif(BUSTER_PRINT_CONFIG STREQUAL "Develop")
+        set(buster_debug ${BUSTER_DEVELOP_CONFIGURATION_DEBUG})
     endif()
     if(BUSTER_PRINT STREQUAL "compile-flags")
         set(arguments ${buster_debug} ${buster_flags} ${buster_optimization} ${buster_defines})

@@ -1945,7 +1945,11 @@ static bool tier1_cert_emitted_walk(Tier1CertEmittedBuild* build, uint32_t b, ui
     // A path that arrives visits each of the tail's records once at most.
     for (uint32_t steps = 0; valid && !arrived && steps <= end - start + 1; steps += 1)
     {
-        arrived = pc == target && (steps != 0 || pc < start || pc >= end);
+        // A jump's copy of the successor's first record, an indirect jump (#2554, tier1_emit_cfg_dispatch), is that record
+        // run in the state the jump would have taken there: an arrival.
+        const bool copied = pc >= start && pc < end && pc != target && target < emitted->code.count && tier1_cert_emitted_kind(emitted->origins[pc]) == TIER1_ORIGIN_CONTROL &&
+                            emitted->code.records[target].form == X86_FORM_JMP_RM64 && tier1_cert_emitted_exactly(emitted->code.records[pc], emitted->code.records[target]);
+        arrived = (pc == target && (steps != 0 || pc < start || pc >= end)) || copied;
         valid = arrived || (pc >= start && pc < end);
         const uint32_t origin = valid && !arrived ? emitted->origins[pc] : 0;
         const Tier1Origin kind = tier1_cert_emitted_kind(origin);

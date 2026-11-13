@@ -44,6 +44,8 @@
 #define BUSTER_TIER1_ALLOCATE_NO_REGISTER UINT8_MAX
 // A hinted value's last place, where the scan with required uses left it in memory: no register to follow.
 #define BUSTER_TIER1_ALLOCATE_MEMORY_HINT 0xfeu
+// In a hint_intervals entry: the named interval's register at its end, rather than at its start (#2553).
+#define BUSTER_TIER1_ALLOCATE_HINT_EXIT 0x80000000u
 
 typedef struct Tier1FixedIntervals Tier1FixedIntervals;
 struct Tier1FixedIntervals
@@ -73,7 +75,10 @@ struct Tier1AllocationInput
     const uint32_t* hint_values;
     // Optional, with hint_values: per interval, an interval of its class starting before it, whose register at its
     // start the interval takes first (UINT32_MAX for none): a block's entry can take a sibling block's convention, as
-    // every successor of a dispatch loop's join does from the first, which no value's last register says.
+    // every successor of a dispatch loop's join does from the first, which no value's last register says. With
+    // BUSTER_TIER1_ALLOCATE_HINT_EXIT, the named interval ends at or before this one starts, and its register at its end
+    // is the one (#2553): a block's entry takes its values' places at the exit of a block that dominates it, and a phi
+    // its operand's at a predecessor's.
     const uint32_t* hint_intervals;
     const uint8_t* rematerializable;
     // Both use columns may be absent (next use then conservatively means interval end). Otherwise each slice is
@@ -84,6 +89,13 @@ struct Tier1AllocationInput
     // operand. Required uses trigger reload/resplit in the scalar path. A position denotes one simultaneous phase;
     // a producer uses separate input/output phases when the instruction may reuse a dying input register.
     const uint8_t* use_required;
+    // Optional, with use_required (#2574): positions, nondecreasing, where the registers clobber_registers[class] lose
+    // their values, as a call's definition phase does the caller-saved ones. Only a rematerializable interval there leaves
+    // its register, for a recomputation where a required use next needs it; the consumer saves every other value around
+    // the clobber itself. A clobber at an interval's start doesn't reach it: the clobber comes first.
+    const uint32_t* clobbers;
+    uint32_t clobber_count;
+    uint32_t clobber_registers[BUSTER_TIER1_ALLOCATE_CLASSES];
     uint32_t use_count;
     uint32_t count;
     uint32_t value_count;
@@ -160,6 +172,15 @@ static bool tier1_allocation_input_valid(const Tier1AllocationInput* input)
         valid = valid && (input->fixed.count == 0 || (input->fixed.starts != 0 && input->fixed.ends != 0 && input->fixed.registers != 0 && input->fixed.classes != 0));
         valid = valid && ((input->use_offsets == 0 && input->use_positions == 0 && input->use_count == 0) || (input->use_offsets != 0 && (input->use_count == 0 || input->use_positions != 0)));
         valid = valid && (input->use_required == 0 || input->use_offsets != 0);
+        valid = valid && (input->clobber_count == 0 || (input->clobbers != 0 && input->use_required != 0 && input->clobber_count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS));
+        for (uint32_t k = 0; valid && k < input->clobber_count; k += 1)
+        {
+            valid = input->clobbers[k] < input->position_count && (k == 0 || input->clobbers[k - 1] <= input->clobbers[k]);
+        }
+        for (uint32_t c = 0; valid && c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
+        {
+            valid = input->clobber_count == 0 || (input->clobber_registers[c] & ~input->registers[c]) == 0;
+        }
         if (valid && input->use_offsets != 0)
         {
             valid = input->use_offsets[0] == 0 && input->use_offsets[input->count] == input->use_count;
@@ -228,18 +249,34 @@ static uint8_t tier1_allocation_spill_kind(const Tier1AllocationInput* input, ui
     return input->rematerializable != 0 && input->rematerializable[interval] != 0 ? BUSTER_TIER1_ALLOCATE_REMATERIALIZE : BUSTER_TIER1_ALLOCATE_SPILL;
 }
 
+// Whether a clobber (#2574) lies inside (start, end): one at the start precedes the interval's start event.
+static bool tier1_allocation_clobbered(const Tier1AllocationInput* input, uint32_t start, uint32_t end)
+{
+    uint32_t low = 0;
+    uint32_t high = input->clobber_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        low = input->clobbers[middle] <= start ? middle + 1 : low;
+        high = input->clobbers[middle] <= start ? high : middle;
+    }
+    return low < input->clobber_count && input->clobbers[low] < end;
+}
+
 // Scalar decisions are bounded by 32 physical registers, not by the number of previously seen intervals. An interval
 // frees its register at its end event, unless an eviction gave the register to another interval (active[r] says
 // whose it is); ends precede starts at one position, so adjacent half-open intervals still share registers.
 // Fixed clobbers restrict a whole interval; splitting around call sites belongs in the producer's machine ranges.
 // The register a hinted value holds last, or UINT8_MAX: `last` is null without hint_values. With hint_intervals, `last`'s
-// value_count + 1 bytes are followed by each interval's opening register (BUSTER_TIER1_ALLOCATE_MEMORY_HINT where it
-// started without one), which the scans and the coloring write as each interval starts.
+// value_count + 1 bytes are followed by each interval's opening register, which the scans and the coloring write as
+// each interval starts, then by each one's closing register, which they write as it ends (#2553); either is
+// BUSTER_TIER1_ALLOCATE_MEMORY_HINT where the interval had no register there.
 static uint8_t tier1_allocation_value_hint(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval)
 {
     const uint32_t value = last != 0 ? columns->hint_values[interval] : UINT32_MAX;
-    const uint32_t earlier = last != 0 && columns->hint_intervals != 0 ? columns->hint_intervals[interval] : UINT32_MAX;
-    const uint8_t opening = earlier != UINT32_MAX ? last[(uint64_t)columns->value_count + 1 + earlier] : UINT8_MAX;
+    const uint32_t named = last != 0 && columns->hint_intervals != 0 ? columns->hint_intervals[interval] : UINT32_MAX;
+    const uint64_t closings = (named & BUSTER_TIER1_ALLOCATE_HINT_EXIT) != 0 ? columns->count : 0;
+    const uint8_t opening = named != UINT32_MAX ? last[(uint64_t)columns->value_count + 1 + closings + (named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT)] : UINT8_MAX;
     // A hinted interval whose own value already had a place, in an interval earlier in layout, keeps it: a loop's header
     // after its body takes the register the body gave its phi, not its operand's.
     const uint8_t own = value != UINT32_MAX ? last[columns->values[interval]] : UINT8_MAX;
@@ -252,6 +289,21 @@ static void tier1_allocation_note_opening(const Tier1AllocationInput* columns, u
     {
         last[(uint64_t)columns->value_count + 1 + interval] = chosen < 32 ? (uint8_t)chosen : BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
     }
+}
+
+// An interval's register as it ends, or none (#2553): read by the intervals that name it with BUSTER_TIER1_ALLOCATE_HINT_EXIT.
+static void tier1_allocation_note_closing(const Tier1AllocationInput* columns, uint8_t* last, uint32_t interval, uint32_t held)
+{
+    if (last != 0 && columns->hint_intervals != 0)
+    {
+        last[(uint64_t)columns->value_count + 1 + columns->count + interval] = held < 32 ? (uint8_t)held : BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
+    }
+}
+
+// The hint bytes `last` holds: each value's, then each interval's opening and closing register with hint_intervals.
+static uint64_t tier1_allocation_hint_bytes(const Tier1AllocationInput* columns)
+{
+    return (uint64_t)columns->value_count + 1 + (columns->hint_intervals != 0 ? 2 * (uint64_t)columns->count : 0);
 }
 
 static inline __attribute__((always_inline)) bool tier1_allocate_scan(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* allowed, uint8_t* regs, uint32_t* split, uint8_t* kinds, uint8_t* last)
@@ -274,11 +326,13 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan(const Tier
             if ((events[e] & 1) == 0)
             {
                 const uint32_t r = regs[interval];
-                if (r < 32 && active[r] == interval)
+                const bool held = r < 32 && active[r] == interval;
+                if (held)
                 {
                     active[r] = UINT32_MAX;
                     occupied &= ~(1u << r);
                 }
+                tier1_allocation_note_closing(&columns, last, interval, held ? r : UINT32_MAX);
             }
             else
             {
@@ -453,9 +507,31 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
     {
         const bool use_event = (events[e] & BUSTER_TIER1_ALLOCATE_USE_EVENT) != 0;
         const uint32_t use = events[e] & ~BUSTER_TIER1_ALLOCATE_USE_EVENT;
-        const uint32_t interval = use_event ? use_intervals[use] : events[e] >> 1;
+        // A clobber (#2574): its event follows the uses' (use_count + its index), before the starts at its position.
+        const bool clobber_event = use_event && use >= columns.use_count;
+        const uint32_t interval = clobber_event ? UINT32_MAX : use_event ? use_intervals[use] : events[e] >> 1;
         const bool end_event = !use_event && (events[e] & 1) == 0;
-        if (last != 0 && !use_event && !end_event && columns.classes[interval] == class && columns.starts[interval] != claims_at)
+        if (clobber_event)
+        {
+            // Each recomputable value in a clobbered register leaves it, as an eviction does: a recomputation, no store,
+            // where its next required use takes a register again. A value required here keeps it, which its consumer saves.
+            const uint32_t position = columns.clobbers[use - columns.use_count];
+            for (uint32_t left = occupied & columns.clobber_registers[class]; left != 0; left &= left - 1)
+            {
+                const uint32_t r = (uint32_t)__builtin_ctz(left);
+                const uint32_t victim = active[r];
+                if (tier1_allocation_spill_kind(&columns, victim) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && !tier1_allocation_required_at(&columns, victim, position))
+                {
+                    tier1_allocation_finish_piece(pieces, victim, begins[victim], position, kinds[victim], regs[victim]);
+                    begins[victim] = position;
+                    kinds[victim] = BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
+                    regs[victim] = UINT8_MAX;
+                    active[r] = UINT32_MAX;
+                    occupied &= ~(1u << r);
+                }
+            }
+        }
+        else if (last != 0 && !use_event && !end_event && columns.classes[interval] == class && columns.starts[interval] != claims_at)
         {
             // Ends precede starts at a position, so the run of starts from here is every one at it.
             claims_at = columns.starts[interval];
@@ -476,13 +552,15 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
         if (end_event && columns.classes[interval] == class)
         {
             const uint32_t r = regs[interval];
-            if (r < 32 && active[r] == interval)
+            const bool held = r < 32 && active[r] == interval;
+            if (held)
             {
                 active[r] = UINT32_MAX;
                 occupied &= ~(1u << r);
             }
+            tier1_allocation_note_closing(&columns, last, interval, held ? r : UINT32_MAX);
         }
-        else if (!end_event && columns.classes[interval] == class && (!use_event || kinds[interval] != BUSTER_TIER1_ALLOCATE_REGISTER))
+        else if (!clobber_event && !end_event && columns.classes[interval] == class && (!use_event || kinds[interval] != BUSTER_TIER1_ALLOCATE_REGISTER))
         {
             const uint32_t position = use_event ? columns.use_positions[use] : columns.starts[interval];
             const bool required = tier1_allocation_required_at(&columns, interval, position);
@@ -615,6 +693,7 @@ static inline __attribute__((always_inline)) void tier1_allocation_color(const T
             level -= 1;
             ended[level] = regs[interval];
             deposited |= last != 0 ? 1u << regs[interval] : 0;
+            tier1_allocation_note_closing(input, last, interval, regs[interval]);
         }
         else if (last == 0)
         {
@@ -822,6 +901,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
                 event_count += columns.use_required[use];
             }
         }
+        event_count += columns.clobber_count;
         allocation.interval_count = columns.count;
         allocation.fragment_offsets = arena_push_array(arena, (uint64_t)columns.count + 1, sizeof(uint32_t), 4);
         allocation.starts = arena_push_array(arena, fragment_capacity, sizeof(uint32_t), 4);
@@ -846,7 +926,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
         }
         if (error == TIER1_ALLOCATION_OK && hinted)
         {
-            value_last = arena_push_array(arena, (uint64_t)columns.value_count + 1 + (columns.hint_intervals != 0 ? columns.count : 0), sizeof(uint8_t), 1);
+            value_last = arena_push_array(arena, tier1_allocation_hint_bytes(&columns), sizeof(uint8_t), 1);
             if (value_last == 0)
             {
                 error = TIER1_ALLOCATION_CAPACITY;
@@ -884,6 +964,10 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
         memset(value_active_end, 0, (uint64_t)columns.value_count * sizeof(uint32_t));
         memset(allocation.value_registers, UINT8_MAX, columns.value_count);
         memset(allocation.spill_ids, 0xff, (uint64_t)columns.value_count * sizeof(uint32_t));
+        for (uint32_t k = 0; k < columns.clobber_count; k += 1)
+        {
+            buckets[columns.clobbers[k] + 1] += 1;
+        }
         for (uint32_t i = 0; i < columns.count; i += 1)
         {
             buckets[columns.starts[i] + 1] += 1;
@@ -913,6 +997,12 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
         {
             events[buckets[columns.ends[i]]] = i * 2;
             buckets[columns.ends[i]] += 1;
+        }
+        // Clobbers (#2574) follow the ends and precede the starts, so that an interval starting at one keeps its register.
+        for (uint32_t k = 0; k < columns.clobber_count; k += 1)
+        {
+            events[buckets[columns.clobbers[k]]] = BUSTER_TIER1_ALLOCATE_USE_EVENT | (columns.use_count + k);
+            buckets[columns.clobbers[k]] += 1;
         }
         for (uint32_t i = 0; i < columns.count; i += 1)
         {
@@ -959,7 +1049,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
         }
         if (hinted && value_last != 0)
         {
-            memset(value_last, UINT8_MAX, (uint64_t)columns.value_count + 1 + (columns.hint_intervals != 0 ? columns.count : 0));
+            memset(value_last, UINT8_MAX, tier1_allocation_hint_bytes(&columns));
         }
         if (error == TIER1_ALLOCATION_OK && columns.fixed.count != 0 && !tier1_allocation_filter_fixed(input, arena, BUSTER_VECTOR_PATH(vector), events, event_count, buckets, allowed))
         {
@@ -1020,8 +1110,13 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
                 {
                     const bool use_event = (events[e] & BUSTER_TIER1_ALLOCATE_USE_EVENT) != 0;
                     const uint32_t use = events[e] & ~BUSTER_TIER1_ALLOCATE_USE_EVENT;
-                    const uint32_t interval = use_event ? use_intervals[use] : events[e] >> 1;
-                    if (columns.classes[interval] == class && use_event)
+                    // A clobber (#2574) is no use and changes no pressure.
+                    const bool clobber_event = use_event && use >= columns.use_count;
+                    const uint32_t interval = use_event ? (clobber_event ? 0 : use_intervals[use]) : events[e] >> 1;
+                    if (clobber_event)
+                    {
+                    }
+                    else if (columns.classes[interval] == class && use_event)
                     {
                         here = columns.use_positions[use] == at ? here + 1 : 1;
                         at = columns.use_positions[use];
@@ -1059,7 +1154,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
             pieces.count = 0;
             if (hinted && value_last != 0)
             {
-                memset(value_last, UINT8_MAX, (uint64_t)columns.value_count + 1 + (columns.hint_intervals != 0 ? columns.count : 0));
+                memset(value_last, UINT8_MAX, tier1_allocation_hint_bytes(&columns));
             }
         }
         for (uint32_t class = 0; error == TIER1_ALLOCATION_OK && class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
@@ -1074,6 +1169,11 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
                 {
                     class_count += 1;
                     regular &= allowed[i] == columns.registers[class];
+                    // A recomputable interval a clobber reaches (#2574) leaves its register there, which only the scan does.
+                    if (regular && columns.clobber_registers[class] != 0 && tier1_allocation_spill_kind(&columns, i) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE)
+                    {
+                        regular = !tier1_allocation_clobbered(&columns, columns.starts[i], columns.ends[i]);
+                    }
                 }
             }
             for (uint32_t e = 0; class_count != 0 && e < event_count; e += 1)
@@ -1203,15 +1303,19 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
     return error;
 }
 
-// Each hint a value of the input's, and each hinted interval one of its class that starts before it.
+// Each hint a value of the input's, and each hinted interval one of its class that starts before it; one named by its
+// exit (BUSTER_TIER1_ALLOCATE_HINT_EXIT) ends at or before it starts.
 static bool tier1_allocation_hints_valid(const Tier1AllocationInput* input)
 {
     bool valid = true;
     for (uint32_t i = 0; valid && i < input->count && input->count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS; i += 1)
     {
         valid = input->hint_values[i] == UINT32_MAX || input->hint_values[i] < input->value_count;
-        const uint32_t earlier = input->hint_intervals != 0 ? input->hint_intervals[i] : UINT32_MAX;
-        valid = valid && (earlier == UINT32_MAX || (earlier < input->count && input->classes != 0 && input->starts != 0 && input->classes[earlier] == input->classes[i] && input->starts[earlier] < input->starts[i]));
+        const uint32_t named = input->hint_intervals != 0 ? input->hint_intervals[i] : UINT32_MAX;
+        const bool exit = named != UINT32_MAX && (named & BUSTER_TIER1_ALLOCATE_HINT_EXIT) != 0;
+        const uint32_t earlier = named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT;
+        valid = valid && (named == UINT32_MAX || (earlier < input->count && input->classes != 0 && input->starts != 0 && input->classes[earlier] == input->classes[i] && input->starts[earlier] < input->starts[i] &&
+                                                  (!exit || (input->ends != 0 && input->ends[earlier] <= input->starts[i]))));
     }
     return valid;
 }

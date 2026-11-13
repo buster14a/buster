@@ -9,6 +9,7 @@
 //   ./build-regression --compile-commands-only  # Small database dependency fixture; does not build the compiler.
 //   ./build-regression --driver-only  # Small build.sh helper fixtures; does not configure or build the compiler.
 //   ./build-regression --parallel-codegen-only  # Small optimized-IR partition and dependency fixture.
+//   ./build-regression --develop-only  # The Develop configuration's checks alone, on the selected tree.
 //   ./build-regression --ownership-only [COMPILER]  # Check an existing build's fixture ownership; builds nothing.
 //
 // It removes every tree under build/cmake (clean --all) and checks that
@@ -30,6 +31,9 @@
 //   - an edited unit, an included .c and a header rebuild their dependents alone (Ninja's plan against its depfiles),
 //     and an edited unit is compiled, linked, baked and published alone;
 //   - Debug and Release share the tree, and switching back builds nothing and publishes that configuration's file;
+//   - the Develop configuration builds its units in parts beside them without changing Release's executable, leaves the
+//     benchmark units out with stand-ins that name Release, rebuilds an appended function's one part, writes the
+//     objects Release's executable writes, and after a series of edits is the same file a clean build makes;
 //   - BUSTER_BAKE reruns the post-link step alone, both ways, and BUSTER_LINKER the link;
 //   - a failed post-link step, a failed compile, an interrupt of the build's process group and a termination of
 //     build.sh alone publish nothing and leave nothing running, a clean of the tree during its build waits for the
@@ -138,11 +142,20 @@ static char root[BUSTER_REGRESSION_PATH];
 static char tree[BUSTER_REGRESSION_PATH];
 static char release[BUSTER_REGRESSION_PATH];
 static char debug[BUSTER_REGRESSION_PATH];
+static char develop[BUSTER_REGRESSION_PATH];
 static char ninja_log[PATH_MAX];
 // The source a check edits, and its copy, which is put back however the program ends.
 static const char* const edited_unit = "src/buster/compiler/tier1_model_measure.c";
 static char edited_copy[PATH_MAX];
 static bool edited;
+// The sources check_develop edits, each put back from its copy the same way.
+static const char* const develop_edited[] = {
+    "src/buster/compiler/c_check_input.c",
+    "src/buster/compiler/c_checker_driver_test.c",
+};
+#define BUSTER_REGRESSION_DEVELOP_EDITS (sizeof(develop_edited) / sizeof(develop_edited[0]))
+static char develop_copies[BUSTER_REGRESSION_DEVELOP_EDITS][PATH_MAX];
+static bool develop_saved[BUSTER_REGRESSION_DEVELOP_EDITS];
 
 static void restore(void)
 {
@@ -151,6 +164,16 @@ static void restore(void)
         char command[2 * PATH_MAX];
         snprintf(command, sizeof(command), "cp '%s' '%s'", edited_copy, edited_unit);
         edited = system(command) != 0;
+    }
+    for (uint32_t i = 0; i < BUSTER_REGRESSION_DEVELOP_EDITS; i += 1)
+    {
+        if (develop_saved[i])
+        {
+            // Room for the whole array of copies' names, which is what GCC's -Wformat-truncation bounds an element by.
+            char command[sizeof(develop_copies) + PATH_MAX];
+            snprintf(command, sizeof(command), "cp '%s' '%s'", develop_copies[i], develop_edited[i]);
+            develop_saved[i] = system(command) != 0;
+        }
     }
 }
 
@@ -1341,6 +1364,8 @@ static const OwnershipException ownership_exceptions[] = {
     { "src/buster/compiler/c_builtin_cpu.inc", ownership_checker_units, "production CPU builtin declarations", 0 },
     { "src/buster/compiler/ir_dataflow.c", ownership_backend_units, "production IR dataflow implementation", 0 },
     { "src/buster/compiler/ir_if_convert.c", ownership_backend_units, "production if-conversion pass; CHECKER retains its original include position", 0 },
+    { "src/buster/compiler/ir_thread.c", ownership_backend_units, "production truth-value threading pass; CHECKER includes it through the Tier 1 driver", 0 },
+    { "src/buster/compiler/ir_truth.c", ownership_backend_units, "production truth-value simplification; the threading fixtures reach it before the Tier 1 driver", 0 },
     { "src/buster/compiler/ir_optimize_verified.c", ownership_backend_units, "production verified optimizer pass; CHECKER retains its original include position", 0 },
 };
 
@@ -1353,6 +1378,8 @@ static const OwnershipException ownership_fuzz_exceptions[] = {
     { "src/buster/compiler/c_builtin_cpu.inc", "main.c main_unit_backend.c main_unit_check_builtins.c main_unit_checker.c", "production CPU builtin declarations with fuzz source consumers", 0 },
     { "src/buster/compiler/ir_dataflow.c", "main.c main_unit_backend.c main_unit_checker.c", "production IR dataflow implementation with fuzz consumers", 0 },
     { "src/buster/compiler/ir_if_convert.c", "main.c main_unit_backend.c main_unit_checker.c", "production if-conversion pass with fuzz consumers", 0 },
+    { "src/buster/compiler/ir_thread.c", "main.c main_unit_backend.c main_unit_checker.c", "production truth-value threading pass with fuzz consumers", 0 },
+    { "src/buster/compiler/ir_truth.c", "main.c main_unit_backend.c main_unit_checker.c", "production truth-value simplification with fuzz consumers", 0 },
     { "src/buster/compiler/ir_optimize_verified.c", "main.c main_unit_backend.c main_unit_checker.c", "production verified optimizer pass with fuzz consumers", 0 },
 };
 
@@ -1597,11 +1624,12 @@ static void check_existing_ownership(const char* compiler)
     }
     // realpath resolves symbolic links, not build/compiler's hard link. Match that publication against the
     // selected tree's outputs rather than guessing its configuration; unsupported detached copies fail closed.
-    if (!ownership_suffix(resolved, "/Release/compiler") && !ownership_suffix(resolved, "/Debug/compiler"))
+    if (!ownership_suffix(resolved, "/Release/compiler") && !ownership_suffix(resolved, "/Debug/compiler") &&
+        !ownership_suffix(resolved, "/Develop/compiler"))
     {
-        static const char* configs[] = { "Release", "Debug" };
+        static const char* configs[] = { "Release", "Debug", "Develop" };
         bool found = false;
-        for (uint32_t i = 0; i < 2 && !found; i += 1)
+        for (uint32_t i = 0; i < 3 && !found; i += 1)
         {
             char* output[] = { "./build.sh", "print-output", "--config", (char*)configs[i], 0 };
             capture_line(output, selected, sizeof(selected));
@@ -1990,11 +2018,13 @@ static void check_incremental(void)
         { "src/buster/compiler/ir_dataflow.c", backend_main_units },
         { "src/buster/compiler/ir_optimize_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/ir_if_convert_test.c", "main_unit_backend.c " },
+        { "src/buster/compiler/ir_thread_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/ir_optimize_text_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/ir_optimize_verified_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/tier1_call_probe_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/tier1_address_coalesce_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/ir_if_convert.c", backend_main_units },
+        { "src/buster/compiler/ir_thread.c", backend_main_units },
         { "src/buster/compiler/ir_optimize_verified.c", backend_main_units },
         { "src/buster/compiler/tier1_select_burs_test.c", "main_unit_backend.c main_unit_checker.c " },
         { "src/buster/compiler/preprocessor_fuzz_generate.c", "main_unit_frontend.c " },
@@ -2321,6 +2351,216 @@ static void check_clean_all(void)
         fail("clean --all left a tree or a published file");
     }
     pass("clean --all waits for a build of a tree, then removes every tree and the published files");
+}
+
+// The number of times `needle` occurs in the file `path`.
+static uint32_t occurrences(const char* path, const char* needle)
+{
+    Text text = read_file(path);
+    uint32_t count = 0;
+    for (const char* cursor = text.data; (cursor = strstr(cursor, needle)) != 0; cursor += strlen(needle))
+    {
+        count += 1;
+    }
+    free(text.data);
+    return count;
+}
+
+// Edits develop_edited's `index`: `text` appended, or put before its first line when `before`. The first edit saves the
+// file (cp -p, its time with it).
+static void develop_edit(uint32_t index, const char* text, bool before)
+{
+    if (!develop_saved[index])
+    {
+        snprintf(develop_copies[index], sizeof(develop_copies[index]), "%s/develop-edit-%u.c", work, index);
+        char* save[] = { "cp", "-p", (char*)develop_edited[index], develop_copies[index], 0 };
+        if (run(0, 0, save) != 0)
+        {
+            fail("can't save %s", develop_edited[index]);
+        }
+        develop_saved[index] = true;
+    }
+    Text source = read_file(develop_edited[index]);
+    const size_t length = strlen(text);
+    char* edited_text = malloc(source.length + length + 1);
+    if (edited_text == 0)
+    {
+        fail("out of memory editing %s", develop_edited[index]);
+    }
+    const char* first = before ? text : source.data;
+    const size_t first_length = before ? length : source.length;
+    memcpy(edited_text, first, first_length);
+    memcpy(edited_text + first_length, before ? source.data : text, before ? source.length : length);
+    edited_text[source.length + length] = 0;
+    write_file(develop_edited[index], edited_text, 0644);
+    free(edited_text);
+    free(source.data);
+}
+
+// The Develop configuration (docs/commands/build.md, "Develop"; #2559): Release's flags with its main.c units split
+// before the optimizer (tools/codegen/presplit.c), line tables, the tests' functions optnone and the benchmark units
+// left out. It needs the parts' tools, as BUSTER_PARALLEL_CODEGEN's auto finds them. It leaves the sources and
+// Release's executable as they were, and Develop's outputs cleaned.
+static void check_develop(void)
+{
+    char build_log[PATH_MAX];
+    snprintf(build_log, sizeof(build_log), "%s/build.log", work);
+    const struct stat release_status = status_of(release);
+    BUILD("--config", "Develop");
+    if (access(develop, X_OK) != 0 || !same_file("build/compiler", develop) || !compile_commands_of("Develop"))
+    {
+        fail("the Develop build didn't publish its executable and compile commands");
+    }
+    if (!same_time(status_of(release), release_status))
+    {
+        fail("the Develop build changed the Release executable");
+    }
+    char stamp[PATH_MAX];
+    snprintf(stamp, sizeof(stamp), "%s/Develop/develop/main_unit_checker/split.stamp", tree);
+    if (access(stamp, F_OK) != 0)
+    {
+        fail("Develop compiled main_unit_checker.c whole: its parts need parallel native generation's tools (the configure step names what is missing)");
+    }
+    char benchmark_log[PATH_MAX];
+    snprintf(benchmark_log, sizeof(benchmark_log), "%s/develop-benchmark.log", work);
+    char* benchmark[] = { develop, "benchmark-parser", 0 };
+    const int benchmark_status = run(benchmark_log, 0, benchmark);
+    // A scalar host's executable refuses every benchmark command before it dispatches one (main.c), so there the
+    // stand-in is checked by its symbol instead of its message.
+    const bool scalar = occurrences(benchmark_log, "benchmarks require an AVX-512 host build") == 1;
+    const bool named = occurrences(benchmark_log, "Develop's leaves c_parser_benchmark.c out") == 1 && occurrences(benchmark_log, "build Release") == 1;
+    if (benchmark_status != 1 || (scalar ? !has_symbol(develop, " T run_parser_benchmark") : !named))
+    {
+        fail("Develop's benchmark-parser didn't fail naming the Release configuration: %s", read_file(benchmark_log).data);
+    }
+    char* baked[] = { develop, "test-baked-tables", 0 };
+    Text log = capture(baked);
+    free(log.data);
+    pass("Develop builds in parts beside Release, which it leaves as it was, and its benchmark commands name Release%s",
+         scalar ? " (a scalar host refuses them first; the stand-in is linked)" : "");
+
+    static Snapshot before;
+    char names[8192];
+    snapshot(&before);
+    BUILD("build");
+    ran_since(&before, names, sizeof(names));
+    if (names[0] != 0 || !same_file("build/compiler", release) || !compile_commands_of("Release"))
+    {
+        fail("switching to Release ran %s or didn't publish it", names);
+    }
+    BUILD("--config", "Develop");
+    ran_since(&before, names, sizeof(names));
+    if (names[0] != 0 || !same_file("build/compiler", develop) || !compile_commands_of("Develop"))
+    {
+        fail("switching back to Develop ran %s or didn't publish it", names);
+    }
+    pass("Release and Develop share the tree and switch without building");
+
+    // The executables differ in code, not in what they write: the same object from the same C, at both tiers.
+    static const char* const tiers[] = { 0, "--tier1" };
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        char objects[2][PATH_MAX];
+        const char* compilers[2] = { release, develop };
+        for (uint32_t c = 0; c < 2; c += 1)
+        {
+            snprintf(objects[c], sizeof(objects[c]), "%s/develop-object-%u-%u.o", work, i, c);
+            char* compile[] = { (char*)compilers[c], "-c", "tools/ci/build_regression.c", "-o", objects[c], (char*)tiers[i], 0 };
+            log = capture(compile);
+            free(log.data);
+        }
+        if (!same_bytes(objects[0], objects[1]))
+        {
+            fail("Release's and Develop's executables wrote different objects of tools/ci/build_regression.c%s%s", tiers[i] != 0 ? " with " : "",
+                 tiers[i] != 0 ? tiers[i] : "");
+        }
+    }
+    pass("Release's and Develop's executables write the same objects");
+
+    // The edits: a function appended to the checker's unit's c_check_input.c, then one before its first line, then one
+    // appended to a test file of that unit, then a header's time alone. An appended function changes its part alone.
+    static const char appended[] = "\n__attribute__((used)) static const char* buster_regression_develop_appended(void)\n"
+                                   "{\n    return \"develop appended\";\n}\n";
+    static const char prepended[] = "__attribute__((used)) static const char* buster_regression_develop_prepended(void)\n"
+                                    "{\n    return \"develop prepended\";\n}\n";
+    static const char tested[] = "\n__attribute__((used)) static const char* buster_regression_develop_test(void)\n"
+                                 "{\n    return \"develop test\";\n}\n";
+    develop_edit(0, appended, false);
+    BUILD("--config", "Develop");
+    const uint32_t append_parts = occurrences(build_log, "Optimizing and generating main_unit_checker's part");
+    if (append_parts != 1 || occurrences(build_log, "Optimizing and generating") != 1)
+    {
+        fail("a function appended to c_check_input.c optimized %u of the checker's parts, and %u parts in all, not 1", append_parts,
+             occurrences(build_log, "Optimizing and generating"));
+    }
+    develop_edit(0, prepended, true);
+    BUILD("--config", "Develop");
+    const uint32_t prepend_parts = occurrences(build_log, "Optimizing and generating main_unit_checker's part");
+    if (prepend_parts == 0 || prepend_parts > 12 || occurrences(build_log, "Optimizing and generating") != prepend_parts)
+    {
+        fail("a function before c_check_input.c's first line optimized %u of the checker's parts, not 1 to 12", prepend_parts);
+    }
+    develop_edit(1, tested, false);
+    BUILD("--config", "Develop");
+    if (occurrences(build_log, "Optimizing and generating") != 1)
+    {
+        fail("a function appended to c_checker_driver_test.c optimized %u parts, not 1", occurrences(build_log, "Optimizing and generating"));
+    }
+    const char* const header = "src/buster/compiler/host_isa.h";
+    const struct stat header_status = status_of(header);
+    if (utimensat(AT_FDCWD, header, 0, 0) != 0)
+    {
+        fail("can't update host_isa.h's time");
+    }
+    BUILD("--config", "Develop");
+    // Every unit that reads the header compiles again; the split ones' parts come out the same, so none is optimized
+    // or joined again (the units Develop compiles whole relink the executable).
+    if (occurrences(build_log, "Optimizing and generating") != 0 || occurrences(build_log, "Combining") != 0 ||
+        occurrences(build_log, "Partitioning main_unit_checker's IR before the optimizer") != 1)
+    {
+        fail("a header's time alone optimized %u parts or joined a unit's again", occurrences(build_log, "Optimizing and generating"));
+    }
+    char incremental[PATH_MAX];
+    snprintf(incremental, sizeof(incremental), "%s/develop-incremental", work);
+    char* keep[] = { "cp", develop, incremental, 0 };
+    if (run(0, 0, keep) != 0)
+    {
+        fail("can't keep Develop's incremental executable");
+    }
+    BUILD("clean", "--config", "Develop");
+    BUILD("--config", "Develop");
+    if (!same_bytes(develop, incremental))
+    {
+        fail("Develop's executable after the edits isn't the one a clean build of the same sources makes");
+    }
+    pass("an appended function optimizes its one part (one before the file's first line %u of 48), a header's time none, "
+         "and the executable after the edits is a clean build's",
+         prepend_parts);
+
+    // The sources as they were, their times with them, so that Release's objects stay current; Develop's, built from
+    // the edits, go.
+    const struct timespec header_times[2] = { header_status.st_atim, header_status.st_mtim };
+    if (utimensat(AT_FDCWD, header, header_times, 0) != 0)
+    {
+        fail("can't restore host_isa.h's time");
+    }
+    for (uint32_t i = 0; i < BUSTER_REGRESSION_DEVELOP_EDITS; i += 1)
+    {
+        char* put_back[] = { "cp", "-p", develop_copies[i], (char*)develop_edited[i], 0 };
+        if (develop_saved[i] && run(0, 0, put_back) != 0)
+        {
+            fail("can't restore %s", develop_edited[i]);
+        }
+        develop_saved[i] = false;
+    }
+    BUILD("clean", "--config", "Develop");
+    snapshot(&before);
+    BUILD("build");
+    ran_since(&before, names, sizeof(names));
+    if (strstr(names, ".c.o") != 0 || !same_time(status_of(release), release_status))
+    {
+        fail("restoring the sources Develop's checks edited rebuilt Release's %s", names);
+    }
 }
 
 static void check_failures(void)
@@ -3374,9 +3614,10 @@ int main(int argc, char** argv)
     const bool driver_only = argc == 2 && strcmp(argv[1], "--driver-only") == 0;
     const bool codegen_only = argc == 2 && strcmp(argv[1], "--parallel-codegen-only") == 0;
     const bool ownership_only = (argc == 2 || argc == 3) && strcmp(argv[1], "--ownership-only") == 0;
-    if (argc != 1 && !flags_only && !crt_only && !commands_only && !driver_only && !ownership_only && !codegen_only)
+    const bool develop_only = argc == 2 && strcmp(argv[1], "--develop-only") == 0;
+    if (argc != 1 && !flags_only && !crt_only && !commands_only && !driver_only && !ownership_only && !codegen_only && !develop_only)
     {
-        fail("usage: build-regression [--flags-only | --crt-link-only | --compile-commands-only | --driver-only | --parallel-codegen-only | --ownership-only [COMPILER]]");
+        fail("usage: build-regression [--flags-only | --crt-link-only | --compile-commands-only | --driver-only | --parallel-codegen-only | --develop-only | --ownership-only [COMPILER]]");
     }
     if (getcwd(root, sizeof(root)) == 0 || access("build.sh", X_OK) != 0)
     {
@@ -3409,31 +3650,42 @@ int main(int argc, char** argv)
         check_codegen_system_libraries();
         check_parallel_codegen();
     }
-    if (!ownership_only && !driver_only && !flags_only && !commands_only && !codegen_only)
+    if (!ownership_only && !driver_only && !flags_only && !commands_only && !codegen_only && !develop_only)
     {
         check_crt_link_dependencies();
     }
-    if (!ownership_only && !driver_only && !flags_only && !crt_only && !codegen_only)
+    if (!ownership_only && !driver_only && !flags_only && !crt_only && !codegen_only && !develop_only)
     {
         check_compile_commands();
     }
     if (!ownership_only && !driver_only && !crt_only && !commands_only && !codegen_only)
     {
-        BUILD("clean");
         char* output[] = { "./build.sh", "print-output", 0 };
         char* output_debug[] = { "./build.sh", "print-output", "--config", "Debug", 0 };
+        char* output_develop[] = { "./build.sh", "print-output", "--config", "Develop", 0 };
         capture_line(output, release, sizeof(release));
         capture_line(output_debug, debug, sizeof(debug));
+        capture_line(output_develop, develop, sizeof(develop));
         snprintf(tree, sizeof(tree), "%s", release);
         *strrchr(tree, '/') = 0;
         *strrchr(tree, '/') = 0;
         snprintf(ninja_log, sizeof(ninja_log), "%s/.ninja_log", tree);
+    }
+    if (develop_only)
+    {
+        BUILD("build");
+        check_develop();
+    }
+    if (!ownership_only && !driver_only && !crt_only && !commands_only && !codegen_only && !develop_only)
+    {
+        BUILD("clean");
         check_ignored_flags();
         if (!flags_only)
         {
             check_clean_all();
             check_incremental();
             check_configurations();
+            check_develop();
             check_failures();
             check_presets_and_prints();
             check_experiments();

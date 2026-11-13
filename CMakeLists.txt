@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 #
-# The build of build/cmake/VARIANT/CONFIG/compiler: Ninja Multi-Config, Debug and Release in one tree per toolchain
-# and variant (CMakePresets.json, build.sh). docs/commands/build.md has the configurations, the settings, the targets
-# and the outputs. cmake/BusterSettings.cmake holds the sources and the flags; this file applies them.
+# The build of build/cmake/VARIANT/CONFIG/compiler: Ninja Multi-Config, Debug, Release and Develop in one tree per
+# toolchain and variant (CMakePresets.json, build.sh). docs/commands/build.md has the configurations, the settings, the
+# targets and the outputs. cmake/BusterSettings.cmake holds the sources and the flags; this file applies them.
 
 cmake_minimum_required(VERSION 3.25)
 
-# Debug and Release, and Release when a build names no configuration, as ./build.sh builds.
+# Debug, Release and Develop, and Release when a build names no configuration, as ./build.sh builds.
 if(NOT DEFINED CMAKE_CONFIGURATION_TYPES)
-    set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "The configurations: Debug, Release or both")
+    set(CMAKE_CONFIGURATION_TYPES "Debug;Release;Develop" CACHE STRING "The configurations: any of Debug, Release and Develop")
 endif()
 if(NOT DEFINED CMAKE_DEFAULT_BUILD_TYPE)
     set(CMAKE_DEFAULT_BUILD_TYPE Release CACHE STRING "The configuration a build that names none builds")
@@ -35,8 +35,8 @@ if(NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
     message(FATAL_ERROR "buster: the compiler builds with Clang, not ${CMAKE_C_COMPILER_ID} (${CMAKE_C_COMPILER})")
 endif()
 foreach(config IN LISTS CMAKE_CONFIGURATION_TYPES)
-    if(NOT config MATCHES "^(Debug|Release)$")
-        message(FATAL_ERROR "buster: CMAKE_CONFIGURATION_TYPES may hold Debug and Release, not ${config}")
+    if(NOT config MATCHES "^(Debug|Release|Develop)$")
+        message(FATAL_ERROR "buster: CMAKE_CONFIGURATION_TYPES may hold Debug, Release and Develop, not ${config}")
     endif()
 endforeach()
 
@@ -54,7 +54,7 @@ set(BUSTER_FUZZ_ENTRY "" CACHE FILEPATH "The fuzzing entry's C file (src/buster/
 set(BUSTER_BAKE 1 CACHE STRING "0 leaves the backend's tables to be built when the executable runs")
 set(BUSTER_PGO 0 CACHE STRING "1 builds Release with a profile of the compiler's own compiles (Release alone)")
 set(BUSTER_PGO_TRAIN "" CACHE FILEPATH "A bash script that trains BUSTER_PGO's profile in place of the default compiles")
-set(BUSTER_PARALLEL_CODEGEN auto CACHE STRING "auto, 1 or 0: the two longest Release units' native code in parallel parts")
+set(BUSTER_PARALLEL_CODEGEN auto CACHE STRING "auto, 1 or 0: the two longest Release units' native code, and Develop's units, in parallel parts")
 set(BUSTER_LEXER_VARIANTS "" CACHE STRING "NAME=SOURCE;... lexers compiled in for benchmark-lexer (build.sh lexer-variant)")
 set(BUSTER_SHIFT_SOURCE "" CACHE STRING "The source whose code the shifted links move (build.sh shifts)")
 set(BUSTER_SHIFTS "" CACHE STRING "The shifted links' padding sizes in bytes (build.sh shifts)")
@@ -143,8 +143,8 @@ else()
 endif()
 
 # The compile options of a unit of the executable: the Release configuration's debug information and optimization
-# (BusterSettings.cmake) or the Debug configuration's, around the flags, then the definitions, as print-compile-flags
-# prints them.
+# (BusterSettings.cmake), the Debug configuration's or the Develop configuration's (Release's optimization with line
+# tables), around the flags, then the definitions, as print-compile-flags prints them.
 # With BUSTER_PGO, the profile follows the flags, as -fprofile-instr-use; the trained profile is built before the
 # units and recompiles them when it changes.
 set(pgo "${CMAKE_BINARY_DIR}/pgo")
@@ -152,10 +152,12 @@ set(profile_use "")
 if(buster_pgo)
     set(profile_use "-fprofile-instr-use=${pgo}/compiler.profdata")
 endif()
+buster_shell_group(develop_debug_group ${BUSTER_DEVELOP_CONFIGURATION_DEBUG})
 function(buster_unit_options target definitions)
     target_compile_options(${target} PRIVATE
         "$<$<CONFIG:Release>:${buster_debug}>"
         "$<$<CONFIG:Debug>:${BUSTER_DEBUG_CONFIGURATION_DEBUG}>"
+        "$<$<CONFIG:Develop>:${develop_debug_group}>"
         "${flags_group}"
         ${profile_use}
         "$<IF:$<CONFIG:Debug>,${BUSTER_DEBUG_CONFIGURATION_OPTIMIZATION},${buster_optimization}>"
@@ -176,14 +178,36 @@ if(buster_parallel_codegen)
     endif()
 endif()
 message(STATUS "buster: parallel native generation: ${buster_parallel_codegen}")
+# The Develop configuration (docs/commands/build.md, "Develop"): its main.c units in parts before the optimizer where
+# the parts' tools are (BusterCodegen.cmake), else whole, and the benchmark units BUSTER_DEVELOP_ON_DEMAND names left
+# out of its executable, whose commands then name the configurations that have them.
+set(buster_develop FALSE)
+if("Develop" IN_LIST CMAKE_CONFIGURATION_TYPES)
+    set(buster_develop TRUE)
+endif()
+set(buster_develop_parts FALSE)
+if(buster_develop AND buster_parallel_codegen)
+    set(buster_develop_parts TRUE)
+endif()
+message(STATUS "buster: Develop configuration: ${buster_develop}, in parts: ${buster_develop_parts}")
 
 # Each source is an object library of its own, defined in the compile order, which is the order a clean build starts
 # them in; the executable links their objects in the sources' order.
 buster_compile_order(order)
+set(develop_absent_sources "")
 foreach(index IN LISTS order)
     list(GET BUSTER_SOURCES ${index} source)
     get_filename_component(name "${source}" NAME_WE)
-    add_library(buster_${name} OBJECT "${source}")
+    get_filename_component(file "${source}" NAME)
+    if(buster_develop AND file IN_LIST BUSTER_DEVELOP_ON_DEMAND)
+        # No source in Develop: the link names this object library's objects in every configuration, which would
+        # otherwise make Develop's executable wait for the unit's compile, though it doesn't link it.
+        add_library(buster_${name} OBJECT "$<$<NOT:$<CONFIG:Develop>>:${CMAKE_SOURCE_DIR}/${source}>")
+        set_target_properties(buster_${name} PROPERTIES LINKER_LANGUAGE C)
+        list(APPEND develop_absent_sources "${CMAKE_SOURCE_DIR}/${source}")
+    else()
+        add_library(buster_${name} OBJECT "${source}")
+    endif()
     buster_unit_options(buster_${name} "${defines_group}")
     buster_codegen_split_unit("${name}" split)
     if(split)
@@ -191,6 +215,13 @@ foreach(index IN LISTS order)
         # remains the dependency owner and the sole compile database entry for this C translation unit.
         target_compile_options(buster_${name} PRIVATE "$<$<CONFIG:Release>:-emit-llvm>")
         buster_codegen_unit("${name}")
+    endif()
+    buster_develop_partitions("${name}" develop_partitions)
+    if(NOT develop_partitions EQUAL 0)
+        # Develop's unit stops before LLVM's optimizer, which its parts' jobs run (BusterCodegen.cmake).
+        target_compile_options(buster_${name} PRIVATE "$<$<CONFIG:Develop>:SHELL:-Xclang -disable-llvm-passes>"
+            "$<$<CONFIG:Develop>:-emit-llvm>")
+        buster_develop_unit("${name}")
     endif()
 endforeach()
 set(unit_names "")
@@ -367,6 +398,21 @@ foreach(name IN LISTS unit_names)
     buster_native_object(object "${name}")
     list(APPEND objects "${object}")
 endforeach()
+# Develop's stand-ins for the benchmark units it leaves out (cmake/BusterDevelopAbsent.cmake): each of their run_*
+# entry points says which configurations have its command.
+if(develop_absent_sources)
+    set(absent "${CMAKE_BINARY_DIR}/$<CONFIG>/develop/absent.o")
+    add_custom_command(OUTPUT "${absent}"
+        COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${absent}" "-DSOURCES=${develop_absent_sources}" "-DCLANG=${CMAKE_C_COMPILER}"
+            "-DFLAGS=${flags};${buster_optimization}" -P "${CMAKE_SOURCE_DIR}/cmake/BusterDevelopAbsent.cmake"
+        DEPENDS ${develop_absent_sources} "${CMAKE_SOURCE_DIR}/cmake/BusterDevelopAbsent.cmake"
+        COMMENT "Writing Develop's stand-ins for the benchmark units"
+        VERBATIM)
+    # Joined to the last object, so that Release's and Debug's lists, the post-link step's argument among them, stay
+    # as they were rather than gain an empty element.
+    list(POP_BACK objects last)
+    list(APPEND objects "${last}$<$<CONFIG:Develop>:$<SEMICOLON>${CMAKE_BINARY_DIR}/Develop/develop/absent.o>")
+endif()
 set(compiler "${CMAKE_BINARY_DIR}/$<CONFIG>/compiler")
 add_executable(compiler_link ${objects} ${lexer_objects})
 set_target_properties(compiler_link PROPERTIES OUTPUT_NAME compiler.link)

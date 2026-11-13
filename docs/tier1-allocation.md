@@ -31,6 +31,7 @@ Allocating the unfused uses and then folding is unsound.
 | `use_offsets` | optional u32 | `count+1` CSR offsets into use columns |
 | `use_positions` | optional u32 | Nondecreasing positions inside each range |
 | `use_required` | optional u8 | 1 requires a register at that use; 0 permits memory |
+| `clobbers` | optional u32 | Nondecreasing positions where `clobber_registers[class]` lose their values (#2574) |
 
 `registers[3]` contains the allocatable physical masks. GPR bits are 0–15;
 vector bits are 0–31; opmask bits are 1–7, k1 to k7 (#179,
@@ -192,6 +193,20 @@ independent reference over positions, with and without interval hints, a trace
 whose two values the rule alone swaps, and one whose range takes an earlier
 range's opening register over its own value's last.
 
+With `BUSTER_TIER1_ALLOCATE_HINT_EXIT` in its entry, `hint_intervals` names
+instead an interval that ends by the interval's start, whose register at its
+end, its closing register, the interval takes first (#2553); validation also
+refuses one that ends after the interval starts. The closings follow the
+openings in the same scratch array, written as each interval ends on every path:
+the register it still holds, or the memory hint where an eviction left it in its
+slot. `tier1_cfg.c` names so a value's range at the exit of a block that
+dominates the one the interval enters, and a phi's operand's at a predecessor's
+exit ("Places along dominators" below). The hint test's reference takes the
+closings too, its random inputs name a third of their hinted ranges' earlier
+ranges by their exits where those end first, and a literal trace, whose interval
+the scan moves from r0 through its slot to r1, gives the range named by its exit
+r1 and by its opening r0 on every path.
+
 That matching stays scalar, for a measured reason. It used to resolve the
 partners' registers afterwards: pointer-jumping rounds over every interval,
 after an AVX-512 prefix sum that recounted the pressure the class loop already
@@ -255,6 +270,25 @@ register prefix. With `use_required`, it reenters a register at its next
 required use, potentially evicting another value, and can be split again.
 The output capacity is bounded by `2*intervals + 2*uses`; the simple path needs
 at most `2*intervals`. Dense spill ids are assigned in input-interval order.
+
+With `use_required`, `clobbers` (#2574) are positions where the registers
+`clobber_registers[class]` lose their values, as a call's definition phase
+loses the caller-saved ones. At each, the scan takes every recomputable
+interval holding one of them out of it, as an eviction does: a REMATERIALIZE
+fragment from that position, no store, and a register again at its next
+required use. A value required there keeps its register, and so does a value
+without a recipe: its consumer saves it around the clobber. A clobber's event
+follows the ends at its position and precedes the starts, so an interval
+starting there keeps its register. A class where a clobber falls inside a
+recomputable interval takes the scan, the only path that evicts, and an input
+without recipes is allocated as it would be without its clobbers. Each entry
+into a register is evicted at most once, so the output's bound stands.
+`tier1_allocate_clobbers_test.c` checks each case's trace on the three entry
+points, the refusals (clobbers without required uses, out of order, past the
+positions, or over a register outside the class), and random inputs against
+the verifier, the occupancy oracle and two independent properties: no
+recomputable value holds a clobbered register across a clobber but where a use
+requires it there, and clobbers change no allocation of values without recipes.
 
 This is not yet the complete Wimmer/Franz implementation: it lacks inactive
 interval lookahead across holes, loop-aware split placement, vector spill
@@ -435,6 +469,72 @@ slot, since each join checks every pair of the two slots' values.
 `tier1_cfg_verify` refuses a store over another value its slot still holds;
 `tier1_allocation_verify`, which takes a slot to hold one value, checks the CFG
 tests' allocations with a slot per spilled value.
+
+### Places along dominators (#2553)
+
+A block's ranges used to take, by `hint_values`, the register their value had
+most recently in layout, and a phi its operand's at the predecessor nearest
+before it. A block laid out after a sibling whose code moved a value took the
+moved register wherever control came from, and a phi often took the cold path's:
+each of Lua's handlers tests `trap` and calls `luaG_traceexec` where it is set,
+and the join after that call took the call's result's register, so that the hot
+path moved `trap` on a split edge and the handler's tail rotated three values
+through r11 into the dispatch join's places. #138's measurement put edge moves,
+spills and reloads at 7.4% and 10.0% of speedtest1's and Lua's executed
+instructions.
+
+`tier1_cfg_anchors` takes the CFG's dominator tree (`dominators.c`'s SEMI-NCA,
+one analysis per function) and gives each block:
+
+- a chosen predecessor: one laid out before it that it dominates (a latch of a
+  loop whose header is laid out after its body, whose back edge runs every
+  iteration: the nearest of them in layout), else its immediate dominator where
+  that is a predecessor laid out before it, else its nearest predecessor before
+  it in layout;
+- an anchor: such a latch, else its immediate dominator where that is laid out
+  before it, else none: the entry, an unreachable block, and a dispatch loop's
+  handlers, whose dominator is the join laid out after them, which keep #1216's
+  conventions.
+
+A value live into a block is live out of each of its predecessors, and of its
+immediate dominator unless the block defines it, so the values a block takes
+from one block's exit are there at once, each in its own place. The ranges then
+take, by exit hints:
+
+- a range a value enters a block with, the value's place at the anchor's exit: a
+  value keeps its register from its definition through the blocks it dominates,
+  and an edge moves what the blocks on its way changed;
+- in a block laid out after its first successor (a dispatch loop's join), that
+  successor's entry convention, for its values as #1216 gave it for its phis;
+- a phi, its operand's place at its chosen predecessor's exit, so that the edge
+  from a dominating predecessor, a critical one where the other path rejoins,
+  moves nothing;
+- a value that a phi takes and nothing else hints, where that phi has no range
+  before the value's definition: along the phis that take the phi in turn
+  (`tier1_cfg_operand_targets`, up to eight), the first with a range before it,
+  whose first range's opening register the definition takes. A dispatch loop's
+  join's phi has its first handler's, the register every handler takes it in.
+
+Slot sharing joins phi-to-phi pairs before the others (`tier1_cfg_share_slots`):
+in `sqlite3VdbeExec`, whose latch's join is laid out before its header, an
+operand spilled where it entered the loop joined its phi's slot first and kept
+the loop's two phis apart, so that every handler's edge to the latch copied
+slot to slot.
+
+From its merge base `afcb185e`, the tagged edge moves, stores and reloads fell
+from 225.1 M to 210.6 M on speedtest1 and from 542.7 M to 355.5 M on Lua, where
+the moves through r11 halved (191 M to 96 M). On the 9700X, user cycles fell by
+0.73 on speedtest1 over 8 shifts and by 1.02 on Lua over 33 link orders
+(100 ln(head / base); [the record](https://github.com/buster14a/buster-performance/tree/ddb5213da1fce7ac9325afbf6364a797bbc63b5b/docs/measurements/tier1-dominator-places-2553-2026-11-12)).
+Not everywhere: `sqlite3VdbeExec`'s edge traffic rose by 2.1 M though it runs
+fewer instructions, and `yy_reduce` keeps its parameter `yypParser` in `rdi`,
+its incoming register, into its switch's join, which calls
+`yy_find_reduce_action`: every reduction saves and restores it (4.9 M more).
+The preferred problem lets a parameter keep its incoming register on every one
+of its intervals; keeping one that crosses a call in callee-saved registers past
+its definition's interval cost far more (28.5 M instructions on speedtest1,
+269 M on Lua). The dominator analysis costs about 0.6% of sqlite3.c's
+`--tier1 -c` cycles, the whole change 1.0%.
 
 ### The opmask class (#179)
 
@@ -682,6 +782,102 @@ the one-call order on every function, comparing the allocations field by field
 (`tier1_cfg_differs`), the problems each left and the values each moved. What
 the two calls cost, the design and what the one call measured are in
 [tier1-one-allocation.md](tier1-one-allocation.md).
+
+### Recomputable values read on every iteration (#2574)
+
+Lua's `vmdispatch` is `goto *disptab[GET_OPCODE(i)]`, at the end of every
+handler. Tier 1 computed `disptab`'s address in each handler, `lea
+disptab(%rip)` before the dispatch's load, where clang -O2 keeps it in `r10`
+and computes it again only after calls. Three changes keep it in a register:
+
+- **One value.** IR lowering defines each direct symbol address a function
+  takes at least twice once, in the preheader (`ir_typed_plan_hoisted`, the
+  [IR guide](ir.md)'s preheader), as #1740 does for jump tables' bases.
+- **Hot recipes.** In the preference, a recomputable value that crosses a
+  call is *hot* where it is read on every iteration of the outermost loops it
+  is live across (`tier1_emit_cfg_hot_recipes`, over `dominators.c`'s loops):
+  a loop whose header it is live into but not its parent's, every path from
+  the header back to it passing a block that reads the value. A hot value may
+  take the callee-saved registers and `r8` to `r10`, the caller-saved
+  registers no call takes before its fifth argument and no instruction takes
+  implicitly. Every other value crossing a call keeps the callee-saved ones
+  alone, as before.
+- **Clobbers.** Where the function has a hot value, the preferred problem
+  gets the calls' definition phases as clobbers of the caller-saved registers
+  (`Tier1CfgInput.clobbers`, per problem: the plain one has none). A hot
+  value in `r8` to `r10` leaves it at a call, as an eviction, and its next
+  required use recomputes it; the call saves nothing for it.
+
+This is the frequency weighting LLVM's spill weights make from block
+frequencies, at the grain the scan's decisions need: a value read once per
+iteration weighs as much as the loop's hottest one, and a frame object's
+address read in a few of a loop's handlers doesn't. Hoisting alone had made
+the table one long-lived value that the callee-saved registers' loop-carried
+values evicted first, whose reload at each dispatch then evicted one of them:
+`luaV_execute`'s instructions rose (the issue's experiment). A value read on
+every turn of an inner loop but live across its parent isn't hot: its
+registers are chosen for its whole range. Taking any loop's iterations instead
+gave caller-saved registers to `sqlite3VdbeExec`'s frame objects' addresses,
+which the edges after most opcodes' calls then recomputed: speedtest1 ran
+38.4 M more instructions, Lua the same. Confining hot values to `r8` to `r10`,
+without the callee-saved registers, gained Lua 5 M and lost speedtest1 6 M.
+
+Callgrind's counts at `245e9969` against main `5f75ea52` and clang -O2
+23.1.6, with #1189's `gap.c` over the same inputs as #1217's record (Lua's
+five scripts, speedtest1's `--size 5` mix):
+
+| | main | head | clang -O2 |
+| --- | ---: | ---: | ---: |
+| Lua, `luaV_execute`'s `disptab` `lea`s | 55.1 M | 18.6 M | 7.6 M |
+| Lua, `rip`-relative `lea`s | 68.8 M | 32.3 M | 16.6 M |
+| Lua, non-frame `lea`s | 216.7 M | 180.2 M | 148.8 M |
+| Lua, whole processes | 5,963.7 M | 5,927.1 M | 4,207.3 M |
+| speedtest1, `rip`-relative `lea`s | 59.1 M | 50.7 M | 34.3 M |
+| speedtest1, whole process | 3,249.8 M | 3,246.0 M | 2,028.9 M |
+
+`disptab` now stays in `r8` through the dispatch tails: `mov
+(%r8,%rax,8),%rax`. Each of its remaining recomputations follows a call
+(`luaV_mod`, `luaV_idiv`, `luaH_getshortstr`, the calls into a Lua function
+that reach `startfunc`) or the function's entry, as clang's do; clang inlines
+`luaV_mod` and `luaV_idiv`. Lua's other functions run the same instructions,
+within the string hash's seed's noise (#1217's record).
+On speedtest1, memsys5's functions gain from the hoist (each keeps `mem5`'s
+address in a register over several reads) and a few lose: a hoisted address
+computed at the entry on a path that never reads it, as
+`yy_find_shift_action`'s two tables on its early return, or one that takes a
+callee-saved register its prologue then saves. Placing the one definition at
+its readers' nearest common dominator would remove both (#2593).
+
+After #2573's rip-relative symbols (main `9750b3f0`, against this change merged
+at `f8aeb145`), Lua's scripts run 5,954.3 M and 5,912.9 M instructions and
+`disptab`'s `lea`s are as above, but speedtest1 runs 3,233.3 M and 3,235.7 M:
+#2573 already reads `mem5` through `rip`-relative operands, so memsys5's gains
+are #2573's, and the losses above remain. Counting only the takes inside the
+typed stream's loops (backward jumps' ranges) left those losers hoisted and
+cost Lua 7.5 M.
+
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/pull/476)),
+by #1217's method, against both bases, the instructions fall but the time
+doesn't move measurably:
+- **Lua.** Its instructions fall 0.6% at each of six link orders. Its time is
+  0.9992 (95% interval 0.9875 to 1.0110) against `5f75ea52` and 1.0061
+  (0.9926 to 1.0198) against `9750b3f0`. The `lea` taken out of each dispatch
+  is a one-cycle operation that the dispatch's load and indirect jump don't
+  wait on once it has issued.
+- **speedtest1.** Its time is 1.8% higher at the layout the driver's link
+  gives against `9750b3f0`, with 0.08% more instructions. Six layouts (pads of
+  0 to 3,088 bytes before the unit's code) give 0.9881 to 1.0169 in cycles,
+  with a mean of 1.0020 (0.9918 to 1.0121): that +1.8% is layout, not the
+  change's code.
+- **Compile time.** `sqlite3.c`'s `--tier1 -c` takes 1.0% longer, from 50 M
+  more instructions. By callgrind on a baseline build, they go to:
+  - the hot-recipe test's loop analysis (`dominators_analyze`, 12.5 M) and its
+    walks (8.6 M);
+  - the allocator's longer intervals and clobbered scans (12.5 M);
+  - the hoist's plan (3.3 M).
+
+  The emitter doesn't receive the selector's dominator tree. Passing it
+  would remove the first of these.
 
 A parameter keeps its incoming register over its definition's interval, so a
 parameter live across a run of calls in its entry block, as in Lua's

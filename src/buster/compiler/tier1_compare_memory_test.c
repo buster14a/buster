@@ -43,12 +43,33 @@ static void tier1_select_test_compare_memory_holes(Tier1SelectTest* test)
             sign,
             mask - 1,
             mask,
+            127 & mask,
+            128 & mask,
+            (uint64_t)-128 & mask,
+            (uint64_t)-129 & mask,
         };
+        // The immediates (#2600): the constants each side of a signed byte's and a signed word's bounds, and the
+        // doubleword's, that the width holds as a signed value, at its bits. A word's, a doubleword's or a quadword's
+        // within a signed byte take the sign-extended imm8 form.
+        static const int64_t candidates[] = { -1, 0, 127, 128, -128, -129, 0x7fff, -0x8000, 0x7fffffff, -INT64_C(0x80000000) };
+        uint64_t constants[BUSTER_ARRAY_LENGTH(candidates)];
+        uint32_t constant_count = 0;
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(candidates); k += 1)
+        {
+            const int64_t limit = width == 8 ? INT32_MAX : (int64_t)(sign - 1);
+            if (candidates[k] <= limit && candidates[k] >= -limit - 1)
+            {
+                constants[constant_count++] = (uint64_t)candidates[k] & mask;
+            }
+        }
         uint8_t* bytes = mapping + 4096 - width;
         for (uint32_t predicate = 0; predicate < IR_PREDICATE_COUNT; predicate += 1)
         {
-            for (uint32_t immediate = width < 4 ? 1 : 0; immediate < 2; immediate += 1)
+            // 0 for a register comparison, else the constant immediate - 1's.
+            for (uint32_t immediate = width < 4 ? 1 : 0; immediate <= constant_count; immediate += 1)
             {
+                const uint64_t constant = immediate != 0 ? constants[immediate - 1] : mask;
+                const int64_t signed_constant = (int64_t)(constant << (64 - width * 8)) >> (64 - width * 8);
                 for (uint32_t d = 0; d < BUSTER_ARRAY_LENGTH(destinations); d += 1)
                 {
                     for (uint32_t branch = 0; branch < 2; branch += 1)
@@ -56,7 +77,7 @@ static void tier1_select_test_compare_memory_holes(Tier1SelectTest* test)
                         const Tier1SelectHoles holes =
                         {
                             .rule = branch != 0 ? TIER1_RULE_BRANCH_COMPARE : immediate != 0 ? TIER1_RULE_COMPARE_IMMEDIATE : TIER1_RULE_COMPARE,
-                            .immediate = mask,
+                            .immediate = constant,
                             .memory =
                             {
                                 .displacement = -3,
@@ -72,6 +93,19 @@ static void tier1_select_test_compare_memory_holes(Tier1SelectTest* test)
                             .compare_memory = true,
                         };
                         const Tier1SelectRecords selected = tier1_select_test_expand(test, &holes);
+                        // The comparison's form: an immediate within a signed byte takes imm8 at every width.
+                        uint16_t compare_form = X86_FORM_NONE;
+                        for (uint32_t r = 0; r < selected.count; r += 1)
+                        {
+                            const uint16_t form = selected.records[r].form & BUSTER_X86_FORM_NUMBER;
+                            compare_form = x86_effects(form)->operation == X86_OPERATION_CMP ? form : compare_form;
+                        }
+                        const bool short_immediate = signed_constant >= INT8_MIN && signed_constant <= INT8_MAX;
+                        const uint16_t wanted_form = immediate == 0 ? (width == 8 ? X86_FORM_CMP_R64_RM64 : X86_FORM_CMP_R32_RM32) :
+                                                     width == 1 ? X86_FORM_CMP_RM8_IMM8 :
+                                                     short_immediate ? (width == 2 ? X86_FORM_CMP_RM16_IMM8 : width == 8 ? X86_FORM_CMP_RM64_IMM8 : X86_FORM_CMP_RM32_IMM8) :
+                                                     width == 2 ? X86_FORM_CMP_RM16_IMM16 : width == 8 ? X86_FORM_CMP_RM64_IMM32 : X86_FORM_CMP_RM32_IMM32;
+                        tier1_select_test_expect(test, compare_form == wanted_form, "a memory comparison's immediate takes the shortest form its width sign-extends");
                         X86Instruction records[8];
                         memcpy(records, selected.records, selected.count * sizeof(*records));
                         uint32_t count = selected.count;
@@ -101,7 +135,7 @@ static void tier1_select_test_compare_memory_holes(Tier1SelectTest* test)
                                 for (uint32_t b = 0; b < BUSTER_ARRAY_LENGTH(samples); b += 1)
                                 {
                                     memcpy(bytes, &samples[a], width);
-                                    const bool compared = immediate != 0 ? tier1_select_test_memory_predicate(predicate, width, samples[a], mask) :
+                                    const bool compared = immediate != 0 ? tier1_select_test_memory_predicate(predicate, width, samples[a], constant) :
                                                                           tier1_select_test_memory_predicate(predicate, width, samples[b], samples[a]);
                                     const uint64_t expected = branch != 0 ? (compared ? 11 : 22) : compared;
                                     const uint64_t actual = tier1_select_test_call(test, (uintptr_t)bytes, 3, samples[b]);

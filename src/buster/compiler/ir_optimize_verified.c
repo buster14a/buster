@@ -157,7 +157,7 @@ static __attribute__((unused, aligned(64))) IrCheck ir_optimize_verified(const I
     (void)verify_scalar;
     if (revision->number != UINT64_MAX && output != scratch && analyses != scratch && analyses != output &&
         options.path <= BUSTER_IR_OPTIMIZE_SCALAR &&
-        (options.passes & ~(BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_LAYOUT)) == 0)
+        (options.passes & ~BUSTER_IR_OPTIMIZE_PASSES) == 0)
     {
         options.scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR ||
                          (options.path == BUSTER_IR_OPTIMIZE_AUTO && (options.scalar || ir_optimize_auto_scalar(function)));
@@ -208,6 +208,10 @@ static __attribute__((unused, aligned(64))) IrCheck ir_optimize_verified(const I
             }
         }
         check.error = work.simd_error;
+        if (check.error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_IDENTITY) != 0 && !ir_optimize_identities(&work, scratch))
+        {
+            check.error = IR_ERROR_MEMORY;
+        }
         if (check.error == IR_OK)
         {
             ir_optimize_dce(&work, options);

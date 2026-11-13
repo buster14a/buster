@@ -11,7 +11,7 @@
       "hidden": true,
       "generator": "Ninja Multi-Config",
       "cacheVariables": {
-        "CMAKE_CONFIGURATION_TYPES": "Debug;Release",
+        "CMAKE_CONFIGURATION_TYPES": "Debug;Release;Develop",
         "CMAKE_DEFAULT_BUILD_TYPE": "Release",
         "CMAKE_C_COMPILER": "clang",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
@@ -69,6 +69,11 @@
       "configuration": "Release"
     },
     {
+      "name": "develop",
+      "configurePreset": "native",
+      "configuration": "Develop"
+    },
+    {
       "name": "x86-64-debug",
       "configurePreset": "x86-64",
       "configuration": "Debug"
@@ -79,6 +84,11 @@
       "configuration": "Release"
     },
     {
+      "name": "x86-64-develop",
+      "configurePreset": "x86-64",
+      "configuration": "Develop"
+    },
+    {
       "name": "znver5-debug",
       "configurePreset": "znver5",
       "configuration": "Debug"
@@ -87,6 +97,11 @@
       "name": "znver5-release",
       "configurePreset": "znver5",
       "configuration": "Release"
+    },
+    {
+      "name": "znver5-develop",
+      "configurePreset": "znver5",
+      "configuration": "Develop"
     }
   ],
   "testPresets": [
@@ -123,6 +138,12 @@
       "configuration": "Release"
     },
     {
+      "name": "develop",
+      "inherits": "test-base",
+      "configurePreset": "native",
+      "configuration": "Develop"
+    },
+    {
       "name": "x86-64-debug",
       "inherits": "test-base",
       "configurePreset": "x86-64",
@@ -133,6 +154,12 @@
       "inherits": "test-base",
       "configurePreset": "x86-64",
       "configuration": "Release"
+    },
+    {
+      "name": "x86-64-develop",
+      "inherits": "test-base",
+      "configurePreset": "x86-64",
+      "configuration": "Develop"
     },
     {
       "name": "znver5-debug",
@@ -147,6 +174,12 @@
       "configuration": "Release"
     },
     {
+      "name": "znver5-develop",
+      "inherits": "test-base",
+      "configurePreset": "znver5",
+      "configuration": "Develop"
+    },
+    {
       "name": "debug-build",
       "inherits": "build-base",
       "configurePreset": "native",
@@ -157,6 +190,12 @@
       "inherits": "build-base",
       "configurePreset": "native",
       "configuration": "Release"
+    },
+    {
+      "name": "develop-build",
+      "inherits": "build-base",
+      "configurePreset": "native",
+      "configuration": "Develop"
     }
   ],
   "workflowPresets": [
@@ -191,6 +230,23 @@
         {
           "type": "test",
           "name": "release-build"
+        }
+      ]
+    },
+    {
+      "name": "develop",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "native"
+        },
+        {
+          "type": "build",
+          "name": "develop"
+        },
+        {
+          "type": "test",
+          "name": "develop-build"
         }
       ]
     }

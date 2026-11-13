@@ -1,9 +1,13 @@
 # A faster stage 1 build: design
 
-This is a design with its measurements, not an implementation. It says what
+This is a design with its measurements. It says what
 would most reduce the time to build the compiler with clang (`./build.sh`, the
 stage 1 build) in two cases: the **edit loop** (one file changed, a new
 compiler wanted) and the **clean build** (a fresh clone, CI, a branch switch).
+
+**Status:** steps 1 to 4 below are implemented as the Develop configuration
+(`./build.sh --config Develop`; [the build guide's "Develop"](commands/build.md#develop),
+#2559). Step 5, Release in parts, is the owner's decision and isn't.
 
 Every time below was measured on the Ryzen 7 9700X under its lock, at main
 `c5f0efb2` with the host's clang 23.1.1 and the build's eight jobs, unless the
