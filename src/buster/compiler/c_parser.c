@@ -789,6 +789,9 @@ struct ParseDiagnostic
     // to the mandatory body brace. Its recovery view replaces [token, resume_end) with one semicolon; zero means
     // the ordinary insertion before token. This is diagnostic-only metadata, never acceptance of the input.
     uint32_t resume_end;
+    // A later declarator of an unknown type is never declared by clang. Its failed initializer discards the list
+    // from its first comma, before the diagnostic's token. Zero keeps the ordinary [token, resume_end) range.
+    uint32_t resume_begin;
     // A case's or default's missing `:` before a `;`, which clang's recovery reads as the label's empty statement
     // (check_prefix_resume puts a `:` before the `;` and parses the view again).
     bool resume_colon;
@@ -981,6 +984,9 @@ typedef enum ParseMode
 // have been alone so far (the last of them just before the token). Another `__extension__` goes on with it, as one at a
 // declaration's start does; the specifiers after it are ParseDeclarationSpecifiers', where an `__extension__` isn't one.
 #define BUSTER_PARSE_FRAME_LEADING_ATTRIBUTES 0x20000000u
+// An unknown type specifier was diagnosed in this declaration. Clang parses the first initializer, but an invalid
+// type makes later declarators stop before their initializers (ParseDeclGroup's isInvalidType check, #2640).
+#define BUSTER_PARSE_FRAME_UNKNOWN_TYPE 0x40000000u
 
 // What a declarator's name is, from the derivation its declarator applies to it first (going out from the name, past
 // groups without a `*`), as clang's Declarator::isFunctionDeclarator decides it: none read yet, not known yet, a
@@ -1052,6 +1058,8 @@ struct ParseFrame
     uint32_t name_frame;
     // A missing type is diagnosed only after its declarator's syntax has been read. Zero, or the name token + 1.
     uint32_t typeless_name;
+    // The first comma after an unknown type's first declarator, plus one. Its later declarators have no Sema binding.
+    uint32_t invalid_declarators;
     // The frame a declarator's name in this frame belongs to: this one, or for a group, its parent's.
     uint32_t declaration;
     uint8_t name_meaning;
@@ -1224,6 +1232,7 @@ struct ParseScalar
     bool error_resumed;
     bool error_resume_delete;
     uint32_t error_resume_end;
+    uint32_t error_resume_begin;
     // Whether the error is a case's or default's missing `:` before a `;` (ParseDiagnostic.resume_colon).
     bool error_resume_colon;
     // Whether the error is an expression statement's missing `;` after its first name (ParseDiagnostic.probe).
@@ -1300,7 +1309,8 @@ struct ParseStep
                                        BUSTER_PARSE_FRAME_AFTER_STAR | BUSTER_PARSE_FRAME_EMPTY_OK | BUSTER_PARSE_FRAME_KR | BUSTER_PARSE_FRAME_SPECIFIED | \
                                        BUSTER_PARSE_FRAME_CONDITIONAL | BUSTER_PARSE_FRAME_NAME_REQUIRED | BUSTER_PARSE_FRAME_NAME_OPTIONAL | \
                                        BUSTER_PARSE_FRAME_ABSTRACT | BUSTER_PARSE_FRAME_AUTO | BUSTER_PARSE_FRAME_TYPELESS | \
-                                       BUSTER_PARSE_FRAME_LATER_DECLARATOR | BUSTER_PARSE_FRAME_AFTER_WIDTH | BUSTER_PARSE_FRAME_LEADING_ATTRIBUTES)
+                                       BUSTER_PARSE_FRAME_LATER_DECLARATOR | BUSTER_PARSE_FRAME_AFTER_WIDTH | BUSTER_PARSE_FRAME_LEADING_ATTRIBUTES | \
+                                       BUSTER_PARSE_FRAME_UNKNOWN_TYPE)
 
 
 // The kinds of argument a keyword group takes: a type name, an expression, either, or the keyword's own (none: a call

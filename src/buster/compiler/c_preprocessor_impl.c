@@ -7416,6 +7416,19 @@ static bool pp_pragma_string(Preprocessor* pp, PPToken string, uint32_t name_loc
         const uint32_t begin = pp->arguments.count;
         bool comment = false;
         const bool lexed = pp_lex_scratch(pp, location, n, &pp->arguments, 0, &comment) != BUSTER_PP_NONE;
+        if (lexed && pp->arguments.count != begin)
+        {
+            // Retained pragmas need the destringized spelling's start too: later semantic diagnostics use its
+            // relative column. Replace the builtin's history with this step, keeping the operator's enclosing
+            // origin as its parent so it contributes just one scratch-space note.
+            const PPSource source = { .location = location };
+            const uint32_t origin = pp_history_generated(pp, PP_GENERATED_PRAGMA, location, name_location, &source, 1);
+            if (origin != 0)
+            {
+                pp->generated[(origin & BUSTER_PP_ORIGIN_INDEX) - 1].expansion = pp->diagnostic_origin;
+                pp_history_fill(pp, &pp->arguments, begin, pp->arguments.count, origin);
+            }
+        }
         if (comment)
         {
             pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "unterminated /* comment");
@@ -10584,15 +10597,9 @@ static void pp_pragma_message(Preprocessor* pp, PPPragmaKind kind, const PPToken
         const uint32_t saved_origin = pp->diagnostic_origin;
         if (from_operator)
         {
-            // The destringized pragma has its own scratch spelling. Retain that step before the operator's parent
-            // expansion, so its note and relative column remain distinct from the macro that contained _Pragma.
-            const PPSource source = { .location = names->locations[names_begin] };
-            const uint32_t origin = pp_history_generated(pp, PP_GENERATED_PRAGMA, diagnostic_location, location, &source, 1);
-            if (origin != 0)
-            {
-                pp->generated[(origin & BUSTER_PP_ORIGIN_INDEX) - 1].expansion = saved_origin;
-                pp->diagnostic_origin = origin;
-            }
+            // pp_pragma_string gave every destringized token the same generated spelling and operator parent.
+            // The names keep it even when a capture expands the operands before this message runs.
+            pp->diagnostic_origin = pp_stack_token(names, name).origin;
         }
         if (!pp->fatal)
         {

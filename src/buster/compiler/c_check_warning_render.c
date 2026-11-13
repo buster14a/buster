@@ -1034,17 +1034,22 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
             // (A typeof's sugar has no typedef chain, #1837.)
             const bool typeof_spelling = spelling != BUSTER_CHECK_NONE && spelling < parser->tokens.count && parser->tokens.kinds[spelling] == PARSE_KIND_TYPEOF;
             uint32_t vector_name = 0;
+            uint32_t atomic_name = 0;
             uint32_t chain = alias_type != 0 && spelling != BUSTER_CHECK_NONE && !typeof_spelling ? spelling : 0;
             for (uint32_t steps = 0; chain != 0 && chain < input->token_count && steps < 64; steps += 1)
             {
                 const uint8_t kind = type_kind(types, type_strip_aligned(types, input->declared_types[chain]));
                 vector_name = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR ? chain : vector_name;
+                // Clang doesn't desugar inside an atomic: `_Atomic(I) *` has no a.k.a. Keep its first value typedef
+                // even when the displayed alias names the whole atomic: `typedef _Atomic(S) AS` keeps S (#2441).
+                atomic_name = atomic_name == 0 && check_driver_atomic_value(types, type, input->declared_types[chain]) ? chain : atomic_name;
                 chain = check_input_typedef_spelling(input, parser, chain);
             }
-            TypeId vector_type = vector_name != 0 ? input->declared_types[vector_name] : 0;
-            const uint32_t vector_identifier = vector_name != 0 ? parser->tokens.names[vector_name] : 0;
-            String8 vector_alias = vector_name != 0 ? (String8){ .pointer = (char*)intern_bytes(pp->table, vector_identifier),
-                                                                 .length = intern_length(pp->table, vector_identifier) } : (String8){ 0 };
+            const uint32_t retained_name = atomic_name != 0 ? atomic_name : vector_name;
+            TypeId retained_type = retained_name != 0 ? input->declared_types[retained_name] : 0;
+            const uint32_t retained_identifier = retained_name != 0 ? parser->tokens.names[retained_name] : 0;
+            String8 retained_alias = retained_name != 0 ? (String8){ .pointer = (char*)intern_bytes(pp->table, retained_identifier),
+                                                                     .length = intern_length(pp->table, retained_identifier) } : (String8){ 0 };
             if (names.alias_count != 0 && vector_name != spelling)
             {
                 // clang's `(aka '...')`: the same type with the typedef sugar expanded — an anonymous record's
@@ -1060,15 +1065,9 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
                 const bool naming = tag < names.anonymous_count && names.anonymous[tag].length == alias_name.length &&
                                     memcmp(names.anonymous[tag].pointer, alias_name.pointer, alias_name.length) == 0;
                 expand.anonymous_keyword = spelling != BUSTER_CHECK_NONE && !naming && (typeof_spelling || check_input_typedef_spelling(input, parser, spelling) == 0);
-                expand.alias_count = vector_name != 0 ? 1 : 0;
-                expand.alias_types = &vector_type;
-                expand.alias_names = &vector_alias;
-                // clang's desugarForDiagnostic doesn't look inside an _Atomic (#1447): a typedef that is an atomic's value
-                // type stays in the a.k.a. (`_Atomic(I) *` has none).
-                const bool atomic_value = vector_name == 0 && alias_type != 0 && !typeof_spelling && check_driver_atomic_value(types, type, alias_type);
-                expand.alias_count = atomic_value ? 1 : expand.alias_count;
-                expand.alias_types = atomic_value ? &alias_type : expand.alias_types;
-                expand.alias_names = atomic_value ? &alias_name : expand.alias_names;
+                expand.alias_count = retained_name != 0 ? 1 : 0;
+                expand.alias_types = &retained_type;
+                expand.alias_names = &retained_alias;
                 expand.parenthesis_count = 0;
                 // desugarForDiagnostic strips a macro's name too: the a.k.a. spells the space out.
                 expand.space_macro_count = 0;

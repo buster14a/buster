@@ -6128,19 +6128,36 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
             }
         }
         const CheckInput* pragma_input = original_pragmas != NULL ? original_pragmas : input;
+        const CheckInputPackPragmas* pack_history = pragma_input->pack_pragmas;
         uint32_t pragma = 0;
+        uint32_t pack = 0;
         uint32_t packed = 0;
         for (uint32_t token = 0; !pp->fatal && token <= count; token += 1)
         {
-            while (!pp->fatal && pragma < pragma_input->fp_pragma_count && pragma_input->fp_pragmas[pragma].token == token)
+            while (!pp->fatal && ((pragma < pragma_input->fp_pragma_count && pragma_input->fp_pragmas[pragma].token == token) ||
+                (pack_history != NULL && pack < pack_history->count && pack_history->records[pack].token == token)))
             {
-                const CheckInputFpPragma* record = pragma_input->fp_pragmas + pragma;
                 const bool retained = original_pragmas != NULL || repair == NULL || token < check_repair_pragma_end(repair);
-                if (retained)
+                const uint32_t fp_source = pragma < pragma_input->fp_pragma_count && pragma_input->fp_pragmas[pragma].token == token ?
+                                           pragma_input->fp_pragmas[pragma].source_begin : UINT32_MAX;
+                const uint32_t pack_source = pack_history != NULL && pack < pack_history->count && pack_history->records[pack].token == token ?
+                                             pack_history->records[pack].source_begin : UINT32_MAX;
+                if (fp_source < pack_source)
                 {
-                    check_driver_pragma_report(parser, pp, pragma_input, record, quiet);
+                    if (retained)
+                    {
+                        check_driver_pragma_report(parser, pp, pragma_input, pragma_input->fp_pragmas + pragma, quiet);
+                    }
+                    pragma += 1;
                 }
-                pragma += 1;
+                else
+                {
+                    if (retained)
+                    {
+                        check_driver_pack_report(parser, pp, pack_history->records + pack);
+                    }
+                    pack += 1;
+                }
             }
             uint32_t flags = show_warnings && (repair == NULL || check_repair_warning_token(repair, token)) ?
                              warnings[token].flags : 0;
@@ -6222,9 +6239,20 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
         }
         // A directive in an unfinished expression can lie beyond every safely checked prefix. Its original
         // source spelling and warning policy are independent of that expression and precede the parser failure.
-        for (; !pp->fatal && original_pragmas != NULL && pragma < pragma_input->fp_pragma_count; pragma += 1)
+        while (!pp->fatal && original_pragmas != NULL && (pragma < pragma_input->fp_pragma_count || (pack_history != NULL && pack < pack_history->count)))
         {
-            check_driver_pragma_report(parser, pp, pragma_input, pragma_input->fp_pragmas + pragma, quiet);
+            const uint32_t fp_source = pragma < pragma_input->fp_pragma_count ? pragma_input->fp_pragmas[pragma].source_begin : UINT32_MAX;
+            const uint32_t pack_source = pack_history != NULL && pack < pack_history->count ? pack_history->records[pack].source_begin : UINT32_MAX;
+            if (fp_source < pack_source)
+            {
+                check_driver_pragma_report(parser, pp, pragma_input, pragma_input->fp_pragmas + pragma, quiet);
+                pragma += 1;
+            }
+            else
+            {
+                check_driver_pack_report(parser, pp, pack_history->records + pack);
+                pack += 1;
+            }
         }
     }
     arena_pop_to(scratch, mark);
@@ -6279,6 +6307,7 @@ static void check_test_driver_reports(CheckTest* test)
         wide_source,
         "int f(void) { return 1; }\n",
         "int f(void) { return 1; } int f(void) __asm__(\"late_name\");\n",
+        "#pragma options align=mac68k\n#pragma STDC FENV_ACCESS MAYBE\nint f(void) { return 1; }\n",
     };
     uint64_t state = 0x592;
     uint32_t compared = 0;

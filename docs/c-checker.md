@@ -1933,6 +1933,28 @@ each with clang on both paths, `-fsyntax-only` and `-c`. Differences left: an
 array of unknown bound's error still stops the unit's later initializers'
 checks, as an unknown field's in one does.
 
+An atomic object's braced initializer, including a compound literal's, retains
+its atomic type and the opening brace in `CHECK_INIT_ATOMIC_BRACES` (#2441,
+item 5). The driver prints "illegal initializer type 'T'" there, preserving
+typedef spelling. A compound literal with this error does not produce another
+error from the enclosing initializer that uses it; independent later
+initializers are still diagnosed. A GNU statement expression whose sole
+statement is the rejected literal, through parentheses, is an exception:
+Clang drops the invalid statement and gives its empty body a void value. The
+diagnostic scan records that separate value in `CheckInitFailure.recovered_type`
+and the driver uses the ordinary initialization-conversion wording, preserving
+the target's spelling. Its completion is the enclosing initializer's end, so
+this error follows the literal's own error despite its earlier caret location.
+The checked graph and initializer plans remain unchanged and rejected. A
+preceding usable statement makes a rejected final statement invalidate the
+whole statement expression instead; this exception does not apply then. An
+earlier rejected statement does not invalidate an expression's separate valid
+final value. The semantic-recovery fixtures compare full
+diagnostics with Clang for scalars, records, unions, typedefs, member and array
+initializers, empty-body recovery and a preceding-statement control on both
+paths and with deferred bodies. Atomic-brace errors during
+unknown-array-bound inference still use its generic declaration diagnostic.
+
 The source initializer adapter matches the selected language's warning policy
 for excess elements and compatible overlong string copies. Ignored tails are
 still expression-checked, but produce no stores, runtime evaluations or live
@@ -10964,7 +10986,9 @@ enables, which this checker doesn't all give.
   `typeof` (`&s.m` of a `typeof(long) m` is `'typeof(long) *'`, #1837). An a.k.a. keeps a
   vector's own typedef at any level (`'pv' (aka 'v4si *')`), as
   `desugarForDiagnostic` stops there. It doesn't look inside an `_Atomic`
-  either: `_Atomic(I) *` has no a.k.a. (`check_driver_atomic_value`). A typedef'd array's element keeps its
+  either: `_Atomic(I) *` has no a.k.a. (`check_driver_atomic_value`), and an outer
+  typedef's a.k.a. retains the first value typedef in its chain (`typedef
+  _Atomic(S) AS` prints `'AS' (aka '_Atomic(S)')`, #2441). A typedef'd array's element keeps its
   qualified typedef (`'CI[2]' (aka 'const int[2]')`, `type_print`). A qualifier
   the specifiers write again beside a qualified typedef prints over its name
   (`const CI twice[1]`'s `'const CI[1]' (aka 'const int[1]')`): the operand's
@@ -11232,8 +11256,20 @@ else warns "#pragma options align=reset failed: stack empty". A malformed one
 is ignored with clang's `-Wignored-pragmas` warning at its place ("expected
 'align' following '#pragma options'", "expected '='", "expected identifier",
 "invalid alignment option", "extra tokens"), as the options and pragmas map
-it. `mac68k`, clang's error on this target, is refused by name, as are other
-unsupported semantic effects.
+it. `mac68k` gives clang's target error without changing the stack; later
+declarations are still checked, and an emitting command preserves any existing
+output after the error (#2449). This error cannot be suppressed by warning
+options or diagnostic pragmas. The driver merges it with other retained pragma
+diagnostics in source order, including after a parse error.
+On a failed parse, the original-token view retains this state-free error at
+proven declaration, statement and record-member boundaries without reading the
+discarded parse tree or reconstructing packing state. It excludes expression,
+initializer and enum interiors, missing-semicolon lookaheads, and ambiguous
+boundaries from that semantic error history. The same view retains state-free
+alignment syntax warnings wherever they occur, including when recovery skips a
+nearby annotation, and appends their specific messages and carets through the
+ordinary lexical warning events. Only histories with a nonzero `error_count`
+enter the driver's target-error merge.
 
 `#pragma pack`'s own warnings (#1849, `check_input_pack_record` and
 `check_input_pack_align_warnings`) are clang's, whole output on both paths:

@@ -228,6 +228,39 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "struct P { int x; int y; };\nint a[2] = 5;\nstruct P p = { .z = 1 };\nvoid f(void)\n{\n    int b[2] = 6;\n    struct P q = 3;\n"
         "    char c[1] = 7;\n    (void)b; (void)q; (void)c;\n}\nstatic int *sp = { 1.5 };\nint n = undeclared;\nstruct P r = { 1, 2, 3 };\nint e[3] = 8;\n",
         "int k;\nstatic int s1 = k;\nint a[2] = 5;\nstruct Q { char *p; } qs = { 4 };\nstatic struct Q qq = { 5L };\nint u(void) { int w; return 0; }\n",
+        // An illegal atomic compound literal's initializer (#2441 item 5) is diagnosed once, at its `{` and with its
+        // actual type. Its enclosing initializer has no value to convert; later independent errors still appear.
+        "struct S { int x; };\n_Atomic struct S t = (_Atomic struct S){1};\nint after = 1 + (void)0;\n",
+        // Atomic scalars, direct braces and typedef spelling, including a type name whose value type is a typedef.
+        "typedef int I;\ntypedef _Atomic(int) A;\nA a = (A){1};\n_Atomic(I) b = (_Atomic(I)){2};\n"
+        "_Atomic int c = {3};\nA d = {4};\nint after = 1 + (void)0;\n",
+        // Unions, a record typedef, parenthesized literals, and several independent declarations in one unit.
+        "union U { int x; double y; };\ntypedef struct S { int x; } S;\ntypedef _Atomic(S) AS;\n"
+        "_Atomic union U u = (_Atomic union U){1};\nAS s = ((AS){2});\n"
+        "void local(void) { _Atomic struct S a = (_Atomic struct S){3}; AS b = (AS){4}; (void)a; (void)b; }\n"
+        "int after = 1 + (void)0;\n",
+        // Array elements and member initializers: plain lists containing atomic scalar elements and ordinary compound
+        // literals remain valid, while an element's own atomic braces fail. A later initializer keeps its own error.
+        "struct S { int x; };\nstruct T { _Atomic int x; };\n_Atomic int good_array[2] = {1, 2};\n"
+        "struct T good_record = {3};\nstruct S good_literal = (struct S){4};\n"
+        "_Atomic int bad_array[1] = {(_Atomic int){5}};\nstruct T bad_record = {{6}};\n"
+        "int *after = 1.5;\n",
+        // An earlier discarded statement-expression statement does not poison its final value: the final int still
+        // gives the record's independent conversion error. A sole rejected literal leaves an empty void-valued body.
+        "struct S { int x; };\n"
+        "void f(void) { struct S s = ({ (void)(_Atomic int){1}; 3; }); (void)s; }\n"
+        "void g(void) { _Atomic struct S s = ({ (_Atomic struct S){2}; }); (void)s; }\n",
+        // An outer atomic typedef's a.k.a. keeps the first value typedef, through chains on either side of _Atomic.
+        "typedef int I;\ntypedef I II;\ntypedef _Atomic(II) A;\ntypedef A AA;\n"
+        "typedef struct S { int x; } S;\ntypedef S SS;\ntypedef _Atomic(SS) AS;\n"
+        "AA a = (AA){1};\nAS s = {2};\nint after = 1 + (void)0;\n",
+        // The empty-body recovery passes through parentheses and applies to scalar literals too. A preceding usable
+        // statement instead makes the whole statement expression invalid, so only its literal's error remains.
+        "struct S { int x; };\n"
+        "void parenthesized(void) { _Atomic struct S s = (({ ((_Atomic struct S){1}); })); (void)s; }\n"
+        "void scalar(void) { _Atomic int s = ({ (_Atomic int){2}; }); (void)s; }\n"
+        "void preceding(void) { _Atomic struct S s = ({ (void)0; (_Atomic struct S){3}; }); (void)s; }\n"
+        "int after = 1 + (void)0;\n",
         // A pointer converted to int at file scope, each one's conversion and its "not a compile-time constant" (relayed
         // from the type attributes' session).
         "int x = \"str\";\nint y = \"two\";\nint z = 5;\nint w = \"three\";\n",
@@ -271,6 +304,30 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void f(void) { unknown_type z = \"x\"; }\nint y = 1 + (void)0;\n",
         "unknown_type a = \"x\";\nint b = a + 1;\nint y = 1 + (void)0;\n",
         "unknown_type z = \"x\";\nint g(void) { return 1 + (void)0; }\nint h(void) { return 2 + (void)0; }\n",
+        // Later declarators of an unknown type never reach clang's initializer handler (#2640). Its missing ';'
+        // follows the later declarator, and the skipped names cannot hide errors in subsequent declarations.
+        "unknown_type a = \"x\", b = \"y\";\nint y = 1 + (void)0;\n",
+        "unknown_type a, b = 2;\nint y = 1 + (void)0;\n",
+        "unknown_type a = 1, b, c = 2;\nint y = 1 + (void)0;\n",
+        "unknown_type a = 1, b = (1, (2 + (void)0)), c = absent;\nint y = 1 + (void)0;\n",
+        "unknown_type a = 1, b[] = { 2, 3 };\nint y = 1 + (void)0;\n",
+        "unknown_type a = 1, (*b)(void) = 0;\nint y = 1 + (void)0;\n",
+        // The discarded declarators can already have diagnosed their parameters. Keep those diagnostics once,
+        // including after another recovery round has shifted all their token indices.
+        "unknown_type a = 1, (*b)(other_type p) = 0;\nint y = 1 + (void)0;\n",
+        "unknown_type a = 1, (*b)(const p) = 0;\nint y = 1 + (void)0;\n",
+        "unknown_type a = 1, b = 2;\nunknown_type c = 3, (*d)(other_type p, another_type q) = 0;\nint y = 1 + (void)0;\n",
+        "void f(void) {\nunknown_type a = 1, b = 2;\nunknown_type c = 3, (*d)(other_type p) = 0;\nint y = 1 + (void)0;\n}\n",
+        "unknown_type first = 1, never_declared = 2;\nint *use = &never_declared;\nint y = 1 + (void)0;\n",
+        "void f(void) { unknown_type a = 1, b = 2; int y = 1 + (void)0; }\nint z = 2 + (void)0;\n",
+        "unknown_type a = 1, b = 2;\nunknown_type c = 3, d = 4;\nint y = 1 + (void)0;\n",
+        // A missing initializer on later declarators is no missing ';', and the declaration's state must not leak.
+        "unknown_type a = 1, b, c;\nint x = 2, y = 3;\nint z = 1 + (void)0;\n",
+        "void f(unknown_type p, int x);\nint a = 1, b = 2;\nint z = 1 + (void)0;\n",
+        "#define Unknown unknown_type\nUnknown a = 1, b = 2;\nint y = 1 + (void)0;\n",
+        // Original pragma errors and atomic literal diagnostics survive the comma-declaration recovery together.
+        "#pragma options align=mac68k\nunknown_type a = \"x\", b = \"y\";\n"
+        "struct S { int x; };\n_Atomic struct S t = (_Atomic struct S){1};\nint after = 1 + (void)0;\n",
         // Clang's words and places (#1447): a static initializer's culprit (an operator, a member's name, a cast's `(`, a
         // call's or a name's first token), `sizeof` and `alignof` of an incomplete type (the type as written, at a type
         // name's keyword or an expression's start, with the tag's note; an array of unknown size's alignment its
@@ -1168,6 +1225,7 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
     snprintf(object, sizeof(object), "%s/semantic-recovery.o", directory);
     for (uint32_t f = 0; expected_lines != NULL && actual_lines != NULL && f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
     {
+        bool mismatch_reported = false;
         snprintf(source, sizeof(source), "%s/semantic-recovery-%u.c", directory, f);
         const bool stress = strncmp(fixtures[f], "/* typo stress */", 17) == 0;
         const uint64_t stress_length = stress ? check_test_typo_stress(stress_text, sizeof(stress_text)) : 0;
@@ -1233,7 +1291,15 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
                     char description[8192];
                     snprintf(description, sizeof(description), "semantic recovery %u, %s %s, mode %u: status %d (clang %d), lines\n%s(clang\n%s)", f, standards[s],
                              options[o] != NULL ? options[o] : "", mode, status, oracle, actual_lines, expected_lines);
-                    check_test_expect(test, same && (status != 0) == (oracle != 0) && !written, description);
+                    const bool correct = same && (status != 0) == (oracle != 0) && !written;
+                    if (!correct && !mismatch_reported)
+                    {
+                        // One fixture can exhaust the shared failure-detail limit across its language and reader
+                        // variants. Keep the first difference of every later fixture visible in hosted logs too.
+                        fprintf(stderr, "semantic recovery first mismatch: %s\n", description);
+                        mismatch_reported = true;
+                    }
+                    check_test_expect(test, correct, description);
                     free(actual);
                 }
                 free(expected);
