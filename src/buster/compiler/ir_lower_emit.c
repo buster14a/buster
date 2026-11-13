@@ -220,7 +220,15 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 }
                 else if (class == BUSTER_TYPED_CLASS_F80)
                 {
-                    stack[depth] = ir_typed_wide_constant(&sink, type, input->x87_constants[value * 2], input->x87_constants[value * 2 + 1]);
+                    if (input->x87_symbols != NULL)
+                    {
+                        const uint32_t address = ir_typed_emit(&sink, IR_SYMBOL_ADDR, IR_PTR, input->x87_symbols[value], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                        stack[depth] = ir_typed_emit(&sink, IR_LOAD, IR_F80, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                    }
+                    else
+                    {
+                        stack[depth] = ir_typed_wide_constant(&sink, type, input->x87_constants[value * 2], input->x87_constants[value * 2 + 1]);
+                    }
                 }
                 else
                 {

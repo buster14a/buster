@@ -861,6 +861,12 @@ static bool tier0_inline_tables(const Tier0InlineInput* input, const Tier0Inline
     const uint64_t locals = plan->local_count;
     const uint64_t rows = plan->call_count;
     const uint64_t arguments = plan->argument_count;
+    bool literal_symbols = plan->x87_count != 0 && (caller->x87_constant_count == 0 || caller->x87_symbols != NULL);
+    for (uint32_t d = 0; literal_symbols && d < plan->distinct_count; d += 1)
+    {
+        const Tier0Function* callee = input->callees[plan->distinct[d].index];
+        literal_symbols = callee->x87_constant_count == 0 || callee->x87_symbols != NULL;
+    }
     uint8_t* local_classes = BUSTER_TIER0_INLINE_PUSH(arena, uint8_t, locals);
     uint8_t* local_flags = BUSTER_TIER0_INLINE_PUSH(arena, uint8_t, locals);
     uint32_t* local_sizes = plan->sizes ? BUSTER_TIER0_INLINE_PUSH(arena, uint32_t, locals) : 0;
@@ -877,6 +883,7 @@ static bool tier0_inline_tables(const Tier0InlineInput* input, const Tier0Inline
     uint32_t* argument_sizes = plan->argument_sizes ? BUSTER_TIER0_INLINE_PUSH(arena, uint32_t, arguments) : 0;
     Tier0Operation* operations = plan->operation_count != 0 ? BUSTER_TIER0_INLINE_PUSH(arena, Tier0Operation, plan->operation_count) : 0;
     uint64_t* x87_constants = plan->x87_count != 0 ? BUSTER_TIER0_INLINE_PUSH(arena, uint64_t, 2 * plan->x87_count) : 0;
+    SymbolId* x87_symbols = literal_symbols ? BUSTER_TIER0_INLINE_PUSH(arena, SymbolId, plan->x87_count) : NULL;
     uint64_t* vector_constants = plan->vector_count != 0 ? BUSTER_TIER0_INLINE_PUSH(arena, uint64_t, 8 * plan->vector_count) : 0;
     uint8_t* vector_constant_bytes = plan->vector_count != 0 ? BUSTER_TIER0_INLINE_PUSH(arena, uint8_t, plan->vector_count) : 0;
     // The asm bodies (#1839): the caller's, then each site's copy of its callee's, its block rebased to the site's locals.
@@ -894,7 +901,7 @@ static bool tier0_inline_tables(const Tier0InlineInput* input, const Tier0Inline
     valid = valid && local_classes != 0 && local_flags != 0 && (!plan->sizes || (local_sizes != 0 && local_alignments != 0)) && call_targets != 0 && call_first != 0 &&
                  call_argument_counts != 0 && call_variadic != 0 && calls != 0 && (!plan->result_objects || call_result_objects != 0) &&
                  (caller->call_tails == 0 || call_tails != 0) && argument_locations != 0 && argument_classes != 0 && (!plan->argument_sizes || argument_sizes != 0) &&
-                 (plan->operation_count == 0 || operations != 0) && (plan->x87_count == 0 || x87_constants != 0) &&
+                 (plan->operation_count == 0 || operations != 0) && (plan->x87_count == 0 || x87_constants != 0) && (!literal_symbols || x87_symbols != NULL) &&
                  (plan->vector_count == 0 || (vector_constants != 0 && vector_constant_bytes != 0));
     if (valid)
     {
@@ -974,6 +981,10 @@ static bool tier0_inline_tables(const Tier0InlineInput* input, const Tier0Inline
         if (caller->x87_constant_count != 0)
         {
             tier0_inline_copy(x87_constants, caller->x87_constants, (uint64_t)caller->x87_constant_count * 2 * sizeof(uint64_t));
+            if (literal_symbols)
+            {
+                tier0_inline_copy(x87_symbols, caller->x87_symbols, (uint64_t)caller->x87_constant_count * sizeof(SymbolId));
+            }
         }
         if (caller->vector_constant_count != 0)
         {
@@ -1020,6 +1031,10 @@ static bool tier0_inline_tables(const Tier0InlineInput* input, const Tier0Inline
             if (callee->x87_constant_count != 0)
             {
                 tier0_inline_copy(x87_constants + 2 * (uint64_t)distinct->x87_base, callee->x87_constants, (uint64_t)callee->x87_constant_count * 2 * sizeof(uint64_t));
+                if (literal_symbols)
+                {
+                    tier0_inline_copy(x87_symbols + distinct->x87_base, callee->x87_symbols, (uint64_t)callee->x87_constant_count * sizeof(SymbolId));
+                }
             }
             if (callee->vector_constant_count != 0)
             {
@@ -1099,6 +1114,7 @@ static bool tier0_inline_tables(const Tier0InlineInput* input, const Tier0Inline
         g->operations = operations;
         g->operation_count = (uint32_t)plan->operation_count;
         g->x87_constants = x87_constants;
+        g->x87_symbols = x87_symbols;
         g->x87_constant_count = (uint32_t)plan->x87_count;
         g->vector_constants = vector_constants;
         g->vector_constant_bytes = vector_constant_bytes;

@@ -4174,11 +4174,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_FUNCTION,
                                             BUSTER_LINK_SOURCE_NONE) == helper->symbol;
     }
-    // Constant automatic initializers have one local readonly symbol per pooled byte image, before runtime symbols.
+    // Constant automatic initializers and machine literals have one local readonly symbol per pooled byte image.
     for (uint32_t p = 0; valid && p < pools->count; p += 1)
     {
         char spelling[48];
-        const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_initializer_%u", p);
+        const bool x87 = p >= pools->x87_first && p - pools->x87_first < pools->x87_count;
+        const int length = snprintf(spelling, sizeof(spelling), x87 ? ".Lbuster_x87_%u" : ".Lbuster_initializer_%u", p);
         const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_OBJECT,
                                             BUSTER_LINK_SOURCE_NONE) == pools->symbol_base + p;
@@ -4641,8 +4642,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     for (uint32_t p = 0; valid && p < pools->count; p += 1)
     {
         const CheckLowerInitPool* pool = pools->items + p;
-        uint8_t* data = arena_push(bytes, pool->size, 1);
-        const AtomId atom = data != NULL ? link_add_atom(&result->link, BUSTER_LINK_CLASS_RODATA, 0, pool->size,
+        uint8_t* data = arena_push(bytes, pool->size, UINT64_C(1) << pool->alignment_log2);
+        const AtomId atom = data != NULL ? link_add_atom(&result->link, BUSTER_LINK_CLASS_RODATA, pool->alignment_log2, pool->size,
                                                        memcpy(data, pool->bytes, pool->size), 0) : 0;
         valid = atom != 0 && link_define_symbol(&result->link, pools->symbol_base + p, atom, 0, pool->size);
         if (valid)

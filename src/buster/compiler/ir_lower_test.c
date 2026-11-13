@@ -989,6 +989,81 @@ static bool ir_lower_test_wide_typed_run(const Tier0Function* function, uint8_t*
     return ran;
 }
 
+// The optional literal-symbol column changes F80 materialization only; raw clients retain their wide constants.
+static void ir_lower_test_x87_symbols(IrLowerTestTally* tally)
+{
+    static const uint8_t kinds[] = { BUSTER_TYPED_CONST, BUSTER_TYPED_RETURN };
+    static const uint8_t classes[] = { BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_F80 };
+    static const uint64_t values[] = { 0, 0 };
+    static const uint64_t constant[] = { UINT64_C(0xc000000000000000), UINT64_C(0x3fff) };
+    SymbolId symbols[] = { 3 };
+    Tier0Function source = {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = BUSTER_ARRAY_LENGTH(kinds),
+        .x87 = true,
+        .x87_constants = constant,
+        .x87_constant_count = 1,
+        .result = {
+            .kind = BUSTER_ABI_RESULT_REGISTERS,
+            .part_bytes = 16,
+            .registers = { BUSTER_ABI_REGISTER_X87, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE },
+        },
+    };
+    Arena output[2] = { arena_reserve(UINT64_C(1) << 20), arena_reserve(UINT64_C(1) << 20) };
+    Arena scratch = arena_reserve(UINT64_C(1) << 20);
+    const bool ready = output[0].base != NULL && output[1].base != NULL && scratch.base != NULL;
+    ir_lower_test_expect(tally, ready, "x87 literal-symbol adapter arenas", 0, 0);
+    for (uint32_t supplied = 0; ready && supplied < 2; supplied += 1)
+    {
+        source.x87_symbols = supplied != 0 ? symbols : NULL;
+        IrFunction function = { 0 };
+        if (ir_lower_test_lower(tally, &source, IR_F80, 4, output, output + 1, &scratch, &function, 0, supplied))
+        {
+            uint32_t addresses = 0;
+            uint32_t loads = 0;
+            uint32_t constants = 0;
+            bool paired = true;
+            for (uint32_t i = 0; i < function.instruction_count; i += 1)
+            {
+                if (function.op[i] == IR_SYMBOL_ADDR)
+                {
+                    addresses += 1;
+                    paired &= function.a[i] == 3 && i + 1 < function.instruction_count && function.op[i + 1] == IR_LOAD &&
+                              function.type[i + 1] == IR_F80 && function.a[i + 1] == i;
+                }
+                loads += function.op[i] == IR_LOAD && function.type[i] == IR_F80;
+                constants += function.op[i] == IR_CONST && function.type[i] == IR_F80;
+            }
+            ir_lower_test_expect(tally, paired && addresses == supplied && loads == supplied && constants == 1 - supplied,
+                                 "supplied symbols use an m80 load while raw clients retain their exact constant", 0, supplied);
+        }
+        arena_pop_to(output, 0);
+        arena_pop_to(output + 1, 0);
+    }
+    source.x87_symbols = symbols;
+    for (uint32_t bad = 0; ready && bad < 2; bad += 1)
+    {
+        symbols[0] = bad != 0 ? 4 : 0;
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            const IrFunction before = { .symbol_count = 99 };
+            IrFunction refused = before;
+            const uint64_t output_mark = output[path].length;
+            const uint64_t scratch_mark = scratch.length;
+            const IrCheck check = path != 0 ? ir_lower_typed_scalar(&source, IR_F80, 4, output + path, &scratch, &refused) :
+                                              ir_lower_typed(&source, IR_F80, 4, output + path, &scratch, &refused);
+            ir_lower_test_expect(tally, check.error != IR_OK && output[path].length == output_mark && scratch.length == scratch_mark &&
+                                       memcmp(&refused, &before, sizeof(before)) == 0,
+                                 "zero and out-of-range literal symbols refuse without changing the result or arena marks", bad, path);
+        }
+    }
+    arena_release(&scratch);
+    arena_release(output + 1);
+    arena_release(output);
+}
+
 // Long double and the 128-bit integers (#131): Tier 0's own random programs of each class (tier0_x87_test.c and
 // tier0_int128_test.c, their inputs drawn as those tests draw them) lowered by both paths and promoted, then run by the
 // shared IR's interpreter, every output slot they write compared with their stack machines': the x87 programs' calls of C
@@ -4990,6 +5065,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         dynamic.vlas = true;
         dynamic.floating = false;
         ir_lower_test_programs(&tally, seed, count, dynamic, false, "dynamic stack (strict shared IR / Tier 0 native)");
+        ir_lower_test_x87_symbols(&tally);
         ir_lower_test_wide(&tally, seed, 4 * count);
         printf("test-ir-lowering: %" PRIu64 " checks, %" PRIu64 " failed\n", tally.checks, tally.failures);
         result = tally.failures != 0;

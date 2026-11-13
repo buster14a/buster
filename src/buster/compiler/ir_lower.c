@@ -2725,7 +2725,8 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         const uint8_t kind = input->kinds[i];
         const uint64_t value = input->values[i];
         const bool symbol = kind == BUSTER_TYPED_GLOBAL || kind == BUSTER_TYPED_GLOBAL_ADDRESS || kind == BUSTER_TYPED_STORE_GLOBAL || kind == BUSTER_TYPED_SET_GLOBAL;
-        if ((symbol && (value == 0 || value >= symbol_count)) ||
+        const bool x87_symbol = kind == BUSTER_TYPED_CONST && input->classes[i] == BUSTER_TYPED_CLASS_F80 && input->x87_symbols != NULL;
+        if ((symbol && (value == 0 || value >= symbol_count)) || (x87_symbol && (input->x87_symbols[value] == 0 || input->x87_symbols[value] >= symbol_count)) ||
             (kind == BUSTER_TYPED_RETURN && ir_typed_types[input->classes[i]] != result_type))
         {
             check.error = IR_ERROR_TYPE;

@@ -321,7 +321,7 @@ patterns are:
   and an integral one no inexact; the half's truncation raises invalid exactly
   where the value is 2^64 or more. A return moves its value into xmm0. Still
   refused: a select of floating values.
-- Long double (#141): `F80`, the x87's, whose values the CFG consumer keeps in
+- Long double (#141): `F80`, the x87's, whose baseline values the CFG consumer keeps in
   frame objects of their own, 16 bytes each, one per value, and computes on the
   x87 stack between them, leaving it empty after each node, as Tier 0 does
   between its slots (`TIER1_RULE_X87`, its kind in the pattern's `scale`). Its
@@ -329,7 +329,10 @@ patterns are:
   consumer reads them from the IR's operands' objects (`tier1_emit_cfg_x87`), and
   the plan marks them needed as it marks a pattern's values. The values are the
   other operands alone: a load's and a store's address, a conversion's integer
-  or floating operand. A constant stores its 10 bytes as immediates; a load and a
+  or floating operand. A raw IR constant stores its 10 bytes as immediates;
+  the C driver's eligible finite literals instead arrive as read-only symbol
+  loads through its shared exact-payload pool (#1387,
+  [literal lowering](commands/lowering.md)). A load and a
   store are `fld` and `fstp` of them through the address; arithmetic loads both
   operands and `faddp` (`fsubp`, `fmulp`, `fdivp`) `st(1), st(0)`; a negation is
   `fchs`. A comparison is `fucomip` of the operands in the order that makes
@@ -360,6 +363,38 @@ patterns are:
   then st1 into the second (`fstp`); the return loads them the last first, so
   that st0 holds the first (`fld`). A long double argument whose call has ABI
   records takes its stack slots the same way.
+
+  After emission, `tier1_emit_cfg_x87_transfers` annotates canonical results
+  whose complete IR use list has exactly one occurrence. The shared
+  `x87_transfer.c` planner replaces an admitted private `fstpt`/`fldt` pair
+  with `fld st(0)`/`fstp st(0)`: the canonical result remains twice in the x87
+  registers until its consumer takes one copy. Both original waiting points
+  remain and all record indices, references and source/frame events stay
+  unchanged. The post scheduler pins these register transfers so a pending
+  exception cannot move across another effect when the memory operand goes
+  away. This removes the private memory round trip before a left-operand
+  consumer or a direct assignment without changing arithmetic order.
+
+  Each region has at most 64 original records and at most one live retained pair; the
+  complete physical depth, including both copies and intervening operations,
+  cannot exceed eight. An independent replay compares source snapshots,
+  operand identities, operations, private-home overlaps and exit depth before
+  publishing a region. The candidate scan has scalar and vector twins. Raw
+  F80 loads and constants retain their initial transfer because AMD's documented
+  signaling-NaN/unsupported-format store effects do not justify removing it.
+  Multiuse values, right operands under another live x87 value, conversions
+  with control-word changes, calls, inline assembly, volatile/atomic accesses,
+  control edges and unrecognized sequences retain the baseline. Frame homes
+  remain allocated for every fallback. Allocation failure drops this optional
+  plan and restores its scratch. The existing emitted x87 certificate refusal
+  remains; the transport replay does not claim decoded x87 certification.
+
+  `test-tier1-wide` adds exact transfer counts for direct stores, arithmetic
+  chains, repeated operands, right operands and volatile stores on both paths.
+  Its shared-helper fixtures reject mutated operations, stack indices,
+  source accesses, missing stores, false eligibility and hidden private-home
+  reads; depths eight and nine and guarded scalar/vector tails are checked.
+  Runtime speedup and full raw-load retention remain separate acceptance work.
 - Call arguments and parameters take their places by the System V classes
   (`tier1_select_next_place`, #141): the k-th integer or pointer in the k-th of
   the six general argument registers, the k-th floating value in xmm k of eight,

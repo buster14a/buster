@@ -12,6 +12,7 @@
 #include "c_check_program_diagnostic_test.c"
 #include "c_check_control_input_test.c"
 #include "c_check_program_lifetime_test.c"
+#include "c_check_program_x87_literals_test.c"
 
 static void check_test_program_addressed(CheckTest* test)
 {
@@ -902,7 +903,9 @@ static bool check_test_program_function(const Tier0Function* a, const Tier0Funct
                        check_test_program_column(a->argument_locations, b->argument_locations, (uint64_t)a->argument_count * sizeof(AbiLocation)) &&
                        check_test_program_column(a->argument_classes, b->argument_classes, a->argument_count) &&
                        a->x87_constant_count == b->x87_constant_count && a->x87 == b->x87 &&
-                       check_test_program_column(a->x87_constants, b->x87_constants, (uint64_t)a->x87_constant_count * 2 * sizeof(uint64_t));
+                       check_test_program_column(a->x87_constants, b->x87_constants, (uint64_t)a->x87_constant_count * 2 * sizeof(uint64_t)) &&
+                       ((a->x87_symbols == NULL && b->x87_symbols == NULL) ||
+                        check_test_program_column(a->x87_symbols, b->x87_symbols, (uint64_t)a->x87_constant_count * sizeof(SymbolId)));
     return equal;
 }
 
@@ -2159,7 +2162,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             }
             for (uint32_t p = 0; p < 2; p += 1)
             {
-                check_test_expect(test, expected_pools < 0 || lower[p].initializers.count == (uint32_t)expected_pools,
+                check_test_expect(test, expected_pools < 0 || lower[p].initializers.count - lower[p].initializers.x87_count == (uint32_t)expected_pools,
                                   "automatic initializer pooling matches the independently expected threshold and constant eligibility");
                 for (uint32_t b = 0; entry_limit != 0 && b < program.body_count; b += 1)
                 {
@@ -2173,7 +2176,8 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             {
                 const CheckLowerInitPool* a = lower[0].initializers.items + p;
                 const CheckLowerInitPool* b = lower[1].initializers.items + p;
-                check_test_expect(test, a->size == b->size && a->part == b->part && memcmp(a->bytes, b->bytes, a->size) == 0,
+                check_test_expect(test, a->size == b->size && a->part == b->part && a->alignment_log2 == b->alignment_log2 &&
+                                       memcmp(a->bytes, b->bytes, a->size) == 0,
                                   "automatic initializer byte images agree across lowering paths");
             }
             check_test_expect(test, lower[0].errno_symbol == lower[1].errno_symbol && lower[0].errno_pointer_type == lower[1].errno_pointer_type &&
@@ -2214,13 +2218,13 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         {
             check_test_expect(test, entry_limit == 0 || code.code_bytes <= 2048,
                               "initializer native code stays bounded independently of payload size");
-            // (A unit's __builtin_dump_struct strings and __builtin_clear_padding tables are pools too, which no memcpy reads.)
+            // Literal images, __builtin_dump_struct strings and __builtin_clear_padding tables need no memcpy.
             bool tables = false;
             for (uint32_t k = 0; k < code.lowered.initializers.padding_count; k += 1)
             {
                 tables |= code.lowered.initializers.paddings[k].pool != BUSTER_CHECK_NONE;
             }
-            if (code.lowered.initializers.count != 0 && code.lowered.initializers.dump_count == 0 && !tables)
+            if (code.lowered.initializers.count != code.lowered.initializers.x87_count && code.lowered.initializers.dump_count == 0 && !tables)
             {
                 const uint64_t access_mark = scratch.length;
                 uint8_t* defined = NULL;
@@ -3744,6 +3748,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_control_masks(test);
         check_test_control_walks(test);
         check_test_program_addressed(test);
+        check_test_program_x87_literals(test);
         check_test_program_lifetime_planning(test);
         check_test_program_scans(test);
         check_test_program_many_declarators(test, clang);

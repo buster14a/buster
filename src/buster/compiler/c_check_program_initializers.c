@@ -16,6 +16,8 @@ struct CheckLowerInitPool
     uint32_t size;
     // BUSTER_CHECK_NONE denotes a complete constant prefix; otherwise an index in CheckInitializer.parts.
     uint32_t part;
+    // Zero for byte images; machine literals retain their required placement alignment.
+    uint8_t alignment_log2;
 };
 
 // __builtin_dump_struct's printing calls (#148, c_check_program_dump.c): an operand of a call's after the rest of the
@@ -87,6 +89,10 @@ struct CheckLowerInitializers
     uint32_t* first;
     uint32_t count;
     SymbolId symbol_base;
+    // Exact F80 keys (significand, sign/exponent) in ascending key order. Their 16-byte images are items at x87_first.
+    const uint64_t* x87_keys;
+    uint32_t x87_first;
+    uint32_t x87_count;
     // The unit's __builtin_dump_struct calls, whose images are pools after the initializers' (first[count]
     // on), and the room the lowering's writers take besides the per-node bounds: for those calls, which evaluate the
     // printer and the rest of the arguments once a call, and for __builtin_os_log_format's data, evaluated once an item.

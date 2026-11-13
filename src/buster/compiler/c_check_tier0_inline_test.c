@@ -66,6 +66,7 @@ static bool tier0_inline_test_same(const Tier0Function* a, const Tier0Function* 
            tier0_inline_test_same_column(a->argument_sizes, b->argument_sizes, a->argument_count, sizeof(uint32_t));
     same = same && tier0_inline_test_same_column(a->operations, b->operations, a->operation_count, sizeof(Tier0Operation)) &&
            tier0_inline_test_same_column(a->x87_constants, b->x87_constants, 2 * (uint64_t)a->x87_constant_count, sizeof(uint64_t)) &&
+           tier0_inline_test_same_column(a->x87_symbols, b->x87_symbols, a->x87_constant_count, sizeof(SymbolId)) &&
            tier0_inline_test_same_column(a->vector_constants, b->vector_constants, 8 * (uint64_t)a->vector_constant_count, sizeof(uint64_t)) &&
            tier0_inline_test_same_column(a->vector_constant_bytes, b->vector_constant_bytes, a->vector_constant_count, 1) &&
            tier0_inline_test_same_column(a->label_entries, b->label_entries, a->label_count, sizeof(uint32_t));
