@@ -33,6 +33,11 @@
 // status. These runs follow the interpreter children sequentially. The interpreter children and native programs see
 // an empty environment in this mode, including libc's getenv, as well as main's explicit envp.
 //
+// Given more than one CPU (test_process_cpus: the parallel runner's grant, or the CPUs the process may run on), the
+// files and generated programs run as parts, a child process each (test_process.c), one per CPU at once, each running
+// its program's forms in turn rather than at once, a part starting as soon as another ends; their lines come in the
+// items' order (ssa_source_items, #2658).
+//
 // The work directory is under $TMPDIR (or /tmp); --keep keeps it, as a failure does. The report has a line per file,
 // with its functions, each path's phis and its runs, a line per failure, and the totals; the exit status is 1 on any
 // failure. It is a test outside the compile path, with no vector path of its own. Include after ir_source_test.c,
@@ -42,6 +47,7 @@
 #include "buster/compiler/test_paths.h"
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -123,6 +129,9 @@ struct SsaSourceLimits
     // The actual compiler and its original working directory, borrowed for the command's duration.
     const char* compiler;
     const char* directory;
+    // Each program's forms one after another rather than at once: in a part (ssa_source_items), whose command's parts
+    // already keep its CPUs busy, one each.
+    bool forms_in_turn;
 };
 
 // What a run of a form gave: its process, its wait status (-1 if it couldn't be waited for), its output (malloc's), and
@@ -593,8 +602,12 @@ static bool ssa_source_execute(const IrSourceFile* file, IrFunction* const* form
     for (uint32_t form = 0; passed && form < form_count; form += 1)
     {
         ssa_source_start_form(&runs[form], file, forms[form], entry, directories[form], limits);
+        if (limits->forms_in_turn)
+        {
+            ssa_source_finish_form(&runs[form], directories[form]);
+        }
     }
-    for (uint32_t form = 0; passed && form < form_count; form += 1)
+    for (uint32_t form = 0; passed && !limits->forms_in_turn && form < form_count; form += 1)
     {
         ssa_source_finish_form(&runs[form], directories[form]);
     }
@@ -689,9 +702,10 @@ struct SsaSourceArenas
 
 // Checks `name` (a file read with `options`): its functions lowered and promoted by both paths with the SSA checks, and
 // with a main, its program run in the three forms against `expected` (or, without, FILE.expected if there is one), into
-// `totals`, with the file's line and a line per failure. A file the preparation leaves out is counted and passes.
-static void ssa_source_file(SsaSourceTotals* totals, const char* name, char** options, uint32_t option_count, const SsaSourceExpected* expected, SsaSourceArenas* arenas,
-                            const char* work, const SsaSourceLimits* limits, bool keep, int* statuses)
+// `totals`, with the file's line and a line per failure. Its runs' directories in `work` are numbered `index`, which no
+// other file's runs of the command share. A file the preparation leaves out is counted and passes.
+static void ssa_source_file(SsaSourceTotals* totals, uint64_t index, const char* name, char** options, uint32_t option_count, const SsaSourceExpected* expected,
+                            SsaSourceArenas* arenas, const char* work, const SsaSourceLimits* limits, bool keep, int* statuses)
 {
     IrSourceFile file;
     ir_source_prepare(&file, name, options, option_count, &arenas->lowered, &arenas->tables, true, limits->lifetimes);
@@ -780,7 +794,7 @@ static void ssa_source_file(SsaSourceTotals* totals, const char* name, char** op
         const SsaSourceExpected from_file = { .output = bytes, .length = length, .status = 0 };
         const SsaSourceExpected* wanted = expected != 0 ? expected : bytes != 0 ? &from_file : 0;
         uint64_t steps[BUSTER_SSA_SOURCE_FORMS] = { 0 };
-        const bool passed = ssa_source_execute(&file, forms, entry, wanted, name, work, totals->programs, limits, keep, steps, statuses, options, option_count, totals);
+        const bool passed = ssa_source_execute(&file, forms, entry, wanted, name, work, index, limits, keep, steps, statuses, options, option_count, totals);
         totals->programs += 1;
         totals->passed += passed;
         snprintf(counted, sizeof(counted), " steps=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64, steps[0], steps[1], steps[2], steps[3]);
@@ -825,51 +839,194 @@ static bool ssa_source_compile(const char* clang, const char* source, const char
     return compiled;
 }
 
-// The generated programs: `count` of them from `seed` on, each written into `work`, built by clang -O0 and run for what
-// it must print, then checked as a file is.
-static void ssa_source_generated(SsaSourceTotals* totals, uint64_t seed, uint32_t count, const char* clang, char** options, uint32_t option_count, SsaSourceArenas* arenas,
-                                 const char* work, const SsaSourceLimits* limits, bool keep)
+// The generated program `p` of `seed`'s: written into `work`, built by clang -O0 and run for what it must print, then
+// checked as a file is, its runs' directories numbered `index`. `generator` and `text` are its scratch.
+static void ssa_source_program(SsaSourceTotals* totals, uint64_t seed, uint32_t p, uint64_t index, const char* clang, char** options, uint32_t option_count,
+                               SsaSourceArenas* arenas, const char* work, const SsaSourceLimits* limits, bool keep, SsaGenerator* generator, char* text)
 {
+    const uint64_t program_seed = seed * 1000003ull + p;
+    char source[PATH_MAX];
+    char object[PATH_MAX];
+    char executable[PATH_MAX];
+    char log[PATH_MAX];
+    char output[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/program_%u.c", work, p);
+    snprintf(object, sizeof(object), "%s/program_%u.o", work, p);
+    snprintf(executable, sizeof(executable), "%s/program_%u", work, p);
+    snprintf(log, sizeof(log), "%s/program_%u.log", work, p);
+    snprintf(output, sizeof(output), "%s/program_%u.out", work, p);
+    const uint64_t length = generator != 0 && text != 0 ? ssa_generate_program(generator, text, BUSTER_SSA_SOURCE_TEXT, program_seed) : 0;
+    FILE* written = length != 0 ? fopen(source, "w") : 0;
+    bool built = written != 0 && fwrite(text, 1, length, written) == length;
+    built = written != 0 && fclose(written) == 0 && built;
+    built = built && ssa_source_compile(clang, source, object);
+    bool timed_out = false;
+    char* link[] = { (char*)clang, "-o", executable, object, 0 };
+    built = built && c_testsuite_run(link, work, log, limits->timeout, &timed_out) == 0;
+    char* run[] = { executable, 0 };
+    const int status = built ? c_testsuite_run(run, work, output, limits->timeout, &timed_out) : -1;
+    uint64_t bytes = 0;
+    char* expected_output = built && !timed_out ? c_testsuite_read(output, &bytes) : 0;
+    totals->generated += 1;
+    if (expected_output == 0)
+    {
+        totals->unbuilt += 1;
+        printf("test-ssa-source: program of seed %" PRIu64 " (%s): clang's build couldn't be made or run\n", program_seed, source);
+    }
+    else
+    {
+        const SsaSourceExpected expected = { .output = expected_output, .length = bytes, .status = status };
+        ssa_source_file(totals, index, source, options, option_count, &expected, arenas, work, limits, keep, 0);
+    }
+    free(expected_output);
+}
+
+// A command's items: its files, then `generate` programs from `seed` on (built by `clang`), each read with `options`.
+typedef struct SsaSourceItems SsaSourceItems;
+struct SsaSourceItems
+{
+    char** files;
+    uint32_t file_count;
+    uint32_t generate;
+    uint64_t seed;
+    const char* clang;
+    char** options;
+    uint32_t option_count;
+};
+
+// `item` of `items` (a file, or past the files a generated program), into `totals`, its runs' directories numbered by
+// its place among the items.
+static void ssa_source_item(SsaSourceTotals* totals, const SsaSourceItems* items, uint32_t item, SsaSourceArenas* arenas, const char* work, const SsaSourceLimits* limits,
+                            bool keep, SsaGenerator* generator, char* text)
+{
+    if (item < items->file_count)
+    {
+        ssa_source_file(totals, item, items->files[item], items->options, items->option_count, 0, arenas, work, limits, keep, 0);
+    }
+    else
+    {
+        ssa_source_program(totals, items->seed, item - items->file_count, item, items->clang, items->options, items->option_count, arenas, work, limits, keep, generator,
+                           text);
+    }
+}
+
+// Adds a part's counts to `totals`.
+static void ssa_source_add(SsaSourceTotals* totals, const SsaSourceTotals* part)
+{
+    totals->files += part->files;
+    totals->left_out += part->left_out;
+    totals->failed_files += part->failed_files;
+    totals->functions += part->functions;
+    totals->instructions += part->instructions;
+    totals->promoted[0] += part->promoted[0];
+    totals->promoted[1] += part->promoted[1];
+    totals->phis[0] += part->phis[0];
+    totals->phis[1] += part->phis[1];
+    totals->failures += part->failures;
+    totals->programs += part->programs;
+    totals->passed += part->passed;
+    for (uint32_t form = 0; form < BUSTER_SSA_SOURCE_FORMS; form += 1)
+    {
+        totals->steps[form] += part->steps[form];
+    }
+    totals->generated += part->generated;
+    totals->unbuilt += part->unbuilt;
+    totals->native_programs += part->native_programs;
+    totals->native_passed += part->native_passed;
+    totals->native_functions[0] += part->native_functions[0];
+    totals->native_functions[1] += part->native_functions[1];
+}
+
+// How many parts may have started past the oldest one whose report is still to come, per CPU: what a slow item holds the
+// others' reports back by before it holds back their starts.
+#define BUSTER_SSA_SOURCE_WINDOW 8
+
+// Every item of `items`, into `totals`. With one CPU (test_process_cpus: the parallel runner's grant), in this process,
+// each program's forms at once, as the command ran before #2658. With more, each item is a part (test_process.c): a
+// child process of its own, at most one per CPU at once, which runs its program's forms in turn, so that the parts keep
+// the command's CPUs busy rather than an item's longest form and its serial preparation and native builds leaving
+// them idle (the c-testsuite comparison kept 0.70 of its 4 CPUs busy in every hosted sanitizer row). A part starts as
+// soon as any other ends, and the parts' lines come in the items' order, as one after another would print them. A part
+// that couldn't start or didn't send its counts fails its item.
+static void ssa_source_items(SsaSourceTotals* totals, const SsaSourceItems* items, SsaSourceArenas* arenas, const char* work, const SsaSourceLimits* limits, bool keep)
+{
+    const uint32_t count = items->file_count + items->generate;
+    const uint32_t cpus = test_process_cpus();
     SsaGenerator* generator = malloc(sizeof(SsaGenerator));
     char* text = malloc(BUSTER_SSA_SOURCE_TEXT);
-    for (uint32_t p = 0; p < count; p += 1)
+    const bool parts = cpus > 1 && count > 1;
+    for (uint32_t item = 0; !parts && item < count; item += 1)
     {
-        const uint64_t program_seed = seed * 1000003ull + p;
-        char source[PATH_MAX];
-        char object[PATH_MAX];
-        char executable[PATH_MAX];
-        char log[PATH_MAX];
-        char output[PATH_MAX];
-        snprintf(source, sizeof(source), "%s/program_%u.c", work, p);
-        snprintf(object, sizeof(object), "%s/program_%u.o", work, p);
-        snprintf(executable, sizeof(executable), "%s/program_%u", work, p);
-        snprintf(log, sizeof(log), "%s/program_%u.log", work, p);
-        snprintf(output, sizeof(output), "%s/program_%u.out", work, p);
-        const uint64_t length = generator != 0 && text != 0 ? ssa_generate_program(generator, text, BUSTER_SSA_SOURCE_TEXT, program_seed) : 0;
-        FILE* written = length != 0 ? fopen(source, "w") : 0;
-        bool built = written != 0 && fwrite(text, 1, length, written) == length;
-        built = written != 0 && fclose(written) == 0 && built;
-        built = built && ssa_source_compile(clang, source, object);
-        bool timed_out = false;
-        char* link[] = { (char*)clang, "-o", executable, object, 0 };
-        built = built && c_testsuite_run(link, work, log, limits->timeout, &timed_out) == 0;
-        char* run[] = { executable, 0 };
-        const int status = built ? c_testsuite_run(run, work, output, limits->timeout, &timed_out) : -1;
-        uint64_t bytes = 0;
-        char* expected_output = built && !timed_out ? c_testsuite_read(output, &bytes) : 0;
-        totals->generated += 1;
-        if (expected_output == 0)
-        {
-            totals->unbuilt += 1;
-            printf("test-ssa-source: program of seed %" PRIu64 " (%s): clang's build couldn't be made or run\n", program_seed, source);
-        }
-        else
-        {
-            const SsaSourceExpected expected = { .output = expected_output, .length = bytes, .status = status };
-            ssa_source_file(totals, source, options, option_count, &expected, arenas, work, limits, keep, 0);
-        }
-        free(expected_output);
+        ssa_source_item(totals, items, item, arenas, work, limits, keep, generator, text);
     }
+    TestProcess* processes = parts ? calloc(count, sizeof(TestProcess)) : 0;
+    bool* ended = parts ? calloc(count, sizeof(bool)) : 0;
+    struct pollfd* polled = parts ? calloc(count, sizeof(struct pollfd)) : 0;
+    const bool ready = processes != 0 && ended != 0 && polled != 0;
+    if (parts && !ready)
+    {
+        totals->failed_files += count;
+        printf("test-ssa-source: memory ran out for the %u items' parts\n", count);
+    }
+    SsaSourceLimits part_limits = *limits;
+    part_limits.forms_in_turn = true;
+    const uint64_t window = (uint64_t)cpus * BUSTER_SSA_SOURCE_WINDOW;
+    uint32_t started = 0;
+    uint32_t finished = 0;
+    uint32_t running = 0;
+    while (ready && finished < count)
+    {
+        while (started < count && running < cpus && started - finished < window)
+        {
+            if (test_process_start(&processes[started]))
+            {
+                SsaSourceTotals part = { 0 };
+                ssa_source_item(&part, items, started, arenas, work, &part_limits, keep, generator, text);
+                test_process_exit(&processes[started], &part, sizeof(part));
+            }
+            ended[started] = processes[started].pid <= 0;
+            running += ended[started] ? 0 : 1;
+            started += 1;
+        }
+        // The oldest part still running: wait for any running part to send its counts or end (its pipe's end).
+        uint32_t watched = 0;
+        for (uint32_t i = finished; !ended[finished] && i < started; i += 1)
+        {
+            if (!ended[i])
+            {
+                polled[watched] = (struct pollfd){ .fd = processes[i].result, .events = POLLIN };
+                watched += 1;
+            }
+        }
+        const int woken = watched != 0 ? poll(polled, watched, -1) : 0;
+        uint32_t at = 0;
+        for (uint32_t i = finished; woken > 0 && i < started; i += 1)
+        {
+            if (!ended[i])
+            {
+                const bool done = (polled[at].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0;
+                ended[i] = done;
+                running -= done ? 1 : 0;
+                at += 1;
+            }
+        }
+        while (finished < started && ended[finished])
+        {
+            SsaSourceTotals part = { 0 };
+            const bool ran = test_process_finish(&processes[finished], &part, sizeof(part));
+            ssa_source_add(totals, &part);
+            if (!ran)
+            {
+                totals->failed_files += 1;
+                printf("test-ssa-source: item %u's part (%s) didn't run to its end or send its counts\n", finished,
+                       finished < items->file_count ? items->files[finished] : "a generated program");
+            }
+            finished += 1;
+        }
+    }
+    free(polled);
+    free(ended);
+    free(processes);
     free(text);
     free(generator);
 }
@@ -1053,7 +1210,7 @@ static bool ssa_source_execution_tests(SsaSourceArenas* arenas, const char* work
             limits.tier1 = requested->tier1 && test->passed;
             limits.compiler = requested->compiler;
             limits.directory = requested->directory;
-            ssa_source_file(&totals, source, 0, 0, 0, arenas, directory, &limits, true, statuses);
+            ssa_source_file(&totals, totals.programs, source, 0, 0, 0, arenas, directory, &limits, true, statuses);
             const uint64_t functions = test->left_out ? 0 : test->functions != 0 ? test->functions : 1;
             // A file the preparation leaves out is counted as left out alone.
             checked = totals.files == (test->left_out ? 0 : 1) && totals.left_out == (uint64_t)test->left_out && totals.failed_files == 0 &&
@@ -1200,17 +1357,25 @@ static int run_ssa_source_tests(int count, char** arguments)
         .tier1 = tier1,
         .compiler = compiler,
         .directory = directory,
+        .forms_in_turn = false,
     };
     SsaSourceTotals totals = { 0 };
     const bool controls = !valid || !self_test || ssa_source_execution_tests(&arenas, work, &limits);
     const bool native_controls = !valid || !self_test || !tier1 || ssa_source_native_tests(work, &limits);
-    for (uint32_t i = 0; valid && i < file_count; i += 1)
+    // The cache's counts are in shared memory set up with it, so that the parts' runs add to them (oracle_cache.c).
+    OracleCache* cache = valid ? oracle_cache() : 0;
+    const SsaSourceItems items = {
+        .files = files,
+        .file_count = file_count,
+        .generate = (uint32_t)generate,
+        .seed = seed,
+        .clang = clang,
+        .options = options,
+        .option_count = option_count,
+    };
+    if (valid)
     {
-        ssa_source_file(&totals, files[i], options, option_count, 0, &arenas, work, &limits, keep, 0);
-    }
-    if (valid && generate != 0)
-    {
-        ssa_source_generated(&totals, seed, (uint32_t)generate, clang, options, option_count, &arenas, work, &limits, keep);
+        ssa_source_items(&totals, &items, &arenas, work, &limits, keep);
     }
     const bool passed = valid && controls && native_controls && totals.failed_files == 0 && totals.failures == 0 && totals.passed == totals.programs && totals.unbuilt == 0 &&
                         (self_test || totals.functions != 0) && (!tier1 || (totals.left_out == 0 && totals.native_programs == totals.programs && totals.native_passed == totals.programs));
@@ -1223,7 +1388,7 @@ static int run_ssa_source_tests(int count, char** arguments)
                totals.files, totals.left_out, totals.failed_files, totals.functions, totals.instructions, totals.promoted[0], totals.promoted[1], totals.phis[0],
                totals.phis[1], totals.failures, totals.programs, totals.passed, totals.steps[0], totals.steps[1], totals.steps[2], totals.steps[3], totals.generated, totals.unbuilt,
                totals.native_programs, totals.native_passed, totals.native_functions[0], totals.native_functions[1]);
-        oracle_cache_report(oracle_cache(), "test-ssa-source");
+        oracle_cache_report(cache, "test-ssa-source");
         if (!keep && passed)
         {
             c_testsuite_remove_directory(work);

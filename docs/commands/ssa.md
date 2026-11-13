@@ -36,7 +36,12 @@ requirements. [Command index](README.md).
   programs' status and output with the interpreted forms. Compilation must
   succeed with every emitted function compiled by Tier 1; a refusal or Tier 0
   fallback fails. Native builds and executions follow the interpreter children
-  sequentially, so the command keeps the same CPU grant.
+  sequentially, so the command keeps the same CPU grant. Given more than one
+  CPU (`BUSTER_PARALLEL_CPUS`, `test_process_cpus`), the files and generated
+  programs run as parts (`test_process.c`), one per CPU at once, each running
+  its forms in turn and starting as soon as another ends, with their lines in
+  the items' order (#2658): the c-testsuite comparison, one file at a time,
+  kept 0.70 of its 4 CPUs busy in every hosted sanitizer row.
   `--typed` adds the production typed interpreter as a fourth form. It runs the
   retained typed stream directly; no IR is executed for that form. The source
   suite and random-program CI commands enable it, including the subprocess

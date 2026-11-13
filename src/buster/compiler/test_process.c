@@ -24,6 +24,9 @@
 //     }
 //
 // Start parts only while a process doesn't run other threads: the child has the calling thread alone.
+//
+// The parts are the frontend's (the preprocessor's, the parser's and the predefines' tests) and the backend's
+// (test-ssa-source's files and generated programs, #2658); the tests of these helpers are the frontend's.
 #ifndef BUSTER_TEST_PROCESS_INCLUDED
 #define BUSTER_TEST_PROCESS_INCLUDED
 
@@ -38,7 +41,7 @@
 
 // A part's child process: the files its standard output and errors go to, the pipe its result comes through, and its
 // id (-1 if it couldn't start).
-#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 typedef struct TestProcess TestProcess;
 struct TestProcess
 {
@@ -93,7 +96,7 @@ static FILE* test_process_file(void)
 
 // Starts a part: its output files and result pipe, and a child process. Returns true in the child, whose standard
 // output and errors then go to the files, and false in the parent (with pid -1 if the part couldn't start).
-#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 static bool test_process_start(TestProcess* process)
 {
     int fds[2] = { -1, -1 };
@@ -185,7 +188,9 @@ static bool test_process_finish(TestProcess* process, void* result, size_t size)
     return test_process_finish_to(process, result, size, stdout, stderr);
 }
 
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 #include "test_process_test.c"
+#endif
 #endif
 
 #endif
