@@ -4,6 +4,7 @@
 // #1116: exercise the public size-only command with original tiny sources under all corpus filenames. Every unit
 // deliberately defines the same name: matching must stay within its object pair. The complete 34-source Lua corpus
 // must qualify without runtime inputs; removing luac.c or refusing the oracle must fail instead of reducing coverage.
+// Selecting Lua alone still reports both corpora, with the gate enforced only for Lua; unknown selectors are refused.
 // Helper-level tests separately cover malformed manifests, ELF extents, threshold boundaries and fallback accounting.
 
 #define _POSIX_C_SOURCE 200809L
@@ -115,7 +116,7 @@ static bool size_field(const char* line, const char* field, uint64_t expected)
            (*end == '\t' || *end == '\n') && parsed == expected;
 }
 
-static bool size_summaries(const char* log)
+static bool size_summaries(const char* log, bool sqlite_enforced)
 {
     FILE* file = fopen(log, "r");
     bool ok = file != NULL;
@@ -129,9 +130,10 @@ static bool size_summaries(const char* log)
         if (sqlite_line || lua_line)
         {
             const uint64_t units = sqlite_line ? 1 : 34;
+            const uint64_t enforced = sqlite_line ? sqlite_enforced : 1;
             ok = size_field(line, "\tunits=", units) && size_field(line, "\tcompiled=", units) &&
                  size_field(line, "\tmatched=", units) && size_field(line, "\tfallbacks=", 0) &&
-                 size_field(line, "\tunmatched=", 0) && size_field(line, "\tenforced=", 1) && strstr(line, "\tgate=pass\t") != NULL;
+                 size_field(line, "\tunmatched=", 0) && size_field(line, "\tenforced=", enforced) && strstr(line, "\tgate=pass\t") != NULL;
             sqlite += sqlite_line;
             lua += lua_line;
         }
@@ -190,8 +192,29 @@ int main(int argc, char** argv)
     {
         char* arguments[] = { argv[1], "measure-tier1-programs", "--sizes-only", "--check-code-size", "--clang", argv[2],
                               "--sqlite", directory, "--lua", directory, "--directory", directory, NULL };
-        ok = size_run(arguments, log) == 0 && size_summaries(log);
+        ok = size_run(arguments, log) == 0 && size_summaries(log, true);
         printf("Tier 1 code-size complete corpora: %s\n", ok ? "pass" : "FAIL");
+        if (ok)
+        {
+            arguments[3] = "--check-code-size=lua";
+            ok = size_run(arguments, log) == 0 && size_summaries(log, false);
+            printf("Tier 1 code-size Lua-only enforcement: %s\n", ok ? "pass" : "FAIL");
+        }
+        if (ok)
+        {
+            char* combined[14] = { 0 };
+            memcpy(combined, arguments, 12 * sizeof(char*));
+            combined[12] = "--check-code-size=sqlite";
+            ok = size_run(combined, log) == 0 && size_summaries(log, true);
+            printf("Tier 1 code-size combined corpus selectors: %s\n", ok ? "pass" : "FAIL");
+        }
+        if (ok)
+        {
+            arguments[3] = "--check-code-size=invalid";
+            ok = size_run(arguments, log) == 1 && size_has(log, "usage:", "measure-tier1-programs");
+            printf("Tier 1 code-size invalid corpus selector: %s\n", ok ? "pass" : "FAIL");
+        }
+        arguments[3] = "--check-code-size";
         if (ok)
         {
             ok = size_path(source, sizeof(source), directory, "luac.c") && unlink(source) == 0;

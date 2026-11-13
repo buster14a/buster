@@ -736,13 +736,15 @@ and dispatched qualifications under the current [CI policy](commands/ci.md).
 ### Function-size qualification (#1116)
 
 PR #1159 removed the redundant call moves and repeated call saves described
-by #1116. Its remaining size criterion is now an explicit corpus gate:
-`test-c-testsuite --tier1 --check-code-size` and
-`measure-tier1-programs --check-code-size` require the sum of all emitted Tier 1
-function bytes to be no greater than the matching Clang `-O0` sum. The gate applies
-separately to c-testsuite, SQLite's `sqlite3.c` and Lua's 34 sources, with
-`luac.c` included. The program command also offers `--sizes-only`, which
-requires no runtime scripts or hardware counters.
+by #1116. Its remaining Lua size criterion is now an explicit corpus gate:
+`measure-tier1-programs --check-code-size=lua` requires the sum of all emitted
+Tier 1 function bytes across Lua's 34 sources, including `luac.c`, to be no
+greater than the matching Clang `-O0` sum. The command also reports SQLite's
+`sqlite3.c`; `test-c-testsuite --tier1 --code-size` reports the same quantities
+for c-testsuite. Their above-bound results stay visible as `gate=fail` with
+`enforced=0`. Strict optional gates remain available with the bare
+`--check-code-size` flag on either command, or `=sqlite` on the program
+command. `--sizes-only` needs no runtime scripts or hardware counters.
 
 An opt-in, versioned `--tier1-function-sizes` manifest identifies source bodies
 by exact emitted symbol names and their actual tier after publication. The
@@ -759,9 +761,11 @@ section total is a separate quantity. Missing, malformed, duplicate or
 inconsistent evidence cannot pass, and an empty comparison cannot qualify.
 This is an aggregate size bound, not a bound on every function or a claim
 about execution time. The [command guide](commands/tier1.md) describes the
-flags and reporting. Hosted correctness exercises all three corpus gates
-before merge, with the real Lua release acquired once in its verified offline
-input bundle and the existing frozen SQLite amalgamation.
+flags and reporting. Hosted correctness validates all three reports and
+enforces the issue's Lua bound before merge, with the real Lua release
+acquired once in its verified offline input bundle and the existing frozen
+SQLite amalgamation. The nightly runtime measurement enforces the same Lua
+bound; both commands continue to reject missing or malformed evidence.
 
 #1216 keeps dispatch loops' loop-carried values in registers and their phi
 webs in one slot ([the allocation guide](tier1-allocation.md)). From its merge

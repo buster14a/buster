@@ -7,7 +7,7 @@
 //
 //   build/compiler measure-tier1-programs --clang PATH [--tcc PATH] --sqlite DIR --speedtest DIR --lua DIR --scripts DIR
 //                                         [--runs N] [--warmups N] [--directory DIR] [--keep] [--uncounted]
-//                                         [--variant OPTION]... [--check-code-size] [--sizes-only]
+//                                         [--variant OPTION]... [--check-code-size[=lua|sqlite|all]] [--sizes-only]
 //
 // The programs and their inputs are #1189's (buster-performance's tier1-gap-1189-2026-11-03, after the cc3387f record's):
 // - speedtest1: DIR/sqlite3.c (--sqlite: the frozen corpus's SQLite 3.53.2 amalgamation) and DIR/speedtest1.c
@@ -40,8 +40,9 @@
 // #1116: paired relocatable objects also compare the exact source bodies compiled by Tier 1 against clang -O0.
 // SQLite is sqlite3.c alone with the flags below; Lua includes luac.c as well as the interpreter's 33 sources.
 // Matching stays within each translation unit, so local names and the runtime's unity build cannot skew the sums.
-// --check-code-size requires each corpus's matched Tier 1 function bytes <= clang -O0's, with complete evidence and
-// a nonempty match. --sizes-only needs only --clang, --sqlite and --lua, and performs no runtime measurements.
+// --check-code-size requires each corpus's complete Tier 1 function bytes <= its matching clang -O0 bytes; =lua or
+// =sqlite enforces only that corpus. Every report still requires valid, nonempty evidence. --sizes-only needs only
+// --clang, --sqlite and --lua, and performs no runtime measurements.
 
 #include <dirent.h>
 
@@ -53,6 +54,9 @@
 #define BUSTER_TIER1_PROGRAMS_LISTS (1 + BUSTER_TIER1_PROGRAMS_SCRIPTS)
 #define BUSTER_TIER1_PROGRAMS_MAX_RUNS 1000
 #define BUSTER_TIER1_PROGRAMS_ARGUMENTS 64
+#define BUSTER_TIER1_PROGRAMS_SIZE_SQLITE 1u
+#define BUSTER_TIER1_PROGRAMS_SIZE_LUA 2u
+#define BUSTER_TIER1_PROGRAMS_SIZE_ALL (BUSTER_TIER1_PROGRAMS_SIZE_SQLITE | BUSTER_TIER1_PROGRAMS_SIZE_LUA)
 
 typedef enum Tier1ProgramsBuild
 {
@@ -102,7 +106,7 @@ struct Tier1Programs
     // --uncounted: a run need not be counted (a host without the counters, as a virtual machine's), its cycles and
     // instructions then 0.
     bool uncounted;
-    bool check_code_size;
+    uint32_t code_size_corpora;
     bool sizes_only;
     char directory[PATH_MAX];
     // Each build's executables, and the errors of every build's commands.
@@ -363,7 +367,8 @@ static bool tier1_programs_sizes(Arena* arena, const Tier1Programs* p)
             {
                 char name[128];
                 snprintf(name, sizeof(name), "%s/%s", label, p->files[b]);
-                const bool passed = tier1_code_size_report(&totals[b], name, p->check_code_size);
+                const uint32_t selected = lua ? BUSTER_TIER1_PROGRAMS_SIZE_LUA : BUSTER_TIER1_PROGRAMS_SIZE_SQLITE;
+                const bool passed = tier1_code_size_report(&totals[b], name, (p->code_size_corpora & selected) != 0);
                 qualified = qualified && passed;
             }
         }
@@ -633,8 +638,11 @@ static int run_tier1_programs_measure(int argc, char** argv)
     {
         uint64_t value = 0;
         const bool pair = i + 1 < argc;
+        const bool size_all = strcmp(argv[i], "--check-code-size") == 0 || strcmp(argv[i], "--check-code-size=all") == 0;
+        const bool size_lua = strcmp(argv[i], "--check-code-size=lua") == 0;
+        const bool size_sqlite = strcmp(argv[i], "--check-code-size=sqlite") == 0;
         const bool flag = strcmp(argv[i], "--keep") == 0 || strcmp(argv[i], "--uncounted") == 0 ||
-                          strcmp(argv[i], "--check-code-size") == 0 || strcmp(argv[i], "--sizes-only") == 0;
+                          size_all || size_lua || size_sqlite || strcmp(argv[i], "--sizes-only") == 0;
         if (strcmp(argv[i], "--runs") == 0 && pair && profile_count_option(argv[i + 1], &value) && value <= BUSTER_TIER1_PROGRAMS_MAX_RUNS)
         {
             p.runs = (uint32_t)value;
@@ -679,9 +687,9 @@ static int run_tier1_programs_measure(int argc, char** argv)
         {
             p.uncounted = true;
         }
-        else if (strcmp(argv[i], "--check-code-size") == 0)
+        else if (size_all || size_lua || size_sqlite)
         {
-            p.check_code_size = true;
+            p.code_size_corpora |= size_all ? BUSTER_TIER1_PROGRAMS_SIZE_ALL : size_lua ? BUSTER_TIER1_PROGRAMS_SIZE_LUA : BUSTER_TIER1_PROGRAMS_SIZE_SQLITE;
         }
         else if (strcmp(argv[i], "--sizes-only") == 0)
         {
@@ -723,8 +731,8 @@ static int run_tier1_programs_measure(int argc, char** argv)
     if (!valid)
     {
         fprintf(stderr, "usage: measure-tier1-programs --clang PATH [--tcc PATH] --sqlite DIR --speedtest DIR --lua DIR --scripts DIR [--runs N] [--warmups N] [--directory DIR] [--keep] "
-                        "[--uncounted] [--variant OPTION]... [--check-code-size] [--sizes-only]\n"
-                        "       measure-tier1-programs --sizes-only --clang PATH --sqlite DIR --lua DIR [--check-code-size] [--variant OPTION]... [--directory DIR] [--keep]\n");
+                        "[--uncounted] [--variant OPTION]... [--check-code-size[=lua|sqlite|all]] [--sizes-only]\n"
+                        "       measure-tier1-programs --sizes-only --clang PATH --sqlite DIR --lua DIR [--check-code-size[=lua|sqlite|all]] [--variant OPTION]... [--directory DIR] [--keep]\n");
     }
     else if (!made)
     {

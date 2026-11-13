@@ -5,7 +5,7 @@
 // The c-testsuite harness (#145), for the test-c-testsuite command:
 //
 //   build/compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--clang PATH]
-//                                   [--id-order N] [--tier1] [--cross-check] [--check-code-size] [--keep] DIR
+//                                   [--id-order N] [--tier1] [--cross-check] [--code-size] [--check-code-size] [--keep] DIR
 //   build/compiler test-c-testsuite --self-test
 //
 // DIR is a checkout of c-testsuite (https://github.com/c-testsuite/c-testsuite) or its tests/single-exec directory. Each
@@ -33,11 +33,12 @@
 // as with them in another order, and both paths' programs must run as expected. The report adds how many of the tests'
 // functions Tier 1 compiled (the vector path's --tier1-report).
 //
-// --check-code-size requires --tier1 and implies --cross-check. The object compile also emits the explicit per-body
+// --code-size requires --tier1 and implies --cross-check. The object compile also emits the explicit per-body
 // size report, kept apart from readelf's and the linker's logs. Each successful cross-check reads that report against
-// the same objects whose symbols were compared. The corpus's sum of all emitted Tier 1 function bytes must not exceed
-// the matching clang -O0 functions' sum. An unpaired Tier 1 body stays in our sum and adds no reference bytes; its bytes
-// are reported as a subset of our total. Fallback bodies are separate, and missing evidence or an empty comparison fails.
+// the same objects whose symbols were compared. The report compares the corpus's sum of all emitted Tier 1 function
+// bytes with the matching clang -O0 functions' sum. An unpaired Tier 1 body stays in our sum and adds no reference bytes;
+// its bytes are reported as a subset of our total. Fallback bodies are separate. Missing or invalid evidence and an empty
+// comparison fail in both modes; --check-code-size also requires the Tier 1 sum not to exceed the reference sum.
 //
 // --self-test checks the harness itself, on tests of its own and a stand-in compiler (c_testsuite_self_test).
 //
@@ -126,6 +127,7 @@ struct CTestsuite
     uint32_t compile_timeout;
     bool cross_check;
     bool tier1;
+    bool code_size;
     bool check_code_size;
     // The scalar path's compiles' --id-order, test i's this plus i.
     uint64_t id_order;
@@ -452,7 +454,7 @@ static bool c_testsuite_symbols(const CTestsuite* suite, const char* source, con
             snprintf(detail, capacity, "cross-check: the object's symbols aren't clang -O0 -c's: %s, %u in all", report, differences);
         }
     }
-    if (valid && suite->check_code_size)
+    if (valid && suite->code_size)
     {
         char size_detail[192] = { 0 };
         valid = tier1_code_size_read(code_size, object, oracle, code_report, &arena, size_detail, sizeof(size_detail));
@@ -484,7 +486,7 @@ static bool c_testsuite_cross_check(const CTestsuite* suite, const char* source,
     snprintf(output, sizeof(output), "%s/output-cc.txt", directory);
     char* compile[BUSTER_C_TESTSUITE_ARGUMENTS];
     char* const compile_rest[] = { "-c", (char*)source, "-o", object, "--tier1-function-sizes" };
-    c_testsuite_compile_arguments(compile, suite, compile_rest, BUSTER_ARRAY_LENGTH(compile_rest) - !suite->check_code_size);
+    c_testsuite_compile_arguments(compile, suite, compile_rest, BUSTER_ARRAY_LENGTH(compile_rest) - !suite->code_size);
     char* const readelf[] = { "readelf", "-a", "-W", object, 0 };
     char* const link[] = { "cc", object, "-lm", "-o", program, 0 };
     bool timed_out = false;
@@ -898,14 +900,14 @@ static bool c_testsuite_report(const CTestsuite* suite, bool subset)
     }
     printf("\n");
     bool size_passed = true;
-    if (suite->check_code_size)
+    if (suite->code_size)
     {
         Tier1CodeSize total = { 0 };
         for (uint32_t i = 0; i < suite->count; i += 1)
         {
             tier1_code_size_add(&total, &suite->results[i].code_size);
         }
-        size_passed = tier1_code_size_report(&total, "c-testsuite", true);
+        size_passed = tier1_code_size_report(&total, "c-testsuite", suite->check_code_size);
     }
     return counts[C_TESTSUITE_FAILED] == 0 && counts[C_TESTSUITE_NOT_RUN] == 0 && subset_passed == subset_count && size_passed;
 }
@@ -1003,10 +1005,10 @@ static pid_t c_testsuite_wait_scenario(pid_t child, int* status)
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // Corpus size is an aggregate gate: a larger function may be offset by another's smaller body. A one-byte aggregate
-// regression and empty evidence must fail the report that decides the command's exit status. An unpaired body's bytes
-// stay in the total with no reference credit, and every compiled body must be counted as matched or unmatched. Invalid
-// flag combinations go through the actual command's parser and must refuse before running a corpus or recursively
-// entering its self-test.
+// excess fails with enforcement and is reported without failing in report-only mode; invalid or empty evidence fails
+// either mode. An unpaired body's bytes stay in the total with no reference credit, and every compiled body must be
+// counted as matched or unmatched. Invalid flag combinations go through the actual command's parser and must refuse
+// before running a corpus or recursively entering its self-test.
 static bool c_testsuite_code_size_self_test(const char* directory)
 {
     char names[2][BUSTER_C_TESTSUITE_NAME_BYTES] = { "larger", "smaller" };
@@ -1029,6 +1031,7 @@ static bool c_testsuite_code_size_self_test(const char* directory)
         .names = names,
         .count = BUSTER_ARRAY_LENGTH(results),
         .tier1 = true,
+        .code_size = true,
         .check_code_size = true,
         .results = results,
     };
@@ -1043,6 +1046,12 @@ static bool c_testsuite_code_size_self_test(const char* directory)
         failures += !c_testsuite_report(&suite, true);
         results[1].code_size.tier1_bytes += 1;
         failures += c_testsuite_report(&suite, true);
+        suite.check_code_size = false;
+        failures += !c_testsuite_report(&suite, true);
+        results[1].code_size.invalid = true;
+        failures += c_testsuite_report(&suite, true);
+        results[1].code_size.invalid = false;
+        suite.check_code_size = true;
         // One matched byte and four unpaired bytes keep the corpus at equality; the latter get no oracle credit.
         results[1].tier1_functions = 2;
         results[1].tier1_compiled = 2;
@@ -1069,6 +1078,8 @@ static bool c_testsuite_code_size_self_test(const char* directory)
         }
         failures += c_testsuite_report(&suite, true);
         suite.check_code_size = false;
+        failures += c_testsuite_report(&suite, true);
+        suite.code_size = false;
         failures += !c_testsuite_report(&suite, true);
         failures += fflush(stdout) != 0;
     }
@@ -1077,6 +1088,19 @@ static bool c_testsuite_code_size_self_test(const char* directory)
         failures += dup2(saved_output, STDOUT_FILENO) < 0;
         close(saved_output);
     }
+    bool report_only_seen = false;
+    if (captured && fseek(capture, 0, SEEK_SET) == 0)
+    {
+        char line[2048];
+        while (fgets(line, sizeof(line), capture) != NULL)
+        {
+            report_only_seen |= strstr(line, "tier1-code-size\tcorpus=c-testsuite\t") == line &&
+                                strstr(line, "\ttier1_bytes=21\tclang_bytes=20\t") != NULL &&
+                                strstr(line, "\tgate=fail\tenforced=0\n") != NULL;
+        }
+        report_only_seen = report_only_seen && !ferror(capture);
+    }
+    failures += !report_only_seen;
     if (capture != NULL)
     {
         fclose(capture);
@@ -1087,6 +1111,8 @@ static bool c_testsuite_code_size_self_test(const char* directory)
     char* const arguments[][7] = {
         { "/proc/self/exe", "test-c-testsuite", "--check-code-size", (char*)directory, NULL },
         { "/proc/self/exe", "test-c-testsuite", "--tier1", "--check-code-size", "--self-test", NULL },
+        { "/proc/self/exe", "test-c-testsuite", "--code-size", (char*)directory, NULL },
+        { "/proc/self/exe", "test-c-testsuite", "--tier1", "--code-size", "--self-test", NULL },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(arguments); i += 1)
     {
@@ -1099,7 +1125,7 @@ static bool c_testsuite_code_size_self_test(const char* directory)
         free(text);
     }
     unlink(log);
-    printf("test-c-testsuite: code-size aggregation and options: 9 checks, %u failed\n", failures);
+    printf("test-c-testsuite: code-size aggregation and options: 15 checks, %u failed\n", failures);
     return failures == 0;
 }
 
@@ -1109,7 +1135,7 @@ static bool c_testsuite_code_size_self_test(const char* directory)
 // time, in one path or both, which must fail, not be unsupported (#377's review); with --cross-check where -c's
 // refusals are killed, which must fail whether or not the direct path compiled the test; and with --cross-check where
 // -c's object defines a function that clang -O0 -c's doesn't, which must fail though its program passes; and with
-// --check-code-size where a successful object's size report is missing, which must fail after its program passes.
+// --code-size where a successful object's size report is missing, which must fail even without threshold enforcement.
 // 00003's program, and in the fourth scenario its compiles, must be killed at their five-second timeouts, long before
 // they would end.
 static int c_testsuite_self_test(CTestsuite* suite)
@@ -1125,7 +1151,7 @@ static int c_testsuite_self_test(CTestsuite* suite)
         { "checkout/tests/single-exec/00003.c", "int main(void) { for (;;) { } }\n" },
         { "checkout/tests/single-exec/00003.c.expected", "" },
     };
-    static const char* const scenarios[] = { "relative paths", "without a pidfd", "cross-check", "killed refusals", "killed -c refusals", "symbols", "missing size report" };
+    static const char* const scenarios[] = { "relative paths", "without a pidfd", "cross-check", "killed refusals", "killed -c refusals", "symbols", "missing size report (report-only)" };
     static const CTestsuiteExpectation expectations[][3] = {
         {
             { C_TESTSUITE_PASSED, "" },
@@ -1214,7 +1240,8 @@ static int c_testsuite_self_test(CTestsuite* suite)
             c_testsuite_without_pidfd = scenario == 1;
             suite->cross_check = scenario == 2 || scenario == 4 || scenario == 5 || scenario == 6;
             suite->tier1 = scenario == 6;
-            suite->check_code_size = scenario == 6;
+            suite->code_size = scenario == 6;
+            suite->check_code_size = false;
             snprintf(path, sizeof(path), "%s/checkout", base);
             bool ready = suite->results != 0 && (!relative || (chdir(base) == 0 && setenv("TMPDIR", "work", 1) == 0));
             ready = ready && (scenario != 2 || setenv("C_TESTSUITE_REFUSE_OBJECTS", "1", 1) == 0);
@@ -1340,9 +1367,10 @@ static int run_c_testsuite_tests(int argc, char** argv)
         {
             suite.tier1 = true;
         }
-        else if (strcmp(argv[i], "--check-code-size") == 0)
+        else if (strcmp(argv[i], "--code-size") == 0 || strcmp(argv[i], "--check-code-size") == 0)
         {
-            suite.check_code_size = true;
+            suite.code_size = true;
+            suite.check_code_size |= strcmp(argv[i], "--check-code-size") == 0;
             suite.cross_check = true;
         }
         else if (strcmp(argv[i], "--keep") == 0)
@@ -1363,10 +1391,10 @@ static int run_c_testsuite_tests(int argc, char** argv)
         }
     }
     int result = 1;
-    if (!valid || (self_test ? root != 0 : root == 0) || (suite.check_code_size && (!suite.tier1 || self_test)))
+    if (!valid || (self_test ? root != 0 : root == 0) || (suite.code_size && (!suite.tier1 || self_test)))
     {
         fprintf(stderr, "usage: compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--clang PATH] "
-                        "[--id-order N] [--tier1] [--cross-check] [--check-code-size] [--keep] DIR\n       compiler test-c-testsuite --self-test\n");
+                        "[--id-order N] [--tier1] [--cross-check] [--code-size] [--check-code-size] [--keep] DIR\n       compiler test-c-testsuite --self-test\n");
     }
     else
     {

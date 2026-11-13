@@ -459,10 +459,15 @@ static void tier1_code_size_add(Tier1CodeSize* total, const Tier1CodeSize* unit)
 
 // The corpus charges every Tier 1 byte against only the exact-name reference bytes it has. Missing functions may
 // fit in that bound, but an empty reference cannot qualify. Subtraction keeps the classification check overflow-safe.
-static bool tier1_code_size_qualified(const Tier1CodeSize* total)
+static bool tier1_code_size_evidence(const Tier1CodeSize* total)
 {
     return !total->invalid && total->units != 0 && total->matched != 0 && total->clang_bytes != 0 && total->matched <= total->compiled &&
-           total->unmatched == total->compiled - total->matched && total->tier1_bytes <= total->clang_bytes;
+           total->unmatched == total->compiled - total->matched;
+}
+
+static bool tier1_code_size_qualified(const Tier1CodeSize* total)
+{
+    return tier1_code_size_evidence(total) && total->tier1_bytes <= total->clang_bytes;
 }
 
 // Report the same byte bound in optional and enforcing modes, including every unmatched body's cost and count.
@@ -474,5 +479,5 @@ static bool tier1_code_size_report(const Tier1CodeSize* total, const char* label
            "\tunmatched_bytes=%" PRIu64 "\tother_bytes=%" PRIu64 "\ttext_bytes=%" PRIu64 "\tclang_text_bytes=%" PRIu64 "\tgate=%s\tenforced=%u\n",
            label, total->units, total->compiled, total->fallbacks, total->matched, total->tier1_bytes, total->clang_bytes, total->fallback_bytes,
            total->unmatched, total->unmatched_bytes, total->other_bytes, total->text_bytes, total->clang_text_bytes, qualified ? "pass" : "fail", (unsigned)enforce);
-    return !total->invalid && (!enforce || qualified);
+    return tier1_code_size_evidence(total) && (!enforce || qualified);
 }

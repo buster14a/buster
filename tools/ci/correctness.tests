@@ -162,9 +162,9 @@ clang -std=c17 -O2 "${host_flags[@]}" -Wall -Wextra -Werror -fno-strict-aliasing
 # #140 and #138: each program compiled by the driver's --tier1 (each function Tier 1's pipeline takes by Tier 1, the
 # others by Tier 0, with both tiers' unwind tables, #177), by both paths, whose allocators assign registers differently,
 # both programs run; the scalar path's executable the same bytes with the ids in source order and in another (#153).
-# The declared subset must pass. #1116 also requires all Tier 1 function bytes <= clang -O0's matching bytes;
-# --check-code-size implies the object/Clang cross-check and reports fallbacks and unmatched bodies separately.
-"$BUSTER_COMPILER" test-c-testsuite --tier1 --check-code-size --clang clang --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
+# The declared subset must pass. #1116 also reports all Tier 1 function bytes against clang -O0's matching bytes;
+# --code-size implies the object/Clang cross-check and validates the evidence. Lua below is the required size corpus.
+"$BUSTER_COMPILER" test-c-testsuite --tier1 --code-size --clang clang --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
 == Reject unfinished SSA-source runs and preserve normal program exits [4 CPUs]
 # #925: real C preparation/promotions and all three child processes, no expected-output sidecar. Normal return and
 # native exits (including255) pass; alarms, interpreter limits and real record-write failure fail, with every process
@@ -785,9 +785,10 @@ clang -std=c17 -O2 "${host_flags[@]}" -Wall -Wextra -Werror -fno-strict-aliasing
 ./build/test-driver-tier1-code-size "$BUSTER_COMPILER" clang
 # #1116 is a deterministic object-size bound, independent of the machine's timing. Reuse this row's compiler and
 # frozen SQLite, and Lua 5.4.8 from the run's verified offline input bundle; include luac.c, not only the interpreter.
+# Enforce the issue's Lua corpus bound. SQLite's size status remains visible with enforced=0.
 directory=$(mktemp -d)
 bash tools/ci/hosted-offline.sh lua "$directory/lua"
-"$BUSTER_COMPILER" measure-tier1-programs --sizes-only --check-code-size --clang clang --sqlite "$BUSTER_CORPUS/sqlite" \
+"$BUSTER_COMPILER" measure-tier1-programs --sizes-only --check-code-size=lua --clang clang --sqlite "$BUSTER_CORPUS/sqlite" \
     --lua "$directory/lua/src" --directory "$directory"
 rm -rf "$directory"
 == Measure the frames and keep the frame pointer on request

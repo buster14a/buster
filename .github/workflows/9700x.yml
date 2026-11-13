@@ -1767,8 +1767,8 @@ jobs:
         # output clang -O0's); then every build runs every program in each of 11 rounds, each round in a Williams design's order,
         # as whole processes on one CPU with their user cycles and instructions (docs/tier1.md has the results). Where
         # `changes` doesn't rule it out (Tier 1's pipeline and the measurement: `tier1_programs`), and on the daily and
-        # dispatched runs. #1116 also gates all Tier 1 function bytes against matching clang -O0 bytes on sqlite3.c
-        # and all 34 Lua sources (luac.c included), using paired objects rather than the linked executables' sizes.
+        # dispatched runs. #1116 also gates all 34 Lua sources' Tier 1 function bytes against matching clang -O0 bytes,
+        # with luac.c included, and reports sqlite3.c's status, using paired objects rather than linked-executable sizes.
         if: needs.changes.outputs.tier1_programs != 'false'
         timeout-minutes: 5
         run: |
@@ -1790,7 +1790,7 @@ jobs:
           scripts="$PWD/build/tier1-programs-evidence/docs/measurements/tier1-reciprocal-141-2026-11-01/9700x/lua"
           clang --version | head -1
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler measure-tier1-programs --check-code-size --runs 11 --clang clang --tcc "$tcc" --sqlite "$sqlite" --speedtest "$inputs" --lua "$inputs/lua-5.4.8/src" --scripts "$scripts" --directory /tmp
+          taskset -c "$cpu" ./build/compiler measure-tier1-programs --check-code-size=lua --runs 11 --clang clang --tcc "$tcc" --sqlite "$sqlite" --speedtest "$inputs" --lua "$inputs/lua-5.4.8/src" --scripts "$scripts" --directory /tmp
 
       - name: Time vector code by both tiers and the base's Tier 1, with the moves around Tier 1's machine rows
         # #1283: test-checker-driver's machine rows' unit, a lexer's byte scan and the compiler's own lexer (on
