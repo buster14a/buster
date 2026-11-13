@@ -202,7 +202,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           # Redirect before consuming; process substitution would hide an exporter failure.
           ./build.sh print-sources > "$artifacts/sources.argv"
-          ./build.sh print-compile-flags > "$artifacts/flags.argv"
+          ./build.sh print-compile-flags --config Release > "$artifacts/flags.argv"
           ./build.sh --config Release 2>&1 | tee "$artifacts/build.log"
           # The Release configuration's own executable, which build/compiler is too.
           compiler=$(./build.sh print-output --config Release)

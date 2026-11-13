@@ -17,8 +17,10 @@
 # A build configures build/cmake/VARIANT, Ninja Multi-Config's tree for the BUSTER_* environment's host ISA,
 # runtime, sanitizer, fuzzing and debug information, only when the settings, PATH or the toolchain changed since it
 # last did (a changed clang starts the tree afresh), then has Ninja build what changed: an unchanged build compiles,
-# links and bakes nothing. It builds Release unless --config says Debug or Develop (Release's optimization in parts, for
-# the edit loop), at most one compile per core of the CPUs it may run on, and when it builds the executable,
+# links and bakes nothing. It builds Develop (Release's optimization in parts, for the edit loop; the owner's default
+# since #2559) unless --config says Release or Debug; Release is the configuration every timing and benchmark measures,
+# and the default of the commands that exist to measure (shifts, lexer-variant) and of a BUSTER_PGO tree, which has it
+# alone. It runs at most one compile per core of the CPUs it may run on, and when it builds the executable,
 # build/cmake/VARIANT/CONFIG/compiler, it publishes that file as build/compiler (a hard link, the same file) and its
 # configuration's compile commands as build/compile_commands.json, once the build has succeeded. Builds of one tree,
 # and publications, wait for each other.
@@ -66,7 +68,7 @@ case "${1-}" in
         usage
         ;;
 esac
-config=Release
+config=""
 config_given=0
 jobs=""
 targets=()
@@ -95,6 +97,13 @@ while [ $# -gt 0 ]; do
         *) arguments+=("$1"); shift ;;
     esac
 done
+# The default configuration: Develop for the edit loop; Release for the commands that measure and for BUSTER_PGO.
+if [ "$config_given" = 0 ]; then
+    case "$command" in
+        shifts|lexer-variant) config=Release ;;
+        *) [ "${BUSTER_PGO:-0}" = 1 ] && config=Release || config=Develop ;;
+    esac
+fi
 case "$config" in
     Debug|debug) config=Debug ;;
     Release|release) config=Release ;;
@@ -297,11 +306,13 @@ case "$command" in
         ;;
 esac
 
-# BUSTER_PGO's tree has the Release configuration alone, which its profile is for.
+# BUSTER_PGO's tree has the Release configuration alone, which its profile is for; the others' default is Develop.
 configurations="Debug;Release;Develop"
+default_config=Develop
 if [ "${BUSTER_PGO:-0}" = 1 ]; then
     [ "$config" = Release ] || die "BUSTER_PGO builds the Release configuration alone"
     configurations=Release
+    default_config=Release
 fi
 tree="$root/build/cmake/$variant"
 binary="$tree/$config/compiler"
@@ -372,7 +383,7 @@ configure_arguments=(
     "-DCMAKE_MAKE_PROGRAM=$ninja"
     "-DCMAKE_C_COMPILER=$clang"
     "-DCMAKE_CONFIGURATION_TYPES=$configurations"
-    -DCMAKE_DEFAULT_BUILD_TYPE=Release
+    "-DCMAKE_DEFAULT_BUILD_TYPE=$default_config"
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
     # CMake would take these from the environment once, at the first configure, and keep them.
     -DCMAKE_C_COMPILER_LAUNCHER=

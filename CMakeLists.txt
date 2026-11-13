@@ -7,12 +7,17 @@
 
 cmake_minimum_required(VERSION 3.25)
 
-# Debug, Release and Develop, and Release when a build names no configuration, as ./build.sh builds.
+# Debug, Release and Develop, and Develop when a build names no configuration, as ./build.sh builds (Release where a
+# tree has no Develop, as BUSTER_PGO's has Release alone). Release is the configuration every timing measures.
 if(NOT DEFINED CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_CONFIGURATION_TYPES "Debug;Release;Develop" CACHE STRING "The configurations: any of Debug, Release and Develop")
 endif()
 if(NOT DEFINED CMAKE_DEFAULT_BUILD_TYPE)
-    set(CMAKE_DEFAULT_BUILD_TYPE Release CACHE STRING "The configuration a build that names none builds")
+    if("Develop" IN_LIST CMAKE_CONFIGURATION_TYPES)
+        set(CMAKE_DEFAULT_BUILD_TYPE Develop CACHE STRING "The configuration a build that names none builds")
+    else()
+        set(CMAKE_DEFAULT_BUILD_TYPE Release CACHE STRING "The configuration a build that names none builds")
+    endif()
 endif()
 
 # The flags are the build description's alone. Clear the cache before project() enables C and compiles/links its

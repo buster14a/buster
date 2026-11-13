@@ -1113,7 +1113,7 @@ batch's stage 3 makes the batch after it hash again.
 ## Reproduction
 
 ```sh
-./build.sh
+./build.sh --config Release
 ./build/compiler test-refinement src
 taskset -c 2 ./build/compiler benchmark-refinement inputs/sqlite3.c
 taskset -c 2 ./build/compiler benchmark-refinement --after-scalar 100 --only refine_tokens_64 inputs/sqlite3.c

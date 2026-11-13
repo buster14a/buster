@@ -299,27 +299,26 @@ computers:
 
 ## Build
 
-Use `./build.sh` (Clang, CMake 3.25+, Ninja): Release (`-O3`) by default,
-`--config Develop` (`-O3` in parts, no benchmarks) or `--config Debug`
-(`-O0 -g`), incrementally in `build/cmake/VARIANT`, published as
-`build/compiler`. Develop where edits dominate, Release for every timing,
-Debug for a debugger. Respect the lock and `cores` rules above.
-`BUSTER_DEBUG_INFO=0` omits Release's `-g`. Read [build
-details](docs/commands/build.md) before changing translation units, flags,
-baked tables or code-placement experiments. `build/` is disposable; never
-commit generated binaries or captures.
+Use `./build.sh` (Clang, CMake 3.25+, Ninja): Develop (`-O3` in parts) by
+default, for edits and tests; `--config Release` (`-O3`) for **every timing
+and benchmark**; `--config Debug` (`-O0 -g`) for a debugger; incremental in
+`build/cmake/VARIANT`, published as `build/compiler`. Respect
+the lock and `cores` rules above. `BUSTER_DEBUG_INFO=0` omits Release's `-g`.
+Read [build details](docs/commands/build.md) before changing translation
+units, flags, baked tables or code-placement experiments. `build/` is
+disposable; never commit generated binaries or captures.
 
 ## Current repository and exact smoke commands
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
 
 ```sh
-./build.sh
+./build.sh --config Release
 clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
 ./build/compiler parse -fsyntax-only -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 ./build/compiler -fsyntax-only -march=native -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror src/buster/compiler/main.c
 ./build/compiler test-call-graph
-./build.sh check-call-graph
+./build.sh check-call-graph --config Release
 ./build/compiler test-profile
 ./build/compiler test-parallel
 ./build/compiler test-lexer

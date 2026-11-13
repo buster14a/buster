@@ -615,7 +615,7 @@ step_setup()
             continue
         fi
         log "setup: build $arch"
-        hold_build env BUSTER_HOST_ARCH="$arch" "$repository/build.sh" > "$SCRATCH/build-$arch.log" 2>&1 || { log "setup: build $arch failed"; exit 2; }
+        hold_build env BUSTER_HOST_ARCH="$arch" "$repository/build.sh" --config Release > "$SCRATCH/build-$arch.log" 2>&1 || { log "setup: build $arch failed"; exit 2; }
         cp "$repository/build/compiler" "bin/compiler-$arch"
         echo "$identity" > "bin/compiler-$arch.commit"
     done
@@ -699,7 +699,7 @@ step_build_commit()
             continue
         fi
         log "build-commit: $name $arch ($(cat "$tree/COMMIT"))"
-        hold_build env BUSTER_HOST_ARCH="$arch" "$tree/build.sh" > "$SCRATCH/build-$name-$arch.log" 2>&1 || { log "build-commit: $name $arch failed"; exit 2; }
+        hold_build env BUSTER_HOST_ARCH="$arch" "$tree/build.sh" --config Release > "$SCRATCH/build-$name-$arch.log" 2>&1 || { log "build-commit: $name $arch failed"; exit 2; }
         cp "$tree/build/compiler" "bin/compiler-$name-$arch"
         cp "$tree/COMMIT" "bin/compiler-$name-$arch.commit"
     done

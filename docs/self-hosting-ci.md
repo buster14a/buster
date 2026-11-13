@@ -102,10 +102,10 @@ For the baseline bootstrap, set `BUSTER_HOST_ARCH=x86-64` in all three
 `build.sh` commands instead; it runs on any Linux/x86-64 host:
 
 ```sh
-BUSTER_HOST_ARCH=native BUSTER_DEBUG_INFO=0 BUSTER_SANITIZER=none BUSTER_FUZZ_AVAILABLE=0 ./build.sh
+BUSTER_HOST_ARCH=native BUSTER_DEBUG_INFO=0 BUSTER_SANITIZER=none BUSTER_FUZZ_AVAILABLE=0 ./build.sh --config Release
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/selfhost.c -o /tmp/buster-selfhost-gate
 BUSTER_HOST_ARCH=native BUSTER_DEBUG_INFO=0 BUSTER_SANITIZER=none BUSTER_FUZZ_AVAILABLE=0 ./build.sh print-sources > /tmp/buster-selfhost-sources.argv
-BUSTER_HOST_ARCH=native BUSTER_DEBUG_INFO=0 BUSTER_SANITIZER=none BUSTER_FUZZ_AVAILABLE=0 ./build.sh print-compile-flags > /tmp/buster-selfhost-flags.argv
+BUSTER_HOST_ARCH=native BUSTER_DEBUG_INFO=0 BUSTER_SANITIZER=none BUSTER_FUZZ_AVAILABLE=0 ./build.sh print-compile-flags --config Release > /tmp/buster-selfhost-flags.argv
 /tmp/buster-selfhost-gate "$PWD/build/compiler" /tmp/buster-selfhost-sources.argv /tmp/buster-selfhost-flags.argv /tmp/buster-selfhost-result 900
 ```
 

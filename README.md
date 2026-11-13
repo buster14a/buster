@@ -24,8 +24,9 @@ Build with Clang, CMake 3.25 or later and Ninja on the intended host:
 
 The build produces one executable, `build/compiler`, using `-march=native`:
 `./build.sh` configures CMake's Ninja Multi-Config tree in `build/cmake/`, builds
-the Release configuration incrementally (`--config Debug` for the other), and
-publishes it there; `CMakePresets.json` drives the same tree with CMake and
+the Develop configuration, the edit loop's, incrementally (`--config Release` for
+the product and for every timing or benchmark, `--config Debug` for a debugger),
+and publishes it there; `CMakePresets.json` drives the same tree with CMake and
 CTest directly ([the build guide](docs/commands/build.md)).
 Its stage 1 link prefers an installed Wild, then mold, then the system linker.
 Set `BUSTER_LINKER=system|wild|mold|lld|bfd` or an absolute executable path to

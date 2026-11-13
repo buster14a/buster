@@ -574,7 +574,8 @@ part*.o --join, as #2058's--> unit.o --link--> compiler.link --bake--> compiler
 
 The name is the implementation's to choose. `./build.sh` keeps building
 Release by default until the owner changes that; a session asks for Develop as
-it asks for Debug today. Sanitizer, fuzzing and profile-guided builds keep the
+it asks for Debug today. (The owner did on 2026-11-13: `./build.sh` builds
+Develop, and every timing names `--config Release`.) Sanitizer, fuzzing and profile-guided builds keep the
 whole-unit compile, as they do with #2058.
 
 ### The splitter's rules

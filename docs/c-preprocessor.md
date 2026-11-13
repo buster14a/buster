@@ -325,7 +325,7 @@ To reproduce, use a separate checkout of `d8109dd` on the 9700X, build through
 the shared lock, and run from that checkout (Bash):
 
 ```sh
-EXCLUSIVE_OWNER=cache-110-repro ~/buster-fast-bench/exclusive.sh ./build.sh
+EXCLUSIVE_OWNER=cache-110-repro ~/buster-fast-bench/exclusive.sh ./build.sh --config Release
 EXCLUSIVE_OWNER=cache-110-repro ~/buster-fast-bench/exclusive.sh ./build/compiler test-preprocessor --clang
 corpus="$HOME/buster-fast-bench/preprocessor-corpora-astra-01a158dd"
 EXCLUSIVE_OWNER=cache-110-repro ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler benchmark-preprocessor \
@@ -3577,7 +3577,7 @@ spellings alone would miss this change (#272).
 ## Reproduction
 
 ```sh
-./build.sh
+./build.sh --config Release
 ./build/compiler test-preprocessor --clang
 ./build/compiler test-preprocessor --clang path/to/sqlite3.c
 taskset -c 2 ./build/compiler benchmark-preprocessor --clang path/to/sqlite3.c

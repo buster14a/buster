@@ -35,11 +35,16 @@ the binutils `nm` and `readelf`. CI stages the official Clang 23.1.4, CMake
 ./build.sh shifts [--config C] [--jobs N] DIRECTORY SOURCE SHIFT...
 ```
 
-- **build** (the default) builds Release unless `--config Debug` or
-  `--config Develop`, the executable unless `--target` names CMake targets, then publishes the
+- **build** (the default) builds Develop, the edit loop's configuration
+  (the owner's default since #2559), unless `--config Release` or `--config
+  Debug`, the executable unless `--target` names CMake targets, then publishes the
   configuration's executable, `build/cmake/VARIANT/CONFIG/compiler`, as
   `build/compiler` and its compile commands as `build/compile_commands.json`.
-  Plain `./build.sh` is the optimized build it has always been.
+  **Every timing, benchmark and `perf` run measures Release**: build it with
+  `./build.sh --config Release`. `shifts` and `lexer-variant`, which exist to
+  measure, and a `BUSTER_PGO` tree, which has Release alone, default to
+  Release; so do the CI jobs, which name `--config Release` wherever they
+  build, print the compile flags or check the call graph.
 - **test** builds and publishes as `build` does, then runs the tree's CTest
   tests for the configuration (below) without holding the tree's lock.
 - **clean** removes this environment's tree; with `--config`, that
@@ -81,8 +86,8 @@ compiled, its time and the three longest compiles, from Ninja's log.
 
 One tree holds **Release**, **Debug** and **Develop**, in `CONFIG/`
 subdirectories of their own; switching between them builds nothing that is up to
-date. Release is for the product and every timing, Develop for edits and tests,
-Debug for a debugger.
+date. Release is for the product and every timing, Develop for edits and tests
+(and the default), Debug for a debugger.
 
 - **Release** is the production build, with the flags the build has always had:
   `-g` (none with `BUSTER_DEBUG_INFO=0`), the host target (`-march=$BUSTER_HOST_ARCH`), `-Isrc
@@ -185,7 +190,7 @@ build publishes nothing, and an unchanged one nothing again. CI runs the configu
 as `BUSTER_COMPILER`) and checks that `build/compiler` is that file. Ninja
 Multi-Config's `compile_commands.json` has every unit once per configuration;
 `build/compile_commands.json` has the published configuration's alone, which
-editors and static analyzers read (Release after a plain `./build.sh`). Ninja
+editors and static analyzers read (Develop's after a plain `./build.sh`). Ninja
 keeps that filtered database in `CONFIG/compile_commands.json`, rebuilding it
 when CMake regenerates the multi-config database, its filter changes, or the
 cached file is missing. Unchanged builds and source edits reuse it. Publication
@@ -735,8 +740,9 @@ build](../stage1-build-design.md#step-5-measured), #2559).
 
 ## Develop
 
-The edit loop's configuration (#2559; [A faster stage 1 build](../stage1-build-design.md)
-is its design, with the measurements that sized it). A Release edit waits for one
+The edit loop's configuration, and `./build.sh`'s default since 2026-11-13 (#2559;
+[A faster stage 1 build](../stage1-build-design.md) is its design, with the
+measurements that sized it); time and benchmark Release, never Develop. A Release edit waits for one
 clang process, a unit's front end and `-O3` pipeline, whatever the edit: the
 checker's unit's took 56.6 s on the 9700X. Develop stops each `main.c` unit's
 compile before LLVM's optimizer and optimizes it in parts, at once, so that an
