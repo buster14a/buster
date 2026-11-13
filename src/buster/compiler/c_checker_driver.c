@@ -944,6 +944,10 @@ struct CheckDriverDiagnostic
     // source's node plus one (0 for none) and its target.
     uint32_t default_source;
     TypeId default_target;
+    // A predefined typedef's declaration has no source location (#2250).
+    bool unlocated_note;
+    // A reread builtin typo precedes the corrected expression's own diagnostic, even at the same token.
+    bool corrected;
 };
 
 // A conversion clang warns of with an error by default and makes (#1969, check_driver_report_default_error), whose source a
@@ -4470,6 +4474,16 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         }
         const uint64_t* completions = completion_count != 0 ? c_bindings_sort(completion_keys, completion_sorting, completion_count, !scalar, varying) : NULL;
         uint32_t report_total = 0;
+        // A builtin typo is corrected before the reread expression is checked (#2250). Stable token sorting keeps
+        // this name error before an argument or direct-call error at the same token.
+        for (uint32_t i = 0; i < extra_count; i += 1)
+        {
+            if (extra[i].corrected)
+            {
+                const uint32_t token = extra[i].position < count ? extra[i].position : count;
+                report_keys[report_total++] = (uint64_t)token << 32 | (input->report_count + stream_reports + i);
+            }
+        }
         for (uint32_t i = 0; i < input->report_count; i += 1)
         {
             const uint32_t located = input->reports[i].sort != 0 ? input->reports[i].sort : input->reports[i].token;
@@ -4491,8 +4505,11 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         }
         for (uint32_t i = 0; i < extra_count; i += 1)
         {
-            const uint32_t token = extra[i].position < count ? extra[i].position : count;
-            report_keys[report_total++] = (uint64_t)token << 32 | (input->report_count + stream_reports + i);
+            if (!extra[i].corrected)
+            {
+                const uint32_t token = extra[i].position < count ? extra[i].position : count;
+                report_keys[report_total++] = (uint64_t)token << 32 | (input->report_count + stream_reports + i);
+            }
         }
         for (uint32_t i = 0; i < input->implicit_function_count; i += 1)
         {
@@ -4576,7 +4593,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
             // A typo's correction (#1447) is not its token's error but a name's: the expression it recovers to keeps its own
             // error at that token, as clang's does (`static int s = countr;`'s non-constant one), once.
             const uint32_t last = first_count != 0 ? (uint32_t)firsts[first_count - 1] : BUSTER_CHECK_NONE;
-            const bool corrected = last < input->report_count && input->reports[last].message == CHECK_INPUT_UNDECLARED_CORRECTED;
+            const uint32_t last_extra = last - input->report_count - stream_reports;
+            const bool corrected = (last < input->report_count && input->reports[last].message == CHECK_INPUT_UNDECLARED_CORRECTED) ||
+                                   (last_extra < extra_count && extra[last_extra].corrected);
             if (first_count == 0 || (firsts[first_count - 1] >> 32) != (firsts[i] >> 32) || repeated || corrected)
             {
                 firsts[first_count++] = firsts[i];
@@ -5740,19 +5759,30 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             // name with its note, and the name stays undeclared.
                             const CheckInputReport* report = input->reports + index;
                             const uint32_t name = parser->tokens.names[located];
-                            const uint32_t meant = report->subject != 0 ? report->subject - 1 : BUSTER_CHECK_NONE;
+                            const bool predefined = (report->detail & CHECK_TYPO_PREDEFINED) != 0 && report->subject != 0 &&
+                                                    report->subject <= BUSTER_PARSE_PREDECLARED_TYPEDEFS;
+                            const uint32_t meant = !predefined && report->subject != 0 ? report->subject - 1 : BUSTER_CHECK_NONE;
                             const uint32_t index_of = report->detail & (CHECK_TYPO_STATEMENT - 1);
                             const uint32_t keyword = index_of != 0 && index_of <= BUSTER_ARRAY_LENGTH(check_typo_keywords) ? index_of - 1 : 0;
                             // A statement's typedef is clang's parser's "unknown type name" (check_driver_typo_edits).
-                            const bool unknown_type = meant < count && (report->detail & CHECK_TYPO_STATEMENT) != 0;
-                            const char* other = meant < count ? (const char*)intern_bytes(pp->table, parser->tokens.names[meant]) : check_typo_keywords[keyword];
+                            const bool unknown_type = (predefined || meant < count) && (report->detail & CHECK_TYPO_STATEMENT) != 0 &&
+                                                      (report->detail & CHECK_TYPO_BUILTIN) == 0;
+                            const char* other = predefined ? parse_predeclared_typedefs[report->subject - 1] :
+                                                meant < count ? (const char*)intern_bytes(pp->table, parser->tokens.names[meant]) : check_typo_keywords[keyword];
                             const int other_length = meant < count ? (int)intern_length(pp->table, parser->tokens.names[meant]) : (int)strlen(other);
                             char declared[512];
                             snprintf(declared, sizeof(declared), "'%.*s' declared here", other_length, other);
-                            const PPOutputDiagnosticNote note = { .token = meant < count ? parser->tokens.sources[meant] : 0, .message = declared };
-                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, meant < count ? 1u : 0u,
-                                                        "%s '%.*s'; did you mean '%.*s'?", unknown_type ? "unknown type name" : "use of undeclared identifier",
-                                                        (int)intern_length(pp->table, name), intern_bytes(pp->table, name), other_length, other);
+                            const uint32_t note_source = meant < count ? parser->tokens.sources[meant] : BUSTER_CHECK_NONE;
+                            pp_history_ensure(pp);
+                            const PPDiagnosticSourceNote note = {
+                                .location = note_source < pp->output.count ? pp->output.locations[note_source] : 0,
+                                .origin = pp_history_at(pp, note_source),
+                                .message = declared,
+                            };
+                            pp_diagnose_placed_sources_phase(pp, PP_SEVERITY_ERROR, pp->output.locations[source], pp_history_at(pp, source), publication,
+                                                              PP_DIAGNOSTIC_SEMANTIC, &note, predefined || meant < count ? 1u : 0u,
+                                                              "%s '%.*s'; did you mean '%.*s'?", unknown_type ? "unknown type name" : "use of undeclared identifier",
+                                                              (int)intern_length(pp->table, name), intern_bytes(pp->table, name), other_length, other);
                         }
                         else if ((kind == CHECK_INPUT_UNDECLARED || kind == CHECK_INPUT_UNKNOWN_BUILTIN) && named)
                         {
@@ -6305,6 +6335,13 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1, "%s", message);
                         }
+                        else if (phase == 2 && extra[index].note != NULL && extra[index].unlocated_note)
+                        {
+                            const PPDiagnosticSourceNote note = { .location = 0, .origin = 0, .message = extra[index].note };
+                            pp_history_ensure(pp);
+                            pp_diagnose_placed_sources_phase(pp, PP_SEVERITY_ERROR, pp->output.locations[source], pp_history_at(pp, source), publication,
+                                                              PP_DIAGNOSTIC_SEMANTIC, &note, 1, "%s", message);
+                        }
                         else if (phase == 2 && extra[index].note != NULL && extra[index].note_token < count)
                         {
                             const PPOutputDiagnosticNote note = { .token = parser->tokens.sources[extra[index].note_token], .message = extra[index].note };
@@ -6428,7 +6465,13 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
     bool valid = total64 != 0 && total64 <= BUSTER_PARSE_MAX_TOKENS;
     const uint32_t total = valid ? (uint32_t)total64 : 0;
     Parser* view = &result->parser;
-    *view = (Parser){ .options = original->options, .language = original->language, .preprocessor = original->preprocessor };
+    *view = (Parser){
+        .options = original->options,
+        .language = original->language,
+        .preprocessor = original->preprocessor,
+        .typo_sources = original->typo_sources,
+        .typo_count = original->typo_count,
+    };
     memcpy(view->predeclared, original->predeclared, sizeof(view->predeclared));
     if (valid)
     {
@@ -7378,11 +7421,18 @@ static bool check_driver_rejected_top_known(const Parser* parser, const uint32_t
 // Whether the first reading's errors at `token` all leave their declaration valid (check_driver_report_keeps_valid,
 // #1835): no other error is there. A typo's correction (#1447, CHECK_INPUT_UNDECLARED_CORRECTED) does in a body too
 // (`bodied`): the reading corrects it again, its use bound as clang's, whose warnings (an array index's) stay. Only a
-// rejected unit's rounds call it.
-static bool check_driver_rejected_recovered(const CheckInput* input, uint32_t token, bool bodied)
+// rejected unit's rounds call it. A builtin corrected by a driver name edit (#2250) has the same recovered status in
+// the extra diagnostics; an independent expression error at its token still rejects the expression.
+static bool check_driver_rejected_recovered(const CheckInput* input, const CheckDriverDiagnostic* extra, uint32_t extra_count, uint32_t token, bool bodied)
 {
     bool recovered = false;
     bool stopped = false;
+    for (uint32_t i = 0; i < extra_count; i += 1)
+    {
+        const bool at = extra[i].token == token;
+        recovered |= at && extra[i].corrected;
+        stopped |= at && !extra[i].corrected;
+    }
     for (uint32_t i = 0; i < input->report_count; i += 1)
     {
         const bool at = input->reports[i].token == token;
@@ -7979,6 +8029,7 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
 #define BUSTER_CHECK_DRIVER_REJECTED_ROUNDS 4u
 
 static void check_driver_rejected_common(const Parser* unit, const Parser* original, Preprocessor* pp, const CheckInput* first_input, const TypeTable* first_types,
+                                         const CheckDriverDiagnostic* extra, uint32_t extra_count,
                                          const uint32_t* errors, uint32_t error_count, const CheckDriverConversionSite* sites, uint32_t site_count,
                                          const uint8_t* nonconstant, bool scalar, bool return_warning,
                                          CheckWarningSeverity return_baseline,
@@ -8183,7 +8234,7 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
             // needs no part left out, nor does a typo's correction anywhere: the reading recovers it again, its declaration
             // valid, as clang keeps it. It still counts in its scope (error_counts). (A prototype's dropped declaration would
             // leave out the bodies that name its parameters' names too.)
-            const bool recovered = token < count && check_driver_rejected_recovered(first_input, token, bodied);
+            const bool recovered = token < count && check_driver_rejected_recovered(first_input, extra, extra_count, token, bodied);
             // A conversion that defaults to an error (#1969) is kept, its source cast, where its tokens are all kept; where
             // the parts left out before it hold them all, it is left out with them. (Its sites come after the others' errors.)
             const CheckDriverConversionSite* site = NULL;
@@ -10238,7 +10289,8 @@ struct CheckDriverTypoEdits
 {
     CheckPrefixEdit edits[BUSTER_CHECK_DRIVER_TYPO_EDITS];
     // Beside each replacement, the keyword it takes (its index in check_typo_keywords + 1) or the typedef's declaration
-    // token (the original's), for its error; BUSTER_CHECK_NONE for a left-out tail.
+    // token (the original's), for its error; BUSTER_CHECK_NONE for a left-out tail. CHECK_TYPO_PREDEFINED in keywords
+    // makes types a predefined index; CHECK_TYPO_BUILTIN makes it the builtin's first-use token (#2250).
     uint32_t keywords[BUSTER_CHECK_DRIVER_TYPO_EDITS];
     uint32_t types[BUSTER_CHECK_DRIVER_TYPO_EDITS];
     // Beside a left-out block item after GNU attributes, the name its errors are at, and the value's declaration token
@@ -10250,6 +10302,8 @@ struct CheckDriverTypoEdits
     // Beside each replacement, whether it is a parameter's unknown type name's (CHECK_TYPO_PARAMETER), whose error is
     // "unknown type name" with a keyword too.
     bool parameters[BUSTER_CHECK_DRIVER_TYPO_EDITS];
+    uint32_t sources[BUSTER_CHECK_DRIVER_TYPO_EDITS];
+    uint32_t source_count;
     const InternTable* table;
     uint32_t count;
     uint32_t rejected_count;
@@ -10504,11 +10558,14 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
         const CheckInputReport* report = parameter ? NULL : input->reports + r;
         const uint32_t detail = parameter ? input->parameter_typo_details[p] : report->detail;
         const uint32_t subject = parameter ? input->parameter_typo_types[p] : report->subject;
-        const bool statement = parameter || (report->message == CHECK_INPUT_UNDECLARED && (detail & CHECK_TYPO_STATEMENT) != 0);
+        const bool predefined = (detail & CHECK_TYPO_PREDEFINED) != 0 && subject != 0 && subject <= BUSTER_PARSE_PREDECLARED_TYPEDEFS;
+        const bool builtin = (detail & CHECK_TYPO_BUILTIN) != 0;
+        const bool statement = parameter || (report->message == CHECK_INPUT_UNDECLARED && (detail & (CHECK_TYPO_STATEMENT | CHECK_TYPO_BUILTIN)) != 0);
         const uint32_t token = statement ? check_driver_original_token(original, checking, parameter ? input->parameter_typo_tokens[p] : report->token) :
                                            BUSTER_CHECK_NONE;
         const uint32_t keyword = detail & (CHECK_TYPO_STATEMENT - 1);
-        const uint32_t type = statement && subject != 0 ? check_driver_original_token(original, checking, subject - 1) : BUSTER_CHECK_NONE;
+        const uint32_t type = predefined ? subject - 1 :
+                              statement && subject != 0 ? check_driver_original_token(original, checking, subject - 1) : BUSTER_CHECK_NONE;
         uint32_t name = 0;
         uint8_t kind = PARSE_KIND_IDENTIFIER;
         if (keyword != 0 && keyword <= BUSTER_ARRAY_LENGTH(check_typo_keywords))
@@ -10523,12 +10580,13 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
         }
         else
         {
-            name = type < count ? original->tokens.names[type] : 0;
+            name = predefined ? original->predeclared[type] : type < count ? original->tokens.names[type] : 0;
         }
         if (token < count && name != 0 && kind != PARSE_KIND_UNKNOWN && original->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
         {
             const CheckPrefixEdit edit = { .token = token, .end = 0, .name = name, .kind = kind };
-            added |= check_driver_typo_add(edits, edit, keyword, keyword != 0 ? BUSTER_CHECK_NONE : type, BUSTER_CHECK_NONE, parameter);
+            const uint32_t special = (predefined ? CHECK_TYPO_PREDEFINED : 0u) | (builtin ? CHECK_TYPO_BUILTIN : 0u);
+            added |= check_driver_typo_add(edits, edit, keyword | special, keyword != 0 ? BUSTER_CHECK_NONE : type, BUSTER_CHECK_NONE, parameter);
         }
     }
     // A probe's statement whose expression has an undeclared name that no correction took: its rest is left out.
@@ -10555,7 +10613,7 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
         for (uint32_t r = 0; first < count && r < input->report_count; r += 1)
         {
             const CheckInputReport* report = input->reports + r;
-            const bool corrected = (report->detail & CHECK_TYPO_STATEMENT) != 0;
+            const bool corrected = (report->detail & (CHECK_TYPO_STATEMENT | CHECK_TYPO_BUILTIN)) != 0;
             const uint32_t token = report->message == CHECK_INPUT_UNDECLARED && !corrected ? check_driver_original_token(original, checking, report->token) :
                                    BUSTER_CHECK_NONE;
             undeclared |= token >= first && token < at;
@@ -10565,6 +10623,15 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
         {
             const CheckPrefixEdit edit = { .token = at, .end = end, .name = 0, .kind = 0 };
             added |= check_driver_typo_add(edits, edit, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, false);
+        }
+    }
+    edits->source_count = 0;
+    for (uint32_t e = 0; e < edits->count; e += 1)
+    {
+        const CheckPrefixEdit* edit = edits->edits + e;
+        if (edit->end == 0 && edit->name != 0 && edit->token < count)
+        {
+            edits->sources[edits->source_count++] = original->tokens.sources[edit->token];
         }
     }
     return added;
@@ -10582,24 +10649,28 @@ static uint32_t check_driver_typo_errors(const CheckDriverTypoEdits* edits, cons
     for (uint32_t e = 0; e < edits->count; e += 1)
     {
         const CheckPrefixEdit* edit = edits->edits + e;
-        const uint32_t keyword = edits->keywords[e];
+        const uint32_t detail = edits->keywords[e];
+        const uint32_t keyword = detail & (CHECK_TYPO_STATEMENT - 1);
         const uint32_t type = edits->types[e];
+        const bool predefined = (detail & CHECK_TYPO_PREDEFINED) != 0 && type < BUSTER_PARSE_PREDECLARED_TYPEDEFS;
+        const bool builtin = (detail & CHECK_TYPO_BUILTIN) != 0;
         // (A block item's name after GNU attributes that a correction took as a value, check_driver_typo_tail, is a `;` in
         // the view, its errors there: the correction's, then the parser's.)
         const uint32_t named = edits->names[e];
         const bool value = named < original->tokens.count && edit->end == 0;
         const uint32_t token = edit->end == 0 ? check_driver_view_token(checking, original, edit->token) : BUSTER_CHECK_NONE;
-        const bool typedef_name = !value && keyword == 0 && type < original->tokens.count;
-        const bool noted = typedef_name || (value && type < original->tokens.count);
-        const uint32_t declared = noted ? check_driver_view_token(checking, original, type) : BUSTER_CHECK_NONE;
-        const bool viewed = token < checking->tokens.count && (!noted || declared < checking->tokens.count);
+        const bool typedef_name = !value && !builtin && keyword == 0 && (predefined || type < original->tokens.count);
+        const bool noted = typedef_name || ((value || builtin) && type < original->tokens.count);
+        const uint32_t declared = noted && !predefined ? check_driver_view_token(checking, original, type) : BUSTER_CHECK_NONE;
+        const bool viewed = token < checking->tokens.count && (!noted || predefined || declared < checking->tokens.count);
         char* message = edit->end == 0 && (keyword != 0 || noted) ? arena_push_array(arena, 512, 1, 1) : NULL;
         char* note = message != NULL && noted ? arena_push_array(arena, 512, 1, 1) : NULL;
         if (message != NULL && (!noted || note != NULL))
         {
             const uint32_t name = original->tokens.names[edit->token];
-            const char* other = noted ? (const char*)intern_bytes(pp->table, original->tokens.names[type]) : check_typo_keywords[keyword - 1];
-            const int other_length = noted ? (int)intern_length(pp->table, original->tokens.names[type]) : (int)strlen(other);
+            const char* other = predefined ? parse_predeclared_typedefs[type] :
+                                noted ? (const char*)intern_bytes(pp->table, original->tokens.names[type]) : check_typo_keywords[keyword - 1];
+            const int other_length = noted && !predefined ? (int)intern_length(pp->table, original->tokens.names[type]) : (int)strlen(other);
             snprintf(message, 512, "%s '%.*s'; did you mean '%.*s'?", typedef_name || edits->parameters[e] ? "unknown type name" : "use of undeclared identifier",
                      (int)intern_length(pp->table, name), intern_bytes(pp->table, name), other_length, other);
             if (note != NULL)
@@ -10609,7 +10680,16 @@ static uint32_t check_driver_typo_errors(const CheckDriverTypoEdits* edits, cons
             static const char expected[] = "expected identifier or '('";
             if (viewed)
             {
-                additional[result] = (CheckDriverDiagnostic){ .token = token, .message = message, .position = token, .note_token = declared, .note = note };
+                additional[result] = (CheckDriverDiagnostic){
+                    .token = token,
+                    .message = message,
+                    .position = token,
+                    .completion = builtin ? token : 0,
+                    .note_token = declared,
+                    .note = note,
+                    .unlocated_note = predefined,
+                    .corrected = builtin,
+                };
                 result += 1;
                 additional[result] = (CheckDriverDiagnostic){ .token = token, .message = expected, .position = token, .repeated = true };
                 result += value ? 1u : 0u;
@@ -10617,9 +10697,15 @@ static uint32_t check_driver_typo_errors(const CheckDriverTypoEdits* edits, cons
             else
             {
                 const uint32_t source = original->tokens.sources[edit->token];
-                const PPOutputDiagnosticNote printed = { .token = noted ? original->tokens.sources[type] : 0, .message = note };
+                const uint32_t note_source = noted && !predefined ? original->tokens.sources[type] : BUSTER_CHECK_NONE;
                 pp_history_ensure(pp);
-                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, source, &printed, note != NULL ? 1u : 0u, "%s", message);
+                const PPDiagnosticSourceNote printed = {
+                    .location = note_source < pp->output.count ? pp->output.locations[note_source] : 0,
+                    .origin = pp_history_at(pp, note_source),
+                    .message = note,
+                };
+                pp_diagnose_placed_sources_phase(pp, PP_SEVERITY_ERROR, pp->output.locations[source], pp_history_at(pp, source), source,
+                                                  PP_DIAGNOSTIC_SEMANTIC, &printed, note != NULL ? 1u : 0u, "%s", message);
                 if (value)
                 {
                     pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, source, "%s", expected);
@@ -10722,11 +10808,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         CheckPrefix prefix = { 0 };
         CheckRepair repair = { 0 };
         CheckResumed resumed = { 0 };
-        const Parser* checking = parser;
+        Parser* checking = parser;
         // A failed parse as clang's recovery reads it (check_prefix_resume, #147), or the parse itself: what the views
         // after a failed parse are made of, and the original whose places their diagnostics publish at. Its parse's
         // diagnostics are the original's.
-        const Parser* recovered = parser;
+        Parser* recovered = parser;
         Preprocessor* checking_pp = pp;
         bool prefix_only = false;
         bool repairing = false;
@@ -10771,6 +10857,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         }
         if (ready)
         {
+            parser->typo_sources = NULL;
+            parser->typo_count = 0;
             ready = parse_translation_unit(parser, pp);
             parse_failed = !ready;
             if (ready)
@@ -10981,6 +11069,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     }
                     else
                     {
+                        checking->typo_sources = typo_edits.sources;
+                        checking->typo_count = typo_edits.source_count;
                         input_valid = check_input_compile(&input, checking, checking_pp, &types, arena, scratch, false,
                                                           repairing ? repair.original_end : checking->tokens.count, NULL);
                     }
@@ -11163,14 +11253,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         // The other declarations' failed initializers (#1447, phase 2), which clang reports too: room for
                         // two diagnostics each beside the first's.
                         const uint32_t others = diagnosed && earlier.status != CHECK_INIT_OK && earlier.status != CHECK_INIT_RESOURCE ? earlier.failure_count : 0;
-                        CheckDriverDiagnostic* widened = others > 1 ?
-                            BUSTER_ARENA_PUSH_ARRAY(output_arena, CheckDriverDiagnostic, 5 + (uint64_t)musttails.count + 2 * (uint64_t)others) : NULL;
-                        if (widened != NULL)
-                        {
-                            memcpy(widened, additional, (uint64_t)additional_count * sizeof(CheckDriverDiagnostic));
-                            additional = widened;
-                        }
-                        const uint32_t failure_total = widened != NULL ? others + 1 : 1;
+                        const bool widened = others > 1 && check_driver_additional_room(&additional, &additional_capacity, additional_count,
+                                                                                       2 * (uint64_t)others, output_arena);
+                        const uint32_t failure_total = widened ? others + 1 : 1;
                         for (uint32_t f = 0; f < failure_total; f += 1)
                         {
                             const CheckInitFailure* other = f != 0 ? earlier.failures + (f - 1) : NULL;
@@ -11387,9 +11472,15 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     // A resume that read the whole unit (#147) checks its view as the semantic unit it is, its `prefix_only`
                     // keeping only the emission and the translation unit's end obligations back (`checking` the recovered
                     // parser, where a prefix's or a repair's is a view of its own).
+                    bool recovered_additional = additional_count != 0;
+                    for (uint32_t i = 0; recovered_additional && i < additional_count; i += 1)
+                    {
+                        recovered_additional = additional[i].corrected;
+                    }
                     const bool program_diagnostics = result == 0 ||
-                        (ready && expression_valid && additional_count == 0 && (!prefix_only || checking == recovered || repairing) &&
-                         (pp->errors != 0 || publication_errors || input.recovered_valid || repairing) && !pp->diagnostic_collection_failed && !pp->history_failed);
+                        (ready && expression_valid && (additional_count == 0 || recovered_additional) && (!prefix_only || checking == recovered || repairing) &&
+                         (pp->errors != 0 || publication_errors || input.recovered_valid || recovered_additional || repairing) &&
+                         !pp->diagnostic_collection_failed && !pp->history_failed);
                     CheckInput diagnostic_input;
                     const CheckInput* program_input = &input;
                     if (program_diagnostics && result != 0 && input.visibility_error)
@@ -11584,7 +11675,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         {
                             // A repaired view's, at its complete original statements alone (CheckCommonView, #2431).
                             check_common_view = repairing ? check_driver_common_view(&repair, recovered) : (CheckCommonView){ 0 };
-                            check_driver_rejected_common(checking, recovered, pp, &input, &types, error_tokens, error_count, sites, site_count, nonconstant, scalar,
+                            check_driver_rejected_common(checking, recovered, pp, &input, &types, additional, additional_count,
+                                                         error_tokens, error_count, sites, site_count, nonconstant, scalar,
                                                          return_warning, baseline,
                                                          &shift_warnings,
                                                          &input.warning_events, &stream.warning_events,

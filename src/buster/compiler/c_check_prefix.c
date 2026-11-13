@@ -245,6 +245,8 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
         view->options.tree_only = false;
         view->language = parser->language;
         view->preprocessor = parser->preprocessor;
+        view->typo_sources = parser->typo_sources;
+        view->typo_count = parser->typo_count;
         view->recovered_parameter_types = parameter_types && end > first_error;
         memcpy(view->predeclared, parser->predeclared, sizeof(view->predeclared));
         view->tokens.count = end;
@@ -607,7 +609,13 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
     for (uint32_t v = 0; more && v < (edit_count != 0 ? 3u : 2u); v += 1)
     {
         Parser* view = views + v;
-        *view = (Parser){ .options = original->options, .language = original->language, .preprocessor = original->preprocessor };
+        *view = (Parser){
+            .options = original->options,
+            .language = original->language,
+            .preprocessor = original->preprocessor,
+            .typo_sources = original->typo_sources,
+            .typo_count = original->typo_count,
+        };
         view->options.tree_only = false;
         memcpy(view->predeclared, original->predeclared, sizeof(view->predeclared));
         view->tokens.kinds = check_prefix_column(output, capacity, 1);

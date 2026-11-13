@@ -43,6 +43,25 @@ static uint64_t check_test_typo_stress(char* text, uint64_t capacity)
     return fits ? length : 0;
 }
 
+// Rereading a corrected builtin must not give the unit another spell-checking budget (#2250). The two nonconstant
+// initializers also grow the extra diagnostic list after the corrections, retaining room for every earlier error.
+static uint64_t check_test_builtin_typo_stress(char* text, uint64_t capacity)
+{
+    const int head = snprintf(text, capacity, "int f(void) { int s = __builtin_abs(-1);\n");
+    bool fits = head > 0 && (uint64_t)head < capacity;
+    uint64_t length = fits ? (uint64_t)head : 0;
+    for (uint32_t k = 0; fits && k < 53; k += 1)
+    {
+        const int written = snprintf(text + length, capacity - length, "    s += __builtin_absx(-1);\n");
+        fits = written > 0 && (uint64_t)written < capacity - length;
+        length += fits ? (uint64_t)written : 0;
+    }
+    const int tail = fits ? snprintf(text + length, capacity - length, "    return s; }\nint source(void);\nint first = source();\nint second = source();\n") : -1;
+    fits = tail > 0 && (uint64_t)tail < capacity - length;
+    length += fits ? (uint64_t)tail : 0;
+    return fits ? length : 0;
+}
+
 static void check_test_driver_semantic_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char* const fixtures[] = {
@@ -800,6 +819,80 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // file scope; a nearer or as near name of the block still decides (review of #1822's gaps).
         "void f(void) { printf(\"x\"); { puts(\"y\"); } }\nvoid h(void) { int x = printff; int y = putz; (void)x; (void)y; }\n"
         "void k(void) { int printf_ = 0; int w = printff; (void)printf_; (void)w; }\nvoid m(void) { int puts = 1; int v = putz; (void)v; }\n",
+        // Builtin and predefined-type typo candidates (#2250): a builtin becomes visible at its first use, while
+        // predefined typedefs have no source declaration. GNU17's unknown builtin call still gets no correction.
+        "int g(void) { return __builtin_abs(-1) + __builtin_absx(1); }\n"
+        "void f(int n, ...) { (void)__builtin_c23_va_start; }\n",
+        // Ordinary name recovery must not change the builtin-value error's order before the enclosing attribute's
+        // error (#2250). Continuation after an invalid ordinary value use is covered separately below.
+        "int f(int) __attribute__((diagnose_as_builtin(&__builtin_abs, 1)));\n",
+        // An explicit builtin declaration is the note's source; C23 rechecks the corrected call while GNU17 only
+        // suggests the declaration beside its unknown-builtin error.
+        "unsigned __builtin_bswap32(unsigned);\nvoid f(void) { __builtin_bswap32x(1, 2); }\n",
+        // First use is before the call's arguments, persists across functions, and never comes from a later use or
+        // a feature query. A corrected value must still satisfy the builtin's direct-call constraint.
+        "/* gnu23 only */\n"
+        "int before(void) { return __builtin_bswap32x(1); }\n"
+        "int query(void) { return __has_builtin(__builtin_bswap32) + __builtin_bswap32x(1); }\n"
+        "int outer(void) { return __builtin_bswap32(__builtin_bswap32x(-1)); }\n"
+        "int after(void) { return (__builtin_bswap32x)(1) + __builtin_bswap32(2); }\n"
+        "void value(void) { int n = __builtin_bswap32x; (void)n; (void)__builtin_bswap32x; }\n",
+        // The reread runs the corrected builtin's normal argument checks and warnings, with the name error first.
+        "/* gnu23 only */\n"
+        "int f(void) { return __builtin_bswap32(1); }\n"
+        "void g(void) { __builtin_bswap32x(1, 2); __builtin_bswap32x(1); }\n",
+        // An invalid first value use still declares the builtin. A macro's first use retains its expansion history;
+        // target builtins and shufflevector participate too, unlike parser-only builtin forms.
+        "/* gnu23 only */\n"
+        "int f(void) { (void)__builtin_clz; return __builtin_clzx(1); }\n"
+        "#define SWAP __builtin_bswap32\n"
+        "unsigned g(unsigned x) { return SWAP(x) + __builtin_bswap32x(x); }\n"
+        "unsigned long long h(void) { return __builtin_ia32_rdtsc() + __builtin_ia32_rdtscx(); }\n"
+        "typedef int v4 __attribute__((ext_vector_type(4)));\n"
+        "v4 shuffle(v4 v) { v4 a = __builtin_shufflevector(v, v, 0, 1, 2, 3); return __builtin_shufflevectorx(a, v, 0, 1, 2, 3); }\n"
+        "int special(void) { return __builtin_choose_expr(1, 0, 1) + __builtin_choose_exprx(1, 0, 1); }\n",
+        // Visible declarations shadow builtins, and an equally near declaration keeps the typo ambiguous.
+        "/* gnu23 only */\n"
+        "int f(void) { return __builtin_abs(1); }\n"
+        "int g(void) { int __builtin_abs = 1; return __builtin_absx(2); }\n"
+        "int __builtin_absy(int);\nint h(void) { return __builtin_absx(1); }\n",
+        // Declaration and label names, hidden values, and opaque C23 attribute tokens do not introduce a builtin;
+        // a parsed GNU attribute argument does, even when its attribute is unknown.
+        "/* gnu23 only */\n"
+        "void declared(void) { int __builtin_abs = 1; (void)__builtin_abs; }\n"
+        "int f(void) { return __builtin_absx(1); }\n"
+        "int label(void) { goto __builtin_bswap32; __builtin_bswap32: return 0; }\n"
+        "unsigned g(void) { return __builtin_bswap32x(1); }\n"
+        "void array(void) { int __builtin_clz[__builtin_clzx(1)]; }\n"
+        "[[vendor::opaque(__builtin_popcount(1))]] int n;\n"
+        "int opaque(void) { return __builtin_popcountx(1); }\n"
+        "int m __attribute__((vendor(__builtin_ctz(1))));\n"
+        "int argument(void) { return __builtin_ctzx(1); }\n",
+        // Parser-skipped tails do not introduce a builtin. All three later names stay without a suggestion.
+        "/* gnu23 only */\n"
+        "int f(void) { nosuch x = __builtin_abs(1); return __builtin_absx(2); }\n"
+        "int g(void) { return missing __builtin_clz(1); }\n"
+        "int h(void) { return __builtin_clzx(2); }\n"
+        "int i(void) { (void)(missing) __builtin_bswap32(1); return __builtin_bswap32x(2); }\n",
+        // All predefined types recover as their real types in parameters and declarations, with locationless notes.
+        "void a(__int128_ x, __uint128_ y) { _Static_assert(sizeof(x) == 16 && sizeof(y) == 16, \"types\"); }\n"
+        "void b(__builtin_ms_va_lis p) { _Static_assert(sizeof(p) == 8, \"pointer\"); }\n"
+        "void c(__builtin_va_lis *p) { _Static_assert(sizeof(*p) == 24, \"array\"); }\n"
+        "void d(__NSConstantStrin *p) { _Static_assert(sizeof(*p) == 32, \"record\"); }\n"
+        "void e(void) { __int128_ x = 0; __uint128_ y = 0; _Static_assert(sizeof(x) == 16 && sizeof(y) == 16, \"locals\"); (void)x; (void)y; }\n"
+        "_Static_assert(0, \"after recovered types\");\n",
+        // The existing context filter decides when a type is offered, and equal-distance predefined names tie.
+        "void a(void) { (void)__int128_; (void)sizeof(__int128_); }\n"
+        "int b(void) { return __int128_; }\n"
+        "void c(void) { (void)(__int128_); (void)(__int128_)0; }\n"
+        "int d(__xint128_t x);\n"
+        "int e(void) { return (__int128_); }\n",
+        // A visible typedef gets its own source note; a local object hides the predefined typedef until scope exit.
+        "void f(void)\n{\n"
+        "    { typedef long __builtin_ms_va_list; __builtin_ms_va_lis x = 0; (void)x; }\n"
+        "    { int __builtin_ms_va_list = 0; (void)__builtin_ms_va_lis; (void)__builtin_ms_va_list; }\n"
+        "    (void)__builtin_ms_va_lis;\n"
+        "}\n",
         // Later diagnostics spell the name a correction took, and a warning at the declarator or the operator whose operand
         // holds it comes after the correction's error.
         "const int counter = 1;\nint icount;\n__attribute__((deprecated)) int olden;\nvoid take(int *);\nvoid takeu(unsigned *);\n"
@@ -897,6 +990,7 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // Three thousand names and fifty-three typos, written out where the fixture is (check_test_typo_stress): each
         // search reads the visible names once (c_check_typo.c).
         "/* typo stress */\n",
+        "/* builtin typo stress */\n",
         // An undeclared name in an enumerator's value or a bit-field's width (#1447, check_constant_name): clang's error at
         // each name, with its typo's correction, which the value takes. With none, the enumerator takes the value it would
         // have had without one (B, D, S), and the member isn't a bit-field: an unnamed one stays an unnamed member of its
@@ -1114,20 +1208,26 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
     {
         snprintf(source, sizeof(source), "%s/semantic-recovery-%u.c", directory, f);
         const bool stress = strncmp(fixtures[f], "/* typo stress */", 17) == 0;
-        const uint64_t stress_length = stress ? check_test_typo_stress(stress_text, sizeof(stress_text)) : 0;
-        const bool made = stress ? stress_length != 0 && parse_test_write(source, stress_text, stress_length) :
-                                   parse_test_write(source, fixtures[f], strlen(fixtures[f]));
+        const bool builtin_stress = strncmp(fixtures[f], "/* builtin typo stress */", 25) == 0;
+        const uint64_t stress_length = builtin_stress ? check_test_builtin_typo_stress(stress_text, sizeof(stress_text)) :
+                                      stress ? check_test_typo_stress(stress_text, sizeof(stress_text)) : 0;
+        const bool made = stress || builtin_stress ? stress_length != 0 && parse_test_write(source, stress_text, stress_length) :
+                                                    parse_test_write(source, fixtures[f], strlen(fixtures[f]));
         // A fixture marked as gnu17's alone, which C23's rules or a wording outside this suite reads otherwise.
         const bool c17_only = strncmp(fixtures[f], "/* gnu17 only */", 16) == 0;
         const uint32_t standard_count = f >= before_c23 || c17_only ? 1u : (uint32_t)BUSTER_ARRAY_LENGTH(standards);
         // A fixture that starts with this marker is gnu23's alone (C23's tag compatibility).
-        const bool c23_only = strncmp(fixtures[f], "/* gnu23 only */", 16) == 0;
+        const bool c23_only = builtin_stress || strncmp(fixtures[f], "/* gnu23 only */", 16) == 0;
         for (uint32_t s = c23_only ? 1u : 0u; made && s < standard_count; s += 1)
         {
             for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(options); o += 1)
             {
                 char* arguments[12] = { (char*)clang, (char*)standards[s], "-fsyntax-only", "-fno-caret-diagnostics", source };
                 uint32_t count = 5;
+                if (builtin_stress)
+                {
+                    arguments[count++] = "-ferror-limit=0";
+                }
                 if (options[o] != NULL)
                 {
                     arguments[count++] = (char*)options[o];
@@ -1138,6 +1238,10 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
                 // The deferred readings' arguments: -c's, of no object (-fsyntax-only starts no lanes).
                 char* compile[16] = { (char*)executable, (char*)standards[s], "-c", "-o", object, "-fno-caret-diagnostics", source };
                 uint32_t compile_count = 7;
+                if (builtin_stress)
+                {
+                    compile[compile_count++] = "-ferror-limit=0";
+                }
                 if (options[o] != NULL)
                 {
                     compile[compile_count++] = (char*)options[o];

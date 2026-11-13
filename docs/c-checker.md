@@ -5343,7 +5343,12 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   each, an implicitly declared function's among them in its block. A library
   function's implicit declaration stays one after its block, as clang
   declares the builtin at file scope (`printf` called in one function is
-  `printff`'s correction in the next). A name whose length differs
+  `printff`'s correction in the next). Predefined typedefs are candidates from
+  the start, with declaration notes that have no source location (#2250).
+  A builtin function's name becomes a candidate at its first use, before its
+  arguments, and stays one after the block; its note points to that first use.
+  A feature query alone introduces no builtin declaration. Visible declarations
+  shadow both kinds of candidate. A name whose length differs
   from the typo's by more than a third of it is skipped
   (`TypoCorrectionConsumer::addName`), and so is one further than
   (length + 2) / 3 by Levenshtein's distance. The nearest is taken if no other
@@ -5489,12 +5494,23 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   calls', and clang's search at each call of a prototyped function with too
   few or too many arguments (`TryTypoCorrectionForCall`, which suggests
   nothing in C). The calls' suggestions past the limit are dropped once the
-  values' are known (`check_typo_finish`).
+  values' are known (`check_typo_finish`). Recovery views retain the source
+  positions of already corrected names, so rereading a builtin or type typo
+  does not renew that budget (`Parser.typo_sources`, #2250).
+
+A builtin suggestion is read again through the driver's existing name-edit
+view, preserving the original typo error and its first-use note before the
+corrected expression's diagnostics. Its normal argument checks, warnings
+and direct-call constraint still run. Predefined-type corrections
+at statements and parameters use the same view with the predefined name,
+and retain their locationless declaration notes.
 
 The search runs only after an undeclared name, so a valid unit pays nothing.
 It replays the binding stream's scope stack once per unit (`CheckTypoScope`,
-one for the walk's calls and one for the answers' values), then prefilters
-the visible names by length (`3 * |difference| <= length`) in AVX-512. Each
+one for the walk's calls and one for the answers' values), alongside the
+effective parse's builtin operands. Both operand discovery and the candidate
+length prefilter (`3 * |difference| <= length`) have AVX-512 and scalar paths.
+Predefined types and used builtins share the existing candidate filter. Each
 distance comes from Myers's bit-parallel algorithm, with the candidate's
 equality masks from byte compares; names over 64 bytes, and the scalar path,
 use the dynamic-programming table, the twin that `test-checker` checks against
@@ -5503,11 +5519,6 @@ use the dynamic-programming table, the twin that `test-checker` checks against
 with an undeclared name fails them and is read again in source order.
 
 Left as they were:
-
-- No search offers a builtin's name or a predefined type's (clang's
-  `use of undeclared identifier '__builtin_absx'; did you mean
-  '__builtin_abs'?`, or `'__builtin_ms_va_list'` for
-  `__builtin_c23_va_start` named outside a call before C23).
 
 - A parameter's correction to a storage class (`statc v` to `static`) reads
   the parameter with it, but buster lacks clang's "invalid storage class
