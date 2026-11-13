@@ -1127,6 +1127,16 @@ alone at 287.2 MB against main's 293.7 MB, with 396 more faults. Its observed
 medians were 138.7 against 139.9 ms, from three unpaired runs each, which
 establish no difference in time.
 
+The file cache's token columns took a huge page each for far less (#1444): the
+four-byte ones, the starts' and the values', of a unit that includes
+`stdio.h` (18,000 tokens) filled 72 KB, 8 KB past their 64 KB of base pages, so
+each cleared 2 MB for two pages, two of the six huge pages of a hello world's
+`-c` on the 9700X. They now start with 256 KB of base pages
+(`BUSTER_FILE_CACHE_COLUMN_SMALL_BYTES`, 64K tokens, about 64 faults, less
+than a huge page costs to clear), and `sqlite3.c`'s 1.3 million tokens take
+48 more faults a column; a group of more than four lanes keeps
+`BUSTER_FILES_COLUMN_SMALL_BYTES` past lane 0.
+
 ### Partly used huge pages, and three changes not taken (#628)
 
 A map of each push's resident pages at the three peaks of `-c sqlite3.c`, with
