@@ -263,8 +263,9 @@ built (`bake-tables`, `baked.c`, #590): the state that `x86_encoder_initialize`,
 `x86_semantics_initialize`, `x86_zen5_initialize`, `tier0_initialize`,
 `unwind_initialize`, `tier1_select_initialize`,
 `check_lower_runtime_names_initialize` (the lowering's runtime functions' names'
-lengths and hashes, #442) and `check_asm_index_initialize` (the asm matcher's
-index of every form, #2532) write is in a section of its own (`buster_baked`:
+lengths and hashes, #442), `check_asm_index_initialize` (the asm matcher's
+index of every form, #2532) and `builtin_intrinsic_table_initialize` (the
+intrinsic catalogue's exact table, #2654) write is in a section of its own (`buster_baked`:
 `BUSTER_BAKED` for state main.c's units share, `BUSTER_BAKED_UNIT` for a
 module's statics, baked in the checker's unit, the C driver's), so a compile
 starts with them built; the file's build ID is recomputed over the baked

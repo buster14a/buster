@@ -472,6 +472,8 @@ struct InternTable
     // outgrown it (intern_intrinsic_rows); intern_reset and intern_release drop it.
     uint16_t* intrinsic_rows;
     uint32_t intrinsic_capacity;
+    // The ids below this have their codes (c_check_intrinsic_input.c fills a table's new ids in id order, #2654).
+    uint32_t intrinsic_known;
     Arena intrinsic_arena;
 };
 
@@ -1090,6 +1092,7 @@ static __attribute__((unused)) bool intern_reset(InternTable* table)
     arena_release(&table->intrinsic_arena);
     table->intrinsic_rows = NULL;
     table->intrinsic_capacity = 0;
+    table->intrinsic_known = 0;
     memset(table->buckets, 0, (table->bucket_mask + 1) * BUSTER_INTERN_BUCKET_BYTES);
     table->record_arena.length = (uint64_t)(table->records - table->record_arena.base) + 1;
     table->count = 1;

@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "host_isa.h"
+#include "baked.h"
 #include "c_builtin_fortify.c"
 #include "c_builtin_library.c"
 
@@ -115,6 +116,83 @@ static const BuiltinIntrinsicInfo* builtin_intrinsic_lookup_in(const BuiltinIntr
 static __attribute__((unused)) const BuiltinIntrinsicInfo* builtin_intrinsic_lookup(const char* name, uint32_t length)
 {
     const BuiltinIntrinsicInfo* result = builtin_intrinsic_lookup_in(builtin_intrinsic_infos, BUSTER_BUILTIN_INTRINSIC_COUNT, name, length);
+    return result;
+}
+
+// The catalogue's exact table (#893, #2654): each row by a hash of every byte of its name, in open addressing over
+// BUSTER_BUILTIN_INTRINSIC_TABLE_SLOTS slots of 32 bits, each its row plus one in the low half (0 for an empty slot) and
+// the hash's top 16 bits in the high half. A lookup hashes the name once and reads the slots from the hash's to the first
+// empty one, comparing the names of the rows whose tag matches: one compare for a name of the catalogue, and almost never
+// one for a name of none, where the binary search makes about twelve. It is baked into the executable (baked.h, #590) in
+// the checker's unit; where it isn't (a PIE, BUSTER_BAKE=0, another unit's copy), builtin_intrinsic_table_initialize
+// makes it, which a command of several units runs before its lanes start. The binary search is its oracle.
+#define BUSTER_BUILTIN_INTRINSIC_TABLE_SLOTS 8192u
+_Static_assert(BUSTER_BUILTIN_INTRINSIC_COUNT * 2 <= BUSTER_BUILTIN_INTRINSIC_TABLE_SLOTS, "the exact table stays at most half full");
+_Static_assert(BUSTER_BUILTIN_INTRINSIC_COUNT < UINT16_MAX, "a row plus one fits a slot's low half");
+static BUSTER_BAKED_UNIT uint32_t builtin_intrinsic_table[BUSTER_BUILTIN_INTRINSIC_TABLE_SLOTS];
+static BUSTER_BAKED_UNIT bool builtin_intrinsic_table_ready;
+
+// The exact table's hash of a bounded name: its 8-byte words, the last one's bytes past the name zero, each folded in by
+// a multiply and a shift, then a final mix. It reads the name's bytes alone.
+static uint64_t builtin_intrinsic_table_hash(const char* name, uint32_t length)
+{
+    uint64_t hash = (uint64_t)length * UINT64_C(0x9e3779b97f4a7c15);
+    for (uint32_t at = 0; at < length; at += 8)
+    {
+        uint64_t word = 0;
+        if (length - at >= 8)
+        {
+            memcpy(&word, name + at, sizeof(word));
+        }
+        else
+        {
+            for (uint32_t i = 0; i < length - at; i += 1)
+            {
+                word |= (uint64_t)(uint8_t)name[at + i] << (8 * i);
+            }
+        }
+        hash = (hash ^ word) * UINT64_C(0xbf58476d1ce4e5b9);
+        hash ^= hash >> 31;
+    }
+    hash = (hash ^ (hash >> 29)) * UINT64_C(0x94d049bb133111eb);
+    hash ^= hash >> 32;
+    return hash;
+}
+
+// Makes builtin_intrinsic_table, once: before any lane may read it. A table that isn't made answers every name as none's.
+static __attribute__((unused)) bool builtin_intrinsic_table_initialize(void)
+{
+    for (uint32_t row = 0; !builtin_intrinsic_table_ready && row < BUSTER_BUILTIN_INTRINSIC_COUNT; row += 1)
+    {
+        const uint64_t hash = builtin_intrinsic_table_hash(builtin_intrinsic_infos[row].name, builtin_intrinsic_infos[row].name_length);
+        uint32_t slot = (uint32_t)hash & (BUSTER_BUILTIN_INTRINSIC_TABLE_SLOTS - 1);
+        while (builtin_intrinsic_table[slot] != 0)
+        {
+            slot = (slot + 1) & (BUSTER_BUILTIN_INTRINSIC_TABLE_SLOTS - 1);
+        }
+        builtin_intrinsic_table[slot] = (uint32_t)(hash >> 48) << 16 | (row + 1);
+    }
+    builtin_intrinsic_table_ready = true;
+    return builtin_intrinsic_table_ready;
+}
+
+// The row of a bounded name by the exact table (made: builtin_intrinsic_table_ready), or null; null or empty names miss.
+// The same answer as builtin_intrinsic_lookup's.
+static __attribute__((unused)) const BuiltinIntrinsicInfo* builtin_intrinsic_table_lookup(const char* name, uint32_t length)
+{
+    const BuiltinIntrinsicInfo* result = NULL;
+    const bool named = name != NULL && length != 0;
+    const uint64_t hash = named ? builtin_intrinsic_table_hash(name, length) : 0;
+    const uint32_t tag = (uint32_t)(hash >> 48);
+    uint32_t slot = (uint32_t)hash & (BUSTER_BUILTIN_INTRINSIC_TABLE_SLOTS - 1);
+    uint32_t entry = named ? builtin_intrinsic_table[slot] : 0;
+    while (entry != 0 && result == NULL)
+    {
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_infos + (entry & 0xffffu) - 1;
+        result = entry >> 16 == tag && info->name_length == length && memcmp(info->name, name, length) == 0 ? info : NULL;
+        slot = (slot + 1) & (BUSTER_BUILTIN_INTRINSIC_TABLE_SLOTS - 1);
+        entry = builtin_intrinsic_table[slot];
+    }
     return result;
 }
 
