@@ -46,9 +46,11 @@
 // The last is counted apart: the declarations it alone reaches.
 //
 // Layout: CheckAttested (the command's state and counts), check_attested_ids (each new name's facts), the passes
-// (check_attested_lists, check_attested_hashes, check_attested_chain, check_attested_reach, check_attested_marks),
-// check_attested_input, the record (check_attested_after), check_attested_report and run_attested_census. Include after
-// c_checker_units.c: c_checker_driver.c declares the two calls and check_driver_attested.
+// (check_attested_lists: the walk, the scalar path's, and on the vector path the bounds, the own hashes and the lane's
+// cache of lists, check_attested_lists_cached; check_attested_hashes, check_attested_chain, check_attested_reach,
+// check_attested_marks), check_attested_input, the compile's lane state, the reader's tree columns from the cache
+// (check_attested_tree_columns), the record (check_attested_after), check_attested_report and run_attested_census.
+// Include after c_checker_units.c: c_checker_driver.c declares the two calls and check_driver_attested.
 //
 // The census is a measurement beside the compile; the passes are the compile's.
 #ifndef BUSTER_C_CHECK_ATTESTED_INCLUDED
