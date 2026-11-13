@@ -1,37 +1,32 @@
 # Hosted correctness, native vector correctness and Zen 5 benchmarks
 
-Every merge and direct push to `main` triggers hosted correctness against
-that push's exact `github.sha`, including documentation-only changes (#1271).
-In the nightly mode it runs the plain rows: both host architectures, plain
-O3, four shards each (#2057, the owner's choice on 2026-11-10). Every row
-runs SQLite's pinned Tcl subset; the whole suite (`hosted-correctness.yml`'s
-`sqlite-full`) runs on the nightly and dispatched runs alone, not on pushes
-(#2334). The sanitizer
-rows and fuzz campaigns run once a day on the nightly snapshot's deferred run,
-until the merge queue (#1430) runs the complete suite before each merge and
-pushes to main run no checks at all. Before the nightly mode, which has no
-snapshot to cover them, a push runs all four O3 build modes (plain and three
-sanitizer configurations) across each row's shards, and all three fuzz campaigns.
-The pre-merge PR matrix, Measurement storage and a no-code exemption do not
-replace a push's own hosted rows.
+Every change reaches `main` through the merge queue (#1430). The queue's
+candidate for it runs the complete hosted contract on its exact commit before
+it merges: both host architectures with all four O3 build modes (plain and
+three sanitizer configurations) across each row's shards, the vector pool, the
+three fuzz campaigns, and each auxiliary workflow its change touches (see "The
+merge queue"). Documentation-only changes run it too. Main's ruleset requires
+the queue, with no bypass, and main is fast-forwarded to the commit the queue
+tested. A push to `main` runs no checks (the owner's decision on 2026-11-10);
+the nightly measures main's first-parent states on the 9700X. SQLite's whole
+Tcl suite (`hosted-correctness.yml`'s `sqlite-full`) runs on the nightly and
+dispatched runs alone (#2334).
 
-Main pushes have separate run-id concurrency groups: a later merge cannot
-replace an earlier pending main run. PRs keep their per-PR superseded-run
-cancellation. Hardware jobs still take the shared host lock. Push evidence
-always reports `hosted=run` and no hosted source, with `scope=plain` in the
-nightly mode and `scope=full` before it.
-The selector's main-policy mutants and the nightly glue fixtures pin this
-contract. A push reuses no PR native evidence (#1272). In the nightly mode it
-runs no 9700X job at all (the owner's choice on 2026-11-05): its native
-correctness and targeted measurements run in the 02:00-08:00 window as its
-first-parent state's (see "Nightly main measurements").
-Both selector push modes force correctness for every file class. The
-qualification self-test rejects a main push with an all-skipped suite: only
-pre-merge PRs can use the no-code exemption.
+Before the queue, every merge and direct push to `main` ran hosted correctness
+against its own `github.sha` (#1271). In the nightly mode that was the plain
+rows alone (#2057), with the sanitizer rows and fuzz campaigns on the nightly
+snapshot's daily run; before it, every row and campaign. The nightly still
+reads those runs' records, and the selector keeps its push modes for them.
 
-A merge-queue candidate (`merge_group`) runs the complete suite already; see
-"The merge queue". Until a ruleset requires the queue, nothing starts one, and
-pushes keep the rows above.
+Candidates have separate run-id concurrency groups: none cancels or replaces
+another, and each candidate's `stale` job cancels the runs of candidates GitHub
+dropped. PRs keep their per-PR superseded-run cancellation. Hardware jobs still
+take the shared host lock. The selector's main-policy mutants and the nightly
+glue fixtures pin this contract, a push trigger included. A candidate never
+runs the 9700X job (`hardware=skip`): its native correctness and targeted
+measurements run in the 02:00-08:00 window as its first-parent state's (see
+"Nightly main measurements"). The qualification self-test rejects a candidate
+with an all-skipped suite: only pre-merge PRs can use the no-code exemption.
 
 The workflow in `.github/workflows/9700x.yml` runs correctness tests on
 GitHub-hosted `ubuntu-26.04` runners. Its matrix builds the triggering revision
@@ -224,16 +219,17 @@ are the other costs. `tests/ci/caches.sh` tests each cache's hit, miss,
 corruption and changed input.
 
 The hosted `qualification` job is the ruleset's required context,
-`Integration qualification` (#1430). Until then it was named
-`Build and execute on Ryzen 7 9700X`, which no longer described a job that
-qualifies most runs on hosted runners alone. The `qualification-alias` job
-reports the old name until main's ruleset requires the new one: the
-replacement is installed and observed first, and the ruleset switches names in
-the same edit that turns on the merge queue, so no interval is unprotected. It
-requires the `evidence` job's success,
-successful hosted tests and fuzzing, and the hardware job: on a push to main
-before the nightly mode and on the daily and dispatched runs, native
-correctness and the measurements. A pull request, draft or ready, never runs
+`Integration qualification` (#1430). It was named
+`Build and execute on Ryzen 7 9700X` until the merge queue, which no longer
+described a job that qualifies most runs on hosted runners alone; an alias job
+reported the old name until the ruleset required the new one, which it did in
+the same edit that turned on the merge queue. It requires the `evidence` job's
+success, successful hosted tests and fuzzing, and the hardware job: on the
+daily and dispatched runs (and, before the queue, a push to main before the
+nightly mode), native correctness and the measurements. A merge-queue
+candidate never runs the hardware job: the context passes on the full hosted
+contract, which its coverage step checks job by job (see "The merge queue").
+A pull request, draft or ready, never runs
 the hardware job (#2055, the owner's choice on 2026-11-10): the context passes
 on its hosted plain rows with fuzzing and the hardware job skipped, and its
 message says that native correctness and measurements run on the merged
@@ -243,12 +239,12 @@ changes keep their explicit no-code path. A nightly dispatch reports through
 its coverage record and has no such context, and neither does a scheduled run
 the nightly mode retired.
 
-A push no longer reuses its pull request's native qualification: that run has
-none, and the `host-identity` job is gone. Before the nightly mode, every push
-to main runs native correctness on the landed commit. In the nightly mode it
-runs none in the daytime, and has no `Integration qualification`
-context: its state's nightly run qualifies it on the 9700X, recorded in the
-ledger.
+A push to main runs nothing (#1430): its candidate's run qualified it before
+it landed, and its state's nightly run qualifies it on the 9700X, recorded in
+the ledger. Before the queue, a push reused no pull request's native
+qualification (that run has none, and the `host-identity` job is gone); before
+the nightly mode it ran native correctness on the landed commit, and in it
+none in the daytime.
 
 Draft and ready PRs alike run hosted correctness and never queue the 9700X
 (#2055). Both `ready_for_review` and `converted_to_draft` still trigger the
@@ -384,7 +380,8 @@ Products stay in their run. No cache holds one. A shard downloads only
 from its own run (no `run-id` or token), by the name and SHA-256 that its
 run's build job gave, and the identity binds the product to the repository,
 run, commit and tree. A pull request's run builds and tests its own products, a
-push or dispatch on main builds its own, and no run can use another's. The
+merge-queue candidate or a dispatch builds its own, and no run can use
+another's. The
 selector's row policy (`changes_row_policy`) pins this with counterexamples.
 
 A failed build fails its row's shards at their first step, and a cancelled one
@@ -423,12 +420,12 @@ its shards, which one pool of draws holds:
 
 - A pull request: the plain configuration alone (`none`, 4 items), its second
   row, in place of `native`.
-- The runs that run the sanitizer rows (full dispatches, the nightly
-  snapshot's deferred run, pushes before the nightly mode): the plain and the
-  three sanitizer configurations (`none address thread memory`, 16 items),
-  beside the `native` rows.
-- Elsewhere (pushes in the nightly mode, nightly backlog runs and admitted
-  snapshot runs, the `plain` scope): no vector row. Their `native` rows stay,
+- The runs that run the sanitizer rows (merge-queue candidates, full
+  dispatches, the nightly snapshot's deferred run; before the queue, pushes
+  before the nightly mode): the plain and the three sanitizer configurations
+  (`none address thread memory`, 16 items), beside the `native` rows.
+- Elsewhere (nightly backlog runs and admitted snapshot runs, the `plain`
+  scope; before the queue, pushes in the nightly mode): no vector row. Their `native` rows stay,
   and `tools/ci/nightly.c` counts the plain rows' shards by their names, which
   the vector row's jobs don't have, so its jobs never count.
 
@@ -498,13 +495,18 @@ uploads succeeded, in each of 4 rounds, and the run held 16 artifacts by that
 name. So no candidate claims anything. Each draw's **collector**
 (`collect-1` to `collect-4`, one per draw: the pilot had none for the last
 draw, whose candidates would have waited 30 minutes for nothing) starts with
-its draw and polls the run every 15 s, through the artifacts and jobs APIs
-(`actions: read`). Those calls share the repository's hourly REST limit with
-every other run, so a failed listing doubles the pause, up to 60 s, and the
-jobs fetch `tools/ci/vector-draw.sh` by a one-file checkout rather than the
-contents API (#2309). It waits until as many candidates qualified as items are
+its draw and polls the run's artifacts every 15 s through the same-run Results
+service used by `upload-artifact` and `download-artifact`. These lookups use the
+job's artifact runtime token and consume no repository REST requests (#2309).
+A failed listing doubles the pause, up to 60 s. A small local Node action,
+`.github/actions/vector-runtime`, runs the existing shell with the runtime
+credentials that GitHub supplies to JavaScript actions. It installs no npm
+packages, writes no token to files or workflow outputs, and has no REST
+fallback. The script and action come from the triggering commit through a
+sparse git checkout. The collector waits until as many candidates qualified as items are
 missing, or every candidate has published its verdict or ended, at most 25
-minutes. Then it assigns: the qualifying candidates, by their numbers, get the
+minutes. Only when the artifacts cannot decide does it read one optional jobs
+snapshot, within the page allowance below. Then it assigns: the qualifying candidates, by their numbers, get the
 missing items, the costliest first (`BUSTER_VECTOR_ITEMS`). One
 job decides, and it uploads the decision once, as an artifact whose name holds
 it: `-assign-LEVEL-ITEMxCANDIDATE...`. Nothing can take an item twice. It never
@@ -554,6 +556,79 @@ holder ended without publishing, when its attempt has two products, or after
 90 minutes. Products stay in their run, as the portable rows' do: no cache,
 and a download by name from the run alone.
 
+After its publication step, the builder always uploads
+`vector-OOPT-ATTEMPT-builder-CONFIGURATION-ended`, including after setup,
+build or upload failure. A waiting item checks the product first, then this
+marker; no product plus a marker fails promptly. One optional jobs snapshot
+also detects a builder that already ended without its marker. If the runner
+disappears after that snapshot and cannot publish the marker, the existing
+90-minute product deadline applies. Jobs are never polled repeatedly.
+
+### Vector REST budget (#2309)
+
+The first attempt of a PR's four-item vector row makes at most **16 charged
+REST requests**, regardless of how many artifact polls or candidates run:
+
+| Caller | Maximum charged REST requests |
+| --- | ---: |
+| Four collectors, one optional jobs snapshot each, at most two pages | 8 |
+| Three product consumers, one optional jobs snapshot each, at most two pages | 6 |
+| Before/after quota observations, collector 1 and the verdict | 2 |
+| Candidate assignment waits and artifact/product listings | 0 |
+| **Total** | **16** |
+
+Thirty such PR attempts per hour use at most **480** requests. Against the
+conservative 1,000-request hourly budget in #2309, that leaves 520 for other
+workflows; a token with a larger live limit has more room. This is the vector
+row's bound, not a promise about unrelated workflows' consumption.
+The daily/full pool's twelve product consumers raise its first-attempt bound
+to 34. Job lists larger than their allowance remain unknown; they do not
+extend the budget or permit a partial list to establish that a job is absent.
+
+Failed-job and full reruns need additional job identity reads: the jobs API
+labels carried-over jobs with the new attempt number, so their start time
+must be compared with `run_started_at`. Each rerun command has at most six
+requests, including failed requests and pages; collector 1 gets one extra
+for the initial observation. The product resolves its builder's attempt once
+per holder, then waits through the artifact service. An unavailable,
+ambiguous or incomplete identity fails closed. A rerun is not covered by
+the fresh-PR 16-request bound; its own count is reported separately.
+
+Every REST call reads `X-RateLimit-Remaining` and `X-RateLimit-Reset` and
+refuses another request while the observed remaining quota is at or below
+100 and the reset has not arrived. Missing or malformed headers stop further
+reads in that command. Optional first-attempt status reads can stop while
+artifact progress continues; required rerun identity reads cannot be replaced
+by a guess. The Results-service client has one 20-second request timeout and
+no internal retries; the shell owns its bounded exponential back-off.
+
+Each command keeps a TSV request ledger outside shell subshells, so requests
+inside command substitutions and pipelines still count. The candidate and
+collector always upload those ledgers as
+`vector-OOPT-ATTEMPT-rest-draw-LEVEL-CANDIDATE` and
+`vector-OOPT-ATTEMPT-rest-collect-LEVEL`. The verdict totals this attempt's
+ledgers, checks that completed draw/assignment records have ledgers, enforces
+the first-attempt ceiling and reports the before/after header observations.
+The local request count is exact; the header delta includes other workflows
+sharing the token. If the quota window changed, it reports both observations
+without claiming a comparable delta.
+
+Artifact inventories preserve every attempt and duplicate name. An invalid
+or incomplete listing is never an empty inventory: collectors cannot assign
+without a successful complete listing and every earlier draw's assignment.
+The runtime client conservatively refuses 1,000 or more artifacts instead of
+assuming completeness across many reruns; this is our safeguard, not a
+documented Results-service truncation limit. A fresh workflow run clears that
+condition. The exact upstream protocol references are pinned in the action's
+source header; no third-party implementation is vendored.
+
+Passing assignments through job outputs would require a different rendezvous:
+a candidate must keep its qualifying VM while the collector decides, so making
+it depend on that collector would create a dependency cycle. Splitting probe
+and execution into different jobs would lose the CPU qualification. The
+runtime artifact rendezvous retains the current assignment and product
+contract while removing REST polling.
+
 The trade-off is latency against one tested binary. A waiting item's runner
 is idle while item 1 builds, as long as it would have taken to build its own;
 it then spends the pack, the upload, a poll and the install (about 20 s in the
@@ -591,7 +666,8 @@ draws all passed: re-run all jobs to draw again.
 **Permissions and the race fixture.** Nothing needs write access: every record
 is the run's own artifact, which a fork's pull request can upload too.
 `.github/workflows/vector-claim-race.yml`, on pull requests that change the
-draws (the row workflow, `tools/ci/vector-draw.sh`) or the fixture and on
+draws (the row workflow, `tools/ci/vector-draw.sh`, the runtime action or its
+fixtures) or the race fixture and on
 dispatch, runs 16 racers, each on its own runner, as one draw's candidates at
 one instant, through the same script: about half qualify (by a hash of the
 racer and the run), the collector assigns the 4 items of its one configuration
@@ -602,8 +678,12 @@ assigned. Its control round uploads one name from every racer at once and
 reports how many succeeded. `bash tests/ci/vector-draw.sh` tests the script's
 collector, candidates (reruns among them), a pool's order, the product waits
 (an earlier attempt's product, a rerun builder's, a builder that ended without
-one, an item 1 no draw can assign) and the verdict against a fake `gh`; the
-PR's `evidence` job runs it. `bash tests/ci/hosted-product.sh` tests a vector
+one, an item 1 no draw can assign), request budgets, quota guards, back-off and
+the verdict against fake runtime and REST services. The PR's `evidence` job
+runs it and `node tests/ci/vector-runtime.cjs`, which verifies the runtime
+wire contract, duplicate/all-attempt semantics, malformed responses,
+completeness bound, secret-safe errors and shell action hand-off.
+`bash tests/ci/hosted-product.sh` tests a vector
 product's install on a qualifying runner and its refusals.
 
 ## CI latency baseline
@@ -619,7 +699,8 @@ classes stay
 separate:
 
 - PR;
-- main push;
+- main push (before the merge queue; merge-queue candidates have their own
+  section, `timings --queue`);
 - nightly targeted: backlog dispatches, recognized by their run name;
 - full: the daily run, full dispatches and the nightly snapshot's run.
 
@@ -672,12 +753,27 @@ GitHub's merge queue (#1430) tests each queued pull request on a temporary
 `gh-readonly-queue/main/...` branch: main and the entries ahead of it,
 merged with the pull request. It merges only what passed. `9700x.yml` runs
 on that branch's `merge_group` event (type `checks_requested`, main, no path
-filter), so a candidate reports both required contexts. Nothing starts one
-until a ruleset turns the queue on. Until then this path is inert, and pushes
-to main keep their own hosted rows.
+filter), so a candidate reports both required contexts, `Integration
+qualification` and `Measurement storage policy`. Main's ruleset (25225502)
+requires them and the queue, with no bypass actors:
 
-Once the queue is required, a candidate's run is the only per-merge
-correctness run (the owner's decision on 2026-11-10). It works like this:
+- merge commits, the method main keeps;
+- only candidates that pass merge (`ALLGREEN`), one at a time;
+- at most 4 candidates build at once;
+- a 180-minute limit for the required checks to report.
+
+The build limit comes from the drill's measured demand. A passing candidate
+runs 100 jobs and 912 runner-minutes over a 37-minute critical path, peaks at
+72 concurrent jobs during the vector draw, and holds about 45 until minute 21.
+So four builds hold about 180 of the account's roughly 360 concurrent jobs,
+which leaves the rest for pull requests, and merge about 6.5 candidates an hour
+(156 a day). That covers the peak day of 135 merges, though not a burst like
+11 November's, when 102 merged in four and a half hours. Then the queue grows,
+and each entry waits its turn. Merge limits don't combine builds, so raising
+the batch size saves nothing.
+
+A candidate's run is the only per-merge correctness run (the owner's decision
+on 2026-11-10). It works like this:
 
 - **Scope.** The full hosted contract runs on the candidate's exact commit:
   - both host architectures, each with its plain, ASan, TSan and MSan O3
@@ -761,7 +857,12 @@ correctness run (the owner's decision on 2026-11-10). It works like this:
   main), passed but invalidated, failed, or cancelled. For each it gives the
   candidates and the runner-minutes (the sum of the jobs' own times), the
   share spent on candidates that didn't merge (failures and rebuild waste),
-  and the merged candidates' median and p95 wall time.
+  and the merged candidates' median and p95 wall time. Queue delay is apart
+  from the run (#2031): each hosted job's wait for a runner, from its creation
+  to its start, of the jobs a runner took (not skipped ones, nor the 9700X's,
+  which waits for its own machine, not the hosted pool). The report gives the median and
+  p95 of each candidate's longest wait and the mean of every job's. It doesn't
+  see the time an entry waits in the queue before its candidate's run starts.
 - **Nightly credit.** The drill (12–13 November, #1430) showed that main is
   fast-forwarded to the exact commit the queue tested, with the same SHA and
   tree. So that run is the state's own:
@@ -782,9 +883,21 @@ pushes run nothing, `selfhost.yml`'s daily schedule keeps the caches fresh,
 since it calls `prepare-hosted-tools.yml`. The apt closure's key changes with
 each runner image.
 
-Still to come, tracked in #1430: the ruleset that requires the queue, and the
-change that removes the checking workflows' `push` triggers. The two land
-together, and AGENTS.md's main-push sentence changes with them.
+**Hotfix entry.** The `hotfix` label lets a pull request enter the queue without waiting for its own rows, to land
+a fix as fast as possible. The queue admits a pull request only once the ruleset's contexts pass on the pull
+request itself, and `Integration qualification` normally waits for its hosted rows.
+- **When the label is added,** `hotfix.yml` reports that context as passed on the pull request's head. With the
+  policy job's `Measurement storage policy`, about 30 s, the pull request can be queued at once.
+- **On later pushes while the label stays,** `9700x.yml` skips the pull request's aggregate, which counts as passed.
+- **Unchanged:** its rows still run as feedback, and its candidate runs the full contract like any other. A
+  `merge_group` event has no pull request labels, and nothing in `hotfix.yml` runs for a candidate or a push
+  (`changes_hotfix_policy` pins this).
+- **The cost:** a hotfix that fails its candidate fails in the queue, holds a candidate until then, and makes
+  GitHub rebuild the entries behind it. Adding a label takes triage access.
+
+The checking workflows have no `push` trigger: `9700x.yml`, and the auxiliary
+workflows a candidate calls. `publish-hosted-inputs.yml` keeps its trigger,
+since it publishes rather than checks.
 
 ## Nightly main measurements
 
@@ -794,14 +907,16 @@ Main's first-parent states (#1207) are measured on the 9700X between 02:00 and
 them is. Each state needs **targeted** coverage: the selector's choice against
 its own first parent, with native correctness first in the same job. A state
 whose first-parent change is documentation alone needs no targeted measurements,
-and the ledger says so; its main push still runs its own hosted rows.
+and the ledger says so; its merge-queue candidate ran the full hosted contract
+on it.
 The cycle's snapshot also needs **full** coverage, which adds every benchmark,
 the isolated samples and the oracle-cache audit. Plain coverage, every plain
 run as pushes measured before the nightly mode, satisfies neither.
 
 A state is measured behind its own plain hosted rows (both architectures,
-every shard), the gate a pull request needs. Its sanitizer and fuzz results
-come from the snapshot's daily run and, before the nightly mode, its pushes. They are
+every shard), the gate a pull request needs: its merge-queue candidate's run,
+whose sanitizer and fuzz results are the state's too. Before the queue they
+came from the snapshot's daily run and, before the nightly mode, its pushes. They are
 reported, but they don't block measurement, which was the owner's choice on
 2026-11-03.
 
@@ -1068,7 +1183,8 @@ shows when they don't.
 **Rollout.** The switch is `vars.BUSTER_NIGHTLY`. Until it is `on`, scheduled
 coordinator runs are dry runs: they harvest, plan and report, and pushes measure
 every plain run. A dispatch with `mode: run` can try the coordinator first. With
-the switch on, pushes run hosted rows alone and keep off the 9700X, and the
+the switch on, pushes ran hosted rows alone and kept off the 9700X (since
+#1430 they run nothing), and the
 coordinator dispatches their native correctness and targeted measurements into
 the window. `9700x.yml`'s daily `23 7 * * *` run is removed (2026-11-05): the
 snapshot's comprehensive run is the daily run, so with the switch off there is
@@ -1090,8 +1206,9 @@ Instrumentation is applied to every build unit and the final link; it cannot
 be combined with the private baseline runtime used for QEMU smoke tests.
 `BUSTER_SANITIZER_OPTIMIZATION=1|2|3` remains available for explicitly selected
 diagnostic builds. The hosted matrix runs at `-O3` throughout, without separate
-`-O1` sanitizer rows. Its sanitizer rows and the fuzz campaigns run on pushes
-to main and on the daily and dispatched runs, not on pull requests, whose
+`-O1` sanitizer rows. Its sanitizer rows and the fuzz campaigns run on
+merge-queue candidates and on the daily and dispatched runs, not on pull
+requests, whose
 hosted jobs are the plain builds of both architectures.
 The sanitizer rows' job limit is 360 minutes and each command's is 7200 seconds:
 the driver's in-process checks run the whole compiler per fixture and take tens
@@ -1244,8 +1361,8 @@ header reader. It is an actual replacement for the default frontend callback.
 Do not retain borrowed input pointers after the callback returns.
 
 Hosted CI runs bounded frontend and ELF campaigns with seed 133, original C
-seeds and newly compiled original ELF fixtures. Main pushes run 10,000
-inputs per campaign; scheduled/manual runs use 100,000. A third, deliberately
+seeds and newly compiled original ELF fixtures. Merge-queue candidates (main
+pushes before the queue) run 10,000 inputs per campaign; scheduled/manual runs use 100,000. A third, deliberately
 crashing entry proves the override, saved crash bytes and exact-input replay.
 All three jobs retain their corpora, crash inputs, logs, compile commands and
 matching executable, and on those runs must pass before hardware qualification can start.

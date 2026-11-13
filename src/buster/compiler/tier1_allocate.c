@@ -474,6 +474,14 @@ static bool tier1_allocation_required_at(const Tier1AllocationInput* input, uint
     return required;
 }
 
+// Whether register `r` (in `occupied`) holds a recomputable interval that no use requires at `position` (#2618): such an
+// interval gives its register to a value without a recipe whose hint names it, recomputed at its next required use.
+static bool tier1_allocation_yields(const Tier1AllocationInput* columns, const uint32_t* active, uint32_t occupied, uint32_t r, uint32_t position)
+{
+    const uint32_t holder = r < 32 && ((occupied >> r) & 1) != 0 ? active[r] : UINT32_MAX;
+    return holder != UINT32_MAX && tier1_allocation_spill_kind(columns, holder) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && !tier1_allocation_required_at(columns, holder, position);
+}
+
 // Reload at required uses, with the same next-use eviction rule as the simpler scan. All values needed at the
 // current position are pinned before processing any one event, so input order cannot evict a simultaneous operand.
 // Each start/use creates at most two transitions (its own and its victim's), bounding the temporary piece capacity.
@@ -564,13 +572,29 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
         {
             const uint32_t position = use_event ? columns.use_positions[use] : columns.starts[interval];
             const bool required = tier1_allocation_required_at(&columns, interval, position);
-            const uint32_t free = ~occupied & allowed[interval];
             const uint8_t follow = tier1_allocation_value_hint(&columns, last, interval);
             const bool recomputed = tier1_allocation_spill_kind(&columns, interval) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
             // An unused recipe may keep an unclaimed free register, preserving a hoisted definition without taking
             // a continuing value's register. It never evicts one; an unused value last in memory stays there.
             const bool idle = !use_event && !required && columns.use_offsets[interval] == columns.use_offsets[interval + 1] && (recomputed || follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT);
             const bool starting = !use_event && position == claims_at;
+            // A value without a recipe takes its value's hinted register (no static hint of its own overriding it) from a
+            // recipe no use requires here (#2618), unless another interval starting here claimed it: the recipe leaves it as
+            // an eviction does, recomputed at its next required use. Where a recipe holds the register an edge or a block's entry would keep a loop's value in, the value took
+            // another one, and the edges moved it back (luaV_execute's frame objects' addresses and Tier 1's constants).
+            const bool hinted = columns.hints == 0 || columns.hints[interval] == UINT8_MAX;
+            if (hinted && !idle && !recomputed && follow < 32 && ((allowed[interval] >> follow) & 1) != 0 && !(starting && ((claimed >> follow) & 1) != 0 && claimers[follow] != interval) &&
+                tier1_allocation_yields(&columns, active, occupied, follow, position))
+            {
+                const uint32_t victim = active[follow];
+                tier1_allocation_finish_piece(pieces, victim, begins[victim], position, kinds[victim], regs[victim]);
+                begins[victim] = position;
+                kinds[victim] = BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
+                regs[victim] = UINT8_MAX;
+                active[follow] = UINT32_MAX;
+                occupied &= ~(1u << follow);
+            }
+            const uint32_t free = ~occupied & allowed[interval];
             const uint32_t mine = starting && follow < 32 && ((claimed >> follow) & 1) != 0 && claimers[follow] == interval ? 1u << follow : 0;
             const uint32_t open = free & ~(starting ? claimed & ~mine : 0);
             claimed &= ~mine;

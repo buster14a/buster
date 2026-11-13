@@ -86,9 +86,10 @@ static TypeId check_input_intrinsic_type(const CheckInputReader* reader, uint32_
     return type;
 }
 
-// The tokens from `first` of the next 64 (a bit each) that are identifier operands outside the deferred bodies, which
-// the intrinsics' tables are sized for. The vector path tests 64 at once; the scalar path, its twin, takes every token,
-// and the caller tests each.
+// The tokens from `first` (a multiple of 64) of the next 64 (a bit each) that are identifier operands outside the deferred
+// bodies and the declarations attested declarations skip (CheckInputReader.skips, which the walk never reads), which the
+// intrinsics' tables are sized for. The vector path tests 64 at once; the scalar path, its twin, takes every token, and
+// the caller tests each.
 static uint64_t check_input_intrinsic_operands(const CheckInputReader* reader, uint32_t first)
 {
     const Parser* parser = reader->parser;
@@ -103,6 +104,7 @@ static uint64_t check_input_intrinsic_operands(const CheckInputReader* reader, u
         {
             result &= ~check_input_scan_nonzero(deferred_tokens, first, count);
         }
+        result &= reader->skips != NULL ? ~reader->skips[first / 64] : ~UINT64_C(0);
     }
     return result;
 }
@@ -111,8 +113,9 @@ static bool check_input_intrinsic_operand(const CheckInputReader* reader, uint32
 {
     const Parser* parser = reader->parser;
     const uint8_t* deferred_tokens = reader->output->deferred_tokens;
+    const bool skipped = reader->skips != NULL && (reader->skips[token / 64] >> (token % 64) & 1) != 0;
     return parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_OPERAND &&
-           (deferred_tokens == 0 || reader->deferred != 0 || !deferred_tokens[token]);
+           (deferred_tokens == 0 || reader->deferred != 0 || !deferred_tokens[token]) && !skipped;
 }
 
 // Looks the batch's `lanes` names up, and records each intrinsic found in the cache: false without a cache to record it.

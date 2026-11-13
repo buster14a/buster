@@ -77,7 +77,7 @@
 #define BUSTER_NIGHTLY_HARDWARE_JOB "Native tests and benchmarks on Benchpress (Ryzen 7 9700X)"
 // The required aggregate (9700x.yml's `qualification`), which passes a merge-queue candidate after its coverage check.
 #define BUSTER_NIGHTLY_AGGREGATE_JOB "Integration qualification"
-// Its name until #1430 renamed it, which earlier runs' jobs carry, and the alias job that reports it during the move.
+// Its name until #1430 renamed it, which earlier runs' jobs carry (and an alias job's, during the move).
 #define BUSTER_NIGHTLY_AGGREGATE_JOB_BEFORE "Build and execute on Ryzen 7 9700X"
 #define BUSTER_NIGHTLY_RECORD_FORMAT "buster-coverage-record-1"
 #define BUSTER_NIGHTLY_LEDGER_FORMAT "# buster-nightly-ledger 1"

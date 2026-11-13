@@ -2101,6 +2101,10 @@ struct CheckInputReader
     // walk in source order's marks (BUSTER_CHECK_RESOLVE_*), then the expressions' walk's classes (BUSTER_CHECK_EXPRESSION_*).
     // Lanes (#113) share it, each writing its own body's.
     uint8_t* visits;
+    // The tokens of the declarations attested declarations skip (#2531: a bit a token, 64 a word, from
+    // check_attested_skips), which the walk passes and the unit-wide passes that size or prepare what the walk reads leave
+    // out; null where nothing is skipped.
+    const uint64_t* skips;
     // A bit a token, (count + 64) / 64 words: whether one of the sparse columns the expressions' walk tests first has an
     // entry for it (check_input_expression_sparse), kept by every write of those columns (check_input_sparse_mark). The
     // vector path of the walk's classes reads these bits rather than the seven columns at every token, so that the
@@ -16736,6 +16740,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         .deferred = deferred,
         .syntax = syntax,
         .visits = visits,
+        .skips = attested != NULL ? check_attested_skips(attested) : NULL,
     };
     for (uint32_t i = 0; i < BUSTER_PARSE_PREDECLARED_TYPEDEFS; i += 1)
     {
@@ -16979,7 +16984,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     // The binding table in the base pages too (#628): each of its nine event columns has room for four events a token, of
     // which the walk writes a prefix (sqlite3.c's 167,456 of 2.86 million) and reads no further, so that in huge pages each
     // column's first touch cleared one or two 2 MB pages for a few hundred kilobytes, 11 of the arena's 34 huge pages.
-    valid = valid && c_bindings_initialize(&reader.bindings, &sparse, pp->table->count, count * 4 + 1);
+    // (The arena is the reading's own, reserved above and pushed through no copy: its bytes past its length are zero where
+    // nothing pushed there, and the heads need no clearing.)
+    valid = valid && c_bindings_initialize_zeroed(&reader.bindings, &sparse, pp->table->count, count * 4 + 1, arena_untouched(&sparse));
     BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
 #undef BUSTER_CHECK_SPARSE_ARRAY
     // The huge pages' token columns, which a lane claims a region of before it writes there (check_input_rare_claim).
@@ -17019,6 +17026,14 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     valid &= reader.cached_constants != 0;
     reader.parameter_seen = valid ? arena_push_array(scratch, pp->table->count, sizeof(uint32_t), 64) : 0;
     valid &= reader.parameter_seen != 0;
+    reader.member_seen = valid ? arena_push_array(scratch, pp->table->count, sizeof(uint32_t), 64) : 0;
+    valid &= reader.member_seen != 0;
+    reader.linked_declarations = valid ? arena_push_array(scratch, pp->table->count, sizeof(uint32_t), 64) : 0;
+    valid &= reader.linked_declarations != 0;
+    reader.linked_types = valid ? arena_push_array(scratch, pp->table->count, sizeof(TypeId), 64) : 0;
+    valid &= reader.linked_types != 0;
+    reader.library_declarations = valid ? arena_push_array(scratch, pp->table->count, sizeof(uint32_t), 64) : 0;
+    valid &= reader.library_declarations != 0;
     reader.builtin_names = valid ? arena_push_array(scratch, pp->table->count, sizeof(uint16_t), 64) : 0;
     valid &= reader.builtin_names != 0;
     reader.vararg_capacity = counts.groups[CHECK_INPUT_COUNT_VARARGS];
@@ -17029,14 +17044,6 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         input->graph.varargs_capacity = reader.vararg_capacity;
         valid = reader.varargs != 0 && input->graph.varargs_calls != 0;
     }
-    reader.member_seen = valid ? arena_push_array(scratch, pp->table->count, sizeof(uint32_t), 64) : 0;
-    valid &= reader.member_seen != 0;
-    reader.linked_declarations = valid ? arena_push_array(scratch, pp->table->count, sizeof(uint32_t), 64) : 0;
-    valid &= reader.linked_declarations != 0;
-    reader.linked_types = valid ? arena_push_array(scratch, pp->table->count, sizeof(TypeId), 64) : 0;
-    valid &= reader.linked_types != 0;
-    reader.library_declarations = valid ? arena_push_array(scratch, pp->table->count, sizeof(uint32_t), 64) : 0;
-    valid &= reader.library_declarations != 0;
     reader.tag_completions = valid ? arena_push_array(scratch, types->tags.capacity, sizeof(uint32_t), 4) : 0;
     valid &= reader.tag_completions != 0;
     reader.enum_fixed = valid ? arena_push_array(scratch, types->tags.capacity, sizeof(uint8_t), 4) : 0;
@@ -17271,10 +17278,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             }
             if (!input->resource)
             {
-                const uint64_t* skips = attested != NULL ? check_attested_skips(attested) : NULL;
-                if (skips != NULL)
+                if (reader.skips != NULL)
                 {
-                    check_input_skip(&reader, skips, count, BUSTER_SCALAR_PATH(parser->options.scalar));
+                    check_input_skip(&reader, reader.skips, count, BUSTER_SCALAR_PATH(parser->options.scalar));
                 }
                 check_input_resolve_range(&reader, 0, count);
             }

@@ -140,7 +140,9 @@ or the toolchain changed since it last did (`build.sh.configuration` in the
 tree). A different `clang` (its path, its file or its version) starts the tree
 afresh, since its objects and CMake's cache can't be reused; any other change
 reconfigures in place, and Ninja reruns exactly the steps whose commands
-changed: `BUSTER_BUILD_DEFINES` recompiles every unit, `BUSTER_LINKER` relinks,
+changed: `BUSTER_BUILD_DEFINES` recompiles every unit, `BUSTER_LINKER` relinks
+(and joins the split units' parts again where it changes whether the link merges
+constants, below),
 and `BUSTER_BAKE` reruns the post-link step alone. A tree that a preset
 configured is reused when its clang is the one it records
 (`buster-toolchain.txt`). CMake alone notices a compiler at another path, but
@@ -163,7 +165,7 @@ a preset's tree with `cmake --fresh --preset NAME`, or build it with
 | `BUSTER_BAKE` | `1` | `0` leaves the tables to be built when the executable runs |
 | `BUSTER_PGO` | `0` | `1` builds Release with a profile of the compiler's own compiles (below): a `-pgo` tree, Release alone |
 | `BUSTER_PGO_TRAIN` | none | with `BUSTER_PGO=1`, a bash script that trains the profile in place of those compiles |
-| `BUSTER_PARALLEL_CODEGEN` | `auto` | CHECKER's and BACKEND's Release native code, and Develop's `main.c` units, in parallel parts (below): `auto` where the tools are, `1` requires them, `0` never |
+| `BUSTER_PARALLEL_CODEGEN` | `auto` | CHECKER's and BACKEND's Release native code (a sanitizer build's too), and Develop's `main.c` units, in parallel parts (below): `auto` where the tools are, `1` requires them, `0` never |
 
 An empty value is the default, but for `BUSTER_DEBUG_INFO` and `BUSTER_LINKER`,
 which reject it; the incompatible combinations fail as they always have
@@ -666,11 +668,14 @@ undefined hidden symbol, which lld ignores and GNU ld refuses. The module's inli
 section (`.text`, a named section, a cold function's `.text.unlikely.`), at a
 function of the greatest alignment it holds there, so that the relocatable
 link adds no padding. The bitcode the parts are written as keeps its use-list
-order: `split_bitcode.cpp` is the one call to LLVM's C++ API, which LLVM's C
-API lacks. The merge clears the parts' allocated `SHF_MERGE` flags first: a
+order: `split_bitcode.cpp` holds the calls to LLVM's C++ API that its C API
+lacks (that writer, and erasing an alias). The merge clears the parts' allocated `SHF_MERGE` flags first: a
 relocatable link merges those sections, which the final link at `-O0` copies
 whole from the single object (the checker's parts lost 27,904 bytes of
-duplicate constants that way). Read-only data keeps its order and each item's
+duplicate constants that way). A final link that merges them itself, every
+linker but lld at `-O0` (a sanitizer build's dynamic link by wild), merges the
+single object's with the other units', so there the parts keep the flags: the
+join reads `-DMERGES`, set where `-Wl,-O0` isn't. Read-only data keeps its order and each item's
 alignment, but a part's `.rodata` takes its greatest item's alignment (64), so
 items after a part boundary can move by less than that: 256 bytes in all for
 the two units (768 with fourteen parts), with `.eh_frame` 16 bytes longer. Between a part's last function
@@ -690,8 +695,9 @@ has the runs, scripts and the comparison of the two executables' code.
 wherever its flags allow and the tools are there, and otherwise says why in the
 configure step's `parallel native generation` line and compiles the units
 whole. `1` requires the parts, failing the configuration without them; `0`
-never uses them. Sanitizers, fuzzing, PGO, an explicit host runtime,
-`BUSTER_BUILD_DEFINES` and lexer variants keep the single compile. The tools,
+never uses them. Fuzzing, PGO, an explicit host runtime,
+`BUSTER_BUILD_DEFINES` and lexer variants keep the single compile; sanitizer
+builds take the parts ([below](#in-sanitizer-builds)). The tools,
 beside the configured Clang or on `PATH`, at its version: `llvm-config` with
 LLVM's C API headers and library (the splitter is built in the tree, at
 `codegen-tools/split`, and Develop's at `codegen-tools/presplit`, with the
@@ -732,6 +738,67 @@ its gate on the 9700X: `benchmark-assembler` ran 9.6% slower, and 4.6% after
 five changes to the splitter, where its clean build took 77.6 s against 86.4 s
 and an edit of `c_check_input.c` 32.5 s against 75.1 s ([A faster stage 1
 build](../stage1-build-design.md#step-5-measured), #2559).
+
+### In sanitizer builds
+
+A sanitizer build (`BUSTER_SANITIZER=address|undefined|thread|memory`) generates
+the two units' native code in parts too (#2639): its checker unit's single
+compile was the whole build's wall time, and its CI rows build it once per
+candidate. The sanitizers instrument the module inside the unit's own
+optimization pipeline, before the split, and MemorySanitizer's cleanup passes
+run there too, so the parts generate the single compile's instrumented, optimized
+module, with the unit's optimization level and the sanitizer's flags (its
+`-fPIE` among them). What a sanitizer adds to the module goes with the part
+that emits it:
+
+- **The module constructors.** `llvm.used` and the constructor and destructor
+  arrays keep their entries in the part that emits the function they name, so
+  that the constructor keeps its retained section (`.text.msan.module_ctor`,
+  `"axR"`) and AddressSanitizer's its comdat with its `.init_array.1` entry.
+  The split refuses arrays whose entries a part order would reorder, or whose
+  key another part emits.
+- **AddressSanitizer's globals.** Each instrumented global is in a comdat of its
+  own, with its descriptor in `asan_globals` and a private alias the
+  descriptor names: the data part keeps all three, no declaration keeps a
+  comdat, and a code part drops the aliases (the split fails for one it still
+  refers to).
+- **The comdat flags.** `llvm-objcopy`, which the join runs to clear the merge
+  flags and to localize names, also clears `GRP_COMDAT` on every group whose
+  signature is local, as the module constructor's is. The join's last step,
+  `codegen-tools/comdat` (`tools/codegen/comdat.c`), sets it again on the groups
+  the parts had as comdats: without it the executable ran each split unit's
+  AddressSanitizer constructor beside the first unit's.
+
+`build-regression --parallel-codegen-only` builds and runs the codegen fixture
+under AddressSanitizer and MemorySanitizer and checks that the joined objects
+keep the comdat constructor (one in the executable) and the retained one. A
+sanitizer tree's Develop units still compile whole (below). `BUSTER_DEBUG_INFO`
+changes no sanitizer build: its units have line tables either way, in the same
+tree.
+
+**Measured** on the 9700X, clean builds at `-O3` with the host's clang 23.1.1,
+whole against in parts ([the record](https://github.com/buster14a/buster-performance/tree/b6b0666ca131c5ab26cec4b085878d8fcd7e0b54/docs/measurements/sanitizer-build-parts-2639-2026-11-13)):
+
+| Shape | Build | Whole | In parts |
+| --- | --- | ---: | ---: |
+| 8 cores, 8 jobs | native MSan | 346.5 s | 188.7 s |
+| | native ASan | 282.7 s | 199.6 s |
+| | native TSan | 117.4 s | 81.5 s |
+| 2 cores of 2 threads, 4 jobs (a hosted runner's, as CI builds there) | x86-64 MSan | 314.8 s | 258.2 s |
+| | vector ASan | 365.3 s | 367.1 s |
+| the same, 2 jobs (`build.sh`'s default there) | x86-64 MSan | 312.7 s | 324.5 s |
+| 4 cores, 4 jobs | x86-64 MSan | 266.9 s | 186.5 s |
+
+The checker's unit took 345.7 s whole under MSan, 318 s of it compiled alone:
+the front end 6.8 s, the optimizer 86.5 s (the MSan pass 2.0 s) and code
+generation 224.6 s, which the parts divide; its bitcode compile, 130.5 s in the
+build, is now the critical path. The parts add 5% to 13% of user time, which a
+build bound by its work pays: 2 jobs on 2 cores, and the vector ASan build,
+whose benchmark units are 29% of its work. The executables are the whole
+builds' function for function, every function at one offset from where it was
+(the joined parts' merged constants move `.rodata`'s end by 50 to 66 KB), with
+the same instructions but for the padding between parts and, in the
+fixed-address ASan executable, the moved data's addresses.
 
 ## Develop
 

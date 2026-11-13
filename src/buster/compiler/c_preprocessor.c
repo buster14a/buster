@@ -1636,6 +1636,13 @@ struct Preprocessor
     uint8_t warning_mappings[32];
     uint8_t* warning_saved;
     uint32_t warning_capacity;
+    // The severity the command line gives each warning, by PPWarning (pp_warning_command_read, #2547): what
+    // pp_warning_severity reads before a pragma's mapping and the location count, from PPOptions at the warning's first
+    // use in the unit, BUSTER_PP_COMMAND_UNREAD before. And a bit by PPWarning, clear for each that no location can give
+    // from here on (pp_warning_possible), set again for all by each #pragma clang diagnostic push, pop or mapping. A
+    // path that reaches a warning off by default at every directive (-Wreserved-macro-identifier's) tests its bit first.
+    uint8_t warning_commands[32];
+    uint32_t warnings_possible;
     // Where the open #pragma clang assume_nonnull, arc_cf_code_audited and unsafe_buffer_usage regions begin, or 0.
     uint32_t region_locations[3];
     // #pragma GCC poison's names, by IdentId, and how many there are (pp_check_poison).

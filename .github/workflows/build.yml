@@ -23,28 +23,10 @@ on:
       - tools/ci/install-hosted-tools.sh
       - .github/actions/hosted-tools/action.yml
       - .github/workflows/build.yml
-  push:
-    branches: [main]
-    paths:
-      - build.sh
-      - CMakeLists.txt
-      - CMakePresets.json
-      - 'cmake/**'
-      - tools/ci/build_regression.c
-      - 'tools/ci/codegen_fixture/**'
-      - 'tools/codegen/**'
-      - 'tools/ci/build_ownership*.h'
-      - tools/ci/setup-build-tools.sh
-      - tools/ci/setup-hosted.sh
-      - tools/ci/hosted-offline.sh
-      - tools/ci/hosted-release.sh
-      - tools/ci/hosted-tools.lock
-      - tools/ci/install-hosted-tools.sh
-      - .github/actions/hosted-tools/action.yml
-      - .github/workflows/build.yml
   workflow_dispatch:
   # A merge-queue candidate calls this workflow whole where its change touches a path the pull_request trigger above
-  # lists (9700x.yml's auxiliary-build job, which tools/ci/changes.c decides from that list; #1430).
+  # lists (9700x.yml's auxiliary-build job, which tools/ci/changes.c decides from that list; #1430). A push to main runs
+  # nothing: the queue tested it before it landed.
   workflow_call:
 
 permissions:

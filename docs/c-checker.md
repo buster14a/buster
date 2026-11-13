@@ -6298,9 +6298,10 @@ warning: an unevaluated or unreachable shift gives it too. Under `-fwrapv`
 which no graph node holds (an enumerator's, a bound's), leave a
 `CHECK_WARNING_EVENT_SHIFT_SIGN`, which the scan reports as the graph's.
 Left: a left operand past 64 bits there (an `__int128`'s), and a
-`_BitInt` past 128 bits anywhere, give none. And, as on main before it, a
-body's `-Wshift-overflow` is published at the function's end, where clang
-gives it as the shift is built (#2488). `-Wassign-enum` (#2264, off by default,
+`_BitInt` past 128 bits anywhere, give none. A body's `-Wshift-overflow`
+is also published as the shift is built, before later immediate diagnostics,
+while runtime shift warnings remain deferred to the function's end (#2488).
+`-Wassign-enum` (#2264, off by default,
 `check_common_assign_enum`) is clang's `DiagnoseAssignmentEnum`: an integer
 constant expression of another type than the enumeration it converts to (an
 assignment's right operand, a compound assignment's too, an initializer's, a
@@ -10989,6 +10990,10 @@ enables, which this checker doesn't all give.
   (`check_input_typedef_sugar`, resolved by `check_input_sugar_declaration`).
   A typedef with fewer qualifiers than its level names it under the others
   (`volatile CI`'s `'volatile CI[2]' (aka 'const volatile int[2]')`).
+  An aligned typedef keeps its name after the printer strips its layout
+  wrapper. A function typedef keeps its name through decay and pointer
+  arithmetic: `f + 1` of `F f` (`typedef int F(void)`) is
+  `'F *' (aka 'int (*)(void)')` (#2212).
   A `-Wformat` argument prints its type as the lvalue conversion leaves it
   (`check_common_format_value`): without its top-level qualifiers (`const I x`
   is `'I' (aka 'int')`, a file-scope `const int` is `'int'`), and desugared

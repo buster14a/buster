@@ -3,8 +3,10 @@
 Status: step 0, the census, is built and measured
 ([below](#step-0-the-census)), and so are steps 1 and 2, the shadow and the
 skip in the compile ([below](#steps-1-and-2-the-skip-in-the-compile)): a
-command of several source files skips by default (`--attested=on`). Steps 3
-and 4 are design. It is
+command of several source files skips by default (`--attested=on`). Step 3's
+first part is built and measured, and its gate isn't held
+([below](#step-3-its-first-part-what-a-skipped-unit-still-clears-and-scans));
+the rest of step 3, and step 4, are design. It is
 [#672](https://github.com/buster14a/buster/issues/672)'s one-core target's
 design for what [the node machine](node-machine.md)
 ([#2524](https://github.com/buster14a/buster/issues/2524)) doesn't cover:
@@ -676,6 +678,69 @@ branch's code (buster#2620), CPU 2, `setarch -R`, against main's `df85213e`
 - **Not done:** the field-by-class test of the reader's state ("Risks"),
   whose evidence is still the corpora's zero contradictions; the passes from
   the parser's roles, whose cost is now the gap to the expected gains; step 3.
+
+## Step 3, its first part: what a skipped unit still clears and scans
+
+With the skip, the reader's passes outside its walk cost more than the walk.
+A probe of `check_input_run`'s phases (a measurement patch, the TSC ticks of
+musl's command in a cloud VM, each phase's ticks a token of the units) gave
+the walk 126 and the rest 196: the bindings table's initialization 36 (its
+heads' clear, three namespaces a name of the lane's intern table, which holds
+every unit's names: 14,569 a unit against 3,772 tokens), the columns' clears
+30, the expressions' walk 53 (its bodies', which the skip doesn't change), the
+intrinsics' pass 17, the tree's derived columns 16, the reading's arena's
+release 10, the bindings' pass 7, the regions 7 and the rest under 5 each.
+Two of them now take only what the unit reads:
+
+- **The intrinsics' pass leaves the skipped declarations' operands out**
+  (`CheckInputReader.skips`): the walk never reads them, and their names'
+  lookups were most of the pass (17 ticks a token to 7).
+- **The bindings table's heads aren't cleared** in the reading's own arena,
+  which is reserved for it and zero (`c_bindings_initialize_zeroed`,
+  `arena_untouched`): their pages are touched only where a name binds (36 to
+  0.2, part of which the walk then pays as its faults).
+
+On the 9700X against main's `26f0bb0e` (CPU 2, `setarch -R`, the median of 5
+rounds; [the record](https://github.com/buster14a/buster-performance/tree/c3974d9530378c80ba8edfd9e5b6ccb07b8cc0b7/docs/measurements/attested-step3-2531-2026-11-13)):
+
+| `-c` of the command, one lane | musl, 1,336 units | 512 units over glibc's headers |
+| --- | ---: | ---: |
+| main with `--attested=off`, ms (M cycles) | 1,014.0 (5,616.6) | 835.3 (4,629.9) |
+| main | 858.1 (4,752.6) | 560.2 (3,104.2) |
+| the first part | 831.6 (4,605.9) | 546.5 (3,028.6) |
+| against main; against `--attested=off` (step 3's gate) | 1.032; **1.219** (1.26) | 1.025; **1.528** (1.7) |
+| user instructions, main and the first part | 9,062.8 M; 8,973.9 M | 6,748.7 M; 6,637.6 M |
+| page faults, main and the first part | 331,098; 290,116 | 153,938; 151,431 |
+
+- **Every object and diagnostic** is `--attested=off`'s and `--scalar`'s,
+  by one lane and by eight, with `-Wall -Wextra` and by `--attested=verify`
+  (with `-g`); `-c sqlite3.c` (124.1 against 123.2 ms) and a small unit's
+  process (1.3 ms each) are main's.
+- **By eight lanes** (seven rounds) the CPU time is main's or less, 1,450.0
+  against 1,425.6 ms on musl and 969.0 against 963.6 on the glibc units, and the
+  wall time main's (199.6 against 198.4 ms, 135.0 against 135.1): the heads'
+  saved user cycles pay for more kernel ones there.
+- **Each part apart** (seven rounds): the intrinsics' pass alone is 1.011 on
+  musl and 1.024 on the glibc units by one lane, 1.017 on musl by eight; the
+  heads add 1.020 on musl by one lane and nothing elsewhere.
+- **Left out: the names' columns that start zero** (`parameter_seen`,
+  `member_seen`, `linked_declarations`, `linked_types`,
+  `library_declarations`: 20 bytes a name), moved into the same zero arena.
+  They cleared half as much, but each unit then faulted in the pages it
+  touched: 16,600 more page faults on the glibc units' command, 230 to 280 M
+  more kernel cycles by eight lanes, and slower there.
+
+**The gate isn't held.** A skipped token's cost to the reader is now its
+share of the passes that still take every token: the columns' clears and the
+tree's derived columns (about 45 ticks a token of the unit in the probe),
+which some 20 files read by token, so that taking the read ranges needs the
+design's poison check of every column under `--attested=verify` first; and
+the passes' own cost (5.0% of musl's user cycles). The glibc units' gap is
+beyond the reader: with the skip, their preprocessing is 46% of the command
+("What it leaves" below). The run of main with `--attested=off` varied by 4%
+between two batches of rounds that day (1,014.0 and 1,060.6 ms on musl, the
+same instructions), which moves the cumulative figure but not the comparison
+with main, whose rounds alternate with the first part's.
 
 ## Expected gains
 

@@ -76,7 +76,10 @@ slot, load or store. A symbol's address taken more than once is one value
 (#2574) defined where `ir_typed_plan_places` puts it (#2593): past an early
 return, at a branch every path from which takes it, before a loop that takes
 it, and not at all where a path takes it nowhere or only a loop's exits do,
-each checked by its blocks and the function's results. Every lowered function is also promoted by both SSA
+each checked by its blocks and the function's results. Three more (#2618) leave
+a loop's takes their own where every iteration calls or one iteration alone
+takes the symbol, and keep one definition before a nest whose call-free inner
+loop takes it on every iteration, as Lua's dispatch loop does. Every lowered function is also promoted by both SSA
 paths, verified, and must keep its objects' slots. Tier 0's random long double
 and `__int128` programs (four times the count) run through the shared IR's
 interpreter (#176) against their stack machines. The default count is 32

@@ -154,9 +154,10 @@ static const char node_census_test_quiet[] =
 // the action alike. Its calls: direct and discarded, nested (whose rows the tasks number in preorder, outer first, where
 // the entries are in postorder), variadic (a char and a float promoted), of pointers converted to a parameter's (to
 // const char and to void, and null), through a pointer, a member and a call's result; and refused, a long double's
-// parameter (the templates') and a pointer whose first parameter is a jmp_buf's (a callee that returns twice). Calls
-// under and around `&&`, `||` and `?:` too, whose labels are numbered from their subtrees' least records, a call's
-// arguments included, and whose calls' rows in the tasks' preorder. The argument memo's keys come again
+// parameter (the templates'), and callees that return twice: a pointer whose first parameter is a jmp_buf's, and a
+// function of such a name. Calls under and around `&&`, `||` and `?:` too, whose labels are numbered from their
+// subtrees' least records, a call's arguments included, and whose calls' rows in the tasks' preorder. The argument
+// memo's keys come again
 // (node_machine_argument_memo): a string and a null pointer constant for the same parameters, integer constants where a
 // value of their type filled the entry, variadic constants, and a function designator. T's direct rules for what the
 // action typed before: integer constant folds (unary + too, comparisons and plain char constants, whose signedness the
@@ -178,6 +179,7 @@ static const char node_shadow_test_text[] =
     "int (*pick(int))(int);\n"
     "int ldf(long double);\n"
     "int ap(int (*)(int), int);\n"
+    "int getcontext(void*);\n"
     "long h(struct S* p, struct S s, int a, int b, unsigned u, char c, double d, float e, int* q, const int* r, int (*fp)(int, double),\n"
     "       int (*sj)(struct __jmp_buf_tag*))\n"
     "{\n"
@@ -239,6 +241,7 @@ static const char node_shadow_test_text[] =
     "    x = pick(a)(b); // machine: taken\n"
     "    x = ldf(d); // machine: template\n"
     "    x = sj(0); // machine: callee\n"
+    "    x = getcontext(q); // machine: callee\n"
     "    x = a && f(b); // machine: taken\n"
     "    x = f(a) || f(b); // machine: taken\n"
     "    x = f(a ? b : c); // machine: taken\n"
