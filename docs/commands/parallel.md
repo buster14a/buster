@@ -43,7 +43,7 @@ extra arguments are a usage error.
 
 ## The parallel runner
 
-`./build/compiler parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [LIST]`
+`./build/compiler parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [--memory MIB] [LIST]`
 runs a list of commands at once. LIST (standard input without one) holds them:
 each starts at a heading, a line `== TITLE`, and its script is the lines after
 it, up to the next heading; before the first heading there may be blank lines
