@@ -1,0 +1,26 @@
+name: Hotfix entry
+
+# A pull request labeled `hotfix` may enter the merge queue at once (#1430). Main's ruleset requires `Integration
+# qualification` on the pull request before the queue takes it, and that context normally waits for the pull request's
+# own hosted rows. When the label is added, this reports the context as passed on the pull request's head; 9700x.yml
+# skips the aggregate on its later pushes while the label stays, which counts as passed too. The pull request's rows
+# still run, as feedback, and its merge-queue candidate runs the full contract as every candidate does: nothing here runs
+# for a candidate or a push. Adding a label takes triage access, so the people who may queue a pull request decide.
+#
+# Any other label skips the job, whose check run then isn't named after the required context (tools/ci/changes.c's
+# changes_hotfix_policy pins this file).
+on:
+  pull_request:
+    types: [labeled]
+
+permissions: {}
+
+jobs:
+  hotfix:
+    name: ${{ github.event.label.name == 'hotfix' && 'Integration qualification' || 'Hotfix entry (another label)' }}
+    if: github.event.label.name == 'hotfix'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 2
+    steps:
+      - name: Leave the qualification to the merge queue
+        run: echo "::notice title=Hotfix entry::labeled hotfix, so its merge-queue candidate's full contract is its gate; its own rows don't hold its entry"
