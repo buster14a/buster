@@ -307,4 +307,97 @@ static const uint16_t ir_simd_fround_forms[4][2] = {
     { X86_FORM_VDIVPS_Z_Z_Z_ER, X86_FORM_VDIVPD_Z_Z_Z_ER },
 };
 
+// The byte shuffles by an immediate (#1840): vpshufd's doublewords, vpshuflw's low and vpshufhw's high words and vpslldq's
+// and vpsrldq's byte shifts move the same bytes within every 16-byte lane, so each is the IR's shuffle (vpshufb) of its
+// vector by a constant, their indices (ir_simd_shuffle_immediate_indices). Their EVEX forms by the kind and the width,
+// each of the source in rm into the destination in reg, the byte shifts' in vvvv (their reg is the opcode's extension):
+// the typed lowering's decoder (ir_simd_typed_shuffle_immediate) admits their rows, and Tier 1's selection
+// (tier1_select_shuffle_immediate) matches a shuffle by a constant back to one (ir_simd_shuffle_immediate_match).
+#define BUSTER_IR_SHUFFLE_IMMEDIATE_DWORDS 0u
+#define BUSTER_IR_SHUFFLE_IMMEDIATE_LOW_WORDS 1u
+#define BUSTER_IR_SHUFFLE_IMMEDIATE_HIGH_WORDS 2u
+#define BUSTER_IR_SHUFFLE_IMMEDIATE_LEFT_BYTES 3u
+#define BUSTER_IR_SHUFFLE_IMMEDIATE_RIGHT_BYTES 4u
+#define BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS 5u
+// A 16-byte lane's bytes, and a vpshufb index's zeroing bit.
+#define BUSTER_IR_SHUFFLE_LANE_BYTES 16u
+#define BUSTER_IR_SHUFFLE_ZERO 0x80u
+static const uint16_t ir_simd_shuffle_immediate_forms[BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS][3] = {
+    { X86_FORM_VPSHUFD_X_XM128_IMM8_EVEX, X86_FORM_VPSHUFD_Y_YM256_IMM8_EVEX, X86_FORM_VPSHUFD_Z_ZM512_IMM8 },
+    { X86_FORM_VPSHUFLW_X_XM128_IMM8_EVEX, X86_FORM_VPSHUFLW_Y_YM256_IMM8_EVEX, X86_FORM_VPSHUFLW_Z_ZM512_IMM8 },
+    { X86_FORM_VPSHUFHW_X_XM128_IMM8_EVEX, X86_FORM_VPSHUFHW_Y_YM256_IMM8_EVEX, X86_FORM_VPSHUFHW_Z_ZM512_IMM8 },
+    { X86_FORM_VPSLLDQ_X_XM128_IMM8, X86_FORM_VPSLLDQ_Y_YM256_IMM8, X86_FORM_VPSLLDQ_Z_ZM512_IMM8 },
+    { X86_FORM_VPSRLDQ_X_XM128_IMM8, X86_FORM_VPSRLDQ_Y_YM256_IMM8, X86_FORM_VPSRLDQ_Z_ZM512_IMM8 },
+};
+
+// A byte shuffle by an immediate's indices in each 16-byte lane (#1840), vpshufb's: index i names the lane's byte that
+// result byte i takes, or is BUSTER_IR_SHUFFLE_ZERO for a zero. The doublewords' and the words' immediates name a source
+// by 2 bits each; a byte shift's moves the bytes up (left) or down by the immediate, 16 or more zeroing the lane.
+static void ir_simd_shuffle_immediate_indices(uint32_t kind, uint32_t immediate, uint8_t* indices)
+{
+    for (uint32_t i = 0; i < BUSTER_IR_SHUFFLE_LANE_BYTES; i += 1)
+    {
+        const uint32_t word = i >> 1;
+        const uint32_t dwords = ((immediate >> (2 * (i >> 2))) & 3) * 4 + (i & 3);
+        const uint32_t low_words = word < 4 ? ((immediate >> (2 * word)) & 3) * 2 + (i & 1) : i;
+        const uint32_t high_words = word >= 4 ? 8 + ((immediate >> (2 * (word - 4))) & 3) * 2 + (i & 1) : i;
+        const uint32_t left = immediate <= i ? i - immediate : BUSTER_IR_SHUFFLE_ZERO;
+        const uint32_t right = i + immediate < BUSTER_IR_SHUFFLE_LANE_BYTES ? i + immediate : BUSTER_IR_SHUFFLE_ZERO;
+        const uint32_t index = kind == BUSTER_IR_SHUFFLE_IMMEDIATE_DWORDS     ? dwords :
+                               kind == BUSTER_IR_SHUFFLE_IMMEDIATE_LOW_WORDS  ? low_words :
+                               kind == BUSTER_IR_SHUFFLE_IMMEDIATE_HIGH_WORDS ? high_words :
+                               kind == BUSTER_IR_SHUFFLE_IMMEDIATE_LEFT_BYTES ? left :
+                                                                                right;
+        indices[i] = (uint8_t)index;
+    }
+}
+
+// Which byte shuffle by an immediate (#1840) a vpshufb by the constant `bytes` of `width` bytes (16, 32 or 64) is, as
+// vpshufb reads an index (its zeroing bit and low 4 bits): every 16-byte lane's indices the same, and those of the first
+// kind, in BUSTER_IR_SHUFFLE_IMMEDIATE's order, at the immediate the first lane's indices name for it; false for any
+// other indices. vpshufd moves doublewords in 1 cycle against vpshufb's 2 on Zen 5 and loads no constant. This runs once
+// for a shuffle node whose indices are a constant, a few per function, on 64 bytes at most; it stays scalar.
+static bool ir_simd_shuffle_immediate_match(const uint8_t* bytes, uint32_t width, uint32_t* kind, uint32_t* immediate)
+{
+    uint8_t lane[BUSTER_IR_SHUFFLE_LANE_BYTES];
+    bool uniform = width == 16 || width == 32 || width == 64;
+    for (uint32_t i = 0; i < BUSTER_IR_SHUFFLE_LANE_BYTES; i += 1)
+    {
+        lane[i] = (uint8_t)((bytes[i] & BUSTER_IR_SHUFFLE_ZERO) != 0 ? BUSTER_IR_SHUFFLE_ZERO : bytes[i] & 15);
+    }
+    for (uint32_t i = BUSTER_IR_SHUFFLE_LANE_BYTES; uniform && i < width; i += 1)
+    {
+        const uint32_t index = (bytes[i] & BUSTER_IR_SHUFFLE_ZERO) != 0 ? BUSTER_IR_SHUFFLE_ZERO : bytes[i] & 15u;
+        uniform = index == lane[i % BUSTER_IR_SHUFFLE_LANE_BYTES];
+    }
+    // Each kind's immediate as the first lane names it: its doublewords' and words' first bytes' sources, and the byte
+    // shifts' zeros at the lane's bottom and top.
+    uint32_t candidates[BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS] = { 0, 0, 0, 0, 0 };
+    for (uint32_t j = 0; j < 4; j += 1)
+    {
+        candidates[BUSTER_IR_SHUFFLE_IMMEDIATE_DWORDS] |= ((uint32_t)(lane[4 * j] >> 2) & 3) << (2 * j);
+        candidates[BUSTER_IR_SHUFFLE_IMMEDIATE_LOW_WORDS] |= ((uint32_t)(lane[2 * j] >> 1) & 3) << (2 * j);
+        candidates[BUSTER_IR_SHUFFLE_IMMEDIATE_HIGH_WORDS] |= ((uint32_t)(lane[8 + 2 * j] >> 1) & 3) << (2 * j);
+    }
+    bool bottom = true;
+    bool top = true;
+    for (uint32_t i = 0; i < BUSTER_IR_SHUFFLE_LANE_BYTES; i += 1)
+    {
+        bottom = bottom && lane[i] == BUSTER_IR_SHUFFLE_ZERO;
+        top = top && lane[BUSTER_IR_SHUFFLE_LANE_BYTES - 1 - i] == BUSTER_IR_SHUFFLE_ZERO;
+        candidates[BUSTER_IR_SHUFFLE_IMMEDIATE_LEFT_BYTES] += bottom ? 1u : 0u;
+        candidates[BUSTER_IR_SHUFFLE_IMMEDIATE_RIGHT_BYTES] += top ? 1u : 0u;
+    }
+    bool found = false;
+    for (uint32_t k = 0; uniform && !found && k < BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS; k += 1)
+    {
+        uint8_t expected[BUSTER_IR_SHUFFLE_LANE_BYTES];
+        ir_simd_shuffle_immediate_indices(k, candidates[k], expected);
+        found = memcmp(expected, lane, sizeof(lane)) == 0;
+        *kind = found ? k : *kind;
+        *immediate = found ? candidates[k] : *immediate;
+    }
+    return found;
+}
+
 #endif

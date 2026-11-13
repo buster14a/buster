@@ -168,6 +168,14 @@ struct Tier1MasksTest
     // The truncating conversions of lane 0 (#1840, tier1_masks_test_cvtts): those tried, and those through every stage.
     uint32_t cvtt_attempts;
     uint32_t cvtt_rows;
+    // The byte shuffles by an immediate (#1840, tier1_masks_test_shuffle_immediates): those tried, and those through every
+    // stage as the IR's shuffle by a constant, which Tier 1 emits as the immediate form.
+    uint32_t shuffle_attempts;
+    uint32_t shuffle_rows;
+    // Forms whose records tier1_masks_test_typed_pipeline counts in Tier 1's code by both paths (X86_FORM_NONE for none),
+    // and their counts.
+    uint16_t watched_forms[2];
+    uint32_t watched_records[2];
     // The machine rows' mutants (#1284, tier1_masks_test_row_mutants): borrowed opmask registers' reloads left out, staging
     // copies renamed into a live value's register; and of each, those the code's certificate refused.
     uint32_t row_reloads;
@@ -4609,6 +4617,14 @@ static bool tier1_masks_test_typed_pipeline(Tier1MasksTest* test, const char* na
             memset(&emitted[f], 0, sizeof(emitted[f]));
             const Tier1EmitError error = ok ? tier1_emit_function(&plan, &options, test->v4, &arenas[2], &test->scratch, &emitted[f], &node) : TIER1_EMIT_OK;
             ok = ok && tier1_masks_test_expect(test, error == TIER1_EMIT_OK && emitted[f].general, "Tier 1's CFG consumer emits the typed program");
+            for (uint32_t r = 0; ok && r < emitted[f].code.count; r += 1)
+            {
+                const uint16_t form = emitted[f].code.records[r].form;
+                for (uint32_t w = 0; w < 2; w += 1)
+                {
+                    test->watched_records[w] += test->watched_forms[w] != X86_FORM_NONE && form == test->watched_forms[w];
+                }
+            }
             if (!ok)
             {
                 printf("test-tier1-masks: %s, function %u, %s path: selection %u, emission %u, at node %u (op %u)\n", name, f, path == 0 ? "vector" : "scalar", (unsigned)selected, (unsigned)error, node,
@@ -5335,6 +5351,179 @@ static void tier1_masks_test_permutes(Tier1MasksTest* test)
             ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, true, inputs, expected, arenas, &machine);
             test->permute_rows += ok;
             tier1_masks_test_expect(test, test->scratch.length == 0, "the permutes return the scratch arena");
+            arena_pop_to(&test->output, output_mark);
+            for (uint32_t k = 0; k < 3; k += 1)
+            {
+                arena_pop_to(&arenas[k], 0);
+            }
+        }
+    }
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        arena_release(&arenas[k]);
+    }
+    free(expected);
+    free(inputs);
+    free(program);
+}
+
+// A byte shuffle by an immediate's kind (BUSTER_IR_SHUFFLE_IMMEDIATE_*) by its builtin's name (#1840): pshufd at its
+// three widths, pshuflw, pshufhw, and the byte shifts pslldqi and psrldqi; BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS for any other
+// rule. ir_simd_typed_test.c's decoder test reads the same rules.
+static uint32_t tier1_masks_test_shuffle_immediate_kind(const CheckX86LowerRule* rule)
+{
+    static const char* const prefixes[BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS] = {
+        "__builtin_ia32_pshufd",
+        "__builtin_ia32_pshuflw",
+        "__builtin_ia32_pshufhw",
+        "__builtin_ia32_pslldqi",
+        "__builtin_ia32_psrldqi",
+    };
+    uint32_t kind = BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS;
+    for (uint32_t k = 0; rule->family == CHECK_X86_LOWER_UNARY_IMMEDIATE && k < BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS; k += 1)
+    {
+        kind = strncmp(rule->name, prefixes[k], strlen(prefixes[k])) == 0 ? k : kind;
+    }
+    return kind;
+}
+
+// The immediates the byte shuffles by an immediate are tried at (#1840), by `code` 0 to 7: the shuffles' broadcasts of
+// each source, a reversal and two rotations, none the identity; the byte shifts' counts below 16, 16 and past it.
+static uint32_t tier1_masks_test_shuffle_immediate_value(uint32_t kind, uint32_t code)
+{
+    static const uint8_t shuffles[8] = { 0x00, 0x55, 0xaa, 0xff, 0x1b, 0x4e, 0xb1, 0x93 };
+    static const uint8_t shifts[8] = { 1, 3, 7, 8, 15, 16, 200, 255 };
+    const bool shift = kind == BUSTER_IR_SHUFFLE_IMMEDIATE_LEFT_BYTES || kind == BUSTER_IR_SHUFFLE_IMMEDIATE_RIGHT_BYTES;
+    return shift ? shifts[code & 7] : shuffles[code & 7];
+}
+
+// A byte shuffle by an immediate of `bytes` bytes at `in` into `out` (#1840), as Intel's manual defines each in every
+// 16-byte lane: vpshufd's doubleword j the source's that the immediate's bits 2j and 2j + 1 name; vpshuflw's low four
+// words the same way and its high quadword the source's, vpshufhw's high four and its low quadword; vpslldq's byte i the
+// source's byte i - n, zero below n, and vpsrldq's byte i + n, zero from 16 - n, n the immediate, 16 or more every byte
+// zero.
+static void tier1_masks_test_shuffle_immediate_model(uint32_t kind, uint32_t immediate, uint32_t bytes, const uint8_t* in, uint8_t* out)
+{
+    for (uint32_t lane = 0; lane < bytes; lane += 16)
+    {
+        const uint8_t* source = in + lane;
+        uint8_t* result = out + lane;
+        if (kind == BUSTER_IR_SHUFFLE_IMMEDIATE_DWORDS)
+        {
+            for (uint32_t j = 0; j < 4; j += 1)
+            {
+                memcpy(result + 4 * j, source + 4 * ((immediate >> (2 * j)) & 3), 4);
+            }
+        }
+        else if (kind == BUSTER_IR_SHUFFLE_IMMEDIATE_LOW_WORDS || kind == BUSTER_IR_SHUFFLE_IMMEDIATE_HIGH_WORDS)
+        {
+            const uint32_t moved = kind == BUSTER_IR_SHUFFLE_IMMEDIATE_LOW_WORDS ? 0 : 8;
+            memcpy(result + (8 - moved), source + (8 - moved), 8);
+            for (uint32_t w = 0; w < 4; w += 1)
+            {
+                memcpy(result + moved + 2 * w, source + moved + 2 * ((immediate >> (2 * w)) & 3), 2);
+            }
+        }
+        else
+        {
+            for (uint32_t i = 0; i < 16; i += 1)
+            {
+                const bool left = kind == BUSTER_IR_SHUFFLE_IMMEDIATE_LEFT_BYTES;
+                const bool zero = immediate >= 16 || (left ? i < immediate : i + immediate >= 16);
+                result[i] = zero ? 0 : source[left ? i - immediate : i + immediate];
+            }
+        }
+    }
+}
+
+// The front end's byte shuffles by an immediate through the IR to Tier 1 (#1840): pshufd, pshuflw, pshufhw, pslldqi and
+// psrldqi at each width (tier1_masks_test_shuffle_immediate_kind), at 8 immediates each, as the program's only row in 4
+// statements of the input buffer's vector k into the output's vector k. tier1_masks_test_typed_pipeline takes each through
+// the IR as its shuffle by a constant, which the interpreter runs at every stage, and Tier 1 natively, against Intel's
+// definitions; Tier 1's code by both paths has the 4 records of the immediate form that the constant's indices match
+// (ir_simd_shuffle_immediate_match: a byte shift of 16 or more is vpslldq's of 16) and no vpshufb.
+static void tier1_masks_test_shuffle_immediates(Tier1MasksTest* test)
+{
+    static const uint16_t shuffles[3] = { X86_FORM_VPSHUFB_X_X_XM128_EVEX, X86_FORM_VPSHUFB_Y_Y_YM256_EVEX, X86_FORM_VPSHUFB_Z_Z_ZM512 };
+    const X86Target target = { .features = test->v4_features };
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
+    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
+    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
+    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0,
+                                         "the byte shuffles' memory");
+    uint64_t state = test->random ^ UINT64_C(0x1f83d9abfb41bd6b);
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        const uint32_t kind = tier1_masks_test_shuffle_immediate_kind(rule);
+        for (uint32_t code = 0; kind < BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS && code < 8; code += 1)
+        {
+            const uint64_t output_mark = test->output.length;
+            test->shuffle_attempts += 1;
+            const uint32_t immediate = tier1_masks_test_shuffle_immediate_value(kind, code);
+            const uint32_t bytes = rule->bytes;
+            const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+            Tier0Operation row;
+            const bool made = check_x86_lower_row_of(&target, rule, immediate, 4, 0, false, &row) == NULL;
+            char name[128];
+            snprintf(name, sizeof(name), "%s (immediate %u)", rule->name, immediate);
+            bool ok = tier1_masks_test_expect(test, made && row.operand_count == 1 && row.result_class == BUSTER_TYPED_CLASS_VECTOR, "the front end's byte shuffle's row");
+            // The immediate form Tier 1 emits: the first whose indices the shuffle's are.
+            uint8_t indices[64];
+            ir_simd_shuffle_immediate_indices(kind, immediate, indices);
+            for (uint32_t at = 16; at < bytes; at += 16)
+            {
+                memcpy(indices + at, indices, 16);
+            }
+            uint32_t matched = BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS;
+            uint32_t matched_immediate = 0;
+            ok = ok && tier1_masks_test_expect(test, ir_simd_shuffle_immediate_match(indices, bytes, &matched, &matched_immediate), "a byte shuffle's indices match an immediate form");
+            program->count = 0;
+            program->overflow = false;
+            program->rows = true;
+            program->objects = false;
+            for (uint32_t k = 0; ok && k < 4; k += 1)
+            {
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, k * bytes / 8);
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k * bytes / 8 % 32);
+                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+                tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
+                tier0_test_mask_emit(program, BUSTER_TYPED_SET, row.result_class, bytes);
+            }
+            tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+            ok = ok && tier1_masks_test_expect(test, !program->overflow, "the byte shuffle's program fits");
+            Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
+            functions[0].operations = &row;
+            functions[0].operation_count = 1;
+            for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+            {
+                uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
+                uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
+                tier0_test_mask_inputs(in, &state);
+                memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
+                for (uint32_t k = 0; k < 4; k += 1)
+                {
+                    tier1_masks_test_shuffle_immediate_model(kind, immediate, bytes, (const uint8_t*)in + k * bytes % 256, wanted + k * bytes);
+                }
+            }
+            test->watched_forms[0] = ok ? ir_simd_shuffle_immediate_forms[matched][width] : X86_FORM_NONE;
+            test->watched_forms[1] = shuffles[width];
+            test->watched_records[0] = 0;
+            test->watched_records[1] = 0;
+            bool machine = false;
+            ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, true, inputs, expected, arenas, &machine);
+            ok = ok && tier1_masks_test_expect(test, !machine && test->watched_records[0] == 2 * 4 && test->watched_records[1] == 0,
+                                               "a byte shuffle by an immediate is the IR's shuffle by a constant, which Tier 1 emits as the immediate form by both paths");
+            if (!ok)
+            {
+                printf("test-tier1-masks: %s: kind %u immediate %u matched %u and %u: %u immediate records, %u vpshufb\n", name, kind, immediate, matched, matched_immediate,
+                       test->watched_records[0], test->watched_records[1]);
+            }
+            test->watched_forms[0] = X86_FORM_NONE;
+            test->watched_forms[1] = X86_FORM_NONE;
+            test->shuffle_rows += ok;
+            tier1_masks_test_expect(test, test->scratch.length == 0, "the byte shuffles return the scratch arena");
             arena_pop_to(&test->output, output_mark);
             for (uint32_t k = 0; k < 3; k += 1)
             {
@@ -7201,6 +7390,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             .output = arena_reserve(64u << 20),
             .scratch = arena_reserve(64u << 20),
             .execution = arena_reserve(64u << 20),
+            .watched_forms = { X86_FORM_NONE, X86_FORM_NONE },
         };
         uint8_t* baseline = malloc(X86_FORM_COUNT);
         uint8_t* foundation = malloc(X86_FORM_COUNT);
@@ -7249,6 +7439,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_selects(&test);
             tier1_masks_test_widths(&test);
             tier1_masks_test_permutes(&test);
+            tier1_masks_test_shuffle_immediates(&test);
             tier1_masks_test_conversions(&test);
             tier1_masks_test_shifts(&test);
             tier1_masks_test_mask_vectors(&test);
@@ -7276,7 +7467,8 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
                                     "Tier 0's mask programs go through the IR and Tier 1, those whose rows the decoders refuse as machine rows");
             tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.select_rows + test.width_rows + test.permute_rows + test.convert_rows +
                                                                                test.shift_rows + test.mask_vector_rows + test.lane_op_rows + test.permute2_rows + test.ternlog_rows + test.compress_rows +
-                                                                               test.masked_rows + test.lane_rows + test.reduce_rows + test.unary_rows + test.fround_rows + test.cvtt_rows),
+                                                                               test.masked_rows + test.lane_rows + test.reduce_rows + test.unary_rows + test.fround_rows + test.cvtt_rows +
+                                                                               test.shuffle_rows),
                                     "every typed program and front-end row runs natively by both of Tier 1's paths");
             // The comparisons: 24 integer rules (bytes to quadwords, signed and unsigned, at 3 widths) at 8 immediates, 6
             // of them the IR's; 6 packed float rules at 32, 12 of them the IR's.
@@ -7294,6 +7486,10 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             // 3 widths and the two shuffles of lanes at 2, at 8 immediates.
             tier1_masks_test_expect(&test, test.permute_attempts == 6 + 3 + 6 * 8 + 4 * 8 && test.permute_rows == test.permute_attempts,
                                     "every front-end permute goes through the IR and Tier 1 as the IR's permute");
+            // The byte shuffles by an immediate (#1840): pshufd, pshuflw, pshufhw, pslldqi and psrldqi at 3 widths, at 8
+            // immediates.
+            tier1_masks_test_expect(&test, test.shuffle_attempts == 5 * 3 * 8 && test.shuffle_rows == test.shuffle_attempts,
+                                    "every front-end byte shuffle by an immediate goes through the IR and Tier 1 as the IR's shuffle by a constant, and back to its immediate form");
         printf("test-tier1-masks: the front end's selects and undefined vectors: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its vselect and zero vector\n",
                test.select_rows);
             // The conversions (#1840): convertvector's and the masked truncations whose lanes fill their results.
@@ -7359,6 +7555,9 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
         printf("test-tier1-masks: the front end's permutes: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its permute, shuffle, align and "
                "shuffle_lanes\n",
                test.permute_rows);
+        printf("test-tier1-masks: the front end's byte shuffles by an immediate: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its shuffle by a "
+               "constant, emitted as the immediate forms\n",
+               test.shuffle_rows);
         tier1_masks_test_expect(&test, tier1_masks_test_row_occupancy(),
                                 "VECTOR roles share a register where one is done with it before the other's pure write in a record whose destination may be a source, and only there (#1283, #1284)");
         tier1_masks_test_expect(&test, test.row_reloads != 0 && test.row_stagings != 0 && test.row_roles != 0 && test.row_k0 != 0 && test.row_splits != 0 && test.row_split_mutants != 0 && test.vector_moves != 0,
