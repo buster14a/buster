@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 
 typedef struct ComdatFile ComdatFile;
 struct ComdatFile
@@ -28,13 +29,14 @@ struct ComdatFile
     uint64_t size;
 };
 
-// Signatures of comdat groups, a count of names into one buffer each.
+// Signatures of the parts' comdat groups, sorted once they are all in (comdat_sort), which comdat_named then searches:
+// an AddressSanitizer unit has a comdat for every global it describes, tens of thousands.
 typedef struct ComdatNames ComdatNames;
 struct ComdatNames
 {
     char** names;
-    uint32_t count;
-    uint32_t capacity;
+    uint64_t count;
+    uint64_t capacity;
 };
 
 static bool comdat_read(const char* path, ComdatFile* file)
@@ -119,17 +121,26 @@ static uint32_t* comdat_flags(const ComdatFile* file, const Elf64_Shdr* group)
     return inside ? (uint32_t*)(file->data + group->sh_offset) : 0;
 }
 
-static bool comdat_named(const ComdatNames* names, const char* name)
+static int comdat_compare(const void* a, const void* b)
 {
-    bool found = false;
-    for (uint32_t i = 0; i < names->count && !found; i += 1)
-    {
-        found = strcmp(names->names[i], name) == 0;
-    }
-    return found;
+    return strcmp(*(const char* const*)a, *(const char* const*)b);
 }
 
-// Adds the signatures of `file`'s comdat groups to `names`.
+static void comdat_sort(ComdatNames* names)
+{
+    if (names->count != 0)
+    {
+        qsort(names->names, names->count, sizeof(char*), comdat_compare);
+    }
+}
+
+// Whether the sorted `names` hold `name`.
+static bool comdat_named(const ComdatNames* names, const char* name)
+{
+    return names->count != 0 && bsearch(&name, names->names, names->count, sizeof(char*), comdat_compare) != 0;
+}
+
+// Adds the signatures of `file`'s comdat groups to `names`, unsorted.
 static bool comdat_collect(const ComdatFile* file, const char* path, ComdatNames* names)
 {
     bool collected = true;
@@ -141,7 +152,7 @@ static bool comdat_collect(const ComdatFile* file, const char* path, ComdatNames
             const char* signature = comdat_signature(file, section);
             const uint32_t* flags = comdat_flags(file, section);
             collected = signature != 0 && flags != 0;
-            if (collected && (*flags & GRP_COMDAT) != 0 && !comdat_named(names, signature))
+            if (collected && (*flags & GRP_COMDAT) != 0)
             {
                 if (names->count == names->capacity)
                 {
@@ -178,10 +189,13 @@ int main(int argc, char** argv)
             ready = comdat_read(argv[i], &part) && comdat_valid(&part, argv[i]) && comdat_collect(&part, argv[i], &names);
             free(part.data);
         }
+        comdat_sort(&names);
         ComdatFile object = { 0 };
         ready = ready && comdat_read(argv[1], &object) && comdat_valid(&object, argv[1]);
-        uint32_t restored = 0;
+        // The flag words to set, by their offsets in the file, which is written there alone.
         const uint64_t sections = ready ? comdat_sections(&object) : 0;
+        uint64_t* offsets = calloc(sections + 1, sizeof(uint64_t));
+        uint64_t restored = 0;
         for (uint64_t i = 0; ready && i < sections; i += 1)
         {
             const Elf64_Shdr* section = comdat_section(&object, i);
@@ -193,6 +207,7 @@ int main(int argc, char** argv)
                 if (ready && (*flags & GRP_COMDAT) == 0 && comdat_named(&names, signature))
                 {
                     *flags |= GRP_COMDAT;
+                    offsets[restored] = section->sh_offset;
                     restored += 1;
                 }
             }
@@ -200,16 +215,21 @@ int main(int argc, char** argv)
         if (ready && restored != 0)
         {
             FILE* stream = fopen(argv[1], "r+b");
-            ready = stream != 0 && fwrite(object.data, 1, object.size, stream) == object.size;
+            ready = stream != 0;
+            for (uint64_t i = 0; ready && i < restored; i += 1)
+            {
+                ready = fseeko(stream, (off_t)offsets[i], SEEK_SET) == 0 && fwrite(object.data + offsets[i], sizeof(uint32_t), 1, stream) == 1;
+            }
             ready = stream != 0 && fclose(stream) == 0 && ready;
             if (!ready)
             {
                 fprintf(stderr, "comdat: can't write %s\n", argv[1]);
             }
         }
+        free(offsets);
         status = ready ? 0 : 1;
         free(object.data);
-        for (uint32_t i = 0; i < names.count; i += 1)
+        for (uint64_t i = 0; i < names.count; i += 1)
         {
             free(names.names[i]);
         }
