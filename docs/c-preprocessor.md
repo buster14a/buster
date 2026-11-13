@@ -1126,8 +1126,11 @@ system-level boundary requests the existing replay, which supplies its canonical
 visibility and count, including for quiet clients. The system-warning tests cover
 both kernels, immediate/deferred history, quiet counting, both option states,
 macro uses in both directions, nested headers, predefined-macro whitespace and
-invocations spanning header exits. Destringized `_Pragma` messages retain their
-scratch-spelling step and column as a generated diagnostic source.
+invocations spanning header exits. Destringized `_Pragma` tokens retain their
+scratch-spelling step and column as a shared generated source, including when
+the checker later diagnoses a retained pragma. Messages reuse that source;
+its parent is the operator's enclosing expansion, without a duplicate builtin
+note. Leading whitespace in the string remains part of the relative column.
 
 Then the headers among others (#255's review), in each mode, hosted and
 freestanding: two units include buster's 11, the C library's headers that
@@ -1929,10 +1932,11 @@ The append-only tables belong to the translation unit:
 - `PPSubstitution` (12 bytes) retains the expansion, parameter occurrence and
   source origin for each argument run. Reusing an expanded argument retains
   its original expansion and creates distinct substitution occurrences.
-- `PPGenerated` (24 bytes) distinguishes pastes and stringifications.
+- `PPGenerated` (24 bytes) distinguishes pastes, stringifications and
+  destringized pragma spellings.
   A paste retains both operand locations and origins; a stringification keeps
   its raw argument's token locations and origins in `PPSource` records (eight
-  bytes each). These survive reuse of the temporary argument buffers. Builtins
+  bytes each). These survive reuse of the temporary argument buffers. Other builtins
   retain their identity through the expansion record, even when `0` and `1`
   reuse the same scratch spelling; they need no duplicate generated record.
 
