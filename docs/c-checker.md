@@ -3874,14 +3874,35 @@ What the lowering covers past scalars (#145's programs):
   operands of more than 128 bits"): the exact result in the signed `_BitInt`
   that holds it, by these limbs' operations ([the builtins'
   guide](c-builtins-integration.md)'s overflow section).
-- **Bit-fields.** A bit-field is read and written through the bytes that hold
-  its bits and no other member's (C11 makes those other memory locations), as
-  pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read shifts
-  its bits to the top and back, sign- or zero-extending them as its type says;
-  a store clears its bits and puts the value's in, and its value is the field's
-  as it now reads. `++`, `--` and compound assignment read, operate and store
-  the same way, and so do initializer parts with a bit width. A field whose bits
-  are spread over more than 8 bytes (a packed one) is refused.
+- **Bit-fields.** A bit-field is read and written through its access unit,
+  as pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read
+  shifts its bits to the top and back, sign- or zero-extending them as its type
+  says; a store reads the unit, clears the field's bits, puts the value's in and
+  writes the unit back, and its value is the field's as it now reads. `++`, `--`
+  and compound assignment read, operate and store the same way. Through `.` and
+  `->`, the unit is clang's (#1372, `check_lower_bit_unit_place`): the access
+  unit of the field's run of bit-fields that `CGRecordLowering::accumulateBitFields`
+  makes, which `abi_bit_field_unit` computes for the calling convention
+  ([its guide](calling-convention.md)'s "Bit-fields' access units"). The
+  integer of a run's bytes, and of the runs after it while the span fits 8
+  bytes, that fits before the next member clang stores or the record's end, or
+  else the first run's bytes, so that it never holds another member's bytes (C11
+  makes those other memory locations) but may take padding. Every field of a
+  unit is then read and written at one address and width, and a read after a
+  store forwards from it: in `struct { unsigned x : 3, y : 7, z : 13, w : 9; }`
+  each field's access is 4 bytes at 0, where the bytes that hold each field's
+  bits (2 at 0, 1 and 2) overlap without matching and fail store-to-load
+  forwarding; the issue's four-field update took 3.5 times clang -O0's cycles.
+  The member is the one the node's name finds, in the anonymous struct or union
+  that holds it, whose units are its own. A constant address of a field's lvalue
+  (a local's or a global's, the checker's of the field's first byte) is its
+  unit's too (`check_lower_bit_constant_address`). A union's bit-fields, an
+  `ms_struct` record's (clang's discrete units), a unit of more than 8 bytes,
+  initializer parts with a bit width and `__builtin_dump_struct`'s reads take
+  the bytes that hold the field's bits. A field whose bits are spread over more
+  than 8 bytes (a packed one) is refused. `c_check_program_bit_unit_test.c`
+  checks each fixture's loads and stores against clang's units and runs them
+  against clang's code.
 - **Variable-length arrays.** Their objects live on the stack, as clang's do.
   The source reader's declaration handoff retains the half-open append range
   of VLA records introduced by its specifiers and declarator. Only that range

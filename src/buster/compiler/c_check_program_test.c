@@ -2797,6 +2797,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_fence_test.c"
 #include "c_check_program_atomic_access_test.c"
 #include "c_check_program_atomic_rmw_test.c"
+#include "c_check_program_bit_unit_test.c"
 #include "c_check_program_vector_test.c"
 #include "c_check_program_x86_test.c"
 #include "c_check_program_x86_rest_test.c"
@@ -4100,6 +4101,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "int tested(int n){struct P6 a={1,2};struct P7 b={3,-4};struct P3 c[2]={{5,-6},{7,8}};a.x=(unsigned long long)n*0x123456789ULL;"
             "b.y=(long long)n*-0x1234567891LL;c[1].z=n*-30001;a.x+=7;b.y--;int t=(int)(c[1].z++);c[0].z^=n;"
             "return (int)(a.x%1013)+(int)(b.y%1019)+c[1].z+c[0].z*3+a.k+b.k*5+c[0].k+c[1].k*7+t*11;}", "bit-field-packed-spans", clang);
+        check_test_program_bit_units(test, clang);
         check_test_program_source(test,
             "int tested(int n){unsigned x=(unsigned)n|1;return __builtin_popcount(x)+__builtin_clz(x)+__builtin_ctz(x)+"
             "__builtin_parity(x)+__builtin_ffs((int)x)+(int)(__builtin_bswap16((unsigned short)x)%101);}", "integer-builtin-runtime", clang);
