@@ -666,11 +666,14 @@ undefined hidden symbol, which lld ignores and GNU ld refuses. The module's inli
 section (`.text`, a named section, a cold function's `.text.unlikely.`), at a
 function of the greatest alignment it holds there, so that the relocatable
 link adds no padding. The bitcode the parts are written as keeps its use-list
-order: `split_bitcode.cpp` is the one call to LLVM's C++ API, which LLVM's C
-API lacks. The merge clears the parts' allocated `SHF_MERGE` flags first: a
+order: `split_bitcode.cpp` holds the calls to LLVM's C++ API that its C API
+lacks (that writer, and erasing an alias). The merge clears the parts' allocated `SHF_MERGE` flags first: a
 relocatable link merges those sections, which the final link at `-O0` copies
 whole from the single object (the checker's parts lost 27,904 bytes of
-duplicate constants that way). Read-only data keeps its order and each item's
+duplicate constants that way). A final link that merges them itself, every
+linker but lld at `-O0` (a sanitizer build's dynamic link by wild), merges the
+single object's with the other units', so there the parts keep the flags: the
+join reads `-DMERGES`, set where `-Wl,-O0` isn't. Read-only data keeps its order and each item's
 alignment, but a part's `.rodata` takes its greatest item's alignment (64), so
 items after a part boundary can move by less than that: 256 bytes in all for
 the two units (768 with fourteen parts), with `.eh_frame` 16 bytes longer. Between a part's last function
