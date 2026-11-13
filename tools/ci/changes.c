@@ -3155,15 +3155,13 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow, Text ro
     }
 }
 
-// Every main push, including documentation alone, runs its own hosted rows (#1271): every row before the nightly mode,
-// the plain rows in it (#2057, until the merge queue carries the full suite; the nightly snapshot runs the sanitizer
-// rows and fuzzing). Keep its unfiltered trigger and per-run concurrency separate from a PR's replaceable queue. The
-// evidence glue tests pin scope and hosted=run for pushes; here the workflow must consume those decisions without
-// reducing the matrix or suppressing fuzzing for a full scope.
-// Every merge-queue candidate (#1430), documentation alone included, runs the full contract too: its trigger is
-// `checks_requested` for main with no path filter, its concurrency group its own run's (the queue builds several at
-// once), its selector the merge-group profile, and the required aggregate runs for it and reads its coverage step,
-// which checks the candidate's jobs one by one.
+// Every main revision is tested before it lands, by the merge queue (#1430), and a push to main runs nothing: the owner's
+// decision of 10 November, which replaces #1271's run of every push. So the workflow has no push trigger. Every
+// merge-queue candidate, documentation alone included, runs the full contract: its trigger is `checks_requested` for
+// main with no path filter, its concurrency group its own run's (the queue builds several at once), its selector the
+// merge-group profile with its auxiliary workflows' calls, and the required aggregate waits for them and reads its
+// coverage step, which checks the candidate's jobs one by one. The workflow must consume a full scope without reducing
+// the matrix or suppressing fuzzing.
 // This pins the repository's YAML spelling, as the oracle policy does; it is not a general YAML evaluator.
 static bool changes_main_policy(Text workflow)
 {
@@ -3172,7 +3170,7 @@ static bool changes_main_policy(Text workflow)
         uint32_t job;
         const char* line;
     } required[] = {
-        { 0, "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}" },
+        { 0, "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}" },
         { 0, "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}" },
         { 5, "    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && inputs.purpose == 'backlog')" },
         { 5, "          if [ \"$GITHUB_EVENT_NAME\" = merge_group ]; then" },
@@ -3221,7 +3219,6 @@ static bool changes_main_policy(Text workflow)
     bool push = false;
     bool queue = false;
     uint32_t pushes = 0;
-    uint32_t branches = 0;
     uint32_t queues = 0;
     uint32_t queue_types = 0;
     uint32_t queue_branches = 0;
@@ -3252,13 +3249,6 @@ static bool changes_main_policy(Text workflow)
                 queue = text_equal_c(line, "  merge_group:");
                 queues += queue;
             }
-            else if (section == 1 && push)
-            {
-                // The main push has exactly its branch selector, no paths, paths-ignore or other filter.
-                const bool branch = text_equal_c(line, "    branches: [main]");
-                branches += branch;
-                valid = valid && branch;
-            }
             else if (section == 1 && queue)
             {
                 // A merge-queue candidate for main: the one event type, and no path or other filter.
@@ -3283,12 +3273,12 @@ static bool changes_main_policy(Text workflow)
     {
         valid = valid && seen[i];
     }
-    return valid && pushes == 1 && branches == 1 && queues == 1 && queue_types == 1 && queue_branches == 1;
+    return valid && pushes == 0 && queues == 1 && queue_types == 1 && queue_branches == 1;
 }
 
 static void changes_test_main_policy(ChangesTest* test, Text workflow)
 {
-    changes_expect(test, changes_main_policy(workflow), "main policy: unfiltered pushes, independent runs and full hosted coverage", (Text){ 0 });
+    changes_expect(test, changes_main_policy(workflow), "main policy: no push checks, unfiltered candidates, independent runs and full hosted coverage", (Text){ 0 });
     static const struct
     {
         const char* section;
@@ -3296,16 +3286,14 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
         const char* after;
         const char* name;
     } mutants[] = {
-        { "on:", "    branches: [main]", "    branches: [main]\n    paths-ignore:\n      - 'docs/**'\n      - '**.md'", "documentation path exclusion" },
-        { "on:", "    branches: [main]", "    branches: [main]\n    paths:\n      - 'src/**'", "source-only path inclusion" },
-        { "on:", "    branches: [main]", "    branches: [release]", "wrong push branch" },
-        { "on:", "  push:", "  pull_request_target:", "missing main push" },
+        { "on:", "  pull_request:\n", "  push:\n    branches: [main]\n  pull_request:\n", "a main push trigger restored: a second run of every merge" },
+        { "on:", "  pull_request:\n", "  push:\n  pull_request:\n", "an unfiltered push trigger" },
         { "  merge_group:", "    branches: [main]", "    branches: [main]\n    paths-ignore:\n      - 'docs/**'", "merge-queue documentation exclusion" },
         { "  merge_group:", "    branches: [main]", "    branches: [main]\n    paths:\n      - 'src/**'", "merge-queue source-only inclusion" },
         { "  merge_group:", "    branches: [main]", "    branches: [release]", "merge queue of another branch" },
         { "  merge_group:", "    types: [checks_requested]", "    types: [destroyed]", "merge queue without its checks" },
         { "  merge_group:", "  merge_group:\n    types: [checks_requested]\n    branches: [main]\n", "", "missing merge-queue trigger" },
-        { "concurrency:", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "shared main pending slot" },
+        { "concurrency:", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'schedule' && 'schedule') || github.ref }}", "shared candidate pending slot" },
         { "concurrency:", " || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id))", "", "candidates share one pending slot" },
         { "  changes:", " || github.event_name == 'merge_group' || ", " || ", "a candidate skips the selector and its self-tests" },
         { "  changes:", "          if [ \"$GITHUB_EVENT_NAME\" = merge_group ]; then", "          if false; then", "a candidate decided by its change alone" },

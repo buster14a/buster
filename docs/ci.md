@@ -1,37 +1,32 @@
 # Hosted correctness, native vector correctness and Zen 5 benchmarks
 
-Every merge and direct push to `main` triggers hosted correctness against
-that push's exact `github.sha`, including documentation-only changes (#1271).
-In the nightly mode it runs the plain rows: both host architectures, plain
-O3, four shards each (#2057, the owner's choice on 2026-11-10). Every row
-runs SQLite's pinned Tcl subset; the whole suite (`hosted-correctness.yml`'s
-`sqlite-full`) runs on the nightly and dispatched runs alone, not on pushes
-(#2334). The sanitizer
-rows and fuzz campaigns run once a day on the nightly snapshot's deferred run,
-until the merge queue (#1430) runs the complete suite before each merge and
-pushes to main run no checks at all. Before the nightly mode, which has no
-snapshot to cover them, a push runs all four O3 build modes (plain and three
-sanitizer configurations) across each row's shards, and all three fuzz campaigns.
-The pre-merge PR matrix, Measurement storage and a no-code exemption do not
-replace a push's own hosted rows.
+Every change reaches `main` through the merge queue (#1430). The queue's
+candidate for it runs the complete hosted contract on its exact commit before
+it merges: both host architectures with all four O3 build modes (plain and
+three sanitizer configurations) across each row's shards, the vector pool, the
+three fuzz campaigns, and each auxiliary workflow its change touches (see "The
+merge queue"). Documentation-only changes run it too. Main's ruleset requires
+the queue, with no bypass, and main is fast-forwarded to the commit the queue
+tested. A push to `main` runs no checks (the owner's decision on 2026-11-10);
+the nightly measures main's first-parent states on the 9700X. SQLite's whole
+Tcl suite (`hosted-correctness.yml`'s `sqlite-full`) runs on the nightly and
+dispatched runs alone (#2334).
 
-Main pushes have separate run-id concurrency groups: a later merge cannot
-replace an earlier pending main run. PRs keep their per-PR superseded-run
-cancellation. Hardware jobs still take the shared host lock. Push evidence
-always reports `hosted=run` and no hosted source, with `scope=plain` in the
-nightly mode and `scope=full` before it.
-The selector's main-policy mutants and the nightly glue fixtures pin this
-contract. A push reuses no PR native evidence (#1272). In the nightly mode it
-runs no 9700X job at all (the owner's choice on 2026-11-05): its native
-correctness and targeted measurements run in the 02:00-08:00 window as its
-first-parent state's (see "Nightly main measurements").
-Both selector push modes force correctness for every file class. The
-qualification self-test rejects a main push with an all-skipped suite: only
-pre-merge PRs can use the no-code exemption.
+Before the queue, every merge and direct push to `main` ran hosted correctness
+against its own `github.sha` (#1271). In the nightly mode that was the plain
+rows alone (#2057), with the sanitizer rows and fuzz campaigns on the nightly
+snapshot's daily run; before it, every row and campaign. The nightly still
+reads those runs' records, and the selector keeps its push modes for them.
 
-A merge-queue candidate (`merge_group`) runs the complete suite already; see
-"The merge queue". Until a ruleset requires the queue, nothing starts one, and
-pushes keep the rows above.
+Candidates have separate run-id concurrency groups: none cancels or replaces
+another, and each candidate's `stale` job cancels the runs of candidates GitHub
+dropped. PRs keep their per-PR superseded-run cancellation. Hardware jobs still
+take the shared host lock. The selector's main-policy mutants and the nightly
+glue fixtures pin this contract, a push trigger included. A candidate never
+runs the 9700X job (`hardware=skip`): its native correctness and targeted
+measurements run in the 02:00-08:00 window as its first-parent state's (see
+"Nightly main measurements"). The qualification self-test rejects a candidate
+with an all-skipped suite: only pre-merge PRs can use the no-code exemption.
 
 The workflow in `.github/workflows/9700x.yml` runs correctness tests on
 GitHub-hosted `ubuntu-26.04` runners. Its matrix builds the triggering revision
@@ -224,16 +219,17 @@ are the other costs. `tests/ci/caches.sh` tests each cache's hit, miss,
 corruption and changed input.
 
 The hosted `qualification` job is the ruleset's required context,
-`Integration qualification` (#1430). Until then it was named
-`Build and execute on Ryzen 7 9700X`, which no longer described a job that
-qualifies most runs on hosted runners alone. The `qualification-alias` job
-reports the old name until main's ruleset requires the new one: the
-replacement is installed and observed first, and the ruleset switches names in
-the same edit that turns on the merge queue, so no interval is unprotected. It
-requires the `evidence` job's success,
-successful hosted tests and fuzzing, and the hardware job: on a push to main
-before the nightly mode and on the daily and dispatched runs, native
-correctness and the measurements. A pull request, draft or ready, never runs
+`Integration qualification` (#1430). It was named
+`Build and execute on Ryzen 7 9700X` until the merge queue, which no longer
+described a job that qualifies most runs on hosted runners alone; an alias job
+reported the old name until the ruleset required the new one, which it did in
+the same edit that turned on the merge queue. It requires the `evidence` job's
+success, successful hosted tests and fuzzing, and the hardware job: on the
+daily and dispatched runs (and, before the queue, a push to main before the
+nightly mode), native correctness and the measurements. A merge-queue
+candidate never runs the hardware job: the context passes on the full hosted
+contract, which its coverage step checks job by job (see "The merge queue").
+A pull request, draft or ready, never runs
 the hardware job (#2055, the owner's choice on 2026-11-10): the context passes
 on its hosted plain rows with fuzzing and the hardware job skipped, and its
 message says that native correctness and measurements run on the merged
@@ -243,12 +239,12 @@ changes keep their explicit no-code path. A nightly dispatch reports through
 its coverage record and has no such context, and neither does a scheduled run
 the nightly mode retired.
 
-A push no longer reuses its pull request's native qualification: that run has
-none, and the `host-identity` job is gone. Before the nightly mode, every push
-to main runs native correctness on the landed commit. In the nightly mode it
-runs none in the daytime, and has no `Integration qualification`
-context: its state's nightly run qualifies it on the 9700X, recorded in the
-ledger.
+A push to main runs nothing (#1430): its candidate's run qualified it before
+it landed, and its state's nightly run qualifies it on the 9700X, recorded in
+the ledger. Before the queue, a push reused no pull request's native
+qualification (that run has none, and the `host-identity` job is gone); before
+the nightly mode it ran native correctness on the landed commit, and in it
+none in the daytime.
 
 Draft and ready PRs alike run hosted correctness and never queue the 9700X
 (#2055). Both `ready_for_review` and `converted_to_draft` still trigger the
@@ -384,7 +380,8 @@ Products stay in their run. No cache holds one. A shard downloads only
 from its own run (no `run-id` or token), by the name and SHA-256 that its
 run's build job gave, and the identity binds the product to the repository,
 run, commit and tree. A pull request's run builds and tests its own products, a
-push or dispatch on main builds its own, and no run can use another's. The
+merge-queue candidate or a dispatch builds its own, and no run can use
+another's. The
 selector's row policy (`changes_row_policy`) pins this with counterexamples.
 
 A failed build fails its row's shards at their first step, and a cancelled one
@@ -423,12 +420,12 @@ its shards, which one pool of draws holds:
 
 - A pull request: the plain configuration alone (`none`, 4 items), its second
   row, in place of `native`.
-- The runs that run the sanitizer rows (full dispatches, the nightly
-  snapshot's deferred run, pushes before the nightly mode): the plain and the
-  three sanitizer configurations (`none address thread memory`, 16 items),
-  beside the `native` rows.
-- Elsewhere (pushes in the nightly mode, nightly backlog runs and admitted
-  snapshot runs, the `plain` scope): no vector row. Their `native` rows stay,
+- The runs that run the sanitizer rows (merge-queue candidates, full
+  dispatches, the nightly snapshot's deferred run; before the queue, pushes
+  before the nightly mode): the plain and the three sanitizer configurations
+  (`none address thread memory`, 16 items), beside the `native` rows.
+- Elsewhere (nightly backlog runs and admitted snapshot runs, the `plain`
+  scope; before the queue, pushes in the nightly mode): no vector row. Their `native` rows stay,
   and `tools/ci/nightly.c` counts the plain rows' shards by their names, which
   the vector row's jobs don't have, so its jobs never count.
 
@@ -619,7 +616,8 @@ classes stay
 separate:
 
 - PR;
-- main push;
+- main push (before the merge queue; merge-queue candidates have their own
+  section, `timings --queue`);
 - nightly targeted: backlog dispatches, recognized by their run name;
 - full: the daily run, full dispatches and the nightly snapshot's run.
 
@@ -672,12 +670,27 @@ GitHub's merge queue (#1430) tests each queued pull request on a temporary
 `gh-readonly-queue/main/...` branch: main and the entries ahead of it,
 merged with the pull request. It merges only what passed. `9700x.yml` runs
 on that branch's `merge_group` event (type `checks_requested`, main, no path
-filter), so a candidate reports both required contexts. Nothing starts one
-until a ruleset turns the queue on. Until then this path is inert, and pushes
-to main keep their own hosted rows.
+filter), so a candidate reports both required contexts, `Integration
+qualification` and `Measurement storage policy`. Main's ruleset (25225502)
+requires them and the queue, with no bypass actors:
 
-Once the queue is required, a candidate's run is the only per-merge
-correctness run (the owner's decision on 2026-11-10). It works like this:
+- merge commits, the method main keeps;
+- only candidates that pass merge (`ALLGREEN`), one at a time;
+- at most 4 candidates build at once;
+- a 180-minute limit for the required checks to report.
+
+The build limit comes from the drill's measured demand. A passing candidate
+runs 100 jobs and 912 runner-minutes over a 37-minute critical path, peaks at
+72 concurrent jobs during the vector draw, and holds about 45 until minute 21.
+So four builds hold about 180 of the account's roughly 360 concurrent jobs,
+which leaves the rest for pull requests, and merge about 6.5 candidates an hour
+(156 a day). That covers the peak day of 135 merges, though not a burst like
+11 November's, when 102 merged in four and a half hours. Then the queue grows,
+and each entry waits its turn. Merge limits don't combine builds, so raising
+the batch size saves nothing.
+
+A candidate's run is the only per-merge correctness run (the owner's decision
+on 2026-11-10). It works like this:
 
 - **Scope.** The full hosted contract runs on the candidate's exact commit:
   - both host architectures, each with its plain, ASan, TSan and MSan O3
@@ -782,9 +795,9 @@ pushes run nothing, `selfhost.yml`'s daily schedule keeps the caches fresh,
 since it calls `prepare-hosted-tools.yml`. The apt closure's key changes with
 each runner image.
 
-Still to come, tracked in #1430: the ruleset that requires the queue, and the
-change that removes the checking workflows' `push` triggers. The two land
-together, and AGENTS.md's main-push sentence changes with them.
+The checking workflows have no `push` trigger: `9700x.yml`, and the auxiliary
+workflows a candidate calls. `publish-hosted-inputs.yml` keeps its trigger,
+since it publishes rather than checks.
 
 ## Nightly main measurements
 
@@ -794,14 +807,16 @@ Main's first-parent states (#1207) are measured on the 9700X between 02:00 and
 them is. Each state needs **targeted** coverage: the selector's choice against
 its own first parent, with native correctness first in the same job. A state
 whose first-parent change is documentation alone needs no targeted measurements,
-and the ledger says so; its main push still runs its own hosted rows.
+and the ledger says so; its merge-queue candidate ran the full hosted contract
+on it.
 The cycle's snapshot also needs **full** coverage, which adds every benchmark,
 the isolated samples and the oracle-cache audit. Plain coverage, every plain
 run as pushes measured before the nightly mode, satisfies neither.
 
 A state is measured behind its own plain hosted rows (both architectures,
-every shard), the gate a pull request needs. Its sanitizer and fuzz results
-come from the snapshot's daily run and, before the nightly mode, its pushes. They are
+every shard), the gate a pull request needs: its merge-queue candidate's run,
+whose sanitizer and fuzz results are the state's too. Before the queue they
+came from the snapshot's daily run and, before the nightly mode, its pushes. They are
 reported, but they don't block measurement, which was the owner's choice on
 2026-11-03.
 
@@ -1068,7 +1083,8 @@ shows when they don't.
 **Rollout.** The switch is `vars.BUSTER_NIGHTLY`. Until it is `on`, scheduled
 coordinator runs are dry runs: they harvest, plan and report, and pushes measure
 every plain run. A dispatch with `mode: run` can try the coordinator first. With
-the switch on, pushes run hosted rows alone and keep off the 9700X, and the
+the switch on, pushes ran hosted rows alone and kept off the 9700X (since
+#1430 they run nothing), and the
 coordinator dispatches their native correctness and targeted measurements into
 the window. `9700x.yml`'s daily `23 7 * * *` run is removed (2026-11-05): the
 snapshot's comprehensive run is the daily run, so with the switch off there is
@@ -1090,8 +1106,9 @@ Instrumentation is applied to every build unit and the final link; it cannot
 be combined with the private baseline runtime used for QEMU smoke tests.
 `BUSTER_SANITIZER_OPTIMIZATION=1|2|3` remains available for explicitly selected
 diagnostic builds. The hosted matrix runs at `-O3` throughout, without separate
-`-O1` sanitizer rows. Its sanitizer rows and the fuzz campaigns run on pushes
-to main and on the daily and dispatched runs, not on pull requests, whose
+`-O1` sanitizer rows. Its sanitizer rows and the fuzz campaigns run on
+merge-queue candidates and on the daily and dispatched runs, not on pull
+requests, whose
 hosted jobs are the plain builds of both architectures.
 The sanitizer rows' job limit is 360 minutes and each command's is 7200 seconds:
 the driver's in-process checks run the whole compiler per fixture and take tens
@@ -1244,8 +1261,8 @@ header reader. It is an actual replacement for the default frontend callback.
 Do not retain borrowed input pointers after the callback returns.
 
 Hosted CI runs bounded frontend and ELF campaigns with seed 133, original C
-seeds and newly compiled original ELF fixtures. Main pushes run 10,000
-inputs per campaign; scheduled/manual runs use 100,000. A third, deliberately
+seeds and newly compiled original ELF fixtures. Merge-queue candidates (main
+pushes before the queue) run 10,000 inputs per campaign; scheduled/manual runs use 100,000. A third, deliberately
 crashing entry proves the override, saved crash bytes and exact-input replay.
 All three jobs retain their corpora, crash inputs, logs, compile commands and
 matching executable, and on those runs must pass before hardware qualification can start.

@@ -6,30 +6,28 @@ requirements. [Command index](README.md).
 
 ## Every main revision
 
-Every merge or direct push to `main`, including documentation/Markdown-only
-changes, starts hosted correctness against that push's `github.sha` (#1271).
-In the nightly mode it runs the plain rows only (#2057, the owner's choice on
-2026-11-10); the sanitizer rows and fuzz campaigns run on the nightly
-snapshot's daily run, until the merge queue (#1430) runs the complete suite
-before each merge and pushes run no checks. Before the nightly mode a push runs
-the full matrix and fuzzing. Main pushes use a separate run-id concurrency
-group each, so rapid merges do not replace pending main runs. PRs still cancel
-only their own superseded runs; the hardware lock still serializes the 9700X.
+Every change reaches `main` through the merge queue (#1430). The queue's
+candidate runs the complete hosted contract on its exact commit before it
+merges: every row and sanitizer, the vector pool, the fuzz campaigns and the
+auxiliary workflows its change touches. Documentation-only changes run it too.
+A push to `main` runs no checks (the owner's decision on 2026-11-10). Each
+candidate takes its own run-id concurrency group. PRs still cancel only their
+own superseded runs, and the hardware lock still serializes the 9700X.
 
-Do not add main-push path filters, treat a successful PR run or Measurement
-storage as a push's own hosted rows, or let native-evidence reuse suppress
-them. `changes --self-test` checks the trigger, concurrency and hosted-scope
-policy with counterexamples; `tests/ci/nightly.sh` checks that every push's
-evidence keeps `hosted=run` and no hosted reuse source, with `scope=plain` in
-the nightly mode and `scope=full` before it, including documentation-only
-pushes.
+Do not add a push trigger or a candidate path filter. Do not treat a
+successful PR run or Measurement storage as a candidate's own hosted rows, and
+don't let native-evidence reuse suppress them. `changes --self-test` checks the
+triggers, concurrency and hosted-scope policy with counterexamples, a restored
+push trigger among them. `tests/ci/nightly.sh` checks the candidates' evidence
+and coverage. Before the queue, every push ran its own hosted rows (#1271):
+the plain rows in the nightly mode (#2057), and the full matrix before it.
 
 ## The merge queue
 
-`9700x.yml` also runs on `merge_group` (`checks_requested`, main, no path
-filter), the merge queue's candidates (#1430). It is inert until a ruleset
-turns the queue on; the ruleset, removing the `push` triggers and the AGENTS.md
-rule change together, after the capacity gate and the owner's decision.
+`9700x.yml` runs on `merge_group` (`checks_requested`, main, no path filter),
+the merge queue's candidates (#1430). Main's ruleset requires the queue with no
+bypass, and the checking workflows have no `push` trigger: a push to main runs
+nothing, since the queue tested it before it landed.
 
 - **What a candidate runs.** The full hosted contract on its exact commit,
   documentation alone included:
@@ -82,8 +80,8 @@ rule change together, after the capacity gate and the owner's decision.
   shared slot, a skipped selector or coverage step, an auxiliary workflow never
   called or not awaited, and its list unchecked.
 
-[The merge queue](../ci.md#the-merge-queue) has the details and what is still
-to come.
+[The merge queue](../ci.md#the-merge-queue) has the details and the ruleset's
+settings.
 
 ## Sharing the 9700X
 
@@ -120,16 +118,17 @@ TSan/MSan `main.c` compiles) run in its shard 1.
 The repository syntax check retains each build's sanitizer feature flags and
 predefines, while excluding its exact host-only detector and frame controls
 (#1423). The compiler executing the check remains instrumented.
-On the daily and dispatched runs, the nightly snapshot's daily run and pushes
-before the nightly mode (not on pull requests, which they would hold up for over
-an hour, nor on pushes in the nightly mode, #2057), each host architecture also runs the
+On merge-queue candidates and the daily and dispatched runs, the nightly
+snapshot's daily run among them (not on pull requests, which they would hold up
+for over an hour; before the queue, on pushes before the nightly mode), each
+host architecture also runs the
 inventory under `BUSTER_SANITIZER=address|thread|memory`, but the
 compiler's own `main.c` checking comparison in the TSan and MSan rows, whose
 measured memory (docs/ci.md) exceeds a hosted runner's; their `-c` compiles run
 in a separate step after the suite. ASan combines UBSan, bounds,
 leak and stack-lifetime checks; TSan and MSan use separate builds.
 Standalone `BUSTER_SANITIZER=undefined` remains available for manual diagnosis,
-but no longer repeats the full suite on every main push. Diagnostic
+but no longer repeats the full suite on every candidate. Diagnostic
 builds default to `-O3`, frames and line information, with fatal symbolized detector
 proofs and child-report auditing. `BUSTER_FUZZ_AVAILABLE=1` adds in-process
 coverage and the `--fuzz` driver override; `BUSTER_FUZZ_ENTRY=FILE.c` replaces
@@ -525,11 +524,11 @@ bash tests/ci/rerun.sh
 Git glue, and [the CI guide](../../docs/ci.md#nightly-main-measurements) has
 the policy. In short:
 
-- Every `9700x.yml` run has an `evidence` job, which must succeed. A push to
-  main is admitted and runs its own native correctness: it reuses nothing
-  from its pull request, whose 9700X job skips native correctness (#1272).
-  A merge-queue candidate is never admitted. When main is fast-forwarded to its
-  commit, its plain rows are that state's (#1430).
+- Every `9700x.yml` run has an `evidence` job, which must succeed. A
+  merge-queue candidate is never admitted. Main is fast-forwarded to its
+  commit, so its plain rows are that state's (#1430). A push to main runs
+  nothing; before the queue it was admitted (deferred in the nightly mode)
+  and reused nothing from its pull request (#1272).
   A nightly dispatch's `evidence` job checks that the commit is a first-parent state of
   main, may reuse the commit's own earlier plain hosted rows (a push's, a
   dispatch's or a merge-queue candidate's), and enforces
