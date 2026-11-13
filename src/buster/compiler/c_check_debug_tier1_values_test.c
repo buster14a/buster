@@ -217,6 +217,15 @@ static const char check_debug_tier1_values_source[] =
     "    printf(\"T1-ASSIGN-END %d %d\\n\",value,total);\n"
     "    return total^value;\n"
     "}\n"
+    "struct DebugNamed { long a[5]; };\n"
+    "__attribute__((noinline)) struct DebugNamed t1_named(int n)\n"
+    "{\n"
+    "    struct DebugNamed named;\n"
+    "    for (int i=0;i<5;i++) named.a[i]=n+i;\n"
+    "    t1_checkpoint(13);\n"
+    "    printf(\"T1-NAMED %ld %ld\\n\",named.a[0],named.a[4]);\n"
+    "    return named;\n"
+    "}\n"
     "int main(void)\n"
     "{\n"
     "    int failed=t1_values(10);\n"
@@ -233,6 +242,8 @@ static const char check_debug_tier1_values_source[] =
     "    failed|=t1_branch(1,10)!=33;\n"
     "    failed|=t1_branch(0,10)!=48;\n"
     "    failed|=t1_assignment_loop(3,3)!=51;\n"
+    "    struct DebugNamed named=t1_named(5);\n"
+    "    failed|=named.a[1]!=6;\n"
     "    if (!failed) puts(\"T1-RUN-OK\");\n"
     "    return failed;\n"
     "}\n";
@@ -289,6 +300,7 @@ static const char* const check_debug_tier1_values_expected[] = {
     "T1-ASSIGN-LOOP 1 13 6",
     "T1-ASSIGN-LOOP 2 28 19",
     "T1-ASSIGN-END 28 47",
+    "T1-NAMED 5 9",
 };
 
 // Unlike the short-command helper, a checked command file neither drops commands at an argv limit nor accepts a
@@ -405,6 +417,10 @@ static const char check_debug_tier1_values_script[] =
     "continue\n"
     "up\n"
     "t1-read printf \"GDB-T1-ASSIGN-END %d %d\\n\",value,total\n"
+    "down\n"
+    "continue\n"
+    "up\n"
+    "t1-read printf \"GDB-T1-NAMED %ld %ld\\n\",named.a[0],named.a[4]\n"
     "down\n"
     "continue\n"
     "printf \"GDB-T1-DONE\\n\"\n";

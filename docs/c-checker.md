@@ -2420,6 +2420,33 @@ What the lowering covers past scalars (#145's programs):
   argument and callee calls retain their own result objects. Assignments
   continue to evaluate into a separate result and copy afterwards. This is a
   code-shape change; the #1376 measurements above do not measure this change.
+  A function that returns a struct or union through the hidden pointer builds
+  its named result there (#1375), as clang's NRVO does at `-O0`: an automatic
+  object of the body's own (no parameter), of the result's type and size,
+  aligned no more than the result's canonical type (the hidden pointer's
+  alignment), with no volatile part, that every `return` names whole (a
+  compound literal's object too, which the return evaluates). A return without
+  a value, or the end that falls off, takes any. `check_lower_named_result`
+  finds it before the statements, from the body's controls 16 kinds at a time
+  on the vector path (four registers of four controls, two `vpermt2d`) with a
+  scalar twin; after them, `check_lower_named_rewrite` turns each
+  `LOCAL_ADDRESS` of it into a `LOCAL` of the hidden pointer, which pushes the
+  same U64, and the object becomes an unreferenced value local with no frame
+  slot. Its returns copy nothing, so its fields' stores are never reloaded
+  by a copy's wider loads, which they can't forward to. The caller's storage is unaliased during the call (a fresh
+  object, #1549's destination, or clang's `sret`, which is `noalias`), so no
+  other access sees the object move. A return with cleanups whose value is a
+  named return value as clang's Sema decides it (`check_control_named`,
+  below) comes after its cleanups, which write the object in place as clang's
+  code does; a return that keeps its value first (`CHECK_CONTROL_RESULT`), a
+  musttail one, a second object, a parameter, a global, a member or a
+  dereference keep the copy, as does a body that names a returns-twice
+  function. The object's own call initializer returns into an object of its
+  own (`call_result_objects` names a frame object, not the hidden pointer's
+  target) and is copied in, which costs the same copy that #1549's
+  destination and the return's would. Its debug location is the hidden
+  pointer's, dereferenced (`CheckDebugBinding.indirect`, as a VLA's is), by
+  both tiers. Register returns keep their path.
   Above 128 bytes of explicit constant payload, dense nonvolatile byte-aligned numeric
   plans use a readonly byte image and one call to the target C library's
   `memcpy` (#598). The call returns the destination and discards it, which is the
@@ -4084,7 +4111,8 @@ What the lowering covers past scalars (#145's programs):
   or where the hidden pointer points), then the cleanups, then returns it
   (`RETURN` of target `BUSTER_CHECK_CONTROL_KEPT`). But a named return value,
   which clang's code builds in the return slot (Sema's NRVO), is returned
-  after the cleanups, which may write it: a struct or union variable of the
+  after the cleanups, which may write it (and which the lowering builds in
+  place when every return names it, #1375): a struct or union variable of the
   function's result type, automatic, neither volatile nor aligned past its
   type, named alone (in parentheses or not), with every return after its
   declaration in its scope naming it too (`check_control_named`: what
