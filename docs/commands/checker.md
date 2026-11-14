@@ -86,7 +86,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   --attribute-recovery-only | --malformed-calls-only | --assert-bool-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
-  `check_test_driver_named_ucns`; with
+  `check_test_driver_named_ucns`; a generated unit of about 180,000 tokens as
+  a process of its own under an `RLIMIT_AS` of 768 MiB past the executable's
+  image, about 1 GiB for Release, which it must compile, and of 32 MiB past
+  it, where it must fail with a fatal error that names the limit and no error
+  at a line of the unit, #1118, `check_test_driver_address_limit`; with
   `--lazy-system-headers`, only the checks that pass the driver
   `-flazy-system-headers`, including the real system-header lazy-policy
   fixtures and eager/lazy object comparisons, since the others run the same either way, and
