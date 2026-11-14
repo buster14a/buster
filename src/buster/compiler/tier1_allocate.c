@@ -275,7 +275,8 @@ static bool tier1_allocation_clobbered(const Tier1AllocationInput* input, uint32
 // The register a hinted value holds last, or UINT8_MAX: `last` is null without hint_values. With hint_intervals, `last`'s
 // value_count + 1 bytes are followed by each interval's opening register, which the scans and the coloring write as
 // each interval starts, then by each one's closing register, which they write as it ends (#2553); either is
-// BUSTER_TIER1_ALLOCATE_MEMORY_HINT where the interval had no register there.
+// BUSTER_TIER1_ALLOCATE_MEMORY_HINT where the interval had no register there. Then come value_count + 1 bytes of each
+// value's first register, which the scan with required uses writes (tier1_allocation_firsts, #2768).
 static uint8_t tier1_allocation_value_hint(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval)
 {
     const uint32_t value = last != 0 ? columns->hint_values[interval] : UINT32_MAX;
@@ -315,10 +316,18 @@ static void tier1_allocation_note_closing(const Tier1AllocationInput* columns, u
     }
 }
 
-// The hint bytes `last` holds: each value's, then each interval's opening and closing register with hint_intervals.
+// Each value's first register in the scan with required uses, UINT8_MAX before it has one (#2768): the register its
+// value's other paths most likely hold it in, which a range that waits in its slot takes where it is free.
+static uint8_t* tier1_allocation_firsts(const Tier1AllocationInput* columns, uint8_t* last)
+{
+    return last + (uint64_t)columns->value_count + 1 + (columns->hint_intervals != 0 ? 2 * (uint64_t)columns->count : 0);
+}
+
+// The hint bytes `last` holds: each value's, then each interval's opening and closing register with hint_intervals, then
+// each value's first register.
 static uint64_t tier1_allocation_hint_bytes(const Tier1AllocationInput* columns)
 {
-    return (uint64_t)columns->value_count + 1 + (columns->hint_intervals != 0 ? 2 * (uint64_t)columns->count : 0);
+    return 2 * ((uint64_t)columns->value_count + 1) + (columns->hint_intervals != 0 ? 2 * (uint64_t)columns->count : 0);
 }
 
 static inline __attribute__((always_inline)) bool tier1_allocate_scan(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* allowed, uint8_t* regs, uint32_t* split, uint8_t* kinds, uint8_t* last)
@@ -646,7 +655,15 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             // disptab, which every dispatch recomputed.
             const uint32_t named = last != 0 && columns.hint_intervals != 0 ? columns.hint_intervals[interval] : UINT32_MAX;
             const bool rests = follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT && named != UINT32_MAX && (named & BUSTER_TIER1_ALLOCATE_HINT_EXIT) == 0;
-            if (idle && (!recomputed || open == 0 || rests))
+            // A range that continues its value (hinted to its own value: a block's entry, not a phi's definition) where the
+            // value was last in its slot waits there for its next required use, as an unused one rests (#2768), unless its
+            // value's first register is free: whatever register was free at the block's start, which edges then reloaded
+            // the value into, held it to the blocks after, where the value's paths meet in the first one. Lua's
+            // OP_GETTABUP reloaded pc into i's register after its call, and the fetch swapped the two through r11.
+            const uint8_t first = follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT ? tier1_allocation_firsts(&columns, last)[columns.values[interval]] : UINT8_MAX;
+            const bool settled = first < 32 && ((open >> first) & 1) != 0;
+            const bool waits = follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT && !use_event && !required && !recomputed && !settled && columns.hint_values[interval] == columns.values[interval];
+            if ((idle && (!recomputed || open == 0 || rests)) || waits)
             {
             }
             else if (open != 0 || (free != 0 && required))
@@ -661,6 +678,10 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
                 else if (follow < 32 && ((pool >> follow) & 1) != 0)
                 {
                     chosen = follow;
+                }
+                else if (first < 32 && ((pool >> first) & 1) != 0)
+                {
+                    chosen = first;
                 }
             }
             else
@@ -715,7 +736,9 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
                 occupied |= 1u << chosen;
                 if (last != 0)
                 {
+                    uint8_t* firsts = tier1_allocation_firsts(&columns, last);
                     last[columns.values[interval]] = (uint8_t)chosen;
+                    firsts[columns.values[interval]] = firsts[columns.values[interval]] == UINT8_MAX ? (uint8_t)chosen : firsts[columns.values[interval]];
                 }
             }
             else if (last != 0 && !use_event && !recomputed)

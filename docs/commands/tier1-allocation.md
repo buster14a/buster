@@ -22,11 +22,11 @@ requirements. [Command index](README.md).
   rematerialization. Its clobbers (#2574), where a call evicts a recomputable
   value from a caller-saved register, have their traces, refusals and random
   properties in `tier1_allocate_clobbers_test.c`, and a recipe that gives its
-register to a value its hint names (#2618) has its traces in
-`tier1_allocate_hints_test.c`, as does a range's alternate (#2734:
-`alternate_intervals`, taken where its interval's value still holds the
-register and it is free), which the random inputs and their reference model
-too; `test-tier1-emit` checks
+  register to a value its hint names (#2618), a range that waits in its value's
+  slot for its next required use (#2768), and a range's alternate (#2734:
+  `alternate_intervals`, taken where its interval's value still holds the
+  register and it is free), which the random inputs and their reference model
+  too, have their traces in `tier1_allocate_hints_test.c`; `test-tier1-emit` checks
   which values the CFG consumer finds read on every iteration of their loops
   (`tier1_hot_recipes_test.c`). Use the shared 9700X lock per build/test/measurement and
   CPU 2 for timing.
