@@ -3439,6 +3439,50 @@ subnormals among them, at x86-64, x86-64-v2, x86-64-v3 and x86-64-v4
 `tier1-extremes` fixture runs them by `--tier1` at x86-64, x86-64-v3 and
 x86-64-v4.
 
+**Memory functions, absolute values and signs** (#1373). The reader marks a
+plain call of `memcpy`, `memmove`, `memset`, `abs`, `labs`, `llabs`, `fabs`,
+`fabsf`, `fabsl`, `copysign`, `copysignf` and `copysignl` by the same rules as
+`fmax`'s (`cbuiltin_library_plain_folds`' rows of no fold, each with its
+`computed` kind, `CBuiltinLibraryComputed`), and the lowering computes it in
+the call's place (`check_program_call_computed`, `check_lower_library_computed`)
+at both tiers, as clang -O0's code computes `llvm.memcpy`, `llvm.memmove`,
+`llvm.abs`, `llvm.fabs` and `llvm.copysign`; such a call references no
+function, and an asm label, `-fno-builtin`, `-fno-builtin-NAME`,
+`-ffreestanding` and `no_builtin` keep it a call:
+
+- `memcpy`, `memmove` and `memset` of a constant size of at most 32 bytes
+  (`BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES`): `memcpy` by a `COPY` of the size,
+  as `__builtin_memcpy`'s recipe copies; `memmove` by pieces of 8 bytes, the
+  last ending at the size (below 8 bytes, the widest that fits and one ending
+  at the size), all loaded before any is stored, so that ranges that overlap
+  in either direction move right; `memset` by stores of those pieces of its
+  value's byte repeated, a constant value's computed by the compiler. The
+  value is the destination. A larger size, or one that is no constant, calls
+  the library's function, as clang's code calls `memcpy` past 32 bytes.
+  clang's `memmove` stores up to 8 of its widest vectors inline (128 bytes at
+  x86-64, 256 at x86-64-v3) and its `memset` calls the library whatever the
+  size, so this code calls `memmove` of 33 to 128 bytes where clang's doesn't,
+  and stores a small `memset`'s bytes where clang's code calls it.
+- `abs`, `labs` and `llabs`, and their `__builtin_` forms, which were calls
+  of the library's functions: the argument's sign spread by an arithmetic
+  shift, s, then `(x ^ s) - s`, where clang's code has `neg` and `cmovns`.
+- `fabs`, `fabsf`, `fabsl`, `copysign`, `copysignf`, `copysignl` and
+  `__builtin_copysignl`: the first argument's bits in an object of its own,
+  its sign bit cleared or replaced by the second's, as `__builtin_fabs`'s
+  recipe clears it; a `long double`'s sign is bit 15 of its exponent word,
+  which no x87 operation reads, so that a signaling NaN stays one, as clang's
+  `fabs` and `fchs` leave it. `__builtin_copysign` and `__builtin_copysignf`
+  keep their math helper.
+
+`memcmp` stays a call, as clang's code makes it. The node machine and its
+census leave a computed call to the pipeline, and take a marked one that stays a
+call as any call (`check_program_call_library`). `test-checker
+--program-library`'s `library-computed-inline` program runs each size to 33,
+overlapping both ways, and the signs of the harness's special values against
+clang -O0's build, and `test-checker-driver`'s library runs define `memcpy`,
+`memmove`, `abs`, `labs`, `fabs` and `copysign` in the unit, counting their
+calls, which must be clang's under each option.
+
 **Folds.** The rows with attribute `E` that clang's constant evaluator folds,
 this folds too, in constant contexts (static initializers, `_Static_assert`,
 array bounds, enumerators and case labels) and in code, where clang folds a

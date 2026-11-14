@@ -2514,9 +2514,17 @@ What the lowering covers past scalars (#145's programs):
   function. The object's own call initializer returns into an object of its
   own (`call_result_objects` names a frame object, not the hidden pointer's
   target) and is copied in, which costs the same copy that #1549's
-  destination and the return's would. Its debug location is the hidden
+  destination and the return's would; passing the hidden pointer down to it,
+  and to `return f(...);`, is #2684. Its debug location is the hidden
   pointer's, dereferenced (`CheckDebugBinding.indirect`, as a VLA's is), by
-  both tiers. Register returns keep their path.
+  both tiers. Register returns keep their path. On the 9700X
+  ([record](https://github.com/buster14a/buster-performance/tree/e8c1b78f2c67b5917f7ef19d999aa61372d4e795/docs/measurements/named-results-1375-2026-11-13)),
+  #1375's 64-byte struct returned in a loop takes 829.5 → 426.5 M cycles in
+  Tier 0 and 334.6 → 196.4 M in Tier 1 (clang `-O0`: 513.3 M), its loads
+  that couldn't forward falling from 4 a call to none in Tier 0; its 24-byte
+  return takes 382.6 → 247.0 and 251.0 → 203.9 (clang `-O0`: 200.4). `-c`'s
+  instructions on sqlite3.c and the compiler's `main.c` move by 0.024% at
+  most, in either tier.
   Above 128 bytes of explicit constant payload, dense nonvolatile byte-aligned numeric
   plans use a readonly byte image and one call to the target C library's
   `memcpy` (#598). The call returns the destination and discards it, which is the

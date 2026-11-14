@@ -98,8 +98,12 @@ requirements. [Command index](README.md).
   folds them (`c_check_builtin_library.c`), and the plain names (`sin`,
   `strlen`) are builtins as `-fno-builtin`, `-fno-builtin-NAME` and
   `-ffreestanding` say, declared implicitly with their prototypes as clang
-  declares them; `test-checker --program-library` and `test-checker-driver`
-  check them against clang (the guide's "Library builtins"). The plain table is
+  declares them; a plain call of `memcpy`, `memmove` or `memset` of a constant
+  size of at most 32 bytes, of `abs`, `labs` or `llabs`, or of `fabs`,
+  `copysign` or their kin is computed in its place, as clang -O0's code
+  computes its intrinsic (#1373); `test-checker --program-library` and
+  `test-checker-driver` check them against clang (the guide's "Library
+  builtins"). The plain table is
   pinned to Clang 23.1.4's official build, CI's reference: its GNU library
   builtins include `strlcat` and `strlcpy`, as every upstream 23.x release's
   do. Debian's and Ubuntu's clang packages (apt.llvm.org's too, which cloud

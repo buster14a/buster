@@ -42,7 +42,15 @@ requirements. [Command index](README.md).
   executables to be the same bytes (#1395, #2606). Compilation must
   succeed with every emitted function compiled by Tier 1; a refusal or Tier 0
   fallback fails. Native builds and executions follow the interpreter children
-  sequentially, so the command keeps the same CPU grant.
+  sequentially, so the command keeps the same CPU grant. Given more than one
+  CPU (`BUSTER_PARALLEL_CPUS`, `test_process_cpus`), the files and generated
+  programs run as parts (`test_process.c`) on the command's CPUs as tokens in
+  a pipe, as make's jobserver keeps them: a part holds one from its start to
+  its end, and its forms run at once on as many more as it can borrow, so that
+  a long program's forms spread over the CPUs the others leave at the end. The
+  parts' lines come in the items' order (#2658): the c-testsuite comparison,
+  one file at a time, kept 0.70 of its 4 CPUs busy in every hosted sanitizer
+  row.
   `--typed` adds the production typed interpreter as a fourth form. It runs the
   retained typed stream directly; no IR is executed for that form. The source
   suite and random-program CI commands enable it, including the subprocess

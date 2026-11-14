@@ -137,7 +137,10 @@ indices and intermediate offsets, self edges, empty edge arrays, and a
 16,384-way dispatch and join. Existing allocation fixtures cover phi moves,
 critical edges, loops and all register classes through both allocation paths.
 These source changes remove the three degree-squared searches from #1356;
-the whole Tier 1 pipeline has other costs. Locked 9700X scaling measurements
-on the issue's switch and label-table inputs remain necessary before claiming
-its wall-time acceptance or a measured speedup.
+the whole Tier 1 pipeline has other costs. On the 9700X, main `b7a95eed`'s
+`tier0` stage under `--tier1 --tier1-strict` takes 5.2, 10.4 and 19.3 ms for
+the issue's 4,000-, 8,000- and 16,000-case switch and label table (about
+1.3 µs per case; 1.85x to 1.99x per doubling, against the issue's 2.9x to
+3.1x). The generator, recipe and raw results are in
+[buster-performance's #1356 record](https://github.com/buster14a/buster-performance/tree/8640815ecb5a3b0f9483d88e530cd78540d55dfa/docs/measurements/tier1-cfg-1356/results-2026-11-13-claude).
 

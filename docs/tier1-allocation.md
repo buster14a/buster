@@ -1120,6 +1120,23 @@ left out (`tier1_emit_cfg_dead_definition`, decided from the last node back):
 the C front end's address chains define each link right before the allocator
 evicts it, a write nothing read.
 
+A recomputed value's definition needs no register at all (#2618): its own use
+isn't required, so where values read sooner hold every register the allocator
+gives it none, the cheapest choice, and the recipe's fragment starts at the
+definition, which is left out too. While that use was required, the
+assignment found no register for it and failed, and the second, with every
+definition freed, spilled a value around it (`tier1_dropped_test.c`'s `g`). In
+a `sqlite3VdbeExec` handler run 288,561 times on speedtest1, two frame
+objects' addresses no longer take registers, and a value in `r14` no longer
+spills and reloads around them: four instructions fewer a run. By callgrind at main
+`b7a95eed` (#1189's `gap.c`, #1217's inputs), speedtest1 runs 1.50 M fewer
+instructions: `sqlite3VdbeExec` −0.71 M (0.29 M fewer `lea`s, 0.39 M fewer
+moves), `sqlite3Atoi64` −0.23 M, `sqlite3_str_vappendf` −0.21 M,
+`pageFreeArray` −0.13 M; `instrFunc` +0.17 M, its loop's spills moved from one
+value to another. Lua's scripts run the same instructions. The emitter accepts
+a definition whose first fragment is its recipe's for a recomputed value alone,
+and records no register for it.
+
 The same holds where control enters a block (`tier1_cfg_entry_unread`, #1217):
 a recomputed value whose register fragment at the block's start serves no use
 before its next fragment, the recipe's, takes over, before the block's last

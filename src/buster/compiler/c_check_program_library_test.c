@@ -65,12 +65,19 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
         const CBuiltinLibraryPlainFold* fold = cbuiltin_library_plain_folds + f;
         const uint32_t length = (uint32_t)strlen(fold->name);
         const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup(fold->name, length);
-        // A fold's row has attribute E; an inline one's (#967) none, and its library builtin is the same function's.
+        // A fold's row has attribute E; a computed one's (#967, #1373) none, or C++'s constant evaluation's alone (memcpy's and
+        // memmove's), and its library builtin is its __builtin_ form's where the list has that (__builtin_fmax's,
+        // __builtin_abs's), none where that form is another family's (__builtin_fabs's, __builtin_memcpy's).
         const bool inline_call = fold->fold == CBUILTIN_LIBRARY_FOLD_NONE;
-        folds &= info != NULL && strcmp(info->encoding, fold->prototype) == 0 && info->constant_evaluable_attribute != inline_call &&
+        const bool cplusplus = fold->computed == CBUILTIN_LIBRARY_COMPUTED_COPY || fold->computed == CBUILTIN_LIBRARY_COMPUTED_MOVE;
+        char builtin[64];
+        const int builtin_length = snprintf(builtin, sizeof(builtin), "__builtin_%s", fold->name);
+        const CBuiltinLibraryId own = cbuiltin_library_id(builtin, (uint32_t)builtin_length);
+        folds &= info != NULL && strcmp(info->encoding, fold->prototype) == 0 &&
+                 (inline_call ? !info->constant_evaluable_attribute || cplusplus : info->constant_evaluable_attribute) &&
                  cbuiltin_library_plain(fold->name, length) != NULL && cbuiltin_library_plain_fold(fold->name, length) == f &&
-                 (inline_call ? fold->library < CBUILTIN_LIBRARY_COUNT && strcmp(cbuiltin_library_names[fold->library], fold->name) == 0 :
-                                fold->library == CBUILTIN_LIBRARY_COUNT);
+                 (inline_call ? fold->computed != CBUILTIN_LIBRARY_COMPUTED_NONE && fold->library == own :
+                                fold->library == CBUILTIN_LIBRARY_COUNT && fold->computed == CBUILTIN_LIBRARY_COMPUTED_NONE);
     }
     // Every fold of a listed call is of a row with attribute E, which clang's evaluator folds.
     for (uint32_t l = 0; l < CBUILTIN_LIBRARY_COUNT; l += 1)
@@ -215,177 +222,11 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
 // initializer, _Static_assert, an array's size, an enumerator and a case label of each kind of fold; a const array's
 // string, a string at an offset and a plain declaration's call; and their refusals: a builtin clang doesn't fold, a
 // mutable array, a declaration of another prototype, and a static declaration, which isn't the builtin.
-static const CheckSourceFixture check_library_source_fixtures[] =
-{
-    {
-        .name = "library folds: comparisons and lengths in constant contexts",
-        .source = "static const unsigned long a = __builtin_strlen(\"abcd\");static const int b = __builtin_strcmp(\"a\", \"b\");\n"
-                  "_Static_assert(__builtin_strcmp(\"a\", \"b\") < 0 && __builtin_strcmp(\"b\", \"b\") == 0, \"strcmp\");\n"
-                  "_Static_assert(__builtin_strncmp(\"abc\", \"abd\", 2) == 0 && __builtin_strncmp(\"ab\", \"abc\", 5) == -1, \"strncmp\");\n"
-                  "_Static_assert(__builtin_memcmp(\"ab\\0c\", \"ab\\0d\", 4) == -1 && __builtin_bcmp(\"ab\", \"ab\", 2) == 0, \"memcmp\");\n"
-                  "_Static_assert(__builtin_strcmp(\"\\x80\", \"\\x01\") == 1, \"unsigned bytes\");\n"
-                  "_Static_assert(__builtin_wcslen(L\"wide\") == 4 && __builtin_wcscmp(L\"\\x80000000\", L\"\\x01\") == -1, \"wide\");\n"
-                  "_Static_assert(__builtin_wcsncmp(L\"ab\", L\"ac\", 1) == 0 && __builtin_wmemcmp(L\"ab\", L\"ac\", 2) == -1, \"wide bounded\");\n"
-                  "int c[__builtin_strlen(\"abc\")];enum { E = __builtin_strlen(\"xy\") };\n"
-                  "int f(int x){switch(x){case __builtin_strlen(\"ab\"):return 1;case __builtin_wcslen(L\"abc\"):return 2;}return 0;}\n",
-        .rejected = false,
-    },
-    {
-        .name = "library folds: strings at offsets and in const arrays",
-        .source = "static const char s[] = \"abc\";static const unsigned long n = __builtin_strlen(s);\n"
-                  "_Static_assert(__builtin_strlen(\"abc\" + 1) == 2 && __builtin_strcmp(&\"abc\"[1], \"bc\") == 0, \"offsets\");\n"
-                  "int f(void){static const char t[] = \"xyz\";return (int)__builtin_strlen(t);}\n",
-        .rejected = false,
-    },
-    {
-        .name = "library folds: integers and floating values",
-        .source = "static int a = __builtin_abs(-3);static long b = __builtin_labs(-4L);static long long c = __builtin_llabs(-5LL);\n"
-                  "_Static_assert(__builtin_abs(-7) == 7, \"abs\");\n"
-                  "static const double d = __builtin_fmax(1.0, 2.0);static const float e = __builtin_fminf(1.0f, -2.0f);\n"
-                  "static const long double f = __builtin_fmaxl(1.0L, __builtin_nanl(\"\"));static const double g = __builtin_fmaximum_num(-0.0, 0.0);\n"
-                  "static const long double h = __builtin_copysignl(2.0L, -1.0L);\n",
-        .rejected = false,
-    },
-    {
-        .name = "library folds: plain declarations of the builtins",
-        .source = "unsigned long strlen(const char*);int strcmp(const char*, const char*);int memcmp(const void*, const void*, unsigned long);\n"
-                  "static const unsigned long n = strlen(\"abcd\");_Static_assert(strcmp(\"a\", \"b\") < 0 && memcmp(\"ab\", \"ac\", 2) == -1, \"plain\");\n",
-        .rejected = false,
-    },
-    {
-        .name = "library folds: ordinary declarations beside overloads in constant contexts",
-        .source = "int ov(int) __attribute__((overloadable));double ov(double) __attribute__((overloadable));\n"
-                  "unsigned long strlen(const char*);int strcmp(const char*, const char*);int memcmp(const void*, const void*, unsigned long);\n"
-                  "static const unsigned long n = strlen(\"abcd\");_Static_assert(strcmp(\"a\", \"c\") == -1, \"ordinary\");\n"
-                  "enum { length = strlen(\"abc\") };int a[strlen(\"abc\")];\n"
-                  "int f(int x){switch(x){case memcmp(\"ab\", \"ad\", 2):return length;}return 0;}\n",
-        .rejected = false,
-    },
-    {
-        .name = "library folds: the selected ordinary declaration precedes its overload",
-        .source = "unsigned long strlen(const char*);unsigned long strlen(int) __attribute__((overloadable));\n"
-                  "static const unsigned long n = strlen(\"abcd\");_Static_assert(strlen(\"abc\") == 3, \"ordinary first\");\n",
-        .rejected = false,
-    },
-    {
-        .name = "library folds: the selected ordinary declaration follows its overload",
-        .source = "unsigned long strlen(int) __attribute__((overloadable));unsigned long strlen(const char*);\n"
-                  "static const unsigned long n = strlen(\"abcd\");_Static_assert(strlen(\"abc\") == 3, \"ordinary last\");\n",
-        .rejected = false,
-    },
-    {
-        .name = "library folds: an overloadable declaration of the same prototype is no builtin",
-        .source = "unsigned long strlen(const char*) __attribute__((overloadable));\n"
-                  "static const unsigned long n = strlen(\"abcd\");\n",
-        .rejected = true,
-    },
-    {
-        .name = "library folds: another prototype beside overloads is no builtin",
-        .source = "int ov(int) __attribute__((overloadable));int strlen(const char*);\n"
-                  "static const int n = strlen(\"abcd\");\n",
-        .rejected = true,
-    },
-    {
-        .name = "library folds: a static declaration beside overloads is no builtin",
-        .source = "int ov(int) __attribute__((overloadable));static unsigned long strlen(const char* s){return 0;}\n"
-                  "static const unsigned long n = strlen(\"abcd\");\n",
-        .rejected = true,
-    },
-    {
-        .name = "library folds: an argument's side effect beside overloads is no constant",
-        .source = "int ov(int) __attribute__((overloadable));unsigned long strlen(const char*);int calls;\n"
-                  "static const unsigned long n = strlen((++calls, \"abcd\"));\n",
-        .rejected = true,
-    },
-    {
-        .name = "library folds: a builtin clang doesn't fold is no constant",
-        .source = "static const double d = __builtin_sin(0.0);\n",
-        .rejected = true,
-    },
-    {
-        .name = "library folds: a mutable array's string is no constant",
-        .source = "static char m[] = \"abc\";static const unsigned long n = __builtin_strlen(m);\n",
-        .rejected = true,
-    },
-    {
-        .name = "library folds: a declaration of another prototype isn't the builtin",
-        .source = "int strlen(const char*);static const int n = strlen(\"abcd\");\n",
-        .rejected = true,
-    },
-    {
-        .name = "library folds: a static declaration isn't the builtin",
-        .source = "static unsigned long strlen(const char* s){return 0;}static const unsigned long n = strlen(\"abcd\");\n",
-        .rejected = true,
-    },
-    {
-        .name = "FILE builtins: the unit's FILE at file scope",
-        .source = "typedef struct F FILE;\nint f(FILE* p, __builtin_va_list a){return __builtin_fprintf(p, \"%d\", 1) + __builtin_vfscanf(p, \"x\", a) + "
-                  "__builtin___fprintf_chk(p, 1, \"x\") + __builtin___vfprintf_chk(p, 1, \"x\", a);}\n",
-        .rejected = false,
-    },
-    {
-        .name = "FILE builtins: a local object named FILE leaves the file scope's",
-        .source = "typedef int FILE;\nint f(FILE* p){int FILE = 3;return __builtin_fprintf(p, \"%d\", FILE);}\n",
-        .rejected = false,
-    },
-    {
-        .name = "FILE builtins: no FILE",
-        .source = "int f(void* p){return __builtin_fprintf(p, \"x\");}\n",
-        .rejected = true,
-    },
-    {
-        .name = "FILE builtins: a FILE of block scope alone",
-        .source = "void g(void){typedef int FILE;}\nint f(void* p){return __builtin_fscanf(p, \"x\");}\n",
-        .rejected = true,
-    },
-    {
-        .name = "FILE builtins: FILE declared after the call",
-        .source = "int f(void* p){return __builtin_vfprintf(p, \"x\", 0);}\ntypedef struct F FILE;\n",
-        .rejected = true,
-    },
-    {
-        .name = "FILE builtins: a FILE of the wrong type",
-        .source = "typedef int FILE;\nint f(long* p){return __builtin_fprintf(p, \"x\");}\n",
-        .rejected = true,
-    },
-};
 
 static __attribute__((noinline)) void check_test_library_sources(CheckTest* test, const char* clang)
 {
-    enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(check_library_source_fixtures) };
-    char directory[4096];
-    const char* temporary = oracle_temporary_directory();
-    snprintf(directory, sizeof(directory), "%s/buster-checker-library-XXXXXX", temporary);
-    const bool created = mkdtemp(directory) != NULL;
-    bool ready = created;
-    static char paths[FILE_COUNT][4200];
-    char* pointers[FILE_COUNT];
-    ParseTestClang outcomes[FILE_COUNT];
-    for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
-    {
-        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
-        pointers[i] = paths[i];
-        ready = parse_test_write(paths[i], check_library_source_fixtures[i].source, strlen(check_library_source_fixtures[i].source));
-    }
-    const char* arguments[] = { "-std=gnu17" };
-    ready = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), pointers, FILE_COUNT, outcomes);
-    check_test_expect(test, ready, "library folds: the clang oracle is available");
-    for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
-    {
-        char description[224];
-        snprintf(description, sizeof(description), "%s: recorded GNU17 acceptance agrees with Clang", check_library_source_fixtures[i].name);
-        check_test_expect(test, outcomes[i].rejected == check_library_source_fixtures[i].rejected, description);
-        check_test_source(test, check_library_source_fixtures + i, paths[i], outcomes + i);
-    }
-    for (uint32_t i = 0; created && i < FILE_COUNT; i += 1)
-    {
-        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
-        unlink(paths[i]);
-    }
-    if (created)
-    {
-        rmdir(directory);
-    }
+    // Its source fixtures are runtime data (#2053): tests/checker/library, which check_test_suite reads and runs.
+    check_test_suite(test, clang, "checker/library", "library folds: the clang oracle is available");
 }
 
 // The programs' fold of a value's bits into a hash, which a program returns in place of the values (a NaN's bits too).
@@ -574,6 +415,34 @@ static __attribute__((noinline)) void check_test_library_programs(CheckTest* tes
         "__builtin_free(p);long*q=__builtin_calloc(8,sizeof(long));r+=(int)q[7];__builtin_free(q);"
         "return r+__builtin_abs(n-7)*3+(int)__builtin_labs(-(long)n)*5+(int)__builtin_llabs((long long)n*-3)*7;}",
         "library-memory-and-absolutes", clang);
+    // The plain library builtins the code computes in place of their calls (#1373), as clang -O0's code computes their
+    // intrinsics: memcpy, memmove and memset of each constant size to one past BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES, whose
+    // bytes and values must be the library's, memmove's ranges overlapping by up to 9 bytes in either direction and
+    // memset's values negative and wider than a byte, constant and not; a musttail return of a memcpy; abs, labs and
+    // llabs, plain and __builtin_, of their extremes but the undefined ones; and fabs, fabsf, fabsl, copysign, copysignf
+    // and copysignl, plain, and __builtin_copysignl, of the harness's special values, signaling NaNs among them, bit for bit.
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_LIBRARY_FOLD
+        "typedef unsigned long size_t;void*memcpy(void*,const void*,size_t);void*memmove(void*,const void*,size_t);void*memset(void*,int,size_t);"
+        "int abs(int);long labs(long);long long llabs(long long);double fabs(double);float fabsf(float);long double fabsl(long double);"
+        "double copysign(double,double);float copysignf(float,float);long double copysignl(long double,long double);"
+        "double fp_special(int);float fp_specialf(int);"
+        "static void*tail(void*d,const void*s,size_t k){(void)k;__attribute__((musttail)) return memcpy(d,s,8);}"
+        "static unsigned long at(const void*p,const char*a){return (unsigned long)((const char*)p-a);}\n"
+        "#define M(k) h+=at(memmove(b+40+o,b+40,k),b);h+=at(memcpy(c+3,b+(o&7)+8,k),c);h+=at(memset(c+60+(o&7),v,k),c);memset(c+90,-2,k);"
+        "h=hash(hash(h,b,128),c,128);\n"
+        "int tested(int n){unsigned long h=14695981039346656037UL;char b[128],c[128];int o=(int)((unsigned)n%19)-9;int v=n*37-200;"
+        "for(int i=0;i<128;i++){b[i]=(char)(i*7+n);c[i]=(char)(i*5+1);}"
+        "M(0)M(1)M(2)M(3)M(4)M(5)M(6)M(7)M(8)M(9)M(10)M(11)M(12)M(13)M(14)M(15)M(16)M(17)M(18)M(19)M(20)M(21)M(22)M(23)M(24)M(25)M(26)M(27)M(28)M(29)M(30)M(31)M(32)M(33)"
+        "h+=at(tail(c,b+(unsigned)n%5,0),c);h=hash(h,c,16);"
+        "int x=(int)((unsigned)n*123456789u);long l=(long)n*1099511627776L;long long q=-(long long)n*1000000007LL;"
+        "h+=(unsigned long)abs(x)*3+(unsigned long)labs(l)*5+(unsigned long)llabs(q)*7+(unsigned long)__builtin_abs(-x)+(unsigned long)__builtin_labs(l-1)*11"
+        "+(unsigned long)__builtin_llabs(q+3)*13+(unsigned long)abs(-2147483647+n%2)+(unsigned long)labs(-9223372036854775807L+n%2)*17+(unsigned long)llabs(n<0?-1:1);"
+        "for(int i=0;i<9;i++){double a=fp_special(n),d=fp_special(i);float f=fp_specialf(n),g=fp_specialf(i);long double la=a,ld=-d;"
+        "h=hd(h,fabs(a));h=hd(h,copysign(a,d));h=hd(h,copysign(d,-a));h=hf(h,fabsf(f));h=hf(h,copysignf(g,f));h=hl(h,fabsl(la));h=hl(h,copysignl(la,ld));"
+        "h=hl(h,__builtin_copysignl(ld,la));h=hd(h,fabs(a)+copysign(1.0,d));}"
+        "long double s=n%2?__builtin_nansl(\"\"):-__builtin_nansl(\"1\");h=hl(hl(hl(h,fabsl(s)),copysignl(s,-1.0L*n)),copysignl(2.5L,s));return out(h);}",
+        "library-computed-inline", clang);
     // The folds in code: clang's -1, 0 or 1 of constant strings, where the library's functions return the differences
     // (glibc's strcmp("a", "c") is -2), through __builtin_X and the plain declarations; a const array's string; and a
     // call with a side effect, which neither folds.

@@ -12,78 +12,8 @@
 // mask an integer constant expression in [0, 1023], and the signbits' and canonicalize's prototypes.
 static __attribute__((noinline)) void check_test_classify_sources(CheckTest* test, const char* clang)
 {
-    static const CheckSourceFixture fixtures[] =
-    {
-        { .name = "classify: folds in constant expressions",
-          .source = "_Static_assert(__builtin_isnormal(1.0) && !__builtin_isnormal(0x1p-1030) && __builtin_issubnormal(0x1p-1030), \"\");\n"
-                    "_Static_assert(__builtin_iszero(-0.0f) && !__builtin_issignaling(__builtin_nanf(\"\")) && __builtin_isfpclass(-1.0, 8), \"\");\n"
-                    "_Static_assert(__builtin_isnormal(0x1p-16382L) && __builtin_issubnormal(0x1p-16383L) && __builtin_isfpclass(-0.0L, 32), \"\");\n"
-                    "_Static_assert(__builtin_signbitf(-0.0) && !__builtin_signbitl(1) && __builtin_signbitl(-__builtin_infl()), \"\");\n"
-                    "int a[__builtin_isfpclass(-2.0, 8) + 1];\nint f(double x)\n{\nswitch (1)\n{\ncase __builtin_isnormal(1.0):\nreturn 1;\n}\n"
-                    "return __builtin_issignaling(x);\n}\n" },
-        { .name = "classify: result types",
-          .source = "_Static_assert(_Generic(__builtin_isfpclass(1.0f, 3), int: 1, default: 0) && _Generic(__builtin_signbitl(1), int: 1, default: 0), \"\");\n"
-                    "_Static_assert(_Generic(__builtin_canonicalizef(1), float: 1, default: 0), \"\");\n"
-                    "_Static_assert(_Generic(__builtin_canonicalize(1.0f), double: 1, default: 0), \"\");\n"
-                    "_Static_assert(_Generic(__builtin_canonicalizel(1.0), long double: 1, default: 0), \"\");\n" },
-        { .name = "classify: masks of other integer types",
-          .source = "int f(double x)\n{\nreturn __builtin_isfpclass(x, 1023u) + __builtin_isfpclass(x, (char)3) + __builtin_isfpclass(x, (int)3.7) +\n"
-                    "__builtin_isfpclass(x, sizeof(int)) + __builtin_isfpclass(x, (_Bool)0) + __builtin_isfpclass(x, (unsigned char)127);\n}\n" },
-        { .name = "classify: isfpclass of a vector",
-          .source = "typedef float v4 __attribute__((vector_size(16)));\ntypedef int i4 __attribute__((vector_size(16)));\n"
-                    "typedef double v2 __attribute__((ext_vector_type(2)));\ni4 f(v4 x)\n{\nreturn __builtin_isfpclass(x, 3);\n}\n"
-                    "_Static_assert(_Generic(__builtin_isfpclass((v4){ 0 }, 3), i4: 1, default: 0), \"\");\n" },
-        { .name = "classify: a mask that isn't constant", .source = "int f(double x, int m)\n{\nreturn __builtin_isfpclass(x, m);\n}\n", .rejected = true },
-        { .name = "classify: a mask past 1023", .source = "int f(double x)\n{\nreturn __builtin_isfpclass(x, 1024);\n}\n", .rejected = true },
-        { .name = "classify: a negative mask", .source = "int f(double x)\n{\nreturn __builtin_isfpclass(x, -1);\n}\n", .rejected = true },
-        // clang sign-extends the mask from its type's width, whatever its signedness.
-        { .name = "classify: a bool mask of 1", .source = "int f(double x)\n{\nreturn __builtin_isfpclass(x, (_Bool)1);\n}\n", .rejected = true },
-        { .name = "classify: an unsigned char mask of 200", .source = "int f(double x)\n{\nreturn __builtin_isfpclass(x, (unsigned char)200);\n}\n",
-          .rejected = true },
-        { .name = "classify: a floating mask", .source = "int f(double x)\n{\nreturn __builtin_isfpclass(x, 1.0);\n}\n", .rejected = true },
-        { .name = "classify: a comma's mask", .source = "int f(double x)\n{\nreturn __builtin_isfpclass(x, (1, 2));\n}\n", .rejected = true },
-        { .name = "classify: isfpclass of an int", .source = "int f(int x)\n{\nreturn __builtin_isfpclass(x, 3);\n}\n", .rejected = true },
-        { .name = "classify: isfpclass of a complex", .source = "int f(_Complex double x)\n{\nreturn __builtin_isfpclass(x, 3);\n}\n", .rejected = true },
-        { .name = "classify: isfpclass without its mask", .source = "int f(double x)\n{\nreturn __builtin_isfpclass(x);\n}\n", .rejected = true },
-        { .name = "classify: isnormal of an int", .source = "int f(int x)\n{\nreturn __builtin_isnormal(x);\n}\n", .rejected = true },
-        { .name = "classify: iszero of two", .source = "int f(double x)\n{\nreturn __builtin_iszero(x, x);\n}\n", .rejected = true },
-        { .name = "classify: issubnormal of a struct", .source = "struct S { double d; };\nint f(struct S s)\n{\nreturn __builtin_issubnormal(s);\n}\n",
-          .rejected = true },
-        { .name = "classify: signbitf of a pointer", .source = "int f(int *p)\n{\nreturn __builtin_signbitf(p);\n}\n", .rejected = true },
-        { .name = "classify: canonicalize of a pointer", .source = "double f(int *p)\n{\nreturn __builtin_canonicalize(p);\n}\n", .rejected = true },
-        { .name = "classify: canonicalize in a static initializer", .source = "static const double d = __builtin_canonicalize(1.0);\n", .rejected = true },
-    };
-    enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(fixtures) };
-    char directory[] = "/tmp/buster-checker-classify-XXXXXX";
-    bool ready = mkdtemp(directory) != 0;
-    char paths[FILE_COUNT][160];
-    char* pointers[FILE_COUNT];
-    ParseTestClang outcomes[FILE_COUNT];
-    for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
-    {
-        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
-        pointers[i] = paths[i];
-        ready = parse_test_write(paths[i], fixtures[i].source, strlen(fixtures[i].source));
-    }
-    const char* arguments[] = { "-std=gnu17" };
-    ready = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), pointers, FILE_COUNT, outcomes);
-    check_test_expect(test, ready, "classification Clang oracle could not run");
-    for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
-    {
-        char description[192];
-        snprintf(description, sizeof(description), "%s: expectation differs from Clang", fixtures[i].name);
-        check_test_expect(test, outcomes[i].rejected == (fixtures[i].rejected && (!fixtures[i].unsupported || fixtures[i].undecided)), description);
-        check_test_source(test, &fixtures[i], paths[i], &outcomes[i]);
-    }
-    for (uint32_t i = 0; i < FILE_COUNT; i += 1)
-    {
-        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
-        unlink(paths[i]);
-    }
-    if (directory[0] != 0)
-    {
-        rmdir(directory);
-    }
+    // Its source fixtures are runtime data (#2053): tests/checker/classify, which check_test_suite reads and runs.
+    check_test_suite(test, clang, "checker/classify", "classification Clang oracle could not run");
 }
 
 // isfpclass of x with every mask (each a constant, as it must be), into an FNV-1a hash h of the answers.

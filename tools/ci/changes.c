@@ -3214,7 +3214,12 @@ static bool changes_main_policy(Text workflow)
         { 6, "        run: bash tools/ci/nightly.sh coverage \"$RUNNER_TEMP/coverage\"" },
         { 6, "          COVERAGE_RESULT: ${{ steps.coverage.outcome }}" },
         { 6, "          AUXILIARY: ${{ needs.changes.outputs.auxiliary }}" },
-        { 6, "    needs: [changes, evidence, policy, test, fuzz, benchmarks, auxiliary-build, auxiliary-build-pgo, auxiliary-selfhost, auxiliary-tier1-problem]" },
+        { 6, "    needs: [changes, evidence, glue, policy, test, fuzz, benchmarks, auxiliary-build, auxiliary-build-pgo, auxiliary-selfhost, auxiliary-tier1-problem]" },
+        { 6, "          GLUE_RESULT: ${{ needs.glue.result }}" },
+        // The CI glue's fixtures run on pull requests and candidates beside the rows, which don't wait for them (#2658);
+        // the aggregate requires them (tools/ci/qualification.c's qualification_evidence).
+        { 3, "    name: CI glue fixtures" },
+        { 3, "    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'" },
         { 7, "    uses: ./.github/workflows/build.yml" },
         { 7, "    if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',build,') }}" },
         { 7, "    uses: ./.github/workflows/build-pgo.yml" },
@@ -3430,6 +3435,9 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
         { "  auxiliary-tier1-problem:", "github.event_name == 'merge_group' && ", "", "an auxiliary workflow called on every event" },
         { "  qualification:", ", auxiliary-build-pgo, ", ", ", "the aggregate doesn't wait for an auxiliary workflow" },
         { "  qualification:", "          AUXILIARY: ${{ needs.changes.outputs.auxiliary }}\n", "", "a candidate's auxiliary workflows unchecked" },
+        { "  qualification:", ", glue, ", ", ", "the aggregate doesn't wait for the CI glue's fixtures" },
+        { "  qualification:", "          GLUE_RESULT: ${{ needs.glue.result }}\n", "", "the aggregate ignores the CI glue's fixtures" },
+        { "  glue:", "    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'", "    if: github.event_name == 'pull_request'", "a candidate skips the CI glue's fixtures" },
         { "  qualification:", " && !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'hotfix')) }}", " && !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'hotfix')) && github.event_name != 'merge_group' }}", "a candidate without the required aggregate" },
         { "  qualification:", " && !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'hotfix')) }}", " && !contains(github.event.pull_request.labels.*.name, 'hotfix') }}", "a hotfix label that could skip more than a pull request's aggregate" },
         { "  qualification:", "        if: github.event_name == 'merge_group'\n", "        if: false\n", "a candidate's coverage unchecked" },
