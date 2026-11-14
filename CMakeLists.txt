@@ -59,7 +59,7 @@ set(BUSTER_FUZZ_ENTRY "" CACHE FILEPATH "The fuzzing entry's C file (src/buster/
 set(BUSTER_BAKE 1 CACHE STRING "0 leaves the backend's tables to be built when the executable runs")
 set(BUSTER_PGO 0 CACHE STRING "1 builds Release with a profile of the compiler's own compiles (Release alone)")
 set(BUSTER_PGO_TRAIN "" CACHE FILEPATH "A bash script that trains BUSTER_PGO's profile in place of the default compiles")
-set(BUSTER_PARALLEL_CODEGEN auto CACHE STRING "auto, 1 or 0: the two longest Release units' native code, and Develop's units, in parallel parts")
+set(BUSTER_PARALLEL_CODEGEN auto CACHE STRING "auto, 1 or 0: Release's and Develop's main.c units in parts (a sanitizer build's two longest Release units' native code)")
 set(BUSTER_LEXER_VARIANTS "" CACHE STRING "NAME=SOURCE;... lexers compiled in for benchmark-lexer (build.sh lexer-variant)")
 set(BUSTER_SHIFT_SOURCE "" CACHE STRING "The source whose code the shifted links move (build.sh shifts)")
 set(BUSTER_SHIFTS "" CACHE STRING "The shifted links' padding sizes in bytes (build.sh shifts)")

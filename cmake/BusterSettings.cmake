@@ -251,9 +251,10 @@ function(buster_settings_normalize)
         buster_settings_fail("BUSTER_BUILD_DEFINES can't hold a semicolon or \$<")
     endif()
 
-    # Parallel native generation after the ordinary O3 IR pipeline (BusterCodegen.cmake): auto, the default, takes it
-    # where the build's flags allow it and the tools are there (CMakeLists.txt checks them); 1 requires it; 0 never.
-    # A sanitizer build takes it too: its module is instrumented by that pipeline, so the parts generate the single
+    # The units in parts (BusterCodegen.cmake): auto, the default, builds Release's and Develop's main.c units in parts
+    # before the optimizer (#2559) where the build's flags allow it and the tools are there (CMakeLists.txt checks
+    # them); 1 requires it; 0 never. A sanitizer build's Release generates its two longest units' native code in parts
+    # after the ordinary O3 IR pipeline instead, which instruments its module, so the parts generate the single
     # compile's code (#2639). Fuzzing, PGO, an explicit host runtime and BUSTER_BUILD_DEFINES keep the single compile.
     set(parallel_codegen "${BUSTER_PARALLEL_CODEGEN}")
     if(parallel_codegen STREQUAL "")

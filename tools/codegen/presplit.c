@@ -7,13 +7,13 @@
 // bitcode an edit changed.
 //
 //   presplit INPUT.bc PARTS DIRECTORY [--import LIMIT] [--anchor M] [--cohere CAP] [--spread S] [--tests-optnone]
-//            [--strip-debug] [--keep-statics] [--benchmark-bodies] [--verify] [--report]
+//            [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--verify] [--report]
 //
 // writes DIRECTORY/part0.bc to DIRECTORY/partPARTS.bc and DIRECTORY/locals.txt. Parts 0 to PARTS - 1 hold function
 // definitions; part PARTS holds the global variables more than one part refers to, and no function. INPUT is clang's
 // bitcode before any LLVM pass (-Xclang -disable-llvm-passes), with line tables or full debug information, which name
-// each function's file. Derived from #2058's split.c, which partitioned a unit after the optimizer, and from the
-// record's prototype (buster-performance's stage1-build-design-2040-2026-11-12).
+// each function's file. Derived from split.c, which partitions a unit after the optimizer (a sanitizer build's Release),
+// and from the record's prototype (buster-performance's stage1-build-design-2040-2026-11-12).
 //
 // Which part a function goes to (the design's rules 1, 2 and 6):
 // - each source file's functions, in their source order (their line, then their name), are cut into chunks: a function
@@ -31,7 +31,8 @@
 // What a part sees of the others (rules 3 and 4):
 // - it reads, available_externally and without their debug information, the bodies of the functions its code calls
 //   that another part defines, of at most LIMIT unoptimized instructions (--import, 100) or always_inline, and so on
-//   through those bodies, so that its inliner still inlines them; a body that can't inline (optnone) reads none;
+//   through those bodies, so that its inliner still inlines them; a body that can't inline (optnone) reads none; and
+//   every code part reads the bodies the input itself holds available_externally (a C library header's inline ones);
 // - a local function another part refers to keeps its local name where it is defined, and a hidden alias,
 //   NAME.buster_split, names it for the others, as #2058's split.c did;
 // - a local global variable that exactly one code part refers to, and whose initializer names no other global, stays
@@ -52,6 +53,13 @@
 // --strip-debug writes the parts without any debug information: a Release build without it (BUSTER_DEBUG_INFO=0)
 // compiles its units with line tables for the plan's files alone. --verify runs LLVM's verifier on each part; --report
 // prints each part's definitions, cost and imports, and the plan's times, to stderr.
+//
+// Release's options make a part's inliner decide as the whole unit's (#2559's step 5, #2624): --keep-statics gives the
+// parts that read a static function that is only ever called a local copy of it, keeps a body in its part when it calls
+// a static function called once, and gives a part's static function a phantom caller wherever the whole module calls it
+// more (presplit_keep_statics, presplit_phantoms); --benchmark-bodies has a benchmark's file read the bodies it calls,
+// whatever their size; --simplified-size measures a body for LIMIT by what SROA leaves of it, with LLVM's vector bonus
+// (presplit_scan); and a part that reads a constant table reads the constants it names (presplit_readable_readers).
 //
 // BusterCodegenMerge.cmake joins the parts' objects and restores local binding (locals.txt). The module is parsed
 // once and the plan made on it; each part is then a clone of its own definitions (split_bitcode.cpp's
@@ -139,9 +147,11 @@ struct PresplitFunction
     // Its uses in the whole module, which a part's copy or definition of a local function keeps the inliner's view of
     // (presplit_phantoms).
     uint32_t uses;
-    // A body the input itself holds available_externally (a C library header's extern inline function, pthread_equal,
-    // atoi): the code parts that refer to it, which read it so, as the whole unit's inliner does.
-    uint64_t external_readers;
+    // A body the input itself holds available_externally (a C library header's extern inline function: pthread_equal,
+    // bsearch, putchar): every code part reads it so, as the whole unit's inliner does, whether its code calls it or the
+    // optimizer makes a call (printf("\n") becomes putchar('\n') in run_streaming_benchmark). There are a handful,
+    // and a part's optimizer drops those it doesn't call.
+    bool external;
 };
 
 typedef struct PresplitGlobal PresplitGlobal;
@@ -1333,14 +1343,10 @@ static void presplit_plan(PresplitPlan* plan)
     }
     presplit_readable_closure(plan);
     presplit_readable_readers(plan);
-    const uint64_t code = data - 1;
     for (uint32_t i = 0; i < plan->function_count; i += 1)
     {
         PresplitFunction* entry = &plan->functions[i];
-        if (!entry->defined && LLVMGetLinkage(entry->function) == LLVMAvailableExternallyLinkage && !LLVMIsDeclaration(entry->function))
-        {
-            entry->external_readers = presplit_references(plan, entry->function) & code;
-        }
+        entry->external = !entry->defined && LLVMGetLinkage(entry->function) == LLVMAvailableExternallyLinkage && !LLVMIsDeclaration(entry->function);
     }
 }
 
@@ -1349,10 +1355,14 @@ static void presplit_plan(PresplitPlan* plan)
 // to a static function where the whole unit's sees other calls and doesn't: arena_reserve_small, one call in
 // scratch_begin's copy and in arena_reserve's, went into both, and scratch_begin (cost 60 in the whole unit, 1350 so) and
 // arena_reserve (5, 970) then stayed outlined in the assembler's layout, emission and benchmark. So each such function
-// gets a phantom caller standing for the others: an available_externally function, optnone, that calls it with poison
-// arguments and that llvm.compiler.used keeps; nothing calls it, and the optimizer drops its body after the inliner
-// (EliminateAvailableExternallyPass), so the function goes where the whole unit's would. Poison arguments leave
-// interprocedural constant propagation to the part's own callers. Returns the phantoms, for llvm.compiler.used.
+// gets a phantom caller standing for the others: an available_externally function, optnone, that passes its own
+// arguments on to it, ignores its result and that llvm.compiler.used keeps; nothing calls it, and the optimizer drops
+// its body after the inliner (EliminateAvailableExternallyPass), so the function goes where the whole unit's would.
+// Its arguments are unknown to interprocedural constant propagation, as the other parts' callers' are: poison ones let
+// a part specialize tier1_select_induction_bounds's copy to its own callers' constants, which folded a call away, gave
+// tier1_select_range_phi_endpoint the last-call bonus, and kept the bigger body out of tier1_burs_check_prepare. A
+// result the phantom returned would keep dead argument elimination from dropping one no caller reads, as the whole
+// unit's does. Returns the phantoms, for llvm.compiler.used.
 static uint32_t presplit_phantoms(const PresplitPlan* plan, LLVMModuleRef module, uint32_t part, LLVMValueRef* phantoms)
 {
     const uint64_t bit = UINT64_C(1) << part;
@@ -1379,16 +1389,16 @@ static uint32_t presplit_phantoms(const PresplitPlan* plan, LLVMModuleRef module
             LLVMTypeRef type = LLVMGlobalGetValueType(function);
             const unsigned parameters = LLVMCountParamTypes(type);
             LLVMTypeRef* types = presplit_allocate((uint64_t)parameters + 1, sizeof(LLVMTypeRef));
-            LLVMValueRef* arguments = presplit_allocate((uint64_t)parameters + 1, sizeof(LLVMValueRef));
             LLVMGetParamTypes(type, types);
-            for (unsigned p = 0; p < parameters; p += 1)
-            {
-                arguments[p] = LLVMGetPoison(types[p]);
-            }
             char* phantom_name = presplit_allocate(length + sizeof(".buster_phantom"), 1);
             memcpy(phantom_name, name, length);
             memcpy(phantom_name + length, ".buster_phantom", sizeof(".buster_phantom"));
-            LLVMValueRef phantom = LLVMAddFunction(module, phantom_name, type);
+            LLVMValueRef phantom = LLVMAddFunction(module, phantom_name, LLVMFunctionType(LLVMVoidTypeInContext(context), types, parameters, 0));
+            LLVMValueRef* arguments = presplit_allocate((uint64_t)parameters + 1, sizeof(LLVMValueRef));
+            for (unsigned p = 0; p < parameters; p += 1)
+            {
+                arguments[p] = LLVMGetParam(phantom, p);
+            }
             LLVMSetLinkage(phantom, LLVMAvailableExternallyLinkage);
             LLVMAddAttributeAtIndex(phantom, LLVMAttributeFunctionIndex, LLVMCreateEnumAttribute(context, optnone, 0));
             LLVMAddAttributeAtIndex(phantom, LLVMAttributeFunctionIndex, LLVMCreateEnumAttribute(context, noinline, 0));
@@ -1396,14 +1406,7 @@ static uint32_t presplit_phantoms(const PresplitPlan* plan, LLVMModuleRef module
             LLVMValueRef call = LLVMBuildCall2(builder, type, function, arguments, parameters, "");
             LLVMSetInstructionCallConv(call, LLVMGetFunctionCallConv(function));
             LLVMAddCallSiteAttribute(call, LLVMAttributeFunctionIndex, LLVMCreateEnumAttribute(context, noinline, 0));
-            if (LLVMGetTypeKind(LLVMGetReturnType(type)) == LLVMVoidTypeKind)
-            {
-                LLVMBuildRetVoid(builder);
-            }
-            else
-            {
-                LLVMBuildRet(builder, call);
-            }
+            LLVMBuildRetVoid(builder);
             phantoms[count] = phantom;
             count += 1;
             free(phantom_name);
@@ -1428,7 +1431,7 @@ static bool presplit_part(const PresplitPlan* plan, uint32_t part, const char* p
     for (uint32_t i = 0; i < plan->function_count; i += 1)
     {
         const PresplitFunction* entry = &plan->functions[i];
-        if ((entry->defined && (entry->part == part || (entry->imported & bit) != 0)) || (code && (entry->external_readers & bit) != 0))
+        if ((entry->defined && (entry->part == part || (entry->imported & bit) != 0)) || (code && entry->external))
         {
             keep[kept] = entry->function;
             kept += 1;
