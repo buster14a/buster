@@ -144,6 +144,10 @@ struct Tier1CfgInput
     const uint32_t* clobbers;
     uint32_t clobber_count;
     uint32_t clobber_registers[BUSTER_TIER1_ALLOCATE_CLASSES];
+    // Optional (#2685), two per value: the values whose registers its definition may take, in preference order, or
+    // BUSTER_TIER1_CFG_NONE: a two-address instruction's first operand, which its destination is otherwise a copy of. The
+    // definition's interval takes one where that operand's interval ends at the definition, and nothing else hints it.
+    const uint32_t* ties;
     uint32_t block_count;
     uint32_t edge_count;
     uint32_t value_count;
@@ -1087,6 +1091,29 @@ static void tier1_cfg_operand_targets(const Tier1CfgInput* input, const uint32_t
             const uint32_t first = offsets[target];
             pieces->hints[own] = target;
             pieces->hint_intervals[own] = pieces->hint_intervals[own] == BUSTER_TIER1_CFG_NONE && pieces->starts[first] < pieces->starts[own] ? first : pieces->hint_intervals[own];
+        }
+    }
+}
+
+// A definition that nothing else hints, of a value tied to an operand whose interval ends there (#2685), takes that
+// interval's closing register: a two-address instruction's result in its dying first operand's register, which leaves
+// out the copy into the destination. An operand live past the definition holds its register, so no hint names it.
+static void tier1_cfg_ties(const Tier1CfgInput* input, const uint32_t* offsets, Tier1CfgPieces* pieces)
+{
+    for (uint32_t v = 0; input->ties != 0 && v < input->value_count; v += 1)
+    {
+        const uint32_t definition = input->definitions[v];
+        const uint32_t own = input->ties[2 * (uint64_t)v] != BUSTER_TIER1_CFG_NONE && definition != 0 ? tier1_cfg_piece_at(pieces, offsets[v], offsets[v + 1], definition) : BUSTER_TIER1_CFG_NONE;
+        const bool open = own != BUSTER_TIER1_CFG_NONE && pieces->starts[own] == definition && pieces->hints[own] == BUSTER_TIER1_CFG_NONE && pieces->hint_intervals[own] == BUSTER_TIER1_CFG_NONE;
+        for (uint32_t k = 0; open && k < 2; k += 1)
+        {
+            const uint32_t tied = input->ties[2 * (uint64_t)v + k];
+            const uint32_t taken = tied != BUSTER_TIER1_CFG_NONE && tied != v ? tier1_cfg_piece_at(pieces, offsets[tied], offsets[tied + 1], definition - 1) : BUSTER_TIER1_CFG_NONE;
+            if (taken != BUSTER_TIER1_CFG_NONE && pieces->ends[taken] == definition && pieces->classes[taken] == pieces->classes[own] && pieces->hints[own] == BUSTER_TIER1_CFG_NONE)
+            {
+                pieces->hints[own] = tied;
+                pieces->hint_intervals[own] = taken | BUSTER_TIER1_ALLOCATE_HINT_EXIT;
+            }
         }
     }
 }
@@ -2046,6 +2073,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                 use_offsets[count] = input->use_count;
                 tier1_cfg_phi_exits(input, chosen, candidate.value_interval_offsets, &pieces);
                 tier1_cfg_operand_targets(input, phi_hints, ups, phis, candidate.value_interval_offsets, &pieces);
+                tier1_cfg_ties(input, candidate.value_interval_offsets, &pieces);
                 candidate.block_starts = input->block_starts;
                 candidate.block_count = input->block_count;
                 candidate.intervals = (Tier1AllocationInput){

@@ -409,6 +409,8 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
     uint32_t* positions = 0;
     uint8_t* required = 0;
     uint8_t* interval_remat = 0;
+    uint32_t* hints = 0;
+    uint8_t* returned = 0;
     uint8_t* operations = 0;
     uint8_t* widths = 0;
     uint8_t* flags = 0;
@@ -429,6 +431,8 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
         positions = ir_allocate(output, uses, 4, &ok);
         required = ir_allocate(output, uses, 1, &ok);
         interval_remat = ir_allocate(output, source->count, 1, &ok);
+        hints = ir_allocate(output, (uint64_t)source->count + 1, 4, &ok);
+        returned = ir_allocate(output, (uint64_t)count + 1, 1, &ok);
         operations = ir_allocate(output, count, 1, &ok);
         widths = ir_allocate(output, count, 1, &ok);
         flags = ir_allocate(output, count, 1, &ok);
@@ -497,6 +501,26 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
             }
         }
         offsets[source->count] = use;
+        // A two-address result takes its first operand's register where that operand's interval ends at its definition
+        // (#2685, tier1_select_ties), which leaves out the copy into the destination: the hinted allocator's value hints.
+        // A returned value takes none (tier1_select_returned).
+        tier1_select_returned(plan, returned);
+        for (uint32_t interval = 0; interval < source->count; interval += 1)
+        {
+            const uint32_t value = source->values[interval];
+            uint32_t ties[2] = { BUSTER_IR_NONE, BUSTER_IR_NONE };
+            if (returned[value] == 0)
+            {
+                tier1_select_ties(plan, value, &ties[0], &ties[1]);
+            }
+            hints[interval] = BUSTER_IR_NONE;
+            for (uint32_t k = 0; k < 2; k += 1)
+            {
+                const uint32_t tied = ties[k] < count ? prepared.value_intervals[ties[k]] : BUSTER_IR_NONE;
+                const bool ends = tied != BUSTER_IR_NONE && source->ends[tied] == source->starts[interval];
+                hints[interval] = hints[interval] == BUSTER_IR_NONE && ends ? ties[k] : hints[interval];
+            }
+        }
         // The prospective spill set contains every selected definition. Its alignment determines frame-base
         // reservations before allocation; reducing it to actual spills later cannot add a reservation.
         const Tier1FrameRequest prospective = {
@@ -532,6 +556,7 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
             prepared.allocation.use_required = required;
             prepared.allocation.use_count = use;
             prepared.allocation.rematerializable = interval_remat;
+            prepared.allocation.hint_values = hints;
         }
     }
     if (error == TIER1_EMIT_OK)

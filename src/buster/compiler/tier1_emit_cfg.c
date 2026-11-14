@@ -759,6 +759,8 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     uint32_t* phi_values = ok ? ir_allocate(output, (uint64_t)phi_count + 1, 4, &ok) : 0;
     uint32_t* phi_operand_offsets = ok ? ir_allocate(output, (uint64_t)phi_count + 1, 4, &ok) : 0;
     uint32_t* phi_operands = ok ? ir_allocate(output, (uint64_t)operand_count + 1, 4, &ok) : 0;
+    uint32_t* ties = ok ? ir_allocate(output, 2 * (uint64_t)value_count + 2, 4, &ok) : 0;
+    uint8_t* returned = ok ? ir_allocate(scratch, (uint64_t)count + 1, 1, &ok) : 0;
     error = ok || error != TIER1_EMIT_OK ? error : TIER1_EMIT_MEMORY;
     if (error == TIER1_EMIT_OK)
     {
@@ -801,6 +803,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             }
         }
         predecessor_offsets[blocks] = edge;
+        tier1_select_returned(plan, returned);
         // Values: a parameter in its incoming register from position 0 (its definition's interval alone: elsewhere it may
         // be in any register), a phi at its block's start, any other at its node's definition phase.
         use_offsets[0] = 0;
@@ -823,6 +826,18 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             // reads this column).
             rematerializable[v] = classes[v] != BUSTER_TIER1_ALLOCATE_GPR ? 0 : marks[node];
             use_offsets[v + 1] = op != IR_PHI;
+            // The operands whose registers a two-address result may take (#2685, tier1_select_ties): values of its class.
+            // A returned value takes none (tier1_select_returned).
+            uint32_t first = BUSTER_IR_NONE;
+            uint32_t second = BUSTER_IR_NONE;
+            if (op != IR_PHI && !parameter && returned[node] == 0)
+            {
+                tier1_select_ties(plan, node, &first, &second);
+            }
+            const uint32_t first_value = first < count ? node_values[first] : BUSTER_TIER1_CFG_NONE;
+            const uint32_t second_value = second < count ? node_values[second] : BUSTER_TIER1_CFG_NONE;
+            ties[2 * (uint64_t)v] = first_value != BUSTER_TIER1_CFG_NONE && node_classes[value_nodes[first_value]] == classes[v] ? first_value : BUSTER_TIER1_CFG_NONE;
+            ties[2 * (uint64_t)v + 1] = second_value != BUSTER_TIER1_CFG_NONE && node_classes[value_nodes[second_value]] == classes[v] ? second_value : BUSTER_TIER1_CFG_NONE;
         }
         // Uses by value, counted then filled in node order, which is position order: a node's effective uses, then its
         // definition's own use. A parameter's, at position 0, precedes every other use of it.
@@ -975,6 +990,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             .phi_values = phi_values,
             .phi_operand_offsets = phi_operand_offsets,
             .phi_operands = phi_operands,
+            .ties = ties,
             .block_count = blocks,
             .edge_count = edges,
             .value_count = value_count,
