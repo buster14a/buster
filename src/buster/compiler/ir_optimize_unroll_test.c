@@ -183,6 +183,8 @@ struct IrUnrollTestShape
     uint32_t bound;
     uint32_t reduction;
     bool memory;
+    // The sum form's constant: the header tests i + sum, apart from the increment.
+    uint32_t sum;
 };
 
 #define BUSTER_IR_UNROLL_TEST_FORM_TOP 0u
@@ -190,7 +192,8 @@ struct IrUnrollTestShape
 #define BUSTER_IR_UNROLL_TEST_FORM_SINGLE 2u
 #define BUSTER_IR_UNROLL_TEST_FORM_LATCH 3u
 #define BUSTER_IR_UNROLL_TEST_FORM_DIAMOND 4u
-#define BUSTER_IR_UNROLL_TEST_FORMS 5u
+#define BUSTER_IR_UNROLL_TEST_FORM_SUM 5u
+#define BUSTER_IR_UNROLL_TEST_FORMS 6u
 #define BUSTER_IR_UNROLL_TEST_REDUCTIONS 14u
 
 static const char* const ir_unroll_test_predicates[4] = { "ult", "ule", "lt", "le" };
@@ -263,10 +266,11 @@ static void ir_unroll_test_reduction(IrUnrollTestText* text, const IrUnrollTestS
 static void ir_unroll_test_shape(IrUnrollTestText* text, const IrUnrollTestShape* shape)
 {
     const char* type = ir_unroll_test_type(shape->bits);
-    const bool top = shape->form == BUSTER_IR_UNROLL_TEST_FORM_TOP || shape->form == BUSTER_IR_UNROLL_TEST_FORM_TOP_INCREMENT || shape->form == BUSTER_IR_UNROLL_TEST_FORM_DIAMOND;
-    const bool increment_tested = shape->form != BUSTER_IR_UNROLL_TEST_FORM_TOP && shape->form != BUSTER_IR_UNROLL_TEST_FORM_DIAMOND;
+    const bool top = shape->form == BUSTER_IR_UNROLL_TEST_FORM_TOP || shape->form == BUSTER_IR_UNROLL_TEST_FORM_TOP_INCREMENT || shape->form == BUSTER_IR_UNROLL_TEST_FORM_DIAMOND ||
+                     shape->form == BUSTER_IR_UNROLL_TEST_FORM_SUM;
+    const bool increment_tested = shape->form != BUSTER_IR_UNROLL_TEST_FORM_TOP && shape->form != BUSTER_IR_UNROLL_TEST_FORM_DIAMOND && shape->form != BUSTER_IR_UNROLL_TEST_FORM_SUM;
     const char* predicate = ir_unroll_test_predicate(shape);
-    const char* compared = increment_tested ? "{i2}" : "{i}";
+    const char* compared = shape->form == BUSTER_IR_UNROLL_TEST_FORM_SUM ? "{isum}" : increment_tested ? "{i2}" : "{i}";
     char test[96] = { 0 };
     snprintf(test, sizeof(test), shape->swapped ? "icmp.i1 {n}, %s %s" : "icmp.i1 %s, {n} %s", compared, predicate);
     // The header's and latch's blocks: b1 the header, the body's last block the latch, the exit after it.
@@ -294,6 +298,7 @@ static void ir_unroll_test_shape(IrUnrollTestText* text, const IrUnrollTestShape
     ir_unroll_test_constant(text, "seven", type, shape->bits, 7);
     ir_unroll_test_constant(text, "fifteen", type, shape->bits, 15);
     ir_unroll_test_constant(text, "r0", type, shape->bits, shape->reduction == 2 ? 1 : shape->reduction == 3 ? UINT64_MAX : 0);
+    ir_unroll_test_constant(text, "c_sum", type, shape->bits, shape->sum);
     ir_unroll_test_line(text, "slot", "stack_addr.ptr $0");
     ir_unroll_test_line(text, "", "br.void b1");
     ir_unroll_test_label(text, 1);
@@ -303,6 +308,10 @@ static void ir_unroll_test_shape(IrUnrollTestText* text, const IrUnrollTestShape
     if (shape->form == BUSTER_IR_UNROLL_TEST_FORM_TOP_INCREMENT)
     {
         ir_unroll_test_line(text, "i2", "add.%s {i}, {step}", type);
+    }
+    if (shape->form == BUSTER_IR_UNROLL_TEST_FORM_SUM)
+    {
+        ir_unroll_test_line(text, "isum", "add.%s {c_sum}, {i}", type);
     }
     if (top)
     {
@@ -478,8 +487,9 @@ static void ir_unroll_test_shape_run(IrOptimizeTest* test, const IrUnrollTestSha
     IrUnrollTestText* text = calloc(1, sizeof(IrUnrollTestText));
     IrFunction f = { 0 };
     char label[192] = { 0 };
-    snprintf(label, sizeof(label), "shape i%u %s%s%s form %u step %u start %u bound %u reduction %u%s", shape->bits, ir_unroll_test_predicates[shape->predicate], shape->swapped ? " swapped" : "",
-             shape->inverted ? " inverted" : "", shape->form, shape->step, shape->start, shape->bound, shape->reduction, shape->memory ? " memory" : "");
+    snprintf(label, sizeof(label), "shape i%u %s%s%s form %u step %u start %u bound %u reduction %u sum %u%s", shape->bits, ir_unroll_test_predicates[shape->predicate],
+             shape->swapped ? " swapped" : "", shape->inverted ? " inverted" : "", shape->form, shape->step, shape->start, shape->bound, shape->reduction, shape->sum,
+             shape->memory ? " memory" : "");
     const bool built = text != NULL;
     if (built)
     {
@@ -517,6 +527,7 @@ static void ir_unroll_test_shapes(IrOptimizeTest* test, uint32_t random_shapes)
                     .start = 0,
                     .bound = 13,
                     .reduction = 0,
+                    .sum = order + 1,
                 };
                 ir_unroll_test_shape_run(test, &shape, IR_UNROLL_UNROLLED);
             }
@@ -568,6 +579,7 @@ static void ir_unroll_test_shapes(IrOptimizeTest* test, uint32_t random_shapes)
             .bound = start + (uint32_t)((r >> 14) % 40),
             .reduction = (uint32_t)((r >> 20) % BUSTER_IR_UNROLL_TEST_REDUCTIONS),
             .memory = ((r >> 26) & 1) != 0,
+            .sum = (uint32_t)((r >> 36) % 6),
         };
         ir_unroll_test_shape_run(test, &shape, IR_UNROLL_UNROLLED);
     }
@@ -604,7 +616,7 @@ static void ir_unroll_test_latch(IrUnrollTestText* text, uint32_t exit)
 // Each refusal's loop, with one thing wrong; the nested loop's inner loop unrolls beside its refused outer loop.
 static void ir_unroll_test_refusals(IrOptimizeTest* test)
 {
-    for (uint32_t k = 0; k < 15; k += 1)
+    for (uint32_t k = 0; k < 16; k += 1)
     {
         IrUnrollTestText* text = calloc(1, sizeof(IrUnrollTestText));
         const char* label = "";
@@ -692,6 +704,19 @@ static void ir_unroll_test_refusals(IrOptimizeTest* test)
             ir_unroll_test_label(text, 3);
             ir_unroll_test_line(text, "", "ret.void {s}");
         }
+        else if (k == 15)
+        {
+            // i - 1 tested: a sum of a negative constant.
+            label = "test of i - 1";
+            expected = IR_UNROLL_INDUCTION_REFUSED;
+            ir_unroll_test_prefix(text, 2, "i64");
+            ir_unroll_test_constant(text, "minus", "i64", 64, UINT64_MAX);
+            ir_unroll_test_line(text, "im", "add.i64 {i}, {minus}");
+            ir_unroll_test_line(text, "t", "icmp.i1 {im}, {n} lt");
+            ir_unroll_test_line(text, "", "cbr.void {t}, b2, b3");
+            ir_unroll_test_label(text, 2);
+            ir_unroll_test_latch(text, 3);
+        }
         else if (k == 10)
         {
             label = "test of a non-induction";
@@ -759,8 +784,8 @@ static void ir_unroll_test_refusals(IrOptimizeTest* test)
         }
         else
         {
-            // A header entered from two outside blocks, then a loop around a counted one.
-            label = k == 14 ? "two entries" : "";
+            // A header entered from two outside blocks.
+            label = "two entries";
             expected = IR_UNROLL_PREHEADER;
             snprintf(text->header, sizeof(text->header), "function (i64) -> i64 {");
             ir_unroll_test_label(text, 0);

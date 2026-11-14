@@ -12,9 +12,9 @@
 //   MX: the main loop's values (a split reduction's accumulators combined); br H
 //   H:  the original loop, its phis entered from MX in place of P
 //
-// K' is (factor - 1 + d) * step, less one for a non-strict test, where d is 1 where the test reads the increment and 0
-// where it reads the induction phi: every one of the `factor` iterations then passes the original test, so each copy's
-// own test is known and its exit branch becomes a jump. Copy k's induction is i + (k - 1) * step from the main phi
+// K' is (factor - 1) * step + c, less one for a non-strict test, where the test reads the induction phi plus c >= 0 (0
+// for the phi itself, the step for its increment): every one of the `factor` iterations then passes the original test,
+// so each copy's own test is known and its exit branch becomes a jump. Copy k's induction is i + (k - 1) * step from the main phi
 // rather than a chain of increments. An integer reduction (wrapping add, sub, mul, and, or, xor, alone or under a select
 // against the old value, and signed or unsigned minimum or maximum by an icmp and a select) whose phi and update the
 // loop uses nowhere else takes up to `accumulators` accumulators, the extra ones starting at the operation's identity,
@@ -22,8 +22,9 @@
 //
 // A loop is admitted when it is innermost and reducible, has one outside predecessor ending in `br` to its header (its
 // preheader), one latch, and one exit edge, from a conditional branch in its header or its latch on an icmp of an
-// integer induction phi (or its increment) against a value defined outside the loop; the induction's increment adds a
-// positive constant step; the test continues while ult, ule, slt or sle (either operand order, either branch sense);
+// integer induction phi (or it plus a constant, as its increment) against a value defined outside the loop or a
+// constant; the induction's increment adds a positive constant step; the test continues while ult, ule, slt or sle
+// (either operand order, either branch sense);
 // and it has no call, switch, indirect branch, labeled block, return, unreachable, alloca or stack save/restore. Each
 // refused loop is counted by its first failing rule (IrUnrollRefusal). The factor is the largest power of two up to
 // `factor` whose copies' estimated cost (the instructions live in a copy, minus the free ones) fits `budget`, and a
@@ -748,7 +749,9 @@ static IrUnrollRefusal ir_unroll_loop(IrUnrollWork* work, uint32_t loop, bool in
                                                                                                               IR_UNROLL_UNROLLED;
         }
     }
-    // The induction: a header phi whose latch value adds it a positive constant step, compared or its increment compared.
+    // The induction: a header phi whose latch value adds it a positive constant step, compared itself or plus a constant
+    // c >= 0 (its increment, c the step, or another sum, as `i + 1 < n`): iteration k returns while i + k * step + c
+    // passes, so `distance` is c.
     uint32_t increment = BUSTER_IR_NONE;
     uint64_t distance = 0;
     if (outcome == IR_UNROLL_UNROLLED)
@@ -759,14 +762,25 @@ static IrUnrollRefusal ir_unroll_loop(IrUnrollWork* work, uint32_t loop, bool in
             phi_end += 1;
         }
         result.phi_end = phi_end;
+        // The compared value's phi and constant: the value itself, or one operand of its add.
+        uint32_t base = compared;
+        uint64_t added_constant = 0;
+        bool offset_known = true;
+        if (compared != BUSTER_IR_NONE && f->op[compared] == IR_ADD && ir_unroll_constant(f, f->b[compared], &added_constant))
+        {
+            base = f->a[compared];
+        }
+        else if (compared != BUSTER_IR_NONE && f->op[compared] == IR_ADD && ir_unroll_constant(f, f->a[compared], &added_constant))
+        {
+            base = f->b[compared];
+        }
         for (uint32_t phi = f->block_offsets[header]; phi < phi_end; phi += 1)
         {
-            const uint32_t value = ir_unroll_incoming(f, phi, result.latch);
-            if (phi == compared || (value == compared && compared != BUSTER_IR_NONE))
+            if (phi == base)
             {
                 result.induction = phi;
-                increment = value;
-                distance = phi == compared ? 0 : 1;
+                increment = ir_unroll_incoming(f, phi, result.latch);
+                distance = added_constant;
             }
         }
         const uint32_t type = increment != BUSTER_IR_NONE ? f->type[result.induction] : IR_VOID;
@@ -776,7 +790,9 @@ static IrUnrollRefusal ir_unroll_loop(IrUnrollWork* work, uint32_t loop, bool in
         const uint64_t mask = ir_unroll_mask(type);
         const uint64_t sign = (mask >> 1) + 1;
         const bool positive = constant && step != 0 && (step & sign) == 0 && step <= BUSTER_IR_UNROLL_STEP_LIMIT;
-        outcome = ir_unroll_integer(type) && ir_unroll_value_inside(work, loop, increment) && positive ? IR_UNROLL_UNROLLED : IR_UNROLL_INDUCTION_REFUSED;
+        // The compared sum's constant: of the induction's type, at least 0 and at most the step limit.
+        offset_known = (compared == result.induction || f->type[compared] == type) && (distance & sign) == 0 && distance <= BUSTER_IR_UNROLL_STEP_LIMIT;
+        outcome = ir_unroll_integer(type) && ir_unroll_value_inside(work, loop, increment) && positive && offset_known ? IR_UNROLL_UNROLLED : IR_UNROLL_INDUCTION_REFUSED;
         result.type = (uint8_t)type;
         result.step = step;
         result.start = outcome == IR_UNROLL_UNROLLED ? ir_unroll_incoming(f, result.induction, result.preheader) : BUSTER_IR_NONE;
@@ -795,11 +811,11 @@ static IrUnrollRefusal ir_unroll_loop(IrUnrollWork* work, uint32_t loop, bool in
         const uint64_t mask = ir_unroll_mask(result.type);
         const uint64_t limit = result.predicate == IR_LT ? mask >> 1 : mask;
         const bool strict = predicate == IR_ULT || predicate == IR_LT;
-        uint64_t offset = ((uint64_t)factor - 1 + distance) * result.step - (strict ? 0 : 1);
+        uint64_t offset = ((uint64_t)factor - 1) * result.step + distance - (strict ? 0 : 1);
         while (factor > 2 && offset > limit)
         {
             factor /= 2;
-            offset = ((uint64_t)factor - 1 + distance) * result.step - (strict ? 0 : 1);
+            offset = ((uint64_t)factor - 1) * result.step + distance - (strict ? 0 : 1);
         }
         result.factor = (uint8_t)factor;
         result.offset = offset;

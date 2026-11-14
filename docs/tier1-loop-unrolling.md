@@ -43,7 +43,7 @@ is and counted under its first failing rule, which `--tier1-report` prints
 | That edge's block ends in a conditional branch on an integer `icmp`. | `test` |
 | One of the compared values is defined outside the loop, or is a constant (wherever the lowering put it). | `bound` |
 | The loop continues while the other is `ult`, `ule`, `slt` or `sle` than it, in either operand order and on either edge. | `predicate` |
-| The other is a header phi of an integer type (8 to 64 bits), or its latch value, which adds it a positive constant step of at most 65,536 (read through copies, extensions and truncations, as the lowering's `sext (const 1)`). | `induction` |
+| The other is a header phi of an integer type (8 to 64 bits), or it plus a constant c from 0 to 65,536 (its increment, or another sum, as `i + 1 < n`), and the phi's latch value adds it a positive constant step of at most 65,536 (each read through copies, extensions and truncations, as the lowering's `sext (const 1)`). | `induction` |
 | Two copies' estimated cost fits the budget (below), and the loop has at most 1,024 instructions. | `size` |
 | The function's growth stays within its budget. | `growth` |
 
@@ -58,13 +58,13 @@ these.
 ## The rewrite
 
 Write the continuing test as `v P n`, where P is `<` or `<=` (signed or
-unsigned), `v` is the induction phi `i` (d = 0) or its increment `i + s`
-(d = 1), and `n` the bound. Iteration k of the loop returns to the header
-exactly when `i + (k + d)s P n`. With the induction increasing and no wrap,
-`f` whole iterations from `i` all return exactly when the last one does:
-`i + (f - 1 + d)s P n`. So, with K' = (f - 1 + d)s for a strict test and one less
-for a non-strict one, the main loop may run its `f` copies exactly when
-`i < n - K'` in the test's signedness. The preheader computes that bound once:
+unsigned), `v` is the induction phi `i` plus a constant c >= 0 (0 for the phi,
+the step `s` for its increment), and `n` the bound. Iteration k of the loop
+returns to the header exactly when `i + ks + c P n`. With the induction
+increasing and no wrap, `f` whole iterations from `i` all return exactly when
+the last one does: `i + (f - 1)s + c P n`. So, with K' = (f - 1)s + c for a
+strict test and one less for a non-strict one, the main loop may run its `f`
+copies exactly when `i < n - K'` in the test's signedness. The preheader computes that bound once:
 
 ```text
 P:   ...
@@ -205,8 +205,8 @@ vectorized parts are the ones that run over every instruction of a function
   budgets (factors 1, 2 and 64, a budget of 1, no growth, one accumulator) and
   every short output arena (each fails with nothing left in it or succeeds)
   have their own checks.
-- **Mutations.** An off-by-one in the unsafe direction of the offset, the
-  missing `d`, a wrong `and` identity, a displacement without its scale and an
+- **Mutations.** An off-by-one in the unsafe direction of the offset, a
+  missing c, a wrong `and` identity, a displacement without its scale and an
   unclamped bound each fail it. Testing `<=` as `<` passes, as it should: the
   main loop then leaves one iteration early, to the remainder.
 - **`test-ir-optimize`** runs `tests/ir/optimize/unroll-loops-*.ir`: a store
