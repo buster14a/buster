@@ -724,6 +724,17 @@ at the target's forms, by both of the checker's paths:
   dword (`pshufd`, or of 32 bytes `vextractf128` and `shufps`), makes each element's kept bits its whole value by shifts
   and packs them with saturation (`packssdw`, `packsswb`, `packuswb`), 32 bytes as their two halves. Conversions between
   8- or 16-bit integers and floats or doubles go through dwords by them.
+- The x86 builtins whose SSSE3, SSE4.1, AVX or AVX2 instruction the target hasn't, which only a `target_clones`
+  copy's body reaches (clang refuses them elsewhere), are SSE2's sequences of LLVM's expansion
+  (`check_x86_lower_sse2_row`, #1834): `palignr` as b's `psrldq` ORed with a's `pslldq` (a's `psrldq` past 16 bytes,
+  zeros past 31); `pblendw`, `blendps`, `blendpd` and `pblendd` as `a ^ ((a ^ b) & mask)` of the immediate's mask
+  built from a general register (`movabs`, `movq`, `punpcklqdq`), or SSE4.1's `blendps` for `pblendd`; `pextrb` as
+  its word's `pextrw`, shifted right by 8 for an odd byte; `pinsrb` as its word's `pextrw`, the other byte masked and
+  the value's ORed in, then `pinsrw`; `pinsrd` as two `pinsrw`s of its halves; `pinsrq` as `movq` then `movsd` or
+  `punpcklqdq`; `vpermilpd` as `shufpd` of a and a; and the packed compares by clang's predicates past 7 as `cmpeqps`
+  ORed with `cmpunordps` (EQ_UQ), `cmpneqps` ANDed with `cmpordps` (NEQ_OQ), `xorps` (FALSE) and `pcmpeqd` (TRUE), a
+  greater-than's operands swapped into a copy. `roundps`, `roundpd`, `dpps` and `mpsadbw` stay refused by name: clang's
+  backend fails to select them there. A function with FENV_ACCESS keeps its predicates' 5 bits, those past 7 refused.
 - A shuffle no row of these sequences takes (of bytes and words without SSSE3, of 32-byte vectors of them without
   AVX-512, of any 32-byte vectors without AVX2) runs element by element through memory, as a wide vector's does
   (`check_lower_transport_shuffle`, #1834).
