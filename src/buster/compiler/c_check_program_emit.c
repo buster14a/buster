@@ -126,6 +126,8 @@ struct CheckProgramCode
     uint64_t records;
     uint64_t deferred;
     uint64_t code_bytes;
+    // The functions --tier1's inlining left without code (#2541 step 2, check_tier1_inline_dead).
+    uint32_t dead_functions;
     // Optional source-body identities for --tier1-function-sizes. Kept until the driver has published the object,
     // so the manifest reads its final symbol sizes after named sections and assembly .size directives are applied.
     SymbolId* tier1_size_symbols;
@@ -510,6 +512,11 @@ struct CheckTier1Lane
     uint8_t schedule;
 };
 
+// A body's CheckTier1Inline.held byte (#2541 step 2): one the unit stage may hold back, and one whose code waits for the
+// last pass (c_check_tier1_inline.c's check_tier1_inline_held).
+#define BUSTER_CHECK_TIER1_INLINE_HELD 1u
+#define BUSTER_CHECK_TIER1_INLINE_WAITING 2u
+
 // The unit's inline callees (#1282, check_tier1_inline_table): by symbol (of `symbol_count`), the index plus one of the body
 // of each always_inline function of internal linkage, 0 for every other symbol (Tier 0's splice, #1398); the bodies' typed
 // streams in `lowered`. With --tier1's inlining, its unit stage and summaries (#2541, c_check_tier1_inline.c).
@@ -535,6 +542,20 @@ struct CheckTier1Inline
     struct CheckTier1Summary* summaries;
     uint32_t* stage;
     Arena* arenas;
+    // Per body (#2541 step 2): whether a candidate keeps its code whatever its callers expand (an external one, one an
+    // attribute, a section, static data or an alias keeps), and whether the emission gave it none
+    // (check_tier1_inline_dead, after the lanes). Null without --tier1's inlining.
+    const uint8_t* rooted;
+    uint8_t* dead;
+    // Per body, its direct calls in the unit (the unit stage's, saturating): one makes a single-site candidate (#2541 step 2).
+    uint32_t* sites;
+    // Per body (#2541 step 2), whether the unit stage holds its code back for the last pass (check_tier1_inline_stage), and
+    // whether the last pass let it go on (check_program_emit_last); whether the run holds any back (`holding`, which the
+    // emission sets: not under -g, -fpatchable-function-entry or in a unit with asm). And the scalar twins' choice.
+    uint8_t* held;
+    uint8_t* released;
+    bool holding;
+    bool scalar;
     uint32_t body_count;
 };
 
@@ -610,6 +631,8 @@ struct CheckTier1Report
     uint64_t inlined_calls;
     uint64_t schedule_blocks;
     uint64_t schedule_moved;
+    // The functions the inlining left without code (#2541 step 2, CheckProgramCode.dead_functions).
+    uint64_t dead_functions;
 };
 
 // #1059's coverage of the operations a helper may implement, summed over a command's units (--helper-report): each
@@ -840,6 +863,9 @@ struct CheckProgramLanes
     bool tier1_no_lifetimes;
     // --tier1-no-inline keeps every call of the unit's always_inline functions (#1282's comparison).
     bool tier1_no_inline;
+    // --tier1-no-hold makes every candidate's code on its lane, none in the last pass (#2541 step 2, CheckTier1Inline.held):
+    // the objects are the same, which the comparison checks.
+    bool tier1_no_hold;
     // --tier0-no-inline keeps Tier 0's (#1398's comparison, c_check_tier0_inline.c).
     bool tier0_no_inline;
     // --tier1-schedule's variant (BUSTER_CHECK_TIER1_SCHEDULE_*, #172's measurement): none by default.
@@ -877,10 +903,14 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
 // Releases a lane's arenas for the pipeline.
 static void check_tier1_lane_release(CheckTier1Lane* lane);
 // Defined in c_check_tier1_inline.c (#1282): the unit's inline callees by symbol, in `arena`, or false for none.
-static bool check_tier1_inline_table(const CheckProgram* program, const CheckProgramLowered* lowered, uint32_t symbol_count, bool tier1, Arena* arena, CheckTier1Inline* table);
+static bool check_tier1_inline_table(const CheckProgram* program, const CheckProgramLowered* lowered, uint32_t symbol_count, bool tier1, bool scalar, Arena* arena,
+                                     CheckTier1Inline* table);
 static void check_tier1_inline_release(CheckTier1Inline* table);
 // Gives `table` a new generation, which no lane's cache is valid for: its bodies are lowered again.
 static void check_tier1_inline_renew(CheckTier1Inline* table);
+// Defined in c_check_tier1_inline.c (#2541 step 2): the candidates the emission gives no code, once every body's is made.
+static uint32_t check_tier1_inline_dead(CheckTier1Inline* inlining, const EmittedCode* codes, const CheckProgramHelpers* helpers, const CheckProgramNaked* naked,
+                                        const SymbolId* asm_symbols, uint32_t asm_names, bool sources, Arena* scratch);
 static uint32_t check_tier1_operation(CheckTier1Outcome outcome);
 // Prints `report`, a line on `stream`: how many functions each tier compiled, and why Tier 1 refused the others.
 static void check_tier1_print_report(FILE* stream, const CheckTier1Report* report);
@@ -1050,6 +1080,10 @@ struct CheckEmitRun
     uint32_t* orders[BUSTER_CHECK_EMIT_MAX_LANES];
     CheckEmitPart* parts;
     uint32_t part_count;
+    // The last pass's failures (#2541 step 2, check_program_emit_last): the first body whose Tier 0 code or code after it
+    // failed there, or body_count for none.
+    uint32_t late_tier0_failed;
+    uint32_t late_code_failed;
     CheckEmitLane* lane_states;
     // A growing team's (CheckEmitGrowth), which its round's lanes take the parts by; null for any other run.
     CheckEmitGrowth* growth;
@@ -1601,8 +1635,9 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
                                         check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
                                                             !run->lanes->tier1_no_rematerialize, run->lanes->tier1_gvn, run->verify, run->sources, lane->scratch,
                                                             &run->codes[b], &run->tier1_counts[b], fault);
-    outcome = check_tier1_policy(outcome, run->lanes->tier1_strict);
-    run->tier1_outcomes[b] = outcome;
+    // A held body (#2541 step 2) has no outcome yet: the last pass's, or none for a dead one.
+    outcome = outcome.held ? outcome : check_tier1_policy(outcome, run->lanes->tier1_strict);
+    run->tier1_outcomes[b] = outcome.held ? (CheckTier1Outcome){ 0 } : outcome;
     return outcome;
 }
 
@@ -1737,6 +1772,15 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
         else
         {
             outcome = lane->tier1 != NULL ? check_program_emit_tier1(run, lane, b, naked != 0) : (CheckTier1Outcome){ 0 };
+        }
+        // A candidate whose code waits for the last pass (#2541 step 2, check_tier1_inline_held): none yet, which the last
+        // pass makes where emitted code still refers to it, and the merge leaves out where none does.
+        if (outcome.held)
+        {
+            run->codes[b] = (EmittedCode){ 0 };
+            run->bodies[b] = (CheckEmitBody){ .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
+            run->tier1_counts[b] = (CheckTier1Counts){ 0 };
+            continue;
         }
         const bool tier1 = outcome.category == CHECK_TIER1_SUCCESS;
         const bool forbidden = outcome.fallback == CHECK_TIER1_FALLBACK_FORBIDDEN;
@@ -2219,6 +2263,42 @@ static void check_program_emit_alone(CheckEmitRun* run)
     else
     {
         check_program_emit_part_refused(part);
+    }
+}
+
+// The last pass (#2541 step 2): the held candidates' code (check_tier1_inline_held) where the emitted code still refers to
+// them, on the calling thread with lane 0's state, once the lanes are done: the dead set by the code made so far
+// (check_tier1_inline_dead), each held body it leaves alive let go on and its code made, in body order, until no held body
+// that is still without code is alive. A failure is recorded as a part's (CheckEmitRun.late_tier0_failed,
+// late_code_failed).
+static void check_program_emit_last(CheckEmitRun* run, CheckTier1Inline* inlining, const CheckProgramHelpers* helpers, const CheckProgramNaked* naked)
+{
+    CheckEmitLane* lane = run->lane_states;
+    if (!lane->prepared)
+    {
+        lane->ready = check_program_emit_lane_arenas(run, lane, 0);
+        lane->prepared = true;
+    }
+    bool pending = lane->ready;
+    while (pending)
+    {
+        check_tier1_inline_dead(inlining, run->codes, helpers, naked, NULL, 0, false, lane->scratch);
+        pending = false;
+        for (uint32_t b = 0; b < run->body_count; b += 1)
+        {
+            if (inlining->held[b] == BUSTER_CHECK_TIER1_INLINE_WAITING && inlining->released[b] == 0 && inlining->dead[b] == 0)
+            {
+                inlining->released[b] = 1;
+                pending = true;
+                CheckEmitPart part = { 0 };
+                part.lower.first = b;
+                part.lower.end = b + 1;
+                part.lower.stage = CHECK_LOWER_STAGE_NONE;
+                check_program_emit_code_half(run, lane, &part);
+                run->late_tier0_failed = part.tier0_failed != part.lower.end && b < run->late_tier0_failed ? b : run->late_tier0_failed;
+                run->late_code_failed = part.code_failed != part.lower.end && b < run->late_code_failed ? b : run->late_code_failed;
+            }
+        }
     }
 }
 
@@ -2991,9 +3071,12 @@ static bool check_program_emit_return(WorkerBudgetLease* leases, uint32_t count)
     return result;
 }
 
+// The emission (check_program_emit_lanes'), each step's time charged to `stage_clock`. With `binding`, an executable's
+// link bound to the C runtime; with `kept`, a link kept for a link of several units (c_checker_units.c), which binds its
+// every program symbol as an executable's does: neither leaves a function without code (#2541 step 2's dead functions).
 static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgram* program, const Parser* parser,
                                      const InternTable* identifiers, LinkCapacity data_capacity, bool scalar, Arena* output, Arena* bytes, Arena* scratch,
-                                     CheckProgramBinding* binding, CheckProgramRows* rows, bool unwind, bool verify, CheckProgramLanes* lanes,
+                                     CheckProgramBinding* binding, bool kept, CheckProgramRows* rows, bool unwind, bool verify, CheckProgramLanes* lanes,
                                      CheckClock* stage_clock)
 {
     (void)scalar;
@@ -3079,6 +3162,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         .access = access,
         .access_count = access_count,
         .body_count = count,
+        .late_tier0_failed = count,
+        .late_code_failed = count,
         .scalar = BUSTER_SCALAR_PATH(scalar),
         .verify = verify,
         .unwind = unwind,
@@ -3106,11 +3191,18 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     CheckTier1Inline tier1_inline = { 0 };
     const bool tier1_inlines = tier1 && run.tier1_outcomes != 0 && !lanes->tier1_no_inline;
     const bool tier0_inlines = valid && (lanes == NULL || !lanes->tier0_no_inline);
-    if ((tier1_inlines || tier0_inlines) && check_tier1_inline_table(program, &result->lowered, access_count, tier1_inlines, scratch, &tier1_inline))
+    if ((tier1_inlines || tier0_inlines) && check_tier1_inline_table(program, &result->lowered, access_count, tier1_inlines, run.scalar, scratch, &tier1_inline))
     {
         run.inline_table = &tier1_inline;
         run.tier1_inline = tier1_inlines ? &tier1_inline : NULL;
         run.tier0_inline = tier0_inlines ? &tier1_inline : NULL;
+        // The candidates' code held back for the last pass (#2541 step 2), where a dead one may lose its code: in -c's
+        // object alone, whose symbols nothing refers to are left out (an executable's binding resolves every program
+        // symbol, a direct one's or, with `kept`, that of a link of several units); not under -g, whose
+        // entries have no form for a function without code yet, -fpatchable-function-entry or in a unit with asm, whose
+        // templates refer to names.
+        tier1_inline.holding = tier1_inlines && tier1_inline.held != NULL && binding == NULL && !kept && rows == NULL && program->patchable_count == 0 &&
+                               program->input->asm_count == 0 && !lanes->tier1_no_hold;
     }
     if (tier1 && run.tier1_outcomes != 0 && !check_tier1_ready)
     {
@@ -3290,6 +3382,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     // Also return the leases when an active-lane allocation failed before dispatch. A returned lease is a no-op.
     valid = check_program_emit_return(leases, lease_count) && valid;
+    // The held candidates that the emitted code still refers to (#2541 step 2), from their summaries.
+    if (valid && count != 0 && tier1_inline.holding)
+    {
+        check_program_emit_last(&run, &tier1_inline, &result->lowered.helpers, result->lowered.asms.naked);
+    }
     // Every body's code is done: the summaries (#2541) have no reader left.
     check_tier1_inline_release(&tier1_inline);
     if (lanes != NULL && lanes->budget != NULL && lanes->budget->return_failed)
@@ -3694,6 +3791,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     {
         failed = run.parts[p].tier0_failed < failed && run.parts[p].tier0_failed != run.parts[p].lower.end ? run.parts[p].tier0_failed : failed;
     }
+    failed = valid && run.late_tier0_failed < failed ? run.late_tier0_failed : failed;
     if (valid && failed != count)
     {
         const CheckTier1Outcome outcome = run.tier1_outcomes != NULL ? run.tier1_outcomes[failed] : (CheckTier1Outcome){ 0 };
@@ -3733,6 +3831,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const uint32_t code_failed = run.parts[p].code_failed;
         encoded = code_failed != run.parts[p].lower.end && code_failed < encoded ? code_failed : encoded;
     }
+    encoded = valid && run.late_code_failed < encoded ? run.late_code_failed : encoded;
     if (valid && rows != NULL)
     {
         valid = check_program_emit_reserve_rows(rows, result->lowered.entries, count, output);
@@ -4305,6 +4404,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     valid = valid && (program->target_group_count == 0 || check_program_target_symbols(result, program, output));
     // Declarations whose asm labels name the made symbols of those groups (#2204).
     valid = valid && ((program->target_group_count == 0 && program->cpu_group_count == 0) || check_program_label_forwards(result, program, output));
+    // The candidates whose every call --tier1 expanded and that nothing else refers to (#2541 step 2,
+    // check_tier1_inline_dead): no atom, symbol, frame or jump table of theirs is published. `dead` is null for none.
+    const uint32_t dead_count = valid && run.tier1_inline != NULL && binding == NULL && !kept ?
+                                check_tier1_inline_dead(&tier1_inline, run.codes, helpers, asms->naked, asm_symbols, asms->name_count, run.sources, scratch) : 0;
+    const uint8_t* dead = dead_count != 0 ? tier1_inline.dead : NULL;
+    result->dead_functions = dead_count;
     // Every symbol of the program's exists: an executable's runtime joins now, before the program's atoms, with the
     // symbols this emission and the static data will define marked as the program's definitions (bind.c).
     for (uint32_t b = 0; valid && binding != NULL && b < count + helpers->count + binding->data_count; b += 1)
@@ -4446,6 +4551,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     for (uint32_t b = 0; valid && b < count + helpers->count; b += 1)
     {
         const bool source_body = b < count;
+        // A dead function (#2541 step 2) defines no label of its own (check_tier1_inline_dead).
+        if (source_body && dead != NULL && dead[b] != 0)
+        {
+            continue;
+        }
         // A helper's code as the emission takes it (emitted_from_tier0, below), a body's as its lane made it.
         EmittedCode helper_code = { 0 };
         const EmittedCode* code = source_body ? &run.codes[b] : &helper_code;
@@ -4686,21 +4796,33 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // function after it, as one EH_FRAME atom whose FDEs' initial locations refer to their functions.
     if (valid && frames != 0)
     {
-        UnwindOutput tables = { .location_capacity = (uint32_t)frames, .shared = true };
-        valid = unwind_write(run.frames, (uint32_t)frames, &tables, BUSTER_SCALAR_PATH(scalar)) == UNWIND_ERROR_CAPACITY;
-        uint32_t* locations = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, frames) : 0;
+        // Each frame's function's symbol, and a dead function's frame left out (#2541 step 2): the others move down.
+        SymbolId* frame_symbols = BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, frames);
+        valid = frame_symbols != 0;
+        uint32_t kept = 0;
+        for (uint32_t f = 0; valid && f < frames; f += 1)
+        {
+            if (f >= count || dead == NULL || dead[f] == 0)
+            {
+                frame_symbols[kept] = f < count ? check_program_body_symbol(program, f) : f < target_first ? helpers->items[f - count].symbol :
+                                      target_frame_symbols[f - target_first];
+                run.frames[kept] = run.frames[f];
+                kept += 1;
+            }
+        }
+        UnwindOutput tables = { .location_capacity = kept, .shared = true };
+        valid = valid && unwind_write(run.frames, kept, &tables, BUSTER_SCALAR_PATH(scalar)) == UNWIND_ERROR_CAPACITY;
+        uint32_t* locations = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, kept) : 0;
         uint8_t* table_bytes = valid ? arena_push(bytes, tables.size, 8) : 0;
         tables.bytes = table_bytes;
         tables.capacity = tables.size;
         tables.locations = locations;
-        valid = locations != 0 && table_bytes != 0 && unwind_write(run.frames, (uint32_t)frames, &tables, BUSTER_SCALAR_PATH(scalar)) == UNWIND_OK;
+        valid = locations != 0 && table_bytes != 0 && unwind_write(run.frames, kept, &tables, BUSTER_SCALAR_PATH(scalar)) == UNWIND_OK;
         const AtomId atom = valid ? link_add_atom(&result->link, BUSTER_LINK_CLASS_EH_FRAME, 3, tables.size, table_bytes, 0) : 0;
         valid = atom != 0;
-        for (uint32_t f = 0; valid && f < frames; f += 1)
+        for (uint32_t f = 0; valid && f < kept; f += 1)
         {
-            const SymbolId symbol = f < count ? check_program_body_symbol(program, f) : f < target_first ? helpers->items[f - count].symbol :
-                                    target_frame_symbols[f - target_first];
-            valid = link_add_fixup(&result->link, atom, locations[f], BUSTER_LINK_FIXUP_PC32, symbol, 0) != 0;
+            valid = link_add_fixup(&result->link, atom, locations[f], BUSTER_LINK_FIXUP_PC32, frame_symbols[f], 0) != 0;
         }
     }
     check_clock_mark(stage_clock, CHECK_STAGE_UNWIND);
@@ -4709,6 +4831,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     for (uint32_t t = 0; valid && t < result->lowered.table_count; t += 1)
     {
         const CheckLowerTable* table = result->lowered.tables + t;
+        // A dead function's tables (#2541 step 2), which its code alone refers to.
+        if (dead != NULL && table->function < count && dead[table->function] != 0)
+        {
+            continue;
+        }
         const uint64_t size = (uint64_t)table->count * 4;
         uint8_t* data = arena_push(bytes, size, 4);
         const AtomId atom = data != 0 ? link_add_atom(&result->link, BUSTER_LINK_CLASS_RODATA, 2, size, (uint8_t*)memset(data, 0, size), 0) : 0;
@@ -4789,14 +4916,21 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         result->tier1_size_symbols = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, count) : NULL;
         result->tier1_size_kinds = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, count) : NULL;
         valid = count == 0 || (result->tier1_size_symbols != NULL && result->tier1_size_kinds != NULL && run.tier1_outcomes != NULL);
+        // A dead function (#2541 step 2) has no symbol in the object, and no entry.
+        uint32_t listed = 0;
         for (uint32_t b = 0; valid && b < count; b += 1)
         {
+            if (dead != NULL && dead[b] != 0)
+            {
+                continue;
+            }
             const CheckTier1Outcome outcome = run.tier1_outcomes[b];
-            result->tier1_size_symbols[b] = check_program_body_symbol(program, b);
-            result->tier1_size_kinds[b] = outcome.category == CHECK_TIER1_SUCCESS ? 1 : 0;
+            result->tier1_size_symbols[listed] = check_program_body_symbol(program, b);
+            result->tier1_size_kinds[listed] = outcome.category == CHECK_TIER1_SUCCESS ? 1 : 0;
             valid = outcome.category == CHECK_TIER1_SUCCESS || outcome.fallback == CHECK_TIER1_FALLBACK_TIER0;
+            listed += 1;
         }
-        result->tier1_size_count = valid ? count : 0;
+        result->tier1_size_count = valid ? listed : 0;
         result->tier1_sizes_ready = valid;
     }
     // Report only source order's prefix through the winning Tier 1 failure, not the speculative work later parts
@@ -4805,10 +4939,18 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     const uint32_t report_end = valid ? count : result->tier1_failure.category != CHECK_TIER1_UNATTEMPTED ? failed + 1 : 0;
     if (lanes != NULL && lanes->tier1)
     {
-        lanes->tier1_report.requested += count;
+        // The dead functions (#2541 step 2) aren't the object's: `dead=` counts them.
+        const uint32_t left = dead != NULL ? dead_count : 0;
+        lanes->tier1_report.requested += count - left;
+        lanes->tier1_report.dead_functions += left;
     }
     for (uint32_t b = 0; run.tier1_outcomes != 0 && b < report_end; b += 1)
     {
+        // A dead function (#2541 step 2) is no function of the object's: `dead=` counts it.
+        if (dead != NULL && dead[b] != 0)
+        {
+            continue;
+        }
         const CheckTier1Outcome outcome = run.tier1_outcomes[b];
         const uint32_t stage = outcome.stage;
         const bool attempted = outcome.category != CHECK_TIER1_UNATTEMPTED;
@@ -4932,8 +5074,8 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
 {
     (void)scalar;
 
-    return check_program_emit_timed(result, program, parser, identifiers, data_capacity, BUSTER_SCALAR_PATH(scalar), output, bytes, scratch, binding, rows, unwind, verify, lanes,
-                                    NULL);
+    return check_program_emit_timed(result, program, parser, identifiers, data_capacity, BUSTER_SCALAR_PATH(scalar), output, bytes, scratch, binding, false, rows, unwind, verify,
+                                    lanes, NULL);
 }
 
 // check_program_emit_lanes on the calling thread alone.

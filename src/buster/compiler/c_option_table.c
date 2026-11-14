@@ -67,6 +67,7 @@
     ENTRY(TIER1, "--tier1") \
     ENTRY(TIER1_FUNCTION_SIZES, "--tier1-function-sizes") \
     ENTRY(TIER1_GVN, "--tier1-gvn") \
+    ENTRY(TIER1_NO_HOLD, "--tier1-no-hold") \
     ENTRY(TIER1_NO_INLINE, "--tier1-no-inline") \
     ENTRY(TIER1_NO_LIFETIMES, "--tier1-no-lifetimes") \
     ENTRY(TIER1_NO_REMATERIALIZE, "--tier1-no-rematerialize") \

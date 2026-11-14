@@ -116,6 +116,9 @@ struct CheckTier1Outcome
     bool dominance_checked;
     // Where selection refused a call, the call's kinds (1 << CheckTier1CallKind); zero for any other outcome.
     uint32_t call_kinds;
+    // Whether the body made no code because it waits for the emission's last pass (#2541 step 2,
+    // check_tier1_inline_held): its callers should expand every call of it. Otherwise unattempted.
+    bool held;
 };
 
 // Caller-owned regression control, immutable during a run. After a stage succeeds, substitute this raw error at its

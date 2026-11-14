@@ -8,8 +8,9 @@
 // 8-byte aligned, whose R_X86_64_64 points to the sled's start (check_test_patchable_describe); its program, linked by
 // clang, must print what clang's does: each sled's bytes, how many entries of each section point to it (through the
 // linker's __start_ and __stop_), and the depth glibc's backtrace finds from two patched functions, which their unwind
-// tables (FDEs from the symbols, the sleds' NOPs under the CIE's rules) give, through a helper that, as the static patched
-// one, is noinline, so that --tier1's inlining (#2541) leaves each its frame; and so must the direct path's executable,
+// tables (FDEs from the symbols, the sleds' NOPs under the CIE's rules) give, through a helper that, as the two patched
+// ones that call it (a static one and, since --tier1 expands external definitions too, #2541 step 2, an external one), is
+// noinline, so that --tier1's inlining (#2541) leaves each its frame; and so must the direct path's executable,
 // by both checker paths. -fpatchable-function-entry=N,M[,SECTION]'s default the same way, an attribute's 0 turning it off,
 // and the option's errors, clang's.
 
@@ -102,7 +103,7 @@ static const char check_test_patchable_program[] =
     "extern char __stop_custom_entries[] __attribute__((weak));\n"
     "__attribute__((noinline)) static int depth(void) { void *frames[64]; return backtrace(frames, 64); }\n"
     "__attribute__((patchable_function_entry(3))) int f(int x) { return x + 1; }\n"
-    "__attribute__((patchable_function_entry(5, 2))) int g(int x) { return depth() + x * 2; }\n"
+    "__attribute__((patchable_function_entry(5, 2), noinline)) int g(int x) { return depth() + x * 2; }\n"
     "__attribute__((patchable_function_entry(0))) int h(int x) { return x - 1; }\n"
     "__attribute__((patchable_function_entry(15, 15))) int k(int x) { return x * 3; }\n"
     "__attribute__((patchable_function_entry(20, 4), noinline)) static int s(int x) { return depth() + x; }\n"

@@ -469,6 +469,10 @@ struct CheckProgram
     // and no code emits the block-scope statics it declares (check_program_select_mode). Null in a unit without regions.
     uint8_t* region_reached;
     uint32_t* references;
+    // The objects static data's initializers refer to (CheckProgramOptions.initializer_references, borrowed): what keeps
+    // a function whose calls --tier1 expanded (#2541 step 2, check_tier1_inline_rooted).
+    const uint32_t* initializer_references;
+    uint32_t initializer_reference_count;
     uint32_t* builtin_nodes;
     uint32_t* asm_offsets;
     uint32_t* asm_targets;
@@ -4612,7 +4616,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
                                .asm_helpers = options.asm_helpers, .asm_bodies = options.asm_bodies, .helper_forms = options.helper_forms, .target = options.target, .frame_pointer = options.frame_pointer,
                                .probe_stack = options.probe_stack, .patchable_count = options.patchable_count, .patchable_offset = options.patchable_offset,
-                               .patchable_section = options.patchable_section, .token = BUSTER_CHECK_NONE,
+                               .patchable_section = options.patchable_section, .initializer_references = options.initializer_references,
+                               .initializer_reference_count = options.initializer_reference_count, .token = BUSTER_CHECK_NONE,
                                .diagnostic_position = BUSTER_CHECK_NONE };
     // The constant CFStrings' calls (#148), which the bodies' references read (check_program_references).
     if (options.prepared_data != NULL)
