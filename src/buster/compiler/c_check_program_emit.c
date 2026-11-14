@@ -809,6 +809,9 @@ struct CheckProgramLanes
     // In a units' run, the lane of the unit that these lanes' emission is (c_checker_units.c), whose unit takes its
     // estimated peak from the run's memory once preprocessed (#1109, check_units_admit). Null elsewhere.
     struct CheckUnitsLane* units_lane;
+    // A command of one source file's attested declarations' state, where it keeps a memo across processes (#2531's step 4,
+    // --attested-memo, check_driver_one_unit). Null elsewhere: a units' run's lanes have theirs.
+    struct CheckAttested* attested;
     // A test's tokens that lane 0 of a growing team (CheckEmitGrowth) writes to the jobserver after its first item, as
     // another recipe returning them would, each byte BUSTER_CHECK_EMIT_SUPPLY_BYTE plus its index (0 for none).
     uint32_t grow_supply;
@@ -845,6 +848,17 @@ struct CheckProgramLanes
     bool tier1_no_inline;
     // --tier0-no-inline keeps Tier 0's (#1398's comparison, c_check_tier0_inline.c).
     bool tier0_no_inline;
+    // --emit-window=N (#2536's step 1, docs/all-core-path.md): one lane's emission takes its bodies in windows of about
+    // N tokens, each window's lowering and code before the next window's, in memory the next window reuses
+    // (check_program_emit_windows). 0, the default, is one window as long as the unit (W = ∞): today's order, and the
+    // windows' twin.
+    uint32_t window_tokens;
+    // --poison-arenas (a test option): each window's bytes are overwritten as it is popped, so that a part that read what
+    // another part left would show (BUSTER_CHECK_EMIT_WINDOW_POISON).
+    bool poison_windows;
+    // A test's room for one lane's window, past which its pushes fail as in a reservation the address space cut short:
+    // the bodies then go again as one part (check_program_emit_windows_again). 0 for the window's whole capacity.
+    uint64_t squeeze_window;
     // --tier1-schedule's variant (BUSTER_CHECK_TIER1_SCHEDULE_*, #172's measurement): none by default.
     uint8_t tier1_schedule;
     CheckTier1Report tier1_report;
@@ -950,6 +964,13 @@ static _Thread_local Arena check_program_thread_columns;
 // as its columns are, so that an emission without lanes inlines what one with them does and makes the same object.
 // Its pages are popped by the next emission's first use; never released.
 static _Thread_local CheckTier0InlineLane check_program_thread_inline;
+// The byte --poison-arenas writes over a popped window (CheckProgramLanes.poison_windows).
+#define BUSTER_CHECK_EMIT_WINDOW_POISON 0xa5
+// The calling thread's window (#2536's step 1, check_program_emit_windows): a window's typed streams and Tier 0 code,
+// popped at its end, so that the next window's pushes find the same pages, resident and in the cache. Base pages
+// throughout: a window is a few megabytes, touched densely. Reserved at the thread's first windowed emission, never
+// given back, and its bytes past a pop are the last window's, not zero.
+static _Thread_local Arena check_program_thread_window;
 
 // A body's code, as its lane made it (check_program_emit_code): its bytes, encoded after branch sizing; each marked
 // instruction's end (x86_encode's fixup ends) and each label's offset (or UINT32_MAX for a record past the code), and a
@@ -973,6 +994,11 @@ struct CheckEmitBody
     uint32_t* row_tokens;
     uint32_t row_count;
     uint32_t body_offset;
+    // A window's body (check_program_emit_windows): its code's records are the ones its references mark, in their order
+    // (check_program_emit_window_keep), `kept_records` of them, which the merge's fixups read in place of its code's
+    // count; false for every other body, whose code's records are all there.
+    bool windowed;
+    uint32_t kept_records;
     CheckProgramStatus status;
     uint32_t token;
     const char* reason;
@@ -1007,6 +1033,11 @@ struct CheckEmitLane
     Arena* bytes;
     // The arena of its writer's columns (check_lower_writer_begin): its scratch, but lane 0's (CheckEmitRun.columns).
     Arena* columns;
+    // The arenas of a part's typed streams (check_lower_part's output) and of its Tier 0 code (Tier0Code and the
+    // EmittedCode's slices, Tier 0's inlined streams): its output and its scratch, but a window's
+    // (check_program_emit_windows).
+    Arena* streams;
+    Arena* code;
     // With --tier1, its arenas for Tier 1's pipeline (CheckProgramLaneArenas.tier1); null without.
     CheckTier1Lane* tier1;
     // With Tier 0's inlining (CheckEmitRun.tier0_inline), its cache of expanded callees; null without.
@@ -1069,6 +1100,13 @@ struct CheckEmitRun
     // The driver's --time-stages clock (c_check_clock.c), which the calling thread's laps charge per function when it
     // compiles the bodies alone (check_program_emit_alone): null on the lanes, whose run its caller's mark charges.
     CheckClock* stage_clock;
+    // The windows' tokens when the bodies are compiled alone (CheckProgramLanes.window_tokens): 0 for one part; whether
+    // each window is poisoned as it is popped (CheckProgramLanes.poison_windows); a test's room for the window
+    // (CheckProgramLanes.squeeze_window); and whether the bodies ran by windows.
+    uint32_t window_tokens;
+    bool poison_windows;
+    uint64_t squeeze_window;
+    bool windowed;
 };
 
 // The typed class of body `b`'s result, as Tier 1's lowering takes it: its RETURNs' class, or for a function without one
@@ -1679,11 +1717,11 @@ static void check_program_emit_lower_half(CheckEmitRun* run, CheckEmitLane* lane
 {
     if (run->sources)
     {
-        check_lower_part_sources(&lane->writer, run->shared, &part->lower, lane->output, lane->scratch);
+        check_lower_part_sources(&lane->writer, run->shared, &part->lower, lane->streams, lane->scratch);
     }
     else
     {
-        check_lower_part(&lane->writer, run->shared, &part->lower, lane->output, lane->scratch);
+        check_lower_part(&lane->writer, run->shared, &part->lower, lane->streams, lane->scratch);
     }
     // What the code reads of each lowered function beside its stream: the access column, and the entries' first records
     // only for source rows. Set here rather than by its code (#1282), since with inlining another body's lane reads this
@@ -1749,7 +1787,7 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
             {
                 // Its code is its unit's entry atom, which the merge publishes; its length and start are known here for
                 // -g's rows, before the merge.
-                run->codes[b] = emitted_from_tier0(&naked->code, false, run->sources, true, lane->scratch);
+                run->codes[b] = emitted_from_tier0(&naked->code, false, run->sources, true, lane->code);
                 CheckEmitBody* body = run->bodies + b;
                 *body = (CheckEmitBody){ .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
                 body->length = naked->unit.entry_atom != 0 ? naked->unit.link.atoms.size[naked->unit.entry_atom] : 0;
@@ -1768,18 +1806,18 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
                 // With Tier 0's inlining (#1398), the body's stream with its inline callees' calls spliced in, its code's
                 // entries and locals then put back in terms of its own (tier0_inline_code).
                 Tier0Inlined inlined;
-                const bool spliced = naked == 0 && lane->tier0_inline != NULL && check_tier0_inline_body(run, lane, b, lane->scratch, &inlined);
+                const bool spliced = naked == 0 && lane->tier0_inline != NULL && check_tier0_inline_body(run, lane, b, lane->code, &inlined);
                 const Tier0Function* source = spliced ? &inlined.function : function;
-                Tier0Code compiled = naked != 0 ? naked->code : run->scalar ? tier0_compile_scalar(source, lane->scratch) : tier0_compile(source, lane->scratch);
+                Tier0Code compiled = naked != 0 ? naked->code : run->scalar ? tier0_compile_scalar(source, lane->code) : tier0_compile(source, lane->code);
                 if (spliced)
                 {
-                    tier0_inline_code(&compiled, function, &inlined, lane->scratch);
+                    tier0_inline_code(&compiled, function, &inlined, lane->code);
                 }
                 // A body whose asm template returns (#1839) leaves its frame as its template does, which the verifier doesn't
                 // read, as it doesn't a naked function's; and so does one that moves a value into rsp (#1846, tier0_asm_stack).
                 run->codes[b] = emitted_from_tier0(&compiled, run->unwind && naked == 0, run->sources,
                                                    naked != 0 || tier0_asm_leaves(source) || tier0_asm_stack(source),
-                                                   lane->scratch);
+                                                   lane->code);
             }
             check_clock_lap(run->stage_clock, CHECK_STAGE_TIER0);
             if (forbidden || run->codes[b].error != TIER0_OK)
@@ -1842,6 +1880,8 @@ static bool check_program_emit_lane_arenas(CheckEmitRun* run, CheckEmitLane* lan
         lane->bytes = &arenas->bytes;
         lane->columns = &arenas->scratch;
     }
+    lane->streams = lane->output;
+    lane->code = lane->scratch;
     lane->tier1 = run->tier1_outcomes != NULL ? &run->lanes->arenas[index].tier1 : NULL;
     lane->tier0_inline = run->tier0_inline == NULL ? NULL : run->lanes != NULL ? &run->lanes->arenas[index].tier0_inline : &check_program_thread_inline;
     return valid;
@@ -2236,8 +2276,237 @@ static void check_program_emit_follow(LaneFlow* flow)
     }
 }
 
+// Whether body `b` is one of Tier 0's inline callees (#1398, CheckEmitRun.tier0_inline), whose typed stream the bodies
+// that call it splice.
+static bool check_program_emit_callee(const CheckEmitRun* run, uint32_t b)
+{
+    const CheckTier1Inline* table = run->tier0_inline;
+    const CheckProgram* program = run->program;
+    const uint32_t object = program->bodies[b].object;
+    const SymbolId symbol = table != NULL && object <= program->input->token_count ? program->object_symbols[object] : 0;
+    return symbol != 0 && symbol < table->symbol_count && table->bodies[symbol] == b + 1;
+}
+
+// Whether `pointer` is in what `window` pushed past `mark`: a window's typed streams or Tier 0 code.
+static bool check_program_emit_windowed(const Arena* window, uint64_t mark, const void* pointer)
+{
+    const uintptr_t address = (uintptr_t)pointer;
+    const uintptr_t first = (uintptr_t)window->base + mark;
+    const uintptr_t end = (uintptr_t)window->base + window->length;
+    return pointer != NULL && address >= first && address < end;
+}
+
+// `source`'s `count` elements of `size` bytes, copied to `kept` where they are in the window past `mark` (null for none),
+// and otherwise `source` itself. *valid becomes false if `kept` has no room.
+static void* check_program_emit_window_copy(Arena* kept, const Arena* window, uint64_t mark, const void* source, uint64_t count, uint64_t size, bool* valid)
+{
+    void* result = (void*)source;
+    if (check_program_emit_windowed(window, mark, source))
+    {
+        result = count != 0 ? arena_push(kept, count * size, 16) : NULL;
+        if (result != NULL)
+        {
+            memcpy(result, source, count * size);
+        }
+        *valid = *valid && (count == 0 || result != NULL);
+    }
+    return result;
+}
+
+// What the merge reads of body `b`'s code and lowering once its window is popped (check_program_emit_windows), copied out
+// of the window (its bytes past `mark`) to `kept`: its references and the records they mark, in their order, the
+// references renumbered to them (CheckEmitBody.kept_records); its asm labels' names; and with -g its locals' homes,
+// classes and bindings. Its code's other slices, which nothing reads past its code, are nulled where they were the
+// window's. A body whose references don't ascend over its records keeps every record, so that the merge's fixups refuse
+// it as they would. Returns false if `kept` has no room.
+static bool check_program_emit_window_keep(CheckEmitRun* run, uint32_t b, Arena* kept, const Arena* window, uint64_t mark)
+{
+    EmittedCode* code = run->codes + b;
+    CheckEmitBody* body = run->bodies + b;
+    Tier0Function* function = run->lowered->functions + b;
+    // The marked records, as link_add_code_fixups pairs them with the encoder's fixup ends: the references' distinct
+    // instructions, ascending (a displacement's and an immediate's reference share one).
+    bool ascending = true;
+    uint32_t marked = 0;
+    uint32_t previous = UINT32_MAX;
+    for (uint32_t i = 0; i < code->reference_count; i += 1)
+    {
+        const uint32_t instruction = code->references[i].instruction;
+        ascending = ascending && instruction < code->count && (previous == UINT32_MAX || instruction >= previous);
+        marked += instruction != previous ? 1 : 0;
+        previous = instruction;
+    }
+    const bool compact = ascending && check_program_emit_windowed(window, mark, code->records) && check_program_emit_windowed(window, mark, code->references);
+    bool valid = true;
+    LinkReference* references = check_program_emit_window_copy(kept, window, mark, code->references, code->reference_count, sizeof(LinkReference), &valid);
+    X86Instruction* records = compact ? (marked != 0 ? BUSTER_ARENA_PUSH_ARRAY(kept, X86Instruction, marked) : NULL) :
+                                        check_program_emit_window_copy(kept, window, mark, code->records, code->count, sizeof(X86Instruction), &valid);
+    valid = valid && (!compact || marked == 0 || records != NULL);
+    if (valid && compact)
+    {
+        uint32_t kept_index = UINT32_MAX;
+        previous = UINT32_MAX;
+        for (uint32_t i = 0; i < code->reference_count; i += 1)
+        {
+            const uint32_t instruction = references[i].instruction;
+            if (instruction != previous)
+            {
+                kept_index += 1;
+                records[kept_index] = code->records[instruction];
+                previous = instruction;
+            }
+            references[i].instruction = kept_index;
+        }
+        body->windowed = true;
+        body->kept_records = marked;
+    }
+    const uint32_t* asm_label_names = check_program_emit_window_copy(kept, window, mark, code->asm_label_names, code->asm_label_count, sizeof(uint32_t), &valid);
+    const Tier0Home* local_homes = check_program_emit_window_copy(kept, window, mark, code->local_homes, code->local_count, sizeof(Tier0Home), &valid);
+    if (valid)
+    {
+        code->references = references;
+        code->records = records;
+        code->asm_label_names = asm_label_names;
+        code->local_homes = local_homes;
+        code->branches = check_program_emit_windowed(window, mark, code->branches) ? NULL : code->branches;
+        code->targets = check_program_emit_windowed(window, mark, code->targets) ? NULL : code->targets;
+        code->label_records = check_program_emit_windowed(window, mark, code->label_records) ? NULL : code->label_records;
+        code->asm_label_records = check_program_emit_windowed(window, mark, code->asm_label_records) ? NULL : code->asm_label_records;
+        code->local_ranges = check_program_emit_windowed(window, mark, code->local_ranges) ? NULL : code->local_ranges;
+        code->source_records = check_program_emit_windowed(window, mark, code->source_records) ? NULL : code->source_records;
+        code->source_origins = check_program_emit_windowed(window, mark, code->source_origins) ? NULL : code->source_origins;
+        code->frames = check_program_emit_windowed(window, mark, code->frames) ? NULL : code->frames;
+    }
+    if (valid && run->sources)
+    {
+        // The rows' locals (the merge's CheckDebugBody): their classes and bindings, from the lowering's stream.
+        const uint8_t* classes = check_program_emit_window_copy(kept, window, mark, function->local_classes, function->local_count, sizeof(uint8_t), &valid);
+        CheckDebugBinding* bindings = check_program_emit_window_copy(kept, window, mark, run->lowered->debug_bindings[b], function->local_count, sizeof(CheckDebugBinding), &valid);
+        if (valid)
+        {
+            function->local_classes = classes;
+            run->lowered->debug_bindings[b] = bindings;
+            run->lowered->entry_tokens[b] = check_program_emit_windowed(window, mark, run->lowered->entry_tokens[b]) ? NULL : run->lowered->entry_tokens[b];
+        }
+    }
+    return valid;
+}
+
+// One lane's emission by windows (#2536's step 1, docs/all-core-path.md): the bodies cut into parts of about
+// run->window_tokens tokens, each part's lowering and its code before the next part's, its typed streams and Tier 0 code
+// in the thread's window, which the next part's reuse once what the merge reads is kept (check_program_emit_window_keep).
+// The parts are as the lanes' are, which a lane takes in this order, so the object and the failure are one part's
+// (check_lower_finish orders the lowering's, the merge the rest). Tier 0's inline callees (#1398) are parts of their own,
+// lowered first and into the lane's output, since a body before its callee splices the callee's stream; their streams
+// stay for the unit. A part that fails keeps its window's bytes, which the merge's report reads. Returns false, having
+// run nothing, where the window can't be reserved or the parts have no room: the caller runs the bodies as one part.
+static bool check_program_emit_windows(CheckEmitRun* run, CheckEmitLane* lane)
+{
+    const uint32_t count = run->body_count;
+    Arena* window = &check_program_thread_window;
+    if (window->base == 0)
+    {
+        *window = arena_reserve_small(UINT64_C(1) << 36, UINT64_C(1) << 36);
+    }
+    CheckEmitPart* parts = window->base != 0 ? BUSTER_ARENA_PUSH_ARRAY(lane->scratch, CheckEmitPart, count) : NULL;
+    uint8_t* early = parts != NULL ? BUSTER_ARENA_PUSH_ARRAY(lane->scratch, uint8_t, count) : NULL;
+    const bool valid = parts != NULL && early != NULL;
+    if (valid)
+    {
+        run->windowed = true;
+        arena_pop_to(window, 0);
+        // A test's room (CheckEmitRun.squeeze_window), until the windows are done.
+        const uint64_t capacity = window->capacity;
+        window->capacity = run->squeeze_window != 0 && run->squeeze_window < capacity ? run->squeeze_window : capacity;
+        // The cut: a part ends where its tokens reach the window's, and an inline callee is a part alone.
+        uint32_t part_count = 0;
+        uint32_t first = 0;
+        for (uint32_t b = 0; b < count; b += 1)
+        {
+            const bool callee = check_program_emit_callee(run, b);
+            const bool before_callee = b + 1 < count && check_program_emit_callee(run, b + 1);
+            const uint64_t tokens = run->costs[b] - (first != 0 ? run->costs[first - 1] : 0);
+            if (callee || before_callee || tokens >= run->window_tokens || b + 1 == count)
+            {
+                parts[part_count] = (CheckEmitPart){ 0 };
+                parts[part_count].lower.first = first;
+                parts[part_count].lower.end = b + 1;
+                early[part_count] = callee;
+                part_count += 1;
+                first = b + 1;
+            }
+        }
+        run->parts = parts;
+        run->part_count = part_count;
+        // The callees' lowering, in the lane's output, which outlives the windows.
+        for (uint32_t p = 0; p < part_count; p += 1)
+        {
+            if (early[p])
+            {
+                check_program_emit_lower_half(run, lane, parts + p);
+            }
+        }
+        lane->streams = window;
+        lane->code = window;
+        for (uint32_t p = 0; p < part_count; p += 1)
+        {
+            CheckEmitPart* part = parts + p;
+            const uint64_t mark = window->length;
+            if (!early[p])
+            {
+                check_program_emit_lower_half(run, lane, part);
+            }
+            check_program_emit_code_half(run, lane, part);
+            const uint32_t end = part->lower.end;
+            bool kept = part->lower.stage == CHECK_LOWER_STAGE_NONE && part->tier0_failed == end && part->code_failed == end;
+            for (uint32_t b = part->lower.first; kept && b < end; b += 1)
+            {
+                kept = check_program_emit_window_keep(run, b, lane->scratch, window, mark);
+            }
+            if (kept)
+            {
+                const uint64_t written = window->length;
+                arena_pop_to(window, mark);
+                if (run->poison_windows)
+                {
+                    memset(window->base + mark, BUSTER_CHECK_EMIT_WINDOW_POISON, written - mark);
+                }
+                // Its streams are gone: only a callee's, which stay, are ready.
+                for (uint32_t b = part->lower.first; !early[p] && run->inline_table != NULL && b < end; b += 1)
+                {
+                    run->inline_table->ready[b] = 0;
+                }
+            }
+            check_clock_lap(run->stage_clock, CHECK_STAGE_CODE_ATOMS);
+        }
+        lane->streams = lane->output;
+        lane->code = lane->scratch;
+        window->capacity = capacity;
+    }
+    return valid;
+}
+
+// Why one lane's windows (check_program_emit_windows) leave the bodies to one part: a part short of room in its
+// lowering, its Tier 0 code or its code after Tier 0, as a lane's part goes again; CHECK_PROGRAM_AGAIN_NONE for none.
+static CheckProgramAgain check_program_emit_windows_again(const CheckEmitRun* run)
+{
+    CheckProgramAgain again = CHECK_PROGRAM_AGAIN_NONE;
+    for (uint32_t p = 0; again == CHECK_PROGRAM_AGAIN_NONE && p < run->part_count; p += 1)
+    {
+        const CheckEmitPart* part = run->parts + p;
+        const uint32_t end = part->lower.end;
+        const bool tier0 = part->lower.stage == CHECK_LOWER_STAGE_NONE && part->tier0_failed != end && run->codes[part->tier0_failed].error == TIER0_ERROR_MEMORY;
+        const bool code = part->lower.stage == CHECK_LOWER_STAGE_NONE && part->code_failed != end && run->bodies[part->code_failed].status == CHECK_PROGRAM_RESOURCE;
+        again = part->lower.stage != CHECK_LOWER_STAGE_NONE && part->lower.status == CHECK_PROGRAM_RESOURCE ? CHECK_PROGRAM_AGAIN_LOWERING :
+                tier0                                                                                         ? CHECK_PROGRAM_AGAIN_TIER0 :
+                code                                                                                          ? CHECK_PROGRAM_AGAIN_CODE :
+                                                                                                                CHECK_PROGRAM_AGAIN_NONE;
+    }
+    return again;
+}
+
 // The bodies as one part on the calling thread, without the lanes' calls: one lane's emission, which a caller running in
-// a group of lanes of its own may make.
+// a group of lanes of its own may make; with CheckEmitRun.window_tokens, by windows (check_program_emit_windows).
 static void check_program_emit_alone(CheckEmitRun* run)
 {
     CheckEmitLane* lane = run->lane_states;
@@ -2249,7 +2518,10 @@ static void check_program_emit_alone(CheckEmitRun* run)
     lane->prepared = true;
     if (lane->ready)
     {
-        check_program_emit_part(run, lane, part, CHECK_EMIT_HALF_BOTH);
+        if (run->window_tokens == 0 || !check_program_emit_windows(run, lane))
+        {
+            check_program_emit_part(run, lane, part, CHECK_EMIT_HALF_BOTH);
+        }
     }
     else
     {
@@ -3136,6 +3408,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     const bool tier1 = valid && count != 0 && lanes != NULL && lanes->tier1;
     run.tier1_outcomes = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Outcome, count) : 0;
     run.tier1_counts = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Counts, count) : 0;
+    // The windows (#2536), where the bodies are compiled alone: the plain emission's, since --tier1's inlining and
+    // --helper-report read the bodies' streams after every body's code.
+    run.window_tokens = lanes != NULL && !tier1 && !lanes->helper_reporting ? lanes->window_tokens : 0;
+    run.poison_windows = lanes != NULL && lanes->poison_windows;
+    run.squeeze_window = lanes != NULL ? lanes->squeeze_window : 0;
     if (run.tier1_outcomes != 0)
     {
         // A body a failure before it left unreached has no outcome, never success.
@@ -3304,8 +3581,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         {
             valid = check_program_emit_return(leases, lease_count);
         }
-        if (valid && (!laned || again != CHECK_PROGRAM_AGAIN_NONE))
+        // One lane's run: the parts of a single part, or of windows (check_program_emit_windows), whose run goes again as
+        // one part where a window ran short of room (#2536).
+        CheckEmitPart* const single = run.parts;
+        bool alone = valid && (!laned || again != CHECK_PROGRAM_AGAIN_NONE);
+        while (alone)
         {
+            run.parts = single;
             arena_pop_to(output, output_before);
             arena_pop_to(bytes, bytes_before);
             arena_pop_to(scratch, scratch_before);
@@ -3326,6 +3608,14 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             shared.timed = stage_clock != NULL;
             check_program_emit_alone(&run);
             worked = 1;
+            // A window short of room (an arena's reservation the address space cut short, or
+            // CheckProgramLanes.squeeze_window's test) leaves the bodies to one part, from the arenas as they were, as a
+            // lane's part does.
+            const CheckProgramAgain short_of_room = run.windowed ? check_program_emit_windows_again(&run) : CHECK_PROGRAM_AGAIN_NONE;
+            again = short_of_room != CHECK_PROGRAM_AGAIN_NONE ? short_of_room : again;
+            alone = short_of_room != CHECK_PROGRAM_AGAIN_NONE;
+            run.window_tokens = 0;
+            run.windowed = false;
         }
     }
     // Also return the leases when an active-lane allocation failed before dispatch. A returned lease is a no-op.
@@ -4188,7 +4478,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             // builtin of a name points to (__builtin_FILE's and its kin's, #148), which clang makes a private constant as
             // it makes a literal's.
             char spelling[48];
-            const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_string_%u", object);
+            const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_string_%u", parse_origin(parser, object - 1) + 1);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         }
         else if (program->cfstring_class_own && object == program->cfstring_class)
@@ -4205,7 +4495,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             // clang's .L_unnamed_cfstring_ and its characters' constant are.
             char spelling[48];
             const bool record = parser->tree.roles[object - 1] == PARSE_ROLE_CLOSE_CALL;
-            const int length = snprintf(spelling, sizeof(spelling), record ? ".Lbuster_cfstring_%u" : ".Lbuster_string_%u", object);
+            const int length = snprintf(spelling, sizeof(spelling), record ? ".Lbuster_cfstring_%u" : ".Lbuster_string_%u", parse_origin(parser, object - 1) + 1);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         }
         else if (object != 0 && object - 1 < parser->tokens.count && parser->tree.roles[object - 1] == PARSE_ROLE_LABEL)
@@ -4214,8 +4504,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             char spelling[48];
             // (A target_clones copy's of the label, #2247, by its own symbol.)
             const bool copied = program->object_symbols[object] != s + 1;
-            const int length = copied ? snprintf(spelling, sizeof(spelling), ".Lbuster_label_%u_%u", object, s + 1) :
-                                        snprintf(spelling, sizeof(spelling), ".Lbuster_label_%u", object);
+            const uint32_t numbered = parse_origin(parser, object - 1) + 1;
+            const int length = copied ? snprintf(spelling, sizeof(spelling), ".Lbuster_label_%u_%u", numbered, s + 1) :
+                                        snprintf(spelling, sizeof(spelling), ".Lbuster_label_%u", numbered);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
             flags = BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_NOTYPE;
         }
@@ -4640,8 +4931,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             // A function with patchable_function_entry's NOPs (#1447, CheckEmitBody.sled) has its symbol after the first
             // `prefix` of them, which the atom's alignment comes before, as clang's: its entry's label is the atom's start.
             const AtomId atom = link_add_atom(&result->link, BUSTER_LINK_CLASS_TEXT, alignment, body->length, body->bytes, 0);
+            // A window's body keeps only its marked records (check_program_emit_window_keep).
+            const uint32_t record_count = body->windowed ? body->kept_records : code->count;
             valid = atom != 0 && symbol != 0 && link_define_symbol(&result->link, symbol, atom, body->prefix, body->length - body->prefix) &&
-                    link_add_code_fixups(&result->link, atom, code->records, code->count, body->fixup_ends,
+                    link_add_code_fixups(&result->link, atom, code->records, record_count, body->fixup_ends,
                                          assembly ? check_program_emit_marked(code) : code->reference_count, code->references, code->reference_count);
             if (valid && source_body && body->sled != 0)
             {

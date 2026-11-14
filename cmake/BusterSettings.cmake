@@ -490,6 +490,14 @@ set(BUSTER_DEVELOP_ON_DEMAND
     x86_semantics_benchmark.c tier0_benchmark.c tier1_schedule_benchmark.c tier1_select_benchmark.c
     c_preprocessor_benchmark.c)
 
+# The units a sanitizer tree leaves out of every configuration's executable (#2639): Develop's on-demand units but
+# c_lexer_benchmark.c, whose benchmark-lexer is each vector item's evidence that its CPU runs the vector kernels, in the
+# sanitizer configurations too (hosted-correctness.yml, "Confirm the vector kernels run on this CPU"). The correctness
+# inventory runs none of the others' commands, and on the hosted runners they were 29% of a vector or native sanitizer
+# build's unit time (387.4 of 1,324.0 s with 4 jobs), which the vector rows' builders and the fuzz jobs wait for.
+set(BUSTER_SANITIZER_ON_DEMAND ${BUSTER_DEVELOP_ON_DEMAND})
+list(REMOVE_ITEM BUSTER_SANITIZER_ON_DEMAND c_lexer_benchmark.c)
+
 # The linker for the executable's link alone (compilation and IR capture keep their flags), from BUSTER_LINKER, into
 # buster_linker_flags (--ld-path=PATH, or none for clang's default) and buster_linker (its description).
 function(buster_settings_linker)
