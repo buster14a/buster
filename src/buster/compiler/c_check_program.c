@@ -281,6 +281,10 @@ struct CheckProgramOptions
     // The scratch gives its pages past this pass's columns back in whole huge pages (arena_discard_huge): a lane of the
     // C driver's units that will compile another unit after this one (#777), whose parse and reader push as far again.
     bool discard_huge;
+    // With discard_huge, the bytes past this pass's columns that it keeps besides: for a unit read as its view (#2531),
+    // what its columns would have taken for the parse's tokens the view leaves out, which its next unit's parse and
+    // reader push as far again (without it, each viewed unit gave back huge pages that the next one took fresh, cleared).
+    uint64_t discard_keep;
 };
 
 typedef struct CheckProgramCase CheckProgramCase;
@@ -5148,7 +5152,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     // parse and reader fault the part in again a base page at a time, as each later unit does.
     if (valid && options.discard_huge)
     {
-        arena_discard_huge(scratch);
+        arena_discard_past(scratch, scratch->length + options.discard_keep, true);
     }
     else if (valid)
     {
