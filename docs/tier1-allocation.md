@@ -1355,6 +1355,15 @@ but needed #2574's hot test over every recipe and cost `sqlite3Parser` 1.2 M;
 after the allocation, and on `45cd9ae` the rule gains speedtest1 0.58 M and
 costs Lua 0.2 M.
 
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/cc05fb63e9bf0c495940bd6918d18e03a077cc31/docs/measurements/tier1-hoist-finish-2618-2026-11-14),
+#2593's method, a hold of the lock per round), main `45cd9ae` against the
+change: speedtest1 takes 0.9954 of the cycles (95% interval 0.9922 to 0.9986)
+over six layouts, for 0.04% fewer instructions; Lua's five scripts take 1.0002
+of the time (0.9926 to 1.0079) over six link orders for 0.10% fewer
+instructions, each script's cycles moving with the link order for the same
+instructions (`closures` 0.981 to 1.035). `sqlite3.c`'s `--tier1 -c` runs 0.05%
+more instructions.
+
 ### Recipes no block reads, settled phi places, and the fixed rules' scratch (#2734, #2592)
 
 What #2592's operand sink left of `luaV_execute`'s moves through `r11` was
