@@ -4,11 +4,12 @@
 // The order-preserving partition of one unit's optimized module for parallel native code generation
 // (docs/commands/build.md, "Parallel native generation"):
 //
-//   split INPUT.bc PARTS DIRECTORY [--verify] [--report] [--first LIST]
+//   split INPUT.bc PARTS DIRECTORY [--verify] [--report] [--first LIST] [--codegen-costs] [--padded-starts]
 //
 // writes DIRECTORY/part0.bc to DIRECTORY/partPARTS.bc. Parts 0 to PARTS - 1 hold contiguous ranges of the module's
-// function definitions in module order, the costliest (by instruction count) as cheap as the alignment rule below
-// allows; part PARTS holds every global variable definition and no function. The code generator emits a module's functions in order, each with its constant pools and
+// function definitions in module order, the costliest (by instruction count, or with --codegen-costs by the code
+// generator's measured costs) as cheap as the alignment rule below allows; part PARTS holds every global variable
+// definition and no function. The code generator emits a module's functions in order, each with its constant pools and
 // jump tables, and its global variables after them, so the parts' sections, concatenated in index order by
 // BusterCodegenMerge.cmake's relocatable link, hold the single module's code and data in the single module's order.
 //
@@ -36,6 +37,14 @@
 // unit, which the link's script can't reorder) goes first in that section, in LIST's order, before the parts are
 // planned (split_order_first). That is the one change to the single module's order: those functions are together, in
 // fewer of the 64 KB windows the kernel's fault-around maps, and every function's code is what it was.
+//
+// --codegen-costs and --padded-starts plan a sanitizer build's parts (#2639), whose longest part is on its build's
+// critical path and whose addresses no benchmark reads. --codegen-costs weighs a function as split_codegen_cost says:
+// the code generator's time grows faster than a function's instructions. --padded-starts drops the alignment rule
+// below: a part may start at any function, and the relocatable link then pads the part's start in a text section to
+// the greatest alignment it holds there (at most 48 bytes a part, 63 with an aligned(64) function), so the functions
+// after it move by that much and their code is the same. Without them the plan is Release's, whose addresses are the
+// single module's.
 //
 // --verify runs LLVM's verifier on each part; --report prints each part's functions and estimated cost to stderr.
 // The input is parsed once; the parts are written by one child process each, forked after the plan, as many at once as
@@ -116,6 +125,10 @@ struct SplitPlan
     SplitMap owners;
     bool verify;
     bool report;
+    // --codegen-costs: functions weighed by split_codegen_cost.
+    bool codegen_costs;
+    // --padded-starts: a part may start at any function (no alignment rule).
+    bool padded_starts;
 };
 
 static SplitMap split_map_create(uint64_t minimum)
@@ -209,31 +222,52 @@ static SplitSection split_function_section(LLVMValueRef function)
     return result;
 }
 
+// The code generator's measured cost of a function of `instructions` IR instructions in `blocks` blocks (--codegen-costs,
+// #2639), in units of a small function's instruction: per instruction it grows with the function's size, from 0.035 ms
+// (300 to 1,000 instructions) to 0.09 ms (over 30,000) in the MSan checker unit's parts, with each block adding two
+// instructions' worth and each function about 30, the fixed work of a small one. optnone's fast instruction selector
+// takes a quarter of an instruction's time, as split_function_cost's count says. Fit to every function's time in that
+// unit's eight parts (-ftime-trace in a 4-CPU container), whose longest part then took 82.3 s to generate against 95.7 s
+// planned by instruction count, and 72.9 s with --padded-starts (the eight 537 s in all).
+static uint64_t split_codegen_cost(uint64_t instructions, uint64_t blocks, bool optnone)
+{
+    const uint64_t work = optnone ? (instructions + 3) / 4 : instructions + 2 * blocks + instructions * instructions / 50000;
+    return work + 30;
+}
+
 // The estimated cost of generating the function's code: its instructions, a quarter of them under optnone, which the
-// fast instruction selector takes.
-static uint64_t split_function_cost(LLVMValueRef function)
+// fast instruction selector takes; with `codegen`, split_codegen_cost's.
+static uint64_t split_function_cost(LLVMValueRef function, bool codegen)
 {
     uint64_t count = 0;
+    uint64_t blocks = 0;
     for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(function); block != 0; block = LLVMGetNextBasicBlock(block))
     {
         for (LLVMValueRef instruction = LLVMGetFirstInstruction(block); instruction != 0; instruction = LLVMGetNextInstruction(instruction))
         {
             count += 1;
         }
+        blocks += 1;
     }
-    if (split_has_attribute(function, "optnone"))
+    const bool optnone = split_has_attribute(function, "optnone");
+    uint64_t cost = 0;
+    if (codegen)
     {
-        count = (count + 3) / 4;
+        cost = split_codegen_cost(count, blocks, optnone);
     }
-    return count + 8;
+    else
+    {
+        cost = (optnone ? (count + 3) / 4 : count) + 8;
+    }
+    return cost;
 }
 
 // The fewest parts covering the functions [0, count), each costing at most `limit` and valid: starting, in each text
 // section, with a function of the greatest alignment it holds there, so that the relocatable link's section alignment
-// adds no padding the single module didn't have. A part [i, j) that is invalid stays invalid as j grows, and one
-// function alone is valid. parts_to[j] is the fewest parts covering [0, j), previous[j] where its last part starts.
+// adds no padding the single module didn't have (but where `padded`, --padded-starts). A part [i, j) that is invalid
+// stays invalid as j grows, and one function alone is valid. parts_to[j] is the fewest parts covering [0, j), previous[j] where its last part starts.
 // Returns parts_to[count], or UINT32_MAX when no cover exists.
-static uint32_t split_cover(const SplitFunction* functions, uint32_t count, uint64_t limit, uint32_t* parts_to, uint32_t* previous)
+static uint32_t split_cover(const SplitFunction* functions, uint32_t count, uint64_t limit, bool padded, uint32_t* parts_to, uint32_t* previous)
 {
     parts_to[0] = 0;
     for (uint32_t j = 1; j <= count; j += 1)
@@ -255,7 +289,7 @@ static uint32_t split_cover(const SplitFunction* functions, uint32_t count, uint
                 cost += function->cost;
                 first[section] = first[section] == 0 ? function->alignment : first[section];
                 greatest[section] = function->alignment > greatest[section] ? function->alignment : greatest[section];
-                valid = cost <= limit && first[section] >= greatest[section];
+                valid = cost <= limit && (padded || first[section] >= greatest[section]);
             }
             if (valid && parts_to[i] + 1 < parts_to[j + 1])
             {
@@ -285,7 +319,7 @@ static void split_boundaries(SplitPlan* plan)
     while (low < high)
     {
         const uint64_t middle = low + (high - low) / 2;
-        if (split_cover(plan->functions, plan->count, middle, parts_to, previous) <= plan->parts)
+        if (split_cover(plan->functions, plan->count, middle, plan->padded_starts, parts_to, previous) <= plan->parts)
         {
             high = middle;
         }
@@ -294,7 +328,7 @@ static void split_boundaries(SplitPlan* plan)
             low = middle + 1;
         }
     }
-    const uint32_t used = split_cover(plan->functions, plan->count, low, parts_to, previous);
+    const uint32_t used = split_cover(plan->functions, plan->count, low, plan->padded_starts, parts_to, previous);
     for (uint32_t p = used; p <= plan->parts; p += 1)
     {
         plan->starts[p] = plan->count;
@@ -622,7 +656,7 @@ static void split_plan(SplitPlan* plan)
         entry->defined = !LLVMIsDeclaration(function) && LLVMGetLinkage(function) != LLVMAvailableExternallyLinkage;
         if (entry->defined)
         {
-            entry->cost = split_function_cost(function);
+            entry->cost = split_function_cost(function, plan->codegen_costs);
             entry->alignment = split_function_alignment(function);
             entry->section = split_function_section(function);
         }
@@ -1038,6 +1072,8 @@ int main(int argc, char** argv)
     int status = 2;
     bool verify = false;
     bool report = false;
+    bool codegen_costs = false;
+    bool padded_starts = false;
     const char* first = 0;
     bool flags = argc >= 4;
     for (int i = 4; i < argc; i += 1)
@@ -1049,6 +1085,14 @@ int main(int argc, char** argv)
         else if (strcmp(argv[i], "--report") == 0)
         {
             report = true;
+        }
+        else if (strcmp(argv[i], "--codegen-costs") == 0)
+        {
+            codegen_costs = true;
+        }
+        else if (strcmp(argv[i], "--padded-starts") == 0)
+        {
+            padded_starts = true;
         }
         else if (strcmp(argv[i], "--first") == 0 && i + 1 < argc && first == 0)
         {
@@ -1064,7 +1108,8 @@ int main(int argc, char** argv)
     const unsigned long parts = argc >= 4 ? strtoul(argv[2], &end, 10) : 0;
     if (!flags || end == argv[2] || *end != 0 || parts == 0 || parts > SPLIT_MAXIMUM_PARTS)
     {
-        fprintf(stderr, "usage: split INPUT.bc PARTS DIRECTORY [--verify] [--report] [--first LIST]  (PARTS from 1 to %u)\n", SPLIT_MAXIMUM_PARTS);
+        fprintf(stderr, "usage: split INPUT.bc PARTS DIRECTORY [--verify] [--report] [--first LIST] [--codegen-costs] [--padded-starts]  (PARTS from 1 to %u)\n",
+                SPLIT_MAXIMUM_PARTS);
     }
     else
     {
@@ -1092,7 +1137,14 @@ int main(int argc, char** argv)
             }
             else if (moved != UINT32_MAX)
             {
-                SplitPlan plan = { .module = module, .parts = (uint32_t)parts, .verify = verify, .report = report };
+                SplitPlan plan = {
+                    .module = module,
+                    .parts = (uint32_t)parts,
+                    .verify = verify,
+                    .report = report,
+                    .codegen_costs = codegen_costs,
+                    .padded_starts = padded_starts,
+                };
                 if (plan.report && first != 0)
                 {
                     fprintf(stderr, "split: %u functions first in their named sections\n", moved);
