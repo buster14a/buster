@@ -11,7 +11,8 @@
 //
 // presplit.c's parts (split_clone_part, split_write_part): a module's clone with chosen definitions alone, and its
 // bitcode without the use-list order, which the optimizer that follows each part doesn't need (the part's object then
-// depends on its bitcode's bytes alone).
+// depends on its bitcode's bytes alone). Its argument promotion inlines a function's always_inline callees into it
+// first (split_inline_always), as the optimizer's mandatory inliner does.
 
 #include <llvm-c/Core.h>
 #include <llvm/ADT/DenseSet.h>
@@ -19,6 +20,7 @@
 #include <llvm/IR/DebugInfo.h>
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/DerivedTypes.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/raw_ostream.h>
@@ -75,6 +77,44 @@ extern "C" void split_move_function(LLVMValueRef function, LLVMValueRef before)
     llvm::Function* next = llvm::cast<llvm::Function>(llvm::unwrap(before));
     llvm::Module::FunctionListType& list = moved->getParent()->getFunctionList();
     list.splice(next->getIterator(), list, moved->getIterator());
+}
+
+// presplit.c's argument promotion (presplit_promote_arguments): every call `function` makes to an always_inline body
+// inlined into it, and the calls those bring, until it makes none, as the optimizer's mandatory inliner does before
+// anything else. Returns the calls it inlined.
+extern "C" uint32_t split_inline_always(LLVMValueRef function)
+{
+    llvm::Function* caller = llvm::cast<llvm::Function>(llvm::unwrap(function));
+    uint32_t inlined = 0;
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        llvm::SmallVector<llvm::CallBase*, 16> calls;
+        for (llvm::BasicBlock& block : *caller)
+        {
+            for (llvm::Instruction& instruction : block)
+            {
+                llvm::CallBase* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                llvm::Function* callee = call != nullptr ? call->getCalledFunction() : nullptr;
+                if (callee != nullptr && callee != caller && !callee->isDeclaration() && !callee->isInterposable() &&
+                    callee->hasFnAttribute(llvm::Attribute::AlwaysInline))
+                {
+                    calls.push_back(call);
+                }
+            }
+        }
+        for (llvm::CallBase* call : calls)
+        {
+            llvm::InlineFunctionInfo information;
+            if (llvm::InlineFunction(*call, information).isSuccess())
+            {
+                inlined += 1;
+                changed = true;
+            }
+        }
+    }
+    return inlined;
 }
 
 // `module`'s clone in the same context: every global value declared, and the `count` in `keep` defined as they are.

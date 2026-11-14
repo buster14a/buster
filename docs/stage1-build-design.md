@@ -832,9 +832,13 @@ instructions by function:
   stores: `benchmark-check-units` ran 0.72% more cycles and the checker on
   musl's source 1.85%, outside their floors, with as many instructions. So
   the same child inlines the `always_inline` bodies and runs argument
-  promotion, and each part that calls a function whose parameters that
-  rewrites holds a local copy of it, whatever its size (`--copy-promoted`;
-  20 copies of that one, 0.3% more code in the checker's unit).
+  promotion, and the functions whose parameters that rewrites get the same
+  in the unit before the split, which LLVM's argument promotion then
+  rewrites with their calls (`--promote-arguments`, 296 in the checker's
+  unit). A local copy of each in every part that called it (20 of that one)
+  had let the parts promote them too, but the copies stayed outlined, and the
+  checker's and the backend's sources ran up to 12% more instruction cache
+  misses.
 
 TODO-MEASURE
 

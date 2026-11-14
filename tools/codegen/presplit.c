@@ -7,7 +7,7 @@
 // bitcode an edit changed.
 //
 //   presplit INPUT.bc PARTS DIRECTORY [--import LIMIT] [--anchor M] [--cohere CAP] [--spread S] [--tests-optnone]
-//            [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--constant-arguments] [--copy-promoted] [--first LIST] [--verify]
+//            [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--constant-arguments] [--promote-arguments] [--first LIST] [--verify]
 //            [--report]
 //
 // writes DIRECTORY/part0.bc to DIRECTORY/partPARTS.bc and DIRECTORY/locals.txt. Parts 0 to PARTS - 1 hold function
@@ -63,10 +63,9 @@
 // more (presplit_keep_statics, presplit_phantoms); --benchmark-bodies has a benchmark's file read the bodies it calls,
 // whatever their size; --simplified-size measures a body for LIMIT by what SROA leaves of it, with LLVM's vector bonus
 // (presplit_scan); --constant-arguments writes the arguments the whole module's constant propagation finds constant into
-// their functions (presplit_constant_arguments); --copy-promoted gives the parts that call a static function whose
-// parameters the whole module's argument promotion rewrites a local copy of it, whatever its size
-// (presplit_promoted_child, presplit_copies); and a part that reads a constant table reads the constants it names
-// (presplit_readable_readers).
+// their functions (presplit_constant_arguments); --promote-arguments rewrites the parameters of the static functions
+// the whole module's argument promotion rewrites, in the module before the split (presplit_promote_arguments); and a
+// part that reads a constant table reads the constants it names (presplit_readable_readers).
 //
 // BusterCodegenMerge.cmake joins the parts' objects and restores local binding (locals.txt). The module is parsed
 // once and the plan made on it; each part is then a clone of its own definitions (split_bitcode.cpp's
@@ -117,6 +116,7 @@
 // it keeps but doesn't own without their debug information, and its struct types without names; and a module's bitcode
 // without its use-list order, which the optimizer that follows doesn't need.
 LLVMModuleRef split_clone_part(LLVMModuleRef module, LLVMValueRef* keep, uint64_t count, LLVMValueRef* owned, uint64_t owned_count, bool lists);
+uint32_t split_inline_always(LLVMValueRef function);
 bool split_write_part(LLVMModuleRef module, const char* path);
 
 typedef struct PresplitFunction PresplitFunction;
@@ -153,10 +153,6 @@ struct PresplitFunction
     bool copied;
     // A benchmark's function calls it, so the benchmark's part reads its body whatever its size (--benchmark-bodies).
     bool measured;
-    // The whole module's argument promotion rewrites its parameters (--copy-promoted).
-    bool promoted;
-    // Too large to import, but only ever called and promoted: the parts that call it hold copies (--copy-promoted).
-    bool copyable;
     // No other part reads its body: it calls a local function only its own part calls and no other part may read.
     bool kept;
     // Its uses in the whole module, which a part's copy or definition of a local function keeps the inliner's view of
@@ -228,8 +224,8 @@ struct PresplitPlan
     bool benchmark_bodies;
     bool simplified_size;
     bool constant_arguments;
-    bool copy_promoted;
-    // By the module's function index, the functions the whole module's argument promotion rewrites (--copy-promoted).
+    bool promote_arguments;
+    // By the module's function index, the functions the whole module's argument promotion rewrites (--promote-arguments).
     bool* promoted;
     // --first's list, and the named sections whose functions it put first (presplit_order_first).
     const char* first;
@@ -1145,21 +1141,14 @@ static void presplit_keep_statics(PresplitPlan* plan)
 }
 
 // The local functions that go to the parts that read them as copies (--keep-statics, above), once what each part reads
-// is known: only ever called, and read by another part. --copy-promoted (Release's) adds those too large to import whose
-// parameters the whole module's argument promotion rewrites, for the parts that call them: a part promotes a function
-// only when it sees its every call, which a function other parts call through its alias isn't. The whole unit passes
-// check_action_operand_value's 96-byte operand in two vector registers; the parts passed its address, and its loads
-// of 64 and 32 bytes read the caller's narrower stores, from which a load can't take its value until they retire:
-// benchmark-check-units ran 0.72% more cycles, and benchmark-checker-source on musl 1.85%. Each part that calls such a
-// function holds a copy of it (check_action_operand_value, 20); the checker's unit grew by 0.3%.
+// is known: only ever called, and read by another part.
 static void presplit_copies(PresplitPlan* plan)
 {
     for (uint32_t i = 0; i < plan->function_count; i += 1)
     {
         PresplitFunction* entry = &plan->functions[i];
-        const bool called = entry->defined && entry->local && !entry->used && !entry->opaque && presplit_only_called(plan, entry, false);
-        entry->copyable = called && entry->promoted && !entry->pinned && !entry->importable && !entry->kept;
-        entry->copied = called && (entry->importable || entry->measured || entry->copyable);
+        entry->copied = entry->defined && entry->local && !entry->used && !entry->opaque && (entry->importable || entry->measured) &&
+                        presplit_only_called(plan, entry, false);
     }
 }
 
@@ -1196,7 +1185,7 @@ static void presplit_imports(PresplitPlan* plan)
             for (uint32_t c = 0; c < entry->callee_count && where != 0; c += 1)
             {
                 PresplitFunction* callee = &plan->functions[entry->callees[c]];
-                if (callee->importable || callee->copyable || (callee->measured && plan->files[entry->file].benchmark))
+                if (callee->importable || (callee->measured && plan->files[entry->file].benchmark))
                 {
                     const uint64_t added = where & ~(UINT64_C(1) << callee->part) & ~callee->imported;
                     callee->imported |= added;
@@ -1230,7 +1219,6 @@ static void presplit_plan(PresplitPlan* plan)
         entry->function = function;
         entry->defined = !LLVMIsDeclaration(function) && LLVMGetLinkage(function) != LLVMAvailableExternallyLinkage;
         entry->local = presplit_local(function);
-        entry->promoted = plan->promoted != 0 && plan->promoted[at];
         entry->part = UINT32_MAX;
         size_t length = 0;
         LLVMGetValueName2(function, &length);
@@ -1861,11 +1849,11 @@ struct PresplitConstant
     uint64_t bits;
 };
 
-// --copy-promoted's half of the child (presplit_copies has the reason): the local functions whose parameters argument
-// promotion rewrites once always_inline bodies are inlined, sent as records of the parameter UINT32_MAX. Without those
-// bodies, check_action_operand_value passed its operand's address on and kept it; the whole unit's inliner inlines more
-// before it promotes, but took the child 10 s more on the checker's unit, against 1.6 s (locally). Returns whether it
-// could send them.
+// --promote-arguments' half of the child (presplit_promote_arguments has the reason): the local functions whose
+// parameters argument promotion rewrites once always_inline bodies are inlined, sent as records of the parameter
+// UINT32_MAX. Without those bodies, check_action_operand_value passed its operand's address on and kept it; the whole
+// unit's inliner inlines more before it promotes, but took the child 10 s more on the checker's unit, against 1.6 s
+// (locally). Returns whether it could send them.
 static bool presplit_promoted_child(LLVMModuleRef module, int output)
 {
     uint32_t count = 0;
@@ -2084,6 +2072,75 @@ static uint32_t presplit_order_first(PresplitPlan* plan, const char* path)
     return moved;
 }
 
+// --promote-arguments (Release's): the parameters the whole module's argument promotion rewrites, rewritten in the module
+// before the split. A part promotes a static function's arguments only when it sees its every call, which a function
+// other parts call through its alias isn't. The whole unit passes check_action_operand_value's 96-byte operand in two
+// vector registers; the parts passed its address, and its loads of 64 and 32 bytes read the caller's narrower stores,
+// from which a load can't take its value until they retire: benchmark-check-units ran 0.72% more cycles, and
+// benchmark-checker-source on musl 1.85%. A local copy of such a function in each part that calls it let each part
+// promote it, but left the copies outlined: 20 of that one, whose callers' parts ran each its own, and the checker's and
+// the backend's sources ran up to 12% more instruction cache misses. So each function the child reports
+// (presplit_promoted_child) gets what the child's promotion saw of it, its always_inline callees inlined
+// (split_inline_always) and SROA, and the module LLVM's argument promotion, which rewrites those and the calls to them;
+// every other function still stores its parameters, as clang wrote it, and keeps them. Returns the functions whose
+// parameters changed, or UINT32_MAX on a failure.
+static uint32_t presplit_promote_arguments(LLVMModuleRef module, const bool* promoted)
+{
+    LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
+    uint32_t count = 0;
+    for (LLVMValueRef function = LLVMGetFirstFunction(module); function != 0; function = LLVMGetNextFunction(function))
+    {
+        count += 1;
+    }
+    LLVMTypeRef* types = presplit_allocate((uint64_t)count + 1, sizeof(LLVMTypeRef));
+    char** names = presplit_allocate((uint64_t)count + 1, sizeof(char*));
+    bool valid = true;
+    uint32_t index = 0;
+    for (LLVMValueRef function = LLVMGetFirstFunction(module); function != 0 && valid; function = LLVMGetNextFunction(function))
+    {
+        if (promoted[index])
+        {
+            size_t length = 0;
+            const char* name = LLVMGetValueName2(function, &length);
+            names[index] = presplit_allocate(length + 1, 1);
+            memcpy(names[index], name, length);
+            types[index] = LLVMGlobalGetValueType(function);
+            split_inline_always(function);
+            LLVMErrorRef error = LLVMRunPassesOnFunction(function, "sroa<modify-cfg>", 0, options);
+            valid = error == 0;
+            if (error != 0)
+            {
+                char* message = LLVMGetErrorMessage(error);
+                fprintf(stderr, "presplit: SROA on %s: %s\n", names[index], message);
+                LLVMDisposeErrorMessage(message);
+            }
+        }
+        index += 1;
+    }
+    LLVMErrorRef error = valid ? LLVMRunPasses(module, "cgscc(argpromotion)", 0, options) : 0;
+    if (error != 0)
+    {
+        char* message = LLVMGetErrorMessage(error);
+        fprintf(stderr, "presplit: the module's argument promotion: %s\n", message);
+        LLVMDisposeErrorMessage(message);
+        valid = false;
+    }
+    LLVMDisposePassBuilderOptions(options);
+    uint32_t changed = 0;
+    for (uint32_t i = 0; i < count && valid; i += 1)
+    {
+        LLVMValueRef function = names[i] != 0 ? LLVMGetNamedFunction(module, names[i]) : 0;
+        changed += function != 0 && LLVMGlobalGetValueType(function) != types[i] ? 1 : 0;
+    }
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        free(names[i]);
+    }
+    free(names);
+    free(types);
+    return valid ? changed : UINT32_MAX;
+}
+
 static double presplit_seconds(void)
 {
     struct timespec now;
@@ -2129,9 +2186,9 @@ static bool presplit_options(PresplitPlan* plan, int argc, char** argv)
         {
             plan->constant_arguments = true;
         }
-        else if (strcmp(argv[i], "--copy-promoted") == 0)
+        else if (strcmp(argv[i], "--promote-arguments") == 0)
         {
-            plan->copy_promoted = true;
+            plan->promote_arguments = true;
         }
         else if (strcmp(argv[i], "--first") == 0 && i + 1 < argc && plan->first == 0)
         {
@@ -2168,8 +2225,8 @@ static bool presplit_options(PresplitPlan* plan, int argc, char** argv)
             valid = false;
         }
     }
-    // --copy-promoted's facts come from --constant-arguments' child.
-    return valid && (!plan->copy_promoted || plan->constant_arguments);
+    // --promote-arguments' facts come from --constant-arguments' child.
+    return valid && (!plan->promote_arguments || plan->constant_arguments);
 }
 
 int main(int argc, char** argv)
@@ -2187,7 +2244,7 @@ int main(int argc, char** argv)
     const unsigned long parts = argc >= 4 ? strtoul(argv[2], &end, 10) : 0;
     if (!valid || end == argv[2] || *end != 0 || parts == 0 || parts > PRESPLIT_MAXIMUM_PARTS)
     {
-        fprintf(stderr, "usage: presplit INPUT.bc PARTS DIRECTORY [--import LIMIT] [--anchor M] [--cohere CAP] [--spread S] [--tests-optnone] [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--constant-arguments] [--copy-promoted] [--first LIST] [--verify] [--report]  (PARTS from 1 to %u)\n",
+        fprintf(stderr, "usage: presplit INPUT.bc PARTS DIRECTORY [--import LIMIT] [--anchor M] [--cohere CAP] [--spread S] [--tests-optnone] [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--constant-arguments] [--promote-arguments] [--first LIST] [--verify] [--report]  (PARTS from 1 to %u)\n",
                 PRESPLIT_MAXIMUM_PARTS);
     }
     else
@@ -2212,7 +2269,7 @@ int main(int argc, char** argv)
             plan.parts = (uint32_t)parts;
             plan.srcloc = LLVMGetMDKindIDInContext(context, "srcloc", 6);
             const double parsed = presplit_seconds();
-            if (plan.copy_promoted)
+            if (plan.promote_arguments)
             {
                 uint32_t functions = 0;
                 for (LLVMValueRef function = LLVMGetFirstFunction(module); function != 0; function = LLVMGetNextFunction(function))
@@ -2222,12 +2279,13 @@ int main(int argc, char** argv)
                 plan.promoted = presplit_allocate((uint64_t)functions + 1, sizeof(bool));
             }
             const uint32_t constants = plan.constant_arguments ? presplit_constant_arguments(module, plan.promoted) : 0;
+            const uint32_t promotions = constants != UINT32_MAX && plan.promote_arguments ? presplit_promote_arguments(module, plan.promoted) : 0;
             const uint32_t moved = plan.first != 0 ? presplit_order_first(&plan, plan.first) : 0;
             if (moved == UINT32_MAX)
             {
                 fprintf(stderr, "presplit: can't read %s\n", plan.first);
             }
-            const bool simplified = constants != UINT32_MAX && moved != UINT32_MAX;
+            const bool simplified = constants != UINT32_MAX && promotions != UINT32_MAX && moved != UINT32_MAX;
             const double prepared = presplit_seconds();
             if (simplified)
             {
@@ -2241,8 +2299,9 @@ int main(int argc, char** argv)
             status = simplified && presplit_locals(&plan, argv[3]) && presplit_parts(&plan, argv[3]) ? 0 : 1;
             if (plan.report)
             {
-                fprintf(stderr, "presplit: reading %.2f s, constant arguments %.2f s (%u), planning %.2f s, writing the parts %.2f s\n",
-                        parsed - started, prepared - parsed, simplified ? constants : 0, planned - prepared, presplit_seconds() - planned);
+                fprintf(stderr, "presplit: reading %.2f s, constant arguments and promotion %.2f s (%u, %u), planning %.2f s, writing the parts %.2f s\n",
+                        parsed - started, prepared - parsed, simplified ? constants : 0, simplified ? promotions : 0, planned - prepared,
+                        presplit_seconds() - planned);
             }
         }
     }
