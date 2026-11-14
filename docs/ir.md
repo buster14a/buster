@@ -991,7 +991,11 @@ reads that one value, which Tier 1 keeps in a register around a loop that reads
 it on every iteration (Lua's dispatch table) and otherwise recomputes where it
 is read ([the allocation guide](tier1-allocation.md)'s "Recomputable values
 read on every iteration"). A GOT slot's or a thread-local's address stays where
-it is taken.
+it is taken, and so does a take whose access Tier 1's selection folds into a
+rip-relative operand (#2573), which needs no register: a load at a constant
+offset, or a store of a constant or a local (`ir_typed_folds`, #2618).
+`speedtest1_run`'s hot `g`, read so between calls, was recomputed after each
+one, and its takes don't count towards the two.
 
 Where the value is defined is `ir_typed_plan_places`'s (#2593), over the typed
 CFG the emission's branches make (the preheader, each source block and the
@@ -1013,7 +1017,13 @@ of its reachable takes' nearest common dominator, P, and then:
   ends), and where every iteration calls (`sqlite3_str_vappendf`'s `fmtinfo`,
   read through a format loop that appends each piece), over which Tier 1
   would keep the value in a callee-saved register the loop's own values need,
-  or recompute it after each call;
+  or recompute it after each call. The walks that test the iterations go from
+  a `&&`'s or `||`'s alternative, a block of one constant that goes into its
+  truth value's join, straight to the join's choice for it, as #2554's
+  threading takes that edge in Tier 1's IR: `memsys5MallocUnsafe`'s
+  `iBin<=LOGMAX && mem5.aiFreelist[iBin]<0` has a typed path from the
+  alternative through the join into the loop's body, which takes the table
+  nowhere, though no run takes it. The dominators keep the emission's edges;
 - otherwise at P, where some take is inside a loop or where every path from P
   takes it before leaving the function (`sqlite3GetToken`'s `aiClass`, read by
   its switch). A path that takes it nowhere (`powerOfTen`'s `aBase`,
@@ -1131,15 +1141,34 @@ Without the separation test, `sqlite3GetToken` loses 0.79 M to 1.20 M. A take
 whose access folds rip-relative needs no register, and leaving such takes out
 of the hoist gains `speedtest1_run` its 0.27 M (its hot `g`, read at constant
 offsets, was recomputed after each call), but `memsys5Unlink` and
-`memsys5MallocUnsafe` lose 0.30 M each: without the hoisted address in a
+`memsys5MallocUnsafe` lost 0.30 M each: without the hoisted address in a
 register, the allocator's lowest free register for a two-address `imul`'s
-result is no longer its dying operand's, and a copy is added on every call. No
-hint ties such a result to its operand. What the hoist still costs is the
-allocator's, at most 0.21 M a function: `speedtest1_run` +0.21 M,
-`jsonLookupStep` +0.10 M (frame addresses giving way, then recomputed), and
-`hexFunc` +0.07 M, whose call-free loop needs ten values in nine caller-saved
-registers, so the address is evicted inside the loop and moved back on its
-backedge.
+result was no longer its dying operand's, and a copy was added on every call.
+[The allocation guide](tier1-allocation.md)'s "Two-address results" (#2685)
+ties such a result to its operand. Then `memsys5Unlink` gains too, but
+`memsys5MallocUnsafe` still lost 0.32 M: its folded take of `mem5.szAtom` at
+the function's entry had kept its other takes' P outside the loops, and without
+it P is its `&&` loop's header, whose test of the iterations failed on the
+alternative's path. The walks through the alternatives keep them before the
+loop. By callgrind at #2688's head `01a2d0b3`, with #2685's ties, speedtest1
+runs 0.22 M fewer instructions (`speedtest1_run` −0.27 M, `memsys5Unlink`
+−0.02 M; `sqlite3Atoi64` +0.09 M and `sqlite3_strnicmp` +0.01 M, whose
+`sqlite3CtypeMap` the walks lift out of an `isspace` loop and whose registers
+then shift, which the allocation guide's "Recipes evicted before a read" more
+than takes back), and Lua's scripts the same. The walks alone cost 0.10 M, the
+folded takes alone gain nothing (+0.02 M).
+
+With those and the allocation guide's rules ("Two-address results" and
+"Recipes evicted before a read"), against the same compiler with no hoist at
+all, speedtest1 runs 8.00 M fewer instructions and Lua's scripts 18.9 M fewer.
+`speedtest1_run`, `memsys5Unlink`, `jsonTranslateBlobToText` and
+`sqlite3FindFunction` run the same instructions, `jsonLookupStep` 431 fewer and
+`memsys5MallocUnsafe` 0.32 M fewer; `hexFunc` 675 more: its loop's back edge no
+longer moves `hexdigits`, but its definition before the loop, which the loop's
+first value evicts before any read, is still computed on each of its 675 calls.
+No function loses more than 30 K to the hoist (`sqlite3Atoi64` +29.6 K,
+`sqlite3Select` +13.1 K, `sqlite3_strnicmp` +11.5 K, `sqlite3GetInt32`
++10.7 K).
 `test-ir-lowering` checks both lowering paths, the verifiers, the interpreter's
 results and promotion for a symbol taken three times, one taken once and one
 through its GOT slot, and each of the rules above: a definition past an early
@@ -1149,7 +1178,9 @@ own; and (#2618) takes left their own in a loop whose every iteration calls and
 in one where a single iteration takes the symbol, one definition before a nest
 whose call-free inner loop takes it on every iteration, a definition before
 each of two cases' loops entered from P alone, one at P for groups a path
-takes in turn, and a definition in each group of a value join's.
+takes in turn, and a definition in each group of a value join's; takes whose
+loads fold left their own beside one definition of the others, and one
+definition before a loop whose `&&` takes the symbol on every iteration.
 Backedges to source entry zero skip that initialization. The typed stream's U64
 pointer representation becomes explicit `inttoptr` / `ptrtoint` at memory and
 address operations; ordinary U64 arithmetic remains integer arithmetic. Integer
