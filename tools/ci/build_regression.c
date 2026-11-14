@@ -2434,7 +2434,7 @@ static void check_develop(void)
         fail("the Develop build changed the Release executable");
     }
     char stamp[PATH_MAX];
-    snprintf(stamp, sizeof(stamp), "%s/Develop/develop/main_unit_checker/split.stamp", tree);
+    snprintf(stamp, sizeof(stamp), "%s/Develop/parts/main_unit_checker/split.stamp", tree);
     if (access(stamp, F_OK) != 0)
     {
         fail("Develop compiled main_unit_checker.c whole: its parts need parallel native generation's tools (the configure step names what is missing)");
@@ -2845,13 +2845,15 @@ static void check_failures(void)
     }
 
     // An interrupt of the build's process group, as a terminal's, and a termination of build.sh alone, as
-    // timeout(1)'s: main_unit_types.c takes 20 s on the 9700X and longer elsewhere, so each comes while it compiles.
+    // timeout(1)'s: main_unit_checker.c's front end alone takes 7 s on the 9700X and longer elsewhere, then its split,
+    // so each comes while it compiles. In parts a main.c unit's own compile stops at its front end: main_unit_types.c's
+    // rebuild took 1.7 s on a hosted runner, and a benchmark unit compiles little on a scalar host.
     char log[PATH_MAX];
     snprintf(log, sizeof(log), "%s/interrupted.log", work);
     char* argv[] = { "./build.sh", "--config", "Release", 0 };
     for (uint32_t i = 0; i < 2; i += 1)
     {
-        utimensat(AT_FDCWD, "src/buster/compiler/main_unit_types.c", 0, 0);
+        utimensat(AT_FDCWD, "src/buster/compiler/main_unit_checker.c", 0, 0);
         const pid_t child = start(log, 0, argv, true);
         sleep_seconds(3);
         if (i == 0)
@@ -2885,7 +2887,7 @@ static void check_failures(void)
     }
 
     // A clean of the tree while a build compiles in it: the clean waits for the build, which publishes.
-    utimensat(AT_FDCWD, "src/buster/compiler/main_unit_types.c", 0, 0);
+    utimensat(AT_FDCWD, "src/buster/compiler/main_unit_checker.c", 0, 0);
     char* clean_debug[] = { "./build.sh", "clean", "--config", "Debug", 0 };
     overlap(argv, clean_debug, "waiting for another build or clean", "a clean of a tree during its build");
     if (!same_file("build/compiler", release) || access(debug, F_OK) == 0)
@@ -3930,7 +3932,7 @@ static void check_parallel_codegen_compiler(void)
     snprintf(log, sizeof(log), "%s/parallel-codegen-output.log", work);
     if (run(log, settings, print) != 0)
     {
-        fail("can't find the opt-in compiler");
+        fail("can't find the compiler in parts");
     }
     Text output = read_file(log);
     char* newline = strchr(output.data, '\n');
@@ -3940,6 +3942,18 @@ static void check_parallel_codegen_compiler(void)
     }
     snprintf(path, sizeof(path), "%s", output.data);
     free(output.data);
+    // The executable's tree (TREE/Release/compiler) split every main.c unit before the optimizer (presplit.c, #2559):
+    // the checker's unit into 48 code parts, a part's job each, and their join.
+    char stamp[PATH_MAX];
+    char part[PATH_MAX];
+    char* release = strrchr(path, '/');
+    const int directory = release != 0 ? (int)(release - path) : 0;
+    snprintf(stamp, sizeof(stamp), "%.*s/parts/main_unit_checker/split.stamp", directory, path);
+    snprintf(part, sizeof(part), "%.*s/parts/main_unit_checker/part47.o", directory, path);
+    if (access(stamp, F_OK) != 0 || access(part, F_OK) != 0)
+    {
+        fail("the Release build compiled main_unit_checker.c whole, not in parts: no %s or %s", stamp, part);
+    }
     char* baked[] = { path, "test-baked-tables", 0 };
     output = capture(baked);
     free(output.data);
@@ -3947,9 +3961,9 @@ static void check_parallel_codegen_compiler(void)
     BUILD_ENV(settings, "build", "--config", "Release");
     if (!same_time(status_of(path), compiler) || !same_file("build/compiler", path))
     {
-        fail("an unchanged opt-in compiler build regenerated or failed to publish its executable");
+        fail("an unchanged build of the compiler in parts regenerated or failed to publish its executable");
     }
-    pass("the full opt-in compiler links native units, passes baking/canary checks and reuses its unchanged executable");
+    pass("the full compiler in parts links its units, passes baking/canary checks and reuses its unchanged executable");
 }
 
 int main(int argc, char** argv)

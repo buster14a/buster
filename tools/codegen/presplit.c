@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// The partition of one unit's module before LLVM's optimizer, for the Develop configuration (docs/commands/build.md,
-// "Develop"; docs/stage1-build-design.md, #2559): each part's job then runs the -O3 pipeline and the code generator on
-// its part alone, the parts run at once, and a rebuild repeats only the parts whose bitcode an edit changed.
+// The partition of one unit's module before LLVM's optimizer, for the Release and Develop configurations
+// (docs/commands/build.md, "Units in parts"; docs/stage1-build-design.md, #2559): each part's job then runs the -O3
+// pipeline and the code generator on its part alone, the parts run at once, and a rebuild repeats only the parts whose
+// bitcode an edit changed.
 //
-//   presplit INPUT.bc PARTS DIRECTORY [--import LIMIT] [--anchor M] [--cohere CAP] [--tests-optnone] [--verify] [--report]
+//   presplit INPUT.bc PARTS DIRECTORY [--import LIMIT] [--anchor M] [--cohere CAP] [--spread S] [--tests-optnone]
+//            [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--constant-arguments] [--verify]
+//            [--report]
 //
 // writes DIRECTORY/part0.bc to DIRECTORY/partPARTS.bc and DIRECTORY/locals.txt. Parts 0 to PARTS - 1 hold function
 // definitions; part PARTS holds the global variables more than one part refers to, and no function. INPUT is clang's
-// bitcode before any LLVM pass (-Xclang -disable-llvm-passes), with line tables, which name each function's file.
-// Derived from tools/codegen/split.c, which partitions a unit after the optimizer (Release), and from the record's
-// prototype (buster-performance's stage1-build-design-2040-2026-11-12).
+// bitcode before any LLVM pass (-Xclang -disable-llvm-passes), with line tables or full debug information, which name
+// each function's file. Derived from split.c, which partitions a unit after the optimizer (a sanitizer build's Release),
+// and from the record's prototype (buster-performance's stage1-build-design-2040-2026-11-12).
 //
 // Which part a function goes to (the design's rules 1, 2 and 6):
 // - each source file's functions, in their source order (their line, then their name), are cut into chunks: a function
@@ -29,9 +32,10 @@
 // What a part sees of the others (rules 3 and 4):
 // - it reads, available_externally and without their debug information, the bodies of the functions its code calls
 //   that another part defines, of at most LIMIT unoptimized instructions (--import, 100) or always_inline, and so on
-//   through those bodies, so that its inliner still inlines them; a body that can't inline (optnone) reads none;
+//   through those bodies, so that its inliner still inlines them; a body that can't inline (optnone) reads none; and
+//   every code part reads the bodies the input itself holds available_externally (a C library header's inline ones);
 // - a local function another part refers to keeps its local name where it is defined, and a hidden alias,
-//   NAME.buster_split, names it for the others, as split.c's parts do;
+//   NAME.buster_split, names it for the others, as #2058's split.c did;
 // - a local global variable that exactly one code part refers to, and whose initializer names no other global, stays
 //   local to that part; any other one a code part refers to becomes a hidden external one in the data part, and the
 //   code parts that refer to a strong constant read its initializer available_externally, so that loads from it fold;
@@ -40,16 +44,28 @@
 // What keeps an unchanged function's part the same bytes (rules 5 and 7): a local variable whose name ends in a number
 // clang gave it in the order it met them (.str.N, a string literal; constinit.N; a second static of one name) is named
 // by its contents instead; an inline-assembly statement loses its !srcloc, its offset in the whole unit; struct types
-// lose their names (struct.anon.N is numbered so too); a body a part only reads comes without its line numbers; the
-// unit's debug information is DWARF 4 line tables, which name no file's checksum. The same input gives the same parts,
-// whatever the CPUs and the order the children run in.
+// lose their names (struct.anon.N is numbered so too); a body a part only reads comes without its line numbers;
+// Develop's debug information is DWARF 4 line tables, which name no file's checksum (Release's -g, DWARF 5, names each
+// file's, so that an edit of a file changes every part that mentions it). The same input gives the same parts, whatever
+// the CPUs and the order the children run in.
 //
-// --tests-optnone (the design's step 3) marks the functions of the tests' files optnone and noinline, as #681's pragma
-// does for the checker's own: a file whose name has _test_, _test., _tests., test_ or fuzz in it. --verify runs LLVM's
-// verifier on each part; --report prints each part's definitions, cost and imports, and the plan's times, to stderr.
+// --tests-optnone (the design's step 3, Develop's) marks the functions of the tests' files optnone and noinline, as
+// #681's pragma does for the checker's own: a file whose name has _test_, _test., _tests., test_ or fuzz in it.
+// --strip-debug writes the parts without any debug information: a Release build without it (BUSTER_DEBUG_INFO=0)
+// compiles its units with line tables for the plan's files alone. --verify runs LLVM's verifier on each part; --report
+// prints each part's definitions, cost and imports, and the plan's times, to stderr.
 //
-// BusterCodegenMerge.cmake joins the parts' objects and restores local binding as it does for split.c's. The module is
-// parsed once and the plan made on it; each part is then a clone of its own definitions (split_bitcode.cpp's
+// Release's options make a part's inliner decide as the whole unit's (#2559's step 5, #2624): --keep-statics gives the
+// parts that read a static function that is only ever called a local copy of it, keeps a body in its part when it calls
+// a static function called once, and gives a part's static function a phantom caller wherever the whole module calls it
+// more (presplit_keep_statics, presplit_phantoms); --benchmark-bodies has a benchmark's file read the bodies it calls,
+// whatever their size; --simplified-size measures a body for LIMIT by what SROA leaves of it, with LLVM's vector bonus
+// (presplit_scan); --constant-arguments writes the arguments the whole module's constant propagation finds constant into
+// their functions (presplit_constant_arguments); and a part that reads a constant table reads the constants it names
+// (presplit_readable_readers).
+//
+// BusterCodegenMerge.cmake joins the parts' objects and restores local binding (locals.txt). The module is parsed
+// once and the plan made on it; each part is then a clone of its own definitions (split_bitcode.cpp's
 // split_clone_part), written by a child process, as many at once as the CPUs and the memory allow. It is build tooling
 // outside the compiler's compile path, using LLVM's C API (and split_bitcode.cpp's C++ calls), with no vector path.
 
@@ -100,6 +116,9 @@ struct PresplitFunction
 {
     LLVMValueRef function;
     uint64_t cost;
+    // Its size to the import limit with --simplified-size: what SROA leaves of its instructions, scaled down by LLVM's
+    // inliner's vector bonus (presplit_scan).
+    uint64_t import_size;
     // The parts that read the body, available_externally.
     uint64_t imported;
     uint32_t* callees;
@@ -122,6 +141,20 @@ struct PresplitFunction
     bool opaque;
     // Holds inline assembly with text: kept in part 0 and never read by another part (presplit_scan).
     bool pinned;
+    // A part that reads it holds a local copy of its own, and its own part no alias (--keep-statics).
+    bool copied;
+    // A benchmark's function calls it, so the benchmark's part reads its body whatever its size (--benchmark-bodies).
+    bool measured;
+    // No other part reads its body: it calls a local function only its own part calls and no other part may read.
+    bool kept;
+    // Its uses in the whole module, which a part's copy or definition of a local function keeps the inliner's view of
+    // (presplit_phantoms).
+    uint32_t uses;
+    // A body the input itself holds available_externally (a C library header's extern inline function: pthread_equal,
+    // bsearch, putchar): every code part reads it so, as the whole unit's inliner does, whether its code calls it or the
+    // optimizer makes a call (printf("\n") becomes putchar('\n') in run_streaming_benchmark). There are a handful,
+    // and a part's optimizer drops those it doesn't call.
+    bool external;
 };
 
 typedef struct PresplitGlobal PresplitGlobal;
@@ -145,6 +178,8 @@ struct PresplitFile
     // The parts its chunks are dealt over.
     uint32_t run;
     bool test;
+    // A benchmark's own file (_benchmark in its name): --benchmark-bodies.
+    bool benchmark;
 };
 
 // Values to their indices, by address.
@@ -176,6 +211,11 @@ struct PresplitPlan
     uint64_t spread;
     unsigned srcloc;
     bool tests_optnone;
+    bool strip_debug;
+    bool keep_statics;
+    bool benchmark_bodies;
+    bool simplified_size;
+    bool constant_arguments;
     bool verify;
     bool report;
 };
@@ -313,12 +353,24 @@ static void presplit_push(LLVMValueRef** stack, uint32_t* depth, uint32_t* capac
 static void presplit_scan(PresplitPlan* plan, PresplitFunction* entry)
 {
     uint64_t count = 0;
+    // The instructions SROA leaves (no alloca, lifetime marker or load or store through an alloca), and how many of
+    // those make vectors.
+    uint64_t simplified = 0;
+    uint64_t vectors = 0;
     uint32_t capacity = 0;
     for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(entry->function); block != 0; block = LLVMGetNextBasicBlock(block))
     {
         for (LLVMValueRef instruction = LLVMGetFirstInstruction(block); instruction != 0; instruction = LLVMGetNextInstruction(instruction))
         {
             count += 1;
+            LLVMValueRef called = LLVMIsACallInst(instruction) != 0 ? LLVMGetCalledValue(instruction) : 0;
+            size_t called_length = 0;
+            const char* called_name = called != 0 && LLVMIsAFunction(called) != 0 ? LLVMGetValueName2(called, &called_length) : "";
+            const bool scaffolding = LLVMIsAAllocaInst(instruction) != 0 || strncmp(called_name, "llvm.lifetime.", 14) == 0 ||
+                                     (LLVMIsALoadInst(instruction) != 0 && LLVMIsAAllocaInst(LLVMGetOperand(instruction, 0)) != 0) ||
+                                     (LLVMIsAStoreInst(instruction) != 0 && LLVMIsAAllocaInst(LLVMGetOperand(instruction, 1)) != 0);
+            simplified += scaffolding ? 0 : 1;
+            vectors += !scaffolding && LLVMGetTypeKind(LLVMTypeOf(instruction)) == LLVMVectorTypeKind ? 1 : 0;
             if (LLVMIsACallInst(instruction) != 0)
             {
                 LLVMValueRef callee = LLVMGetCalledValue(instruction);
@@ -350,6 +402,11 @@ static void presplit_scan(PresplitPlan* plan, PresplitFunction* entry)
         }
     }
     entry->cost = count + PRESPLIT_FUNCTION_COST;
+    // LLVM's inliner raises its threshold by 150% for a callee whose instructions are more than half vectors, by 75%
+    // for more than a tenth: asm_word_registers_vector, 721 unoptimized instructions and 337 left by SROA, inlined at
+    // cost 710 against a threshold of 1574 into the assembler's register cache.
+    const uint64_t bonus = vectors * 2 > simplified ? 250 : vectors * 10 > simplified ? 175 : 100;
+    entry->import_size = simplified * 100 / bonus;
 }
 
 // The parts that read `function`'s body: the one that emits it and those that import it.
@@ -439,6 +496,55 @@ static bool presplit_leaf(LLVMValueRef value)
     }
     free(stack);
     return leaf;
+}
+
+// A code part that reads a constant's initializer reads the constants it names too, to a fixed point: a table of
+// strings (asm_alias's mnemonics, `static const char* const aliases[][2]`) is no use to strlen's folding when its strings
+// come as declarations alone, and asm_instruction made 46 calls to strlen where the whole unit's made 16. Their readers
+// were the data part's alone, from the table's initializer.
+static void presplit_readable_readers(PresplitPlan* plan)
+{
+    const uint64_t code = (UINT64_C(1) << plan->parts) - 1;
+    uint32_t capacity = 64;
+    LLVMValueRef* stack = presplit_allocate(capacity, sizeof(LLVMValueRef));
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        for (uint32_t i = 0; i < plan->global_count; i += 1)
+        {
+            const PresplitGlobal* entry = &plan->globals[i];
+            const uint64_t readers = entry->readers & code;
+            uint32_t depth = 0;
+            if (entry->defined && readers != 0 && presplit_readable(entry->global))
+            {
+                presplit_push(&stack, &depth, &capacity, LLVMGetInitializer(entry->global));
+            }
+            while (depth != 0)
+            {
+                depth -= 1;
+                LLVMValueRef value = stack[depth];
+                if (LLVMIsAGlobalVariable(value))
+                {
+                    const uint32_t index = presplit_map_get(&plan->global_indices, value);
+                    if (index != UINT32_MAX && (readers & ~plan->globals[index].readers) != 0)
+                    {
+                        plan->globals[index].readers |= readers;
+                        changed = true;
+                    }
+                }
+                else if (!LLVMIsAGlobalValue(value) && LLVMIsAConstant(value))
+                {
+                    const int operands = LLVMGetNumOperands(value);
+                    for (int o = 0; o < operands; o += 1)
+                    {
+                        presplit_push(&stack, &depth, &capacity, LLVMGetOperand(value, (unsigned)o));
+                    }
+                }
+            }
+        }
+    }
+    free(stack);
 }
 
 // What a code part reads, it may refer to: every local global a readable constant's initializer names is made a hidden
@@ -787,6 +893,7 @@ static void presplit_files(PresplitPlan* plan)
                     .hash = hash,
                     .length = length,
                     .test = presplit_test_file(name, length),
+                    .benchmark = presplit_contains(name, length, "_benchmark"),
                 };
                 plan->file_count += 1;
             }
@@ -962,7 +1069,94 @@ static void presplit_cohere(PresplitPlan* plan)
     free(tree);
 }
 
-// Rule 3: what each part reads, to a fixed point: the importable callees of the bodies it reads that can inline.
+// Whether every use of the local function `entry` is a call from a defined function: of its own part, with `own`.
+static bool presplit_only_called(const PresplitPlan* plan, const PresplitFunction* entry, bool own)
+{
+    bool inside = LLVMGetFirstUse(entry->function) != 0;
+    for (LLVMUseRef use = LLVMGetFirstUse(entry->function); use != 0 && inside; use = LLVMGetNextUse(use))
+    {
+        LLVMValueRef user = LLVMGetUser(use);
+        inside = LLVMIsACallInst(user) != 0 && LLVMGetCalledValue(user) == entry->function;
+        if (inside)
+        {
+            const uint32_t caller = presplit_map_get(&plan->function_indices, LLVMGetBasicBlockParent(LLVMGetInstructionParent(user)));
+            inside = caller != UINT32_MAX && plan->functions[caller].defined && (!own || plan->functions[caller].part == entry->part);
+        }
+    }
+    return inside;
+}
+
+// --keep-statics (Release's): a body another part reads makes every local function it calls the target of an alias in
+// that function's own part, a use the owner's inliner counts, so that it no longer inlines the function as the last
+// call to a static one, which the whole unit's does whatever its size (asm_assemble's imported body kept asm_layout,
+// asm_parse and asm_emit outlined, and instruction_is_valid's mode_register_is_valid: benchmark-assembler ran 9.6% more
+// cycles). So a local function that is only ever called, and that other parts may read, goes to each part that calls
+// it or reads a caller's body as a local copy of its own, which that part's inliner treats as the whole unit's does
+// (with a phantom caller where the whole module calls it more: presplit_phantoms), and keeps no alias in its own part;
+// and no other part reads a body that calls a local function they may not read whose one call is in its part, to a
+// fixed point (the body then becomes such a function itself when its callers do). A function the whole module calls
+// more than once has no last-call bonus to keep: type_derive's many callers in c_types.c had kept type_pointer, 8
+// instructions, from every part but its own. always_inline bodies stay readable.
+static void presplit_keep_statics(PresplitPlan* plan)
+{
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        for (uint32_t i = 0; i < plan->function_count; i += 1)
+        {
+            PresplitFunction* entry = &plan->functions[i];
+            bool keeps = false;
+            for (uint32_t c = 0; entry->defined && !entry->kept && c < entry->callee_count && !keeps; c += 1)
+            {
+                const PresplitFunction* callee = &plan->functions[entry->callees[c]];
+                keeps = callee->defined && callee->local && !callee->used && !callee->opaque && !callee->importable &&
+                        callee->uses == 1 && presplit_only_called(plan, callee, true);
+            }
+            if (keeps && !presplit_has_attribute(entry->function, "alwaysinline"))
+            {
+                // A body too large to import stays kept as well, from a benchmark's reading (--benchmark-bodies):
+                // foreign_gc_link's, read by its benchmark, outlined its five single-call phases.
+                entry->kept = true;
+                changed = changed || entry->importable;
+                entry->importable = false;
+            }
+        }
+    }
+}
+
+// The local functions that go to the parts that read them as copies (--keep-statics, above), once what each part reads
+// is known: only ever called, and read by another part.
+static void presplit_copies(PresplitPlan* plan)
+{
+    for (uint32_t i = 0; i < plan->function_count; i += 1)
+    {
+        PresplitFunction* entry = &plan->functions[i];
+        entry->copied = entry->defined && entry->local && !entry->used && !entry->opaque && (entry->importable || entry->measured) &&
+                        presplit_only_called(plan, entry, false);
+    }
+}
+
+// --benchmark-bodies (Release's): a benchmark measures the functions it calls as the whole unit compiles them, inlined
+// into its loop where the whole unit's inliner inlines them, so its own file's functions read the bodies of everything
+// they call whatever their size (benchmark-environments ran 15% more instructions with c_environment_lookup_batch called,
+// benchmark-lowering 3.4% with c_lowering_vector and c_lowering_scalar). A body --keep-statics keeps in its part stays
+// there: asm_assemble's, read by the assembler's benchmark, would outline asm_layout and asm_emit again.
+static void presplit_measured(PresplitPlan* plan)
+{
+    for (uint32_t i = 0; i < plan->function_count; i += 1)
+    {
+        const PresplitFunction* entry = &plan->functions[i];
+        for (uint32_t c = 0; entry->defined && plan->files[entry->file].benchmark && c < entry->callee_count; c += 1)
+        {
+            PresplitFunction* callee = &plan->functions[entry->callees[c]];
+            callee->measured = callee->measured || (callee->defined && !callee->opaque && !callee->pinned && !callee->kept && callee->part != entry->part);
+        }
+    }
+}
+
+// Rule 3: what each part reads, to a fixed point: the importable callees of the bodies it reads that can inline, and a
+// benchmark's file's functions every callee it measures (--benchmark-bodies).
 static void presplit_imports(PresplitPlan* plan)
 {
     bool changed = true;
@@ -976,7 +1170,7 @@ static void presplit_imports(PresplitPlan* plan)
             for (uint32_t c = 0; c < entry->callee_count && where != 0; c += 1)
             {
                 PresplitFunction* callee = &plan->functions[entry->callees[c]];
-                if (callee->importable)
+                if (callee->importable || (callee->measured && plan->files[entry->file].benchmark))
                 {
                     const uint64_t added = where & ~(UINT64_C(1) << callee->part) & ~callee->imported;
                     callee->imported |= added;
@@ -1069,6 +1263,10 @@ static void presplit_plan(PresplitPlan* plan)
         if (plan->functions[i].defined)
         {
             presplit_scan(plan, &plan->functions[i]);
+            for (LLVMUseRef use = LLVMGetFirstUse(plan->functions[i].function); use != 0; use = LLVMGetNextUse(use))
+            {
+                plan->functions[i].uses += 1;
+            }
         }
     }
     presplit_files(plan);
@@ -1084,7 +1282,8 @@ static void presplit_plan(PresplitPlan* plan)
             const bool always = presplit_has_attribute(entry->function, "alwaysinline");
             entry->inert = presplit_has_attribute(entry->function, "optnone");
             entry->opaque = presplit_has_attribute(entry->function, "noinline") || entry->inert || presplit_has_attribute(entry->function, "naked");
-            entry->importable = !entry->opaque && !entry->pinned && (always || entry->cost <= plan->import_limit + PRESPLIT_FUNCTION_COST);
+            const bool small = plan->simplified_size ? entry->import_size <= plan->import_limit : entry->cost <= plan->import_limit + PRESPLIT_FUNCTION_COST;
+            entry->importable = !entry->opaque && !entry->pinned && (always || small);
         }
     }
 
@@ -1100,6 +1299,18 @@ static void presplit_plan(PresplitPlan* plan)
             plan->functions[i].part = 0;
         }
     }
+    if (plan->keep_statics)
+    {
+        presplit_keep_statics(plan);
+    }
+    if (plan->benchmark_bodies)
+    {
+        presplit_measured(plan);
+    }
+    if (plan->keep_statics)
+    {
+        presplit_copies(plan);
+    }
     presplit_imports(plan);
 
     for (uint32_t i = 0; i < plan->function_count; i += 1)
@@ -1107,7 +1318,11 @@ static void presplit_plan(PresplitPlan* plan)
         PresplitFunction* entry = &plan->functions[i];
         if (entry->defined && entry->local)
         {
-            entry->aliased = entry->used || (presplit_references(plan, entry->function) & ~(UINT64_C(1) << entry->part)) != 0;
+            const uint64_t references = presplit_references(plan, entry->function);
+            // A copy serves only the parts that read the function; another part's reference (an optnone caller's,
+            // whose callees no part reads) needs the alias.
+            entry->copied = entry->copied && (references & ~presplit_where(entry)) == 0;
+            entry->aliased = !entry->copied && (entry->used || (references & ~(UINT64_C(1) << entry->part)) != 0);
         }
     }
     const uint64_t data = UINT64_C(1) << plan->parts;
@@ -1131,6 +1346,80 @@ static void presplit_plan(PresplitPlan* plan)
         }
     }
     presplit_readable_closure(plan);
+    presplit_readable_readers(plan);
+    for (uint32_t i = 0; i < plan->function_count; i += 1)
+    {
+        PresplitFunction* entry = &plan->functions[i];
+        entry->external = !entry->defined && LLVMGetLinkage(entry->function) == LLVMAvailableExternallyLinkage && !LLVMIsDeclaration(entry->function);
+    }
+}
+
+// --keep-statics: a local function's definition in a part, its own or a copy, has fewer uses there than in the whole
+// module when other parts call it too (through their copies). The owner's inliner would then inline it as the last call
+// to a static function where the whole unit's sees other calls and doesn't: arena_reserve_small, one call in
+// scratch_begin's copy and in arena_reserve's, went into both, and scratch_begin (cost 60 in the whole unit, 1350 so) and
+// arena_reserve (5, 970) then stayed outlined in the assembler's layout, emission and benchmark. So each such function
+// gets a phantom caller standing for the others: an available_externally function, optnone, that passes its own
+// arguments on to it, ignores its result and that llvm.compiler.used keeps; nothing calls it, and the optimizer drops
+// its body after the inliner (EliminateAvailableExternallyPass), so the function goes where the whole unit's would.
+// Its arguments are unknown to interprocedural constant propagation, as the other parts' callers' are: poison ones let
+// a part specialize tier1_select_induction_bounds's copy to its own callers' constants, which folded a call away, gave
+// tier1_select_range_phi_endpoint the last-call bonus, and kept the bigger body out of tier1_burs_check_prepare. A
+// result the phantom returned would keep dead argument elimination from dropping one no caller reads, as the whole
+// unit's does. Returns the phantoms, for llvm.compiler.used.
+static uint32_t presplit_phantoms(const PresplitPlan* plan, LLVMModuleRef module, uint32_t part, LLVMValueRef* phantoms)
+{
+    const uint64_t bit = UINT64_C(1) << part;
+    LLVMContextRef context = LLVMGetModuleContext(module);
+    LLVMBuilderRef builder = LLVMCreateBuilderInContext(context);
+    const unsigned optnone = presplit_attribute_kind("optnone");
+    const unsigned noinline = presplit_attribute_kind("noinline");
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < plan->function_count; i += 1)
+    {
+        const PresplitFunction* entry = &plan->functions[i];
+        const bool mine = entry->defined && entry->part == part && !entry->aliased;
+        const bool copy = entry->defined && entry->part != part && entry->copied && (entry->imported & bit) != 0;
+        size_t length = 0;
+        const char* name = (mine || copy) && entry->local ? LLVMGetValueName2(entry->function, &length) : 0;
+        LLVMValueRef function = name != 0 ? LLVMGetNamedFunction(module, name) : 0;
+        uint32_t uses = 0;
+        for (LLVMUseRef use = function != 0 ? LLVMGetFirstUse(function) : 0; use != 0; use = LLVMGetNextUse(use))
+        {
+            uses += 1;
+        }
+        if (uses != 0 && uses < entry->uses)
+        {
+            LLVMTypeRef type = LLVMGlobalGetValueType(function);
+            const unsigned parameters = LLVMCountParamTypes(type);
+            LLVMTypeRef* types = presplit_allocate((uint64_t)parameters + 1, sizeof(LLVMTypeRef));
+            LLVMGetParamTypes(type, types);
+            char* phantom_name = presplit_allocate(length + sizeof(".buster_phantom"), 1);
+            memcpy(phantom_name, name, length);
+            memcpy(phantom_name + length, ".buster_phantom", sizeof(".buster_phantom"));
+            LLVMValueRef phantom = LLVMAddFunction(module, phantom_name, LLVMFunctionType(LLVMVoidTypeInContext(context), types, parameters, 0));
+            LLVMValueRef* arguments = presplit_allocate((uint64_t)parameters + 1, sizeof(LLVMValueRef));
+            for (unsigned p = 0; p < parameters; p += 1)
+            {
+                arguments[p] = LLVMGetParam(phantom, p);
+            }
+            LLVMSetLinkage(phantom, LLVMAvailableExternallyLinkage);
+            LLVMAddAttributeAtIndex(phantom, LLVMAttributeFunctionIndex, LLVMCreateEnumAttribute(context, optnone, 0));
+            LLVMAddAttributeAtIndex(phantom, LLVMAttributeFunctionIndex, LLVMCreateEnumAttribute(context, noinline, 0));
+            LLVMPositionBuilderAtEnd(builder, LLVMAppendBasicBlockInContext(context, phantom, ""));
+            LLVMValueRef call = LLVMBuildCall2(builder, type, function, arguments, parameters, "");
+            LLVMSetInstructionCallConv(call, LLVMGetFunctionCallConv(function));
+            LLVMAddCallSiteAttribute(call, LLVMAttributeFunctionIndex, LLVMCreateEnumAttribute(context, noinline, 0));
+            LLVMBuildRetVoid(builder);
+            phantoms[count] = phantom;
+            count += 1;
+            free(phantom_name);
+            free(arguments);
+            free(types);
+        }
+    }
+    LLVMDisposeBuilder(builder);
+    return count;
 }
 
 // Part `part` of the plan: a clone of the module with this part's definitions alone, written to `path`. Runs in its own
@@ -1146,7 +1435,7 @@ static bool presplit_part(const PresplitPlan* plan, uint32_t part, const char* p
     for (uint32_t i = 0; i < plan->function_count; i += 1)
     {
         const PresplitFunction* entry = &plan->functions[i];
-        if (entry->defined && (entry->part == part || (entry->imported & bit) != 0))
+        if ((entry->defined && (entry->part == part || (entry->imported & bit) != 0)) || (code && entry->external))
         {
             keep[kept] = entry->function;
             kept += 1;
@@ -1201,12 +1490,13 @@ static bool presplit_part(const PresplitPlan* plan, uint32_t part, const char* p
                 }
                 free(alias);
             }
-            if (function != 0 && imported)
+            // A copied function stays a local definition of this part's own.
+            if (function != 0 && imported && !entry->copied)
             {
                 LLVMSetLinkage(function, LLVMAvailableExternallyLinkage);
             }
             // A local function no other part refers to is no other part's business.
-            if (function != 0 && !mine && entry->local && !entry->aliased && LLVMGetFirstUse(function) != 0)
+            if (function != 0 && !mine && entry->local && !entry->aliased && !(imported && entry->copied) && LLVMGetFirstUse(function) != 0)
             {
                 fprintf(stderr, "presplit: part %u refers to %s, which stays local to part %u\n", part, name, entry->part);
                 consistent = false;
@@ -1237,6 +1527,21 @@ static bool presplit_part(const PresplitPlan* plan, uint32_t part, const char* p
             }
         }
     }
+    if (code && plan->keep_statics)
+    {
+        LLVMValueRef* phantoms = presplit_allocate((uint64_t)plan->function_count + 1, sizeof(LLVMValueRef));
+        const uint32_t count = presplit_phantoms(plan, module, part, phantoms);
+        if (count != 0)
+        {
+            LLVMContextRef context = LLVMGetModuleContext(module);
+            LLVMTypeRef pointer = LLVMPointerTypeInContext(context, 0);
+            LLVMValueRef array = LLVMAddGlobal(module, LLVMArrayType2(pointer, count), "llvm.compiler.used");
+            LLVMSetLinkage(array, LLVMAppendingLinkage);
+            LLVMSetSection(array, "llvm.metadata");
+            LLVMSetInitializer(array, LLVMConstArray2(pointer, phantoms, count));
+        }
+        free(phantoms);
+    }
     // A global variable declaration nothing here uses goes: the code generator would still name a hidden one.
     LLVMValueRef global = LLVMGetFirstGlobal(module);
     while (global != 0)
@@ -1251,6 +1556,10 @@ static bool presplit_part(const PresplitPlan* plan, uint32_t part, const char* p
     if (part != 0)
     {
         LLVMSetModuleInlineAsm2(module, "", 0);
+    }
+    if (plan->strip_debug)
+    {
+        LLVMStripModuleDebugInfo(module);
     }
     LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
     LLVMErrorRef error = LLVMRunPasses(module, "strip-dead-debug-info,strip-dead-prototypes", 0, options);
@@ -1481,6 +1790,137 @@ static void presplit_report(const PresplitPlan* plan)
             total != 0 ? 100.0 * (double)imported_total / (double)total : 0.0, plan->global_count, moved, hidden);
 }
 
+// --constant-arguments (Release's): the arguments interprocedural constant propagation finds constant over the whole
+// module, written into the functions that take them, before the plan. A part's own propagation doesn't see every call
+// of a local function that other parts call (an alias names it, which is a use it can't follow), and so doesn't find
+// them: the whole unit's folded the encoder mode's flags that instruction_is_valid passes mode_register_is_valid,
+// whose cost to the parts' inliner was then 265 to 290 against the whole unit's 195, so that it stayed outlined and
+// benchmark-assembler ran 6.3% more instructions. A child process runs SROA and IPSCCP on its copy of the module, and
+// a local function's integer or floating-point argument that its IPSCCP replaced, which every call there passes as the
+// same constant, becomes that constant in the module's own function, whose IR is otherwise the unit's as clang wrote
+// it: running the simplification on the module itself, and again in each part, reshaped code that the whole unit's
+// pipeline shapes once (benchmark-environments ran 2.7% more cycles). The child sends each such argument as a record;
+// cloning the module instead took longer than the passes. Returns the arguments it wrote, or UINT32_MAX on a failure.
+typedef struct PresplitConstant PresplitConstant;
+struct PresplitConstant
+{
+    uint32_t function;
+    uint32_t parameter;
+    // An integer's bits (of at most 64), or a floating-point constant's value's.
+    uint64_t bits;
+};
+
+static void presplit_constant_child(LLVMModuleRef module, int output)
+{
+    static const char pipeline[] = "function<eager-inv>(sroa<modify-cfg>),ipsccp";
+    LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
+    LLVMErrorRef error = LLVMRunPasses(module, pipeline, 0, options);
+    LLVMDisposePassBuilderOptions(options);
+    bool sent = error == 0;
+    if (error != 0)
+    {
+        char* message = LLVMGetErrorMessage(error);
+        fprintf(stderr, "presplit: the whole module's constant propagation: %s\n", message);
+        LLVMDisposeErrorMessage(message);
+    }
+    uint32_t index = 0;
+    for (LLVMValueRef function = LLVMGetFirstFunction(module); function != 0 && sent; function = LLVMGetNextFunction(function))
+    {
+        const unsigned parameters = presplit_local(function) && !LLVMIsDeclaration(function) ? LLVMCountParams(function) : 0;
+        for (unsigned p = 0; p < parameters && sent; p += 1)
+        {
+            LLVMValueRef argument = LLVMGetParam(function, p);
+            const LLVMTypeKind kind = LLVMGetTypeKind(LLVMTypeOf(argument));
+            const bool integer = kind == LLVMIntegerTypeKind && LLVMGetIntTypeWidth(LLVMTypeOf(argument)) <= 64;
+            LLVMValueRef constant = 0;
+            bool same = (integer || kind == LLVMFloatTypeKind || kind == LLVMDoubleTypeKind) && LLVMGetFirstUse(argument) == 0 &&
+                        LLVMGetFirstUse(function) != 0;
+            for (LLVMUseRef use = same ? LLVMGetFirstUse(function) : 0; use != 0 && same; use = LLVMGetNextUse(use))
+            {
+                LLVMValueRef call = LLVMGetUser(use);
+                same = LLVMIsACallInst(call) != 0 && LLVMGetCalledValue(call) == function;
+                LLVMValueRef value = same ? LLVMGetOperand(call, p) : 0;
+                same = same && (LLVMIsAConstantInt(value) != 0 || LLVMIsAConstantFP(value) != 0) && (constant == 0 || constant == value);
+                constant = value;
+            }
+            if (same && constant != 0)
+            {
+                LLVMBool lost = 0;
+                const double real = integer ? 0 : LLVMConstRealGetDouble(constant, &lost);
+                PresplitConstant record = {
+                    .function = index,
+                    .parameter = p,
+                    .bits = integer ? LLVMConstIntGetZExtValue(constant) : 0,
+                };
+                if (!integer)
+                {
+                    memcpy(&record.bits, &real, sizeof(record.bits));
+                }
+                sent = !lost && write(output, &record, sizeof(record)) == (ssize_t)sizeof(record);
+            }
+        }
+        index += 1;
+    }
+    close(output);
+    _exit(sent ? 0 : 1);
+}
+
+static uint32_t presplit_constant_arguments(LLVMModuleRef module)
+{
+    uint32_t count = 0;
+    for (LLVMValueRef function = LLVMGetFirstFunction(module); function != 0; function = LLVMGetNextFunction(function))
+    {
+        count += 1;
+    }
+    LLVMValueRef* functions = presplit_allocate((uint64_t)count + 1, sizeof(LLVMValueRef));
+    count = 0;
+    for (LLVMValueRef function = LLVMGetFirstFunction(module); function != 0; function = LLVMGetNextFunction(function))
+    {
+        functions[count] = function;
+        count += 1;
+    }
+    fflush(0);
+    int channel[2];
+    const pid_t child = pipe(channel) == 0 ? fork() : -1;
+    if (child == 0)
+    {
+        close(channel[0]);
+        presplit_constant_child(module, channel[1]);
+    }
+    uint32_t written = UINT32_MAX;
+    if (child > 0)
+    {
+        close(channel[1]);
+        written = 0;
+        PresplitConstant record;
+        ssize_t got = 0;
+        while ((got = read(channel[0], &record, sizeof(record))) == (ssize_t)sizeof(record))
+        {
+            LLVMValueRef argument = record.function < count && record.parameter < LLVMCountParams(functions[record.function]) ?
+                                        LLVMGetParam(functions[record.function], record.parameter) : 0;
+            LLVMTypeRef type = argument != 0 ? LLVMTypeOf(argument) : 0;
+            double real = 0;
+            memcpy(&real, &record.bits, sizeof(real));
+            LLVMValueRef constant = type == 0 ? 0 : LLVMGetTypeKind(type) == LLVMIntegerTypeKind ? LLVMConstInt(type, record.bits, 0) : LLVMConstReal(type, real);
+            if (constant != 0 && LLVMGetFirstUse(argument) != 0)
+            {
+                LLVMReplaceAllUsesWith(argument, constant);
+                written += 1;
+            }
+        }
+        close(channel[0]);
+        int status = 0;
+        const bool exited = waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        written = exited && got == 0 ? written : UINT32_MAX;
+    }
+    if (written == UINT32_MAX)
+    {
+        fprintf(stderr, "presplit: the whole module's constant propagation failed\n");
+    }
+    free(functions);
+    return written;
+}
+
 static double presplit_seconds(void)
 {
     struct timespec now;
@@ -1505,6 +1945,26 @@ static bool presplit_options(PresplitPlan* plan, int argc, char** argv)
         else if (strcmp(argv[i], "--tests-optnone") == 0)
         {
             plan->tests_optnone = true;
+        }
+        else if (strcmp(argv[i], "--strip-debug") == 0)
+        {
+            plan->strip_debug = true;
+        }
+        else if (strcmp(argv[i], "--keep-statics") == 0)
+        {
+            plan->keep_statics = true;
+        }
+        else if (strcmp(argv[i], "--benchmark-bodies") == 0)
+        {
+            plan->benchmark_bodies = true;
+        }
+        else if (strcmp(argv[i], "--simplified-size") == 0)
+        {
+            plan->simplified_size = true;
+        }
+        else if (strcmp(argv[i], "--constant-arguments") == 0)
+        {
+            plan->constant_arguments = true;
         }
         else if ((strcmp(argv[i], "--anchor") == 0 || strcmp(argv[i], "--import") == 0 || strcmp(argv[i], "--cohere") == 0 || strcmp(argv[i], "--spread") == 0) && i + 1 < argc)
         {
@@ -1554,7 +2014,7 @@ int main(int argc, char** argv)
     const unsigned long parts = argc >= 4 ? strtoul(argv[2], &end, 10) : 0;
     if (!valid || end == argv[2] || *end != 0 || parts == 0 || parts > PRESPLIT_MAXIMUM_PARTS)
     {
-        fprintf(stderr, "usage: presplit INPUT.bc PARTS DIRECTORY [--import LIMIT] [--anchor M] [--cohere CAP] [--tests-optnone] [--verify] [--report]  (PARTS from 1 to %u)\n",
+        fprintf(stderr, "usage: presplit INPUT.bc PARTS DIRECTORY [--import LIMIT] [--anchor M] [--cohere CAP] [--spread S] [--tests-optnone] [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--constant-arguments] [--verify] [--report]  (PARTS from 1 to %u)\n",
                 PRESPLIT_MAXIMUM_PARTS);
     }
     else
@@ -1579,17 +2039,23 @@ int main(int argc, char** argv)
             plan.parts = (uint32_t)parts;
             plan.srcloc = LLVMGetMDKindIDInContext(context, "srcloc", 6);
             const double parsed = presplit_seconds();
-            presplit_plan(&plan);
+            const uint32_t constants = plan.constant_arguments ? presplit_constant_arguments(module) : 0;
+            const bool simplified = constants != UINT32_MAX;
+            const double prepared = presplit_seconds();
+            if (simplified)
+            {
+                presplit_plan(&plan);
+            }
             const double planned = presplit_seconds();
-            if (plan.report)
+            if (simplified && plan.report)
             {
                 presplit_report(&plan);
             }
-            status = presplit_locals(&plan, argv[3]) && presplit_parts(&plan, argv[3]) ? 0 : 1;
+            status = simplified && presplit_locals(&plan, argv[3]) && presplit_parts(&plan, argv[3]) ? 0 : 1;
             if (plan.report)
             {
-                fprintf(stderr, "presplit: reading %.2f s, planning %.2f s, writing the parts %.2f s\n", parsed - started, planned - parsed,
-                        presplit_seconds() - planned);
+                fprintf(stderr, "presplit: reading %.2f s, constant arguments %.2f s (%u), planning %.2f s, writing the parts %.2f s\n",
+                        parsed - started, prepared - parsed, simplified ? constants : 0, planned - prepared, presplit_seconds() - planned);
             }
         }
     }

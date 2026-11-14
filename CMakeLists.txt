@@ -59,7 +59,7 @@ set(BUSTER_FUZZ_ENTRY "" CACHE FILEPATH "The fuzzing entry's C file (src/buster/
 set(BUSTER_BAKE 1 CACHE STRING "0 leaves the backend's tables to be built when the executable runs")
 set(BUSTER_PGO 0 CACHE STRING "1 builds Release with a profile of the compiler's own compiles (Release alone)")
 set(BUSTER_PGO_TRAIN "" CACHE FILEPATH "A bash script that trains BUSTER_PGO's profile in place of the default compiles")
-set(BUSTER_PARALLEL_CODEGEN auto CACHE STRING "auto, 1 or 0: the two longest Release units' native code, and Develop's units, in parallel parts")
+set(BUSTER_PARALLEL_CODEGEN auto CACHE STRING "auto, 1 or 0: Release's and Develop's main.c units in parts (a sanitizer build's two longest Release units' native code)")
 set(BUSTER_LEXER_VARIANTS "" CACHE STRING "NAME=SOURCE;... lexers compiled in for benchmark-lexer (build.sh lexer-variant)")
 set(BUSTER_SHIFT_SOURCE "" CACHE STRING "The source whose code the shifted links move (build.sh shifts)")
 set(BUSTER_SHIFTS "" CACHE STRING "The shifted links' padding sizes in bytes (build.sh shifts)")
@@ -201,20 +201,24 @@ if(buster_parallel_codegen)
     endif()
 endif()
 message(STATUS "buster: parallel native generation: ${buster_parallel_codegen}")
-# The Develop configuration (docs/commands/build.md, "Develop"): its main.c units in parts before the optimizer where
-# the parts' tools are (BusterCodegen.cmake), else whole, and the benchmark units BUSTER_DEVELOP_ON_DEMAND names left
-# out of its executable, whose commands then name the configurations that have them.
+# The Develop configuration (docs/commands/build.md, "Develop"): its main.c units in parts as Release's are, where the
+# parts' tools are (BusterCodegen.cmake), else whole, and the benchmark units BUSTER_DEVELOP_ON_DEMAND names left out
+# of its executable, whose commands then name the configurations that have them.
 set(buster_develop FALSE)
 if("Develop" IN_LIST CMAKE_CONFIGURATION_TYPES)
     set(buster_develop TRUE)
 endif()
-# A sanitizer tree's Develop units compile whole: its parts would be instrumented apart, after inlining across parts was
-# lost, which Release's parts (after the whole module's pipeline) aren't.
-set(buster_develop_parts FALSE)
-if(buster_develop AND buster_parallel_codegen AND buster_sanitizer STREQUAL "none")
-    set(buster_develop_parts TRUE)
+# The units in parts (BusterCodegen.cmake, #2559): Release's and Develop's main.c units split before the optimizer. A
+# sanitizer tree's would be instrumented apart, after inlining across parts was lost: its Release splits the two longest
+# units after the whole module's pipeline instead (split.c, #2639), and its Develop compiles every unit whole.
+set(buster_unit_parts FALSE)
+set(buster_split_parts FALSE)
+if(buster_parallel_codegen AND buster_sanitizer STREQUAL "none")
+    set(buster_unit_parts TRUE)
+elseif(buster_parallel_codegen)
+    set(buster_split_parts TRUE)
 endif()
-message(STATUS "buster: Develop configuration: ${buster_develop}, in parts: ${buster_develop_parts}")
+message(STATUS "buster: Develop configuration: ${buster_develop}, units in parts: ${buster_unit_parts}")
 
 # The benchmark units a tree leaves out, which stand-ins replace (cmake/BusterDevelopAbsent.cmake): a sanitizer tree's
 # BUSTER_SANITIZER_ON_DEMAND in every configuration (#2639), else Develop's BUSTER_DEVELOP_ON_DEMAND in Develop alone.
@@ -252,18 +256,15 @@ foreach(index IN LISTS order)
     endif()
     buster_unit_options(buster_${name} "${defines_group}")
     buster_codegen_split_unit("${name}" split)
+    buster_unit_partitions("${name}" partitions)
     if(split)
         # This is the ordinary O3 pipeline through optimized IR, not LTO's pre-link pipeline. The source target
         # remains the dependency owner and the sole compile database entry for this C translation unit.
         target_compile_options(buster_${name} PRIVATE "$<$<CONFIG:Release>:-emit-llvm>")
         buster_codegen_unit("${name}")
-    endif()
-    buster_develop_partitions("${name}" develop_partitions)
-    if(NOT develop_partitions EQUAL 0)
-        # Develop's unit stops before LLVM's optimizer, which its parts' jobs run (BusterCodegen.cmake).
-        target_compile_options(buster_${name} PRIVATE "$<$<CONFIG:Develop>:SHELL:-Xclang -disable-llvm-passes>"
-            "$<$<CONFIG:Develop>:-emit-llvm>")
-        buster_develop_unit("${name}")
+    elseif(NOT partitions EQUAL 0)
+        # Release's and Develop's unit stops before LLVM's optimizer, which its parts' jobs run (BusterCodegen.cmake).
+        buster_parts_unit("${name}")
     endif()
 endforeach()
 set(unit_names "")

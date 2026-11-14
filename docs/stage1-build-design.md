@@ -7,8 +7,9 @@ compiler wanted) and the **clean build** (a fresh clone, CI, a branch switch).
 
 **Status:** steps 1 to 4 below are implemented as the Develop configuration
 (`./build.sh --config Develop`; [the build guide's "Develop"](commands/build.md#develop),
-#2559). Step 5, Release in parts, was measured against its gate and failed
-it, so Release stays whole ([Step 5, measured](#step-5-measured)).
+#2559). Step 5, Release in parts, failed its gate on 2026-11-13
+([Step 5, measured](#step-5-measured)) and, with the splitter taken further,
+TODO-STATUS ([Step 5, renewed](#step-5-renewed)).
 
 Every time below was measured on the Ryzen 7 9700X under its lock, at main
 `c5f0efb2` with the host's clang 23.1.1 and the build's eight jobs, unless the
@@ -775,9 +776,57 @@ them) and compared with the whole build as the 9700X job builds it
   has the changes as patches; the tables' constants also bear on Develop,
   whose parts read the same tables.
 
-So, by the rule above, Release stays whole and the design is Develop alone.
+So, by the rule above, Release stayed whole and the design was Develop alone.
 A later attempt starts from the record's improved splitter and the
 assembler's remaining calls.
+
+### Step 5, renewed
+
+On 2026-11-14, at the owner's direction, the splitter was taken further until
+the parts' optimizer decides as the whole unit's does (#2624), and Release
+was built in parts again at main `ca1ede6a`
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/release-in-parts-renewed-2559-2026-11-14)).
+Each cause was found by comparing the whole unit's inlining remarks with its
+parts' (clang's `-Rpass=inline`, every `main.c` unit), then the 9700X's
+instructions by function:
+
+- **A copy had fewer uses than the whole unit's function.** The record's
+  local copies of static functions gave a part's inliner the last-call bonus
+  where the whole unit sees more calls: `arena_reserve_small` went into
+  `scratch_begin` (cost 60 in the whole unit, 1,350 in the parts) and
+  `arena_reserve` (5 against 970), which then stayed outlined in the
+  assembler's layout, emission and benchmark. A phantom caller now stands for
+  the other parts' calls: `available_externally`, `optnone`, kept by
+  `llvm.compiler.used` until the optimizer drops it after the inliner. It
+  passes its own parameters (with poison ones, a part specialized a copy on
+  its own constants and folded a call away) and ignores the result.
+- **Kept bodies.** A body is kept from other parts only when it calls a static
+  function the whole module calls once (`type_derive`'s many callers had kept
+  `type_pointer`, eight instructions, out of every part but its own), and a
+  body too large to read stays kept from a benchmark's reading too
+  (`foreign_gc_link`).
+- **What a part reads.** The C library headers' inline bodies go to every part
+  (`printf("\n")` becomes `putchar('\n')`, whose body was missing), and a
+  body's size to the limit is what SROA leaves of it, scaled down by LLVM's
+  vector bonus (`arena_release`, inlined at 79 sites, was one instruction over
+  the old limit; `asm_word_registers_vector`, 721 unoptimized instructions,
+  inlines at a threshold of 1,574).
+- **An alias hides callers from constant propagation.** A static function
+  other parts call has an alias, a use that makes its arguments unknown to
+  IPSCCP. The whole unit folded the encoder mode's flags that
+  `instruction_is_valid` passes `mode_register_is_valid`, whose cost to the
+  inliner was then 195 against the parts' 265 to 290; the parts kept it
+  outlined and `benchmark-assembler` ran 6.3% more instructions. Running the
+  `-O3` pipeline's simplification before the inliner on the whole unit before
+  the split fixed it (`benchmark-assembler` 2.75% fewer instructions than the
+  whole build's), but the parts' pipelines then simplified the module a
+  second time, which reshaped other code (`benchmark-environments` 2.65% more
+  cycles, outside its floor). So a child process runs SROA and IPSCCP on its
+  copy of the whole unit, and the arguments every call passes as the same
+  constant are written into their functions, which are otherwise as clang
+  wrote them (`--constant-arguments`, 310 in the checker's unit).
+
+TODO-MEASURE
 
 ### Risks
 

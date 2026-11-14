@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// The order-preserving partition of one unit's optimized module for parallel native code generation
-// (docs/commands/build.md, "Parallel native generation"):
+// The order-preserving partition of one unit's optimized module for parallel native code generation, in a sanitizer
+// build's Release (docs/commands/build.md, "Units in parts", "In sanitizer builds"):
 //
 //   split INPUT.bc PARTS DIRECTORY [--verify] [--report]
 //
