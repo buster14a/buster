@@ -3342,8 +3342,8 @@ static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectP
     {
         tier1_cert_emitted_range(&build, &range, false, hidden_offset, (int64_t)hidden_offset + 8);
     }
-    // And the red zone below rsp, where the code stages a by-value aggregate's parts and a vector constant's words (#789,
-    // #141), wherever a record reaches below rsp.
+    // And the red zone below rsp, where the code stages a by-value aggregate's parts (#789), wherever a record reaches below
+    // rsp. (A vector constant's words were staged there too until its literal pool, #2744.)
     bool below = false;
     for (uint32_t r = 0; valid && !below && r < records; r += 1)
     {

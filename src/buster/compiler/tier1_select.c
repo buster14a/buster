@@ -247,8 +247,8 @@ typedef enum Tier1SelectRule
 // - ZERO (a constant of zeros, or undef): vpxord of the destination with itself;
 // - ONES (every bit): vpternlogd of the destination with itself, 0xff;
 // - SPLAT (every lane `immediate`): the lane into the scratch general register and vpbroadcastd from it;
-// - CONSTANT (any other, its index in `immediate`): its words as immediates into the red zone below rsp and a load, which
-//   the CFG consumer writes (tier1_emit_cfg_vector_constant), having the constant's payload; or, where its quadwords are
+// - CONSTANT (any other, its index in `immediate`): its literal's rip-relative load, which the CFG consumer writes
+//   (tier1_emit_cfg_vector_constant, #2744's literal pool), having the constant's payload; or, where its quadwords are
 //   one value and the target has EVEX's forms, the quadword into the scratch general register and vpbroadcastq (#2744);
 // - COPY of values[0], vmovdqa64 at the width, none where the allocation gave both one register;
 // - BINARY of values[0] and values[1], `operation` its index among add, sub, mul, and, or and xor (vpaddd, vpsubd,
