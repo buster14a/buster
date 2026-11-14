@@ -709,6 +709,7 @@ static int run_ir_parse_tests(int argc, char** argv)
                 "tests/ir/rows.ir",
                 "tests/ir/carrier-rows.ir",
                 "tests/ir/masked-memory.ir",
+                "tests/ir/gathers.ir",
                 "tests/ir/lane-moves.ir",
                 "tests/ir/reductions.ir",
                 "tests/ir/lane-unary.ir",

@@ -364,6 +364,10 @@ typedef enum Tier1SelectRule
 // half, values[1] the low half and values[2] the counts; or, where the halves are one value and the counts a constant
 // in every lane (`condition` 1), a rotate by that count, `immediate`, of values[0] alone.
 #define BUSTER_TIER1_VECTOR_FUNNEL 31
+// A gather (#1840, tier1_select_gather): `operation` its lanes (IrSimdLane: I32 or I64), `immediate` its scale's log2,
+// `source_width` its index's bytes; values[0] the base, values[1] the index, values[2] the mask and values[3] the
+// passthrough a select of it merges into, none for its own zeros.
+#define BUSTER_TIER1_VECTOR_GATHER 32
 // A floating operation at its own rounding of values[0] and values[1] (#1840): `immediate` the IR's flags, one record of
 // ir_simd_fround_forms' with the rounding in its decorations.
 #define BUSTER_TIER1_VECTOR_FROUND 26
@@ -1699,7 +1703,10 @@ static void tier1_select_masked_binary(Tier1SelectRecords* result, const Tier1Se
 
 // A masked load or store (#1840, TIER1_RULE_FLOAT_LOAD's or _STORE's of `condition` nonzero): vmovdqu8 to vmovdqu64 by
 // the lanes, under the mask's k register. A load merges into the destination, which takes the passthrough first unless
-// it holds it; a store writes the vector in `third` to the address alone.
+// it holds it; a store writes the vector in `third` to the address alone. A store's `operation` 1 is a compressing
+// store's, vpcompressb to vpcompressq; 2 a truncating store's of the truncation's source, its flags in `immediate` and its
+// bytes in `source_width` (tier1_select_convert_form's form, vpmovwb to vpmovusqd, whose memory form writes the lanes).
+static uint16_t tier1_select_convert_form(uint32_t kind, uint32_t flags, uint32_t width, uint32_t source_width);
 static void tier1_select_masked_move(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
 {
     const uint32_t width = holes->width;
@@ -1711,11 +1718,56 @@ static void tier1_select_masked_move(Tier1SelectRecords* result, const Tier1Sele
     {
         tier1_select_append(result, tier1_select_class_move(x, passthrough, width, false));
     }
+    const uint32_t size = (holes->condition - 1u) & 3;
     X86Instruction record = holes->memory;
-    record.form = ir_simd_masked_moves[(holes->condition - 1u) & 3][store][at];
+    record.form = !store || holes->operation == 0 ? ir_simd_masked_moves[size][store][at] : holes->operation == 1 ? ir_simd_compress_forms[size][at] :
+                  tier1_select_convert_form(1, (uint32_t)holes->immediate, width, holes->source_width);
     record.reg = store ? passthrough : x;
     record.decorations = (uint8_t)(holes->right & BUSTER_X86_DECORATION_MASK);
     tier1_select_append(result, record);
+}
+
+// A gather (#1840, BUSTER_TIER1_VECTOR_GATHER): vpgatherdd to vpgatherqq (ir_simd_gather_forms) of the lanes at
+// [base + index * scale] under the mask's k register into the destination, which takes the passthrough first unless it
+// holds it, or is zeroed (vpxor) where there is none: its masked-off lanes are then 0, and the instruction doesn't wait for
+// the register's last writer. The instruction's destination may not be its index's register, whose index moves into the
+// vector class's scratch register first; and it clears its mask register as it completes, which keeps the mask in the
+// general scratch register (kmovw, the 16 bits of up to 16 lanes) to reload it after.
+static void tier1_select_gather(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
+{
+    const uint32_t width = holes->width;
+    const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
+    const uint32_t lane = (uint32_t)holes->operation == (uint32_t)IR_SIMD_LANE_I64 ? 1 : 0;
+    const uint32_t count = width >> (2 + lane);
+    const uint32_t index_size = count != 0 && holes->source_width == count * 8 ? 1 : 0;
+    const uint8_t x = destination & 15;
+    const uint8_t mask = holes->third & BUSTER_X86_DECORATION_MASK;
+    uint8_t index = holes->right & 15;
+    if (index == x)
+    {
+        tier1_select_append(result, tier1_select_class_move(BUSTER_TIER1_SELECT_FLOAT_SCRATCH, index, holes->source_width, false));
+        index = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+    }
+    if (holes->has_fourth && x != (holes->fourth & 15))
+    {
+        tier1_select_append(result, tier1_select_class_move(x, holes->fourth & 15, width, false));
+    }
+    else if (!holes->has_fourth)
+    {
+        const X86Instruction zero = { .form = X86_FORM_VPXOR_X_X_XM128, .reg = x, .vvvv = x, .rm = x, .mode = BUSTER_X86_REGISTER_DIRECT };
+        tier1_select_append(result, zero);
+    }
+    tier1_select_append(result, tier1_select_register_record(X86_FORM_KMOVW_R32_K, BUSTER_TIER1_SELECT_SCRATCH, mask));
+    const X86Instruction record = {
+        .form = ir_simd_gather_forms[0][lane][index_size][at],
+        .reg = x,
+        .rm = holes->left,
+        .index = index,
+        .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(holes->immediate & 3),
+        .decorations = mask,
+    };
+    tier1_select_append(result, record);
+    tier1_select_append(result, tier1_select_register_record(X86_FORM_KMOVW_K_R32, mask, BUSTER_TIER1_SELECT_SCRATCH));
 }
 
 // One lane of a vector or its lanes' sign bits (#1840, BUSTER_TIER1_VECTOR_LANE_EXTRACT, _LANE_INSERT and _MOVEMASK).
@@ -2484,6 +2536,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         else if (kind == BUSTER_TIER1_VECTOR_COMPRESS)
         {
             tier1_select_compress(&result, holes, destination);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_GATHER)
+        {
+            tier1_select_gather(&result, holes, destination);
         }
         else if (kind == BUSTER_TIER1_VECTOR_LANE_EXTRACT || kind == BUSTER_TIER1_VECTOR_LANE_INSERT || kind == BUSTER_TIER1_VECTOR_MOVEMASK)
         {
@@ -4570,6 +4626,34 @@ static X86Operation tier1_select_operation(uint32_t op)
     return result;
 }
 
+// A gather's pattern (#1840, BUSTER_TIER1_VECTOR_GATHER) of node `gather` merged into `passthrough` (none for its zeros),
+// into `pattern`, whose rule stays as it was where no form takes it.
+static void tier1_select_gather_pattern(const IrFunction* function, uint32_t gather, uint32_t passthrough, Tier1SelectPattern* pattern)
+{
+    const uint32_t width = tier1_select_vector_width(function->type[gather]);
+    const uint32_t index = function->b[gather];
+    const uint32_t index_width = index < function->instruction_count ? tier1_select_vector_width(function->type[index]) : 0;
+    const uint32_t lane = function->flags[gather];
+    const uint32_t count = lane == IR_SIMD_LANE_I32 ? width / 4 : lane == IR_SIMD_LANE_I64 ? width / 8 : 0;
+    const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : width == 64 ? 2 : 3;
+    const bool shaped = count != 0 && at < 3 && (index_width == count * 4 || index_width == count * 8) &&
+                        ir_simd_gather_forms[0][lane == IR_SIMD_LANE_I64 ? 1 : 0][index_width == count * 8 ? 1 : 0][at] != X86_FORM_NONE;
+    if (shaped)
+    {
+        pattern->rule = TIER1_RULE_VECTOR;
+        pattern->width = (uint8_t)width;
+        pattern->scale = BUSTER_TIER1_VECTOR_GATHER;
+        pattern->operation = (uint8_t)lane;
+        pattern->immediate = function->alignment_log2[gather] & 3;
+        pattern->source_width = (uint8_t)index_width;
+        pattern->values[0] = function->a[gather];
+        pattern->values[1] = index;
+        pattern->values[2] = function->c[gather];
+        pattern->values[3] = passthrough;
+        pattern->intrinsic_cost = 1;
+    }
+}
+
 static bool tier1_select_tree_child(const Tier1SelectForest* forest, uint32_t parent, uint32_t value)
 {
     return value != BUSTER_IR_NONE && value < parent && forest->uses[value] == 1 && forest->blocks[value] == forest->blocks[parent];
@@ -5559,6 +5643,18 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 expand.intrinsic_cost = 1;
                 tier1_select_add_candidate(forest, node, &candidates, expand);
             }
+            // A select of a gather whose only use it is, under the gather's own mask at its lanes (#1840): the gather merged
+            // into w, or into zeros where w is a zero vector.
+            if (tier1_select_tree_child(forest, node, b) && function->op[b] == IR_GATHER && function->c[b] == a && function->flags[b] == function->flags[node])
+            {
+                Tier1SelectPattern merged = base;
+                tier1_select_gather_pattern(function, b, tier1_select_vector_fill(function, c, vector_width) == 0 ? BUSTER_IR_NONE : c, &merged);
+                if (merged.rule == TIER1_RULE_VECTOR)
+                {
+                    tier1_select_fold(forest, node, b, &merged);
+                    tier1_select_add_candidate(forest, node, &candidates, merged);
+                }
+            }
             // A select of an operation whose only use it is (#1840, BUSTER_TIER1_VECTOR_MASKED_BINARY): a BINARY's but the
             // bitwise ones (whose forms' masks have a bit per dword or qword, not per lane) or a LANE_OP's, at the select's
             // lanes, whose EVEX form takes a writemask, and zeroing where w is a zero vector. It folds the operation.
@@ -5782,21 +5878,48 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.intrinsic_cost = 3;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if (forest->vectors && (op == IR_MASKED_LOAD || op == IR_MASKED_STORE))
+    else if (forest->vectors && (op == IR_MASKED_LOAD || op == IR_MASKED_STORE || op == IR_COMPRESS_STORE))
     {
         // A masked load or store (#1840): TIER1_RULE_FLOAT_LOAD's or _STORE's with `condition` its lanes' bytes' log2 plus
         // one, the address in values[0], unfolded, the mask in values[1] and the passthrough or the stored vector in
-        // values[2] (tier1_select_masked_move).
+        // values[2] (tier1_select_masked_move); a compressing store's `operation` 1.
         static const uint8_t sizes[4] = { 2, 0, 1, 3 };
-        const bool store = op == IR_MASKED_STORE;
+        const bool store = op != IR_MASKED_LOAD;
         base.rule = store ? TIER1_RULE_FLOAT_STORE : TIER1_RULE_FLOAT_LOAD;
         base.width = (uint8_t)tier1_select_vector_width(store && b < function->instruction_count ? function->type[b] : type);
         base.condition = (uint8_t)(1 + sizes[function->flags[node] & 3]);
+        base.operation = op == IR_COMPRESS_STORE ? 1 : 0;
         base.values[0] = a;
         base.values[1] = store ? c : b;
         base.values[2] = store ? b : c;
         base.intrinsic_cost = 1;
         if (base.width != 0 && function->flags[node] < 4)
+        {
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        // A masked store of a truncation whose only use it is (#1840): the truncation's memory form of its source, under
+        // the mask (`operation` 2), one vpmov* [p]{k} as the truncating store's row was.
+        const bool truncated = op == IR_MASKED_STORE && tier1_select_tree_child(forest, node, b) && function->op[b] == IR_INTRINSIC &&
+                               function->c[b] == BUSTER_IR_INTRINSIC_TRUNCATE && function->a[b] < function->instruction_count;
+        if (truncated && base.width != 0 && function->flags[node] < 4)
+        {
+            Tier1SelectPattern narrowed = base;
+            narrowed.operation = 2;
+            narrowed.immediate = function->flags[b];
+            narrowed.source_width = (uint8_t)tier1_select_vector_width(function->type[function->a[b]]);
+            narrowed.values[2] = function->a[b];
+            if (tier1_select_convert_form(1, function->flags[b], base.width, narrowed.source_width) != X86_FORM_NONE)
+            {
+                tier1_select_fold(forest, node, b, &narrowed);
+                tier1_select_add_candidate(forest, node, &candidates, narrowed);
+            }
+        }
+    }
+    else if (forest->vectors && op == IR_GATHER)
+    {
+        // A gather (#1840, BUSTER_TIER1_VECTOR_GATHER) into its own zeros: a select of it under its mask is its merge.
+        tier1_select_gather_pattern(function, node, BUSTER_IR_NONE, &base);
+        if (base.rule == TIER1_RULE_VECTOR)
         {
             tier1_select_add_candidate(forest, node, &candidates, base);
         }

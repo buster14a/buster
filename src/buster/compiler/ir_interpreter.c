@@ -1226,6 +1226,70 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     wide_value = lanes;
                     break;
                 }
+                case IR_COMPRESS_STORE:
+                {
+                    // A compressing store (#1840): the lanes whose mask bits are set, one after another from the address in
+                    // the lanes' order, each its bytes alone; no other byte is written. Its alignment is checked as a
+                    // masked store's.
+                    const uint32_t vector_type = function->type[b];
+                    const uint32_t count = ir_lane_count(vector_type, function->flags[i]);
+                    const uint32_t size = count != 0 ? ir_type_bits[vector_type] / 8 / count : 0;
+                    const uint64_t bits = frame->values[c].low;
+                    const uint64_t alignment_mask = (1ull << function->alignment_log2[i]) - 1;
+                    const IrSimdValue lanes = ir_interpreter_simd_value(frame, b);
+                    uint64_t address = av.low;
+                    result.status = count == 0 ? INTERPRETER_INVALID : options->check_memory && (av.low & alignment_mask) != 0 ? INTERPRETER_MEMORY : INTERPRETER_OK;
+                    for (uint32_t lane = 0; result.status == INTERPRETER_OK && lane < count; lane += 1)
+                    {
+                        if ((bits >> lane & 1) != 0)
+                        {
+                            result.status = interpreter_memory_access(&runtime, address, size, true);
+                            if (result.status == INTERPRETER_OK)
+                            {
+                                memcpy((void*)(uintptr_t)address, (const uint8_t*)lanes.words + (uint64_t)lane * size, size);
+                            }
+                            address += size;
+                        }
+                    }
+                    break;
+                }
+                case IR_GATHER:
+                {
+                    // A gather (#1840): each lane whose mask bit is set read at the base plus its index element, sign-
+                    // extended, times the scale, its bytes alone, and 0 in each other lane, whose address is never read.
+                    const uint32_t count = ir_lane_count(type, function->flags[i]);
+                    const uint32_t size = count != 0 ? ir_type_bits[type] / 8 / count : 0;
+                    const uint32_t index_size = count != 0 ? ir_type_bits[function->type[b]] / 8 / count : 0;
+                    const uint64_t bits = frame->values[c].low;
+                    const IrSimdValue indices = ir_interpreter_simd_value(frame, b);
+                    IrSimdValue lanes = { 0 };
+                    result.status = count == 0 || (index_size != 4 && index_size != 8) ? INTERPRETER_INVALID : INTERPRETER_OK;
+                    for (uint32_t lane = 0; result.status == INTERPRETER_OK && lane < count; lane += 1)
+                    {
+                        if ((bits >> lane & 1) != 0)
+                        {
+                            int64_t index = 0;
+                            if (index_size == 4)
+                            {
+                                int32_t element = 0;
+                                memcpy(&element, (const uint8_t*)indices.words + (uint64_t)lane * 4, 4);
+                                index = element;
+                            }
+                            else
+                            {
+                                memcpy(&index, (const uint8_t*)indices.words + (uint64_t)lane * 8, 8);
+                            }
+                            const uint64_t address = av.low + ((uint64_t)index << function->alignment_log2[i]);
+                            result.status = interpreter_memory_access(&runtime, address, size, false);
+                            if (result.status == INTERPRETER_OK)
+                            {
+                                memcpy((uint8_t*)lanes.words + (uint64_t)lane * size, (const void*)(uintptr_t)address, size);
+                            }
+                        }
+                    }
+                    wide_value = lanes;
+                    break;
+                }
                 case IR_CALL:
                 case IR_CALL_INDIRECT:
                 {

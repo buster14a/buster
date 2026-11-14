@@ -52,7 +52,7 @@ static bool tier1_schedule_ir_barrier(const IrFunction* f, uint32_t i)
     const uint32_t op = f->op[i];
     return op == IR_PHI || op == IR_PARAM || ir_terminator_table[op] != 0 || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA ||
            op == IR_STACK_SAVE || op == IR_STACK_RESTORE || op == IR_LIFETIME || op == IR_FENCE || op == IR_ATOMIC_RMW || op == IR_INTRINSIC ||
-           op == IR_MASKED_LOAD || op == IR_MASKED_STORE ||
+           op == IR_MASKED_LOAD || op == IR_MASKED_STORE || op == IR_COMPRESS_STORE || op == IR_GATHER ||
            (op == IR_LOAD && (f->flags[i] & BUSTER_IR_OBSERVABLE) != 0);
 }
 
