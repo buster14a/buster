@@ -546,8 +546,9 @@ of a function that takes or returns a vector by value, which its frame emitter
 stores into and reloads from frame objects, are unchanged. The typed stream's
 lowering copies an aggregate parameter that a vector register holds whole by
 one vector load and store rather than eight `i64`s (`ir_typed_vector_whole`), in
-a function with vectors and at a target with AVX-512, so that its object is one
-field.
+a function with vectors and at the widths whose moves its target has (16 bytes
+at every target, 32 with AVX, 64 with AVX-512F: `ir_typed_vector_copies`,
+#2750), so that its object is one field.
 
 The passes from promotion to the optimizer are one function,
 `check_tier1_passes` (in `c_check_tier1.c`), which a body's own pipeline and a
@@ -918,6 +919,15 @@ measured as a third program. [The unit inlining design](tier1-unit-inlining.md)
 the first-ranked lever that no issue owns (inlining the unit's small functions
 whatever their control flow, with a prototype's measurements), and the
 inventory of what stands between Tier 1 and `-O1` and above.
+
+For array loops, [the loop vectorization design](tier1-loop-vectorization.md)
+(#2743) ranks the missing pieces from the 9700X's 25-kernel suite: 3.32 times
+clang -O2 at x86-64 and 17.50 at znver5 over the 19 loops clang vectorizes,
+with vectorization components of 2.18 and 9.36 against 1.41 and 1.64 for
+unrolling. Its explicit-vector probe leaves a separate 1.29 same-source
+back-end gap at znver5. It designs a data-parallel loop vectorizer over the existing vector
+IR, with exact scalar twins, run-time overlap guards and strict floating-point
+reductions left scalar. This is design only; no such pass runs in the pipeline.
 
 ## Current integration boundary
 

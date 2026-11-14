@@ -3471,6 +3471,40 @@ static void check_input_recovered_publish(CheckInputReader* reader)
 
 static void check_input_target_versions_calls(CheckInputReader* reader);
 
+// A failed parse's call-shaped lookup is never an expression to check (#2406). The private view has already erased
+// its unread arguments; its ordinary binding and implicit declaration must survive for later statements. Append the
+// existing silent invalid-use report after lookup, so the normal subtree cuts suppress only this call and its parents.
+static void check_input_invalid_calls(CheckInputReader* reader)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    for (uint32_t token = 0; token < count; token += 1)
+    {
+        if (parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_OPERAND)
+        {
+            // Search the sorted original callee sources, not a view's token sources: a repair's synthetic closers
+            // have no source, and another diagnostic view may repeat a source for inserted punctuation or casts.
+            const uint32_t source = parser->tokens.sources[token];
+            uint32_t low = 0;
+            uint32_t high = parser->invalid_call_count;
+            while (low < high)
+            {
+                const uint32_t middle = low + (high - low) / 2;
+                const bool before = parser->invalid_call_sources[middle] < source;
+                low = before ? middle + 1 : low;
+                high = before ? high : middle;
+            }
+            if (low < parser->invalid_call_count && parser->invalid_call_sources[low] == source)
+            {
+                // Classification is not a value use: availability/deprecation checks must not read this synthetic call.
+                // Keep the declaration's type and binding events, including an implicit declaration at this same token.
+                reader->output->declarations[token] = BUSTER_CHECK_NONE;
+                check_input_report(reader, token, CHECK_INPUT_INVALID_USE);
+            }
+        }
+    }
+}
+
 // Publish the unit's deferred multiversioning reports after its body checks have run, in their discovery order: first the
 // calls no default version of a function multiversioned by target strings reaches (#1838).
 static void check_input_multiversion_flush(CheckInputReader* reader)
@@ -6131,7 +6165,9 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     // may have a function specifier, which is its own error (check_input_declaration).
     const bool free_standing = reader->specifier_free_standing && reader->specifier_owner == first;
     const bool typed = base != 0 || integer_seen || longs || shorts || signedness || complex;
-    const bool implicit_int = !typed && (parser->language.standard < 1999 || free_standing || (parameter && parser->recovered_parameter_types));
+    const bool recovered_implicit = __builtin_expect(parser->recovered_types != NULL, 0) &&
+                                    parser->recovered_types[first] == PARSE_RECOVERED_TYPE_IMPLICIT_INT;
+    const bool implicit_int = !typed && (parser->language.standard < 1999 || free_standing || (parameter && parser->recovered_parameter_types) || recovered_implicit);
     valid &= implicit_int || (saw && typed);
     if (dropped_bit_int && !typed && !implicit_int)
     {
@@ -11492,7 +11528,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         const uint8_t* const recovered_types = parser->recovered_types;
         for (uint32_t token = first; !invalid_specifiers && token < i && token < count; token += 1)
         {
-            invalid_specifiers = recovered_types[token] != 0;
+            invalid_specifiers = recovered_types[token] == PARSE_RECOVERED_TYPE_UNKNOWN;
         }
     }
     reader->specifier_free_standing = false;
@@ -12277,6 +12313,12 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     }
                 }
                 check_input_schedule(reader, name, i, type, is_typedef ? C_BINDING_TYPEDEF : function ? C_BINDING_FUNCTION : C_BINDING_OBJECT);
+                if (__builtin_expect(parser->recovered_types != NULL, 0) &&
+                    parser->recovered_types[declaration_group] == PARSE_RECOVERED_TYPE_IMPLICIT_INT)
+                {
+                    check_input_rare_claim(reader, &reader->declaration_specifiers[name]);
+                    reader->declaration_specifiers[name] = declaration_group;
+                }
                 if (__builtin_expect(invalid, 0))
                 {
                     check_input_invalid_declare(reader, name);
@@ -12735,6 +12777,46 @@ static bool check_input_invalid_redefinition_note(CheckInputReader* reader, uint
     return room;
 }
 
+// A recovered attributed declaration can redeclare a parameter or local object (#2332). They are definitions even
+// when definition_origins, which tracks linked entities and initialized objects, has no entry. Clang merges the new
+// declaration's attributes before diagnosing the redefinition, dropping a new declaration attribute with this warning.
+// The invalid declaration itself will be dropped, so its attributes need no copied, merged record.
+static void check_input_implicit_late_attributes(CheckInputReader* reader, uint32_t token, uint32_t previous)
+{
+    const CheckInputAttributes* attributes = check_input_attributes_at(reader->output, token);
+    const CheckInputAttributes* earlier = check_input_attributes_at(reader->output, previous);
+    uint64_t kinds[2] = { 0 };
+    check_input_attribute_after_kinds(reader, earlier, kinds);
+    const uint8_t late = check_input_attribute_late_mask(earlier, 0);
+    for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        const bool late_kind = check_input_attribute_late_kind(attribute);
+        const bool after_kind = !late_kind && check_input_attribute_after_kind(reader, attribute);
+        const bool had = late_kind ? (late & check_input_attribute_late_bit(attribute)) != 0 :
+                         after_kind && ((kinds[(uint32_t)attribute->kind >> 6] >> ((uint32_t)attribute->kind & 63)) & 1) != 0;
+        if (!attribute->ignored && !attribute->subject_ignored && (late_kind || after_kind) && !had)
+        {
+            const CheckWarningEvent event = {
+                .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+                .kind = CHECK_WARNING_EVENT_LATE_ATTRIBUTE,
+                .token = attribute->name_token,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = token,
+                .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+            };
+            const CheckWarningNote note = {
+                .kind = CHECK_WARNING_NOTE_PREVIOUS_DEFINITION,
+                .token = previous,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+            };
+            check_input_warning_event(reader, &event, &note, 1);
+        }
+    }
+}
+
 // A declaration's binding at its point, after its checks against the visible declaration `old` (a handle, or 0) and its
 // entity's linked one.
 static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, uint32_t point, uint32_t old)
@@ -12855,12 +12937,26 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
         }
         if (mismatch || (thread_local && !thread_local_alone))
         {
+            const uint32_t specifiers = reader->parser->recovered_types != NULL ? reader->declaration_specifiers[token] : 0;
+            const bool implicit = __builtin_expect(reader->parser->recovered_types != NULL, 0) &&
+                                  reader->parser->recovered_types[specifiers] == PARSE_RECOVERED_TYPE_IMPLICIT_INT;
+            const bool implicit_object = implicit && kind == C_BINDING_OBJECT;
+            if (implicit_object && reader->bindings.kind[old - 1] == C_BINDING_OBJECT &&
+                check_input_linkage(reader->declaration_bits, token) == 0 && check_input_linkage(reader->declaration_bits, previous) == 0)
+            {
+                check_input_implicit_late_attributes(reader, token, previous);
+            }
             // An object's (MergeVarDecl merges the attributes first); a function's types are checked before (MergeFunctionDecl).
             const bool labelled = kind == C_BINDING_OBJECT && check_input_asm_label_conflict(reader, token, previous);
             const CheckInputMessage message = kind == C_BINDING_FUNCTION && reader->declaration_kinds[previous] == kind && compatible == TYPE_ANSWER_NO && !library_redeclaration ?
                                               CHECK_INPUT_CONFLICTING_TYPES : CHECK_INPUT_REDECLARATION;
             const uint32_t before = reader->output->report_count;
             check_input_redeclaration_report(reader, token, previous, judged, repeatable, parameter_conflict, true, message);
+            if (implicit_object && reader->output->report_count > before)
+            {
+                // After the missing type and its attributes, but before any malformed suffix's parser error.
+                reader->output->reports[before].sort = token + 1;
+            }
             for (uint32_t r = before; labelled && r < reader->output->report_count; r += 1)
             {
                 reader->output->reports[r].repeated = true;
@@ -12869,6 +12965,21 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
             // declaration still (#1447's semantic recovery, phase 2): the report moves past, and the declaration isn't
             // bound or linked.
             dropped = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
+            if (dropped && implicit_object)
+            {
+                check_input_invalid_declare(reader, token);
+                // Sema still builds the initializer's expression, but never converts it to an invalid declaration's
+                // type. Remove the initializer action and its output metadata together, keeping its operands' checks.
+                if (point < reader->parser->tokens.count && reader->initializer_declarations[point] == token)
+                {
+                    reader->initializers[point] = 0;
+                    reader->initializer_declarations[point] = BUSTER_CHECK_NONE;
+                    reader->query_types[point] = 0;
+                    reader->ignored[point] = true;
+                    check_sparse_set(reader->output->sparse_pool, reader->output->initializer_begins, token, BUSTER_CHECK_NONE);
+                    check_sparse_set(reader->output->sparse_pool, reader->output->initializer_ends, token, BUSTER_CHECK_NONE);
+                }
+            }
         }
         else
         {
@@ -17602,6 +17713,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             check_input_bindings(&reader, binding_mode);
             check_input_builtin_uses_publish(&reader);
             check_typo_finish(&reader);
+            if (__builtin_expect(parser->invalid_call_count != 0, 0))
+            {
+                check_input_invalid_calls(&reader);
+            }
             input->typo_searched = reader.typo != NULL;
             if (reader.fallthrough_count != 0 && !input->resource)
             {

@@ -7771,6 +7771,7 @@ static void check_test_driver_declspec_literals(CheckTest* test, const char* cla
 #include "c_check_semantic_recovery_driver_test.c"
 #include "c_check_statement_recovery_driver_test.c"
 #include "c_check_type_attribute_recovery_driver_test.c"
+#include "c_check_attribute_declaration_driver_test.c"
 #include "c_check_structural_recovery_driver_test.c"
 #include "c_check_repaired_view_driver_test.c"
 #include "c_check_empty_declaration_driver_test.c"
@@ -8864,6 +8865,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool target_versions_only = false;
     // --semantic-recovery-only: the semantic error recovery section alone (#1447).
     bool semantic_recovery_only = false;
+    // --label-attributes-only: labels' subject checks and mixed parser/subject diagnostic order (#2332).
+    bool label_attributes_only = false;
+    // --attribute-recovery-only: the label, declaration and call recovery fixtures and their combined source.
+    bool attribute_recovery_only = false;
     // --operand-diagnostics-only: rejected record and atomic operands, including constant contexts (#2441).
     bool operand_diagnostics_only = false;
     // --type-sugar-only: the type sugar section alone (#1447).
@@ -8900,6 +8905,14 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--semantic-recovery-only") == 0)
         {
             semantic_recovery_only = true;
+        }
+        else if (strcmp(argv[i], "--label-attributes-only") == 0)
+        {
+            label_attributes_only = true;
+        }
+        else if (strcmp(argv[i], "--attribute-recovery-only") == 0)
+        {
+            attribute_recovery_only = true;
         }
         else if (strcmp(argv[i], "--operand-diagnostics-only") == 0)
         {
@@ -8953,7 +8966,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
                              (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only +
-                             (uint32_t)operand_diagnostics_only;
+                             (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -9463,8 +9476,21 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_semantic_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_statement_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_type_attribute_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+        check_test_driver_attribute_declarations(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_structural_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_repaired_view(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+    }
+    if (temporary && label_attributes_only)
+    {
+        check_test_driver_label_attributes(&test, clang, executable, directory);
+        check_test_driver_unknown_attributes(&test, clang, executable, directory);
+        check_test_driver_label_order(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+    }
+    if (temporary && attribute_recovery_only)
+    {
+        check_test_driver_label_order(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+        check_test_driver_attribute_calls(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+        check_test_driver_attribute_declarations(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
     }
     if (temporary && type_sugar_only)
     {
@@ -9616,6 +9642,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_type_attribute_recovery(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_attribute_declarations(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {

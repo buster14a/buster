@@ -652,9 +652,7 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
         // The lowering and the summaries are verified, and the expansion is by SROA below where it runs, else by
         // promotion (check_tier1_passes).
         options.trusted = true;
-        const uint64_t evex = BUSTER_X86_FEATURE(AVX512F);
-        const uint64_t narrow = evex | BUSTER_X86_FEATURE(AVX512VL);
-        options.vector_copies = (target->features & evex) != evex ? 0 : (target->features & narrow) == narrow ? 7 : 4;
+        options.vector_copies = ir_typed_vector_copies(target->features);
         IrInlineResult expanded = { 0 };
         uint32_t failed = BUSTER_IR_NONE;
         // (A unit that didn't fit is no unit, which the inliner refuses.)

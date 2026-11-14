@@ -178,10 +178,18 @@ set(profile_use "")
 if(buster_pgo)
     set(profile_use "-fprofile-instr-use=${pgo}/compiler.profdata")
 endif()
-buster_shell_group(develop_debug_group ${BUSTER_DEVELOP_CONFIGURATION_DEBUG})
+buster_shell_group(develop_debug_group ${BUSTER_DEVELOP_CONFIGURATION_DEBUG} ${BUSTER_LINE_TABLES_CODEGEN})
+# The configurations whose debug information is line tables alone take BUSTER_LINE_TABLES_CODEGEN
+# (BusterSettings.cmake): Develop always, and Release in a sanitizer build; buster_release_line_tables is Release's,
+# for its parts' jobs too.
+set(buster_release_line_tables "")
+if(buster_debug STREQUAL "-gline-tables-only")
+    set(buster_release_line_tables ${BUSTER_LINE_TABLES_CODEGEN})
+endif()
+buster_shell_group(release_debug_group ${buster_debug} ${buster_release_line_tables})
 function(buster_unit_options target definitions)
     target_compile_options(${target} PRIVATE
-        "$<$<CONFIG:Release>:${buster_debug}>"
+        "$<$<CONFIG:Release>:${release_debug_group}>"
         "$<$<CONFIG:Debug>:${BUSTER_DEBUG_CONFIGURATION_DEBUG}>"
         "$<$<CONFIG:Develop>:${develop_debug_group}>"
         "${flags_group}"

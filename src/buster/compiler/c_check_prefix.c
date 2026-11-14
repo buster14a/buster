@@ -156,7 +156,11 @@ static bool check_prefix_parameter_error(const ParseDiagnostic* diagnostic)
 static bool check_prefix_type_error(const Parser* parser, const ParseDiagnostic* diagnostic)
 {
     const uint32_t token = diagnostic->token;
-    const bool result = check_prefix_parameter_error(diagnostic) ||
+    const bool implicit = parser->language.standard >= 1999 && parser->language.standard < 2023 &&
+                          diagnostic->declaration_type && diagnostic->argument < parser->tokens.count &&
+                          parser->tokens.kinds[diagnostic->argument] == PARSE_KIND_ATTRIBUTE &&
+                          (diagnostic->message == PARSE_MESSAGE_TYPE_SPECIFIER_MISSING || diagnostic->message == PARSE_MESSAGE_TYPE_SPECIFIER_REQUIRED);
+    const bool result = check_prefix_parameter_error(diagnostic) || implicit ||
                         (diagnostic->message == PARSE_MESSAGE_UNKNOWN_TYPE_NAME && token < parser->tokens.count &&
                          parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_SPECIFIER);
     return result;
@@ -256,9 +260,14 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
         view->options = parser->options;
         view->options.tree_only = false;
         view->language = parser->language;
+        // Later private views may reparse this prefix (#2748). Keep the meaning table's bounds and predefined names even
+        // though checking this tree alone needs no mutable table of its own.
+        view->meanings = parser->meanings;
         view->preprocessor = parser->preprocessor;
         view->typo_sources = parser->typo_sources;
         view->typo_count = parser->typo_count;
+        view->invalid_call_sources = parser->invalid_call_sources;
+        view->invalid_call_count = parser->invalid_call_count;
         view->prefix_view = true;
         view->recovered_parameter_types = parameter_types && end > first_error;
         memcpy(view->predeclared, parser->predeclared, sizeof(view->predeclared));
@@ -306,8 +315,18 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
                         prefix->status = recovered_types != NULL ? CHECK_PREFIX_READY : CHECK_PREFIX_RESOURCE;
                         if (recovered_types != NULL)
                         {
-                            recovered_types[token] = 1;
+                            recovered_types[token] = PARSE_RECOVERED_TYPE_UNKNOWN;
                         }
+                    }
+                }
+                else if (diagnostic->error && diagnostic->declaration_type && diagnostic->argument < end && token < end &&
+                         check_prefix_type_error(parser, diagnostic))
+                {
+                    recovered_types = recovered_types != NULL ? recovered_types : check_prefix_column(output, end, sizeof(uint8_t));
+                    prefix->status = recovered_types != NULL ? CHECK_PREFIX_READY : CHECK_PREFIX_RESOURCE;
+                    if (recovered_types != NULL)
+                    {
+                        recovered_types[diagnostic->argument] = PARSE_RECOVERED_TYPE_IMPLICIT_INT;
                     }
                 }
             }
@@ -410,7 +429,7 @@ struct CheckPrefixEdit
 typedef struct CheckPrefixTails CheckPrefixTails;
 struct CheckPrefixTails
 {
-    uint32_t (*end)(const Parser* view, const uint32_t* origin, const ParseDiagnostic* diagnostic, uint32_t* begin, uint32_t* name, const void* context);
+    uint32_t (*end)(const Parser* view, const uint32_t* origin, ParseDiagnostic* diagnostic, uint32_t* begin, uint32_t* name, const void* context);
     const void* context;
 };
 
@@ -478,6 +497,11 @@ static bool check_prefix_resumes(const Parser* view, const ParseDiagnostic* diag
     }
     valid &= !diagnostic->resume_delete || diagnostic->resume_end != 0;
     valid &= diagnostic->resume_begin == 0 || (diagnostic->resume_delete && diagnostic->resume_end != 0);
+    valid = valid && (!diagnostic->resume_call || (diagnostic->resume_delete && begin < diagnostic->token && diagnostic->token + 2 < diagnostic->resume_end &&
+                                         diagnostic->resume_end <= view->tokens.count &&
+                                         view->tokens.kinds[diagnostic->token] == PARSE_KIND_IDENTIFIER &&
+                                         view->tokens.kinds[diagnostic->token + 1] == PARSE_KIND_L_PAREN &&
+                                         view->tokens.kinds[diagnostic->resume_end - 1] == PARSE_KIND_R_PAREN));
     return valid;
 }
 
@@ -645,6 +669,8 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             .preprocessor = original->preprocessor,
             .typo_sources = original->typo_sources,
             .typo_count = original->typo_count,
+            .invalid_call_sources = original->invalid_call_sources,
+            .invalid_call_count = original->invalid_call_count,
         };
         view->options.tree_only = false;
         memcpy(view->predeclared, original->predeclared, sizeof(view->predeclared));
@@ -711,7 +737,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             // Unknown types were read as specifiers before recovery erased the declaration's tree. They do not stop
             // a later declarator's proven tail repair (#2640); the reparse retains their errors and the prefix view
             // marks their recovered types invalid. Missing parameter types likewise do not stop the rounds.
-            const bool type = check_prefix_parameter_error(diagnostic) || diagnostic->message == PARSE_MESSAGE_UNKNOWN_TYPE_NAME;
+            const bool type = check_prefix_parameter_error(diagnostic) || diagnostic->declaration_type || diagnostic->message == PARSE_MESSAGE_UNKNOWN_TYPE_NAME;
             const bool other = diagnostic->error && !check_prefix_resumes(current, diagnostic, count) && !type;
             limit = other && diagnostic->token < limit ? diagnostic->token : limit;
             // The original parser abandoned this K&R header. Later diagnostics may have treated its remaining
@@ -722,6 +748,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             }
         }
         uint32_t insert = 0;
+        uint32_t retained = 0;
         uint32_t discard = 0;
         uint32_t repairs = 0;
         uint32_t last = 0;
@@ -736,6 +763,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             ordered &= !taken || begin > last;
             last = taken ? (diagnostic->resume_end != 0 ? diagnostic->resume_end - 1 : diagnostic->token) : last;
             insert += taken && !diagnostic->resume_delete;
+            retained += taken && diagnostic->resume_call ? 3u : 0u;
             repairs += taken;
             discard += taken && diagnostic->resume_end != 0 ? diagnostic->resume_end - begin : 0;
             // At most one tail is taken in a round (limit above). A tail starting before its error also removes
@@ -749,7 +777,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             const uint32_t token = diagnostics[d].token;
             preserved += token >= preserve_begin && token < preserve_end;
         }
-        const uint32_t total = count + insert - discard;
+        const uint32_t total = count + insert + retained - discard;
         work += total;
         more = ordered && repairs != 0 && total <= capacity && (uint64_t)pending_count + repairs + preserved <= original_count && work <= budget;
         Parser* view = views + (round & 1);
@@ -798,7 +826,21 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                     written += length;
                     if (diagnostic != 0)
                     {
-                        if (!diagnostic->resume_delete)
+                        if (diagnostic->resume_call)
+                        {
+                            const uint32_t call[] = { diagnostic->token, diagnostic->token + 1, diagnostic->resume_end - 1 };
+                            for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(call); c += 1)
+                            {
+                                const uint32_t token = call[c];
+                                view->tokens.kinds[written] = current->tokens.kinds[token];
+                                view->tokens.names[written] = current->tokens.names[token];
+                                view->tokens.sources[written] = current->tokens.sources[token];
+                                view->tokens.flags[written] = current->tokens.flags[token];
+                                next_origin[written] = origin != NULL ? origin[token] : token;
+                                written += 1;
+                            }
+                        }
+                        else if (!diagnostic->resume_delete)
                         {
                             view->tokens.kinds[written] = diagnostic->resume_colon ? PARSE_KIND_COLON : PARSE_KIND_SEMI;
                             view->tokens.names[written] = 0;
@@ -831,7 +873,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             view->errors = parsed.errors;
             view->fatal = PARSE_MESSAGE_NONE;
             resumed->inserted += insert;
-            resumed->discarded += discard;
+            resumed->discarded += discard - retained;
             resumed->status = parsed.out_of_memory ? CHECK_PREFIX_RESOURCE : CHECK_PREFIX_READY;
             more = !parsed.out_of_memory && parsed.errors != 0;
             current = view;
@@ -853,6 +895,40 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
         if (resumed->status == CHECK_PREFIX_READY)
         {
             check_prefix_sort_diagnostics(resumed->diagnostics, temporary, total);
+            uint32_t calls = original->invalid_call_count;
+            for (uint32_t d = 0; d < total; d += 1)
+            {
+                calls += resumed->diagnostics[d].resume_call;
+            }
+            uint32_t* sources = calls != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, calls) : NULL;
+            resumed->status = calls == 0 || sources != NULL ? CHECK_PREFIX_READY : CHECK_PREFIX_RESOURCE;
+            if (sources != NULL)
+            {
+                const uint32_t inherited = original->invalid_call_count;
+                uint32_t prior = 0;
+                uint32_t written = 0;
+                for (uint32_t d = 0; d < total; d += 1)
+                {
+                    const ParseDiagnostic* diagnostic = resumed->diagnostics + d;
+                    if (diagnostic->resume_call && diagnostic->token < original_count)
+                    {
+                        const uint32_t source = original->tokens.sources[diagnostic->token];
+                        // Diagnostics have original token order; merge inherited callee sources in the same order.
+                        while (prior < inherited && original->invalid_call_sources[prior] <= source)
+                        {
+                            sources[written++] = original->invalid_call_sources[prior++];
+                        }
+                        sources[written++] = source;
+                    }
+                }
+                while (prior < inherited)
+                {
+                    sources[written++] = original->invalid_call_sources[prior++];
+                }
+                Parser* view = (Parser*)current;
+                view->invalid_call_sources = sources;
+                view->invalid_call_count = written;
+            }
         }
         resumed->diagnostic_count = total;
     }
