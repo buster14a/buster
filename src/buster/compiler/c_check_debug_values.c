@@ -48,6 +48,7 @@ typedef enum CheckDebugAbbreviation
     CHECK_DEBUG_UNAVAILABLE_GLOBAL = 35,
     CHECK_DEBUG_ENUM_WIDE = 36,
     CHECK_DEBUG_INLINED = 37,
+    CHECK_DEBUG_ABSTRACT = 38,
 } CheckDebugAbbreviation;
 
 static const uint8_t check_debug_value_abbreviations[] = {
@@ -86,6 +87,7 @@ static const uint8_t check_debug_value_abbreviations[] = {
     0x23, 0x34, 0x00, 0x03, 0x08, 0x49, 0x13, 0x3f, 0x0c, 0x00, 0x00, // UNAVAILABLE_GLOBAL
     0x24, 0x28, 0x00, 0x03, 0x08, 0x1c, 0x1e, 0x00, 0x00, // ENUM_WIDE
     0x25, 0x1d, 0x01, 0x31, 0x13, 0x55, 0x17, 0x58, 0x0f, 0x59, 0x0f, 0x00, 0x00, // INLINED
+    0x26, 0x2e, 0x01, 0x03, 0x08, 0x49, 0x13, 0x3a, 0x0f, 0x3b, 0x0f, 0x20, 0x0b, 0x00, 0x00, // ABSTRACT
     0,
 };
 
@@ -120,10 +122,14 @@ struct CheckDebugValues
     uint32_t span_leaves;
     uint32_t span_segment_count;
     uint32_t span_body;
-    // Each body's DW_TAG_subprogram's offset in the unit, which the measuring pass sets and the writing pass reads, the
-    // expanded callees' instances' abstract origins; and, for a function's instances, the open ones (a stack) and
-    // their order by call token (CheckDebugInline, #2541 step 3), room for the most a function has.
+    // Each expanded callee's abstract instance's offset in the unit (a DW_TAG_subprogram with DW_AT_inline and no code,
+    // written before its own DW_TAG_subprogram), which the measuring pass sets and the writing pass reads, its instances'
+    // abstract origin; which bodies some instance expands; and, for a function's instances, the open ones (a stack) and
+    // their order by call token (CheckDebugInline, #2541 step 3), room for the most a function has. An instance's origin
+    // can't be the out-of-line DW_TAG_subprogram: a debugger reads an attribute an entry lacks from its origin, and gdb 18
+    // (and CI's) takes the inherited DW_AT_low_pc over the instance's DW_AT_ranges, which drops the instance.
     uint32_t* function_offsets;
+    uint8_t* expanded;
     uint32_t* inline_open;
     uint64_t* inline_order;
 };
@@ -934,7 +940,24 @@ static void check_debug_values_write(CheckDebugValues* values)
         const DebugFunction function = original->unit.functions[b];
         const uint32_t closing = parser->tree.parents[body.opening];
         const TypeId type = input->declared_types[body.declaration];
-        values->function_offsets[b] = (uint32_t)values->info.size;
+        // The abstract instance its instances refer to (#2541 step 3): its name, type, line and parameters, no code.
+        if (values->expanded[b] != 0)
+        {
+            values->function_offsets[b] = (uint32_t)values->info.size;
+            debug_uleb(&values->info, CHECK_DEBUG_ABSTRACT);
+            debug_string(&values->info, function.name);
+            check_debug_type_reference(values, type_return(program->types, type));
+            debug_uleb(&values->info, function.file);
+            debug_uleb(&values->info, function.line);
+            debug_integer(&values->info, 1, 1); // DW_INL_inlined
+            for (uint32_t p = check_sparse_get(input->parameters, body.opening); p != BUSTER_CHECK_NONE; p = check_sparse_get(input->parameter_next, p))
+            {
+                debug_uleb(&values->info, CHECK_DEBUG_UNAVAILABLE_PARAMETER);
+                debug_string(&values->info, check_debug_name(values, parser->tokens.names[p]));
+                check_debug_type_reference(values, input->declared_types[p]);
+            }
+            debug_integer(&values->info, 0, 1); // abstract instance children
+        }
         // Its top-level described instances (#2541 step 3) by call token, written where the walk reaches their call,
         // in the scope that holds it; those whose call is outside the body's tokens after them.
         const CheckDebugBody* source = values->rows->values + b;
@@ -1046,6 +1069,7 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
         most_inlines = rows->values[b].inline_count > most_inlines ? rows->values[b].inline_count : most_inlines;
     }
     values.function_offsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->body_count + 1);
+    values.expanded = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1);
     values.inline_open = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)most_inlines + 1);
     values.inline_order = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)most_inlines + 1);
     // The driver uses tree_only parsing: the checker's derived traversal was scratch-owned and is gone now.
@@ -1053,12 +1077,21 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
     CheckProgram traversal = *program;
     values.ends = parser->ends != NULL ? parser->ends : check_program_statement_ends(&traversal, parser, scratch);
     bool valid = values.type_offsets != NULL && values.types != NULL && values.enum_definitions != NULL && values.enum_owners != NULL && values.local_ids != NULL && values.scopes != NULL && values.ends != NULL &&
-                 values.function_offsets != NULL && values.inline_open != NULL && values.inline_order != NULL;
+                 values.function_offsets != NULL && values.expanded != NULL && values.inline_open != NULL && values.inline_order != NULL;
     if (valid)
     {
         memset(values.type_offsets, 0, room * sizeof(uint32_t));
         memset(values.enum_definitions, 0, (uint64_t)table->types.count * sizeof(uint32_t));
         memset(values.local_ids, 0xff, ((uint64_t)tokens + 1) * sizeof(uint32_t));
+        memset(values.expanded, 0, (uint64_t)program->body_count + 1);
+        for (uint32_t b = 0; b < program->body_count; b += 1)
+        {
+            for (uint32_t k = 0; k < rows->values[b].inline_count; k += 1)
+            {
+                const CheckDebugInline instance = rows->values[b].inlines[k];
+                values.expanded[instance.body < program->body_count ? instance.body : program->body_count] |= instance.described;
+            }
+        }
         for (uint32_t t = 0; t < tokens; t += 1)
         {
             if (check_debug_value_declaration(input, t))

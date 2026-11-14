@@ -151,8 +151,12 @@ the function's own entries, an instance's (`IrDebugInline`, #2541 step 3): the
 location proofs read them as the instance's outermost call, the rows as its
 callee's entries (its lines), and `check_debug_values` writes each instance
 whose call is in the function's file as a `DW_TAG_inlined_subroutine` nested in
-the lexical block of its call and in its parent instance, its abstract origin
-the callee's subprogram, its ranges its code's spans.
+the lexical block of its call and in its parent instance, its ranges its code's
+spans. Its abstract origin is the callee's abstract instance (a
+`DW_TAG_subprogram` with `DW_AT_inline`, its parameters and no code, written
+before the out-of-line one), not the out-of-line `DW_TAG_subprogram`: a reader
+takes an attribute an entry lacks from its origin, and gdb 18 (and CI's) takes
+the inherited `DW_AT_low_pc` over the instance's `DW_AT_ranges` and drops it.
 The emitter's record origins and the post-scheduler's final permutation carry
 the surviving identities to the actual machine records. Source rows therefore
 describe surviving statements, including suspended callers' call sites.

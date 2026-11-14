@@ -670,19 +670,24 @@ static void check_debug_tier1_values_test(CheckDebugTestTally* tally, const char
     }
 }
 
-// #2541 step 3: Tier 1's expanded callees under -g. Two static callees, one expanded into the other and both into main,
-// whose code has no call left: each expansion is a DW_TAG_inlined_subroutine nested as it was expanded, its rows its
-// callee's lines, so that gdb, stopped at a line of the innermost callee in main's code, shows that callee's frame, its
-// caller's at its call's line and main's at its own. By both paths and by one lane and eight (the same bytes); -g
-// changes no code; llvm-dwarfdump --verify passes.
+// #2541 step 3: Tier 1's expanded callees under -g. Two static callees, one expanded into the other and both into main;
+// the inner one calls a noinline function, where gdb stops: each expansion is a DW_TAG_inlined_subroutine nested as it
+// was expanded, its rows its callee's lines, so that the backtrace from there shows the inner callee at its call's line,
+// the outer at its call of the inner, and main at its own. The stop is a real frame's, with the expansions' code around
+// its return address: a stop at an instance's first address is one gdb may show as its caller's, by version. By both
+// paths and by one lane and eight (the same bytes); -g changes no code; llvm-dwarfdump --verify passes.
 static const char check_debug_tier1_inline_source[] =
     "#line 1 \"dbg_tier1_inline.c\"\n"
     "int printf(const char *, ...);\n"
     "volatile int t1i_sink;\n"
+    "__attribute__((noinline)) void t1i_mark(int y)\n"
+    "{\n"
+    "    t1i_sink = y;\n"
+    "}\n"
     "static int t1i_square(int x)\n"
     "{\n"
     "    int y = x * x;\n"
-    "    t1i_sink = y;\n"
+    "    t1i_mark(y);\n"
     "    return y + 1;\n"
     "}\n"
     "static int t1i_twice(int x)\n"
@@ -702,23 +707,34 @@ static const char check_debug_tier1_inline_source[] =
 
 static const char check_debug_tier1_inline_script[] =
     "set pagination off\n"
-    "break dbg_tier1_inline.c:6\n"
+    "break t1i_mark\n"
     "run\n"
     "bt\n"
     "printf \"GDB-T1I-DONE\\n\"\n"
     "kill\n";
 
-// Whether gdb's backtrace in `transcript` has frame `frame` as `function` at `line` of the fixture.
+// Whether gdb's backtrace in `transcript` has frame `frame` as `function` at `line` of the fixture: "#N  ", the frame's
+// address and " in " where gdb prints them (a frame's pc past its line's start), the function, its arguments, and the
+// file (its directory where gdb shows one) at the line.
 static bool check_debug_tier1_inline_frame(const char* transcript, uint32_t frame, const char* function, uint32_t line)
 {
-    char start[64];
+    char start[32];
     char place[64];
-    snprintf(start, sizeof(start), "#%u  %s (", frame, function);
+    snprintf(start, sizeof(start), "\n#%u  ", frame);
     snprintf(place, sizeof(place), "dbg_tier1_inline.c:%u\n", line);
     const char* found = transcript != NULL ? strstr(transcript, start) : NULL;
-    const char* end = found != NULL ? strchr(found, '\n') : NULL;
-    const char* at = found != NULL ? strstr(found, place) : NULL;
-    return found != NULL && end != NULL && at != NULL && at + strlen(place) - 1 == end;
+    const char* name = found != NULL ? found + strlen(start) : NULL;
+    if (name != NULL && name[0] == '0' && name[1] == 'x')
+    {
+        const char* in = strstr(name, " in ");
+        const char* end = strchr(name, '\n');
+        name = in != NULL && (end == NULL || in < end) ? in + strlen(" in ") : NULL;
+    }
+    const size_t length = strlen(function);
+    const char* end = name != NULL ? strchr(name, '\n') : NULL;
+    const char* at = name != NULL ? strstr(name, place) : NULL;
+    return name != NULL && strncmp(name, function, length) == 0 && name[length] == ' ' && name[length + 1] == '(' && end != NULL && at != NULL &&
+           at + strlen(place) - 1 == end;
 }
 
 static void check_debug_tier1_inline_test(CheckDebugTestTally* tally, const char* directory, Arena* arena)
@@ -775,9 +791,10 @@ static void check_debug_tier1_inline_test(CheckDebugTestTally* tally, const char
         const bool inspected = built && object_test_run(gdb, report, errors) == 0;
         const String8 transcript = inspected ? foreign_test_read(arena, report) : (String8){ 0 };
         const bool done = transcript.pointer != NULL && strstr(transcript.pointer, "GDB-T1I-DONE\n") != NULL;
-        check_debug_test_expect(tally, done && check_debug_tier1_inline_frame(transcript.pointer, 0, "t1i_square", 6) &&
-                                      check_debug_tier1_inline_frame(transcript.pointer, 1, "t1i_twice", 11) &&
-                                      check_debug_tier1_inline_frame(transcript.pointer, 2, "main", 18),
+        check_debug_test_expect(tally, done && check_debug_tier1_inline_frame(transcript.pointer, 0, "t1i_mark", 5) &&
+                                      check_debug_tier1_inline_frame(transcript.pointer, 1, "t1i_square", 10) &&
+                                      check_debug_tier1_inline_frame(transcript.pointer, 2, "t1i_twice", 15) &&
+                                      check_debug_tier1_inline_frame(transcript.pointer, 3, "main", 22),
                                 "gdb's backtrace in main's code shows the expanded callees' frames at their calls' lines", report);
     }
 }

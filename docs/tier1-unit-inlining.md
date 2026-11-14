@@ -1039,11 +1039,14 @@ larger hashing and interning functions with several callers
   its lines are the callee's; and the DWARF has a `DW_TAG_inlined_subroutine` per
   instance whose call is in the function's file, nested in the lexical block
   that holds its call and in the instance it was expanded in, its abstract
-  origin the callee's `DW_TAG_subprogram`, its ranges its code's. On
-  `test-check-debug`'s fixture gdb, stopped at a callee's line in `main`'s code,
-  shows the callee, its caller at its call's line and `main`; `-g` changes no
-  code (an executable's sections are the same bytes, and sqlite3.c's
-  `--tier1 -g -c` passes `llvm-dwarfdump --verify` with 16,708 instances). Not
+  origin the callee's abstract instance (a `DW_TAG_subprogram` with
+  `DW_AT_inline` and no code: gdb 18 reads an out-of-line origin's
+  `DW_AT_low_pc` over the instance's ranges and drops the frame), its ranges its
+  code's. On `test-check-debug`'s fixture gdb, stopped in a function the inner
+  callee calls, shows the callee at its call's line, its caller at its call of
+  the callee and `main`; `-g` changes no code (an executable's sections are the
+  same bytes, and sqlite3.c's `--tier1 -g -c` passes `llvm-dwarfdump --verify`
+  with 17,095 instances of 1,349 callees). Not
   yet: an instance's callee locals (unavailable, as before), a call site in
   another file than the function's, and gdb's breakpoints by a callee's name,
   which take its out-of-line copy only (`break file:line` takes every
