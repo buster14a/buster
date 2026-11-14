@@ -301,11 +301,17 @@ required aggregate waits for. In the evidence job they held every row back by
 about 4 minutes (merge-queue run 43481767714: 236 s of its 246 s, the rows
 starting at 298 s), when neither a pull request nor a candidate uses the
 9700X; a candidate's pull request has passed the same fixtures.
+Within a shard, a pull request's or a candidate's runner stops at its first
+failing command too (`parallel --fail-fast`, #2703): it starts nothing more and
+kills the commands running beside the failure, so the failure ends its job at
+once rather than when the shard's last command does.
 GitHub has no fail-fast across jobs. A job that cancels the run through the API
-was considered (#1195) and dropped: it needs a token with `actions: write`,
-which fork pull requests don't get; on a pull request, once the policy checks
-gate the tests, nothing would remain for it to stop; and on the other runs it
-would cut the coverage above.
+was considered (#1195) and dropped for pull requests and the other runs: it
+needs a token with `actions: write`, which fork pull requests don't get; on a
+pull request, once the policy checks gate the tests, nothing would remain for it
+to stop; and on the other runs it would cut the coverage above. A merge-queue
+candidate has none of those reasons, and its run is cancelled at its first
+failure (#2703; see "The merge queue").
 
 To check CI edits locally, run the selector's self-test and validate the shell
 and workflow syntax. To exercise fallback code on a capable machine, set
@@ -828,11 +834,22 @@ on 2026-11-10). It works like this:
   - Its first failing row cancels the other rows, and within a row its first
     failing shard or vector draw cancels the rest.
   - Its first failing fuzz campaign cancels the other campaigns.
+  - Within a shard, its first failing command stops the shard (`parallel
+    --fail-fast`, #2703): nothing more starts, and the commands beside it are
+    killed.
+  - Once its test rows or its fuzz campaigns have failed, `stop-tests` or
+    `stop-fuzz` cancels its run (#2703). GitHub's fail-fast works within one
+    matrix only, so the aggregate used to wait for the other matrix, the glue
+    fixtures and the auxiliary workflows: the fuzz campaigns alone take about
+    21 minutes (`frontend`). Its `Integration qualification` still runs
+    (`always()`) and fails, as in the 68 runs `stale` had cancelled by 14
+    November, and GitHub rebuilds the entries behind it at once.
 
-  GitHub's fail-fast works within one matrix only. So a test failure doesn't
-  stop the fuzz campaigns, nor a fuzz failure the test rows, and the aggregate
-  reports when both have ended. In the full dispatch 43261314947 the longest
-  campaign (`frontend`) took 19 minutes and the longest test shards about 21.
+  Before #2703, a failing candidate's first failed job ended 22.5 minutes in,
+  on average, over 15 failures (13–14 November), though its failing command
+  ran for 0.7 to 82 s. Each held about 790 runner-minutes, near a passing
+  candidate's 912. Failures were 18.3% of the queue's runner time, and the
+  entries cancelled behind them another 11.2%.
 - **Auxiliary workflows.** A candidate also calls `build.yml`, `build-pgo.yml`,
   `selfhost.yml` and `tier1-problem.yml`, each whole (`workflow_call`, job
   `auxiliary-NAME`), where its own change touches a path that workflow's
