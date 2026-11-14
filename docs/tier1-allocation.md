@@ -1110,6 +1110,12 @@ evicted it, and the back edge moved the table into it on every iteration.
   edges into its block then moved or recomputed the value into it, though the
   block never read it: in `luaV_execute`, frame objects' addresses through the
   handlers' blocks.
+- **Definitions no edge reads.** A definition whose register fragment reaches
+  its block's end is left out where no edge leaving the block reads it: each
+  successor the value is live into enters with its recipe, and no phi takes it
+  along the edge (`tier1_emit_cfg_dead_definition`, "Rematerialization"
+  below). `hexFunc` computed `hexdigits` before its loop on every call for a
+  header that rests. `tier1_dropped_test.c`'s `r` is that loop.
 
 By callgrind (#1189's `gap.c`, #1217's inputs) at #2688's head `01a2d0b3`, with
 #2685's ties before it, the two rules took speedtest1 from 2,983.71 M to
@@ -1129,13 +1135,15 @@ the resting rule 12.54 M and 127.28 M of it alone: `luaV_execute` −125.8 M,
 `tier1_allocate_hints_test.c`'s traces check the three eviction sites and the
 resting range, and its quiet-range trace now gives its register up.
 
-With #2685's ties and the IR guide's folded takes (#2618), by callgrind at
-main `389d25b8` against it, speedtest1 runs 2,851.42 M instructions instead of
-2,871.10 M (−0.69%) and Lua's five scripts 5,090.40 M instead of 5,235.80 M
-(−2.78%; `arithmetic` −6.6%, `calls` −4.7%): `luaV_execute` −129.8 M, and no
-Lua function more. speedtest1's largest losses are `sqlite3ExprCodeTarget`
-+0.17 M and `sqlite3BtreeIndexMoveto` +0.09 M, against `sqlite3VdbeExec`
-−4.83 M and `sqlite3_str_vappendf` −2.04 M.
+With #2685's ties, the IR guide's folded takes (#2618) and the definitions no
+edge reads, by callgrind at main `389d25b9` against it, speedtest1 runs
+2,851.20 M instructions instead of 2,871.10 M (−0.69%) and Lua's five scripts
+5,080.78 M instead of 5,235.80 M (−2.96%; `arithmetic` −6.6%, `calls` −4.7%,
+`tables` −2.7%): `luaV_execute` −139.3 M, and no Lua function more.
+speedtest1's largest losses are `sqlite3BtreeIndexMoveto` +0.09 M and
+`sqlite3WhereBegin` +0.09 M, against `sqlite3VdbeExec` −4.83 M and
+`sqlite3_str_vappendf` −2.04 M. The definitions no edge reads are 0.22 M and
+9.62 M of it (`luaV_execute` −9.50 M, `sqlite3ExprCodeTarget` −0.18 M).
 
 ## Rematerialization
 
@@ -1217,7 +1225,11 @@ recomputed value's definition whose first register fragment no use reads
 before a recomputation takes over, or that only definitions left out read, is
 left out (`tier1_emit_cfg_dead_definition`, decided from the last node back):
 the C front end's address chains define each link right before the allocator
-evicts it, a write nothing read.
+evicts it, a write nothing read. A fragment that reaches the block's end is one
+too where no edge leaving the block reads its register (#2618): every
+successor the value is live into enters with its recipe, and no phi there takes
+the value along the edge. Otherwise an edge reads it: a move from the
+register, or none where the successor keeps the value (or the phi) in it.
 
 A recomputed value's definition needs no register at all (#2618): its own use
 isn't required, so where values read sooner hold every register the allocator

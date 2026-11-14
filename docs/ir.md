@@ -1163,12 +1163,13 @@ With those and the allocation guide's rules ("Two-address results" and
 all, speedtest1 runs 8.00 M fewer instructions and Lua's scripts 18.9 M fewer.
 `speedtest1_run`, `memsys5Unlink`, `jsonTranslateBlobToText` and
 `sqlite3FindFunction` run the same instructions, `jsonLookupStep` 431 fewer and
-`memsys5MallocUnsafe` 0.32 M fewer; `hexFunc` 675 more: its loop's back edge no
-longer moves `hexdigits`, but its definition before the loop, which the loop's
-first value evicts before any read, is still computed on each of its 675 calls.
-No function loses more than 30 K to the hoist (`sqlite3Atoi64` +29.6 K,
-`sqlite3Select` +13.1 K, `sqlite3_strnicmp` +11.5 K, `sqlite3GetInt32`
-+10.7 K).
+`memsys5MallocUnsafe` 0.32 M fewer. `hexFunc` ran 675 more: its loop's back
+edge no longer moved `hexdigits`, but its definition before the loop, which the
+loop's first value evicts before any read, was still computed on each of its
+675 calls; Tier 1 now leaves out a definition no edge leaving its block reads,
+and `hexFunc` runs the same instructions too. No function loses more than 30 K
+to the hoist (`sqlite3Atoi64` +29.6 K, `sqlite3Select` +13.1 K,
+`sqlite3_strnicmp` +11.5 K, `sqlite3GetInt32` +10.7 K).
 `test-ir-lowering` checks both lowering paths, the verifiers, the interpreter's
 results and promotion for a symbol taken three times, one taken once and one
 through its GOT slot, and each of the rules above: a definition past an early
