@@ -1346,14 +1346,30 @@ static __attribute__((always_inline)) inline void ir_typed_spill(IrTypedSink* si
     }
 }
 
+// Whether a take's address is read by a load at a constant offset or written by a store of a one-entry value (a constant
+// or a local), each of a scalar class: Tier 1's selection folds such an access into a rip-relative operand (#2573),
+// which needs no register. Hoisted, the address took one, and where calls took it away the take was recomputed before
+// each access: speedtest1_run's hot `g`, read at constant offsets between calls (#2618).
+static bool ir_typed_folds(const Tier0Function* input, uint32_t entry)
+{
+    uint32_t next = entry + 1;
+    const bool offset = next + 1 < input->count && input->kinds[next] == BUSTER_TYPED_CONST && input->kinds[next + 1] == BUSTER_TYPED_PTR_ADD;
+    next += offset ? 2 : 0;
+    const bool load = next < input->count && input->kinds[next] == BUSTER_TYPED_LOAD && input->classes[next] < BUSTER_TYPED_CLASS_LIMIT;
+    const uint8_t value = next < input->count ? input->kinds[next] : 0;
+    const uint8_t after = next + 1 < input->count ? input->kinds[next + 1] : 0;
+    const bool store = (value == BUSTER_TYPED_CONST || value == BUSTER_TYPED_LOCAL) && (after == BUSTER_TYPED_STORE || after == BUSTER_TYPED_SET) && input->classes[next + 1] < BUSTER_TYPED_CLASS_LIMIT;
+    return load || store;
+}
+
 // A GLOBAL_ADDRESS entry whose address the function may compute once (#2574): a U64 of a symbol accessed directly, as
-// a jump table's base is (tier0_jump_tables_valid), which no load or TLS access is moved for. The tables' own entries
-// stay theirs.
+// a jump table's base is (tier0_jump_tables_valid), which no load or TLS access is moved for, and whose access Tier 1
+// doesn't fold (ir_typed_folds). The tables' own entries stay theirs.
 static bool ir_typed_hoistable(const Tier0Function* input, uint32_t entry)
 {
     const uint64_t symbol = input->values[entry];
     return input->kinds[entry] == BUSTER_TYPED_GLOBAL_ADDRESS && input->classes[entry] == BUSTER_TYPED_CLASS_U64 && symbol != 0 && symbol <= UINT32_MAX &&
-           (input->symbol_access == 0 || (symbol < input->symbol_count && input->symbol_access[symbol] == BUSTER_TIER0_ACCESS_DIRECT));
+           (input->symbol_access == 0 || (symbol < input->symbol_count && input->symbol_access[symbol] == BUSTER_TIER0_ACCESS_DIRECT)) && !ir_typed_folds(input, entry);
 }
 
 // The symbols whose addresses the function computes once (IrTypedPlan.hoisted_symbols, #2574): each one the function
@@ -1838,6 +1854,43 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan, 
             }
         }
     }
+    // The walks' successors (#2618): those of a block of one constant that goes into a block whose first entries test it
+    // (a `&&`'s or `||`'s alternative, into its truth value's join), the test's choice for it. #2554's threading takes
+    // that edge past the join in Tier 1's IR, but the typed CFG has a path from the alternative through the join into
+    // the `&&`'s body without its right operand: memsys5MallocUnsafe's `iBin<=LOGMAX && mem5.aiFreelist[iBin]<0` loop
+    // then had an iteration without its take. The dominators keep the typed CFG's edges, which the emission's are.
+    uint32_t* walks = successors;
+    if (predecessors != 0)
+    {
+        walks = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)edges + 1);
+        ok = ok && walks != 0;
+        for (uint32_t n = 0; walks != 0 && n < nodes; n += 1)
+        {
+            for (uint32_t e = offsets[n]; e < offsets[n + 1]; e += 1)
+            {
+                walks[e] = successors[e];
+            }
+            const bool source = n != 0 && n <= plan->block_count;
+            const uint32_t first = source ? plan->block_firsts[n - 1] : 0;
+            const uint32_t end = source ? plan->block_firsts[n] : 0;
+            const bool constant = source && end > first && input->kinds[first] == BUSTER_TYPED_CONST &&
+                                  (end - first == 1 || (end - first == 2 && input->kinds[first + 1] == BUSTER_TYPED_JUMP_VALUE)) && offsets[n + 1] - offsets[n] == 1;
+            const uint32_t join = constant ? successors[offsets[n]] : 0;
+            const bool joined = join != 0 && join <= plan->block_count && plan->block_firsts[join - 1] < plan->block_firsts[join];
+            // The join's truth test: its branch, or a comparison with zero first (NE keeps the value's truth, EQ inverts it).
+            const uint32_t at = joined ? plan->block_firsts[join - 1] : 0;
+            const bool compared = joined && plan->block_firsts[join] - at >= 3 && input->kinds[at] == BUSTER_TYPED_CONST && input->values[at] == 0 &&
+                                  (input->kinds[at + 1] == BUSTER_TYPED_NE || input->kinds[at + 1] == BUSTER_TYPED_EQ);
+            const uint32_t branch = compared ? at + 2 : at;
+            const uint8_t kind = joined ? input->kinds[branch] : 0;
+            const bool truth = compared && input->kinds[at + 1] == BUSTER_TYPED_EQ ? input->values[first] == 0 : input->values[first] != 0;
+            if (kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE)
+            {
+                const bool taken = (kind == BUSTER_TYPED_BRANCH_FALSE) == !truth;
+                walks[offsets[n]] = taken ? plan->entry_blocks[(uint32_t)input->values[branch]] + 1 : join + 1;
+            }
+        }
+    }
     const uint64_t mark = output->length;
     Dominators dominators = { 0 };
     DominatorStatus analyzed = DOMINATOR_INVALID;
@@ -1910,13 +1963,13 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan, 
         bool kept = !placed;
         if (placed)
         {
-            const IrTypedPlace whole = ir_typed_place(plan, &dominators, offsets, successors, calls, order, firsts[k], firsts[k + 1], 2, reads, seen, stack, marks, k + 1, &walk, &budget, &loop_budget);
+            const IrTypedPlace whole = ir_typed_place(plan, &dominators, offsets, walks, calls, order, firsts[k], firsts[k + 1], 2, reads, seen, stack, marks, k + 1, &walk, &budget, &loop_budget);
             const uint32_t top = whole.ancestor;
             kept = whole.kept;
             place = whole.place;
             // Kept at P outside loops for a take in a loop where some path from P takes it nowhere: its takes' groups, by
             // the child of P that dominates each, are placed each as a symbol is.
-            if (kept && whole.loop == BUSTER_DOMINATOR_NONE && whole.looped && !ir_typed_anticipated(offsets, successors, reads, seen, stack, top, k + 1, &budget))
+            if (kept && whole.loop == BUSTER_DOMINATOR_NONE && whole.looped && !ir_typed_anticipated(offsets, walks, reads, seen, stack, top, k + 1, &budget))
             {
                 for (uint32_t x = firsts[k]; x < firsts[k + 1]; x += 1)
                 {
@@ -1972,7 +2025,7 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan, 
                         next += 1;
                     }
                     walk += 1;
-                    const IrTypedPlace part = children[group] != BUSTER_DOMINATOR_NONE ? ir_typed_place(plan, &dominators, offsets, successors, calls, order, group, next, 2, reads, seen, stack, marks, walk, &walk, &budget, &loop_budget) :
+                    const IrTypedPlace part = children[group] != BUSTER_DOMINATOR_NONE ? ir_typed_place(plan, &dominators, offsets, walks, calls, order, group, next, 2, reads, seen, stack, marks, walk, &walk, &budget, &loop_budget) :
                                                                                           (IrTypedPlace){ .ancestor = BUSTER_DOMINATOR_NONE, .loop = BUSTER_DOMINATOR_NONE };
                     below = !part.kept || (part.place != top && ir_typed_dominated(&dominators, top, part.place));
                     if (below && part.kept)

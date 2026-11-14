@@ -7446,6 +7446,44 @@ static X86Instruction tier1_select_memory_holes(const Tier1SelectPattern* patter
     return result;
 }
 
+// The operands whose register a node's result may take to save the copy its records make into the destination otherwise
+// (#2685): a two-address instruction's first operand, and a commutative one's second, which its records swap into the
+// first place; a select's value where its condition holds not, which its cmov keeps, and the other one, which it inverts
+// to keep. BUSTER_IR_NONE where it has none. The allocator takes such a register only where the operand's interval ends
+// there: an operand live past the node holds it.
+static inline __attribute__((always_inline)) void tier1_select_ties(const Tier1SelectPlan* plan, uint32_t node, uint32_t* first, uint32_t* second)
+{
+    const Tier1SelectPattern* pattern = &plan->patterns[node];
+    const uint8_t rule = plan->covered[node] ? TIER1_RULE_NONE : pattern->rule;
+    const bool multiply = pattern->operation == X86_OPERATION_IMUL && rule == TIER1_RULE_IMMEDIATE;
+    const bool swapped = (rule == TIER1_RULE_REGISTER && tier1_select_commutative((X86Operation)pattern->operation)) ||
+                         (rule == TIER1_RULE_FLOAT_BINARY && (((uint32_t)pattern->operation & 3) == IR_FADD - IR_FADD || ((uint32_t)pattern->operation & 3) == IR_FMUL - IR_FADD));
+    const bool left = rule == TIER1_RULE_COPY || (rule == TIER1_RULE_TRUNCATE && pattern->width == 4) || rule == TIER1_RULE_UNARY || rule == TIER1_RULE_REGISTER ||
+                      (rule == TIER1_RULE_IMMEDIATE && !multiply) || rule == TIER1_RULE_MULTIPLY_SHIFT || rule == TIER1_RULE_LOAD_OPERAND ||
+                      (rule == TIER1_RULE_INTRINSIC && pattern->immediate == BUSTER_IR_INTRINSIC_BSWAP) || rule == TIER1_RULE_FLOAT_COPY || rule == TIER1_RULE_FLOAT_BINARY ||
+                      rule == TIER1_RULE_FLOAT_LOAD_OPERAND || rule == TIER1_RULE_FLOAT_NEGATE;
+    const bool select = rule == TIER1_RULE_SELECT;
+    *first = left ? pattern->values[0] : select ? pattern->values[2] : BUSTER_IR_NONE;
+    *second = swapped ? pattern->values[1] : select ? pattern->values[1] : BUSTER_IR_NONE;
+}
+
+// Marks each node whose value a return reads in `returned` (one byte per node, cleared here). Such a value takes no tie
+// (tier1_select_ties): the return wants it in rax, where the lowest free register, which it takes without one, often
+// is; memsys5Size's product, whose operands both end at its imul, took the first one's rcx and was copied into eax.
+static void tier1_select_returned(const Tier1SelectPlan* plan, uint8_t* returned)
+{
+    const uint32_t count = plan->function->instruction_count;
+    memset(returned, 0, count);
+    for (uint32_t node = 0; node < count; node += 1)
+    {
+        const uint32_t value = plan->patterns[node].values[0];
+        if (plan->covered[node] == 0 && plan->patterns[node].rule == TIER1_RULE_RETURN && value < count)
+        {
+            returned[value] = 1;
+        }
+    }
+}
+
 static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const uint8_t* registers, uint32_t node)
 {
     const Tier1SelectPattern* pattern = &plan->patterns[node];

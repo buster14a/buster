@@ -446,6 +446,30 @@ static void tier1_allocation_finish_piece(Tier1AllocationPieces* pieces, uint32_
     }
 }
 
+static void tier1_allocation_note_opening(const Tier1AllocationInput* columns, uint8_t* last, uint32_t interval, uint32_t chosen);
+
+// An eviction of `victim` at `position` into `kind`: its register fragment ends there. A recomputable value that has held
+// its register since its interval's start, where no use read it, is recomputed from that start instead (#2618), where
+// `unread` allows it: its block's entry, and the edges into it, then keep no register for it, and its opening becomes the
+// memory hint, so that a range taking its block's entry convention rests too. A call's clobber keeps the fragment: a
+// dispatch loop's handler that calls before its first read would make every handler recompute the table on entry.
+static void tier1_allocation_evict(const Tier1AllocationInput* columns, Tier1AllocationPieces* pieces, uint32_t victim, uint32_t position, uint32_t* begins, uint8_t* kinds, uint8_t* regs, uint8_t* last, uint8_t kind, bool unread)
+{
+    const uint32_t first = columns->use_offsets[victim] < columns->use_offsets[victim + 1] ? columns->use_positions[columns->use_offsets[victim]] : UINT32_MAX;
+    const bool undone = unread && kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && kinds[victim] == BUSTER_TIER1_ALLOCATE_REGISTER && begins[victim] == columns->starts[victim] && first >= position;
+    if (undone)
+    {
+        tier1_allocation_note_opening(columns, last, victim, UINT32_MAX);
+    }
+    else
+    {
+        tier1_allocation_finish_piece(pieces, victim, begins[victim], position, kinds[victim], regs[victim]);
+        begins[victim] = position;
+    }
+    kinds[victim] = kind;
+    regs[victim] = UINT8_MAX;
+}
+
 static bool tier1_allocation_required_at(const Tier1AllocationInput* input, uint32_t interval, uint32_t position)
 {
     bool required = input->flags != 0 && (input->flags[interval] & BUSTER_TIER1_ALLOCATE_REQUIRED) != 0;
@@ -530,10 +554,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
                 const uint32_t victim = active[r];
                 if (tier1_allocation_spill_kind(&columns, victim) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && !tier1_allocation_required_at(&columns, victim, position))
                 {
-                    tier1_allocation_finish_piece(pieces, victim, begins[victim], position, kinds[victim], regs[victim]);
-                    begins[victim] = position;
-                    kinds[victim] = BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
-                    regs[victim] = UINT8_MAX;
+                    tier1_allocation_evict(&columns, pieces, victim, position, begins, kinds, regs, last, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, false);
                     active[r] = UINT32_MAX;
                     occupied &= ~(1u << r);
                 }
@@ -575,7 +596,8 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             const uint8_t follow = tier1_allocation_value_hint(&columns, last, interval);
             const bool recomputed = tier1_allocation_spill_kind(&columns, interval) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
             // An unused recipe may keep an unclaimed free register, preserving a hoisted definition without taking
-            // a continuing value's register. It never evicts one; an unused value last in memory stays there.
+            // a continuing value's register. It never evicts one; an unused value last in memory stays there, and so
+            // does an unused recipe hinted to a range's opening that took no register (#2618, `rests` below).
             const bool idle = !use_event && !required && columns.use_offsets[interval] == columns.use_offsets[interval + 1] && (recomputed || follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT);
             const bool starting = !use_event && position == claims_at;
             // A value without a recipe takes its value's hinted register (no static hint of its own overriding it) from a
@@ -587,10 +609,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
                 tier1_allocation_yields(&columns, active, occupied, follow, position))
             {
                 const uint32_t victim = active[follow];
-                tier1_allocation_finish_piece(pieces, victim, begins[victim], position, kinds[victim], regs[victim]);
-                begins[victim] = position;
-                kinds[victim] = BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
-                regs[victim] = UINT8_MAX;
+                tier1_allocation_evict(&columns, pieces, victim, position, begins, kinds, regs, last, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, true);
                 active[follow] = UINT32_MAX;
                 occupied &= ~(1u << follow);
             }
@@ -599,7 +618,13 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             const uint32_t open = free & ~(starting ? claimed & ~mine : 0);
             claimed &= ~mine;
             uint32_t chosen = UINT32_MAX;
-            if (idle && (!recomputed || open == 0))
+            // An unused recipe rests where its hint is another range's opening that took no register: the convention of the
+            // block it takes, whose edges then recompute nothing for it (hexFunc's header, after its body). A range's
+            // closing after a call took the register isn't one: luaV_execute's dispatch join then took no register for
+            // disptab, which every dispatch recomputed.
+            const uint32_t named = last != 0 && columns.hint_intervals != 0 ? columns.hint_intervals[interval] : UINT32_MAX;
+            const bool rests = follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT && named != UINT32_MAX && (named & BUSTER_TIER1_ALLOCATE_HINT_EXIT) == 0;
+            if (idle && (!recomputed || open == 0 || rests))
             {
             }
             else if (open != 0 || (free != 0 && required))
@@ -643,10 +668,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
                 if (chosen != UINT32_MAX)
                 {
                     const uint32_t victim = active[chosen];
-                    tier1_allocation_finish_piece(pieces, victim, begins[victim], position, kinds[victim], regs[victim]);
-                    begins[victim] = position;
-                    kinds[victim] = tier1_allocation_spill_kind(&columns, victim);
-                    regs[victim] = UINT8_MAX;
+                    tier1_allocation_evict(&columns, pieces, victim, position, begins, kinds, regs, last, tier1_allocation_spill_kind(&columns, victim), true);
                     if (last != 0 && kinds[victim] == BUSTER_TIER1_ALLOCATE_SPILL)
                     {
                         last[columns.values[victim]] = BUSTER_TIER1_ALLOCATE_MEMORY_HINT;

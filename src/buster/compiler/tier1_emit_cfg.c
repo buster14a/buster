@@ -512,6 +512,14 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     bool ok = error == TIER1_EMIT_OK;
     uint32_t* node_values = ok ? ir_allocate(output, count, 4, &ok) : 0;
     uint32_t* value_nodes = ok ? ir_allocate(output, (uint64_t)count + 1, 4, &ok) : 0;
+    // Two per value: the operands whose registers its definition may take (#2685, Tier1CfgInput.ties), first as nodes;
+    // and each node a return reads.
+    uint32_t* ties = ok ? ir_allocate(output, 2 * (uint64_t)count + 2, 4, &ok) : 0;
+    uint8_t* returned = ok ? ir_allocate(scratch, (uint64_t)count + 1, 1, &ok) : 0;
+    if (ok)
+    {
+        memset(returned, 0, (uint64_t)count + 1);
+    }
     uint32_t value_count = 0;
     uint32_t phi_count = 0;
     uint32_t operand_count = 0;
@@ -548,6 +556,18 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         floats += floating && value;
         node_values[node] = value ? value_count : BUSTER_TIER1_CFG_NONE;
         value_nodes[value_count] = node;
+        // The operands whose registers a two-address result may take (#2685, tier1_select_ties), as nodes, and the node a
+        // return reads (tier1_select_returned's rule), from the pattern this pass reads anyway: the values' pass maps them.
+        uint32_t first = BUSTER_IR_NONE;
+        uint32_t second = BUSTER_IR_NONE;
+        if (value)
+        {
+            tier1_select_ties(plan, node, &first, &second);
+        }
+        ties[2 * (uint64_t)value_count] = first;
+        ties[2 * (uint64_t)value_count + 1] = second;
+        const uint32_t read = plan->covered[node] == 0 && plan->patterns[node].rule == TIER1_RULE_RETURN ? plan->patterns[node].values[0] : BUSTER_IR_NONE;
+        returned[read < count ? read : count] = read < count;
         value_count += value;
         phi_count += function->op[node] == IR_PHI && !x87;
         operand_count += function->op[node] == IR_PHI && !x87 ? function->b[node] : 0;
@@ -823,6 +843,13 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             // reads this column).
             rematerializable[v] = classes[v] != BUSTER_TIER1_ALLOCATE_GPR ? 0 : marks[node];
             use_offsets[v + 1] = op != IR_PHI;
+            // The ties as values of v's class; a returned value takes none (tier1_select_returned).
+            for (uint32_t k = 0; k < 2; k += 1)
+            {
+                const uint32_t tied = ties[2 * (uint64_t)v + k];
+                const uint32_t tied_value = tied < count && returned[node] == 0 ? node_values[tied] : BUSTER_TIER1_CFG_NONE;
+                ties[2 * (uint64_t)v + k] = tied_value != BUSTER_TIER1_CFG_NONE && node_classes[tied] == classes[v] ? tied_value : BUSTER_TIER1_CFG_NONE;
+            }
         }
         // Uses by value, counted then filled in node order, which is position order: a node's effective uses, then its
         // definition's own use. A parameter's, at position 0, precedes every other use of it.
@@ -975,6 +1002,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             .phi_values = phi_values,
             .phi_operand_offsets = phi_operand_offsets,
             .phi_operands = phi_operands,
+            .ties = ties,
             .block_count = blocks,
             .edge_count = edges,
             .value_count = value_count,
@@ -1863,8 +1891,27 @@ static bool tier1_emit_cfg_dead_definition(const Tier1EmitResult* emitted, uint3
     const bool starts = interval != BUSTER_TIER1_CFG_NONE && cfg->intervals.starts[interval] == definition;
     // Given no register at all (#2618: its definition's use isn't required), the first fragment recomputes it.
     const bool bare = starts && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
-    bool dead = starts && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER && allocation->ends[first] < input->block_starts[block + 1] &&
-                (inside || (!last && allocation->kinds[first + 1] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE));
+    // Or the fragment reaches its block's end, where no edge leaving the block reads its register (#2618): each successor
+    // that v is live into enters with its recipe (a range that rests there), and no phi takes v along the edge.
+    bool leaves = starts && last && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER && allocation->ends[first] == end && end == input->block_starts[block + 1];
+    for (uint32_t e = leaves ? input->successor_offsets[block] : 0; leaves && e < input->successor_offsets[block + 1]; e += 1)
+    {
+        const uint32_t successor = input->successors[e];
+        uint32_t location = 0;
+        uint8_t kind = 0;
+        leaves = !tier1_cfg_entry_location(cfg, v, input->block_starts[successor], &location, &kind) || kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
+        uint32_t j = 0;
+        while (j < input->predecessor_offsets[successor + 1] - input->predecessor_offsets[successor] && input->predecessors[input->predecessor_offsets[successor] + j] != block)
+        {
+            j += 1;
+        }
+        for (uint32_t k = input->phi_offsets[successor]; leaves && k < input->phi_offsets[successor + 1]; k += 1)
+        {
+            leaves = input->phi_operands[input->phi_operand_offsets[k] + j] != v;
+        }
+    }
+    bool dead = starts && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER &&
+                ((allocation->ends[first] < input->block_starts[block + 1] && (inside || (!last && allocation->kinds[first + 1] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE))) || leaves);
     // Uses are sorted: the definition's own (at its position), then those the first fragment serves, before its end.
     for (uint32_t u = dead ? input->use_offsets[v] : 0; dead && u < input->use_offsets[v + 1]; u += 1)
     {
