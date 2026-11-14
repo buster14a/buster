@@ -5204,11 +5204,11 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                 phase == 2 && extra[index].completion != 0 ? extra[index].completion :
                                                 phase == 2 && extra[index].position != located ? extra[index].position :
                                                 node < input->graph.count && input->graph.source_positions != NULL ? input->graph.source_positions[node] : 0;
-                    // A false assertion's root is omitted from the rejected unit's warning walk (#2409). Its conversion
-                    // to bool still warns before the assertion fails, at the same expression boundary as the error.
+                    // A false assertion's tree is omitted from the rejected unit's warning walk (#2409). Its retained
+                    // boolean conversions still warn before the assertion fails, at the same boundary as the error.
                     if (show_warnings && phase == 1 && stream->reports[index].message == CHECK_MESSAGE_STATIC_ASSERT && node < input->graph.count)
                     {
-                        check_common_int_in_bool(parser, pp, input, stream, types, node, NULL, completion != 0 ? completion : located, scratch);
+                        check_common_failed_assertion(parser, pp, input, stream, types, &spell, node, completion != 0 ? completion : located, scratch);
                     }
                     // An x86 builtin's call whose hard immediate constraint failed: clang's message at the call's begin,
                     // published where the report's own token puts it (#1066).
@@ -6501,7 +6501,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                  "initializer for variable '%.*s' with type '%s' contains multiple expressions",
                                                  (int)intern_length(pp->table, name), intern_bytes(pp->table, name), c23 ? "auto" : "__auto_type");
                         }
-                        else if (phase == 0 && (input->reports[index].message == CHECK_INPUT_AUTO_TYPE_INITIALIZER || input->reports[index].message == CHECK_INPUT_AUTO_TYPE_SELF) &&
+                        else if (phase == 0 && ((input->reports[index].message == CHECK_INPUT_AUTO_TYPE_INITIALIZER && input->reports[index].type == 0) ||
+                                               input->reports[index].message == CHECK_INPUT_AUTO_TYPE_SELF) &&
                                  token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
                         {
                             // An __auto_type variable's errors at its name, or at a use of it, name it as clang's do.
@@ -9389,8 +9390,8 @@ static void check_driver_selection_census(const CheckProgram* program, const Che
 {
     fprintf(stderr, "selection-census\tbodies\t%u\tdropped\t%u\tselected-bodies\t%u\tselected-symbols\t%u", program->body_count, program->census_dropped_bodies,
             selected->program.body_count, selected->program.symbol_count + selected->data.count);
-    const CheckProgramCensus* censuses[] = { &program->census_walk, &program->census_scan, &program->census_arms };
-    const char* names[] = { "walk", "scan", "arms" };
+    const CheckProgramCensus* censuses[] = { &program->census_walk, &program->census_scan, &program->census_arms, &program->census_pass };
+    const char* names[] = { "walk", "scan", "arms", "pass" };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(censuses); c += 1)
     {
         const CheckProgramCensus* census = censuses[c];
@@ -9402,8 +9403,9 @@ static void check_driver_selection_census(const CheckProgram* program, const Che
         fprintf(stderr, "\t%s\tdiffering\t%u\tunarmed\t%u\tmissing\t%u\tselection\t%s\textra-bodies\t%lld\textra-symbols\t%lld", names[c], census->differing,
                 census->unarmed, census->missing, verdict, (long long)bodies, (long long)objects);
     }
-    fprintf(stderr, "\nselection-census-ticks\treferences\t%llu\twalk\t%llu\tscan\t%llu\tarms\t%llu\n", (unsigned long long)program->census_references_ticks,
-            (unsigned long long)program->census_walk.ticks, (unsigned long long)program->census_scan.ticks, (unsigned long long)program->census_arms.ticks);
+    fprintf(stderr, "\nselection-census-ticks\treferences\t%llu\twalk\t%llu\tscan\t%llu\tarms\t%llu\tpass\t%llu\n", (unsigned long long)program->census_references_ticks,
+            (unsigned long long)program->census_walk.ticks, (unsigned long long)program->census_scan.ticks, (unsigned long long)program->census_arms.ticks,
+            (unsigned long long)program->census_pass.ticks);
 }
 
 // The checked program's code and data, as -c writes them: its object at `output_path`, or with `kept` (one of several
@@ -11641,8 +11643,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
             // The parse's and the reader's pages of the scratch, 82 MB of sqlite3.c's, which check-expressions and
             // check-declarations would otherwise hold to static-data's end (check_driver_discard_scratch, #628), but for
-            // what they and check_program push into it again (BUSTER_CHECK_DRIVER_SCRATCH_REUSE).
-            check_driver_discard_scratch(scratch, lanes, scratch->length + BUSTER_CHECK_DRIVER_SCRATCH_REUSE * (uint64_t)checking->tokens.count);
+            // what they and check_program push into it again (BUSTER_CHECK_DRIVER_SCRATCH_REUSE): the parse's tokens, so
+            // that a unit read as its view (#2531) keeps what it would have kept read whole, which its next unit's parse
+            // pushes as far again.
+            check_driver_discard_scratch(scratch, lanes, scratch->length + BUSTER_CHECK_DRIVER_SCRATCH_REUSE * (uint64_t)parser->tokens.count);
             if (stage_clock != NULL && deferring)
             {
                 stage_clock->deferred = true;
@@ -12054,6 +12058,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         // A units lane with a unit left to take gives its scratch's pages back in whole huge pages
                         // (#777).
                         .discard_huge = lanes != NULL && lanes->units_lane != NULL && check_units_discard_huge(lanes->units_lane),
+                        // (A unit read as its view keeps what the parse's tokens the view leaves out would have taken.)
+                        .discard_keep = parser->tokens.count > checking->tokens.count ?
+                                        BUSTER_CHECK_DRIVER_SCRATCH_REUSE * (uint64_t)(parser->tokens.count - checking->tokens.count) : 0,
                     });
                     // A resume that read the whole unit (#147) checks its view as the semantic unit it is, its `prefix_only`
                     // keeping only the emission and the translation unit's end obligations back (`checking` the recovered
@@ -13460,10 +13467,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // The functions' unwind tables, as clang has them: by default, unless freestanding or an option turns them off.
     const bool unwind_tables = parsed && predefines_unwind_tables(&options.predefines, options.freestanding);
     options.defer_history = !lazy_system_headers && !scalar && !source_rows;
-    // With -g a unit's DWARF describes every type its table holds (c_check_debug_values.c), a skipped declaration's too, so
-    // -g skips nothing; --attested=verify, which skips nothing, still runs.
-    const uint8_t command_attested = (uint8_t)(scalar || (attested == CHECK_ATTESTED_MODE_ON && (options.predefines.debug || options.predefines.debug_modules)) ?
-                                               CHECK_ATTESTED_MODE_OFF : attested);
+    // (-g skips too: a unit's DWARF describes what its definitions reach, check_debug_value_roots, which a skipped
+    // declaration is not.)
+    const uint8_t command_attested = (uint8_t)(scalar ? CHECK_ATTESTED_MODE_OFF : attested);
     // A memo kept across processes is keyed by the compiler's build: one that can't be identified keeps none.
     uint64_t attested_key[2] = { 0 };
     const bool memo_keyed = parsed && attested_memo != NULL && command_attested != CHECK_ATTESTED_MODE_OFF &&

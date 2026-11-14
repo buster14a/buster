@@ -83,7 +83,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --operand-diagnostics-only | --label-attributes-only |
-  --attribute-recovery-only] [--in-process] [--clang-server PATH]
+  --attribute-recovery-only | --assert-bool-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; with
@@ -130,6 +130,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   typedef and qualifier spelling, and valid scalar/record/atomic-lvalue controls. The
   atomic conditional controls also compile, link and execute selections of integer,
   floating, pointer and aligned values through Clang and all three Buster routes.
+  `--assert-bool-only` runs `c_check_assert_bool_driver_test.c` alone, including
+  the original `tests/driver/assert_bool_*.c` sources for root and nested
+  boolean-conversion warnings in failed static assertions (#2409). It compares
+  complete diagnostics and exit status under warning promotion/suppression,
+  error limits, source policy, C17/C23, both reader choices and lane requests,
+  and verifies existing object-output preservation for rejected input.
   `--semantic-recovery-only` runs
   `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,
   `c_check_attribute_call_recovery_driver_test.c`,
@@ -894,6 +900,16 @@ requested lanes, syntax checks, object emission or preservation, and
 default/`-Werror`/`-w` policies compare complete diagnostics with Clang.
 These lane options exercise the existing scheduling requests; they do not by
 themselves establish that a particular body is admitted to deferred checking.
+
+`c_check_auto_qualifier_driver_test.c` uses that same harness for the original
+`tests/driver/auto-qualifiers/` sources (#1844): the rejected combination of
+atomic and restrict specifiers on `__auto_type` diagnoses each declarator,
+then drops restrict and continues atomic deduction. Specifier order, GNU
+spellings, macro locations, comma groups, missing initializers, recovered types,
+later errors and accepted neighboring declarations are checked in GNU17 and
+C23, including preservation of output after a rejected unit. A C23 constexpr
+comma group guards the continuation flags. The source names and expected
+diagnostic counts come from the runtime `cases.txt` catalog.
 
 `c_check_format_bitint_driver_test.c` adds 25 original fixtures to
 `test-checker-driver` through the shared default-warning harness. Independent

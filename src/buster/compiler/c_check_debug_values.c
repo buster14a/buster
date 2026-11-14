@@ -101,6 +101,9 @@ struct CheckDebugValues
     uint32_t* enum_owners;
     uint32_t* local_ids;
     uint32_t* scopes;
+    // By token: CHECK_DEBUG_ROOT where the token is in one of the unit's roots, CHECK_DEBUG_USED at a file-scope typedef's
+    // name that one names (check_debug_value_roots).
+    uint8_t* marks;
     const uint32_t* ends;
     DebugWriter info;
     DebugWriter ranges;
@@ -680,15 +683,24 @@ static uint32_t check_debug_home_expression(Tier0Home home, uint8_t class, bool 
     return (uint32_t)expression.size;
 }
 
+// Whether object declaration `token`'s object is defined in the unit: its symbol has an atom, its storage.
+static bool check_debug_value_defined(const CheckDebugValues* values, uint32_t token)
+{
+    const CheckInput* input = values->program->input;
+    const uint32_t object = input->objects[token];
+    const SymbolId symbol = object < values->program->object_count ? values->program->object_symbols[object] : 0;
+    const Link* link = values->rows->link;
+    return link != NULL && symbol != 0 && symbol < link->symbols.count && link->symbols.atom[symbol] != 0 &&
+           (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_OBJECT;
+}
+
 static void check_debug_value_variable(CheckDebugValues* values, uint32_t token, uint32_t body, uint32_t scope_end, bool parameter)
 {
     const CheckInput* input = values->program->input;
     const TypeId type = input->declared_types[token];
     const uint32_t object = input->objects[token];
     const SymbolId symbol = object < values->program->object_count ? values->program->object_symbols[object] : 0;
-    const Link* link = values->rows->link;
-    const bool defined = link != NULL && symbol != 0 && symbol < link->symbols.count && link->symbols.atom[symbol] != 0 &&
-                         (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_OBJECT;
+    const bool defined = check_debug_value_defined(values, token);
     const bool local = body < values->program->body_count;
     const CheckDebugBody* source = local ? values->rows->values + body : NULL;
     const uint32_t id = local ? values->local_ids[token] : BUSTER_CHECK_NONE;
@@ -783,6 +795,92 @@ static bool check_debug_value_declaration(const CheckInput* input, uint32_t toke
                                                   check_sparse_get(input->declaration_bodies, token) != BUSTER_CHECK_NONE);
 }
 
+#define CHECK_DEBUG_ROOT 1u
+#define CHECK_DEBUG_USED 2u
+#define CHECK_DEBUG_BODY 4u
+#define CHECK_DEBUG_SCANNED 8u
+
+// The unit's roots, as clang's DWARF has them (#2531): its file-scope declarations that define what the unit emits, a
+// function's body or an object's storage (any declaration of a defined object), with everything inside them; and the
+// file-scope typedefs whose names they bind (CheckInput.declarations), and those that such a typedef's declaration binds
+// in turn. Only these give the unit's DWARF its types, typedefs and variables: a prototype, an extern declaration, a
+// typedef or a tag that nothing defined in the unit names gives it nothing, as in clang's, which leaves out unused
+// types. So a file-scope declaration that the unit's definitions don't reach changes no -g object, and attested
+// declarations skip with -g (docs/attested-declarations.md): what the reach doesn't reach, no root binds.
+// `starts` gives each declaration's last token its first; `pending` is room for a declaration a token.
+static void check_debug_value_roots(CheckDebugValues* values, uint32_t* starts, uint32_t* pending)
+{
+    const CheckProgram* program = values->program;
+    const CheckInput* input = program->input;
+    const Parser* parser = values->parser;
+    const uint32_t tokens = input->token_count;
+    uint8_t* marks = values->marks;
+    memset(marks, 0, (uint64_t)tokens + 1);
+    for (uint32_t b = 0; b < program->body_count; b += 1)
+    {
+        const uint32_t declaration = program->bodies[b].declaration;
+        marks[declaration < tokens ? declaration : tokens] |= CHECK_DEBUG_BODY;
+    }
+    // Each file-scope declaration, its last token the tree's root (a declaration of a valid parse is a tree of its own):
+    // a root where one of its tokens declares a body or a defined object.
+    uint32_t first = 0;
+    bool defines = false;
+    for (uint32_t t = 0; t < tokens; t += 1)
+    {
+        const bool object = check_debug_value_declaration(input, t) && input->declaration_kinds[t] == C_BINDING_OBJECT && check_debug_value_defined(values, t);
+        defines |= object || (marks[t] & CHECK_DEBUG_BODY) != 0;
+        if (parser->tree.parents[t] == BUSTER_PARSE_ROOT)
+        {
+            starts[t] = first;
+            for (uint32_t u = first; defines && u <= t; u += 1)
+            {
+                marks[u] |= CHECK_DEBUG_ROOT;
+            }
+            first = t + 1;
+            defines = false;
+        }
+    }
+    // The typedefs the roots bind, then those their declarations bind: each declaration scanned once.
+    uint32_t count = 0;
+    for (uint32_t t = 0; t < tokens; t += 1)
+    {
+        if (parser->tree.parents[t] == BUSTER_PARSE_ROOT && (marks[t] & CHECK_DEBUG_ROOT) != 0)
+        {
+            marks[t] |= CHECK_DEBUG_SCANNED;
+            pending[count] = t;
+            count += 1;
+        }
+    }
+    while (count != 0)
+    {
+        count -= 1;
+        const uint32_t last = pending[count];
+        for (uint32_t t = starts[last]; t <= last; t += 1)
+        {
+            const uint32_t declaration = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER ? input->declarations[t] : BUSTER_CHECK_NONE;
+            const bool typedef_name = declaration < tokens && declaration != t && input->declaration_kinds[declaration] == C_BINDING_TYPEDEF &&
+                                      (marks[declaration] & (CHECK_DEBUG_USED | CHECK_DEBUG_ROOT)) == 0;
+            if (typedef_name)
+            {
+                marks[declaration] |= CHECK_DEBUG_USED;
+                // The typedef's declaration, scanned in turn: its own last token is the first at or after it whose parent is
+                // the root.
+                uint32_t end = declaration;
+                while (end < tokens && parser->tree.parents[end] != BUSTER_PARSE_ROOT)
+                {
+                    end += 1;
+                }
+                if (end < tokens && (marks[end] & CHECK_DEBUG_SCANNED) == 0)
+                {
+                    marks[end] |= CHECK_DEBUG_SCANNED;
+                    pending[count] = end;
+                    count += 1;
+                }
+            }
+        }
+    }
+}
+
 static void check_debug_values_write(CheckDebugValues* values)
 {
     const CheckProgram* program = values->program;
@@ -805,12 +903,14 @@ static void check_debug_values_write(CheckDebugValues* values)
     {
         const bool declaration = check_debug_value_declaration(input, token) && type_is_valid(program->types, input->declared_types[token]);
         const bool file = declaration && check_sparse_get(input->declaration_bodies, token) == BUSTER_CHECK_NONE;
-        if (file && input->declaration_kinds[token] == C_BINDING_TYPEDEF)
+        // (A file-scope typedef that a root names, and an object the unit defines: check_debug_value_roots.)
+        if (file && input->declaration_kinds[token] == C_BINDING_TYPEDEF && (values->marks[token] & (CHECK_DEBUG_USED | CHECK_DEBUG_ROOT)) != 0)
         {
             check_debug_value_typedef(values, token);
         }
         else if (file && input->declaration_kinds[token] == C_BINDING_OBJECT && input->objects[token] < program->object_count &&
-                 program->object_declarations[input->objects[token]] == token && parser->tokens.names[token] != 0)
+                 program->object_declarations[input->objects[token]] == token && parser->tokens.names[token] != 0 &&
+                 check_debug_value_defined(values, token))
         {
             check_debug_value_variable(values, token, program->body_count, input->token_count, false);
         }
@@ -884,6 +984,7 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
     values.enum_owners = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->enum_value_count + 1);
     values.local_ids = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1);
     values.scopes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1);
+    values.marks = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)tokens + 1);
     // The spans' index (#1640), room for the largest function's; without it, each list scans its function's spans.
     uint32_t most_spans = 0;
     for (uint32_t b = 0; b < program->body_count; b += 1)
@@ -899,15 +1000,18 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
     // Reuse the bounded statement-end derivation without changing the already checked program's status.
     CheckProgram traversal = *program;
     values.ends = parser->ends != NULL ? parser->ends : check_program_statement_ends(&traversal, parser, scratch);
-    bool valid = values.type_offsets != NULL && values.types != NULL && values.enum_definitions != NULL && values.enum_owners != NULL && values.local_ids != NULL && values.scopes != NULL && values.ends != NULL;
+    bool valid = values.type_offsets != NULL && values.types != NULL && values.enum_definitions != NULL && values.enum_owners != NULL && values.local_ids != NULL &&
+                 values.scopes != NULL && values.marks != NULL && values.ends != NULL;
     if (valid)
     {
         memset(values.type_offsets, 0, room * sizeof(uint32_t));
         memset(values.enum_definitions, 0, (uint64_t)table->types.count * sizeof(uint32_t));
+        // (The roots' scan takes the local ids and the scopes for its starts and its worklist, before either is used.)
+        check_debug_value_roots(&values, values.local_ids, values.scopes);
         memset(values.local_ids, 0xff, ((uint64_t)tokens + 1) * sizeof(uint32_t));
         for (uint32_t t = 0; t < tokens; t += 1)
         {
-            if (check_debug_value_declaration(input, t))
+            if (check_debug_value_declaration(input, t) && (values.marks[t] & (CHECK_DEBUG_ROOT | CHECK_DEBUG_USED)) != 0)
             {
                 check_debug_type_add(&values, input->declared_types[t]);
             }

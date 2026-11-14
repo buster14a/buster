@@ -74,6 +74,13 @@ struct Tier1CfgTestTally
     // Block entries where a recomputed value's register reads nothing before its recipe takes over, which its edges
     // then leave unfilled (tier1_cfg_entry_unread, #1217).
     uint64_t unread_entries;
+    // Of those, the intervals tier1_cfg_carried_unread proved, which carry the value to blocks that take it as their recipe
+    // (#2734), and the mutants that mark one it refused: a block it carries the value to reads its register, which the
+    // entry state leaves empty.
+    uint64_t carried_entries;
+    uint64_t carried_mutants;
+    uint64_t carried_killed;
+    uint64_t carried_refused;
     // The opmask class's share: moves of masks, spilled masks, and moves of masks at splits (around calls).
     uint64_t mask_moves;
     uint64_t mask_spills;
@@ -860,6 +867,10 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                     tally->unread_entries += found && kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && result.allocation.kinds[fragment] == BUSTER_TIER1_ALLOCATE_REGISTER;
                 }
             }
+            for (uint32_t i = 0; path == 0 && result.unread_entries != 0 && i < result.intervals.count; i += 1)
+            {
+                tally->carried_entries += result.unread_entries[i] != 0;
+            }
             tier1_cfg_test_expect(tally, (result.temp_slots & temp_slots) == temp_slots, "the case uses its temporary slots");
             tier1_cfg_test_expect(tally, result.move_count - result.edge_move_offsets[input->edge_count] >= split_moves, "the case moves values at its splits");
             if (mutate && path == 1)
@@ -930,6 +941,34 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                             tally->slot_killed += rejected;
                             tried += 1;
                         }
+                    }
+                }
+                // #2734: an interval of the carried proof's shape that it refused, marked as proven: a recomputed value's one
+                // register fragment, unused, over whole blocks. A block it carries the value to reads the register, which
+                // control now enters without.
+                tried = 0;
+                for (uint32_t i = 0; result.unread_entries != 0 && result.intervals.rematerializable != 0 && tried < 4 && i < result.intervals.count; i += 1)
+                {
+                    const uint32_t f = allocation->fragment_offsets[i];
+                    const uint32_t first = tier1_cfg_block_of(input, result.intervals.starts[i]);
+                    const uint32_t last = tier1_cfg_block_of(input, result.intervals.ends[i] - 1);
+                    const bool shaped = result.unread_entries[i] == 0 && result.intervals.rematerializable[i] != 0 && allocation->fragment_offsets[i + 1] - f == 1 &&
+                                        allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && result.intervals.use_offsets[i] == result.intervals.use_offsets[i + 1] &&
+                                        input->definitions[result.intervals.values[i]] != result.intervals.starts[i] && input->block_starts[first] == result.intervals.starts[i] &&
+                                        input->block_starts[last + 1] == result.intervals.ends[i];
+                    bool operand = false;
+                    for (uint32_t o = 0; shaped && o < input->phi_operand_offsets[input->phi_count]; o += 1)
+                    {
+                        operand = operand || input->phi_operands[o] == result.intervals.values[i];
+                    }
+                    if (shaped && !operand)
+                    {
+                        result.unread_entries[i] = 1;
+                        const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->carried_refused);
+                        result.unread_entries[i] = 0;
+                        tally->carried_mutants += 1;
+                        tally->carried_killed += rejected;
+                        tried += 1;
                     }
                 }
                 // Order: a move run before one that reads what it writes, where that location is written once on the
@@ -2411,6 +2450,8 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         tier1_cfg_test_expect(&tally, tally.mask_moves != 0 && tally.mask_spills != 0 && tally.mask_split_moves != 0, "the opmask class moves, spills and splits masks");
         tier1_cfg_test_expect(&tally, count < 100 || tally.undefined_operands != 0, "the cases reach undefined phi operands");
         tier1_cfg_test_expect(&tally, count < 500 || tally.unread_entries != 0, "the cases reach block entries whose recomputed value's register reads nothing");
+        tier1_cfg_test_expect(&tally, tally.carried_killed == tally.carried_mutants && (count < 500 || (tally.carried_entries != 0 && tally.carried_mutants != 0)),
+                              "the cases reach entries the carried proof takes and ones it refuses, and every refused one marked fails the checker");
         // #939: every allocation's certificate proved, and the oracle reached some of them.
         tier1_cfg_test_expect(&tally, tally.certificates == tally.allocations && tally.oracle_certificates != 0, "every allocation's certificate is proved, the oracle's share among them");
         // A mutant that moves a value wrongly must fail the certificate too: every order, definition and split
@@ -2418,13 +2459,13 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         // names of equal contents in one register at a block's start, a mask in k0 for a fragment nothing reads), and
         // the certificate never refuses what the verifier accepts.
         tier1_cfg_test_expect(&tally, tally.order_refused == tally.order_mutants && tally.definition_refused == tally.definition_mutants && tally.destination_refused == tally.destination_mutants, "every order, definition and split destination mutant fails the certificate");
-        tier1_cfg_test_expect(&tally, tally.certificate_only == 0 && tally.verifier_only == (tally.interference_mutants - tally.interference_refused) + (tally.k0_mutants - tally.k0_refused) + (tally.slot_mutants - tally.slot_refused), "the certificate refuses no mutant the verifier accepts");
+        tier1_cfg_test_expect(&tally, tally.certificate_only == 0 && tally.verifier_only == (tally.interference_mutants - tally.interference_refused) + (tally.k0_mutants - tally.k0_refused) + (tally.slot_mutants - tally.slot_refused) + (tally.carried_mutants - tally.carried_refused), "the certificate refuses no mutant the verifier accepts");
         // #2538: the one-call order reaches a taken preference, a refused one, a constraint that frees the definitions and a
         // case with fixed ranges.
         tier1_cfg_test_expect(&tally, count < 500 || (tally.two_taken != 0 && tally.two_refused != 0 && tally.two_freed != 0 && tally.two_fixed != 0), "two problems reach every outcome");
         // A malformed shape must fail both, before either reads through it (#1142's review).
         tier1_cfg_test_expect(&tally, tally.shape_mutants != 0 && tally.shape_killed == tally.shape_mutants && tally.shape_refused == tally.shape_mutants, "every malformed shape fails both checkers");
-        printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0, %" PRIu64 " of %" PRIu64 " shared slot; %" PRIu64 " values in a phi web's slot, %" PRIu64 " entries left to their recipes (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, tally.slot_killed, tally.slot_mutants, tally.shared_slots, tally.unread_entries, seed, count);
+        printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0, %" PRIu64 " of %" PRIu64 " shared slot; %" PRIu64 " values in a phi web's slot, %" PRIu64 " entries left to their recipes, %" PRIu64 " carried, %" PRIu64 " of %" PRIu64 " carried mutants rejected (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, tally.slot_killed, tally.slot_mutants, tally.shared_slots, tally.unread_entries, tally.carried_entries, tally.carried_killed, tally.carried_mutants, seed, count);
         printf("test-tier1-cfg: certificates: %" PRIu64 " proved (%" PRIu64 " by the oracle too), %" PRIu64 " facts, %" PRIu64 " edits, %" PRIu64 " operands, %" PRIu64 " renames; mutants refused: %" PRIu64 " interference, %" PRIu64 " order, %" PRIu64 " definition, %" PRIu64 " split destination, %" PRIu64 " k0, %" PRIu64 " shared slot, %" PRIu64 " of %" PRIu64 " shape; %" PRIu64 " refused by the certificate alone, %" PRIu64 " by the verifier alone\n", tally.certificates, tally.oracle_certificates, tally.certificate_facts, tally.certificate_edits, tally.certificate_operands, tally.certificate_renames, tally.interference_refused, tally.order_refused, tally.definition_refused, tally.destination_refused, tally.k0_refused, tally.slot_refused, tally.shape_refused, tally.shape_mutants, tally.certificate_only, tally.verifier_only);
         printf("test-tier1-cfg: two problems in one call and in two: %" PRIu64 " cases, %" PRIu64 " preferred allocations taken, %" PRIu64 " refused, %" PRIu64 " freed of their definitions' registers; %" PRIu64 " with fixed ranges refused another column\n", tally.two_cases, tally.two_taken, tally.two_refused, tally.two_freed, tally.two_fixed);
         result = tally.failures == 0 ? 0 : 1;

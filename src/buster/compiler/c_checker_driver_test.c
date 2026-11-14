@@ -958,8 +958,10 @@ static void check_test_driver_static_label(CheckTest* test, const char* executab
 // calls (`arm`) and one only an association _Generic doesn't select names (`association`), and leaves out of its symbols
 // a string literal only sizeof reads and memcpy, a call of which the code computes, the report's three censuses, by both
 // paths: each a superset (no body misses a reference); the walk's selection keeps both functions, the scan's both and
-// the two symbols, the pruned scan's the association alone; then the ticks' line. A unit of overloads has no scan, and one
-// of one function the same references everywhere. Each object is the one without the option.
+// the two symbols, the pruned scan's the association alone, by the writer's dropped arms and by its own (the pass before
+// the bodies' controls, #2536's step 2.2); then the ticks' line. A unit of overloads has no scan, one of one function the
+// same references everywhere, and one of constant arms tells the writer's dropped arms from the pass's: a constant
+// switch's dead case, which only the writer leaves out. Each object is the one without the option.
 static void check_test_driver_selection_census(CheckTest* test, const char* executable, const char* directory)
 {
     static const char program[] = "static int arm(void) { return 1; }\n"
@@ -988,31 +990,80 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
                                     "static int __attribute__((overloadable)) pick(double x) { return (int)x; }\n"
                                     "int main(void) { return pick(1); }\n";
     static const char plain[] = "int main(void) { return 0; }\n";
-    static const char* const sources[] = { program, overloads, plain };
-    static const char* const expected[][5] = {
+    // A constant switch's dead case, which the writer leaves out and the pass keeps, a constant if's dead else, which both
+    // leave out, and an if (0)'s arm that a goto enters, which both keep.
+    static const char arms[] = "static int dead_case(void) { return 7; }\n"
+                               "static int live_case(void) { return 8; }\n"
+                               "static int else_arm(void) { return 9; }\n"
+                               "static int entered(void) { return 10; }\n"
+                               "int main(int argc, char** argv)\n"
+                               "{\n"
+                               "    int r = 0;\n"
+                               "    (void)argv;\n"
+                               "    switch (2)\n"
+                               "    {\n"
+                               "    case 1:\n"
+                               "        r = dead_case();\n"
+                               "        break;\n"
+                               "    case 2:\n"
+                               "        r = live_case();\n"
+                               "        break;\n"
+                               "    }\n"
+                               "    if (1)\n"
+                               "    {\n"
+                               "        r += 1;\n"
+                               "    }\n"
+                               "    else\n"
+                               "    {\n"
+                               "        r += else_arm();\n"
+                               "    }\n"
+                               "    if (argc > 5)\n"
+                               "    {\n"
+                               "        goto inside;\n"
+                               "    }\n"
+                               "    if (0)\n"
+                               "    {\n"
+                               "    inside:\n"
+                               "        r += entered();\n"
+                               "    }\n"
+                               "    return r;\n"
+                               "}\n";
+    static const char* const sources[] = { program, overloads, plain, arms };
+    static const char* const expected[][6] = {
         {
             "selection-census\tbodies\t5\tdropped\t1\tselected-bodies\t3\t",
             "\twalk\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t2\textra-symbols\t2\t",
             "\tscan\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t2\textra-symbols\t4\t",
-            "\tarms\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t1\textra-symbols\t1\n",
+            "\tarms\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t1\textra-symbols\t1\t",
+            "\tpass\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t1\textra-symbols\t1\n",
             "\nselection-census-ticks\treferences\t",
         },
         {
             "selection-census\tbodies\t3\tdropped\t0\tselected-bodies\t2\t",
             "\twalk\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\t",
             "\tscan\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tnone\t",
-            "\tarms\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tnone\textra-bodies\t0\textra-symbols\t0\n",
+            "\tarms\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tnone\textra-bodies\t0\textra-symbols\t0\t",
+            "\tpass\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tnone\textra-bodies\t0\textra-symbols\t0\n",
             "\nselection-census-ticks\treferences\t",
         },
         {
             "selection-census\tbodies\t1\tdropped\t0\tselected-bodies\t1\t",
             "\twalk\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\t",
             "\tscan\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\t",
-            "\tarms\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\textra-bodies\t0\textra-symbols\t0\n",
+            "\tarms\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\textra-bodies\t0\textra-symbols\t0\t",
+            "\tpass\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\textra-bodies\t0\textra-symbols\t0\n",
+            "\nselection-census-ticks\treferences\t",
+        },
+        {
+            "selection-census\tbodies\t5\tdropped\t1\tselected-bodies\t3\t",
+            "\twalk\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t2\textra-symbols\t2\t",
+            "\tscan\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t2\textra-symbols\t2\t",
+            "\tarms\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\textra-bodies\t0\textra-symbols\t0\t",
+            "\tpass\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t1\textra-symbols\t1\n",
             "\nselection-census-ticks\treferences\t",
         },
     };
-    static const char* const names[] = { "dead calls", "overloads", "one function" };
+    static const char* const names[] = { "dead calls", "overloads", "one function", "constant arms" };
     char source[256];
     char object[256];
     char reference[256];
@@ -8703,6 +8754,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_generic_attribute_driver_test.c"
 #include "c_check_unused_result_driver_test.c"
 #include "c_check_address_space_driver_test.c"
+#include "c_check_auto_qualifier_driver_test.c"
 #include "c_check_sizeof_array_decay_driver_test.c"
 #include "c_check_format_bitint_driver_test.c"
 #include "c_check_shift_count_driver_test.c"
@@ -8871,6 +8923,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool attribute_recovery_only = false;
     // --operand-diagnostics-only: rejected record and atomic operands, including constant contexts (#2441).
     bool operand_diagnostics_only = false;
+    // --assert-bool-only: static assertion boolean conversions, including rejected trees (#2409).
+    bool assert_bool_only = false;
     // --type-sugar-only: the type sugar section alone (#1447).
     bool type_sugar_only = false;
     // --asm-definitions-only: what inline assembly defines, against clang's objects and builds, alone (#1848).
@@ -8917,6 +8971,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--operand-diagnostics-only") == 0)
         {
             operand_diagnostics_only = true;
+        }
+        else if (strcmp(argv[i], "--assert-bool-only") == 0)
+        {
+            assert_bool_only = true;
         }
         else if (strcmp(argv[i], "--type-sugar-only") == 0)
         {
@@ -8966,7 +9024,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
                              (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only +
-                             (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only;
+                             (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -9500,6 +9558,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_operand_diagnostics(&test, clang, executable, directory);
     }
+    if (temporary && assert_bool_only)
+    {
+        check_test_driver_assert_bool(&test, clang, executable, directory);
+    }
     if (temporary && call_counts_only)
     {
         check_test_driver_call_counts(&test, clang, executable, directory);
@@ -9730,6 +9792,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_generic_attributes,
             check_test_driver_unused_results,
             check_test_driver_address_spaces,
+            check_test_driver_auto_qualifiers,
             check_test_driver_sizeof_array_decay,
         };
         for (uint32_t s = 0; !lazy && s < BUSTER_ARRAY_LENGTH(sweeps); s += 1)
