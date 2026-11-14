@@ -1155,7 +1155,7 @@ struct ParseTree
 };
 
 // The spellings of the attributes whose arguments clang's parser reads its own way (parse_scalar_custom_attribute).
-#define BUSTER_PARSE_CUSTOM_ATTRIBUTES 12u
+#define BUSTER_PARSE_CUSTOM_ATTRIBUTES 14u
 
 // The bindings a parse starts from: a meaning for every IdentId, PARSE_MEANING_ORDINARY but for clang's predeclared
 // typedef names, which every parse leaves as it found them.
@@ -1167,7 +1167,7 @@ struct ParseMeanings
     // The scalar parser reads attribute spellings only where they decide declaration versus statement syntax.
     const InternTable* table;
     // availability's, external_source_symbol's, type_tag_for_datatype's, objc_bridge_related's, swift_newtype's and
-    // swift_wrapper's names, and their keyword spellings (#1447), found once in `table` where the meanings are made (0 for a name the unit doesn't have):
+    // swift_wrapper's and suppress's names, and their keyword spellings (#1447, #2332), found once in `table` where the meanings are made (0 for a name the unit doesn't have):
     // parse_flag_custom_attributes reads these, not the table, which a caller may have released by then (the parser
     // benchmark's is).
     IdentId custom_attributes[BUSTER_PARSE_CUSTOM_ATTRIBUTES];

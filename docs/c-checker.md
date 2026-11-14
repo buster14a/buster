@@ -6867,9 +6867,26 @@ incompatible one (`check_driver_conversion_source` keeps an rvalue's atomic
 type, where an lvalue's is its value's): "initializing 'int' with an
 expression of incompatible type '_Atomic(int)'", a pointer's and a `_Bool`'s
 too. A variadic argument's, clang's `-Wnon-pod-varargs` error, is refused by
-name. Other operators refuse it in the checker's words as they refuse a
-record's (clang's "invalid argument type '_Atomic(int)' to unary expression",
-"statement requires expression of scalar type", #2441). Buster's `-c` emits
+name. Invalid unary, binary, conditional, indirection and address operators
+name their operands as clang does, retaining typedef spelling and dropping
+lvalue qualifiers only where the language conversion does (#2441).
+Statement conditions distinguish scalar requirements from a switch's integer
+requirement and point to the statement keyword. Assertions require a scalar
+type and case labels an integer type before constant evaluation; GNU constant
+folding cannot make an atomic rvalue satisfy either constraint or add a folding
+warning for that rejected type. Rejected assertions retain their comma-operand
+warnings through the existing source events before recovery drops the condition.
+The cold renderer supplies the contextual boolean and integer-constant type
+diagnostics. An enumerator with a noninteger value reports its type and recovers
+to the ordinary implicit successor; later enumerators and declarations are still
+checked. Its expression warnings precede the type error, which in turn precedes
+any overflow of the recovered value or name redefinition error. Two conditional arms
+with the same canonical atomic type retain that type; aliases and alignment
+inside it do not make it different, while an
+atomic enum and its compatible integer type remain distinct. The original runtime fixtures
+in `tests/driver/operand_diagnostics/` compare the complete output through both
+readers and deferred bodies under gnu17 and C23, and execute selections of atomic
+integer, floating and pointer values. Buster's `-c` emits
 the static initializers clang's code generation refuses ("cannot compile this
 static initializer yet" for `_Atomic(int *) p = (_Atomic(int *))&x;`).
 
@@ -8757,10 +8774,18 @@ change, it refused such a declaration by name.
   (`suppress(("a"))`, clang's `checkStringLiteralArgumentAttr`); a non-string
   inside them (`suppress((1))`, #2332) is the string error, then the parser's
   "expected ')'" at the same token, noted "to match this '('" at the innermost
-  `(` (`check_input_attribute_suppress_paren`). Not yet clang's: arguments
-  clang's parser itself rejects (`suppress("a",)`, `suppress("a" x)`), after
-  whose first error clang's parser goes on and buster's parser stops; and an
-  implicit int's declaration after a statement's attributes (`__attribute__((unused))
+  `(`. Both parser paths retain balanced string lists for
+  `check_input_attribute_suppress_parse`, including malformed tails such as
+  `suppress("a",)` and `suppress("a" x)`. Their delimiter errors and notes keep
+  clang's locations and order, and later independent declarations are checked.
+  An empty parenthesized argument has only its string-literal error. A malformed
+  GNU outer tail discards the following complete semicolon-bounded declaration,
+  so its name cannot hide a later undeclared-name error; a C23 list keeps its
+  declaration. The original `tests/driver/attribute_recovery.c` fixtures compare
+  both language modes, readers, warning policy, deferred checking and output
+  preservation. Mixed statement/nonstatement attributes, string subscripts and
+  unmatched outer lists still have recovery gaps. So does an implicit int's
+  declaration after a statement's attributes (`__attribute__((unused))
   (x)++;`), whose redeclaration errors and `-Wignored-attributes` warning
   clang's Sema gives after the parser's errors, which stop buster (#2332). The calls
   are clang's `CallExprFinder`'s (`check_input_statement_call`): a call's

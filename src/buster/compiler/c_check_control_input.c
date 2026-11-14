@@ -188,6 +188,22 @@ static bool check_input_label_suppress_literal(const Parser* parser, uint32_t na
             stop = group > stop && group < close ? group + 1 : stop + 1;
         }
         result = check_input_attribute_suppress_literal(parser, argument, stop) != BUSTER_CHECK_NONE;
+        uint32_t token = argument;
+        while (!result && token < stop && kinds[token] == PARSE_KIND_L_PAREN)
+        {
+            token += 1;
+        }
+        uint32_t open = token;
+        while (!result && token < stop && kinds[token] == PARSE_KIND_STRING)
+        {
+            token += 1;
+        }
+        while (!result && open > argument)
+        {
+            open -= 1;
+            token = parser->tree.parents[open] + 1;
+        }
+        result |= token < stop;
         argument = stop + 1;
     }
     return result;
@@ -1097,6 +1113,7 @@ static bool check_input_suppress_dropped(CheckInputReader* reader, uint32_t firs
                 bool done = suppress && (end == item + 1 || (at < end && parser->tokens.kinds[at] == PARSE_KIND_R_PAREN));
                 while (suppress && !done && !malformed && at < end)
                 {
+                    const uint32_t argument = at;
                     uint32_t level = 0;
                     while (at < end && parser->tokens.kinds[at] == PARSE_KIND_L_PAREN)
                     {
@@ -1108,14 +1125,18 @@ static bool check_input_suppress_dropped(CheckInputReader* reader, uint32_t firs
                     {
                         at += 1;
                     }
-                    while (string && level != 0 && at < end && parser->tokens.kinds[at] == PARSE_KIND_R_PAREN)
+                    while (string && level != 0)
                     {
                         level -= 1;
-                        at += 1;
+                        // A valid literal with a malformed inner tail survives its pair's recovery. Only an invalid
+                        // literal or a tail outside all its pairs drops suppress (#2332).
+                        at = parser->tree.parents[argument + level] + 1;
                     }
                     const uint8_t next = at < end ? parser->tokens.kinds[at] : PARSE_KIND_END;
-                    malformed = !string || level != 0 || (next != PARSE_KIND_COMMA && next != PARSE_KIND_R_PAREN);
-                    done = next == PARSE_KIND_R_PAREN;
+                    // A tail outside the literal's pairs has already reported the leftover attribute delimiter as
+                    // an invalid declaration start. It does not also diagnose the following statement's token.
+                    malformed = !string;
+                    done = next != PARSE_KIND_COMMA;
                     at += 1;
                 }
                 all = suppress && malformed && parser->tokens.kinds[item + 1] == PARSE_KIND_L_PAREN;
@@ -1212,7 +1233,12 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
         // an implicit int's declarator, whose errors and Sema's that follow are left out.)
         if (expression && gnu && !head && next != PARSE_KIND_L_PAREN && next != PARSE_KIND_STAR && check_input_suppress_dropped(reader, first, after))
         {
+            const uint32_t reports = reader->output->report_count;
             check_input_report(reader, after, CHECK_INPUT_DROPPED_SUPPRESS_DECLARATION);
+            if (reader->output->report_count > reports)
+            {
+                check_input_recover_reports(reader, reports);
+            }
         }
         uint32_t musttail = BUSTER_CHECK_NONE;
         valid = valid && check_input_statement_attribute_kinds(reader, attributes, empty, returns, after, &musttail);

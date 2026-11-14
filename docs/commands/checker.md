@@ -82,7 +82,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
-  --asm-definitions-only | --call-counts-only | --fp-contract-only] [--in-process] [--clang-server PATH]
+  --asm-definitions-only | --call-counts-only | --fp-contract-only | --operand-diagnostics-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; with
@@ -119,7 +119,17 @@ unused-warning fixtures also check exact scope-completion tokens.
   plain row; `--cpu-dispatch-only` runs the `cpu_specific` and
   `cpu_dispatch` section alone, #1447; `--target-versions-only` runs GNU multiversioning's `target` and
   `target_clones` section alone, #1838; `--asm-definitions-only` runs what
-  inline assembly defines against clang's objects alone, #1848; `--semantic-recovery-only` runs
+  inline assembly defines against clang's objects alone, #1848; `--operand-diagnostics-only` runs
+  the original runtime sources in `tests/driver/operand_diagnostics/` against Clang's complete
+  diagnostics for invalid record and atomic operators, statement conditions, assertions and
+  case labels and enumerators (#2441). Enum controls also check implicit successors,
+  fixed underlying types, overflow and redefinition ordering. It checks gnu17 and C23,
+  error promotion/suppression, scalar/vector
+  readers and one/three requested lanes, deferred bodies, existing output preservation,
+  typedef and qualifier spelling, and valid scalar/record/atomic-lvalue controls. The
+  atomic conditional controls also compile, link and execute selections of integer,
+  floating, pointer and aligned values through Clang and all three Buster routes.
+  `--semantic-recovery-only` runs
   `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,
   `c_check_type_attribute_recovery_driver_test.c`,
   `c_check_structural_recovery_driver_test.c` and `c_check_repaired_view_driver_test.c` alone, the whole output and status

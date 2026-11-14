@@ -8585,6 +8585,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_unused_local_typedef_driver_test.c"
 #include "c_check_alignment_builtin_driver_test.c"
 #include "c_check_lvalue_cast_driver_test.c"
+#include "c_check_operand_diagnostic_driver_test.c"
 #include "c_check_default_error_driver_test.c"
 #include "c_check_shift_sign_overflow_driver_test.c"
 #include "c_check_assign_enum_driver_test.c"
@@ -8766,6 +8767,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool target_versions_only = false;
     // --semantic-recovery-only: the semantic error recovery section alone (#1447).
     bool semantic_recovery_only = false;
+    // --operand-diagnostics-only: rejected record and atomic operands, including constant contexts (#2441).
+    bool operand_diagnostics_only = false;
     // --type-sugar-only: the type sugar section alone (#1447).
     bool type_sugar_only = false;
     // --asm-definitions-only: what inline assembly defines, against clang's objects and builds, alone (#1848).
@@ -8800,6 +8803,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--semantic-recovery-only") == 0)
         {
             semantic_recovery_only = true;
+        }
+        else if (strcmp(argv[i], "--operand-diagnostics-only") == 0)
+        {
+            operand_diagnostics_only = true;
         }
         else if (strcmp(argv[i], "--type-sugar-only") == 0)
         {
@@ -8848,7 +8855,8 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
     }
     const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
-                             (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only;
+                             (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only +
+                             (uint32_t)operand_diagnostics_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -9365,6 +9373,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_type_sugar(&test, clang, executable, directory);
     }
+    if (temporary && operand_diagnostics_only)
+    {
+        check_test_driver_operand_diagnostics(&test, clang, executable, directory);
+    }
     if (temporary && call_counts_only)
     {
         check_test_driver_call_counts(&test, clang, executable, directory);
@@ -9571,6 +9583,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_unused_local_typedef,
             check_test_driver_alignment_builtins,
             check_test_driver_lvalue_casts,
+            check_test_driver_operand_diagnostics,
             check_test_driver_default_errors,
             check_test_driver_shift_sign_overflow,
             check_test_driver_assign_enum,
