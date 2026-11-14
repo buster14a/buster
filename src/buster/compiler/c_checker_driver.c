@@ -10354,6 +10354,11 @@ struct CheckDriverCommand
     // --attested=MODE (#2531): what a command of several source files does with the file-scope declarations its lanes'
     // earlier units read silently and purely (CheckAttestedMode, c_check_attested.c).
     uint8_t attested;
+    // --attested-memo=DIRECTORY (#2531's step 4): the directory of the memos kept across processes, where a command of
+    // any number of source files loads its lanes' memos and keeps what they learn, or null; and its file's key, the
+    // compiler's build and the command's options (check_attested_memo_key).
+    const char* attested_memo;
+    uint64_t attested_key[2];
     // -Wreturn-type's: whether to warn, whether -Werror promotes it, and -Werror=return-type's (1) or
     // -Wno-error=return-type's (-1) say.
     bool return_warning;
@@ -11024,7 +11029,18 @@ static bool check_attested_read(CheckAttested* attested, CheckInput* input, cons
 static void check_attested_contradiction(const CheckAttested* attested, Preprocessor* pp, FILE* errors);
 static bool check_attested_verifying(const CheckAttested* attested);
 // The parse a unit's reader took and the stages after it take (step 3's view where the unit skipped, the parse otherwise).
-static const Parser* check_attested_parse(const CheckAttested* attested, const Parser* parser);
+static Parser* check_attested_parse(CheckAttested* attested, Parser* parser);
+// Step 4's memo kept across processes: its key for a command, and a command of one source file's state (a units' run's
+// lanes open theirs, c_checker_units.c), whose unit is read again where it skipped and failed.
+static bool check_attested_memo_key(int count, char** arguments, char* const* inputs, uint32_t input_count, uint64_t* key);
+static CheckAttested* check_attested_lane_open(uint8_t mode, const char* memo, const uint64_t* key, bool alone);
+static void check_attested_lane_close(CheckAttested* attested);
+static void check_attested_begin(CheckAttested* attested, bool again);
+static bool check_attested_again(const CheckAttested* attested, bool failed);
+static void check_attested_summary(const CheckAttested* attested, uint64_t* counts);
+// The last command's counts of attested declarations (c_checker_units.c), which a command of one source file with a memo
+// kept across processes gives too, for the tests.
+static uint64_t check_units_attested_last[CHECK_ATTESTED_SUMMARY];
 
 static int check_driver_unit(const CheckDriverCommand* command, const PPOptions* options, const char* path, InternTable* identifiers, Preprocessor* pp,
                              Parser* parser, Arena* arena, Arena* scratch, Arena* output_arena, CheckProgramLanes* lanes, CheckClock* stage_clock,
@@ -11038,7 +11054,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     // The thread's last arena failure as the unit starts, against which its end tells a commit the unit was refused.
     const ArenaFailure failure_before = arena_failure;
     // #2531's attested declarations: the lane's state where the unit is one of a command's several (none for the census's).
-    CheckAttested* const attested = check_driver_attested == NULL && lanes != NULL && lanes->units_lane != NULL ? check_units_attested(lanes->units_lane) : NULL;
+    CheckAttested* const attested = check_driver_attested != NULL || lanes == NULL ? NULL :
+                                    lanes->units_lane != NULL ? check_units_attested(lanes->units_lane) : lanes->attested;
     const bool scalar = command->scalar;
     const bool verify = command->verify;
     const bool dump = command->dump;
@@ -12275,9 +12292,52 @@ static int check_driver_one_unit(const CheckDriverRun* run)
     DependencyOutput dependency = { 0 };
     PPOptions options = run->command->options;
     options.preprocessed = run->command->inputs != NULL && run->command->inputs[0].preprocessed;
+    // A memo kept across processes (#2531's step 4): the unit's attested declarations' state, and its diagnostics into a
+    // stream of their own, which a unit that skipped and failed is read into again from its start with nothing skipped (as
+    // a units' run's lanes read theirs, check_units_compile), then given to stderr.
+    CheckAttested* const attested = run->command->attested_memo != NULL && !run->command->deferred_bodies ?
+                                    check_attested_lane_open(run->command->attested, run->command->attested_memo, run->command->attested_key, true) : NULL;
+    FILE* const stream = attested != NULL ? tmpfile() : NULL;
+    FILE* const errors = stream != NULL ? stream : stderr;
+    run->lanes->attested = stream != NULL ? attested : NULL;
+    const uint64_t marks[3] = { run->arena->length, run->scratch->length, run->output_arena->length };
+    check_attested_begin(run->lanes->attested, false);
     int result = check_driver_unit(run->command, &options, run->path, interned ? &identifiers : NULL, &pp, &parser, run->arena, run->scratch,
-                                  run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, stderr, NULL, run->release, &dependency, run->arena,
+                                  run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, errors, NULL, run->release, &dependency, run->arena,
                                   run->command->deferred_bodies ? &deferred : NULL, NULL);
+    if (check_attested_again(run->lanes->attested, result != 0))
+    {
+        fflush(errors);
+        result = fseeko(errors, 0, SEEK_SET) == 0 && ftruncate(fileno(errors), 0) == 0 ? result : 1;
+        arena_pop_to(run->arena, marks[0]);
+        arena_pop_to(run->scratch, marks[1]);
+        arena_pop_to(run->output_arena, marks[2]);
+        dependency = (DependencyOutput){ 0 };
+        check_attested_begin(run->lanes->attested, true);
+        result = check_driver_unit(run->command, &options, run->path, interned ? &identifiers : NULL, &pp, &parser, run->arena, run->scratch,
+                                   run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, errors, NULL, run->release, &dependency, run->arena, NULL, NULL);
+    }
+    if (stream != NULL)
+    {
+        // The unit's diagnostics, the last reading's.
+        fflush(stream);
+        rewind(stream);
+        char block[4096];
+        size_t length = fread(block, 1, sizeof(block), stream);
+        while (length != 0)
+        {
+            fwrite(block, 1, length, stderr);
+            length = fread(block, 1, sizeof(block), stream);
+        }
+        fclose(stream);
+    }
+    run->lanes->attested = NULL;
+    if (attested != NULL)
+    {
+        memset(check_units_attested_last, 0, sizeof(check_units_attested_last));
+        check_attested_summary(attested, check_units_attested_last);
+    }
+    check_attested_lane_close(attested);
     if (result == 0)
     {
         result = dependency_publish(&dependency, stderr) ? 0 : 1;
@@ -12498,6 +12558,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // --attested=on|verify|off (CheckAttestedMode).
     CheckAttestedMode attested = CHECK_ATTESTED_MODE_ON;
     bool invalid_attested = false;
+    const char* attested_memo = NULL;
     // --lower-all lowers every definition that may be emitted, referenced or not: #129's test option, to measure what
     // lowering only the referenced ones saves.
     bool lower_all = false;
@@ -12882,6 +12943,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             attested = strcmp(mode, "on") == 0 ? CHECK_ATTESTED_MODE_ON : strcmp(mode, "verify") == 0 ? CHECK_ATTESTED_MODE_VERIFY : CHECK_ATTESTED_MODE_OFF;
             invalid_attested |= strcmp(mode, "on") != 0 && strcmp(mode, "verify") != 0 && strcmp(mode, "off") != 0;
         }
+        else if (match.joined == C_OPTION_ATTESTED_MEMO_EQ)
+        {
+            attested_memo = arguments[i] + 16;
+            invalid_attested |= attested_memo[0] == 0;
+        }
         else if (match.joined == C_OPTION_UNITS_MEMORY_EQ)
         {
             char* end = NULL;
@@ -13088,6 +13154,18 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // The functions' unwind tables, as clang has them: by default, unless freestanding or an option turns them off.
     const bool unwind_tables = parsed && predefines_unwind_tables(&options.predefines, options.freestanding);
     options.defer_history = !lazy_system_headers && !scalar && !source_rows;
+    // With -g a unit's DWARF describes every type its table holds (c_check_debug_values.c), a skipped declaration's too, so
+    // -g skips nothing; --attested=verify, which skips nothing, still runs.
+    const uint8_t command_attested = (uint8_t)(scalar || (attested == CHECK_ATTESTED_MODE_ON && (options.predefines.debug || options.predefines.debug_modules)) ?
+                                               CHECK_ATTESTED_MODE_OFF : attested);
+    // A memo kept across processes is keyed by the compiler's build: a build without an ID keeps none.
+    uint64_t attested_key[2] = { 0 };
+    const bool memo_keyed = parsed && attested_memo != NULL && command_attested != CHECK_ATTESTED_MODE_OFF &&
+                            check_attested_memo_key(count, arguments, inputs, input_count, attested_key);
+    if (parsed && attested_memo != NULL && command_attested != CHECK_ATTESTED_MODE_OFF && !memo_keyed)
+    {
+        fprintf(stderr, "warning: --attested-memo keeps no memo: the compiler has no build ID\n");
+    }
     const CheckDriverCommand command = {
         .options = options,
         .scalar = scalar,
@@ -13100,10 +13178,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .lower_all = lower_all,
         // The scalar path keeps source order's reader, the twin the deferred one is checked against.
         .deferred_bodies = deferred_bodies && !scalar,
-        // With -g a unit's DWARF describes every type its table holds (c_check_debug_values.c), a skipped declaration's
-        // too, so -g skips nothing; --attested=verify, which skips nothing, still runs.
-        .attested = (uint8_t)(scalar || (attested == CHECK_ATTESTED_MODE_ON && (options.predefines.debug || options.predefines.debug_modules)) ? CHECK_ATTESTED_MODE_OFF :
-                              attested),
+        .attested = command_attested,
+        .attested_memo = command_attested != CHECK_ATTESTED_MODE_OFF && memo_keyed ? attested_memo : NULL,
+        .attested_key = { attested_key[0], attested_key[1] },
         .return_warning = return_warning,
         .warning_errors = warning_errors,
         .return_error = return_error,
@@ -13165,7 +13242,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-function-sizes] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }

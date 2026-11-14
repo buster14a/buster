@@ -806,6 +806,9 @@ struct CheckProgramLanes
     // In a units' run, the lane of the unit that these lanes' emission is (c_checker_units.c), whose unit takes its
     // estimated peak from the run's memory once preprocessed (#1109, check_units_admit). Null elsewhere.
     struct CheckUnitsLane* units_lane;
+    // A command of one source file's attested declarations' state, where it keeps a memo across processes (#2531's step 4,
+    // --attested-memo, check_driver_one_unit). Null elsewhere: a units' run's lanes have theirs.
+    struct CheckAttested* attested;
     // A test's tokens that lane 0 of a growing team (CheckEmitGrowth) writes to the jobserver after its first item, as
     // another recipe returning them would, each byte BUSTER_CHECK_EMIT_SUPPLY_BYTE plus its index (0 for none).
     uint32_t grow_supply;
