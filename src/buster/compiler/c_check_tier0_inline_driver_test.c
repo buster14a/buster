@@ -8,8 +8,10 @@
 // statement expression (their starts), a callee without arguments as another's argument (two insertions at one entry),
 // parameters of four classes (bindings one after its argument), a callee with a loop, one with two returns (refused, a
 // call), a cycle of two (its closing call a call), a callee through a pointer, a pointer parameter, long double, a struct
-// argument and result in registers, a chain of wrappers (_mm256_mask_add_epi32's), and intrinsics of 16, 32 and 64
-// bytes. Built at x86-64-v4 by the vector path, the scalar twin and --tier0-no-inline: each runs as clang -O0's build
+// argument and result in registers, a chain of wrappers (_mm256_mask_add_epi32's), intrinsics of 16, 32 and 64
+// bytes, and a callee that calls a runtime function (an __int128 division's __divti3), which a caller in another part,
+// with no runtime call of its own, takes by its final symbol (the default windows lower each callee as a part of its
+// own: its provisional symbol named no symbol, #1398). Built at x86-64-v4 by the vector path, the scalar twin and --tier0-no-inline: each runs as clang -O0's build
 // does where the host has x86-64-v4, the two paths' objects are the same bytes, and the control's differs. The object
 // leaves out the callees spliced at every call (#1398 step 3) and keeps those a call or an address still refers to (the
 // cycle's, the one of two returns, the one whose address is taken), as the control keeps every one; and it is the same
@@ -39,6 +41,7 @@ static const char check_test_tier0_inline_source[] =
     "AI int pong(int n) { return n <= 0 ? 0 : ping(n - 1) + 1; }\n"
     "AI void bump(int* p, int k) { *p += k; }\n"
     "AI long double ld(long double x, int k) { return x * k + 0.5L; }\n"
+    "AI __int128 quot(__int128 a, __int128 b) { return a / b; }\n"
     "static __attribute__((noinline)) int kept(int x) { return x * 7; }\n"
     "__attribute__((noinline)) __m512i mix(__m512i a, __m512i b, __m512i c)\n"
     "{\n"
@@ -90,7 +93,8 @@ static const char check_test_tier0_inline_source[] =
     "    for (int i = 0; i < n; i += 1) bump(&b, i % 3 ? add3(i, 1, 2) : seven());\n"
     "    long double l = ld(ld(1.25L, n), m);\n"
     "    int (*fp)(int, int, int) = add3;\n"
-    "    return (long long)x * 1000003 + y * 1009 + z * 17 + (long long)(d * 8) + s * 101 + r * 7 + b + (long long)(l * 4) + fp(n, m, 2);\n"
+    "    return (long long)x * 1000003 + y * 1009 + z * 17 + (long long)(d * 8) + s * 101 + r * 7 + b + (long long)(l * 4) + fp(n, m, 2) +\n"
+    "           (long long)quot((__int128)n << 70, 12345 + m);\n"
     "}\n"
     "int main(void)\n"
     "{\n"
@@ -355,7 +359,7 @@ static void check_test_driver_tier0_inline(CheckTest* test, const char* clang, c
                       "windows of one token make the object of one window, by both paths");
     // The callees left out (#1398 step 3): those spliced at every call, wrappers among them; the others a kept call or an
     // address refers to, and the noinline function. The control defines them all.
-    static const char* const spliced[] = { "swap", "twist", "mixf", "seven", "sum_to", "bump", "ld", "_mm512_add_epi32", "_mm256_mask_add_epi32", "_mm_slli_epi32" };
+    static const char* const spliced[] = { "swap", "twist", "mixf", "seven", "sum_to", "bump", "ld", "quot", "_mm512_add_epi32", "_mm256_mask_add_epi32", "_mm_slli_epi32" };
     static const char* const still_called[] = { "add3", "sgn", "ping", "pong", "kept" };
     for (uint32_t build = 0; build < 3; build += 2)
     {

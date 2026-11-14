@@ -4960,11 +4960,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         valid = false;
     }
     // Every reference of a runtime function's provisional symbol takes the function's (check_lower_finish numbered them):
-    // only a part that called one has them, but with --tier1's inlining any part may, whose bodies expanded a callee's
-    // calls of one (#2541 step 2: a callee lowered on another lane).
+    // only a part that called one has them, but with either tier's inlining any part may, whose bodies expanded or
+    // spliced a callee's calls of one (#2541 step 2: a callee lowered on another lane; #1398: a Tier 0 callee in a part
+    // of its own, as windows lower it, kept its provisional symbol, which named no symbol or another one).
     for (uint32_t p = 0; valid && p < run.part_count; p += 1)
     {
-        const bool runtime = run.parts[p].lower.runtime_count != 0 || run.tier1_inline != NULL;
+        const bool runtime = run.parts[p].lower.runtime_count != 0 || run.inline_table != NULL;
         for (uint32_t b = run.parts[p].lower.first; runtime && b < run.parts[p].lower.end; b += 1)
         {
             // A naked function's references are its templates' names (mapped below), which no runtime function's are.
