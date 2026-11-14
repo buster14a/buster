@@ -4684,10 +4684,18 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         valid = false;
     }
     // Every reference of a runtime function's provisional symbol takes the function's (check_lower_finish numbered them):
-    // only a part that called one has them.
+    // only a part that called one has them, unless the unit inlines (#1344): a body's code then holds its inlined
+    // callees' calls, whatever their parts, and a provisional symbol left in it is a jump table's label's number once
+    // those are final (the compiler's own lexer's memmove calls went to a case of its scalar lexer's switch).
+    bool runtime_parts = false;
     for (uint32_t p = 0; valid && p < run.part_count; p += 1)
     {
-        for (uint32_t b = run.parts[p].lower.first; run.parts[p].lower.runtime_count != 0 && b < run.parts[p].lower.end; b += 1)
+        runtime_parts = runtime_parts || run.parts[p].lower.runtime_count != 0;
+    }
+    const bool runtime_spliced = runtime_parts && run.inline_table != NULL;
+    for (uint32_t p = 0; valid && p < run.part_count; p += 1)
+    {
+        for (uint32_t b = run.parts[p].lower.first; (run.parts[p].lower.runtime_count != 0 || runtime_spliced) && b < run.parts[p].lower.end; b += 1)
         {
             // A naked function's references are its templates' names (mapped below), which no runtime function's are.
             const EmittedCode* code = run.codes + b;
