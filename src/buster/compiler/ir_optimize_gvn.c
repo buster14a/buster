@@ -25,6 +25,8 @@ struct IrGvnOptions
     // Refine every instruction in synchronous rounds instead of numbering the acyclic ones first: the exact oracle
     // of the acyclic numbering.
     bool complete;
+    // PROTOTYPE (#1344 census): apply a congruence only to vector- and mask-typed values.
+    bool vectors;
 };
 
 typedef struct IrGvnResult IrGvnResult;
@@ -85,6 +87,7 @@ static __attribute__((unused)) IrGvnOptions ir_gvn_options(void)
     const IrGvnOptions options = {
         .sweep_limit = 64,
         .probes = BUSTER_IR_GVN_PROBES_PER_INSTRUCTION,
+        .vectors = getenv("BUSTER_PROTO_VECTORS") != NULL,
     };
     return options;
 }
@@ -1036,6 +1039,13 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
             work.statistics.classes = numbered + (count != 0 ? ir_gvn_refine(&work, count, numbered, options.sweep_limit) : 0);
         }
         check.error = ir_gvn_available(&work, scratch, options.scalar);
+        for (uint32_t i = 0; options.vectors && check.error == IR_OK && i < function->instruction_count; i += 1)
+        {
+            if (function->type[i] < IR_V4I32)
+            {
+                work.alias[i] = i;
+            }
+        }
     }
     IrFunction view = { 0 };
     if (check.error == IR_OK)

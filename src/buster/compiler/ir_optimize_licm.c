@@ -10,6 +10,8 @@ struct IrLicmOptions
 {
     uint32_t sweep_limit;
     bool scalar;
+    // PROTOTYPE (#1344 census): move only vector- and mask-typed values, and the in-loop operands they need.
+    bool vectors;
 };
 
 typedef struct IrLicmResult IrLicmResult;
@@ -40,7 +42,7 @@ struct IrLicmWork
 
 static __attribute__((unused)) IrLicmOptions ir_licm_options(void)
 {
-    const IrLicmOptions options = { .sweep_limit = 64 };
+    const IrLicmOptions options = { .sweep_limit = 64, .vectors = getenv("BUSTER_PROTO_VECTORS") != NULL };
     return options;
 }
 
@@ -275,6 +277,46 @@ static IrError ir_licm_analyze(IrLicmWork* work, Arena* scratch, IrLicmOptions o
                 work->available[i] = !inside && dominators_dominates(&work->loops, work->destination[i], preheader);
             }
             ir_licm_complete(work, options);
+            if (options.vectors)
+            {
+                // PROTOTYPE: keep (2) the available vector- and mask-typed candidates, then their in-loop operands.
+                for (uint32_t i = 0; i < f->instruction_count; i += 1)
+                {
+                    if (work->candidate[i] != 0 && work->available[i] != 0 && f->type[i] >= IR_V4I32)
+                    {
+                        work->candidate[i] = 2;
+                    }
+                }
+                bool changed = true;
+                while (changed)
+                {
+                    changed = false;
+                    for (uint32_t i = f->instruction_count; i != 0; i -= 1)
+                    {
+                        const uint32_t user = i - 1;
+                        if (work->candidate[user] == 2)
+                        {
+                            const uint32_t mask = ir_value_mask3(f, user);
+                            const uint32_t operands[3] = { (mask & 1) != 0 ? f->a[user] : BUSTER_IR_NONE, (mask & 2) != 0 ? f->b[user] : BUSTER_IR_NONE, (mask & 4) != 0 ? ir_value_third(f, user) : BUSTER_IR_NONE };
+                            for (uint32_t k = 0; k < 3; k += 1)
+                            {
+                                if (operands[k] != BUSTER_IR_NONE && work->candidate[operands[k]] == 1 && work->available[operands[k]] != 0)
+                                {
+                                    work->candidate[operands[k]] = 2;
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                for (uint32_t i = 0; i < f->instruction_count; i += 1)
+                {
+                    if (work->candidate[i] == 1)
+                    {
+                        work->candidate[i] = 0;
+                    }
+                }
+            }
             for (uint32_t i = 0; i < f->instruction_count; i += 1)
             {
                 if (work->candidate[i] != 0 && work->available[i] != 0)
