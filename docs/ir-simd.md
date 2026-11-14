@@ -830,6 +830,77 @@ The tests:
   source, which an earlier version took as signed.
 - `test-checker-driver`'s machine-rows unit: 59 rows and 32 moves.
 
+## Casts into SSE carriers and their extensions (#1840)
+
+An SSE carrier (#1280) is a vector of 4 or 8 bytes, an `f32` or `f64` in the IR,
+in the vector class's registers. clang's headers make one before many
+conversions. `_mm256_cvtepu8_epi32`, for example, shuffles a vector's first
+8 bytes into a narrower vector, then converts that. The front end gives the
+pair as two rows: a cast with no record, then the extension of the carrier.
+Both are now the IR's, with no new operation:
+
+```text
+%3 = intrinsic.f64 %1 lane_extract 3
+%5 = intrinsic.v8i32 %3 extend 8
+```
+
+- **The cast** (`ir_simd_typed_carrier_cast`): a row of no record of a vector of
+  16, 32 or 64 bytes into one of 4 or 8. It is `lane_extract` of lane 0 of
+  doublewords or quadwords at the carrier's type. The verifier now admits an
+  `f32` or `f64` result for that lane alone, and `IR_INTRINSIC`'s result types
+  include them. Every other kind's rule still refuses them.
+- **The extension** (`ir_simd_typed_convert`): `extend`'s source may be a
+  carrier, whose bytes it reads as a vector's low ones. The verifier checks the
+  lanes against the type's bytes. The model takes the scalar operand's bits
+  (no shape), at most 8 bytes of them.
+- **The target** needs AVX512F, VL and the vectors' moves, as the conversions do.
+
+**Tier 1:**
+- The cast (`BUSTER_TIER1_VECTOR_LANE_EXTRACT`, `source_width` the carrier's
+  bytes) is nothing where the carrier takes the vector's register. Elsewhere
+  it is `tier1_select_carrier_move` into its own register, zero-extended. A
+  carrier may hold anything past its bytes, and every row reads one
+  zero-extended.
+- The extension is its form, which reads the carrier register's low bytes.
+- In the compiler's own units the allocator gives every such carrier its
+  vector's register. A fold of the cast into the extension (reading the vector
+  directly) gave the same records, so there is none.
+
+Machine rows at `--tier1 -march=znver5`, both compilers (Develop builds)
+compiling this change's sources, against main (`26f0bb0e`), with the byte
+shuffles by an immediate above:
+
+| Unit | Rows before | Rows after | Records before | Records after |
+| --- | ---: | ---: | ---: | ---: |
+| `main_unit_frontend.c` | 1 | 1 | 635,525 | 635,525 |
+| `main_unit_backend.c` | 268 | 132 | 1,602,817 | 1,602,779 |
+
+The 19 casts and 19 extensions (`vpmovzxbd` of 32 bytes, `vpmovzxbq` of 64)
+leave the units. The 38 records fewer are the moves each extension's row made
+of its carrier into its role.
+
+The tests:
+
+- **`test-ir`:**
+  - both verifiers admit `extend` of an `f32` or `f64` into every width whose
+    lanes it holds, at every flags byte (28 forms), and the model's lanes are
+    C's;
+  - `lane_extract` into an `f32` or `f64` is admitted for lane 0 of
+    doublewords or quadwords alone, at every width.
+- **`test-ir-parse`:** `tests/ir/carriers.ir` round-trips.
+- **`test-ir-simd`:**
+  - the 6 casts (4 and 8 bytes, from 16, 32 and 64) and the real producer's 18
+    whole-lane extensions of a carrier decode at exactly their features;
+  - each is refused without each feature and under changes.
+- **`test-tier1-masks`:** 48 programs through both lowering paths and Tier 1
+  natively, against C:
+  - the 18 extensions of a cast, and of a carrier loaded from memory, through
+    the interpreter at every stage too;
+  - the 6 casts stored whole;
+  - the 6 casts whose vector stays live past them into a machine row's
+    `vpaddd` or `vpaddq`, so the carrier needs its own register. With the
+    carrier's move left out, these 48 runs fail.
+
 ## Shifts by a scalar count (#1840)
 
 One more binary kind of `intrinsic`, `shift` (`BUSTER_IR_INTRINSIC_SHIFT`),
@@ -1673,6 +1744,191 @@ The tests:
 - **`test-tier1-masks`:** the four run through both lowering paths, the
   interpreter and Tier 1 natively on values of every magnitude around both
   ranges, infinities and NaNs.
+
+## Bit shuffles into a mask (#1840)
+
+One more binary `intrinsic` kind, `bitshuffle` (`BUSTER_IR_INTRINSIC_BITSHUFFLE`),
+picks a bit for each byte of a vector, into a mask:
+
+```text
+%6 = intrinsic.m64 %3, %4 bitshuffle
+```
+
+- **Operands:** a and b are vectors of one type, any width. The result is the
+  mask of their bytes' lanes (`m16`, `m32` or `m64`). Its flags are 0.
+- **Semantics:** bit i is the bit of a's quadword i / 8 that b's byte i's low
+  6 bits name (`vpshufbitqmb`, BITALG).
+- **Model and passes:** `IR_SIMD_BITSHUFFLE`. The interpreter runs it as it runs
+  a comparison into a mask. SCCP folds two constant vectors by the model, and
+  GVN and LICM take it as pure and total.
+
+**Decoder** (`ir_simd_typed_bitshuffle`): the vpshufbitqmb builtins' rows
+(`__builtin_ia32_vpshufbitqmb128_mask` to 512's) as the opmask conversion
+leaves them, as a comparison into a mask is:
+- one record of the form at the vectors' width, `VECTOR(0)` in vvvv and
+  `VECTOR(1)` in rm, into `MASK_RESULT` under `MASK(2)`;
+- the IR's `bitshuffle`, ANDed with the writemask, the third operand, which
+  the lowering leaves out where the typed stream's writemask has every lane
+  (`ir_typed_unmasked`);
+- the target needs BITALG, BW, AVX512F and VL below 64 bytes.
+
+**Tier 1** (`BUSTER_TIER1_VECTOR_BITSHUFFLE`): `vpshufbitqmb` into the
+destination's opmask register. A `bitshuffle` ANDed with another mask, as its
+only use, is `vpshufbitqmb` under that mask (`{k}`), as #1847 folds a
+comparison's AND (`tier1_select_masked_compare` takes both).
+
+**Zen 5:** the 6 forms (register and masked, at 3 widths) had no row. They were
+measured on the 9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-bitshuffle-quadword-1840-2026-11-13)):
+3 cycles at 16 bytes, 4 at 32 and 6 at 64, 2 per cycle, the same under a
+writemask.
+
+Machine rows at `--tier1 -march=znver5`, against main (`26f0bb0e`), with the
+byte shuffles and the carriers above: `main_unit_backend.c` 132 → 105. No
+`vpshufbitqmb` row is left.
+
+The tests:
+
+- **`test-ir`:**
+  - both verifiers admit `bitshuffle` exactly of two vectors of one type into
+    their bytes' mask, at flags 0;
+  - they refuse another width's b, another mask and a vector result;
+  - the model is checked against the instruction's definition on random
+    vectors.
+- **`test-ir-parse`:** `tests/ir/bitshuffle.ir` round-trips.
+- **`test-ir-simd`:** the 3 rules' rows decode at exactly their features, each
+  refused without each and under 6 changes.
+- **`test-tier1-masks`:** the 3 run, under an input word's writemask and under
+  every lane, through both lowering paths, the interpreter at every stage and
+  Tier 1 natively. Both paths' code has the form's 8 records and no `kand`.
+  With the fold left out, the 8 `kand`s fail it.
+
+## Quadword operations (#1840)
+
+One more binary `intrinsic` kind, `quadword_op` (`BUSTER_IR_INTRINSIC_QUADWORD_OP`),
+computes each quadword of the result from the bytes of a and b in it:
+
+```text
+%3 = intrinsic.v4i32 %1, %2 quadword_op 0
+```
+
+- **Operands:** a and b are of the result's type, any width.
+- **Flags:** the operation (`BUSTER_IR_QUADWORD_*`):
+  - **0, multishift:** byte j of each quadword is the 8 bits of b's quadword
+    from the bit a's byte j's low 6 bits name, wrapping around the quadword
+    (`vpmultishiftqb`, VBMI);
+  - **1, sum of absolute differences:** each quadword is the sum of
+    |a's byte − b's byte| over its 8 unsigned bytes (`vpsadbw`).
+- **Model and passes:** `IR_SIMD_QUADWORD_OP`. SCCP folds two constant vectors
+  by the model, and GVN and LICM take it as pure and total.
+
+**Decoder** (`ir_simd_typed_quadword_op`): the builtins'
+`__builtin_ia32_vpmultishiftqb128` to 512 and `__builtin_ia32_psadbw128` to 512
+are one record of `ir_simd_quadword_op_forms`' form at the result's width:
+`VECTOR(0)` in vvvv and `VECTOR(1)` in rm into `VECTOR(0)`. The target needs BW
+(and VBMI for the multishifts), AVX512F and VL below 64 bytes.
+
+**Tier 1** (`BUSTER_TIER1_VECTOR_QUADWORD_OP`) selects the same form back.
+
+**Zen 5:** the 6 forms had no row. They were measured on the 9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-bitshuffle-quadword-1840-2026-11-13)):
+`vpmultishiftqb` and `vpsadbw` take 3 cycles at every width and run 2 per cycle.
+
+Machine rows at `--tier1 -march=znver5`, against main (`26f0bb0e`), with the
+families above: `main_unit_backend.c` 105 → 96. No `vpmultishiftqb` or
+`vpsadbw` row is left.
+
+The tests:
+
+- **`test-ir`:** both verifiers admit `quadword_op` exactly of two vectors of
+  the result's type at flags 0 and 1, at every width. The model is checked
+  against both instructions' definitions, written out bit by bit, on random
+  vectors.
+- **`test-ir-parse`:** `tests/ir/quadword-op.ir` round-trips.
+- **`test-ir-simd`:** the 6 rules' rows decode at exactly their features, each
+  refused without each and under 6 changes.
+- **`test-tier1-masks`:** the 6 run through both lowering paths, the
+  interpreter at every stage and Tier 1 natively, against the definitions. The
+  multishifts' target adds VBMI to x86-64-v4's. A host that runs Tier 1's code
+  natively without it leaves them to `test-ir-simd`.
+
+## Funnel shifts and rotates (#1840)
+
+One more ternary `intrinsic` kind, `funnel` (`BUSTER_IR_INTRINSIC_FUNNEL`), is
+the funnel shift of each lane of two vectors by a third's:
+
+```text
+%6 = intrinsic.v16i32 %3, %4, %5 funnel 6
+```
+
+- **Operands:** a (the high halves), b (the low halves) and the third operand
+  (the counts) are of the result's type. The third is in the extra array, as
+  the other ternary kinds' are.
+- **Flags:** the lanes' bytes' log2 in bits 0 and 1 (1 to 3, words to
+  quadwords) and the direction in bit 2 (`BUSTER_IR_FUNNEL_RIGHT`):
+  - **left:** the high half of a:b shifted left (C's `fshl`, `vpshldvw` to
+    `vpshldvq`);
+  - **right:** its low half shifted right (`fshr`, `vpshrdvw` to `vpshrdvq`).
+  The count is taken modulo the lanes' bits. A rotate is the funnel of one
+  vector twice.
+- **Numbering:** the ternary kinds are a range of kind numbers, so `funnel`
+  takes 30, the old `aes`. `aes` to `quadword_op` each move up by one (31 to 40).
+- **Model and passes:** `IR_SIMD_FUNNEL`. SCCP folds three constants, and GVN
+  and LICM take it as pure and total, as the other ternary kinds.
+
+**Decoder** (`ir_simd_typed_funnel`):
+- **clang's `__builtin_elementwise_fshl` and `fshr`** of words to quadwords,
+  three vectors, as `c_check_program_vector_builtins.c` writes them:
+  - fshl's one `vpshldv` into `VECTOR(0)` (a) from `VECTOR(1)` by `VECTOR(2)`;
+  - fshr's `vpshrdv` into `VECTOR(1)` (b) from `VECTOR(0)` by `VECTOR(2)`,
+    then `VECTOR(1)` moved into `VECTOR(0)`;
+  - the target needs VBMI2 and BW (their target rows'), AVX512F and VL below 64
+    bytes.
+- **The rotates by an immediate:** `__builtin_ia32_prold`, `prolq`, `prord`
+  and `prorq` at each width. One `vprold` to `vprorq` of `VECTOR(0)` is the
+  funnel of the vector twice by a constant, the immediate modulo the lanes'
+  bits in every lane. The target needs AVX512F and VL below 64 bytes.
+
+**Tier 1** (`BUSTER_TIER1_VECTOR_FUNNEL`, `tier1_select_funnel`):
+- **A rotate by an immediate:** where a and b are one value and the counts a
+  constant of one value in every lane (`tier1_select_lane_splat`), the first
+  candidate, the counts left unused. It is `vprold` to `vprorq`, or VBMI2's
+  `vpshldw` or `vpshrdw` of the vector twice for words.
+- **Otherwise** `vpshldv` or `vpshrdv` by the counts' register. Their
+  destination is their first source: the high half for a left shift, the low
+  half for a right one. The destination takes that half first by a move where
+  it isn't already its register. Where it holds the other half or the counts,
+  the vector class's scratch register keeps them across that move.
+
+**Zen 5:** the 36 forms had no row: the 18 variable funnels, the 12 rotates
+and the 6 word funnels by an immediate. They were measured on the 9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-funnel-1840-2026-11-13)):
+every one takes 2 cycles and runs 2 per cycle.
+
+Machine rows at `--tier1 -march=znver5`, against main (`26f0bb0e`), with the
+families above: `main_unit_backend.c` 96 → 92. The 3 `vpshrdvd` rows and the
+`vprold` row are gone.
+
+The tests:
+
+- **`test-ir`:**
+  - both verifiers admit `funnel` exactly of three vectors of the result's
+    type, at flags 1 to 3 and 5 to 7;
+  - the model is checked against C's `fshl` and `fshr`, written out a bit at a
+    time, on random vectors whose counts are often zero or past the lanes'
+    bits.
+- **`test-ir-parse`:** `tests/ir/funnel.ir` round-trips.
+- **`test-ir-simd`:** the 18 funnels' rows and the 4 rotate rules at 3 widths
+  and 4 immediates decode at exactly their features. Each is refused without
+  each and under 6 changes.
+- **`test-tier1-masks`:** the 18 funnels and the 72 rotates (6 immediates each)
+  run through both lowering paths, the interpreter at every stage and Tier 1
+  natively, against C.
+  - A rotate's code by both paths has its immediate form's 4 records.
+  - The funnels' target adds VBMI2 to x86-64-v4's. A host without it, running
+    Tier 1's code natively, leaves them to `test-ir-simd`.
+  - With the scratch register's save left out, 144 of their runs fail; with a
+    wrong rotate count, 576.
 
 ## Masks to vectors and back (#1840)
 

@@ -850,7 +850,7 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
     else if (operation->lane_move != 0)
     {
         // One lane of a vector or its lanes' sign bits (#1840), its flags the lane: an extraction's I32 or I64 narrowed to
-        // the row's integer, and an insertion's integer widened to its I32 first.
+        // the row's integer (or an SSE carrier's F32 or F64, lane 0's), and an insertion's integer widened to its I32 first.
         const uint32_t kind = operation->lane_move - 1u;
         const uint32_t size = operation->immediate & 3;
         const IrType scalar = size == 3 ? IR_I64 : IR_I32;
@@ -863,7 +863,9 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         }
         else
         {
-            const IrType produced = kind == BUSTER_IR_INTRINSIC_MOVEMASK ? IR_I32 : scalar;
+            // A cast into an SSE carrier (#1840: an F32 or F64) is lane 0's extraction at the carrier's type itself.
+            const bool carrier = type == IR_F32 || type == IR_F64;
+            const IrType produced = kind == BUSTER_IR_INTRINSIC_MOVEMASK ? IR_I32 : carrier ? type : scalar;
             value = ir_typed_emit(sink, IR_INTRINSIC, produced, operands[0], BUSTER_IR_NONE, kind, 0);
             ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
             if (type != produced)
@@ -954,6 +956,45 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], operation->permute - 1u, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
     }
+    else if (operation->funnel)
+    {
+        // A funnel shift (#1840), its flags its lanes and direction, its counts the third operand, in the extra array; a
+        // rotate's of its vector twice by its count, a constant in each lane.
+        uint32_t counts = operation->rotate ? BUSTER_IR_NONE : operands[2];
+        if (operation->rotate)
+        {
+            const uint32_t lane_bytes = 1u << (operation->immediate & 3);
+            uint8_t lanes[64] = {0};
+            for (uint32_t at = 0; at < ir_type_bits[type] / 8; at += lane_bytes)
+            {
+                lanes[at] = operation->part;
+            }
+            uint64_t words[8] = {0};
+            memcpy(words, lanes, sizeof(lanes));
+            counts = ir_typed_vector_constant(sink, type, words);
+        }
+        const uint32_t slot = (uint32_t)sink->sizes.extra_count;
+        if (sink->output != 0)
+        {
+            sink->output->extra[slot] = counts;
+        }
+        sink->sizes.extra_count += 1;
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operation->rotate ? operands[0] : operands[1], ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_FUNNEL, slot), 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+    }
+    else if (operation->quadword_op)
+    {
+        // A quadword operation (#1840), its operation in its flags.
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_QUADWORD_OP, 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+    }
+    else if (operation->bitshuffle)
+    {
+        // A bit shuffle into a mask (#1840), `type` the mask of the vectors' bytes, ANDed with its writemask, the third
+        // operand, but where the typed stream's writemask has every lane.
+        const uint32_t mask = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_BITSHUFFLE, 0);
+        value = unmasked ? mask : ir_typed_emit(sink, IR_AND, type, mask, operands[2], BUSTER_IR_NONE, 0);
+    }
     else if (operation->shuffle_immediate != 0)
     {
         // A byte shuffle by an immediate (#1840): the IR's shuffle of the vector by its kind's indices at the immediate,
@@ -1008,8 +1049,9 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
 // it, so both lowering passes agree.
 static bool ir_typed_unmasked(const Tier0Function* input, const IrSimdTypedOperation* operation, uint32_t i)
 {
-    // A comparison's lanes, or a masked extract's or truncation's (#1840): its result's, the merged operand's.
-    const uint32_t lanes = operation->compare_mask                                    ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) :
+    // A comparison's lanes or a bit shuffle's bytes, or a masked extract's or truncation's (#1840): its result's, the
+    // merged operand's.
+    const uint32_t lanes = operation->compare_mask || operation->bitshuffle           ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) :
                            operation->merge_mask || operation->masked_memory != 0 ? 8u * operation->operand_bytes[1] / ir_simd_lane_bits(operation->lane) :
                                                                                      0;
     const uint64_t every = lanes >= 64 ? UINT64_MAX : (UINT64_C(1) << lanes) - 1;

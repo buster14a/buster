@@ -55,6 +55,7 @@ static IrSimdOperation ir_interpreter_simd_intrinsic(uint32_t kind)
         case BUSTER_IR_INTRINSIC_TERNLOG: operation = IR_SIMD_TERNLOG; break;
         case BUSTER_IR_INTRINSIC_COMPRESS: operation = IR_SIMD_COMPRESS; break;
         case BUSTER_IR_INTRINSIC_EXPAND: operation = IR_SIMD_EXPAND; break;
+        case BUSTER_IR_INTRINSIC_FUNNEL: operation = IR_SIMD_FUNNEL; break;
         case BUSTER_IR_INTRINSIC_AES: operation = IR_SIMD_AES; break;
         case BUSTER_IR_INTRINSIC_LANE_EXTRACT: operation = IR_SIMD_LANE_EXTRACT; break;
         case BUSTER_IR_INTRINSIC_LANE_INSERT: operation = IR_SIMD_LANE_INSERT; break;
@@ -63,6 +64,8 @@ static IrSimdOperation ir_interpreter_simd_intrinsic(uint32_t kind)
         case BUSTER_IR_INTRINSIC_LANE_UNARY: operation = IR_SIMD_LANE_UNARY; break;
         case BUSTER_IR_INTRINSIC_FROUND: operation = IR_SIMD_FROUND; break;
         case BUSTER_IR_INTRINSIC_CVTT: operation = IR_SIMD_CVTT; break;
+        case BUSTER_IR_INTRINSIC_BITSHUFFLE: operation = IR_SIMD_BITSHUFFLE; break;
+        case BUSTER_IR_INTRINSIC_QUADWORD_OP: operation = IR_SIMD_QUADWORD_OP; break;
         default: break;
     }
     return operation;
