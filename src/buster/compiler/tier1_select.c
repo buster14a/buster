@@ -3075,13 +3075,30 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
         const uint16_t form = holes->operation == X86_OPERATION_SHL ? (width == 8 ? X86_FORM_SHL_RM64_CL : X86_FORM_SHL_RM32_CL) :
                               holes->operation == X86_OPERATION_SHR ? (width == 8 ? X86_FORM_SHR_RM64_CL : X86_FORM_SHR_RM32_CL) :
                                                                       (width == 8 ? X86_FORM_SAR_RM64_CL : X86_FORM_SAR_RM32_CL);
-        records[count++] = tier1_select_move(8, scratch, holes->left);
-        if (holes->right != X86_REGISTER_RCX)
+        // The value shifts in the destination itself (#2592: OP_NEWTABLE's `1 << (b - 1)` went through the scratch register
+        // on every table), but where the destination is rcx, which the count takes, or holds the count while the value is in
+        // rcx: then either first move would overwrite the other's source. Else the count goes to cl first where the value
+        // isn't there, and the value is read before the destination, where the count may be, is written.
+        const uint8_t rcx = X86_REGISTER_RCX;
+        const bool direct = holes->destination != rcx && !(holes->left == rcx && holes->destination == holes->right);
+        const uint8_t shifted = direct ? holes->destination : scratch;
+        if (holes->right != rcx && holes->left != rcx)
         {
-            records[count++] = tier1_select_move(4, X86_REGISTER_RCX, holes->right);
+            records[count++] = tier1_select_move(4, rcx, holes->right);
         }
-        records[count++] = (X86Instruction){ .rm = scratch, .form = form };
-        records[count++] = tier1_select_move(width, holes->destination, scratch);
+        if (shifted != holes->left)
+        {
+            records[count++] = tier1_select_move(8, shifted, holes->left);
+        }
+        if (holes->right != rcx && holes->left == rcx)
+        {
+            records[count++] = tier1_select_move(4, rcx, holes->right);
+        }
+        records[count++] = (X86Instruction){ .rm = shifted, .form = form };
+        if (!direct)
+        {
+            records[count++] = tier1_select_move(width, holes->destination, scratch);
+        }
     }
     else if (holes->rule == TIER1_RULE_DIVIDE_RECIPROCAL)
     {
@@ -7589,7 +7606,10 @@ static inline __attribute__((always_inline)) void tier1_select_ties(const Tier1S
                       (rule == TIER1_RULE_INTRINSIC && pattern->immediate == BUSTER_IR_INTRINSIC_BSWAP) || rule == TIER1_RULE_FLOAT_COPY || rule == TIER1_RULE_FLOAT_BINARY ||
                       rule == TIER1_RULE_FLOAT_LOAD_OPERAND || rule == TIER1_RULE_FLOAT_NEGATE;
     const bool select = rule == TIER1_RULE_SELECT;
-    *first = left ? pattern->values[0] : select ? pattern->values[2] : BUSTER_IR_NONE;
+    // An address from a register (#2592): `lea d(%r),%r` costs what a lea into another register does, and an incremented
+    // pointer, Lua's `pc + 1` in OP_LFALSESKIP, keeps the register its dispatch takes it in.
+    const bool address = rule == TIER1_RULE_ADDRESS && !pattern->rip && pattern->stack_object == BUSTER_IR_NONE;
+    *first = left || address ? pattern->values[0] : select ? pattern->values[2] : BUSTER_IR_NONE;
     *second = swapped ? pattern->values[1] : select ? pattern->values[1] : BUSTER_IR_NONE;
 }
 
