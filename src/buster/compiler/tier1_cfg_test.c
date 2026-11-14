@@ -62,6 +62,8 @@ struct Tier1CfgTestBuilder
     uint32_t sequence_instruction[BUSTER_TIER1_CFG_TEST_SEQUENCES];
     uint32_t sequence_registers[BUSTER_TIER1_CFG_TEST_SEQUENCES];
     uint32_t sequence_reader[BUSTER_TIER1_CFG_TEST_SEQUENCES];
+    uint32_t sequence_operand[BUSTER_TIER1_CFG_TEST_SEQUENCES];
+    uint32_t sequence_result[BUSTER_TIER1_CFG_TEST_SEQUENCES];
     uint32_t registers[BUSTER_TIER1_ALLOCATE_CLASSES];
     uint8_t scratch[BUSTER_TIER1_ALLOCATE_CLASSES];
 };
@@ -258,7 +260,9 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
     uint32_t* sequences = arena_push_array(arena, builder->sequence_count + 1, sizeof(uint32_t), 4);
     uint32_t* sequence_registers = arena_push_array(arena, builder->sequence_count + 1, sizeof(uint32_t), 4);
     uint32_t* sequence_readers = arena_push_array(arena, builder->sequence_count + 1, sizeof(uint32_t), 4);
-    const bool built = (!builder->share_slots || slot_widths != 0) && sequences != 0 && sequence_registers != 0 && sequence_readers != 0 && block_starts != 0 && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && classes != 0 && allowed != 0 && definitions != 0 && remat != 0 && use_offsets != 0 && use_positions != 0 && use_required != 0 && phi_offsets != 0 && phi_values != 0 && phi_operand_offsets != 0 && phi_operands != 0 && fixed_starts != 0 && fixed_ends != 0 && fixed_registers != 0 && fixed_classes != 0;
+    uint32_t* sequence_operands = arena_push_array(arena, builder->sequence_count + 1, sizeof(uint32_t), 4);
+    uint32_t* sequence_results = arena_push_array(arena, builder->sequence_count + 1, sizeof(uint32_t), 4);
+    const bool built = (!builder->share_slots || slot_widths != 0) && sequences != 0 && sequence_registers != 0 && sequence_readers != 0 && sequence_operands != 0 && sequence_results != 0 && block_starts != 0 && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && classes != 0 && allowed != 0 && definitions != 0 && remat != 0 && use_offsets != 0 && use_positions != 0 && use_required != 0 && phi_offsets != 0 && phi_values != 0 && phi_operand_offsets != 0 && phi_operands != 0 && fixed_starts != 0 && fixed_ends != 0 && fixed_registers != 0 && fixed_classes != 0;
     if (built)
     {
         block_starts[0] = 0;
@@ -353,6 +357,8 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
             sequences[k] = block_starts[builder->sequence_block[k]] + 2 * builder->sequence_instruction[k] + 1;
             sequence_registers[k] = builder->sequence_registers[k];
             sequence_readers[k] = builder->sequence_reader[k];
+            sequence_operands[k] = builder->sequence_operand[k];
+            sequence_results[k] = builder->sequence_result[k];
         }
         *input = (Tier1CfgInput){
             .block_starts = block_starts,
@@ -375,6 +381,8 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
             .sequences = builder->sequence_count != 0 ? sequences : 0,
             .sequence_registers = builder->sequence_count != 0 ? sequence_registers : 0,
             .sequence_readers = builder->sequence_count != 0 ? sequence_readers : 0,
+            .sequence_operands = builder->sequence_count != 0 ? sequence_operands : 0,
+            .sequence_results = builder->sequence_count != 0 ? sequence_results : 0,
             .sequence_count = builder->sequence_count,
             .block_count = blocks,
             .edge_count = builder->edge_count,
@@ -405,8 +413,9 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
 }
 
 // The registers each range avoids (#2767), recomputed apart from tier1_cfg_crossed: each general range's, those of every
-// sequence strictly inside it whose reader its value isn't, gathered by value, then joined along every phi and its
-// operands until nothing changes; each general range must avoid exactly its value's, and every other range nothing.
+// sequence strictly inside it whose reader its value isn't, gathered by value with each sequence's operand's and result's,
+// then joined along every phi and its operands until nothing changes; each general range must avoid exactly its value's,
+// and every other range nothing.
 // Without sequences the allocator must have no such column.
 static bool tier1_cfg_test_avoided(Tier1CfgTestTally* tally, const Tier1CfgInput* input, const Tier1CfgAllocation* result, Arena* scratch)
 {
@@ -427,6 +436,19 @@ static bool tier1_cfg_test_avoided(Tier1CfgTestTally* tally, const Tier1CfgInput
                 const bool read = input->sequence_readers != 0 && input->sequence_readers[k] == intervals->values[i];
                 masks[intervals->values[i]] |= inside && !read ? input->sequence_registers[k] : 0;
                 tally->reading_ranges += inside && read;
+            }
+        }
+        for (uint32_t k = 0; k < input->sequence_count; k += 1)
+        {
+            const uint32_t operand = input->sequence_operands != 0 ? input->sequence_operands[k] : BUSTER_TIER1_CFG_NONE;
+            const uint32_t result = input->sequence_results != 0 ? input->sequence_results[k] : BUSTER_TIER1_CFG_NONE;
+            if (operand != BUSTER_TIER1_CFG_NONE)
+            {
+                masks[operand] |= input->sequence_registers[k];
+            }
+            if (result != BUSTER_TIER1_CFG_NONE)
+            {
+                masks[result] |= input->sequence_registers[k];
             }
         }
         bool changed = true;
@@ -1478,7 +1500,8 @@ static bool tier1_cfg_test_generate(Tier1CfgTestBuilder* builder, uint64_t seed,
         builder->slot_width[v] = v % 7 == 6 ? 4 : 8;
     }
     // Half the cases have fixed registers' sequences (#2767), from a generator of their own, so that the programs stay
-    // those of earlier runs: at one instruction in six, of one to three general registers, a third of them with a reader.
+    // those of earlier runs: at one instruction in six, of one to three general registers, a third of them with a reader,
+    // a third with an operand and a third with a result that avoid them (any general value: what avoids is the input's).
     uint64_t sequenced = seed ^ UINT64_C(0x2767276727672767);
     builder->sequence_count = 0;
     for (uint32_t b = 0; valid && seed % 2 == 0 && b < builder->block_count; b += 1)
@@ -1500,6 +1523,10 @@ static bool tier1_cfg_test_generate(Tier1CfgTestBuilder* builder, uint64_t seed,
             builder->sequence_instruction[builder->sequence_count] = i;
             builder->sequence_registers[builder->sequence_count] = pick;
             builder->sequence_reader[builder->sequence_count] = tier1_cfg_test_random(&sequenced) % 3 == 0 && builder->classes[reader] == BUSTER_TIER1_ALLOCATE_GPR ? reader : BUSTER_TIER1_CFG_NONE;
+            const uint32_t operand = (uint32_t)(tier1_cfg_test_random(&sequenced) % builder->value_count);
+            const uint32_t result = (uint32_t)(tier1_cfg_test_random(&sequenced) % builder->value_count);
+            builder->sequence_operand[builder->sequence_count] = tier1_cfg_test_random(&sequenced) % 3 == 0 && builder->classes[operand] == BUSTER_TIER1_ALLOCATE_GPR ? operand : BUSTER_TIER1_CFG_NONE;
+            builder->sequence_result[builder->sequence_count] = tier1_cfg_test_random(&sequenced) % 3 == 0 && builder->classes[result] == BUSTER_TIER1_ALLOCATE_GPR ? result : BUSTER_TIER1_CFG_NONE;
             builder->sequence_count += tier1_cfg_test_random(&sequenced) % 6 == 0 && pick != 0;
         }
     }

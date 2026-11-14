@@ -2,20 +2,25 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Values live across fixed registers' sequences (#2767), included after tier1_ties_test.c. f(p0, p1), the CFG consumer's:
-// x = p1 | 1, y = p0 ^ 0x55, c = p1 & 31, s = p0 << c, q = p0 / x (unsigned), r = s + q + x + y + c, then a branch on r's
-// low bit to a return of r + p1 or of r - p1. Without the rule, x took rax, the lowest free register, and y rcx, and the
-// division and the shift saved them around themselves in their call-save rows; and c, the shift's count, which it reads
-// in cl and leaves there, was saved around its own shift where it was in rcx. Each range live across a sequence now
-// avoids its registers (Tier1CfgInput.sequences): no value is stored around either, and no row is given for one. It runs
-// natively against its oracle, by both paths, with every register and with the registers of the parameters, the
-// sequences and two more alone, where the values crowd the registers the sequences take.
+// x = p1 | 1, c = p1 & 31, s = p0 << c, q = p0 / x (unsigned), y = p1 ^ 0x55, t = s + q + x + y; u = t / (p1 | 3) and
+// v = (y & 0xff) << c, whose divisor and shifted value end at them; z = p1 << (p1 & 7), whose count ends at it and whose
+// value lives past it; r = u + v + z + c, and a branch on r's low bit to a return of r + p1 or of r - p1.
+//
+// Without the rule, x took rax, the lowest free register, and the division saved it around itself in its call-save row;
+// c, the shift's count, which it reads in cl and leaves there, was saved around its own shift where it was in rcx; and a
+// divisor in rax or rdx, or a shift's destination in rcx (z's, where its count left rcx free), went through the scratch
+// register. Each range live across a sequence now avoids its registers (Tier1CfgInput.sequences), and so do a
+// division's divisor and a shift's other operand and destination: no value is stored around either, no row is given for
+// one, and nothing moves into the scratch register. It runs natively against its oracle, by both paths, with every
+// register and with the registers of the parameters, the sequences and two more alone, where the values crowd the
+// registers the sequences take.
 
 static bool tier1_sequences_function(Arena* input, IrFunction* function)
 {
     const IrSizes sizes = {
-        .instruction_count = 32,
+        .instruction_count = 48,
         .block_count = 3,
-        .constant_count = 4,
+        .constant_count = 7,
         .parameter_count = 2,
     };
     const bool created = ir_create(input, &sizes, function) == IR_OK;
@@ -29,6 +34,9 @@ static bool tier1_sequences_function(Arena* input, IrFunction* function)
         function->constants[1].low = 1;
         function->constants[2].low = 31;
         function->constants[3].low = 0;
+        function->constants[4].low = 3;
+        function->constants[5].low = 0xff;
+        function->constants[6].low = 7;
         uint32_t next = 0;
         const uint32_t p0 = tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         const uint32_t p1 = tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
@@ -36,14 +44,25 @@ static bool tier1_sequences_function(Arena* input, IrFunction* function)
         const uint32_t one = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
         const uint32_t bits = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
         const uint32_t x = tier1_select_test_append(function, &next, IR_OR, IR_I64, p1, one, BUSTER_IR_NONE);
-        const uint32_t y = tier1_select_test_append(function, &next, IR_XOR, IR_I64, p0, mask, BUSTER_IR_NONE);
         const uint32_t c = tier1_select_test_append(function, &next, IR_AND, IR_I64, p1, bits, BUSTER_IR_NONE);
         const uint32_t s = tier1_select_test_append(function, &next, IR_SHL, IR_I64, p0, c, BUSTER_IR_NONE);
         const uint32_t q = tier1_select_test_append(function, &next, IR_UDIV, IR_I64, p0, x, BUSTER_IR_NONE);
+        const uint32_t y = tier1_select_test_append(function, &next, IR_XOR, IR_I64, p1, mask, BUSTER_IR_NONE);
         const uint32_t t1 = tier1_select_test_append(function, &next, IR_ADD, IR_I64, s, q, BUSTER_IR_NONE);
         const uint32_t t2 = tier1_select_test_append(function, &next, IR_ADD, IR_I64, t1, x, BUSTER_IR_NONE);
         const uint32_t t3 = tier1_select_test_append(function, &next, IR_ADD, IR_I64, t2, y, BUSTER_IR_NONE);
-        const uint32_t r = tier1_select_test_append(function, &next, IR_ADD, IR_I64, t3, c, BUSTER_IR_NONE);
+        const uint32_t three = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t m = tier1_select_test_append(function, &next, IR_OR, IR_I64, p1, three, BUSTER_IR_NONE);
+        const uint32_t u = tier1_select_test_append(function, &next, IR_UDIV, IR_I64, t3, m, BUSTER_IR_NONE);
+        const uint32_t byte = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t n = tier1_select_test_append(function, &next, IR_AND, IR_I64, y, byte, BUSTER_IR_NONE);
+        const uint32_t v = tier1_select_test_append(function, &next, IR_SHL, IR_I64, n, c, BUSTER_IR_NONE);
+        const uint32_t seven = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 6, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t k = tier1_select_test_append(function, &next, IR_AND, IR_I64, p1, seven, BUSTER_IR_NONE);
+        const uint32_t z = tier1_select_test_append(function, &next, IR_SHL, IR_I64, p1, k, BUSTER_IR_NONE);
+        const uint32_t w = tier1_select_test_append(function, &next, IR_ADD, IR_I64, u, v, BUSTER_IR_NONE);
+        const uint32_t w2 = tier1_select_test_append(function, &next, IR_ADD, IR_I64, w, z, BUSTER_IR_NONE);
+        const uint32_t r = tier1_select_test_append(function, &next, IR_ADD, IR_I64, w2, c, BUSTER_IR_NONE);
         const uint32_t low = tier1_select_test_append(function, &next, IR_AND, IR_I64, r, one, BUSTER_IR_NONE);
         const uint32_t zero = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
         const uint32_t odd = tier1_select_test_append(function, &next, IR_ICMP, IR_I1, low, zero, IR_NE);
@@ -64,7 +83,9 @@ static uint64_t tier1_sequences_oracle(uint64_t p0, uint64_t p1)
 {
     const uint64_t x = p1 | 1;
     const uint64_t c = p1 & 31;
-    const uint64_t r = (p0 << c) + p0 / x + x + (p0 ^ 0x55) + c;
+    const uint64_t y = p1 ^ 0x55;
+    const uint64_t t = (p0 << c) + p0 / x + x + y;
+    const uint64_t r = t / (p1 | 3) + ((y & 0xff) << c) + (p1 << (p1 & 7)) + c;
     return (r & 1) != 0 ? r + p1 : r - p1;
 }
 
@@ -88,7 +109,7 @@ static void tier1_sequences_compile(Tier1EmitTest* test, bool vector, uint32_t r
         divisions += plan.covered[n] == 0 && plan.patterns[n].rule == TIER1_RULE_DIVIDE;
         shifts += plan.covered[n] == 0 && plan.patterns[n].rule == TIER1_RULE_SHIFT;
     }
-    tier1_emit_test_expect(test, !planned || (divisions == 1 && shifts == 1), "the fixture divides and shifts by registers");
+    tier1_emit_test_expect(test, !planned || (divisions == 2 && shifts == 3), "the fixture divides and shifts by registers");
     const Tier1EmitOptions options = { .register_mask = registers, .vector = vector, .rematerialize = true, .certify = true };
     Tier1EmitResult emitted;
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
@@ -101,6 +122,14 @@ static void tier1_sequences_compile(Tier1EmitTest* test, bool vector, uint32_t r
         {
             fprintf(stderr, "  sequences vector=%u: %u stores around the sequences, rows %#x\n", vector, emitted.call_stores, emitted.prepared.call_save_mask);
         }
+        uint32_t scratch_moves = 0;
+        for (uint32_t k = 0; k < emitted.code.count; k += 1)
+        {
+            const X86Instruction* record = &emitted.code.records[k];
+            const uint16_t form = record->form & BUSTER_X86_FORM_NUMBER;
+            scratch_moves += (form == X86_FORM_MOV_R64_RM64 || form == X86_FORM_MOV_R32_RM32) && record->mode == BUSTER_X86_REGISTER_DIRECT && record->reg == BUSTER_TIER1_SELECT_SCRATCH;
+        }
+        tier1_emit_test_expect(test, !roomy || scratch_moves == 0, "no divisor or shift moves through the scratch register");
         void* executable = MAP_FAILED;
         uint64_t bytes = 0;
         if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))

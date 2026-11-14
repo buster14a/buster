@@ -3268,6 +3268,22 @@ static uint32_t tier1_select_fixed_reader(const Tier1SelectPattern* pattern)
     return pattern->rule == TIER1_RULE_SHIFT ? pattern->values[1] : BUSTER_IR_NONE;
 }
 
+// The operand a fixed-register rule's records move out of its fixed registers, through the scratch register, where it is
+// in one (#2767): a division's divisor, and a shift's other operand, whose register its destination takes where it dies
+// there; BUSTER_IR_NONE for another rule and for a shift by its own value. Its web avoids those registers.
+static uint32_t tier1_select_fixed_operand(const Tier1SelectPattern* pattern)
+{
+    const bool shift = pattern->rule == TIER1_RULE_SHIFT && pattern->values[0] != pattern->values[1];
+    return pattern->rule == TIER1_RULE_DIVIDE ? pattern->values[1] : shift ? pattern->values[0] : BUSTER_IR_NONE;
+}
+
+// Whether a fixed-register rule's own value avoids its fixed registers (#2767): a shift's destination, which shifts in
+// the scratch register where it is rcx. A quotient and a remainder are written where the division leaves them.
+static bool tier1_select_fixed_result(const Tier1SelectPattern* pattern)
+{
+    return pattern->rule == TIER1_RULE_SHIFT;
+}
+
 typedef struct Tier1SelectPlan Tier1SelectPlan;
 struct Tier1SelectPlan
 {

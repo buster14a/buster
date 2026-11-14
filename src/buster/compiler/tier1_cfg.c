@@ -158,10 +158,15 @@ struct Tier1CfgInput
     // other register is free, and evicts no value for one. The sequence's own value, which starts there, and an operand
     // that ends there don't avoid them. Optional with them, sequence_readers names per sequence a value it reads in its
     // registers and leaves there (a shift's count in cl), whose range doesn't avoid them across it, or
-    // BUSTER_TIER1_CFG_NONE.
+    // BUSTER_TIER1_CFG_NONE. Optional with them too, sequence_operands and sequence_results name per sequence an operand
+    // and its own value, or BUSTER_TIER1_CFG_NONE, that avoid its registers though they don't live across it: values its
+    // records would move out of them through the scratch register (a division's divisor; a shift's other operand, and
+    // the shift's destination, which takes that operand's register where it dies).
     const uint32_t* sequences;
     const uint32_t* sequence_registers;
     const uint32_t* sequence_readers;
+    const uint32_t* sequence_operands;
+    const uint32_t* sequence_results;
     uint32_t sequence_count;
     uint32_t block_count;
     uint32_t edge_count;
@@ -285,6 +290,8 @@ static bool tier1_cfg_input_valid_into(const Tier1CfgInput* input, Arena* scratc
     {
         valid = input->sequences[k] < input->position_count && (k == 0 || input->sequences[k - 1] < input->sequences[k]) && (input->sequence_registers[k] & 0xffff0000u) == 0;
         valid = valid && (input->sequence_readers == 0 || input->sequence_readers[k] == BUSTER_TIER1_CFG_NONE || input->sequence_readers[k] < input->value_count);
+        valid = valid && (input->sequence_operands == 0 || input->sequence_operands[k] == BUSTER_TIER1_CFG_NONE || input->sequence_operands[k] < input->value_count);
+        valid = valid && (input->sequence_results == 0 || input->sequence_results[k] == BUSTER_TIER1_CFG_NONE || input->sequence_results[k] < input->value_count);
     }
     for (uint32_t b = 0; valid && b < input->block_count; b += 1)
     {
@@ -1687,7 +1694,8 @@ static bool tier1_cfg_crossed(const Tier1CfgInput* input, const uint32_t* starts
     uint32_t* webs = before != 0 ? arena_push_array(scratch, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     uint32_t* web_masks = webs != 0 ? arena_push_array(scratch, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     const bool ready = web_masks != 0 && (readers == 0 || readings != 0);
-    for (uint32_t v = 0; ready && v < input->value_count; v += 1)
+    // Past the values, a mask that no sequence's missing operand or result is read from.
+    for (uint32_t v = 0; ready && v <= input->value_count; v += 1)
     {
         webs[v] = v;
         web_masks[v] = 0;
@@ -1816,6 +1824,14 @@ static bool tier1_cfg_crossed(const Tier1CfgInput* input, const uint32_t* starts
             row += 1;
         }
         web_masks[webs[values[i]]] |= mask;
+    }
+    // The operands and results that avoid their sequences' registers, and their webs with them.
+    for (uint32_t k = 0; ready && k < sequences; k += 1)
+    {
+        const uint32_t operand = input->sequence_operands != 0 ? input->sequence_operands[k] : BUSTER_TIER1_CFG_NONE;
+        const uint32_t result = input->sequence_results != 0 ? input->sequence_results[k] : BUSTER_TIER1_CFG_NONE;
+        web_masks[operand != BUSTER_TIER1_CFG_NONE ? webs[operand] : input->value_count] |= input->sequence_registers[k];
+        web_masks[result != BUSTER_TIER1_CFG_NONE ? webs[result] : input->value_count] |= input->sequence_registers[k];
     }
     for (uint32_t i = 0; ready && i < count; i += 1)
     {
