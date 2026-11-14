@@ -3,8 +3,10 @@
 Status: design. Step 0, the gauge, is built: `tools/allcore/allcore.c`
 ([its guide](commands/all-core.md)), measured against its gate in
 [its record](https://github.com/buster14a/buster-performance/tree/359dcadc4a98855be571e0e7b64c50c44d82c9c9/docs/measurements/all-core-gauge-2536-2026-11-12).
-Nothing else below is implemented, and its gains are a model's that its first
-steps exist to confirm or refute. It is
+Step 1, the back half by parts, is built behind `--emit-window=N` and measured
+(["Step 1's result"](#step-1s-result)): the emission meets its gate and the
+lowering doesn't, so W stays ∞ by default. Nothing else below is implemented,
+and its gains are a model's that its first steps exist to confirm or refute. It is
 [#672](https://github.com/buster14a/buster/issues/672)'s all-core target's
 design: what eight workers cost a compile on the 9700X, what the designs
 already in hand remove of that, and the change that removes the rest. The issue
@@ -623,6 +625,46 @@ tests' twin.
 | 4. The tree and the file scope by windows | The parser yields external declarations; the spine reads a window's declarations into the environment before its bodies; the tree's columns are the window's. | The parse at most 1.3 times its one-worker cycles (3.43). The unit without its bodies at most 1.3 times (1.70). Peak under 60 MB. | 538, 1.86 |
 | 5. The tokens by windows | The preprocessor yields; the unit's own file is lexed in blocks. | The preprocessor at most 1.2 times (1.40). Peak under 30 MB. Under 25 DRAM bytes moved a source byte (146). | 567, 1.96 |
 | 6. Windows on lanes | The spine on one lane and the chain's windows on the others; a units' lane keeps its window arena across its units. | `--lanes 8` of `sqlite3.c` alone: the chain's stages scale as the emission's lanes do today. musl's command on 8 lanes: kernel cycles a pass at most eight processes' (1,417 M; 2,265 M today). | one unit's latency; musl's pass 1.1 |
+
+### Step 1's result
+
+Step 1 is built as `--emit-window=N` ([function lanes](commands/function-lanes.md#windows-2536)),
+`W = ∞` (0) by default, and measured on the 9700X at main `ca1ede6a` with step
+0's gauge, no strays in any cohort
+([its record](https://github.com/buster14a/buster-performance/tree/5bb1edae9d4a01dff7e53dcba81699de2b4841a3/docs/measurements/all-core-step1-2536-2026-11-14)):
+
+| `sqlite3.c` | main | `W = ∞` | W = 2,048 |
+| --- | ---: | ---: | ---: |
+| eight workers, MB/s | 287.6 | 289.3 | 292.9 |
+| their user cycles | 1,076.8 M | 1,070.7 M | 1,053.8 M |
+| one worker, MB/s | 76.5 | 76.6 | 76.5 |
+| user instructions | 1,361.4 M | 1,361.4 M | 1,363.3 M |
+| `lower`, times its one-worker user cycles | 1.59 | 1.60 | 1.49 |
+| the emission, the same | 1.32 | 1.33 | 1.15 |
+| `lower`'s faults at eight workers | 2,140 | 2,139 | 933 |
+
+- **The premise holds where the record was the boundary.** Tier 0 reads the
+  typed stream a window after the lowering wrote it: `tier0_validate_accepts`
+  went from 6.1 times its one-worker cycles to 1.05, `tier0_compile_entries`
+  from 2.1 to 1.18, `tier0_generate` from 1.24 to 1.03 (a profile by function
+  at one worker and beside seven). The emission meets the gate.
+- **The lowering doesn't**, and not for its output. Its statements' loop
+  (`check_lower_drain`) still costs 2.0 times its one-worker cycles: it reads
+  the program's rows, which `check_program` writes for the whole unit before
+  the lowering starts. That is step 2's boundary. The rest is
+  `check_lower_prepare`'s unit-wide work before any window (three times its
+  one-worker time): tables of one entry a token, set for all 716,136 tokens,
+  and passes over the graph, whose code is #1048's redesign.
+- **The window's size.** Every W from 512 to 8,192 takes 1.2 to 1.6% of the
+  user cycles at eight workers; below 2,048 a window's own cost shows at one
+  worker (512: 0.5% more user cycles).
+- **Objects are the same bytes** at W of 1, 2,048 and ∞, with and without
+  `-g`, by the vector and the scalar paths and with poisoned windows, on
+  `sqlite3.c`, Lua's 34 sources, c-testsuite's 220 programs, `main.c` and
+  musl's 1,336 units. musl's command on one lane is unchanged.
+- **So W stays ∞ by default**, as this table's rule says. The step was
+  expected to give 298 MB/s (1.03 times); it gives 292.9 (1.013 times `W = ∞`
+  on the same executable).
 
 **Across the three designs**, by what each next step gives eight workers on
 `sqlite3.c` (the model's expected case, cumulative): the node machine's step

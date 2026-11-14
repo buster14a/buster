@@ -46,6 +46,7 @@
     ENTRY(DUMP_STATIC, "--dump-static") \
     ENTRY(DUMP_TYPED, "--dump-typed") \
     ENTRY(EMBED_DIR_EQ, "--embed-dir=") \
+    ENTRY(EMIT_WINDOW_EQ, "--emit-window=") \
     ENTRY(HELPER_FORMS_EQ, "--helper-forms=") \
     ENTRY(HELPER_REPORT, "--helper-report") \
     ENTRY(ID_ORDER, "--id-order") \
