@@ -130,7 +130,7 @@ function(buster_codegen_tools available missing)
         set(llvm_libs "")
         foreach(mode link-shared link-static)
             if(llvm_libs STREQUAL "")
-                execute_process(COMMAND "${found_CONFIG}" "--${mode}" --libs core bitreader bitwriter analysis passes transformutils
+                execute_process(COMMAND "${found_CONFIG}" "--${mode}" --libs core bitreader bitwriter analysis passes transformutils x86
                     OUTPUT_VARIABLE libraries RESULT_VARIABLE libraries_status ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE TIMEOUT 30)
                 execute_process(COMMAND "${found_CONFIG}" "--${mode}" --system-libs
                     OUTPUT_VARIABLE system RESULT_VARIABLE system_status ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE TIMEOUT 30)

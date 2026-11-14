@@ -91,6 +91,8 @@
 #include <llvm-c/Core.h>
 #include <llvm-c/DebugInfo.h>
 #include <llvm-c/Error.h>
+#include <llvm-c/Target.h>
+#include <llvm-c/TargetMachine.h>
 #include <llvm-c/Transforms/PassBuilder.h>
 
 #define PRESPLIT_ALIAS_SUFFIX ".buster_split"
@@ -116,7 +118,7 @@
 // it keeps but doesn't own without their debug information, and its struct types without names; and a module's bitcode
 // without its use-list order, which the optimizer that follows doesn't need.
 LLVMModuleRef split_clone_part(LLVMModuleRef module, LLVMValueRef* keep, uint64_t count, LLVMValueRef* owned, uint64_t owned_count, bool lists);
-uint32_t split_inline_always(LLVMValueRef function);
+uint32_t split_inline_always(LLVMValueRef function, LLVMTargetMachineRef machine);
 bool split_write_part(LLVMModuleRef module, const char* path);
 
 typedef struct PresplitFunction PresplitFunction;
@@ -1840,6 +1842,32 @@ static void presplit_report(const PresplitPlan* plan)
 // it: running the simplification on the module itself, and again in each part, reshaped code that the whole unit's
 // pipeline shapes once (benchmark-environments ran 2.7% more cycles). The child sends each such argument as a record;
 // cloning the module instead took longer than the passes. Returns the arguments it wrote, or UINT32_MAX on a failure.
+// The passes --constant-arguments and --promote-arguments run see the target as the unit's pipeline does: argument
+// promotion asks it whether a promoted value passes between caller and callee as their target features have it, and
+// without a target machine every type does. A parameter promoted to a vector type the code generator couldn't pass
+// stopped its part's compile (the vector row's x86_encode_16: "Do not know how to split the result of this operator").
+// Each function's own target-cpu and target-features choose its subtarget; the machine is the module's triple's.
+static LLVMTargetMachineRef presplit_target_machine(LLVMModuleRef module)
+{
+    LLVMInitializeX86TargetInfo();
+    LLVMInitializeX86Target();
+    LLVMInitializeX86TargetMC();
+    const char* triple = LLVMGetTarget(module);
+    LLVMTargetRef target = 0;
+    char* message = 0;
+    LLVMTargetMachineRef machine = 0;
+    if (LLVMGetTargetFromTriple(triple, &target, &message) == 0)
+    {
+        machine = LLVMCreateTargetMachine(target, triple, "", "", LLVMCodeGenLevelAggressive, LLVMRelocPIC, LLVMCodeModelDefault);
+    }
+    else
+    {
+        fprintf(stderr, "presplit: no target for %s: %s\n", triple, message);
+        LLVMDisposeMessage(message);
+    }
+    return machine;
+}
+
 typedef struct PresplitConstant PresplitConstant;
 struct PresplitConstant
 {
@@ -1854,7 +1882,7 @@ struct PresplitConstant
 // UINT32_MAX. Without those bodies, check_action_operand_value passed its operand's address on and kept it; the whole
 // unit's inliner inlines more before it promotes, but took the child 10 s more on the checker's unit, against 1.6 s
 // (locally). Returns whether it could send them.
-static bool presplit_promoted_child(LLVMModuleRef module, int output)
+static bool presplit_promoted_child(LLVMModuleRef module, LLVMTargetMachineRef machine, int output)
 {
     uint32_t count = 0;
     for (LLVMValueRef function = LLVMGetFirstFunction(module); function != 0; function = LLVMGetNextFunction(function))
@@ -1878,7 +1906,7 @@ static bool presplit_promoted_child(LLVMModuleRef module, int output)
     }
     static const char pipeline[] = "cgscc(inline<only-mandatory>),cgscc(argpromotion)";
     LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
-    LLVMErrorRef error = LLVMRunPasses(module, pipeline, 0, options);
+    LLVMErrorRef error = LLVMRunPasses(module, pipeline, machine, options);
     LLVMDisposePassBuilderOptions(options);
     bool sent = error == 0;
     if (error != 0)
@@ -1903,11 +1931,11 @@ static bool presplit_promoted_child(LLVMModuleRef module, int output)
     return sent;
 }
 
-static void presplit_constant_child(LLVMModuleRef module, int output, bool promotion)
+static void presplit_constant_child(LLVMModuleRef module, LLVMTargetMachineRef machine, int output, bool promotion)
 {
     static const char pipeline[] = "function<eager-inv>(sroa<modify-cfg>),ipsccp";
     LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
-    LLVMErrorRef error = LLVMRunPasses(module, pipeline, 0, options);
+    LLVMErrorRef error = LLVMRunPasses(module, pipeline, machine, options);
     LLVMDisposePassBuilderOptions(options);
     bool sent = error == 0;
     if (error != 0)
@@ -1954,12 +1982,12 @@ static void presplit_constant_child(LLVMModuleRef module, int output, bool promo
         }
         index += 1;
     }
-    sent = sent && (!promotion || presplit_promoted_child(module, output));
+    sent = sent && (!promotion || presplit_promoted_child(module, machine, output));
     close(output);
     _exit(sent ? 0 : 1);
 }
 
-static uint32_t presplit_constant_arguments(LLVMModuleRef module, bool* promoted)
+static uint32_t presplit_constant_arguments(LLVMModuleRef module, LLVMTargetMachineRef machine, bool* promoted)
 {
     uint32_t count = 0;
     for (LLVMValueRef function = LLVMGetFirstFunction(module); function != 0; function = LLVMGetNextFunction(function))
@@ -1979,7 +2007,7 @@ static uint32_t presplit_constant_arguments(LLVMModuleRef module, bool* promoted
     if (child == 0)
     {
         close(channel[0]);
-        presplit_constant_child(module, channel[1], promoted != 0);
+        presplit_constant_child(module, machine, channel[1], promoted != 0);
     }
     uint32_t written = UINT32_MAX;
     if (child > 0)
@@ -2084,7 +2112,7 @@ static uint32_t presplit_order_first(PresplitPlan* plan, const char* path)
 // (split_inline_always) and SROA, and the module LLVM's argument promotion, which rewrites those and the calls to them;
 // every other function still stores its parameters, as clang wrote it, and keeps them. Returns the functions whose
 // parameters changed, or UINT32_MAX on a failure.
-static uint32_t presplit_promote_arguments(LLVMModuleRef module, const bool* promoted)
+static uint32_t presplit_promote_arguments(LLVMModuleRef module, LLVMTargetMachineRef machine, const bool* promoted)
 {
     LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
     uint32_t count = 0;
@@ -2105,8 +2133,8 @@ static uint32_t presplit_promote_arguments(LLVMModuleRef module, const bool* pro
             names[index] = presplit_allocate(length + 1, 1);
             memcpy(names[index], name, length);
             types[index] = LLVMGlobalGetValueType(function);
-            split_inline_always(function);
-            LLVMErrorRef error = LLVMRunPassesOnFunction(function, "sroa<modify-cfg>", 0, options);
+            split_inline_always(function, machine);
+            LLVMErrorRef error = LLVMRunPassesOnFunction(function, "sroa<modify-cfg>", machine, options);
             valid = error == 0;
             if (error != 0)
             {
@@ -2117,7 +2145,7 @@ static uint32_t presplit_promote_arguments(LLVMModuleRef module, const bool* pro
         }
         index += 1;
     }
-    LLVMErrorRef error = valid ? LLVMRunPasses(module, "cgscc(argpromotion)", 0, options) : 0;
+    LLVMErrorRef error = valid ? LLVMRunPasses(module, "cgscc(argpromotion)", machine, options) : 0;
     if (error != 0)
     {
         char* message = LLVMGetErrorMessage(error);
@@ -2278,8 +2306,9 @@ int main(int argc, char** argv)
                 }
                 plan.promoted = presplit_allocate((uint64_t)functions + 1, sizeof(bool));
             }
-            const uint32_t constants = plan.constant_arguments ? presplit_constant_arguments(module, plan.promoted) : 0;
-            const uint32_t promotions = constants != UINT32_MAX && plan.promote_arguments ? presplit_promote_arguments(module, plan.promoted) : 0;
+            LLVMTargetMachineRef machine = plan.constant_arguments ? presplit_target_machine(module) : 0;
+            const uint32_t constants = plan.constant_arguments ? machine != 0 ? presplit_constant_arguments(module, machine, plan.promoted) : UINT32_MAX : 0;
+            const uint32_t promotions = constants != UINT32_MAX && plan.promote_arguments ? presplit_promote_arguments(module, machine, plan.promoted) : 0;
             const uint32_t moved = plan.first != 0 ? presplit_order_first(&plan, plan.first) : 0;
             if (moved == UINT32_MAX)
             {

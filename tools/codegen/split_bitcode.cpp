@@ -15,6 +15,11 @@
 // first (split_inline_always), as the optimizer's mandatory inliner does.
 
 #include <llvm-c/Core.h>
+#include <llvm-c/TargetMachine.h>
+#include <llvm/Analysis/InlineCost.h>
+#include <llvm/Analysis/TargetTransformInfo.h>
+#include <llvm/IR/Attributes.h>
+#include <llvm/Target/TargetMachine.h>
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/DebugInfo.h>
@@ -81,10 +86,13 @@ extern "C" void split_move_function(LLVMValueRef function, LLVMValueRef before)
 
 // presplit.c's argument promotion (presplit_promote_arguments): every call `function` makes to an always_inline body
 // inlined into it, and the calls those bring, until it makes none, as the optimizer's mandatory inliner does before
-// anything else. Returns the calls it inlined.
-extern "C" uint32_t split_inline_always(LLVMValueRef function)
+// anything else, and where it does: a callee whose attributes or target features the caller's don't allow stays a call
+// (the encoder's helpers for features its caller lacks, whose vector code the caller's subtarget can't generate).
+// Returns the calls it inlined.
+extern "C" uint32_t split_inline_always(LLVMValueRef function, LLVMTargetMachineRef machine)
 {
     llvm::Function* caller = llvm::cast<llvm::Function>(llvm::unwrap(function));
+    llvm::TargetMachine* target = reinterpret_cast<llvm::TargetMachine*>(machine);
     uint32_t inlined = 0;
     bool changed = true;
     while (changed)
@@ -97,8 +105,10 @@ extern "C" uint32_t split_inline_always(LLVMValueRef function)
             {
                 llvm::CallBase* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
                 llvm::Function* callee = call != nullptr ? call->getCalledFunction() : nullptr;
-                if (callee != nullptr && callee != caller && !callee->isDeclaration() && !callee->isInterposable() &&
-                    callee->hasFnAttribute(llvm::Attribute::AlwaysInline))
+                const bool always = callee != nullptr && callee != caller && !callee->isDeclaration() && !callee->isInterposable() &&
+                                    callee->hasFnAttribute(llvm::Attribute::AlwaysInline);
+                if (always && llvm::isInlineViable(*callee).isSuccess() && llvm::AttributeFuncs::areInlineCompatible(*caller, *callee) &&
+                    target->getTargetTransformInfo(*caller).areInlineCompatible(caller, callee))
                 {
                     calls.push_back(call);
                 }
