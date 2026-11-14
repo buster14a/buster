@@ -91,7 +91,7 @@ static bool tier0_inline_test_file(Tier0InlineTestTally* tally, const char* file
     const uint32_t count = program->body_count;
     const uint32_t symbol_count = accessed && count != 0 ? code.lowered.functions[0].symbol_count : 0;
     CheckTier1Inline table = { 0 };
-    const bool callees = accessed && count != 0 && check_tier1_inline_table(program, &code.lowered, symbol_count, false, &work, &table);
+    const bool callees = accessed && count != 0 && check_tier1_inline_table(program, &code.lowered, symbol_count, false, false, &work, &table);
     if (callees)
     {
         memset(table.ready, 1, count);

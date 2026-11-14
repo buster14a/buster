@@ -7,15 +7,15 @@
 # a part, which runs the O3 pipeline and the code generator on its part; a relocatable link joins the parts in order
 # and restores the source unit's public symbols before the ordinary final link. A rebuild repeats only the parts whose
 # bitcode changed. The configurations differ in what a part reads of the others and in their debug information:
-# Release reads bodies of up to 300 unoptimized instructions where they are called, keeps the whole unit's inlining of
-# static functions (--keep-statics) and its benchmarks' kernels (--benchmark-bodies), and keeps its -g (the design's
-# step 5); Develop reads up to 100, with line tables and the tests' own functions optnone (steps 1 to 3). No C boundary
+# Release's options have each part's inliner decide as the whole unit's (BUSTER_RELEASE_SPLIT_OPTIONS, the design's
+# step 5); Develop's read less, with line tables and the tests' own functions optnone (steps 1 to 3). No C boundary
 # or private state moves between source units. The Debug configuration compiles every unit whole.
 #
 # A sanitizer build's Release instead generates the two longest units' native code in parallel after the ordinary O3
 # IR pipeline (#2058, #2639): their object targets compile C through O3 to bitcode, tools/codegen/split.c partitions
 # that optimized IR in module order, and the same join restores the unit's symbols. The code is the single object's,
-# function for function, instrumented by the whole module's pipeline; its Develop compiles every unit whole.
+# function for function, instrumented by the whole module's pipeline, but where the start's order puts the functions
+# small compiles run first in .text.buster_checker (#1444, split.c --first); its Develop compiles every unit whole.
 
 # split.c's code parts per unit, besides the part of its global variables: one per job of build.sh's default, a
 # physical core of the 9700X (8). Fourteen, one per hardware thread, ran in two waves there and took 74.0 s against
@@ -30,8 +30,9 @@ set(BUSTER_DEFAULT_PARTITIONS 8)
 # presplit's options, the design's (docs/stage1-build-design.md, "The splitter's rules"): bodies of up to LIMIT
 # unoptimized instructions read where they are called, chunks at one name in 24, single callers' trees up to 150,000
 # instructions, each file's functions over a run of parts sized at half the unit's mean. Release reads bodies of up to
-# 300 instructions and keeps the whole unit's inlining of static functions and benchmarks' kernels (step 5's gate);
-# Develop up to 100, for a shorter edit, with the tests' functions optnone.
+# 200 instructions as SROA leaves them, with the whole unit's constant arguments, argument promotion, inlining of
+# static functions and benchmarks' kernels (step 5's gate); Develop up to 100, for a shorter edit, with the tests'
+# functions optnone.
 set(BUSTER_RELEASE_SPLIT_OPTIONS --import 200 --simplified-size --constant-arguments --copy-promoted --anchor 24 --cohere 150000
     --spread 2 --keep-statics --benchmark-bodies)
 set(BUSTER_DEVELOP_SPLIT_OPTIONS --import 100 --anchor 24 --cohere 150000 --spread 2 --tests-optnone)
@@ -290,13 +291,27 @@ function(buster_codegen_unit name)
     set(exports "${directory}/exports.txt")
     set(locals "${directory}/locals.txt")
     set(stamp "${directory}/split.stamp")
+    # The start's order (#1444, BusterStartOrder.cmake): in a static build, whatever its linker, as CMakeLists.txt
+    # decides (buster_split_order), the split puts the unit's functions small compiles run in .text.buster_checker,
+    # which no link script can reorder, first in that section.
+    set(first "")
+    set(options "")
+    if(buster_split_order)
+        set(first "${CMAKE_BINARY_DIR}/start-order/${name}.txt")
+        buster_start_order_unit("${start_order_list}" "${name}" "${first}" own)
+        if(own EQUAL 0)
+            set(first "")
+        else()
+            set(options --first "${first}")
+        endif()
+    endif()
     add_custom_command(OUTPUT "${stamp}"
         BYPRODUCTS ${parts} "${exports}" "${locals}"
         COMMAND "${CMAKE_COMMAND}" "-DINPUT=$<TARGET_OBJECTS:buster_${name}>" "-DDIRECTORY=${directory}"
             "-DSPLIT=${BUSTER_CODEGEN_SPLIT}" "-DNM=${BUSTER_CODEGEN_NM}" "-DPARTITIONS=${BUSTER_CODEGEN_PARTITIONS}"
-            -P "${scripts}/BusterCodegenSplit.cmake"
+            "-DOPTIONS=${options}" -P "${scripts}/BusterCodegenSplit.cmake"
         DEPENDS "$<TARGET_OBJECTS:buster_${name}>" "${BUSTER_CODEGEN_SPLIT}" "${BUSTER_CODEGEN_NM}"
-            "${scripts}/BusterCodegenSplit.cmake"
+            "${scripts}/BusterCodegenSplit.cmake" ${first}
         COMMENT "Partitioning ${name}'s optimized IR"
         ${explicit}
         VERBATIM)

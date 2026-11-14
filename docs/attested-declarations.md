@@ -9,8 +9,9 @@ built in three parts, and its gate is held by its third, the view
 `--attested=off`; a skipped token's cost to the reader at the gate on musl's
 command, where the measurements disagree, and far under it on the glibc
 units'). Step 4, the owner's choice, is built as an option
-(`--attested-memo`) and its gates aren't held
-([below](#step-4-a-memo-kept-across-processes)). It is
+(`--attested-memo`) and its gates are held
+([below](#step-4-a-memo-kept-across-processes): 1.096 times for a process
+a musl unit and 1.025 times for `-c sqlite3.c`, the memo warm). It is
 [#672](https://github.com/buster14a/buster/issues/672)'s one-core target's
 design for what [the node machine](node-machine.md)
 ([#2524](https://github.com/buster14a/buster/issues/2524)) doesn't cover:
@@ -1048,34 +1049,48 @@ attested.
   unit skips; a command of other options, a file of its own; and a scrambled
   file, a memo of nothing, written again.
 
-On the 9700X (CPU 2, `setarch -R`, 5 rounds; the record's `stat-ppu-*` and
-`stat-sqlite4-*`), the memo warm (a process each of musl's preprocessed units,
-then `sqlite3.c` twice, all with the memo), against the same build without
-it:
+On the 9700X (CPU 2, `setarch -R`, 5 rounds, each round's builds in one hold
+of the lock; the record's `stat-ppu-*` and `stat-sqlite4-*`), the memo warm (a
+process each of musl's preprocessed units, then `sqlite3.c` twice, all with the
+memo), against the same build without it; first as #2710 built it, then at
+#2726's head:
 
 | | without the memo | with it | | gate |
 | --- | ---: | ---: | ---: | ---: |
-| musl's 1,336 preprocessed units, a process each: M cycles (user, kernel) | 8,240.6 (4,143.5, 4,097.0) | 8,149.3 (3,486.0, 4,663.3) | **1.011** | 1.08 |
-| … page faults | 791,559 | 1,212,826 | | |
-| `-c sqlite3.c`: M cycles | 683.4 | 684.2 | **0.999** | 1.02 |
+| #2710: musl's 1,336 preprocessed units, a process each, M cycles (user, kernel) | 8,240.6 (4,143.5, 4,097.0) | 8,149.3 (3,486.0, 4,663.3) | 1.011 | 1.08 |
+| … `-c sqlite3.c`, M cycles | 683.4 | 684.2 | 0.999 | 1.02 |
+| #2726: musl's units, a process each | 8,178.6 (4,148.1, 4,030.5) | 7,463.1 (3,340.1, 4,123.1) | **1.096** ✓ (rounds 1.073 to 1.099) | 1.08 |
+| … page faults | 801,875 | 900,983 | | |
+| … `-c sqlite3.c` | 680.7 (596.1, 84.6) | 664.3 (581.2, 83.5) | **1.025** ✓ (1.021 to 1.026) | 1.02 |
 
-Every object and diagnostic of the units' processes is the same bytes with
-the memo and without it.
+Every object and diagnostic of the units' processes, and `sqlite3.c`'s, is
+the same bytes with the memo and without it.
 
-**The gates aren't held.** A process a unit saves 15.8% of its user cycles (490
-thousand cycles a process, the reader's skip and its view), and lost them to
-316 more page faults a process: the memo's table, sized at a quarter full with
-slack, took 128 pages for 3,000 hashes, and its load copied the file. Even with
-no cost of its own, the user cycles saved are 1.087 times the command's. And
-`sqlite3.c`, which names most of what it declares, skips 2,156 of its 6,873
-file-scope declarations, 40,639 tokens (6%): the passes over its 716,000 tokens
-cost about what that saves.
+**What held the gates back, and what took them** (each found by a profile on
+the 9700X: `perf record -e page-faults` and of the kernel's cycles, by
+symbol):
 
-A follow-up sizes a one-file command's memo at half full once for its records,
-loads it a block at a time through a buffer on the stack, and makes its lists
-by the vector path without the cache: in the cloud VM a process takes 43 more
-faults than without the memo, where it took 247, and 6 to 7% fewer user
-cycles.
+- **The memo's table.** As #2710 built it, a process a unit saved 15.8% of its
+  user cycles and lost them to 316 more page faults: the table, a quarter full
+  with slack, took 128 pages for 3,000 hashes, and its load copied the file.
+  Half full and loaded through a buffer on the stack, it still took 63 of 112
+  more faults a process (`check_attested_memo_add`, a table of 16,384 16-byte
+  slots for musl's 3,448 hashes): 1.063. As an array of the hashes, read by
+  one call, and a table of their indexes (`check_attested_memo_load_alone`), it
+  takes 22 pages: 1.094.
+- **`sqlite3.c`'s view.** It names most of what it declares and skips 2,156 of
+  its 6,873 file-scope declarations, 40,639 tokens, 6% of the unit; its view
+  copied the rest, about 4,000 of the command's 12,113 faults with the memo,
+  more than the skip saved (1.005). A command of one source file reads its unit
+  as its view only where it skips a third of its tokens or more, and otherwise
+  passes the skipped declarations by their marks: 1.025. 1,158 of musl's 1,331
+  units with tokens still read as views, a process each.
+- **The rest:** an in-memory stream for the diagnostics in place of a file,
+  the state's arenas left to the exit, and no caches of lists or trees mapped:
+  a few syscalls and mappings a process.
+
+The passes are what `sqlite3.c` still pays for its skip: the lists, the chain
+and the reach over its 710,061 tokens, about 2% of its user cycles.
 
 ## Expected gains
 
