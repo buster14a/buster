@@ -333,7 +333,6 @@ struct CheckLowerTable
 #define BUSTER_CHECK_LOWER_TYPE_BIT_INT BUSTER_CHECK_LOWER_TYPE_KIND
 
 #include "c_check_program_initializers.c"
-#include "c_check_program_x87_literals.c"
 
 // Source declaration attached to a local home, retained only by the source-aware lowering.
 typedef struct CheckDebugBinding CheckDebugBinding;
@@ -18155,11 +18154,6 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         lowered->status = CHECK_PROGRAM_RESOURCE;
         valid = false;
     }
-    if (valid && !check_lower_x87_literal_pools(&lowered->initializers, program, output, scratch, scalar))
-    {
-        lowered->status = CHECK_PROGRAM_RESOURCE;
-        valid = false;
-    }
     const uint32_t errno_calls = valid ? check_lower_runtime_symbols(lowered, program) : 0;
     valid = valid && lowered->status == CHECK_PROGRAM_OK;
     for (uint32_t i = 0; i < lowered->helpers.count; i += 1)
@@ -18209,11 +18203,10 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
             cleanup_calls += (uint64_t)program->chains[exit->first].depth - program->chains[exit->last].depth + 1;
         }
     }
-    const uint32_t initializer_copies = lowered->initializers.count - lowered->initializers.x87_count;
-    const uint64_t abi_capacity64 = (uint64_t)nodes * 3 + program->body_count + errno_calls + asm_statements + initializer_copies + limb_room.calls +
+    const uint64_t abi_capacity64 = (uint64_t)nodes * 3 + program->body_count + errno_calls + asm_statements + lowered->initializers.count + limb_room.calls +
                                     lane_calls + lowered->initializers.extra_calls + cleanup_calls + 1;
     const uint64_t argument_capacity64 = input != 0 ? (uint64_t)input->graph.argument_count + count + (uint64_t)nodes * 4 + errno_calls + asm_statements +
-                                                    (uint64_t)initializer_copies * 3 + limb_room.arguments + lane_arguments + lowered->initializers.extra_arguments + cleanup_calls + 1 : 0;
+                                                    (uint64_t)lowered->initializers.count * 3 + limb_room.arguments + lane_arguments + lowered->initializers.extra_arguments + cleanup_calls + 1 : 0;
     const uint64_t pool_base = (uint64_t)program->symbol_count + lowered->helpers.count + 1;
     const uint64_t provisional64 = pool_base + lowered->initializers.count;
     lowered->initializers.symbol_base = provisional64 < UINT32_MAX ? (SymbolId)pool_base : 0;
@@ -19267,33 +19260,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             BUSTER_CHECK_LOWER_COPY(x87_constants, x87_constants, uint64_t, 2 * (uint64_t)writer->x87_constant_count);
             function->x87_constant_count = writer->x87_constant_count;
             function->x87 = true;
-            const CheckLowerInitializers* pools = &status->initializers;
-            if (status->status == CHECK_PROGRAM_OK && pools->x87_count != 0)
-            {
-                const uint64_t symbol_mark = output->length;
-                SymbolId* symbols = BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, writer->x87_constant_count);
-                bool found = symbols != NULL;
-                for (uint32_t k = 0; found && k < writer->x87_constant_count; k += 1)
-                {
-                    const uint64_t low = writer->x87_constants[2 * (uint64_t)k];
-                    const uint64_t high = writer->x87_constants[2 * (uint64_t)k + 1];
-                    symbols[k] = check_lower_x87_literal_symbol(pools, low, high);
-                    found = symbols[k] != 0 && check_lower_x87_literal_load_safe(low, high);
-                }
-                if (symbols == NULL)
-                {
-                    check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
-                }
-                else if (found)
-                {
-                    function->x87_symbols = symbols;
-                }
-                else
-                {
-                    // Unqualified transfer effects or a future synthesis outside the pool keep the baseline emitter.
-                    arena_pop_to(output, symbol_mark);
-                }
-            }
         }
         function->int128 = writer->int128;
         function->segments = writer->segment_entries;

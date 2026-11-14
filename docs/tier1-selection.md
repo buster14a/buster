@@ -333,10 +333,7 @@ patterns are:
   consumer reads them from the IR's operands' objects (`tier1_emit_cfg_x87`), and
   the plan marks them needed as it marks a pattern's values. The values are the
   other operands alone: a load's and a store's address, a conversion's integer
-  or floating operand. A raw IR constant stores its 10 bytes as immediates;
-  the C driver's eligible finite literals instead arrive as read-only symbol
-  loads through its shared exact-payload pool (#1387,
-  [literal lowering](commands/lowering.md)). A load and a
+  or floating operand. A constant stores its 10 bytes as immediates. A load and a
   store are `fld` and `fstp` of them through the address; arithmetic loads both
   operands and `faddp` (`fsubp`, `fmulp`, `fdivp`) `st(1), st(0)`; a negation is
   `fchs`. A comparison is `fucomip` of the operands in the order that makes

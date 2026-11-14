@@ -634,9 +634,6 @@ struct Tier0Function
     uint32_t symbol_count;
     const uint64_t* x87_constants;
     uint32_t x87_constant_count;
-    // Optional immutable symbols for the same constants (#1387), whose payloads have ten significant bytes in
-    // sixteen-byte aligned storage. A CONST loads through its symbol when present; otherwise it constructs its slot.
-    const uint32_t* x87_symbols;
     bool x87;
     bool int128;
     // Whether the function saves every callee-saved register and restores it, as LLVM's llvm.eh.unwind.init makes a
@@ -7266,7 +7263,7 @@ static void tier0_x87_truncate(Tier0Writer* writer, uint8_t scratch)
 // A long double entry's records (tier0_memory_entry's): its operands loaded onto the x87 stack from their slots (an F80
 // operand at integer depth d in slot d), the x87 operation, and its result stored into its own slot (or its register, for
 // an integer or a floating class), leaving the x87 stack empty. With d the entry's integer depth:
-//   - CONST: its immutable symbol loaded into slot d when x87_symbols is present, otherwise its 10 bytes stored as immediates;
+//   - CONST: its constant's 10 bytes stored into slot d as immediates;
 //   - LOAD, STORE, SET: the value through the address in the register at d − 1 (or d − 2, a store's), STORE's kept in
 //     slot d − 2 too; DUP: slot d − 1 copied into slot d; LOCAL: its object's 10 bytes into slot d; STORE_LOCAL and
 //     SET_LOCAL: slot d − 1 into its object; NEG: fchs;
@@ -7293,36 +7290,17 @@ static void tier0_emit_x87(const Tier0Function* function, const Tier0Entries* en
     if (kind == BUSTER_TYPED_CONST)
     {
         const uint64_t constant = function->values[i];
-        if (function->x87_symbols != 0)
-        {
-            if (writer->records != 0)
-            {
-                writer->references[writer->reference_count] = (LinkReference){
-                    .instruction = writer->count,
-                    .field = X86_FIXUP_DISPLACEMENT,
-                    .kind = BUSTER_LINK_FIXUP_PC32,
-                    .target = function->x87_symbols[constant],
-                    .addend = 0,
-                };
-            }
-            writer->reference_count += 1;
-            tier0_put(writer, tier0_instruction(X86_FORM_FLD_M80 | BUSTER_X86_FORM_FIXUP, 0, 0, BUSTER_X86_MEMORY_RIP, 0, 0));
-            tier0_put(writer, tier0_memory_slot(X86_FORM_FSTP_M80, frame, depth, 0));
-        }
-        else
-        {
-            const uint64_t significand = function->x87_constants[2 * constant];
-            const uint64_t top = function->x87_constants[2 * constant + 1];
-            X86Instruction low = tier0_memory_slot(X86_FORM_MOV_RM32_IMM32, frame, depth, 0);
-            X86Instruction high = tier0_memory_slot(X86_FORM_MOV_RM32_IMM32, frame, depth, 4);
-            X86Instruction exponent = tier0_memory_slot(X86_FORM_MOV_RM16_IMM16, frame, depth, 8);
-            low.immediate = (int32_t)(uint32_t)significand;
-            high.immediate = (int32_t)(uint32_t)(significand >> 32);
-            exponent.immediate = (int32_t)(uint16_t)top;
-            tier0_put(writer, low);
-            tier0_put(writer, high);
-            tier0_put(writer, exponent);
-        }
+        const uint64_t significand = function->x87_constants[2 * constant];
+        const uint64_t top = function->x87_constants[2 * constant + 1];
+        X86Instruction low = tier0_memory_slot(X86_FORM_MOV_RM32_IMM32, frame, depth, 0);
+        X86Instruction high = tier0_memory_slot(X86_FORM_MOV_RM32_IMM32, frame, depth, 4);
+        X86Instruction exponent = tier0_memory_slot(X86_FORM_MOV_RM16_IMM16, frame, depth, 8);
+        low.immediate = (int32_t)(uint32_t)significand;
+        high.immediate = (int32_t)(uint32_t)(significand >> 32);
+        exponent.immediate = (int32_t)(uint16_t)top;
+        tier0_put(writer, low);
+        tier0_put(writer, high);
+        tier0_put(writer, exponent);
     }
     else if (kind == BUSTER_TYPED_LOAD)
     {
@@ -7475,16 +7453,14 @@ static void tier0_emit_x87(const Tier0Function* function, const Tier0Entries* en
 }
 
 // How many records tier0_emit_x87 writes for entry i, without writing them (tier0_count_deferred's).
-static uint32_t tier0_count_x87(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, uint32_t* references)
+static uint32_t tier0_count_x87(const Tier0Entries* entries, uint32_t i)
 {
     const uint32_t kind = entries->key_kinds[i];
     const uint32_t class = entries->key_classes[i];
     uint32_t count = 0;
     if (kind == BUSTER_TYPED_CONST || kind == BUSTER_TYPED_NEG)
     {
-        const bool literal = kind == BUSTER_TYPED_CONST && function->x87_symbols != 0;
-        count = literal ? 2 : 3;
-        *references += literal ? 1 : 0;
+        count = 3;
     }
     else if (kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_DUP || kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_STORE_LOCAL ||
              kind == BUSTER_TYPED_SET_LOCAL)
@@ -9652,7 +9628,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const
     }
     else if (memory && tier0_memory_entry(entries, i))
     {
-        count = tier0_count_x87(function, entries, i, references);
+        count = tier0_count_x87(entries, i);
     }
     else if (kind == BUSTER_TYPED_DIV || kind == BUSTER_TYPED_MOD)
     {
@@ -12584,11 +12560,6 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar_entries(const 
                 {
                     tier0_reject(&validator, i, "a long double global read as a value (its address's LOAD reads it), or a constant past x87_constants");
                 }
-                if (kind == BUSTER_TYPED_CONST && tier0_class_x87(class) && value < function->x87_constant_count && function->x87_symbols != 0 &&
-                    function->x87_symbols[value] == 0)
-                {
-                    tier0_reject(&validator, i, "a long double literal without a symbol");
-                }
                 if (tier0_class_int128(class) && kind == BUSTER_TYPED_GLOBAL)
                 {
                     tier0_reject(&validator, i, "a 128-bit integer global read as a value (its address's LOAD reads it)");
@@ -15123,7 +15094,6 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
     const uint32_t count = function->count;
     const uint32_t local_count = function->local_count;
     const uint32_t call_count = function->call_count;
-    const uint32_t* const x87_symbols = function->x87_symbols;
     // What tier0_validate_scalar checks before the stream: the limits, the frame, the calls, the parameters and the tables.
     // A function with vectors, masks or tail calls is the scalar validator's (its TAIL_CALL entries are refused below too).
     bool valid = !function->vectors && !function->masks && function->call_tails == 0 && count <= BUSTER_TIER0_MAX_ENTRIES && (function->label_count == 0 || function->label_entries != 0) &&
@@ -15262,13 +15232,6 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
             const __m512i any = _mm512_or_si512(low_words[q], high_words);
             bounded |= (__mmask64)inside << (16 * q);
             nonzero |= (__mmask64)_mm512_test_epi32_mask(any, any) << (16 * q);
-            if (x87_symbols != 0)
-            {
-                const __mmask16 literals = (__mmask16)(x87_constants >> (16 * q)) & inside & (__mmask16)(lanes >> (16 * q));
-                const __mmask16 reachable = literals & _mm512_cmple_epu32_mask(low_words[q], _mm512_set1_epi32(INT32_MAX));
-                const __m512i symbols = _mm512_mask_i32gather_epi32(zero, reachable, low_words[q], x87_symbols, 4);
-                refused |= (__mmask64)(literals & _mm512_cmpeq_epi32_mask(symbols, zero)) << (16 * q);
-            }
         }
         refused |= lanes & (~bounded | (_mm512_test_epi8_mask(shapes, _mm512_set1_epi8(BUSTER_TIER0_SCAN_NONZERO)) & ~nonzero));
         const __m512i indices = tier0_scan_bytes(low_words);

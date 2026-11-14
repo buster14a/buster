@@ -433,14 +433,8 @@ stack) and returns in st0; a struct of one returns in st0, and a struct of a `_C
   the value's slot: a front end's locals of the class, and its temporaries of it, objects of their own. A parameter's
   home is its incoming stack slot, whose place is a multiple of 16.
 - **Its constants** are an optional column of the function's (`x87_constants`, `x87_constant_count` values of two words:
-  the significand, then the sign and exponent), which `CONST F80` indexes. The optional parallel `x87_symbols` column
-  names immutable 16-byte aligned objects containing those ten payload bytes and six zero padding bytes. With the
-  column, a constant uses a RIP-relative `fldt` and stores into its private slot, with the same symbolic relocation
-  contract as other code references; both count paths account for its two records and one reference. The C producer
-  supplies the column only when every constant is a canonical finite F80 encoding, including signed zero and
-  subnormal values. A function containing an infinity, NaN or noncanonical encoding keeps the original three integer
-  stores for every constant, so materialization introduces no new raw-payload x87 operation. Synthetic typed streams
-  without the optional column keep that construction too.
+  the significand, then the sign and exponent), which `CONST F80` indexes. A constant is three immediate stores into its
+  slot.
 - **A function says whether it has long double values** (`Tier0Function.x87`: an entry of class F80, or a long double
   result), which its producer knows as it writes them. Only such a function has the slots, and only its compile looks
   for long double's entries: selection, measuring and the deferred entries' emitter are each written once with the flag
@@ -484,9 +478,8 @@ allocation leaves the original records intact.
 `test-tier0` checks direct destination stores, ordered subtraction/division chains, duplicate uses, both kinds of kept
 stores, raw-copy and fence fallbacks, and scalar/vector record equality. Native arithmetic fixtures compare all four
 rounding modes and all three supported precision settings with explicit full-width C intermediates, including result
-bytes, exception flags, empty-stack state and preserved control words. Separate literal fixtures compare both
-encoders, resolve repeated PC-relative references to one aligned payload, and execute signed-zero, subnormal,
-extended-precision and finite-boundary cases.
+bytes, exception flags, empty-stack state and preserved control words. A driver fixture also checks that a pending
+unmasked x87 exception does not trap at a literal before an intervening volatile store.
 
 `tier0_validate` refuses a local of the class that isn't an object, a global read or stored as an F80 value, a constant
 past the column, an integer operation of the class or a branch on it, an F80 argument anywhere but its 16 bytes of the

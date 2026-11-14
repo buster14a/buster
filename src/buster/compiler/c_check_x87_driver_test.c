@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 
-// #1387: both tiers' exact literals and expression transfers through ELF and native execution. The separately
+// #1387: both tiers' long-double expression transfers through ELF and native execution. The separately
 // compiled Clang harness compares ten-byte results, sticky exception flags and the control word in twelve x87 modes.
 // Include after c_check_tier1_driver_test.c for its bounded object decoder.
 
 static const char check_test_x87_source[] =
+    "extern volatile int marker; long double x87_pending(void) { return 0.5L + (marker = 1, 2.0L); }\n"
     "void x87_add(long double *out, const long double *p) { *out = p[0] + p[1]; }\n"
     "void x87_chain(long double *out, const long double *p) { *out = p[0] * p[1] + p[2]; }\n"
     "void x87_order(long double *out, const long double *p) { *out = (p[0] - p[1]) / (p[2] - p[3]); }\n"
@@ -26,6 +27,8 @@ static const char check_test_x87_harness[] =
     "void x87_literals(long double*); void x87_alias(long double*);\n"
     "void x87_trap(volatile int*, long double*, const long double*);\n"
     "long double x87_join(int); long double x87_call(long double);\n"
+    "volatile int marker; long double x87_pending(void);\n"
+    "static void pending_trapped(int s) { _exit(s==SIGFPE && marker==1 ? 0 : 92); }\n"
     "static volatile sig_atomic_t trap_marker;\n"
     "static long double trap_result=1.0L;\n"
     "static void trapped(int number) { static const unsigned char one[10]={0,0,0,0,0,0,0,128,255,63};\n"
@@ -63,34 +66,10 @@ static const char check_test_x87_harness[] =
     "x87_trap(&trap_marker,&trap_result,inputs[3]); _exit(91); }\n"
     "int child_status=0; if(child<0) ++errors; else {\n"
     "errors+=waitpid(child,&child_status,0)!=child; errors+=!WIFEXITED(child_status)||WEXITSTATUS(child_status)!=0; }\n"
+    "child=fork(); if(child==0) { alarm(5); signal(SIGFPE,pending_trapped); const unsigned short cw=0x037e;\n"
+    "__asm__ volatile(\"fninit; fldz; fldz; fdivp; fldcw %0\"::\"m\"(cw):\"memory\"); (void)x87_pending(); _exit(93); }\n"
+    "if(child<0) ++errors; else { errors+=waitpid(child,&child_status,0)!=child; errors+=!WIFEXITED(child_status)||WEXITSTATUS(child_status)!=0; }\n"
     "printf(\"%u\\n\",errors); return errors!=0; }\n";
-
-static void check_test_x87_records(CheckTest* test, const char* object)
-{
-    enum
-    {
-        CHECK_TEST_X87_RECORDS = 512,
-    };
-    X86Decoded* records = calloc(CHECK_TEST_X87_RECORDS, sizeof(X86Decoded));
-    uint32_t* offsets = calloc(CHECK_TEST_X87_RECORDS, sizeof(uint32_t));
-    uint32_t* types = calloc(CHECK_TEST_X87_RECORDS, sizeof(uint32_t));
-    const bool ready = records != NULL && offsets != NULL && types != NULL && x86_disassembler_initialize();
-    uint32_t relocations = 0;
-    const uint32_t count = ready ? check_test_tier1_function(object, "x87_literals", records, CHECK_TEST_X87_RECORDS, offsets, types, &relocations) : 0;
-    uint32_t immediate_stores = 0;
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        const X86Instruction record = records[i].instruction;
-        const uint32_t form = record.form & BUSTER_X86_FORM_NUMBER;
-        immediate_stores += (record.mode & BUSTER_X86_MODE_MEMORY) != 0 &&
-                            (form == X86_FORM_MOV_RM16_IMM16 || form == X86_FORM_MOV_RM32_IMM32 || form == X86_FORM_MOV_RM64_IMM32);
-    }
-    check_test_expect(test, count != 0 && relocations != 0 && immediate_stores == 0,
-                      "long double literals use data relocations without integer construction stores");
-    free(types);
-    free(offsets);
-    free(records);
-}
 
 static void check_test_driver_x87(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
@@ -140,7 +119,6 @@ static void check_test_driver_x87(CheckTest* test, const char* clang, const char
         free(text);
         if (status == 0)
         {
-            check_test_x87_records(test, object);
             char* link_arguments[] = { (char*)clang, "-std=gnu17", "-O0", "-ffp-contract=off", "-fno-strict-aliasing", "-o", output, harness, object, NULL };
             text = NULL;
             status = check_test_driver_spawn(link_arguments, &text);

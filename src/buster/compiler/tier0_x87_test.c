@@ -1753,103 +1753,6 @@ static void tier0_test_x87_transfers(Tier0TestTally* tally, const Tier0TestX87Ab
     arena_release(&arena);
 }
 
-// The literal caller supplies immutable symbols: both references must reach one aligned ten-byte payload without
-// executable integer construction stores. Resolve the encoder's actual fixup ends into the executable image, so this
-// checks PC-relative addends as well as the scalar/vector count and reference columns.
-static void tier0_test_x87_literals(Tier0TestTally* tally, const Tier0TestX87Abi* abi, Tier0TestX87Shared* shared)
-{
-    static const uint64_t constants[][2] = {
-        { 0, 0 },
-        { 0, 0x8000 },
-        { UINT64_C(1) << 63, 0x3ffe },
-        { (UINT64_C(1) << 63) | 1, 0x3fff },
-        { UINT64_MAX, 0x7ffe },
-        { 1, 0 },
-    };
-    Arena arena = arena_reserve(1ull << 24);
-    uint8_t* image = calloc(2, 4 * BUSTER_TIER0_TEST_PAGE);
-    const bool ready = tier0_test_expect(tally, image != 0 && arena.base != 0, "x87", "literal fixture memory");
-    for (uint32_t which = 0; ready && which < BUSTER_ARRAY_LENGTH(constants); which += 1)
-    {
-        Tier0TestX87Program program;
-        memset(&program, 0, sizeof(program));
-        program.constant_count = 1;
-        memcpy(program.constants, constants[which], sizeof(constants[which]));
-        for (uint32_t use = 0; use < 2; use += 1)
-        {
-            tier0_test_x87_element(&program, 3, use, 16);
-            tier0_test_x87_emit(&program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_F80, 0);
-            tier0_test_x87_emit(&program, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_F80, 0);
-        }
-        tier0_test_x87_emit(&program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
-        uint32_t symbols[1] = { 17 };
-        Tier0Function function = tier0_test_x87_function(&program, abi);
-        function.x87_symbols = symbols;
-        arena_pop_to(&arena, 0);
-        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
-        const Tier0Code vector = tier0_compile(&function, &arena);
-        bool valid = tier0_test_expect(tally, tier0_validate(&function).error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector),
-                                       "x87", "literal %u: validation or scalar/vector code differs", which);
-        valid = valid && tier0_test_expect(tally, scalar.reference_count == 2 && x86_validate(scalar.records, scalar.count) == scalar.count,
-                                           "x87", "literal %u: records or reference count", which);
-        for (uint32_t r = 0; valid && r < scalar.count; r += 1)
-        {
-            const X86Instruction record = scalar.records[r];
-            const bool immediate = record.form == X86_FORM_MOV_RM32_IMM32 || record.form == X86_FORM_MOV_RM16_IMM16;
-            valid = tier0_test_expect(tally, !immediate || record.mode == BUSTER_X86_REGISTER_DIRECT, "x87", "literal %u: integer construction store", which);
-        }
-        uint32_t* offsets = valid ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, (uint64_t)scalar.count + 1) : 0;
-        const BranchSizing sizing = offsets != 0 ? size_branches(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count, offsets) : (BranchSizing){ 0 };
-        valid = valid && tier0_test_expect(tally, offsets != 0 && sizing.error == BRANCH_SIZING_OK, "x87", "literal %u: branch sizing", which);
-        uint32_t vector_ends[BUSTER_X86_ENCODER_FIXUP_CAPACITY(2)] = { 0 };
-        uint32_t scalar_ends[2] = { 0 };
-        const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(scalar.count);
-        const int64_t vector_length = valid && capacity < 4 * BUSTER_TIER0_TEST_PAGE ? x86_encode(scalar.records, scalar.count, image, capacity, 0, vector_ends) : -1;
-        const int64_t scalar_length = valid && capacity < 4 * BUSTER_TIER0_TEST_PAGE ? x86_encode_scalar(scalar.records, scalar.count, image + 4 * BUSTER_TIER0_TEST_PAGE, capacity, 0, scalar_ends) : -1;
-        valid = valid && tier0_test_expect(tally, vector_length > 0 && vector_length == scalar_length &&
-                                                   memcmp(image, image + 4 * BUSTER_TIER0_TEST_PAGE, (size_t)vector_length) == 0 &&
-                                                   memcmp(vector_ends, scalar_ends, sizeof(scalar_ends)) == 0,
-                                           "x87", "literal %u: encoders or fixup ends differ", which);
-        const uint32_t literal = valid ? ((uint32_t)vector_length + 15) & ~15u : 0;
-        valid = valid && literal + 16 <= 4 * BUSTER_TIER0_TEST_PAGE;
-        if (valid)
-        {
-            memset(image + literal, 0, 16);
-            memcpy(image + literal, &constants[which][0], 8);
-            const uint16_t top = (uint16_t)constants[which][1];
-            memcpy(image + literal + 8, &top, 2);
-            for (uint32_t use = 0; valid && use < 2; use += 1)
-            {
-                const LinkReference reference = scalar.references[use];
-                const bool inside = reference.instruction < scalar.count;
-                const X86Instruction record = inside ? scalar.records[reference.instruction] : (X86Instruction){ 0 };
-                valid = tier0_test_expect(tally, inside && reference.target == symbols[0] && reference.kind == BUSTER_LINK_FIXUP_PC32 && reference.addend == 0 &&
-                                                   reference.field == X86_FIXUP_DISPLACEMENT && record.form == (X86_FORM_FLD_M80 | BUSTER_X86_FORM_FIXUP) &&
-                                                   record.mode == BUSTER_X86_MEMORY_RIP,
-                                           "x87", "literal %u: symbolic FLD reference %u", which, use);
-                if (valid)
-                {
-                    const int32_t displacement = (int32_t)literal - (int32_t)vector_ends[use];
-                    const uint32_t field = vector_ends[use] - x86_fixup_distance(record.form, reference.field);
-                    memcpy(image + field, &displacement, sizeof(displacement));
-                }
-            }
-            memset(shared->out, 0, sizeof(shared->out));
-            const bool ran = valid && tier0_test_expect(tally, tier0_test_x87_native(image, literal + 16, tier0_test_x87_run_body, shared), "x87", "literal %u: native run", which);
-            if (ran)
-            {
-                tier0_test_expect(tally, memcmp(shared->out, image + literal, 10) == 0 && memcmp(shared->out + 16, image + literal, 10) == 0,
-                                  "x87", "literal %u: payload changed", which);
-            }
-        }
-        symbols[0] = 0;
-        tier0_test_expect(tally, tier0_validate(&function).error != TIER0_OK && tier0_validate_scalar(&function).error != TIER0_OK,
-                          "x87", "literal %u: missing symbol accepted", which);
-    }
-    free(image);
-    arena_release(&arena);
-}
-
 // ---------------------------------------------------------------------------------------------------------------------
 // The rules
 
@@ -2062,7 +1965,6 @@ static void tier0_test_x87(Tier0TestTally* tally, Tier0Tables* tables, uint64_t 
         tier0_test_x87_functions(tally, &abi, shared);
         tier0_test_x87_boundaries(tally, &abi, shared);
         tier0_test_x87_transfers(tally, &abi, shared);
-        tier0_test_x87_literals(tally, &abi, shared);
         tier0_test_x87_programs(tally, &abi, seed, count, shared, too_deep, entries);
     }
     if (shared != MAP_FAILED)
