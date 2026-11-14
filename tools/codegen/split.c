@@ -69,6 +69,8 @@
 bool split_write_bitcode(LLVMModuleRef module, const char* path);
 // split_bitcode.cpp: erases `alias` once its dead constant users are gone, and whether it could (nothing else used it).
 bool split_erase_alias(LLVMValueRef alias);
+// split_bitcode.cpp: deletes `function`'s blocks, every instruction's operands dropped first.
+void split_delete_blocks(LLVMValueRef function);
 // split_bitcode.cpp: moves `function` right before `before` in their module's list of functions.
 void split_move_function(LLVMValueRef function, LLVMValueRef before);
 
@@ -694,34 +696,7 @@ static void split_plan(SplitPlan* plan)
 // Deletes a function's body, leaving a declaration.
 static void split_delete_body(LLVMValueRef function)
 {
-    for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(function); block != 0; block = LLVMGetNextBasicBlock(block))
-    {
-        for (LLVMValueRef instruction = LLVMGetFirstInstruction(block); instruction != 0; instruction = LLVMGetNextInstruction(instruction))
-        {
-            LLVMTypeRef type = LLVMTypeOf(instruction);
-            if (LLVMGetTypeKind(type) != LLVMVoidTypeKind)
-            {
-                LLVMReplaceAllUsesWith(instruction, LLVMGetPoison(type));
-            }
-        }
-    }
-    for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(function); block != 0; block = LLVMGetNextBasicBlock(block))
-    {
-        LLVMValueRef instruction = LLVMGetFirstInstruction(block);
-        while (instruction != 0)
-        {
-            LLVMValueRef next = LLVMGetNextInstruction(instruction);
-            LLVMInstructionEraseFromParent(instruction);
-            instruction = next;
-        }
-    }
-    LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(function);
-    while (block != 0)
-    {
-        LLVMBasicBlockRef next = LLVMGetNextBasicBlock(block);
-        LLVMDeleteBasicBlock(block);
-        block = next;
-    }
+    split_delete_blocks(function);
     LLVMGlobalClearMetadata(function);
     if (LLVMHasPersonalityFn(function))
     {
