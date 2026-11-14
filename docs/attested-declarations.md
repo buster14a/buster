@@ -1024,18 +1024,26 @@ attested.
 - **A command of one source file** runs the passes with the memo
   (`check_driver_one_unit`): it opens a state for its unit, whose arenas are
   base pages throughout (a huge page's first touch would clear 2 MB for a few
-  kilobytes of a short process) and which keeps no caches of lists or trees (a
-  unit only fills them: `CheckAttested.alone`); its diagnostics go to a stream
-  of their own, and a unit that skipped and failed is read again from its
-  start with nothing skipped, as a units' lane reads its units again. A
-  command of several source files loads the memo in each lane, so that its
-  first units skip too.
+  kilobytes of a short process) and stay mapped to the exit as the command's
+  own memory does, and which keeps no caches of lists or trees and maps none
+  (a unit only fills them: `CheckAttested.alone`). Its memo is the hashes in
+  the order loaded and learned, read from the file by one call, and a table of
+  their indexes at most half full (`check_attested_memo_load_alone`): about 24
+  bytes a hash for the process to fault in, where a table of the hashes
+  themselves takes 32 to 64. Its diagnostics, the preprocessor's and the
+  checker's, go to an in-memory stream of their own, and a unit that skipped
+  and failed is read again from its start with nothing skipped, as a units'
+  lane reads its units again, so that only the second reading's diagnostics
+  print. A command of several source files loads the memo in each lane, so
+  that its first units skip too.
 - **The tests** (`test-checker --attested`): each of the compile fixture's
   units by a command of its own, with the memo cold and then warm, against
   `--attested=off` (every object and diagnostic the same bytes; a command
-  skips what earlier commands learned, every unit when warm); the units as one
-  command, whose first unit skips; a command of other options, a file of its
-  own; and a scrambled file, a memo of nothing, written again.
+  skips what earlier commands learned, every unit when warm); its two units
+  with errors, each by a command of its own with the memo warm, read again
+  and printing `off`'s diagnostics once; the units as one command, whose first
+  unit skips; a command of other options, a file of its own; and a scrambled
+  file, a memo of nothing, written again.
 
 On the 9700X (CPU 2, `setarch -R`, 5 rounds; the record's `stat-ppu-*` and
 `stat-sqlite4-*`), the memo warm (a process each of musl's preprocessed units,
