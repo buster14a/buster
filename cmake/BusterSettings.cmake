@@ -475,6 +475,15 @@ set(BUSTER_DEBUG_CONFIGURATION_OPTIMIZATION -O0)
 # so that an edit changed every part that mentions its file (docs/stage1-build-design.md).
 set(BUSTER_DEVELOP_CONFIGURATION_DEBUG -gdwarf-4 -gline-tables-only)
 
+# The code generator's option for a compile whose debug information is line tables alone: Develop's, and a sanitizer
+# build's Release (#2739). Such a compile has no variable locations, yet LLVM's instruction-referencing LiveDebugValues
+# ran its analysis of the machine values on every function regardless: 188 s of the 1,815 s an x86-64 MSan build's
+# compiles took (-ftime-trace's "Live DEBUG_VALUE analysis"), 17% of a part of the checker's unit. The older pass,
+# with nothing to track either, takes none of it, and the objects are the same, byte for byte. With -g there are
+# variables, which the two passes locate differently, so a -g compile keeps LLVM's default. A build option rather than
+# one of the code's flags, as -fmacro-prefix-map is: print-compile-flags leaves it out.
+set(BUSTER_LINE_TABLES_CODEGEN -mllvm -experimental-debug-variable-locations=false)
+
 # The units of their own that the Develop configuration leaves out of its executable (#2559's step 2), built on demand
 # by Release and Debug: the benchmark units whose only entry is a benchmark command's run_* function and that no test
 # runs, which BusterDevelopAbsent.cmake's stand-ins replace in Develop. test-preprocessor's location option runs

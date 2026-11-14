@@ -162,9 +162,10 @@ callee's parameter becomes, since the callee owns its copy; and an aggregate
 result's bytes are copied from the address the callee returns into the call's
 destination. Where a vector register holds the aggregate whole and
 `IrInlineOptions.vector_copies` allows its width (bit 0 16 bytes, bit 1 32, bit
-2 64: the target's AVX-512F, and VL for the narrower), a copy is one vector load
-and store; otherwise 8-, 4-, 2- and 1-byte integers, each piece past the first
-through an `ADDRESS` of each side. Default options copy by integers. The
+2 64: the widths whose moves the target has, `ir_typed_vector_copies`, so 16
+bytes at every target, 32 with AVX and 64 with AVX-512F, #2750), a copy is one
+vector load and store; otherwise 8-, 4-, 2- and 1-byte integers, each piece past
+the first through an `ADDRESS` of each side. Default options copy by integers. The
 copies' instructions, addresses and slots are counted in the expansion's size,
 cost and growth bounds, and the result is verified as any other.
 
@@ -173,7 +174,12 @@ guide](ir-scalar-replacement.md)) splits every slot whose accesses are whole
 vectors into vector slots, which promotion then makes values, so an inlined
 wrapper's arguments, parameter objects and result leave no memory access.
 Integer copies of a vector the callee reads whole overlap its vector field and
-stay memory, correctly. `test-ir-inline` runs a by-value unit on the IR's
+stay memory, correctly, and slowly: the callee's 16-byte load of two 8-byte
+stores can't be forwarded from the store buffer. Below AVX-512 that was every
+wrapper's operands until #2750 (an SSE2 loop ran 15 times slower than Tier 0's
+on the 9700X, with 14 store-to-load conflicts an iteration);
+`test-checker-driver`'s vector copies' fixture holds x86-64's and x86-64-v3's
+frames to x86-64-v4's. `test-ir-inline` runs a by-value unit on the IR's
 interpreter before and after inlining (both copy kinds, both twins), after SROA
 and after promotion, which leaves only the parameter's two loads and its store;
 and checks a rows fixture's columns (the interpreter has no model of x86

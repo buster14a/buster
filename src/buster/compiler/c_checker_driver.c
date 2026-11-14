@@ -5204,11 +5204,11 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                 phase == 2 && extra[index].completion != 0 ? extra[index].completion :
                                                 phase == 2 && extra[index].position != located ? extra[index].position :
                                                 node < input->graph.count && input->graph.source_positions != NULL ? input->graph.source_positions[node] : 0;
-                    // A false assertion's root is omitted from the rejected unit's warning walk (#2409). Its conversion
-                    // to bool still warns before the assertion fails, at the same expression boundary as the error.
+                    // A false assertion's tree is omitted from the rejected unit's warning walk (#2409). Its retained
+                    // boolean conversions still warn before the assertion fails, at the same boundary as the error.
                     if (show_warnings && phase == 1 && stream->reports[index].message == CHECK_MESSAGE_STATIC_ASSERT && node < input->graph.count)
                     {
-                        check_common_int_in_bool(parser, pp, input, stream, types, node, NULL, completion != 0 ? completion : located, scratch);
+                        check_common_failed_assertion(parser, pp, input, stream, types, &spell, node, completion != 0 ? completion : located, scratch);
                     }
                     // An x86 builtin's call whose hard immediate constraint failed: clang's message at the call's begin,
                     // published where the report's own token puts it (#1066).
@@ -6501,7 +6501,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                  "initializer for variable '%.*s' with type '%s' contains multiple expressions",
                                                  (int)intern_length(pp->table, name), intern_bytes(pp->table, name), c23 ? "auto" : "__auto_type");
                         }
-                        else if (phase == 0 && (input->reports[index].message == CHECK_INPUT_AUTO_TYPE_INITIALIZER || input->reports[index].message == CHECK_INPUT_AUTO_TYPE_SELF) &&
+                        else if (phase == 0 && ((input->reports[index].message == CHECK_INPUT_AUTO_TYPE_INITIALIZER && input->reports[index].type == 0) ||
+                                               input->reports[index].message == CHECK_INPUT_AUTO_TYPE_SELF) &&
                                  token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
                         {
                             // An __auto_type variable's errors at its name, or at a use of it, name it as clang's do.
@@ -6733,6 +6734,8 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
         .preprocessor = original->preprocessor,
         .typo_sources = original->typo_sources,
         .typo_count = original->typo_count,
+        .invalid_call_sources = original->invalid_call_sources,
+        .invalid_call_count = original->invalid_call_count,
     };
     memcpy(view->predeclared, original->predeclared, sizeof(view->predeclared));
     if (valid)
@@ -6750,7 +6753,7 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
         view->sizes = check_prefix_column(output, total, sizeof(uint32_t));
         view->diagnostic_capacity = total + 16;
         view->diagnostics = BUSTER_ARENA_PUSH_ARRAY(output, ParseDiagnostic, view->diagnostic_capacity);
-        view->meanings.capacity = original->meanings.capacity;
+        view->meanings = original->meanings;
         view->meanings.meanings = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, view->meanings.capacity);
         result->to_view = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1);
         result->to_original = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, total);
@@ -6911,7 +6914,20 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
             }
             const ParseScalarResult parsed = parse_scalar(view->tokens.kinds, view->tokens.names, view->tokens.flags, total, view->language, &view->meanings,
                                                           &view->tree, scratch, view->diagnostics, view->diagnostic_capacity, &view->diagnostic_count);
-            valid = !parsed.out_of_memory && parsed.errors == 0 && view->diagnostic_count == 0 && check_prefix_order(view, scratch) == CHECK_PREFIX_READY;
+            // A kept attributed implicit-int declaration has its original error already. Only that exact, mapped
+            // provenance may survive this reparse; another parser error still refuses the private warning view.
+            uint32_t recovered_errors = 0;
+            bool diagnosed = true;
+            for (uint32_t d = 0; diagnosed && d < view->diagnostic_count; d += 1)
+            {
+                const ParseDiagnostic* diagnostic = view->diagnostics + d;
+                diagnosed = diagnostic->declaration_type && diagnostic->error && recovered_types != NULL &&
+                            diagnostic->argument < written && recovered_types[diagnostic->argument] == PARSE_RECOVERED_TYPE_IMPLICIT_INT &&
+                            (diagnostic->message == PARSE_MESSAGE_TYPE_SPECIFIER_MISSING || diagnostic->message == PARSE_MESSAGE_TYPE_SPECIFIER_REQUIRED);
+                recovered_errors += diagnosed;
+            }
+            valid = !parsed.out_of_memory && diagnosed && parsed.errors == recovered_errors && check_prefix_order(view, scratch) == CHECK_PREFIX_READY;
+            view->diagnostic_count = valid ? 0 : view->diagnostic_count;
         }
     }
     arena_pop_to(scratch, scratch_mark);
@@ -7151,13 +7167,19 @@ static bool check_driver_edit_uses(CheckDriverEditor* editor, uint32_t begin, ui
     }
     bool valid = true;
     const uint32_t name = name_token != BUSTER_CHECK_NONE ? parser->tokens.names[name_token] : 0;
+    const bool invalid = name_token != BUSTER_CHECK_NONE && editor->input->invalid_declarations != NULL &&
+                         editor->input->invalid_declarations[name_token] != 0;
     for (uint32_t at = after + 1; valid && name_token != BUSTER_CHECK_NONE && at < scope_end; at += 1)
     {
         const uint8_t previous = parser->tokens.kinds[at - 1];
         const bool ordinary = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && parser->tokens.names[at] == name && parser->tree.roles[at] != PARSE_ROLE_TAG &&
                               parser->tree.roles[at] != PARSE_ROLE_MEMBER && previous != PARSE_KIND_PERIOD && previous != PARSE_KIND_ARROW &&
                               previous != PARSE_KIND_GOTO && parser->tree.roles[parser->tree.parents[at] < parser->tokens.count ? parser->tree.parents[at] : at] != PARSE_ROLE_LABEL;
-        valid = !ordinary || editor->edits[at] != CHECK_DRIVER_EDIT_KEEP || check_driver_edit_queue(editor, at);
+        // A dropped invalid redeclaration never hid the earlier binding (#2332). Keep a use the first reading
+        // already resolved to that other declaration; an unbound or invalid declaration's own use is still dropped.
+        const uint32_t declaration = ordinary && invalid ? editor->input->declarations[at] : BUSTER_CHECK_NONE;
+        const bool previous_binding = invalid && declaration < parser->tokens.count && declaration != name_token;
+        valid = !ordinary || previous_binding || editor->edits[at] != CHECK_DRIVER_EDIT_KEEP || check_driver_edit_queue(editor, at);
     }
     return valid;
 }
@@ -7694,10 +7716,21 @@ static bool check_driver_rejected_top_known(const Parser* parser, const uint32_t
 // (`bodied`): the reading corrects it again, its use bound as clang's, whose warnings (an array index's) stay. Only a
 // rejected unit's rounds call it. A builtin corrected by a driver name edit (#2250) has the same recovered status in
 // the extra diagnostics; an independent expression error at its token still rejects the expression.
-static bool check_driver_rejected_recovered(const CheckInput* input, const CheckDriverDiagnostic* extra, uint32_t extra_count, uint32_t token, bool bodied)
+static bool check_driver_rejected_recovered(const Parser* parser, const CheckInput* input, const CheckDriverDiagnostic* extra, uint32_t extra_count, uint32_t token, bool bodied)
 {
     bool recovered = false;
     bool stopped = false;
+    // A recovered implicit-int redeclaration keeps no new binding or initializer conversion, but Sema still builds
+    // its initializer expression (#2332). Reread it for those warnings; its known redefinition is not published again.
+    uint32_t declaration = bodied && parser->recovered_types != NULL && input->invalid_declarations != NULL &&
+                           token < parser->tokens.count && input->invalid_declarations[token] != 0 ? token : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; declaration < parser->tokens.count && parser->tree.roles[declaration] != PARSE_ROLE_TERMINATOR &&
+         steps < parser->tokens.count; steps += 1)
+    {
+        declaration = parser->tree.parents[declaration];
+    }
+    const uint32_t first = declaration < parser->tokens.count ? check_driver_subtree_start(parser, 0, declaration) : BUSTER_CHECK_NONE;
+    const bool implicit = first < parser->tokens.count && parser->recovered_types[first] == PARSE_RECOVERED_TYPE_IMPLICIT_INT;
     for (uint32_t i = 0; i < extra_count; i += 1)
     {
         const bool at = extra[i].token == token;
@@ -7708,7 +7741,8 @@ static bool check_driver_rejected_recovered(const CheckInput* input, const Check
     {
         const bool at = input->reports[i].token == token;
         const bool corrected = input->reports[i].message == CHECK_INPUT_UNDECLARED_CORRECTED && input->reports[i].recovered;
-        const bool keeps = corrected || (!bodied && check_driver_report_keeps_valid(input->reports + i));
+        const bool keeps = corrected || (!bodied && check_driver_report_keeps_valid(input->reports + i)) ||
+                           (implicit && input->reports[i].recovered && input->reports[i].message == CHECK_INPUT_REDECLARATION);
         recovered |= at && keeps;
         stopped |= at && !keeps;
     }
@@ -8508,7 +8542,7 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
             // needs no part left out, nor does a typo's correction anywhere: the reading recovers it again, its declaration
             // valid, as clang keeps it. It still counts in its scope (error_counts). (A prototype's dropped declaration would
             // leave out the bodies that name its parameters' names too.)
-            const bool recovered = token < count && check_driver_rejected_recovered(first_input, extra, extra_count, token, bodied);
+            const bool recovered = token < count && check_driver_rejected_recovered(parser, first_input, extra, extra_count, token, bodied);
             // A conversion that defaults to an error (#1969) is kept, its source cast, where its tokens are all kept; where
             // the parts left out before it hold them all, it is left out with them. (Its sites come after the others' errors.)
             const CheckDriverConversionSite* site = NULL;
@@ -9293,6 +9327,85 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
         result = object_build(&code->link, &units, &symbols, 0, options, source, scratch);
     }
     return result;
+}
+
+// One census's verdict for --selection-census (check_driver_selection_census): "same-references" where every body's
+// candidates' references are its own, and otherwise the selection over them (`mode` and `keep_sectioned` as the exact
+// one's, `selected`) compared with the exact one: "same" bodies, symbols, data and objects, or "different", with how many
+// more bodies and objects it keeps in *bodies and *objects; "failed" where it fails. Nothing of it stays in `output` or
+// `scratch`.
+static const char* check_driver_census_verdict(const CheckProgram* program, const CheckProgramCensus* census, const CheckDataPrepared* data,
+                                               const CheckProgramSelection* selected, CLoweringMode mode, bool scalar, bool keep_sectioned, int64_t* bodies,
+                                               int64_t* objects, Arena* output, Arena* scratch)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    const char* verdict = "same-references";
+    *bodies = 0;
+    *objects = 0;
+    if (census->differing != 0)
+    {
+        CheckProgram candidates = *program;
+        CheckProgramBody* copies = program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramBody, program->body_count) : NULL;
+        uint32_t total = 0;
+        for (uint32_t b = 0; copies != NULL && b < program->body_count; b += 1)
+        {
+            copies[b] = program->bodies[b];
+            copies[b].reference_first = census->first[b];
+            copies[b].reference_count = census->counts[b];
+            total += census->counts[b];
+        }
+        candidates.bodies = copies;
+        candidates.references = census->references;
+        candidates.reference_count = total;
+        CheckProgramSelection result;
+        const bool selection = copies != NULL && check_program_select_mode(&result, &candidates, data, mode, scalar, keep_sectioned, output, scratch);
+        bool same = selection && result.program.body_count == selected->program.body_count && result.program.symbol_count == selected->program.symbol_count &&
+                    result.data.count == selected->data.count && result.program.object_count == selected->program.object_count;
+        for (uint32_t b = 0; same && b < result.program.body_count; b += 1)
+        {
+            same = result.program.bodies[b].declaration == selected->program.bodies[b].declaration;
+        }
+        for (uint32_t o = 0; same && o < result.program.object_count; o += 1)
+        {
+            same = result.program.object_symbols[o] == selected->program.object_symbols[o];
+        }
+        verdict = !selection ? "failed" : same ? "same" : "different";
+        *bodies = selection ? (int64_t)result.program.body_count - (int64_t)selected->program.body_count : 0;
+        *objects = selection ? (int64_t)(result.program.symbol_count + result.data.count) - (int64_t)(selected->program.symbol_count + selected->data.count) : 0;
+    }
+    arena_pop_to(output, output_mark);
+    arena_pop_to(scratch, scratch_mark);
+    return verdict;
+}
+
+// --selection-census's report (#2536's step 2.1, check_program_census_walk and _scan), on stderr, in two lines. The
+// first: the bodies, those with a dropped arm, the exact selection's bodies and symbols (its data's too); for each census
+// (the scan's, where it has one), the bodies whose candidates' references aren't their own, those of them without a
+// dropped arm, those whose candidates miss one of their own, and its verdict (check_driver_census_verdict) with the extra
+// bodies and symbols. The second, selection-census-ticks: the references pass's TSC ticks and each census's, which differ
+// between any two runs, as --time-stages' report lines do.
+static void check_driver_selection_census(const CheckProgram* program, const CheckDataPrepared* data, const CheckProgramSelection* selected, CLoweringMode mode,
+                                          bool scalar, bool keep_sectioned, Arena* output, Arena* scratch)
+{
+    fprintf(stderr, "selection-census\tbodies\t%u\tdropped\t%u\tselected-bodies\t%u\tselected-symbols\t%u", program->body_count, program->census_dropped_bodies,
+            selected->program.body_count, selected->program.symbol_count + selected->data.count);
+    const CheckProgramCensus* censuses[] = { &program->census_walk, &program->census_scan, &program->census_arms, &program->census_pass };
+    const char* names[] = { "walk", "scan", "arms", "pass" };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(censuses); c += 1)
+    {
+        const CheckProgramCensus* census = censuses[c];
+        int64_t bodies = 0;
+        int64_t objects = 0;
+        const char* verdict = census->first != NULL ? check_driver_census_verdict(program, census, data, selected, mode, scalar, keep_sectioned, &bodies, &objects,
+                                                                                  output, scratch) :
+                                                      "none";
+        fprintf(stderr, "\t%s\tdiffering\t%u\tunarmed\t%u\tmissing\t%u\tselection\t%s\textra-bodies\t%lld\textra-symbols\t%lld", names[c], census->differing,
+                census->unarmed, census->missing, verdict, (long long)bodies, (long long)objects);
+    }
+    fprintf(stderr, "\nselection-census-ticks\treferences\t%llu\twalk\t%llu\tscan\t%llu\tarms\t%llu\tpass\t%llu\n", (unsigned long long)program->census_references_ticks,
+            (unsigned long long)program->census_walk.ticks, (unsigned long long)program->census_scan.ticks, (unsigned long long)program->census_arms.ticks,
+            (unsigned long long)program->census_pass.ticks);
 }
 
 // The checked program's code and data, as -c writes them: its object at `output_path`, or with `kept` (one of several
@@ -10393,6 +10506,9 @@ struct CheckDriverCommand
     // --poison-arenas, #152's test option: the lanes of several units overwrite what each unit left in their arenas
     // with a pattern, before the next unit reuses them (c_checker_units.c).
     bool poison_arenas;
+    // --selection-census (#2536's step 2.1): the candidates' references beside the exact ones, and their selection where
+    // they differ, reported on stderr (check_driver_selection_census).
+    bool selection_census;
     // --shared-parts, #777's test option: a unit's emission that shares its functions' parts on the units' board pauses
     // after each part it takes itself, so that the lanes without units take some, and the command reports how many
     // they took and how many lanes left their memory to the exit, after the units' diagnostics (c_checker_units.c).
@@ -10652,6 +10768,7 @@ struct CheckDriverTypoEdits
     uint32_t sources[BUSTER_CHECK_DRIVER_TYPO_EDITS];
     uint32_t source_count;
     const InternTable* table;
+    Arena* scratch;
     uint32_t count;
     uint32_t rejected_count;
 };
@@ -10738,7 +10855,7 @@ static uint32_t check_driver_skip_end(const Parser* parser, uint32_t token);
 // with its typo correction (ClassifyName), and a name it corrects to a value is "expected identifier or '('" there. The
 // view leaves the attributes out, so that the reading searches the name at the statement's start; a correction it takes
 // makes the next pass's view leave the item out (check_driver_typo_edits), with both errors.
-static uint32_t check_driver_typo_tail(const Parser* view, const uint32_t* origin, const ParseDiagnostic* diagnostic, uint32_t* begin, uint32_t* name_of,
+static uint32_t check_driver_typo_tail(const Parser* view, const uint32_t* origin, ParseDiagnostic* diagnostic, uint32_t* begin, uint32_t* name_of,
                                        const void* context)
 {
     const CheckDriverTypoEdits* edits = context;
@@ -10746,7 +10863,9 @@ static uint32_t check_driver_typo_tail(const Parser* view, const uint32_t* origi
     const uint32_t count = view->tokens.count;
     const uint32_t at = diagnostic->token;
     // The attributes before an implicit int's name, from their first `__attribute__`, after a statement's start.
-    const bool implicit = (diagnostic->message == PARSE_MESSAGE_TYPE_SPECIFIER_MISSING || diagnostic->message == PARSE_MESSAGE_TYPE_SPECIFIER_REQUIRED) &&
+    const bool call = diagnostic->message == PARSE_MESSAGE_EXPECTED_IDENTIFIER_OR_PAREN && view->language.standard < 2023 && at + 1 < count &&
+                      view->tokens.kinds[at + 1] == PARSE_KIND_L_PAREN;
+    const bool implicit = (call || diagnostic->message == PARSE_MESSAGE_TYPE_SPECIFIER_MISSING || diagnostic->message == PARSE_MESSAGE_TYPE_SPECIFIER_REQUIRED) &&
                           at < count && at >= 2 && view->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && view->tokens.kinds[at - 1] == PARSE_KIND_R_PAREN;
     uint32_t first = at;
     bool going = implicit;
@@ -10769,7 +10888,52 @@ static uint32_t check_driver_typo_tail(const Parser* view, const uint32_t* origi
     }
     const uint8_t before_first = first < at && first != 0 ? view->tokens.kinds[first - 1] : PARSE_KIND_END;
     const bool attributed = first < at && (before_first == PARSE_KIND_SEMI || before_first == PARSE_KIND_L_BRACE || before_first == PARSE_KIND_R_BRACE);
-    bool fresh = attributed;
+    if (attributed && call)
+    {
+        // Clang classifies the callee before rejecting a GNU attribute's declarator, but never reads the arguments.
+        // Keep an empty call only to perform that lookup and implicit declaration, then cut it before expression
+        // checking. Catalog-recognized builtin spellings, including library names, can prepare arguments during
+        // lookup and retain the existing recovery.
+        const uint32_t identifier = view->tokens.names[at];
+        const InternSpan span = table->spans[identifier];
+        const char* spelling = (const char*)table->records + span.offset;
+        const bool ordinary = builtin_intrinsic_lookup(spelling, span.length) == NULL;
+        const uint64_t mark = edits->scratch->length;
+        uint8_t* stack = ordinary ? BUSTER_ARENA_PUSH_ARRAY(edits->scratch, uint8_t, count - at) : NULL;
+        uint32_t depth = 0;
+        uint32_t end = at + 1;
+        bool balanced = stack != NULL;
+        do
+        {
+            const uint8_t kind = end < count ? view->tokens.kinds[end] : PARSE_KIND_END;
+            const bool open = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+            const bool close = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE;
+            const uint8_t wanted = kind == PARSE_KIND_R_PAREN ? PARSE_KIND_L_PAREN : kind == PARSE_KIND_R_SQUARE ? PARSE_KIND_L_SQUARE : PARSE_KIND_L_BRACE;
+            balanced = balanced && end < count && kind != PARSE_KIND_END && !(kind == PARSE_KIND_SEMI && depth == 1) &&
+                       (!close || (depth != 0 && stack[depth - 1] == wanted));
+            if (balanced && open)
+            {
+                stack[depth++] = kind;
+            }
+            else if (balanced && close)
+            {
+                depth -= 1;
+            }
+            end += balanced ? 1u : 0u;
+        }
+        while (balanced && depth != 0);
+        if (balanced && end < count && view->tokens.kinds[end] == PARSE_KIND_SEMI)
+        {
+            diagnostic->resumed = true;
+            diagnostic->resume_delete = true;
+            diagnostic->resume_call = true;
+            diagnostic->resume_begin = first;
+            diagnostic->resume_end = end;
+            diagnostic->publication = at + 1;
+        }
+        arena_pop_to(edits->scratch, mark);
+    }
+    bool fresh = attributed && !call;
     for (uint32_t r = 0; fresh && r < edits->rejected_count; r += 1)
     {
         fresh = edits->rejected[r] != (origin != NULL ? origin[at] : at);
@@ -11186,7 +11350,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         bool original_pragmas_printed = false;
         // A statement start's typo corrections (check_driver_typo_edits), and whether the parse's warnings were printed
         // before a correction failed the unit.
-        CheckDriverTypoEdits typo_edits = { .count = 0, .table = pp->table };
+        CheckDriverTypoEdits typo_edits = { .count = 0, .table = pp->table, .scratch = scratch };
         const CheckPrefixTails typo_tails = { .end = check_driver_typo_tail, .context = &typo_edits };
         bool parse_printed = false;
         check_clock_mark(stage_clock, CHECK_STAGE_SETUP);
@@ -11223,6 +11387,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         {
             parser->typo_sources = NULL;
             parser->typo_count = 0;
+            parser->invalid_call_sources = NULL;
+            parser->invalid_call_count = 0;
             ready = parse_translation_unit(parser, pp);
             parse_failed = !ready;
             if (ready)
@@ -11477,8 +11643,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
             // The parse's and the reader's pages of the scratch, 82 MB of sqlite3.c's, which check-expressions and
             // check-declarations would otherwise hold to static-data's end (check_driver_discard_scratch, #628), but for
-            // what they and check_program push into it again (BUSTER_CHECK_DRIVER_SCRATCH_REUSE).
-            check_driver_discard_scratch(scratch, lanes, scratch->length + BUSTER_CHECK_DRIVER_SCRATCH_REUSE * (uint64_t)checking->tokens.count);
+            // what they and check_program push into it again (BUSTER_CHECK_DRIVER_SCRATCH_REUSE): the parse's tokens, so
+            // that a unit read as its view (#2531) keeps what it would have kept read whole, which its next unit's parse
+            // pushes as far again.
+            check_driver_discard_scratch(scratch, lanes, scratch->length + BUSTER_CHECK_DRIVER_SCRATCH_REUSE * (uint64_t)parser->tokens.count);
             if (stage_clock != NULL && deferring)
             {
                 stage_clock->deferred = true;
@@ -11886,9 +12054,13 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         // Tier 1's IR takes asm bodies (#1839), not a statement's row.
                         .asm_bodies = lanes != NULL && lanes->tier1,
                         .helper_forms = lanes != NULL ? lanes->helper_forms : 0,
+                        .selection_census = command->selection_census,
                         // A units lane with a unit left to take gives its scratch's pages back in whole huge pages
                         // (#777).
                         .discard_huge = lanes != NULL && lanes->units_lane != NULL && check_units_discard_huge(lanes->units_lane),
+                        // (A unit read as its view keeps what the parse's tokens the view leaves out would have taken.)
+                        .discard_keep = parser->tokens.count > checking->tokens.count ?
+                                        BUSTER_CHECK_DRIVER_SCRATCH_REUSE * (uint64_t)(parser->tokens.count - checking->tokens.count) : 0,
                     });
                     // A resume that read the whole unit (#147) checks its view as the semantic unit it is, its `prefix_only`
                     // keeping only the emission and the translation unit's end obligations back (`checking` the recovered
@@ -12165,6 +12337,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         const bool selection = check_program_select_mode(&selected, &program, &data, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar,
                                                                          kept != NULL, output_arena, scratch);
                         check_clock_mark(stage_clock, CHECK_STAGE_SELECT);
+                        if (selection && program.census_walk.first != NULL)
+                        {
+                            check_driver_selection_census(&program, &data, &selected, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar, kept != NULL,
+                                                          output_arena, scratch);
+                        }
                         if (selection)
                         {
                             result = check_driver_target_features(&selected.program, checking, recovered, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
@@ -12189,6 +12366,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         const bool selection = check_program_select_mode(&selected, &program, &data, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar,
                                                                          false, output_arena, scratch);
                         check_clock_mark(stage_clock, CHECK_STAGE_SELECT);
+                        if (selection && program.census_walk.first != NULL)
+                        {
+                            check_driver_selection_census(&program, &data, &selected, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar, false,
+                                                          output_arena, scratch);
+                        }
                         if (selection)
                         {
                             result = check_driver_target_features(&selected.program, checking, recovered, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
@@ -12656,6 +12838,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // --poison-arenas, --shared-parts and --units-memory=BYTES: #152's, #777's and #1109's test options
     // (CheckDriverCommand's).
     bool poison_arenas = false;
+    bool selection_census = false;
     bool shared_parts = false;
     uint64_t units_memory = 0;
     bool invalid_units_memory = false;
@@ -13054,6 +13237,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             lower_all = true;
         }
+        else if (match.exact == C_OPTION_SELECTION_CENSUS)
+        {
+            selection_census = true;
+        }
         else if (match.exact == C_OPTION_POISON_ARENAS)
         {
             poison_arenas = true;
@@ -13280,10 +13467,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // The functions' unwind tables, as clang has them: by default, unless freestanding or an option turns them off.
     const bool unwind_tables = parsed && predefines_unwind_tables(&options.predefines, options.freestanding);
     options.defer_history = !lazy_system_headers && !scalar && !source_rows;
-    // With -g a unit's DWARF describes every type its table holds (c_check_debug_values.c), a skipped declaration's too, so
-    // -g skips nothing; --attested=verify, which skips nothing, still runs.
-    const uint8_t command_attested = (uint8_t)(scalar || (attested == CHECK_ATTESTED_MODE_ON && (options.predefines.debug || options.predefines.debug_modules)) ?
-                                               CHECK_ATTESTED_MODE_OFF : attested);
+    // (-g skips too: a unit's DWARF describes what its definitions reach, check_debug_value_roots, which a skipped
+    // declaration is not.)
+    const uint8_t command_attested = (uint8_t)(scalar ? CHECK_ATTESTED_MODE_OFF : attested);
     // A memo kept across processes is keyed by the compiler's build: one that can't be identified keeps none.
     uint64_t attested_key[2] = { 0 };
     const bool memo_keyed = parsed && attested_memo != NULL && command_attested != CHECK_ATTESTED_MODE_OFF &&
@@ -13313,6 +13499,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .id_ordered = id_ordered,
         .id_order = id_order,
         .poison_arenas = poison_arenas,
+        .selection_census = selection_census,
         .shared_parts = shared_parts,
         .units_memory = units_memory,
         .emit_object = emit_object,

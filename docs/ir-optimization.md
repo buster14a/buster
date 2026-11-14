@@ -455,8 +455,10 @@ The passes, and the guides that record each one:
 - **[Private-field scalar replacement](ir-scalar-replacement.md):** nonescaping,
   disjoint constant-offset fields.
 - **[Inlining](ir-inlining.md):** #2541's summaries and general splice.
+- **[Loop vectorization](tier1-loop-vectorization.md):** #2743's measured
+  design, not yet an implemented pass.
 
-Each has before/after fixtures, built in C and in the text form (#175), with
+Each implemented pass has before/after fixtures, built in C and in the text form (#175), with
 both twins and an independent executor. #139's last items close as follows.
 The record is buster-performance's [`ssa-passes-139-2026-11-14`](https://github.com/buster14a/buster-performance/tree/c61db97a94c50c8f896ac5f4a58fb35bb44a23fe/docs/measurements/ssa-passes-139-2026-11-14).
 

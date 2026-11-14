@@ -42,6 +42,7 @@
 #: derived Test the C lexer as C++
 #: derived Test the C lexer with C11's raw-string prefixes
 #: derived Test the C lexer with the R and LR raw-string prefixes
+#: unmeasured Compile the lexer's benchmark unit by Tier 1 on one lane and on four [4 CPUs]
 #: peak 8 Check unity fixture ownership without rebuilding
 #: peak 154 Test the foreign inputs [8 CPUs]
 #: peak 901 Check the no-recursion rule on the call graph [8 CPUs]
@@ -323,6 +324,7 @@
 14.9 Dispatch Tier 1's program measurement and refuse its incomplete commands
 0.2 Measure the frames and keep the frame pointer on request
 1.2 Dispatch Tier 1's vector code measurement and refuse its incomplete commands
+40.4 Compile the lexer's benchmark unit by Tier 1 on one lane and on four [4 CPUs]
 0.5 Test dominators, frontiers and natural loops
 0.6 Test fences and atomic loads and stores through the IR's lowerings, promotion, text and interpreter against clang
 0.7 Test the overflow builtins through the IR's lowerings, promotion, text, interpreters and Tier 1 against clang

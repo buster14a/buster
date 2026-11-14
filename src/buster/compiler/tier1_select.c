@@ -244,7 +244,8 @@ typedef enum Tier1SelectRule
 // - ONES (every bit): vpternlogd of the destination with itself, 0xff;
 // - SPLAT (every lane `immediate`): the lane into the scratch general register and vpbroadcastd from it;
 // - CONSTANT (any other, its index in `immediate`): its words as immediates into the red zone below rsp and a load, which
-//   the CFG consumer writes (tier1_emit_cfg_vector_constant), having the constant's payload;
+//   the CFG consumer writes (tier1_emit_cfg_vector_constant), having the constant's payload; or, where its quadwords are
+//   one value and the target has EVEX's forms, the quadword into the scratch general register and vpbroadcastq (#2744);
 // - COPY of values[0], vmovdqa64 at the width, none where the allocation gave both one register;
 // - BINARY of values[0] and values[1], `operation` its index among add, sub, mul, and, or and xor (vpaddd, vpsubd,
 //   vpmulld, vpandq, vporq, vpxord: unmasked, a quadword's and and or are the doublewords' bits): three operands, so the
@@ -3045,8 +3046,9 @@ static uint32_t tier1_select_reciprocal_records(const Tier1SelectHoles* holes, X
 // for BUSTER_TIER1_SELECT_FIXED_RECORDS; none for any other rule. They read every operand before writing a fixed
 // register, through the scratch register where they must, and write the destination last; their consumers save the other
 // values that live past the node in those registers around them, in their call-save rows (tier1_emit_fixed). A division
-// or remainder by a register (TIER1_RULE_DIVIDE): the divisor in the scratch register, the dividend in rax, its sign or
-// zero through rdx, then div or idiv. A shift by a register (TIER1_RULE_SHIFT): the value in the scratch register, the
+// or remainder by a register (TIER1_RULE_DIVIDE): the divisor in the scratch register where it is in rax or rdx, the
+// dividend in rax, its sign or zero through rdx, then div or idiv. A shift by a register (TIER1_RULE_SHIFT): the value in
+// the destination, or in the scratch register where the count's move or the value's would overwrite the other, the
 // count in cl. A division by a constant's reciprocal: tier1_select_reciprocal_records.
 static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction* records)
 {
@@ -3057,13 +3059,20 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
     {
         const bool signed_divide = (holes->immediate & 1) != 0;
         const uint8_t result = (holes->immediate & 2) != 0 ? X86_REGISTER_RDX : X86_REGISTER_RAX;
-        records[count++] = tier1_select_move(8, scratch, holes->right);
+        // The divisor divides from its own register where neither the dividend's move into rax nor rdx's extension writes
+        // it (#2592: Lua's integer `%` and `//`, which #2541 inlined into luaV_execute, moved it on every one).
+        const bool direct = holes->right != X86_REGISTER_RAX && holes->right != X86_REGISTER_RDX;
+        const uint8_t divisor = direct ? holes->right : scratch;
+        if (!direct)
+        {
+            records[count++] = tier1_select_move(8, scratch, holes->right);
+        }
         if (holes->left != X86_REGISTER_RAX)
         {
             records[count++] = tier1_select_move(8, X86_REGISTER_RAX, holes->left);
         }
         records[count++] = signed_divide ? (X86Instruction){ .form = width == 8 ? X86_FORM_CQO : X86_FORM_CDQ } : tier1_select_register_record(X86_FORM_XOR_R32_RM32, X86_REGISTER_RDX, X86_REGISTER_RDX);
-        records[count++] = (X86Instruction){ .rm = scratch, .form = width == 8 ? (signed_divide ? X86_FORM_IDIV_RM64 : X86_FORM_DIV_RM64) : (signed_divide ? X86_FORM_IDIV_RM32 : X86_FORM_DIV_RM32) };
+        records[count++] = (X86Instruction){ .rm = divisor, .form = width == 8 ? (signed_divide ? X86_FORM_IDIV_RM64 : X86_FORM_DIV_RM64) : (signed_divide ? X86_FORM_IDIV_RM32 : X86_FORM_DIV_RM32) };
         if (holes->destination != result)
         {
             records[count++] = tier1_select_move(width, holes->destination, result);
@@ -3074,13 +3083,30 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
         const uint16_t form = holes->operation == X86_OPERATION_SHL ? (width == 8 ? X86_FORM_SHL_RM64_CL : X86_FORM_SHL_RM32_CL) :
                               holes->operation == X86_OPERATION_SHR ? (width == 8 ? X86_FORM_SHR_RM64_CL : X86_FORM_SHR_RM32_CL) :
                                                                       (width == 8 ? X86_FORM_SAR_RM64_CL : X86_FORM_SAR_RM32_CL);
-        records[count++] = tier1_select_move(8, scratch, holes->left);
-        if (holes->right != X86_REGISTER_RCX)
+        // The value shifts in the destination itself (#2592: OP_NEWTABLE's `1 << (b - 1)` went through the scratch register
+        // on every table), but where the destination is rcx, which the count takes, or holds the count while the value is in
+        // rcx: then either first move would overwrite the other's source. Else the count goes to cl first where the value
+        // isn't there, and the value is read before the destination, where the count may be, is written.
+        const uint8_t rcx = X86_REGISTER_RCX;
+        const bool direct = holes->destination != rcx && !(holes->left == rcx && holes->destination == holes->right);
+        const uint8_t shifted = direct ? holes->destination : scratch;
+        if (holes->right != rcx && holes->left != rcx)
         {
-            records[count++] = tier1_select_move(4, X86_REGISTER_RCX, holes->right);
+            records[count++] = tier1_select_move(4, rcx, holes->right);
         }
-        records[count++] = (X86Instruction){ .rm = scratch, .form = form };
-        records[count++] = tier1_select_move(width, holes->destination, scratch);
+        if (shifted != holes->left)
+        {
+            records[count++] = tier1_select_move(8, shifted, holes->left);
+        }
+        if (holes->right != rcx && holes->left == rcx)
+        {
+            records[count++] = tier1_select_move(4, rcx, holes->right);
+        }
+        records[count++] = (X86Instruction){ .rm = shifted, .form = form };
+        if (!direct)
+        {
+            records[count++] = tier1_select_move(width, holes->destination, scratch);
+        }
     }
     else if (holes->rule == TIER1_RULE_DIVIDE_RECIPROCAL)
     {
@@ -7569,6 +7595,47 @@ static X86Instruction tier1_select_memory_holes(const Tier1SelectPattern* patter
         .mode = rip ? BUSTER_X86_MEMORY_RIP : index == BUSTER_IR_NONE ? BUSTER_X86_MEMORY_BASE : (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(pattern->scale),
     };
     return result;
+}
+
+// The operands whose register a node's result may take to save the copy its records make into the destination otherwise
+// (#2685): a two-address instruction's first operand, and a commutative one's second, which its records swap into the
+// first place; a select's value where its condition holds not, which its cmov keeps, and the other one, which it inverts
+// to keep. BUSTER_IR_NONE where it has none. The allocator takes such a register only where the operand's interval ends
+// there: an operand live past the node holds it.
+static inline __attribute__((always_inline)) void tier1_select_ties(const Tier1SelectPlan* plan, uint32_t node, uint32_t* first, uint32_t* second)
+{
+    const Tier1SelectPattern* pattern = &plan->patterns[node];
+    const uint8_t rule = plan->covered[node] ? TIER1_RULE_NONE : pattern->rule;
+    const bool multiply = pattern->operation == X86_OPERATION_IMUL && rule == TIER1_RULE_IMMEDIATE;
+    const bool swapped = (rule == TIER1_RULE_REGISTER && tier1_select_commutative((X86Operation)pattern->operation)) ||
+                         (rule == TIER1_RULE_FLOAT_BINARY && (((uint32_t)pattern->operation & 3) == IR_FADD - IR_FADD || ((uint32_t)pattern->operation & 3) == IR_FMUL - IR_FADD));
+    const bool left = rule == TIER1_RULE_COPY || (rule == TIER1_RULE_TRUNCATE && pattern->width == 4) || rule == TIER1_RULE_UNARY || rule == TIER1_RULE_REGISTER ||
+                      (rule == TIER1_RULE_IMMEDIATE && !multiply) || rule == TIER1_RULE_MULTIPLY_SHIFT || rule == TIER1_RULE_LOAD_OPERAND ||
+                      (rule == TIER1_RULE_INTRINSIC && pattern->immediate == BUSTER_IR_INTRINSIC_BSWAP) || rule == TIER1_RULE_FLOAT_COPY || rule == TIER1_RULE_FLOAT_BINARY ||
+                      rule == TIER1_RULE_FLOAT_LOAD_OPERAND || rule == TIER1_RULE_FLOAT_NEGATE;
+    const bool select = rule == TIER1_RULE_SELECT;
+    // An address from a register (#2592): `lea d(%r),%r` costs what a lea into another register does, and an incremented
+    // pointer, Lua's `pc + 1` in OP_LFALSESKIP, keeps the register its dispatch takes it in.
+    const bool address = rule == TIER1_RULE_ADDRESS && !pattern->rip && pattern->stack_object == BUSTER_IR_NONE;
+    *first = left || address ? pattern->values[0] : select ? pattern->values[2] : BUSTER_IR_NONE;
+    *second = swapped ? pattern->values[1] : select ? pattern->values[1] : BUSTER_IR_NONE;
+}
+
+// Marks each node whose value a return reads in `returned` (one byte per node, cleared here). Such a value takes no tie
+// (tier1_select_ties): the return wants it in rax, where the lowest free register, which it takes without one, often
+// is; memsys5Size's product, whose operands both end at its imul, took the first one's rcx and was copied into eax.
+static void tier1_select_returned(const Tier1SelectPlan* plan, uint8_t* returned)
+{
+    const uint32_t count = plan->function->instruction_count;
+    memset(returned, 0, count);
+    for (uint32_t node = 0; node < count; node += 1)
+    {
+        const uint32_t value = plan->patterns[node].values[0];
+        if (plan->covered[node] == 0 && plan->patterns[node].rule == TIER1_RULE_RETURN && value < count)
+        {
+            returned[value] = 1;
+        }
+    }
 }
 
 static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const uint8_t* registers, uint32_t node)

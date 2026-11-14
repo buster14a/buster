@@ -43,7 +43,9 @@ requirements. [Command index](README.md).
 `./build/compiler test-lexer` needs no corpus. Its checks are ports of the
 snippet and random-input checks of `c/c_tokenizer_test.c` in
 Accelerated-Zig-Parser, where the lexer comes from. They compare `c_tokenize`
-with the scalar lexer token by token, each input twice: with C23's digit
+with the scalar lexer token by token (in a scalar host's build, whose
+`c_tokenize` is the scalar lexer, each input is lexed once: comparing the
+function with itself took a third of the portable rows' lexer commands, #2658), each input twice: with C23's digit
 separators, and without them (`C_TOKENIZER_NO_DIGIT_SEPARATORS`, as C17 lexes
 numbers, which the preprocessor asks for before C23). Each check prints the
 second's counts after the first's. The inputs:

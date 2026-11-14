@@ -1200,7 +1200,8 @@ or 64 bytes, the xmm, ymm or zmm one (`tier1_select_vector_forms`):
 | `vconst` of zeros, `undef` | `ZERO` | `vpxord x, x, x` |
 | `vconst` of every bit | `ONES` | `vpternlogd x, x, x, 0xff` |
 | `vconst` of one lane in all | `SPLAT` | `mov r11d, imm32` and `vpbroadcastd x, r11d` |
-| any other `vconst` | `CONSTANT` | its words into the red zone below rsp (a `mov qword` of a sign-extended imm32, or two `mov dword`) and `vmovdqu32` from there (`tier1_emit_cfg_vector_constant`) |
+| a `vconst` whose quadwords are one value, at an EVEX target | `CONSTANT` | the quadword into the scratch general register by the shortest `mov` that holds it and `vpbroadcastq` from it (`tier1_emit_cfg_vector_constant`, #2744's step 1: `_mm512_set1_epi64(63)`) |
+| any other `vconst` | `CONSTANT` | its words into the red zone below rsp (a `mov qword` of a sign-extended imm32, or two `mov dword`) and `vmovdqu32` from there (`tier1_emit_cfg_vector_constant`); its load is wider than each store, so none forwards (#2744) |
 | `copy` | `COPY` | `vmovdqa64` (`movaps` for 16 bytes), none where allocation gave both one register |
 | `add`, `sub`, `mul`, `and`, `or`, `xor` | `BINARY` | `vpaddd`, `vpsubd`, `vpmulld`, `vpandq`, `vporq`, `vpxord`: three operands, the destination any register |
 | `not` | `NOT` | `vpternlogd x, a, a, 0x55`, the complement of its third operand |

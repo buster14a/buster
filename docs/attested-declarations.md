@@ -1,16 +1,22 @@
 # Attested declarations: a file-scope declaration is read once per command (#2531): design
 
-Status: step 0, the census, is built and measured
-([below](#step-0-the-census)), and so are steps 1 and 2, the shadow and the
-skip in the compile ([below](#steps-1-and-2-the-skip-in-the-compile)): a
-command of several source files skips by default (`--attested=on`). Step 3 is
-built in three parts, and its gate is held by its third, the view
-([below](#step-3-its-third-part-the-view): 1.266 and 1.737 times against
-`--attested=off`; a skipped token's cost to the reader at the gate on musl's
-command, where the measurements disagree, and far under it on the glibc
-units'). Step 4, the owner's choice, is built as an option
-(`--attested-memo`) and its gates aren't held
-([below](#step-4-a-memo-kept-across-processes)). It is
+Status: built, every step's gate held. Step 0, the census, is built and
+measured ([below](#step-0-the-census)), and so are steps 1 and 2, the shadow
+and the skip in the compile ([below](#steps-1-and-2-the-skip-in-the-compile)):
+a command of several source files skips by default (`--attested=on`). Step 3
+is built in three parts, and its gate is held by its third, the view
+([below](#step-3-its-third-part-the-view): 1.280 and 1.764 times against
+`--attested=off` since its arenas' fix; a skipped token's cost to the reader
+at the gate on musl's command, where the measurements disagree, and far under
+it on the glibc units'). Step 4, the owner's choice, is built as an option
+(`--attested-memo`) and its gates are held
+([below](#step-4-a-memo-kept-across-processes): 1.096 times for a process
+a musl unit and 1.025 times for `-c sqlite3.c`, the memo warm). The issue's
+last part made `-g` skip too ("Risks"), gave every field of the reader's state
+a class that a test checks, and stopped a viewed unit's discards giving back
+the huge pages the next unit faults in again ("The kernel's part" below). The
+passes' cost on a large unit is
+[#2769](https://github.com/buster14a/buster/issues/2769). It is
 [#672](https://github.com/buster14a/buster/issues/672)'s one-core target's
 design for what [the node machine](node-machine.md)
 ([#2524](https://github.com/buster14a/buster/issues/2524)) doesn't cover:
@@ -607,7 +613,8 @@ the census names:
   the symbols in asm labels' and alias attributes' strings.
 
 **What it doesn't do.** "Risks" below gives step 0 a test listing every field of
-the reader's state by class; the census doesn't have it. Its evidence on that
+the reader's state by class; the census doesn't have it (#2531's last part
+added it). Its evidence on that
 risk is the zero contradictions over 566,907 hits, and step 1's shadow checks
 each would-be skipped reading. The census runs one lane, without `-g` and
 without deferred bodies (it refuses those options); step 1 runs with them.
@@ -668,8 +675,9 @@ branch's code (buster#2620), CPU 2, `setarch -R`, against main's `df85213e`
   with the rule (and the reader's environment published for the events)
   measured musl's command 1.145 times faster and the glibc units' 1.442, two
   rounds each.
-- **What else the compile needed.** `-g` skips nothing: the unit's DWARF
-  describes every type its table holds ("Risks" below). A diagnostic of the
+- **What else the compile needed.** `-g` skipped nothing then: the unit's
+  DWARF described every declaration's types (since #2531's last part it skips:
+  "Risks" below). A diagnostic of the
   unit's end (`-Wunused-function`'s) is published past its last token, so it
   is placed by its location; placed by its output position, a `-Wall` unit
   learned nothing. A unit that skipped is read again with nothing skipped,
@@ -679,9 +687,10 @@ branch's code (buster#2620), CPU 2, `setarch -R`, against main's `df85213e`
   declaration's list by key as its events start: scanning the list at each
   event took a large function body's square, and made the compiler's own 61
   unity units 2 s slower.
-- **Not done:** the field-by-class test of the reader's state ("Risks"),
-  whose evidence is still the corpora's zero contradictions; the passes from
-  the parser's roles, whose cost is now the gap to the expected gains; step 3.
+- **Not done then:** the field-by-class test of the reader's state
+  ("Risks"), whose evidence was the corpora's zero contradictions (since
+  #2531's last part, `check_test_attested_fields`); the passes from the
+  parser's roles, whose cost was the gap to the expected gains; step 3.
 
 ## Step 3, its first part: what a skipped unit still clears and scans
 
@@ -940,8 +949,20 @@ the median of 7 rounds, each round's trees in turn in one hold of the lock;
   faulted in where main's command faults 318. The view's columns are in the
   lane's state, whose pages stay; what changes is how much each unit's own
   arenas take, which the units' lanes give back in whole huge pages after a
-  unit (#777) and the next unit faults in again. Which arena it is isn't
-  measured here.
+  unit (#777) and the next unit faults in again. **Since #2771** it is gone.
+  A lane gives a unit's scratch back twice, after the reader (keeping 96 bytes
+  a token for the passes after it) and at `check_program`'s end (in whole huge
+  pages past its columns), and both were sized by the view's tokens, where the
+  next unit's parse and reader push in proportion to its whole parse. Both now
+  keep what they would for the parse (`CheckProgramOptions.discard_keep`, the
+  same 96 bytes for each token the view leaves out); a unit read whole keeps
+  what it kept. musl's command faults 222 huge pages (`--attested=off`'s 311)
+  and 1,019 M kernel cycles where it faulted 719 and 1,069 M, and the glibc
+  units' 17 where 192; against the view as above (main `c513832`, 5 rounds,
+  medians, [the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/attested-leftovers-2531-2026-11-14))
+  the commands are 1.018 and 1.016 times faster, and against
+  `--attested=off` **1.280** and **1.764** (rounds 1.276 to 1.284 and 1.741
+  to 1.767), every object and diagnostic the same.
 
 **What a skipped token still costs** (the record's `gone` and `perunit`): the
 measurement-only probe (`scripts/probe.patch`) sums the TSC ticks of the
@@ -1048,34 +1069,48 @@ attested.
   unit skips; a command of other options, a file of its own; and a scrambled
   file, a memo of nothing, written again.
 
-On the 9700X (CPU 2, `setarch -R`, 5 rounds; the record's `stat-ppu-*` and
-`stat-sqlite4-*`), the memo warm (a process each of musl's preprocessed units,
-then `sqlite3.c` twice, all with the memo), against the same build without
-it:
+On the 9700X (CPU 2, `setarch -R`, 5 rounds, each round's builds in one hold
+of the lock; the record's `stat-ppu-*` and `stat-sqlite4-*`), the memo warm (a
+process each of musl's preprocessed units, then `sqlite3.c` twice, all with the
+memo), against the same build without it; first as #2710 built it, then at
+#2726's head:
 
 | | without the memo | with it | | gate |
 | --- | ---: | ---: | ---: | ---: |
-| musl's 1,336 preprocessed units, a process each: M cycles (user, kernel) | 8,240.6 (4,143.5, 4,097.0) | 8,149.3 (3,486.0, 4,663.3) | **1.011** | 1.08 |
-| … page faults | 791,559 | 1,212,826 | | |
-| `-c sqlite3.c`: M cycles | 683.4 | 684.2 | **0.999** | 1.02 |
+| #2710: musl's 1,336 preprocessed units, a process each, M cycles (user, kernel) | 8,240.6 (4,143.5, 4,097.0) | 8,149.3 (3,486.0, 4,663.3) | 1.011 | 1.08 |
+| … `-c sqlite3.c`, M cycles | 683.4 | 684.2 | 0.999 | 1.02 |
+| #2726: musl's units, a process each | 8,178.6 (4,148.1, 4,030.5) | 7,463.1 (3,340.1, 4,123.1) | **1.096** ✓ (rounds 1.073 to 1.099) | 1.08 |
+| … page faults | 801,875 | 900,983 | | |
+| … `-c sqlite3.c` | 680.7 (596.1, 84.6) | 664.3 (581.2, 83.5) | **1.025** ✓ (1.021 to 1.026) | 1.02 |
 
-Every object and diagnostic of the units' processes is the same bytes with
-the memo and without it.
+Every object and diagnostic of the units' processes, and `sqlite3.c`'s, is
+the same bytes with the memo and without it.
 
-**The gates aren't held.** A process a unit saves 15.8% of its user cycles (490
-thousand cycles a process, the reader's skip and its view), and lost them to
-316 more page faults a process: the memo's table, sized at a quarter full with
-slack, took 128 pages for 3,000 hashes, and its load copied the file. Even with
-no cost of its own, the user cycles saved are 1.087 times the command's. And
-`sqlite3.c`, which names most of what it declares, skips 2,156 of its 6,873
-file-scope declarations, 40,639 tokens (6%): the passes over its 716,000 tokens
-cost about what that saves.
+**What held the gates back, and what took them** (each found by a profile on
+the 9700X: `perf record -e page-faults` and of the kernel's cycles, by
+symbol):
 
-A follow-up sizes a one-file command's memo at half full once for its records,
-loads it a block at a time through a buffer on the stack, and makes its lists
-by the vector path without the cache: in the cloud VM a process takes 43 more
-faults than without the memo, where it took 247, and 6 to 7% fewer user
-cycles.
+- **The memo's table.** As #2710 built it, a process a unit saved 15.8% of its
+  user cycles and lost them to 316 more page faults: the table, a quarter full
+  with slack, took 128 pages for 3,000 hashes, and its load copied the file.
+  Half full and loaded through a buffer on the stack, it still took 63 of 112
+  more faults a process (`check_attested_memo_add`, a table of 16,384 16-byte
+  slots for musl's 3,448 hashes): 1.063. As an array of the hashes, read by
+  one call, and a table of their indexes (`check_attested_memo_load_alone`), it
+  takes 22 pages: 1.094.
+- **`sqlite3.c`'s view.** It names most of what it declares and skips 2,156 of
+  its 6,873 file-scope declarations, 40,639 tokens, 6% of the unit; its view
+  copied the rest, about 4,000 of the command's 12,113 faults with the memo,
+  more than the skip saved (1.005). A command of one source file reads its unit
+  as its view only where it skips a third of its tokens or more, and otherwise
+  passes the skipped declarations by their marks: 1.025. 1,158 of musl's 1,331
+  units with tokens still read as views, a process each.
+- **The rest:** an in-memory stream for the diagnostics in place of a file,
+  the state's arenas left to the exit, and no caches of lists or trees mapped:
+  a few syscalls and mappings a process.
+
+The passes are what `sqlite3.c` still pays for its skip: the lists, the chain
+and the reach over its 710,061 tokens, about 2% of its user cycles.
 
 ## Expected gains
 
@@ -1134,11 +1169,13 @@ Each ends the work with a record.
   silent: a declaration skipped that would have reported something here. The
   candidates are state the reader consults that is neither token, name nor
   pragma: a diagnostic given once a unit, an error limit already reached, a
-  table indexed by something other than a name. Step 0 lists every field of
-  `CheckInputReader` and `CheckInput` by class (the declaration's own tokens,
-  a name's entry, the type table, a table with consequences, ambient), and a
-  test fails when a new field has no class. An entry is added only at the end
-  of a unit without errors.
+  table indexed by something other than a name. Every field of
+  `CheckInputReader` and `CheckInput` has a class (the declaration's own
+  tokens, a name's entry, the type table, a table with consequences, ambient,
+  a unit's transient state, a measurement), and `test-checker --attested`
+  fails when a new field has none (`check_test_attested_fields` reads the
+  fields by `__builtin_dump_struct`). An entry is added only at the end of a
+  unit without errors.
 - **Purity is the reader's word.** A new kind of declaration with a
   consequence at the unit's end, and no counter the record compares, would be
   attested. The guards are `test-check-units` on every fixture and the rule
@@ -1149,12 +1186,16 @@ Each ends the work with a record.
   library names, strings that hold symbols); a new one needs its own, and the
   corpus comparison is what finds it.
 - **`-g`.** A unit's DWARF must not describe a skipped declaration, as clang's
-  describes no unused one; if `check_debug_type_reference`'s rule reaches
-  them some other way, `-g` units don't skip until it doesn't. Step 1 found it
-  does: `c_check_debug_values.c` describes every type the unit's table holds
-  (a header's unused `struct` among them, unlike clang), so the objects of
-  `test-check-units`' `-g` programs differed. `-g` skips nothing; `--attested=verify`
-  runs with it.
+  describes no unused one. Step 1 found that `c_check_debug_values.c`
+  described every declaration's types (a header's unused `struct` among them,
+  unlike clang), so the objects of `test-check-units`' `-g` programs differed,
+  and `-g` skipped nothing. Since #2531's last part, its roots are clang's
+  (`check_debug_value_roots`): the declarations that define what the unit
+  emits (a body, an object's storage), the types they reach, and the typedefs
+  they bind, in turn; a prototype, an extern declaration, a typedef or a tag
+  that no definition names gives the DWARF nothing. What a definition binds
+  it also spells, so the reach reaches it: `-g` skips, and every `-g` object is
+  `--attested=off`'s.
 - **Hash collisions.** 128 bits, keyed; a collision could only skip the
   checking of a declaration nothing names.
 - **Order of the lane's units.** A unit's output can't depend on the memo

@@ -77,10 +77,17 @@ written at bases with the same unit alone, byte for byte but the four offsets.
 ## C types and values (`-g`)
 
 `c_check_debug_values.c` enriches the core producer for [#1114](https://github.com/buster14a/buster/issues/1114).
-It emits a DIE for each reachable, qualified `TypeId` in the translation unit:
-base and pointer types, fixed and incomplete arrays, records and unions (with
-byte or bit offsets), enums and enumerators, function signatures, qualifiers,
-and declaration-scoped typedef names. A bounded worklist handles recursive
+It emits a DIE for each qualified `TypeId` the unit's roots reach
+(`check_debug_value_roots`, #2531): its file-scope declarations that define
+what it emits (a function's body, an object's storage) and everything inside
+them, and the file-scope typedefs those bind (the checker's bindings,
+`CheckInput.declarations`), and those that such a typedef binds in turn. As in
+clang's DWARF, a prototype, an extern declaration, a typedef, a tag or an
+enumeration that nothing defined in the unit names gives it nothing, and a
+global variable is described where the unit defines it. The DIEs are base and
+pointer types, fixed and incomplete arrays, records and unions (with byte or
+bit offsets), enums and enumerators, function signatures, qualifiers, and
+declaration-scoped typedef names. A bounded worklist handles recursive
 records without recursion. Two passes measure and then write CU-relative
 `DW_FORM_ref4` references, including forward references; these references need
 no relocation when units are concatenated.

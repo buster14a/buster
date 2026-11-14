@@ -144,6 +144,10 @@ struct Tier1CfgInput
     const uint32_t* clobbers;
     uint32_t clobber_count;
     uint32_t clobber_registers[BUSTER_TIER1_ALLOCATE_CLASSES];
+    // Optional (#2685), two per value: the values whose registers its definition may take, in preference order, or
+    // BUSTER_TIER1_CFG_NONE: a two-address instruction's first operand, which its destination is otherwise a copy of. The
+    // definition's interval takes one where that operand's interval ends at the definition, and nothing else hints it.
+    const uint32_t* ties;
     uint32_t block_count;
     uint32_t edge_count;
     uint32_t value_count;
@@ -197,6 +201,9 @@ struct Tier1CfgAllocation
     // The input's blocks, borrowed as `intervals` borrows its uses (tier1_cfg_entry_unread), or null for none.
     const uint32_t* block_starts;
     uint32_t block_count;
+    // Per interval, 1 where it enters its block as its recipe because no block it carries the value to reads its
+    // register (tier1_cfg_carried_unread, #2734), or null for none.
+    uint8_t* unread_entries;
 };
 
 typedef enum Tier1CfgError
@@ -632,7 +639,8 @@ static uint32_t tier1_cfg_interval_fragment(const Tier1CfgAllocation* result, ui
 // A value's location where control enters its block at `entry`, from `interval`, which covers it: its fragment at
 // `position` (entry, or entry - 1 for an interval that continues from the layout predecessor), found once and encoded
 // as tier1_cfg_interval_location encodes it, or the recipe where that register fragment reads nothing from the entry on
-// (tier1_cfg_entry_unread). Only a register fragment of a recomputed value with a recipe's fragment after it can be one.
+// (tier1_cfg_entry_unread): a register fragment of a recomputed value with a recipe's fragment after it, or one that
+// tier1_cfg_carried_unread proved.
 static inline __attribute__((always_inline)) bool tier1_cfg_interval_entry(const Tier1CfgAllocation* result, uint32_t value, uint32_t interval, uint32_t position, uint32_t entry, uint32_t* location, uint8_t* kind)
 {
     const Tier1Allocation* allocation = &result->allocation;
@@ -641,10 +649,10 @@ static inline __attribute__((always_inline)) bool tier1_cfg_interval_entry(const
     if (found)
     {
         const uint8_t fragment_kind = allocation->kinds[fragment];
-        const bool candidate = fragment_kind == BUSTER_TIER1_ALLOCATE_REGISTER && fragment + 1 < allocation->fragment_offsets[interval + 1] &&
-                               allocation->kinds[fragment + 1] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && result->intervals.rematerializable != 0 &&
-                               result->intervals.rematerializable[interval] != 0;
-        const bool recipe = candidate && tier1_cfg_entry_unread(result, interval, fragment, entry);
+        const bool recomputed = fragment_kind == BUSTER_TIER1_ALLOCATE_REGISTER && result->intervals.rematerializable != 0 && result->intervals.rematerializable[interval] != 0;
+        const bool candidate = recomputed && fragment + 1 < allocation->fragment_offsets[interval + 1] && allocation->kinds[fragment + 1] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
+        const bool carried = recomputed && result->unread_entries != 0 && result->unread_entries[interval] != 0;
+        const bool recipe = carried || (candidate && tier1_cfg_entry_unread(result, interval, fragment, entry));
         *kind = recipe ? (uint8_t)BUSTER_TIER1_ALLOCATE_REMATERIALIZE : fragment_kind;
         *location = recipe || fragment_kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE ? BUSTER_TIER1_CFG_REMATERIALIZE :
                     fragment_kind == BUSTER_TIER1_ALLOCATE_REGISTER                  ? (uint32_t)result->intervals.classes[interval] * 32 + allocation->registers[fragment] :
@@ -689,6 +697,96 @@ static bool tier1_cfg_entry_location(const Tier1CfgAllocation* result, uint32_t 
 static bool tier1_cfg_entry_location_oracle(const Tier1CfgAllocation* result, uint32_t value, uint32_t entry, uint32_t* location, uint8_t* kind)
 {
     return tier1_cfg_entry_location_mode(result, value, entry, location, kind, true);
+}
+
+// #2734: a recomputed value's interval that covers whole blocks, from one's start to the end of the last that continues
+// it in layout, which it enters in a register that no use there reads, may carry the value only to blocks that take it
+// as their recipe: each successor's interval of the value enters with a recipe's fragment, or with a register that
+// reads nothing (tier1_cfg_entry_unread, or this proof in turn), and the value is no phi's operand, which an edge would
+// move. Then it enters as its recipe too (tier1_cfg_interval_entry), and no edge into its block recomputes the value
+// into a register that the code it reaches overwrites unread: Lua's OP_CALL recomputed five frame addresses into the
+// registers that `startfunc` and `returning` load `ci`'s state into. Every interval that qualifies on its own block is
+// marked, then a worklist unmarks each with a successor that reads its register, putting back on the list its value's
+// marked intervals in the block's predecessors, which may have relied on it: the greatest such set, so that a loop
+// carrying a recipe it nowhere reads is proven too. The verifier's walk checks it: an edge that read such a register
+// would move nothing into its destination. On no room, no proof.
+static void tier1_cfg_carried_unread(const Tier1CfgInput* input, Tier1CfgAllocation* result, Arena* output, Arena* scratch)
+{
+    const Tier1Allocation* allocation = &result->allocation;
+    const Tier1AllocationInput* intervals = &result->intervals;
+    const uint32_t count = intervals->count;
+    const uint64_t mark = scratch->length;
+    const bool possible = intervals->rematerializable != 0 && intervals->use_offsets != 0 && count != 0 && input->block_count != 0;
+    uint8_t* marked = possible ? arena_push(output, (uint64_t)count + 1, 1) : 0;
+    uint8_t* operands = marked != 0 ? arena_push(scratch, (uint64_t)input->value_count + 1, 1) : 0;
+    uint32_t* list = operands != 0 ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    uint32_t listed = 0;
+    if (list != 0)
+    {
+        memset(marked, 0, (uint64_t)count + 1);
+        memset(operands, 0, (uint64_t)input->value_count + 1);
+        for (uint32_t o = 0; o < input->phi_operand_offsets[input->phi_count]; o += 1)
+        {
+            const uint32_t operand = input->phi_operands[o];
+            if (operand != BUSTER_TIER1_CFG_NONE)
+            {
+                operands[operand] = 1;
+            }
+        }
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t v = intervals->values[i];
+            const uint32_t f = allocation->fragment_offsets[i];
+            const bool single = intervals->rematerializable[i] != 0 && allocation->fragment_offsets[i + 1] - f == 1 && allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER &&
+                                intervals->use_offsets[i] == intervals->use_offsets[i + 1] && operands[v] == 0 && input->definitions[v] != intervals->starts[i];
+            const uint32_t b = single ? tier1_cfg_block_of(input, intervals->starts[i]) : 0;
+            const uint32_t last = single ? tier1_cfg_block_of(input, intervals->ends[i] - 1) : 0;
+            if (single && input->block_starts[b] == intervals->starts[i] && input->block_starts[last + 1] == intervals->ends[i])
+            {
+                marked[i] = 2;
+                list[listed] = i;
+                listed += 1;
+            }
+        }
+        // Marks: 0 none, 1 proven so far, 2 proven so far and on the list.
+        result->unread_entries = marked;
+    }
+    while (listed != 0)
+    {
+        listed -= 1;
+        const uint32_t i = list[listed];
+        const uint32_t v = intervals->values[i];
+        const uint32_t first = tier1_cfg_block_of(input, intervals->starts[i]);
+        const uint32_t last = tier1_cfg_block_of(input, intervals->ends[i] - 1);
+        marked[i] = 1;
+        bool read = false;
+        // The blocks' edges: an edge to the next of them, which the interval continues into, enters it as the interval.
+        for (uint32_t e = input->successor_offsets[first]; !read && e < input->successor_offsets[last + 1]; e += 1)
+        {
+            const uint32_t entry = input->block_starts[input->successors[e]];
+            const uint32_t j = tier1_cfg_interval_at(result, v, entry);
+            uint32_t location = 0;
+            uint8_t kind = 0;
+            const uint32_t position = j != BUSTER_TIER1_CFG_NONE && intervals->starts[j] < entry ? entry - 1 : entry;
+            read = j != BUSTER_TIER1_CFG_NONE && (!tier1_cfg_interval_entry(result, v, j, position, entry, &location, &kind) || kind != BUSTER_TIER1_ALLOCATE_REMATERIALIZE);
+        }
+        if (read)
+        {
+            marked[i] = 0;
+            for (uint32_t k = input->predecessor_offsets[first]; k < input->predecessor_offsets[last + 1]; k += 1)
+            {
+                const uint32_t p = input->predecessors[k];
+                const uint32_t h = tier1_cfg_interval_at(result, v, input->block_starts[p + 1] - 1);
+                if (h != BUSTER_TIER1_CFG_NONE && h != i && marked[h] == 1)
+                {
+                    marked[h] = 2;
+                    list[listed] = h;
+                    listed += 1;
+                }
+            }
+        }
+    }
+    arena_pop_to(scratch, mark);
 }
 
 // Last spill end at each fragment, by value and layout position. The prefix includes earlier pieces of the
@@ -956,6 +1054,7 @@ struct Tier1CfgPieces
     uint8_t* remat;
     uint32_t* hints;
     uint32_t* hint_intervals;
+    uint32_t* alternates;
     uint32_t* split_positions;
     uint32_t* split_values;
     uint64_t count;
@@ -979,6 +1078,7 @@ static void tier1_cfg_piece(Tier1CfgPieces* pieces, const Tier1CfgInput* input, 
         pieces->remat[i] = input->rematerializable != 0 ? input->rematerializable[v] : 0;
         pieces->hints[i] = hint;
         pieces->hint_intervals[i] = earlier;
+        pieces->alternates[i] = BUSTER_TIER1_CFG_NONE;
         if (split)
         {
             pieces->split_positions[pieces->splits] = start;
@@ -1067,18 +1167,37 @@ static uint32_t tier1_cfg_piece_at(const Tier1CfgPieces* pieces, uint32_t first,
 // A phi's interval that no sibling convention models (#1216) takes its operand's register at the exit of its block's
 // chosen predecessor (#2553, tier1_cfg_anchors). Every value's intervals must be filled: an operand's may follow its
 // phi's.
-static void tier1_cfg_phi_exits(const Tier1CfgInput* input, const uint32_t* chosen, const uint32_t* offsets, Tier1CfgPieces* pieces)
+//
+// But a block with one successor runs its edge to it each time it runs, at least as often as all the edges into it
+// together. A phi there that a phi of that successor takes (`ups`, its first) takes first the register that phi's first
+// interval opened with, its convention, where that phi still holds it last and it is free at the block's start (the
+// allocator's alternate_intervals): the edges into the block then move its operands where they must, rather than the
+// one edge after it moving it every time, in a cycle with the values the block defines for the successor's other phis.
+// Lua's `startfunc` (#2592, #2734), between OP_CALL's new `ci` and the loop's `returning`, swapped `ci` with `trap`
+// through the scratch register on every call. Otherwise the operand's register stays the hint. Following that phi's
+// latest register instead gave Lua's handlers swaps of their own, where it had moved in one; following its first
+// interval without the check spilled phis in sqlite3VdbeExec, whose phi there had moved to memory.
+static void tier1_cfg_phi_exits(const Tier1CfgInput* input, const uint32_t* chosen, const uint32_t* ups, const uint32_t* offsets, Tier1CfgPieces* pieces)
 {
     for (uint32_t b = 0; b < input->block_count; b += 1)
     {
         const uint32_t j = chosen[b];
         const uint32_t predecessor = j != BUSTER_TIER1_CFG_NONE ? input->predecessors[input->predecessor_offsets[b] + j] : BUSTER_TIER1_CFG_NONE;
         const uint32_t exit = predecessor != BUSTER_TIER1_CFG_NONE ? input->block_starts[predecessor + 1] - 1 : 0;
-        for (uint32_t k = input->phi_offsets[b]; predecessor != BUSTER_TIER1_CFG_NONE && k < input->phi_offsets[b + 1]; k += 1)
+        const bool single = input->successor_offsets[b + 1] - input->successor_offsets[b] == 1;
+        const uint32_t next = single ? input->successors[input->successor_offsets[b]] : BUSTER_TIER1_CFG_NONE;
+        for (uint32_t k = input->phi_offsets[b]; k < input->phi_offsets[b + 1]; k += 1)
         {
             const uint32_t v = input->phi_values[k];
-            const uint32_t operand = input->phi_operands[input->phi_operand_offsets[k] + j];
             const uint32_t own = tier1_cfg_piece_at(pieces, offsets[v], offsets[v + 1], input->block_starts[b]);
+            const uint32_t up = next != BUSTER_TIER1_CFG_NONE ? ups[v] : BUSTER_TIER1_CFG_NONE;
+            const bool along = own != BUSTER_TIER1_CFG_NONE && up != BUSTER_TIER1_CFG_NONE && input->definitions[up] == input->block_starts[next] && input->classes[up] == input->classes[v];
+            const uint32_t first = along && offsets[up] != offsets[up + 1] ? offsets[up] : BUSTER_TIER1_CFG_NONE;
+            if (first != BUSTER_TIER1_CFG_NONE && pieces->starts[first] < pieces->starts[own])
+            {
+                pieces->alternates[own] = first;
+            }
+            const uint32_t operand = predecessor != BUSTER_TIER1_CFG_NONE ? input->phi_operands[input->phi_operand_offsets[k] + j] : BUSTER_TIER1_CFG_NONE;
             const uint32_t taken = operand != BUSTER_TIER1_CFG_NONE ? tier1_cfg_piece_at(pieces, offsets[operand], offsets[operand + 1], exit) : BUSTER_TIER1_CFG_NONE;
             if (own != BUSTER_TIER1_CFG_NONE && taken != BUSTER_TIER1_CFG_NONE && pieces->hint_intervals[own] == BUSTER_TIER1_CFG_NONE && pieces->classes[taken] == pieces->classes[own] &&
                 pieces->ends[taken] <= pieces->starts[own])
@@ -1117,6 +1236,29 @@ static void tier1_cfg_operand_targets(const Tier1CfgInput* input, const uint32_t
             const uint32_t first = offsets[target];
             pieces->hints[own] = target;
             pieces->hint_intervals[own] = pieces->hint_intervals[own] == BUSTER_TIER1_CFG_NONE && pieces->starts[first] < pieces->starts[own] ? first : pieces->hint_intervals[own];
+        }
+    }
+}
+
+// A definition that nothing else hints, of a value tied to an operand whose interval ends there (#2685), takes that
+// interval's closing register: a two-address instruction's result in its dying first operand's register, which leaves
+// out the copy into the destination. An operand live past the definition holds its register, so no hint names it.
+static void tier1_cfg_ties(const Tier1CfgInput* input, const uint32_t* offsets, Tier1CfgPieces* pieces)
+{
+    for (uint32_t v = 0; input->ties != 0 && v < input->value_count; v += 1)
+    {
+        const uint32_t definition = input->definitions[v];
+        const uint32_t own = input->ties[2 * (uint64_t)v] != BUSTER_TIER1_CFG_NONE && definition != 0 ? tier1_cfg_piece_at(pieces, offsets[v], offsets[v + 1], definition) : BUSTER_TIER1_CFG_NONE;
+        const bool open = own != BUSTER_TIER1_CFG_NONE && pieces->starts[own] == definition && pieces->hints[own] == BUSTER_TIER1_CFG_NONE && pieces->hint_intervals[own] == BUSTER_TIER1_CFG_NONE;
+        for (uint32_t k = 0; open && k < 2; k += 1)
+        {
+            const uint32_t tied = input->ties[2 * (uint64_t)v + k];
+            const uint32_t taken = tied != BUSTER_TIER1_CFG_NONE && tied != v ? tier1_cfg_piece_at(pieces, offsets[tied], offsets[tied + 1], definition - 1) : BUSTER_TIER1_CFG_NONE;
+            if (taken != BUSTER_TIER1_CFG_NONE && pieces->ends[taken] == definition && pieces->classes[taken] == pieces->classes[own] && pieces->hints[own] == BUSTER_TIER1_CFG_NONE)
+            {
+                pieces->hints[own] = tied;
+                pieces->hint_intervals[own] = taken | BUSTER_TIER1_ALLOCATE_HINT_EXIT;
+            }
         }
     }
 }
@@ -1931,10 +2073,11 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                 pieces.remat = ready ? arena_push(output, interval_count + 1, 1) : 0;
                 pieces.hints = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 pieces.hint_intervals = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+                pieces.alternates = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 use_offsets = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 pieces.split_positions = ready ? arena_push_array(scratch, split_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 pieces.split_values = ready ? arena_push_array(scratch, split_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-                ready = ready && pieces.starts != 0 && pieces.ends != 0 && pieces.values != 0 && pieces.allowed != 0 && pieces.classes != 0 && pieces.remat != 0 && pieces.hints != 0 && pieces.hint_intervals != 0 && use_offsets != 0 && pieces.split_positions != 0 && pieces.split_values != 0;
+                ready = ready && pieces.starts != 0 && pieces.ends != 0 && pieces.values != 0 && pieces.allowed != 0 && pieces.classes != 0 && pieces.remat != 0 && pieces.hints != 0 && pieces.hint_intervals != 0 && pieces.alternates != 0 && use_offsets != 0 && pieces.split_positions != 0 && pieces.split_values != 0;
                 pieces.fill = ready;
             }
             if (ready)
@@ -2060,8 +2203,9 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                     }
                 }
                 use_offsets[count] = input->use_count;
-                tier1_cfg_phi_exits(input, chosen, candidate.value_interval_offsets, &pieces);
+                tier1_cfg_phi_exits(input, chosen, ups, candidate.value_interval_offsets, &pieces);
                 tier1_cfg_operand_targets(input, phi_hints, ups, phis, candidate.value_interval_offsets, &pieces);
+                tier1_cfg_ties(input, candidate.value_interval_offsets, &pieces);
                 candidate.block_starts = input->block_starts;
                 candidate.block_count = input->block_count;
                 candidate.intervals = (Tier1AllocationInput){
@@ -2071,6 +2215,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                     .allowed_registers = pieces.allowed,
                     .classes = pieces.classes,
                     .hint_values = pieces.hints,
+                    .alternate_intervals = pieces.alternates,
                     .hint_intervals = pieces.hint_intervals,
                     .rematerializable = input->rematerializable != 0 ? pieces.remat : 0,
                     .use_offsets = use_offsets,
@@ -2180,6 +2325,10 @@ static Tier1CfgError tier1_cfg_finish(const Tier1CfgInput* input, const Tier1Cfg
     const uint32_t* entering = prepared->entering;
     tier1_cfg_install_lookup(input, output, scratch, &candidate);
     bool ready = input->slot_widths == 0 || candidate.allocation.spill_count < 2 || tier1_cfg_share_slots(input, &candidate, scratch);
+    if (ready)
+    {
+        tier1_cfg_carried_unread(input, &candidate, output, scratch);
+    }
     // Splits by position, counted then filled: the values whose ranges are cut there, and the distinct positions.
     const uint32_t splits = ready ? prepared->splits : 0;
     uint32_t* split_offsets = ready ? arena_push_array(scratch, (uint64_t)input->position_count + 2, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
