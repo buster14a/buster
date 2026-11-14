@@ -324,6 +324,10 @@ static bool memory_partial_commit(void)
     return memory_wait(child, 0);
 }
 
+// 32 simultaneous 64 GiB requests under a 2 GiB RLIMIT_AS (#1118): each grows in a slot of its own (arena_reserve_growing),
+// past its share of the limit (16 MiB) as far as its pushes reach, its base fixed; together they take 1 GiB, 32 MiB each,
+// which the shares refused. A push past what the limit leaves fails as a reservation refused (ENOMEM), leaving the arena
+// and every byte written before as they were, and the arena then grows again once another's release gives room back.
 static bool memory_many_arenas(void)
 {
     const pid_t child = fork();
@@ -331,19 +335,49 @@ static bool memory_many_arenas(void)
     {
         bool valid = memory_limit(UINT64_C(2) << 30);
         Arena arenas[32] = { 0 };
+        uint8_t* bases[32] = { 0 };
+        const uint64_t share = UINT64_C(16) << 20;
+        const uint64_t each = UINT64_C(32) << 20;
         for (uint32_t i = 0; valid && i < 32; i += 1)
         {
             arenas[i] = arena_reserve(UINT64_C(64) << 30);
+            bases[i] = arenas[i].base;
             uint8_t* byte = arena_push(arenas + i, 1, 1);
-            valid = byte != 0 && arenas[i].capacity <= (UINT64_C(16) << 20);
+            valid = byte != 0 && arenas[i].grows && arenas[i].capacity > share && arenas[i].capacity <= BUSTER_ARENA_GROWTH_CAPACITY;
             if (byte != 0)
             {
                 *byte = (uint8_t)i;
             }
         }
+        for (uint32_t i = 0; valid && i < 32; i += 1)
+        {
+            uint8_t* bytes = arena_push(arenas + i, each, 64);
+            valid = bytes != 0 && arenas[i].base == bases[i];
+            if (bytes != 0)
+            {
+                bytes[0] = (uint8_t)~i;
+                bytes[each - 1] = (uint8_t)i;
+            }
+        }
+        // Past the limit: 2 GiB more than any process can have.
+        const Arena before = arenas[0];
+        arena_failure = (ArenaFailure){ 0 };
+        const uint8_t* refused = valid ? arena_push(arenas, UINT64_C(2) << 30, 64) : (uint8_t*)1;
+        valid = valid && refused == 0 && arenas[0].length == before.length && arenas[0].peak == before.peak && arena_failure.error == ENOMEM && !arena_failure.commit;
         for (uint32_t i = 0; i < 32; i += 1)
         {
-            valid = valid && (arenas[i].base == 0 || arenas[i].base[0] == i);
+            valid = valid && arenas[i].base[0] == i && arenas[i].base[64] == (uint8_t)~i && arenas[i].base[64 + each - 1] == i;
+        }
+        // Room given back by a release is the next growth's.
+        arena_release(arenas + 31);
+        uint8_t* again = valid ? arena_push(arenas, each, 64) : 0;
+        valid = valid && again != 0 && arenas[0].base == bases[0];
+        if (again != 0)
+        {
+            again[each - 1] = 0x5a;
+        }
+        for (uint32_t i = 0; i < 32; i += 1)
+        {
             arena_release(arenas + i);
         }
         _exit(valid ? 0 : 1);

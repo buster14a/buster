@@ -1273,6 +1273,70 @@ static bool lane_test_arenas(void)
                      "a reservation's share didn't follow RLIMIT_AS before the limits were fixed, or changed after");
     lane_test_expect(&tally, !arena_limits.fixed, "the tests' process has its limits fixed");
 
+#if BUSTER_ARENA_GROWTH
+    // Growing reservations (#1118), in a child whose RLIMIT_AS admits 256 MiB past what it maps: a 64 GiB reservation,
+    // past its share, grows in a slot of its own, its base fixed, to 96 MiB and past; a copy of it grows it further, which
+    // the arena then finds rather than mapping over; a push past the limit is refused as a reservation (ENOMEM) and leaves
+    // the arena and its bytes as they were; its release frees its slot. A reservation within its share doesn't grow.
+    fflush(stdout);
+    const pid_t growing = fork();
+    if (growing == 0)
+    {
+        arena_pool = 0;
+        arena_compact = false;
+        arena_failure = (ArenaFailure){ 0 };
+        uint64_t pages = 0;
+        FILE* statm = fopen("/proc/self/statm", "r");
+        bool valid = statm != NULL && fscanf(statm, "%llu", (unsigned long long*)&pages) == 1;
+        if (statm != NULL)
+        {
+            fclose(statm);
+        }
+        struct rlimit space;
+        valid = valid && getrlimit(RLIMIT_AS, &space) == 0;
+        space.rlim_cur = pages * BUSTER_ARENA_PAGE_BYTES + (256ull << 20);
+        valid = valid && (space.rlim_max == RLIM_INFINITY || space.rlim_cur <= space.rlim_max) && setrlimit(RLIMIT_AS, &space) == 0;
+        Arena arena = valid ? arena_reserve(64ull << 30) : (Arena){ 0 };
+        uint8_t* const base = arena.base;
+        const uintptr_t mapping = (uintptr_t)arena.base - arena.mapping_offset;
+        const uint32_t slot = arena_slot_of((const uint8_t*)mapping);
+        valid = valid && arena.grows && mapping >= BUSTER_ARENA_SLOT_REGION && slot < BUSTER_ARENA_SLOT_COUNT && arena.capacity > arena_reservation_limit() &&
+                arena.capacity <= BUSTER_ARENA_GROWTH_CAPACITY;
+        uint8_t* first = valid ? arena_push(&arena, 1, 1) : 0;
+        uint8_t* large = first != 0 ? arena_push(&arena, 96ull << 20, 64) : 0;
+        valid = valid && large != 0 && arena.base == base;
+        if (large != 0)
+        {
+            first[0] = 0x5a;
+            large[0] = 0xa5;
+            large[(96ull << 20) - 1] = 0x3c;
+        }
+        Arena copy = arena;
+        uint8_t* copied = valid ? arena_push(&copy, 32ull << 20, 64) : 0;
+        uint8_t* after = copied != 0 ? arena_push(&arena, 48ull << 20, 64) : 0;
+        valid = valid && after == copied && arena.committed >= copy.committed;
+        if (after != 0)
+        {
+            after[(48ull << 20) - 1] = 0x77;
+        }
+        const Arena before = arena;
+        arena_failure = (ArenaFailure){ 0 };
+        const uint8_t* refused = valid ? arena_push(&arena, 512ull << 20, 64) : (uint8_t*)1;
+        valid = valid && refused == 0 && arena.length == before.length && arena.peak == before.peak && arena_failure.error == ENOMEM && !arena_failure.commit &&
+                first[0] == 0x5a && large[0] == 0xa5 && large[(96ull << 20) - 1] == 0x3c && after[(48ull << 20) - 1] == 0x77;
+        arena_release(&arena);
+        valid = valid && __atomic_load_n(&arena_slots.bytes[slot], __ATOMIC_RELAXED) == 0;
+        Arena within = arena_reserve(1ull << 20);
+        valid = valid && within.base != 0 && !within.grows;
+        arena_release(&within);
+        _exit(valid ? 0 : 1);
+    }
+    int growing_status = 0;
+    const bool growing_waited = growing > 0 && waitpid(growing, &growing_status, 0) == growing;
+    lane_test_expect(&tally, growing_waited && WIFEXITED(growing_status) && WEXITSTATUS(growing_status) == 0,
+                     "an arena past its share of RLIMIT_AS didn't grow in place, or a refusal changed it");
+#endif
+
     // The executable's .bss in base pages (arena_static_base_pages): a static of this file's there, and its last page. The
     // static is page-aligned so that its page is a whole page of .bss whatever the linker's layout; the advice leaves out
     // .bss's first page when that holds .data's last bytes.
