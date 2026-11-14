@@ -12006,6 +12006,8 @@ static bool check_lower_x86_split(CheckLowerWriter* writer, uint32_t node, const
     return valid;
 }
 
+#include "c_check_program_x86_lanes.c"
+
 // An x86 builtin's row (#136, #148): an X86 entry of its row (check_x86_lower_row), after its arguments but its immediate,
 // which the row's records take, and the row's result converted to the call's type. Its record in the stream
 // (CheckStream.x86, in its nodes' order) names it; an integer operand's class is its converted argument's, widened to 32
@@ -12103,10 +12105,20 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
         }
         operand += taken;
     }
-    // A 32-byte builtin the target can't run, on its halves (#2426), where it has a split and its halves' rows.
-    const bool split = reason != NULL && constants && rule != NULL && rule->bytes == 32 && rule->immediate_extra == 0 &&
+    // A builtin whose row a target without AVX-512F and AVX-512VL can't run, refused or without a reviewed baseline row
+    // (check_lower_operation_index's), lane by lane (#2716), where its family is one check_lower_x86_lanes computes; or a
+    // 32-byte one on its halves (#2426), where it has a split and its halves' rows.
+    const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+    const bool evex_target = (writer->target.features & evex) == evex;
+    // The reviewed baseline row of a target without them, computed once: the X86 entry below takes it as it is.
+    Tier0Operation baseline;
+    const bool based = reason == NULL && !reduce && !evex_target && check_vector_baseline_row(&writer->target, &row, &baseline);
+    const bool runs = reason == NULL && (reduce || evex_target || based);
+    const bool lanes = !runs && constants && rule != NULL && !evex_target && rule->immediate_extra == 0 &&
+                       check_lower_x86_lanes(writer, node, rule, immediate, rounded, rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? (uint64_t)immediates[1].integer : 4, strict);
+    const bool split = !lanes && reason != NULL && constants && rule != NULL && rule->bytes == 32 && rule->immediate_extra == 0 &&
                        rounded == BUSTER_CHECK_X86_NO_IMMEDIATE && check_lower_x86_split(writer, node, rule, immediate, strict);
-    if (split)
+    if (lanes || split)
     {
     }
     else if (reason == NULL && operand != (reduce ? row.operand_count + tail.operand_count - 1 : row.operand_count))
@@ -12119,7 +12131,7 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
     }
     else
     {
-        const uint32_t index = check_lower_operation_index(writer, &row);
+        const uint32_t index = based ? check_lower_operation_add(writer, &baseline) : check_lower_operation_index(writer, &row);
         const uint32_t last = reduce ? check_lower_operation_index(writer, &tail) : index;
         const uint8_t result_class = reduce ? tail.result_class : row.result_class;
         const TypeId result = check_lower_x86_bits_type(writer, check_stream_type(stream, node));
@@ -18127,9 +18139,12 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // (check_lower_limb_room).
     const CheckLowerLimbRoom limb_room = program->status == CHECK_PROGRAM_OK && program->stream != 0 && input != 0 && types != 0 ? check_lower_limb_room(program) :
                                                                                                                                 (CheckLowerLimbRoom){ 0 };
+    // A target without AVX-512F and AVX-512VL computes some x86 builtins lane by lane (#2716, check_lower_x86_lanes), past
+    // the per-node bounds (check_x86_lanes_room).
+    const uint64_t x86_lanes = check_x86_lanes_room(program);
     const uint64_t capacity64 = (uint64_t)nodes * 32 + (uint64_t)program->control_count * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
                                 varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + asm_operands * 16 + asm_statements * 6 + asm_labels * 4 + (uint64_t)(input != NULL ? input->kr_parameter_count : 0) * 5 +
-                                limb_room.entries + lane_calls * 17 + node_counts.transport_entries + 32;
+                                limb_room.entries + lane_calls * 17 + node_counts.transport_entries + 32 + x86_lanes;
     // A node's lowering takes up to two temporaries, and a 128-bit integer's four more: a division's two operands, a
     // conversion's or an argument's object, and a call's result object. The bounds are address space: an arena's push
     // touches none of it.
