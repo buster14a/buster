@@ -483,77 +483,12 @@ static void tier1_allocation_test_waits(Tier1AllocationTestTally* tally, Arena* 
     }
 }
 
-// An unused recipe entering a join (#2618, Tier1AllocationInput.join_starts), with two registers of which the ranges may
-// take r0: recipe value 0 takes r0 at 0, read at 1, and holds it to its end at 10; its range at 10 isn't read. Named by the
-// first range's closing, it takes r0 there unless it enters a join of three that a predecessor reaches from later, where it
-// rests; resident, it takes r0 all the same, and without the resident column, which recipes keep theirs isn't known: it
-// takes r0 too. Named by the first range's opening, it rests at a join of three alone.
-static void tier1_allocation_test_joins(Tier1AllocationTestTally* tally, Arena* arena)
-{
-    const uint32_t starts[2] = { 0, 10 };
-    const uint32_t ends[2] = { 10, 20 };
-    const uint32_t values[2] = { 0, 0 };
-    const uint32_t allowed[2] = { 1, 1 };
-    const uint8_t classes[2] = { 0 };
-    const uint8_t rematerializable[2] = { 1, 1 };
-    const uint32_t closing[2] = { UINT32_MAX, 0 | BUSTER_TIER1_ALLOCATE_HINT_EXIT };
-    const uint32_t opening[2] = { UINT32_MAX, 0 };
-    const uint32_t use_offsets[3] = { 0, 1, 1 };
-    const uint32_t use_positions[1] = { 1 };
-    const uint8_t required[1] = { 1 };
-    const uint8_t no_join[2] = { 0, 0 };
-    const uint8_t earlier[2] = { 0, 3 };
-    const uint8_t later[2] = { 0, 3 | BUSTER_TIER1_ALLOCATE_JOIN_LATER };
-    const uint8_t resident[1] = { 1 };
-    const uint8_t transient[1] = { 0 };
-    const uint8_t* joins[] = { no_join, earlier, later, later, earlier, later };
-    const uint32_t* named[] = { closing, closing, closing, closing, opening, closing };
-    const uint8_t* residents[] = { transient, transient, transient, resident, transient, 0 };
-    const bool rests[] = { false, false, true, false, true, false };
-    const char* names[] = {
-        "an unused recipe outside a join takes its closing's register",
-        "an unused recipe entering a join its predecessors precede takes its closing's register",
-        "an unused recipe entering a join a later predecessor reaches rests",
-        "a resident recipe entering a join takes its closing's register",
-        "an unused recipe entering a join named by an opening rests",
-        "without the resident column, a recipe entering a join takes its closing's register",
-    };
-    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(names); fixture += 1)
-    {
-        const Tier1AllocationInput input = {
-            .starts = starts,
-            .ends = ends,
-            .values = values,
-            .allowed_registers = allowed,
-            .classes = classes,
-            .hint_values = values,
-            .hint_intervals = named[fixture],
-            .join_starts = joins[fixture],
-            .resident_values = residents[fixture],
-            .rematerializable = rematerializable,
-            .use_offsets = use_offsets,
-            .use_positions = use_positions,
-            .use_required = required,
-            .use_count = 1,
-            .count = 2,
-            .value_count = 1,
-            .position_count = 20,
-            .registers = { 3 },
-        };
-        const uint8_t kinds[2] = { BUSTER_TIER1_ALLOCATE_REGISTER, rests[fixture] ? BUSTER_TIER1_ALLOCATE_REMATERIALIZE : BUSTER_TIER1_ALLOCATE_REGISTER };
-        const uint8_t registers[2] = { 0, rests[fixture] ? UINT8_MAX : 0 };
-        const uint32_t fragment_starts[2] = { 0, 10 };
-        tier1_allocation_test_fragments(tally, arena, &input, 2, kinds, registers, fragment_starts, names[fixture]);
-    }
-}
-
 static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* arena, uint64_t seed)
 {
     tier1_allocation_test_idle(tally, arena);
     tier1_allocation_test_yields(tally, arena);
     tier1_allocation_test_unread(tally, arena);
     tier1_allocation_test_waits(tally, arena);
-    tier1_allocation_test_joins(tally, arena);
     // Two values, each with two adjacent ranges: a [0, 10) [10, 20), b [2, 10) [10, 20). Ends come first in input
     // order, a's then b's, so the level rule gives a's second range b's register and b's a's.
     {

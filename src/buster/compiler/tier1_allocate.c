@@ -49,11 +49,6 @@
 // A closing's byte in `last` while its interval, evicted by a clobber, is out of its register (#2735): noted as no hint at
 // its end, not as BUSTER_TIER1_ALLOCATE_MEMORY_HINT. Never a register or a hint a reader takes.
 #define BUSTER_TIER1_ALLOCATE_CLOBBERED 0xfdu
-// A join_starts byte (#2618): the block's predecessors, saturating, and whether one is laid out at or after the block.
-#define BUSTER_TIER1_ALLOCATE_JOIN_COUNT 0x7fu
-#define BUSTER_TIER1_ALLOCATE_JOIN_LATER 0x80u
-// The predecessors from which an unused recipe rests at a block's entry (#2618).
-#define BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM 3
 
 typedef struct Tier1FixedIntervals Tier1FixedIntervals;
 struct Tier1FixedIntervals
@@ -93,16 +88,6 @@ struct Tier1AllocationInput
     // and it is free there (UINT32_MAX for none): a phi whose block passes it to a phi of its one successor takes the
     // place that phi's first interval took, where it is settled, rather than its operand's (#2734).
     const uint32_t* alternate_intervals;
-    // Optional, with hint_intervals (#2618): per interval, a join_starts byte where it enters its block from another one,
-    // the block's predecessor count and BUSTER_TIER1_ALLOCATE_JOIN_LATER; 0 for any other interval. A recipe the
-    // interval doesn't use rests at a join of BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM or more predecessors where its hint is
-    // no predecessor's closing or a predecessor comes later, rather than make each edge recompute it: sqlite3VdbeExec's
-    // dispatch join, laid out after its first successor.
-    const uint8_t* join_starts;
-    // Optional, per value (#2618): nonzero for a recipe that keeps its register at a join all the same, one read on every
-    // iteration of its loops (Lua's disptab, a switch's table in a loop), which every predecessor already holds. Recipes
-    // rest at joins only with this column: without it, which recipes those are isn't known.
-    const uint8_t* resident_values;
     const uint8_t* rematerializable;
     // Both use columns may be absent (next use then conservatively means interval end). Otherwise each slice is
     // sorted, contains positions inside its interval, and may be empty. Duplicate positions are legal.
@@ -675,20 +660,13 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             // An unused recipe rests where its hint is another range's opening that took no register: the convention of the
             // block it takes, whose edges then recompute nothing for it (hexFunc's header, after its body).
             const uint32_t named = last != 0 && columns.hint_intervals != 0 ? columns.hint_intervals[interval] : UINT32_MAX;
-            const bool opening = named == UINT32_MAX || (named & BUSTER_TIER1_ALLOCATE_HINT_EXIT) == 0;
-            const bool rests = follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT && named != UINT32_MAX && opening;
+            const bool rests = follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT && named != UINT32_MAX && (named & BUSTER_TIER1_ALLOCATE_HINT_EXIT) == 0;
             // A recipe whose hint is memory, which its last range ended in, takes no register at its start either: it
             // waits for its first read, where a required use gives it one. jsonLookupStep's sqlite3CtypeMap, read past a
             // loop, otherwise took the register the loop's frame address followed and made each iteration swap them
             // (#2618). A closing a call emptied gives no such hint (tier1_allocation_note_closing).
             const bool waits = recomputed && !use_event && !required && follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
-            // An unused recipe entering a join rests there too, unless it is resident or its hint is a closing of the
-            // predecessors before it, which already hold it (lua_getmetatable's zero): each edge would recompute it, where
-            // its reads after the join, on fewer paths, do (sqlite3VdbeExec's frame address at its dispatch join).
-            const uint8_t join = columns.join_starts != 0 ? columns.join_starts[interval] : 0;
-            const bool resident = columns.resident_values == 0 || columns.resident_values[columns.values[interval]] != 0;
-            const bool joins = (join & BUSTER_TIER1_ALLOCATE_JOIN_COUNT) >= BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM && !resident && (opening || (join & BUSTER_TIER1_ALLOCATE_JOIN_LATER) != 0);
-            if ((idle && (!recomputed || open == 0 || rests || joins)) || waits)
+            if ((idle && (!recomputed || open == 0 || rests)) || waits)
             {
             }
             else if (open != 0 || (free != 0 && required))

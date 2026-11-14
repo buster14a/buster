@@ -4353,13 +4353,13 @@ static bool tier1_emit_cfg_cyclic(const Tier1CfgInput* input)
     return cyclic;
 }
 
-// The loops tier1_emit_cfg_hot_recipes tests, analyzed once for every pass of it (`*looped` where there are some). A CFG
-// without a backward edge in layout has no loop: most functions without one skip the analysis, and so does one without
-// candidates. False where an arena is short; a CFG the analysis refuses has none.
-static bool tier1_emit_cfg_loops(const Tier1CfgInput* input, bool candidates, Arena* output, Arena* scratch, Dominators* loops, bool* looped)
+static bool tier1_emit_cfg_hot_recipes(const Tier1CfgInput* input, const Tier1CfgAllocation* intervals, uint32_t candidates, Arena* output, Arena* scratch, uint8_t* hot)
 {
+    const uint32_t blocks = input->block_count;
+    bool ok = true;
+    Dominators loops = { 0 };
     const DominatorCfg graph = {
-        .block_count = input->block_count,
+        .block_count = blocks,
         .edge_count = input->edge_count,
         .entry = 0,
         .successor_offsets = input->successor_offsets,
@@ -4369,17 +4369,10 @@ static bool tier1_emit_cfg_loops(const Tier1CfgInput* input, bool candidates, Ar
     };
     DominatorOptions options = dominators_options();
     options.outputs = BUSTER_DOMINATOR_LOOPS;
-    *loops = (Dominators){ 0 };
-    const DominatorStatus analyzed = candidates && tier1_emit_cfg_cyclic(input) ? dominators_analyze(scratch, output, &graph, options, loops) : DOMINATOR_INVALID;
-    *looped = analyzed == DOMINATOR_OK && loops->loop_count != 0;
-    return analyzed != DOMINATOR_NO_MEMORY;
-}
-
-static bool tier1_emit_cfg_hot_recipes(const Tier1CfgInput* input, const Tier1CfgAllocation* intervals, const Dominators* analysis, bool looped, Arena* scratch, uint8_t* hot)
-{
-    const uint32_t blocks = input->block_count;
-    bool ok = true;
-    const Dominators loops = *analysis;
+    // A CFG without a backward edge in layout has no loop: most functions without one skip the analysis.
+    const DominatorStatus analyzed = candidates != 0 && tier1_emit_cfg_cyclic(input) ? dominators_analyze(scratch, output, &graph, options, &loops) : DOMINATOR_INVALID;
+    ok = analyzed != DOMINATOR_NO_MEMORY;
+    const bool looped = analyzed == DOMINATOR_OK && loops.loop_count != 0;
     // Per block: the stamp of the value whose readers it holds, and of the walk that reached it.
     uint32_t* reads = looped ? ir_allocate(scratch, (uint64_t)blocks + 1, 4, &ok) : 0;
     uint32_t* seen = looped ? ir_allocate(scratch, (uint64_t)blocks + 1, 4, &ok) : 0;
@@ -4555,42 +4548,11 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
     uint8_t* hot = ok ? ir_allocate(scratch, (uint64_t)input->value_count + 1, 1, &ok) : 0;
     uint32_t candidates = 0;
     uint32_t hot_count = 0;
-    // The recipes that may rest at a join (#2618): those with an unused range entering one, of
-    // BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM or more predecessors. Of them, the ones read on every iteration of the loops they
-    // are live across keep their registers there (resident, after the passes). Every other recipe can't rest at a join.
-    uint8_t* resident = ok ? ir_allocate(output, (uint64_t)input->value_count + 1, 1, &ok) : 0;
-    uint32_t joined = 0;
-    const Tier1AllocationInput* pieces = &intervals->intervals;
-    for (uint32_t v = 0; resident != 0 && v < input->value_count; v += 1)
-    {
-        uint32_t root = v;
-        while (parents[root] != root)
-        {
-            root = parents[root];
-        }
-        const bool recipe = input->classes[v] == BUSTER_TIER1_ALLOCATE_GPR && root == v && input->rematerializable != 0 && input->rematerializable[v] != 0;
-        bool entering = false;
-        for (uint32_t i = intervals->value_interval_offsets[v]; recipe && pieces->join_starts != 0 && !entering && i < intervals->value_interval_offsets[v + 1]; i += 1)
-        {
-            entering = (pieces->join_starts[i] & BUSTER_TIER1_ALLOCATE_JOIN_COUNT) >= BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM && pieces->use_offsets[i] == pieces->use_offsets[i + 1];
-        }
-        resident[v] = entering ? 2 : 0;
-        joined += entering;
-    }
-    // The loops, analyzed once for both passes of the hot test.
-    Dominators loops = { 0 };
-    bool looped = false;
-    bool analyzed = false;
     for (uint32_t pass = 0; ok && pass < 2; pass += 1)
     {
-        if (pass == 1 && (candidates != 0 || joined != 0))
+        if (pass == 1 && candidates != 0)
         {
-            ok = tier1_emit_cfg_loops(input, true, output, scratch, &loops, &looped);
-            analyzed = ok;
-        }
-        if (pass == 1 && candidates != 0 && ok)
-        {
-            ok = tier1_emit_cfg_hot_recipes(input, intervals, &loops, looped, scratch, hot);
+            ok = tier1_emit_cfg_hot_recipes(input, intervals, candidates, output, scratch, hot);
         }
         for (uint32_t v = 0; ok && v < input->value_count; v += 1)
         {
@@ -4664,12 +4626,6 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
             hot_count += pass == 1 && hot[v] == 1 && (caller & BUSTER_TIER1_EMIT_CFG_RESIDENT) != 0;
         }
     }
-    // The recipes read on every iteration of the loops they are live across, whether they cross a call or not, keep their
-    // registers at joins in the preferred problem (#2618, Tier1AllocationInput.resident_values): every handler's tail
-    // holds Lua's disptab already, and every case's a switch's table in a loop (tier1_table_loop's), where an unused recipe
-    // read in a few of a loop's blocks rests. The problem rests recipes at joins only with this column, which the plain
-    // problem hasn't. A pass of its own: tier1_emit_cfg_hot_recipes's budget is shared by its candidates.
-    ok = ok && (joined == 0 || !analyzed || tier1_emit_cfg_hot_recipes(input, intervals, &loops, looped, scratch, resident));
     // The calls' definition phases clobber the caller-saved registers in the preferred problem, where a hot value leaves
     // one of them: its recomputation, where it is next needed, stands for a save and a reload around the call.
     uint32_t* clobbers = ok && hot_count != 0 ? ir_allocate(output, (uint64_t)call_count + 1, 4, &ok) : 0;
@@ -4685,7 +4641,6 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
             0,
             0,
         },
-        .resident = resident,
     };
     *preferred = allowed;
     *crossing = count;
@@ -4756,7 +4711,6 @@ static Tier1EmitError tier1_emit_cfg_two_calls(const Tier1SelectPlan* plan, cons
             clobbering.clobber_registers[1],
             clobbering.clobber_registers[2],
         },
-        .resident = clobbering.resident,
     };
     error = error == TIER1_EMIT_OK && moved != 0 && !tier1_cfg_preferred(input, &preference, output, &problem) ? TIER1_EMIT_MEMORY : error;
     if (error == TIER1_EMIT_OK && moved != 0)
@@ -4817,7 +4771,6 @@ static Tier1EmitError tier1_emit_cfg_one_call(const Tier1SelectPlan* plan, const
                 clobbering.clobber_registers[1],
                 clobbering.clobber_registers[2],
             },
-            .resident = clobbering.resident,
             .verdict = true,
         };
         const uint32_t* preferred = 0;

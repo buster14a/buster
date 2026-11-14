@@ -27,10 +27,7 @@ static void tier1_hot_recipes_check(Tier1EmitTest* test, Tier1CfgTestBuilder* bu
             {
                 hot[values[k]] = 2;
             }
-            Dominators loops;
-            bool looped = false;
-            same = tier1_emit_cfg_loops(&input, count != 0, &test->output, &test->scratch, &loops, &looped) &&
-                   tier1_emit_cfg_hot_recipes(&input, &order.prepared.candidate, &loops, looped, &test->scratch, hot);
+            same = tier1_emit_cfg_hot_recipes(&input, &order.prepared.candidate, count, &test->output, &test->scratch, hot);
         }
         for (uint32_t v = 0; same && v < input.value_count; v += 1)
         {
