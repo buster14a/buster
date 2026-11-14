@@ -1334,6 +1334,32 @@ static uint32_t check_semantic_operand_spelling(const Parser* parser, const Chec
 {
     const CheckGraph* graph = &input->graph;
     uint32_t result = 0;
+    if (node < graph->count && node < stream->count && (graph->ops[node] == CHECK_OP_MEMBER || graph->ops[node] == CHECK_OP_ARROW) &&
+        (check_stream_value(stream, node).flags & BUSTER_CHECK_VECTOR_ELEMENT) != 0)
+    {
+        const TypeId type = type_unqualified(type_strip_aligned(types, check_stream_type(stream, node)));
+        const bool aliases = type != 0 && type_kind(types, type) == BUSTER_TYPE_KIND_EXT_VECTOR && input->declarations != NULL &&
+                             input->declaration_kinds != NULL && input->declared_types != NULL && input->objects != NULL &&
+                             check_sparse_wide_present(input->attributes);
+        // Clang names a swizzle's vector result with the first matching extended-vector typedef declared so far.
+        // This is diagnostic sugar only; the value keeps its interned vector type and component flags.
+        const uint32_t before = graph->tokens[node] < input->token_count ? graph->tokens[node] : input->token_count;
+        for (uint32_t t = 0; aliases && result == 0 && t < before; t += 1)
+        {
+            if (parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && input->declarations[t] == t && input->objects[t] != 0 &&
+                input->declaration_kinds[t] == C_BINDING_TYPEDEF &&
+                type_unqualified(type_strip_aligned(types, input->declared_types[t])) == type)
+            {
+                const CheckInputAttributes* attributes = check_input_attributes_at(input, t);
+                const uint32_t attribute_count = attributes != NULL ? attributes->count : 0;
+                for (uint32_t a = 0; result == 0 && a < attribute_count; a += 1)
+                {
+                    const CheckInputAttribute* attribute = attributes->records + a;
+                    result = attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE && attribute->neon == 0 ? t : 0;
+                }
+            }
+        }
+    }
     uint32_t at = node;
     for (uint32_t steps = 0; result == 0 && at < graph->count && steps < graph->count; steps += 1)
     {
@@ -1347,6 +1373,37 @@ static uint32_t check_semantic_operand_spelling(const Parser* parser, const Chec
         result = declaration != 0 && declaration < input->token_count ? check_input_typedef_sugar(input, parser, declaration) : 0;
         const bool through = declaration == 0 && (op == CHECK_OP_VALUE || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT);
         at = result == 0 && through ? graph->operand0[at] : BUSTER_CHECK_NONE;
+    }
+    return result;
+}
+
+// A swizzle adopts the matching extended-vector typedef's name even when that declaration carries alignment.
+// Supply its underlying type as the alias key without changing the result's type or generic typedef printing.
+static String8 check_semantic_vector_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                          const TypeTable* types, CheckWarningSpelling* spell, Arena* scratch, TypeId type, uint32_t spelling, uint32_t node)
+{
+    const TypeId vector = type_unqualified(type_strip_aligned(types, type));
+    const bool named = vector != 0 && type_kind(types, vector) == BUSTER_TYPE_KIND_EXT_VECTOR && node < stream->count &&
+                       (check_stream_value(stream, node).flags & BUSTER_CHECK_VECTOR_ELEMENT) != 0 && spelling != 0 &&
+                       spelling < input->token_count && input->declared_types != NULL;
+    String8 result = { 0 };
+    if (named)
+    {
+        const TypeId alias = type_strip_alignment(types, input->declared_types[spelling]);
+        const String8 name = check_semantic_name(parser, pp, spelling);
+        const TypeNames names = { .alias_types = &alias, .alias_names = &name, .alias_count = 1 };
+        const uint32_t options = pp->options.language.standard >= 2023 ? BUSTER_TYPE_PRINT_C23 : 0;
+        const String8 sugared = type_print(types, scratch, type, (String8){ 0 }, &names, options);
+        const String8 element = check_driver_warning_type(parser, pp, input, types, spell, scratch, check_vector_element(types, vector), 0);
+        const uint64_t count = types->types.extent[type_index(vector)];
+        const char* text = sugared.length != 0 && element.length != 0 ?
+                           check_warning_text(scratch, "'%.*s' (vector of %llu %.*s %s)", (int)sugared.length, sugared.pointer,
+                                              (unsigned long long)count, (int)element.length, element.pointer, count > 1 ? "values" : "value") : NULL;
+        result = text != NULL ? (String8){ .pointer = (char*)text, .length = strlen(text) } : (String8){ 0 };
+    }
+    else
+    {
+        result = check_driver_warning_type(parser, pp, input, types, spell, scratch, type, spelling);
     }
     return result;
 }
@@ -1607,7 +1664,8 @@ static void check_semantic_parameter_note(const Parser* parser, Preprocessor* pp
                                           PPOutputDiagnosticNote* note, Arena* scratch)
 {
     const uint32_t count = parser->tokens.count;
-    const uint32_t declaration = callee < input->token_count && parser->tokens.kinds[callee] == PARSE_KIND_IDENTIFIER ? input->declarations[callee] : BUSTER_CHECK_NONE;
+    const uint32_t declaration = callee < input->token_count && parser->tokens.kinds[callee] == PARSE_KIND_IDENTIFIER ?
+                                 check_driver_callee_declaration(input, callee) : BUSTER_CHECK_NONE;
     const bool function = declaration < input->token_count && input->declaration_kinds[declaration] == C_BINDING_FUNCTION && declaration + 1 < count &&
                           parser->tokens.kinds[declaration + 1] == PARSE_KIND_L_PAREN;
     const uint32_t close = function ? parser->tree.parents[declaration + 1] : 0;
@@ -1877,6 +1935,8 @@ static const char* check_semantic_overload_hint(const TypeTable* types, const Ch
 // callee's name. The candidates' outcomes are the selection's again (check_overload_explain), a candidate that failed by
 // an argument's conversion with clang's "no known conversion" note (#2384). NULL, and the checker's own error, where the
 // notes are more than the report holds.
+static uint32_t check_semantic_argument_begin(const Parser* parser, const CheckGraph* graph, uint32_t node, uint32_t argument);
+
 static const char* check_semantic_overload_call(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                                 CheckWarningSpelling* spell, uint32_t node, uint32_t* location, PPOutputDiagnosticNote* note, uint32_t* note_count,
                                                 Arena* scratch)
@@ -1894,7 +1954,8 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
         low = node > at ? middle + 1 : low;
     }
     const uint32_t callee = graph->operand0[node];
-    const uint32_t name = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+    const uint32_t named = callee < graph->count && graph->ops[callee] == CHECK_OP_ADDRESS ? graph->operand0[callee] : callee;
+    const uint32_t name = named < graph->count && graph->ops[named] == CHECK_OP_VALUE ? graph->tokens[named] : BUSTER_CHECK_NONE;
     const uint32_t argument_count = graph->argument_counts[node];
     const bool found = head < graph->overload_candidate_count && name < parser->tokens.count;
     CheckValue* arguments = found ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckValue, (uint64_t)argument_count + 1) : NULL;
@@ -1968,15 +2029,35 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
             uint32_t parameter_count = 0;
             const TypeId* parameters = type_parameters(types, type_strip_aligned(types, candidate->type), &parameter_count);
             const TypeId parameter = parameters != NULL && index < parameter_count ? parameters[index] : 0;
-            const TypeId value = check_semantic_value_type(types, check_stream_type(stream, argument), false);
+            const TypeId actual = check_stream_type(stream, argument);
+            // A rejected function designator keeps its function type in the candidate note (#2424).
+            const TypeId value = type_kind(types, type_strip_aligned(types, actual)) == BUSTER_TYPE_KIND_FUNCTION ?
+                                 actual : check_semantic_value_type(types, actual, false);
             const String8 from = value != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, value,
                                                                         check_semantic_operand_spelling(parser, input, stream, types, argument)) :
                                               (String8){ "", 0 };
             const String8 to = parameter != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, parameter, 0) : (String8){ "", 0 };
             const uint32_t ordinal = index + 1;
             const char* suffix = ordinal % 100 >= 11 && ordinal % 100 <= 13 ? "th" : ordinal % 10 == 1 ? "st" : ordinal % 10 == 2 ? "nd" : ordinal % 10 == 3 ? "rd" : "th";
-            const char* hint = parameter != 0 ? check_semantic_overload_hint(types, stream, argument, value, parameter) : "";
-            text = from.length != 0 && to.length != 0 ?
+            const bool pointer_lvalue = check_stream_category(stream, argument) == CHECK_LVALUE &&
+                                        check_action_kind(types, value) == BUSTER_TYPE_KIND_POINTER && check_action_kind(types, parameter) == BUSTER_TYPE_KIND_POINTER &&
+                                        check_action_kind(types, type_element(types, value)) == BUSTER_TYPE_KIND_FUNCTION &&
+                                        check_action_kind(types, type_element(types, parameter)) == BUSTER_TYPE_KIND_FUNCTION;
+            const uint32_t first = pointer_lvalue && graph->argument_tokens != NULL ? check_semantic_argument_begin(parser, graph, node, index) : BUSTER_CHECK_NONE;
+            // clang's candidate fix-it names an address change for an incompatible function-pointer lvalue. Parentheses
+            // distinguish its "take the address" wording from a bare dereference's "remove *" (#2424).
+            const char* hint = pointer_lvalue ?
+                               (first < parser->tokens.count && parser->tokens.kinds[first] == PARSE_KIND_STAR && parser->tree.roles[first] == PARSE_ROLE_PREFIX ?
+                                "; remove *" : "; take the address of the argument with &") :
+                               parameter != 0 ? check_semantic_overload_hint(types, stream, argument, value, parameter) : "";
+            const uint32_t referenced = argument < graph->count && graph->ops[argument] == CHECK_OP_ADDRESS ? graph->operand0[argument] : argument;
+            const uint32_t reference = referenced < graph->count && graph->ops[referenced] == CHECK_OP_VALUE ? graph->tokens[referenced] : BUSTER_CHECK_NONE;
+            const String8 overloaded = check_input_target_candidate(input, reference) != BUSTER_CHECK_NONE ?
+                                       check_semantic_name(parser, pp, reference) : (String8){ 0 };
+            text = overloaded.length != 0 && to.length != 0 ?
+                   check_warning_text(scratch, "candidate function not viable: no overload of '%.*s' matching %.*s for %u%s argument", (int)overloaded.length,
+                                      overloaded.pointer, (int)to.length, to.pointer, ordinal, suffix) :
+                   from.length != 0 && to.length != 0 ?
                    check_warning_text(scratch, "candidate function not viable: no known conversion from %.*s to %.*s for %u%s argument%s", (int)from.length,
                                       from.pointer, (int)to.length, to.pointer, ordinal, suffix, hint) : NULL;
             renderable = text != NULL;
@@ -2006,7 +2087,12 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
     if (renderable)
     {
         const String8 called = check_semantic_name(parser, pp, name);
-        *location = name;
+        uint32_t first = name;
+        if ((graph->overload_candidates[head].flags & BUSTER_CHECK_OVERLOAD_TARGET) != 0)
+        {
+            check_target_versions_callee_end(parser, name, &first);
+        }
+        *location = first;
         result = ambiguous ? check_warning_text(scratch, "call to '%.*s' is ambiguous", (int)called.length, called.pointer) :
                              check_warning_text(scratch, "no matching function for call to '%.*s'", (int)called.length, called.pointer);
     }
@@ -2340,7 +2426,7 @@ static uint32_t check_semantic_case_begin(const Parser* parser, const CheckInput
 // (check_semantic_note_count counts them): const assignment's are several (#1447).
 
 static const char* check_semantic_expression(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                                            const TypeTable* types, const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location,
+                                            const TypeTable* types, const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location, uint32_t* character_offset,
                                             PPOutputDiagnosticNote* note, Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
@@ -2352,6 +2438,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
     const TypeId operand_type = operand < stream->count ? check_stream_type(stream, operand) : 0;
     const char* result = check_driver_report_message(report);
     *location = token;
+    *character_offset = 0;
     memset(note, 0, sizeof(*note) * BUSTER_CHECK_SEMANTIC_NOTES);
     uint32_t note_count = 0;
     // A call of an overload set none or several of whose candidates are viable (#1447), whose text is clang's where its
@@ -2446,13 +2533,41 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const bool aggregate = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
             const uint8_t pointee = op == CHECK_OP_MEMBER && kind == BUSTER_TYPE_KIND_POINTER ? type_kind(types, type_strip_aligned(types, type_element(types, record))) : 0;
             const bool suggestion = pointee == BUSTER_TYPE_KIND_STRUCT || pointee == BUSTER_TYPE_KIND_UNION;
-            const uint32_t spelling = op == CHECK_OP_MEMBER && !aggregate ? check_input_operand_type_spelling(input, parser, operand) : 0;
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, aggregate ? type_unqualified(record) : record, spelling);
+            const uint32_t direct = op == CHECK_OP_MEMBER && !aggregate ? check_input_operand_type_spelling(input, parser, operand) : 0;
+            const uint32_t spelling = direct != 0 ? direct : !aggregate ? check_semantic_operand_spelling(parser, input, stream, types, operand) : 0;
+            const String8 type = check_semantic_vector_type(parser, pp, input, stream, types, spell, scratch, aggregate ? type_unqualified(record) : record, spelling, operand);
             *location = aggregate ? token + 1 : token;
             result = type.length == 0 ? NULL :
                      aggregate ? check_warning_text(scratch, "no member named '%.*s' in %.*s", (int)name.length, name.pointer, (int)type.length, type.pointer) :
                      suggestion ? check_warning_text(scratch, "member reference type %.*s is a pointer; did you mean to use '->'?", (int)type.length, type.pointer) :
                      check_warning_text(scratch, "member reference base type %.*s is not a structure or union", (int)type.length, type.pointer);
+            if (kind == BUSTER_TYPE_KIND_EXT_VECTOR)
+            {
+                // The typed action already rejected this member. Spell its first illegal component, or the valid
+                // spelling's out-of-range access, only on this cold path. Clang locates a bad character relative to
+                // the operator (even for ->); boolean vectors reject the whole member at its own token.
+                const bool boolean = check_vector_element(types, record) == BUSTER_TYPE_BOOL;
+                const bool numeric = name.length > 1 && (name.pointer[0] == 's' || name.pointer[0] == 'S');
+                const bool color = name.length != 0 && (name.pointer[0] == 'r' || name.pointer[0] == 'g' || name.pointer[0] == 'b' || name.pointer[0] == 'a');
+                const bool point = name.length != 0 && strchr("xyzwrgba", (unsigned char)name.pointer[0]) != NULL;
+                const char* alphabet = numeric || !point ? "0123456789abcdefABCDEF" : color ? "rgba" : "xyzw";
+                uint32_t bad = BUSTER_CHECK_NONE;
+                for (uint32_t i = numeric ? 1u : 0u; !boolean && bad == BUSTER_CHECK_NONE && i < name.length; i += 1)
+                {
+                    bad = strchr(alphabet, (unsigned char)name.pointer[i]) == NULL ? i : BUSTER_CHECK_NONE;
+                }
+                if (boolean || bad != BUSTER_CHECK_NONE)
+                {
+                    result = check_warning_text(scratch, "illegal vector component name '%.*s'", boolean ? (int)name.length : 1,
+                                                name.pointer + (boolean ? 0 : bad));
+                    *location = boolean ? token + 1 : token;
+                    *character_offset = boolean ? 0 : bad + 1;
+                }
+                else
+                {
+                    result = type.length != 0 ? check_warning_text(scratch, "vector component access exceeds type %.*s", (int)type.length, type.pointer) : NULL;
+                }
+            }
         }
         else if (report->diagnostic == CHECK_DIAG_POINTER_REQUIRED && op == CHECK_OP_ARROW && operand_type != 0 && token + 1 < parser->tokens.count)
         {
@@ -2652,6 +2767,27 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             {
                 result = check_warning_text(scratch, "called object type %.*s is not a function or function pointer", (int)type.length, type.pointer);
                 *location = open;
+            }
+        }
+        else if ((report->diagnostic == CHECK_DIAG_LVALUE_REQUIRED || report->diagnostic == CHECK_DIAG_MODIFIABLE_REQUIRED) &&
+                 (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) && operand < stream->count &&
+                 (check_stream_value(stream, operand).flags & BUSTER_CHECK_VECTOR_DUPLICATE) != 0)
+        {
+            result = "vector is not assignable (contains duplicate components)";
+        }
+        else if (report->diagnostic == CHECK_DIAG_LVALUE_REQUIRED && op == CHECK_OP_ADDRESS && operand < stream->count &&
+                 (check_stream_value(stream, operand).flags & BUSTER_CHECK_VECTOR_ELEMENT) != 0)
+        {
+            const CheckValue value = check_stream_value(stream, operand);
+            if (value.category == CHECK_LVALUE && (value.flags & BUSTER_CHECK_VECTOR_DUPLICATE) == 0)
+            {
+                result = "address of vector element requested";
+            }
+            else
+            {
+                const String8 type = check_semantic_vector_type(parser, pp, input, stream, types, spell, scratch, operand_type,
+                                                                 check_semantic_operand_spelling(parser, input, stream, types, operand), operand);
+                result = type.length != 0 ? check_warning_text(scratch, "cannot take the address of an rvalue of type %.*s", (int)type.length, type.pointer) : NULL;
             }
         }
         else if (report->diagnostic == CHECK_DIAG_LVALUE_REQUIRED &&

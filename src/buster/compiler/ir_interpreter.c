@@ -1435,10 +1435,11 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     break;
                 }
                 default:
-                    // A vector's lane, its lanes' sign bits or its lane 0's truncating conversion (#1840): a scalar the model
-                    // computes from a vector.
+                    // A vector's lane, its lanes' sign bits, its lane 0's truncating conversion or its bytes' bit shuffle into
+                    // a mask (#1840): a scalar the model computes from a vector.
                     if (ir_vector_type(type) || op == IR_VCMP ||
-                        (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_MOVEMASK || c == BUSTER_IR_INTRINSIC_CVTT)))
+                        (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_MOVEMASK || c == BUSTER_IR_INTRINSIC_CVTT ||
+                                                c == BUSTER_IR_INTRINSIC_BITSHUFFLE)))
                     {
                         result.status = ir_interpreter_simd_operation(frame, i, &wide_value);
                         value.low = wide_value.words[0];

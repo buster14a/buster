@@ -173,7 +173,7 @@
     ENTRY(FFILE_PREFIX_MAP_EQ, "-ffile-prefix-map=") \
     ENTRY(FFINITE_MATH_ONLY, "-ffinite-math-only") \
     ENTRY(FFIXED_POINT, "-ffixed-point") \
-    ENTRY(FFP_CONTRACT_EQ_OFF, "-ffp-contract=off") \
+    ENTRY(FFP_CONTRACT_EQ, "-ffp-contract=") \
     ENTRY(FFP_EVAL_METHOD_EQ, "-ffp-eval-method=") \
     ENTRY(FFP_EXCEPTION_BEHAVIOR_EQ, "-ffp-exception-behavior=") \
     ENTRY(FFP_MODEL_EQ, "-ffp-model=") \

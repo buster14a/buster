@@ -112,9 +112,13 @@ static bool tier1_schedule_is_pinned(Tier1ScheduleInput input, uint32_t index, u
     const X86Effects* effects = x86_effects(instruction->form);
     const uint64_t special = BUSTER_X86_RESOURCE_CONTROL | BUSTER_X86_RESOURCE_CALL | BUSTER_X86_RESOURCE_MXCSR;
     const uint8_t ordering = BUSTER_X86_MEMORY_EFFECT_ATOMIC | BUSTER_X86_MEMORY_EFFECT_FENCE;
+    // Register transfers can replace compiler-private m80 spills/reloads (#1387). They keep the original waiting
+    // points, even though they no longer carry a memory resource: no access may move before a pending x87 trap.
+    const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
+    const bool x87_transfer = form == X86_FORM_FLD_ST || form == X86_FORM_FSTP_ST;
     const bool operation = effects->operation == X86_OPERATION_NONE || effects->operation == X86_OPERATION_STORE_MXCSR || effects->operation == X86_OPERATION_ENDBR ||
                            effects->operation == X86_OPERATION_SYSTEM;
-    const bool pinned = (input.pinned && input.pinned[index]) || operation || instruction->decorations != 0 || (effects->properties & BUSTER_X86_EFFECT_FAULT) != 0 ||
+    const bool pinned = (input.pinned && input.pinned[index]) || operation || x87_transfer || instruction->decorations != 0 || (effects->properties & BUSTER_X86_EFFECT_FAULT) != 0 ||
                         (writes & special) != 0 || (reads & BUSTER_X86_RESOURCE_CALL) != 0 || (effects->memory & ordering) != 0 ||
                         tier1_schedule_fusion_pair(input, index);
     return pinned;

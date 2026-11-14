@@ -4,8 +4,8 @@
 // Retain source-ordered floating environment and complex range settings. A setting at the beginning of a
 // compound statement ends with that compound; file settings persist. The optional graph column carries runtime
 // floating policy. Complex range is a permission to relax evaluation, so retaining full-range actions is valid.
-// FP_CONTRACT, reassociation, reciprocal evaluation and float_control(precise, off) grant permissions that this
-// compiler need not use. Exception-sensitive scopes use the existing runtime environment path, which retains their
+// FP_CONTRACT survives in the graph for source-scoped contraction; reassociation, reciprocal evaluation and
+// float_control(precise, off) grant other independent permissions. Exception-sensitive scopes retain their
 // operations and conversions. File-scope float_control push/pop snapshots the arithmetic settings, including STDC's.
 // The last evaluation pragma's method and location persist across pop for lexical restrictions.
 // Evaluation methods use the same lexical history but insert ordinary floating promotions, including in constants.
@@ -91,10 +91,12 @@ static uint8_t check_input_fp_environment(CheckFpState state)
     const uint8_t evaluation = state.values[CHECK_FP_PRAGMA_EVAL_METHOD];
     const uint8_t method = evaluation & CHECK_FP_EVAL_METHOD_MASK;
     const uint8_t last = (evaluation & CHECK_FP_EVAL_LAST_MASK) >> CHECK_FP_EVAL_LAST_SHIFT;
+    const uint8_t contract = state.values[CHECK_FP_PRAGMA_FP_CONTRACT];
     return (state.values[CHECK_FP_PRAGMA_FENV_ACCESS] != 0 || (exceptions != 0 && exceptions != CHECK_FP_EXCEPTIONS_DEFAULT) ? BUSTER_CHECK_FP_ENV_ACCESS : 0) |
            (method == CHECK_FP_EVAL_DOUBLE ? BUSTER_CHECK_FP_EVAL_DOUBLE : method == CHECK_FP_EVAL_EXTENDED ? BUSTER_CHECK_FP_EVAL_EXTENDED : 0) |
            (last == CHECK_FP_EVAL_DOUBLE ? BUSTER_CHECK_FP_EVAL_LAST_DOUBLE : last == CHECK_FP_EVAL_EXTENDED ? BUSTER_CHECK_FP_EVAL_LAST_EXTENDED : 0) |
-           ((evaluation & CHECK_FP_EVAL_SEEN) != 0 ? BUSTER_CHECK_FP_EVAL_PRAGMA : 0);
+           ((evaluation & CHECK_FP_EVAL_SEEN) != 0 ? BUSTER_CHECK_FP_EVAL_PRAGMA : 0) |
+           (contract == BUSTER_PREDEFINES_CONTRACT_ON ? BUSTER_CHECK_FP_CONTRACT_ON : contract == BUSTER_PREDEFINES_CONTRACT_FAST ? BUSTER_CHECK_FP_CONTRACT_FAST : 0);
 }
 
 static const char* check_input_fp_error_message(uint8_t error)
@@ -287,7 +289,8 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
         const uint8_t option_error = (relaxation & BUSTER_PREDEFINES_FP_APPROX_FUNC ? CHECK_FP_ERROR_EVAL_APPROX_OPTION : 0) |
                                      (relaxation & BUSTER_PREDEFINES_FP_REASSOCIATE ? CHECK_FP_ERROR_EVAL_REASSOCIATE_OPTION : 0) |
                                      (relaxation & BUSTER_PREDEFINES_FP_RECIPROCAL ? CHECK_FP_ERROR_EVAL_RECIPROCAL_OPTION : 0);
-        CheckFpState state = { .values = { [CHECK_FP_PRAGMA_PRECISE] = 1, [CHECK_FP_PRAGMA_FP_CONTRACT] = 1,
+        const uint8_t default_contract = predefines_fp_contract(&reader->pp->options.predefines);
+        CheckFpState state = { .values = { [CHECK_FP_PRAGMA_PRECISE] = 1, [CHECK_FP_PRAGMA_FP_CONTRACT] = default_contract,
                                           [CHECK_FP_PRAGMA_EXCEPTIONS] = CHECK_FP_EXCEPTIONS_DEFAULT } };
         for (uint32_t token = 0; token <= parser->tokens.count; token += 1)
         {
@@ -305,7 +308,8 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                     uint32_t end = source;
                     const bool directive = parse_pragma_at(&reader->pp->output, source, &end);
                     const bool on = directive && check_input_fp_name(reader, source + 4, "ON");
-                    const bool off = directive && (check_input_fp_name(reader, source + 4, "OFF") || check_input_fp_name(reader, source + 4, "DEFAULT"));
+                    const bool restore = directive && check_input_fp_name(reader, source + 4, "DEFAULT");
+                    const bool off = directive && (check_input_fp_name(reader, source + 4, "OFF") || restore);
                     const bool recognized = on || off;
                     const bool precise = state.values[CHECK_FP_PRAGMA_PRECISE] != 0 && state.values[CHECK_FP_PRAGMA_REASSOCIATE] == 0 &&
                                          state.values[CHECK_FP_PRAGMA_RECIPROCAL] == 0;
@@ -316,7 +320,7 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                     }
                     else if (accepted && recognized)
                     {
-                        state.values[contract ? CHECK_FP_PRAGMA_FP_CONTRACT : CHECK_FP_PRAGMA_FENV_ACCESS] = on;
+                        state.values[contract ? CHECK_FP_PRAGMA_FP_CONTRACT : CHECK_FP_PRAGMA_FENV_ACCESS] = contract && restore ? default_contract : (uint8_t)on;
                     }
                     input->fp_pragmas[input->fp_pragma_count++] = (CheckInputFpPragma)
                     {

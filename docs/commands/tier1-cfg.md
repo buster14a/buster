@@ -21,8 +21,15 @@ requirements. [Command index](README.md).
   registers (#179: k1 to k7 for values, a class with k0 refused, k0 the class's
   scratch, every mask clobbered by a call). Edge moves read each live value's location at the predecessor's exit and
   the successor's entry from one forward sweep of that value's intervals (#1399), and emission resolves a position
-  from the first interval overlapping its block when that column fits. The verifier and the certificate keep the
-  binary search and check both results against it. `test-tier1-cfg` runs fixtures and random SSA over random CFGs of the
+  from the first interval overlapping its block when that column fits. Validation fills the position-to-block
+  column that allocation and emission then read (to 2^20 positions), and checks each use against its definition's
+  block start with one compare instead of a search per use and definition: on the 9700X, sqlite3.c's single-lane
+  `--tier1` compile took 0.8% fewer cycles, and validation's lines fell from 0.78% of them to 0.18%, the most a vector
+  pass over the uses could take off
+  ([record](https://github.com/buster14a/buster-performance/tree/9e1b1d03ac4ceffdfaf513a9d04112699aeaaf44/docs/measurements/tier1-cfg-validation-1399-2026-11-13)).
+  The verifier and the certificate keep the
+  binary search and check both results against it; `test-tier1-cfg` compares the two validations over every
+  placement of a definition and two uses in a small CFG, and runs fixtures and random SSA over random CFGs of the
   three classes with mutants (three generated cases in four share phi webs' slots, and a mutant gives two values whose
   slot fragments overlap one slot), and #2553's two: a join whose dominating critical edge moves nothing, and a phi web
   around a loop that keeps one slot; `test-tier1-cfg-source` adapts every function `-c`
@@ -130,7 +137,10 @@ indices and intermediate offsets, self edges, empty edge arrays, and a
 16,384-way dispatch and join. Existing allocation fixtures cover phi moves,
 critical edges, loops and all register classes through both allocation paths.
 These source changes remove the three degree-squared searches from #1356;
-the whole Tier 1 pipeline has other costs. Locked 9700X scaling measurements
-on the issue's switch and label-table inputs remain necessary before claiming
-its wall-time acceptance or a measured speedup.
+the whole Tier 1 pipeline has other costs. On the 9700X, main `b7a95eed`'s
+`tier0` stage under `--tier1 --tier1-strict` takes 5.2, 10.4 and 19.3 ms for
+the issue's 4,000-, 8,000- and 16,000-case switch and label table (about
+1.3 µs per case; 1.85x to 1.99x per doubling, against the issue's 2.9x to
+3.1x). The generator, recipe and raw results are in
+[buster-performance's #1356 record](https://github.com/buster14a/buster-performance/tree/8640815ecb5a3b0f9483d88e530cd78540d55dfa/docs/measurements/tier1-cfg-1356/results-2026-11-13-claude).
 

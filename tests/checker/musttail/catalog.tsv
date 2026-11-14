@@ -1,0 +1,72 @@
+buster-fixtures v1 checker-sources
+# check_test_musttail_sources's source fixtures (c_check_musttail_test.c; #2053): ID, FILE, FLAGS, NAME, tab-separated.
+0001	0001.c	-	musttail: a direct tail call
+0002	0002.c	-	musttail: clang's C23 spelling
+0003	0003.c	-	musttail: GNU's other spelling
+0004	0004.c	-	musttail: twice
+0005	0005.c	-	musttail: a parenthesized call
+0006	0006.c	-	musttail: a selection's call
+0007	0007.c	-	musttail: _Generic's call
+0008	0008.c	-	musttail: __extension__'s call
+0009	0009.c	-	musttail: a call through a dereference
+0010	0010.c	-	musttail: a pointer's call
+0011	0011.c	rejected	musttail: a member's call of another signature
+0012	0012.c	-	musttail: a call in a loop, a switch and a nested block
+0013	0013.c	-	musttail: after a label
+0014	0014.c	-	musttail: in a statement expression
+0015	0015.c	-	musttail: a cleanup's scope ended before it
+0016	0016.c	-	musttail: a qualified parameter and a pointer's qualifiers
+0017	0017.c	-	musttail: a K&R definition's promoted parameters
+0018	0018.c	-	musttail: structs, long double, complex and __int128
+0019	0019.c	-	musttail: a void function
+0020	0020.c	-	musttail: GNU's noreturn and C11's _Noreturn callees
+0021	0021.c	rejected	musttail: an expression statement's
+0022	0022.c	rejected	musttail: a null statement's
+0023	0023.c	rejected	musttail: an if's
+0024	0024.c	rejected	musttail: a declaration's
+0025	0025.c	rejected	musttail: a function's
+0026	0026.c	rejected	musttail: a named label's
+0027	0027.c	rejected	musttail: with an argument
+0028	0028.c	rejected	musttail: a return without a value
+0029	0029.c	rejected	musttail: a value that isn't a call
+0030	0030.c	rejected	musttail: a cast of a call
+0031	0031.c	rejected	musttail: a conditional of calls
+0032	0032.c	rejected	musttail: an implicitly converted result
+0033	0033.c	rejected	musttail: another parameter count
+0034	0034.c	rejected	musttail: another parameter type
+0035	0035.c	rejected	musttail: another pointee
+0036	0036.c	rejected	musttail: another enum
+0037	0037.c	rejected	musttail: a pointer's other signature
+0038	0038.c	rejected	musttail: a variadic callee
+0039	0039.c	rejected	musttail: a variadic caller
+0040	0040.c	rejected	musttail: a callee without a prototype
+0041	0041.c	rejected	musttail: a caller without a prototype
+0042	0042.c	rejected	musttail: another calling convention
+0043	0043.c	rejected	musttail: a [[noreturn]] callee
+# #936's review: a standard noreturn counts where an accepted declaration before the call has it (clang's
+# inheritance), not where clang drops it after the definition, and not where it is declared after the call.
+0044	0044.c	rejected	musttail: an earlier declaration's [[noreturn]]
+0045	0045.c	-	musttail: a [[noreturn]] clang drops after the definition
+0046	0046.c	gnu23	musttail: a [[noreturn]] clang drops after the definition, in C23
+0047	0047.c	-	musttail: a [[noreturn]] declared after the call
+# #936's review: pointers' qualifiers beneath arrays of the same bound, or of none, are similar types too
+# (UnwrapSimilarArrayTypes), and arrays of another bound or another element beneath them aren't.
+0048	0048.c	-	musttail: pointers' qualifiers beneath arrays of the same bound
+0049	0049.c	-	musttail: pointers' qualifiers beneath arrays of no bound
+0050	0050.c	rejected	musttail: arrays of another bound
+0051	0051.c	rejected	musttail: another element beneath arrays of the same bound
+# #936's second review: pointers' qualifiers at any depth, 63, 64 and 65 levels, and another leaf at 64.
+0052	0052.c	-	musttail: a leaf's qualifiers beneath 63 pointers
+0053	0053.c	-	musttail: a leaf's qualifiers beneath 64 pointers
+0054	0054.c	-	musttail: a leaf's qualifiers beneath 65 pointers
+0055	0055.c	rejected	musttail: another leaf beneath 64 pointers
+0056	0056.c	rejected	musttail: in a cleanup's scope
+0057	0057.c	rejected	musttail: in a nested cleanup's scope
+0058	0058.c	rejected	musttail: in a for statement's cleanup's scope
+0059	0059.c	rejected	musttail: a later return's error
+# __builtin_call_with_static_chain's (#148), of clang's signature R(R, C).
+0060	0060.c	-	musttail: a static chain's call
+0061	0061.c	-	musttail: a static chain's function chain
+0062	0062.c	rejected	musttail: a static chain's other signature
+# Refused by name, where clang takes it (its call of the builtin's own signature) and computes the builtin inline.
+0063	0063.c	rejected,unsupported	musttail: a builtin's call

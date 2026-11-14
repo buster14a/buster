@@ -1233,6 +1233,10 @@ struct CheckInput
     // attributes of other strings, target("default") or target_clones. A unit with one is read in source order
     // (check_deferred_bodies), whose binding events say what was used before a declaration.
     bool target_multiversion;
+    // The default candidate of a target overload set visible at each identifier use (#2424): declaration token + 1,
+    // or 0 for a set without a default. NONE means an ordinary use, including one visible version and target_clones.
+    // A separate sparse pool is allocated only for a use that actually sees multiple target-version entities.
+    CheckSparseColumn target_candidates;
     bool resource;
     // Type sugar (#1447, c_types_sugar.c), last, out of the hot fields' cache lines: the nodes, and the declaring tokens
     // that have one, an open-addressed map of token plus one (0 empty) to node, `sugar_mask + 1` slots
@@ -1244,6 +1248,11 @@ struct CheckInput
     uint32_t sugar_mask;
     uint32_t sugar_entries;
 };
+
+static __attribute__((unused)) uint32_t check_input_target_candidate(const CheckInput* input, uint32_t token)
+{
+    return token < input->token_count && check_sparse_present(input->target_candidates) ? check_sparse_get(input->target_candidates, token) : BUSTER_CHECK_NONE;
+}
 
 // The type sugar of the declaration at `token` (#1447, CheckInput.sugar_tokens), or 0.
 static __attribute__((unused)) uint32_t check_input_declared_sugar(const CheckInput* input, uint32_t token)
@@ -2247,6 +2256,8 @@ struct CheckInputReader
     uint32_t* target_bind_redeclares;
     uint32_t target_bind_count;
     uint32_t target_bind_capacity;
+    // Writer state for CheckInput.target_candidates; absent until the first use of an actual target overload set.
+    CheckSparsePool* target_candidate_pool;
     // #619: the walk's declarations that the section settings and conflicts read (check_input_section_declaration), from
     // the first setting's position or section attribute's token on (section_record_from, BUSTER_CHECK_NONE before
     // either; check_input_attribute_read_item lowers it to each section attribute's token as it reads one).
@@ -3192,7 +3203,8 @@ static void check_input_report(CheckInputReader* reader, uint32_t token, CheckIn
         {
             .token = token,
             .message = message,
-            .completion = (message == CHECK_INPUT_UNDECLARED || message == CHECK_INPUT_INVALID_USE || message == CHECK_INPUT_AMBIGUOUS) && reader->parser != NULL && token < reader->parser->tokens.count &&
+            .completion = (message == CHECK_INPUT_UNDECLARED || message == CHECK_INPUT_INVALID_USE || message == CHECK_INPUT_AMBIGUOUS) &&
+                          reader->parser != NULL && token < reader->parser->tokens.count &&
                           reader->parser->tokens.kinds != NULL && reader->parser->tree.roles != NULL &&
                           reader->parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && reader->parser->tree.roles[token] == PARSE_ROLE_OPERAND ? token + 1u : 0,
         };
@@ -3411,6 +3423,33 @@ static void check_input_recover_undo(CheckInputReader* reader, uint32_t mark)
     input->recovered_count = mark < input->recovered_count ? mark : input->recovered_count;
 }
 
+// A builtin's invalid value use still introduces its declaration for later typo correction (#2250). Its report waits
+// while the ordered walk finishes, then rejoins the missing-name reports whose expression cuts suppress follow-on
+// diagnostics. Keeping the original read avoids losing that first use in the driver's rejected-expression view.
+static void check_input_builtin_uses_publish(CheckInputReader* reader)
+{
+    CheckInput* input = reader->output;
+    const uint32_t count = input->recovered_count;
+    uint32_t kept = 0;
+    for (uint32_t r = 0; r < count; r += 1)
+    {
+        CheckInputReport report = input->recovered_reports[r];
+        const bool builtin = report.message == CHECK_INPUT_BUILTIN_NOT_CALLED;
+        const bool room = input->report_count < input->report_capacity;
+        if (builtin && room)
+        {
+            report.recovered = false;
+            input->reports[input->report_count++] = report;
+        }
+        else
+        {
+            input->resource |= builtin && !room;
+            input->recovered_reports[kept++] = report;
+        }
+    }
+    input->recovered_count = kept;
+}
+
 // The recovered reports appended to the unit's reports once the reader has run (#1447), which rejects the unit: its
 // expressions' and declarations' later diagnostics were found as a valid unit's would be.
 static void check_input_recovered_publish(CheckInputReader* reader)
@@ -3479,7 +3518,8 @@ static void check_input_diagnostic_recover(CheckInputReader* reader, bool resolv
     for (uint32_t report = 0; recoverable && report < input->report_count; report += 1)
     {
         const CheckInputReport* item = input->reports + report;
-        recoverable = (item->message == CHECK_INPUT_UNDECLARED || item->message == CHECK_INPUT_INVALID_USE || item->message == CHECK_INPUT_AMBIGUOUS) &&
+        recoverable = (item->message == CHECK_INPUT_UNDECLARED || item->message == CHECK_INPUT_INVALID_USE || item->message == CHECK_INPUT_AMBIGUOUS ||
+                       item->message == CHECK_INPUT_BUILTIN_NOT_CALLED) &&
                       item->pragma == 0 && item->token < count &&
                       parser->tokens.kinds[item->token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[item->token] == PARSE_ROLE_OPERAND;
     }
@@ -13693,7 +13733,18 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
         else
         {
             // A builtin's name that no call takes (its address, a value of it): clang's error at it.
+            const uint32_t before = reader->output->report_count;
             check_input_report(reader, i, CHECK_INPUT_BUILTIN_NOT_CALLED);
+            if (!reader->output->resource && reader->output->report_count == before + 1)
+            {
+                // This name's recovery completes after the operand (#2250). Attribute handlers also use the message,
+                // but set their own completion/suborder; giving those token+1 would put their follow-on error first.
+                reader->output->reports[before].completion = parser->tokens.kinds[i] == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND ? i + 1u : 0;
+                if (!reader->lane && reader->deferred == NULL)
+                {
+                    check_input_recover_reports(reader, before);
+                }
+            }
         }
     }
     else if (reader->output->declarations[i] == BUSTER_CHECK_NONE)
@@ -14281,7 +14332,7 @@ static inline __attribute__((always_inline)) uint32_t check_input_add_node(Check
         }
         if (__builtin_expect(reader->output->graph.fp_environments != 0, 0))
         {
-            const uint8_t mask = BUSTER_CHECK_FP_EVAL_MASK | (reader->constant_contexts[token] == 0 ? BUSTER_CHECK_FP_ENV_ACCESS : 0);
+            const uint8_t mask = BUSTER_CHECK_FP_EVAL_MASK | BUSTER_CHECK_FP_CONTRACT_MASK | (reader->constant_contexts[token] == 0 ? BUSTER_CHECK_FP_ENV_ACCESS : 0);
             reader->output->graph.fp_environments[node] = reader->output->fp_environments[token] & mask;
         }
     }
@@ -17029,6 +17080,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     uint8_t* warning_suppressed = recorded_pure != NULL ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : NULL;
     valid &= warning_suppressed != NULL;
     valid &= check_graph_initialize(&input->graph, arena, (uint32_t)graph_capacity, count + 1);
+    const uint8_t fp_contract = predefines_fp_contract(&pp->options.predefines);
+    input->graph.fp_contract_default = fp_contract == BUSTER_PREDEFINES_CONTRACT_ON ? BUSTER_CHECK_FP_CONTRACT_ON :
+                                       fp_contract == BUSTER_PREDEFINES_CONTRACT_FAST ? BUSTER_CHECK_FP_CONTRACT_FAST : 0;
     input->graph.recorded_pure = valid ? recorded_pure : NULL;
     input->graph.extensions = check_input_expression_extensions(parser);
     input->graph.const_values = &input->const_values;
@@ -17516,6 +17570,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 check_input_tentative_arrays(&reader, reader.position < count ? reader.position : count);
             }
             check_input_bindings(&reader, binding_mode);
+            check_input_builtin_uses_publish(&reader);
             check_typo_finish(&reader);
             input->typo_searched = reader.typo != NULL;
             if (reader.fallthrough_count != 0 && !input->resource)

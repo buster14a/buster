@@ -736,9 +736,10 @@ static void ir_test_permutes(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_expect(test, admitted_count == 12 + 3 + 42 + 260, "every permute's valid flags are admitted, and no other");
 }
 
-// The conversions (#1840): extend and truncate between every pair of vector widths at every flags byte below 64, admitted
-// by both verifiers exactly where the lanes' sizes, mode and widths agree as written out here, and the model's lanes
-// against C's conversions of each lane on random vectors.
+// The conversions (#1840): extend and truncate between every pair of vector widths, and an extension of an SSE carrier
+// (an F32 or F64 of 4 or 8 bytes) into each width, at every flags byte below 64, admitted by both verifiers exactly where
+// the lanes' sizes, mode and widths agree as written out here, and the model's lanes against C's conversions of each lane
+// on random vectors.
 static void ir_test_conversions(IrTestTally* test, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
@@ -747,7 +748,8 @@ static void ir_test_conversions(IrTestTally* test, Arena* output, Arena* scratch
     for (uint32_t kind = BUSTER_IR_INTRINSIC_EXTEND; kind <= BUSTER_IR_INTRINSIC_TRUNCATE; kind += 1)
     {
         const bool extend = kind == BUSTER_IR_INTRINSIC_EXTEND;
-        for (uint32_t from = 0; from < 3; from += 1)
+        // The source: a vector of 16, 32 or 64 bytes, or a carrier (from 3, an F32; 4, an F64), which only an extension takes.
+        for (uint32_t from = 0; from < 5; from += 1)
         {
             for (uint32_t to = 0; to < 3; to += 1)
             {
@@ -756,12 +758,13 @@ static void ir_test_conversions(IrTestTally* test, Arena* output, Arena* scratch
                     const uint32_t source = 1u << (flags & 3);
                     const uint32_t result = 1u << ((flags >> 2) & 3);
                     const uint32_t mode = flags >> 4;
-                    const uint32_t from_bytes = 16u << from;
+                    const bool carrier = from >= 3;
+                    const uint32_t from_bytes = carrier ? 4u << (from - 3) : 16u << from;
                     const uint32_t to_bytes = 16u << to;
                     const uint32_t lanes = extend ? to_bytes / result : from_bytes / source;
                     const uint32_t used = lanes * result;
                     const bool admitted = extend ? result > source && mode <= 1 && lanes * source <= from_bytes :
-                                                   result < source && mode <= 2 && to_bytes == (used > 16 ? used : 16);
+                                                   !carrier && result < source && mode <= 2 && to_bytes == (used > 16 ? used : 16);
                     admitted_count += admitted;
                     IrFunction function = {0};
                     const IrSizes sizes = { .instruction_count = 3, .block_count = 1 };
@@ -770,7 +773,7 @@ static void ir_test_conversions(IrTestTally* test, Arena* output, Arena* scratch
                         ir_test_expect(test, false, "conversion verifier fixture allocation");
                         continue;
                     }
-                    const IrType a = (IrType)(IR_V4I32 + from);
+                    const IrType a = carrier ? (from == 3 ? IR_F32 : IR_F64) : (IrType)(IR_V4I32 + from);
                     const IrType type = (IrType)(IR_V4I32 + to);
                     function.result_type = IR_VOID;
                     function.block_offsets[1] = 3;
@@ -786,8 +789,10 @@ static void ir_test_conversions(IrTestTally* test, Arena* output, Arena* scratch
                         {
                             state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
                             // Now and then a word of extreme lanes, at the saturations' edges.
-                            value_a.words[w] = w >= from_bytes / 8 ? 0 : (state & 3) == 0 ? UINT64_C(0x807f80017fff8000) : (state & 3) == 1 ? UINT64_MAX : state;
+                            value_a.words[w] = 8 * w >= from_bytes ? 0 : (state & 3) == 0 ? UINT64_C(0x807f80017fff8000) : (state & 3) == 1 ? UINT64_MAX : state;
                         }
+                        // A carrier's value is its type's bits alone, as the interpreter holds an F32's.
+                        value_a.words[0] = from_bytes == 4 ? value_a.words[0] & UINT32_MAX : value_a.words[0];
                         const IrSimdValue* operands[3] = { &value_a, 0, 0 };
                         const IrSimdAction action = {
                             .operation = extend ? IR_SIMD_EXTEND : IR_SIMD_TRUNCATE,
@@ -833,8 +838,10 @@ static void ir_test_conversions(IrTestTally* test, Arena* output, Arena* scratch
         }
     }
     // Extends of each of the 6 pairs, zero and signed, to each width from each width wide enough, and truncates of each
-    // pair and mode from each width into the one its lanes fill (counted apart, by the conditions above: 156).
-    ir_test_expect(test, admitted_count == 156, "every conversion of the IR's vector widths is admitted, and no other");
+    // pair and mode from each width into the one its lanes fill (counted apart, by the conditions above: 156); and the
+    // carriers' extends, zero and signed, into each width whose lanes they hold: an F64's 10 pairs and widths, an F32's 4
+    // (2 * (10 + 4)).
+    ir_test_expect(test, admitted_count == 156 + 28, "every conversion of the IR's vector widths and carriers is admitted, and no other");
 }
 
 // The shifts by a scalar count (#1840): shift at every vector width, every flags byte below 32 and a count of each of
@@ -925,6 +932,106 @@ static void ir_test_scalar_shifts(IrTestTally* test, Arena* output, Arena* scrat
     }
     // Three lanes' sizes and three shifts at each width.
     ir_test_expect(test, admitted_count == 3 * 3 * 3, "every scalar shift of the IR's vector widths is admitted, and no other");
+}
+
+// A ternary intrinsic's third value lives in extra, outside the three instruction columns. It obeys the same
+// definition-before-use and block-dominance rules as a and b. Keep those two inputs valid while varying only the
+// third, with the intrinsic in every position of a verifier batch, so a fast-path omission cannot hide behind them.
+static void ir_test_ternary_dominance(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    static const uint32_t kinds[] = {
+        BUSTER_IR_INTRINSIC_PERMUTE2,
+        BUSTER_IR_INTRINSIC_TERNLOG,
+        BUSTER_IR_INTRINSIC_COMPRESS,
+        BUSTER_IR_INTRINSIC_EXPAND,
+    };
+    for (uint32_t kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+    {
+        for (uint32_t width = 0; width < 3; width += 1)
+        {
+            for (uint32_t padding = 0; padding < BUSTER_IR_VECTOR_COUNT; padding += 1)
+            {
+                const uint64_t mark = output->length;
+                const uint32_t use = 7 + padding;
+                const IrSizes sizes = {
+                    .instruction_count = use + 3,
+                    .block_count = 3,
+                    .extra_count = 1,
+                };
+                IrFunction function = { 0 };
+                const bool ready = ir_create(output, &sizes, &function) == IR_OK;
+                ir_test_expect(test, ready, "ternary dominance fixture allocates");
+                if (ready)
+                {
+                    const IrType type = (IrType)(IR_V4I32 + width);
+                    const IrType second = kind >= 2 ? (width == 2 ? IR_M16 : IR_M8) : type;
+                    function.result_type = IR_VOID;
+                    function.block_offsets[1] = 5;
+                    function.block_offsets[2] = 7;
+                    function.block_offsets[3] = use + 3;
+                    ir_test_instruction(&function, 0, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, 1, IR_UNDEF, second, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, 2, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, 3, IR_UNDEF, IR_I1, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, 4, IR_CBR, IR_VOID, 3, 1, 2);
+                    ir_test_instruction(&function, 5, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, 6, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    for (uint32_t i = 7; i < use; i += 1)
+                    {
+                        ir_test_instruction(&function, i, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    }
+                    ir_test_instruction(&function, use, IR_INTRINSIC, type, 0, 1, ir_intrinsic_ternary_c(kinds[kind], 0));
+                    function.flags[use] = kind == 1 ? 0xa6 : 2;
+                    ir_test_instruction(&function, use + 1, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, use + 2, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    // Entry dominates both return arms; neither arm dominates the other.
+                    const uint32_t enter[] = {
+                        0,
+                        1,
+                        2,
+                    };
+                    const uint32_t leave[] = {
+                        3,
+                        2,
+                        3,
+                    };
+                    const IrDominance dominance = {
+                        .enter = enter,
+                        .leave = leave,
+                        .block_count = 3,
+                    };
+                    const uint32_t values[] = {
+                        2,
+                        use,
+                        use + 1,
+                        5,
+                    };
+                    for (uint32_t variant = 0; variant < BUSTER_ARRAY_LENGTH(values); variant += 1)
+                    {
+                        function.extra[0] = values[variant];
+                        for (uint32_t supplied = 0; supplied < 2; supplied += 1)
+                        {
+                            const IrDominance* view = supplied != 0 ? &dominance : NULL;
+                            const bool invalid = variant == 1 || variant == 2 || (variant == 3 && supplied != 0);
+                            const IrError error = invalid ? IR_ERROR_DOMINANCE : IR_OK;
+                            const uint32_t instruction = invalid ? use : BUSTER_IR_NONE;
+                            const uint32_t detail = invalid ? 3 : 0;
+                            const uint64_t scratch_mark = scratch->length;
+                            const IrCheck vector = ir_verify(&function, scratch, view);
+                            ir_test_expect(test, vector.error == error && vector.instruction == instruction && vector.detail == detail &&
+                                           vector.dominance_checked == (!invalid && supplied != 0) && scratch->length == scratch_mark,
+                                           "vector verifier checks a ternary intrinsic's third operand dominance and exact diagnostic");
+                            const IrCheck scalar = ir_verify_scalar(&function, scratch, view);
+                            ir_test_expect(test, scalar.error == error && scalar.instruction == instruction && scalar.detail == detail &&
+                                           scalar.dominance_checked == (!invalid && supplied != 0) && scratch->length == scratch_mark,
+                                           "scalar verifier checks a ternary intrinsic's third operand dominance and exact diagnostic");
+                        }
+                    }
+                }
+                arena_pop_to(output, mark);
+            }
+        }
+    }
 }
 
 // The permutes of two tables (#1840), whose third operand the extra array holds: both verifiers admit permute2 exactly
@@ -1020,6 +1127,102 @@ static void ir_test_permute2s(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_expect(test, admitted_count == 3 * 2 * 4, "permute2 is admitted at every width and lanes, its slot first or not");
 }
 
+// The funnel shifts (#1840): both verifiers admit funnel of three vectors of the result's type exactly at lanes of 2, 4 or
+// 8 bytes and either direction (flags 1 to 3 and 5 to 7), refusing other flags and counts of another width; and the
+// model gives C's funnel shift of each lane, a:b's high half shifted left or its low half shifted right by the count
+// modulo the lanes' bits, on random vectors whose counts are often past the lanes' bits or zero.
+static void ir_test_funnels(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    uint64_t state = UINT64_C(0x510e527f9b05688c);
+    uint32_t admitted_count = 0;
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t flags = 0; flags < 256; flags += 1)
+        {
+            for (uint32_t other = 0; other < 2; other += 1)
+            {
+                const IrType type = (IrType)(IR_V4I32 + width);
+                const bool admitted = other == 0 && (flags & 3) != 0 && flags <= 7;
+                IrFunction function = {0};
+                const IrSizes sizes = { .instruction_count = 5, .block_count = 1, .extra_count = 1 };
+                if (ir_create(output, &sizes, &function) != IR_OK)
+                {
+                    ir_test_expect(test, false, "funnel verifier fixture allocation");
+                    continue;
+                }
+                function.result_type = IR_VOID;
+                function.block_offsets[1] = 5;
+                ir_test_instruction(&function, 0, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 1, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 2, IR_UNDEF, other == 0 ? type : (IrType)(IR_V4I32 + (width + 1) % 3), BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 3, IR_INTRINSIC, type, 0, 1, ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_FUNNEL, 0));
+                ir_test_instruction(&function, 4, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                function.extra[0] = 2;
+                function.flags[3] = (uint8_t)flags;
+                ir_test_pair(test, &function, scratch, NULL, admitted, "a funnel shift is admitted exactly at its lanes and direction, its three operands of its type");
+                admitted_count += admitted;
+                arena_pop_to(output, mark);
+            }
+        }
+    }
+    ir_test_expect(test, admitted_count == 3 * 6, "funnel shifts are admitted at every width, lanes and direction");
+    bool exact = true;
+    for (uint32_t trial = 0; trial < 3 * 6 * 4; trial += 1)
+    {
+        const uint32_t width = trial % 3;
+        const uint32_t size = 1 + (trial / 3) % 3;
+        const uint32_t right = (trial / 9) % 2;
+        const uint32_t bytes = 16u << width;
+        const uint32_t element = 1u << size;
+        const uint32_t bits = 8 * element;
+        IrSimdValue values[3] = { 0 };
+        for (uint32_t v = 0; v < 3; v += 1)
+        {
+            for (uint32_t w = 0; w < bytes / 8; w += 1)
+            {
+                values[v].words[w] = ir_test_random(&state);
+            }
+        }
+        // Counts of 0, of the lanes' bits and past them, and small ones.
+        uint8_t* counts = (uint8_t*)values[2].words;
+        for (uint32_t lane = 0; lane < bytes / element; lane += 1)
+        {
+            const uint64_t random = ir_test_random(&state);
+            const uint64_t count = (random & 3) == 0 ? 0 : (random & 3) == 1 ? bits : (random & 3) == 2 ? bits + (random >> 8) % bits : (random >> 8) % bits;
+            memcpy(counts + lane * element, &count, element);
+        }
+        IrSimdValue wanted = { 0 };
+        for (uint32_t lane = 0; lane < bytes / element; lane += 1)
+        {
+            uint64_t high = 0;
+            uint64_t low = 0;
+            uint64_t count = 0;
+            memcpy(&high, (const uint8_t*)values[0].words + lane * element, element);
+            memcpy(&low, (const uint8_t*)values[1].words + lane * element, element);
+            memcpy(&count, counts + lane * element, element);
+            count %= bits;
+            // C's fshl and fshr: the lanes' 2 * bits of high:low, shifted, a bit at a time.
+            uint64_t value = 0;
+            for (uint32_t bit = 0; bit < bits; bit += 1)
+            {
+                const uint32_t from = right != 0 ? bit + (uint32_t)count : bit + bits - (uint32_t)count;
+                const uint32_t at = from % (2 * bits);
+                const uint64_t source = at >= bits ? high >> (at - bits) : low >> at;
+                value |= (source & 1) << bit;
+            }
+            memcpy((uint8_t*)wanted.words + lane * element, &value, element);
+        }
+        const IrSimdShape shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        const IrSimdValue* operands[3] = { &values[0], &values[1], &values[2] };
+        const IrSimdAction action = { .operation = IR_SIMD_FUNNEL, .result = shape, .operands = { shape, shape, shape }, .index = (uint8_t)(size | right << 2) };
+        IrSimdValue value;
+        memset(&value, 0xa5, sizeof(value));
+        exact = exact && ir_simd_evaluate(&action, operands, 0, 0, 0, &value) && memcmp(value.words, wanted.words, bytes) == 0;
+    }
+    ir_test_expect(test, exact, "the model's funnel shift gives C's fshl and fshr of each lane");
+}
+
 // The bitwise functions of three vectors (#1840): both verifiers admit ternlog of three vectors of the result's type with
 // any truth table, and refuse a third operand of another width; the model is checked against each bit's table entry.
 static void ir_test_ternlogs(IrTestTally* test, Arena* output, Arena* scratch)
@@ -1080,8 +1283,9 @@ static void ir_test_ternlogs(IrTestTally* test, Arena* output, Arena* scratch)
 
 // One lane's moves and the lanes' sign bits (#1840): both verifiers admit lane_extract, lane_insert and movemask exactly
 // where the flags' lane is below the vector's lanes, the scalar an I32 for a lane of 1, 2 or 4 bytes and an I64 for one of
-// 8 (movemask an I32 of a vector of 16 or 32 bytes, of bytes, doublewords or quadwords); and the model gives C's lane,
-// C's replaced lane and C's sign bits on random vectors.
+// 8, or an extraction's lane 0 of doublewords or quadwords into an SSE carrier, an F32 or an F64 (movemask an I32 of a
+// vector of 16 or 32 bytes, of bytes, doublewords or quadwords); and the model gives C's lane, C's replaced lane and C's
+// sign bits on random vectors.
 static void ir_test_lane_moves(IrTestTally* test, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
@@ -1094,14 +1298,18 @@ static void ir_test_lane_moves(IrTestTally* test, Arena* output, Arena* scratch)
         {
             for (uint32_t flags = 0; flags < 256; flags += 1)
             {
-                for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+                // The scalar: the lane's integer, the other integer, or an SSE carrier (#1840: an F32 for lanes of 4 bytes or
+                // less, an F64 for 8), which lane 0 of doublewords or quadwords alone extracts into.
+                for (uint32_t scalar = 0; scalar < 3; scalar += 1)
                 {
                     const IrType vector = (IrType)(IR_V4I32 + width);
                     const uint32_t size = flags & 3;
                     const uint32_t lanes = (16u << width) >> size;
                     const IrType right = size == 3 ? IR_I64 : IR_I32;
-                    const IrType given = scalar == 0 ? right : right == IR_I64 ? IR_I32 : IR_I64;
-                    const bool admitted = kind == 2 ? scalar == 0 && flags <= 3 && flags != 1 && width < 2 : scalar == 0 && (flags >> 2) < lanes;
+                    const IrType given = scalar == 0 ? right : scalar == 1 ? (right == IR_I64 ? IR_I32 : IR_I64) : size == 3 ? IR_F64 : IR_F32;
+                    const bool admitted = kind == 2 ? scalar == 0 && flags <= 3 && flags != 1 && width < 2 :
+                                          kind == 0 ? (scalar == 0 && (flags >> 2) < lanes) || (scalar == 2 && (flags == 2 || flags == 3)) :
+                                                      scalar == 0 && (flags >> 2) < lanes;
                     expected_count += admitted;
                     IrFunction function = {0};
                     const IrSizes sizes = { .instruction_count = 4, .block_count = 1 };
@@ -1120,7 +1328,7 @@ static void ir_test_lane_moves(IrTestTally* test, Arena* output, Arena* scratch)
                     }
                     else
                     {
-                        const IrType result = kind == 2 ? (scalar == 0 ? IR_I32 : IR_I64) : given;
+                        const IrType result = kind == 2 ? (scalar == 0 ? IR_I32 : scalar == 1 ? IR_I64 : IR_F32) : given;
                         ir_test_instruction(&function, 2, IR_INTRINSIC, result, 0, BUSTER_IR_NONE, kind == 0 ? BUSTER_IR_INTRINSIC_LANE_EXTRACT : BUSTER_IR_INTRINSIC_MOVEMASK);
                     }
                     ir_test_instruction(&function, 3, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
@@ -1260,6 +1468,160 @@ static void ir_test_reductions(IrTestTally* test, Arena* output, Arena* scratch)
         exact = exact && ir_simd_evaluate(&action, operands, 0, 0, 0, &got) && memcmp(&got, &expected, sizeof(got)) == 0;
     }
     ir_test_expect(test, exact, "the model's reductions are C's");
+}
+
+// The quadword operations (#1840): both verifiers admit quadword_op exactly of two vectors of the result's type at flags 0
+// and 1, refusing another width's b and other flags; and the model gives vpmultishiftqb's and vpsadbw's quadwords, as
+// their definitions written out here, on random vectors.
+static void ir_test_quadword_ops(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    uint64_t state = UINT64_C(0xa54ff53a3c6ef372);
+    uint32_t admitted_count = 0;
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t flags = 0; flags < 256; flags += 1)
+        {
+            for (uint32_t other = 0; other < 2; other += 1)
+            {
+                const IrType vector = (IrType)(IR_V4I32 + width);
+                const bool admitted = other == 0 && flags <= 1;
+                IrFunction function = {0};
+                const IrSizes sizes = { .instruction_count = 4, .block_count = 1 };
+                if (ir_create(output, &sizes, &function) != IR_OK)
+                {
+                    ir_test_expect(test, false, "quadword operation verifier fixture allocation");
+                    continue;
+                }
+                function.result_type = IR_VOID;
+                function.block_offsets[1] = 4;
+                ir_test_instruction(&function, 0, IR_UNDEF, vector, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 1, IR_UNDEF, other == 0 ? vector : (IrType)(IR_V4I32 + (width + 1) % 3), BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 2, IR_INTRINSIC, vector, 0, 1, BUSTER_IR_INTRINSIC_QUADWORD_OP);
+                ir_test_instruction(&function, 3, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                function.flags[2] = (uint8_t)flags;
+                ir_test_pair(test, &function, scratch, NULL, admitted, "a quadword operation is admitted exactly at its operations, of its type");
+                admitted_count += admitted;
+                arena_pop_to(output, mark);
+            }
+        }
+    }
+    ir_test_expect(test, admitted_count == 3 * 2, "quadword operations are admitted at every width and operation");
+    bool exact = true;
+    for (uint32_t trial = 0; trial < 3 * 2 * 8; trial += 1)
+    {
+        const uint32_t width = trial % 3;
+        const uint32_t operation = (trial / 3) % 2;
+        const uint32_t bytes = 16u << width;
+        IrSimdValue a = {0};
+        IrSimdValue b = {0};
+        for (uint32_t w = 0; w < bytes / 8; w += 1)
+        {
+            a.words[w] = ir_test_random(&state);
+            b.words[w] = ir_test_random(&state);
+        }
+        const uint8_t* left = (const uint8_t*)a.words;
+        const uint8_t* right = (const uint8_t*)b.words;
+        IrSimdValue wanted = {0};
+        uint8_t* out = (uint8_t*)wanted.words;
+        for (uint32_t q = 0; q < bytes / 8; q += 1)
+        {
+            uint64_t data = 0;
+            memcpy(&data, right + 8 * q, 8);
+            uint64_t sum = 0;
+            for (uint32_t j = 0; j < 8; j += 1)
+            {
+                // vpmultishiftqb: byte j is the 8 bits of b's quadword from bit a's byte j's low 6 bits, modulo 64.
+                uint32_t byte = 0;
+                for (uint32_t bit = 0; bit < 8; bit += 1)
+                {
+                    byte |= (uint32_t)((data >> ((left[8 * q + j] + bit) % 64)) & 1) << bit;
+                }
+                out[8 * q + j] = (uint8_t)byte;
+                sum += left[8 * q + j] > right[8 * q + j] ? (uint64_t)(left[8 * q + j] - right[8 * q + j]) : (uint64_t)(right[8 * q + j] - left[8 * q + j]);
+            }
+            if (operation == 1)
+            {
+                memcpy(out + 8 * q, &sum, 8);
+            }
+        }
+        const IrSimdShape shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        const IrSimdValue* operands[3] = { &a, &b, 0 };
+        const IrSimdAction action = { .operation = IR_SIMD_QUADWORD_OP, .result = shape, .operands = { shape, shape, IR_SIMD_NONE }, .index = (uint8_t)operation };
+        IrSimdValue value;
+        memset(&value, 0xa5, sizeof(value));
+        exact = exact && ir_simd_evaluate(&action, operands, 0, 0, 0, &value) && memcmp(value.words, wanted.words, bytes) == 0;
+    }
+    ir_test_expect(test, exact, "the model's quadword operations give vpmultishiftqb's and vpsadbw's quadwords");
+}
+
+// The bit shuffles into a mask (#1840): both verifiers admit bitshuffle exactly of two vectors of one type into the mask
+// of their bytes (m16, m32 or m64) with flags 0, refusing another vector's operand, another mask and flags; and the
+// model gives each byte's bit of its quadword, as vpshufbitqmb's definition, written out here, on random vectors.
+static void ir_test_bitshuffles(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    static const IrType masks[3] = { IR_M16, IR_M32, IR_M64 };
+    const uint64_t mark = output->length;
+    uint64_t state = UINT64_C(0x3c6ef372a54ff53a);
+    uint32_t admitted_count = 0;
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t change = 0; change < 5; change += 1)
+        {
+            // 0 the rule's; 1 b of another width; 2 a mask of another width; 3 flags 1; 4 a vector result.
+            const IrType vector = (IrType)(IR_V4I32 + width);
+            const IrType other = (IrType)(IR_V4I32 + (width + 1) % 3);
+            const IrType result = change == 2 ? masks[(width + 1) % 3] : change == 4 ? vector : masks[width];
+            const bool admitted = change == 0;
+            IrFunction function = {0};
+            const IrSizes sizes = { .instruction_count = 4, .block_count = 1 };
+            if (ir_create(output, &sizes, &function) != IR_OK)
+            {
+                ir_test_expect(test, false, "bit shuffle verifier fixture allocation");
+                continue;
+            }
+            function.result_type = IR_VOID;
+            function.block_offsets[1] = 4;
+            ir_test_instruction(&function, 0, IR_UNDEF, vector, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_instruction(&function, 1, IR_UNDEF, change == 1 ? other : vector, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_instruction(&function, 2, IR_INTRINSIC, result, 0, 1, BUSTER_IR_INTRINSIC_BITSHUFFLE);
+            ir_test_instruction(&function, 3, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            function.flags[2] = change == 3 ? 1 : 0;
+            ir_test_pair(test, &function, scratch, NULL, admitted, "a bit shuffle is admitted exactly of two vectors of one type into their bytes' mask");
+            admitted_count += admitted;
+            arena_pop_to(output, mark);
+        }
+    }
+    ir_test_expect(test, admitted_count == 3, "bit shuffles are admitted at every width");
+    bool exact = true;
+    for (uint32_t trial = 0; trial < 3 * 16; trial += 1)
+    {
+        const uint32_t width = trial % 3;
+        const uint32_t bytes = 16u << width;
+        IrSimdValue a = {0};
+        IrSimdValue b = {0};
+        for (uint32_t w = 0; w < bytes / 8; w += 1)
+        {
+            a.words[w] = ir_test_random(&state);
+            b.words[w] = ir_test_random(&state);
+        }
+        // vpshufbitqmb: bit i of the mask is bit (b's byte i & 63) of a's quadword i / 8.
+        const uint8_t* indices = (const uint8_t*)b.words;
+        uint64_t wanted = 0;
+        for (uint32_t i = 0; i < bytes; i += 1)
+        {
+            uint64_t quadword = 0;
+            memcpy(&quadword, (const uint8_t*)a.words + 8 * (i / 8), 8);
+            wanted |= ((quadword >> (indices[i] % 64)) & 1) << i;
+        }
+        const IrSimdShape shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        const IrSimdValue* operands[3] = { &a, &b, 0 };
+        const IrSimdAction action = { .operation = IR_SIMD_BITSHUFFLE, .result = ir_simd_shape(masks[width]), .operands = { shape, shape, IR_SIMD_NONE } };
+        IrSimdValue value;
+        memset(&value, 0xa5, sizeof(value));
+        exact = exact && ir_simd_evaluate(&action, operands, 0, 0, 0, &value) && value.words[0] == wanted;
+    }
+    ir_test_expect(test, exact, "the model's bit shuffle gives each byte its quadword's indexed bit");
 }
 
 // The lanes' unary operations (#1840): both verifiers admit lane_unary exactly where its operand is of its type and its
@@ -1869,6 +2231,7 @@ static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
 {
     ir_test_scalar_shifts(test, output, scratch);
     ir_test_lane_ops(test, output, scratch);
+    ir_test_ternary_dominance(test, output, scratch);
     ir_test_permute2s(test, output, scratch);
     ir_test_ternlogs(test, output, scratch);
     ir_test_compresses(test, output, scratch);
@@ -1876,6 +2239,9 @@ static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_lane_moves(test, output, scratch);
     ir_test_reductions(test, output, scratch);
     ir_test_lane_unaries(test, output, scratch);
+    ir_test_bitshuffles(test, output, scratch);
+    ir_test_quadword_ops(test, output, scratch);
+    ir_test_funnels(test, output, scratch);
     ir_test_frounds(test, output, scratch);
     ir_test_cvtts(test, output, scratch);
     ir_test_aes(test, output, scratch);

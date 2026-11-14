@@ -251,11 +251,11 @@ static void check_test_fp_graph(CheckTest* test, TypeTable* table)
                                   "all graph partitions preserve FENV proofs, runtime masks and complete math descriptors");
                 arena_pop_to(&output, mark);
             }
-            environments[divided] = 0x80;
+            environments[divided] = BUSTER_CHECK_FP_CONTRACT_MASK;
             CheckStream invalid;
             check_test_expect(test, !check_graph_run(table, &graph, &output, &scratch, &options, &invalid) &&
                                    invalid.status == CHECK_STATUS_INVALID_GRAPH && output.length == mark && scratch.length == 0,
-                              "unknown floating-environment bits reject atomically before graph publication");
+                              "contradictory floating contraction bits reject atomically before graph publication");
         }
     }
     arena_release(&scratch);
