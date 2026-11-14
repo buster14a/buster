@@ -7,7 +7,8 @@
 // bitcode an edit changed.
 //
 //   presplit INPUT.bc PARTS DIRECTORY [--import LIMIT] [--anchor M] [--cohere CAP] [--spread S] [--tests-optnone]
-//            [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--verify] [--report]
+//            [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--constant-arguments] [--verify]
+//            [--report]
 //
 // writes DIRECTORY/part0.bc to DIRECTORY/partPARTS.bc and DIRECTORY/locals.txt. Parts 0 to PARTS - 1 hold function
 // definitions; part PARTS holds the global variables more than one part refers to, and no function. INPUT is clang's
@@ -59,7 +60,9 @@
 // a static function called once, and gives a part's static function a phantom caller wherever the whole module calls it
 // more (presplit_keep_statics, presplit_phantoms); --benchmark-bodies has a benchmark's file read the bodies it calls,
 // whatever their size; --simplified-size measures a body for LIMIT by what SROA leaves of it, with LLVM's vector bonus
-// (presplit_scan); and a part that reads a constant table reads the constants it names (presplit_readable_readers).
+// (presplit_scan); --constant-arguments writes the arguments the whole module's constant propagation finds constant into
+// their functions (presplit_constant_arguments); and a part that reads a constant table reads the constants it names
+// (presplit_readable_readers).
 //
 // BusterCodegenMerge.cmake joins the parts' objects and restores local binding (locals.txt). The module is parsed
 // once and the plan made on it; each part is then a clone of its own definitions (split_bitcode.cpp's
@@ -212,7 +215,7 @@ struct PresplitPlan
     bool keep_statics;
     bool benchmark_bodies;
     bool simplified_size;
-    bool simplify_first;
+    bool constant_arguments;
     bool verify;
     bool report;
 };
@@ -1787,37 +1790,135 @@ static void presplit_report(const PresplitPlan* plan)
             total != 0 ? 100.0 * (double)imported_total / (double)total : 0.0, plan->global_count, moved, hidden);
 }
 
-// --simplify-first (Release's): the whole module's simplification before LLVM's inliner, as the -O3 pipeline runs it
-// (clang 23's default<O3> up to its always-inline, without the passes that do nothing to a C unit: coroutines, OpenMP,
-// memory profiles), before the plan. Its interprocedural constant propagation then sees every call of a local function,
-// which a part's doesn't see of one other parts call (an alias names it): the whole unit's folded the encoder mode's
-// flags that instruction_is_valid passes mode_register_is_valid, which cost the parts' inliner 70 to 90 more and kept
-// it outlined, and benchmark-assembler ran 6.3% more instructions. A part's job then runs the whole -O3 pipeline again,
-// from the simplified module. Whether it ran.
-static bool presplit_simplify(LLVMModuleRef module)
+// --constant-arguments (Release's): the arguments interprocedural constant propagation finds constant over the whole
+// module, written into the functions that take them, before the plan. A part's own propagation doesn't see every call
+// of a local function that other parts call (an alias names it, which is a use it can't follow), and so doesn't find
+// them: the whole unit's folded the encoder mode's flags that instruction_is_valid passes mode_register_is_valid,
+// whose cost to the parts' inliner was then 265 to 290 against the whole unit's 195, so that it stayed outlined and
+// benchmark-assembler ran 6.3% more instructions. A child process runs SROA and IPSCCP on its copy of the module, and
+// a local function's integer or floating-point argument that its IPSCCP replaced, which every call there passes as the
+// same constant, becomes that constant in the module's own function, whose IR is otherwise the unit's as clang wrote
+// it: running the simplification on the module itself, and again in each part, reshaped code that the whole unit's
+// pipeline shapes once (benchmark-environments ran 2.7% more cycles). The child sends each such argument as a record;
+// cloning the module instead took longer than the passes. Returns the arguments it wrote, or UINT32_MAX on a failure.
+typedef struct PresplitConstant PresplitConstant;
+struct PresplitConstant
 {
-    static const char pipeline[] =
-        "annotation2metadata,forceattrs,inferattrs,"
-        "function<eager-inv>(lower-expect,"
-        "simplifycfg<bonus-inst-threshold=1;no-forward-switch-cond;no-switch-range-to-icmp;no-switch-to-arithmetic;no-switch-to-lookup;"
-        "keep-loops;no-hoist-common-insts;no-hoist-loads-stores-with-cond-faulting;no-sink-common-insts;speculate-blocks;"
-        "simplify-cond-branch;no-speculate-unpredictables>,"
-        "sroa<modify-cfg>,early-cse<>,callsite-splitting),"
-        "ipsccp,called-value-propagation,globalopt,"
-        "function<eager-inv>(mem2reg,instcombine<max-iterations=1;no-verify-fixpoint>,"
-        "simplifycfg<bonus-inst-threshold=1;no-forward-switch-cond;switch-range-to-icmp;no-switch-to-arithmetic;no-switch-to-lookup;"
-        "keep-loops;no-hoist-common-insts;no-hoist-loads-stores-with-cond-faulting;no-sink-common-insts;speculate-blocks;"
-        "simplify-cond-branch;no-speculate-unpredictables>)";
+    uint32_t function;
+    uint32_t parameter;
+    // An integer's bits (of at most 64), or a floating-point constant's value's.
+    uint64_t bits;
+};
+
+static void presplit_constant_child(LLVMModuleRef module, int output)
+{
+    static const char pipeline[] = "function<eager-inv>(sroa<modify-cfg>),ipsccp";
     LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
     LLVMErrorRef error = LLVMRunPasses(module, pipeline, 0, options);
     LLVMDisposePassBuilderOptions(options);
+    bool sent = error == 0;
     if (error != 0)
     {
         char* message = LLVMGetErrorMessage(error);
-        fprintf(stderr, "presplit: the simplification before the split: %s\n", message);
+        fprintf(stderr, "presplit: the whole module's constant propagation: %s\n", message);
         LLVMDisposeErrorMessage(message);
     }
-    return error == 0;
+    uint32_t index = 0;
+    for (LLVMValueRef function = LLVMGetFirstFunction(module); function != 0 && sent; function = LLVMGetNextFunction(function))
+    {
+        const unsigned parameters = presplit_local(function) && !LLVMIsDeclaration(function) ? LLVMCountParams(function) : 0;
+        for (unsigned p = 0; p < parameters && sent; p += 1)
+        {
+            LLVMValueRef argument = LLVMGetParam(function, p);
+            const LLVMTypeKind kind = LLVMGetTypeKind(LLVMTypeOf(argument));
+            const bool integer = kind == LLVMIntegerTypeKind && LLVMGetIntTypeWidth(LLVMTypeOf(argument)) <= 64;
+            LLVMValueRef constant = 0;
+            bool same = (integer || kind == LLVMFloatTypeKind || kind == LLVMDoubleTypeKind) && LLVMGetFirstUse(argument) == 0 &&
+                        LLVMGetFirstUse(function) != 0;
+            for (LLVMUseRef use = same ? LLVMGetFirstUse(function) : 0; use != 0 && same; use = LLVMGetNextUse(use))
+            {
+                LLVMValueRef call = LLVMGetUser(use);
+                same = LLVMIsACallInst(call) != 0 && LLVMGetCalledValue(call) == function;
+                LLVMValueRef value = same ? LLVMGetOperand(call, p) : 0;
+                same = same && (LLVMIsAConstantInt(value) != 0 || LLVMIsAConstantFP(value) != 0) && (constant == 0 || constant == value);
+                constant = value;
+            }
+            if (same && constant != 0)
+            {
+                LLVMBool lost = 0;
+                const double real = integer ? 0 : LLVMConstRealGetDouble(constant, &lost);
+                PresplitConstant record = {
+                    .function = index,
+                    .parameter = p,
+                    .bits = integer ? LLVMConstIntGetZExtValue(constant) : 0,
+                };
+                if (!integer)
+                {
+                    memcpy(&record.bits, &real, sizeof(record.bits));
+                }
+                sent = !lost && write(output, &record, sizeof(record)) == (ssize_t)sizeof(record);
+            }
+        }
+        index += 1;
+    }
+    close(output);
+    _exit(sent ? 0 : 1);
+}
+
+static uint32_t presplit_constant_arguments(LLVMModuleRef module)
+{
+    uint32_t count = 0;
+    for (LLVMValueRef function = LLVMGetFirstFunction(module); function != 0; function = LLVMGetNextFunction(function))
+    {
+        count += 1;
+    }
+    LLVMValueRef* functions = presplit_allocate((uint64_t)count + 1, sizeof(LLVMValueRef));
+    count = 0;
+    for (LLVMValueRef function = LLVMGetFirstFunction(module); function != 0; function = LLVMGetNextFunction(function))
+    {
+        functions[count] = function;
+        count += 1;
+    }
+    fflush(0);
+    int channel[2];
+    const pid_t child = pipe(channel) == 0 ? fork() : -1;
+    if (child == 0)
+    {
+        close(channel[0]);
+        presplit_constant_child(module, channel[1]);
+    }
+    uint32_t written = UINT32_MAX;
+    if (child > 0)
+    {
+        close(channel[1]);
+        written = 0;
+        PresplitConstant record;
+        ssize_t got = 0;
+        while ((got = read(channel[0], &record, sizeof(record))) == (ssize_t)sizeof(record))
+        {
+            LLVMValueRef argument = record.function < count && record.parameter < LLVMCountParams(functions[record.function]) ?
+                                        LLVMGetParam(functions[record.function], record.parameter) : 0;
+            LLVMTypeRef type = argument != 0 ? LLVMTypeOf(argument) : 0;
+            double real = 0;
+            memcpy(&real, &record.bits, sizeof(real));
+            LLVMValueRef constant = type == 0 ? 0 : LLVMGetTypeKind(type) == LLVMIntegerTypeKind ? LLVMConstInt(type, record.bits, 0) : LLVMConstReal(type, real);
+            if (constant != 0 && LLVMGetFirstUse(argument) != 0)
+            {
+                LLVMReplaceAllUsesWith(argument, constant);
+                written += 1;
+            }
+        }
+        close(channel[0]);
+        int status = 0;
+        const bool exited = waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        written = exited && got == 0 ? written : UINT32_MAX;
+    }
+    if (written == UINT32_MAX)
+    {
+        fprintf(stderr, "presplit: the whole module's constant propagation failed\n");
+    }
+    free(functions);
+    return written;
 }
 
 static double presplit_seconds(void)
@@ -1861,9 +1962,9 @@ static bool presplit_options(PresplitPlan* plan, int argc, char** argv)
         {
             plan->simplified_size = true;
         }
-        else if (strcmp(argv[i], "--simplify-first") == 0)
+        else if (strcmp(argv[i], "--constant-arguments") == 0)
         {
-            plan->simplify_first = true;
+            plan->constant_arguments = true;
         }
         else if ((strcmp(argv[i], "--anchor") == 0 || strcmp(argv[i], "--import") == 0 || strcmp(argv[i], "--cohere") == 0 || strcmp(argv[i], "--spread") == 0) && i + 1 < argc)
         {
@@ -1913,7 +2014,7 @@ int main(int argc, char** argv)
     const unsigned long parts = argc >= 4 ? strtoul(argv[2], &end, 10) : 0;
     if (!valid || end == argv[2] || *end != 0 || parts == 0 || parts > PRESPLIT_MAXIMUM_PARTS)
     {
-        fprintf(stderr, "usage: presplit INPUT.bc PARTS DIRECTORY [--import LIMIT] [--anchor M] [--cohere CAP] [--spread S] [--tests-optnone] [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--simplify-first] [--verify] [--report]  (PARTS from 1 to %u)\n",
+        fprintf(stderr, "usage: presplit INPUT.bc PARTS DIRECTORY [--import LIMIT] [--anchor M] [--cohere CAP] [--spread S] [--tests-optnone] [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--constant-arguments] [--verify] [--report]  (PARTS from 1 to %u)\n",
                 PRESPLIT_MAXIMUM_PARTS);
     }
     else
@@ -1938,7 +2039,8 @@ int main(int argc, char** argv)
             plan.parts = (uint32_t)parts;
             plan.srcloc = LLVMGetMDKindIDInContext(context, "srcloc", 6);
             const double parsed = presplit_seconds();
-            const bool simplified = !plan.simplify_first || presplit_simplify(module);
+            const uint32_t constants = plan.constant_arguments ? presplit_constant_arguments(module) : 0;
+            const bool simplified = constants != UINT32_MAX;
             const double prepared = presplit_seconds();
             if (simplified)
             {
@@ -1952,8 +2054,8 @@ int main(int argc, char** argv)
             status = simplified && presplit_locals(&plan, argv[3]) && presplit_parts(&plan, argv[3]) ? 0 : 1;
             if (plan.report)
             {
-                fprintf(stderr, "presplit: reading %.2f s, simplifying %.2f s, planning %.2f s, writing the parts %.2f s\n", parsed - started,
-                        prepared - parsed, planned - prepared, presplit_seconds() - planned);
+                fprintf(stderr, "presplit: reading %.2f s, constant arguments %.2f s (%u), planning %.2f s, writing the parts %.2f s\n",
+                        parsed - started, prepared - parsed, simplified ? constants : 0, planned - prepared, presplit_seconds() - planned);
             }
         }
     }

@@ -754,13 +754,16 @@ them in full; `--report` prints a plan's parts, files and largest functions):
 design, its gate the 9700X job's whole measure; [Release in parts](#release-in-parts)
 below). Its options (`BUSTER_RELEASE_SPLIT_OPTIONS`) add:
 
-- **The whole module's simplification first** (`--simplify-first`): the
-  `-O3` pipeline's passes before its inliner (SROA, EarlyCSE, interprocedural
-  constant propagation, GlobalOpt, InstCombine) run once on the whole unit
-  before the split, so that constant propagation sees every call of a static
-  function, which a part doesn't see of one that other parts call. Without it
-  the parts' `mode_register_is_valid` was 70 to 90 costlier to the inliner
-  than the whole unit's and stayed outlined in `instruction_is_valid`.
+- **The whole module's constant arguments** (`--constant-arguments`): a
+  child process runs SROA and interprocedural constant propagation on the
+  whole unit, and a static function's argument that every call passes as the
+  same constant becomes that constant in the function, before the split. A
+  part's own propagation doesn't see every call of a function other parts
+  call: without it the parts' `mode_register_is_valid` was 70 to 90 costlier
+  to the inliner than the whole unit's and stayed outlined in
+  `instruction_is_valid`. Running the whole simplification before the split
+  instead, and again in each part, reshaped code the whole unit's pipeline
+  shapes once (`benchmark-environments` ran 2.7% slower).
 - **A part reads bodies by what SROA leaves of them** (`--simplified-size`):
   up to 200 instructions, and up to 2.5 times that for vector code, as LLVM's
   inliner raises its threshold for it (`asm_word_registers_vector`, 721

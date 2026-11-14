@@ -816,10 +816,15 @@ instructions by function:
   IPSCCP. The whole unit folded the encoder mode's flags that
   `instruction_is_valid` passes `mode_register_is_valid`, whose cost to the
   inliner was then 195 against the parts' 265 to 290; the parts kept it
-  outlined and `benchmark-assembler` ran 6.3% more instructions. Release now
-  runs the `-O3` pipeline's simplification before the inliner (SROA, EarlyCSE,
-  IPSCCP, GlobalOpt, InstCombine) once on the whole unit, before the split
-  (`--simplify-first`), and the parts' inliner decided as the whole unit's.
+  outlined and `benchmark-assembler` ran 6.3% more instructions. Running the
+  `-O3` pipeline's simplification before the inliner on the whole unit before
+  the split fixed it (`benchmark-assembler` 2.75% fewer instructions than the
+  whole build's), but the parts' pipelines then simplified the module a
+  second time, which reshaped other code (`benchmark-environments` 2.65% more
+  cycles, outside its floor). So a child process runs SROA and IPSCCP on its
+  copy of the whole unit, and the arguments every call passes as the same
+  constant are written into their functions, which are otherwise as clang
+  wrote them (`--constant-arguments`, 310 in the checker's unit).
 
 TODO-MEASURE
 
