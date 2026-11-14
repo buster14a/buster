@@ -1766,17 +1766,18 @@ static IrError ir_optimize_merges(IrOptimizeWork* work, const uint32_t* threads,
             }
         }
     }
-    // A forwarded phi's value may be another merged block's phi, or an identity: each forward goes to its root.
-    for (uint32_t i = 0; error == IR_OK && *merges != 0 && work->forward != 0 && i < f->instruction_count; i += 1)
+    // A forwarded phi's value may be another merged block's phi, or an identity (whose forwards already go to their
+    // roots): each merged phi's forward goes to its root, so the rewrite reads one step.
+    for (uint32_t block = 0; error == IR_OK && *merges != 0 && work->forward != 0 && block < count; block += 1)
     {
-        if (work->forward[i] != BUSTER_IR_NONE)
+        for (uint32_t i = f->block_offsets[block]; heads[block] != block && i < f->block_offsets[(uint64_t)block + 1] && f->op[i] == IR_PHI; i += 1)
         {
             uint32_t root = work->forward[i];
-            while (work->forward[root] != BUSTER_IR_NONE)
+            while (root != BUSTER_IR_NONE && work->forward[root] != BUSTER_IR_NONE)
             {
                 root = work->forward[root];
             }
-            for (uint32_t at = i; work->forward[at] != root;)
+            for (uint32_t at = i; root != BUSTER_IR_NONE && work->forward[at] != root;)
             {
                 const uint32_t following = work->forward[at];
                 work->forward[at] = root;
