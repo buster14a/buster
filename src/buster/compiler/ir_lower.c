@@ -3100,10 +3100,8 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         plan.operations = operations;
         plan.ignored_arguments = ir_typed_ignored_arguments(input, BUSTER_VECTOR_PATH(vector));
         // A function with vectors copies its whole-vector aggregate parameters by vectors of the widths its target has
-        // (#1282): the lowering admits those widths alone (AVX-512F, and VL for 16 and 32 bytes, as a vector entry's).
-        const uint64_t evex = BUSTER_X86_FEATURE(AVX512F);
-        const uint64_t narrow = evex | BUSTER_X86_FEATURE(AVX512VL);
-        plan.vector_copies = !input->vectors || (target_features & evex) != evex ? 0 : (target_features & narrow) == narrow ? 7 : 4;
+        // (#1282): the lowering admits those widths alone (ir_typed_vector_copies, as a vector entry's).
+        plan.vector_copies = input->vectors ? ir_typed_vector_copies(target_features) : 0;
         if (plan.error == 0 && !ir_typed_plan_depth_slots(&plan, scratch))
         {
             plan.error = "no scratch memory for the depth slots";

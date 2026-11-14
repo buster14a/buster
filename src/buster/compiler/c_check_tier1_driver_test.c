@@ -5705,6 +5705,121 @@ static void check_test_driver_tier1_half(CheckTest* test, const char* clang, con
     unlink(unit);
 }
 
+// #2750's copies: below AVX-512 too, an inlined wrapper's by-value vectors are copied by the target's own vector moves
+// (16 bytes at every target, 32 with AVX), so SROA and promotion take their slots as at x86-64-v4. Copied by 8-byte
+// integers, each stayed memory that the wrapper's 16-byte load could not be forwarded from. By each path the build at
+// x86-64 and at x86-64-v3 leaves no more frame than x86-64-v4's of the same source, and runs as clang -O0's does.
+static const char check_test_tier1_vector_copies_source[] =
+    "#include <immintrin.h>\n"
+    "#include <stdio.h>\n"
+    "__attribute__((noinline)) void add(int* d, const int* a, const int* b, int n)\n"
+    "{\n"
+    "    for (int i = 0; i + 4 <= n; i += 4) _mm_storeu_si128((__m128i*)(d + i), _mm_add_epi32(_mm_loadu_si128((const __m128i*)(a + i)), _mm_loadu_si128((const __m128i*)(b + i))));\n"
+    "}\n"
+    "__attribute__((noinline)) void scale(float* d, const float* a, float k, int n)\n"
+    "{\n"
+    "    __m128 kk = _mm_set1_ps(k);\n"
+    "    for (int i = 0; i + 4 <= n; i += 4) _mm_storeu_ps(d + i, _mm_mul_ps(_mm_loadu_ps(a + i), kk));\n"
+    "}\n"
+    "#ifdef WIDE\n"
+    "__attribute__((noinline)) void sub256(int* d, const int* a, const int* b, int n)\n"
+    "{\n"
+    "    for (int i = 0; i + 8 <= n; i += 8) _mm256_storeu_si256((__m256i*)(d + i), _mm256_sub_epi32(_mm256_loadu_si256((const __m256i*)(a + i)), _mm256_loadu_si256((const __m256i*)(b + i))));\n"
+    "}\n"
+    "#endif\n"
+    "static int a[16], b[16], d[16];\n"
+    "static float fa[16], fd[16];\n"
+    "int main(void)\n"
+    "{\n"
+    "    for (int i = 0; i < 16; i += 1) { a[i] = i * 7 + 1; b[i] = 100 - i * 3; fa[i] = (float)i * 0.5f; }\n"
+    "    add(d, a, b, 16);\n"
+    "    scale(fd, fa, 3.0f, 16);\n"
+    "    long s = 0;\n"
+    "    for (int i = 0; i < 16; i += 1) s = s * 31 + d[i] + (long)fd[i];\n"
+    "#ifdef WIDE\n"
+    "    sub256(d, a, b, 16);\n"
+    "    for (int i = 0; i < 16; i += 1) s = s * 31 + d[i];\n"
+    "#endif\n"
+    "    printf(\"%ld\\n\", s);\n"
+    "    return 0;\n"
+    "}\n";
+
+static void check_test_driver_tier1_vector_copies(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const targets[2] = { "x86-64", "x86-64-v3" };
+    char unit[512];
+    snprintf(unit, sizeof(unit), "%s/tier1-vector-copies.c", directory);
+    const bool written = parse_test_write(unit, check_test_tier1_vector_copies_source, strlen(check_test_tier1_vector_copies_source));
+    check_test_expect(test, written, "the vector copies' fixture is written");
+    for (uint32_t t = 0; written && t < 2; t += 1)
+    {
+        // The 32-byte loop is the AVX target's alone: x86-64 has no ymm register.
+        const bool wide = t != 0;
+        X86Target target = { 0 };
+        const bool parsed = x86_target_parse(targets[t], strlen(targets[t]), &target);
+        const bool host = parsed && (x86_target_native().features & target.features) == target.features;
+        char march[64];
+        char reference[512];
+        snprintf(march, sizeof(march), "-march=%s", targets[t]);
+        snprintf(reference, sizeof(reference), "%s/tier1-vector-copies-clang-%u", directory, t);
+        char* reference_arguments[8] = { (char*)clang, "-O0", march, "-o", reference, unit, wide ? "-DWIDE" : NULL, NULL };
+        char* text = NULL;
+        const bool referenced = check_test_driver_spawn(reference_arguments, &text) == 0;
+        free(text);
+        char expected[256] = { 0 };
+        const bool ran = referenced && (!host || (check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0));
+        char message[256];
+        snprintf(message, sizeof(message), "clang's build of the vector copies' fixture runs (%s)", targets[t]);
+        check_test_expect(test, ran, message);
+        for (uint32_t path = 0; ran && path < 2; path += 1)
+        {
+            // Build 0 is the target's; build 1 is x86-64-v4's, whose copies were vectors before #2750: its frame bounds the
+            // target's.
+            uint64_t frames[2] = { UINT64_MAX, 0 };
+            bool clean = true;
+            char program[512];
+            snprintf(program, sizeof(program), "%s/tier1-vector-copies-%u-%u", directory, t, path);
+            for (uint32_t build = 0; build < 2; build += 1)
+            {
+                char* arguments[12] = { (char*)executable, "--tier1", "--tier1-report", "--verify", build == 0 ? march : "-march=x86-64-v4" };
+                uint32_t count = 5;
+                if (wide)
+                {
+                    arguments[count++] = "-DWIDE";
+                }
+                if (path != 0)
+                {
+                    arguments[count++] = "--scalar";
+                }
+                if (build != 0)
+                {
+                    arguments[count++] = "-c";
+                }
+                arguments[count++] = "-o";
+                arguments[count++] = build == 0 ? program : "/dev/null";
+                arguments[count++] = unit;
+                arguments[count] = NULL;
+                text = NULL;
+                const bool built = check_test_driver_spawn(arguments, &text) == 0;
+                uint64_t internal = UINT64_MAX;
+                uint64_t fallbacks = UINT64_MAX;
+                clean = built && check_test_tier1_field(text, "frame_bytes", &frames[build]) && check_test_tier1_field(text, "internal_failures", &internal) && internal == 0 &&
+                        check_test_tier1_field(text, "fallbacks", &fallbacks) && fallbacks == 0 && clean;
+                free(text);
+            }
+            snprintf(message, sizeof(message), "the wrappers' vectors leave no more frame at %s than at x86-64-v4: %llu bytes against %llu (%s path)", targets[t], (unsigned long long)frames[0],
+                     (unsigned long long)frames[1], path != 0 ? "scalar" : "vector");
+            check_test_expect(test, clean && frames[0] <= frames[1], message);
+            char actual[256] = { 0 };
+            snprintf(message, sizeof(message), "the vector copies' fixture by --tier1 runs as clang -O0's build does (%s, %s path)", targets[t], path != 0 ? "scalar" : "vector");
+            check_test_expect(test, clean && (!host || (check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0)), message);
+            unlink(program);
+        }
+        unlink(reference);
+    }
+    unlink(unit);
+}
+
 // #1282's inlining: the unit's always_inline functions of internal linkage expanded into their callers by --tier1, the
 // x86 intrinsics' wrappers above all, whose vectors pass and return by value: their byte-wise copies into fresh slots,
 // split by SROA and promoted. A static always_inline helper of a struct by value (copies by integers), and a static
@@ -5868,6 +5983,7 @@ static void check_test_driver_tier1_inline(CheckTest* test, const char* clang, c
     }
     unlink(reference);
     unlink(unit);
+    check_test_driver_tier1_vector_copies(test, clang, executable, directory);
 }
 
 // The convention's rarer shapes' fixture (#141).
