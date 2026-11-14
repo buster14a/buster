@@ -62,7 +62,7 @@
 //
 // - NodeMachine: the unit's state (node_machine_begin) and the current expression's columns, which T writes, C reads and
 //   writes its own of, and X reads, writing the tape.
-// - The type words (node_machine_word, node_machine_class, node_machine_facts, node_machine_aggregate): one load a type.
+// - The type words (node_machine_word, node_machine_class, node_machine_facts): one load a type.
 // - The record accessors (node_machine_record_*): every read of a record by C, X and the shadow's comparison, and C's
 //   writes of its own columns, go through them, so that a record's layout (T's columns, the design's: a value's type,
 //   flags, object, standing and payload, and the rare value whole on the side) changes here and in T alone.
@@ -370,14 +370,13 @@ struct NodeMachine
     // node_machine_callee_refused.
     IdentId twice_names[BUSTER_CHECK_LOWER_TWICE_NAMES];
     IdentId twice_tag;
-    // C's: the record C is classifying, its operands' consumer. Where a record's state has
-    // BUSTER_NODE_MACHINE_AFTER_CONDITION or _AFTER_ARM, its hook is its consumer's record, whose segment follows its row;
-    // where its template is NODE_MACHINE_TEMPLATE_BRANCH, its label base is the first of its two labels, counted from the
-    // expression's first in the order the tasks number them (node_machine_number_labels), of the expression's
-    // `label_count`. `stack` is the numbering's: the labeled records C met, then their subtrees' first records.
+    // C's: where a record's state has BUSTER_NODE_MACHINE_AFTER_CONDITION or _AFTER_ARM, its hook is its consumer's
+    // record, whose segment follows its row; where its template is NODE_MACHINE_TEMPLATE_BRANCH, its label base is the
+    // first of its two labels, counted from the expression's first in the order the tasks number them
+    // (node_machine_number_labels), of the expression's `label_count`. `stack` is the numbering's: the labeled records C
+    // met, then their subtrees' first records.
     uint32_t* stack;
     uint32_t label_count;
-    uint32_t classified;
     // For an update and its destination (BUSTER_NODE_MACHINE_SPLIT), its plan among the expression's `update_count`
     // `updates` (node_machine_record_update).
     uint32_t* consumers;
@@ -385,14 +384,14 @@ struct NodeMachine
     uint32_t update_count;
     // X's tape, BUSTER_NODE_MACHINE_TAPE_MOST entries: the expression's entries, a local's holding its object, a branch's
     // its label, a call's its row relative to the expression's first and a temporary its number (`temporary_count` of
-    // them); each label's entry, its place in the tape; per record, the evaluated calls before it in postorder; and per
-    // row, its call's record, `call_count` rows.
+    // them); each label's entry, its place in the tape; the evaluated calls' records in the order X writes them
+    // (postorder); and per row, its call's record, `call_count` rows.
     uint8_t* kinds;
     uint8_t* classes;
     uint64_t* tape;
     uint32_t* label_entries;
     uint32_t entry_count;
-    uint32_t* calls_at;
+    uint32_t* calls_written;
     uint32_t* call_records;
     uint32_t call_count;
     uint32_t temporary_count;
@@ -455,7 +454,7 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
     machine->classes = node_machine_column(arena, entries, sizeof(uint8_t), 54);
     machine->tape = node_machine_column(arena, entries, sizeof(uint64_t), 56);
     machine->label_entries = node_machine_column(arena, 2 * most, sizeof(uint32_t), 58);
-    machine->calls_at = node_machine_column(arena, most, sizeof(uint32_t), 60);
+    machine->calls_written = node_machine_column(arena, most, sizeof(uint32_t), 60);
     machine->call_records = node_machine_column(arena, most, sizeof(uint32_t), 62);
     machine->arguments = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
     machine->argument_conversions = BUSTER_ARENA_PUSH_ARRAY(arena, CheckConversion, most);
@@ -467,7 +466,7 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
     machine->const_pointers = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, (uint64_t)machine->type_count + 64);
     const bool room = machine->type_words != NULL && machine->type_complete_at != NULL && classes != NULL && facts != NULL && machine->columns != NULL &&
                       machine->wides != NULL && machine->kinds != NULL && machine->classes != NULL && machine->tape != NULL && machine->label_entries != NULL &&
-                      machine->calls_at != NULL && machine->call_records != NULL && machine->arguments != NULL && machine->argument_conversions != NULL &&
+                      machine->calls_written != NULL && machine->call_records != NULL && machine->arguments != NULL && machine->argument_conversions != NULL &&
                       machine->argument_values != NULL && machine->verified != NULL && machine->stack != NULL && machine->consumers != NULL &&
                       machine->updates != NULL && machine->pointers != NULL && machine->const_pointers != NULL &&
                       machine->argument_memo != NULL;
@@ -505,11 +504,6 @@ static uint8_t node_machine_class(const NodeMachine* machine, TypeId type)
 static uint8_t node_machine_facts(const NodeMachine* machine, TypeId type)
 {
     return (uint8_t)(node_machine_word(machine, type) >> 8);
-}
-
-static bool node_machine_aggregate(const NodeMachine* machine, TypeId type)
-{
-    return (node_machine_facts(machine, type) & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0;
 }
 
 // Record `r`'s graph node.
