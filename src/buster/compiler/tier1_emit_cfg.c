@@ -1879,8 +1879,27 @@ static bool tier1_emit_cfg_dead_definition(const Tier1EmitResult* emitted, uint3
     const bool starts = interval != BUSTER_TIER1_CFG_NONE && cfg->intervals.starts[interval] == definition;
     // Given no register at all (#2618: its definition's use isn't required), the first fragment recomputes it.
     const bool bare = starts && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
-    bool dead = starts && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER && allocation->ends[first] < input->block_starts[block + 1] &&
-                (inside || (!last && allocation->kinds[first + 1] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE));
+    // Or the fragment reaches its block's end, where no edge leaving the block reads its register (#2618): each successor
+    // that v is live into enters with its recipe (a range that rests there), and no phi takes v along the edge.
+    bool leaves = starts && last && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER && allocation->ends[first] == end && end == input->block_starts[block + 1];
+    for (uint32_t e = leaves ? input->successor_offsets[block] : 0; leaves && e < input->successor_offsets[block + 1]; e += 1)
+    {
+        const uint32_t successor = input->successors[e];
+        uint32_t location = 0;
+        uint8_t kind = 0;
+        leaves = !tier1_cfg_entry_location(cfg, v, input->block_starts[successor], &location, &kind) || kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
+        uint32_t j = 0;
+        while (j < input->predecessor_offsets[successor + 1] - input->predecessor_offsets[successor] && input->predecessors[input->predecessor_offsets[successor] + j] != block)
+        {
+            j += 1;
+        }
+        for (uint32_t k = input->phi_offsets[successor]; leaves && k < input->phi_offsets[successor + 1]; k += 1)
+        {
+            leaves = input->phi_operands[input->phi_operand_offsets[k] + j] != v;
+        }
+    }
+    bool dead = starts && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER &&
+                ((allocation->ends[first] < input->block_starts[block + 1] && (inside || (!last && allocation->kinds[first + 1] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE))) || leaves);
     // Uses are sorted: the definition's own (at its position), then those the first fragment serves, before its end.
     for (uint32_t u = dead ? input->use_offsets[v] : 0; dead && u < input->use_offsets[v + 1]; u += 1)
     {
