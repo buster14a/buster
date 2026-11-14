@@ -1435,10 +1435,14 @@ parallel move, without emitting it; the scalar path runs the emitter to count, w
   left are cycles, each of n moves taking n − 1 `xchg`s. With rax first in the depth table and rdi first in the ABI's
   order, a call makes cycles of two alone; a test of the resolver's own covers every length.
 - Division and shifts by a register at depths where rax, rdx or rcx hold other values (through two fixed frame slots).
-- Copies, through their stacks' first free register (an XMM one from 16 bytes, a general one below), which selection
-  counts as reached, so that no local takes it as its home:
-  - from 16 bytes, a load and a store with `movups` per 16, the last 16 ending at the end;
-  - below, two of a general register's 8, 4, 2 or 1 bytes, the second ending at the end (one when that is all).
+- Copies, through their stacks' first free register (an XMM one past 32 bytes, a general one up to 32), which
+  selection counts as reached, so that no local takes it as its home:
+  - past 32 bytes, per 16 bytes, two 8-byte loads into the XMM register's halves (`movsd`, `movhps`) and one store of
+    it (`movups`), the last 16 ending at the end (#2693): no load is wider than the 8-byte stores that often just built
+    the source, which a wider load can't forward from (#1375), and the stores are half as many as 8-byte pieces', which
+    bound a cold source's copy;
+  - from 8 to 32 bytes, a load and a store of the general register's 8 bytes per 8, the last 8 ending at the end;
+  - below, two of a general register's 4, 2 or 1 bytes, the second ending at the end (one when that is all).
 
   Overlapping pieces copy what they would apart, the ranges being the same or apart. `rep movsb` would copy any size
   in a few records, but `x86_semantics.c` has no row for it, and `unwind_tier0.c` refuses a function with an
