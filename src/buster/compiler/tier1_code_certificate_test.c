@@ -1283,6 +1283,113 @@ static void tier1_code_certificate_store(Tier1EmitTest* test, bool vector)
     arena_pop_to(&test->input, 0);
 }
 
+// The literal pool (#2744): l(p) stores c0 + c1 at p, two vector constants of four doublewords that no broadcast makes
+// ({ 1, 2, 3, 4 } and { 16, 32, 48, 64 }), each its literal's rip-relative load. Its code is certified. Then each of
+// these is refused, one at a time, everything put back after: a literal's bytes changed, its width, a load's reference's
+// addend, its target the other literal (whose bytes aren't its constant's), and the emission's index naming the other
+// literal for a constant. The literal's bytes, not its index, are what the certificate checks.
+static void tier1_code_certificate_literals(Tier1EmitTest* test, bool vector, uint32_t* refused)
+{
+    const IrSizes sizes = { .instruction_count = 6, .block_count = 1, .parameter_count = 1, .vector_constant_count = 2 };
+    IrFunction function;
+    const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+    if (created)
+    {
+        function.result_type = IR_VOID;
+        function.parameter_types[0] = IR_PTR;
+        function.incoming = (AbiCall){ .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .integer_registers = 1 };
+        function.block_offsets[1] = 6;
+        for (uint32_t lane = 0; lane < 4; lane += 1)
+        {
+            ir_simd_lane_write(&function.vector_constants[0], 32, lane, lane + 1);
+            ir_simd_lane_write(&function.vector_constants[1], 32, lane, 16 * (lane + 1));
+        }
+        tier1_select_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 1, IR_VCONST, IR_V4I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 2, IR_VCONST, IR_V4I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 3, IR_ADD, IR_V4I32, 1, 2, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 4, IR_STORE, IR_VOID, 0, 3, BUSTER_IR_NONE);
+        function.alignment_log2[4] = 4;
+        tier1_select_test_node(&function, 5, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    }
+    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    tier1_emit_test_expect(test, valid, "the code certificate's literal fixture is valid IR");
+    IrDominance dominance;
+    const bool dominated = valid && tier1_terminal_dominance(test, &function, vector, &dominance);
+    Tier1SelectPlan plan;
+    uint32_t node = BUSTER_IR_NONE;
+    const Tier1SelectError selection = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+    const bool planned = selection == TIER1_SELECT_OK;
+    tier1_emit_test_expect(test, planned, "the code certificate's literal fixture selects");
+    Tier1EmitDiagnostic diagnostic = {0};
+    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .certify = true, .diagnostic = &diagnostic };
+    Tier1EmitResult emitted = {0};
+    const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+    const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
+    if (!certified)
+    {
+        fprintf(stderr, "tier1-emit: literal certificate: path=%s selection=%u emission=%u cause=%u detail=%u node=%u checked=%u reason=%u\n",
+                vector ? "vector" : "scalar", (unsigned)selection, (unsigned)error, (unsigned)diagnostic.cause, diagnostic.error, node, emitted.code_checked, emitted.code_reason);
+    }
+    tier1_emit_test_expect(test, certified, "a function whose vector constants are its literals' loads passes the emitted-code certificate");
+    // Both constants are literals, each loaded once, rip-relative, by the reference that names it.
+    uint32_t loads = 0;
+    uint32_t first = UINT32_MAX;
+    for (uint32_t i = 0; certified && i < emitted.reference_count; i += 1)
+    {
+        const LinkReference reference = emitted.references[i];
+        const X86Instruction record = emitted.code.records[reference.instruction];
+        const bool literal = reference.target >= BUSTER_TIER1_EMIT_LITERAL && reference.kind == BUSTER_LINK_FIXUP_PC32 && reference.field == X86_FIXUP_DISPLACEMENT &&
+                             reference.addend == 0 && (record.mode & BUSTER_X86_MEMORY_RIP) == BUSTER_X86_MEMORY_RIP;
+        loads += literal;
+        first = literal && first == UINT32_MAX ? i : first;
+    }
+    const bool shaped = certified && emitted.literal_count == 2 && loads == 2 && emitted.literal_widths[0] == 16 && emitted.literal_widths[1] == 16;
+    tier1_emit_test_expect(test, shaped, "the literal fixture's two constants are two 16-byte literals, each one rip-relative load's");
+    for (uint32_t mutation = 0; shaped && mutation < 5; mutation += 1)
+    {
+        LinkReference* reference = &emitted.references[first];
+        const LinkReference kept_reference = *reference;
+        const uint32_t literal = reference->target - BUSTER_TIER1_EMIT_LITERAL;
+        const IrSimdValue kept_bytes = emitted.literals[literal];
+        const uint8_t kept_width = emitted.literal_widths[literal];
+        // The constant's entry of the emission's index (16-byte literals: each constant's first of three).
+        uint32_t* index = &emitted.literal_of[literal == emitted.literal_of[0] - 1 ? 0 : 3];
+        const uint32_t kept_index = *index;
+        if (mutation == 0)
+        {
+            emitted.literals[literal].words[1] ^= 1;
+        }
+        else if (mutation == 1)
+        {
+            emitted.literal_widths[literal] = 32;
+        }
+        else if (mutation == 2)
+        {
+            reference->addend = 4;
+        }
+        else if (mutation == 3)
+        {
+            reference->target = BUSTER_TIER1_EMIT_LITERAL + (literal ^ 1);
+        }
+        else
+        {
+            *index = (literal ^ 1) + 1;
+        }
+        const bool rejected = tier1_code_certificate_refused(test, &plan, &emitted);
+        *reference = kept_reference;
+        emitted.literals[literal] = kept_bytes;
+        emitted.literal_widths[literal] = kept_width;
+        *index = kept_index;
+        tier1_emit_test_expect(test, rejected, "a literal's corrupted bytes, width, addend, target or index is refused");
+        *refused += rejected;
+    }
+    tier1_emit_test_expect(test, !shaped || !tier1_code_certificate_refused(test, &plan, &emitted), "the literal fixture's code is certified again once put back");
+    arena_pop_to(&test->output, 0);
+    arena_pop_to(&test->scratch, 0);
+    arena_pop_to(&test->input, 0);
+}
+
 // The producer's row owners are assertions, not evidence. Corrupt them without
 // touching the allocation, and corrupt the predecessor's store without changing
 // its metadata: both must be refused even though the register assertion remains.
@@ -1633,6 +1740,12 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
     {
         tier1_code_certificate_realigned(test, variant != 0, &counts);
     }
+    uint32_t literals_refused = 0;
+    for (uint32_t variant = 0; variant < 2; variant += 1)
+    {
+        tier1_code_certificate_literals(test, variant != 0, &literals_refused);
+    }
+    tier1_emit_test_expect(test, literals_refused == 10, "every corrupted literal of both paths' compiles is refused");
     tier1_emit_test_expect(test, counts.realigned == 2 && counts.late == 2, "the realigned-frame fixture's compiles push a register past rbp, and their allocation moves before it");
     tier1_emit_test_expect(test, counts.narrow == 2 && counts.narrow_register == 2 && counts.narrow_stack == 2, "the narrow-parameter fixture's compiles have an extension in a register and one from a slot");
     tier1_emit_test_expect(test, counts.exchange == 2 && counts.exchange_live == 2, "the compare-exchange fixture's compiles each restore rax around the exchange");

@@ -3227,7 +3227,9 @@ static uint8_t* tier1_masks_test_load(Tier1MasksTest* test, Tier1EmitResult* emi
     const uint32_t helper_count = tier1_masks_test_helper(helper);
     const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
     const uint64_t helper_start = (capacity + 63) & ~UINT64_C(63);
-    *mapped = (helper_start + BUSTER_X86_ENCODER_CAPACITY(helper_count) + 4095) & ~UINT64_C(4095);
+    // The code's literals after the helper (#2744, tier1_emit_place_literals).
+    const uint64_t literal_start = helper_start + BUSTER_X86_ENCODER_CAPACITY(helper_count);
+    *mapped = (literal_start + tier1_emit_literal_bytes(emitted) + 4095) & ~UINT64_C(4095);
     uint8_t* machine = mmap(0, *mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     uint8_t* scalar = malloc(capacity);
     uint32_t* offsets = malloc(((uint64_t)code->count + 1) * sizeof(uint32_t));
@@ -3275,9 +3277,14 @@ static uint8_t* tier1_masks_test_load(Tier1MasksTest* test, Tier1EmitResult* emi
         ok = ok && tier1_masks_test_expect(test, helper_size > 0, "encode the helper");
         test->records += code->count;
     }
+    ok = ok && tier1_masks_test_expect(test, tier1_emit_place_literals(emitted, machine, ends, literal_start, *mapped), "the code's literals are placed");
     for (uint32_t reference = 0; ok && reference < emitted->reference_count; reference += 1)
     {
         const LinkReference* fixup = &emitted->references[reference];
+        if (fixup->target >= BUSTER_TIER1_EMIT_LITERAL)
+        {
+            continue;
+        }
         const uint32_t end = ends[reference];
         const uint32_t distance = x86_fixup_distance(code->records[fixup->instruction].form, fixup->field);
         ok = tier1_masks_test_expect(test, fixup->kind == BUSTER_LINK_FIXUP_CALL && fixup->target == BUSTER_TIER1_MASKS_TEST_HELPER && distance == 4 && end >= distance, "each call is the helper's");
