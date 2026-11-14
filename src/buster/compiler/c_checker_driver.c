@@ -9311,8 +9311,8 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     CheckDebug dwarf = { 0 };
     check_clock_mark(stage_clock, CHECK_STAGE_EMIT_SETUP);
     bool valid = output.base != 0 && bytes.base != 0 &&
-                 check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output, &bytes, scratch, NULL, debug ? &rows : NULL,
-                                          unwind, verify, lanes, stage_clock);
+                 check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output, &bytes, scratch, NULL, kept != NULL && !foreign,
+                                          debug ? &rows : NULL, unwind, verify, lanes, stage_clock);
     check_driver_lower_report(&code, stage_clock);
     if (!valid)
     {
@@ -9976,7 +9976,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                                                                                     scratch, merge_lanes, lanes->units_flow, &merge_lease) :
                                         units != NULL     ? check_units_merge(&code.link, units, unit_count, &binding, debug ? &dwarf.attach : NULL, &output, &bytes, scratch) :
                                                             check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output,
-                                                                                     &bytes, scratch, &binding, debug ? &rows : NULL, unwind, verify, lanes, stage_clock));
+                                                                                     &bytes, scratch, &binding, false, debug ? &rows : NULL, unwind, verify, lanes, stage_clock));
         check_units_slots_back(lanes->units_flow, &merge_lease);
         if (units != NULL)
         {
@@ -10413,13 +10413,14 @@ struct CheckDriverCommand
     // --tier1 (c_check_tier1.c), and the report its units' emissions sum into, atomically: units compile on lanes; and
     // --tier1-refusals' stream, or null; and --tier1-no-rematerialize; and --tier1-gvn, which each unit's lanes take
     // too (check_units_compile), so that a command of several files runs the solver its option asked for; and
-    // --tier1-no-lifetimes; and --tier1-no-inline (#1282).
+    // --tier1-no-lifetimes; and --tier1-no-inline (#1282); and --tier1-no-hold (#2541 step 2).
     bool tier1;
     bool tier1_strict;
     bool tier1_no_rematerialize;
     bool tier1_gvn;
     bool tier1_no_lifetimes;
     bool tier1_no_inline;
+    bool tier1_no_hold;
     // --tier0-no-inline keeps Tier 0's calls of always_inline functions (#1398).
     bool tier0_no_inline;
     // --emit-window=N: each unit's one-lane emission by windows of about N tokens (#2536, CheckProgramLanes.window_tokens).
@@ -12882,6 +12883,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             lanes->tier1_no_inline = true;
         }
+        else if (match.exact == C_OPTION_TIER1_NO_HOLD)
+        {
+            lanes->tier1_no_hold = true;
+        }
         else if (match.exact == C_OPTION_TIER0_NO_INLINE)
         {
             lanes->tier0_no_inline = true;
@@ -13151,7 +13156,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // instrumentation, ABI layouts and the language/target. The Tier 1 combination check has no source dependency.
     const CheckRequestRefusal refusal = parsed ? check_request_refusal(&request, &options, emit_object || link) : codegen;
     const bool invalid_tier1 = !lanes->tier1 && (lanes->tier1_strict || tier1_report || lanes->tier1_refusals != NULL || lanes->tier1_no_rematerialize ||
-                                               tier1_gvn || lanes->tier1_no_lifetimes || lanes->tier1_no_inline || tier1_schedule_seen);
+                                               tier1_gvn || lanes->tier1_no_lifetimes || lanes->tier1_no_inline || lanes->tier1_no_hold || tier1_schedule_seen);
     const bool libraries_ready = !parsed || refusal.error != CHECK_REQUEST_ACCEPTED || !link || mixed_inputs || libraries.count == 0 ||
                                  worker_budget.dry_run || invalid_tier1 || check_driver_named_archives(&libraries, runtime_kind, &arena, &mixed_inputs);
     if (parsed && libraries_ready && stdin_count != 0)
@@ -13241,6 +13246,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier1_gvn = lanes->tier1_gvn,
         .tier1_no_lifetimes = lanes->tier1_no_lifetimes,
         .tier1_no_inline = lanes->tier1_no_inline,
+        .tier1_no_hold = lanes->tier1_no_hold,
         .tier0_no_inline = lanes->tier0_no_inline,
         .window_tokens = lanes->window_tokens,
         .tier1_schedule = lanes->tier1_schedule,
@@ -13305,7 +13311,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                                                     tier1_report ? "--tier1-report" : lanes->tier1_refusals != NULL ? "--tier1-refusals" :
                                                     lanes->tier1_no_rematerialize ? "--tier1-no-rematerialize" : tier1_gvn ? "--tier1-gvn" :
                                                     lanes->tier1_no_lifetimes ? "--tier1-no-lifetimes" : lanes->tier1_no_inline ? "--tier1-no-inline" :
-                                                    "--tier1-schedule");
+                                                    lanes->tier1_no_hold ? "--tier1-no-hold" : "--tier1-schedule");
     }
     else
     {

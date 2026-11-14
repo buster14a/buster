@@ -2252,6 +2252,7 @@ static void check_units_lane_functions(const CheckUnitsRun* run, CheckUnitsLane*
         .tier1_gvn = command->tier1_gvn,
         .tier1_no_lifetimes = command->tier1_no_lifetimes,
         .tier1_no_inline = command->tier1_no_inline,
+        .tier1_no_hold = command->tier1_no_hold,
         .tier0_no_inline = command->tier0_no_inline,
         .window_tokens = command->window_tokens,
         .poison_windows = command->poison_arenas,

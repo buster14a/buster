@@ -702,13 +702,26 @@ static bool ir_inline_shape(const IrFunction* function, bool control_flow, Arena
     {
         // A value's result is a COPY; an aggregate's bytes are copied instead (ir_inline_copies).
         body.size = function->result_type != IR_VOID && function->result_size == 0;
+        uint64_t extra = 0;
+        uint64_t types = 0;
+        uint32_t descriptors = 0;
         for (uint32_t node = 0; node + 1 < function->instruction_count; node += 1)
         {
             // A br is the chain's (ir_inline_chain), between its blocks, and disappears.
             const uint32_t op = function->op[node];
             body.supported &= op == IR_BR || (ir_inline_cloned(op) && (op != IR_CALL || function->calls[function->b[node]].row != 0 || function->calls[function->b[node]].body != 0));
             body.size += op != IR_PARAM && op != IR_BR;
+            // The rows its calls' rebuilt descriptors and ternary intrinsics' third operands take (ir_inline_descriptor,
+            // ir_inline_third), which are what an expansion writes: an optimized function's tables may hold rows no node
+            // names any more.
+            const bool call = op == IR_CALL;
+            descriptors += call;
+            extra += call ? function->calls[function->b[node]].argument_count : ir_ternary_instruction(function, node) ? 1 : 0;
+            types += call ? function->calls[function->b[node]].parameter_count : 0;
         }
+        body.descriptors = descriptors;
+        body.extra = extra < BUSTER_IR_INLINE_MAX_ITEMS ? (uint32_t)extra : BUSTER_IR_INLINE_MAX_ITEMS;
+        body.types = types < BUSTER_IR_INLINE_MAX_ITEMS ? (uint32_t)types : BUSTER_IR_INLINE_MAX_ITEMS;
         const uint64_t cost = (uint64_t)body.size + function->constant_count + function->address_count + function->vector_constant_count + function->row_count + function->asm_body_count + function->slot_count;
         body.cost = cost < UINT32_MAX ? (uint32_t)cost : UINT32_MAX - 1;
     }
@@ -840,8 +853,10 @@ static void ir_inline_threshold(const uint32_t* costs, uint32_t count, uint32_t 
     }
 }
 
-// The side-table rows an expansion of `callee` appends to its caller past its copies' (#2541): a general body's rebuilt
-// slices, descriptors, blocks and ABI records; a straight line's tables as they are.
+// The side-table rows an expansion of `callee` appends to its caller past its copies' (#2541): its calls' rebuilt
+// descriptors and slices (ir_inline_shape counts what its nodes name, a straight line's too: #2541 step 2 found a summary
+// whose tables held a deleted call's types, which the caller's then held uninitialized), and a general body's blocks and
+// ABI records.
 typedef struct IrInlineRows IrInlineRows;
 struct IrInlineRows
 {
@@ -856,9 +871,9 @@ struct IrInlineRows
 static IrInlineRows ir_inline_rows(const IrFunction* callee, const IrInlineBody* shape)
 {
     const IrInlineRows rows = {
-        .descriptors = shape->general ? shape->descriptors : callee->call_count,
-        .extra = shape->general ? shape->extra : callee->extra_count,
-        .types = shape->general ? shape->types : callee->call_type_count,
+        .descriptors = shape->descriptors,
+        .extra = shape->extra,
+        .types = shape->types,
         .blocks = shape->general ? (uint64_t)callee->block_count + 1 : 0,
         .abi_calls = shape->general ? callee->abi_call_count : 0,
         .passed = shape->general ? callee->passed_count : 0,

@@ -11,7 +11,8 @@
 // expects, then that the chain ends at main's frame. Each build, by Tier 0 and by --tier1 (with and without
 // rematerialization), by each path and with the leaf rule or without, prints clang's build's output, and its object
 // starts each chain function with `push rbp; mov rbp, rsp`, the leaf function too but under the leaf rule. Without the
-// option, Tier 0's and Tier 1's frames keep none, as before.
+// option, Tier 0's and Tier 1's frames keep none, as before. The chain's one inlining candidate, frame_third, is noinline:
+// --tier1 expands an external definition's calls too (#2541 step 2), which would take its frame out of the chain.
 
 static const char check_test_frame_pointer_source[] =
     "#include <stdarg.h>\n"
@@ -20,7 +21,7 @@ static const char check_test_frame_pointer_source[] =
     "\n"
     "int frame_leaf(int x) { return x * 3 + 1; }\n"
     "\n"
-    "int frame_third(int x)\n"
+    "__attribute__((noinline)) int frame_third(int x)\n"
     "{\n"
     "    int a[4] = { x, x + 1, x + 2, x + 3 };\n"
     "    return frame_walk(3) * 100 + a[x & 3];\n"

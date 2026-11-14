@@ -1836,6 +1836,88 @@ static void ir_inline_test_side_table_growth(IrInlineTest* test, Arena* input, A
     arena_pop_to(twin, 0);
 }
 
+// A straight-line callee whose side tables hold rows no node names any more, as an optimized summary's may (#2541 step
+// 2: the optimizer deleted a call, whose descriptor, arguments and types stayed): an expansion writes the rows its nodes
+// name alone, so the caller's tables hold its own calls' rows and nothing else, and the result verifies. Sized by the
+// callee's whole tables, the caller's held the stale rows' count of uninitialized ones, which IR_VOID types fail. The
+// callee is copied as it is (IrInlineUnit.only, as a summary is), not rewritten first, which would drop its stale rows.
+static void ir_inline_test_stale_rows(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
+{
+    IrFunction functions[2];
+    // The caller: its parameter, a call of the leaf (expanded), a call of an unknown symbol (kept) and its return.
+    functions[0] = ir_inline_test_function(test, input, (IrSizes){
+                                                            .instruction_count = 4,
+                                                            .block_count = 1,
+                                                            .call_count = 2,
+                                                            .extra_count = 2,
+                                                            .call_type_count = 2,
+                                                            .parameter_count = 1,
+                                                        },
+                                           IR_I32);
+    // The leaf: x + 3, with a deleted call's descriptor, two arguments' slots and two types left in its tables.
+    functions[1] = ir_inline_test_function(test, input, (IrSizes){
+                                                            .instruction_count = 4,
+                                                            .block_count = 1,
+                                                            .constant_count = 1,
+                                                            .parameter_count = 1,
+                                                            .call_count = 1,
+                                                            .extra_count = 2,
+                                                            .call_type_count = 2,
+                                                        },
+                                           IR_I32);
+    if (test->failures == 0)
+    {
+        functions[0].parameter_types[0] = IR_I32;
+        ir_inline_test_node(&functions[0], 0, IR_PARAM, IR_I32, 0, UINT32_MAX, UINT32_MAX);
+        functions[0].extra[0] = 0;
+        functions[0].extra[1] = 1;
+        ir_inline_test_call(&functions[0], 1, 0, 2, 0, 1, IR_I32);
+        ir_inline_test_call(&functions[0], 2, 1, 9, 1, 1, IR_I32);
+        ir_inline_test_node(&functions[0], 3, IR_RET, IR_VOID, 2, UINT32_MAX, UINT32_MAX);
+        functions[1].parameter_types[0] = IR_I32;
+        functions[1].constants[0].low = 3;
+        ir_inline_test_node(&functions[1], 0, IR_PARAM, IR_I32, 0, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_node(&functions[1], 1, IR_CONST, IR_I32, 0, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_node(&functions[1], 2, IR_ADD, IR_I32, 0, 1, UINT32_MAX);
+        ir_inline_test_node(&functions[1], 3, IR_RET, IR_VOID, 2, UINT32_MAX, UINT32_MAX);
+        functions[1].calls[0] = (IrCall){ .argument_first = 0, .argument_count = 2, .type_first = 0, .parameter_count = 2, .result_type = IR_I32 };
+        functions[1].extra[0] = 0;
+        functions[1].extra[1] = 2;
+        functions[1].call_types[0] = IR_I32;
+        functions[1].call_types[1] = IR_I32;
+        const uint32_t symbols[] = {
+            1,
+            2,
+        };
+        const uint8_t flags[] = {
+            0,
+            BUSTER_IR_INLINE_INTERNAL,
+        };
+        // The caller alone rewritten, its callee copied as it is, as Tier 1's driver copies a summary (IrInlineUnit.only).
+        const IrInlineUnit unit = {
+            .functions = functions,
+            .symbols = symbols,
+            .flags = flags,
+            .count = 2,
+            .symbol_count = 128,
+            .only = 1,
+        };
+        IrInlineResult result = { 0 };
+        if (ir_inline_test_run(test, &unit, ir_inline_options(), output, twin, scratch, &result))
+        {
+            const IrFunction* caller = &result.functions[0];
+            ir_inline_test_expect(test, result.inlined_calls == 1 && caller->call_count == 1 && caller->extra_count == 1 && caller->call_type_count == 1,
+                                  "a straight line's stale rows take no rows of its caller's");
+            const uint64_t mark = scratch->length;
+            ir_inline_test_expect(test, ir_verify_path(caller, scratch, 0, true).error == IR_OK, "the caller of a straight line with stale rows verifies");
+            arena_pop_to(scratch, mark);
+        }
+    }
+    arena_pop_to(input, 0);
+    arena_pop_to(output, 0);
+    arena_pop_to(twin, 0);
+}
+
 static void ir_inline_test_failures(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
 {
     IrFunction functions[2];
@@ -1987,6 +2069,7 @@ static __attribute__((unused)) int run_ir_optimize_inline_tests(int argc, char**
         ir_inline_test_threshold_guards(&test);
         ir_inline_test_empty_and_identity(&test, &input, &output, &twin, &scratch);
         ir_inline_test_side_table_growth(&test, &input, &output, &twin, &scratch);
+        ir_inline_test_stale_rows(&test, &input, &output, &twin, &scratch);
         ir_inline_test_failures(&test, &input, &output, &twin, &scratch);
         ir_inline_test_simd(&test, &input, &output, &twin, &scratch);
         ir_inline_test_general(&test, &input, &output, &twin, &scratch);

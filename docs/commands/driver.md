@@ -33,8 +33,10 @@ requirements. [Command index](README.md).
   `code_certified`, or left for a shape it doesn't decode, `code_uncertified`),
   and `--tier1-no-rematerialize` compiles them without rematerialization,
   `--tier1-no-lifetimes` without their objects' lifetimes and
-  `--tier1-no-inline` without expanding the unit's always_inline functions'
-  calls, which the report's `inlined` counts (#1282): [the Tier 1
+  `--tier1-no-inline` without expanding the unit's candidates' calls, which
+  the report's `inlined` counts, or leaving functions without code, its
+  `dead` (#1282, #2541), and `--tier1-no-hold` with every candidate's code
+  made on its lane, none held for the last pass (the same objects): [the Tier 1
   guide](../../docs/tier1.md)'s "The C driver's `--tier1`" and "Inlining", and [Tier 1 failure
   outcomes](../../docs/tier1-outcomes.md)); `-O` flags set only preprocessor
   optimization macros, not the tier; Tier 0 is the default, and inlines the same calls: `--tier0-no-inline` keeps them, #1398's control, [the Tier 0 guide](tier0.md#inlining-always_inline-functions-1398)), `--emit-window=N` taking one lane's emission in windows of about N tokens, each window's lowering and code before the next one's, in memory the next one reuses (#2536's step 1; 0, the default, is one window: [function lanes](function-lanes.md#windows-2536)), `--id-order N` handing the unit's identifiers their

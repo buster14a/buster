@@ -37,7 +37,9 @@
 // --directory ($TMPDIR, or /tmp: a tmpfs on the 9700X, which takes speedtest1's database and SQLite's temporary
 // files), removed at the end unless --keep. docs/tier1.md has the 9700X's numbers.
 //
-// #1116: paired relocatable objects also compare the exact source bodies compiled by Tier 1 against clang -O0.
+// #1116: paired relocatable objects also compare the exact source bodies compiled by Tier 1 against clang -O0, each built
+// by its --tier1 options and --tier1-no-inline: a function into which inlining expanded others' bodies has no counterpart
+// in clang -O0's object, and inlining's own growth is #2541's measurement (docs/tier1-unit-inlining.md).
 // SQLite is sqlite3.c alone with the flags below; Lua includes luac.c as well as the interpreter's 33 sources.
 // Matching stays within each translation unit, so local names and the runtime's unity build cannot skew the sums.
 // --check-code-size requires each corpus's complete Tier 1 function bytes <= its matching clang -O0 bytes; =lua or
@@ -285,6 +287,9 @@ static bool tier1_programs_size_object(const Tier1Programs* p, uint32_t build, b
     if (tier1)
     {
         tier1_programs_add(&c, "--tier1-function-sizes");
+        // The bound is per function against clang -O0's same function, which an expansion of another function's body
+        // makes no counterpart of (#2541 step 2): its objects keep every call.
+        tier1_programs_add(&c, "--tier1-no-inline");
         // Object sizes need no parallel compilation; respect the hosted command group's single-CPU budget.
         tier1_programs_add(&c, "--lanes");
         tier1_programs_add(&c, "1");
