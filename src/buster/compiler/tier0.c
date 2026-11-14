@@ -496,8 +496,8 @@ struct Tier0AsmBody
 #define BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 4
 // A COPY's bytes, at most: 16 stores of 16 bytes, the most LLVM expands a memcpy into at -O0.
 #define BUSTER_TIER0_MAX_COPY_BYTES 256
-// An aggregate argument's bytes, at most (Tier0Function.argument_sizes): one on the stack is copied into place by a load
-// and a store per 16 bytes, so that a call's records stay within 8,192 per argument.
+// An aggregate argument's bytes, at most (Tier0Function.argument_sizes): one on the stack is copied into place by two
+// loads and a store per 16 bytes (tier0_copy), so that a call's records stay within 12,288 per argument.
 #define BUSTER_TIER0_MAX_ARGUMENT_BYTES (1u << 16)
 
 // A function, as the front end hands it to Tier 0: the body's columns, the locals (parameters first, in order) with
@@ -5585,11 +5585,13 @@ static void tier0_extend(Tier0Writer* writer, uint32_t class, uint32_t reg)
     }
 }
 
-// A copy of at most this many bytes moves 8 bytes at a time, as Tier 1 does: a small aggregate is often built by 8-byte
-// stores, and a 16-byte load spanning two of them can't forward (#1375). Larger copies keep 16-byte moves: on the
-// 9700X, 8-byte pieces copy a 64-byte struct just built in 0.63 times the cycles, but a cold 128- or 256-byte source in
-// 1.75 to 1.77 times, store-bound (#1375's record, buster-performance's named-results-1375-2026-11-13). A width chosen
-// from what last wrote the source is #2693.
+// A copy of at most this many bytes moves 8 bytes at a time through a general register, as Tier 1 does; a larger one
+// moves 16 at a time through an XMM register, each 16 loaded as two 8-byte halves (movsd, movhps) and stored whole
+// (movups). No load is wider than 8 bytes, so none spans two 8-byte stores that built the source just before, which
+// can't forward to it (#1375); half as many stores as 8-byte pieces keep a cold source's copy from being store-bound.
+// The one shape serves both sources, which a copy can't tell apart (#2693). On the 9700X, against 16-byte loads and
+// stores, a 64- to 256-byte copy of a struct just built by 8-byte stores takes 0.26 to 0.63 times the cycles, and one
+// of a cold source XXX (buster-performance's copy-shapes-2693-2026-11-14).
 #define BUSTER_TIER0_COPY_NARROW_BYTES 32
 
 // The widest piece a copy of `size` bytes uses: 8 for a small aggregate, 16 for a larger one.
@@ -5598,10 +5600,11 @@ static uint32_t tier0_copy_width(uint32_t size)
     return size <= BUSTER_TIER0_COPY_NARROW_BYTES ? 8 : 16;
 }
 
-// `size` bytes copied from [from + from_displacement] to [to + to_displacement], the ranges the same or apart: a load
-// and a store per piece through `general`'s 8 bytes or XMM register `xmm`'s 16, the last piece ending at the end; below
-// 8, one or two of a general register's 4, 2 or 1 bytes. Overlapping pieces copy what they would apart. A COPY's
-// records, and a call's aggregates' (tier0_emit_call).
+// `size` bytes copied from [from + from_displacement] to [to + to_displacement], the ranges the same or apart, a piece
+// at a time, the last piece ending at the end: an 8-byte one as a load and a store of `general`, a 16-byte one as two
+// 8-byte loads into XMM register `xmm`'s halves and a store of it; below 8, one or two of a general register's 4, 2 or 1
+// bytes. Each piece's loads come before its store, so overlapping pieces copy what they would apart. A COPY's records,
+// and a call's aggregates' (tier0_emit_call).
 static void tier0_copy(Tier0Writer* writer, uint8_t to, int32_t to_displacement, uint8_t from, int32_t from_displacement, uint32_t size, uint8_t general, uint8_t xmm)
 {
     const uint32_t width = tier0_copy_width(size);
@@ -5610,11 +5613,17 @@ static void tier0_copy(Tier0Writer* writer, uint8_t to, int32_t to_displacement,
         for (uint32_t offset = 0; offset < size; offset += width)
         {
             const int32_t at = (int32_t)(offset + width <= size ? offset : size - width);
-            const uint32_t load = width == 16 ? X86_FORM_MOVUPS_X_XM : X86_FORM_MOV_R64_RM64;
-            const uint32_t store = width == 16 ? X86_FORM_MOVUPS_XM_X : X86_FORM_MOV_RM64_R64;
-            const uint8_t reg = width == 16 ? xmm : general;
-            tier0_put(writer, tier0_instruction(load, reg, from, BUSTER_X86_MEMORY_BASE, from_displacement + at, 0));
-            tier0_put(writer, tier0_instruction(store, reg, to, BUSTER_X86_MEMORY_BASE, to_displacement + at, 0));
+            if (width == 16)
+            {
+                tier0_put(writer, tier0_instruction(X86_FORM_MOVSD_X_XM64, xmm, from, BUSTER_X86_MEMORY_BASE, from_displacement + at, 0));
+                tier0_put(writer, tier0_instruction(X86_FORM_MOVHPS_X_M64, xmm, from, BUSTER_X86_MEMORY_BASE, from_displacement + at + 8, 0));
+                tier0_put(writer, tier0_instruction(X86_FORM_MOVUPS_XM_X, xmm, to, BUSTER_X86_MEMORY_BASE, to_displacement + at, 0));
+            }
+            else
+            {
+                tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, general, from, BUSTER_X86_MEMORY_BASE, from_displacement + at, 0));
+                tier0_put(writer, tier0_instruction(X86_FORM_MOV_RM64_R64, general, to, BUSTER_X86_MEMORY_BASE, to_displacement + at, 0));
+            }
         }
     }
     else
@@ -5632,12 +5641,14 @@ static void tier0_copy(Tier0Writer* writer, uint8_t to, int32_t to_displacement,
     }
 }
 
-// How many records tier0_copy writes for `size` bytes (at least 1): a load and a store per piece; below 8, one or two.
+// How many records tier0_copy writes for `size` bytes (at least 1): two per 8-byte piece, three per 16-byte one (two
+// loads and a store); below 8, two or four.
 static uint32_t tier0_copy_records(uint32_t size)
 {
     const uint32_t width = tier0_copy_width(size);
     const uint32_t piece = size >= 4 ? 4 : size >= 2 ? 2 : 1;
-    return size >= width ? 2 * ((size + width - 1) / width) : size > piece ? 4 : 2;
+    const uint32_t per_piece = width == 16 ? 3 : 2;
+    return size >= width ? per_piece * ((size + width - 1) / width) : size > piece ? 4 : 2;
 }
 
 // The red zone temporary `t`'s place below rsp (BUSTER_TIER0_TEMPORARIES), or an interrupt service routine's in its frame,
@@ -7094,9 +7105,11 @@ static void tier0_emit_shift(const Tier0Entries* entries, const Tier0Frame* fram
 }
 
 // A copy of `value` bytes, from the address at depth − 1 to the one at depth − 2, through its stacks' first free
-// register: from 16 bytes, 16 at a time in an XMM register (movups), the last 16 ending at the end, overlapping the ones
-// before; below 16, two pieces of a general register's 8, 4, 2 or 1 bytes, the second ending at the end (one when
-// that is the whole). The ranges are the same or apart, so overlapping pieces copy what they would apart.
+// register (tier0_copy): past BUSTER_TIER0_COPY_NARROW_BYTES, 16 at a time in an XMM register, loaded as two 8-byte
+// halves and stored whole, the last 16 ending at the end, overlapping the ones before; up to it, 8 at a time in a general
+// register, the last 8 ending at the end; below 8, two pieces of a general register's 4, 2 or 1 bytes, the second
+// ending at the end (one when that is the whole). The ranges are the same or apart, so overlapping pieces copy what
+// they would apart.
 static void tier0_emit_copy(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, Tier0Writer* writer)
 {
     const uint32_t size = (uint32_t)function->values[i];
