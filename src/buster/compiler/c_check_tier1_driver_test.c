@@ -2095,8 +2095,10 @@ static void check_test_driver_tier1_passes(CheckTest* test, const char* clang, c
     snprintf(object_b, sizeof(object_b), "%s/tier1-passes-two-b.o", directory);
     unlink(object_a);
     unlink(object_b);
-    // #2781's vector/mask-only passes are on by default: this function has two equal loop-invariant vector additions.
-    // Its scalar loop and arithmetic are untouched by -vectors, whose report must show neither pass ran.
+    // #2781's vector/mask-only passes are on by default: this function's loop builds the same vector constant twice, as
+    // the lexer's byte-class tables are built at each use. The solver runs before promotion, where a local's reads are
+    // loads, which it never merges (two `a + a` stay apart even with +gvn): equal constants are what it shares here. It
+    // merges the two, and LICM moves what is left out of the loop. -vectors's report must show neither pass ran.
     static const char vector_passes_source[] =
         "#include <stdio.h>\n"
         "typedef int Tier1Vector __attribute__((vector_size(16)));\n"
@@ -2105,9 +2107,9 @@ static void check_test_driver_tier1_passes(CheckTest* test, const char* clang, c
         "    Tier1Vector total = { 0, 0, 0, 0 };\n"
         "    for (int i = 0; i < n; i += 1)\n"
         "    {\n"
-        "        Tier1Vector x = a + a;\n"
-        "        Tier1Vector y = a + a;\n"
-        "        total += x + y;\n"
+        "        const Tier1Vector low = { 1, 3, 5, 7 };\n"
+        "        const Tier1Vector high = { 1, 3, 5, 7 };\n"
+        "        total += (a & low) + (a ^ high);\n"
         "    }\n"
         "    return total[0] + total[1] + total[2] + total[3];\n"
         "}\n"

@@ -909,6 +909,7 @@ static void ir_gvn_test_vectors(IrOptimizeTest* test)
     arena_release(&scalar);
     arena_release(&scratch);
 }
+
 // The width changes (#1840) on values SCCP can't fold, a parameter's splat: GVN merges an insert, an extract and a widen
 // equal to another, keeps the insert and the extract of another part (the intrinsic's flags) apart, by both paths, and the
 // interpreter's mask is unchanged.

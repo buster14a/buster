@@ -462,6 +462,7 @@ static void ir_licm_test_vector_nested(IrOptimizeTest* test)
     arena_release(&scalar);
     arena_release(&scratch);
 }
+
 static void ir_licm_test_simd(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(UINT64_C(16) << 20);
