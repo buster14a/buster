@@ -47,6 +47,8 @@ typedef enum CheckDebugAbbreviation
     CHECK_DEBUG_VECTOR = 34,
     CHECK_DEBUG_UNAVAILABLE_GLOBAL = 35,
     CHECK_DEBUG_ENUM_WIDE = 36,
+    CHECK_DEBUG_INLINED = 37,
+    CHECK_DEBUG_ABSTRACT = 38,
 } CheckDebugAbbreviation;
 
 static const uint8_t check_debug_value_abbreviations[] = {
@@ -84,6 +86,8 @@ static const uint8_t check_debug_value_abbreviations[] = {
     0x22, 0x01, 0x01, 0x49, 0x13, 0x87, 0x42, 0x19, 0x00, 0x00, // VECTOR
     0x23, 0x34, 0x00, 0x03, 0x08, 0x49, 0x13, 0x3f, 0x0c, 0x00, 0x00, // UNAVAILABLE_GLOBAL
     0x24, 0x28, 0x00, 0x03, 0x08, 0x1c, 0x1e, 0x00, 0x00, // ENUM_WIDE
+    0x25, 0x1d, 0x01, 0x31, 0x13, 0x55, 0x17, 0x58, 0x0f, 0x59, 0x0f, 0x00, 0x00, // INLINED
+    0x26, 0x2e, 0x01, 0x03, 0x08, 0x49, 0x13, 0x3a, 0x0f, 0x3b, 0x0f, 0x20, 0x0b, 0x00, 0x00, // ABSTRACT
     0,
 };
 
@@ -121,6 +125,16 @@ struct CheckDebugValues
     uint32_t span_leaves;
     uint32_t span_segment_count;
     uint32_t span_body;
+    // Each expanded callee's abstract instance's offset in the unit (a DW_TAG_subprogram with DW_AT_inline and no code,
+    // written before its own DW_TAG_subprogram), which the measuring pass sets and the writing pass reads, its instances'
+    // abstract origin; which bodies some instance expands; and, for a function's instances, the open ones (a stack) and
+    // their order by call token (CheckDebugInline, #2541 step 3), room for the most a function has. An instance's origin
+    // can't be the out-of-line DW_TAG_subprogram: a debugger reads an attribute an entry lacks from its origin, and gdb 18
+    // (and CI's) takes the inherited DW_AT_low_pc over the instance's DW_AT_ranges, which drops the instance.
+    uint32_t* function_offsets;
+    uint8_t* expanded;
+    uint32_t* inline_open;
+    uint64_t* inline_order;
 };
 
 static String8 check_debug_name(const CheckDebugValues* values, uint32_t identifier)
@@ -795,6 +809,111 @@ static bool check_debug_value_declaration(const CheckInput* input, uint32_t toke
                                                   check_sparse_get(input->declaration_bodies, token) != BUSTER_CHECK_NONE);
 }
 
+// The end of instance `k`'s subtree among a function's instances (CheckDebugInline), which lists each instance's own after
+// it (the inliner appends an expansion's callee's instances after its own): the first after it with no ancestor at k.
+static uint32_t check_debug_inline_end(const CheckDebugBody* source, uint32_t k)
+{
+    uint32_t end = k + 1;
+    bool inside = true;
+    while (inside && end < source->inline_count)
+    {
+        uint32_t parent = source->inlines[end].parent;
+        while (parent != BUSTER_CHECK_NONE && parent > k && parent < end)
+        {
+            parent = source->inlines[parent].parent;
+        }
+        inside = parent == k;
+        end += inside ? 1 : 0;
+    }
+    return end;
+}
+
+// The range list of instance subtree [first, end) in body `body`: its spans (CheckDebugValueSpan.inline_instance)
+// adjacent ones coalesced; how many pairs it has (0 writes nothing but the list's end, which the caller doesn't refer to).
+static uint32_t check_debug_inline_ranges(const CheckDebugBody* source, DebugWriter* out, uint32_t body, uint32_t first, uint32_t end)
+{
+    uint32_t pairs = 0;
+    uint32_t begin = 0;
+    uint32_t stop = 0;
+    for (uint32_t s = 0; s <= source->span_count; s += 1)
+    {
+        const CheckDebugValueSpan span = s < source->span_count ? source->spans[s] : (CheckDebugValueSpan){ 0 };
+        const bool keep = s < source->span_count && span.inline_instance > first && span.inline_instance <= end;
+        if (begin < stop && (!keep || span.begin != stop))
+        {
+            if (pairs == 0)
+            {
+                debug_integer(out, 1, 1); // DW_RLE_base_addressx
+                debug_uleb(out, body);
+            }
+            check_debug_value_pair(out, begin, stop, NULL, 0);
+            pairs += 1;
+            begin = stop;
+        }
+        if (keep)
+        {
+            begin = begin == stop ? span.begin : begin;
+            stop = span.end;
+        }
+    }
+    if (pairs != 0)
+    {
+        debug_integer(out, 0, 1);
+    }
+    return pairs;
+}
+
+// Body `body`'s described instance `k` and its subtree, nested as their expansions were (#2541 step 3): a
+// DW_TAG_inlined_subroutine each, whose abstract origin is its callee's DW_TAG_subprogram, at its call's line in the
+// function's file, over its code and its nested instances' code. An instance without code, or undescribed, is left out with
+// its subtree. Explicit stack, no recursion: the instances list each subtree in order.
+static void check_debug_inline_write(CheckDebugValues* values, uint32_t body, uint32_t k, uint32_t file)
+{
+    const CheckDebugBody* source = values->rows->values + body;
+    const uint32_t end = check_debug_inline_end(source, k);
+    uint32_t depth = 0;
+    for (uint32_t j = k; j < end; j += 1)
+    {
+        const CheckDebugInline instance = source->inlines[j];
+        while (depth != 0 && values->inline_open[depth - 1] != instance.parent)
+        {
+            debug_integer(&values->info, 0, 1);
+            depth -= 1;
+        }
+        const bool placed = j == k || depth != 0;
+        const uint32_t subtree = check_debug_inline_end(source, j);
+        // The pairs first, by measuring into a writer of no bytes: a list of none isn't referred to.
+        DebugWriter probe = { 0 };
+        const bool spanned = placed && instance.described && check_debug_inline_ranges(source, &probe, body, j, subtree) != 0;
+        if (spanned)
+        {
+            debug_uleb(&values->info, CHECK_DEBUG_INLINED);
+            debug_integer(&values->info, values->function_offsets[instance.body], 4);
+            check_debug_value_field(values, DEBUG_SECTION_RNGLISTS, values->ranges.size);
+            check_debug_inline_ranges(source, &values->ranges, body, j, subtree);
+            debug_uleb(&values->info, file);
+            debug_uleb(&values->info, instance.call_line);
+            values->inline_open[depth++] = j;
+        }
+        else
+        {
+            j = subtree - 1;
+        }
+    }
+    while (depth != 0)
+    {
+        debug_integer(&values->info, 0, 1);
+        depth -= 1;
+    }
+}
+
+static int check_debug_inline_compare(const void* x, const void* y)
+{
+    const uint64_t a = *(const uint64_t*)x;
+    const uint64_t b = *(const uint64_t*)y;
+    return a < b ? -1 : a > b ? 1 : 0;
+}
+
 #define CHECK_DEBUG_ROOT 1u
 #define CHECK_DEBUG_USED 2u
 #define CHECK_DEBUG_BODY 4u
@@ -921,6 +1040,42 @@ static void check_debug_values_write(CheckDebugValues* values)
         const DebugFunction function = original->unit.functions[b];
         const uint32_t closing = parser->tree.parents[body.opening];
         const TypeId type = input->declared_types[body.declaration];
+        // The abstract instance its instances refer to (#2541 step 3): its name, type, line and parameters, no code.
+        if (values->expanded[b] != 0)
+        {
+            values->function_offsets[b] = (uint32_t)values->info.size;
+            debug_uleb(&values->info, CHECK_DEBUG_ABSTRACT);
+            debug_string(&values->info, function.name);
+            check_debug_type_reference(values, type_return(program->types, type));
+            debug_uleb(&values->info, function.file);
+            debug_uleb(&values->info, function.line);
+            debug_integer(&values->info, 1, 1); // DW_INL_inlined
+            for (uint32_t p = check_sparse_get(input->parameters, body.opening); p != BUSTER_CHECK_NONE; p = check_sparse_get(input->parameter_next, p))
+            {
+                debug_uleb(&values->info, CHECK_DEBUG_UNAVAILABLE_PARAMETER);
+                debug_string(&values->info, check_debug_name(values, parser->tokens.names[p]));
+                check_debug_type_reference(values, input->declared_types[p]);
+            }
+            debug_integer(&values->info, 0, 1); // abstract instance children
+        }
+        // Its top-level described instances (#2541 step 3) by call token, written where the walk reaches their call,
+        // in the scope that holds it; those whose call is outside the body's tokens after them.
+        const CheckDebugBody* source = values->rows->values + b;
+        uint32_t ordered = 0;
+        for (uint32_t k = 0; k < source->inline_count; k += 1)
+        {
+            if (source->inlines[k].parent == BUSTER_CHECK_NONE && source->inlines[k].described)
+            {
+                values->inline_order[ordered++] = (uint64_t)source->inlines[k].call_token << 32 | k;
+            }
+        }
+        qsort(values->inline_order, ordered, sizeof(uint64_t), check_debug_inline_compare);
+        uint32_t next_inline = 0;
+        while (next_inline < ordered && (uint32_t)(values->inline_order[next_inline] >> 32) <= body.opening)
+        {
+            next_inline += 1;
+        }
+        const uint32_t first_inline = next_inline;
         debug_uleb(&values->info, CHECK_DEBUG_FUNCTION);
         debug_string(&values->info, function.name);
         check_debug_type_reference(values, type_return(program->types, type));
@@ -957,10 +1112,23 @@ static void check_debug_values_write(CheckDebugValues* values)
                     check_debug_value_typedef(values, token);
                 }
             }
+            while (next_inline < ordered && (uint32_t)(values->inline_order[next_inline] >> 32) == token)
+            {
+                check_debug_inline_write(values, b, (uint32_t)values->inline_order[next_inline], function.file);
+                next_inline += 1;
+            }
             while (depth != 0 && values->scopes[depth - 1] <= token)
             {
                 debug_integer(&values->info, 0, 1);
                 depth -= 1;
+            }
+        }
+        // The instances whose call is outside the body's tokens (before its opening brace, or past its closing one).
+        for (uint32_t k = 0; k < ordered; k += 1)
+        {
+            if (k < first_inline || k >= next_inline)
+            {
+                check_debug_inline_write(values, b, (uint32_t)values->inline_order[k], function.file);
             }
         }
         debug_integer(&values->info, 0, 1); // subprogram children
@@ -996,12 +1164,22 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
     values.span_tree = values.span_segments != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 4 * (uint64_t)check_debug_value_leaves(most_spans + 1)) : NULL;
     values.span_breaks = values.span_tree != NULL ? values.span_breaks : NULL;
     values.span_body = BUSTER_CHECK_NONE;
+    uint32_t most_inlines = 0;
+    for (uint32_t b = 0; b < program->body_count; b += 1)
+    {
+        most_inlines = rows->values[b].inline_count > most_inlines ? rows->values[b].inline_count : most_inlines;
+    }
+    values.function_offsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->body_count + 1);
+    values.expanded = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1);
+    values.inline_open = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)most_inlines + 1);
+    values.inline_order = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)most_inlines + 1);
     // The driver uses tree_only parsing: the checker's derived traversal was scratch-owned and is gone now.
     // Reuse the bounded statement-end derivation without changing the already checked program's status.
     CheckProgram traversal = *program;
     values.ends = parser->ends != NULL ? parser->ends : check_program_statement_ends(&traversal, parser, scratch);
     bool valid = values.type_offsets != NULL && values.types != NULL && values.enum_definitions != NULL && values.enum_owners != NULL && values.local_ids != NULL &&
-                 values.scopes != NULL && values.marks != NULL && values.ends != NULL;
+                 values.scopes != NULL && values.marks != NULL && values.ends != NULL && values.function_offsets != NULL && values.expanded != NULL &&
+                 values.inline_open != NULL && values.inline_order != NULL;
     if (valid)
     {
         memset(values.type_offsets, 0, room * sizeof(uint32_t));
@@ -1009,6 +1187,15 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
         // (The roots' scan takes the local ids and the scopes for its starts and its worklist, before either is used.)
         check_debug_value_roots(&values, values.local_ids, values.scopes);
         memset(values.local_ids, 0xff, ((uint64_t)tokens + 1) * sizeof(uint32_t));
+        memset(values.expanded, 0, (uint64_t)program->body_count + 1);
+        for (uint32_t b = 0; b < program->body_count; b += 1)
+        {
+            for (uint32_t k = 0; k < rows->values[b].inline_count; k += 1)
+            {
+                const CheckDebugInline instance = rows->values[b].inlines[k];
+                values.expanded[instance.body < program->body_count ? instance.body : program->body_count] |= instance.described;
+            }
+        }
         for (uint32_t t = 0; t < tokens; t += 1)
         {
             if (check_debug_value_declaration(input, t) && (values.marks[t] & (CHECK_DEBUG_ROOT | CHECK_DEBUG_USED)) != 0)
