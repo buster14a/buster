@@ -4,7 +4,10 @@
 // Original #1382 C-source regressions. Include after c_check_tier1_driver_test.c. The ordinary driver command runs
 // the semantic fixtures against Clang on both scalar paths and with rematerialization on/off. A separate decoded
 // object check proves the C lowering/promotion/if-conversion/selection chain reaches cmov for pure max/clamp and
-// conditional arithmetic, while the guarding branches of potentially faulting loads and division remain.
+// conditional arithmetic, while the guarding branches of potentially faulting loads and division remain. #1382's
+// kernels follow: a nested clamp, `&&` and `||` values, and loops whose arms reload the element the head compared
+// (a conditional sum and a select of it or its negation), whose only conditional branch is the loop's. A running max,
+// whose condition reads the maximum its select would carry, and a reload after a call keep their branches.
 
 static const char check_test_tier1_if_convert_header[] =
     "long if_max(long a, long b);\n"
@@ -19,7 +22,14 @@ static const char check_test_tier1_if_convert_header[] =
     "unsigned long if_shift(int take, unsigned long a, unsigned b);\n"
     "unsigned long if_effects(int take, volatile unsigned long* p, unsigned long x);\n"
     "unsigned long if_call(int take, unsigned long x);\n"
-    "unsigned long other_effect(unsigned long x);\n";
+    "unsigned long other_effect(unsigned long x);\n"
+    "long if_nested(long x);\n"
+    "_Bool if_and(int a, int b);\n"
+    "int if_andor(int a, int b, int c);\n"
+    "long if_condsum(const int* a, int n);\n"
+    "long if_abssum(const int* a, int n);\n"
+    "int if_runmax(const int* a, int n);\n"
+    "unsigned long if_reload_call(const unsigned long* p);\n";
 
 static const char check_test_tier1_if_convert_source[] =
     "#include \"tier1-if-convert.h\"\n"
@@ -34,7 +44,14 @@ static const char check_test_tier1_if_convert_source[] =
     "unsigned long if_div(int take, unsigned long a, unsigned long b) { return take ? a / b : 11; }\n"
     "unsigned long if_shift(int take, unsigned long a, unsigned b) { return take ? a << b : 13; }\n"
     "unsigned long if_effects(int take, volatile unsigned long* p, unsigned long x) { if (take) { *p = x; return *p; } return 17; }\n"
-    "unsigned long if_call(int take, unsigned long x) { return take ? other_effect(x) : 19; }\n";
+    "unsigned long if_call(int take, unsigned long x) { return take ? other_effect(x) : 19; }\n"
+    "long if_nested(long x) { return x < 0 ? 0 : x > 255 ? 255 : x; }\n"
+    "_Bool if_and(int a, int b) { return a < 128 && b < 128; }\n"
+    "int if_andor(int a, int b, int c) { return (a < b) && (b < c || c == 0); }\n"
+    "long if_condsum(const int* a, int n) { long s = 0; for (int i = 0; i < n; i++) if (a[i] > 128) s += a[i]; return s; }\n"
+    "long if_abssum(const int* a, int n) { long s = 0; for (int i = 0; i < n; i++) s += a[i] > 128 ? a[i] : -a[i]; return s; }\n"
+    "int if_runmax(const int* a, int n) { int m = 0; for (int i = 0; i < n; i++) m = a[i] > m ? a[i] : m; return m; }\n"
+    "unsigned long if_reload_call(const unsigned long* p) { unsigned long v = *p; unsigned long w = other_effect(v); return v > 3 ? *p + w : w; }\n";
 
 static const char check_test_tier1_if_convert_other[] =
     "#include <stdio.h>\n"
@@ -68,9 +85,25 @@ static const char check_test_tier1_if_convert_other[] =
     "        h = h * 31 + if_effects(take, take ? &observed : (volatile unsigned long*)0, data[i]);\n"
     "        h = h * 31 + if_call(take, data[i]);\n"
     "    }\n"
+    "    for (long x = -300; x < 600; x += 7) h = h * 31 + (unsigned long)if_nested(x);\n"
+    "    h = h * 31 + (unsigned long)if_nested(edges[0]) + (unsigned long)if_nested(edges[8]);\n"
+    "    for (int a = 120; a < 136; a += 1) for (int b = 120; b < 136; b += 1) h = h * 31 + (unsigned)if_and(a, b);\n"
+    "    for (int a = -2; a < 3; a += 1) for (int b = -2; b < 3; b += 1) for (int c = -2; c < 3; c += 1) h = h * 31 + (unsigned)if_andor(a, b, c);\n"
+    "    int elements[64];\n"
+    "    for (unsigned i = 0; i < 64; i += 1) { state = state * 6364136223846793005UL + 1; elements[i] = (int)((state >> 33) % 300) - 20; }\n"
+    "    for (int n = 0; n <= 64; n += 1) h = h * 31 + (unsigned long)if_condsum(elements, n) + (unsigned long)if_abssum(elements, n) * 7 + (unsigned)if_runmax(elements, n);\n"
+    "    for (unsigned i = 0; i < 97; i += 1) h = h * 31 + if_reload_call(&data[i]) + (data[i] & 3);\n"
     "    printf(\"%lu %lu %lu\\n\", h, calls, observed);\n"
     "    return 0;\n"
     "}\n";
+
+typedef struct CheckTestIfConvertShape CheckTestIfConvertShape;
+struct CheckTestIfConvertShape
+{
+    const char* name;
+    uint32_t selects;
+    uint32_t branches;
+};
 
 static void check_test_driver_tier1_if_convert(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
@@ -92,7 +125,89 @@ static void check_test_driver_tier1_if_convert(CheckTest* test, const char* clan
     uint32_t* types = calloc(CHECK_TEST_IF_CONVERT_RECORDS, sizeof(uint32_t));
     const bool ready = written && records != NULL && offsets != NULL && types != NULL && x86_disassembler_initialize();
     check_test_expect(test, ready, "if-conversion native code-shape fixture prepares");
-    static const char* const names[] = { "if_max", "if_umax", "if_clamp", "if_add", "if_both", "if_load", "if_div", "if_shift", "if_call" };
+    // Each function's least cmov count and its conditional branches: none, the loop's alone, or a kept one (any).
+    static const CheckTestIfConvertShape shapes[] = {
+        {
+            .name = "if_max",
+            .selects = 1,
+            .branches = 0,
+        },
+        {
+            .name = "if_umax",
+            .selects = 1,
+            .branches = 0,
+        },
+        {
+            .name = "if_clamp",
+            .selects = 2,
+            .branches = 0,
+        },
+        {
+            .name = "if_add",
+            .selects = 1,
+            .branches = 0,
+        },
+        {
+            .name = "if_both",
+            .selects = 1,
+            .branches = 0,
+        },
+        {
+            .name = "if_nested",
+            .selects = 2,
+            .branches = 0,
+        },
+        {
+            .name = "if_and",
+            .selects = 1,
+            .branches = 0,
+        },
+        {
+            .name = "if_andor",
+            .selects = 2,
+            .branches = 0,
+        },
+        {
+            .name = "if_condsum",
+            .selects = 1,
+            .branches = 1,
+        },
+        {
+            .name = "if_abssum",
+            .selects = 1,
+            .branches = 1,
+        },
+        {
+            .name = "if_runmax",
+            .selects = 0,
+            .branches = UINT32_MAX,
+        },
+        {
+            .name = "if_load",
+            .selects = 0,
+            .branches = UINT32_MAX,
+        },
+        {
+            .name = "if_div",
+            .selects = 0,
+            .branches = UINT32_MAX,
+        },
+        {
+            .name = "if_shift",
+            .selects = 0,
+            .branches = UINT32_MAX,
+        },
+        {
+            .name = "if_call",
+            .selects = 0,
+            .branches = UINT32_MAX,
+        },
+        {
+            .name = "if_reload_call",
+            .selects = 0,
+            .branches = UINT32_MAX,
+        },
+    };
     for (uint32_t path = 0; ready && path < 2; path += 1)
     {
         char object[512];
@@ -100,10 +215,10 @@ static void check_test_driver_tier1_if_convert(CheckTest* test, const char* clan
         CheckTestTier1Build build;
         const bool compiled = check_test_tier1_build(executable, source, "", object, false, path != 0, true, false, NULL, &build);
         check_test_expect(test, compiled, "if-conversion native shape unit compiles entirely by Tier 1");
-        for (uint32_t function = 0; compiled && function < BUSTER_ARRAY_LENGTH(names); function += 1)
+        for (uint32_t function = 0; compiled && function < BUSTER_ARRAY_LENGTH(shapes); function += 1)
         {
             uint32_t relocations = 0;
-            const uint32_t count = check_test_tier1_function(object, names[function], records, CHECK_TEST_IF_CONVERT_RECORDS, offsets, types, &relocations);
+            const uint32_t count = check_test_tier1_function(object, shapes[function].name, records, CHECK_TEST_IF_CONVERT_RECORDS, offsets, types, &relocations);
             uint32_t selects = 0;
             uint32_t branches = 0;
             for (uint32_t i = 0; i < count; i += 1)
@@ -112,9 +227,11 @@ static void check_test_driver_tier1_if_convert(CheckTest* test, const char* clan
                 selects += x86_effects(form)->operation == X86_OPERATION_CMOVCC;
                 branches += (x86_effects(form)->kinds >> 4) == BUSTER_X86_CONTROL_BRANCH;
             }
+            const bool guarded = shapes[function].branches == UINT32_MAX;
             char message[256];
-            snprintf(message, sizeof(message), "if-conversion %s has %s (path %u)", names[function], function < 5 ? "cmov and no conditional branch" : "a guarding conditional branch", path);
-            check_test_expect(test, count != 0 && (function < 5 ? selects >= (function == 2 ? 2u : 1u) && branches == 0 : branches != 0), message);
+            snprintf(message, sizeof(message), "if-conversion %s has %s (path %u)", shapes[function].name,
+                     guarded ? "a guarding conditional branch" : shapes[function].branches == 0 ? "cmov and no conditional branch" : "cmov and only its loop's conditional branch", path);
+            check_test_expect(test, count != 0 && selects >= shapes[function].selects && (guarded ? branches != 0 : branches == shapes[function].branches), message);
         }
         unlink(object);
     }

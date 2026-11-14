@@ -43,10 +43,17 @@
 #define BUSTER_CHECK_CLASS_PENDING (UINT32_MAX - 1)
 // A class slot's shape for a value with a payload row: this bit and its template's index.
 #define BUSTER_CHECK_CLASS_PAYLOAD (1u << 31)
-// The key's first word: the operator, extensions << 8, the floating environment << 11, the objects' pattern << 12, the
-// arguments' count << 18 and this bit, so that a header is neither static word's other value, with the member in its high
-// half.
+// The key's first word: seven operator bits, three extension bits, eight floating-policy bits, six object-pattern
+// bits, seven argument-count bits, then VALID. Keep their ranges disjoint as the environment gains policy bits.
+// The member occupies the key's high half.
+#define BUSTER_CHECK_KEY_EXTENSIONS_SHIFT 7u
+#define BUSTER_CHECK_KEY_ENVIRONMENT_SHIFT 10u
+#define BUSTER_CHECK_KEY_OBJECTS_SHIFT 18u
+#define BUSTER_CHECK_KEY_ARGUMENTS_SHIFT 24u
 #define BUSTER_CHECK_KEY_VALID (1u << 31)
+
+_Static_assert(CHECK_OP_COUNT <= (1u << BUSTER_CHECK_KEY_EXTENSIONS_SHIFT), "transition operators fit before the extensions");
+_Static_assert(BUSTER_CHECK_TRANSITION_ARGUMENTS < 128, "transition argument counts fit below the valid bit");
 
 // How a node's key came out: memoized, a node the table doesn't take, an operand or argument without a class (a fold), or
 // an operand waiting in the batch, which must run first.
@@ -192,8 +199,9 @@ static uint32_t check_transition_static(const CheckGraph* graph, const CheckStre
                           (!call || ((graph->members[node] & BUSTER_CHECK_LIBRARY_CALL) == 0 && count <= BUSTER_CHECK_TRANSITION_ARGUMENTS));
     const uint32_t token = graph->tokens != NULL ? graph->tokens[node] : BUSTER_CHECK_NONE;
     const uint32_t extensions = graph->extensions | (check_graph_relaxed_token(graph, token) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0);
-    const uint32_t environment = graph->fp_environments != NULL ? graph->fp_environments[node] : 0;
-    const uint32_t header = (uint32_t)op | extensions << 8 | environment << 11 | count << 18 | BUSTER_CHECK_KEY_VALID;
+    const uint32_t environment = graph->fp_environments != NULL ? graph->fp_environments[node] : graph->fp_contract_default;
+    const uint32_t header = (uint32_t)op | extensions << BUSTER_CHECK_KEY_EXTENSIONS_SHIFT | environment << BUSTER_CHECK_KEY_ENVIRONMENT_SHIFT |
+                            count << BUSTER_CHECK_KEY_ARGUMENTS_SHIFT | BUSTER_CHECK_KEY_VALID;
     return op == CHECK_OP_VALUE ? BUSTER_CHECK_TRANSITION_LEAF : eligible ? header : BUSTER_CHECK_TRANSITION_OTHER;
 }
 
@@ -236,11 +244,12 @@ static void check_transition_statics(const CheckGraph* graph, const CheckStream*
             }
         }
         const __m512i environment = graph->fp_environments != NULL ? _mm512_cvtepu8_epi32(_mm_loadu_si128((const __m128i*)(graph->fp_environments + node))) :
-                                    _mm512_setzero_si512();
+                                    _mm512_set1_epi32(graph->fp_contract_default);
         const __m512i extensions = _mm512_mask_or_epi32(_mm512_set1_epi32((int)graph->extensions), system, _mm512_set1_epi32((int)graph->extensions),
                                                         _mm512_set1_epi32(BUSTER_CHECK_EXTENSION_SYSTEM_HEADER));
-        const __m512i header = _mm512_or_si512(_mm512_or_si512(op, _mm512_slli_epi32(extensions, 8)),
-                                               _mm512_or_si512(_mm512_or_si512(_mm512_slli_epi32(environment, 11), _mm512_slli_epi32(arguments, 18)),
+        const __m512i header = _mm512_or_si512(_mm512_or_si512(op, _mm512_slli_epi32(extensions, BUSTER_CHECK_KEY_EXTENSIONS_SHIFT)),
+                                               _mm512_or_si512(_mm512_or_si512(_mm512_slli_epi32(environment, BUSTER_CHECK_KEY_ENVIRONMENT_SHIFT),
+                                                                               _mm512_slli_epi32(arguments, BUSTER_CHECK_KEY_ARGUMENTS_SHIFT)),
                                                                _mm512_set1_epi32((int)BUSTER_CHECK_KEY_VALID)));
         const __m512i words = _mm512_mask_mov_epi32(_mm512_maskz_mov_epi32(eligible, header), _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(CHECK_OP_VALUE)),
                                                     _mm512_set1_epi32(BUSTER_CHECK_TRANSITION_LEAF));
@@ -552,7 +561,7 @@ static inline __attribute__((always_inline)) CheckTransitionKind check_transitio
         wait |= operand_classes[i] == BUSTER_CHECK_CLASS_PENDING;
         fold |= operand_classes[i] == BUSTER_CHECK_CLASS_UNKEYED;
     }
-    const uint32_t count = header >> 18 & 0x7f;
+    const uint32_t count = header >> BUSTER_CHECK_KEY_ARGUMENTS_SHIFT & 0x7f;
     // A call's arguments: each one's class with whether it has an object, and their hash (FNV-1a's, by words).
     uint64_t arguments = count != 0 ? 0xcbf29ce484222325u : 0;
     const uint32_t offset = count != 0 ? graph->argument_offsets[node] : 0;
@@ -566,7 +575,7 @@ static inline __attribute__((always_inline)) CheckTransitionKind check_transitio
         argument_words[i] = word;
         arguments = (arguments ^ word) * 0x100000001b3u;
     }
-    miss->key[0] = (header | check_transition_pattern(operand_objects) << 12) | (uint64_t)graph->members[node] << 32;
+    miss->key[0] = (header | check_transition_pattern(operand_objects) << BUSTER_CHECK_KEY_OBJECTS_SHIFT) | (uint64_t)graph->members[node] << 32;
     miss->key[1] = graph->types[node] | (uint64_t)operand_classes[0] << 32;
     miss->key[2] = operand_classes[1] | (uint64_t)operand_classes[2] << 32;
     miss->key[3] = arguments;
@@ -940,7 +949,8 @@ static __attribute__((noinline)) void check_transition_other(CheckTransitionRun*
     {
         check_transition_flush(run->types, graph, stream, table, run->classes, batch, run->arguments, run->scratch);
         kind = eligible ? check_transition_key(graph, stream, run->classes, node, header, miss, run->words) : CHECK_TRANSITION_NONE;
-        found = kind == CHECK_TRANSITION_KEYED ? check_transitions_find(table, miss->key, miss->hash, run->words, header >> 18 & 0x7f) : BUSTER_CHECK_NONE;
+        found = kind == CHECK_TRANSITION_KEYED ? check_transitions_find(table, miss->key, miss->hash, run->words,
+                                                                      header >> BUSTER_CHECK_KEY_ARGUMENTS_SHIFT & 0x7f) : BUSTER_CHECK_NONE;
     }
     miss->keyed = kind == CHECK_TRANSITION_KEYED;
     miss->guards = (CheckActionGuards){ 0 };
@@ -1032,7 +1042,8 @@ static __attribute__((noinline)) bool check_graph_transitions(TypeTable* types, 
             if (header > BUSTER_CHECK_TRANSITION_LEAF)
             {
                 kind = check_transition_key(graph, stream, classes, node, header, &miss, words);
-                found = kind == CHECK_TRANSITION_KEYED ? check_transitions_find(&table, miss.key, miss.hash, words, header >> 18 & 0x7f) : BUSTER_CHECK_NONE;
+                found = kind == CHECK_TRANSITION_KEYED ? check_transitions_find(&table, miss.key, miss.hash, words,
+                                                                              header >> BUSTER_CHECK_KEY_ARGUMENTS_SHIFT & 0x7f) : BUSTER_CHECK_NONE;
                 done = found != BUSTER_CHECK_NONE && check_transition_guards_hold(graph, &table, table.entries + found, node);
             }
             if (done)

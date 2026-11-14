@@ -38,7 +38,7 @@ static uint32_t ir_rebuild_values(uint32_t op)
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_SDIV: case IR_UDIV: case IR_SREM: case IR_UREM:
         case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_LSHR: case IR_ASHR:
         case IR_FADD: case IR_FSUB: case IR_FMUL: case IR_FDIV: case IR_ICMP: case IR_FCMP: case IR_STORE: case IR_INTRINSIC: case IR_ATOMIC_RMW: mask = 3; break;
-        case IR_SELECT: case IR_MASKED_LOAD: case IR_MASKED_STORE: mask = 7; break;
+        case IR_SELECT: case IR_MASKED_LOAD: case IR_MASKED_STORE: case IR_COMPRESS_STORE: case IR_GATHER: mask = 7; break;
         default: break;
     }
     return mask;

@@ -1328,7 +1328,7 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
                 end = cfg->intervals.ends[i] > end ? cfg->intervals.ends[i] : end;
             }
             // A phi's slot is written at its predecessors' ends, where the phi isn't live yet.
-            const uint32_t home = phis[v] != 0 ? tier1_cfg_block_of(input, input->definitions[v]) : 0;
+            const uint32_t home = phis[v] != 0 ? tier1_cfg_block_at(input, cfg, input->definitions[v]) : 0;
             for (uint32_t e = phis[v] != 0 ? input->predecessor_offsets[home] : 0; phis[v] != 0 && e < input->predecessor_offsets[home + 1]; e += 1)
             {
                 const uint32_t exit = input->block_starts[input->predecessors[e] + 1] - 1;
@@ -1858,8 +1858,8 @@ static bool tier1_emit_cfg_dead_definition(const Tier1EmitResult* emitted, uint3
     const uint32_t first = interval != BUSTER_TIER1_CFG_NONE ? allocation->fragment_offsets[interval] : 0;
     const bool last = interval != BUSTER_TIER1_CFG_NONE && first + 1 == allocation->fragment_offsets[interval + 1];
     const uint32_t end = interval != BUSTER_TIER1_CFG_NONE ? cfg->intervals.ends[interval] : 0;
-    const bool inside = last && end != input->block_starts[tier1_cfg_block_of(input, end - 1) + 1];
-    const uint32_t block = interval != BUSTER_TIER1_CFG_NONE ? tier1_cfg_block_of(input, definition) : 0;
+    const bool inside = last && end != input->block_starts[tier1_cfg_block_at(input, cfg, end - 1) + 1];
+    const uint32_t block = interval != BUSTER_TIER1_CFG_NONE ? tier1_cfg_block_at(input, cfg, definition) : 0;
     const bool starts = interval != BUSTER_TIER1_CFG_NONE && cfg->intervals.starts[interval] == definition;
     // Given no register at all (#2618: its definition's use isn't required), the first fragment recomputes it.
     const bool bare = starts && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
@@ -3625,7 +3625,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 transitions.values[f] = node;
             }
             // The blocks whose starts the interval covers.
-            uint32_t b = cfg->position_blocks != 0 ? cfg->position_blocks[start] : tier1_cfg_block_of(input, start);
+            uint32_t b = tier1_cfg_block_at(input, cfg, start);
             b += input->block_starts[b] < start ? 1 : 0;
             for (; error == TIER1_EMIT_OK && b < blocks && input->block_starts[b] < cfg->intervals.ends[i]; b += 1)
             {
@@ -4319,7 +4319,7 @@ static bool tier1_emit_cfg_hot_recipes(const Tier1CfgInput* input, const Tier1Cf
         hot[v] = 0;
         for (uint32_t u = input->use_offsets[v]; candidate && stack != 0 && u < input->use_offsets[v + 1]; u += 1)
         {
-            reads[tier1_cfg_block_of(input, input->use_positions[u])] = v + 1;
+            reads[tier1_cfg_block_at(input, intervals, input->use_positions[u])] = v + 1;
         }
         // Live into each loop's header: an interval of the value covers its start, which isn't the value's definition.
         for (uint32_t l = 0; candidate && live != 0 && l < loops.loop_count; l += 1)

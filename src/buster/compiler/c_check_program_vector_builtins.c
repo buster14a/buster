@@ -928,6 +928,27 @@ static const char* check_vector_scalar_row(const X86Target* target, CBuiltinId b
     return reason;
 }
 
+// A source expression's contracted product (#1239), keeping its operands in evaluation order: a, b, c for a * b + c,
+// or c, a, b for c + a * b. The product's second operand stays the destructive destination in either order, as
+// clang -O0's fmuladd does (and therefore keeps the same NaN priority). Negations are explicit typed operands; using
+// fmsub or fnmadd instead would change the sign of a NaN. The result still replaces the first stack operand.
+static const char* check_vector_contract_row(const X86Target* target, uint8_t class, bool product_right, Tier0Operation* row)
+{
+    const char* reason = check_vector_scalar_row(target, CBUILTIN_ELEMENTWISE_FMA, class, 3, row);
+    if (reason == NULL && (target->features & BUSTER_X86_FEATURE(AVX512VL)) == 0)
+    {
+        // Scalar EVEX FMA needs AVX512F alone, but the 128-bit copy needs VL. Its VEX twin keeps this row legal when
+        // the function's target removes VL; the mixed row's floating roles are placed below xmm16 by both tiers.
+        row->records[1].form = X86_FORM_VMOVAPS_X_XM128;
+    }
+    if (reason == NULL && product_right)
+    {
+        row->records[0] = check_vector_lower_record(row->records[0].form, BUSTER_TIER0_ROLE_FLOATING(2), BUSTER_TIER0_ROLE_FLOATING(1), BUSTER_TIER0_ROLE_FLOATING(0));
+        row->records[1] = check_vector_lower_record(row->records[1].form, BUSTER_TIER0_ROLE_FLOATING_RESULT, 0, BUSTER_TIER0_ROLE_FLOATING(2));
+    }
+    return reason;
+}
+
 // Whether a floating elementwise builtin is computed by instructions (check_vector_floating_row and its scalar twin),
 // rather than by the C library's functions an element at a time (sin, pow and the rest: check_lower_vector_calls).
 static bool check_vector_floating_instructions(CBuiltinId builtin)

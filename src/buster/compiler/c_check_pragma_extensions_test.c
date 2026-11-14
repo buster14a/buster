@@ -39,7 +39,29 @@ static void check_test_pragma_extension_history(CheckTest* test)
     const char* names[] = { "file_on", "local_off", "inner_on", "restored_off", "restored_on", "file_off", "exceptions_on", "exceptions_off",
                             "exceptions_maytrap", "exceptions_restored", "exceptions_file", "stack_restored", "relaxed", "permissions", "precise_restored",
                             "pushed_strict", "exceptions_disabled", "popped_off", "complex_off", "complex_on", "complex_end" };
-    const uint8_t expected[] = { 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0 };
+    const uint8_t expected[] = {
+        BUSTER_CHECK_FP_CONTRACT_ON | BUSTER_CHECK_FP_ENV_ACCESS,
+        BUSTER_CHECK_FP_CONTRACT_ON,
+        BUSTER_CHECK_FP_CONTRACT_ON | BUSTER_CHECK_FP_ENV_ACCESS,
+        BUSTER_CHECK_FP_CONTRACT_ON,
+        BUSTER_CHECK_FP_CONTRACT_ON | BUSTER_CHECK_FP_ENV_ACCESS,
+        BUSTER_CHECK_FP_CONTRACT_ON,
+        BUSTER_CHECK_FP_ENV_ACCESS,
+        0,
+        BUSTER_CHECK_FP_ENV_ACCESS,
+        0,
+        BUSTER_CHECK_FP_ENV_ACCESS,
+        0,
+        BUSTER_CHECK_FP_CONTRACT_FAST,
+        0,
+        0,
+        BUSTER_CHECK_FP_ENV_ACCESS,
+        0,
+        0,
+        0,
+        0,
+        0,
+    };
     const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true, .semantic_pragmas = true };
     Arena arena = arena_reserve(UINT64_C(1) << 16);
     Arena scratch = arena_reserve(UINT64_C(1) << 16);

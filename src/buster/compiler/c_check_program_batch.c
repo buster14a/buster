@@ -255,7 +255,8 @@ static inline __attribute__((always_inline)) bool check_lower_batch_expression(C
     const uint32_t room = writer->capacity < BUSTER_TIER0_MAX_ENTRIES ? writer->capacity : BUSTER_TIER0_MAX_ENTRIES;
     bool valid = recipe != 0 && recipe != BUSTER_CHECK_LOWER_BATCH_VALUE && value->overload_head == 0 && !check_lower_batch_proof(value, op) &&
                  node >= 1 + binary && a + 1 + binary == node && (!binary || b + 1 == node) && writer->count <= room &&
-                 entries <= room - writer->count && writer->depth <= writer->capacity && 5 <= writer->capacity - writer->depth;
+                 entries <= room - writer->count && writer->depth <= writer->capacity && 5 <= writer->capacity - writer->depth &&
+                 !check_lower_contract_candidate(writer, node);
     if (valid)
     {
         const TypeId left = op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE ? value->type :

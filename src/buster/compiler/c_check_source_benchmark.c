@@ -132,6 +132,7 @@ static bool check_source_body_graph(CheckGraph* graph, const CheckInput* input, 
         graph->tag_completion_count = source->tag_completion_count;
         graph->transparent_unions = source->transparent_unions;
         graph->fp_environments = source->fp_environments != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, source->count) : NULL;
+        graph->fp_contract_default = source->fp_contract_default;
         graph->warning_suppressed = source->warning_suppressed != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, source->count) : NULL;
         graph->varargs_calls = source->varargs_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckVarargsCall, source->varargs_count) : 0;
         graph->varargs_capacity = source->varargs_count;

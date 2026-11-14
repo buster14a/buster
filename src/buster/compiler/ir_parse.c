@@ -996,7 +996,7 @@ static void ir_parse_instruction(IrParseState* state)
                 {
                     row.flags = BUSTER_IR_STACK_SAVE_FRAME;
                 }
-                if (row.op == IR_LOAD || row.op == IR_STORE || row.op == IR_ATOMIC_RMW || row.op == IR_MASKED_LOAD || row.op == IR_MASKED_STORE)
+                if (row.op == IR_LOAD || row.op == IR_STORE || row.op == IR_ATOMIC_RMW || (ir_masked_access(row.op) && row.op != IR_GATHER))
                 {
                     ir_parse_keyword(state, "align=");
                     const uint32_t alignment = (uint32_t)ir_parse_unsigned(state, UINT32_C(1) << 31, false);
@@ -1009,9 +1009,23 @@ static void ir_parse_instruction(IrParseState* state)
                         row.alignment_log2 = (uint8_t)__builtin_ctz(alignment);
                     }
                 }
-                if (row.op == IR_MASKED_LOAD || row.op == IR_MASKED_STORE)
+                if (row.op == IR_GATHER)
                 {
-                    // A masked access's lanes (#1840), after its alignment, as its flags.
+                    // A gather's scale (#1840), 1, 2, 4 or 8, as its alignment_log2.
+                    ir_parse_keyword(state, "scale=");
+                    const uint32_t scale = (uint32_t)ir_parse_unsigned(state, 8, false);
+                    if (state->result.error == IR_PARSE_OK && (scale == 0 || (scale & (scale - 1)) != 0))
+                    {
+                        ir_parse_fail(state, IR_PARSE_SYNTAX);
+                    }
+                    if (scale != 0)
+                    {
+                        row.alignment_log2 = (uint8_t)__builtin_ctz(scale);
+                    }
+                }
+                if (ir_masked_access(row.op))
+                {
+                    // A masked access's lanes (#1840), after its alignment or scale, as its flags.
                     ir_parse_keyword(state, "lanes=");
                     row.flags = (uint8_t)ir_parse_named(state, ir_lane_names, IR_SIMD_LANE_COUNT);
                 }

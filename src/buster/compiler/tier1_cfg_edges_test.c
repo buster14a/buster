@@ -2,7 +2,9 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Original CFG edge-contract regressions for #1356. These construct both CSR views independently, including
-// unordered rows, duplicates and a wide dispatch/join, without the small random builder's degree limits.
+// unordered rows, duplicates and a wide dispatch/join, without the small random builder's degree limits. And #1399's
+// use checks: validation through the position column against validation by search, over every placement of a value's
+// definition and two uses in a small CFG.
 
 static void tier1_cfg_test_edge_views(Tier1CfgTestTally* tally, Arena* scratch)
 {
@@ -146,4 +148,90 @@ static void tier1_cfg_test_wide_edges(Tier1CfgTestTally* tally, Arena* output, A
     }
     tier1_cfg_test_expect(tally, scratch->length == scratch_saved, "wide edge validation restores scratch");
     arena_pop_to(output, saved);
+}
+
+// Every definition position and every pair of use positions (one past the last position included) of one value in four
+// blocks: the column's checks (tier1_cfg_input_valid_into) and the search's (tier1_cfg_input_valid) accept exactly the
+// inputs whose uses are sorted, in range and none before the definition in its own block, from a block found by a
+// linear scan here, and the column holds each position's block.
+static void tier1_cfg_test_use_blocks(Tier1CfgTestTally* tally, Arena* scratch)
+{
+    const uint64_t saved = scratch->length;
+    uint32_t starts[] = { 0, 3, 5, 9, 10 };
+    uint32_t successor_offsets[] = { 0, 1, 2, 3, 3 };
+    uint32_t successors[] = { 1, 2, 3 };
+    uint32_t predecessor_offsets[] = { 0, 0, 1, 2, 3 };
+    uint32_t predecessors[] = { 0, 1, 2 };
+    uint32_t phis[] = { 0, 0, 0, 0, 0 };
+    uint8_t classes[] = { BUSTER_TIER1_ALLOCATE_GPR };
+    uint32_t allowed[] = { 0 };
+    uint32_t definitions[] = { 0 };
+    uint32_t use_offsets[] = { 0, 2 };
+    uint32_t use_positions[] = { 0, 0 };
+    uint32_t column[10];
+    const Tier1CfgInput input =
+    {
+        .block_starts = starts,
+        .successor_offsets = successor_offsets,
+        .successors = successors,
+        .predecessor_offsets = predecessor_offsets,
+        .predecessors = predecessors,
+        .phi_offsets = phis,
+        .phi_operand_offsets = phis,
+        .classes = classes,
+        .allowed_registers = allowed,
+        .definitions = definitions,
+        .use_offsets = use_offsets,
+        .use_positions = use_positions,
+        .block_count = 4,
+        .value_count = 1,
+        .use_count = 2,
+        .edge_count = 3,
+        .position_count = 10,
+    };
+    uint32_t cases = 0;
+    uint32_t agreed = 0;
+    uint32_t accepted = 0;
+    bool labeled = true;
+    for (uint32_t d = 0; d < 10; d += 1)
+    {
+        for (uint32_t first = 0; first <= 10; first += 1)
+        {
+            for (uint32_t second = 0; second <= 10; second += 1)
+            {
+                definitions[0] = d;
+                use_positions[0] = first;
+                use_positions[1] = second;
+                uint32_t home = 0;
+                while (starts[home + 1] <= d)
+                {
+                    home += 1;
+                }
+                bool expected = first <= second && second < 10;
+                for (uint32_t u = 0; expected && u < 2; u += 1)
+                {
+                    const uint32_t p = use_positions[u];
+                    expected = !(starts[home] <= p && p < starts[home + 1]) || p >= d;
+                }
+                memset(column, 0xff, sizeof(column));
+                const bool searched = tier1_cfg_input_valid(&input, scratch);
+                const bool mapped = tier1_cfg_input_valid_into(&input, scratch, column);
+                for (uint32_t q = 0; q < 10; q += 1)
+                {
+                    uint32_t b = 0;
+                    while (starts[b + 1] <= q)
+                    {
+                        b += 1;
+                    }
+                    labeled = labeled && column[q] == b;
+                }
+                cases += 1;
+                agreed += searched == expected && mapped == expected;
+                accepted += expected;
+            }
+        }
+    }
+    tier1_cfg_test_expect(tally, agreed == cases && accepted != 0 && accepted != cases, "validation by the position column and by search agree on every use placement");
+    tier1_cfg_test_expect(tally, labeled, "validation labels every position with its block");
+    tier1_cfg_test_expect(tally, scratch->length == saved, "use validation restores scratch");
 }

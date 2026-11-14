@@ -442,11 +442,17 @@ static void tier1_cfg_test_shape(Tier1CfgTestTally* tally, const Tier1CfgInput* 
     tally->shape_mutants += 1;
 }
 
-// The block column answers the same intervals and locations as the binary search, at every position and every block entry.
+// The block column answers the same intervals and locations as the binary search, at every position and every block entry,
+// and the position column, which validation fills (#1399), each position's block.
 static bool tier1_cfg_test_lookup(const Tier1CfgInput* input, const Tier1CfgAllocation* result)
 {
     const bool expect = result->position_blocks != 0 && input->value_count != 0 && input->block_count != 0 && input->value_count <= BUSTER_TIER1_CFG_BLOCK_INTERVALS / input->block_count;
     bool ok = !expect || result->value_block_base != 0;
+    ok = ok && (input->position_count > BUSTER_TIER1_CFG_POSITION_BLOCKS || result->position_blocks != 0);
+    for (uint32_t q = 0; ok && result->position_blocks != 0 && q < input->position_count; q += 1)
+    {
+        ok = result->position_blocks[q] == tier1_cfg_block_of(input, q) && tier1_cfg_block_at(input, result, q) == result->position_blocks[q];
+    }
     for (uint32_t v = 0; ok && result->value_block_base != 0 && v < input->value_count; v += 1)
     {
         if (result->value_block_base[v] != BUSTER_TIER1_CFG_NONE)
@@ -2373,6 +2379,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
             tier1_cfg_test_current_slots(&tally, &output, &scratch);
             tier1_cfg_test_edge_views(&tally, &scratch);
             tier1_cfg_test_wide_edges(&tally, &output, &scratch);
+            tier1_cfg_test_use_blocks(&tally, &scratch);
             Tier1CfgTestBuilder* builder = arena_push(&work, sizeof(Tier1CfgTestBuilder), _Alignof(Tier1CfgTestBuilder));
             tier1_cfg_test_expect(&tally, builder != 0, "builder memory");
             for (uint64_t sample = 0; builder != 0 && sample < count; sample += 1)

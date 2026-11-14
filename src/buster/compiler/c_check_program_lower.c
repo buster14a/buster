@@ -437,6 +437,8 @@ typedef enum CheckLowerTaskKind
     // The size of `type`, a variable-length array's, computed from its extents (an I64: a pointer's runtime stride).
     CHECK_LOWER_SIZE,
     CHECK_LOWER_ATOMIC,
+    // A contracted product's wrappers and operands: `node` the wrapper, `type` the product, `value` its negation.
+    CHECK_LOWER_CONTRACT,
     // Expression `node`'s operation on complex values (check_lower_complex_emit), its operands in the temporaries `value`
     // holds (the first's in its low 32 bits), or with `address` its compound assignment's (check_lower_complex_update_emit),
     // the value's and the destination's address's.
@@ -706,9 +708,11 @@ struct CheckLowerWriter
     uint32_t* local_map;
     uint32_t* switch_locals;
     // The cleanups' chains (#1370, CheckProgramChain): the label of each record's entry past its run's fall's store, by
-    // its CheckInput.cleanups index (BUSTER_CHECK_NONE where its CLEANUP control's own is its entry); the body's
+    // its CheckInput.cleanups index (BUSTER_CHECK_NONE where its CLEANUP control's own is its entry); each destination's
+    // label, by its CheckProgram.chain_stops index, BUSTER_CHECK_NONE until an emitted exit reaches it; the body's
     // destination slot, an I32 temporary, BUSTER_CHECK_NONE until an exit or a fall stores it.
     uint32_t* chain_labels;
+    uint32_t* chain_destinations;
     uint32_t chain_slot;
     // How many controls an exit's shared tail or a completed sparse-switch dispatch has consumed, with no incoming
     // edges. One counter keeps the ordinary control loop's skip check unchanged.
@@ -7963,6 +7967,8 @@ static __attribute__((noinline)) TypeId check_lower_update_through(const CheckLo
 
 static void check_lower_transport_maskmove(CheckLowerWriter* writer, uint32_t node);
 
+#include "c_check_program_contract.c"
+
 static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -8054,6 +8060,10 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
         {
             check_lower_operand(writer, node, 1, false, BUSTER_TYPE_LONG);
         }
+    }
+    else if (check_lower_contract(writer, node, true))
+    {
+        // The RHS's product consumes the old LHS value loaded below; the ordinary address and store stay in place.
     }
     else
     {
@@ -15050,6 +15060,10 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
                 check_lower_operand(writer, node, left_pointer ? 0 : 1, false, pointer_type);
             }
         }
+        else if (check_lower_contract(writer, node, false))
+        {
+            // Both operands are the same-expression fused row's tasks.
+        }
         else
         {
             check_lower_instruction(writer, check_lower_binary(op), class, 0);
@@ -15361,6 +15375,10 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         else if (kind == CHECK_LOWER_ATOMIC)
         {
             check_lower_atomic_emit(writer, node);
+        }
+        else if (kind == CHECK_LOWER_CONTRACT)
+        {
+            check_lower_contract_product(writer, node, type, (value >> 32) != 0);
         }
         else if (kind >= CHECK_LOWER_COMPLEX)
         {
@@ -17178,9 +17196,10 @@ static void check_lower_chain_store(CheckLowerWriter* writer, uint32_t value)
 
 // An exit through its cleanups' chain (CHECK_CONTROL_EXIT, #1370): its destination's value where a dispatch on its path
 // tests it, and a jump to its first record's entry. Its tail follows it, which only its destination's dispatch reaches:
-// the first exit of a destination keeps it there, the others leave it out (`skip`). An exit that keeps its run (a `skip`
-// of BUSTER_CHECK_NONE) calls its records' functions in place, and its tail follows.
-static void check_lower_exit(CheckLowerWriter* writer, CheckControl control)
+// the first emitted exit of a destination keeps it there, the others leave it out. A constant expression may omit a
+// region, so choosing the representative here also keeps its unlowered tails out of enclosing records' dispatches.
+// An exit that keeps its run (a `tail_count` of BUSTER_CHECK_NONE) calls its records' functions in place, and its tail follows.
+static void check_lower_exit(CheckLowerWriter* writer, uint32_t index, CheckControl control)
 {
     const CheckProgram* program = writer->program;
     const CheckProgramExit* exit = control.target < program->exit_count && writer->body->chains ? program->exits + control.target : NULL;
@@ -17188,7 +17207,7 @@ static void check_lower_exit(CheckLowerWriter* writer, CheckControl control)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
-    else if (exit->skip == BUSTER_CHECK_NONE)
+    else if (exit->tail_count == BUSTER_CHECK_NONE)
     {
         // Its run in place, innermost first, as before chains: its records' scopes' ends have none to share.
         uint32_t record = exit->first;
@@ -17199,14 +17218,25 @@ static void check_lower_exit(CheckLowerWriter* writer, CheckControl control)
             record = record != exit->last ? program->chains[record].parent : BUSTER_CHECK_NONE;
         }
     }
+    else if (exit->destination >= program->chain_stop_count)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
     else
     {
+        const CheckProgramStop stop = program->chain_stops[exit->destination];
+        const bool first = writer->chain_destinations[exit->destination] == BUSTER_CHECK_NONE;
+        const bool tail = stop.label == BUSTER_CHECK_NONE;
+        if (first)
+        {
+            writer->chain_destinations[exit->destination] = tail ? index + 1 : stop.label;
+        }
         if (exit->value != BUSTER_CHECK_NONE)
         {
             check_lower_chain_store(writer, exit->value);
         }
         check_lower_emit(writer, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, check_lower_chain_entry(writer, exit->first));
-        writer->control_skip = exit->skip;
+        writer->control_skip = first && tail ? 0 : exit->tail_count;
     }
 }
 
@@ -17229,24 +17259,38 @@ static void check_lower_chain_cleanup(CheckLowerWriter* writer, uint32_t index, 
     {
         const bool outward = (chain->flags & BUSTER_CHECK_CHAIN_OUTWARD) != 0;
         const bool natural = (chain->flags & BUSTER_CHECK_CHAIN_NATURAL) != 0;
-        const uint32_t total = chain->stop_count + outward + natural;
-        if (total >= 2 && writer->chain_slot == BUSTER_CHECK_NONE)
+        const uint32_t stop_first = chain->stop_first;
+        const uint32_t stop_count = chain->stop_count;
+        const uint32_t* const destinations = writer->chain_destinations + stop_first;
+        uint32_t active = 0;
+        for (uint32_t k = 0; k < stop_count; k += 1)
+        {
+            active += destinations[k] != BUSTER_CHECK_NONE;
+        }
+        // Each emitted exit precedes its records' scope ends, including a region's value before its own cleanup run.
+        // Only those destinations have tails to branch to; the planner's natural/outward paths remain conservative.
+        uint32_t remaining = active + outward + natural;
+        if (remaining >= 2 && writer->chain_slot == BUSTER_CHECK_NONE)
         {
             writer->chain_slot = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
         }
-        for (uint32_t k = 0; k < chain->stop_count; k += 1)
+        for (uint32_t k = 0; k < stop_count; k += 1)
         {
-            const CheckProgramStop stop = program->chain_stops[chain->stop_first + k];
-            if (k + 1 == total)
+            const uint32_t label = destinations[k];
+            if (label != BUSTER_CHECK_NONE)
             {
-                check_lower_emit(writer, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, stop.label);
-            }
-            else
-            {
-                check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, writer->chain_slot);
-                check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, stop.value);
-                check_lower_emit(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
-                check_lower_emit(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, stop.label);
+                remaining -= 1;
+                if (remaining == 0)
+                {
+                    check_lower_emit(writer, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, label);
+                }
+                else
+                {
+                    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, writer->chain_slot);
+                    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, program->chain_stops[stop_first + k].value);
+                    check_lower_emit(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, label);
+                }
             }
         }
         if (outward && natural)
@@ -17355,7 +17399,7 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     }
     else if (control.kind == CHECK_CONTROL_EXIT)
     {
-        check_lower_exit(writer, control);
+        check_lower_exit(writer, index, control);
     }
     else if (control.kind == CHECK_CONTROL_LIFETIME)
     {
@@ -18190,14 +18234,14 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // runtime call, independent of its byte size, within the same per-node bounds. A complex _BitInt's past 128 bits makes
     // more, which check_lower_limb_room counts. The runtime functions' provisional symbols (check_lower_runtime) follow
     // the helpers'.
-    // A cleanup's call is a CLEANUP control's (#147): one per variable at its scope's end, its chain's (#1370), and one per
-    // variable a statement expression's exit leaves; and an EXIT's that keeps its run, one per record it leaves.
+    // A cleanup's call is a CLEANUP control's (#147): one per variable at its scope's end, its chain's (#1370); and an
+    // EXIT's that keeps its run because a scope end is missing, one per record it leaves.
     uint64_t cleanup_calls = 0;
     for (uint32_t i = 0; input != 0 && input->cleanup_count != 0 && program->status == CHECK_PROGRAM_OK && i < program->control_count; i += 1)
     {
         const CheckControl* control = program->controls + i;
         cleanup_calls += control->kind == CHECK_CONTROL_CLEANUP;
-        if (control->kind == CHECK_CONTROL_EXIT && control->target < program->exit_count && program->exits[control->target].skip == BUSTER_CHECK_NONE)
+        if (control->kind == CHECK_CONTROL_EXIT && control->target < program->exit_count && program->exits[control->target].tail_count == BUSTER_CHECK_NONE)
         {
             const CheckProgramExit* exit = program->exits + control->target;
             cleanup_calls += (uint64_t)program->chains[exit->first].depth - program->chains[exit->last].depth + 1;
@@ -18523,6 +18567,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .switch_trees = &shared->switch_trees,
     };
 #define BUSTER_CHECK_LOWER_COLUMN(field, type, length) writer->field = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, type, length) : 0; valid &= writer->field != 0
+    BUSTER_CHECK_LOWER_COLUMN(chain_destinations, uint32_t, (uint64_t)program->chain_stop_count + 1);
     // Give the following columns the same offset modulo 4 KB relative to the task stack as 32-byte
     // records. Padding is at most 4080 bytes, while each active task still touches just 16 bytes.
     BUSTER_CHECK_LOWER_COLUMN(tasks, CheckLowerTaskPacked, (uint64_t)capacity + (capacity & 255u));
@@ -18755,12 +18800,16 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->x87_constants[1] = 0;
         memset(writer->extent_locals, 0xff, ((uint64_t)input->vla_count + 1) * sizeof(uint32_t));
         memset(writer->labels, 0xff, ((uint64_t)body.count + 1) * sizeof(uint32_t));
-        // Its cleanups' chains (#1370): an entry label past each fall's store, which the exits jump to.
+        // Its cleanups' chains (#1370): an entry label past each fall's store, which the exits jump to, and destinations
+        // activated only by emitted exits. Each writer owns its destinations: target_clones can lower copies of one
+        // cleanup plan on different lanes, and an exit may only reuse a tail this writer has emitted.
         writer->chain_slot = BUSTER_CHECK_NONE;
         writer->control_skip = 0;
         for (uint32_t r = body.cleanup_first; body.chains && r < body.cleanup_first + body.cleanup_count; r += 1)
         {
-            writer->chain_labels[r] = (program->chains[r].flags & BUSTER_CHECK_CHAIN_FALL_STORE) != 0 ? check_lower_label(writer) : BUSTER_CHECK_NONE;
+            const CheckProgramChain* chain = program->chains + r;
+            writer->chain_labels[r] = (chain->flags & BUSTER_CHECK_CHAIN_FALL_STORE) != 0 ? check_lower_label(writer) : BUSTER_CHECK_NONE;
+            memset(writer->chain_destinations + chain->stop_first, 0xff, (uint64_t)chain->stop_count * sizeof(uint32_t));
         }
         if (writer->track)
         {

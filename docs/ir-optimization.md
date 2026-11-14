@@ -12,7 +12,11 @@ Include `ir_optimize.c` after `ir.c` and `dominators.c`.
 an `IrCheck`. `ir_optimize_options()` selects SCCP, dead-code removal and CFG
 cleanup, a 64-sweep limit, and the vector path. The `passes` bits are
 `BUSTER_IR_OPTIMIZE_SCCP`, `BUSTER_IR_OPTIMIZE_DCE` and
-`BUSTER_IR_OPTIMIZE_CFG`; `scalar` selects the worklist twins. A zero sweep
+`BUSTER_IR_OPTIMIZE_CFG`; `scalar` selects the worklist twins. Tier 1 also
+asks for `_LAYOUT` (#1218), `_IDENTITY` (#2554) and `_MERGE`, CFG cleanup's
+merges of single-predecessor chains (#139, `ir_optimize_merges`: "#139's
+acceptance" below and [the Tier 1 guide](tier1.md)), which the default
+leaves off. A zero sweep
 limit immediately uses worklist completion. It never publishes a partially
 converged optimistic analysis.
 
@@ -39,64 +43,161 @@ retains the final CFG and dominators in a caller-owned analysis arena for
 [the analysis-handoff guide](ir-analysis-handoff.md). `ir_optimize` remains the
 independent rebuilding control.
 
-### Scalar diamond/triangle if-conversion (#1382)
+### Scalar if-conversion (#1382)
 
-The C driver's `ir_if_convert.c` runs after SSA promotion, wide-value splitting
-and integer truth simplification, before the ordinary optimizer prepares any
-analysis. It finds conditional terminators with a bounded 64-byte opcode mask
-and an exact scalar twin. A function without one needs no CFG or output
-allocation. Reachability and exact predecessor sets then identify local
-diamonds and triangles: each arm has a single entry from the head and an
-unconditional exit to the same two-predecessor join. A join may head a later
-region, so sequential clamps convert in the same pass. An arm cannot overlap
-another accepted region, and joins with extra predecessors or general nested
-decision trees remain control flow.
+The C driver's `ir_if_convert.c` runs after SSA promotion, wide-value splitting,
+integer truth simplification and truth threading, before the ordinary optimizer
+prepares any analysis. It finds conditional terminators with a bounded 64-byte
+opcode mask and an exact scalar twin. A function without one needs no CFG or
+output allocation.
 
-Every initial phi in an accepted join becomes an `IR_SELECT` of the head's
-condition and that phi's true/false incoming values. Arm rows move, in
-dependency order, before these selects; the head branches directly to the
-join. Original arm blocks retain only unreachable branch stubs for the
-ordinary SCCP/DCE/CFG pass to remove. Rows are permuted without duplication,
-and block identities remain stable. The subsequent optimizer validates the
-rewritten SSA and publishes its usual final analysis revision.
+A region is a reachable head ending in a conditional branch whose two sides
+reach one join. Each side is the join itself (a triangle) or an arm: a chain of
+at most four blocks, each with the previous block (or the head) as its only
+reachable predecessor and an unconditional branch to the next. A region's
+blocks overlap no other region's in a round, except that a join may head
+another region, so sequential clamps convert in one round.
+
+The C lowering's arms hold rows that no phi needs: the comparisons truth
+simplification copied, their zero extensions and zeros. They also hold rows the
+head already computed, such as a conditional sum's reloaded element and its
+address. So each arm row is first numbered against the earlier arm rows and the
+head's rows. A row whose operation, type, flags, fields and represented
+operands equal an earlier row's takes that row's value, comparing an address's
+scale and offset by content. The head's rows are filtered 16 at a time
+(AVX-512 compares of the operation, type, flags and operand columns, with a
+scalar twin), latest first, and each candidate is checked whole. A load takes
+an earlier value only from a plain load of the same address and type after the
+head's last write. A write here is a store, an atomic, a fence, a call, a stack
+restore, a lifetime marker or an observable load; no arm row writes. The
+barrier scan is one `vpermi2b` lookup of a 128-entry opcode class table per 64
+rows, with a scalar twin.
+
+Then only the rows the join's phis need, through their represented operands,
+move to the head's end, before its branch. Each needed row must be total:
+constants, copies, wrapping integer arithmetic, bitwise operations, integer
+comparisons, selects, integer and pointer conversions, addresses, and shifts by
+an in-range constant. A plain load is speculated where the head made a plain
+load or store of the same address, of at least its size, after its last
+release. A call, a stack restore or a lifetime marker counts as a release,
+since it could unmap or reuse the memory. Nothing else proves an address.
+Rows no phi needs stay in their arm, which becomes an unreachable stub ending
+in `unreachable` for SCCP/DCE/CFG cleanup to remove. A row left there must be a
+reused one or one that could have moved, so the stub drops no effect and no
+fault: a dead division by a variable, a dead unproven load, a call or a store
+refuses the region.
+
+A join reached only by the region's two edges turns each phi into a select of
+the head's condition in place. A join with other predecessors keeps its phis.
+Each phi takes a new select row in the head for the region's two entries, which
+become one entry from the head. That is the shape of LLVM SimplifyCFG's
+`FoldTwoEntryPHINode` and `SpeculativelyExecuteBB`, for the C lowering's
+nested `?:`. The head then branches to the join. Rows are permuted, and the
+only new rows are the folded selects and the sunk accumulations' zeros (below).
+
+Two cost rules keep a branch or move a select:
+
+- **A recurrence through the condition stays a branch.** The head's condition
+  may read, within 16 rows, a phi that one of the join's phis flows into, as a
+  running maximum's does. Its select would put the comparison on the loop's
+  carried chain: on the 9700X, `cmp; setg; test; cmovne` is four cycles per
+  element against a predicted branch's one, and #1382's running max ran 3.8
+  times main's cycles. LLVM's x86 cmov conversion turns such a `cmov` back into
+  a branch after selection, and clang -O2 keeps branches there.
+- **An accumulation's select sinks below its operation.** An in-place phi may
+  take `s op x` on one edge and `s` on the other: an addition, a subtraction
+  from `s`, an or or a xor of integers, which nothing else reads. The
+  operation's row then selects `x` or zero instead, and the phi becomes
+  `s op select`, as InstCombine folds a select of a binary operation. A
+  conditional sum's accumulator then waits for one addition per element, not
+  for the `cmov` as well, and a predictable condition costs no more than its
+  branch did. The zero is a new constant row in the head that names a zero the
+  constant table already has; a function whose table has none keeps the select
+  outside. A variable binding of the operation's row, whose value changed,
+  becomes unavailable.
+
+A converted head whose single-predecessor chain climbs to a conditional branch
+may now be an outer region's arm (a nested `?:`, `||` inside `&&`). In that
+case the pass runs again, for at most four rounds. Between rounds and after the
+last, `ir_truth_simplify_values` takes the truth values the selects make: a
+select of truth values tested against zero becomes an i1 select in that test's
+row. So `select c, (zext x), 0` tested nonzero is `select c, x, c` (`c && x`),
+and `select c, 1, (zext y)` is `select c, c, y` (`c || y`). Tier 1 selects i1
+selects as it does wider ones. Its integer rules take no i1 `and`/`or`, so the
+truth values stay selects (#1382's follow-up). The earlier truth pass, before
+threading, keeps its comparison rules alone.
 
 The admissible values are `i1`, `i8`, `i16`, `i32`, `i64` and pointers, matching
-the scalar select consumer. Arms may contain constants, copies, wrapping
-integer arithmetic, bitwise operations, integer comparisons, scalar selects
-and integer/pointer conversions. Scalar shifts require a direct constant
-count strictly below the result width. Loads, stores, atomics, calls, division,
-remainder, floating operations and conversions, allocation/stack operations,
-lifetime markers, fences, undefined-value producers and unknown operations
-refuse the whole region. A load needs a dereferenceability proof which this
-pass does not attempt. Functions containing indirect-branch labels remain
+the scalar select consumer. Each arm moves at most four non-constant rows, and
+its blocks hold at most 32 rows in all, needed or not. Each join takes at most
+four selects. The moved rows' cost plus two per select is at most eight: a
+constant costs nothing, an integer multiply three, a select two, and other
+admitted rows (a speculated load among them) one. These conservative bounds
+limit speculation and added live values; they are not measured target
+latencies. The IR has no branch-probability metadata (`__builtin_expect`
+currently lowers to its value), so a predictable branch converts unless the
+recurrence rule keeps it. Functions containing indirect-branch labels remain
 unchanged.
-
-Each arm has at most four rows and each join at most four phis. The combined
-cost limit is eight: an integer multiply costs three, a select costs two,
-and other admitted rows cost one. These conservative bounds limit speculation
-and additional live values; they are not measured target latencies. The IR has
-no branch-probability metadata (`__builtin_expect` currently lowers to its
-value), so there is no retained profile hint for this pass to consult.
 
 `ir_if_convert(function, output, scratch, scalar, result)` requires verified
 SSA and distinct output/scratch arenas; scratch must own none of the input.
 The output arena may already contain the input. A changed result owns fresh
-row columns, block offsets, extra words and call records, borrowing immutable
-tables from the input until the ordinary optimizer materializes its output.
-Both lifetimes must cover that consumption. Shared or overlapping `extra`
-slices are never remapped in place: original switch/label words stay intact,
-and surviving phi/call occurrences get appended value slices. With no accepted
-region the result borrows the input and allocates no output. Failure preserves
-the result and output mark; scratch is restored on every outcome.
+row columns, block offsets, extra words and call records for each round,
+borrowing immutable tables from the input until the ordinary optimizer
+materializes its output. Both lifetimes must cover that consumption. Shared or
+overlapping `extra` slices are never remapped in place: original switch/label
+words stay intact, and surviving phi/call occurrences get appended value
+slices. With no accepted region the result borrows the input and allocates no
+output. Failure preserves the result and output mark; scratch is restored on
+every outcome. The result counts the regions, selects, folded joins, reused
+rows, reused or speculated loads, sunk accumulations, the candidate regions
+each round left for a recurrence, and the rounds.
 
 The existing optimizer command covers the pass with independent execution,
 complete verification, exact twins, hostile speculation cases, guarded tails,
-side-table aliasing and allocation failures. The C driver tests also check
-native results against Clang and decode actual `cmov`/branch shapes. Generated
-code shape and runtime performance are separate evidence: approved-host
-measurements of unpredictable and predictable branches, code size, register
-pressure and compiler throughput remain necessary. No runtime speedup is
-claimed here.
+side-table aliasing and allocation failures. Its fixtures cover nested and
+three-predecessor regions, the reload's reuse, its speculation behind a store
+or a fence, its refusal behind a call, a volatile reload or another offset, and
+the `&&`/`||` truth values with their dead and repeated rows. The C driver
+tests also check native results against Clang and decode actual `cmov`/branch
+shapes. These include #1382's nested clamp, `&&` and `||` values, and loops
+whose only conditional branch is the loop's. A running max and a reload after
+a call keep their branches.
+
+Measured effect (#2674, the 9700X, CPU 2): #1382's kernels compiled by main
+`b7a95eed`'s Tier 1 and by #2674's `fab53452`, called from a clang -O2 driver in
+another object, median `cycles:u` of five rounds
+([record](https://github.com/buster14a/buster-performance/tree/2c957f4be1b74bdaba6d81d4f2b92e93222ffbe5/docs/measurements/tier1-if-convert-1382-2026-11-13)).
+The scalar kernels take 50 M calls on xorshift64's high bits, about 310 Mcycles
+of which is the driver's loop. The loops take 80 passes over 2^20 such bytes.
+
+| kernel | main | `fab53452` | clang -O2 -fno-vectorize |
+| --- | ---: | ---: | ---: |
+| `x < 0 ? 0 : x > 255 ? 255 : x` | 1,146.8 | 341.3 | 332.5 |
+| `a < 128 && b < 128` | 1,131.6 | 344.3 | 335.9 |
+| `(a < b) && (b < c \|\| c == 0)` | 1,321.8 | 371.3 | 349.9 |
+| `if (a[i] > 128) s += a[i]` | 1,327.1 | 162.1 | 93.3 |
+| `s += a[i] > 128 ? a[i] : -a[i]` | 1,349.5 | 203.5 | 150.6 |
+| `m = a[i] > m ? a[i] : m` | 90.4 | 90.4 | 72.0 |
+
+Each converted kernel's 25 to 42 M branch misses fell to a few thousand. #2674's
+first commit had put the running max's comparison on its loop's carried chain
+(342.1 Mcycles, 3.78 times main), which the recurrence rule removed. The sums'
+remaining gap is clang's unrolling and the `setcc; test` that each `cmov`
+waits for ([#2676](https://github.com/buster14a/buster/issues/2676)). The
+truth values are i1 selects, where clang uses `and`/`or`
+([#2677](https://github.com/buster14a/buster/issues/2677)).
+
+The pass costs about 1.2% of sqlite3.c's `--tier1 -c` user cycles. That is
+2,163.6 against 2,138.4 Mcycles over 11 runs, with 0.63% more instructions. Its
+object has 0.17% more text, 678 `cmov`s against 422, and 16,266 conditional
+jumps against 16,503. The time spreads over the rounds' analysis and rewrite
+without a hot spot. Storing the per-row maps plus one instead of setting them
+up each round measured 0.25% slower, and was dropped.
+
+The lookup of a phi's entry from a block stops at the first one. Without the
+early exit, clang vectorized the scan into AVX-512 masked gathers, which
+MemorySanitizer reports as reading uninitialized lanes.
 
 SCCP tracks a state and two-word constant per instruction and an executable
 byte per deduplicated CFG edge. It sweeps executable blocks in reverse
@@ -339,57 +440,207 @@ address-keyed trace, so that pair compares values and statuses alone.
 regeneration of the pairs. The [text tools guide](ir-tools.md#pass-fixtures-in-the-text-form)
 has the fixture-by-fixture record and the exact contracts.
 
-## Remaining issue scope and acceptance
+## #139's acceptance
 
-The SCCP/dead-code/CFG group and the following separate slices are implemented
-against the shared IR, with local verifier and independent execution checks:
+The passes, and the guides that record each one:
 
-- [Value numbering](ir-value-numbering.md) uses congruence partition
-  refinement, dominance-qualified substitution and an independent scoped
-  scalar expression table. Cyclic congruences are compared semantically.
-- [Loop-invariant motion](ir-loop-motion.md) consumes #174's loops and
-  dominance, with exact vector/worklist output and conservative total-operation
-  motion into existing dedicated preheaders.
-- [Private-field scalar replacement](ir-scalar-replacement.md) splits
-  nonescaping, disjoint constant-offset fields. Tests compose its output with
-  both upstream #134 promotion paths, including conditional stores and loops.
-- [Bounded inlining](ir-inlining.md) processes acyclic call-graph components
-  from callees to callers, expands small single-block leaf bodies, and preserves
-  recursive calls and explicit growth limits. Vector cost admission has a
-  scalar twin; rewriting preserves caller control flow and ordered effects.
-- The [additional pass-cost harness](ir-optimization-measurements.md) measures
-  complete GVN, LICM and field-splitting calls on frozen inputs. Its local
-  sanitizer smoke checks provide no target performance claim.
+- **SCCP, dead-code removal and CFG cleanup:** this guide.
+- **CFG cleanup's merges (`BUSTER_IR_OPTIMIZE_MERGE`):** this guide, and [the
+  Tier 1 guide](tier1.md)'s "The C driver's `--tier1`".
+- **[Value numbering](ir-value-numbering.md):** congruence partition
+  refinement, with an independent scoped scalar expression table; cyclic
+  congruences are compared semantically.
+- **[Loop-invariant motion](ir-loop-motion.md):** total operations into existing
+  dedicated preheaders of #174's loops.
+- **[Private-field scalar replacement](ir-scalar-replacement.md):** nonescaping,
+  disjoint constant-offset fields.
+- **[Inlining](ir-inlining.md):** #2541's summaries and general splice.
 
-These slices do not complete #139. The following work remains tracked:
+Each has before/after fixtures, built in C and in the text form (#175), with
+both twins and an independent executor. #139's last items close as follows.
+The record is buster-performance's [`ssa-passes-139-2026-11-14`](https://github.com/buster14a/buster-performance/tree/c61db97a94c50c8f896ac5f4a58fb35bb44a23fe/docs/measurements/ssa-passes-139-2026-11-14).
 
-- Scalar floating numeric evaluation needs an explicit environment contract.
-- CFG cleanup still needs nonempty single-predecessor merging and metadata
-  compaction where measurements justify its cost.
-- Inlining still needs general callee CFG and stack-object cloning, measured
-  profitability, complete translation-unit driver integration and vector
-  operand rebasing beyond the current vector cost-admission sweep.
-- The aggregate-size limit, motion profitability, pass order and repetitions
-  require measurement. Conservative operation and alias exclusions are
-  documented by each implemented stage.
-- Complete pipeline integration, corpus and randomized-IR qualification,
-  all-pass and individual-pass differential tests, and 9700X compile-time
-  and emitted-program runtime acceptance remain pending.
+### The pipeline and the order
 
-Each transformation requires before/after verifier checks and independent
-execution comparisons. Every function of the source corpora and randomized
-IR must exercise the sweep and scalar paths; #142 must compare passes both on
-and individually off. Those checks must use the complete source-lowering
-and compiler-consumer pipeline. Local diagnostic tests do not satisfy 9700X
-acceptance.
+`--tier1`'s order is: lowering; the unit's inlining from summaries (#2541);
+SROA (`+sroa`); #866's solver (`+gvn`); promotion; the wide integers'
+halves and the wide vectors' pieces; truth simplification; threading;
+if-conversion; LICM (`+licm`); and the optimizer, which runs SCCP, dead-code
+removal, CFG cleanup and its merges, layout and identities, then the final
+verification that selection reads. `--tier1-passes=` turns each pass on or
+off ([the Tier 1 guide](tier1.md)). By default SCCP, dead-code removal, CFG
+cleanup, the merges and the inlining run; LICM, SROA and the solver don't,
+and none repeats. The measurements below decided this.
 
-The required measurements are full pass time, including operand preparation,
-analysis, remapping, allocation and verifier costs where enabled, plus emitted
-program time for `speedtest1` and the corpora. They must report useful items,
-bytes and peak scratch, compare both implementations in separately locked
-9700X runs on CPU 2, and include sustained vector work and work after a lighter
-phase. A kernel-only result cannot select the final pass order or discharge
-the compiler performance criteria.
+### Agreement of the twins
+
+- **The corpora.** `test-ir-source --passes` ([the IR guide](commands/ir.md))
+  runs every pass by both versions on every function of c-testsuite's subset
+  (430 functions), the frozen `sqlite3.c` (2,602) and musl (2,775, 1,355
+  units). It covers SROA, the solver (exact against its complete-refinement
+  oracle, semantic against its scalar twin), the optimizer's rows, LICM, and
+  the inliner per caller. Every pass's versions agree on every function. On
+  `sqlite3.c` the scalar solver removes the same 93,467 instructions as the
+  partition. The correctness list runs it on all three.
+- **Random IR.** `test-ir-metamorphic`'s combination row now includes the
+  merges. A run of seed 139 over 2,000 cases (14,000 variants, 1,568,000
+  checked executions through both twins of every pass) passed. The pass
+  fixtures run every pass mask, with and without the merges, on both paths.
+
+### #142's differential campaigns
+
+Csmith `0cdc7103` and YARPGen `1adb290f` (#142's pins), seeds 5000 to 5039
+of each, 80 programs per campaign, against clang -O0 and -O2 at both of
+Buster's tiers, with Tier 1 as `--tier1 --tier1-passes=+all` and with each
+pass turned off from there. Each campaign ran on a cloud host, a correctness
+run and no timing:
+
+| Tier 1 | Programs | Passed | Failed: clang -O0's link | Failed: clang -O0's 30 s bound |
+| --- | ---: | ---: | ---: | ---: |
+| `+all` | 80 | 66 | 8 | 6 |
+| `+all,-sccp` | 80 | 66 | 8 | 6 |
+| `+all,-dce` | 80 | 66 | 8 | 6 |
+| `+all,-cfg` | 80 | 66 | 8 | 6 |
+| `+all,-merge` | 80 | 66 | 8 | 6 |
+| `+all,-gvn` | 80 | 66 | 8 | 6 |
+| `+all,-licm` | 80 | 66 | 8 | 6 |
+| `+all,-sroa` | 80 | 66 | 8 | 6 |
+| `+all,-inline` | 80 | 66 | 8 | 6 |
+| `+all` with `--scalar` | 80 | 66 | 8 | 6 |
+
+A passed case means both of Buster's tiers and both clang modes compiled,
+ran and printed the same output. The same 14 cases fail in every campaign,
+each first at a step of clang -O0's:
+- **8 YARPGen programs:** their arrays need more than the small code model
+  reaches, so clang's link refuses them (`relocation truncated to fit`).
+  Buster's link refuses 7 of them the same way. For the eighth, Buster links,
+  and the cloud host's memory limit killed its executables at about 7 GB.
+- **6 Csmith programs:** every build's run passes the 30-second bound, clang
+  -O2's too.
+
+No case shows a difference or a failure of Buster at either tier: 660
+accepted comparisons of Tier 1's pipeline, 66 per configuration. The ledgers
+are in the record. Each case's every mode is listed there.
+
+### Compile time per pass, both versions
+
+`benchmark-ir-source --passes` on the 9700X (CPU 2, under the lock) on the
+frozen `sqlite3.c`: each pass's public call over all 2,602 functions (599,220
+lowered IR instructions), medians of 21 rounds. Each call includes its
+checks, analyses, rewrite and verification, which dominate the single-pass
+rows.
+
+| Pass | Vector, ms | Scalar, ms | Vector, ns an instruction | Scalar, ns an instruction | Scalar / vector |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SROA (Tier 1's options), on the lowered form | 46.3 | 63.3 | 77.2 | 105.7 | 1.37 |
+| #866's solver, on the lowered form | 49.3 | 59.4 | 82.3 | 99.2 | 1.21 |
+| SCCP alone | 42.9 | 46.7 | 71.6 | 77.9 | 1.09 |
+| Dead-code removal alone | 38.2 | 47.0 | 63.8 | 78.4 | 1.23 |
+| CFG cleanup alone | 30.9 | 40.4 | 51.6 | 67.4 | 1.30 |
+| CFG cleanup and its merges | 33.1 | 41.6 | 55.3 | 69.5 | 1.26 |
+| SCCP, dead-code removal and CFG cleanup | 50.4 | 53.1 | 84.2 | 88.6 | 1.05 |
+| Tier 1's set (with the merges, layout, identities) | 54.2 | 56.9 | 90.5 | 95.0 | 1.05 |
+| LICM | 55.8 | 58.3 | 93.1 | 97.2 | 1.04 |
+| The inliner, 1,794 callers' units | 22.8 | 30.4 | 38.0 | 50.8 | 1.34 |
+
+The optimizer's rows and LICM take the promoted form, 480,852 instructions.
+The merges cost 2.2 ms over CFG cleanup alone on the vector path (1.3 ms on
+the scalar), or 4 ns a lowered instruction. Their predecessor counts are one
+scalar pass over the executable edges, a scatter of one count per edge, which
+that bound includes; the chain heads come from the threading's pointer jumping,
+with its vector and scalar twins.
+
+The whole driver, `--tier1 --lanes 1 -c sqlite3.c`, 11 runs each by
+`time-runs`, in user cycles:
+
+| `--tier1-passes=` | User cycles, M | Against the default | Wall, ms |
+| --- | ---: | ---: | ---: |
+| (the default) | 2,459.1 | | 481.8 |
+| `-sccp` | 2,500.5 | +1.7% | 470.3 |
+| `-dce` | 2,582.3 | +5.0% | 484.9 |
+| `-cfg` | 2,474.0 | +0.6% | 472.9 |
+| `-merge` | 2,473.0 | +0.6% | 484.8 |
+| `-inline` | 2,099.4 | −14.6% | 416.0 |
+| `+gvn` | 3,247.3 | +32.0% | 604.5 |
+| `+licm` | 3,023.3 | +22.9% | 565.5 |
+| `+sroa` | 3,248.5 | +32.1% | 624.8 |
+| `+all` | 4,177.3 | +69.9% | 773.1 |
+| `-all` | 2,234.6 | −9.1% | 420.7 |
+
+The default passes earn their compile time: turning SCCP, dead-code removal
+or CFG cleanup off makes the rest of the pipeline do more. The merges save
+0.6% of the compile's cycles: 8,003 of `sqlite3.c`'s blocks join their
+predecessors, which leaves allocation and emission fewer blocks. Against main
+`ca1ede6a`, whose objects head's `--tier1-passes=-merge` reproduces byte for
+byte (speedtest1's unit and Lua's 33 units), head's `--tier1` takes 2,457.5 M
+user cycles to main's 2,463.3 M (−0.23%), and Tier 0's compile is unchanged
+(586.9 M to main's 588.1 M).
+
+### Run time per pass
+
+`measure-tier1-programs` on the 9700X (CPU 2, 11 rounds of a Williams design
+per run) with each variant beside the default `--tier1`. Every build gives
+speedtest1's verification hash and each Lua script's clang -O0 output. The
+default's medians varied by about 0.3% on speedtest1 and 0.8% on Lua between
+the five runs; earlier records place code-placement effects at about 1.5%.
+
+Each variant against the default `--tier1` of the same run, in user cycles and
+instructions (speedtest1's wall time is mostly its database's I/O):
+
+| `--tier1-passes=` | speedtest1, cycles | speedtest1, instructions | Lua, cycles | Lua, instructions |
+| --- | ---: | ---: | ---: | ---: |
+| `-sccp` | +3.7% | +9.4% | +5.8% | +5.3% |
+| `-dce` | +24.4% | +54.9% | +22.9% | +46.7% |
+| `-cfg` | +0.0% | +0.0% | −1.0% | −0.0% |
+| `-merge` | −0.6% | −0.1% | +2.0% | −0.0% |
+| `-inline` | +4.4% | +3.0% | +1.5% | +0.6% |
+| `+gvn` | −0.8% | +4.5% | +11.0% | +10.5% |
+| `+licm` | +5.3% | +6.2% | +57.9% | +56.0% |
+| `+sroa` | −1.6% | −0.4% | −0.6% | +0.1% |
+| `+all` | +2.6% | +7.6% | +58.3% | +60.7% |
+| `-all` | +34.2% | +66.7% | +26.9% | +52.5% |
+
+The default `--tier1` took 1.30 to 1.32 times clang -O2's user cycles on
+speedtest1 and 1.19 to 1.21 times on Lua. Head's `--tier1-passes=-merge`
+writes main's objects, so the `-merge` row is head against main.
+
+What the measurements decided:
+- **SCCP, dead-code removal and the inlining** pay at run time, and turning
+  them off makes the compile slower as well. All the default passes off cost
+  34% of speedtest1's cycles and 27% of Lua's.
+- **CFG cleanup's threading** is neutral at run time, since the layout already
+  makes a jump to the next block a fall-through. It saves 0.6% of the compile.
+- **The merges** stay on. They save 0.6% of the compile, take 0.35% from
+  `sqlite3.c`'s Tier 1 text (1,100,264 to 1,096,408 bytes) and 439 call-save
+  stores from its 15,424. Their run-time change, 0.1% fewer instructions, is
+  inside code placement's noise either way.
+- **#866's solver** stays off: Lua runs 11% more cycles. Its class
+  representatives lengthen live ranges that the allocator then spills, as the
+  value-numbering guide's earlier measurement found. It also costs 32% of the
+  compile.
+- **LICM** stays off: Lua runs 58% more cycles. Its moved values live across
+  their loops, where they spill (#1189's breakdown).
+- **SROA** stays off: at most 1.6% fewer cycles, inside the noise, with no
+  fewer instructions, for 32% more compile. It splits the driver's one-slot
+  scalars, which promotion takes anyway, and the aggregates that matter escape
+  to calls until the inlining removes those calls. The inlining's expansions
+  already run it where they copy aggregates.
+- **Repetition:** no pass runs twice. The optimizer cleans up after the passes
+  before it, the inlining's summaries are optimized once each, and nothing
+  measured here would gain from a second round.
+
+### What stays open
+
+Each item #139's design or guide named that this close-out doesn't finish has
+an issue of its own:
+- **Value numbering with memory** (repeated loads, store-to-load forwarding):
+  #2718.
+- **A policy under which LICM and the solver pay** (register pressure, values
+  Tier 1 recomputes kept at their users): #2719.
+- **Scalar floating folding** under #1450's floating-environment contract:
+  #2720.
+- **Inlining callees with control flow, its classes and budgets:** #2541 and its
+  claimed steps. Its unit refusal of a variadic or unprototyped call: #2721.
 
 ## Algorithm sources and provenance
 

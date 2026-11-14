@@ -43,7 +43,7 @@ extra arguments are a usage error.
 
 ## The parallel runner
 
-`./build/compiler parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [--memory MIB] [LIST]`
+`./build/compiler parallel [--jobs N] [--timeout SECONDS] [--github] [--fail-fast] [--shard K/N [--costs FILE]] [--memory MIB] [LIST]`
 runs a list of commands at once. LIST (standard input without one) holds them:
 each starts at a heading, a line `== TITLE`, and its script is the lines after
 it, up to the next heading; before the first heading there may be blank lines
@@ -100,6 +100,22 @@ and the report gives what every command wrote; once every command has ended, one
 drops the rest of the report rather than wait for its reader. A report that
 can't be written (EPIPE: `parallel | head`, whether or not SIGPIPE is ignored)
 stops the run, and its commands are killed.
+
+`--fail-fast` (#2703) stops the run at its first failure: a command that
+fails, times out or can't start. Nothing more starts, the running commands'
+groups are killed, and the run ends as soon as they have been reaped. The
+killed commands are reported as `failed (stopped: another command failed)`,
+counted apart from the failures, without an annotation of their own. The
+summary line adds `stopped at the first failure (N running commands stopped)`,
+and the commands after the failure are `not started`. A command that ended of
+its own before the kill keeps its outcome, and a skipped command doesn't stop
+the run. The hosted rows pass it on pull requests and merge-queue candidates,
+whose rows already fail fast by job. A shard there can't pass after its first
+failure, and running the rest only delayed the report: one candidate's 2.8 s
+failure showed when its shard ended, 820 s later, and failing candidates'
+first failed jobs ended 22.5 minutes in, on average. Pushes, the daily run and
+dispatches run every command, for their coverage. `costs.c` reads a stopped
+command's heading as an incomplete sample, as it reads any failure's.
 
 `--shard K/N` runs the K-th of N shards of the list, for N machines that each
 run one: the hosted test job runs each row's inventory as the row's own number

@@ -463,8 +463,38 @@ does, each rule checked against clang's answers on probes of it:
   The ordinary control walk is specialized without the prefix checks.
   Tier 0 has no loop transformation for the hints to steer.
 - **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
-  or a compound statement's start. Its state changes nothing, since nothing
-  here contracts `a * b + c` into a fused operation.
+  or a compound statement's start. `ON` permits contraction within a source
+  expression, `OFF` forbids it, and `DEFAULT` restores the command-line
+  contraction mode. The command-line default is `-ffp-contract=on`;
+  `off`, `on`, `fast` and `fast-honor-pragmas` are validated, ordered options.
+  Clang 23's `fast-honor-pragmas` is an alias of `fast`, and both allow lexical
+  pragma overrides. Fast mode grants a broader optimization permission;
+  Clang's `-O0` retains separate multiply/add operations in that mode.
+  The optional `CheckGraph.fp_environments` byte carries contraction in bits
+  `BUSTER_CHECK_FP_CONTRACT_ON` and `BUSTER_CHECK_FP_CONTRACT_FAST`, independently
+  of evaluation methods and environment access. Its zero policy is off.
+  Sources without floating pragmas allocate no new column: their immutable
+  `fp_contract_default` carries the argv policy. Handwritten graphs default
+  to off. Scalar and SIMD input publication preserve the same bits, and
+  deferred expression slices retain the source graph's default and column.
+  Shared native lowering (`c_check_program_contract.c`) contracts scalar float
+  and double multiply/add/subtract expressions when both operations permit
+  `on` and the function's effective target has FMA or AVX512F. Parentheses,
+  same-format casts and selected wrappers retain the opportunity; stored
+  products, statement-expression results, dynamic conditional joins and
+  conversions to another floating format are boundaries. Compound `+=` and
+  `-=` keep the ordinary address evaluation and single store. The existing
+  exact x86 operation row carries the fused operation through both tiers;
+  operand order and explicit negations preserve the pinned oracle's NaN bits.
+  Targets without FMA retain separate arithmetic, and `fast` retains the
+  pinned `-O0` behavior rather than adding a cross-statement optimization pass.
+  Constant products retain their prior rounding. A GNU statement expression
+  that supplies a constant floating operand is materialized at runtime in
+  every contraction mode, as Clang does: its source proof remains available,
+  while the inherited source/runtime flag prevents an enclosing expression
+  from folding an unfused answer over a fused result. This correction can
+  change instruction bytes for those previously folded statement expressions
+  even on a non-FMA target; default and explicit `off` still agree there.
 - **The clang and Microsoft floating-point spellings** (`c_check_fp_input.c`):
   `#pragma clang fp` accepts any sequence of `contract(on|off|fast)`,
   `reassociate(on|off)`, `reciprocal(on|off)`, `eval_method(source|double|extended)` and
@@ -475,8 +505,8 @@ does, each rule checked against clang's answers on probes of it:
   Clang's `-Wignored-pragmas` warning with ordinary command-line, source and
   system-header policy. Illegal precision/exception combinations and stack
   operations inside a compound have Clang's diagnostic text and location.
-  Permission to contract, reassociate, use reciprocals or relax precision does
-  not require those transformations; generated evaluation remains precise.
+  Reassociation, reciprocal evaluation and precision relaxation remain
+  independent permissions; they are not implied by contraction.
   `strict` and `maytrap` preserve runtime operations and conversions through the
   existing floating-environment path, including discarded results and constant
   operands. The exception state is separate from STDC `FENV_ACCESS`, so changing
@@ -4194,7 +4224,7 @@ What the lowering covers past scalars (#145's programs):
   function's end, and a statement expression's end, after its value is kept
   (`CheckProgramRegion.cleanups`). Each variable's call is written once
   (#1370), as clang's is: `CHECK_CONTROL_CLEANUP` (whose target is the record)
-  at its scope's end. An exit of the function's statements is one
+  at its scope's end. An exit of the function's or a statement expression's statements is one
   `CHECK_CONTROL_EXIT` instead of a run of calls, which names its first and
   last record (`CheckProgramExit`); its tail (its restore, lifetime ends and
   jump, or its return) follows it, so every walk of the controls sees the
@@ -4202,26 +4232,39 @@ What the lowering covers past scalars (#145's programs):
   body's chains in linear passes (`CheckProgramChain`): the lowering jumps
   from the exit to its first record's call, and after each call a dispatch
   goes on to the destinations that stop there (exits with the same last
-  record and the same tail share one, whose tail the first of them keeps in
+  record and the same tail share one, whose tail the first emitted exit keeps in
   place; a lone jump's is its target), to the parent's call for exits that go
   on, and to the next control. Only a dispatch of two continuations or more
   tests an I32 destination slot, which every exit and fall that crosses one
   stores first (a fall 0, at its run's head, past which exits enter): the
   issue's function of early returns stores none, and its calls are its
-  variables' count. An exit from a statement expression's statements takes
-  the chain through the records within its block, whose calls its region
-  lowers with its statements, from the empty evaluation stack the region
-  starts with: the dispatch's jumps and the exit's agree on the stack, out of
-  the region as within it. An exit that leaves the block's own records (their
-  calls run after its END, once its value is kept) or records outside it, one
-  through a record whose scope's end a constant switch's kept statements leave
-  out, and one whose jump no path reaches keep their runs in place. Code and call rows grow
+  variables' count. Statement expressions share the chain through their own
+  block's records and enclosing records too. Their own calls run after their
+  `END`, once the value has been kept (and an aggregate copied), before any
+  saved outer expression operands are restored. Both a normal completion and
+  an exit therefore reach the calls with an empty evaluation stack. The
+  post-value run has a natural fall, which stores zero when its dispatch
+  needs it; a nested region's earlier exit cannot leave a stale destination.
+  Destinations become active when their exits are lowered
+  (`CheckLowerWriter.chain_destinations`), and a dispatch only names active
+  destinations. This matters when a constant expression skips a region:
+  its return tail is never emitted, and an enclosing cleanup must neither
+  branch to that absent tail nor make an emitted exit share it.
+  An exit through a record whose scope's end a constant switch's kept
+  statements leave out, and one whose jump no path reaches, keeps its run
+  in place. Code and call rows grow
   linearly in exits plus cleanups, where they grew as their product (85
   cleanups with an early return each made 3,825 calls, and 86 exhausted the
   call rows). An exit keeps only the innermost record whose scope holds its
   target; the planner finds its last record in one preorder sweep, and a
   scope's end and `check_control_cleanup_at` skip closed scopes whole, so the
-  planning is linear too. On the 9700X, 10,000 cleanups with an early return
+  planning is linear too. Control room reserves at most one `RESULT` and
+  `EXIT` per jump and one `CLEANUP` per variable, including regions; inline
+  fallbacks expand during lowering and need no repeated control entries.
+  `c_check_cleanup_driver_test.c` checks region-own and enclosing-chain
+  growth, cleanup traces against Clang in both tiers and both reader paths,
+  retained scalar and aggregate values, nested regions, skipped return
+  destinations and VLA cleanup before release. On the 9700X, 10,000 cleanups with an early return
   each compile in 36 ms by Tier 0 (`-c`), and sqlite3.c's compile is
   unchanged ([the measurements](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/cleanup-chains-1370-2026-11-09)).
   The planner stays scalar. It runs only for a body with an exit through a
@@ -4861,6 +4904,17 @@ warns, as clang's `isUnusedResultAWarning` names those unconditionally. Reading
 its value is clang's error, and so is a definition (`void v;`, `extern void v = 1;`).
 
 #### Semantic error recovery (#1447)
+
+For #2406's semicolon-bounded malformed block items, the parser retains the
+original diagnostic and records a deletion range for the checker's private
+resume view. This covers a stray `else`, a control keyword followed immediately
+by `;` instead of an opening parenthesis, and plain declaration specifiers
+without a first declarator.
+The range stops before the semicolon and never discards a preceding declarator
+or tag definition. Later complete statements are checked in the same scope;
+the original unit remains rejected and `-c` writes no object. Runtime fixtures
+compare complete diagnostics with Clang in GNU C17 and C23, through both readers
+and deferred-body compilation, with warning suppression and error limits.
 
 Translation-unit-wide recovery after semantic errors comes in phases. The plan
 is [on #1447](https://github.com/buster14a/buster/issues/1447#issuecomment-6719193112).
@@ -6813,9 +6867,26 @@ incompatible one (`check_driver_conversion_source` keeps an rvalue's atomic
 type, where an lvalue's is its value's): "initializing 'int' with an
 expression of incompatible type '_Atomic(int)'", a pointer's and a `_Bool`'s
 too. A variadic argument's, clang's `-Wnon-pod-varargs` error, is refused by
-name. Other operators refuse it in the checker's words as they refuse a
-record's (clang's "invalid argument type '_Atomic(int)' to unary expression",
-"statement requires expression of scalar type", #2441). Buster's `-c` emits
+name. Invalid unary, binary, conditional, indirection and address operators
+name their operands as clang does, retaining typedef spelling and dropping
+lvalue qualifiers only where the language conversion does (#2441).
+Statement conditions distinguish scalar requirements from a switch's integer
+requirement and point to the statement keyword. Assertions require a scalar
+type and case labels an integer type before constant evaluation; GNU constant
+folding cannot make an atomic rvalue satisfy either constraint or add a folding
+warning for that rejected type. Rejected assertions retain their comma-operand
+warnings through the existing source events before recovery drops the condition.
+The cold renderer supplies the contextual boolean and integer-constant type
+diagnostics. An enumerator with a noninteger value reports its type and recovers
+to the ordinary implicit successor; later enumerators and declarations are still
+checked. Its expression warnings precede the type error, which in turn precedes
+any overflow of the recovered value or name redefinition error. Two conditional arms
+with the same canonical atomic type retain that type; aliases and alignment
+inside it do not make it different, while an
+atomic enum and its compatible integer type remain distinct. The original runtime fixtures
+in `tests/driver/operand_diagnostics/` compare the complete output through both
+readers and deferred bodies under gnu17 and C23, and execute selections of atomic
+integer, floating and pointer values. Buster's `-c` emits
 the static initializers clang's code generation refuses ("cannot compile this
 static initializer yet" for `_Atomic(int *) p = (_Atomic(int *))&x;`).
 
@@ -6858,8 +6929,7 @@ Clang's `DiagnoseIntInBoolContext` follows every conversion to `_Bool` (#1447,
 `check_common_int_in_bool`): the operands of `!`, `&&` and `||` and the
 conditions of statements and conditionals (`CheckBoolLikeConversion`, the
 operand itself and never a conditional's arms), a static assertion's condition
-(#2409, `check_common_assertion_reach`; left: a failed assertion's, whose
-root its error leaves unwalked, gives none, where clang's precedes the error), and an initializer's,
+(#2409, `check_common_assertion_reach`), and an initializer's,
 assignment's, return's or argument's conversion, whose conditional arms and
 comma result carry it. Its implicit conversions passed, a `<<` of a literal 0,
 or of two literals, always evaluates to one truth, which clang's evaluation
@@ -6874,6 +6944,24 @@ at most a unary minus, with no parentheses. The always-forms are
 a literal conversion, in unreachable code and short-circuited operands too, and
 a brace initializer's in its reverse order; the walks' candidates test the
 operand's operator before any type.
+
+A failed static assertion's root is excluded from the rejected unit's warning
+walk. `check_driver_reports_from` therefore checks that root's
+integer-to-boolean conversion when publishing `CHECK_MESSAGE_STATIC_ASSERT`,
+at the error's expression boundary
+and in the preceding diagnostic phase. This keeps the warning before the
+unchanged assertion error, with the normal command-line and pragma policy,
+including promotion, suppression and fatal/error-limit handling. The original
+runtime sources `tests/driver/assert_bool_*.c`, through
+`c_check_assert_bool_driver_test.c`, compare complete Clang diagnostics for
+file, member and block scopes, repeated failures, successful and non-warning
+controls, unrelated errors, macro expansion notes, C17/C23 and both
+scalar/vector readers and lane requests. Clang is the external behavioral
+oracle; the fixtures and
+implementation are original. Nested boolean conversions inside a failed
+condition, such as `_Static_assert(!(1 << 3), "nested")`, still need the failed
+subtree's conversion traversal; the error path currently checks only the
+assertion condition's own conversion.
 
 The graph's passes share their facts, `check_common_facts`, which give each
 node its parent, whether another node uses its value, whether it is evaluated,
@@ -8406,6 +8494,29 @@ constant evaluation of its own initializer (`(typeof(x)){0}`,
 any use does, recording its declaration, so that the finish's scan of the
 initializer reports it at the use, with clang's message.
 
+Address-space attributes also wrap the placeholder (#1844). Deduction preserves
+each written space at its own level: a specifier's space qualifies the deduced
+object, or the pointee under a pointer declarator; a pointer's own attribute
+qualifies that pointer. GNU numeric and OpenCL spaces use the existing type
+qualifier representation, including target space zero. The ordinary rules still
+reject an automatic object in an address space, allow a pointer to such an
+object and allow file-scope or static objects. Lvalue conversion drops the
+initializer object's space; it keeps a pointer's pointee space. Specifier
+`const`, `volatile` and `_Atomic` survive deduction. A specifier's `restrict`
+with an address-space attribute is invalid before deduction, as clang checks
+the wrapped placeholder; a pointer declarator's `restrict`, or a space after
+the name of a restrict-deduced pointer, remains valid.
+
+Within a statement expression, cached deduction keeps a prepared x86 builtin's
+callee as an expression operand (#2717). The ordered reader's `ignored` mark
+means the retained graph uses the intrinsic call record, not that the callee is
+declaration syntax. Its recorded function type remains available to the cached
+reader; the existing argument and immediate checks still apply. Original runtime
+fixtures cover both reported forms, nested deduction, direct and explicitly
+typed controls, and a rejected nonconstant immediate. The same accepted source
+is compiled and linked for x86-64-v3, and compared with Clang in execution when
+the host supports that target.
+
 Clang's errors, at its places: `__auto_type` anywhere but a declaration's own
 specifiers (a parameter's, a member's, a type name's) at the keyword
 (`CheckInputReader.specifier_auto_type`); a typedef's and a function's at the
@@ -8437,13 +8548,17 @@ deduced one, as clang's C `mergeTypes` takes the placeholder before deducing
 `check_input_auto_type_merged`), through pointer declarators, and a `restrict`
 placeholder's over a restrict pointer. Where clang's `mergeTypes` refuses the
 merge (#1844, `check_input_auto_type_refused`), clang's error is given: the
-qualifiers of a level differ (const, volatile and restrict alike), a pointer
-declarator meets no pointer, or an `_Atomic` placeholder meets no atomic type.
+qualifiers of a level differ (const, volatile, restrict and address space), a
+pointer declarator meets no pointer, or an `_Atomic` placeholder meets no atomic type.
 It reads "redefinition of 'p' with a different type: 'const __auto_type' vs
 'int'", or "redeclaration" with `extern`, at the name. The placeholder is
 printed through its declarator (`'volatile __auto_type *const'`,
-`'_Atomic(__auto_type)'`, `'restrict __auto_type'`;
-`check_semantic_auto_type_spelling`). The note is at the entity's latest
+`'_Atomic(__auto_type)'`, `'restrict __auto_type'`), keeping each level's address
+space and its source macro spelling through the shared type printer
+(`type_print` with aliases for the private placeholder markers;
+`check_semantic_auto_type_spelling`). A local whole-placeholder alias preserves
+the qualifier order of a prefix or suffix macro and the raw address-space
+spelling when an `_Atomic` specifier rebuilds the type. The note is at the entity's latest
 earlier declaration, "previous definition is here" for a definition or a
 tentative one (`CHECK_REDECLARATION_AUTO_TYPE`). The reader stops there, as at
 other initialized invalid declarations, so clang's later errors aren't given.
@@ -8452,8 +8567,11 @@ Refused by name: `_Atomic` and `restrict` through a declarator
 together (clang's restrict error names `_Atomic(__auto_type)`), `_Atomic` of an
 atomic value (clang's error names the placeholder's type), `restrict` of a value
 that is no pointer to an object (clang's `restrict int`, which the placeholder
-can't be told from), and type attributes with `__auto_type` but a vector's and a
-mode's. A redeclaration of an atomic entity takes its type, as clang's
+can't be told from), and other type-changing attributes besides the handled
+vector, mode and address-space attributes. An incompatible address-space
+pointee initializer is rejected by the assignment check, whose message names
+the deduced type rather than clang's undeduced placeholder. A redeclaration of
+an atomic entity takes its type, as clang's
 `mergeTypes` merges it (#1844): a plain placeholder any atomic type
 (`_Atomic int r; __auto_type r = 1;` is an `_Atomic int`, and so is
 `__auto_type *p` after `_Atomic int *p`), and an `_Atomic` one an atomic type
@@ -8472,6 +8590,15 @@ first error's line, on both paths, and its programs (`local-labels`,
 `auto-type`) run natively against clang -O0's code. `test-checker-driver`
 compares each error's line and column, and its text where the driver's message
 is clang's (`c_checker_driver_gnu_test.c`).
+
+The original runtime sources in `tests/driver/auto-address/` run through the
+address-space driver's existing diagnostic harness in GNU17 and C23 modes.
+Their `_Generic` assertions check the deduced qualifier levels, compatible
+redeclarations and lvalue conversion. The error cases check automatic storage,
+incompatible redeclarations, specifier restrict, invalid numeric spaces and
+conflicting attributes; the duplicate-space case checks its warning and
+preserved type. Complete Clang diagnostics, object emission or preservation,
+default/`-Werror`/`-w`, both kernels and one/three requested lanes are covered.
 
 **C23 `auto` and `constexpr` (#793).** In C23 a declaration's `auto`, when no
 other type specifier is beside it, is a type specifier rather than the storage
@@ -8693,10 +8820,18 @@ change, it refused such a declaration by name.
   (`suppress(("a"))`, clang's `checkStringLiteralArgumentAttr`); a non-string
   inside them (`suppress((1))`, #2332) is the string error, then the parser's
   "expected ')'" at the same token, noted "to match this '('" at the innermost
-  `(` (`check_input_attribute_suppress_paren`). Not yet clang's: arguments
-  clang's parser itself rejects (`suppress("a",)`, `suppress("a" x)`), after
-  whose first error clang's parser goes on and buster's parser stops; and an
-  implicit int's declaration after a statement's attributes (`__attribute__((unused))
+  `(`. Both parser paths retain balanced string lists for
+  `check_input_attribute_suppress_parse`, including malformed tails such as
+  `suppress("a",)` and `suppress("a" x)`. Their delimiter errors and notes keep
+  clang's locations and order, and later independent declarations are checked.
+  An empty parenthesized argument has only its string-literal error. A malformed
+  GNU outer tail discards the following complete semicolon-bounded declaration,
+  so its name cannot hide a later undeclared-name error; a C23 list keeps its
+  declaration. The original `tests/driver/attribute_recovery.c` fixtures compare
+  both language modes, readers, warning policy, deferred checking and output
+  preservation. Mixed statement/nonstatement attributes, string subscripts and
+  unmatched outer lists still have recovery gaps. So does an implicit int's
+  declaration after a statement's attributes (`__attribute__((unused))
   (x)++;`), whose redeclaration errors and `-Wignored-attributes` warning
   clang's Sema gives after the parser's errors, which stop buster (#2332). The calls
   are clang's `CallExprFinder`'s (`check_input_statement_call`): a call's

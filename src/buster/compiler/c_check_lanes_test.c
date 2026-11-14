@@ -15,7 +15,9 @@
 //   take its parts and finish first), and on 8 that can't be pinned (CPUs past every one lane_pin takes, which lane_run
 //   runs unpinned and then counts as lanes that didn't start), with -g's rows and unwind tables and without: each the
 //   same object (object_build of the emission's link and the static data), byte for byte, as one lane's, with the lanes
-//   and parts the emission says it ran, run again on one lane only when its lanes didn't start.
+//   and parts the emission says it ran, run again on one lane only when its lanes didn't start; and on one lane by
+//   windows of 1, 64 and 2,048 tokens (#2536, CheckProgramLanes.window_tokens), each one window's object or failure,
+//   and by windows of 64 short of room (CheckProgramLanes.squeeze_window), which go again as one part.
 // - The ids' order (#153): each generated and failing program compiled again by the same path with its identifiers' ids
 //   in another order (check_driver_id_order, the driver's --id-order, from --id-order N on, 153 by default), whose table
 //   must have every name of the first compile, most of them at other ids, then emitted on one lane and on 8, with -g's
@@ -237,7 +239,7 @@ static void check_lanes_test_function(char* text, uint64_t capacity, uint64_t* u
 
 // A generated program of `functions` functions of random kinds (see the file's comment), each calling at most one before
 // it, and a main that calls each with a few inputs and exits with a checksum of their results.
-static uint64_t check_lanes_test_generate(CheckLanesTestTally* tally, char* text, uint64_t capacity, uint32_t functions)
+static uint64_t check_lanes_test_generate(CheckLanesTestTally* tally, char* text, uint64_t capacity, uint32_t functions, bool clones)
 {
     uint64_t used = 0;
     check_lanes_test_append(text, capacity, &used,
@@ -246,6 +248,15 @@ static uint64_t check_lanes_test_generate(CheckLanesTestTally* tally, char* text
                             "static struct pair swap_pair(struct pair p)\n{\n    struct pair q = { p.y, p.x };\n    return q;\n}\n"
                             "static long sum_values(int count, ...)\n{\n    va_list list;\n    va_start(list, count);\n    long total = 0;\n"
                             "    for (int i = 0; i < count; i += 1)\n    {\n        total += va_arg(list, long);\n    }\n    va_end(list);\n    return total;\n}\n");
+    if (clones)
+    {
+        // Copies share object, switch, VLA and cleanup records. Their lowering must not race across parts.
+        check_lanes_test_append(text, capacity, &used,
+                                "static void clone_cleanup(long *p) { *p += 1; }\n"
+                                "__attribute__((target_clones(\"default\", \"sse4.2\", \"avx2\")))\n"
+                                "static long clone_lanes(long n) { long x __attribute__((cleanup(clone_cleanup))) = n;\n"
+                                "long a[(n & 3) + 1]; a[0] = n; switch (n & 3) { case 0: x += a[0]; break; case 1: x -= 2; break; default: x += 3; } return x; }\n");
+    }
     for (uint32_t f = 0; f < functions; f += 1)
     {
         const uint32_t kind = (uint32_t)(check_lanes_test_random(tally) % BUSTER_CHECK_LANES_TEST_KINDS);
@@ -253,6 +264,10 @@ static uint64_t check_lanes_test_generate(CheckLanesTestTally* tally, char* text
         check_lanes_test_function(text, capacity, &used, f, kind, callee);
     }
     check_lanes_test_append(text, capacity, &used, "int main(void)\n{\n    long total = 0;\n    for (long i = 0; i < 3; i += 1)\n    {\n");
+    if (clones)
+    {
+        check_lanes_test_append(text, capacity, &used, "        total += clone_lanes(i);\n");
+    }
     for (uint32_t f = 0; f < functions; f += 1)
     {
         check_lanes_test_append(text, capacity, &used, "        total = total * 31 + f%u(i, total & 255);\n", f);
@@ -574,8 +589,8 @@ static void check_lanes_test_budget(CheckLanesTestTally* tally, CheckLanesTestUn
 }
 
 // `unit` emitted on one lane, then on 2, 3 and 8 lanes, every lane forced, on 8 with lanes 0, 1 and 7 each slow in
-// turn, and on 8 that can't be pinned, with and without -g's rows and unwind tables: each emission the one lane's, the
-// unpinned one run again on one lane, the others not. Returns how many emissions it compared, and `emitted` whether the
+// turn, on 8 that can't be pinned, and on one lane by windows of 1, 64 and 2,048 tokens (#2536), with and without -g's
+// rows and unwind tables: each emission the one lane's, the unpinned one run again on one lane, the others not. Returns how many emissions it compared, and `emitted` whether the
 // one lane's succeeded.
 static uint32_t check_lanes_test_unit(CheckLanesTestTally* tally, CheckLanesTestUnit* unit, const Parser* parser, Preprocessor* pp,
                                       const InternTable* identifiers, bool scalar, const char* what, bool* emitted)
@@ -623,6 +638,46 @@ static uint32_t check_lanes_test_unit(CheckLanesTestTally* tally, CheckLanesTest
             free(many.object);
             compared += 1;
         }
+        // One lane's windows (#2536, CheckProgramLanes.window_tokens): of one token, every body a part, of 64 and of
+        // 2,048, each window poisoned as it is popped: each one window's object or failure, on one lane, never again;
+        // of one token, a part a body.
+        static const uint32_t windows[] = { 1, 64, 2048 };
+        for (uint32_t w = 0; w < BUSTER_ARRAY_LENGTH(windows); w += 1)
+        {
+            CheckProgramLanes lanes = {
+                .lanes = 1,
+                .window_tokens = windows[w],
+                .poison_windows = true,
+            };
+            CheckLanesTestEmission windowed = check_lanes_test_emit(unit, parser, pp, identifiers, &lanes, scalar, rows, unwind);
+            const uint32_t bodies = unit->selected.program.body_count;
+            snprintf(detail, sizeof(detail), "%s, %s path, windows of %u tokens%s: status %u/%u, token %u/%u, %llu/%llu bytes, %u parts", what,
+                     scalar ? "scalar" : "vector", windows[w], rows ? ", -g and unwind tables" : "", (uint32_t)one.status, (uint32_t)windowed.status, one.token,
+                     windowed.token, (unsigned long long)one.size, (unsigned long long)windowed.size, windowed.parts);
+            check_lanes_test_expect(tally, check_lanes_test_same(&one, &windowed), "one lane's windows make one window's", detail);
+            check_lanes_test_expect(tally, windowed.active <= 1 && windowed.again == CHECK_PROGRAM_AGAIN_NONE && (windows[w] != 1 || !one.emitted || windowed.parts == bodies),
+                                    "windows run on one lane, a part a body at one token", detail);
+            free(windowed.object);
+            compared += 1;
+        }
+        // Windows short of room (CheckProgramLanes.squeeze_window: 2 KB, less than a part of 64 tokens takes): the
+        // bodies go again as one part, one window's object or failure.
+        CheckProgramLanes squeezed_lanes = {
+            .lanes = 1,
+            .window_tokens = 64,
+            .poison_windows = true,
+            .squeeze_window = 2048,
+        };
+        CheckLanesTestEmission squeezed = check_lanes_test_emit(unit, parser, pp, identifiers, &squeezed_lanes, scalar, rows, unwind);
+        const uint32_t squeezed_bodies = unit->selected.program.body_count;
+        snprintf(detail, sizeof(detail), "%s, %s path, windows of 64 tokens in 2 KB%s: status %u/%u, token %u/%u, %llu/%llu bytes, again %u", what,
+                 scalar ? "scalar" : "vector", rows ? ", -g and unwind tables" : "", (uint32_t)one.status, (uint32_t)squeezed.status, one.token, squeezed.token,
+                 (unsigned long long)one.size, (unsigned long long)squeezed.size, (uint32_t)squeezed.again);
+        check_lanes_test_expect(tally, check_lanes_test_same(&one, &squeezed), "windows short of room make one window's", detail);
+        check_lanes_test_expect(tally, squeezed.active <= 1 && (!one.emitted || squeezed_bodies < 40 || squeezed.again != CHECK_PROGRAM_AGAIN_NONE),
+                                "windows short of room go again as one part", detail);
+        free(squeezed.object);
+        compared += 1;
         free(one.object);
     }
     return compared;
@@ -747,7 +802,7 @@ static void check_lanes_test_programs(CheckLanesTestTally* tally, const char* di
     for (uint32_t p = 0; text != NULL && p < programs + 2; p += 1)
     {
         const uint32_t functions = p >= programs ? 600 : p < 3 ? 1 + p : 1 + (uint32_t)(check_lanes_test_random(tally) % 240);
-        const uint64_t length = check_lanes_test_generate(tally, text, capacity, functions);
+        const uint64_t length = check_lanes_test_generate(tally, text, capacity, functions, false);
         char path[PATH_MAX];
         snprintf(path, sizeof(path), "%s/program_%u.c", directory, p);
         FILE* file = fopen(path, "wb");
@@ -976,7 +1031,7 @@ static void check_lanes_test_squeezes(CheckLanesTestTally* tally, const char* di
     const uint64_t capacity = UINT64_C(1) << 24;
     char* text = malloc(capacity);
     CheckLanesTestTally fixed = { .random = BUSTER_CHECK_LANES_TEST_SQUEEZE_SEED };
-    const uint64_t length = text != NULL ? check_lanes_test_generate(&fixed, text, capacity, BUSTER_CHECK_LANES_TEST_SQUEEZE_FUNCTIONS) : 0;
+    const uint64_t length = text != NULL ? check_lanes_test_generate(&fixed, text, capacity, BUSTER_CHECK_LANES_TEST_SQUEEZE_FUNCTIONS, false) : 0;
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/squeeze.c", directory);
     FILE* file = text != NULL ? fopen(path, "wb") : NULL;
@@ -1405,7 +1460,7 @@ static void check_lanes_test_rule(CheckLanesTestTally* tally, const char* direct
     char detail[256];
     for (uint32_t s = 0; text != NULL && s < BUSTER_ARRAY_LENGTH(sizes); s += 1)
     {
-        const uint64_t length = check_lanes_test_generate(tally, text, capacity, sizes[s]);
+        const uint64_t length = check_lanes_test_generate(tally, text, capacity, sizes[s], false);
         char path[PATH_MAX];
         snprintf(path, sizeof(path), "%s/rule_%u.c", directory, s);
         FILE* file = fopen(path, "wb");
@@ -1885,7 +1940,7 @@ static void check_lanes_test_driver_growth(CheckLanesTestTally* tally, const cha
         if (p != 0)
         {
             snprintf(sources[p], sizeof(sources[p]), "%s/growth_%u.c", directory, sizes[p]);
-            const uint64_t length = check_lanes_test_generate(tally, text, capacity, sizes[p]);
+            const uint64_t length = check_lanes_test_generate(tally, text, capacity, sizes[p], p == 1);
             FILE* file = fopen(sources[p], "wb");
             const bool written = file != NULL && fwrite(text, 1, length, file) == length;
             referenced = file != NULL && fclose(file) == 0 && written;

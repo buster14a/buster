@@ -192,6 +192,11 @@ predicates. The pass changes only comparison operands and predicates in the
 lane-owned IR, before use lists and verified-analysis revisions exist. The
 optimizer then removes dead chains and verifies the resulting SSA. Its
 64-byte opcode/type candidate scan has an exact scalar twin and masked tails.
+If-conversion (#1382) runs `ir_truth_simplify_values` on its own rounds'
+columns, which also turns a select of truth values tested against zero into an
+i1 select (`c && x` as `select c, x, c`), as
+[the IR optimization guide](ir-optimization.md#bounded-scalar-if-conversion-1382)
+says.
 
 `tests/driver/tier1_truth.c` is the standalone native regression, also run by
 `tools/ci/correctness.tests`. From the repository root with a built compiler:
@@ -329,7 +334,10 @@ functions by `--tier1-strict --verify` on both host paths and runs them
 against Clang's oracle. objdump must find no setcc in the truth functions, six
 immediate stores and no constant in a register in the store function, and no
 shift by zero. In the computed goto, it must find at least four indirect jumps
-and no jump to one:
+and no jump to one. In #2592's fetch, `i = *pc++` at each handler's end, at
+least three indirect jumps must follow the target's load with no register move
+between them, and at least three increments of `pc` must be in place (`add
+$0x4`):
 
 ```sh
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns && ./build/test-driver-tier1-patterns build/compiler "$(command -v clang)"

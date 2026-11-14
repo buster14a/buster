@@ -16,6 +16,10 @@
 //                                                    which its `#: seeded` line names, until a collect over its own
 //   costs peaks --tests LIST --costs DIR LOG...     the rows' tables with the peak memory the logs give (#2031),
 //                                                    keeping their costs: each command's largest, the runners' least
+//   costs split --tests LIST --costs DIR --map FILE every row's table after the inventory split headings into new
+//                                                    ones (#2658), FILE's `HEADING<TAB>NEW<TAB>WEIGHT` lines: each new
+//                                                    heading takes its weight's share of its heading's cost, and its
+//                                                    peak, marked `derived`, until a collect measures it
 //   costs plan --tests LIST --costs FILE --shards N[-M] [--deal FILE] [--jobs J] [--setup SECONDS] [--first SECONDS]
 //                                                    the runner's deal and each shard's predicted time, for each N
 //   costs report LOG...                              a run's rows as they ran: each shard's step and job, the longest,
@@ -993,6 +997,9 @@ typedef enum CostsKind
     COSTS_MEASURED,
     COSTS_LOWER_BOUND,
     COSTS_UNMEASURED,
+    // A share of a heading's cost that the inventory split into several (`costs split`, #2658): kept as it is until a
+    // collect over logs that have the new heading, and no part of the row's median.
+    COSTS_DERIVED,
 } CostsKind;
 
 typedef struct CostsTable CostsTable;
@@ -1065,7 +1072,8 @@ static size_t costs_table_seconds(CostsSlice line, uint64_t* milliseconds)
     return valid ? at : 0;
 }
 
-// A `#: lower-bound TITLE` or `#: unmeasured TITLE` mark: the command's kind, applied after the cost lines.
+// A `#: lower-bound TITLE`, `#: unmeasured TITLE` or `#: derived TITLE` mark: the command's kind, applied after the cost
+// lines.
 static void costs_table_mark(CostsTable* table, const CostsList* list, CostsSlice title, CostsKind kind, CostsKind* marks)
 {
     const uint32_t found = costs_list_find(list, costs_trim(title));
@@ -1203,6 +1211,10 @@ static CostsTable costs_table_parse(const CostsList* list, CostsText text)
         {
             costs_table_mark(&table, list, costs_after(content, 14), COSTS_UNMEASURED, marks);
         }
+        else if (costs_starts(content, "#: derived "))
+        {
+            costs_table_mark(&table, list, costs_after(content, 11), COSTS_DERIVED, marks);
+        }
         else if (costs_starts(content, "#:"))
         {
             table.error = "a `#:` line this tool doesn't write";
@@ -1283,6 +1295,16 @@ static void costs_table_write(const CostsTable* table, const CostsList* list, Co
     costs_append(output, "# failure, a lower bound (`lower-bound`); where it has none, the row's median per CPU times its CPUs (`unmeasured`),\n");
     costs_append(output, "# which `costs refresh` also gives a command the inventory adds. The costs only deal the commands to the shards: a\n");
     costs_append(output, "# stale cost makes a shard longer, never a test go missing.\n");
+    bool derived = false;
+    for (uint32_t i = 0; i < list->count; i += 1)
+    {
+        derived = derived || table->kinds[i] == COSTS_DERIVED;
+    }
+    if (derived)
+    {
+        costs_append(output, "# `derived` is a share of the cost of a heading the inventory split into several (`costs split`, #2658), its weight's,\n");
+        costs_append(output, "# until a collect over logs that have the new heading measures it.\n");
+    }
     if (table->first_given)
     {
         costs_append(output, "# `first-shard` is how much longer shard 1's job ran than the others' besides their commands, the medians' difference\n");
@@ -1318,6 +1340,10 @@ static void costs_table_write(const CostsTable* table, const CostsList* list, Co
         {
             costs_append(output, "#: lower-bound %.*s\n", (int)title.length, title.data);
         }
+        else if (table->kinds[i] == COSTS_DERIVED)
+        {
+            costs_append(output, "#: derived %.*s\n", (int)title.length, title.data);
+        }
         else if (table->kinds[i] == COSTS_ABSENT || table->kinds[i] == COSTS_UNMEASURED)
         {
             costs_append(output, "#: unmeasured %.*s\n", (int)title.length, title.data);
@@ -1332,7 +1358,7 @@ static void costs_table_write(const CostsTable* table, const CostsList* list, Co
     }
     for (uint32_t i = 0; i < list->count; i += 1)
     {
-        const bool measured = table->kinds[i] == COSTS_MEASURED || table->kinds[i] == COSTS_LOWER_BOUND;
+        const bool measured = table->kinds[i] == COSTS_MEASURED || table->kinds[i] == COSTS_LOWER_BOUND || table->kinds[i] == COSTS_DERIVED;
         const uint64_t tenths = measured ? table->milliseconds[i] / 100 : median * costs_held(&list->commands[i], table->jobs);
         costs_append(output, "%llu.%llu %.*s\n", (unsigned long long)(tenths / 10), (unsigned long long)(tenths % 10), (int)list->commands[i].title.length, list->commands[i].title.data);
     }
@@ -1351,6 +1377,97 @@ static bool costs_refresh_text(const CostsList* list, CostsText text, CostsBuffe
            : table.jobs == 0 ? "a table without its runner's CPUs"
            : !measured ? "a table that measures no command"
            : NULL;
+    if (*error == NULL)
+    {
+        costs_table_write(&table, list, output);
+    }
+    costs_table_free(&table);
+    return *error == NULL;
+}
+
+// The headings the inventory split into several (`costs split`, #2658): for each new heading, the heading it came from
+// and its weight, a whole number from 1; a heading's new headings share its cost by their weights.
+typedef struct CostsSplit CostsSplit;
+struct CostsSplit
+{
+    const CostsSlice* from;
+    const CostsSlice* titles;
+    const uint64_t* weights;
+    uint32_t count;
+};
+
+// What a table's own lines give a split heading, which the inventory may no longer have, so that costs_table_parse
+// leaves it out: its cost, whether a mark made it an estimate (`unmeasured`), and its peak (0 without one). False without
+// a cost line for it.
+static bool costs_split_source(CostsText text, CostsSlice title, uint64_t* milliseconds, bool* estimated, uint64_t* peak)
+{
+    bool found = false;
+    *milliseconds = 0;
+    *estimated = false;
+    *peak = 0;
+    size_t offset = 0;
+    CostsSlice line;
+    while (costs_next_line(text, &offset, &line))
+    {
+        const CostsSlice content = costs_trim(line);
+        if (costs_starts(content, "#: unmeasured "))
+        {
+            *estimated = *estimated || costs_equal(costs_trim(costs_after(content, 14)), title);
+        }
+        else if (costs_starts(content, "#: peak "))
+        {
+            uint64_t mebibytes = 0;
+            const CostsSlice rest = costs_after(content, 8);
+            const size_t digits = costs_number(rest, UINT32_MAX, &mebibytes);
+            const bool same = digits != 0 && digits < rest.length && costs_equal(costs_trim(costs_after(rest, digits)), title);
+            *peak = same ? mebibytes : *peak;
+        }
+        else if (content.length != 0 && content.data[0] != '#')
+        {
+            uint64_t value = 0;
+            const size_t length = costs_table_seconds(content, &value);
+            const bool same = length != 0 && length < content.length && costs_equal(costs_trim(costs_after(content, length)), title);
+            *milliseconds = same ? value : *milliseconds;
+            found = found || same;
+        }
+    }
+    return found;
+}
+
+// A row's table after the splits, as refresh would write it for the list as it is: each new heading takes its weight's
+// share of its heading's cost, and its peak, marked `derived`, or an estimate where the heading's own cost was one.
+// False (with *error) where the table can't be refreshed, or has no cost for a split heading.
+static bool costs_split_text(const CostsList* list, const CostsSplit* split, CostsText text, CostsBuffer* output, const char** error)
+{
+    CostsTable table = costs_table_parse(list, text);
+    uint64_t median = 0;
+    const bool measured = table.error == NULL && table.jobs != 0 && costs_table_median(&table, list, &median);
+    *error = table.error != NULL ? table.error
+           : !table.marked ? "a table this tool didn't write"
+           : table.row == BUSTER_COSTS_ROWS ? "a table without its row"
+           : table.jobs == 0 ? "a table without its runner's CPUs"
+           : !measured ? "a table that measures no command"
+           : NULL;
+    for (uint32_t i = 0; *error == NULL && i < split->count; i += 1)
+    {
+        uint64_t milliseconds = 0;
+        bool estimated = false;
+        uint64_t peak = 0;
+        const bool found = costs_split_source(text, split->from[i], &milliseconds, &estimated, &peak);
+        uint64_t total = 0;
+        for (uint32_t j = 0; j < split->count; j += 1)
+        {
+            total += costs_equal(split->from[j], split->from[i]) ? split->weights[j] : 0;
+        }
+        const uint32_t command = costs_list_find(list, split->titles[i]);
+        *error = !found ? "no cost for a heading it splits" : command == list->count ? "a new heading the inventory doesn't have" : NULL;
+        if (*error == NULL)
+        {
+            table.milliseconds[command] = milliseconds * split->weights[i] / total;
+            table.kinds[command] = estimated ? COSTS_UNMEASURED : COSTS_DERIVED;
+            table.peaks[command] = peak;
+        }
+    }
     if (*error == NULL)
     {
         costs_table_write(&table, list, output);
@@ -2516,6 +2633,61 @@ static void costs_test_tables(CostsTest* test, const CostsList* list)
     CostsBuffer none = { 0 };
     costs_expect(test, costs_check_text(&changed_list, 0, text, &none) != 0 && costs_check_text(&changed_list, 0, refreshed_text, &none) == 0, "the old table fails the changed inventory; the refreshed one checks");
     free(none.data);
+    // Split (#2658): the inventory splits Alpha into itself and Theta by 3 to 1, Beta into Iota and Kappa alike, and the
+    // unmeasured Epsilon into Lambda and Mu. Each new heading takes its weight's share of its heading's cost and its
+    // heading's peak, marked derived, which refresh keeps and the median leaves out; an estimate's parts stay estimates.
+    CostsText split_list_text = costs_text_of("== Alpha [4 CPUs]\ntrue\n== Theta [4 CPUs]\ntrue\n== Iota\ntrue\n== Kappa\ntrue\n== Gamma [2 CPUs]\ntrue\n== Delta\ntrue\n"
+                                              "== Lambda\ntrue\n== Mu\ntrue\n");
+    const CostsList split_list = costs_list_parse(split_list_text);
+    const CostsSlice split_from[] = {
+        BUSTER_COSTS_SLICE("Alpha [4 CPUs]"),
+        BUSTER_COSTS_SLICE("Alpha [4 CPUs]"),
+        BUSTER_COSTS_SLICE("Beta: with a colon"),
+        BUSTER_COSTS_SLICE("Beta: with a colon"),
+        BUSTER_COSTS_SLICE("Epsilon 100%"),
+        BUSTER_COSTS_SLICE("Epsilon 100%"),
+    };
+    const CostsSlice split_titles[] = {
+        BUSTER_COSTS_SLICE("Alpha [4 CPUs]"),
+        BUSTER_COSTS_SLICE("Theta [4 CPUs]"),
+        BUSTER_COSTS_SLICE("Iota"),
+        BUSTER_COSTS_SLICE("Kappa"),
+        BUSTER_COSTS_SLICE("Lambda"),
+        BUSTER_COSTS_SLICE("Mu"),
+    };
+    const uint64_t split_weights[] = { 3, 1, 1, 1, 1, 1 };
+    const CostsSplit split = { .from = split_from, .titles = split_titles, .weights = split_weights, .count = 6 };
+    CostsBuffer split_table = { 0 };
+    costs_expect(test, costs_split_text(&split_list, &split, text, &split_table, &error), "a table splits for the inventory's split headings");
+    costs_expect(test, costs_test_contains(&split_table, "\n60.0 Alpha [4 CPUs]\n20.0 Theta [4 CPUs]\n3.5 Iota\n3.5 Kappa\n8.0 Gamma [2 CPUs]\n3.0 Delta\n4.0 Lambda\n4.0 Mu\n"),
+                 "each new heading its weight's share, the estimate's parts the measured median per CPU");
+    costs_expect(test, costs_test_contains(&split_table, "\n#: derived Alpha [4 CPUs]\n#: derived Theta [4 CPUs]\n#: derived Iota\n#: derived Kappa\n#: lower-bound Delta\n#: unmeasured Lambda\n#: unmeasured Mu\n"),
+                 "marked derived, the estimate's parts unmeasured");
+    costs_expect(test, costs_test_contains(&split_table, "\n#: peak 2048 Alpha [4 CPUs]\n#: peak 2048 Theta [4 CPUs]\n#: peak 3 Iota\n#: peak 3 Kappa\n#: peak 12 Gamma [2 CPUs]\n#: peak 5 Delta\n"),
+                 "with their heading's peak");
+    CostsText split_text = { .data = split_table.data, .length = split_table.length };
+    CostsBuffer split_again = { 0 };
+    costs_expect(test, costs_refresh_text(&split_list, split_text, &split_again, &error) && split_again.length == split_table.length && memcmp(split_again.data, split_table.data, split_again.length) == 0,
+                 "refresh keeps a split table as it is");
+    CostsBuffer split_problems = { 0 };
+    costs_expect(test, costs_check_text(&split_list, 0, split_text, &split_problems) == 0, "and it checks");
+    const CostsSlice missing_from[] = {
+        BUSTER_COSTS_SLICE("Nu"),
+    };
+    const CostsSplit missing = { .from = missing_from, .titles = split_titles + 1, .weights = split_weights, .count = 1 };
+    CostsBuffer refused = { 0 };
+    costs_expect(test, !costs_split_text(&split_list, &missing, text, &refused, &error) && strcmp(error, "no cost for a heading it splits") == 0, "a heading the table doesn't cost doesn't split");
+    const CostsSlice stray_title[] = {
+        BUSTER_COSTS_SLICE("Xi"),
+    };
+    const CostsSplit stray = { .from = split_from, .titles = stray_title, .weights = split_weights, .count = 1 };
+    costs_expect(test, !costs_split_text(&split_list, &stray, text, &refused, &error) && strcmp(error, "a new heading the inventory doesn't have") == 0, "nor into a heading the inventory doesn't have");
+    free(refused.data);
+    free(split_problems.data);
+    free(split_again.data);
+    free(split_table.data);
+    free(split_list.commands);
+    free(split_list_text.data);
     // Seed: a row without logs takes another row's measurements, which its `#: seeded` line names; it checks as its own
     // row's table and refreshes as one, and can't seed another.
     const uint32_t vector_thread = BUSTER_COSTS_VECTOR * BUSTER_COSTS_SANITIZERS + 2;
@@ -2949,6 +3121,7 @@ static void costs_usage(void)
                     "       costs check --tests LIST --costs DIR\n"
                     "       costs seed --tests LIST --costs DIR --row ROW --from ROW\n"
                     "       costs peaks --tests LIST --costs DIR LOG...\n"
+                    "       costs split --tests LIST --costs DIR --map FILE\n"
                     "       costs plan --tests LIST --costs FILE --shards N[-M] [--deal FILE] [--jobs J] [--setup SECONDS] [--first SECONDS]\n"
                     "       costs report LOG...\n"
                     "       costs --self-test [--root DIR]\n");
@@ -3149,6 +3322,117 @@ static int costs_command_tables(const char* tests, const char* directory, bool w
     return valid && problems == 0 ? 0 : 1;
 }
 
+// split: every row's table in DIRECTORY after the inventory LIST split headings, which MAP's lines name, each
+// `HEADING<TAB>NEW<TAB>WEIGHT` (blank lines and `#` comments aside): NEW is one of HEADING's new headings, which share its
+// cost by their weights, whole numbers from 1. A heading may keep its title for one of its new headings; otherwise the
+// inventory must no longer have it. Writes nothing unless every table splits.
+static int costs_command_split(const char* tests, const char* directory, const char* map)
+{
+    CostsText text = { 0 };
+    CostsList list = { 0 };
+    CostsText mapping = { 0 };
+    bool valid = costs_load_list(tests, &text, &list);
+    if (valid && !costs_read(map, &mapping))
+    {
+        fprintf(stderr, "costs: %s: %s\n", map, strerror(errno));
+        valid = false;
+    }
+    const uint32_t capacity = BUSTER_COSTS_COMMANDS;
+    CostsSlice* from = costs_allocate(capacity + 1, sizeof(CostsSlice));
+    CostsSlice* titles = costs_allocate(capacity + 1, sizeof(CostsSlice));
+    uint64_t* weights = costs_allocate(capacity + 1, sizeof(uint64_t));
+    CostsSplit split = { .from = from, .titles = titles, .weights = weights };
+    size_t offset = 0;
+    CostsSlice line;
+    uint32_t number = 0;
+    while (valid && costs_next_line(mapping, &offset, &line))
+    {
+        number += 1;
+        const CostsSlice content = costs_trim(line);
+        const char* first = content.length != 0 ? memchr(content.data, '\t', content.length) : NULL;
+        const char* second = first != NULL ? memchr(first + 1, '\t', content.length - (size_t)(first + 1 - content.data)) : NULL;
+        if (content.length == 0 || content.data[0] == '#')
+        {
+            continue;
+        }
+        uint64_t weight = 0;
+        const CostsSlice heading = first != NULL ? costs_trim((CostsSlice){ content.data, (size_t)(first - content.data) }) : (CostsSlice){ 0 };
+        const CostsSlice title = second != NULL ? costs_trim((CostsSlice){ first + 1, (size_t)(second - first - 1) }) : (CostsSlice){ 0 };
+        const CostsSlice value = second != NULL ? (CostsSlice){ second + 1, (size_t)(content.data + content.length - second - 1) } : (CostsSlice){ 0 };
+        valid = heading.length != 0 && title.length != 0 && costs_whole_number(value, 1000000, &weight) && weight >= 1 && split.count < capacity;
+        if (!valid)
+        {
+            fprintf(stderr, "costs: %s:%u: not HEADING<TAB>NEW<TAB>WEIGHT, a whole weight from 1\n", map, number);
+        }
+        else
+        {
+            from[split.count] = heading;
+            titles[split.count] = title;
+            weights[split.count] = weight;
+            split.count += 1;
+        }
+    }
+    for (uint32_t i = 0; valid && i < split.count; i += 1)
+    {
+        bool kept = false;
+        for (uint32_t j = 0; j < split.count; j += 1)
+        {
+            kept = kept || (costs_equal(from[j], from[i]) && costs_equal(titles[j], from[i]));
+        }
+        if (!kept && costs_list_find(&list, from[i]) != list.count)
+        {
+            fprintf(stderr, "costs: split: the inventory still has %.*s\n", (int)from[i].length, from[i].data);
+            valid = false;
+        }
+    }
+    valid = valid && split.count != 0;
+    CostsBuffer outputs[BUSTER_COSTS_ROWS] = { 0 };
+    for (uint32_t row = 0; valid && row < BUSTER_COSTS_ROWS; row += 1)
+    {
+        char name[64];
+        costs_row_name(row, name, sizeof(name));
+        char path[4096];
+        snprintf(path, sizeof(path), "%s/%s.costs", directory, name);
+        CostsText table = { 0 };
+        const char* error = NULL;
+        if (!costs_read(path, &table))
+        {
+            fprintf(stderr, "costs: %s: no table for the row (%s)\n", path, strerror(errno));
+            valid = false;
+        }
+        else if (!costs_split_text(&list, &split, table, &outputs[row], &error))
+        {
+            fprintf(stderr, "costs: split: %s: %s\n", path, error);
+            valid = false;
+        }
+        free(table.data);
+    }
+    for (uint32_t row = 0; row < BUSTER_COSTS_ROWS; row += 1)
+    {
+        char name[64];
+        costs_row_name(row, name, sizeof(name));
+        char path[4096];
+        snprintf(path, sizeof(path), "%s/%s.costs", directory, name);
+        if (valid && !costs_write(path, &outputs[row]))
+        {
+            fprintf(stderr, "costs: can't write %s\n", path);
+            valid = false;
+        }
+        free(outputs[row].data);
+    }
+    if (valid)
+    {
+        fprintf(stderr, "costs: split %u new headings into every row's table\n", split.count);
+    }
+    free(from);
+    free(titles);
+    free(weights);
+    free(mapping.data);
+    free(list.commands);
+    free(text.data);
+    return valid ? 0 : 1;
+}
+
 // seed: DIRECTORY/ROW.costs, which mustn't exist, from DIRECTORY/FROM.costs.
 static int costs_command_seed(const char* tests, const char* directory, const char* row_name, const char* from_name)
 {
@@ -3287,6 +3571,7 @@ int main(int argc, char** argv)
     const char* root = NULL;
     const char* row = NULL;
     const char* from = NULL;
+    const char* map = NULL;
     uint64_t low = 0;
     uint64_t high = 0;
     uint64_t jobs = 4;
@@ -3328,6 +3613,10 @@ int main(int argc, char** argv)
         else if (strcmp(argv[i], "--from") == 0 && has_value)
         {
             from = value;
+        }
+        else if (strcmp(argv[i], "--map") == 0 && has_value)
+        {
+            map = value;
         }
         else if (strcmp(argv[i], "--shards") == 0 && has_value)
         {
@@ -3371,6 +3660,10 @@ int main(int argc, char** argv)
     else if ((strcmp(command, "refresh") == 0 || strcmp(command, "check") == 0) && valid && tests != NULL && costs != NULL && logs == 0)
     {
         status = costs_command_tables(tests, costs, command[0] == 'r');
+    }
+    else if (strcmp(command, "split") == 0 && valid && tests != NULL && costs != NULL && map != NULL && row == NULL && from == NULL && logs == 0)
+    {
+        status = costs_command_split(tests, costs, map);
     }
     else if (strcmp(command, "seed") == 0 && valid && tests != NULL && costs != NULL && row != NULL && from != NULL && logs == 0)
     {

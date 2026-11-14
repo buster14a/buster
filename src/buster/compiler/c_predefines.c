@@ -929,6 +929,9 @@ static const char* predefines_host(PredefinesFeatures* listed, PredefinesFeature
 #define BUSTER_PREDEFINES_EVAL_SOURCE 1
 #define BUSTER_PREDEFINES_EVAL_DOUBLE 2
 #define BUSTER_PREDEFINES_EVAL_EXTENDED 3
+#define BUSTER_PREDEFINES_CONTRACT_OFF 0
+#define BUSTER_PREDEFINES_CONTRACT_ON 1
+#define BUSTER_PREDEFINES_CONTRACT_FAST 2
 
 #define BUSTER_PREDEFINES_FPMATH_SSE 1
 #define BUSTER_PREDEFINES_FPMATH_387 2
@@ -967,6 +970,9 @@ typedef enum PredefinesFloat
     PREDEFINES_FLOAT_OFAST, // -Ofast, which counts only when it is the last -O.
     PREDEFINES_FLOAT_FAST,
     PREDEFINES_FLOAT_NO_FAST,
+    PREDEFINES_FLOAT_CONTRACT_OFF,
+    PREDEFINES_FLOAT_CONTRACT_ON,
+    PREDEFINES_FLOAT_CONTRACT_FAST,
 } PredefinesFloat;
 
 // The hardening flags clang's driver weighs against each other (predefines_finish_neutral), each with its -mno- form.
@@ -2209,6 +2215,18 @@ static __attribute__((unused)) PredefinesParse predefines_option_match(Predefine
         if (event < 0)
         {
             fprintf(stderr, "error: unsupported argument '%s' to option '-ffp-exception-behavior='\n", value);
+        }
+        result = event >= 0 && predefines_push_float(options, (PredefinesFloat)event) ? result : PREDEFINES_PARSE_ERROR;
+    }
+    else if (match.joined == C_OPTION_FFP_CONTRACT_EQ)
+    {
+        const char* value = argument + 14;
+        const int event = strcmp(value, "off") == 0 ? PREDEFINES_FLOAT_CONTRACT_OFF :
+                          strcmp(value, "on") == 0 ? PREDEFINES_FLOAT_CONTRACT_ON :
+                          strcmp(value, "fast") == 0 || strcmp(value, "fast-honor-pragmas") == 0 ? PREDEFINES_FLOAT_CONTRACT_FAST : -1;
+        if (event < 0)
+        {
+            fprintf(stderr, "error: unsupported argument '%s' to option '-ffp-contract='\n", value);
         }
         result = event >= 0 && predefines_push_float(options, (PredefinesFloat)event) ? result : PREDEFINES_PARSE_ERROR;
     }
@@ -3694,6 +3712,43 @@ static __attribute__((unused)) X86Target predefines_function_target(const Predef
 #define BUSTER_PREDEFINES_FP_APPROX_FUNC 0x01u
 #define BUSTER_PREDEFINES_FP_REASSOCIATE 0x02u
 #define BUSTER_PREDEFINES_FP_RECIPROCAL 0x04u
+
+// Clang's contraction policy in argv order, independently of its other fast-math permissions. Disabling fast/unsafe
+// math restores the last explicit -ffp-contract, or replaces fast by on while retaining a precise/strict model's
+// current on/off. Model selections do not erase that explicit choice; an inactive -Ofast event changes nothing.
+// Clang 23 treats fast-honor-pragmas as fast, and both retain lexical pragma overrides.
+static __attribute__((unused)) uint8_t predefines_fp_contract(const PredefinesOptions* options)
+{
+    uint8_t result = BUSTER_PREDEFINES_CONTRACT_ON;
+    uint8_t specified = UINT8_MAX;
+    const uint32_t count = options->float_count;
+    const uint8_t* const floats = options->floats;
+    const bool ofast = options->ofast;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const PredefinesFloat event = (PredefinesFloat)floats[i];
+        if (event >= PREDEFINES_FLOAT_CONTRACT_OFF && event <= PREDEFINES_FLOAT_CONTRACT_FAST)
+        {
+            result = (uint8_t)(event - PREDEFINES_FLOAT_CONTRACT_OFF);
+            specified = result;
+        }
+        else if (event == PREDEFINES_FLOAT_FAST || event == PREDEFINES_FLOAT_UNSAFE || (event == PREDEFINES_FLOAT_OFAST && ofast))
+        {
+            result = BUSTER_PREDEFINES_CONTRACT_FAST;
+        }
+        else if (event == PREDEFINES_FLOAT_NO_FAST || event == PREDEFINES_FLOAT_NO_UNSAFE)
+        {
+            result = specified != UINT8_MAX ? specified : result == BUSTER_PREDEFINES_CONTRACT_FAST ? BUSTER_PREDEFINES_CONTRACT_ON : result;
+        }
+        else if (event >= PREDEFINES_FLOAT_MODEL_FAST && event <= PREDEFINES_FLOAT_MODEL_STRICT &&
+                 (!ofast || event == PREDEFINES_FLOAT_MODEL_AGGRESSIVE))
+        {
+            result = event == PREDEFINES_FLOAT_MODEL_STRICT ? BUSTER_PREDEFINES_CONTRACT_OFF :
+                     event == PREDEFINES_FLOAT_MODEL_PRECISE ? BUSTER_PREDEFINES_CONTRACT_ON : BUSTER_PREDEFINES_CONTRACT_FAST;
+        }
+    }
+    return result;
+}
 
 // The floating-point macros' inputs, stepped through the options in order as clang's driver does
 // (RenderFloatingPointOptions): whether to define __FAST_MATH__, __FINITE_MATH_ONLY__ 1 and __NO_MATH_ERRNO__.
