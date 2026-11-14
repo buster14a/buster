@@ -2841,13 +2841,15 @@ static void check_failures(void)
     }
 
     // An interrupt of the build's process group, as a terminal's, and a termination of build.sh alone, as
-    // timeout(1)'s: main_unit_types.c takes 20 s on the 9700X and longer elsewhere, so each comes while it compiles.
+    // timeout(1)'s: c_parser_benchmark.c, the longest unit Release compiles whole, takes 9.7 s on the 9700X and longer
+    // elsewhere, so each comes while it compiles. A main.c unit's own compile stops at its front end (the units in
+    // parts), and a touch of one rebuilt nothing more: main_unit_types.c's took 1.7 s on a hosted runner.
     char log[PATH_MAX];
     snprintf(log, sizeof(log), "%s/interrupted.log", work);
     char* argv[] = { "./build.sh", "--config", "Release", 0 };
     for (uint32_t i = 0; i < 2; i += 1)
     {
-        utimensat(AT_FDCWD, "src/buster/compiler/main_unit_types.c", 0, 0);
+        utimensat(AT_FDCWD, "src/buster/compiler/c_parser_benchmark.c", 0, 0);
         const pid_t child = start(log, 0, argv, true);
         sleep_seconds(3);
         if (i == 0)
@@ -2881,7 +2883,7 @@ static void check_failures(void)
     }
 
     // A clean of the tree while a build compiles in it: the clean waits for the build, which publishes.
-    utimensat(AT_FDCWD, "src/buster/compiler/main_unit_types.c", 0, 0);
+    utimensat(AT_FDCWD, "src/buster/compiler/c_parser_benchmark.c", 0, 0);
     char* clean_debug[] = { "./build.sh", "clean", "--config", "Debug", 0 };
     overlap(argv, clean_debug, "waiting for another build or clean", "a clean of a tree during its build");
     if (!same_file("build/compiler", release) || access(debug, F_OK) == 0)
