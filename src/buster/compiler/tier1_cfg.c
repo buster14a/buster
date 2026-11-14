@@ -2184,8 +2184,13 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                         // The value's place after the block (#2774), at the entry of the block's first successor in layout: its
                         // entry range there where that block comes no later than this one, else the range that block's entry
                         // takes its opening from, as a dispatch loop's join, laid out after its handlers, takes their first
-                        // one's (`joined` above). A range a merged block continues opens before that block, not at it.
-                        const uint32_t next = pieces.fill ? firsts[b] : BUSTER_TIER1_CFG_NONE;
+                        // one's (`joined` above). A range a merged block continues opens before that block, not at it. A
+                        // range that goes on into the next block in layout, which merges, keeps the place the last of its
+                        // blocks that gives one gives, where its own last gives none: the edges out of the blocks before,
+                        // a loop's back edge among them, store it there too. One whose first successor is that next block
+                        // gives none.
+                        const bool goes_on = pieces.fill && b + 1 < blocks && merges[b + 1] && dense[v] != BUSTER_TIER1_CFG_NONE && tier1_cfg_bit(liveness.in + (uint64_t)(b + 1) * words, dense[v]);
+                        const uint32_t next = pieces.fill && !(goes_on && firsts[b] == b + 1) ? firsts[b] : BUSTER_TIER1_CFG_NONE;
                         const bool later = next != BUSTER_TIER1_CFG_NONE && next > b && dense[v] != BUSTER_TIER1_CFG_NONE && tier1_cfg_bit(liveness.in + (uint64_t)next * words, dense[v]);
                         const uint32_t model = !later ? BUSTER_TIER1_CFG_NONE : siblings[next] != BUSTER_TIER1_CFG_NONE ? siblings[next] : firsts[next] < next ? firsts[next] : BUSTER_TIER1_CFG_NONE;
                         const uint32_t taken = next <= b ? next : model;
