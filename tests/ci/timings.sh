@@ -63,24 +63,31 @@ JSON
         printf '\xef\xbb\xbf%s\n' "2026-11-04T09:00:20.0000000Z ##[group]Run '/usr/local/libexec/buster-9700x/job-started.sh'"
         printf '%s\n' '2026-11-04T09:00:21.0000000Z buster-9700x: this job has the machine' ;;
     # The merge queue: a merged candidate (7), one that passed but was invalidated (8), a failure (9), a cancelled one
-    # (10) and one whose fate can't be read (12); another event's run (13) and one without its times (14) are left out.
+    # (10) and one whose fate can't be read (12); another event's run (13), one without its times (14) and another
+    # branch's queue's candidate (15, the drill's) are left out.
     *workflows/9700x.yml/runs\?event=merge_group\&status=completed\&per_page=100)
-        printf '%s\n' '{"workflow_runs":[{"id":7,"event":"merge_group","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000007","created_at":"2026-11-13T09:00:00Z","run_started_at":"2026-11-13T09:00:10Z","updated_at":"2026-11-13T09:37:26Z"},{"id":8,"event":"merge_group","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000008","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:30:00Z"},{"id":9,"event":"merge_group","status":"completed","conclusion":"failure","head_sha":"0000000000000000000000000000000000000009","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:04:00Z"},{"id":10,"event":"merge_group","status":"completed","conclusion":"cancelled","head_sha":"0000000000000000000000000000000000000010","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:10:00Z"},{"id":12,"event":"merge_group","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000012","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:10:00Z"},{"id":13,"event":"push","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000013","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:10:00Z"},{"id":14,"event":"merge_group","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000014","created_at":null,"updated_at":"2026-11-13T09:10:00Z"}]}' ;;
+        printf '%s\n' '{"workflow_runs":[{"id":7,"event":"merge_group","head_branch":"gh-readonly-queue/main/pr-107-0000000000000000000000000000000000000001","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000007","created_at":"2026-11-13T09:00:00Z","run_started_at":"2026-11-13T09:00:10Z","updated_at":"2026-11-13T09:37:26Z"},{"id":8,"event":"merge_group","head_branch":"gh-readonly-queue/main/pr-108-0000000000000000000000000000000000000001","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000008","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:30:00Z"},{"id":9,"event":"merge_group","head_branch":"gh-readonly-queue/main/pr-109-0000000000000000000000000000000000000001","status":"completed","conclusion":"failure","head_sha":"0000000000000000000000000000000000000009","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:04:00Z"},{"id":10,"event":"merge_group","head_branch":"gh-readonly-queue/main/pr-110-0000000000000000000000000000000000000001","status":"completed","conclusion":"cancelled","head_sha":"0000000000000000000000000000000000000010","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:10:00Z"},{"id":12,"event":"merge_group","head_branch":"gh-readonly-queue/main/pr-112-0000000000000000000000000000000000000001","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000012","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:10:00Z"},{"id":13,"event":"push","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000013","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:10:00Z"},{"id":14,"event":"merge_group","head_branch":"gh-readonly-queue/main/pr-114-0000000000000000000000000000000000000001","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000014","created_at":null,"updated_at":"2026-11-13T09:10:00Z"},{"id":15,"event":"merge_group","head_branch":"gh-readonly-queue/merge-queue-drill/pr-115-0000000000000000000000000000000000000001","status":"completed","conclusion":"failure","head_sha":"0000000000000000000000000000000000000015","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:10:00Z"}]}' ;;
     *compare/0000000000000000000000000000000000000007...main) echo ahead ;;
     *compare/0000000000000000000000000000000000000008...main) echo diverged ;;
     *compare/0000000000000000000000000000000000000009...main) echo behind ;;
     *compare/0000000000000000000000000000000000000010...main) echo diverged ;;
+    # The drill's candidate has a fate and jobs, so that counting it would change the candidates' table.
+    *compare/0000000000000000000000000000000000000015...main) echo diverged ;;
+    *runs/15/jobs\?per_page=100\&filter=latest)
+        printf '%s\n' '{"jobs":[{"id":151,"runner_id":5,"created_at":"2026-11-13T09:00:00Z","started_at":"2026-11-13T09:00:01Z","completed_at":"2026-11-13T09:05:01Z"}]}' ;;
     *compare/0000000000000000000000000000000000000012...main)
         printf '{"message":"Server Error","status":"502"}\n'
         exit 1 ;;
+    # The candidates' jobs. Runner waits count the hosted jobs a runner took (71, 73, 81: 10, 285 and 2 s), not a
+    # skipped one (72, runner 0), one that never started (74), the 9700X's (75, self-hosted) or one without a runner (91).
     *runs/7/jobs\?per_page=100\&filter=latest)
         [[ "$2" == --paginate ]]
-        printf '%s\n' '{"jobs":[{"id":71,"started_at":"2026-11-13T09:00:20Z","completed_at":"2026-11-13T09:30:20Z"},{"id":72,"started_at":"2026-11-13T09:01:00Z","completed_at":"2026-11-13T09:01:00Z"}]}' \
-            '{"jobs":[{"id":73,"started_at":"2026-11-13T09:05:00Z","completed_at":"2026-11-13T09:15:00Z"},{"id":74,"started_at":null,"completed_at":"2026-11-13T09:15:00Z"}]}' ;;
+        printf '%s\n' '{"jobs":[{"id":71,"runner_id":1,"labels":["ubuntu-26.04"],"created_at":"2026-11-13T09:00:10Z","started_at":"2026-11-13T09:00:20Z","completed_at":"2026-11-13T09:30:20Z"},{"id":72,"runner_id":0,"labels":["ubuntu-26.04"],"created_at":"2026-11-13T09:00:10Z","started_at":"2026-11-13T09:01:00Z","completed_at":"2026-11-13T09:01:00Z"}]}' \
+            '{"jobs":[{"id":73,"runner_id":2,"labels":["ubuntu-26.04"],"created_at":"2026-11-13T09:00:15Z","started_at":"2026-11-13T09:05:00Z","completed_at":"2026-11-13T09:15:00Z"},{"id":74,"runner_id":3,"created_at":"2026-11-13T09:00:10Z","started_at":null,"completed_at":"2026-11-13T09:15:00Z"},{"id":75,"runner_id":9,"labels":["self-hosted","buster-9700x"],"created_at":"2026-11-13T09:00:10Z","started_at":"2026-11-13T09:20:00Z","completed_at":"2026-11-13T09:20:00Z"}]}' ;;
     *runs/8/jobs\?per_page=100\&filter=latest)
-        printf '%s\n' '{"jobs":[{"id":81,"started_at":"2026-11-13T09:00:20Z","completed_at":"2026-11-13T09:20:20Z"}]}' ;;
+        printf '%s\n' '{"jobs":[{"id":81,"runner_id":4,"created_at":"2026-11-13T09:00:18Z","started_at":"2026-11-13T09:00:20Z","completed_at":"2026-11-13T09:20:20Z"}]}' ;;
     *runs/9/jobs\?per_page=100\&filter=latest)
-        printf '%s\n' '{"jobs":[{"id":91,"started_at":"2026-11-13T09:00:20Z","completed_at":"2026-11-13T09:00:50Z"}]}' ;;
+        printf '%s\n' '{"jobs":[{"id":91,"created_at":"2026-11-13T09:00:00Z","started_at":"2026-11-13T09:00:20Z","completed_at":"2026-11-13T09:00:50Z"}]}' ;;
     *runs/10/jobs\?per_page=100\&filter=latest)
         printf '%s\n' '{"jobs":[]}' ;;
     *) echo "unexpected gh invocation: $*" >&2; exit 1 ;;
@@ -129,17 +136,19 @@ grep -Fq '| full (daily, dispatched, snapshot) | queue | 3 | 10.0 | 20 |' "$work
 grep -Fq '| full (daily, dispatched, snapshot) | execution | 3 | 20.0 | 1200 |' "$work/report/summary.md"
 grep -Fq '| nightly targeted | execution | 1 | 240.0 | 240 |' "$work/report/summary.md"
 grep -Fq '| PR | host-occupation | 1 | 100.0 | 100 |' "$work/report/summary.md"
-# The merge queue's candidates, each by its fate, and the time spent on those that didn't merge.
-printf '7\tmerged\t2236\t2400\n8\tpassed\t1800\t1200\n9\tfailed\t240\t30\n10\tcancelled\t600\t0\n' > "$work/expected-candidates.tsv"
+# The merge queue's candidates, each by its fate, the time spent on those that didn't merge, and their hosted jobs'
+# waits for a runner: the longest, their sum and their count.
+printf '7\tmerged\t2236\t2400\t285\t295\t2\n8\tpassed\t1800\t1200\t2\t2\t1\n9\tfailed\t240\t30\t0\t0\t0\n10\tcancelled\t600\t0\t0\t0\t0\n' > "$work/expected-candidates.tsv"
 cmp "$work/expected-candidates.tsv" "$work/report/candidates.tsv" || { cat "$work/report/candidates.tsv" >&2; echo 'the candidates differ' >&2; exit 1; }
 grep -Fq '| merged | 1 | 40 |' "$work/report/summary.md"
 grep -Fq '| passed, not merged (invalidated) | 1 | 20 |' "$work/report/summary.md"
 grep -Fq '| all | 4 | 60 |' "$work/report/summary.md"
 grep -Fq "Candidates that didn't merge took 20 runner-minutes, 33.9% of the queue's" "$work/report/summary.md"
 grep -Fq 'median 37.3 min, p95 37.3 min (1 candidates)' "$work/report/summary.md"
+grep -Fq "each candidate's longest, median 143.5 s and p95 285 s (2 candidates); every job's, mean 99.0 s over 3 jobs." "$work/report/summary.md"
 "$work/timings" --queue < /dev/null > "$work/empty-queue.md"
 grep -Fq 'No completed candidate runs' "$work/empty-queue.md"
-if printf '7\tmerged\t1\t1\n7\tfailed\t1\t1\n' | "$work/timings" --queue > /dev/null 2>&1; then
+if printf '7\tmerged\t1\t1\t0\t0\t0\n7\tfailed\t1\t1\t0\t0\t0\n' | "$work/timings" --queue > /dev/null 2>&1; then
     echo 'a candidate counted twice was accepted' >&2
     exit 1
 fi

@@ -8,8 +8,8 @@
 //
 // A READY prefix is not acceptance of the translation unit: the caller must retain every original parse diagnostic
 // and its failing status. In particular, an earlier semantic error inside the malformed declaration is unavailable;
-// recovery erased the whole declaration. A complete declaration whose only errors are missing parameter types can
-// retain its tree and use int for those parameters, as the parser explicitly records. The prefix never guesses
+// recovery erased the whole declaration. A complete declaration whose only errors are unknown type specifiers or
+// missing parameter types can retain its tree and use int for those types, as clang's recovery does. The prefix never guesses
 // missing punctuation or revives erased nodes.
 // Elaborate it with check_input_prefix, not check_input: tentative objects may acquire a complete type later in the
 // original unit, so end-of-translation-unit obligations must not run on this view. Operation-site checks still run.
@@ -151,6 +151,17 @@ static bool check_prefix_parameter_error(const ParseDiagnostic* diagnostic)
                                           diagnostic->message == PARSE_MESSAGE_UNKNOWN_TYPE_NAME);
 }
 
+// An unknown type already parsed as a specifier has a complete declaration tree. As for an unknown parameter
+// type, clang retains that declaration with a recovered int type; it need not cut off later diagnostics (#2509).
+static bool check_prefix_type_error(const Parser* parser, const ParseDiagnostic* diagnostic)
+{
+    const uint32_t token = diagnostic->token;
+    const bool result = check_prefix_parameter_error(diagnostic) ||
+                        (diagnostic->message == PARSE_MESSAGE_UNKNOWN_TYPE_NAME && token < parser->tokens.count &&
+                         parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_SPECIFIER);
+    return result;
+}
+
 static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* parser, Arena* output, Arena* scratch)
 {
     const uint64_t output_mark = output->length;
@@ -184,7 +195,8 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
                     first_error = at;
                     parameter_types = parameter;
                 }
-                if (diagnostic->error && !parameter && at < limit)
+                parameter_types |= diagnostic->error && parameter;
+                if (diagnostic->error && !check_prefix_type_error(parser, diagnostic) && at < limit)
                 {
                     limit = at;
                 }
@@ -247,6 +259,7 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
         view->preprocessor = parser->preprocessor;
         view->typo_sources = parser->typo_sources;
         view->typo_count = parser->typo_count;
+        view->prefix_view = true;
         view->recovered_parameter_types = parameter_types && end > first_error;
         memcpy(view->predeclared, parser->predeclared, sizeof(view->predeclared));
         view->tokens.count = end;
@@ -274,20 +287,31 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
             memcpy(view->tree.roles, parser->tree.roles, end);
             memcpy(view->tree.parents, parser->tree.parents, (uint64_t)end * sizeof(uint32_t));
             memcpy(view->tree.depths, parser->tree.depths, (uint64_t)end * sizeof(uint32_t));
-            // An unknown parameter type has already been diagnosed by the original parser. Its exact specifier
-            // token becomes int only in this private checking view, as clang's recovered parameter does; no other
+            // An unknown type has already been diagnosed by the original parser. Its exact specifier
+            // token becomes int only in this private checking view, as clang's recovery does; no other
             // unknown identifier, source location or original diagnostic is changed.
-            for (uint32_t d = 0; view->recovered_parameter_types && d < parser->diagnostic_count; d += 1)
+            uint8_t* recovered_types = NULL;
+            for (uint32_t d = 0; prefix->status == CHECK_PREFIX_READY && d < parser->diagnostic_count; d += 1)
             {
                 const ParseDiagnostic* diagnostic = parser->diagnostics + d;
                 const uint32_t token = diagnostic->token;
-                if (diagnostic->parameter_type && diagnostic->message == PARSE_MESSAGE_UNKNOWN_TYPE_NAME && token < end &&
+                if (diagnostic->error && diagnostic->message == PARSE_MESSAGE_UNKNOWN_TYPE_NAME && token < end &&
                     view->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && view->tree.roles[token] == PARSE_ROLE_SPECIFIER)
                 {
                     view->tokens.kinds[token] = PARSE_KIND_TYPE;
                     view->tokens.names[token] = C_NAME_INT;
+                    if (!diagnostic->parameter_type)
+                    {
+                        recovered_types = recovered_types != NULL ? recovered_types : check_prefix_column(output, end, sizeof(uint8_t));
+                        prefix->status = recovered_types != NULL ? CHECK_PREFIX_READY : CHECK_PREFIX_RESOURCE;
+                        if (recovered_types != NULL)
+                        {
+                            recovered_types[token] = 1;
+                        }
+                    }
                 }
             }
+            view->recovered_types = recovered_types;
             // Pragma positions are monotone. A pragma exactly at end belongs to the excluded declaration.
             while (view->tokens.pragma_count < parser->tokens.pragma_count && parser->tokens.pragma_positions[view->tokens.pragma_count] < end)
             {
@@ -295,7 +319,7 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
             }
             view->tokens.pragma_positions = parser->tokens.pragma_positions;
             view->tokens.pragma_sources = parser->tokens.pragma_sources;
-            prefix->status = check_prefix_order(view, scratch);
+            prefix->status = prefix->status == CHECK_PREFIX_READY ? check_prefix_order(view, scratch) : prefix->status;
         }
     }
     arena_pop_to(scratch, scratch_mark);
@@ -311,12 +335,12 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
     return prefix->status;
 }
 
-// The prefix view of `parser` where its first error is a parameter's missing or unknown type, which the view reads as
-// `int` (clang's recovered parameter) with every declaration before the first other error: the driver takes it before
+// The prefix view of `parser` where its first error is a recoverable missing or unknown type, which the view reads as
+// `int` with every declaration before the first structural error: the driver takes it before
 // a repair view (check_repair_make), which would end at that parameter's declaration, so that each parameter's typo is
 // searched (#1447, check_input_parameter_typo) and the later declarations are checked. Whether it made one; `output` is
 // restored where it didn't.
-static bool check_prefix_parameter_view(CheckPrefix* prefix, const Parser* parser, Arena* output, Arena* scratch)
+static bool check_prefix_type_view(CheckPrefix* prefix, const Parser* parser, Arena* output, Arena* scratch)
 {
     const uint64_t output_mark = output->length;
     bool first = parser->errors != 0 && parser->diagnostics != 0 && parser->diagnostic_count <= parser->diagnostic_capacity;
@@ -324,13 +348,12 @@ static bool check_prefix_parameter_view(CheckPrefix* prefix, const Parser* parse
     for (uint32_t i = 0; first && i < parser->diagnostic_count; i += 1)
     {
         const ParseDiagnostic* diagnostic = parser->diagnostics + i;
-        const bool parameter = check_prefix_parameter_error(diagnostic);
+        const bool recoverable = check_prefix_type_error(parser, diagnostic);
         const bool earlier = diagnostic->error && diagnostic->token < at;
-        first = earlier ? parameter : first;
+        first = earlier ? recoverable : first;
         at = earlier ? diagnostic->token : at;
     }
-    const bool result = first && at != UINT32_MAX && check_prefix_make(prefix, parser, output, scratch) == CHECK_PREFIX_READY &&
-                        prefix->parser.recovered_parameter_types;
+    const bool result = first && at != UINT32_MAX && check_prefix_make(prefix, parser, output, scratch) == CHECK_PREFIX_READY;
     if (!result)
     {
         arena_pop_to(output, output_mark);
@@ -434,39 +457,46 @@ static bool check_prefix_pragma_between(const Parser* view, uint32_t token)
 // pragma between (check_prefix_pragma_between).
 static bool check_prefix_resumes(const Parser* view, const ParseDiagnostic* diagnostic, uint32_t limit)
 {
+    const uint32_t begin = diagnostic->resume_begin != 0 ? diagnostic->resume_begin : diagnostic->token;
     bool valid = diagnostic->error && (diagnostic->resumed || diagnostic->resume_colon) && diagnostic->token < limit && diagnostic->token != 0 &&
-                 (view->tokens.pragma_count == 0 || !check_prefix_pragma_between(view, diagnostic->token));
+                 begin <= diagnostic->token && (view->tokens.pragma_count == 0 || !check_prefix_pragma_between(view, begin));
     if (valid && diagnostic->resume_end != 0)
     {
         valid = diagnostic->resume_end >= diagnostic->token && diagnostic->resume_end <= view->tokens.count;
-        valid &= !diagnostic->resume_delete || diagnostic->resume_end > diagnostic->token;
+        valid &= !diagnostic->resume_delete || diagnostic->resume_end > begin;
         // Do not move an annotation out of a discarded K&R tail. Those pragmas need their own parser recovery.
         uint32_t low = 0;
         uint32_t high = view->tokens.pragma_count;
         while (low < high)
         {
             const uint32_t middle = low + (high - low) / 2;
-            const bool before = view->tokens.pragma_positions[middle] < diagnostic->token;
+            const bool before = view->tokens.pragma_positions[middle] < begin;
             low = before ? middle + 1 : low;
             high = before ? high : middle;
         }
         valid &= low == view->tokens.pragma_count || view->tokens.pragma_positions[low] >= diagnostic->resume_end;
     }
     valid &= !diagnostic->resume_delete || diagnostic->resume_end != 0;
+    valid &= diagnostic->resume_begin == 0 || (diagnostic->resume_delete && diagnostic->resume_end != 0);
     return valid;
 }
 
 // `diagnostic` at the original's tokens, from a view's whose tokens' originals `origin` has (a synthetic `;`'s, the
-// token after it).
+// token after it). Without `origin`, it is already at the original's tokens.
 static ParseDiagnostic check_prefix_original_diagnostic(const ParseDiagnostic* diagnostic, const uint32_t* origin, uint32_t count, uint32_t original_count)
 {
     ParseDiagnostic result = *diagnostic;
-    result.token = diagnostic->token < count ? origin[diagnostic->token] : original_count;
-    result.argument = diagnostic->argument < count ? origin[diagnostic->argument] : diagnostic->argument;
-    result.note = diagnostic->note < count ? origin[diagnostic->note] : diagnostic->note;
+    if (origin != 0)
+    {
+        result.token = diagnostic->token < count ? origin[diagnostic->token] : original_count;
+        result.argument = diagnostic->argument < count ? origin[diagnostic->argument] : diagnostic->argument;
+        result.note = diagnostic->note < count ? origin[diagnostic->note] : diagnostic->note;
+        result.publication = diagnostic->publication != 0 ? (diagnostic->publication < count ? origin[diagnostic->publication] : original_count) : 0;
+    }
     result.resumed = false;
     result.resume_delete = false;
     result.resume_end = 0;
+    result.resume_begin = 0;
     result.resume_colon = false;
     return result;
 }
@@ -678,9 +708,11 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
         for (uint32_t d = 0; d < current->diagnostic_count; d += 1)
         {
             const ParseDiagnostic* diagnostic = diagnostics + d;
-            // (A parameter's missing or unknown type, which the parse read in place, doesn't stop the rounds: the
-            // prefix view reads it as `int`, check_prefix_parameter_view.)
-            const bool other = diagnostic->error && !check_prefix_resumes(current, diagnostic, count) && !check_prefix_parameter_error(diagnostic);
+            // Unknown types were read as specifiers before recovery erased the declaration's tree. They do not stop
+            // a later declarator's proven tail repair (#2640); the reparse retains their errors and the prefix view
+            // marks their recovered types invalid. Missing parameter types likewise do not stop the rounds.
+            const bool type = check_prefix_parameter_error(diagnostic) || diagnostic->message == PARSE_MESSAGE_UNKNOWN_TYPE_NAME;
+            const bool other = diagnostic->error && !check_prefix_resumes(current, diagnostic, count) && !type;
             limit = other && diagnostic->token < limit ? diagnostic->token : limit;
             // The original parser abandoned this K&R header. Later diagnostics may have treated its remaining
             // parameter declarations as file scope, so re-establish the header before considering those repairs.
@@ -693,20 +725,33 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
         uint32_t discard = 0;
         uint32_t repairs = 0;
         uint32_t last = 0;
+        uint32_t preserve_begin = 0;
+        uint32_t preserve_end = 0;
         bool ordered = true;
         for (uint32_t d = 0; d < current->diagnostic_count; d += 1)
         {
             const ParseDiagnostic* diagnostic = diagnostics + d;
             const bool taken = check_prefix_resumes(current, diagnostic, limit);
-            ordered &= !taken || diagnostic->token > last;
+            const uint32_t begin = diagnostic->resume_begin != 0 ? diagnostic->resume_begin : diagnostic->token;
+            ordered &= !taken || begin > last;
             last = taken ? (diagnostic->resume_end != 0 ? diagnostic->resume_end - 1 : diagnostic->token) : last;
             insert += taken && !diagnostic->resume_delete;
             repairs += taken;
-            discard += taken && diagnostic->resume_end != 0 ? diagnostic->resume_end - diagnostic->token : 0;
+            discard += taken && diagnostic->resume_end != 0 ? diagnostic->resume_end - begin : 0;
+            // At most one tail is taken in a round (limit above). A tail starting before its error also removes
+            // diagnostics already read in that span, such as an unknown parameter type in a later declarator.
+            preserve_begin = taken && diagnostic->resume_begin != 0 ? begin : preserve_begin;
+            preserve_end = taken && diagnostic->resume_begin != 0 ? diagnostic->token : preserve_end;
+        }
+        uint32_t preserved = 0;
+        for (uint32_t d = 0; preserve_begin != 0 && d < current->diagnostic_count; d += 1)
+        {
+            const uint32_t token = diagnostics[d].token;
+            preserved += token >= preserve_begin && token < preserve_end;
         }
         const uint32_t total = count + insert - discard;
         work += total;
-        more = ordered && repairs != 0 && total <= capacity && pending_count + repairs <= original_count && work <= budget;
+        more = ordered && repairs != 0 && total <= capacity && (uint64_t)pending_count + repairs + preserved <= original_count && work <= budget;
         Parser* view = views + (round & 1);
         uint32_t* next_origin = origins[round & 1];
         if (more)
@@ -719,11 +764,22 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             uint32_t written = 0;
             uint32_t from = 0;
             uint32_t pragma = 0;
+            for (uint32_t d = 0; preserve_begin != 0 && d < current->diagnostic_count; d += 1)
+            {
+                const ParseDiagnostic* diagnostic = diagnostics + d;
+                if (diagnostic->token >= preserve_begin && diagnostic->token < preserve_end)
+                {
+                    // Nonoverlapping repairs cannot already retain one of these diagnostics. Its token is gone
+                    // from the next parse, so keep it once, including warnings and all original source references.
+                    pending[pending_count] = check_prefix_original_diagnostic(diagnostic, origin, count, original_count);
+                    pending_count += 1;
+                }
+            }
             for (uint32_t d = 0; d <= current->diagnostic_count; d += 1)
             {
                 const ParseDiagnostic* diagnostic = d < current->diagnostic_count ? diagnostics + d : 0;
                 const bool taken = diagnostic == 0 || check_prefix_resumes(current, diagnostic, limit);
-                const uint32_t to = diagnostic != 0 ? diagnostic->token : count;
+                const uint32_t to = diagnostic != 0 ? (diagnostic->resume_begin != 0 ? diagnostic->resume_begin : diagnostic->token) : count;
                 if (taken)
                 {
                     const uint32_t length = to - from;
@@ -751,12 +807,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                             next_origin[written] = origin != 0 ? origin[to] : to;
                             written += 1;
                         }
-                        // (The first round's tokens are the original's.)
-                        pending[pending_count] = origin != 0 ? check_prefix_original_diagnostic(diagnostic, origin, count, original_count) : *diagnostic;
-                        pending[pending_count].resumed = false;
-                        pending[pending_count].resume_delete = false;
-                        pending[pending_count].resume_end = 0;
-                        pending[pending_count].resume_colon = false;
+                        pending[pending_count] = check_prefix_original_diagnostic(diagnostic, origin, count, original_count);
                         pending_count += 1;
                     }
                     from = diagnostic != NULL && diagnostic->resume_end != 0 ? diagnostic->resume_end : to;

@@ -3609,10 +3609,160 @@ static void check_test_driver_array_alignment(CheckTest* test, const char* clang
     unlink(linked);
 }
 
+// The three keys are independent, and unavailable inode fields must not become keys accidentally.
+static void check_test_dependency_index(CheckTest* test)
+{
+    const DependencyIdentity identity = {
+        .path = "index-protected",
+        .base = "protected",
+        .device = 11,
+        .inode = 101,
+        .parent_device = 21,
+        .parent_inode = 201,
+        .found = true,
+        .parent_found = true,
+    };
+    DependencyIdentity queries[12];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(queries); i += 1)
+    {
+        queries[i] = identity;
+        queries[i].path = "index-distinct";
+        queries[i].base = "different";
+        queries[i].found = false;
+        queries[i].parent_found = false;
+    }
+    queries[0].path = identity.path;
+    queries[1].found = true;
+    queries[2].parent_found = true;
+    queries[2].base = identity.base;
+    queries[3].base = identity.base;
+    queries[4] = queries[1];
+    queries[4].device += 1;
+    queries[5] = queries[1];
+    queries[5].inode += 1;
+    queries[6] = queries[2];
+    queries[6].parent_device += 1;
+    queries[7] = queries[2];
+    queries[7].parent_inode += 1;
+    queries[8].parent_found = true;
+    queries[9] = queries[2];
+    queries[9].found = true;
+    queries[9].inode += 1;
+    queries[10] = queries[0];
+    queries[10].found = true;
+    queries[10].inode += 1;
+    queries[11].dangling = true;
+    const bool expected[] = { true, true, true, false, false, false, false, false, false, true, true, true };
+    DependencyIdentity repeated[64];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(repeated); i += 1)
+    {
+        repeated[i] = identity;
+    }
+    const uint32_t counts[] = { 1, 2, 3, 16, 31, 32, 33, 64 };
+    Arena arena = arena_reserve(UINT64_C(1) << 16);
+    check_test_expect(test, arena.base != NULL, "dependency index scratch");
+    if (arena.base != NULL)
+    {
+        DependencyIndex index = { 0 };
+        for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
+        {
+            arena_pop_to(&arena, 0);
+            const bool prepared = dependency_index_prepare(&index, repeated, counts[c], &arena, NULL);
+            check_test_expect(test, prepared, "dependency index permits duplicate protected identities at odd and even sizes");
+            for (uint32_t q = 0; prepared && q < BUSTER_ARRAY_LENGTH(queries); q += 1)
+            {
+                check_test_expect(test, dependency_index_overlaps(&index, &queries[q], NULL) == expected[q],
+                                  "dependency index matches independent path, inode, parent and dangling expectations");
+            }
+        }
+        DependencyIdentity mixed[33];
+        char mixed_names[33][32];
+        for (uint32_t j = 0; j < BUSTER_ARRAY_LENGTH(mixed); j += 1)
+        {
+            const uint32_t i = j * 7 % BUSTER_ARRAY_LENGTH(mixed);
+            snprintf(mixed_names[j], sizeof(mixed_names[j]), "index-numeric-%u", i);
+            mixed[j] = identity;
+            mixed[j].path = mixed_names[j];
+            mixed[j].device = i == 32 ? (dev_t)-1 : i % 5 + 1;
+            mixed[j].inode = i == 32 ? (ino_t)-1 : i / 5 + 1;
+            mixed[j].parent_device = i == 32 ? (dev_t)-1 : i % 7 + 1;
+            mixed[j].parent_inode = i == 32 ? (ino_t)-1 : i / 7 + 1;
+        }
+        arena_pop_to(&arena, 0);
+        const bool numeric = dependency_index_prepare(&index, mixed, BUSTER_ARRAY_LENGTH(mixed), &arena, NULL);
+        check_test_expect(test, numeric, "permuted distinct numeric identity keys can be indexed");
+        for (uint32_t j = 0; numeric && j < BUSTER_ARRAY_LENGTH(mixed); j += 1)
+        {
+            DependencyIdentity query = mixed[j];
+            query.path = "numeric-query";
+            query.parent_found = false;
+            check_test_expect(test, dependency_index_overlaps(&index, &query, NULL), "file identity lookup finds each permuted device and inode pair");
+            query.device = 0;
+            check_test_expect(test, !dependency_index_overlaps(&index, &query, NULL), "file identity lookup requires the device as well as the inode");
+            query.device = mixed[j].device;
+            query.inode = 0;
+            check_test_expect(test, !dependency_index_overlaps(&index, &query, NULL), "file identity lookup requires the inode as well as the device");
+            query.found = false;
+            query.parent_found = true;
+            check_test_expect(test, dependency_index_overlaps(&index, &query, NULL), "parent identity lookup finds each permuted pair with the same basename");
+            query.parent_device = 0;
+            check_test_expect(test, !dependency_index_overlaps(&index, &query, NULL), "parent identity lookup requires the parent device");
+            query.parent_device = mixed[j].parent_device;
+            query.parent_inode = 0;
+            check_test_expect(test, !dependency_index_overlaps(&index, &query, NULL), "parent identity lookup requires the parent inode");
+        }
+        arena_pop_to(&arena, 0);
+        uint64_t comparisons = 0;
+        const bool empty = dependency_index_prepare(&index, NULL, 0, &arena, &comparisons);
+        check_test_expect(test, empty && arena.length == 0 && comparisons == 0 && index.count == 0 && index.entries == NULL && !index.dangling &&
+                                !dependency_index_overlaps(&index, NULL, &comparisons),
+                          "empty dependency index needs no storage and clears earlier entries");
+        for (uint32_t q = 0; empty && q < BUSTER_ARRAY_LENGTH(queries); q += 1)
+        {
+            check_test_expect(test, !dependency_index_overlaps(&index, &queries[q], &comparisons),
+                              "an empty protected set does not conflict even with a dangling destination");
+        }
+        DependencyIdentity unavailable = identity;
+        unavailable.found = false;
+        unavailable.parent_found = false;
+        const bool unknown = dependency_index_prepare(&index, &unavailable, 1, &arena, NULL);
+        check_test_expect(test, unknown && !dependency_index_overlaps(&index, &queries[1], NULL) &&
+                                !dependency_index_overlaps(&index, &queries[2], NULL) && dependency_index_overlaps(&index, &queries[0], NULL),
+                          "unobserved protected inode fields are ignored while its spelling remains protected");
+        arena_pop_to(&arena, 0);
+        unavailable.dangling = true;
+        const bool dangling = dependency_index_prepare(&index, &unavailable, 1, &arena, NULL);
+        check_test_expect(test, dangling && dependency_index_overlaps(&index, &queries[3], NULL),
+                          "a dangling protected path conservatively conflicts with an unrelated destination");
+        const uint64_t capacity = arena.capacity;
+        const uint64_t bytes = BUSTER_ARRAY_LENGTH(repeated) * DEPENDENCY_IDENTITY_KEY_COUNT * sizeof(*index.entries);
+        arena_pop_to(&arena, 0);
+        arena.capacity = bytes - 1;
+        check_test_expect(test, !dependency_index_prepare(&index, repeated, BUSTER_ARRAY_LENGTH(repeated), &arena, NULL) && index.count == 0 && index.entries == NULL,
+                          "dependency index allocation fails closed with one byte missing");
+        arena.capacity = capacity;
+        arena_pop_to(&arena, 0);
+        const bool prefix = arena_push(&arena, 1, 1) != NULL;
+        arena.capacity = bytes + _Alignof(const DependencyIdentity*) - 1;
+        check_test_expect(test, prefix && !dependency_index_prepare(&index, repeated, BUSTER_ARRAY_LENGTH(repeated), &arena, NULL) &&
+                                index.count == 0 && index.entries == NULL && arena.length == 1,
+                          "dependency index accounts for alignment when scratch is partially exhausted");
+        arena.capacity = capacity;
+        arena_pop_to(&arena, 0);
+        comparisons = 0;
+        const uint64_t overflow = SIZE_MAX / (DEPENDENCY_IDENTITY_KEY_COUNT * sizeof(*index.entries)) + 1;
+        check_test_expect(test, !dependency_index_prepare(&index, NULL, overflow, &arena, &comparisons) &&
+                                index.count == 0 && index.entries == NULL && arena.length == 0 && comparisons == 0,
+                          "dependency index rejects overflowing capacity before reading any identities");
+    }
+    arena_release(&arena);
+}
+
 // Filesystem fixtures keep the conservative overlap relation independent of the identity representation.
 // The two missing spellings and the directory symlink must alias even though the leaf does not exist.
 static void check_test_dependency_identities(CheckTest* test, const char* directory)
 {
+    check_test_dependency_index(test);
     char paths[10][512];
     snprintf(paths[0], sizeof(paths[0]), "%s/admission-identity-file", directory);
     snprintf(paths[1], sizeof(paths[1]), "%s/admission-identity-hard", directory);
@@ -3639,8 +3789,15 @@ static void check_test_dependency_identities(CheckTest* test, const char* direct
             identities[i] = dependency_identity(paths[i], &probes);
         }
         check_test_expect(test, probes <= 3 * BUSTER_ARRAY_LENGTH(identities), "identity collection uses at most three probes per path");
+        bool overlaps[10][10];
+        Arena arena = arena_reserve(UINT64_C(1) << 16);
+        check_test_expect(test, arena.base != NULL, "filesystem identity index scratch");
         for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(identities); a += 1)
         {
+            arena_pop_to(&arena, 0);
+            DependencyIndex index = { 0 };
+            const bool indexed = arena.base != NULL && dependency_index_prepare(&index, &identities[a], 1, &arena, NULL);
+            check_test_expect(test, indexed, "each filesystem identity can be indexed");
             for (uint32_t b = 0; b < BUSTER_ARRAY_LENGTH(identities); b += 1)
             {
                 const bool file_a = a <= 2 || a == 8;
@@ -3648,8 +3805,41 @@ static void check_test_dependency_identities(CheckTest* test, const char* direct
                 const bool missing_a = a == 3 || a == 4 || a == 9;
                 const bool missing_b = b == 3 || b == 4 || b == 9;
                 const bool expected = a == b || a == 5 || b == 5 || (file_a && file_b) || (missing_a && missing_b);
+                overlaps[a][b] = expected;
                 check_test_expect(test, dependency_identities_overlap(&identities[a], &identities[b]) == expected,
                                   "dependency identity preserves textual, inode, parent and dangling-link overlap");
+                check_test_expect(test, indexed && dependency_index_overlaps(&index, &identities[b], NULL) == expected,
+                                  "indexed filesystem identity preserves every pair in the independent alias matrix");
+            }
+        }
+        for (uint32_t mask = 0; arena.base != NULL && mask < (1u << BUSTER_ARRAY_LENGTH(identities)); mask += 1)
+        {
+            for (uint32_t reverse = 0; reverse < 2; reverse += 1)
+            {
+                DependencyIdentity selected[10];
+                uint32_t count = 0;
+                for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(identities); i += 1)
+                {
+                    const uint32_t a = reverse != 0 ? BUSTER_ARRAY_LENGTH(identities) - 1 - i : i;
+                    if ((mask & (1u << a)) != 0)
+                    {
+                        selected[count++] = identities[a];
+                    }
+                }
+                arena_pop_to(&arena, 0);
+                DependencyIndex index = { 0 };
+                const bool indexed = dependency_index_prepare(&index, selected, count, &arena, NULL);
+                check_test_expect(test, indexed, "every filesystem identity subset can be indexed in either order");
+                for (uint32_t b = 0; indexed && b < BUSTER_ARRAY_LENGTH(identities); b += 1)
+                {
+                    bool expected = false;
+                    for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(identities); a += 1)
+                    {
+                        expected = expected || ((mask & (1u << a)) != 0 && overlaps[a][b]);
+                    }
+                    check_test_expect(test, dependency_index_overlaps(&index, &identities[b], NULL) == expected,
+                                      "dependency index membership matches the independent matrix for every subset and order");
+                }
             }
         }
         const DependencyIdentity root = dependency_identity("/buster-dependency-admission-root-missing", NULL);
@@ -3665,6 +3855,12 @@ static void check_test_dependency_identities(CheckTest* test, const char* direct
         check_test_expect(test, !long_identity.found && !long_identity.parent_found && !long_identity.dangling &&
                                 dependency_identities_overlap(&long_identity, &long_identity),
                           "overlong parent keeps textual equality without truncating directory identity");
+        arena_pop_to(&arena, 0);
+        DependencyIndex long_index = { 0 };
+        check_test_expect(test, arena.base != NULL && dependency_index_prepare(&long_index, &long_identity, 1, &arena, NULL) &&
+                                dependency_index_overlaps(&long_index, &long_identity, NULL),
+                          "the index retains textual equality when the parent path is overlong");
+        arena_release(&arena);
     }
     unlink(paths[0]);
     unlink(paths[1]);
@@ -3673,63 +3869,153 @@ static void check_test_dependency_identities(CheckTest* test, const char* direct
     unlink(linked_directory);
 }
 
+// Implicit outputs are relative to cwd. A child keeps these filesystem aliases inside the fixture directory.
+static void check_test_dependency_admission_aliases(CheckTest* test, const char* directory)
+{
+    fflush(NULL);
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        const uint64_t failures = test->failures;
+        Arena arena = arena_reserve(UINT64_C(1) << 16);
+        const bool entered = chdir(directory) == 0;
+        const bool ready = arena.base != NULL && entered && parse_test_write("admission-late-a.c", "x", 1) &&
+                           parse_test_write("admission-late-c.o", "x", 1);
+        check_test_expect(test, ready, "later dependency alias fixtures are created");
+        if (ready)
+        {
+            char* sources[] = { "admission-late-a.c", "admission-late-b.c", "admission-late-c.c" };
+            DependencyOptions options = { .enabled = true };
+            const bool source_alias = link("admission-late-a.c", "admission-late-b.d") == 0;
+            check_test_expect(test, source_alias && !dependency_check_destinations(&options, sources, 3, NULL, true, false, &arena),
+                              "a later indexed destination rejects a hard link to another unit's source");
+            unlink("admission-late-b.d");
+            arena_pop_to(&arena, 0);
+            const bool object_alias = link("admission-late-c.o", "admission-late-c.d") == 0;
+            check_test_expect(test, object_alias && !dependency_check_destinations(&options, sources, 3, NULL, true, false, &arena),
+                              "the final indexed destination rejects a hard link to the final implicit object");
+            unlink("admission-late-c.d");
+            arena_pop_to(&arena, 0);
+            sources[1] = sources[0];
+            check_test_expect(test, dependency_check_destinations(&options, sources, 3, NULL, true, false, &arena),
+                              "duplicate source, object and dependency keys remain legal without destructive overlap");
+            arena_pop_to(&arena, 0);
+            sources[0] = "-";
+            sources[1] = "-";
+            const bool dangling = symlink("admission-late-absent", "-.d") == 0;
+            check_test_expect(test, dangling && dependency_check_destinations(&options, sources, 2, NULL, false, false, &arena),
+                              "stdin-only syntax admission permits dangling destinations when no path is protected");
+            unlink("-.d");
+        }
+        if (entered)
+        {
+            unlink("admission-late-a.c");
+            unlink("admission-late-c.o");
+        }
+        arena_release(&arena);
+        fflush(stderr);
+        _exit(test->failures == failures ? 0 : 1);
+    }
+    int status = 0;
+    pid_t waited;
+    do
+    {
+        waited = child > 0 ? waitpid(child, &status, 0) : -1;
+    }
+    while (waited < 0 && child > 0 && errno == EINTR);
+    check_test_expect(test, child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+                      "indexed admission preserves cross-unit source and artifact aliases in the fixture child");
+}
+
 // Exercise admission directly so its syscall count and command-arena growth are visible independently of compilation.
 static void check_test_dependency_admission(CheckTest* test, const char* directory)
 {
-    char names[32][512];
-    char* sources[32];
+    check_test_dependency_admission_aliases(test, directory);
+    char names[1024][512];
+    char* sources[1024];
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sources); i += 1)
     {
-        snprintf(names[i], sizeof(names[i]), "%s/dependency-admission-%02u.c", directory, i);
+        snprintf(names[i], sizeof(names[i]), "%s/dependency-admission-%04u.c", directory, i);
         sources[i] = names[i];
     }
-    const uint32_t counts[] = { 0, 1, 16, 32 };
+    const uint32_t counts[] = { 0, 1, 16, 32, 64, 128, 256, 512, 1024 };
     DependencyOptions options = { .enabled = true };
     Arena arena = arena_reserve(UINT64_C(1) << 20);
     check_test_expect(test, arena.base != NULL, "dependency admission scratch");
     if (arena.base != NULL)
     {
+        uint64_t previous_comparisons = 0;
+        uint64_t previous_storage = 0;
+        uint64_t previous_probes = 0;
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(counts); i += 1)
         {
             arena_pop_to(&arena, 0);
             const uint32_t count = counts[i];
             uint64_t probes = 0;
-            const bool admitted = dependency_check_destinations_counted(&options, sources, count, NULL, true, false, &arena, &probes);
-            const uint64_t storage = (uint64_t)count * (80 + 2 * sizeof(DependencyIdentity)) + 3 * _Alignof(DependencyIdentity);
+            uint64_t comparisons = 0;
+            const bool admitted = dependency_check_destinations_counted(&options, sources, count, NULL, true, false, &arena, &probes, &comparisons);
+            const uint64_t storage = (uint64_t)count * (80 + 2 * sizeof(DependencyIdentity) + 6 * sizeof(const DependencyIdentity*)) + 3 * _Alignof(DependencyIdentity);
             check_test_expect(test, admitted && arena.length <= storage,
-                              "distinct dependency destinations use linear filename and identity storage");
+                              "distinct dependency destinations use linear filename, identity and index storage");
             check_test_expect(test, admitted && probes <= (uint64_t)count * 9 && (count == 0 || probes != 0),
                               "dependency admission probes each source, object and destination at most three times");
+            uint32_t levels = 0;
+            for (uint32_t remaining = count * 2; remaining > 1; remaining = (remaining + 1) / 2)
+            {
+                levels += 1;
+            }
+            check_test_expect(test, admitted && comparisons <= (uint64_t)count * (32 + 20 * levels) && (count == 0 || comparisons != 0),
+                              "dependency admission comparison work is bounded by N log N including index construction");
+            if (count >= 256)
+            {
+                check_test_expect(test, comparisons < previous_comparisons * 3,
+                                  "doubling distinct dependency units does not quadruple comparison work");
+                check_test_expect(test, arena.length <= previous_storage * 2 + 3 * _Alignof(DependencyIdentity) && probes <= previous_probes * 2,
+                                  "doubling distinct dependency units keeps storage and filesystem work linear");
+            }
+            previous_comparisons = comparisons;
+            previous_storage = arena.length;
+            previous_probes = probes;
         }
         arena_pop_to(&arena, 0);
         sources[31] = "-";
         uint64_t probes = 0;
-        check_test_expect(test, dependency_check_destinations_counted(&options, sources, 32, NULL, true, false, &arena, &probes) && probes <= 32 * 9,
+        check_test_expect(test, dependency_check_destinations_counted(&options, sources, 32, NULL, true, false, &arena, &probes, NULL) && probes <= 32 * 9,
                           "reused input identities skip stdin in every destination pass");
         sources[31] = names[31];
         arena_pop_to(&arena, 0);
         probes = 0;
-        check_test_expect(test, dependency_check_destinations_counted(&options, sources, 32, NULL, false, true, &arena, &probes) && probes <= (32 * 2 + 1) * 3,
+        check_test_expect(test, dependency_check_destinations_counted(&options, sources, 32, NULL, false, true, &arena, &probes, NULL) && probes <= (32 * 2 + 1) * 3,
                           "implicit executable identity is collected once across all destinations");
         arena_pop_to(&arena, 0);
         probes = 0;
-        check_test_expect(test, dependency_check_destinations_counted(&options, sources, 32, NULL, false, false, &arena, &probes) && probes <= 32 * 6,
+        check_test_expect(test, dependency_check_destinations_counted(&options, sources, 32, NULL, false, false, &arena, &probes, NULL) && probes <= 32 * 6,
                           "syntax-only dependency admission probes no primary output");
         arena_pop_to(&arena, 0);
         options.path = "-";
         probes = 0;
-        check_test_expect(test, dependency_check_destinations_counted(&options, sources, 32, NULL, true, false, &arena, &probes) && arena.length == 0 && probes == 0,
-                          "stdout dependency admission needs no storage or filesystem probes");
+        uint64_t comparisons = 0;
+        check_test_expect(test, dependency_check_destinations_counted(&options, sources, 32, NULL, true, false, &arena, &probes, &comparisons) &&
+                                arena.length == 0 && probes == 0 && comparisons == 0,
+                          "stdout dependency admission needs no storage, filesystem probes or comparisons");
         options.path = names[31];
         check_test_expect(test, !dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena),
                           "shared dependency destination checks the last source");
-        options.path = "dependency-admission-31.o";
+        options.path = "dependency-admission-0031.o";
         check_test_expect(test, !dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena),
                           "shared dependency destination checks the last implicit object");
         options.path = "dependency-admission-shared.d";
         arena_pop_to(&arena, 0);
-        check_test_expect(test, dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena) && arena.length <= 32 * 40,
-                          "shared dependency destination reuses bounded object names");
+        comparisons = 0;
+        check_test_expect(test, dependency_check_destinations_counted(&options, sources, 32, NULL, true, false, &arena, NULL, &comparisons) &&
+                                arena.length <= 32 * 40 && comparisons == 64,
+                          "shared dependency destination scans once without an index");
+        options.path = NULL;
+        sources[31] = "./dependency-admission-0015.d";
+        arena_pop_to(&arena, 0);
+        check_test_expect(test, !dependency_check_destinations(&options, sources, 32, NULL, true, false, &arena),
+                          "an indexed later destination detects an alias of the last source through its parent");
+        sources[31] = names[31];
         const uint64_t capacity = arena.capacity;
         arena_pop_to(&arena, 0);
         arena.capacity = 64;
@@ -5842,19 +6128,36 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
             }
         }
         const CheckInput* pragma_input = original_pragmas != NULL ? original_pragmas : input;
+        const CheckInputPackPragmas* pack_history = pragma_input->pack_pragmas;
         uint32_t pragma = 0;
+        uint32_t pack = 0;
         uint32_t packed = 0;
         for (uint32_t token = 0; !pp->fatal && token <= count; token += 1)
         {
-            while (!pp->fatal && pragma < pragma_input->fp_pragma_count && pragma_input->fp_pragmas[pragma].token == token)
+            while (!pp->fatal && ((pragma < pragma_input->fp_pragma_count && pragma_input->fp_pragmas[pragma].token == token) ||
+                (pack_history != NULL && pack < pack_history->count && pack_history->records[pack].token == token)))
             {
-                const CheckInputFpPragma* record = pragma_input->fp_pragmas + pragma;
                 const bool retained = original_pragmas != NULL || repair == NULL || token < check_repair_pragma_end(repair);
-                if (retained)
+                const uint32_t fp_source = pragma < pragma_input->fp_pragma_count && pragma_input->fp_pragmas[pragma].token == token ?
+                                           pragma_input->fp_pragmas[pragma].source_begin : UINT32_MAX;
+                const uint32_t pack_source = pack_history != NULL && pack < pack_history->count && pack_history->records[pack].token == token ?
+                                             pack_history->records[pack].source_begin : UINT32_MAX;
+                if (fp_source < pack_source)
                 {
-                    check_driver_pragma_report(parser, pp, pragma_input, record, quiet);
+                    if (retained)
+                    {
+                        check_driver_pragma_report(parser, pp, pragma_input, pragma_input->fp_pragmas + pragma, quiet);
+                    }
+                    pragma += 1;
                 }
-                pragma += 1;
+                else
+                {
+                    if (retained)
+                    {
+                        check_driver_pack_report(parser, pp, pack_history->records + pack);
+                    }
+                    pack += 1;
+                }
             }
             uint32_t flags = show_warnings && (repair == NULL || check_repair_warning_token(repair, token)) ?
                              warnings[token].flags : 0;
@@ -5942,9 +6245,20 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
         }
         // A directive in an unfinished expression can lie beyond every safely checked prefix. Its original
         // source spelling and warning policy are independent of that expression and precede the parser failure.
-        for (; !pp->fatal && original_pragmas != NULL && pragma < pragma_input->fp_pragma_count; pragma += 1)
+        while (!pp->fatal && original_pragmas != NULL && (pragma < pragma_input->fp_pragma_count || (pack_history != NULL && pack < pack_history->count)))
         {
-            check_driver_pragma_report(parser, pp, pragma_input, pragma_input->fp_pragmas + pragma, quiet);
+            const uint32_t fp_source = pragma < pragma_input->fp_pragma_count ? pragma_input->fp_pragmas[pragma].source_begin : UINT32_MAX;
+            const uint32_t pack_source = pack_history != NULL && pack < pack_history->count ? pack_history->records[pack].source_begin : UINT32_MAX;
+            if (fp_source < pack_source)
+            {
+                check_driver_pragma_report(parser, pp, pragma_input, pragma_input->fp_pragmas + pragma, quiet);
+                pragma += 1;
+            }
+            else
+            {
+                check_driver_pack_report(parser, pp, pack_history->records + pack);
+                pack += 1;
+            }
         }
     }
     arena_pop_to(scratch, mark);
@@ -5999,6 +6313,7 @@ static void check_test_driver_reports(CheckTest* test)
         wide_source,
         "int f(void) { return 1; }\n",
         "int f(void) { return 1; } int f(void) __asm__(\"late_name\");\n",
+        "#pragma options align=mac68k\n#pragma STDC FENV_ACCESS MAYBE\nint f(void) { return 1; }\n",
     };
     uint64_t state = 0x592;
     uint32_t compared = 0;
@@ -6293,6 +6608,13 @@ static void check_test_driver_lazy(CheckTest* test, const char* clang, const cha
             "ordinary unused static semantic error is always checked",
             "static int unused(void){return missing;}\n",
             "#include \"lazy.h\"\nint f(void){return 3;}\n",
+            true,
+            true,
+        },
+        {
+            "opaque assembly keeps a grouped K&R system body checked",
+            "#pragma GCC system_header\nstatic int (unused(a))int a;{return missing;}\n",
+            "#include \"lazy.h\"\n__asm__(\"\");int f(void){return 3;}\n",
             true,
             true,
         },
@@ -8526,9 +8848,9 @@ static int run_checker_driver_tests(int argc, char** argv)
     check_test_expect(&test, pp_test_clang_reference(), "clang reference: version comparison and mismatch reporting");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
-    // With --lazy-system-headers, only the checks that run the driver with -flazy-system-headers: the fixtures below and
-    // the six sections that take `lazy` (check_test_driver_named_ucns, _loop_hints, _gnu_scopes, _section_pragmas,
-    // _optimize_pragmas and _kr_policy), whose gates below have no `!lazy`. Every other check runs the same commands
+    // With --lazy-system-headers, only the checks that run the driver with -flazy-system-headers: the fixtures below,
+    // check_test_driver_lazy's system-header policy checks and the sections that take `lazy`, whose gates below have
+    // no `!lazy`. Every other check runs the same commands
     // either way, so the eager command's run of them is the lazy one's too; repeating them took 90% of the lazy
     // command's time. A section that comes to take `lazy` loses the `!lazy` of its gate.
     if (!focused && !lazy && check_test_driver_takes())
@@ -9279,7 +9601,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_packed_members(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        if (check_test_driver_takes())
         {
             check_test_driver_lazy(&test, clang, executable, directory);
         }

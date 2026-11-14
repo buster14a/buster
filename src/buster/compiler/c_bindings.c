@@ -110,7 +110,12 @@ static __attribute__((unused)) uint64_t c_bindings_bytes(uint32_t names, uint32_
     return (uint64_t)names * C_BINDING_NAMESPACES * 4 + events * (8 * 4 + 2) + 11 * 63;
 }
 
-static __attribute__((unused)) bool c_bindings_initialize(CBindings* bindings, Arena* arena, uint32_t names, uint32_t capacity)
+// The table in `arena`, with room for `names` names (each namespace's heads) and `capacity` events. With `zeroed`, the
+// arena's bytes past its length are as the kernel mapped them (arena_untouched, its caller's word that no copy of it
+// pushed past its length): the heads are zero already, and aren't cleared, so that their pages are touched only where a
+// name binds. A units lane's intern table holds every unit's names (musl's command: 14,569 a unit, 175 KB of heads),
+// which clearing faulted in and wrote for each unit (#2531).
+static __attribute__((unused)) bool c_bindings_initialize_zeroed(CBindings* bindings, Arena* arena, uint32_t names, uint32_t capacity, bool zeroed)
 {
     const uint64_t mark = arena->length;
     *bindings = (CBindings){ .name_capacity = names, .capacity = capacity };
@@ -129,7 +134,10 @@ static __attribute__((unused)) bool c_bindings_initialize(CBindings* bindings, A
     valid = bindings->kind != 0;
     if (valid)
     {
-        memset(bindings->heads, 0, (uint64_t)names * C_BINDING_NAMESPACES * 4);
+        if (!zeroed)
+        {
+            memset(bindings->heads, 0, (uint64_t)names * C_BINDING_NAMESPACES * 4);
+        }
         bindings->valid = true;
     }
     else
@@ -138,6 +146,11 @@ static __attribute__((unused)) bool c_bindings_initialize(CBindings* bindings, A
         *bindings = (CBindings){ 0 };
     }
     return valid;
+}
+
+static __attribute__((unused)) bool c_bindings_initialize(CBindings* bindings, Arena* arena, uint32_t names, uint32_t capacity)
+{
+    return c_bindings_initialize_zeroed(bindings, arena, names, capacity, false);
 }
 
 static __attribute__((unused)) void c_bindings_reset(CBindings* bindings)

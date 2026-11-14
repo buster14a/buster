@@ -7,6 +7,47 @@
 static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[] =
 {
     {
+        .name = "aligned typedefs retain their names in conversions and incomplete arrays",
+        .source = "typedef char C __attribute__((aligned(8)));\nC *p = 1;\nC c = \"x\";\n"
+                  "struct X;\ntypedef struct X TX __attribute__((aligned(8)));\nTX a[3];\n",
+        .errors = 4,
+        .notes = 1,
+    },
+    {
+        .name = "an aligned typedef names an array element whose size is not a multiple of its alignment",
+        .source = "typedef char C __attribute__((aligned(8)));\nC a[2];\n",
+        .errors = 1,
+    },
+    {
+        .name = "aligned typedefs retain their own and outer qualifiers without naming plain neighbors",
+        .source = "typedef const int CI __attribute__((aligned(8)));\ntypedef int *P __attribute__((aligned(32)));\n"
+                  "void f(void){volatile CI *a=1;const P b=1;P c=1;char *d=1;}\n",
+        .errors = 4,
+    },
+    {
+        .name = "a qualified aligned typedef names its incomplete array element",
+        .source = "struct X;\ntypedef struct X TX __attribute__((aligned(8)));\nconst TX a[3];\n",
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "a decayed function typedef survives pointer arithmetic at file scope",
+        .source = "typedef int F(void);\nF f1;\nint z2 = f1 + 1;\n",
+        .errors = 2,
+    },
+    {
+        .name = "function typedefs survive both addition orders subtraction and address operations",
+        .source = "typedef int F(void);typedef F G;\nG g;F f;\nvoid h(void){int a=f+1;int b=1+f;int c=f-1;"
+                  "int d=g+2;int e=&f;int z=*&f+3;int (*raw)(void)=f;int w=raw+1;}\n",
+        .errors = 7,
+    },
+    {
+        .name = "function pointer typedefs in members parameters and casts keep their spelling",
+        .source = "typedef int F(void);typedef F *FP;\nstruct S{F *p;FP q;};\n"
+                  "void h(struct S s,FP p){int a=s.p+1;int b=p+1;int c=(F*)0+1;int d=*(F*)0+1;}\n",
+        .errors = 4,
+    },
+    {
         // A dereference's or subscript's operand keeps the typedef its object's declaration chain names at that level
         // (check_driver_spelling_chain): a vector reached through a pointer typedef prints its own typedef, a typedef
         // inside a typedef its inner name, a parameter's array typedef its element's.

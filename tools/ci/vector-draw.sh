@@ -41,7 +41,7 @@
 #   vector-draw.sh product CONFIGURATION
 #       An item other than its configuration's first, after its setup: waits for the product that the holder of the
 #       configuration's item 1 publishes (in the attempt that holder last ran in), and writes its artifact's name and
-#       SHA-256 to GITHUB_OUTPUT (`name`, `digest`). Polls every 10 s. Fails, without waiting further, when no candidate
+#       SHA-256 to GITHUB_OUTPUT (`name`, `digest`). Polls every 30 s. Fails, without waiting further, when no candidate
 #       can hold item 1 any more, when its holder ended without one, or when the attempt has two; at most 90 minutes.
 #   vector-draw.sh verdict RECORDS
 #       The row's verdict over the downloaded artifacts (a directory per artifact): exactly one passing qualified
@@ -60,9 +60,9 @@ read -r -a every_item <<< "${BUSTER_VECTOR_ITEMS:?}"
 row="(Clang 23, ${configurations[*]}, O$optimization)"
 # The interval between polls, and how long a collector waits for its candidates, a candidate for its collector and an
 # item for its configuration's product. The draws the row unrolls (draw-1 to draw-4).
-# Each poll lists the run's artifacts (and a collector's, its jobs) through the REST API, whose hourly limit the whole
-# repository shares: polls every 5 s exhausted it with many pull requests open (#2309). A failed listing (the limit,
-# for one) doubles the pause, up to poll_limit, until a listing succeeds again.
+# Artifact polling uses the same-run Results service, as upload/download-artifact do, not the repository REST quota
+# (#2309). The few job-state reads below have a fixed request allowance, including every page and failed request.
+# A failed artifact listing doubles the pause, up to poll_limit, until a listing succeeds again.
 poll=${VECTOR_DRAW_POLL:-15}
 poll_limit=${VECTOR_DRAW_POLL_LIMIT:-60}
 
@@ -81,8 +81,8 @@ next_pause()
 collect_limit=${VECTOR_DRAW_COLLECT_LIMIT:-1500}
 take_limit=${VECTOR_DRAW_TAKE_LIMIT:-1800}
 product_limit=${VECTOR_DRAW_PRODUCT_LIMIT:-5400}
-# An item polls for its product less often than a draw for its assignment: it waits for a build, minutes, and a full
-# run's twelve waiting items share the repository's API rate. A failed listing backs off as a draw's does.
+# An item polls for its product less often than a draw for its assignment: it waits for a build, minutes. A failed
+# listing backs off as a draw's does.
 product_poll=${VECTOR_DRAW_PRODUCT_POLL:-30}
 levels=${VECTOR_DRAW_LEVELS:-4}
 
@@ -99,6 +99,99 @@ summary()
     if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
         printf -- '- %s\n' "$*" >> "$GITHUB_STEP_SUMMARY"
     fi
+}
+
+# REST accounting must survive command substitutions and pipelines. Each command has a private, persisted ledger;
+# the workflow uploads its TSV even after failure, and the verdict totals this attempt's ledgers. First attempts:
+# four collectors * two job pages + three PR product waiters * two pages + two quota samples = at most 16 requests.
+# No candidate reads jobs on attempt 1. Reruns need job identity; they get six requests per invocation, never an
+# unbounded poll. Failure to establish that identity is fatal, not permission to reuse an earlier assignment/product.
+rest_command=${1:-invalid}
+rest_directory="${RUNNER_TEMP:?}/vector-rest"
+mkdir -p "$rest_directory"
+rest_ledger="$rest_directory/$rest_command.tsv"
+rest_state="$rest_directory/.$rest_command-state"
+rest_budget=2
+if [ "$attempt" -gt 1 ]; then rest_budget=6; fi
+if [ "$rest_command" = take ] && [ "$attempt" -eq 1 ]; then rest_budget=0; fi
+if [ "$rest_command" = assign ] && [ "${2:-}" = 1 ]; then rest_budget=$((rest_budget + 1)); fi
+if [ "$rest_command" = verdict ]; then rest_budget=1; fi
+printf 'request\tstatus\tremaining\treset\tendpoint\n' > "$rest_ledger"
+printf '0 -1 0\n' > "$rest_state"
+rest_reserve=100
+
+# One charged REST request. No --paginate or implicit retry: callers charge pages separately, discard partial
+# snapshots, and never retry past their allowance. Header observations describe the repository's shared quota,
+# whereas the ledger counts this command's own requests, including HTTP/transport failures.
+rest_get()
+{
+    local endpoint=$1 count remaining reset now raw status result=0 body
+    read -r count remaining reset < "$rest_state"
+    now=$(date +%s)
+    if [ "$count" -ge "$rest_budget" ]; then
+        printf 'vector-draw: REST allowance exhausted (%s requests); no further job reads.\n' "$rest_budget" >&2
+        return 1
+    fi
+    if [ "$remaining" -ge 0 ] && [ "$remaining" -le "$rest_reserve" ] && [ "$now" -lt "$reset" ]; then
+        printf 'vector-draw: preserving the REST reserve (%s remaining, reset %s).\n' "$remaining" "$reset" >&2
+        return 1
+    fi
+    count=$((count + 1))
+    # If no trustworthy headers come back, stop further reads in this invocation.
+    printf '%s 0 9223372036854775807\n' "$count" > "$rest_state"
+    raw=$(mktemp "$rest_directory/.response.XXXXXX")
+    gh api --include -H 'Accept: application/vnd.github+json' "$endpoint" > "$raw" || result=$?
+    status=$(awk '/^HTTP\// { gsub("\r", "", $2); print $2; exit }' "$raw")
+    remaining=$(awk 'tolower($1) == "x-ratelimit-remaining:" { gsub("\r", "", $2); print $2; exit }' "$raw")
+    reset=$(awk 'tolower($1) == "x-ratelimit-reset:" { gsub("\r", "", $2); print $2; exit }' "$raw")
+    printf '%s\t%s\t%s\t%s\t%s\n' "$count" "${status:-unknown}" "${remaining:-unknown}" "${reset:-unknown}" "$endpoint" >> "$rest_ledger"
+    if [[ "$remaining" =~ ^[0-9]+$ && "$reset" =~ ^[0-9]+$ ]]; then
+        printf '%s %s %s\n' "$count" "$remaining" "$reset" > "$rest_state"
+    else
+        result=1
+        printf 'vector-draw: REST response lacks valid quota headers; refusing further reads.\n' >&2
+    fi
+    body=$(awk 'body { print } /^\r?$/ { body=1 }' "$raw")
+    rm -f -- "$raw"
+    if [ "$result" -ne 0 ] || [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then return 1; fi
+    printf '%s\n' "$body"
+}
+
+rest_summary()
+{
+    local count remaining reset
+    read -r count remaining reset < "$rest_state"
+    summary "REST $rest_command: $count/$rest_budget requests; last shared remaining=$remaining, reset=$reset"
+}
+trap 'rest_summary >&2' EXIT
+
+# A full jobs snapshot or nothing. A list exceeding this invocation's remaining page allowance is optional on an
+# initial draw, but cannot establish rerun identity. A changing or malformed total likewise cannot prove absence.
+jobs_snapshot()
+{
+    local page=1 response total=-1 expected size combined='[]'
+    while true; do
+        response=$(rest_get "repos/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}/attempts/$attempt/jobs?per_page=100&page=$page") || return 1
+        jq -e --argjson attempt "$attempt" '(.total_count | type == "number") and (.total_count >= 0) and (.total_count == (.total_count | floor)) and
+            (.jobs | type == "array") and (.jobs | length <= 100) and
+            all(.jobs[]; (.id | type == "number") and (.id > 0) and (.id == (.id | floor)) and
+                (.name | type == "string") and (.name | length > 0) and (.name | test("[\\r\\n\\t]") | not) and
+                (.status | type == "string") and (.status | IN("queued", "waiting", "pending", "requested", "in_progress", "completed")) and
+                (.run_attempt | type == "number") and (.run_attempt >= 1) and (.run_attempt <= $attempt) and (.run_attempt == (.run_attempt | floor)) and
+                (.conclusion == null or (.conclusion | type == "string")) and
+                ((.started_at == null and .status != "completed") or
+                 ((.started_at | type == "string") and (.started_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$")))))' <<< "$response" > /dev/null || return 1
+        expected=$(jq -r '.total_count' <<< "$response")
+        if [ "$total" -ge 0 ] && [ "$total" -ne "$expected" ]; then return 1; fi
+        total=$expected
+        size=$(jq '.jobs | length' <<< "$response")
+        combined=$(jq -cs '.[0] + .[1].jobs' <(printf '%s\n' "$combined") <(printf '%s\n' "$response")) || return 1
+        if [ "$(jq length <<< "$combined")" -eq "$total" ]; then break; fi
+        [ "$size" -eq 100 ] && [ "$(jq length <<< "$combined")" -lt "$total" ] || return 1
+        page=$((page + 1))
+    done
+    jq -e 'length == (map(.id) | unique | length)' <<< "$combined" > /dev/null || return 1
+    jq -c '{jobs: .}' <<< "$combined"
 }
 
 # The configuration whose initial item $1 has.
@@ -152,7 +245,7 @@ item_shards()
 # The run's artifacts' names, every attempt's; nothing (a failed listing, which the caller retries) on failure.
 artifact_names()
 {
-    gh api --paginate "repos/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}/artifacts?per_page=100" --jq '.artifacts[].name'
+    "${VECTOR_ARTIFACT_NODE:?run through the vector-runtime action}" "${VECTOR_ARTIFACT_HELPER:?}" list
 }
 
 # The pairs `ITEM CANDIDATE` of attempt $2's assignment of draw $3 in the names $1, a line each; status 1 without one.
@@ -188,13 +281,14 @@ assigning_attempt()
 # attempt's number too, and only its start, before the attempt's, tells it apart (collector_runs, #2276).
 attempt_jobs()
 {
-    local start='0'
+    local start='0' response
     if [ "$attempt" -gt 1 ]; then
-        start=$(gh api "repos/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}/attempts/$attempt" --jq '.run_started_at') || return 1
+        response=$(rest_get "repos/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}/attempts/$attempt") || return 1
+        start=$(jq -r '.run_started_at' <<< "$response") || return 1
         [[ "$start" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$ ]] || return 1
     fi
-    gh api --paginate "repos/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}/attempts/$attempt/jobs?per_page=100" \
-        --jq ".jobs[] | \"\\(if (.started_at // \"9\") >= \"$start\" then .run_attempt else \"earlier\" end)\\t\\(.status)\\t\\(if (.conclusion // \"\") == \"\" then \"none\" else .conclusion end)\\t\\(.name)\""
+    response=$(jobs_snapshot) || return 1
+    jq -r ".jobs[] | \"\\(if (.started_at // \"9\") >= \"$start\" then .run_attempt else \"earlier\" end)\\t\\(.status)\\t\\(if (.conclusion // \"\") == \"\" then \"none\" else .conclusion end)\\t\\(.name)\"" <<< "$response"
 }
 
 # Whether draw $1's collector runs in this attempt: always in the first; in a later one, only when the attempt reran
@@ -202,52 +296,69 @@ attempt_jobs()
 # its own start, before the attempt's (run 43048124249's attempt 2, 2026-11-11).
 collector_runs()
 {
-    local level=$1 jobs tries start
+    local level=$1 jobs run_attempt status conclusion name found=''
     [ "$attempt" -gt 1 ] || return 0
-    for tries in 1 2 3; do
-        if start=$(gh api "repos/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}/attempts/$attempt" --jq '.run_started_at') &&
-            [[ "$start" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$ ]] &&
-            jobs=$(gh api --paginate "repos/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}/attempts/$attempt/jobs?per_page=100" \
-            --jq ".jobs[] | select(.run_attempt == $attempt and (.started_at // \"9\") >= \"$start\") | .name"); then
-            grep -qF "Vector draw $level's assignment $row" <<< "$jobs" && return 0
-            # A collector the attempt runs is listed from its start, with its draw's candidates; look twice more.
+    jobs=$(attempt_jobs) || return 2
+    while IFS=$'\t' read -r run_attempt status conclusion name; do
+        if [ "$name" = "Vector draw $level's assignment $row" ] || [[ "$name" == *" / Vector draw $level's assignment $row" ]]; then
+            [ -z "$found" ] || return 2
+            found=$run_attempt
         fi
-        [ "$tries" -eq 3 ] || sleep "$poll"
-    done
-    return 1
+    done <<< "$jobs"
+    [ -n "$found" ] || return 2
+    if [ "$found" = "$attempt" ]; then return 0; fi
+    if [ "$found" = earlier ]; then return 1; fi
+    return 2
 }
 
 # The numbers of draw $1's candidates in the jobs of this attempt that have ended (a candidate that couldn't publish its
 # verdict still decides nothing).
 ended_candidates()
 {
-    local level=$1
-    gh api --paginate "repos/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}/attempts/$attempt/jobs?per_page=100" \
-        --jq ".jobs[] | select(.status == \"completed\") | .name" |
+    local level=$1 response
+    response=$(jobs_snapshot) || return 1
+    jq -r '.jobs[] | select(.status == "completed") | .name' <<< "$response" |
         sed -n "s/.*Vector draw $level, candidate \([0-9][0-9]*\) ${row//[()]/[()]}\$/\1/p"
 }
 
 assign()
 {
     local level=$1 candidates=$2 next=$3 start=$SECONDS polls=0 names k item pair taken decided count i list='' name
+    local jobs_read=0 ended='' complete assignments
     local -a missing qualified pairs
     [[ "$level" =~ ^[1-9]$ && "$candidates" =~ ^[0-9]+$ && "$next" =~ ^[0-9]+$ ]] || die "assign: bad arguments: $*"
     [ "$level" -ne 1 ] || [ "$candidates" -ge $((3 * ${#items[@]})) ] ||
         die "the first draw has $candidates candidates for ${#items[@]} items: at least 3 per item (${items[*]})"
     : "${GITHUB_OUTPUT:?}" "${RUNNER_TEMP:?}"
+    if [ "$level" -eq 1 ]; then
+        # A charged, recorded quota observation before the draw. Failure cannot stop artifact-only progress.
+        rest_get "repos/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}/attempts/$attempt" > /dev/null || true
+    fi
     while true; do
         polls=$((polls + 1))
         if names=$(artifact_names); then
             next_pause 0
         else
-            names=''
             next_pause 1
+            [ $((SECONDS - start)) -lt "$collect_limit" ] || die "draw $level: no complete artifact listing before the deadline; no assignment published"
+            sleep "$pause"
+            continue
         fi
         # The items no earlier draw of this attempt assigned, the costliest first.
         taken=''
+        complete=1
         for ((k = 1; k < level; k += 1)); do
-            taken+=" $(assignment "$names" "$attempt" "$k" | cut -d ' ' -f 1 | tr '\n' ' ' || true)"
+            if assignments=$(assignment "$names" "$attempt" "$k"); then
+                taken+=" $(cut -d ' ' -f 1 <<< "$assignments" | tr '\n' ' ')"
+            else
+                complete=0
+            fi
         done
+        if [ "$complete" -ne 1 ]; then
+            [ $((SECONDS - start)) -lt "$collect_limit" ] || die "draw $level: an earlier assignment is missing or ambiguous; no assignment published"
+            sleep "$pause"
+            continue
+        fi
         missing=()
         for item in "${items[@]}"; do
             if ! grep -qw -- "$item" <<< "$taken"; then
@@ -255,11 +366,19 @@ assign()
             fi
         done
         mapfile -t qualified < <(sed -n "s/^$prefix-$attempt-probe-$level-\([0-9][0-9]*\)-yes\$/\1/p" <<< "$names" | sort -n -u)
-        decided=$( { sed -n "s/^$prefix-$attempt-probe-$level-\([0-9][0-9]*\)-\(yes\|no\)\$/\1/p" <<< "$names"
-            ended_candidates "$level" || true; } | sort -n -u | grep -c . || true)
+        decided=$(sed -n "s/^$prefix-$attempt-probe-$level-\([0-9][0-9]*\)-\(yes\|no\)\$/\1/p" <<< "$names" | sort -n -u | grep -c . || true)
         if [ "${#qualified[@]}" -ge "${#missing[@]}" ] || [ "$decided" -ge "$candidates" ]; then
             break
         fi
+        # Only one optional jobs snapshot, and only when artifacts did not already decide. The allowance counts
+        # pages, not snapshots. An incomplete/error response means unknown; the artifact deadline still applies.
+        if [ "$jobs_read" -eq 0 ]; then
+            ended=$(ended_candidates "$level") || ended=''
+            jobs_read=1
+        fi
+        decided=$( { sed -n "s/^$prefix-$attempt-probe-$level-\([0-9][0-9]*\)-\(yes\|no\)\$/\1/p" <<< "$names"
+            printf '%s\n' "$ended"; } | sort -n -u | grep -c . || true)
+        if [ "$decided" -ge "$candidates" ]; then break; fi
         if [ $((SECONDS - start)) -ge "$collect_limit" ]; then
             printf '::warning title=Vector draw::Draw %s: %s of %s candidates decided in %s s; assigning what qualified.\n' \
                 "$level" "$decided" "$candidates" "$((SECONDS - start))"
@@ -298,12 +417,14 @@ assign()
 
 take()
 {
-    local level=$1 candidate=$2 verdict=$3 record=$4 start=$SECONDS item='' decision held names at found configuration shard shards
+    local level=$1 candidate=$2 verdict=$3 record=$4 start=$SECONDS item='' decision held names at found configuration shard shards collector=0
     [[ "$level" =~ ^[1-9]$ && "$candidate" =~ ^[1-9][0-9]*$ ]] || die "take: bad arguments: $*"
     test -f "$record" || die "take: no record $record"
+    collector_runs "$level" || collector=$?
+    [ "$collector" -ne 2 ] || die "cannot establish whether draw $level's collector reran within the REST allowance/reserve; refusing an earlier assignment"
     if [ "$verdict" != qualified ] && [ "$attempt" -eq 1 ]; then
         decision='redraw: the CPU does not qualify'
-    elif collector_runs "$level"; then
+    elif [ "$collector" -eq 0 ]; then
         if [ "$verdict" != qualified ]; then
             decision='redraw: the CPU does not qualify'
         else
@@ -376,7 +497,8 @@ take()
 
 product()
 {
-    local configuration=$1 builder start=$SECONDS polls=0 names latest holder level job jobs run_attempt status conclusion name found
+    local configuration=$1 builder start=$SECONDS polls=0 names latest holder level job jobs run_attempt=1 status=unknown conclusion=unknown name found
+    local identity_holder='' jobs_read=0 selected_attempt=0 listed_attempt listed_status listed_conclusion
     [ -n "$configuration" ] && [ "$(item_configuration "${configuration:0:1}1")" = "$configuration" ] || die "product: no configuration $configuration in ${configurations[*]}"
     builder="${configuration:0:1}1"
     : "${GITHUB_OUTPUT:?}"
@@ -385,8 +507,10 @@ product()
         if names=$(artifact_names); then
             next_pause 0
         else
-            names=''
             next_pause 1
+            [ $((SECONDS - start)) -lt "$product_limit" ] || die "no complete artifact listing for $configuration's product before the deadline"
+            sleep "$((pause > product_poll ? pause : product_poll))"
+            continue
         fi
         latest=$(assigning_attempt "$names")
         holder=''
@@ -396,41 +520,60 @@ product()
             fi
         done
         if [ -n "$holder" ]; then
-            # The attempt the holder last ran in, whose product it is: the first in the first attempt, whose jobs are read
-            # every 6th poll alone, for the holder's end; in a rerun, read every poll, this one if it reran the holder,
-            # else the latest earlier attempt with a product.
             job="Vector draw ${holder% *}, candidate ${holder#* } $row"
-            run_attempt=1
-            status=unknown
-            conclusion=unknown
-            if [ "$attempt" -gt 1 ] || [ $((polls % 6)) -eq 1 ]; then
-                jobs=$(attempt_jobs) || jobs=''
+            if [ "$attempt" -gt 1 ] && [ "$identity_holder" != "$latest $holder" ]; then
+                # Identity, once per holder: queued/rerun jobs must not reuse a carried-over product. Unknown,
+                # incomplete or rate-limited jobs data cannot establish identity and therefore fails closed.
+                jobs=$(attempt_jobs) || die "cannot establish $configuration's builder attempt within the REST allowance/reserve; refusing an earlier product"
                 found=''
-                while IFS=$'\t' read -r run_attempt status conclusion name; do
+                while IFS=$'\t' read -r listed_attempt listed_status listed_conclusion name; do
                     if [ "$name" = "$job" ] || [[ "$name" == *" / $job" ]]; then
-                        found+="$run_attempt $status $conclusion"$'\n'
+                        found+="$listed_attempt $listed_status $listed_conclusion"$'\n'
                     fi
                 done <<< "$jobs"
-                run_attempt=0
-                if [ "$(grep -c . <<< "$found" || true)" -eq 1 ]; then
-                    read -r run_attempt status conclusion <<< "$found"
-                    # Its uploads end before it does: list them again after its status.
-                    names=$(artifact_names) || names=''
-                fi
+                [ "$(grep -c . <<< "$found" || true)" -eq 1 ] || die "cannot identify exactly one builder of $configuration in this attempt's jobs"
+                read -r run_attempt status conclusion <<< "$found"
+                [[ "$run_attempt" = "$attempt" || "$run_attempt" = earlier ]] || die "invalid builder attempt $run_attempt"
+                identity_holder="$latest $holder"
+                # Its uploads end before it does. Always refresh artifacts after learning it completed.
+                continue
             fi
+            selected_attempt=$run_attempt
             if [ "$run_attempt" = earlier ]; then
                 # Carried over from an earlier attempt: its product is the latest attempt's before this one.
-                run_attempt=$(grep -oE "^$product_prefix-[0-9]+-$configuration-[0-9a-f]{64}\$" <<< "$names" | sed -E "s/^$product_prefix-([0-9]+)-.*/\\1/" |
+                selected_attempt=$( { grep -oE "^$product_prefix-[0-9]+-$configuration-[0-9a-f]{64}\$" <<< "$names" || true; } | sed -E "s/^$product_prefix-([0-9]+)-.*/\\1/" |
                     awk -v now="$attempt" '$1 < now && $1 > best { best = $1 } END { print best + 0 }')
             fi
-            found=$(grep -E "^$product_prefix-$run_attempt-$configuration-[0-9a-f]{64}\$" <<< "$names" || true)
-            [ "$(grep -c . <<< "$found" || true)" -le 1 ] || die "attempt $run_attempt has $(grep -c . <<< "$found") products of $configuration: $(tr '\n' ' ' <<< "$found")"
-            if [ "$run_attempt" -gt 0 ] && [ -n "$found" ]; then
+            found=$(grep -E "^$product_prefix-$selected_attempt-$configuration-[0-9a-f]{64}\$" <<< "$names" || true)
+            [ "$(grep -c . <<< "$found" || true)" -le 1 ] || die "attempt $selected_attempt has $(grep -c . <<< "$found") products of $configuration: $(tr '\n' ' ' <<< "$found")"
+            if [ "$selected_attempt" -gt 0 ] && [ -n "$found" ]; then
                 printf 'name=%s\ndigest=%s\n' "$found" "${found##*-}" >> "$GITHUB_OUTPUT"
-                summary "the product of $configuration: $found, built by draw ${holder% *}'s candidate ${holder#* } in attempt $run_attempt, after $((SECONDS - start)) s ($polls polls)"
+                summary "the product of $configuration: $found, built by draw ${holder% *}'s candidate ${holder#* } in attempt $selected_attempt, after $((SECONDS - start)) s ($polls polls)"
                 return 0
             fi
-            [ "$status" != completed ] || die "The holder of item $builder (draw ${holder% *}, candidate ${holder#* }) ended ($conclusion) in attempt $run_attempt without publishing $configuration's product, which this item installs: see its job. Rerun the failed jobs: it reruns first."
+            if grep -qx "$prefix-$selected_attempt-builder-$configuration-ended" <<< "$names"; then
+                status=completed
+                conclusion='publication finished'
+            fi
+            [ "$status" != completed ] || die "The holder of item $builder (draw ${holder% *}, candidate ${holder#* }) ended ($conclusion) in attempt $selected_attempt without publishing $configuration's product, which this item installs: see its job. Rerun the failed jobs: it reruns first."
+            if [ "$attempt" -eq 1 ] && [ "$jobs_read" -eq 0 ]; then
+                # One optional early-failure snapshot, only if the product/ended artifacts have not decided.
+                # A builder normally publishes its ended marker even after setup/build/upload failure; a lost
+                # runner without a marker is covered by this snapshot and the existing product deadline.
+                jobs_read=1
+                if jobs=$(attempt_jobs); then
+                    found=''
+                    while IFS=$'\t' read -r listed_attempt listed_status listed_conclusion name; do
+                        if [ "$name" = "$job" ] || [[ "$name" == *" / $job" ]]; then
+                            found+="$listed_status $listed_conclusion"$'\n'
+                        fi
+                    done <<< "$jobs"
+                    if [ "$(grep -c . <<< "$found" || true)" -eq 1 ]; then
+                        read -r status conclusion <<< "$found"
+                    fi
+                fi
+                continue
+            fi
         elif [ "$latest" -gt 0 ] && assignment "$names" "$latest" "$levels" > /dev/null; then
             die "No candidate holds item $builder, which builds $configuration's product: its last draw assigned it to none. No test failed: re-run all jobs to draw again."
         fi
@@ -439,10 +582,76 @@ product()
     done
 }
 
+# The local charged-request count, separately from the quota deltas shared with other runs. The two samples are
+# ordinary metadata requests and are inside the bound, not extra rate_limit queries hidden from the accounting.
+rest_report()
+{
+    local records=$1 ledger requests total=0 bound=$((10 + 2 * (${#items[@]} - ${#configurations[@]})))
+    local before='' after='' first_reset='' last_reset='' directory name expected missing=0
+    printf '\n### Repository REST requests (attempt %s)\n\n' "$attempt"
+    printf '| Caller | Requests |\n| --- | ---: |\n'
+    for ledger in "$records"/"$prefix-$attempt-rest-"*/*.tsv "$rest_ledger"; do
+        [ -f "$ledger" ] || continue
+        requests=$(awk -F '\t' 'NR == 1 { if ($0 != "request\tstatus\tremaining\treset\tendpoint") exit 1; next }
+            NF != 5 || $1 !~ /^[0-9]+$/ || $1 != NR - 1 { exit 1 } END { if (NR < 1) exit 1; print NR - 1 }' "$ledger") || die "invalid REST ledger: $ledger"
+        total=$((total + requests))
+        directory=${ledger%/*}
+        printf '| %s/%s | %s |\n' "${directory##*/}" "${ledger##*/}" "$requests"
+    done
+    # Every candidate that recorded its decision and every collector that published an assignment must retain its
+    # ledger. Failed commands can also have ledgers without a completed draw, and are included by the loop above.
+    for directory in "$records"/"$prefix-$attempt-draw-"* "$records"/"$prefix-$attempt-assign-"*; do
+        [ -d "$directory" ] || continue
+        name=${directory##*/}
+        if [[ "$name" == "$prefix-$attempt-draw-"* ]]; then
+            expected="$records/$prefix-$attempt-rest-draw-${name#"$prefix-$attempt-draw-"}/take.tsv"
+        else
+            name=${name#"$prefix-$attempt-assign-"}
+            expected="$records/$prefix-$attempt-rest-collect-${name%%-*}/assign.tsv"
+        fi
+        if [ ! -f "$expected" ]; then
+            printf '\nMissing request ledger: `%s`.\n' "${expected#"$records"/}"
+            missing=$((missing + 1))
+        fi
+    done
+    for directory in "$records"/"$prefix-$attempt-evidence-"*; do
+        [ -f "$directory/record" ] || continue
+        if [[ "$(field product "$directory/record")" == installed\ * ]]; then
+            expected="$records/$prefix-$attempt-rest-draw-$(field level "$directory/record")-$(field candidate "$directory/record")/product.tsv"
+            if [ ! -f "$expected" ]; then
+                printf '\nMissing product request ledger: `%s`.\n' "${expected#"$records"/}"
+                missing=$((missing + 1))
+            fi
+        fi
+    done
+    ledger="$records/$prefix-$attempt-rest-collect-1/assign.tsv"
+    if [ -f "$ledger" ]; then
+        before=$(awk -F '\t' 'NR == 2 { print $3 }' "$ledger")
+        first_reset=$(awk -F '\t' 'NR == 2 { print $4 }' "$ledger")
+    fi
+    after=$(awk -F '\t' 'NR == 2 { print $3 }' "$rest_ledger")
+    last_reset=$(awk -F '\t' 'NR == 2 { print $4 }' "$rest_ledger")
+    printf '\nCounted **%s REST requests** from this attempt. ' "$total"
+    if [ "$attempt" -eq 1 ]; then
+        printf 'Hard first-attempt ceiling: **%s** (%s at 30 runs/hour).\n' "$bound" "$((30 * bound))"
+    else
+        printf 'Rerun identity reads have a separate limit of six per command (seven for collector 1 including its sample).\n'
+    fi
+    printf '\nShared quota remaining: %s before / %s after; reset epochs: %s / %s.\n' "${before:-unavailable}" "${after:-unavailable}" "${first_reset:-unavailable}" "${last_reset:-unavailable}"
+    if [[ "$before" =~ ^[0-9]+$ && "$after" =~ ^[0-9]+$ ]] && [ "$first_reset" = "$last_reset" ]; then
+        printf 'Observed shared-quota delta: %s. This includes concurrent workflows and excludes the first sample itself.\n' "$((before - after))"
+    else
+        printf 'No comparable header delta: a sample is unavailable or the quota window changed.\n'
+    fi
+    [ "$missing" -eq 0 ] || die "REST accounting is incomplete: $missing request ledgers are missing"
+    [ "$attempt" -ne 1 ] || [ "$total" -le "$bound" ] || die "REST request ceiling exceeded: $total > $bound"
+}
+
 verdict()
 {
     local records=$1 latest at name names level holder holders evidence passing item report product built configuration incomplete=() failed=()
     test -d "$records" || die "verdict: no directory $records"
+    rest_get "repos/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}/attempts/$attempt" > /dev/null || true
     names=$(find "$records" -mindepth 1 -maxdepth 1 -printf '%f\n')
     latest=$(assigning_attempt "$names")
     holders=''
@@ -465,9 +674,13 @@ verdict()
             printf '| %s | %s | %s | %s | %s | %s |\n' "$at" "$(field level "$name")" "$(field candidate "$name")" \
                 "$(field cpu "$name")" "$(field probe "$name")" "$(field decision "$name")"
         done | sort -t '|' -k 2,2n -k 3,3n -k 4,4n
-        printf '\n| Item | Configuration | Shard | Draw | Candidate | Attempt | CPU | Product | Result |\n'
-        printf '| --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |\n'
     } > "$report"
+    rest_report "$records" >> "$report"
+    {
+        printf '\n### Item results\n\n'
+        printf '| Item | Configuration | Shard | Draw | Candidate | Attempt | CPU | Product | Result |\n'
+        printf '| --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |\n'
+    } >> "$report"
     for item in "${items[@]}"; do
         configuration=$(item_configuration "$item")
         holder=$(awk -v item="$item" '$1 == item { print $3, $2 }' <<< "$holders")

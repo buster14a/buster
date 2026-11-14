@@ -344,8 +344,8 @@ the function's unwind entry, a row program
 (`check_program_emit_asm_unit`'s `omit_frames`). The rows are clang's: a
 backtrace through the function walks to its caller, which
 `test-checker-driver --asm-definitions-only` checks on both paths. The bytes
-encode the same rules with the row writer's advances (`DW_CFA_advance_loc4`
-where clang's is `DW_CFA_advance_loc`). Refused by name: CFI beyond a frame's
+encode the same rules with the row writer's shortest-form PC advances
+(#1377). Refused by name: CFI beyond a frame's
 rows (expressions, escapes, signed offsets) and a frame description that isn't
 a function's (another CIE, several FDEs, a template's own `.cfi_startproc`).
 `unwind_tier0_frame` and `--verify`'s analyzer don't see the function. Its one

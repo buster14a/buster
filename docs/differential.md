@@ -298,6 +298,12 @@ option limits, missing tools, missing tier selection and compiler substitution.
 It also checks the saved-configuration size boundary and exact byte round trip,
 Unicode command records, and refusal of rejected reference runs as reducer targets.
 Its artifacts always state `fixture=true` and zero compiler campaign passes.
+Deliberate hang fixtures use a private one-second deadline only for the selected
+case command; version probes, preflight and other stages keep their ordinary
+deadline. A probe that deliberately takes longer than one second checks that the
+later intended hang still determines the failure. This private selection has no
+CLI option and is absent from replay configuration; command JSON retains each
+stage's actual deadline.
 Run it from the repository root, or supply `--fixture-source PATH`; `--clang`
 selects the fixture-building compiler. Successful self-tests remove their temporary
 evidence; failures and `--keep` runs retain it and print `artifacts=PATH`. A cleanup

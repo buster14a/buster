@@ -182,6 +182,7 @@ struct CheckUnitsRun
 
 static CheckAttested* check_attested_lane_open(uint8_t mode);
 static void check_attested_lane_close(CheckAttested* attested);
+static void check_attested_lane_leave(CheckAttested* attested);
 static void check_attested_begin(CheckAttested* attested, bool again);
 static void check_attested_summary(const CheckAttested* attested, uint64_t* counts);
 static bool check_attested_again(const CheckAttested* attested, bool failed);
@@ -2254,6 +2255,7 @@ static void check_units_lane_functions(const CheckUnitsRun* run, CheckUnitsLane*
         .tier0_no_inline = command->tier0_no_inline,
         .tier1_schedule = command->tier1_schedule,
         .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,
+        .tier1_function_sizes = command->tier1_function_sizes != NULL ? errors : NULL,
         .helper_reporting = command->helper_report != NULL,
         .units_lane = lane,
         .helper_forms = command->helper_forms,
@@ -2658,6 +2660,11 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             ready = check_asm_index_initialize();
         }
+        // And the intrinsic catalogue's exact table (#2654), which every unit's intrinsic set-up reads, whatever it emits.
+        if (ready && !builtin_intrinsic_table_ready)
+        {
+            ready = builtin_intrinsic_table_initialize();
+        }
         // A baked executable starts with the semantics tables built (baked.h, #590), and x86_semantics_initialize rebuilds
         // them unconditionally, writing the baked pages: only an executable that isn't baked runs it (#1571).
         if (ready && command->mixed_inputs)
@@ -2815,6 +2822,13 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             for (uint32_t l = 0; run.release && l < active; l += 1)
             {
                 check_units_lane_release(states + l);
+            }
+            // Where they don't, the last lanes' attested declarations' states leave their arenas to the exit too, as the
+            // lanes' own memory does; each state itself is the heap's, which this frees (LeakSanitizer reads the heap).
+            for (uint32_t l = 0; !run.release && l < active; l += 1)
+            {
+                check_attested_lane_leave(states[l].attested);
+                states[l].attested = NULL;
             }
             check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
             if (result == 0 && command->link)

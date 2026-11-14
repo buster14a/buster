@@ -503,6 +503,10 @@ A qualified array whose element a sugar alias names with those qualifiers
 leaves them to the element (`type_print_element_qualifiers`, #1447): clang's
 array type keeps `CI arr[2]`'s qualifiers on its element, so it prints
 `CI[2]`, not `const int[2]`.
+Typedef aliases compare without their alignment wrappers, with ordinary and
+extended qualifiers retained (#2212). This keeps an aligned typedef's name at
+its scalar, pointer or array level, including when aliases are given by
+declarator occurrence; canonical printing still omits the alignment wrapper.
 
 Extended qualifiers print after const, volatile and restrict, as clang's
 `Qualifiers::print` has them (#1447): a target's space as its attribute

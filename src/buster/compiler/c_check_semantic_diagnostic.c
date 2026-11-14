@@ -2379,6 +2379,49 @@ static const char* check_semantic_clear_padding(const Parser* parser, Preprocess
     return result;
 }
 
+// The beginning and retained root of a case-value operand whose ICE report or propagated constant fault is at `node`,
+// including its written parentheses (#2438). The retained root distinguishes it from an unrelated constant context in
+// the labeled statement or an inner declaration.
+static uint32_t check_semantic_case_begin(const Parser* parser, const CheckInput* input, const CheckStream* stream, uint32_t node, uint32_t* root)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t result = BUSTER_CHECK_NONE;
+    *root = BUSTER_CHECK_NONE;
+    uint32_t ancestor = node < input->graph.count ? input->graph.tokens[node] : count;
+    for (uint32_t steps = 0; ancestor < count && result == BUSTER_CHECK_NONE && steps < count; steps += 1)
+    {
+        if (parser->tree.roles[ancestor] == PARSE_ROLE_CLOSE_CASE)
+        {
+            const uint32_t lower = input->token_nodes[ancestor];
+            const uint32_t upper = check_sparse_get(input->case_ranges, ancestor);
+            const CheckValue low = lower < stream->count ? check_stream_value(stream, lower) : (CheckValue){ 0 };
+            const CheckValue high = upper < stream->count ? check_stream_value(stream, upper) : (CheckValue){ 0 };
+            const bool matches_lower = lower == node || (lower < stream->count && low.fault != CHECK_FAULT_NONE && low.fault_node == node);
+            const bool matches_upper = upper == node || (upper < stream->count && high.fault != CHECK_FAULT_NONE && high.fault_node == node);
+            if (matches_lower || matches_upper)
+            {
+                *root = matches_lower ? lower : upper;
+                uint32_t keyword = ancestor;
+                while (keyword != 0 && !(parser->tokens.kinds[keyword] == PARSE_KIND_CASE && parser->tree.parents[keyword] == ancestor))
+                {
+                    keyword -= 1;
+                }
+                result = parser->tokens.kinds[keyword] == PARSE_KIND_CASE && parser->tree.parents[keyword] == ancestor ? keyword + 1 : BUSTER_CHECK_NONE;
+                if (!matches_lower)
+                {
+                    while (result < ancestor && !(parser->tree.roles[result] == PARSE_ROLE_RANGE && parser->tree.parents[result] == ancestor))
+                    {
+                        result += 1;
+                    }
+                    result = result < ancestor ? result + 1 : BUSTER_CHECK_NONE;
+                }
+            }
+        }
+        ancestor = parser->tree.parents[ancestor];
+    }
+    return result;
+}
+
 // A semantic report's clang text and location, with its notes in `note`, an array of BUSTER_CHECK_SEMANTIC_NOTES
 // (check_semantic_note_count counts them): const assignment's are several (#1447).
 
@@ -2439,6 +2482,31 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
     {
         result = check_semantic_assert(parser, pp, input, stream, types, report, location, note, &note_count, scratch);
     }
+    else if ((report->message == CHECK_MESSAGE_ICE || (report->message == CHECK_MESSAGE_CONSTANT && report->fault == CHECK_FAULT_DIVIDE_BY_ZERO)) && node < stream->count)
+    {
+        uint32_t root = BUSTER_CHECK_NONE;
+        const uint32_t first = check_semantic_case_begin(parser, input, stream, node, &root);
+        const CheckValue value = root < stream->count ? check_graph_context_value(types, graph, stream, root) : (CheckValue){ 0 };
+        if (first < parser->tokens.count)
+        {
+            if (!check_program_switch_type(types, value.type))
+            {
+                // Clang rejects the operand's type before attempting constant evaluation. A written cast retains its
+                // typedef spelling, irrespective of the width of the switch's controlling integer type.
+                const uint32_t spelling = graph->ops[root] == CHECK_OP_CAST ? check_input_operand_type_spelling(input, parser, root) :
+                                          check_semantic_operand_spelling(parser, input, stream, types, root);
+                const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, value.type, spelling);
+                result = type.length != 0 ? check_warning_text(scratch, "integer constant expression must have integer type, not %.*s", (int)type.length, type.pointer) : NULL;
+                *location = first;
+            }
+            else if (report->message == CHECK_MESSAGE_CONSTANT)
+            {
+                result = "expression is not an integer constant expression";
+                *location = first;
+                check_semantic_add_note(parser, note, &note_count, token, "division by zero");
+            }
+        }
+    }
     else if (report->message == CHECK_MESSAGE_STATIC_INITIALIZER && node < count && graph->tokens[node] == token)
     {
         // At clang's culprit (#1447): an initialization's value's, not the initializer's first token. (A report's token is
@@ -2452,7 +2520,11 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
     {
         if (report->diagnostic == CHECK_DIAG_MEMBER && (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && token + 1 < parser->tokens.count)
         {
-            const TypeId record = op == CHECK_OP_ARROW ? type_element(types, type_strip_aligned(types, operand_type)) : operand_type;
+            TypeId record = op == CHECK_OP_ARROW ? type_element(types, type_conversion_operand(types, operand_type)) : operand_type;
+            record = type_strip_aligned(types, record);
+            const TypeId atomic = type_kind(types, record) == BUSTER_TYPE_KIND_ATOMIC ? type_strip_aligned(types, type_element(types, record)) : 0;
+            const uint8_t atomic_kind = atomic != 0 ? type_kind(types, atomic) : BUSTER_TYPE_KIND_NONE;
+            record = atomic_kind == BUSTER_TYPE_KIND_STRUCT || atomic_kind == BUSTER_TYPE_KIND_UNION ? atomic : record;
             const String8 name = check_semantic_name(parser, pp, token + 1);
             // A base of no structure or union is clang's err_typecheck_member_reference_struct_union at the operator
             // (LookupMemberExpr, #2288), the operand's type as written for `.`; `.` of a pointer to one is its

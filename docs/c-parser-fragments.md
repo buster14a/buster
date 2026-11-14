@@ -427,7 +427,7 @@ has the experiment whole. From a checkout of it, on the 9700X, each command
 under the shared lock:
 
 ```sh
-./build.sh
+./build.sh --config Release
 ./build/compiler test-fragments
 ./build/compiler test-fragments --no-fixtures --checker-fixtures
 ./build/compiler test-fragments --no-fixtures sqlite3.c

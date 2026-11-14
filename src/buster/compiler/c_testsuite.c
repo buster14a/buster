@@ -5,7 +5,7 @@
 // The c-testsuite harness (#145), for the test-c-testsuite command:
 //
 //   build/compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--clang PATH]
-//                                   [--id-order N] [--tier1] [--cross-check] [--keep] DIR
+//                                   [--id-order N] [--tier1] [--cross-check] [--code-size] [--check-code-size] [--keep] DIR
 //   build/compiler test-c-testsuite --self-test
 //
 // DIR is a checkout of c-testsuite (https://github.com/c-testsuite/c-testsuite) or its tests/single-exec directory. Each
@@ -32,6 +32,13 @@
 // executables differ: the scalar path's is compiled a third time, with the ids in source order, and must be the same bytes
 // as with them in another order, and both paths' programs must run as expected. The report adds how many of the tests'
 // functions Tier 1 compiled (the vector path's --tier1-report).
+//
+// --code-size requires --tier1 and implies --cross-check. The object compile also emits the explicit per-body
+// size report, kept apart from readelf's and the linker's logs. Each successful cross-check reads that report against
+// the same objects whose symbols were compared. The report compares the corpus's sum of all emitted Tier 1 function
+// bytes with the matching clang -O0 functions' sum. An unpaired Tier 1 body stays in our sum and adds no reference bytes;
+// its bytes are reported as a subset of our total. Fallback bodies are separate. Missing or invalid evidence and an empty
+// comparison fail in both modes; --check-code-size also requires the Tier 1 sum not to exceed the reference sum.
 //
 // --self-test checks the harness itself, on tests of its own and a stand-in compiler (c_testsuite_self_test).
 //
@@ -100,6 +107,7 @@ struct CTestsuiteResult
     // With --tier1, the vector path's functions and those Tier 1 compiled (its --tier1-report).
     uint32_t tier1_functions;
     uint32_t tier1_compiled;
+    Tier1CodeSize code_size;
     char detail[256];
 };
 
@@ -119,6 +127,8 @@ struct CTestsuite
     uint32_t compile_timeout;
     bool cross_check;
     bool tier1;
+    bool code_size;
+    bool check_code_size;
     // The scalar path's compiles' --id-order, test i's this plus i.
     uint64_t id_order;
     CTestsuiteResult* results;
@@ -386,7 +396,8 @@ static bool c_testsuite_ran(const CTestsuite* suite, const char* program, const 
 
 // Whether the object at `object` defines the functions and objects that clang -O0 -c's object of `source` does; if not,
 // why, in `detail`: the first difference.
-static bool c_testsuite_symbols(const CTestsuite* suite, const char* source, const char* directory, const char* object, char* detail, uint64_t capacity)
+static bool c_testsuite_symbols(const CTestsuite* suite, const char* source, const char* directory, const char* object, const char* code_report,
+                               Tier1CodeSize* code_size, char* detail, uint64_t capacity)
 {
     char oracle[PATH_MAX];
     char log[PATH_MAX];
@@ -443,6 +454,15 @@ static bool c_testsuite_symbols(const CTestsuite* suite, const char* source, con
             snprintf(detail, capacity, "cross-check: the object's symbols aren't clang -O0 -c's: %s, %u in all", report, differences);
         }
     }
+    if (valid && suite->code_size)
+    {
+        char size_detail[192] = { 0 };
+        valid = tier1_code_size_read(code_size, object, oracle, code_report, &arena, size_detail, sizeof(size_detail));
+        if (!valid)
+        {
+            snprintf(detail, capacity, "code-size: %s", size_detail);
+        }
+    }
     arena_release(&arena);
     return valid;
 }
@@ -452,28 +472,30 @@ static bool c_testsuite_symbols(const CTestsuite* suite, const char* source, con
 // a test as unsupported only where the direct path did too: when that compiled it (`required`), -c must compile it as
 // well.
 static bool c_testsuite_cross_check(const CTestsuite* suite, const char* source, const char* directory, const char* expected, bool required,
-                                    char* detail, uint64_t capacity)
+                                    Tier1CodeSize* code_size, char* detail, uint64_t capacity)
 {
     char object[PATH_MAX];
     char program[PATH_MAX];
     char log[PATH_MAX];
+    char compile_log[PATH_MAX];
     char output[PATH_MAX];
     snprintf(object, sizeof(object), "%s/object.o", directory);
     snprintf(program, sizeof(program), "%s/program-cc", directory);
     snprintf(log, sizeof(log), "%s/object.txt", directory);
+    snprintf(compile_log, sizeof(compile_log), "%s/object-compile.txt", directory);
     snprintf(output, sizeof(output), "%s/output-cc.txt", directory);
     char* compile[BUSTER_C_TESTSUITE_ARGUMENTS];
-    char* const compile_rest[] = { "-c", (char*)source, "-o", object };
-    c_testsuite_compile_arguments(compile, suite, compile_rest, BUSTER_ARRAY_LENGTH(compile_rest));
+    char* const compile_rest[] = { "-c", (char*)source, "-o", object, "--tier1-function-sizes" };
+    c_testsuite_compile_arguments(compile, suite, compile_rest, BUSTER_ARRAY_LENGTH(compile_rest) - !suite->code_size);
     char* const readelf[] = { "readelf", "-a", "-W", object, 0 };
     char* const link[] = { "cc", object, "-lm", "-o", program, 0 };
     bool timed_out = false;
-    int status = c_testsuite_run(compile, directory, log, suite->compile_timeout, &timed_out);
+    int status = c_testsuite_run(compile, directory, compile_log, suite->compile_timeout, &timed_out);
     // A test the compiler refuses has no object to check. A refusal is one only when -c exits as the compiler does
     // for a unit with errors: after a signal or a timeout, its log's feature is no excuse.
-    bool valid = c_testsuite_compiled(status, timed_out, log, "-c", detail, capacity);
+    bool valid = c_testsuite_compiled(status, timed_out, compile_log, "-c", detail, capacity);
     uint64_t length = 0;
-    char* text = !valid && c_testsuite_refused(status, timed_out) ? c_testsuite_read(log, &length) : 0;
+    char* text = !valid && c_testsuite_refused(status, timed_out) ? c_testsuite_read(compile_log, &length) : 0;
     char feature[sizeof(((CTestsuiteResult*)0)->detail)];
     const bool unsupported = text != 0 && c_testsuite_feature(text, feature, sizeof(feature));
     free(text);
@@ -503,7 +525,7 @@ static bool c_testsuite_cross_check(const CTestsuite* suite, const char* source,
     }
     if (valid)
     {
-        valid = c_testsuite_symbols(suite, source, directory, object, detail, capacity);
+        valid = c_testsuite_symbols(suite, source, directory, object, compile_log, code_size, detail, capacity);
     }
     return valid || (unsupported && !required);
 }
@@ -626,7 +648,7 @@ static void c_testsuite_one(const CTestsuite* suite, uint32_t index)
     }
     char cross_detail[sizeof(result->detail)];
     if (suite->cross_check && result->outcome != C_TESTSUITE_FAILED &&
-        !c_testsuite_cross_check(suite, source, directory, expected, result->outcome == C_TESTSUITE_PASSED, cross_detail, sizeof(cross_detail)))
+        !c_testsuite_cross_check(suite, source, directory, expected, result->outcome == C_TESTSUITE_PASSED, &result->code_size, cross_detail, sizeof(cross_detail)))
     {
         result->outcome = C_TESTSUITE_FAILED;
         snprintf(result->detail, sizeof(result->detail), "%s", cross_detail);
@@ -877,7 +899,17 @@ static bool c_testsuite_report(const CTestsuite* suite, bool subset)
         printf("; the subset's %u: %u passed", subset_count, subset_passed);
     }
     printf("\n");
-    return counts[C_TESTSUITE_FAILED] == 0 && counts[C_TESTSUITE_NOT_RUN] == 0 && subset_passed == subset_count;
+    bool size_passed = true;
+    if (suite->code_size)
+    {
+        Tier1CodeSize total = { 0 };
+        for (uint32_t i = 0; i < suite->count; i += 1)
+        {
+            tier1_code_size_add(&total, &suite->results[i].code_size);
+        }
+        size_passed = tier1_code_size_report(&total, "c-testsuite", suite->check_code_size);
+    }
+    return counts[C_TESTSUITE_FAILED] == 0 && counts[C_TESTSUITE_NOT_RUN] == 0 && subset_passed == subset_count && size_passed;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -889,12 +921,13 @@ static bool c_testsuite_report(const CTestsuite* suite, bool subset)
 // unsupported, and set to `kill`, it is then killed by a signal. With C_TESTSUITE_EXTRA_SYMBOL set, -c of 00001 writes a
 // real object (cc's) of a program that prints the expected line, with a function more than 00001 has. With C_TESTSUITE_ABNORMAL set, every compile refuses
 // its test, naming a feature, and then ends otherwise than a refusal does but in 00001's vector path: 00001's scalar path
-// and both of 00002's are killed by a signal, and both of 00003's sleep past the compile's time limit.
+// and both of 00002's are killed by a signal, and both of 00003's sleep past the compile's time limit. A size-report
+// request makes 00001's real object compile, link, run and match the oracle's symbols, but omits the requested report.
 static const char c_testsuite_stand_in[] =
     "#!/bin/sh\n"
-    "object=0 scalar=0 source= output=\n"
+    "object=0 scalar=0 sizes=0 source= output=\n"
     "while [ $# -gt 0 ]; do\n"
-    "    case \"$1\" in -c) object=1;; --scalar) scalar=1;; -o) output=$2; shift;; -*) ;; *) source=$1;; esac; shift\n"
+    "    case \"$1\" in -c) object=1;; --scalar) scalar=1;; --tier1-function-sizes) sizes=1;; -o) output=$2; shift;; -*) ;; *) source=$1;; esac; shift\n"
     "done\n"
     "[ -f \"$source\" ] || { echo \"error: no such file: $source\" >&2; exit 1; }\n"
     "refuse() { echo \"error: unsupported: $1\" >&2; case \"$2\" in kill) kill -KILL $$;; sleep) exec sleep 30;; esac; exit 1; }\n"
@@ -908,6 +941,9 @@ static const char c_testsuite_stand_in[] =
     "if [ $object = 1 ] && [ -n \"$C_TESTSUITE_REFUSE_OBJECTS\" ]; then refuse 'a stand-in object' \"$C_TESTSUITE_REFUSE_OBJECTS\"; fi\n"
     "if [ $object = 1 ] && [ -n \"$C_TESTSUITE_EXTRA_SYMBOL\" ]; then case \"$source\" in *00001.c)\n"
     "    printf '#include <stdio.h>\\nint extra_symbol(void) { return 1; }\\nint main(void) { puts(\"passed\"); return 0; }\\n' > \"$output.c\"\n"
+    "    exec cc -c \"$output.c\" -o \"$output\";; esac; fi\n"
+    "if [ $object = 1 ] && [ $sizes = 1 ]; then case \"$source\" in *00001.c)\n"
+    "    printf '#include <stdio.h>\\nint main(void) { puts(\"passed\"); return 0; }\\n' > \"$output.c\"\n"
     "    exec cc -c \"$output.c\" -o \"$output\";; esac; fi\n"
     "case \"$source\" in *00002.c) refuse 'a stand-in feature';; esac\n"
     "case \"$source\" in *00003.c) body='exec sleep 30';; *) body='echo passed';; esac\n"
@@ -968,13 +1004,140 @@ static pid_t c_testsuite_wait_scenario(pid_t child, int* status)
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
-// The harness on three tests of its own, with the stand-in compiler, in six scenarios: from a DIR and a $TMPDIR relative
+// Corpus size is an aggregate gate: a larger function may be offset by another's smaller body. A one-byte aggregate
+// excess fails with enforcement and is reported without failing in report-only mode; invalid or empty evidence fails
+// either mode. An unpaired body's bytes stay in the total with no reference credit, and every compiled body must be
+// counted as matched or unmatched. Invalid flag combinations go through the actual command's parser and must refuse
+// before running a corpus or recursively entering its self-test.
+static bool c_testsuite_code_size_self_test(const char* directory)
+{
+    char names[2][BUSTER_C_TESTSUITE_NAME_BYTES] = { "larger", "smaller" };
+    CTestsuiteResult results[2] = { 0 };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(results); i += 1)
+    {
+        results[i].outcome = C_TESTSUITE_PASSED;
+        results[i].subset = true;
+        results[i].tier1_functions = 1;
+        results[i].tier1_compiled = 1;
+        results[i].code_size = (Tier1CodeSize){
+            .units = 1,
+            .compiled = 1,
+            .matched = 1,
+            .tier1_bytes = i == 0 ? 15 : 5,
+            .clang_bytes = 10,
+        };
+    }
+    CTestsuite suite = {
+        .names = names,
+        .count = BUSTER_ARRAY_LENGTH(results),
+        .tier1 = true,
+        .code_size = true,
+        .check_code_size = true,
+        .results = results,
+    };
+    // These deliberately failing synthetic reports must not look like measured corpus rows to CI's log readers.
+    fflush(stdout);
+    FILE* capture = tmpfile();
+    const int saved_output = capture != NULL ? dup(STDOUT_FILENO) : -1;
+    const bool captured = saved_output >= 0 && dup2(fileno(capture), STDOUT_FILENO) >= 0;
+    uint32_t failures = !captured;
+    if (captured)
+    {
+        failures += !c_testsuite_report(&suite, true);
+        results[1].code_size.tier1_bytes += 1;
+        failures += c_testsuite_report(&suite, true);
+        suite.check_code_size = false;
+        failures += !c_testsuite_report(&suite, true);
+        results[1].code_size.invalid = true;
+        failures += c_testsuite_report(&suite, true);
+        results[1].code_size.invalid = false;
+        suite.check_code_size = true;
+        // One matched byte and four unpaired bytes keep the corpus at equality; the latter get no oracle credit.
+        results[1].tier1_functions = 2;
+        results[1].tier1_compiled = 2;
+        results[1].code_size = (Tier1CodeSize){
+            .units = 1,
+            .compiled = 2,
+            .matched = 1,
+            .tier1_bytes = 5,
+            .clang_bytes = 10,
+            .unmatched = 1,
+            .unmatched_bytes = 4,
+        };
+        failures += !c_testsuite_report(&suite, true);
+        results[1].code_size.tier1_bytes += 1;
+        results[1].code_size.unmatched_bytes += 1;
+        failures += c_testsuite_report(&suite, true);
+        results[1].code_size.tier1_bytes -= 1;
+        results[1].code_size.unmatched_bytes -= 1;
+        results[1].code_size.compiled -= 1;
+        failures += c_testsuite_report(&suite, true);
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(results); i += 1)
+        {
+            results[i].code_size = (Tier1CodeSize){ 0 };
+        }
+        failures += c_testsuite_report(&suite, true);
+        suite.check_code_size = false;
+        failures += c_testsuite_report(&suite, true);
+        suite.code_size = false;
+        failures += !c_testsuite_report(&suite, true);
+        failures += fflush(stdout) != 0;
+    }
+    if (saved_output >= 0)
+    {
+        failures += dup2(saved_output, STDOUT_FILENO) < 0;
+        close(saved_output);
+    }
+    bool report_only_seen = false;
+    if (captured && fseek(capture, 0, SEEK_SET) == 0)
+    {
+        char line[2048];
+        while (fgets(line, sizeof(line), capture) != NULL)
+        {
+            report_only_seen |= strstr(line, "tier1-code-size\tcorpus=c-testsuite\t") == line &&
+                                strstr(line, "\ttier1_bytes=21\tclang_bytes=20\t") != NULL &&
+                                strstr(line, "\tgate=fail\tenforced=0\n") != NULL;
+        }
+        report_only_seen = report_only_seen && !ferror(capture);
+    }
+    failures += !report_only_seen;
+    if (capture != NULL)
+    {
+        fclose(capture);
+    }
+
+    char log[PATH_MAX];
+    snprintf(log, sizeof(log), "%s/size-options.txt", directory);
+    char* const arguments[][7] = {
+        { "/proc/self/exe", "test-c-testsuite", "--check-code-size", (char*)directory, NULL },
+        { "/proc/self/exe", "test-c-testsuite", "--tier1", "--check-code-size", "--self-test", NULL },
+        { "/proc/self/exe", "test-c-testsuite", "--code-size", (char*)directory, NULL },
+        { "/proc/self/exe", "test-c-testsuite", "--tier1", "--code-size", "--self-test", NULL },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(arguments); i += 1)
+    {
+        bool timed_out = false;
+        const int status = c_testsuite_run(arguments[i], directory, log, 10, &timed_out);
+        uint64_t length = 0;
+        char* text = c_testsuite_read(log, &length);
+        const bool refused = c_testsuite_refused(status, timed_out) && text != NULL && strstr(text, "usage: compiler test-c-testsuite") != NULL;
+        failures += !refused;
+        free(text);
+    }
+    unlink(log);
+    printf("test-c-testsuite: code-size aggregation and options: 15 checks, %u failed\n", failures);
+    return failures == 0;
+}
+
+// The harness on three tests of its own, with the stand-in compiler, in seven scenarios: from a DIR and a $TMPDIR relative
 // to the current directory; waiting without a pidfd, by polling; with --cross-check where -c refuses what the direct
 // path compiles, which must fail; with refusals that name their feature but are then killed by a signal or for their
 // time, in one path or both, which must fail, not be unsupported (#377's review); with --cross-check where -c's
 // refusals are killed, which must fail whether or not the direct path compiled the test; and with --cross-check where
-// -c's object defines a function that clang -O0 -c's doesn't, which must fail though its program passes. 00003's program, and in the
-// fourth scenario its compiles, must be killed at their five-second timeouts, long before they would end.
+// -c's object defines a function that clang -O0 -c's doesn't, which must fail though its program passes; and with
+// --code-size where a successful object's size report is missing, which must fail even without threshold enforcement.
+// 00003's program, and in the fourth scenario its compiles, must be killed at their five-second timeouts, long before
+// they would end.
 static int c_testsuite_self_test(CTestsuite* suite)
 {
     // The harness's processes must run, each scenario's own: no oracle run comes from the cache (oracle_cache.c).
@@ -988,7 +1151,7 @@ static int c_testsuite_self_test(CTestsuite* suite)
         { "checkout/tests/single-exec/00003.c", "int main(void) { for (;;) { } }\n" },
         { "checkout/tests/single-exec/00003.c.expected", "" },
     };
-    static const char* const scenarios[] = { "relative paths", "without a pidfd", "cross-check", "killed refusals", "killed -c refusals", "symbols" };
+    static const char* const scenarios[] = { "relative paths", "without a pidfd", "cross-check", "killed refusals", "killed -c refusals", "symbols", "missing size report (report-only)" };
     static const CTestsuiteExpectation expectations[][3] = {
         {
             { C_TESTSUITE_PASSED, "" },
@@ -1020,6 +1183,11 @@ static int c_testsuite_self_test(CTestsuite* suite)
             { C_TESTSUITE_UNSUPPORTED, "a stand-in feature" },
             { C_TESTSUITE_FAILED, "the program: timed out" },
         },
+        {
+            { C_TESTSUITE_FAILED, "code-size:" },
+            { C_TESTSUITE_UNSUPPORTED, "a stand-in feature" },
+            { C_TESTSUITE_FAILED, "the program: timed out" },
+        },
     };
     const uint32_t scenario_count = sizeof(scenarios) / sizeof(scenarios[0]);
     char base[PATH_MAX];
@@ -1043,12 +1211,14 @@ static int c_testsuite_self_test(CTestsuite* suite)
     }
     snprintf(suite->compiler, sizeof(suite->compiler), "%s/stand-in.sh", base);
     valid = valid && c_testsuite_write(suite->compiler, c_testsuite_stand_in, 0755);
-    // These six scenarios run concurrently, alongside other correctness tests in hosted CI. A one-second watchdog
+    // These scenarios run concurrently, alongside other correctness tests in hosted CI. A one-second watchdog
     // can kill healthy shell and compiler children that have simply been descheduled. Five seconds still bounds
     // the intentional 30-second hangs, without mistaking hosted scheduler contention for a harness failure.
     suite->timeout = 5;
     suite->compile_timeout = 5;
     uint32_t failures = valid ? 0 : 1;
+    failures += !tier1_code_size_self_test();
+    failures += valid && !c_testsuite_code_size_self_test(base);
     // The scenarios run at once, each in a child process of its own, since each changes the process's directory,
     // environment and pidfd switch: most of each one's time is its programs' and compiles' five-second timeouts, so
     // concurrency keeps the suite bounded. A child's exit status is whether its scenario came out as expected;
@@ -1068,7 +1238,10 @@ static int c_testsuite_self_test(CTestsuite* suite)
             suite->results = results != MAP_FAILED ? results : 0;
             const bool relative = scenario == 0;
             c_testsuite_without_pidfd = scenario == 1;
-            suite->cross_check = scenario == 2 || scenario == 4 || scenario == 5;
+            suite->cross_check = scenario == 2 || scenario == 4 || scenario == 5 || scenario == 6;
+            suite->tier1 = scenario == 6;
+            suite->code_size = scenario == 6;
+            suite->check_code_size = false;
             snprintf(path, sizeof(path), "%s/checkout", base);
             bool ready = suite->results != 0 && (!relative || (chdir(base) == 0 && setenv("TMPDIR", "work", 1) == 0));
             ready = ready && (scenario != 2 || setenv("C_TESTSUITE_REFUSE_OBJECTS", "1", 1) == 0);
@@ -1194,6 +1367,12 @@ static int run_c_testsuite_tests(int argc, char** argv)
         {
             suite.tier1 = true;
         }
+        else if (strcmp(argv[i], "--code-size") == 0 || strcmp(argv[i], "--check-code-size") == 0)
+        {
+            suite.code_size = true;
+            suite.check_code_size |= strcmp(argv[i], "--check-code-size") == 0;
+            suite.cross_check = true;
+        }
         else if (strcmp(argv[i], "--keep") == 0)
         {
             keep = true;
@@ -1212,10 +1391,10 @@ static int run_c_testsuite_tests(int argc, char** argv)
         }
     }
     int result = 1;
-    if (!valid || (self_test ? root != 0 : root == 0))
+    if (!valid || (self_test ? root != 0 : root == 0) || (suite.code_size && (!suite.tier1 || self_test)))
     {
         fprintf(stderr, "usage: compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--clang PATH] "
-                        "[--id-order N] [--tier1] [--cross-check] [--keep] DIR\n       compiler test-c-testsuite --self-test\n");
+                        "[--id-order N] [--tier1] [--cross-check] [--code-size] [--check-code-size] [--keep] DIR\n       compiler test-c-testsuite --self-test\n");
     }
     else
     {

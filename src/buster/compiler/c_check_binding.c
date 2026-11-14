@@ -92,8 +92,16 @@ static bool check_input_expression_comma_seed(const Parser* parser, uint32_t tok
 static bool check_input_discarded_set(const Parser* parser, uint32_t token, bool is_volatile)
 {
     const uint32_t count = parser->tokens.count;
-    const uint32_t op = token < count ? parser->tree.parents[token] : count;
-    const uint8_t kind = op < count && op != token ? parser->tokens.kinds[op] : PARSE_KIND_SEMI;
+    // The use's operator, the operator's holder and its role, by selects (#892): each column is read at the use's own token
+    // where the token it would read is past the unit (a use's token never is). Read where the test before each found
+    // one, the operator's kind was missed at half the uses on the 9700X.
+    const bool used = token < count;
+    const uint32_t safe = used ? token : 0;
+    const uint32_t parent = parser->tree.parents[safe];
+    const uint32_t op = used ? parent : count;
+    const bool inside = (op < count) & (op != token);
+    const uint8_t op_kind = parser->tokens.kinds[inside ? op : safe];
+    const uint8_t kind = inside ? op_kind : PARSE_KIND_SEMI;
     const bool step = kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS;
     const bool compound = kind == PARSE_KIND_STAREQUAL || kind == PARSE_KIND_SLASHEQUAL || kind == PARSE_KIND_PERCENTEQUAL ||
                           kind == PARSE_KIND_PLUSEQUAL || kind == PARSE_KIND_MINUSEQUAL || kind == PARSE_KIND_LESSLESSEQUAL ||
@@ -101,9 +109,12 @@ static bool check_input_discarded_set(const Parser* parser, uint32_t token, bool
                           kind == PARSE_KIND_PIPEEQUAL;
     const bool assignment = kind == PARSE_KIND_EQUAL || compound;
     // The operand is the bare name: the operator's neighbor, the left one of an assignment.
-    const bool bare = (assignment && op == token + 1) || (step && (op == token + 1 || op + 1 == token));
-    const uint32_t holder = bare ? parser->tree.parents[op] : count;
-    const uint8_t role = holder < count && holder != op ? parser->tree.roles[holder] : PARSE_ROLE_NONE;
+    const bool bare = (assignment & (op == token + 1)) | (step & ((op == token + 1) | (op + 1 == token)));
+    const uint32_t op_parent = parser->tree.parents[inside ? op : safe];
+    const uint32_t holder = bare ? op_parent : count;
+    const bool held = (holder < count) & (holder != op);
+    const uint8_t holder_role = parser->tree.roles[held ? holder : safe];
+    const uint8_t role = held ? holder_role : PARSE_ROLE_NONE;
     // A list's separator (an argument's, an initializer's) is a comma operator only where its chain's root is an
     // expression's (check_common_comma_operator's test); its operand before it is discarded.
     uint32_t root = holder;
@@ -239,6 +250,34 @@ static uint32_t check_input_operation_events(const CBindings* events, uint8_t op
             found += (uint32_t)__builtin_popcount(selected);
         }
     }
+    return found;
+}
+
+// The use events of `events`, in order, into `list` (room for every event), and how many, as check_input_operation_events
+// lists them, with the events counted in the same pass: `*identifiers` all but the restores, `*declarations` the declares.
+static uint32_t check_input_use_events(const CBindings* events, uint32_t* list, uint64_t* identifiers, uint64_t* declarations)
+{
+    const __m512i lanes16 = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    uint32_t found = 0;
+    uint64_t restores = 0;
+    uint64_t declares = 0;
+    for (uint32_t first = 0; first < events->count; first += 64)
+    {
+        const uint32_t length = events->count - first < 64 ? events->count - first : 64;
+        const __mmask64 lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
+        const __m512i operations = _mm512_maskz_loadu_epi8(lanes, events->operation + first);
+        const uint64_t uses = _mm512_mask_cmpeq_epi8_mask(lanes, operations, _mm512_set1_epi8((char)C_BINDING_USE));
+        restores += (uint64_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(lanes, operations, _mm512_set1_epi8((char)C_BINDING_RESTORE)));
+        declares += (uint64_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(lanes, operations, _mm512_set1_epi8((char)C_BINDING_DECLARE)));
+        for (uint32_t part = 0; part < length; part += 16)
+        {
+            const __mmask16 selected = (__mmask16)(uses >> part);
+            _mm512_mask_compressstoreu_epi32(list + found, selected, _mm512_add_epi32(_mm512_set1_epi32((int32_t)(first + part)), lanes16));
+            found += (uint32_t)__builtin_popcount(selected);
+        }
+    }
+    *identifiers = events->count - restores;
+    *declarations = declares;
     return found;
 }
 
@@ -530,15 +569,41 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
     bool valid = !output->resource;
     uint64_t identifiers = 0;
     uint64_t declarations = 0;
-    for (uint32_t event = 0; valid && event < events->count; event += 1)
+    // The vector path's passes visit the uses, and the declarations, each listed once in order
+    // (check_input_operation_events), where each visited every event with a branch on its operation; the scalar path, the
+    // twin, visits every event (#529).
+    const bool listed = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    const uint64_t list_mark = reader->scratch != NULL ? reader->scratch->length : 0;
+    uint32_t* uses = valid && listed && reader->scratch != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, events->count) : NULL;
+    uint32_t use_count = events->count;
+    if (uses != NULL)
     {
-        const uint8_t operation = events->operation[event];
-        const uint32_t handle = operation == C_BINDING_USE ? resolved[event] : 0;
-        valid = operation != C_BINDING_USE ||
-                (events->declaration[event] < count && handle <= event &&
-                 (handle == 0 || (events->operation[handle - 1] == C_BINDING_DECLARE && events->declaration[handle - 1] < count)));
-        identifiers += operation != C_BINDING_RESTORE;
-        declarations += operation == C_BINDING_DECLARE;
+        // The uses listed, the events counted by operation in the same pass, then each use's answer tested without a branch
+        // (#892): an answer past its use fails, and its declaration's event is read at the use's own where it has none or
+        // fails. Every event tested its operation first, and the test of each use's, missed at nearly half the uses on the
+        // 9700X, was the reader's most mispredicted branch outside its walks.
+        use_count = check_input_use_events(events, uses, &identifiers, &declarations);
+        for (uint32_t at = 0; valid && at < use_count; at += 1)
+        {
+            const uint32_t event = uses[at];
+            const uint32_t handle = resolved[event];
+            const uint32_t answer = handle - 1 < event ? handle - 1 : event;
+            valid = (events->declaration[event] < count) & (handle <= event) &
+                    ((handle == 0) | ((events->operation[answer] == C_BINDING_DECLARE) & (events->declaration[answer] < count)));
+        }
+    }
+    else
+    {
+        for (uint32_t event = 0; valid && event < events->count; event += 1)
+        {
+            const uint8_t operation = events->operation[event];
+            const uint32_t handle = operation == C_BINDING_USE ? resolved[event] : 0;
+            valid = operation != C_BINDING_USE ||
+                    (events->declaration[event] < count && handle <= event &&
+                     (handle == 0 || (events->operation[handle - 1] == C_BINDING_DECLARE && events->declaration[handle - 1] < count)));
+            identifiers += operation != C_BINDING_RESTORE;
+            declarations += operation == C_BINDING_DECLARE;
+        }
     }
     output->resource |= !valid;
     if (valid)
@@ -546,13 +611,6 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
         output->binding_statistics.identifiers = identifiers;
         output->binding_statistics.declarations = declarations;
     }
-    // The vector path's passes visit the uses, and the declarations, each listed once in order
-    // (check_input_operation_events), where each visited every event with a branch on its operation; the scalar path, the
-    // twin, visits every event (#529).
-    const bool listed = !BUSTER_SCALAR_PATH(parser->options.scalar);
-    const uint64_t list_mark = reader->scratch != NULL ? reader->scratch->length : 0;
-    uint32_t* uses = valid && listed && reader->scratch != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, events->count) : NULL;
-    const uint32_t use_count = uses != NULL ? check_input_operation_events(events, C_BINDING_USE, uses) : events->count;
     const bool deferred = valid && reader->deferred != NULL && check_deferred_binding_answers(reader->deferred, reader, resolved);
     for (uint32_t at = 0; valid && !deferred && at < use_count; at += 1)
     {

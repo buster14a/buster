@@ -6,9 +6,9 @@ run-name: ${{ github.event_name == 'workflow_dispatch' && (inputs.purpose == 'ba
 
 # This public repository must not execute unreviewed fork code on the host.
 on:
-  # Every main update gets full hosted correctness, including documentation-only merges (#1271).
-  push:
-    branches: [main]
+  # No push trigger: the merge queue tests every main revision before it lands, so a push to main runs nothing (the
+  # owner's decision of 10 November, #1430). The merge_group trigger below runs the full contract on each candidate;
+  # the nightly measures main's first-parent states on the 9700X.
   # `full` is the on-demand run of everything on the dispatched branch's head, as before. `backlog` and `snapshot`
   # are the nightly coordinator's (docs/ci.md, "Nightly main measurements"): a first-parent state of main measured
   # against its first parent, or comprehensively, inside 02:00-08:00 Europe/Madrid unless `override` gives a reason.
@@ -46,10 +46,10 @@ on:
     types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
   # A merge-queue candidate (#1430): GitHub's temporary merge of main, the queue's entries ahead of it and its pull
   # request, on a gh-readonly-queue/main/... branch. It runs the full hosted contract once (every row and sanitizer, the
-  # vector pool and the fuzz campaigns; docs/ci.md, "The merge queue") and reports both required contexts, so that a
-  # ruleset requiring the queue merges only what passed. Nothing triggers it until a ruleset turns the queue on. No
-  # path filter: every candidate runs, documentation alone included. `checks_requested` is the event's only type,
-  # named so that a type GitHub adds later doesn't start runs.
+  # vector pool and the fuzz campaigns; docs/ci.md, "The merge queue") and reports both required contexts, which main's
+  # ruleset requires through its merge queue, so that only what passed merges. No path filter: every candidate runs,
+  # documentation alone included. `checks_requested` is the event's only type, named so that a type GitHub adds later
+  # doesn't start runs.
   merge_group:
     types: [checks_requested]
     branches: [main]
@@ -58,14 +58,13 @@ permissions:
   contents: read
 
 # Keep each PR's replaceable queue separate: a newer push cancels only that PR's superseded qualification.
-# Every push to main gets its own run-id group. cancel-in-progress: false alone would still allow a later merge to
-# replace an earlier pending main run in GitHub's default single pending slot; all main revisions need the full
-# hosted matrix and fuzzing (#1271). So does every merge-queue candidate (#1430): the queue builds several at once,
-# and one candidate's run must neither cancel nor replace another's. The daily run and manual refs retain their own
-# groups. The runner's job hooks still serialize hardware jobs with the shared host lock (AGENTS.md), not the hosted
-# correctness runs.
+# Every merge-queue candidate (#1430) gets its own run-id group: the queue builds several at once, and one candidate's
+# run must neither cancel nor replace another's (cancel-in-progress: false alone would still let a later one replace
+# an earlier pending one in GitHub's default single pending slot); the stale job cancels the runs of candidates GitHub
+# dropped. The daily run and manual refs retain their own groups. The runner's job hooks still serialize hardware jobs
+# with the shared host lock (AGENTS.md), not the hosted correctness runs.
 concurrency:
-  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}
+  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'merge_group' && format('queue-{0}', github.run_id)) || (github.event_name == 'schedule' && 'schedule') || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -232,20 +231,6 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
-      - name: Test the nightly glue and the 9700X's caches against fixtures
-        # On pull requests and merge-queue candidates, before any hardware: the scripts this job, the record job and the
-        # 9700X job run, the hosted vector row's draws (tools/ci/vector-draw.sh) and the setup re-run's decisions on
-        # recorded runs (tools/ci/rerun.sh, .github/workflows/rerun.yml), without network access (tools/ci/nightly.c's
-        # own self-test runs in `changes`). A candidate runs them on main and its pull request merged (#1430).
-        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
-        shell: bash
-        run: |
-          bash tests/ci/nightly.sh
-          bash tests/ci/caches.sh
-          bash tests/ci/build-benchmarks.sh
-          bash tests/ci/vector-draw.sh
-          bash tests/ci/rerun.sh
-
       - name: Decide reuse and hardware admission
         id: decide
         shell: bash
@@ -257,6 +242,38 @@ jobs:
           EVIDENCE_OVERRIDE: ${{ inputs.override }}
           EVIDENCE_NIGHTLY: ${{ vars.BUSTER_NIGHTLY }}
         run: bash tools/ci/nightly.sh evidence "$RUNNER_TEMP/evidence"
+
+  # The CI glue's fixtures, on pull requests and merge-queue candidates: the scripts the evidence job, the record job
+  # and the 9700X job run, the hosted vector row's draws (tools/ci/vector-draw.sh) and the setup re-run's decisions on
+  # recorded runs (tools/ci/rerun.sh, .github/workflows/rerun.yml), without network access (tools/ci/nightly.c's own
+  # self-test runs in `changes`). A candidate runs them on main and its pull request merged (#1430). They hold nothing
+  # back: the rows start once the evidence job decides, and the required aggregate requires these to have passed
+  # (tools/ci/qualification.c's `qualification_evidence`). In the evidence job, before the rows, they held every row
+  # back by their 4 minutes, when neither event uses the 9700X (#2658).
+  glue:
+    name: CI glue fixtures
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the run's commit and its first parent
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Test the nightly glue and the 9700X's caches against fixtures
+        shell: bash
+        run: |
+          bash tests/ci/nightly.sh
+          bash tests/ci/caches.sh
+          bash tests/ci/build-benchmarks.sh
+          bash tests/ci/vector-draw.sh
+          node tests/ci/vector-runtime.cjs
+          bash tests/ci/rerun.sh
 
   # One verified release-input acquisition before any hosted shard starts.
   prepare-hosted-tools:
@@ -796,13 +813,9 @@ jobs:
 
       - name: Check out pinned branch-sizing measurement harnesses
         if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.branch_sizing != 'false' }}
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          repository: buster14a/buster-performance
-          ref: a00d16e47b6f1090b8a0424ab0dd8cb4e6016713 # Initial byte-identical measurement import; see buster-performance/MIGRATION.md.
-          path: build/performance-evidence
-          sparse-checkout: docs/measurements/x86-lengths-2026-10-23
-          persist-credentials: false
+        # buster-performance's initial byte-identical measurement import (see its MIGRATION.md), from the private
+        # cache's mirror rather than GitHub on every run (tools/ci/fetch-performance.sh, #2629).
+        run: bash tools/ci/fetch-performance.sh a00d16e47b6f1090b8a0424ab0dd8cb4e6016713 docs/measurements/x86-lengths-2026-10-23 build/performance-evidence
 
       - name: Benchmark branch sizing
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',branch-sizing,') || needs.changes.outputs.branch_sizing == 'true'
@@ -1753,13 +1766,9 @@ jobs:
 
       - name: Check out the pinned Lua scripts of Tier 1's program measurement
         if: needs.changes.outputs.tier1_programs != 'false'
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          repository: buster14a/buster-performance
-          ref: 818cfbbc0be238da287c16d8e2a91fd7275cf228 # Reviewed main, with the cc3387f record's five original scripts.
-          path: build/tier1-programs-evidence
-          sparse-checkout: docs/measurements/tier1-reciprocal-141-2026-11-01/9700x/lua
-          persist-credentials: false
+        # buster-performance's reviewed main with the cc3387f record's five original scripts, from the private cache's
+        # mirror rather than GitHub on every run (tools/ci/fetch-performance.sh, #2629).
+        run: bash tools/ci/fetch-performance.sh 818cfbbc0be238da287c16d8e2a91fd7275cf228 docs/measurements/tier1-reciprocal-141-2026-11-01/9700x/lua build/tier1-programs-evidence
 
       - name: Time speedtest1 and Lua's scripts by both tiers, clang -O0 and -O2 and tcc
         # #138 and #1189: the programs Tier 1 is measured by against clang -O2, each built by this compiler's Tier 0 and
@@ -1767,7 +1776,8 @@ jobs:
         # output clang -O0's); then every build runs every program in each of 11 rounds, each round in a Williams design's order,
         # as whole processes on one CPU with their user cycles and instructions (docs/tier1.md has the results). Where
         # `changes` doesn't rule it out (Tier 1's pipeline and the measurement: `tier1_programs`), and on the daily and
-        # dispatched runs.
+        # dispatched runs. #1116 also gates all 34 Lua sources' Tier 1 function bytes against matching clang -O0 bytes,
+        # with luac.c included, and reports sqlite3.c's status, using paired objects rather than linked-executable sizes.
         if: needs.changes.outputs.tier1_programs != 'false'
         timeout-minutes: 5
         run: |
@@ -1789,7 +1799,7 @@ jobs:
           scripts="$PWD/build/tier1-programs-evidence/docs/measurements/tier1-reciprocal-141-2026-11-01/9700x/lua"
           clang --version | head -1
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler measure-tier1-programs --runs 11 --clang clang --tcc "$tcc" --sqlite "$sqlite" --speedtest "$inputs" --lua "$inputs/lua-5.4.8/src" --scripts "$scripts" --directory /tmp
+          taskset -c "$cpu" ./build/compiler measure-tier1-programs --check-code-size=lua --runs 11 --clang clang --tcc "$tcc" --sqlite "$sqlite" --speedtest "$inputs" --lua "$inputs/lua-5.4.8/src" --scripts "$scripts" --directory /tmp
 
       - name: Time vector code by both tiers and the base's Tier 1, with the moves around Tier 1's machine rows
         # #1283: test-checker-driver's machine rows' unit, a lexer's byte scan and the compiler's own lexer (on
@@ -1831,12 +1841,13 @@ jobs:
           unset CPATH C_INCLUDE_PATH
           sqlite=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite
           printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite/sqlite3.c" | sha256sum --check
-          # SQLite 3.53.2's test/speedtest1.c (#136's), by its hash, as measure-tier1-programs' step takes it.
+          # SQLite 3.53.2's test/speedtest1.c (#136's), by its hash, from the private cache as measure-tier1-programs'
+          # step takes it (#2629).
           inputs="$RUNNER_TEMP/helpers-programs"
           mkdir -p "$inputs"
-          curl --fail --location --retry 3 --output "$inputs/speedtest1.c" \
-            https://raw.githubusercontent.com/sqlite/sqlite/ccc132c5be20ab5c755c97a08d06b1b592fef330/test/speedtest1.c
-          printf '%s  %s\n' b5eaf4bbcbb320fd8eb3f3e6c4cd5f51a64dd0cd70efe969634d1785e3419675 "$inputs/speedtest1.c" | sha256sum --check
+          bash tools/ci/cached-download.sh \
+            https://raw.githubusercontent.com/sqlite/sqlite/ccc132c5be20ab5c755c97a08d06b1b592fef330/test/speedtest1.c \
+            b5eaf4bbcbb320fd8eb3f3e6c4cd5f51a64dd0cd70efe969634d1785e3419675 "$inputs/speedtest1.c"
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler measure-helpers --runs 11 --compiles 5 --sqlite "$sqlite" --speedtest "$inputs" --directory /tmp
 
@@ -2046,11 +2057,9 @@ jobs:
     uses: ./.github/workflows/tier1-problem.yml
 
   qualification:
-    # The required context, `Integration qualification` (#1430; it replaces the
-    # hardware-named `Build and execute on Ryzen 7 9700X`, which the
-    # qualification-alias job below reports until the ruleset requires this
-    # name): both hosted variants and the gated 9700X job must pass on the same
-    # revision. A pull request, draft or ready,
+    # The required context, `Integration qualification` (#1430; it replaced the
+    # hardware-named `Build and execute on Ryzen 7 9700X`): both hosted variants
+    # and the gated 9700X job must pass on the same revision. A pull request, draft or ready,
     # never runs that job (#2055): the context passes on its hosted rows alone,
     # and says that native correctness and measurements run on its merged
     # first-parent state in the nightly window. A merge-queue candidate
@@ -2065,9 +2074,12 @@ jobs:
     # scheduled run (the nightly mode's) runs nothing; and a push in the
     # nightly mode defers its 9700X work to the window. None of the three has
     # this context, so none can show a 9700X qualification that didn't run.
+    # A pull request labeled `hotfix` skips it, which counts as passed, so that it can enter the merge queue without
+    # waiting for its own rows (hotfix.yml reports the context when the label is added); its candidate runs this job in
+    # full, since a merge_group event has no pull request labels.
     name: Integration qualification
-    needs: [changes, evidence, policy, test, fuzz, benchmarks, auxiliary-build, auxiliary-build-pgo, auxiliary-selfhost, auxiliary-tier1-problem]
-    if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') }}
+    needs: [changes, evidence, glue, policy, test, fuzz, benchmarks, auxiliary-build, auxiliary-build-pgo, auxiliary-selfhost, auxiliary-tier1-problem]
+    if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') && !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'hotfix')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     # The coverage step reads this run's jobs; nothing here writes.
@@ -2103,6 +2115,7 @@ jobs:
           SIZE_RESULT: ${{ needs.policy.result }}
           DCO_RESULT: ${{ needs.policy.result }}
           EVIDENCE_RESULT: ${{ needs.evidence.result }}
+          GLUE_RESULT: ${{ needs.glue.result }}
           HARDWARE: ${{ needs.evidence.outputs.hardware }}
           HARDWARE_REASON: ${{ needs.evidence.outputs.hardware_reason }}
           TEST_RESULT: ${{ needs.test.result }}
@@ -2116,25 +2129,6 @@ jobs:
         run: |
           cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/qualification.c -o "$RUNNER_TEMP/qualification"
           "$RUNNER_TEMP/qualification"
-
-  # The required context's old name (#1430), reported until main's ruleset requires `Integration qualification` in
-  # its place: the replacement is installed and observed first, and the ruleset switches names in one edit, so no
-  # interval is unprotected. It passes exactly when the aggregate passes, and runs wherever the aggregate does. The
-  # change that removes main's push triggers removes this job.
-  qualification-alias:
-    name: Build and execute on Ryzen 7 9700X
-    needs: [qualification]
-    if: ${{ always() && needs.qualification.result != 'skipped' }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    steps:
-      - name: Pass exactly when the aggregate passed
-        env:
-          QUALIFICATION_RESULT: ${{ needs.qualification.result }}
-        shell: bash
-        run: |
-          echo "Integration qualification: $QUALIFICATION_RESULT"
-          test "$QUALIFICATION_RESULT" = success
 
   record:
     # The run's coverage record (tools/ci/nightly.c's `record`, docs/ci.md): its commit, tree and first parent; the

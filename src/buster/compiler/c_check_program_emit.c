@@ -126,6 +126,12 @@ struct CheckProgramCode
     uint64_t records;
     uint64_t deferred;
     uint64_t code_bytes;
+    // Optional source-body identities for --tier1-function-sizes. Kept until the driver has published the object,
+    // so the manifest reads its final symbol sizes after named sections and assembly .size directives are applied.
+    SymbolId* tier1_size_symbols;
+    uint8_t* tier1_size_kinds;
+    uint32_t tier1_size_count;
+    bool tier1_sizes_ready;
     // The first of the symbols cpu_dispatch's and cpu_specific's groups add (#1447, check_program_cpu_symbols).
     SymbolId cpu_first;
     // The first of the symbols the groups of multiversioning by target strings add (#1838, check_program_target_symbols).
@@ -495,19 +501,18 @@ struct CheckTier1Lane
     // Whether the solver's arena (step 6) is among the reserved steps: --tier1-gvn's, only.
     bool gvn_reserved;
     bool targeted;
-    // The emission's inline callees (#1282, c_check_tier1_inline.c), null for none; and the lane's cache of their
-    // prepared IR, a state and a function per body, for the generation it was made for.
+    // The emission's inline callees (#1282, #2541, c_check_tier1_inline.c), null for none; and the two arenas of the run's
+    // lane state this lane takes the bodies on, where the summaries it builds live until the run ends: their functions'
+    // and their analyses'.
     const struct CheckTier1Inline* inlining;
+    Arena* summaries;
     // --tier1-schedule's variant (BUSTER_CHECK_TIER1_SCHEDULE_*, #172), which the emission sets for each body.
     uint8_t schedule;
-    Arena inline_cache;
-    uint64_t inline_generation;
-    struct IrFunction* inline_functions;
-    uint8_t* inline_states;
 };
 
-// --tier1's inline callees (#1282, check_tier1_inline_table): by symbol (of `symbol_count`), the index plus one of the body
-// of each always_inline function of internal linkage, 0 for every other symbol; the bodies' typed streams in `lowered`.
+// The unit's inline callees (#1282, check_tier1_inline_table): by symbol (of `symbol_count`), the index plus one of the body
+// of each always_inline function of internal linkage, 0 for every other symbol (Tier 0's splice, #1398); the bodies' typed
+// streams in `lowered`. With --tier1's inlining, its unit stage and summaries (#2541, c_check_tier1_inline.c).
 typedef struct CheckTier1Inline CheckTier1Inline;
 struct CheckTier1Inline
 {
@@ -519,6 +524,18 @@ struct CheckTier1Inline
     uint8_t* ready;
     uint32_t symbol_count;
     uint64_t generation;
+    // Tier 1's candidates by symbol (a body index plus one), and per body its class as a callee, whether it is in a cycle
+    // of the candidates' calls, its summary's state (a lane word) and its summary (c_check_tier1_inline.c's
+    // CheckTier1Summary); the unit stage's word; the summaries' arenas, two per lane state of the run (the functions' and
+    // their analyses'). All null without --tier1's inlining.
+    const uint32_t* candidates;
+    const uint8_t* classes;
+    uint8_t* cyclic;
+    uint32_t* states;
+    struct CheckTier1Summary* summaries;
+    uint32_t* stage;
+    Arena* arenas;
+    uint32_t body_count;
 };
 
 // What Tier 1's code of a body holds: its records, and the allocation's traffic, its spills' stores and reloads, the
@@ -829,6 +846,7 @@ struct CheckProgramLanes
     uint8_t tier1_schedule;
     CheckTier1Report tier1_report;
     FILE* tier1_refusals;
+    FILE* tier1_function_sizes;
     // Every emission's plan of its helpers' operations, summed (#1059, --helper-report), where the command asks for it
     // (`helper_reporting`): its direct forms are a pass over every lowered entry, which on sqlite3.c cost every compile
     // about a millisecond of the lowering's stage (#1048).
@@ -859,7 +877,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
 // Releases a lane's arenas for the pipeline.
 static void check_tier1_lane_release(CheckTier1Lane* lane);
 // Defined in c_check_tier1_inline.c (#1282): the unit's inline callees by symbol, in `arena`, or false for none.
-static bool check_tier1_inline_table(const CheckProgram* program, const CheckProgramLowered* lowered, uint32_t symbol_count, Arena* arena, CheckTier1Inline* table);
+static bool check_tier1_inline_table(const CheckProgram* program, const CheckProgramLowered* lowered, uint32_t symbol_count, bool tier1, Arena* arena, CheckTier1Inline* table);
+static void check_tier1_inline_release(CheckTier1Inline* table);
 // Gives `table` a new generation, which no lane's cache is valid for: its bodies are lowered again.
 static void check_tier1_inline_renew(CheckTier1Inline* table);
 static uint32_t check_tier1_operation(CheckTier1Outcome outcome);
@@ -1575,6 +1594,8 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
     const CheckTier1Fault* fault = run->lanes->tier1_fault;
     fault = fault != NULL && fault->body == b + 1 ? fault : NULL;
     lane->tier1->inlining = run->tier1_inline;
+    // The summaries this lane builds live in its lane state's arena of the run (#2541): another lane may read them.
+    lane->tier1->summaries = run->tier1_inline != NULL && run->tier1_inline->arenas != NULL ? &run->tier1_inline->arenas[2 * (lane - run->lane_states)] : NULL;
     lane->tier1->schedule = run->lanes->tier1_schedule;
     CheckTier1Outcome outcome = naked ? check_tier1_failure(CHECK_TIER1_NAKED, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_NAKED, UINT32_MAX, 0) :
                                         check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
@@ -3008,7 +3029,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     if (valid)
     {
         const uint64_t prepare_start = stage_clock != NULL ? __rdtsc() : 0;
-        valid = check_lower_prepare(&shared, &result->lowered, program, BUSTER_SCALAR_PATH(scalar), rows != NULL, output, scratch);
+        valid = check_lower_prepare(&shared, &result->lowered, program, BUSTER_SCALAR_PATH(scalar), rows != NULL, lanes != NULL && lanes->tier1, output, scratch);
         check_clock_lower(stage_clock, CHECK_CLOCK_LOWER_PREPARE, stage_clock != NULL ? __rdtsc() - prepare_start : 0);
     }
     check_clock_mark(stage_clock, CHECK_STAGE_LOWER);
@@ -3085,7 +3106,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     CheckTier1Inline tier1_inline = { 0 };
     const bool tier1_inlines = tier1 && run.tier1_outcomes != 0 && !lanes->tier1_no_inline;
     const bool tier0_inlines = valid && (lanes == NULL || !lanes->tier0_no_inline);
-    if ((tier1_inlines || tier0_inlines) && check_tier1_inline_table(program, &result->lowered, access_count, scratch, &tier1_inline))
+    if ((tier1_inlines || tier0_inlines) && check_tier1_inline_table(program, &result->lowered, access_count, tier1_inlines, scratch, &tier1_inline))
     {
         run.inline_table = &tier1_inline;
         run.tier1_inline = tier1_inlines ? &tier1_inline : NULL;
@@ -3269,6 +3290,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     // Also return the leases when an active-lane allocation failed before dispatch. A returned lease is a no-op.
     valid = check_program_emit_return(leases, lease_count) && valid;
+    // Every body's code is done: the summaries (#2541) have no reader left.
+    check_tier1_inline_release(&tier1_inline);
     if (lanes != NULL && lanes->budget != NULL && lanes->budget->return_failed)
     {
         result->status = CHECK_PROGRAM_BACKEND;
@@ -4761,6 +4784,21 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         }
     }
     check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
+    if (valid && lanes != NULL && lanes->tier1_function_sizes != NULL)
+    {
+        result->tier1_size_symbols = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, count) : NULL;
+        result->tier1_size_kinds = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, count) : NULL;
+        valid = count == 0 || (result->tier1_size_symbols != NULL && result->tier1_size_kinds != NULL && run.tier1_outcomes != NULL);
+        for (uint32_t b = 0; valid && b < count; b += 1)
+        {
+            const CheckTier1Outcome outcome = run.tier1_outcomes[b];
+            result->tier1_size_symbols[b] = check_program_body_symbol(program, b);
+            result->tier1_size_kinds[b] = outcome.category == CHECK_TIER1_SUCCESS ? 1 : 0;
+            valid = outcome.category == CHECK_TIER1_SUCCESS || outcome.fallback == CHECK_TIER1_FALLBACK_TIER0;
+        }
+        result->tier1_size_count = valid ? count : 0;
+        result->tier1_sizes_ready = valid;
+    }
     // Report only source order's prefix through the winning Tier 1 failure, not the speculative work later parts
     // happened to finish. A failure of an earlier compiler phase publishes no Tier 1 success counters. This is
     // independent of lane completion order, and a rejected body's counts are always zero.
@@ -4855,6 +4893,36 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->merge_ns = check_program_lanes_now() - lanes_end;
     }
     return valid;
+}
+
+// The opt-in manifest describes source bodies only, never inferred helper or alias symbols. Names are hexadecimal
+// bytes, so assembler labels containing whitespace cannot split a record. A successful publication calls this once;
+// even a declaration-only unit has a header and footer. Consumers validate these sizes against the published ELF.
+static void check_program_print_tier1_sizes(FILE* stream, const CheckProgramCode* code)
+{
+    if (stream != NULL && code->tier1_sizes_ready)
+    {
+        const uint32_t count = code->tier1_size_count;
+        const Link* link = &code->link;
+        static const char digits[] = "0123456789abcdef";
+        fprintf(stream, "tier1-function-sizes\tversion=1\tfunctions=%" PRIu32 "\n", count);
+        for (uint32_t b = 0; b < count; b += 1)
+        {
+            const SymbolId symbol = code->tier1_size_symbols[b];
+            const NameId name = symbol < link->symbols.count ? link->symbols.name[symbol] : 0;
+            const uint64_t size = symbol < link->symbols.count ? link->symbols.size[symbol] : 0;
+            const uint32_t length = name != 0 ? link->names.length[name] : 0;
+            fprintf(stream, "tier1-function-size\ttier=%s\tbytes=%" PRIu64 "\tname=", code->tier1_size_kinds[b] != 0 ? "tier1" : "tier0", size);
+            for (uint32_t i = 0; i < length; i += 1)
+            {
+                const uint8_t byte = link->names.bytes[name][i];
+                fputc(digits[byte >> 4], stream);
+                fputc(digits[byte & 15], stream);
+            }
+            fputc('\n', stream);
+        }
+        fprintf(stream, "tier1-function-sizes-end\tfunctions=%" PRIu32 "\n", count);
+    }
 }
 
 // check_program_emit_timed without a clock: the benchmark's and the tests' emission on lanes.

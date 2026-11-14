@@ -36,11 +36,14 @@ typedef struct CheckRepair CheckRepair;
 struct CheckRepair
 {
     Parser parser;
+    const Parser* original;
     Preprocessor* preprocessor;
     CheckRepairStatus status;
     uint32_t diagnostic;
     // Original tokens are [0, original_end); every token after that is synthetic and ineligible for a report.
     uint32_t original_end;
+    // The view's following closers that match original tokens, before its first genuinely synthetic closer.
+    uint32_t original_closed;
     uint32_t record_begin;
     uint8_t* warning_complete;
 };
@@ -393,7 +396,15 @@ static CheckRepairStatus check_repair_make(CheckRepair* repair, const Parser* or
     arena_pop_to(scratch, scratch_mark);
     if (repair->status == CHECK_REPAIR_READY)
     {
+        repair->original = original;
         repair->original_end = cut;
+        uint32_t closed = cut;
+        while (closed < total && closed < count && view->tokens.kinds[closed] == original->tokens.kinds[closed] &&
+               (view->tokens.kinds[closed] == PARSE_KIND_R_BRACE || view->tokens.kinds[closed] == PARSE_KIND_SEMI))
+        {
+            closed += 1;
+        }
+        repair->original_closed = closed;
     }
     else
     {
@@ -408,6 +419,18 @@ static CheckRepairStatus check_repair_make(CheckRepair* repair, const Parser* or
 static bool check_repair_warning_token(const CheckRepair* repair, uint32_t token)
 {
     return repair->status == CHECK_REPAIR_READY && token < repair->original_end && repair->warning_complete != 0 && repair->warning_complete[token];
+}
+
+// Scope-pop warnings require an original scope closer: a complete declaration alone does not end its scope (#2515).
+static bool check_repair_warning_event(const CheckRepair* repair, const CheckWarningEvent* event)
+{
+    // A repair inserts only compound closers: every retained parameter already has its complete original header.
+    const bool parameter = event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER && repair->status == CHECK_REPAIR_READY &&
+                           event->token < repair->original_end;
+    const bool scoped = event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER &&
+                        (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_LABEL);
+    const bool result = (parameter || check_repair_warning_token(repair, event->token)) && (!scoped || event->completion < repair->original_closed);
+    return result;
 }
 
 // Exclusive bound for retained pragma insertion positions only. Original directives just after a retained block

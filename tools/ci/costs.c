@@ -14,6 +14,8 @@
 //   costs seed --tests LIST --costs DIR --row ROW --from ROW
 //                                                    a row without logs yet: its table from another row's measurements,
 //                                                    which its `#: seeded` line names, until a collect over its own
+//   costs peaks --tests LIST --costs DIR LOG...     the rows' tables with the peak memory the logs give (#2031),
+//                                                    keeping their costs: each command's largest, the runners' least
 //   costs plan --tests LIST --costs FILE --shards N[-M] [--deal FILE] [--jobs J] [--setup SECONDS] [--first SECONDS]
 //                                                    the runner's deal and each shard's predicted time, for each N
 //   costs report LOG...                              a run's rows as they ran: each shard's step and job, the longest,
@@ -23,7 +25,9 @@
 // A LOG is a hosted row's job log as GitHub serves it (`gh api repos/O/R/actions/jobs/ID/logs`), or any part of it that
 // keeps the lines read here: the job's name (`Complete job name:`), the runner's CPU (`model name`, which the job's
 // "Report host CPU" step prints), the revision it checked out (actions/checkout's first `git checkout --progress --force
-// SHA`), and the runner's report (`parallel: shard K of N, ...`, the commands' headings and the summary). A log is data:
+// SHA`), the runner's memory where its host report gives it (`memory: N kB`, the sanitizer rows' tools/ci/sanitizers.sh
+// host, before the runner's report), and the runner's report (`parallel: shard K of N, ...`, the commands' headings,
+// with their peak memory since #2031, and the summary). A log is data:
 // nothing here runs or interpolates what it reads, and a log that lacks a line it needs, or holds one twice, is
 // rejected whole, never half-read.
 //
@@ -67,6 +71,10 @@
 #define BUSTER_COSTS_DEFAULT_MILLISECONDS 10000ull
 // The largest cost a table may give, in milliseconds, as parallel.c's: a day of 1,024 CPUs.
 #define BUSTER_COSTS_MAX_MILLISECONDS (86400000ull * 1024)
+// The most MiB a peak or a runner's memory may give, as parallel_mebibytes_read reads them (BUSTER_PARALLEL_MAX_MEBIBYTES).
+#define BUSTER_COSTS_MAX_MEBIBYTES (1ull << 32)
+// The share of the runner's memory, in percent, that the commands running at once may hold (BUSTER_PARALLEL_MEMORY_PERCENT).
+#define BUSTER_COSTS_MEMORY_PERCENT 90
 // The quantile of a command's samples that its cost is, in percent, by nearest rank.
 #define BUSTER_COSTS_QUANTILE 90u
 // A CPU's speed against the reference CPU's (the one most jobs drew) is the median, over the commands that both ran in
@@ -472,6 +480,8 @@ struct CostsSample
     uint64_t tenths;
     // Whether it passed or was skipped: a failed command's time is only a lower bound.
     bool complete;
+    // Its peak memory in MiB, from its heading's `, N MiB peak` (#2031), or 0 where the runner gave none.
+    uint64_t peak;
 };
 
 typedef struct CostsLog CostsLog;
@@ -502,6 +512,8 @@ struct CostsLog
     bool summarized;
     // The runner's own time for the shard's commands, its summary's `N commands in X s`, in tenths of a second.
     uint64_t step_tenths;
+    // The runner's memory in MiB, its host report's `memory: N kB` (tools/ci/sanitizers.sh host), 0 without one.
+    uint64_t memory;
     CostsSample* samples;
     uint32_t sample_count;
     // Headings whose titles the inventory doesn't have: commands since renamed or removed.
@@ -573,9 +585,10 @@ static size_t costs_seconds(CostsSlice slice, uint64_t* tenths)
     return valid ? digits + 4 : 0;
 }
 
-// An outcome and its times, `passed in X s, Y s of CPU`, `skipped in ...` or `failed (REASON) in ...`, the whole slice:
-// whether it is one, its time's tenths and whether it is complete (passed or skipped).
-static bool costs_outcome(CostsSlice rest, uint64_t* tenths, bool* complete)
+// An outcome and its times, `passed in X s, Y s of CPU`, `skipped in ...` or `failed (REASON) in ...`, the whole slice,
+// with the peak memory `, Z MiB peak` after the CPU time where the runner gives it (#2031): whether it is one, its
+// time's tenths, whether it is complete (passed or skipped), and its peak memory in MiB (0 without one).
+static bool costs_outcome(CostsSlice rest, uint64_t* tenths, bool* complete, uint64_t* peak_mebibytes)
 {
     size_t at = 0;
     bool valid = true;
@@ -603,7 +616,13 @@ static bool costs_outcome(CostsSlice rest, uint64_t* tenths, bool* complete)
     const size_t cpu_time = valid ? costs_seconds(costs_after(after, 2), &cpu) : 0;
     valid = valid && cpu_time != 0;
     const CostsSlice tail = valid ? costs_after(after, 2 + cpu_time) : (CostsSlice){ 0 };
-    valid = valid && tail.length == 7 && memcmp(tail.data, " of CPU", 7) == 0;
+    valid = valid && costs_starts(tail, " of CPU");
+    const CostsSlice memory = valid ? costs_after(tail, 7) : (CostsSlice){ 0 };
+    uint64_t mebibytes = 0;
+    const size_t memory_digits = memory.length != 0 && costs_starts(memory, ", ") ? costs_number(costs_after(memory, 2), UINT32_MAX, &mebibytes) : 0;
+    const CostsSlice peak = memory_digits != 0 ? costs_after(memory, 2 + memory_digits) : (CostsSlice){ 0 };
+    valid = valid && (memory.length == 0 || (memory_digits != 0 && peak.length == 9 && memcmp(peak.data, " MiB peak", 9) == 0));
+    *peak_mebibytes = valid && memory.length != 0 ? mebibytes : 0;
     return valid;
 }
 
@@ -829,18 +848,21 @@ static void costs_log_heading(CostsLog* log, const CostsList* list, CostsSlice h
     uint32_t found = list->count;
     uint64_t tenths = 0;
     bool complete = false;
+    uint64_t peak = 0;
     for (size_t i = 0; found == list->count && i + 2 <= length; i += 1)
     {
         if (text[i] == ':' && text[i + 1] == ' ')
         {
             uint64_t time = 0;
             bool whole = false;
-            const bool outcome = costs_outcome((CostsSlice){ .data = text + i + 2, .length = length - i - 2 }, &time, &whole);
+            uint64_t mebibytes = 0;
+            const bool outcome = costs_outcome((CostsSlice){ .data = text + i + 2, .length = length - i - 2 }, &time, &whole, &mebibytes);
             const uint32_t command = outcome ? costs_list_find(list, (CostsSlice){ .data = text, .length = i }) : list->count;
             timed = timed || outcome;
             found = command;
             tenths = time;
             complete = whole;
+            peak = mebibytes;
         }
     }
     if (found != list->count && seen[found])
@@ -850,7 +872,7 @@ static void costs_log_heading(CostsLog* log, const CostsList* list, CostsSlice h
     else if (found != list->count)
     {
         seen[found] = true;
-        log->samples[log->sample_count] = (CostsSample){ .command = found, .tenths = tenths * costs_held(&list->commands[found], log->jobs), .complete = complete };
+        log->samples[log->sample_count] = (CostsSample){ .command = found, .tenths = tenths * costs_held(&list->commands[found], log->jobs), .complete = complete, .peak = peak };
         log->sample_count += 1;
     }
     else
@@ -907,6 +929,16 @@ static CostsLog costs_log_parse(const CostsList* list, CostsText text)
             const CostsSlice revision = costs_trim(costs_after(content, 50));
             log.error = costs_hex40(revision) ? NULL : "a checkout of something other than a commit";
             snprintf(log.revision, sizeof(log.revision), "%.*s", costs_hex40(revision) ? 40 : 0, revision.data);
+        }
+        else if (costs_starts(content, "memory: ") && log.memory == 0 && !log.reported)
+        {
+            // The runner's MemTotal, `memory: N kB`, in MiB, from the host report before the runner's: a line that
+            // isn't one (`memory: unavailable`) says nothing.
+            uint64_t kibibytes = 0;
+            const CostsSlice value = costs_after(content, 8);
+            const size_t digits = costs_number(value, UINT64_MAX / 2, &kibibytes);
+            const bool valid = digits != 0 && costs_equal(costs_after(value, digits), BUSTER_COSTS_SLICE(" kB")) && kibibytes >= 1024;
+            log.memory = valid ? kibibytes / 1024 : 0;
         }
         else if (costs_starts(content, "Vector item "))
         {
@@ -985,6 +1017,10 @@ struct CostsTable
     // Each command's cost in milliseconds and its kind, by its place in the list.
     uint64_t* milliseconds;
     CostsKind* kinds;
+    // Each command's peak memory in MiB (`#: peak MIB TITLE`), 0 for none, and the runner's (`#: runner-memory MIB`), 0
+    // without one (#2031): the largest peak of the command's samples, and the smallest memory any log's runner had.
+    uint64_t* peaks;
+    uint64_t runner_memory;
     // Lines whose titles the list doesn't have, or has twice: each named in `problems`.
     uint32_t extra;
     uint32_t duplicates;
@@ -999,6 +1035,7 @@ static void costs_table_free(CostsTable* table)
     free(table->problems.data);
     free(table->milliseconds);
     free(table->kinds);
+    free(table->peaks);
     *table = (CostsTable){ 0 };
 }
 
@@ -1049,6 +1086,7 @@ static CostsTable costs_table_parse(const CostsList* list, CostsText text)
     CostsTable table = { .row = BUSTER_COSTS_ROWS, .seeded = BUSTER_COSTS_ROWS };
     table.milliseconds = costs_allocate(list->count + 1, sizeof(uint64_t));
     table.kinds = costs_allocate(list->count + 1, sizeof(CostsKind));
+    table.peaks = costs_allocate(list->count + 1, sizeof(uint64_t));
     CostsKind* marks = costs_allocate(list->count + 1, sizeof(CostsKind));
     size_t offset = 0;
     uint32_t number = 0;
@@ -1088,6 +1126,40 @@ static CostsTable costs_table_parse(const CostsList* list, CostsText text)
             const bool valid = table.jobs == 0 && costs_whole_number(costs_after(content, 15), 1024, &jobs) && jobs >= 1;
             table.error = valid ? NULL : "runner CPUs that aren't a count, or twice";
             table.jobs = (uint32_t)jobs;
+        }
+        else if (costs_starts(content, "#: runner-memory "))
+        {
+            uint64_t memory = 0;
+            const bool valid = table.runner_memory == 0 && costs_whole_number(costs_after(content, 17), BUSTER_COSTS_MAX_MEBIBYTES, &memory) && memory >= 1;
+            table.error = valid ? NULL : "a runner's memory that isn't MIB, or twice";
+            table.runner_memory = memory;
+        }
+        else if (costs_starts(content, "#: peak "))
+        {
+            // `#: peak MIB TITLE`: a title the list doesn't have, or a second peak for one, is a problem as a cost's is.
+            const CostsSlice value = costs_after(content, 8);
+            uint64_t peak = 0;
+            const size_t length = costs_number(value, BUSTER_COSTS_MAX_MEBIBYTES, &peak);
+            const CostsSlice title = length != 0 && length < value.length && value.data[length] == ' ' ? costs_trim(costs_after(value, length + 1)) : (CostsSlice){ 0 };
+            const uint32_t found = title.length != 0 ? costs_list_find(list, title) : list->count;
+            if (peak == 0 || title.length == 0)
+            {
+                table.error = "a peak that isn't MIB TITLE";
+            }
+            else if (found == list->count)
+            {
+                table.extra += 1;
+                costs_append(&table.problems, "  a peak for a title the inventory doesn't have: %.*s\n", (int)title.length, title.data);
+            }
+            else if (table.peaks[found] != 0)
+            {
+                table.duplicates += 1;
+                costs_append(&table.problems, "  a peak's title twice: %.*s\n", (int)title.length, title.data);
+            }
+            else
+            {
+                table.peaks[found] = peak;
+            }
         }
         else if (costs_starts(content, "#: samples "))
         {
@@ -1216,8 +1288,22 @@ static void costs_table_write(const CostsTable* table, const CostsList* list, Co
         costs_append(output, "# `first-shard` is how much longer shard 1's job ran than the others' besides their commands, the medians' difference\n");
         costs_append(output, "# with each job scaled as its samples are: the steps the row runs once, which the deal adds to shard 1's schedule.\n");
     }
+    bool peaked = table->runner_memory != 0;
+    for (uint32_t i = 0; !peaked && i < list->count; i += 1)
+    {
+        peaked = table->peaks != NULL && table->peaks[i] != 0;
+    }
+    if (peaked)
+    {
+        costs_append(output, "# `peak` is a command's largest peak memory over its samples, in MiB, and `runner-memory` the smallest memory of the\n");
+        costs_append(output, "# hosted runners whose logs said (#2031): the runner and the deal hold the commands running at once to 90%% of it.\n");
+    }
     costs_append(output, "#: row %s %s %s\n", costs_architectures[table->row / BUSTER_COSTS_SANITIZERS], costs_sanitizers[table->row % BUSTER_COSTS_SANITIZERS], BUSTER_COSTS_OPTIMIZATION);
     costs_append(output, "#: runner-cpus %u\n", table->jobs);
+    if (table->runner_memory != 0)
+    {
+        costs_append(output, "#: runner-memory %llu\n", (unsigned long long)table->runner_memory);
+    }
     if (table->first_given)
     {
         const uint64_t tenths = table->first_milliseconds / 100;
@@ -1235,6 +1321,13 @@ static void costs_table_write(const CostsTable* table, const CostsList* list, Co
         else if (table->kinds[i] == COSTS_ABSENT || table->kinds[i] == COSTS_UNMEASURED)
         {
             costs_append(output, "#: unmeasured %.*s\n", (int)title.length, title.data);
+        }
+    }
+    for (uint32_t i = 0; table->peaks != NULL && i < list->count; i += 1)
+    {
+        if (table->peaks[i] != 0)
+        {
+            costs_append(output, "#: peak %llu %.*s\n", (unsigned long long)table->peaks[i], (int)list->commands[i].title.length, list->commands[i].title.data);
         }
     }
     for (uint32_t i = 0; i < list->count; i += 1)
@@ -1294,6 +1387,29 @@ static bool costs_seed_text(const CostsList* list, uint32_t row, uint32_t from, 
     costs_table_free(&table);
     free(refreshed.data);
     return *error == NULL;
+}
+
+// The row's table `text` with the peaks its logs give (#2031), as refresh would write it, into `output`: each command
+// that `peaks` gives one (the largest of the row's samples, costs_row_peaks) takes it, and the others keep theirs; the
+// runner's memory becomes the smaller of the table's and `memory` (0 where the logs gave none). The costs, kinds and
+// provenance stay as they are: the logs that carry peaks needn't be the ones the costs came from.
+static bool costs_peaks_text(const CostsList* list, CostsText text, const uint64_t* peaks, uint64_t memory, CostsBuffer* output, const char** error)
+{
+    CostsBuffer refreshed = { 0 };
+    const bool written = costs_refresh_text(list, text, &refreshed, error);
+    CostsTable table = written ? costs_table_parse(list, (CostsText){ .data = refreshed.data, .length = refreshed.length }) : (CostsTable){ .row = BUSTER_COSTS_ROWS };
+    if (written)
+    {
+        for (uint32_t i = 0; i < list->count; i += 1)
+        {
+            table.peaks[i] = peaks[i] != 0 ? peaks[i] : table.peaks[i];
+        }
+        table.runner_memory = memory != 0 && (table.runner_memory == 0 || memory < table.runner_memory) ? memory : table.runner_memory;
+        costs_table_write(&table, list, output);
+    }
+    costs_table_free(&table);
+    free(refreshed.data);
+    return written;
 }
 
 // The problems of the row's table `text` against the list, each a line into `report`: how many. A table must be exactly
@@ -1536,6 +1652,35 @@ static uint64_t costs_normalize(const CostsSpeeds* speeds, uint32_t log, uint64_
 
 // Each row's table from the logs, into tables[row] (left empty for a row without logs): false with a message into
 // `report` when the logs disagree. `names` names each log for the messages.
+// The smallest runner's memory, in MiB, of the logs that report one: 0 where none does.
+static uint64_t costs_logs_memory(const CostsLog* logs, uint32_t count)
+{
+    uint64_t memory = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        memory = logs[i].memory != 0 && (memory == 0 || logs[i].memory < memory) ? logs[i].memory : memory;
+    }
+    return memory;
+}
+
+// Each command's largest peak over `row`'s samples, in MiB, into peaks[i]: 0 where none of its samples gives one. A
+// failed sample's peak counts too, since a command that ran out of memory peaked where it failed.
+static void costs_row_peaks(const CostsList* list, const CostsLog* logs, uint32_t count, uint32_t row, uint64_t* peaks)
+{
+    for (uint32_t i = 0; i < list->count; i += 1)
+    {
+        peaks[i] = 0;
+    }
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        for (uint32_t s = 0; !logs[i].build && logs[i].row == row && s < logs[i].sample_count; s += 1)
+        {
+            const CostsSample* sample = &logs[i].samples[s];
+            peaks[sample->command] = sample->peak > peaks[sample->command] ? sample->peak : peaks[sample->command];
+        }
+    }
+}
+
 static bool costs_collect_rows(const CostsList* list, const CostsLog* logs, const char* const* names, uint32_t count, CostsBuffer* tables, CostsBuffer* report)
 {
     bool valid = true;
@@ -1567,8 +1712,12 @@ static bool costs_collect_rows(const CostsList* list, const CostsLog* logs, cons
     uint64_t* first_outside = costs_allocate(count + 1, sizeof(uint64_t));
     uint64_t* other_outside = costs_allocate(count + 1, sizeof(uint64_t));
     CostsSpeeds speeds = costs_speeds(logs, count);
+    // The rows' runners are all the hosted label's: the smallest memory any log's runner reported (#2031).
+    const uint64_t runner_memory = costs_logs_memory(logs, count);
+    uint64_t* peaks = costs_allocate(list->count + 1, sizeof(uint64_t));
     for (uint32_t row = 0; valid && row < BUSTER_COSTS_ROWS; row += 1)
     {
+        costs_row_peaks(list, logs, count, row, peaks);
         uint32_t jobs = 0;
         uint32_t row_logs = 0;
         uint32_t revision_count = 0;
@@ -1625,9 +1774,11 @@ static bool costs_collect_rows(const CostsList* list, const CostsLog* logs, cons
         }
         if (valid && row_logs != 0)
         {
-            CostsTable table = { .marked = true, .row = row, .jobs = jobs, .samples_min = UINT32_MAX };
+            CostsTable table = { .marked = true, .row = row, .jobs = jobs, .samples_min = UINT32_MAX, .runner_memory = runner_memory };
             table.milliseconds = costs_allocate(list->count + 1, sizeof(uint64_t));
             table.kinds = costs_allocate(list->count + 1, sizeof(CostsKind));
+            table.peaks = costs_allocate(list->count + 1, sizeof(uint64_t));
+            memcpy(table.peaks, peaks, list->count * sizeof(uint64_t));
             for (uint32_t i = 0; i < list->count; i += 1)
             {
                 if (complete_count[i] != 0)
@@ -1698,6 +1849,7 @@ static bool costs_collect_rows(const CostsList* list, const CostsLog* logs, cons
     free(cpus);
     free(first_outside);
     free(other_outside);
+    free(peaks);
     costs_speeds_free(&speeds);
     return valid;
 }
@@ -1706,12 +1858,15 @@ static bool costs_collect_rows(const CostsList* list, const CostsLog* logs, cons
 // The plan: the runner's deal (test_deal.h) and its schedule within each shard
 
 // A shard's predicted time, in milliseconds: its commands in the list's order, each starting as soon as the running ones
-// leave it its CPUs (at most `jobs` in all; a command of more runs alone, holding them all), and taking its cost over
-// the CPUs it holds, as the runner schedules them (docs/commands/parallel.md).
-static uint64_t costs_simulate(const CostsList* list, const uint64_t* milliseconds, const uint64_t* assigned, uint64_t shard, uint32_t jobs, CostsBuffer* listing)
+// leave it its CPUs (at most `jobs` in all; a command of more runs alone, holding them all) and, where `peaks` give
+// them, its peak memory within `budget` (test_deal_memory_fits, #2031), and taking its cost over the CPUs it holds, as
+// the runner schedules them (docs/commands/parallel.md).
+static uint64_t costs_simulate(const CostsList* list, const uint64_t* milliseconds, const uint64_t* peaks, uint64_t budget, const uint64_t* assigned, uint64_t shard, uint32_t jobs, CostsBuffer* listing)
 {
     uint64_t* ends = costs_allocate(list->count + 1, sizeof(uint64_t));
     uint32_t* holds = costs_allocate(list->count + 1, sizeof(uint32_t));
+    uint64_t* memories = costs_allocate(list->count + 1, sizeof(uint64_t));
+    uint64_t used = 0;
     uint32_t running = 0;
     uint32_t free_cpus = jobs;
     uint64_t now = 0;
@@ -1723,7 +1878,8 @@ static uint64_t costs_simulate(const CostsList* list, const uint64_t* millisecon
             next += 1;
         }
         const uint32_t held = next < list->count ? costs_held(&list->commands[next], jobs) : 0;
-        if (next < list->count && held <= free_cpus)
+        const uint64_t peak = next < list->count && peaks != NULL ? peaks[next] : 0;
+        if (next < list->count && held <= free_cpus && test_deal_memory_fits(peak, used, running, budget))
         {
             if (listing != NULL)
             {
@@ -1731,8 +1887,10 @@ static uint64_t costs_simulate(const CostsList* list, const uint64_t* millisecon
             }
             ends[running] = now + milliseconds[next] / held;
             holds[running] = held;
+            memories[running] = peak;
             running += 1;
             free_cpus -= held;
+            used += peak;
             next += 1;
         }
         else if (running != 0)
@@ -1750,11 +1908,13 @@ static uint64_t costs_simulate(const CostsList* list, const uint64_t* millisecon
                 if (ends[i] == earliest)
                 {
                     free_cpus += holds[i];
+                    used -= memories[i];
                 }
                 else
                 {
                     ends[kept] = ends[i];
                     holds[kept] = holds[i];
+                    memories[kept] = memories[i];
                     kept += 1;
                 }
             }
@@ -1763,14 +1923,16 @@ static uint64_t costs_simulate(const CostsList* list, const uint64_t* millisecon
     }
     free(ends);
     free(holds);
+    free(memories);
     return now;
 }
 
 // A costs file's milliseconds for the list as parallel_costs_parse gives them: a command without a line costs its CPUs
 // (uncapped) times 10 s. Any table, generated or not (the plan may deal by an older file's costs). *jobs is its
-// runner's CPUs (`#: runner-cpus`), or 0 without them, and *first its shard 1's once-only steps' milliseconds
-// (`#: first-shard`), or 0.
-static bool costs_plan_costs(const CostsList* list, const char* path, uint64_t* milliseconds, uint32_t* jobs, uint64_t* first)
+// runner's CPUs (`#: runner-cpus`), or 0 without them, *first its shard 1's once-only steps' milliseconds
+// (`#: first-shard`), or 0; peaks[i] each command's peak in MiB (`#: peak`) or 0, and *memory the runner's
+// (`#: runner-memory`), or 0.
+static bool costs_plan_costs(const CostsList* list, const char* path, uint64_t* milliseconds, uint64_t* peaks, uint32_t* jobs, uint64_t* first, uint64_t* memory)
 {
     CostsText text = { 0 };
     const bool read = costs_read(path, &text);
@@ -1780,6 +1942,7 @@ static bool costs_plan_costs(const CostsList* list, const char* path, uint64_t* 
     {
         const bool given = table.kinds[i] != COSTS_ABSENT;
         milliseconds[i] = given ? table.milliseconds[i] : list->commands[i].cpus * BUSTER_COSTS_DEFAULT_MILLISECONDS;
+        peaks[i] = table.peaks[i];
     }
     if (!valid)
     {
@@ -1787,6 +1950,7 @@ static bool costs_plan_costs(const CostsList* list, const char* path, uint64_t* 
     }
     *jobs = valid ? table.jobs : 0;
     *first = valid && table.first_given ? table.first_milliseconds : 0;
+    *memory = valid ? table.runner_memory : 0;
     costs_table_free(&table);
     free(text.data);
     return valid;
@@ -1806,8 +1970,11 @@ struct CostsPlan
 // on `deal_cpus` CPUs where the deal's costs name them, by costs alone where 0), each shard's predicted time by
 // `milliseconds` on a runner of `jobs` CPUs, into `times` (one per shard), and the row's summary. `first` is the time of
 // the steps that a row runs on its shard 1 alone, added to its time; `deal_first` is the deal's own (its file's
-// `#: first-shard`), which the scheduled deal adds to shard 1's as parallel's does.
-static CostsPlan costs_plan(const CostsList* list, const uint64_t* deal, uint32_t deal_cpus, uint64_t deal_first, const uint64_t* milliseconds, uint32_t shards, uint32_t jobs, uint64_t first, uint64_t* times, CostsBuffer* listing)
+// `#: first-shard`), which the scheduled deal adds to shard 1's as parallel's does. The peaks and the runner's memory in
+// MiB (null and 0 for none) hold the commands at once to 90% of it (#2031): the deal's for the deal, and the others for
+// the times.
+static CostsPlan costs_plan(const CostsList* list, const uint64_t* deal, const uint64_t* deal_peaks, uint32_t deal_cpus, uint64_t deal_memory, uint64_t deal_first, const uint64_t* milliseconds, const uint64_t* peaks,
+                            uint32_t shards, uint32_t jobs, uint64_t memory, uint64_t first, uint64_t* times, CostsBuffer* listing)
 {
     uint64_t* order = costs_allocate(list->count + 1, sizeof(uint64_t));
     uint64_t* loads = costs_allocate(shards + 1, sizeof(uint64_t));
@@ -1818,14 +1985,16 @@ static CostsPlan costs_plan(const CostsList* list, const uint64_t* deal, uint32_
         uint64_t* held = costs_allocate(list->count + 1, sizeof(uint64_t));
         uint64_t* ends = costs_allocate(deal_cpus + 1, sizeof(uint64_t));
         uint64_t* holds = costs_allocate(deal_cpus + 1, sizeof(uint64_t));
+        uint64_t* memories = costs_allocate(deal_cpus + 1, sizeof(uint64_t));
         for (uint32_t i = 0; i < list->count; i += 1)
         {
             held[i] = costs_held(&list->commands[i], deal_cpus);
         }
-        test_deal_scheduled(deal, held, list->count, shards, deal_cpus, deal_first, order, loads, assigned, ends, holds);
+        test_deal_scheduled(deal, held, deal_peaks, list->count, shards, deal_cpus, deal_memory * BUSTER_COSTS_MEMORY_PERCENT / 100, deal_first, order, loads, assigned, ends, holds, memories);
         free(held);
         free(ends);
         free(holds);
+        free(memories);
     }
     else
     {
@@ -1834,7 +2003,7 @@ static CostsPlan costs_plan(const CostsList* list, const uint64_t* deal, uint32_
     CostsPlan plan = { 0 };
     for (uint32_t k = 0; k < shards; k += 1)
     {
-        times[k] = costs_simulate(list, milliseconds, assigned, k, jobs, listing) + (k == 0 ? first : 0);
+        times[k] = costs_simulate(list, milliseconds, peaks, memory * BUSTER_COSTS_MEMORY_PERCENT / 100, assigned, k, jobs, listing) + (k == 0 ? first : 0);
         plan.longest_shard = times[k] > plan.longest ? k : plan.longest_shard;
         plan.longest = times[k] > plan.longest ? times[k] : plan.longest;
         plan.total += times[k];
@@ -2156,11 +2325,18 @@ static void costs_test_logs(CostsTest* test, const CostsList* list)
     // Malformed outcomes are no samples: a time without its tenth, a missing CPU time, a failure without its reason.
     uint64_t tenths = 0;
     bool complete = false;
-    costs_expect(test, !costs_outcome(BUSTER_COSTS_SLICE("passed in 10 s, 3.0 s of CPU"), &tenths, &complete), "a time without its tenth");
-    costs_expect(test, !costs_outcome(BUSTER_COSTS_SLICE("passed in 10.0 s"), &tenths, &complete), "a time without its CPU time");
-    costs_expect(test, !costs_outcome(BUSTER_COSTS_SLICE("failed in 1.0 s, 1.0 s of CPU"), &tenths, &complete), "a failure without its reason");
-    costs_expect(test, !costs_outcome(BUSTER_COSTS_SLICE("passed in 1.0 s, 1.0 s of CPU and more"), &tenths, &complete), "a line that goes on after its CPU time");
-    costs_expect(test, costs_outcome(BUSTER_COSTS_SLICE("failed (timed out) in 600.1 s, 1.0 s of CPU"), &tenths, &complete) && tenths == 6001 && !complete, "a timeout's time, a lower bound");
+    uint64_t peak = 0;
+    costs_expect(test, !costs_outcome(BUSTER_COSTS_SLICE("passed in 10 s, 3.0 s of CPU"), &tenths, &complete, &peak), "a time without its tenth");
+    costs_expect(test, !costs_outcome(BUSTER_COSTS_SLICE("passed in 10.0 s"), &tenths, &complete, &peak), "a time without its CPU time");
+    costs_expect(test, !costs_outcome(BUSTER_COSTS_SLICE("failed in 1.0 s, 1.0 s of CPU"), &tenths, &complete, &peak), "a failure without its reason");
+    costs_expect(test, !costs_outcome(BUSTER_COSTS_SLICE("passed in 1.0 s, 1.0 s of CPU and more"), &tenths, &complete, &peak), "a line that goes on after its CPU time");
+    costs_expect(test, costs_outcome(BUSTER_COSTS_SLICE("passed in 2.5 s, 1.0 s of CPU, 812 MiB peak"), &tenths, &complete, &peak) && tenths == 25 && complete && peak == 812, "a time with its peak memory");
+    costs_expect(test, costs_outcome(BUSTER_COSTS_SLICE("passed in 2.5 s, 1.0 s of CPU"), &tenths, &complete, &peak) && peak == 0, "a time without its peak memory, none");
+    costs_expect(test, !costs_outcome(BUSTER_COSTS_SLICE("passed in 2.5 s, 1.0 s of CPU, MiB peak"), &tenths, &complete, &peak), "a peak memory without its number");
+    costs_expect(test, !costs_outcome(BUSTER_COSTS_SLICE("passed in 2.5 s, 1.0 s of CPU, 8.5 MiB peak"), &tenths, &complete, &peak), "a peak memory with a fraction");
+    costs_expect(test, !costs_outcome(BUSTER_COSTS_SLICE("passed in 2.5 s, 1.0 s of CPU, 8 MiB peak and more"), &tenths, &complete, &peak), "a line that goes on after its peak memory");
+    costs_expect(test, !costs_outcome(BUSTER_COSTS_SLICE("passed in 2.5 s, 1.0 s of CPU, 8 MiB"), &tenths, &complete, &peak), "a peak memory without its word");
+    costs_expect(test, costs_outcome(BUSTER_COSTS_SLICE("failed (timed out) in 600.1 s, 1.0 s of CPU"), &tenths, &complete, &peak) && tenths == 6001 && !complete, "a timeout's time, a lower bound");
 }
 
 static void costs_test_quantiles(CostsTest* test)
@@ -2176,14 +2352,15 @@ static void costs_test_quantiles(CostsTest* test)
     costs_expect(test, costs_quantile(eleven, 11, 50) == 6, "the median of eleven, the sixth");
 }
 
-// Collects the fixture logs, in the order `order` gives, into the x86-64 plain row's table.
+// Collects the fixture logs, in the order `order` gives, into the x86-64 plain row's table. Revision B's logs give
+// each command's peak memory after its CPU time, as the runner does since #2031, and revision A's don't.
 static bool costs_test_collect(const CostsList* list, const uint32_t* order, CostsBuffer* table, CostsBuffer* report)
 {
     CostsText texts[4] = {
         costs_test_log(BUSTER_COSTS_TEST_SHARD_1, "AMD EPYC 7763 64-Core Processor", BUSTER_COSTS_TEST_SHA_A, "1 of 2, 2 of 5 commands", "Alpha [4 CPUs]: passed in 10.0 s, 30.0 s of CPU\nBeta: with a colon: passed in 5.0 s, 5.0 s of CPU\n", "14"),
         costs_test_log(BUSTER_COSTS_TEST_SHARD_2, "AMD EPYC 9V45 96-Core Processor", BUSTER_COSTS_TEST_SHA_A, "2 of 2, 3 of 5 commands", "Gamma [2 CPUs]: passed in 3.0 s, 6.0 s of CPU\nDelta: failed (exit status 1) in 2.0 s, 2.0 s of CPU\n", "15"),
-        costs_test_log(BUSTER_COSTS_TEST_SHARD_1, "AMD EPYC 9V45 96-Core Processor", BUSTER_COSTS_TEST_SHA_B, "1 of 2, 2 of 5 commands", "Alpha [4 CPUs]: passed in 20.0 s, 60.0 s of CPU\nBeta: with a colon: passed in 7.0 s, 7.0 s of CPU\n", "40"),
-        costs_test_log(BUSTER_COSTS_TEST_SHARD_2, "AMD EPYC 9V45 96-Core Processor", BUSTER_COSTS_TEST_SHA_B, "2 of 2, 3 of 5 commands", "Gamma [2 CPUs]: passed in 4.0 s, 8.0 s of CPU\nDelta: failed (exit status 1) in 3.0 s, 3.0 s of CPU\n", "41"),
+        costs_test_log(BUSTER_COSTS_TEST_SHARD_1, "AMD EPYC 9V45 96-Core Processor", BUSTER_COSTS_TEST_SHA_B, "1 of 2, 2 of 5 commands", "Alpha [4 CPUs]: passed in 20.0 s, 60.0 s of CPU, 2048 MiB peak\nBeta: with a colon: passed in 7.0 s, 7.0 s of CPU, 3 MiB peak\n", "40"),
+        costs_test_log(BUSTER_COSTS_TEST_SHARD_2, "AMD EPYC 9V45 96-Core Processor", BUSTER_COSTS_TEST_SHA_B, "2 of 2, 3 of 5 commands", "Gamma [2 CPUs]: passed in 4.0 s, 8.0 s of CPU, 12 MiB peak\nDelta: failed (exit status 1) in 3.0 s, 3.0 s of CPU, 5 MiB peak\n", "41"),
     };
     CostsLog logs[4];
     const char* names[4];
@@ -2329,7 +2506,10 @@ static void costs_test_tables(CostsTest* test, const CostsList* list)
     const char* error = NULL;
     costs_expect(test, costs_refresh_text(&changed_list, text, &refreshed, &error), "a table refreshes for a changed inventory");
     costs_expect(test, costs_test_contains(&refreshed, "\n80.0 Alpha [4 CPUs]\n7.0 Beta: with a colon\n8.0 Gamma [2 CPUs]\n28.0 Zeta [8 CPUs]\n3.0 Delta\n"), "keeping the measured, estimating the new on its 4 runner CPUs, dropping the removed");
-    costs_expect(test, costs_test_contains(&refreshed, "\n#: unmeasured Zeta [8 CPUs]\n#: lower-bound Delta\n80.0") && !costs_test_contains(&refreshed, "Epsilon"), "with the new one marked and the removed one gone");
+    costs_expect(test, costs_test_contains(&refreshed, "\n#: unmeasured Zeta [8 CPUs]\n#: lower-bound Delta\n#: peak") && !costs_test_contains(&refreshed, "Epsilon"), "with the new one marked and the removed one gone");
+    // The peaks (#2031): each command's largest over its samples, a failed one's too (Delta's 5 MiB), in the list's
+    // order; revision A's logs give none, and the new command has none.
+    costs_expect(test, costs_test_contains(&refreshed, "\n#: peak 2048 Alpha [4 CPUs]\n#: peak 3 Beta: with a colon\n#: peak 12 Gamma [2 CPUs]\n#: peak 5 Delta\n80.0"), "and the measured commands' peaks kept");
     CostsText refreshed_text = { .data = refreshed.data, .length = refreshed.length };
     CostsBuffer twice = { 0 };
     costs_expect(test, costs_refresh_text(&changed_list, refreshed_text, &twice, &error) && twice.length == refreshed.length && memcmp(twice.data, refreshed.data, twice.length) == 0, "refresh is idempotent");
@@ -2487,13 +2667,13 @@ static void costs_test_plan(CostsTest* test)
     const uint64_t milliseconds[] = { 40000, 10000, 10000, 10000, 10000, 10000 };
     uint64_t times[BUSTER_COSTS_SHARDS];
     CostsBuffer listing = { 0 };
-    const CostsPlan whole = costs_plan(&list, milliseconds, 0, 0, milliseconds, 1, 4, 0, times, &listing);
+    const CostsPlan whole = costs_plan(&list, milliseconds, NULL, 0, 0, 0, milliseconds, NULL, 1, 4, 0, 0, times, &listing);
     costs_expect(test, costs_test_contains(&listing, "shard 1:     0.0 s to    10.0 s, 4 CPUs: Wide [8 CPUs]\nshard 1:    10.0 s to    20.0 s, 1 CPUs: One\n"), "the listing gives each command's start and end");
     free(listing.data);
     // One shard: Wide alone (10 s), then One to Four on 4 CPUs (10 s), then Pair (5 s).
     costs_expect(test, whole.longest == 25000 && whole.total == 25000, "one shard runs the list in its order: a wide command alone, then four, then a pair");
     costs_expect(test, whole.floor == 10000 && whole.floor_command == 0, "the floor is the longest command alone");
-    const CostsPlan two = costs_plan(&list, milliseconds, 0, 0, milliseconds, 2, 4, 3000, times, NULL);
+    const CostsPlan two = costs_plan(&list, milliseconds, NULL, 0, 0, 0, milliseconds, NULL, 2, 4, 0, 3000, times, NULL);
     // The deal: Wide (40) to 0; One (10) to 1, Two to 1, Three to 1, Four to 1, Pair (10) to 0... the lightest each time.
     costs_expect(test, times[0] == 15000 + 3000 && times[1] == 10000 && two.longest == 18000 && two.longest_shard == 0, "two shards: shard 1 carries its once-only time");
     uint64_t order[8];
@@ -2506,20 +2686,21 @@ static void costs_test_plan(CostsTest* test)
     CostsText wide_text = costs_text_of("== w1 [8 CPUs]\nx\n== w2 [8 CPUs]\nx\n== w3 [8 CPUs]\nx\n== long\nx\n");
     const CostsList wide = costs_list_parse(wide_text);
     const uint64_t wide_costs[] = { 40000, 40000, 40000, 60000 };
-    const CostsPlan by_costs = costs_plan(&wide, wide_costs, 0, 0, wide_costs, 2, 4, 0, times, NULL);
+    const CostsPlan by_costs = costs_plan(&wide, wide_costs, NULL, 0, 0, 0, wide_costs, NULL, 2, 4, 0, 0, times, NULL);
     costs_expect(test, by_costs.longest == 70000 && times[1] == 20000, "by costs, a wide command holds back the long one");
-    const CostsPlan by_schedule = costs_plan(&wide, wide_costs, 4, 0, wide_costs, 2, 4, 0, times, NULL);
+    const CostsPlan by_schedule = costs_plan(&wide, wide_costs, NULL, 4, 0, 0, wide_costs, NULL, 2, 4, 0, 0, times, NULL);
     costs_expect(test, by_schedule.longest == 60000 && times[1] == 30000, "by schedule, the long one ends at its own time");
     // With shard 1's once-only steps (50 s), as parallel's own fixture: long goes to shard 2, after w3; w1 and w2 to
     // shard 1, which ends at 70 s with them, as shard 2 does.
-    const CostsPlan by_first = costs_plan(&wide, wide_costs, 4, 50000, wide_costs, 2, 4, 50000, times, NULL);
+    const CostsPlan by_first = costs_plan(&wide, wide_costs, NULL, 4, 0, 50000, wide_costs, NULL, 2, 4, 0, 50000, times, NULL);
     costs_expect(test, by_first.longest == 70000 && times[0] == 70000 && times[1] == 70000, "the deal gives shard 1 less by its once-only steps");
     // The listing's simulation and the deal's (test_deal_makespan) agree.
     const uint64_t wide_held[] = { 4, 4, 4, 1 };
     const uint64_t wide_assigned[] = { 1, 1, 0, 0 };
     uint64_t ends[4];
     uint64_t holds[4];
-    costs_expect(test, test_deal_makespan(wide_costs, wide_held, 4, wide_assigned, 0, 4, ends, holds) == 70000 && costs_simulate(&wide, wide_costs, wide_assigned, 0, 4, NULL) == 70000, "the plan's schedule and the deal's agree");
+    uint64_t memories[4];
+    costs_expect(test, test_deal_makespan(wide_costs, wide_held, NULL, 4, wide_assigned, 0, 4, 0, ends, holds, memories) == 70000 && costs_simulate(&wide, wide_costs, NULL, 0, wide_assigned, 0, 4, NULL) == 70000, "the plan's schedule and the deal's agree");
     free(wide.commands);
     free(wide_text.data);
     // A command that doesn't fit yet holds back the ones after it.
@@ -2527,7 +2708,7 @@ static void costs_test_plan(CostsTest* test)
     const CostsList held_list = costs_list_parse(held_text);
     const uint64_t held_costs[] = { 10000, 4000, 1000 };
     const uint64_t one_shard[] = { 0, 0, 0 };
-    costs_expect(test, costs_simulate(&held_list, held_costs, one_shard, 0, 4, NULL) == 12000, "a command waits for its CPUs, and the next for it");
+    costs_expect(test, costs_simulate(&held_list, held_costs, NULL, 0, one_shard, 0, 4, NULL) == 12000, "a command waits for its CPUs, and the next for it");
     free(held_list.commands);
     free(held_text.data);
     free(list.commands);
@@ -2616,6 +2797,121 @@ static void costs_test_root(CostsTest* test, const char* root, uint32_t* problem
     free(tests.data);
 }
 
+// Peak memory (#2031): the runner's memory from a log's host report, each command's largest peak in its row, the
+// tables' `#: peak` and `#: runner-memory` lines, `costs peaks` keeping the costs, and the plan holding the commands
+// running at once to 90% of the runner's memory as parallel does.
+static void costs_test_peaks(CostsTest* test, const CostsList* list)
+{
+    // The runner's memory: the host report's line before the runner's report, `unavailable` saying nothing, and a line
+    // that a command's output prints inside the report not taken for it.
+    CostsText plain = costs_test_log(BUSTER_COSTS_TEST_SHARD_1, "AMD EPYC 7763 64-Core Processor", BUSTER_COSTS_TEST_SHA_A, "1 of 2, 2 of 5 commands", "Alpha [4 CPUs]: passed in 10.0 s, 30.0 s of CPU, 100 MiB peak\n", "14");
+    const CostsBuffer plain_buffer = { .data = plain.data, .length = plain.length };
+    static const char before[] = "2026-11-11T01:14:05.0000000Z ##[group]Before the report";
+    CostsText reported = costs_test_replace(&plain_buffer, before, "2026-11-11T01:14:04.5000000Z memory: 16366640 kB\n2026-11-11T01:14:05.0000000Z ##[group]Before the report");
+    CostsText unavailable = costs_test_replace(&plain_buffer, before, "2026-11-11T01:14:04.5000000Z memory: unavailable\n2026-11-11T01:14:05.0000000Z ##[group]Before the report");
+    CostsText inside = costs_test_replace(&plain_buffer, "the command's own output", "memory: 1048576 kB");
+    CostsLog logs[4] = { costs_log_parse(list, reported), costs_log_parse(list, unavailable), costs_log_parse(list, inside), costs_log_parse(list, plain) };
+    costs_expect(test, logs[0].error == NULL && logs[0].memory == 15983, "a log's runner memory, MemTotal in MiB");
+    costs_expect(test, logs[1].error == NULL && logs[1].memory == 0, "a runner whose memory is unavailable says none");
+    costs_expect(test, logs[2].error == NULL && logs[2].memory == 0, "a command's own `memory:` line isn't the runner's");
+    costs_expect(test, costs_logs_memory(logs, 4) == 15983 && costs_logs_memory(logs + 1, 3) == 0, "the runners' memory is the least any log gives, none without one");
+    // Each command's largest peak over its row's samples: Alpha's 300 MiB of a second log beside the others' 100, and a
+    // log of another row left out.
+    CostsText larger = costs_test_log(BUSTER_COSTS_TEST_SHARD_2, "AMD EPYC 7763 64-Core Processor", BUSTER_COSTS_TEST_SHA_B, "2 of 2, 2 of 5 commands", "Alpha [4 CPUs]: passed in 10.0 s, 30.0 s of CPU, 300 MiB peak\n", "15");
+    CostsText other_row = costs_test_log("Tests on Ubuntu 26.04 (native, none, O3) / Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 1 of 2)", "AMD EPYC 7763 64-Core Processor", BUSTER_COSTS_TEST_SHA_B, "1 of 2, 2 of 5 commands", "Alpha [4 CPUs]: passed in 10.0 s, 30.0 s of CPU, 9000 MiB peak\n", "16");
+    CostsLog rows[3] = { costs_log_parse(list, plain), costs_log_parse(list, larger), costs_log_parse(list, other_row) };
+    uint64_t peaks[8] = { 0 };
+    costs_row_peaks(list, rows, 3, 0, peaks);
+    costs_expect(test, rows[0].error == NULL && rows[1].error == NULL && rows[2].error == NULL && peaks[0] == 300 && peaks[1] == 0, "a command's largest peak in its row");
+    // `costs peaks` on a collected table: Alpha takes the logs' 300 MiB, the others keep theirs, the runner's memory
+    // comes in, and the costs stay as they were; the result is a table `costs check` passes.
+    static const uint32_t order[4] = { 0, 1, 2, 3 };
+    CostsBuffer table = { 0 };
+    CostsBuffer report = { 0 };
+    const bool collected = costs_test_collect(list, order, &table, &report);
+    CostsBuffer updated = { 0 };
+    const char* error = NULL;
+    const bool written = collected && costs_peaks_text(list, (CostsText){ .data = table.data, .length = table.length }, peaks, 15983, &updated, &error);
+    costs_expect(test, written && costs_test_contains(&updated, "\n#: runner-cpus 4\n#: runner-memory 15983\n") && costs_test_contains(&updated, "\n#: peak 300 Alpha [4 CPUs]\n#: peak 3 Beta: with a colon\n#: peak 12 Gamma [2 CPUs]\n#: peak 5 Delta\n"),
+                 "costs peaks takes the logs' peaks and the runners' memory");
+    CostsTable before_table = collected ? costs_table_parse(list, (CostsText){ .data = table.data, .length = table.length }) : (CostsTable){ 0 };
+    CostsTable after_table = written ? costs_table_parse(list, (CostsText){ .data = updated.data, .length = updated.length }) : (CostsTable){ 0 };
+    bool kept = written && before_table.error == NULL && after_table.error == NULL;
+    for (uint32_t i = 0; kept && i < list->count; i += 1)
+    {
+        kept = before_table.milliseconds[i] == after_table.milliseconds[i] && before_table.kinds[i] == after_table.kinds[i];
+    }
+    costs_expect(test, kept, "and keeps every cost and its kind");
+    CostsBuffer problems = { 0 };
+    costs_expect(test, written && costs_check_text(list, 0, (CostsText){ .data = updated.data, .length = updated.length }, &problems) == 0, "a table with peaks is as refresh writes it");
+    costs_table_free(&before_table);
+    costs_table_free(&after_table);
+    // A table's peak lines: no number or 0, a runner's memory of 0 or twice; and a peak for a title the inventory
+    // doesn't have, or twice, which check counts as a cost line's.
+    static const struct
+    {
+        const char* name;
+        const char* before;
+        const char* after;
+        bool error;
+    } mutants[] = {
+        { "a peak of 0", "#: peak 3 Beta", "#: peak 0 Beta", true },
+        { "a peak without its number", "#: peak 3 Beta", "#: peak Beta", true },
+        { "a runner's memory of 0", "#: runner-memory 15983", "#: runner-memory 0", true },
+        { "a runner's memory twice", "#: runner-memory 15983\n", "#: runner-memory 15983\n#: runner-memory 15983\n", true },
+        { "a peak for a title the inventory doesn't have", "#: peak 3 Beta: with a colon\n", "#: peak 3 Beta: with a colon\n#: peak 9 Omega\n", false },
+        { "a peak twice", "#: peak 3 Beta: with a colon\n", "#: peak 3 Beta: with a colon\n#: peak 4 Beta: with a colon\n", false },
+    };
+    for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
+    {
+        CostsText changed = costs_test_replace(&updated, mutants[i].before, mutants[i].after);
+        CostsTable parsed = costs_table_parse(list, changed);
+        CostsBuffer found = { 0 };
+        char what[160];
+        snprintf(what, sizeof(what), "a table with %s is %s", mutants[i].name, mutants[i].error ? "an error" : "a check problem");
+        const bool rejected = mutants[i].error ? parsed.error != NULL : parsed.error == NULL && parsed.extra + parsed.duplicates == 1 && costs_check_text(list, 0, changed, &found) != 0;
+        costs_expect(test, strcmp(changed.data, "not found") != 0 && rejected, what);
+        costs_table_free(&parsed);
+        free(found.data);
+        free(changed.data);
+    }
+    // The plan: two commands of 600 MiB each on one shard, of a runner of 1,000 MiB, run one after the other (20 s), and
+    // without the runner's memory at once (10 s); and the deal as parallel's fixture: big (50 s) to shard 1, a and b
+    // (30 s, 600 MiB each) apart, b beside big.
+    CostsText memory_text = costs_text_of("== big\nx\n== a\nx\n== b\nx\n");
+    const CostsList memory_list = costs_list_parse(memory_text);
+    const uint64_t memory_costs[] = { 50000, 30000, 30000 };
+    const uint64_t memory_peaks[] = { 0, 600, 600 };
+    const uint64_t together[] = { 1, 0, 0 };
+    costs_expect(test, costs_simulate(&memory_list, memory_costs, memory_peaks, 900, together, 0, 4, NULL) == 60000 && costs_simulate(&memory_list, memory_costs, memory_peaks, 0, together, 0, 4, NULL) == 30000,
+                 "a command waits for the memory as for its CPUs");
+    uint64_t times[2] = { 0 };
+    const CostsPlan with = costs_plan(&memory_list, memory_costs, memory_peaks, 4, 1000, 0, memory_costs, memory_peaks, 2, 4, 1000, 0, times, NULL);
+    costs_expect(test, with.longest == 50000 && times[0] == 50000 && times[1] == 30000, "the deal keeps two commands that don't fit together apart");
+    const CostsPlan without = costs_plan(&memory_list, memory_costs, memory_peaks, 4, 0, 0, memory_costs, memory_peaks, 2, 4, 0, 0, times, NULL);
+    costs_expect(test, without.longest == 50000 && times[1] == 30000 && times[0] == 50000, "and without the runner's memory, by time alone");
+    free(memory_list.commands);
+    free(memory_text.data);
+    free(problems.data);
+    free(updated.data);
+    free(table.data);
+    free(report.data);
+    for (uint32_t i = 0; i < 4; i += 1)
+    {
+        free(logs[i].samples);
+    }
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        free(rows[i].samples);
+    }
+    free(plain.data);
+    free(reported.data);
+    free(unavailable.data);
+    free(inside.data);
+    free(larger.data);
+    free(other_row.data);
+}
+
 static int costs_self_test(const char* root)
 {
     CostsTest test = { 0 };
@@ -2630,6 +2926,7 @@ static int costs_self_test(const char* root)
     costs_test_collect_rejects(&test, &list);
     costs_test_speeds(&test);
     costs_test_plan(&test);
+    costs_test_peaks(&test, &list);
     costs_test_report(&test);
     uint32_t problems = 0;
     if (root != NULL)
@@ -2651,6 +2948,7 @@ static void costs_usage(void)
                     "       costs refresh --tests LIST --costs DIR\n"
                     "       costs check --tests LIST --costs DIR\n"
                     "       costs seed --tests LIST --costs DIR --row ROW --from ROW\n"
+                    "       costs peaks --tests LIST --costs DIR LOG...\n"
                     "       costs plan --tests LIST --costs FILE --shards N[-M] [--deal FILE] [--jobs J] [--setup SECONDS] [--first SECONDS]\n"
                     "       costs report LOG...\n"
                     "       costs --self-test [--root DIR]\n");
@@ -2733,6 +3031,67 @@ static int costs_command_collect(const char* tests, const char* output, char** p
         free(tables[row].data);
     }
     free(report.data);
+    free(logs);
+    free(list.commands);
+    free(text.data);
+    return valid ? 0 : 1;
+}
+
+// peaks: every row's table in `directory` that the logs have samples of, with their peaks and runner's memory (#2031).
+static int costs_command_peaks(const char* tests, const char* directory, char** paths, uint32_t count)
+{
+    CostsText text = { 0 };
+    CostsList list = { 0 };
+    CostsLog* logs = costs_allocate(count + 1, sizeof(CostsLog));
+    bool valid = costs_load_list(tests, &text, &list) && costs_load_logs(&list, paths, count, logs);
+    const uint64_t memory = valid ? costs_logs_memory(logs, count) : 0;
+    uint64_t* peaks = costs_allocate(list.count + 1, sizeof(uint64_t));
+    for (uint32_t row = 0; valid && row < BUSTER_COSTS_ROWS; row += 1)
+    {
+        costs_row_peaks(&list, logs, count, row, peaks);
+        uint32_t peaked = 0;
+        for (uint32_t i = 0; i < list.count; i += 1)
+        {
+            peaked += peaks[i] != 0;
+        }
+        char name[64];
+        costs_row_name(row, name, sizeof(name));
+        char path[4096];
+        snprintf(path, sizeof(path), "%s/%s.costs", directory, name);
+        CostsText table = { 0 };
+        CostsBuffer updated = { 0 };
+        const char* error = NULL;
+        if (peaked != 0 && !costs_read(path, &table))
+        {
+            fprintf(stderr, "costs: %s: no table for the row (%s)\n", path, strerror(errno));
+            valid = false;
+        }
+        else if (peaked != 0 && !costs_peaks_text(&list, table, peaks, memory, &updated, &error))
+        {
+            fprintf(stderr, "costs: %s: %s\n", path, error);
+            valid = false;
+        }
+        else if (peaked != 0 && !costs_write(path, &updated))
+        {
+            fprintf(stderr, "costs: can't write %s\n", path);
+            valid = false;
+        }
+        else if (peaked != 0)
+        {
+            fprintf(stderr, "costs: wrote %s: %u commands' peaks\n", path, peaked);
+        }
+        free(updated.data);
+        free(table.data);
+    }
+    if (valid)
+    {
+        fprintf(stderr, "costs: %u logs; the runners' memory %llu MiB\n", count, (unsigned long long)memory);
+    }
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        free(logs[i].samples);
+    }
+    free(peaks);
     free(logs);
     free(list.commands);
     free(text.data);
@@ -2850,14 +3209,18 @@ static int costs_command_plan(const char* tests, const char* costs, const char* 
     bool valid = costs_load_list(tests, &text, &list);
     uint64_t* milliseconds = costs_allocate(list.count + 1, sizeof(uint64_t));
     uint64_t* dealt = costs_allocate(list.count + 1, sizeof(uint64_t));
+    uint64_t* peaks = costs_allocate(list.count + 1, sizeof(uint64_t));
+    uint64_t* dealt_peaks = costs_allocate(list.count + 1, sizeof(uint64_t));
+    uint64_t memory = 0;
+    uint64_t deal_memory = 0;
     // The runner the times are for: the costs' own, or --jobs where they don't say. The deal's CPUs are its file's.
     uint32_t runner = 0;
     uint32_t deal_cpus = 0;
     // Shard 1's once-only steps: --first's where given, else the costs' own; the deal's are its file's.
     uint64_t table_first = 0;
     uint64_t deal_first = 0;
-    valid = valid && costs_plan_costs(&list, costs, milliseconds, &runner, &table_first);
-    valid = valid && costs_plan_costs(&list, deal != NULL ? deal : costs, dealt, &deal_cpus, &deal_first);
+    valid = valid && costs_plan_costs(&list, costs, milliseconds, peaks, &runner, &table_first, &memory);
+    valid = valid && costs_plan_costs(&list, deal != NULL ? deal : costs, dealt, dealt_peaks, &deal_cpus, &deal_first, &deal_memory);
     const uint64_t first_milliseconds = first != UINT64_MAX ? first * 1000 : table_first;
     jobs = runner != 0 ? runner : jobs;
     uint64_t times[BUSTER_COSTS_SHARDS];
@@ -2868,7 +3231,7 @@ static int costs_command_plan(const char* tests, const char* costs, const char* 
     for (uint32_t shards = low; valid && shards <= high; shards += 1)
     {
         CostsBuffer listing = { 0 };
-        const CostsPlan plan = costs_plan(&list, dealt, deal_cpus, deal_first, milliseconds, shards, jobs, first_milliseconds, times, low == high ? &listing : NULL);
+        const CostsPlan plan = costs_plan(&list, dealt, dealt_peaks, deal_cpus, deal_memory, deal_first, milliseconds, peaks, shards, jobs, memory, first_milliseconds, times, low == high ? &listing : NULL);
         const double mean = (double)plan.total / shards / 1000.0;
         const double runner = ((double)plan.total / 1000.0 + (double)(setup * shards)) / 60.0;
         printf("| %u | %.1f s (shard %llu) | %.1f s | %.2f | %.1f s | %.1f |\n", shards, (double)plan.longest / 1000.0, (unsigned long long)plan.longest_shard + 1, mean, mean > 0 ? (double)plan.longest / 1000.0 / mean : 0.0, (double)plan.floor / 1000.0, runner);
@@ -2884,6 +3247,8 @@ static int costs_command_plan(const char* tests, const char* costs, const char* 
     }
     free(milliseconds);
     free(dealt);
+    free(peaks);
+    free(dealt_peaks);
     free(list.commands);
     free(text.data);
     return valid ? 0 : 1;
@@ -2998,6 +3363,10 @@ int main(int argc, char** argv)
     else if (strcmp(command, "collect") == 0 && valid && tests != NULL && output != NULL && logs != 0 && logs <= BUSTER_COSTS_LOGS)
     {
         status = costs_command_collect(tests, output, argv + i, logs);
+    }
+    else if (strcmp(command, "peaks") == 0 && valid && tests != NULL && costs != NULL && output == NULL && logs != 0 && logs <= BUSTER_COSTS_LOGS)
+    {
+        status = costs_command_peaks(tests, costs, argv + i, logs);
     }
     else if ((strcmp(command, "refresh") == 0 || strcmp(command, "check") == 0) && valid && tests != NULL && costs != NULL && logs == 0)
     {

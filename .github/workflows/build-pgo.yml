@@ -6,13 +6,11 @@ name: build.sh PGO
 # settings' checks (cmake/BusterSettings.cmake) make them before any tree is configured.
 on:
   pull_request:
-    paths: [build.sh, CMakeLists.txt, 'cmake/**', tools/ci/setup-build-tools.sh, tools/ci/hosted-release.sh, tools/ci/hosted-tools.lock, .github/workflows/build-pgo.yml]
-  push:
-    branches: [main]
-    paths: [build.sh, CMakeLists.txt, 'cmake/**', tools/ci/setup-build-tools.sh, tools/ci/hosted-release.sh, tools/ci/hosted-tools.lock, .github/workflows/build-pgo.yml]
+    paths: [build.sh, CMakeLists.txt, 'cmake/**', tools/ci/session-toolchain.sh, tools/ci/setup-build-tools.sh, tools/ci/hosted-release.sh, tools/ci/hosted-tools.lock, .github/workflows/build-pgo.yml]
   workflow_dispatch:
   # A merge-queue candidate calls this workflow whole where its change touches a path the pull_request trigger above
-  # lists (9700x.yml's auxiliary-build-pgo job, which tools/ci/changes.c decides from that list; #1430).
+  # lists (9700x.yml's auxiliary-build-pgo job, which tools/ci/changes.c decides from that list; #1430). A push to main runs
+  # nothing: the queue tested it before it landed.
   workflow_call:
 
 permissions:
@@ -54,8 +52,11 @@ jobs:
               local expected="$1" tree output status
               shift
               tree="$(mktemp -d)"
+              mkdir -p "$tree/tools/ci"
               cp -r build.sh cmake "$tree/"
-              output="$(cd "$tree" && env PATH="$bin:$PATH" "$@" 2>&1 > /dev/null)" && status=0 || status=$?
+              cp tools/ci/session-toolchain.sh tools/ci/hosted-tools.lock "$tree/tools/ci/"
+              # PATH's clang, the stand-in: CI's toolchain (build.sh's default) would stage the release in its place.
+              output="$(cd "$tree" && env PATH="$bin:$PATH" BUSTER_TOOLCHAIN=path "$@" 2>&1 > /dev/null)" && status=0 || status=$?
               if [ "$status" = 1 ] && grep -qF -- "$expected" <<< "$output" && [ ! -e "$tree/build" ]; then
                   echo "refused: $*"
               else

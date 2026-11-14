@@ -580,8 +580,112 @@ static void ir_inline_test_general_by_value(IrInlineTest* test, Arena* input, Ar
     arena_pop_to(input, 0);
 }
 
+// #2541 step 1's unit fields: a cost limit per callee (IrInlineUnit.limits), so that one callee of the same cost is
+// expanded and another kept, and the caller alone rewritten (IrInlineUnit.only), its callees taken as they are, finished
+// summaries: neither verified nor rewritten, their own calls kept even where their callee is in the unit.
+static void ir_inline_test_general_limits(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
+{
+    IrInlineCfgText text;
+    IrFunction functions[5];
+    bool parsed = true;
+    text.type = "i64";
+    ir_inline_cfg_begin(&text, "i64");
+    ir_inline_cfg_line(&text, "b0:\n  %%0 = param.i64 0\n  %%1 = param.i64 1\n  %%2 = call.i64 @2(%%0, %%1) fixed=(i64, i64) variadic=0\n");
+    ir_inline_cfg_line(&text, "  %%3 = call.i64 @3(%%1, %%0) fixed=(i64, i64) variadic=0\n  %%4 = call.i64 @4(%%0, %%0) fixed=(i64, i64) variadic=0\n");
+    ir_inline_cfg_line(&text, "  %%5 = add.i64 %%2, %%3\n  %%6 = xor.i64 %%5, %%4\n  %%7 = ret.void %%6\n}\n");
+    parsed = parsed && ir_inline_cfg_parse(test, &text, input, scratch, &functions[0]);
+    // Two callees of one shape (a diamond), and a third that calls the second.
+    ir_inline_cfg_callee(&text, 0, 7);
+    parsed = parsed && ir_inline_cfg_parse(test, &text, input, scratch, &functions[1]);
+    ir_inline_cfg_callee(&text, 0, 9);
+    parsed = parsed && ir_inline_cfg_parse(test, &text, input, scratch, &functions[2]);
+    ir_inline_cfg_begin(&text, "i64");
+    ir_inline_cfg_line(&text, "b0:\n  %%0 = param.i64 0\n  %%1 = param.i64 1\n  %%2 = call.i64 @3(%%0, %%1) fixed=(i64, i64) variadic=0\n  %%3 = ret.void %%2\n}\n");
+    parsed = parsed && ir_inline_cfg_parse(test, &text, input, scratch, &functions[3]);
+    text.type = "i64";
+    ir_inline_cfg_helper(&text, 5, 0);
+    parsed = parsed && ir_inline_cfg_parse(test, &text, input, scratch, &functions[4]);
+    if (parsed)
+    {
+        const uint32_t symbols[5] = {
+            1,
+            2,
+            3,
+            4,
+            5,
+        };
+        const uint8_t flags[5] = {
+            0,
+            BUSTER_IR_INLINE_INTERNAL,
+            BUSTER_IR_INLINE_INTERNAL,
+            BUSTER_IR_INLINE_INTERNAL,
+            0,
+        };
+        const uint32_t limits[5] = {
+            0,
+            UINT32_MAX - 1,
+            1,
+            UINT32_MAX - 1,
+            0,
+        };
+        const IrInlineUnit unit = {
+            .functions = functions,
+            .symbols = symbols,
+            .flags = flags,
+            .count = 5,
+            .symbol_count = 128,
+            .limits = limits,
+            .only = 1,
+        };
+        IrInlineOptions options = ir_inline_options();
+        options.control_flow = true;
+        IrInlineResult result = { 0 };
+        if (ir_inline_test_run(test, &unit, options, output, twin, scratch, &result))
+        {
+            const uint32_t first = result.call_offsets[0];
+            ir_inline_test_expect(test, result.call_offsets[1] - first == 3 && result.decisions[first] == IR_INLINE_SELECTED && result.decisions[first + 1] == IR_INLINE_COST &&
+                                      result.decisions[first + 2] == IR_INLINE_SELECTED && result.inlined_calls == 2,
+                                  "each callee's own cost limit decides its calls");
+            // The third callee's call of the second stays a call in it, and the caller's copy of it keeps that call.
+            uint32_t kept = 0;
+            for (uint32_t node = 0; node < result.functions[0].instruction_count; node += 1)
+            {
+                kept += result.functions[0].op[node] == IR_CALL;
+            }
+            ir_inline_test_expect(test, result.functions[3].op == functions[3].op && result.functions[1].op == functions[1].op && result.decisions[result.call_offsets[3]] == IR_INLINE_DISABLED &&
+                                      kept == 2,
+                                  "the callees are taken as they are, their calls kept");
+            IrInlineCfgRun runs[2];
+            for (uint32_t trial = 0; trial < 16; trial += 1)
+            {
+                InterpreterValue arguments[2] = { 0 };
+                arguments[0].low = ir_inline_test_random(test);
+                arguments[1].low = ir_inline_test_random(test);
+                uint8_t seed[BUSTER_IR_INLINE_CFG_MEMORY] = { 0 };
+                runs[0] = ir_inline_cfg_run(functions, arguments, seed, scratch);
+                runs[1] = ir_inline_cfg_run(result.functions, arguments, seed, scratch);
+                ir_inline_test_expect(test, runs[0].result.status == INTERPRETER_OK && ir_inline_cfg_same(&runs[0], &runs[1], UINT64_MAX), "the caller alone rewritten runs as the unit");
+                test->executions += 2;
+            }
+        }
+        // A limit column inside the output arena's free tail is refused, as any borrowed input there is.
+        IrInlineUnit tail = unit;
+        tail.limits = (const uint32_t*)(output->base + output->length);
+        IrInlineResult refused = { 0 };
+        uint32_t failed = 0;
+        ir_inline_test_expect(test, ir_optimize_inline(&tail, output, scratch, options, &refused, &failed).error == IR_ERROR_STRUCTURE, "a limits column in the output's tail is refused");
+        IrInlineUnit beyond = unit;
+        beyond.only = 6;
+        ir_inline_test_expect(test, ir_optimize_inline(&beyond, output, scratch, options, &refused, &failed).error == IR_ERROR_STRUCTURE, "an only function past the unit is refused");
+    }
+    arena_pop_to(input, 0);
+    arena_pop_to(output, 0);
+    arena_pop_to(twin, 0);
+}
+
 static void ir_inline_test_general(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
 {
     ir_inline_test_general_units(test, input, output, twin, scratch);
     ir_inline_test_general_by_value(test, input, output, twin, scratch);
+    ir_inline_test_general_limits(test, input, output, twin, scratch);
 }

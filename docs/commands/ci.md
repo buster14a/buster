@@ -6,30 +6,28 @@ requirements. [Command index](README.md).
 
 ## Every main revision
 
-Every merge or direct push to `main`, including documentation/Markdown-only
-changes, starts hosted correctness against that push's `github.sha` (#1271).
-In the nightly mode it runs the plain rows only (#2057, the owner's choice on
-2026-11-10); the sanitizer rows and fuzz campaigns run on the nightly
-snapshot's daily run, until the merge queue (#1430) runs the complete suite
-before each merge and pushes run no checks. Before the nightly mode a push runs
-the full matrix and fuzzing. Main pushes use a separate run-id concurrency
-group each, so rapid merges do not replace pending main runs. PRs still cancel
-only their own superseded runs; the hardware lock still serializes the 9700X.
+Every change reaches `main` through the merge queue (#1430). The queue's
+candidate runs the complete hosted contract on its exact commit before it
+merges: every row and sanitizer, the vector pool, the fuzz campaigns and the
+auxiliary workflows its change touches. Documentation-only changes run it too.
+A push to `main` runs no checks (the owner's decision on 2026-11-10). Each
+candidate takes its own run-id concurrency group. PRs still cancel only their
+own superseded runs, and the hardware lock still serializes the 9700X.
 
-Do not add main-push path filters, treat a successful PR run or Measurement
-storage as a push's own hosted rows, or let native-evidence reuse suppress
-them. `changes --self-test` checks the trigger, concurrency and hosted-scope
-policy with counterexamples; `tests/ci/nightly.sh` checks that every push's
-evidence keeps `hosted=run` and no hosted reuse source, with `scope=plain` in
-the nightly mode and `scope=full` before it, including documentation-only
-pushes.
+Do not add a push trigger or a candidate path filter. Do not treat a
+successful PR run or Measurement storage as a candidate's own hosted rows, and
+don't let native-evidence reuse suppress them. `changes --self-test` checks the
+triggers, concurrency and hosted-scope policy with counterexamples, a restored
+push trigger among them. `tests/ci/nightly.sh` checks the candidates' evidence
+and coverage. Before the queue, every push ran its own hosted rows (#1271):
+the plain rows in the nightly mode (#2057), and the full matrix before it.
 
 ## The merge queue
 
-`9700x.yml` also runs on `merge_group` (`checks_requested`, main, no path
-filter), the merge queue's candidates (#1430). It is inert until a ruleset
-turns the queue on; the ruleset, removing the `push` triggers and the AGENTS.md
-rule change together, after the capacity gate and the owner's decision.
+`9700x.yml` runs on `merge_group` (`checks_requested`, main, no path filter),
+the merge queue's candidates (#1430). Main's ruleset requires the queue with no
+bypass, and the checking workflows have no `push` trigger: a push to main runs
+nothing, since the queue tested it before it landed.
 
 - **What a candidate runs.** The full hosted contract on its exact commit,
   documentation alone included:
@@ -73,17 +71,22 @@ rule change together, after the capacity gate and the owner's decision.
   listing and harvest accept the candidate's runs of the same commit. Once
   one is credited, the report lists the states without a passing candidate run
   as coverage gaps.
+- **Hotfix entry.** Label a pull request `hotfix` to queue it without waiting for its own rows. `hotfix.yml`
+  reports `Integration qualification` passed when the label is added, and `9700x.yml` skips the aggregate on the
+  pull request's later pushes. Its candidate still runs everything. Use it for fixes that must land fast: a
+  hotfix that fails does so in the queue, where it costs the entries behind it a rebuild.
 - **Accounting.** `ci-timings.yml` reports candidates by fate (merged,
-  passed but invalidated, failed, cancelled), with their runner-minutes and
-  the merged ones' wall time (`timings --queue`).
+  passed but invalidated, failed, cancelled), with their runner-minutes, the
+  merged ones' wall time and their hosted jobs' waits for a runner
+  (`timings --queue`, #2031).
 - **Policy pins.** `changes --self-test` pins the trigger, the concurrency
   group, the selector's routing, the auxiliary calls and the aggregate's
   coverage step. Its mutants include a path filter, another branch or type, a
   shared slot, a skipped selector or coverage step, an auxiliary workflow never
   called or not awaited, and its list unchecked.
 
-[The merge queue](../ci.md#the-merge-queue) has the details and what is still
-to come.
+[The merge queue](../ci.md#the-merge-queue) has the details and the ruleset's
+settings.
 
 ## Sharing the 9700X
 
@@ -102,6 +105,14 @@ configurations, 16 items in one pool of draws, the costliest first. Each
 configuration's item 1 builds its compiler and publishes it; its other items
 install that product (`tools/ci/hosted-product.sh`, #2032). Its race fixture is
 `.github/workflows/vector-claim-race.yml`.
+Artifact rendezvous uses the job-scoped Results service through
+`.github/actions/vector-runtime`, with no REST fallback (#2309). Fresh PR
+vector rows have a 16-request REST ceiling, including quota observations;
+reruns use bounded identity reads and refuse unknown state. The verdict
+reports request ledgers and shared-quota headers; see [Vector REST
+budget](../ci.md#vector-rest-budget-2309). After changes, run the shell
+fixture above and `node tests/ci/vector-runtime.cjs`; both run in the PR's
+`CI glue fixtures` job.
 Each row (`.github/workflows/hosted-correctness.yml`, which the test job calls
 per row) runs its inventory as its own number of shards, a runner each:
 `parallel --shard K/N --costs tools/ci/costs/ROW.costs` deals the commands by
@@ -120,16 +131,17 @@ TSan/MSan `main.c` compiles) run in its shard 1.
 The repository syntax check retains each build's sanitizer feature flags and
 predefines, while excluding its exact host-only detector and frame controls
 (#1423). The compiler executing the check remains instrumented.
-On the daily and dispatched runs, the nightly snapshot's daily run and pushes
-before the nightly mode (not on pull requests, which they would hold up for over
-an hour, nor on pushes in the nightly mode, #2057), each host architecture also runs the
+On merge-queue candidates and the daily and dispatched runs, the nightly
+snapshot's daily run among them (not on pull requests, which they would hold up
+for over an hour; before the queue, on pushes before the nightly mode), each
+host architecture also runs the
 inventory under `BUSTER_SANITIZER=address|thread|memory`, but the
 compiler's own `main.c` checking comparison in the TSan and MSan rows, whose
 measured memory (docs/ci.md) exceeds a hosted runner's; their `-c` compiles run
 in a separate step after the suite. ASan combines UBSan, bounds,
 leak and stack-lifetime checks; TSan and MSan use separate builds.
 Standalone `BUSTER_SANITIZER=undefined` remains available for manual diagnosis,
-but no longer repeats the full suite on every main push. Diagnostic
+but no longer repeats the full suite on every candidate. Diagnostic
 builds default to `-O3`, frames and line information, with fatal symbolized detector
 proofs and child-report auditing. `BUSTER_FUZZ_AVAILABLE=1` adds in-process
 coverage and the `--fuzz` driver override; `BUSTER_FUZZ_ENTRY=FILE.c` replaces
@@ -358,6 +370,20 @@ build/costs --self-test --root .
   scaled to the slowest CPU as samples are. Only jobs whose commands all passed
   count (a failure skips the later steps), and not the vector row's draws, which
   also wait for their collector; without both kinds of job the line is left out.
+- **Peak memory (#2031).** `#: peak MIB TITLE` is a command's largest peak
+  memory over the row's samples, failed ones included (a command that ran out of
+  memory peaked where it failed), from the runner's `, N MiB peak`. `#:
+  runner-memory MIB` is the smallest MemTotal any log's runner reported (the
+  sanitizer rows' host report, `memory: N kB`); every hosted row draws the same
+  runners, so each table takes it. `parallel` holds the commands running at once
+  to 90% of the runner's memory by their peaks, and the deal simulates the same
+  ([parallel](parallel.md#the-parallel-runner)). The first peaks came from three
+  queue candidates after #2651 (43481775079, 43486864508, 43487074169), 159 logs
+  over every row. The largest were 7,813 MiB (Tier 0's inlining test under TSan
+  and in the vector draws) and 4.5–5.1 GiB (`main.c`'s comparison with clang, the
+  parser and the per-file jobs on the repository's units). The runners had
+  15,982 MiB. Without the bound, one vector draw's four largest commands would
+  have needed 15,922 MiB at once.
 - **Provenance.** The `#:` lines record the row, the runner's CPUs, the
   revisions measured and the CPUs drawn, each with its jobs.
 - **Collect.** After a full run (the nightly snapshot's, or a dispatched
@@ -374,6 +400,13 @@ build/costs --self-test --root .
   without the line, from its caller's one configuration), and its shard from its
   report, which must be the item's; a candidate that took no item has no
   report, and `costs.sh` skips it.
+- **Peaks.** `bash tools/ci/costs.sh --peaks LOGS_DIRECTORY RUN...` fetches the
+  runs' logs as a collect does and runs `costs peaks --tests
+  tools/ci/correctness.tests --costs tools/ci/costs LOG...`. It writes each row's
+  peaks and the runners' memory into the existing tables and keeps their costs,
+  for logs from runs since #2651, whose headings carry `MiB peak`. A command the
+  logs don't sample keeps its peak. A later collect over such logs writes the
+  peaks itself.
 - **Seed.** A row without logs yet takes another row's measurements: `build/costs
   seed --tests tools/ci/correctness.tests --costs tools/ci/costs --row
   vector-address-O3 --from native-address-O3`. Its `#: seeded ROW` line, first
@@ -504,7 +537,7 @@ never ones that failed, so green keeps meaning the tests passed.
   job and test step keep their names, and `rerun.yml` watches exactly the
   workflows that call `hosted-correctness.yml` and re-runs only failed first
   attempts. A renamed setup step fails it until the list follows.
-  `bash tests/ci/rerun.sh`, in the `evidence` job's fixtures step, also runs
+  `bash tests/ci/rerun.sh`, in the `CI glue fixtures` job, also runs
   the cases recorded from the API in `tests/ci/rerun/cases.tsv` against their
   reports and Markdown: the 2026-11-11 outage's push and pull request, test,
   build, timeout, fail-fast, lost-runner and self-hosted failures. It checks
@@ -525,11 +558,11 @@ bash tests/ci/rerun.sh
 Git glue, and [the CI guide](../../docs/ci.md#nightly-main-measurements) has
 the policy. In short:
 
-- Every `9700x.yml` run has an `evidence` job, which must succeed. A push to
-  main is admitted and runs its own native correctness: it reuses nothing
-  from its pull request, whose 9700X job skips native correctness (#1272).
-  A merge-queue candidate is never admitted. When main is fast-forwarded to its
-  commit, its plain rows are that state's (#1430).
+- Every `9700x.yml` run has an `evidence` job, which must succeed. A
+  merge-queue candidate is never admitted. Main is fast-forwarded to its
+  commit, so its plain rows are that state's (#1430). A push to main runs
+  nothing; before the queue it was admitted (deferred in the nightly mode)
+  and reused nothing from its pull request (#1272).
   A nightly dispatch's `evidence` job checks that the commit is a first-parent state of
   main, may reuse the commit's own earlier plain hosted rows (a push's, a
   dispatch's or a merge-queue candidate's), and enforces
@@ -572,8 +605,10 @@ the policy. In short:
   snapshot's comprehensive run is the daily run.
 - Tests: `bash tests/ci/nightly.sh` (the self-test, also under ASan and UBSan,
   and the glue against a fake `gh` and a merge history) and
-  `bash tests/ci/caches.sh` (the 9700X's caches). Pull requests run both in
-  the `evidence` job before any hardware; `changes` runs
+  `bash tests/ci/caches.sh` (the 9700X's caches). Pull requests and
+  merge-queue candidates run both in the `glue` job (`CI glue fixtures`),
+  beside the rows, which don't wait for them, and the required aggregate
+  requires them (#2658); `changes` runs
   `nightly --self-test`, which also fails if the build or the inventory ever
   calls `git`.
 

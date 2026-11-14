@@ -79,7 +79,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-parser, benchmark-parser` | `c_parser.c` | [parser](parser.md) |
 | `test-preprocessor, benchmark-preprocessor` | `c_preprocessor.c` | [preprocessor](preprocessor.md) |
 | `test-preprocessor-fuzz, benchmark-preprocessor-fuzz` | `preprocessor_fuzz.c` | [preprocessor-fuzz](preprocessor-fuzz.md) |
-| `ab, time-runs, test-profile` | `profile.c` | [profiling](profiling.md) |
+| `ab, time-runs, start-order, test-profile` | `profile.c` | [profiling](profiling.md) |
 | `test-refinement, benchmark-refinement` | `c_intern.c` | [refinement](refinement.md) |
 | `test-snapshot, benchmark-snapshot` | `snapshot.c` | [snapshot](snapshot.md) |
 | `test-ssa, test-ssa-ir, test-ssa-source` | `ssa.c` | [ssa](ssa.md) |

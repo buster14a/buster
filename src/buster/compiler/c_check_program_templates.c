@@ -250,6 +250,11 @@ static CheckLowerTemplateUse check_lower_template_classify(const CheckLowerWrite
     else if (op == CHECK_OP_STATEMENT_VALUE || (!address && value->category == CHECK_LVALUE && (facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) != 0))
     {
     }
+    else if (address && (value->flags & BUSTER_CHECK_BIT_FIELD) != 0)
+    {
+        // A bit-field's address, which only its stores ask for, is its unit's (#1372, check_lower_bit_member and
+        // check_lower_bit_constant_address): the tasks'.
+    }
     else if (constant && op != CHECK_OP_INITIALIZE && op != CHECK_OP_BUILTIN_QUERY &&
              ((value->category == CHECK_RVALUE && !address) || ((address || address_value) && value->constant_kind == CHECK_CONSTANT_ADDRESS)))
     {
@@ -289,8 +294,13 @@ static CheckLowerTemplateUse check_lower_template_classify(const CheckLowerWrite
     }
     else if (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)
     {
-        const TypeId record = op == CHECK_OP_ARROW ? type_element(types, type_a) : check_stream_type(stream, a);
-        const uint8_t record_kind = check_action_kind(types, record);
+        TypeId record = type_strip_aligned(types, op == CHECK_OP_ARROW ? type_element(types, type_a) : check_stream_type(stream, a));
+        uint8_t record_kind = type_kind(types, record);
+        if (__builtin_expect(record_kind == BUSTER_TYPE_KIND_ATOMIC, 0))
+        {
+            record = type_strip_aligned(types, type_element(types, record));
+            record_kind = type_kind(types, record);
+        }
         const bool bit_field = (value->flags & BUSTER_CHECK_BIT_FIELD) != 0;
         const bool loads = !address && !address_value;
         if (stream->diagnostics[node] == CHECK_DIAG_NONE && (record_kind == BUSTER_TYPE_KIND_STRUCT || record_kind == BUSTER_TYPE_KIND_UNION) && !bit_field &&
@@ -355,7 +365,7 @@ static CheckLowerTemplateUse check_lower_template_classify(const CheckLowerWrite
     {
         uint8_t binary = check_lower_binary(op);
         uint64_t right = 0;
-        const bool power = check_lower_unsigned_power(writer, node, class, &binary, &right);
+        const bool power = check_lower_power(writer, node, class, &binary, &right) != BUSTER_CHECK_LOWER_POWER_NONE;
         // A rewritten right operand no longer has its child's original entries. Leave this root to the task loop;
         // its children may still be closed templates. The fast twin makes the same choice below.
         // The shifts' and compares' counts are of these classes too, so check_lower_count adds nothing.
@@ -912,10 +922,10 @@ static CheckLowerTemplateFast check_lower_template_fast(const CheckLowerWriter* 
             check_lower_template_put(entries, BUSTER_TYPED_CONST, class, bits);
             fast.handled = true;
         }
-        else if (constant == CHECK_CONSTANT_ADDRESS)
+        else if (constant == CHECK_CONSTANT_ADDRESS && (flags & BUSTER_CHECK_BIT_FIELD) == 0)
         {
             // An address constant (check_lower_constant's): its object's address and offset, converted where it is a signed
-            // integer's rvalue.
+            // integer's rvalue. A bit-field's is its unit's, the tasks' (check_lower_bit_constant_address).
             const uint32_t local = known ? check_lower_local_of(writer, object) : BUSTER_CHECK_NONE;
             if (object == 0 || (known && (local != BUSTER_CHECK_NONE || program->object_symbols[object] != 0)))
             {
@@ -947,8 +957,13 @@ static CheckLowerTemplateFast check_lower_template_fast(const CheckLowerWriter* 
     {
         // A member's read, or its address: past the base's, its offset's addition where it has one.
         const TypeId type_a = stream->conversions[node].operands[0].type;
-        const TypeId record = op == CHECK_OP_ARROW ? type_element(program->types, type_a) : check_stream_type(stream, graph->operand0[node]);
-        const uint8_t record_kind = check_action_kind(program->types, record);
+        TypeId record = type_strip_aligned(program->types, op == CHECK_OP_ARROW ? type_element(program->types, type_a) : check_stream_type(stream, graph->operand0[node]));
+        uint8_t record_kind = type_kind(program->types, record);
+        if (__builtin_expect(record_kind == BUSTER_TYPE_KIND_ATOMIC, 0))
+        {
+            record = type_strip_aligned(program->types, type_element(program->types, record));
+            record_kind = type_kind(program->types, record);
+        }
         const uint64_t bits = stream->member_offsets[node];
         if (stream->diagnostics[node] == CHECK_DIAG_NONE && (record_kind == BUSTER_TYPE_KIND_STRUCT || record_kind == BUSTER_TYPE_KIND_UNION) &&
             (flags & BUSTER_CHECK_BIT_FIELD) == 0 && bits % 8 == 0 && (!reads || check_lower_template_class(class)))
@@ -1081,7 +1096,7 @@ static CheckLowerTemplateFast check_lower_template_fast(const CheckLowerWriter* 
         {
             uint8_t selected = binary;
             uint64_t right = 0;
-            const bool power = check_lower_unsigned_power(writer, node, class, &selected, &right);
+            const bool power = check_lower_power(writer, node, class, &selected, &right) != BUSTER_CHECK_LOWER_POWER_NONE;
             if (check_lower_template_class(check_lower_class(writer, type_a)) && check_lower_template_class(check_lower_class(writer, type_b)) &&
                 !check_lower_aggregate(writer, type_a) && !power)
             {
