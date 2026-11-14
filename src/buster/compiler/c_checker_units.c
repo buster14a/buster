@@ -180,7 +180,7 @@ struct CheckUnitsRun
     uint32_t started;
 };
 
-static CheckAttested* check_attested_lane_open(uint8_t mode);
+static CheckAttested* check_attested_lane_open(uint8_t mode, const char* memo, const uint64_t* key, bool alone);
 static void check_attested_lane_close(CheckAttested* attested);
 static void check_attested_lane_leave(CheckAttested* attested);
 static void check_attested_begin(CheckAttested* attested, bool again);
@@ -2307,9 +2307,9 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
         else
         {
             // The lane's attested declarations (#2531), opened by its first unit of a command of several source files.
-            if (!lane->attested_tried && command->attested != CHECK_ATTESTED_MODE_OFF && command->source_count > 1)
+            if (!lane->attested_tried && command->attested != CHECK_ATTESTED_MODE_OFF && (command->source_count > 1 || command->attested_memo != NULL))
             {
-                lane->attested = check_attested_lane_open(command->attested);
+                lane->attested = check_attested_lane_open(command->attested, command->attested_memo, command->attested_key, false);
                 lane->attested_tried = true;
             }
             check_attested_begin(lane->attested, false);
@@ -2804,15 +2804,16 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 }
                 check_attested_summary(states[l].attested, counts);
             }
-            if (stage_clock != NULL && command->attested != CHECK_ATTESTED_MODE_OFF && command->source_count > 1)
+            if (stage_clock != NULL && command->attested != CHECK_ATTESTED_MODE_OFF && (command->source_count > 1 || command->attested_memo != NULL))
             {
                 const uint64_t outside = counts[CHECK_ATTESTED_SUMMARY_OUTSIDE_TOKENS];
                 fprintf(stderr, "attested declarations: %" PRIu64 " of %" PRIu64 " units skipped %" PRIu64 " of %" PRIu64 " file-scope declarations, %" PRIu64 " of %" PRIu64
-                                " tokens outside definitions (%.2f%%); %" PRIu64 " units read again; %" PRIu64 " hashes in the memos; %" PRIu64 " contradictions; %" PRIu64
-                                " unlisted events\n",
+                                " tokens outside definitions (%.2f%%); %" PRIu64 " units read as views; %" PRIu64 " units read again; %" PRIu64 " hashes in the memos; %" PRIu64
+                                " contradictions; %" PRIu64 " unlisted events\n",
                         counts[CHECK_ATTESTED_SUMMARY_SKIPPING], counts[CHECK_ATTESTED_SUMMARY_UNITS], counts[CHECK_ATTESTED_SUMMARY_SKIPPED],
                         counts[CHECK_ATTESTED_SUMMARY_DECLARATIONS], counts[CHECK_ATTESTED_SUMMARY_SKIPPED_TOKENS], outside,
-                        outside != 0 ? 100.0 * (double)counts[CHECK_ATTESTED_SUMMARY_SKIPPED_TOKENS] / (double)outside : 0.0, counts[CHECK_ATTESTED_SUMMARY_AGAIN],
+                        outside != 0 ? 100.0 * (double)counts[CHECK_ATTESTED_SUMMARY_SKIPPED_TOKENS] / (double)outside : 0.0, counts[CHECK_ATTESTED_SUMMARY_VIEWS],
+                        counts[CHECK_ATTESTED_SUMMARY_AGAIN],
                         counts[CHECK_ATTESTED_SUMMARY_HASHES], counts[CHECK_ATTESTED_SUMMARY_CONTRADICTIONS], counts[CHECK_ATTESTED_SUMMARY_UNLISTED]);
             }
             if (command->units_memory != 0)

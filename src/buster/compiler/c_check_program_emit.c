@@ -809,6 +809,9 @@ struct CheckProgramLanes
     // In a units' run, the lane of the unit that these lanes' emission is (c_checker_units.c), whose unit takes its
     // estimated peak from the run's memory once preprocessed (#1109, check_units_admit). Null elsewhere.
     struct CheckUnitsLane* units_lane;
+    // A command of one source file's attested declarations' state, where it keeps a memo across processes (#2531's step 4,
+    // --attested-memo, check_driver_one_unit). Null elsewhere: a units' run's lanes have theirs.
+    struct CheckAttested* attested;
     // A test's tokens that lane 0 of a growing team (CheckEmitGrowth) writes to the jobserver after its first item, as
     // another recipe returning them would, each byte BUSTER_CHECK_EMIT_SUPPLY_BYTE plus its index (0 for none).
     uint32_t grow_supply;
@@ -4475,7 +4478,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             // builtin of a name points to (__builtin_FILE's and its kin's, #148), which clang makes a private constant as
             // it makes a literal's.
             char spelling[48];
-            const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_string_%u", object);
+            const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_string_%u", parse_origin(parser, object - 1) + 1);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         }
         else if (program->cfstring_class_own && object == program->cfstring_class)
@@ -4492,7 +4495,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             // clang's .L_unnamed_cfstring_ and its characters' constant are.
             char spelling[48];
             const bool record = parser->tree.roles[object - 1] == PARSE_ROLE_CLOSE_CALL;
-            const int length = snprintf(spelling, sizeof(spelling), record ? ".Lbuster_cfstring_%u" : ".Lbuster_string_%u", object);
+            const int length = snprintf(spelling, sizeof(spelling), record ? ".Lbuster_cfstring_%u" : ".Lbuster_string_%u", parse_origin(parser, object - 1) + 1);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         }
         else if (object != 0 && object - 1 < parser->tokens.count && parser->tree.roles[object - 1] == PARSE_ROLE_LABEL)
@@ -4501,8 +4504,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             char spelling[48];
             // (A target_clones copy's of the label, #2247, by its own symbol.)
             const bool copied = program->object_symbols[object] != s + 1;
-            const int length = copied ? snprintf(spelling, sizeof(spelling), ".Lbuster_label_%u_%u", object, s + 1) :
-                                        snprintf(spelling, sizeof(spelling), ".Lbuster_label_%u", object);
+            const uint32_t numbered = parse_origin(parser, object - 1) + 1;
+            const int length = copied ? snprintf(spelling, sizeof(spelling), ".Lbuster_label_%u_%u", numbered, s + 1) :
+                                        snprintf(spelling, sizeof(spelling), ".Lbuster_label_%u", numbered);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
             flags = BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_NOTYPE;
         }

@@ -116,6 +116,10 @@ requirements. [Command index](README.md).
   earlier units read silently and purely and that their own code doesn't reach
   (#2531, `--attested=on|verify|off`, on by default but with `-g` or
   `--scalar`: the [translation units guide](translation-units.md#attested-declarations---attested-2531)).
+  `--attested-memo=DIRECTORY` keeps their memo across processes, in a file
+  of that directory for the compiler's build and the command's options, so
+  that a command of one source file skips what earlier commands learned too
+  (opt-in, step 4).
   `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
