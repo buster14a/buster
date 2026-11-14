@@ -54,6 +54,18 @@ entry points both verify the resulting SSA and remapped CFG. See the
 [Tier 1 command guide](tier1.md#block-placement-and-critical-edge-fall-through-1218)
 for its ordering policy, regression coverage and measurement boundaries.
 
+## Vector and mask values by default (#2781)
+
+Tier 1's `vectors` pass item is on by default. In a function with vector or mask
+values, it runs value numbering before promotion and LICM after if-conversion,
+restricted to those values; `+gvn` and `+licm` still request the unrestricted
+passes, and `-vectors` disables both restricted forms. The LICM implementation
+walks each eligible loop's own blocks and skips loops with no safe vector or
+mask value. `test-ir-gvn` and `test-ir-licm` cover both host paths, the
+per-loop/whole-function LICM oracle, scalar neutrality and nested loops;
+`test-checker-driver` checks the default and `-vectors` reports and native
+output on a C vector fixture. See [the Tier 1 guide](../../docs/tier1.md).
+
 ## Vectors assembled in memory (#1344)
 
 clang's headers write `_mm512_set1_epi8`, `_mm512_setzero_si512`,

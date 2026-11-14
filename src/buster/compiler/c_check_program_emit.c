@@ -486,6 +486,8 @@ struct CheckEmitGrowth
 // lane's first body and emptied for each, and the forms the lane's last target allows (X86_FORM_COUNT entries). Every
 // lane reserves the first BUSTER_CHECK_TIER1_STEPS_ALWAYS steps; the others are the optional passes' outputs, reserved
 // only where an option runs the pass: step 7 #866's solver's (--tier1-gvn), 8 SROA's and 9 LICM's (--tier1-passes=).
+// #2781's passes on vector and mask values take steps 7 and 9 too, reserved at the lane's first function that has such
+// values (check_tier1_lane_reserve), so that a unit without any maps neither.
 #define BUSTER_CHECK_TIER1_STEPS 10
 #define BUSTER_CHECK_TIER1_STEPS_ALWAYS 7
 // --tier1-schedule's variants (#172): none, each block's records after allocation (c_check_tier1_schedule.c), or each
@@ -497,14 +499,16 @@ struct CheckEmitGrowth
 // the default pipeline, which runs SCCP, dead-code removal, CFG cleanup and its merges, and neither LICM nor SROA on every
 // function. SCCP's, dead-code removal's, CFG cleanup's and the merges' bits are ir_optimize.c's BUSTER_IR_OPTIMIZE_SCCP,
 // DCE, CFG and MERGE. #866's solver and the inlining keep their own options (--tier1-gvn, --tier1-no-inline), which the
-// option's list sets too.
+// option's list sets too. VECTORS (#2781, on by default) is the solver and LICM on vector and mask values alone, in
+// the functions that have such values and where the option doesn't run the pass on every value.
 #define BUSTER_CHECK_TIER1_PASS_SCCP 1u
 #define BUSTER_CHECK_TIER1_PASS_DCE 2u
 #define BUSTER_CHECK_TIER1_PASS_CFG 4u
 #define BUSTER_CHECK_TIER1_PASS_LICM 8u
 #define BUSTER_CHECK_TIER1_PASS_SROA 16u
 #define BUSTER_CHECK_TIER1_PASS_MERGE 32u
-#define BUSTER_CHECK_TIER1_PASSES_DEFAULT (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE)
+#define BUSTER_CHECK_TIER1_PASS_VECTORS 64u
+#define BUSTER_CHECK_TIER1_PASSES_DEFAULT (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_VECTORS)
 #define BUSTER_CHECK_TIER1_PASSES_ALL (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA)
 
 typedef struct CheckTier1Lane CheckTier1Lane;
@@ -617,7 +621,8 @@ struct CheckTier1Counts
     uint32_t sunk;
     // What #139's passes did to it (--tier1-passes=): the optimizer's folded constants, the instructions and blocks its
     // output has fewer than its input (SCCP, dead-code removal, CFG cleanup and its merges together) and the blocks merged
-    // into their predecessors, LICM's moved values, SROA's split slots and #866's solver's removed instructions.
+    // into their predecessors, LICM's moved values, SROA's split slots and #866's solver's removed instructions. LICM's
+    // and the solver's are #2781's on vector and mask values where those ran instead.
     uint32_t folded;
     uint32_t removed_instructions;
     uint32_t removed_blocks;

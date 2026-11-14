@@ -25,7 +25,9 @@ struct IrGvnOptions
     // Refine every instruction in synchronous rounds instead of numbering the acyclic ones first: the exact oracle
     // of the acyclic numbering.
     bool complete;
-    // PROTOTYPE (#1344 census): apply a congruence only to vector- and mask-typed values.
+    // Apply a congruence only to a value of vector or mask type (#2781, Tier 1's default policy): the constants and
+    // tables vector code shares, without the general registers' longer live ranges (#2719). The congruences are
+    // computed as without it; every other value stays its own, a forwarded copy included.
     bool vectors;
 };
 
@@ -87,7 +89,6 @@ static __attribute__((unused)) IrGvnOptions ir_gvn_options(void)
     const IrGvnOptions options = {
         .sweep_limit = 64,
         .probes = BUSTER_IR_GVN_PROBES_PER_INSTRUCTION,
-        .vectors = getenv("BUSTER_PROTO_VECTORS") != NULL,
     };
     return options;
 }
@@ -990,6 +991,32 @@ static IrError ir_gvn_alias_view(IrGvnWork* work, Arena* scratch, IrFunction* re
     return error;
 }
 
+// IrGvnOptions.vectors (#2781): every value that is no vector and no mask is its own again, sixteen at a time or, on the
+// scalar twin, one at a time. A vector's or a mask's alias is a value of its own type, so the chains that stay are whole.
+static void ir_gvn_keep_vectors(IrGvnWork* work, bool scalar)
+{
+    const IrFunction* f = work->ir.function;
+    if (BUSTER_SCALAR_PATH(scalar))
+    {
+        for (uint32_t i = 0; i < f->instruction_count; i += 1)
+        {
+            work->alias[i] = f->type[i] >= IR_V4I32 ? work->alias[i] : i;
+        }
+    }
+    else
+    {
+        const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+        for (uint64_t first = 0; first < f->instruction_count; first += 16)
+        {
+            const uint32_t count = f->instruction_count - first < 16 ? (uint32_t)(f->instruction_count - first) : 16;
+            const __mmask16 valid = (__mmask16)((UINT32_C(1) << count) - 1);
+            const __m128i types = _mm_maskz_loadu_epi8(valid, f->type + first);
+            const __mmask16 own = valid & _mm_cmplt_epu8_mask(types, _mm_set1_epi8(IR_V4I32));
+            _mm512_mask_storeu_epi32(work->alias + first, own, _mm512_add_epi32(_mm512_set1_epi32((int32_t)first), lanes));
+        }
+    }
+}
+
 static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* function, Arena* output, Arena* scratch, IrGvnOptions options, IrGvnResult* result)
 {
     const uint64_t output_mark = output->length;
@@ -1039,12 +1066,9 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
             work.statistics.classes = numbered + (count != 0 ? ir_gvn_refine(&work, count, numbered, options.sweep_limit) : 0);
         }
         check.error = ir_gvn_available(&work, scratch, options.scalar);
-        for (uint32_t i = 0; options.vectors && check.error == IR_OK && i < function->instruction_count; i += 1)
+        if (check.error == IR_OK && options.vectors)
         {
-            if (function->type[i] < IR_V4I32)
-            {
-                work.alias[i] = i;
-            }
+            ir_gvn_keep_vectors(&work, options.scalar);
         }
     }
     IrFunction view = { 0 };

@@ -171,10 +171,14 @@ measurements of what each one gains. LIST is a comma-separated list of items
 applied in turn, each `+` or `-` and then a pass's name: `sccp`, `dce`, `cfg`
 (the jump threading), `merge` (CFG cleanup's merges, below), `licm`, `sroa`
 (on every function, with #1282's options, before the solver and promotion),
+`vectors` (#2781's value numbering and LICM on vector and mask values alone),
 `gvn` (as `--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or
-`all`. The default is SCCP, dead-code removal, CFG cleanup, its merges and
-the inlining. LICM runs after if-conversion, before the optimizer, which
-cleans up after it. A function that LICM or SROA refuses goes on as it was.
+`all`. The default is SCCP, dead-code removal, CFG cleanup, its merges, the
+inlining and `vectors`. The restricted value numbering runs before promotion;
+LICM runs after if-conversion, before the optimizer, which cleans up after it.
+Explicit `+gvn` or `+licm` runs that pass on every value instead of its
+restricted counterpart. A function that value numbering, LICM or SROA refuses
+goes on as it was.
 The summaries the unit's inlining builds run the same passes, and with SROA,
 as with the solver, a candidate compiles from its own pipeline.
 `--tier1-report` gives each pass's counts: `folded` constants,
