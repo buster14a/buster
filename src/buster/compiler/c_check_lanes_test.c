@@ -16,7 +16,8 @@
 //   runs unpinned and then counts as lanes that didn't start), with -g's rows and unwind tables and without: each the
 //   same object (object_build of the emission's link and the static data), byte for byte, as one lane's, with the lanes
 //   and parts the emission says it ran, run again on one lane only when its lanes didn't start; and on one lane by
-//   windows of 1, 64 and 2,048 tokens (#2536, CheckProgramLanes.window_tokens), each one window's object or failure.
+//   windows of 1, 64 and 2,048 tokens (#2536, CheckProgramLanes.window_tokens), each one window's object or failure,
+//   and by windows of 64 short of room (CheckProgramLanes.squeeze_window), which go again as one part.
 // - The ids' order (#153): each generated and failing program compiled again by the same path with its identifiers' ids
 //   in another order (check_driver_id_order, the driver's --id-order, from --id-order N on, 153 by default), whose table
 //   must have every name of the first compile, most of them at other ids, then emitted on one lane and on 8, with -g's
@@ -646,6 +647,24 @@ static uint32_t check_lanes_test_unit(CheckLanesTestTally* tally, CheckLanesTest
             free(windowed.object);
             compared += 1;
         }
+        // Windows short of room (CheckProgramLanes.squeeze_window: 2 KB, less than a part of 64 tokens takes): the
+        // bodies go again as one part, one window's object or failure.
+        CheckProgramLanes squeezed_lanes = {
+            .lanes = 1,
+            .window_tokens = 64,
+            .poison_windows = true,
+            .squeeze_window = 2048,
+        };
+        CheckLanesTestEmission squeezed = check_lanes_test_emit(unit, parser, pp, identifiers, &squeezed_lanes, scalar, rows, unwind);
+        const uint32_t squeezed_bodies = unit->selected.program.body_count;
+        snprintf(detail, sizeof(detail), "%s, %s path, windows of 64 tokens in 2 KB%s: status %u/%u, token %u/%u, %llu/%llu bytes, again %u", what,
+                 scalar ? "scalar" : "vector", rows ? ", -g and unwind tables" : "", (uint32_t)one.status, (uint32_t)squeezed.status, one.token, squeezed.token,
+                 (unsigned long long)one.size, (unsigned long long)squeezed.size, (uint32_t)squeezed.again);
+        check_lanes_test_expect(tally, check_lanes_test_same(&one, &squeezed), "windows short of room make one window's", detail);
+        check_lanes_test_expect(tally, squeezed.active <= 1 && (!one.emitted || squeezed_bodies < 40 || squeezed.again != CHECK_PROGRAM_AGAIN_NONE),
+                                "windows short of room go again as one part", detail);
+        free(squeezed.object);
+        compared += 1;
         free(one.object);
     }
     return compared;

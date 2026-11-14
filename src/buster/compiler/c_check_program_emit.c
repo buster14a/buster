@@ -850,6 +850,9 @@ struct CheckProgramLanes
     // --poison-arenas (a test option): each window's bytes are overwritten as it is popped, so that a part that read what
     // another part left would show (BUSTER_CHECK_EMIT_WINDOW_POISON).
     bool poison_windows;
+    // A test's room for one lane's window, past which its pushes fail as in a reservation the address space cut short:
+    // the bodies then go again as one part (check_program_emit_windows_again). 0 for the window's whole capacity.
+    uint64_t squeeze_window;
     // --tier1-schedule's variant (BUSTER_CHECK_TIER1_SCHEDULE_*, #172's measurement): none by default.
     uint8_t tier1_schedule;
     CheckTier1Report tier1_report;
@@ -1091,10 +1094,13 @@ struct CheckEmitRun
     // The driver's --time-stages clock (c_check_clock.c), which the calling thread's laps charge per function when it
     // compiles the bodies alone (check_program_emit_alone): null on the lanes, whose run its caller's mark charges.
     CheckClock* stage_clock;
-    // The windows' tokens when the bodies are compiled alone (CheckProgramLanes.window_tokens): 0 for one part; and
-    // whether each window is poisoned as it is popped (CheckProgramLanes.poison_windows).
+    // The windows' tokens when the bodies are compiled alone (CheckProgramLanes.window_tokens): 0 for one part; whether
+    // each window is poisoned as it is popped (CheckProgramLanes.poison_windows); a test's room for the window
+    // (CheckProgramLanes.squeeze_window); and whether the bodies ran by windows.
     uint32_t window_tokens;
     bool poison_windows;
+    uint64_t squeeze_window;
+    bool windowed;
 };
 
 // The typed class of body `b`'s result, as Tier 1's lowering takes it: its RETURNs' class, or for a function without one
@@ -2369,7 +2375,11 @@ static bool check_program_emit_windows(CheckEmitRun* run, CheckEmitLane* lane)
     const bool valid = parts != NULL && early != NULL;
     if (valid)
     {
+        run->windowed = true;
         arena_pop_to(window, 0);
+        // A test's room (CheckEmitRun.squeeze_window), until the windows are done.
+        const uint64_t capacity = window->capacity;
+        window->capacity = run->squeeze_window != 0 && run->squeeze_window < capacity ? run->squeeze_window : capacity;
         // The cut: a part ends where its tokens reach the window's, and an inline callee is a part alone.
         uint32_t part_count = 0;
         uint32_t first = 0;
@@ -2433,8 +2443,28 @@ static bool check_program_emit_windows(CheckEmitRun* run, CheckEmitLane* lane)
         }
         lane->streams = lane->output;
         lane->code = lane->scratch;
+        window->capacity = capacity;
     }
     return valid;
+}
+
+// Why one lane's windows (check_program_emit_windows) leave the bodies to one part: a part short of room in its
+// lowering, its Tier 0 code or its code after Tier 0, as a lane's part goes again; CHECK_PROGRAM_AGAIN_NONE for none.
+static CheckProgramAgain check_program_emit_windows_again(const CheckEmitRun* run)
+{
+    CheckProgramAgain again = CHECK_PROGRAM_AGAIN_NONE;
+    for (uint32_t p = 0; again == CHECK_PROGRAM_AGAIN_NONE && p < run->part_count; p += 1)
+    {
+        const CheckEmitPart* part = run->parts + p;
+        const uint32_t end = part->lower.end;
+        const bool tier0 = part->lower.stage == CHECK_LOWER_STAGE_NONE && part->tier0_failed != end && run->codes[part->tier0_failed].error == TIER0_ERROR_MEMORY;
+        const bool code = part->lower.stage == CHECK_LOWER_STAGE_NONE && part->code_failed != end && run->bodies[part->code_failed].status == CHECK_PROGRAM_RESOURCE;
+        again = part->lower.stage != CHECK_LOWER_STAGE_NONE && part->lower.status == CHECK_PROGRAM_RESOURCE ? CHECK_PROGRAM_AGAIN_LOWERING :
+                tier0                                                                                         ? CHECK_PROGRAM_AGAIN_TIER0 :
+                code                                                                                          ? CHECK_PROGRAM_AGAIN_CODE :
+                                                                                                                CHECK_PROGRAM_AGAIN_NONE;
+    }
+    return again;
 }
 
 // The bodies as one part on the calling thread, without the lanes' calls: one lane's emission, which a caller running in
@@ -3339,6 +3369,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // --helper-report read the bodies' streams after every body's code.
     run.window_tokens = lanes != NULL && !tier1 && !lanes->helper_reporting ? lanes->window_tokens : 0;
     run.poison_windows = lanes != NULL && lanes->poison_windows;
+    run.squeeze_window = lanes != NULL ? lanes->squeeze_window : 0;
     if (run.tier1_outcomes != 0)
     {
         // A body a failure before it left unreached has no outcome, never success.
@@ -3507,8 +3538,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         {
             valid = check_program_emit_return(leases, lease_count);
         }
-        if (valid && (!laned || again != CHECK_PROGRAM_AGAIN_NONE))
+        // One lane's run: the parts of a single part, or of windows (check_program_emit_windows), whose run goes again as
+        // one part where a window ran short of room (#2536).
+        CheckEmitPart* const single = run.parts;
+        bool alone = valid && (!laned || again != CHECK_PROGRAM_AGAIN_NONE);
+        while (alone)
         {
+            run.parts = single;
             arena_pop_to(output, output_before);
             arena_pop_to(bytes, bytes_before);
             arena_pop_to(scratch, scratch_before);
@@ -3529,6 +3565,14 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             shared.timed = stage_clock != NULL;
             check_program_emit_alone(&run);
             worked = 1;
+            // A window short of room (an arena's reservation the address space cut short, or
+            // CheckProgramLanes.squeeze_window's test) leaves the bodies to one part, from the arenas as they were, as a
+            // lane's part does.
+            const CheckProgramAgain short_of_room = run.windowed ? check_program_emit_windows_again(&run) : CHECK_PROGRAM_AGAIN_NONE;
+            again = short_of_room != CHECK_PROGRAM_AGAIN_NONE ? short_of_room : again;
+            alone = short_of_room != CHECK_PROGRAM_AGAIN_NONE;
+            run.window_tokens = 0;
+            run.windowed = false;
         }
     }
     // Also return the leases when an active-lane allocation failed before dispatch. A returned lease is a no-op.
