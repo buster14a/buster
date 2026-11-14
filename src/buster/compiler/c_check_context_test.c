@@ -150,7 +150,7 @@ static void check_test_context_contract(CheckTest* test)
         const uint32_t counts[] = { 0, 1, 15, 16, 17, 32, CAPACITY };
         const uint8_t policies[] = { 0, BUSTER_CHECK_FP_CONTRACT_ON, BUSTER_CHECK_FP_CONTRACT_FAST };
         uint8_t environments[CAPACITY];
-        uint8_t pure[CAPACITY];
+        uint8_t pure[CAPACITY + 1]; // The graph validators use one sentinel byte after the nodes.
         for (uint32_t size = 0; size < BUSTER_ARRAY_LENGTH(counts); size += 1)
         {
             graph.fp_environments = NULL;
