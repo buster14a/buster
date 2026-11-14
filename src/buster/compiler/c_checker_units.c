@@ -2253,6 +2253,7 @@ static void check_units_lane_functions(const CheckUnitsRun* run, CheckUnitsLane*
         .tier1_no_lifetimes = command->tier1_no_lifetimes,
         .tier1_no_inline = command->tier1_no_inline,
         .tier0_no_inline = command->tier0_no_inline,
+        .window_tokens = command->window_tokens,
         .tier1_schedule = command->tier1_schedule,
         .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,
         .tier1_function_sizes = command->tier1_function_sizes != NULL ? errors : NULL,

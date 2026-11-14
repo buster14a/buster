@@ -131,3 +131,38 @@ runs the test, and the benchmark on the frozen SQLite source where the
 emission changes, on the lane counts of the guide's table (#1069).
 [docs/function-lanes.md](../../docs/function-lanes.md) has the design and the
 measurements.
+
+## Windows (#2536)
+
+`--emit-window=N` (`CheckProgramLanes.window_tokens`) is step 1 of [the
+all-core path](../all-core-path.md): one lane's emission
+(`check_program_emit_alone`) cuts its bodies into parts of about N of their
+tokens, as the lanes cut theirs, and takes each part's lowering and its code
+before the next part's (`check_program_emit_windows`). 0, the default, is one
+part, today's order and the windows' twin. A part's typed streams and Tier 0
+code go in the thread's window (`check_program_thread_window`: base pages,
+reserved once and never given back), which the part pops when its code is
+done, so the next part's pushes find the same pages in the cache. Before the
+pop it copies out what the merge reads (`check_program_emit_window_keep`):
+the references, and of the records only those they mark, the references
+renumbered to them (`CheckEmitBody.kept_records`, which the merge's fixups
+take in place of the code's count); the asm labels' names; and with `-g` the
+locals' homes, classes and bindings. Everything else of the window is gone:
+the code's other slices are nulled, and an inline callee's `ready` is the only
+one left set.
+
+- **The parts are the lanes'.** The lowering takes them in any order and
+  `check_lower_finish` orders their results, so the object and the failure are
+  one part's, as for the lanes: a part that fails keeps its window, which the
+  merge's report reads.
+- **Tier 0's inline callees** (#1398) are parts of their own, lowered first
+  and into the lane's output, since a body before its callee splices the
+  callee's stream; their streams stay for the unit.
+- **What keeps one part:** `--tier1` and `--helper-report`, which read every
+  body's stream after every body's code; a unit on lanes, whose parts are the
+  lanes'; and a thread whose window can't be reserved.
+- **The checks:** `test-check-lanes` emits every generated and failing program
+  by windows of 1, 64 and 2,048 tokens on one lane, by both paths, with `-g`'s
+  rows and unwind tables and without: each one part's object or failure, a part
+  a body at one token. `test-checker-driver`'s Tier 0 inlining fixtures build
+  by `--emit-window=1` (and the lanes' fixture by 64): the objects of one part.

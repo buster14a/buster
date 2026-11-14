@@ -10232,6 +10232,8 @@ struct CheckDriverCommand
     bool tier1_no_inline;
     // --tier0-no-inline keeps Tier 0's calls of always_inline functions (#1398).
     bool tier0_no_inline;
+    // --emit-window=N: each unit's one-lane emission by windows of about N tokens (#2536, CheckProgramLanes.window_tokens).
+    uint32_t window_tokens;
     // --tier1-schedule=post|pre (#172): BUSTER_CHECK_TIER1_SCHEDULE_*.
     uint8_t tier1_schedule;
     CheckTier1Report* tier1_report;
@@ -12626,6 +12628,21 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             lanes->lanes = (uint32_t)lane_count;
             lanes->every_lane = true;
         }
+        else if (match.joined == C_OPTION_EMIT_WINDOW_EQ)
+        {
+            // #2536's step 1: one lane's emission by windows of about N tokens (check_program_emit_windows); 0 is one
+            // window as long as the unit, as without the option.
+            const char* value = arguments[i] + 14;
+            char* end = NULL;
+            const unsigned long tokens = strtoul(value, &end, 10);
+            const bool known = end != value && *end == 0 && tokens <= UINT32_MAX;
+            if (!known)
+            {
+                fprintf(stderr, "error: --emit-window= takes a count of tokens\n");
+            }
+            invalid_lanes |= !known;
+            lanes->window_tokens = known ? (uint32_t)tokens : 0;
+        }
         else if (match.exact == C_OPTION_WORKER_BUDGET || match.joined == C_OPTION_WORKER_BUDGET_EQ)
         {
             const char* value = arguments[i][15] == '=' ? arguments[i] + 16 : i + 1 < count ? arguments[++i] : NULL;
@@ -12908,6 +12925,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier1_no_lifetimes = lanes->tier1_no_lifetimes,
         .tier1_no_inline = lanes->tier1_no_inline,
         .tier0_no_inline = lanes->tier0_no_inline,
+        .window_tokens = lanes->window_tokens,
         .tier1_schedule = lanes->tier1_schedule,
         .tier1_report = &lanes->tier1_report,
         .tier1_refusals = lanes->tier1_refusals,
