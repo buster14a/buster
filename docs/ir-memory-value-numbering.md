@@ -96,9 +96,11 @@ forward nothing.
 
 ## Twins
 
-The phases before the walk are data-parallel, each with a vector version and an
-exact scalar twin, chosen as the optimizer's other passes are
-(`IrOptimizeWork.scalar`, `BUSTER_IR_OPTIMIZE_AUTO`'s size bound):
+The data-parallel phases before the walk have a vector version and an exact
+scalar twin. The caller's explicit request chooses between them, not the
+optimizer's AUTO size bound (`IrOptimizeWork.scalar`): this pass's vector
+phases have no set-up that a small function doesn't repay, as the verifier's
+don't (#786).
 
 - **Classification:** each instruction's kind by a 128-byte table's
   `vpermi2b` lookup, refined by its flags and type, and the operand its address
@@ -107,24 +109,27 @@ exact scalar twin, chosen as the optimizer's other passes are
 - **Derivation:** the slot each value's chain starts at, by pointer jumping
   along those operands until no jump moves (the scalar twin: reverse
   postorder).
-- **Escapes:** the direct operands 16 instructions at a time, their places by
-  the operand tables' lookups and their slots gathered; phis', calls' and the
-  extra array's values by the scalar enumeration of those instructions alone.
-- **Addresses:** 8 accesses at a time, a step of each in a round, with gathers
-  of the current value's info, operands, displacement, scale and constant,
-  overflow by sign masks. A constant out of `int32_t`'s range (whose product
-  with a scale could overflow) leaves the access to `ir_memory_step` from where
-  the rounds left it, so both versions take every address's steps alike.
+- **Escapes:** the values derived from a slot, found 16 at a time by a mask,
+  and their uses (the use lists the optimizer built).
+- **Events:** each block's accesses, writes and markers, compressed into one
+  list 16 instructions at a time (`vpcompressd`), and the accesses into
+  another; the walk and the blocks' summaries read these, not every
+  instruction.
 - **Hashes:** the families' and keys' 64-bit hashes 8 at a time; the grouping
   (an open-addressed table numbering them in access order, comparing whole
   keys) is shared.
 
-The overlap sort, the block summaries, the clear entries and the walk are
-shared. The walk is the ordered part: each block's state is its dominator's,
-and a key's chain of entries follows the tree. Both versions give the same
-forwarded loads (`test-ir-optimize`, `test-ir-source --passes`). Value spaces
-past 2^30 take the scalar twin, since the gathers' indices are signed dwords
-and two of them are doubled.
+Shared by both: the addresses' chains, the grouping, the overlaps (a counting
+sort of the keys by family, then each family's few keys by offset), the blocks'
+writes and clear entries, and the walk. The walk is the ordered part: each
+block's state is its dominator's, and a key's chain of entries follows the
+tree. Both versions give the same forwarded loads (`test-ir-optimize`,
+`test-ir-source --passes`). Value spaces past 2^30 take the scalar twin, since
+the gathers' indices are signed dwords.
+
+### SIMD: what pays
+
+SIMD_PAYS
 
 ## Tests
 

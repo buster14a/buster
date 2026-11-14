@@ -22,9 +22,10 @@
 // The decision walks the dominator tree in preorder, with each key's last access, entered by its value and its class's
 // and its family's write counts there, and an undo log that restores the entries and the counts as the walk leaves a
 // subtree (ir_memory_walk). Across a block boundary a value survives where no path from the block's immediate dominator
-// to the block may write its class's memory (ir_memory_clear). The phases before the walk (classification, the slots'
-// derivation and escapes, the addresses, the families' and keys' hashes and the blocks' writes) have vector versions and
-// exact scalar twins, chosen as the optimizer's passes are (IrOptimizeWork.scalar).
+// to the block may write its class's memory (ir_memory_clear). The data-parallel phases before the walk (classification,
+// the slots' derivation and escapes, the event lists and the families' and keys' hashes) have vector versions and exact
+// scalar twins, which the caller's explicit request chooses; the addresses' chains, the grouping, the overlaps, the
+// blocks' summaries and the walk are shared.
 
 #define BUSTER_IR_MEMORY_NONE 0u
 #define BUSTER_IR_MEMORY_LOAD 1u
@@ -133,13 +134,11 @@ struct IrMemoryWork
     uint32_t* accesses;
     uint32_t access_count;
     uint64_t undo_bound;
-    // By access: its address, class (0 general memory, 1 + s private slot s), family, key and the scalar completion's
-    // mark of the vector addresses.
+    // By access: its address, class (0 general memory, 1 + s private slot s), family, key and hash.
     uint32_t* roots;
     uint32_t* indices;
     uint32_t* scales;
     int64_t* offsets;
-    uint8_t* pending;
     uint32_t* classes;
     uint32_t* families;
     uint32_t* keys;
@@ -178,20 +177,6 @@ static uint32_t ir_memory_bytes(uint32_t type)
 {
     return ((uint32_t)ir_type_bits[type] + 7) / 8;
 }
-
-#if BUSTER_HOST_VECTOR
-// The values the identities forward `values` to (IrOptimizeWork.forward), lanes `active`.
-static __m256i ir_memory_forward8(const IrOptimizeWork* work, __mmask8 active, __m256i values)
-{
-    __m256i result = values;
-    if (work->forward != 0)
-    {
-        const __m256i to = _mm256_mmask_i32gather_epi32(_mm256_set1_epi32((int)BUSTER_IR_NONE), active, values, work->forward, 4);
-        result = _mm256_mask_blend_epi32(_mm256_cmpneq_epi32_mask(to, _mm256_set1_epi32((int)BUSTER_IR_NONE)), values, to);
-    }
-    return result;
-}
-#endif
 
 // Instruction i's kind, refined by its flags (an observable load or store is a write) and types (a conversion of
 // another width, an addition of another type, is nothing here).
@@ -557,123 +542,25 @@ static bool ir_memory_step(const IrMemoryWork* m, IrMemoryAddress* state)
     return moved;
 }
 
-// The steps from an access's address (its operand's forwarded value) to its root. A reachable value's operands dominate
-// it and an identity's operand dominates it, so a chain of steps ends.
-static void ir_memory_finish(const IrMemoryWork* m, uint32_t k)
-{
-    IrMemoryAddress state = { .root = m->roots[k], .index = m->indices[k], .scale = m->scales[k], .offset = m->offsets[k] };
-    while (ir_memory_step(m, &state))
-    {
-    }
-    m->roots[k] = state.root;
-    m->indices[k] = state.index;
-    m->scales[k] = state.scale;
-    m->offsets[k] = state.offset;
-}
-
-// The accesses' addresses. Scalar twin.
-static void ir_memory_addresses_scalar(IrMemoryWork* m)
+// The accesses' addresses: the steps from each one's address operand (its forwarded value) to its root. A reachable
+// value's operands dominate it and an identity's operand dominates it, so a chain of steps ends. Shared by both versions:
+// a chain is a dependent walk of a few steps, and the 9700X's gathers of a round of eight chains' next steps took 2.7
+// times the scalar walk's time (the guide's "SIMD: what pays").
+static void ir_memory_addresses(IrMemoryWork* m)
 {
     const IrFunction* f = m->ir->function;
     for (uint32_t k = 0; k < m->access_count; k += 1)
     {
-        m->roots[k] = ir_optimize_forwarded(m->ir, f->a[m->accesses[k]]);
-        m->indices[k] = BUSTER_IR_NONE;
-        m->scales[k] = 0;
-        m->offsets[k] = 0;
-        ir_memory_finish(m, k);
+        IrMemoryAddress state = { .root = ir_optimize_forwarded(m->ir, f->a[m->accesses[k]]), .index = BUSTER_IR_NONE };
+        while (ir_memory_step(m, &state))
+        {
+        }
+        m->roots[k] = state.root;
+        m->indices[k] = state.index;
+        m->scales[k] = state.scale;
+        m->offsets[k] = state.offset;
     }
 }
-
-#if BUSTER_HOST_VECTOR
-// The vector addresses, 8 accesses at a time, a step of each in a round, with gathers: the conversions, an IR_ADDRESS
-// without an index, with a constant index within int32_t's range (whose product by a scale of at most 255 can't
-// overflow) or with the address's first index, and an addition or subtraction of a constant within that range. An
-// address whose next step is another (a constant out of that range) takes it and the rest by ir_memory_step, from where
-// the rounds left it, so that both versions give every address the same steps.
-static void ir_memory_addresses_vector(IrMemoryWork* m)
-{
-    const IrOptimizeWork* work = m->ir;
-    const IrFunction* f = work->function;
-    const long long* values = (const long long*)work->values;
-    const long long* addresses = (const long long*)f->addresses;
-    _Static_assert(sizeof(IrConstant) == 16 && sizeof(IrAddress) == 16 && offsetof(IrAddress, scale) == 8, "the gathers' strides");
-    const __m256i none = _mm256_set1_epi32((int)BUSTER_IR_NONE);
-    for (uint32_t first = 0; first < m->access_count; first += 8)
-    {
-        const uint32_t count = m->access_count - first < 8 ? m->access_count - first : 8;
-        const __mmask8 lanes = (__mmask8)((UINT32_C(1) << count) - 1);
-        __mmask8 active = lanes;
-        __mmask8 rest = 0;
-        const __m256i operand = _mm256_mmask_i32gather_epi32(_mm256_setzero_si256(), lanes, _mm256_maskz_loadu_epi32(lanes, m->accesses + first), f->a, 4);
-        __m256i root = ir_memory_forward8(work, lanes, operand);
-        __m256i index = none;
-        __m256i scale = _mm256_setzero_si256();
-        __m512i offset = _mm512_setzero_si512();
-        while (active != 0)
-        {
-            const __m256i info = _mm256_mmask_i32gather_epi32(_mm256_setzero_si256(), active, root, m->info, 4);
-            const __m256i kind = _mm256_and_si256(info, _mm256_set1_epi32(BUSTER_IR_MEMORY_KIND));
-            const __m256i follow = _mm256_mmask_i32gather_epi32(none, active, root, m->follow, 4);
-            const __mmask8 linked = _mm256_cmpneq_epi32_mask(follow, none);
-            const __mmask8 through = active & linked & _mm256_cmpeq_epi32_mask(kind, _mm256_set1_epi32(BUSTER_IR_MEMORY_THROUGH));
-            const __mmask8 address = active & _mm256_cmpeq_epi32_mask(kind, _mm256_set1_epi32(BUSTER_IR_MEMORY_ADDRESS));
-            const __mmask8 subtract = active & linked & _mm256_cmpeq_epi32_mask(kind, _mm256_set1_epi32(BUSTER_IR_MEMORY_SUB));
-            const __mmask8 arithmetic = subtract | (active & linked & _mm256_cmpeq_epi32_mask(kind, _mm256_set1_epi32(BUSTER_IR_MEMORY_ADD)));
-            const __m256i a = _mm256_mmask_i32gather_epi32(_mm256_setzero_si256(), address | arithmetic, root, f->a, 4);
-            const __m256i b = _mm256_mmask_i32gather_epi32(none, address | arithmetic, root, f->b, 4);
-            const __m256i c = _mm256_mmask_i32gather_epi32(_mm256_setzero_si256(), address, root, f->c, 4);
-            const __m512i displacement = _mm512_mask_i32gather_epi64(_mm512_setzero_si512(), address, _mm256_slli_epi32(c, 1), addresses, 8);
-            const __m512i words = _mm512_mask_i32gather_epi64(_mm512_setzero_si512(), address, _mm256_add_epi32(_mm256_slli_epi32(c, 1), _mm256_set1_epi32(1)), addresses, 8);
-            const __m512i own_scale = _mm512_and_si512(words, _mm512_set1_epi64(0xff));
-            const __mmask8 indexed = address & _mm256_cmpneq_epi32_mask(b, none);
-            // The constant operand: an IR_ADDRESS's index, or an arithmetic's operand other than the followed one.
-            const __m256i other = _mm256_mask_blend_epi32(address | (arithmetic & _mm256_cmpeq_epi32_mask(follow, a)), a, b);
-            const __mmask8 operand_lanes = indexed | arithmetic;
-            const __m256i other_info = _mm256_mmask_i32gather_epi32(_mm256_setzero_si256(), operand_lanes, other, m->info, 4);
-            const __mmask8 constant = operand_lanes & _mm256_test_epi32_mask(other_info, _mm256_set1_epi32((int)BUSTER_IR_MEMORY_CONSTANT));
-            const __m512i value = _mm512_mask_i32gather_epi64(_mm512_setzero_si512(), constant, _mm256_slli_epi32(other, 1), values, 8);
-            const __mmask8 small = _mm512_cmpeq_epi64_mask(_mm512_cvtepi32_epi64(_mm512_cvtepi64_epi32(value)), value);
-            const __mmask8 constant_index = indexed & constant;
-            const __mmask8 first_index = indexed & ~constant & _mm256_cmpeq_epi32_mask(index, none);
-            const __mmask8 second_index = indexed & ~constant & ~first_index;
-            const __mmask8 large = (constant_index | arithmetic) & ~small;
-            // The scalar step's order: the displacement first, then the product (or the arithmetic's constant).
-            const __m512i displaced = _mm512_mask_add_epi64(offset, address, offset, displacement);
-            const __mmask8 over_displacement = address & _mm512_movepi64_mask(_mm512_andnot_si512(_mm512_xor_si512(offset, displacement), _mm512_xor_si512(offset, displaced)));
-            __m512i addend = _mm512_maskz_mullo_epi64(constant_index, value, own_scale);
-            addend = _mm512_mask_mov_epi64(addend, arithmetic & ~subtract, value);
-            addend = _mm512_mask_sub_epi64(addend, subtract, _mm512_setzero_si512(), value);
-            const __m512i sum = _mm512_add_epi64(displaced, addend);
-            const __mmask8 over_addend = (constant_index | arithmetic) & _mm512_movepi64_mask(_mm512_andnot_si512(_mm512_xor_si512(displaced, addend), _mm512_xor_si512(displaced, sum)));
-            const __mmask8 overflow = over_displacement | over_addend;
-            const __mmask8 moved = (through | (address & ~second_index) | arithmetic) & ~large & ~overflow;
-            offset = _mm512_mask_mov_epi64(offset, moved, sum);
-            const __mmask8 indexing = first_index & moved;
-            index = _mm256_mask_mov_epi32(index, indexing, ir_memory_forward8(work, indexing, b));
-            scale = _mm256_mask_mov_epi32(scale, indexing, _mm512_cvtepi64_epi32(own_scale));
-            root = _mm256_mask_mov_epi32(root, moved, ir_memory_forward8(work, moved, _mm256_mask_blend_epi32(address, follow, a)));
-            rest |= large;
-            active = moved;
-        }
-        _mm256_mask_storeu_epi32(m->roots + first, lanes, root);
-        _mm256_mask_storeu_epi32(m->indices + first, lanes, index);
-        _mm256_mask_storeu_epi32(m->scales + first, lanes, scale);
-        _mm512_mask_storeu_epi64(m->offsets + first, lanes, offset);
-        for (uint32_t lane = 0; lane < count; lane += 1)
-        {
-            m->pending[first + lane] = (uint8_t)((rest >> lane) & 1u);
-        }
-    }
-    for (uint32_t k = 0; k < m->access_count; k += 1)
-    {
-        if (m->pending[k] != 0)
-        {
-            ir_memory_finish(m, k);
-        }
-    }
-}
-#endif
 
 static uint64_t ir_memory_mix(uint64_t hash, uint64_t value)
 {
@@ -1204,7 +1091,6 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, bool reques
     m.indices = ir_memory_push(scratch, a, sizeof(uint32_t), &ok);
     m.scales = ir_memory_push(scratch, a, sizeof(uint32_t), &ok);
     m.offsets = ir_memory_push(scratch, a, sizeof(int64_t), &ok);
-    m.pending = ir_memory_push(scratch, a, sizeof(uint8_t), &ok);
     m.classes = ir_memory_push(scratch, a, sizeof(uint32_t), &ok);
     m.families = ir_memory_push(scratch, a, sizeof(uint32_t), &ok);
     m.keys = ir_memory_push(scratch, a, sizeof(uint32_t), &ok);
@@ -1228,16 +1114,7 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, bool reques
         {
             m.classes[access] = ir_memory_class(&m, m.accesses[access]);
         }
-#if BUSTER_HOST_VECTOR
-        if (!scalar)
-        {
-            ir_memory_addresses_vector(&m);
-        }
-        else
-#endif
-        {
-            ir_memory_addresses_scalar(&m);
-        }
+        ir_memory_addresses(&m);
         for (uint32_t access = 0; access < a; access += 1)
         {
             const uint32_t root = m.roots[access];
