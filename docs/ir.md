@@ -1190,11 +1190,11 @@ calls, the swaps its register cost included (+26.6 K against no hoist). The
 walk follows the stack's depth over the entries that push and pop without
 leaving the block, and stops at anything else, past 48 entries at most.
 
-On main `56b5864`, with this and [the allocation guide](tier1-allocation.md)'s
-"Recipes that wait, and recipes at joins", the hoist against the same compiler
-with no hoist at all (callgrind, #1189's `gap.c`, #1217's inputs): speedtest1
-runs 8.1 M fewer instructions and Lua's scripts 43.5 M fewer, every Lua
-function the same or fewer. The functions that run more:
+On main `45cd9ae`, with this and [the allocation guide](tier1-allocation.md)'s
+"Recipes that wait", the hoist against the same compiler with no hoist at all
+(callgrind, #1189's `gap.c`, #1217's inputs): speedtest1 runs 8.2 M fewer
+instructions and Lua's scripts 43.6 M fewer, every Lua function the same or
+fewer, `jsonLookupStep` and `speedtest1_run` too. The functions that run more:
 - `jsonParseFree` +126 K: with the hoist, unit inlining (#2541) inlines
   `jsonParseReset` into it, where it inlined `jsonParseFree` into its callers;
   `jsonParseReset` and those callers run 124 K fewer, +2.4 K in all;
@@ -1202,9 +1202,12 @@ function the same or fewer. The functions that run more:
   converted to the pointer's width before its `PTR_ADD`, which
   `ir_typed_folds` doesn't match. Matching conversions of constants moved
   `powerOfTen`'s allocation for +196 K, and stays out;
-- `sqlite3PcacheTruncate` +2.8 K, an if-conversion of the shifted blocks;
-  `sqlite3HashClear` +2.1 K, an address defined before a loop that mostly runs
-  no iteration; and functions under 1.4 K each.
+- `sqlite3GetInt32` +5.4 K and `sqlite3HashClear` +2.1 K, addresses defined
+  before a loop that mostly runs no iteration (`sqlite3GetInt32`'s whitespace
+  skip reads `sqlite3CtypeMap`, whose register also costs its exit a move and
+  a jump);
+- `sqlite3PcacheTruncate` +2.8 K, an if-conversion of the shifted blocks; and
+  functions under 1.4 K each.
 `test-ir-lowering` checks both lowering paths, the verifiers, the interpreter's
 results and promotion for a symbol taken three times, one taken once and one
 through its GOT slot, and each of the rules above: a definition past an early
