@@ -866,6 +866,19 @@ if "$BUSTER_COMPILER" measure-tier1-rows --runs 1 --clang clang --base "$directo
 grep -q "^measure-tier1-rows: Tier 0's builds built$" "$errors"
 grep -q "^measure-tier1-rows: --tier1 (base)'s builds FAILED$" "$errors"
 rm -rf "$errors" "$directory"
+== Compile the lexer's benchmark unit by Tier 1 on one lane and on four [4 CPUs]
+# #1344: with inlining, a body's code holds its inlined callees' calls of runtime functions, whatever their parts, and the
+# emission's merge gave those calls their symbols only in the parts that lowered such a call. On more than one lane
+# tokenize_chunks's memmove calls, inlined into the nine tokenize_c functions, went to a case of the scalar lexer's
+# switch, and the object depended on the lanes. It must be the same bytes on one lane and on four (as many of the four
+# as the command's CPUs allow; compiled for znver5 on any host, never run), with every one of those calls memmove's.
+objects=$(mktemp -d)
+lexer=(--tier1 -fno-asynchronous-unwind-tables -march=znver5 -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -c src/buster/compiler/c_lexer_benchmark.c)
+"$BUSTER_COMPILER" --lanes 1 "${lexer[@]}" -o "$objects/one.o"
+"$BUSTER_COMPILER" --lanes 4 "${lexer[@]}" -o "$objects/four.o"
+cmp "$objects/one.o" "$objects/four.o"
+test "$(objdump -dr "$objects/four.o" | grep -c 'R_X86_64_PLT32.*memmove')" -ge 18
+rm -r "$objects"
 == Test dominators, frontiers and natural loops
 "$BUSTER_COMPILER" test-dominators
 "$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/dominators.c
