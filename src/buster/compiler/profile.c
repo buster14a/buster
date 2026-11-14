@@ -1719,8 +1719,7 @@ static uint64_t profile_start_hits(ProfileFunction* functions, uint64_t count, S
 // ordering file places by name. One whose name a unit's local function has too, which the name would move as well, is
 // left out. They go by the first file that ran each, each file's in address order: the smallest command's functions
 // are together, in the fewest of the 64 KB windows the kernel's fault-around maps, and each larger command's add to
-// them (#1444: an empty file's -fsyntax-only ran its 31 functions of .text.buster_checker in 15 windows of 248 functions
-// in address order, and in 7 so).
+// them (#1444, build.md's "The start's code order").
 static bool profile_start_order(Arena* arena, ProfileReport* report, String8 symbols, const String8* samples, uint32_t sample_count)
 {
     uint64_t count = 0;
