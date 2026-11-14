@@ -48,8 +48,6 @@ static const uint8_t check_common_candidate_classes[128] =
     [CHECK_OP_CONDITIONAL] = (1u << CHECK_COMMON_CANDIDATE_REACH) | (1u << CHECK_COMMON_CANDIDATE_MASK),
     [CHECK_OP_CAST] = 1u << CHECK_COMMON_CANDIDATE_DISCARD,
     [CHECK_OP_ADDRESS] = 1u << CHECK_COMMON_CANDIDATE_RETURN,
-    [CHECK_OP_MEMBER] = 1u << CHECK_COMMON_CANDIDATE_REACH,
-    [CHECK_OP_ARROW] = 1u << CHECK_COMMON_CANDIDATE_REACH,
     [CHECK_OP_DEREFERENCE] = 1u << CHECK_COMMON_CANDIDATE_REACH,
     [CHECK_OP_ASSIGN] = 1u << CHECK_COMMON_CANDIDATE_REACH,
     [CHECK_OP_COMMA] = (1u << CHECK_COMMON_CANDIDATE_REACH) | (1u << CHECK_COMMON_CANDIDATE_DISCARD),
@@ -72,7 +70,7 @@ _Static_assert(CHECK_OP_VALUE == 0, "zeroed invalid operators have no candidate 
 // The classifier's scalar twin, expressed as the consumers' operator predicates rather than reading the vector table.
 static uint8_t check_common_candidate_scalar(CheckOp op)
 {
-    const bool reach = op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW || op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN || op == CHECK_OP_CONVERT || op == CHECK_OP_CALL ||
+    const bool reach = op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN || op == CHECK_OP_CONVERT || op == CHECK_OP_CALL ||
                        op == CHECK_OP_SUBSCRIPT || op == CHECK_OP_COMMA || op == CHECK_OP_NOT || op == CHECK_OP_LOGICAL_AND ||
                        op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITION || op == CHECK_OP_CONDITIONAL || op == CHECK_OP_DEREFERENCE ||
                        op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER || op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT ||

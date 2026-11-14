@@ -4749,7 +4749,7 @@ static void check_common_range_drain(const CheckGraph* graph, const CheckStream*
 // The reach scan consumes the shared REACH and COMPARE masks. With `comparisons`, each block's comparison nodes are
 // appended to it (`*listed` of them so far) for -Wtautological-constant-out-of-range-compare's batches
 // (check_common_range_lanes): a block holds one or two comparisons, and the batches' gathers take 16 at once.
-static uint32_t check_common_next_reach_op(const CheckGraph* graph, const CheckCommonCandidates* candidates, bool sign_compare,
+static uint32_t check_common_next_reach_op(const CheckGraph* graph, const CheckCommonCandidates* candidates, bool sign_compare, bool atomic_access,
                                            uint32_t* comparisons, uint32_t* listed, CheckCommonScan* scan)
 {
     const uint32_t count = graph->count;
@@ -4771,8 +4771,16 @@ static uint32_t check_common_next_reach_op(const CheckGraph* graph, const CheckC
                 _mm512_mask_compressstoreu_epi32(comparisons + *listed, compares, nodes);
                 *listed += (uint32_t)__builtin_popcount(compares);
             }
+            uint32_t selected = own[first / 16] | (sign_compare ? compares : 0u);
+            if (atomic_access)
+            {
+                const __mmask16 lanes = (__mmask16)(live == 16 ? 0xffffu : (1u << live) - 1);
+                const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + first);
+                selected |= _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_MEMBER)) |
+                            _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_ARROW));
+            }
             scan->next = first + live;
-            check_common_scan_list(scan, first, (__mmask16)(own[first / 16] | (sign_compare ? compares : 0u)));
+            check_common_scan_list(scan, first, (__mmask16)selected);
         }
     }
     const uint32_t result = check_common_scan_listed(scan, count);
@@ -10675,8 +10683,8 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
         uint32_t* comparisons = enabled->out_of_range && !enabled->sign_compare ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 16) : NULL;
         uint32_t listed = 0;
         uint32_t tested = 0;
-        for (uint32_t node = check_common_next_reach_op(graph, candidates, enabled->sign_compare, comparisons, &listed, &owners); node < count;
-             node = check_common_next_reach_op(graph, candidates, enabled->sign_compare, comparisons, &listed, &owners))
+        for (uint32_t node = check_common_next_reach_op(graph, candidates, enabled->sign_compare, enabled->atomic_access, comparisons, &listed, &owners); node < count;
+             node = check_common_next_reach_op(graph, candidates, enabled->sign_compare, enabled->atomic_access, comparisons, &listed, &owners))
         {
             // A full batch of comparisons is tested as soon as it is listed, while the scan is near their nodes: tested at
             // the end, a large unit's gathers would find its columns cold.

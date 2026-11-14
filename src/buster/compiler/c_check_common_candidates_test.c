@@ -16,8 +16,6 @@ static bool check_test_common_candidate(CheckCommonCandidate kind, CheckOp op)
         {
             switch (op)
             {
-                case CHECK_OP_MEMBER:
-                case CHECK_OP_ARROW:
                 case CHECK_OP_INITIALIZE:
                 case CHECK_OP_ASSIGN:
                 case CHECK_OP_CONVERT:
@@ -236,7 +234,7 @@ static void check_test_common_candidate_comparison_tail(CheckTest* test)
     CheckCommonScan scan = { 0 };
     uint32_t listed = 0;
     uint32_t tested = 0;
-    const uint32_t next = check_common_next_reach_op(&graph, &candidates, false, comparisons, &listed, &scan);
+    const uint32_t next = check_common_next_reach_op(&graph, &candidates, false, false, comparisons, &listed, &scan);
     if (ready)
     {
         check_common_range_drain(&graph, &stream, &types, parents, reach, comparisons, &tested, listed);
