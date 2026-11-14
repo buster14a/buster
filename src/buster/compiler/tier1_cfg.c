@@ -85,6 +85,8 @@
 #define BUSTER_TIER1_CFG_SPILL (32u * BUSTER_TIER1_ALLOCATE_CLASSES)
 #define BUSTER_TIER1_CFG_REMATERIALIZE 0x80000000u
 #define BUSTER_TIER1_CFG_NONE UINT32_MAX
+// In a block's continuation word (#2774, tier1_cfg_prepare): the block named is its first successor's model, not that successor.
+#define BUSTER_TIER1_CFG_LATER 0x80000000u
 // Retained position-to-block column, four bytes each, at or below this many positions.
 #define BUSTER_TIER1_CFG_POSITION_BLOCKS (1u << 20)
 // First interval of a value overlapping each block (#1399). Sixteen mebibytes of entries at most.
@@ -2053,6 +2055,22 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                 }
             }
         }
+        // Per block, the block whose entry ranges give the ranges live out of it their continuations (#2774), or none: its
+        // first successor in layout where that comes no later than it, else the block that successor's entry takes its
+        // opening from (`joined` below), where that comes no later than it; none where the first successor is the next
+        // block in layout and merges, since a range live into it goes on into it. BUSTER_TIER1_CFG_LATER marks the second
+        // kind, whose value must enter that first successor. Most blocks have none, so a range checks one word.
+        uint32_t* continued = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+        ready = ready && continued != 0;
+        for (uint32_t b = 0; ready && b < blocks; b += 1)
+        {
+            const uint32_t next = firsts[b];
+            const bool later = next != BUSTER_TIER1_CFG_NONE && next > b;
+            const uint32_t model = !later ? BUSTER_TIER1_CFG_NONE : siblings[next] != BUSTER_TIER1_CFG_NONE ? siblings[next] : firsts[next] < next ? firsts[next] : BUSTER_TIER1_CFG_NONE;
+            const uint32_t taken = later ? model : next;
+            const bool merged = next == b + 1 && merges[next];
+            continued[b] = taken > b || merged ? BUSTER_TIER1_CFG_NONE : taken | (later ? BUSTER_TIER1_CFG_LATER : 0);
+        }
         // Intervals, counted, then filled, by value and position; and the splits, each piece of a range after the
         // first in its block, by the position it starts at and its value.
         candidate.value_interval_offsets = ready ? arena_push_array(output, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
@@ -2181,20 +2199,19 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                     {
                         exit_stamps[b] = v + 1;
                         exit_pieces[b] = (uint32_t)pieces.count - 1;
-                        // The value's place after the block (#2774), at the entry of the block's first successor in layout: its
-                        // entry range there where that block comes no later than this one, else the range that block's entry
-                        // takes its opening from, as a dispatch loop's join, laid out after its handlers, takes their first
-                        // one's (`joined` above). A range a merged block continues opens before that block, not at it. A
-                        // range that goes on into the next block in layout, which merges, keeps the place the last of its
-                        // blocks that gives one gives, where its own last gives none: the edges out of the blocks before,
-                        // a loop's back edge among them, store it there too. One whose first successor is that next block
-                        // gives none.
-                        const bool goes_on = pieces.fill && b + 1 < blocks && merges[b + 1] && dense[v] != BUSTER_TIER1_CFG_NONE && tier1_cfg_bit(liveness.in + (uint64_t)(b + 1) * words, dense[v]);
-                        const uint32_t next = pieces.fill && !(goes_on && firsts[b] == b + 1) ? firsts[b] : BUSTER_TIER1_CFG_NONE;
-                        const bool later = next != BUSTER_TIER1_CFG_NONE && next > b && dense[v] != BUSTER_TIER1_CFG_NONE && tier1_cfg_bit(liveness.in + (uint64_t)next * words, dense[v]);
-                        const uint32_t model = !later ? BUSTER_TIER1_CFG_NONE : siblings[next] != BUSTER_TIER1_CFG_NONE ? siblings[next] : firsts[next] < next ? firsts[next] : BUSTER_TIER1_CFG_NONE;
-                        const uint32_t taken = next <= b ? next : model;
-                        if (taken <= b && entry_stamps[taken] == v + 1 && home[v] != taken && (later || pieces.starts[entry_pieces[taken]] == input->block_starts[taken]))
+                        // The value's place after the block (#2774), at the entry of the block's first successor in layout
+                        // (`continued` above): its entry range there where that block comes no later than this one, else the
+                        // range that block's entry takes its opening from, as a dispatch loop's join, laid out after its
+                        // handlers, takes their first one's, where the value enters it. A range a merged block continues
+                        // opens before that block, not at it. A range that goes on into the next block in layout, which
+                        // merges, keeps the place the last of its blocks that gives one gives, where its own last gives
+                        // none: the edges out of the blocks before, a loop's back edge among them, store it there too.
+                        const uint32_t entered = pieces.fill ? continued[b] : BUSTER_TIER1_CFG_NONE;
+                        const uint32_t taken = entered & ~BUSTER_TIER1_CFG_LATER;
+                        const bool later = entered != BUSTER_TIER1_CFG_NONE && (entered & BUSTER_TIER1_CFG_LATER) != 0;
+                        const bool stamped = entered != BUSTER_TIER1_CFG_NONE && entry_stamps[taken] == v + 1 && home[v] != taken;
+                        const bool enters = stamped && (later ? dense[v] != BUSTER_TIER1_CFG_NONE && tier1_cfg_bit(liveness.in + (uint64_t)firsts[b] * words, dense[v]) : pieces.starts[entry_pieces[taken]] == input->block_starts[taken]);
+                        if (enters)
                         {
                             pieces.continuations[pieces.count - 1] = entry_pieces[taken];
                         }
