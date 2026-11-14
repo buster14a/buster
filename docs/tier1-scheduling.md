@@ -212,6 +212,20 @@ memory order's chain, built in one pass, and its selection a heap: a vector
 twin of a sparse, per-segment graph has nothing to compare many items at once
 against, and the compile-time measurement below bounds what the pass costs.
 
+One preallocation order does run by default, after this variant where it runs:
+the operand sink (#2592, `tier1_schedule_ir_sink`, in the same file). It moves
+a phi's next value, an expression of one value `a` and constants, to right
+after `a`'s last reader in its segment, so that the value takes `a`'s register,
+as Lua's `i = *(pc++)` needs. [The allocation guide](tier1-allocation.md)'s
+"Increments after their last reader" has the rule and its measurements. It
+keeps every barrier in its place and moves no memory access, so its permutation
+passes the same `tier1_schedule_ir_verify` under `--verify`; `--tier1-report`
+counts its expressions as `sunk`. Two of its scans are data-parallel, with exact
+scalar twins: the instructions' classes and barriers 64 opcode, type and flag
+bytes at a time, and the readers of `a` in the 32 instructions after an
+expression's root, 16 instructions' operands at a time. Its use counts and its
+expressions' walks are short dependent chains and stay scalar.
+
 ## Tests
 
 `test-tier1-schedule [--seed N]` checks both graph matrices, priority edges,

@@ -925,38 +925,250 @@ static uint32_t check_input_target_versions_match(CheckInputReader* reader, uint
     return result;
 }
 
-// The calls of a function multiversioned by target strings that no default version reaches (#1838): for each use event
-// of a multiversioned function's name that is a call's callee, the function's versions visible there (along its name's
-// chain), one of which must be target("default") or target_clones once the function is multiversioned there; clang's
-// "no matching function for call to 'f'" at the callee otherwise. Run once the walk is done, for a unit with one.
+// Retain the candidate visible at an identifier use for later call/address diagnostics (#2424). The ordinary unit's
+// sparse pool has no extra directory or blocks: only an actual target overload set pays for this separate column.
+static void check_target_versions_candidate(CheckInputReader* reader, uint32_t use, uint32_t candidate)
+{
+    CheckInput* output = reader->output;
+    if (!check_sparse_present(output->target_candidates) && !output->resource)
+    {
+        output->resource |= !check_sparse_reserve(reader->arena, &reader->target_candidate_pool, &output->target_candidates, 1,
+                                                 reader->parser->tokens.count, false, false);
+    }
+    if (!output->resource)
+    {
+        check_sparse_set(reader->target_candidate_pool, output->target_candidates, use, candidate);
+        output->resource |= reader->target_candidate_pool->exhausted;
+    }
+}
+
+// A target callee may also be the address of the function, with parentheses on either side of the '&'. Keep this
+// local: the builtin call rules use check_input_callee_end's name-only syntax. The parent check leaves '&f()' at f's
+// call, rather than treating the address of its result as part of its callee.
+static uint32_t check_target_versions_callee_end(const Parser* parser, uint32_t token, uint32_t* first)
+{
+    uint32_t low = token;
+    uint32_t high = token;
+    bool addressed = false;
+    bool more = true;
+    while (more && low > 0 && high + 1 < parser->tokens.count)
+    {
+        const bool group = parser->tree.roles[low - 1] == PARSE_ROLE_OPEN_GROUP &&
+                           parser->tree.roles[high + 1] == PARSE_ROLE_CLOSE_GROUP && parser->tree.parents[low - 1] == high + 1;
+        const bool address = !group && !addressed && parser->tree.roles[low - 1] == PARSE_ROLE_PREFIX &&
+                             parser->tokens.kinds[low - 1] == PARSE_KIND_AMP && parser->tree.parents[high] == low - 1;
+        low -= group || address;
+        high += group;
+        addressed |= address;
+        more = group || address;
+    }
+    *first = low;
+    return high;
+}
+
+static bool check_target_versions_overloadable(const CheckGraph* graph, uint32_t head)
+{
+    bool marked = false;
+    for (uint32_t current = head; !marked && current < graph->overload_candidate_count;)
+    {
+        const CheckOverloadCandidate* candidate = graph->overload_candidates + current;
+        marked = (candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0;
+        current = candidate->previous < current ? candidate->previous : BUSTER_CHECK_NONE;
+    }
+    return marked;
+}
+
+// An unrelated overloadable declaration also records ordinary functions' lexical chains. For a target function's
+// noncallee use that is not its overload set: the versions are one dispatcher address, as in a unit without those
+// tables. Copy only this use's leaf, leaving the objects, source bindings, earlier uses, and genuine overloads alone.
+static void check_target_versions_value_use(CheckInputReader* reader, uint32_t use)
+{
+    CheckGraph* graph = &reader->output->graph;
+    const uint32_t node = reader->output->token_nodes[use];
+    if (node < graph->count && graph->ops[node] == CHECK_OP_VALUE)
+    {
+        CheckValue value = check_graph_leaf_value(graph, node);
+        if (value.overload_head != 0 && !check_target_versions_overloadable(graph, value.overload_head - 1))
+        {
+            value.overload_head = 0;
+            check_graph_update_leaf(graph, node, &value);
+        }
+    }
+}
+
+// Attach the existing call selector to an actual target set's default, without changing the function value's binding
+// or overload head. In particular, an integer-to-pointer argument must fail overload resolution even if the ordinary
+// C conversion diagnostic is disabled. The sorted prefix `previous` may have receipts for ordinary functions too:
+// an unrelated overloadable declaration enables those tables. Replace such a call's set, but leave a genuinely
+// overloadable function's receipt alone. This runs after graph construction, so no declaration index is extended.
+static void check_target_versions_call(CheckInputReader* reader, uint32_t close, uint32_t declaration, uint32_t previous)
+{
+    CheckInput* input = reader->output;
+    CheckGraph* graph = &input->graph;
+    const uint32_t node = input->token_nodes[close];
+    uint32_t low = 0;
+    uint32_t high = previous;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        if (graph->overload_calls[middle].node < node)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    const bool present = low < previous && graph->overload_calls[low].node == node;
+    const uint32_t prior = present ? graph->overload_calls[low].head : BUSTER_CHECK_NONE;
+    const uint32_t captured = present && graph->overload_calls[low].captured_head != 0 ? graph->overload_calls[low].captured_head :
+                              present ? prior + 1 : 0;
+    const bool overloaded = check_target_versions_overloadable(graph, prior);
+    const bool call = node < graph->count && graph->ops[node] == CHECK_OP_CALL && !overloaded;
+    if (call && !input->resource && graph->overload_candidate_count == reader->overload_capacity)
+    {
+        const uint32_t limit = 1u << 30;
+        const uint32_t capacity = reader->overload_capacity == 0 ? 8 :
+                                  reader->overload_capacity < limit / 2 ? reader->overload_capacity * 2 : limit;
+        CheckOverloadCandidate* grown = graph->overload_candidate_count < capacity ?
+            BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckOverloadCandidate, capacity) : NULL;
+        input->resource |= grown == NULL;
+        if (grown != NULL)
+        {
+            if (graph->overload_candidate_count != 0)
+            {
+                memcpy(grown, reader->overload_candidates, (uint64_t)graph->overload_candidate_count * sizeof(CheckOverloadCandidate));
+            }
+            reader->overload_candidates = grown;
+            reader->overload_capacity = capacity;
+            graph->overload_candidates = grown;
+        }
+    }
+    if (call && !present && !input->resource && graph->overload_count == graph->overload_capacity)
+    {
+        const uint32_t doubled = graph->overload_capacity == 0 ? 8 :
+                                 graph->overload_capacity < graph->count / 2 ? graph->overload_capacity * 2 : graph->count;
+        const uint32_t capacity = doubled < graph->count ? doubled : graph->count;
+        CheckOverloadCall* grown = graph->overload_count < capacity ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckOverloadCall, capacity) : NULL;
+        input->resource |= grown == NULL;
+        if (grown != NULL)
+        {
+            if (graph->overload_count != 0)
+            {
+                memcpy(grown, graph->overload_calls, (uint64_t)graph->overload_count * sizeof(CheckOverloadCall));
+            }
+            graph->overload_calls = grown;
+            graph->overload_capacity = capacity;
+        }
+    }
+    if (call && !input->resource)
+    {
+        const uint32_t head = graph->overload_candidate_count++;
+        const uint32_t object = reader->objects[declaration];
+        reader->overload_candidates[head] = (CheckOverloadCandidate)
+        {
+            .type = reader->declared_types[declaration],
+            .declaration = declaration,
+            .canonical = object - 1,
+            .object = object,
+            .previous = BUSTER_CHECK_NONE,
+            .position = declaration,
+            .flags = BUSTER_CHECK_OVERLOAD_TARGET,
+        };
+        const uint32_t receipt = present ? low : graph->overload_count++;
+        graph->overload_calls[receipt] = (CheckOverloadCall){ .node = node, .head = head, .captured_head = captured };
+    }
+}
+
+// Binding uses arrive in source order, but a nested call's node precedes its enclosing call's. Sort only these sparse
+// call receipts, using binding's scalar/vector radix twins; no discovery pass over the expression graph is needed.
+static void check_target_versions_calls_sort(CheckInputReader* reader, uint32_t previous)
+{
+    CheckGraph* graph = &reader->output->graph;
+    const uint32_t count = graph->overload_count;
+    if (!reader->output->resource && count > previous && count > 1)
+    {
+        const uint64_t mark = reader->scratch->length;
+        uint64_t* keys = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, (uint64_t)count * 2);
+        CheckOverloadCall* calls = keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckOverloadCall, count) : NULL;
+        reader->output->resource |= calls == NULL;
+        uint32_t any = 0;
+        uint32_t every = UINT32_MAX;
+        for (uint32_t i = 0; calls != NULL && i < count; i += 1)
+        {
+            const CheckOverloadCall call = graph->overload_calls[i];
+            calls[i] = call;
+            keys[i] = (uint64_t)call.node << 32 | i;
+            any |= call.node;
+            every &= call.node;
+        }
+        const uint64_t* sorted = calls != NULL ? c_bindings_sort(keys, keys + count, count, !BUSTER_SCALAR_PATH(reader->parser->options.scalar), any ^ every) : NULL;
+        uint32_t written = 0;
+        for (uint32_t i = 0; sorted != NULL && i < count; i += 1)
+        {
+            const uint32_t node = (uint32_t)(sorted[i] >> 32);
+            if (written == 0 || graph->overload_calls[written - 1].node != node)
+            {
+                graph->overload_calls[written++] = calls[(uint32_t)sorted[i]];
+            }
+        }
+        graph->overload_count = sorted != NULL ? written : count;
+        arena_pop_to(reader->scratch, mark);
+    }
+}
+
+// The target overload set at each function-name use (#1838, #2424): two distinct valid target entities visible in the
+// use's lexical scope, with its latest default declaration retained. One visible version, repeated declarations of
+// that version, and target_clones are ordinary functions for these diagnostics. The binding chain preserves source
+// order; its depth keeps an inner declaration from reviving a hidden outer overload set. A call with no default still
+// gets "no matching function for call to 'f'" here. Run once the walk is done, for a unit with multiversioning.
 static void check_input_target_versions_calls(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
     const CBindings* bindings = &reader->bindings;
-    for (uint32_t event = bindings->base; reader->output->target_multiversion && bindings->valid && event < bindings->count; event += 1)
+    const uint32_t previous = reader->output->graph.overload_count;
+    for (uint32_t event = bindings->base; reader->output->target_multiversion && !reader->output->resource && bindings->valid && event < bindings->count; event += 1)
     {
-        const uint32_t reached = bindings->operation[event] == C_BINDING_USE && bindings->previous[event] != 0 ? bindings->declaration[bindings->previous[event] - 1] : BUSTER_CHECK_NONE;
+        const uint32_t handle = bindings->operation[event] == C_BINDING_USE ? bindings->previous[event] : 0;
+        const uint32_t reached = handle != 0 ? bindings->declaration[handle - 1] : BUSTER_CHECK_NONE;
         const uint32_t use = bindings->declaration[event];
         const bool function = reached < parser->tokens.count && reader->declaration_kinds[reached] == C_BINDING_FUNCTION && use < parser->tokens.count;
+        const uint32_t depth = function ? bindings->depth[handle - 1] : 0;
         uint32_t group = use;
-        const uint32_t end = function ? check_input_callee_end(parser, use, &group) : use;
+        const uint32_t end = function ? check_target_versions_callee_end(parser, use, &group) : use;
         const uint32_t close = function ? parser->tree.parents[end] : BUSTER_CHECK_NONE;
         const bool call = close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL && end + 1 < close &&
                           parser->tree.roles[end + 1] == PARSE_ROLE_OPEN_CALL;
-        bool multiversioned = false;
-        bool reachable = false;
-        for (uint32_t h = call ? bindings->previous[event] : 0; h != 0; h = bindings->previous[h - 1])
+        uint32_t object = BUSTER_CHECK_NONE;
+        uint32_t candidate = 0;
+        bool overloaded = false;
+        for (uint32_t h = function ? handle : 0; h != 0; h = bindings->previous[h - 1])
         {
             const uint32_t declaration = bindings->declaration[h - 1];
-            const bool version = declaration < parser->tokens.count && declaration < use && reader->declaration_kinds[declaration] == C_BINDING_FUNCTION &&
-                                 !check_cpu_dispatch_invalid(reader, declaration);
+            const bool version = declaration < parser->tokens.count && declaration < use && bindings->depth[h - 1] == depth &&
+                                 reader->declaration_kinds[declaration] == C_BINDING_FUNCTION && !check_cpu_dispatch_invalid(reader, declaration);
             const uint32_t since = version ? check_target_versions_since(reader, reader->objects[declaration]) : BUSTER_CHECK_NONE;
-            multiversioned |= since < use;
-            const CheckInputAttributes* attributes = version ? check_input_attributes_at(reader->output, declaration) : NULL;
-            reachable |= check_target_versions_default(check_target_versions_own(attributes, CHECK_ATTRIBUTE_TARGET)) ||
-                         check_target_versions_own(attributes, CHECK_ATTRIBUTE_TARGET_CLONES) != NULL;
+            const CheckInputAttribute* target = since < use ? check_target_versions_attribute(reader, bindings->previous[h - 1], declaration, CHECK_ATTRIBUTE_TARGET) : NULL;
+            const bool visible = target != NULL;
+            const uint32_t entity = visible ? reader->objects[declaration] : BUSTER_CHECK_NONE;
+            overloaded |= visible && object != BUSTER_CHECK_NONE && object != entity;
+            object = visible && object == BUSTER_CHECK_NONE ? entity : object;
+            candidate = visible && candidate == 0 && check_target_versions_default(target) ? declaration + 1 : candidate;
         }
-        if (call && multiversioned && !reachable)
+        if (overloaded)
+        {
+            check_target_versions_candidate(reader, use, candidate);
+            if (!call && candidate != 0)
+            {
+                check_target_versions_value_use(reader, use);
+            }
+        }
+        if (call && overloaded && candidate != 0)
+        {
+            check_target_versions_call(reader, close, candidate - 1, previous);
+        }
+        if (call && overloaded && candidate == 0)
         {
             // At the callee's outermost parenthesis, as clang's call begins; the name is `attribute`'s.
             const uint32_t before = reader->output->multiversion_report_count;
@@ -968,6 +1180,7 @@ static void check_input_target_versions_calls(CheckInputReader* reader)
             }
         }
     }
+    check_target_versions_calls_sort(reader, previous);
 }
 
 #endif

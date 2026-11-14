@@ -980,6 +980,14 @@ static const char* const nightly_fuzz_entries[] = { "frontend", "elf-override", 
 #define BUSTER_NIGHTLY_VECTOR_POOL "none address thread memory"
 #define BUSTER_NIGHTLY_ROWS_FULL (2u * BUSTER_NIGHTLY_SANITIZERS)
 
+// The rows a full run's contract has (#2032): every x86-64 row, and the native plain row alone. The vector row's
+// sanitizer configurations replaced the native sanitizer rows, which built their compiler on every shard (35% of a
+// merged candidate's runner time, #2703); a native sanitizer row that runs anyway counts for nothing either way.
+static bool nightly_row_required(uint32_t row)
+{
+    return row <= BUSTER_NIGHTLY_SANITIZERS;
+}
+
 // The auxiliary workflows a candidate calls where its change touches their pull_request paths (tools/ci/changes.c's
 // changes_auxiliary, the same names in its order), each by 9700x.yml's job `Auxiliary (NAME.yml)`, whose called jobs
 // the API names `Auxiliary (NAME.yml) / JOB`.
@@ -1013,7 +1021,8 @@ static bool nightly_auxiliary_list(const char* list, bool* called)
 }
 
 // The run's full hosted contract from its own jobs, which a test job's result alone can't show (a skipped shard or row
-// leaves it green): every shard 1..N of each row (x86-64 and native, each sanitizer, -O3; one N per row), the vector
+// leaves it green): every shard 1..N of each row nightly_row_required names (x86-64's with each sanitizer, and native's
+// plain row, -O3; one N per row), the vector
 // pool's verdict and each fuzz campaign, every one completed and successful, and no shard of a row that didn't succeed
 // (one beyond N, say, or a second attempt's). Each auxiliary workflow AUXILIARY names (the selector's list) must have
 // run a job and every job successful; one it doesn't name must have run none. Writes a line per row, the vector verdict,
@@ -1043,7 +1052,7 @@ static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, const char
         uint32_t shard = 0;
         uint32_t count = 0;
         bool plain = false;
-        if (job->run == run && nightly_test_row(job->name, &architecture, &row, &shard, &count, &plain) && row < BUSTER_NIGHTLY_ROWS_FULL)
+        if (job->run == run && nightly_test_row(job->name, &architecture, &row, &shard, &count, &plain) && row < BUSTER_NIGHTLY_ROWS_FULL && nightly_row_required(row))
         {
             inconsistent[row] = inconsistent[row] || (counts[row] != 0 && counts[row] != count);
             counts[row] = count;
@@ -1075,6 +1084,10 @@ static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, const char
     bool complete = true;
     for (uint32_t row = 0; row < BUSTER_NIGHTLY_ROWS_FULL; row += 1)
     {
+        if (!nightly_row_required(row))
+        {
+            continue;
+        }
         const uint32_t count = counts[row];
         const uint64_t every = count == 64 ? UINT64_MAX : ((uint64_t)1 << count) - 1;
         const bool whole = count != 0 && !inconsistent[row] && !unsuccessful[row] && succeeded[row] == every;
@@ -4276,11 +4289,11 @@ static void nightly_test_workflow(NightlyTest* test, const char* root)
 static void nightly_test_candidate(NightlyBuffer* buffer, uint64_t run, const char* odd, const char* conclusion)
 {
     static const char* const architectures[] = { "x86-64", "native" };
-    for (uint32_t row = 0; row < BUSTER_NIGHTLY_ROWS_FULL; row += 1)
+    for (uint32_t row = 0; row <= BUSTER_NIGHTLY_SANITIZERS; row += 1)
     {
         const char* architecture = architectures[row / BUSTER_NIGHTLY_SANITIZERS];
         const char* sanitizer = nightly_sanitizer_names[row % BUSTER_NIGHTLY_SANITIZERS];
-        const uint32_t shards = row == 2 || row == 3 ? 6 : row == 7 ? 5 : 4;
+        const uint32_t shards = row == 2 || row == 3 ? 6 : 4;
         nightly_append(buffer, "job\t%llu\tcompleted\tskipped\tTests on Ubuntu 26.04 (%s, %s, O3) / Vector row verdict (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})\n", (unsigned long long)run, architecture, sanitizer);
         for (uint32_t k = 1; k <= shards; k += 1)
         {
@@ -4439,10 +4452,10 @@ static void nightly_test_queue(NightlyTest* test)
         const char* what;
     } short_of[] = {
         { "x86-64 none 1", NULL, "a plain shard missing" },
-        { "native memory 5", NULL, "a sanitizer row's last shard missing" },
+        { "x86-64 memory 6", NULL, "a sanitizer row's last shard missing" },
         { "x86-64 address 2", "failure", "a failed shard" },
         { "x86-64 thread 6", "cancelled", "a cancelled shard" },
-        { "native thread 3", "skipped", "a skipped shard" },
+        { "x86-64 thread 3", "skipped", "a skipped shard" },
         { "native none 4", "timed_out", "a timed-out shard" },
         { "x86-64 memory 1", "-", "a shard still in progress" },
         { "vector", NULL, "the vector verdict missing" },
@@ -4457,6 +4470,7 @@ static void nightly_test_queue(NightlyTest* test)
     }
     nightly_expect(test, !nightly_test_coverage("", NULL, "job\t60\tcompleted\tsuccess\tTests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 5 of 5)"), "a row whose shards disagree");
     nightly_expect(test, nightly_test_coverage("", NULL, "job\t60\tcompleted\tfailure\tTests on Ubuntu 26.04 (native, address, O1) / Tests on Ubuntu 26.04 (Clang 23, native, address, O1, shard 1 of 4)"), "a row at another optimization isn't the contract's, and doesn't count");
+    nightly_expect(test, nightly_test_coverage("", NULL, "job\t60\tcompleted\tfailure\tTests on Ubuntu 26.04 (native, memory, O3) / Tests on Ubuntu 26.04 (Clang 23, native, memory, O3, shard 1 of 5)"), "a retired native sanitizer row (#2032) isn't the contract's, and doesn't count");
     nightly_expect(test, !nightly_test_coverage("", NULL, "job\t60\tcompleted\tsuccess\tTests on Ubuntu 26.04 (vector, none address thread memory, O3) / Vector row verdict (Clang 24, none address thread memory, O3)"), "two vector verdicts");
     nightly_expect(test, nightly_test_coverage("", NULL, "job\t61\tcompleted\tfailure\tlibFuzzer (ASan + UBSan + leaks, frontend)"), "another run's jobs don't count");
 

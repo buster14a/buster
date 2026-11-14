@@ -120,8 +120,8 @@ static void ir_verified_test_case(IrOptimizeTest* test, const IrFunction* input,
                                     "verified handoff: forced worklist fallback ran");
         }
         ir_optimize_test_expect(test, ir_verified_current(&analysis, &revision, &actual.function), "verified handoff: exact owner and revision accepted");
-        ir_optimize_test_expect(test, analysis.shape_checks == 1 && analysis.row_checks == 1 && analysis.graph_checks == 2 &&
-                                analysis.cfg_builds == 1 && analysis.dominator_builds == 1 && after.dominance_checked &&
+        ir_optimize_test_expect(test, analysis.shape_checks == 1 && analysis.row_checks == 1 && analysis.graph_checks == 1 &&
+                                analysis.dominance_checks == 1 && analysis.cfg_builds == 1 && analysis.dominator_builds == 1 && after.dominance_checked &&
                                 analysis.arena_bytes == analyses->length - analysis_mark,
                                 "verified handoff: final verification builds exactly one CFG and one dominance analysis");
         // Reallocate and overwrite the retired optimizer workspace before reading the retained graph or IR.
@@ -299,6 +299,390 @@ static void ir_verified_test_failures(IrOptimizeTest* test, Arena* input, Arena*
 }
 
 
+static bool ir_verified_test_diagnosis(IrCheck a, IrCheck b)
+{
+    return a.error == b.error && a.instruction == b.instruction && a.detail == b.detail && a.dominance_checked == b.dominance_checked;
+}
+
+// The intervals come from the fixture's independently known graph, never a retained product. Structural errors
+// precede cross-block dominance errors at these boundaries, even when the latter use appears earlier in the IR.
+static void ir_verified_test_boundaries(IrOptimizeTest* test, const IrFunction* function, const IrDominance* dominance, IrError error, uint32_t instruction, IrError prepare_error, Arena* analyses, Arena* reference, Arena* scratch)
+{
+    const uint64_t analysis_mark = analyses->length;
+    const uint64_t reference_mark = reference->length;
+    const uint64_t scratch_mark = scratch->length;
+    const IrCheck structural = ir_verify_scalar(function, scratch, 0);
+    const IrCheck expected = structural.error == IR_OK ? ir_verify_scalar(function, scratch, dominance) : structural;
+    ir_optimize_test_expect(test, expected.error == error && expected.instruction == instruction, "verification reuse: independently known fixture diagnosis");
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        IrCfg cfg = { .edge_count = 1379 };
+        IrCfg saved_cfg;
+        memcpy(&saved_cfg, &cfg, sizeof(cfg));
+        const IrCheck retained_cfg = ir_verify_cfg(function, reference, scratch, scalar == 0, &cfg);
+        ir_optimize_test_expect(test, ir_verified_test_diagnosis(retained_cfg, structural) && scratch->length == scratch_mark,
+                                "verification reuse: retained CFG preserves full structural diagnosis and scratch");
+        if (retained_cfg.error == IR_OK)
+        {
+            const IrCheck remaining = ir_verify_dominance(function, &cfg, dominance, scalar == 0);
+            ir_optimize_test_expect(test, ir_verified_test_diagnosis(remaining, expected), "verification reuse: remaining dominance matches fresh full verifier");
+        }
+        else
+        {
+            ir_optimize_test_expect(test, reference->length == reference_mark && memcmp(&cfg, &saved_cfg, sizeof(cfg)) == 0,
+                                    "verification reuse: failed CFG validation restores storage without publication");
+        }
+        arena_pop_to(reference, reference_mark);
+        const IrCheck ordinary = ir_optimize_verify_twins(function, reference, scratch, scalar != 0, scalar != 0);
+        ir_optimize_test_expect(test, ir_verified_test_diagnosis(ordinary, expected) && reference->length == reference_mark && scratch->length == scratch_mark,
+                                "verification reuse: ordinary final verification preserves exact diagnosis and arena prefixes");
+        IrVerifiedAnalysis analysis = { .revision = 1379 };
+        IrVerifiedAnalysis saved_analysis;
+        memcpy(&saved_analysis, &analysis, sizeof(analysis));
+        const IrCheck retained = ir_verified_build(function, analyses, scratch, scalar != 0, &analysis);
+        ir_optimize_test_expect(test, ir_verified_test_diagnosis(retained, expected) && scratch->length == scratch_mark,
+                                "verification reuse: retained final verification preserves exact diagnosis and scratch prefix");
+        if (retained.error != IR_OK)
+        {
+            ir_optimize_test_expect(test, analyses->length == analysis_mark && memcmp(&analysis, &saved_analysis, sizeof(analysis)) == 0,
+                                    "verification reuse: malformed final IR cannot publish an analysis");
+        }
+        arena_pop_to(analyses, analysis_mark);
+        IrOptimizeWork work = { 0 };
+        const IrCheck prepared = ir_optimize_prepare_twins(&work, function, reference, scratch, scalar != 0, scalar != 0, true);
+        ir_optimize_test_expect(test, prepared.error == prepare_error, "verification reuse: preparation keeps its reachable-use contract");
+        arena_pop_to(scratch, scratch_mark);
+        arena_pop_to(reference, reference_mark);
+    }
+}
+
+static void ir_verified_test_malformed(IrOptimizeTest* test, Arena* input, Arena* analyses, Arena* reference, Arena* scratch)
+{
+    const uint64_t analysis_mark = analyses->length;
+    const uint64_t reference_mark = reference->length;
+    const uint64_t scratch_mark = scratch->length;
+    // Retain nonempty caller prefixes while every path succeeds or rolls back.
+    const bool prefixed = arena_push(analyses, 17, 1) != 0 && arena_push(reference, 19, 1) != 0 && arena_push(scratch, 23, 1) != 0;
+    ir_optimize_test_expect(test, prefixed, "verification reuse: caller-prefix allocation");
+    static const uint32_t enter[] = { 0, 1, 2, 3 };
+    static const uint32_t leave[] = { 4, 2, 3, 4 };
+    const IrDominance diamond = {
+        .enter = enter,
+        .leave = leave,
+        .block_count = 4,
+    };
+    // An unreachable backedge supplies a syntactically complete entry phi, but initial entry has no incoming value.
+    // Both final-verification paths must retain the shared structural rejection before publishing analysis.
+    if (prefixed)
+    {
+        const uint64_t input_mark = input->length;
+        const IrSizes sizes = { .instruction_count = 4, .block_count = 2, .constant_count = 1, .extra_count = 2 };
+        IrFunction function = { 0 };
+        const bool created = ir_create(input, &sizes, &function) == IR_OK;
+        ir_optimize_test_expect(test, created, "verification reuse: entry phi allocation");
+        if (created)
+        {
+            function.result_type = IR_I64;
+            function.block_offsets[1] = 2;
+            function.block_offsets[2] = 4;
+            function.constants[0].low = 7;
+            function.extra[0] = 1;
+            function.extra[1] = 2;
+            ir_optimize_test_instruction(&function, 0, IR_PHI, IR_I64, 0, 1, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&function, 1, IR_RET, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&function, 2, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&function, 3, IR_BR, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t entry[] = { 0, 0 };
+            const uint32_t exit[] = { 1, 0 };
+            const IrDominance dominance = { .enter = entry, .leave = exit, .block_count = 2 };
+            ir_verified_test_boundaries(test, &function, &dominance, IR_ERROR_PHI, 0, IR_ERROR_PHI, analyses, reference, scratch);
+        }
+        arena_pop_to(input, input_mark);
+    }
+    for (uint32_t kind = 0; prefixed && kind < 10; kind += 1)
+    {
+        const uint64_t input_mark = input->length;
+        IrFunction function = { 0 };
+        const bool created = ir_optimize_test_diamond(input, &function, 2);
+        ir_optimize_test_expect(test, created, "verification reuse: malformed diamond allocation");
+        if (created)
+        {
+            IrError error = IR_OK;
+            uint32_t instruction = BUSTER_IR_NONE;
+            switch (kind)
+            {
+                case 1:
+                {
+                    function.op[0] = IR_INVALID;
+                    error = IR_ERROR_OPCODE;
+                    instruction = 0;
+                } break;
+                case 2:
+                {
+                    function.a[4] = function.instruction_count;
+                    error = IR_ERROR_OPERAND;
+                    instruction = 4;
+                } break;
+                case 3:
+                {
+                    function.extra = 0;
+                    error = IR_ERROR_STRUCTURE;
+                } break;
+                case 4:
+                {
+                    function.extra[0] = 0;
+                    error = IR_ERROR_PHI;
+                    instruction = 8;
+                } break;
+                case 5:
+                {
+                    function.extra[2] = 1;
+                    error = IR_ERROR_PHI;
+                    instruction = 8;
+                } break;
+                case 6:
+                {
+                    function.extra[1] = 0;
+                    error = IR_ERROR_PHI;
+                    instruction = 8;
+                } break;
+                case 7:
+                {
+                    function.a[4] = 6;
+                    error = IR_ERROR_DOMINANCE;
+                    instruction = 4;
+                } break;
+                case 8:
+                {
+                    function.a[4] = 6;
+                    function.a[9] = 9;
+                    error = IR_ERROR_DOMINANCE;
+                    instruction = 9;
+                } break;
+                case 9:
+                {
+                    function.a[4] = 6;
+                    function.extra[2] = 1;
+                    error = IR_ERROR_PHI;
+                    instruction = 8;
+                } break;
+                default: break;
+            }
+            ir_verified_test_boundaries(test, &function, &diamond, error, instruction, error, analyses, reference, scratch);
+        }
+        arena_pop_to(input, input_mark);
+    }
+    for (uint32_t kind = 0; prefixed && kind < 4; kind += 1)
+    {
+        const uint64_t input_mark = input->length;
+        IrFunction function = { 0 };
+        const bool created = ir_optimize_test_switch(input, &function, false);
+        ir_optimize_test_expect(test, created, "verification reuse: malformed switch allocation");
+        if (created)
+        {
+            IrError error = IR_OK;
+            uint32_t instruction = BUSTER_IR_NONE;
+            if (kind == 1)
+            {
+                function.extra[3] = function.extra[1];
+                error = IR_ERROR_METADATA;
+                instruction = 1;
+            }
+            else if (kind == 2)
+            {
+                function.c[1] = UINT32_MAX;
+                error = IR_ERROR_TYPE;
+                instruction = 1;
+            }
+            else if (kind == 3)
+            {
+                function.extra[2] = function.block_count;
+                error = IR_ERROR_TYPE;
+                instruction = 1;
+            }
+            ir_verified_test_boundaries(test, &function, &diamond, error, instruction, error, analyses, reference, scratch);
+        }
+        arena_pop_to(input, input_mark);
+    }
+    const uint32_t single_enter[] = { 0 };
+    const uint32_t single_leave[] = { 1 };
+    const IrDominance single = {
+        .enter = single_enter,
+        .leave = single_leave,
+        .block_count = 1,
+    };
+    for (uint32_t kind = 0; prefixed && kind < 3; kind += 1)
+    {
+        const uint64_t input_mark = input->length;
+        IrFunction function = { 0 };
+        const bool created = ir_optimize_test_aggregate_call(input, &function);
+        ir_optimize_test_expect(test, created, "verification reuse: malformed call allocation");
+        if (created)
+        {
+            if (kind == 1)
+            {
+                function.calls[0].argument_first = function.extra_count;
+            }
+            else if (kind == 2)
+            {
+                function.calls[0].abi = function.abi_call_count + 1;
+            }
+            const IrError error = kind == 0 ? IR_OK : IR_ERROR_METADATA;
+            ir_verified_test_boundaries(test, &function, &single, error, BUSTER_IR_NONE, error, analyses, reference, scratch);
+        }
+        arena_pop_to(input, input_mark);
+    }
+    for (uint32_t reachable = 0; prefixed && reachable < 2; reachable += 1)
+    {
+        const uint64_t input_mark = input->length;
+        const IrSizes sizes = {
+            .instruction_count = 6,
+            .block_count = 3,
+            .constant_count = 1,
+        };
+        IrFunction function = { 0 };
+        const bool created = ir_create(input, &sizes, &function) == IR_OK;
+        ir_optimize_test_expect(test, created, "verification reuse: unreachable-region allocation");
+        if (created)
+        {
+            // Entry returns immediately. The two dead blocks have a cross-block use, allowed at preparation but
+            // forbidden by the strict final boundary. The second case also uses that dead definition at entry.
+            function.result_type = IR_I64;
+            function.constants[0].low = 7;
+            function.block_offsets[1] = 2;
+            function.block_offsets[2] = 4;
+            function.block_offsets[3] = 6;
+            ir_optimize_test_instruction(&function, 0, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&function, 1, IR_RET, IR_VOID, reachable != 0 ? 2 : 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&function, 2, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&function, 3, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&function, 4, IR_COPY, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&function, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t dead_enter[] = { 0, 0, 0 };
+            const uint32_t dead_leave[] = { 1, 0, 0 };
+            const IrDominance dead = {
+                .enter = dead_enter,
+                .leave = dead_leave,
+                .block_count = 3,
+            };
+            ir_verified_test_boundaries(test, &function, &dead, IR_ERROR_DOMINANCE, reachable != 0 ? 1 : 4,
+                                        reachable != 0 ? IR_ERROR_DOMINANCE : IR_OK, analyses, reference, scratch);
+        }
+        arena_pop_to(input, input_mark);
+    }
+    if (prefixed)
+    {
+        const uint64_t input_mark = input->length;
+        const uint64_t retained_mark = analyses->length;
+        const uint64_t work_mark = scratch->length;
+        const IrSizes sizes = {
+            .instruction_count = 8,
+            .block_count = 4,
+            .constant_count = 1,
+        };
+        IrFunction function = { 0 };
+        const bool created = ir_create(input, &sizes, &function) == IR_OK;
+        ir_optimize_test_expect(test, created, "verification reuse: mixed reachable/dead errors allocation");
+        if (created)
+        {
+            // Entry jumps over dead block 1 to reachable block 2. Both use dead block 3's definition. Ordinary
+            // final verification historically checked reachable uses first; retained verification used row order.
+            function.result_type = IR_I64;
+            function.constants[0].low = 7;
+            for (uint32_t block = 1; block <= 4; block += 1)
+            {
+                function.block_offsets[block] = 2 * block;
+            }
+            ir_optimize_test_instruction(&function, 0, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&function, 1, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&function, 2, IR_COPY, IR_I64, 6, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&function, 3, IR_RET, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&function, 4, IR_COPY, IR_I64, 6, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&function, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&function, 6, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&function, 7, IR_RET, IR_VOID, 6, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t mixed_enter[] = { 0, 0, 1, 0 };
+            const uint32_t mixed_leave[] = { 2, 0, 2, 0 };
+            const IrDominance mixed = {
+                .enter = mixed_enter,
+                .leave = mixed_leave,
+                .block_count = 4,
+            };
+            const IrCheck first = ir_verify_scalar(&function, scratch, &mixed);
+            ir_optimize_test_expect(test, first.error == IR_ERROR_DOMINANCE && first.instruction == 2 && first.detail == 0,
+                                    "verification reuse: fresh full verifier finds the earlier dead use");
+            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            {
+                IrVerifiedAnalysis analysis = { 0 };
+                const IrCheck retained = ir_verified_build(&function, analyses, scratch, scalar != 0, &analysis);
+                const IrCheck ordinary = ir_optimize_verify_twins(&function, reference, scratch, scalar != 0, scalar != 0);
+                ir_optimize_test_expect(test, ir_verified_test_diagnosis(retained, first) && analyses->length == retained_mark && scratch->length == work_mark,
+                                        "verification reuse: retained final verifier preserves first-use order");
+                ir_optimize_test_expect(test, ordinary.error == IR_ERROR_DOMINANCE && ordinary.instruction == 4 && ordinary.detail == 0,
+                                        "verification reuse: ordinary final verifier preserves reachable-error precedence");
+            }
+        }
+        arena_pop_to(input, input_mark);
+    }
+    arena_pop_to(scratch, scratch_mark);
+    arena_pop_to(reference, reference_mark);
+    arena_pop_to(analyses, analysis_mark);
+}
+
+static void ir_verified_test_dominance_views(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch)
+{
+    const uint64_t input_mark = input->length;
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    IrFunction function = { 0 };
+    const bool created = ir_optimize_test_diamond(input, &function, 2);
+    ir_optimize_test_expect(test, created, "verification reuse: dominance-view allocation");
+    for (uint32_t scalar = 0; created && scalar < 2; scalar += 1)
+    {
+        IrCfg cfg = { 0 };
+        const IrCheck ready = ir_verify_cfg(&function, output, scratch, scalar == 0, &cfg);
+        ir_optimize_test_expect(test, ready.error == IR_OK, "verification reuse: dominance-view structural prerequisite");
+        for (uint32_t kind = 0; ready.error == IR_OK && kind < 6; kind += 1)
+        {
+            uint32_t enter[] = { 0, 1, 2, 3 };
+            uint32_t leave[] = { 4, 2, 3, 4 };
+            IrDominance dominance = {
+                .enter = enter,
+                .leave = leave,
+                .block_count = 4,
+            };
+            switch (kind)
+            {
+                case 1: dominance.block_count -= 1; break;
+                case 2: dominance.enter = 0; break;
+                case 3: dominance.leave = 0; break;
+                case 4: leave[1] = enter[1]; break;
+                case 5: leave[0] = 0; break;
+                default: break;
+            }
+            const IrCheck expected = ir_verify_scalar(&function, scratch, &dominance);
+            const IrCheck actual = ir_verify_dominance(&function, &cfg, &dominance, scalar == 0);
+            ir_optimize_test_expect(test, expected.error == (kind == 0 ? IR_OK : IR_ERROR_DOMINANCE) && ir_verified_test_diagnosis(actual, expected),
+                                    "verification reuse: bad dominance views cannot bypass the full verifier's checks");
+        }
+        arena_pop_to(output, output_mark);
+        IrCfg unpublished = { .edge_count = 1379 };
+        IrCfg saved;
+        memcpy(&saved, &unpublished, sizeof(saved));
+        Arena limited = *output;
+        limited.capacity = limited.length;
+        const IrCheck capacity = ir_verify_cfg(&function, &limited, scratch, scalar == 0, &unpublished);
+        ir_optimize_test_expect(test, capacity.error == IR_ERROR_MEMORY && limited.length == output_mark && scratch->length == scratch_mark &&
+                                memcmp(&unpublished, &saved, sizeof(saved)) == 0, "verification reuse: CFG allocation failure is transactional");
+        const IrCheck alias = ir_verify_cfg(&function, scratch, scratch, scalar == 0, &unpublished);
+        ir_optimize_test_expect(test, alias.error != IR_OK && scratch->length == scratch_mark && memcmp(&unpublished, &saved, sizeof(saved)) == 0,
+                                "verification reuse: aliased retained CFG arenas are refused without publication");
+    }
+    arena_pop_to(scratch, scratch_mark);
+    arena_pop_to(output, output_mark);
+    arena_pop_to(input, input_mark);
+}
+
 static void ir_verified_test_dominator_policy(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch)
 {
     IrFunction function = { 0 };
@@ -392,6 +776,8 @@ static void ir_verified_tests(IrOptimizeTest* test)
     }
     if (ready)
     {
+        ir_verified_test_malformed(test, &input, &analyses, &reference, &scratch);
+        ir_verified_test_dominance_views(test, &input, &output, &scratch);
         ir_verified_test_dominator_policy(test, &input, &output, &scratch);
         ir_verified_test_failures(test, &input, &output, &analyses, &reference, &scratch);
     }

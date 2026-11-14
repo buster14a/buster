@@ -7,7 +7,9 @@
 // - truth values across blocks (`&&`, `||`, `!` and a loop's found flag): no setcc, the comparisons are the branches;
 // - constants stored: each store an immediate's, no constant made in a register first;
 // - shifts by zero and multiplications by one: none;
-// - a computed goto's dispatch: an indirect jump at each handler's end, no jump to the shared one.
+// - a computed goto's dispatch: an indirect jump at each handler's end, no jump to the shared one;
+// - and #2592's fetch, `i = *pc++` at each handler's end: the load before the increment, which adds in pc's register, so
+//   that no move precedes the handlers' indirect jumps (the function's first fetch, of its parameter, may still move).
 
 #if defined(BUSTER_TIER1_PATTERNS_SUBJECT)
 
@@ -140,6 +142,32 @@ operation_halt:
     return stack[sp - 1];
 }
 
+// #2592: Lua's vmfetch, `i = *(pc++)` and a dispatch on its low bits; a push's operand is the rest of its word.
+__attribute__((noinline)) long patterns_fetch(const unsigned int* pc, long* stack)
+{
+    static void* const table[] = { &&fetch_add, &&fetch_push, &&fetch_halt, &&fetch_dup };
+    long sp = 0;
+    unsigned int i = *pc++;
+    goto* table[i & 3];
+fetch_add:
+    stack[sp - 2] += stack[sp - 1];
+    sp -= 1;
+    i = *pc++;
+    goto* table[i & 3];
+fetch_push:
+    stack[sp] = (long)(i >> 2);
+    sp += 1;
+    i = *pc++;
+    goto* table[i & 3];
+fetch_dup:
+    stack[sp] = stack[sp - 1];
+    sp += 1;
+    i = *pc++;
+    goto* table[i & 3];
+fetch_halt:
+    return stack[sp - 1];
+}
+
 #elif defined(BUSTER_TIER1_PATTERNS_ORACLE)
 
 #include <limits.h>
@@ -166,6 +194,7 @@ void patterns_store(struct patterns_record* r);
 int patterns_field(const unsigned int* code, const int* table);
 char* patterns_scale(char* p, unsigned long n);
 long patterns_dispatch(const unsigned char* code, long* stack);
+long patterns_fetch(const unsigned int* pc, long* stack);
 
 int main(void)
 {
@@ -235,6 +264,10 @@ int main(void)
     const unsigned char program[] = { 3, 6, 3, 4, 1, 3, 9, 0, 2 };
     long stack[8] = { 0 };
     valid = patterns_dispatch(program, stack) == 11 && valid;
+    // push 6, push 4, dup, add, add, halt: 6 + 4 + 4.
+    const unsigned int words[] = { 6 << 2 | 1, 4 << 2 | 1, 3, 0, 0, 2 };
+    long fetched[8] = { 0 };
+    valid = patterns_fetch(words, fetched) == 14 && valid;
     puts(valid ? "Tier 1 patterns native oracle: pass" : "Tier 1 patterns native oracle: FAIL");
     return valid ? 0 : 1;
 }
@@ -296,6 +329,7 @@ typedef enum PatternsKind
     PATTERNS_STORE,
     PATTERNS_SHIFT,
     PATTERNS_DISPATCH,
+    PATTERNS_FETCH,
 } PatternsKind;
 
 typedef struct PatternsFunction PatternsFunction;
@@ -315,6 +349,7 @@ static const PatternsFunction patterns_functions[] = {
     { "patterns_field", PATTERNS_SHIFT },
     { "patterns_scale", PATTERNS_SHIFT },
     { "patterns_dispatch", PATTERNS_DISPATCH },
+    { "patterns_fetch", PATTERNS_FETCH },
 };
 
 #define BUSTER_PATTERNS_COUNT (sizeof(patterns_functions) / sizeof(patterns_functions[0]))
@@ -353,6 +388,10 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     unsigned constants = 0;
     unsigned indirect = 0;
     unsigned to_indirect = 0;
+    // Indirect jumps with no register-to-register move right before them, where an edge's moves go, and increments of 4
+    // in place (an add, where a lea into another register would leave the edge a move back).
+    unsigned clean = 0;
+    unsigned increments = 0;
     for (unsigned i = 0; i < body->count; i += 1)
     {
         const PatternsInstruction* instruction = &body->instructions[i];
@@ -368,6 +407,10 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
         constants += (move && operands[0] == '$' && !patterns_memory(destination)) || (strncmp(operation, "xor", 3) == 0 && comma != NULL && strncmp(operands, destination, (size_t)(comma - operands)) == 0);
         const bool jump = strcmp(operation, "jmp") == 0;
         indirect += jump && operands[0] == '*';
+        increments += strncmp(operation, "add", 3) == 0 && strncmp(operands, "$0x4,%", 6) == 0;
+        const PatternsInstruction* before = i != 0 ? &body->instructions[i - 1] : NULL;
+        const bool moved = before != NULL && strcmp(before->operation, "mov") == 0 && before->operands[0] == '%' && !patterns_memory(before->operands);
+        clean += jump && operands[0] == '*' && !moved;
         if (jump && operands[0] != '*')
         {
             const unsigned long long target = strtoull(operands, NULL, 16);
@@ -392,11 +435,14 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     case PATTERNS_DISPATCH:
         valid = valid && indirect >= 4 && to_indirect == 0;
         break;
+    case PATTERNS_FETCH:
+        valid = valid && indirect >= 4 && clean >= 3 && increments >= 3;
+        break;
     }
     if (!valid)
     {
-        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u\n",
-                function->name, body->definitions, sets, shifts, immediates, registers, constants, indirect, to_indirect);
+        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u\n",
+                function->name, body->definitions, sets, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments);
     }
     return valid;
 }

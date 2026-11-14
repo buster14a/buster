@@ -226,7 +226,19 @@ static uint32_t tier1_cfg_block_of(const Tier1CfgInput* input, uint32_t position
     return low;
 }
 
-static bool tier1_cfg_input_valid(const Tier1CfgInput* input, Arena* scratch)
+// Position q's block, from the allocation's retained column when it has one, else by binary search: emission's reads
+// (#1399). Positions past the column search too, as tier1_cfg_block_of answers them.
+static uint32_t tier1_cfg_block_at(const Tier1CfgInput* input, const Tier1CfgAllocation* result, uint32_t position)
+{
+    return result->position_blocks != 0 && position < input->position_count ? result->position_blocks[position] : tier1_cfg_block_of(input, position);
+}
+
+// Whether `input` is one the allocator takes. With `position_blocks`, a column of position_count entries, it also labels
+// each position with its block once the blocks are known to be in order, and checks each value's uses against its
+// definition's block from that column, with no search (#1399): a use at p is in the block [s, t) that holds the
+// definition d only if s <= p < t, and since d < t, "elsewhere or at or after d" is p < s or p >= d. Without it (the
+// verifier, and the column's oracle in test-tier1-cfg) each definition and use searches block_starts.
+static bool tier1_cfg_input_valid_into(const Tier1CfgInput* input, Arena* scratch, uint32_t* position_blocks)
 {
     const uint64_t saved = scratch->length;
     bool valid = input->block_count != 0 && input->block_count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS && input->value_count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS && input->position_count <= BUSTER_TIER1_ALLOCATE_MAX_POSITIONS && input->use_count <= BUSTER_TIER1_ALLOCATE_MAX_USES && input->edge_count <= BUSTER_TIER1_ALLOCATE_MAX_USES;
@@ -249,6 +261,17 @@ static bool tier1_cfg_input_valid(const Tier1CfgInput* input, Arena* scratch)
     for (uint32_t b = 0; valid && b < input->block_count; b += 1)
     {
         valid = input->block_starts[b] < input->block_starts[b + 1];
+    }
+    // The blocks are in order from 0 to position_count: every position gets one label. Each block's bounds are read
+    // before its stores, which could alias block_starts as far as the compiler knows.
+    for (uint32_t b = 0; valid && position_blocks != 0 && b < input->block_count; b += 1)
+    {
+        const uint32_t from = input->block_starts[b];
+        const uint32_t to = input->block_starts[b + 1];
+        for (uint32_t q = from; q < to; q += 1)
+        {
+            position_blocks[q] = b;
+        }
     }
     valid = valid && input->successor_offsets[0] == 0 && input->successor_offsets[input->block_count] == input->edge_count;
     valid = valid && input->predecessor_offsets[0] == 0 && input->predecessor_offsets[input->block_count] == input->edge_count;
@@ -350,17 +373,24 @@ static bool tier1_cfg_input_valid(const Tier1CfgInput* input, Arena* scratch)
         valid = input->classes[v] < BUSTER_TIER1_ALLOCATE_CLASSES && (input->allowed_registers[v] & ~input->registers[input->classes[v]]) == 0 && input->definitions[v] < input->position_count &&
                 (input->definition_registers == 0 || (input->definition_registers[v] & ~input->allowed_registers[v]) == 0);
         valid = valid && (input->rematerializable == 0 || input->rematerializable[v] <= 1) && input->use_offsets[v] <= input->use_offsets[v + 1];
-        const uint32_t block = valid ? tier1_cfg_block_of(input, input->definitions[v]) : 0;
+        const uint32_t definition = valid ? input->definitions[v] : 0;
+        const uint32_t block = valid ? (position_blocks != 0 ? position_blocks[definition] : tier1_cfg_block_of(input, definition)) : 0;
+        const uint32_t entry = valid ? input->block_starts[block] : 0;
         for (uint32_t u = input->use_offsets[v]; valid && u < input->use_offsets[v + 1]; u += 1)
         {
             const uint32_t position = input->use_positions[u];
             valid = position < input->position_count && (u == input->use_offsets[v] || position >= input->use_positions[u - 1]);
-            valid = valid && (tier1_cfg_block_of(input, position) != block || position >= input->definitions[v]);
+            valid = valid && (position_blocks != 0 ? position < entry || position >= definition : tier1_cfg_block_of(input, position) != block || position >= definition);
             valid = valid && (input->use_required == 0 || input->use_required[u] <= 1);
         }
     }
     arena_pop_to(scratch, saved);
     return valid;
+}
+
+static bool tier1_cfg_input_valid(const Tier1CfgInput* input, Arena* scratch)
+{
+    return tier1_cfg_input_valid_into(input, scratch, 0);
 }
 
 // For a validated input, publish the sole incoming edge's successor-CSR index per block, or NONE. The emitter owns
@@ -1500,7 +1530,10 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
     const uint64_t scratch_saved = scratch != 0 ? scratch->length : 0;
     Tier1CfgAllocation candidate = { 0 };
     const bool arguments = input != 0 && output != 0 && scratch != 0 && output != scratch && prepared != 0;
-    if (arguments && tier1_cfg_input_valid(input, scratch))
+    // The position-to-block column, which validation fills and reads (#1399), retained for emission; past its bound, or
+    // where the output has no room, every reader searches block_starts instead.
+    uint32_t* filled = arguments && input->position_count <= BUSTER_TIER1_CFG_POSITION_BLOCKS ? arena_push_array(output, input->position_count, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    if (arguments && tier1_cfg_input_valid_into(input, scratch, filled))
     {
         error = TIER1_CFG_CAPACITY;
         const uint32_t blocks = input->block_count;
@@ -1517,25 +1550,8 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         uint32_t* dense_values = arena_push_array(scratch, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
         uint8_t* edge_local = arena_push(scratch, (uint64_t)values + 1, 1);
         bool ready = home != 0 && dense != 0 && dense_values != 0 && edge_local != 0;
-        const uint32_t* blocks_of = 0;
-        if (ready && input->position_count <= BUSTER_TIER1_CFG_POSITION_BLOCKS)
-        {
-            uint32_t* filled = arena_push_array(output, input->position_count, sizeof(uint32_t), _Alignof(uint32_t));
-            if (filled != 0)
-            {
-                for (uint32_t b = 0; b < blocks; b += 1)
-                {
-                    const uint32_t from = input->block_starts[b];
-                    const uint32_t to = input->block_starts[b + 1];
-                    for (uint32_t q = from; q < to; q += 1)
-                    {
-                        filled[q] = b;
-                    }
-                }
-                candidate.position_blocks = filled;
-                blocks_of = filled;
-            }
-        }
+        const uint32_t* blocks_of = filled;
+        candidate.position_blocks = filled;
         uint32_t dense_count = 0;
         for (uint32_t v = 0; ready && v < values; v += 1)
         {
