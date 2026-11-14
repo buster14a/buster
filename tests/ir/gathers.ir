@@ -1,0 +1,18 @@
+function (ptr, v16i32, v8i32, m16, m8, m64) -> v16i32 {
+b0:
+  %0 = param.ptr 0
+  %1 = param.v16i32 1
+  %2 = param.v8i32 2
+  %3 = param.m16 3
+  %4 = param.m8 4
+  %5 = param.m64 5
+  %6 = gather.v16i32 %0, %1, %3 scale=4 lanes=i32
+  %7 = gather.v16i32 %0, %2, %4 scale=8 lanes=i64
+  %8 = gather.v8i32 %0, %1, %4 scale=1 lanes=i32
+  %9 = gather.v4i32 %0, %2, %4 scale=2 lanes=i32
+  %10 = vselect.v16i32 %3, %6, %1
+  %11 = compress_store.void %0, %10, %3 align=1 lanes=i32
+  %12 = compress_store.void %0, %7, %5 align=1 lanes=i8
+  %13 = compress_store.void %0, %9, %4 align=4 lanes=i64
+  %14 = ret.void %10
+}

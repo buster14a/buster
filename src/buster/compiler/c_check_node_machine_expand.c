@@ -9,7 +9,7 @@
 // behind one test of its state (node_machine_after_row); an update's second row, its own, by node_machine_update_last;
 // a call's CALL by node_machine_call_own, its row numbered as the lowering numbers it. It reads the records T typed and
 // C classified through the record accessors alone; the tape (NodeMachine's kinds, classes and tape), its labels'
-// entries (label_entries) and the call rows (calls_at, call_records, call_count) are its own.
+// entries (label_entries) and the call rows (calls_written, call_records, call_count) are its own.
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_EXPAND_INCLUDED
 #define BUSTER_C_CHECK_NODE_MACHINE_EXPAND_INCLUDED
 
@@ -61,137 +61,153 @@ static void node_machine_address(NodeMachine* machine, uint32_t object, int64_t 
     }
 }
 
+// Whether record `r`'s template ends in a load of its value: an access (a dereference's, a member's, a subscript's)
+// evaluated for its value, neither in an address context nor an address itself (an array's, a function's).
+static inline bool node_machine_loads(const NodeMachine* machine, uint32_t r)
+{
+    return (node_machine_record_context(machine, r) & BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS) == 0 &&
+           (node_machine_record_facts(machine, r) & BUSTER_CHECK_LOWER_TYPE_ADDRESS) == 0;
+}
+
 static void node_machine_update_last(NodeMachine* machine, const NodeMachineUpdate* update);
 
 // Record `r`'s own entries by its template (check_lower_template_own's), after its operands', or an update's second row.
-// `object` as in C.
+// `object` as in C. One case a template, each reading only the fields it writes: a PASS, a VOID and a discarded constant
+// write nothing, where they fell through every template's test (docs/node-machine.md, "C's and X's dispatch").
 static void node_machine_own(NodeMachine* machine, uint32_t r, uint32_t object)
 {
-    const CheckProgram* program = machine->program;
-    const TypeTable* types = machine->types;
-    const CheckOp op = node_machine_record_op(machine, r);
     const CheckLowerTemplate kind = node_machine_record_template(machine, r);
-    const uint8_t context = node_machine_record_context(machine, r);
-    const bool address = (context & BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS) != 0;
-    const bool discard = (context & BUSTER_CHECK_LOWER_TEMPLATE_DISCARD) != 0;
-    const bool address_value = (node_machine_record_facts(machine, r) & BUSTER_CHECK_LOWER_TYPE_ADDRESS) != 0;
     const uint8_t class = node_machine_record_class(machine, r);
-    if (kind == CHECK_LOWER_TEMPLATE_CONSTANT && !discard)
+    switch ((uint32_t)kind)
     {
-        if (node_machine_record_constant_kind(machine, r) == CHECK_CONSTANT_ADDRESS)
+        case CHECK_LOWER_TEMPLATE_LOCAL:
+        {
+            node_machine_put(machine, BUSTER_TYPED_LOCAL, class, node_machine_record_object(machine, r));
+        } break;
+        case CHECK_LOWER_TEMPLATE_CONSTANT:
+        {
+            if ((node_machine_record_context(machine, r) & BUSTER_CHECK_LOWER_TEMPLATE_DISCARD) == 0)
+            {
+                if (node_machine_record_constant_kind(machine, r) == CHECK_CONSTANT_ADDRESS)
+                {
+                    node_machine_address(machine, node_machine_record_object(machine, r), node_machine_record_offset(machine, r));
+                    if (node_machine_record_category(machine, r) == CHECK_RVALUE && class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_I64)
+                    {
+                        node_machine_put(machine, BUSTER_TYPED_CONVERT, class, 0);
+                    }
+                }
+                else if (class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64)
+                {
+                    uint64_t bits = node_machine_record_integer(machine, r);
+                    const uint32_t width = 8u << ((class - 1) / 2);
+                    if (width < 64)
+                    {
+                        const uint64_t mask = (UINT64_C(1) << width) - 1;
+                        bits &= mask;
+                        bits |= (class & 1) != 0 && (bits >> (width - 1)) != 0 ? ~mask : 0;
+                    }
+                    node_machine_put(machine, BUSTER_TYPED_CONST, class, bits);
+                }
+                else
+                {
+                    node_machine_put(machine, BUSTER_TYPED_CONST, class, check_lower_float_bits(NULL, class, node_machine_record_floating(machine, r)));
+                }
+            }
+        } break;
+        case CHECK_LOWER_TEMPLATE_MEMBER:
+        {
+            const uint64_t offset = node_machine_record_member_offset(machine, r);
+            if (offset / 8 != 0)
+            {
+                node_machine_put(machine, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, offset / 8);
+                node_machine_put(machine, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+            }
+            if (node_machine_loads(machine, r))
+            {
+                node_machine_put(machine, BUSTER_TYPED_LOAD, class, check_lower_access_value(machine->types, class, node_machine_record_type(machine, r)));
+            }
+        } break;
+        case CHECK_LOWER_TEMPLATE_STORE_LOCAL: case CHECK_LOWER_TEMPLATE_STORE_GLOBAL:
+        {
+            const uint32_t target = node_machine_record_op(machine, r) == CHECK_OP_INITIALIZE ? object : node_machine_record_object(machine, node_machine_record_left(machine, r));
+            node_machine_put(machine, kind == CHECK_LOWER_TEMPLATE_STORE_LOCAL ? BUSTER_TYPED_STORE_LOCAL : BUSTER_TYPED_STORE_GLOBAL, class,
+                             kind == CHECK_LOWER_TEMPLATE_STORE_LOCAL ? target : machine->program->object_symbols[target]);
+        } break;
+        case CHECK_LOWER_TEMPLATE_STORE:
+        {
+            node_machine_put(machine, BUSTER_TYPED_STORE, class, check_lower_access_value(machine->types, class, node_machine_record_type(machine, r)));
+        } break;
+        case CHECK_LOWER_TEMPLATE_TRUTH:
+        {
+            node_machine_put_truth(machine, node_machine_class(machine, node_machine_record_converted(machine, r, 0)), node_machine_record_op(machine, r) == CHECK_OP_NOT);
+        } break;
+        case CHECK_LOWER_TEMPLATE_BINARY:
+        {
+            node_machine_put(machine, check_lower_binary(node_machine_record_op(machine, r)), class, 0);
+        } break;
+        case CHECK_LOWER_TEMPLATE_POINTER:
+        {
+            const CheckOp op = node_machine_record_op(machine, r);
+            if (op == CHECK_OP_SUBTRACT)
+            {
+                node_machine_put(machine, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_I64, 0);
+            }
+            node_machine_put(machine, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, check_action_pointer_stride(machine->types, node_machine_record_converted(machine, r, 0)));
+            if (op == CHECK_OP_SUBSCRIPT && node_machine_loads(machine, r))
+            {
+                node_machine_put(machine, BUSTER_TYPED_LOAD, class, check_lower_access_value(machine->types, class, node_machine_record_type(machine, r)));
+            }
+        } break;
+        case CHECK_LOWER_TEMPLATE_GLOBAL:
+        {
+            node_machine_put(machine, BUSTER_TYPED_GLOBAL, class, machine->program->object_symbols[node_machine_record_object(machine, r)]);
+        } break;
+        case CHECK_LOWER_TEMPLATE_ADDRESS:
         {
             node_machine_address(machine, node_machine_record_object(machine, r), node_machine_record_offset(machine, r));
-            if (node_machine_record_category(machine, r) == CHECK_RVALUE && class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_I64)
+        } break;
+        case CHECK_LOWER_TEMPLATE_DEREFERENCE:
+        {
+            if (node_machine_loads(machine, r))
             {
-                node_machine_put(machine, BUSTER_TYPED_CONVERT, class, 0);
+                node_machine_put(machine, BUSTER_TYPED_LOAD, class, check_lower_access_value(machine->types, class, node_machine_record_type(machine, r)));
             }
-        }
-        else if (class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64)
+        } break;
+        case CHECK_LOWER_TEMPLATE_UNARY:
         {
-            uint64_t bits = node_machine_record_integer(machine, r);
-            const uint32_t width = 8u << ((class - 1) / 2);
-            if (width < 64)
+            node_machine_put(machine, node_machine_record_op(machine, r) == CHECK_OP_NEGATIVE ? BUSTER_TYPED_NEG : BUSTER_TYPED_NOT, class, 0);
+        } break;
+        case NODE_MACHINE_TEMPLATE_BRANCH:
+        {
+            // After its second operand's or second arm's row: a logical operator's test of it, its jump to its end, its
+            // alternate and its value there, 0 for `&&` and 1 for `||`; then its end, which a conditional's first arm
+            // jumps to.
+            const CheckOp op = node_machine_record_op(machine, r);
+            const uint32_t alternate = node_machine_record_label_base(machine, r);
+            if (op != CHECK_OP_CONDITIONAL)
             {
-                const uint64_t mask = (UINT64_C(1) << width) - 1;
-                bits &= mask;
-                bits |= (class & 1) != 0 && (bits >> (width - 1)) != 0 ? ~mask : 0;
+                node_machine_put_truth(machine, node_machine_class(machine, node_machine_record_converted(machine, r, 1)), false);
+                node_machine_put(machine, class == BUSTER_TYPED_CLASS_VOID ? BUSTER_TYPED_JUMP : BUSTER_TYPED_JUMP_VALUE, class, alternate + 1);
+                machine->label_entries[alternate] = machine->entry_count;
+                node_machine_put(machine, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, op == CHECK_OP_LOGICAL_OR);
             }
-            node_machine_put(machine, BUSTER_TYPED_CONST, class, bits);
-        }
-        else
+            machine->label_entries[alternate + 1] = machine->entry_count;
+        } break;
+        case NODE_MACHINE_TEMPLATE_DECIDED:
         {
-            node_machine_put(machine, BUSTER_TYPED_CONST, class, check_lower_float_bits(NULL, class, node_machine_record_floating(machine, r)));
-        }
-    }
-    else if (kind == CHECK_LOWER_TEMPLATE_ADDRESS)
-    {
-        node_machine_address(machine, node_machine_record_object(machine, r), node_machine_record_offset(machine, r));
-    }
-    else if (kind == CHECK_LOWER_TEMPLATE_LOCAL)
-    {
-        node_machine_put(machine, BUSTER_TYPED_LOCAL, class, node_machine_record_object(machine, r));
-    }
-    else if (kind == CHECK_LOWER_TEMPLATE_GLOBAL)
-    {
-        node_machine_put(machine, BUSTER_TYPED_GLOBAL, class, program->object_symbols[node_machine_record_object(machine, r)]);
-    }
-    else if (kind == CHECK_LOWER_TEMPLATE_DEREFERENCE && !address && !address_value)
-    {
-        node_machine_put(machine, BUSTER_TYPED_LOAD, class, check_lower_access_value(types, class, node_machine_record_type(machine, r)));
-    }
-    else if (kind == CHECK_LOWER_TEMPLATE_MEMBER)
-    {
-        const uint64_t offset = node_machine_record_member_offset(machine, r);
-        if (offset / 8 != 0)
-        {
-            node_machine_put(machine, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, offset / 8);
-            node_machine_put(machine, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
-        }
-        if (!address && !address_value)
-        {
-            node_machine_put(machine, BUSTER_TYPED_LOAD, class, check_lower_access_value(types, class, node_machine_record_type(machine, r)));
-        }
-    }
-    else if (kind == CHECK_LOWER_TEMPLATE_UNARY)
-    {
-        node_machine_put(machine, op == CHECK_OP_NEGATIVE ? BUSTER_TYPED_NEG : BUSTER_TYPED_NOT, class, 0);
-    }
-    else if (kind == CHECK_LOWER_TEMPLATE_TRUTH)
-    {
-        node_machine_put_truth(machine, node_machine_class(machine, node_machine_record_converted(machine, r, 0)), op == CHECK_OP_NOT);
-    }
-    else if (kind == (CheckLowerTemplate)NODE_MACHINE_TEMPLATE_BRANCH)
-    {
-        // After its second operand's or second arm's row: a logical operator's test of it, its jump to its end, its
-        // alternate and its value there, 0 for `&&` and 1 for `||`; then its end, which a conditional's first arm jumps to.
-        const uint32_t alternate = node_machine_record_label_base(machine, r);
-        if (op != CHECK_OP_CONDITIONAL)
+            node_machine_put(machine, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, node_machine_record_op(machine, r) == CHECK_OP_LOGICAL_OR);
+        } break;
+        case NODE_MACHINE_TEMPLATE_SECOND:
         {
             node_machine_put_truth(machine, node_machine_class(machine, node_machine_record_converted(machine, r, 1)), false);
-            node_machine_put(machine, class == BUSTER_TYPED_CLASS_VOID ? BUSTER_TYPED_JUMP : BUSTER_TYPED_JUMP_VALUE, class, alternate + 1);
-            machine->label_entries[alternate] = machine->entry_count;
-            node_machine_put(machine, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, op == CHECK_OP_LOGICAL_OR);
-        }
-        machine->label_entries[alternate + 1] = machine->entry_count;
-    }
-    else if (kind == (CheckLowerTemplate)NODE_MACHINE_TEMPLATE_DECIDED)
-    {
-        node_machine_put(machine, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, op == CHECK_OP_LOGICAL_OR);
-    }
-    else if (kind == (CheckLowerTemplate)NODE_MACHINE_TEMPLATE_SECOND)
-    {
-        node_machine_put_truth(machine, node_machine_class(machine, node_machine_record_converted(machine, r, 1)), false);
-    }
-    else if (kind == CHECK_LOWER_TEMPLATE_BINARY)
-    {
-        node_machine_put(machine, check_lower_binary(op), class, 0);
-    }
-    else if (kind == CHECK_LOWER_TEMPLATE_POINTER)
-    {
-        if (op == CHECK_OP_SUBTRACT)
+        } break;
+        case NODE_MACHINE_TEMPLATE_UPDATE:
         {
-            node_machine_put(machine, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_I64, 0);
-        }
-        node_machine_put(machine, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, check_action_pointer_stride(types, node_machine_record_converted(machine, r, 0)));
-        if (op == CHECK_OP_SUBSCRIPT && !address && !address_value)
+            node_machine_update_last(machine, node_machine_record_update(machine, r));
+        } break;
+        default:
         {
-            node_machine_put(machine, BUSTER_TYPED_LOAD, class, check_lower_access_value(types, class, node_machine_record_type(machine, r)));
-        }
-    }
-    else if (kind == CHECK_LOWER_TEMPLATE_STORE_LOCAL || kind == CHECK_LOWER_TEMPLATE_STORE_GLOBAL)
-    {
-        const uint32_t a = node_machine_record_left(machine, r);
-        const uint32_t target = op == CHECK_OP_INITIALIZE ? object : node_machine_record_object(machine, a);
-        node_machine_put(machine, kind == CHECK_LOWER_TEMPLATE_STORE_LOCAL ? BUSTER_TYPED_STORE_LOCAL : BUSTER_TYPED_STORE_GLOBAL, class,
-                         kind == CHECK_LOWER_TEMPLATE_STORE_LOCAL ? target : program->object_symbols[target]);
-    }
-    else if (kind == CHECK_LOWER_TEMPLATE_STORE)
-    {
-        node_machine_put(machine, BUSTER_TYPED_STORE, class, check_lower_access_value(types, class, node_machine_record_type(machine, r)));
-    }
-    else if (kind == BUSTER_NODE_MACHINE_TEMPLATE_UPDATE)
-    {
-        node_machine_update_last(machine, node_machine_record_update(machine, r));
+        } break;
     }
 }
 
@@ -363,12 +379,21 @@ static void node_machine_hook(NodeMachine* machine, uint32_t r, uint8_t state)
 // Call record `r`'s own entry, after its callee's and its arguments': a CALL of its result's class, whose value is its row
 // relative to the expression's. The lowering numbers a call's row when its task pops, before its operands' tasks (the
 // tasks' preorder), where X writes in postorder: its row is the evaluated calls before its subtree, every one written
-// before its least record, and those that contain it, its call depth (C's).
+// before its least record, and those that contain it, its call depth (C's). The calls written before its subtree are those
+// X wrote (`calls_written`, in postorder: increasing records) short of the ones in its subtree, which it wrote last.
 static void node_machine_call_own(NodeMachine* machine, uint32_t r)
 {
-    const uint32_t row = machine->calls_at[node_machine_record_lowest(machine, r)] + node_machine_record_call_depth(machine, r);
+    const uint32_t lowest = node_machine_record_lowest(machine, r);
+    const uint32_t written = machine->call_count;
+    uint32_t before = written;
+    while (before != 0 && machine->calls_written[before - 1] >= lowest)
+    {
+        before -= 1;
+    }
+    const uint32_t row = before + node_machine_record_call_depth(machine, r);
+    machine->calls_written[written] = r;
     machine->call_records[row] = r;
-    machine->call_count += 1;
+    machine->call_count = written + 1;
     node_machine_put(machine, BUSTER_TYPED_CALL, node_machine_record_class(machine, r), row);
 }
 
@@ -405,7 +430,6 @@ static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t obj
     uint32_t r = 0;
     while (refusal == NODE_MACHINE_TAKEN && r < count)
     {
-        machine->calls_at[r] = machine->call_count;
         const uint8_t state = node_machine_record_state(machine, r);
         if ((state & BUSTER_NODE_MACHINE_EVALUATED) != 0)
         {

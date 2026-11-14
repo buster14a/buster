@@ -1492,14 +1492,16 @@ static uint32_t tier0_register_bit(uint8_t reg, uint32_t allowed)
 // or the results') or none, and two apart; the first one present (eightbyte 0, or with `high` eightbyte 1 alone), the
 // second only past 8 bytes; with `split`, exactly one present (the other part in a stack slot) and 9 to 16 bytes. A
 // 16-byte aggregate's only XMM part takes the whole register, and so does a 32- or 64-byte one's YMM or ZMM part (a
-// vector's, or a struct of one's), which only an only vector register holds.
+// vector's, or a struct of one's), which only an only vector register holds. A 17--23-byte SSE/SSEUP record has a
+// 16-byte payload in that single XMM register, with its remaining bytes absent from register transport.
 static bool tier0_parts_valid(const uint8_t* registers, bool high, bool split, uint32_t size, uint32_t allowed)
 {
     const bool first = registers[0] != BUSTER_ABI_REGISTER_NONE;
     const bool second = registers[1] != BUSTER_ABI_REGISTER_NONE;
     const uint32_t first_bit = tier0_register_bit(registers[0], allowed);
     const uint32_t second_bit = tier0_register_bit(registers[1], allowed);
-    const bool wide = (size == 32 || size == 64) && first && (registers[0] & BUSTER_ABI_REGISTER_VECTOR) != 0 && !second && !high && !split;
+    const bool wide = ((size > 16 && size < 24) || size == 32 || size == 64) && first &&
+                       (registers[0] & BUSTER_ABI_REGISTER_VECTOR) != 0 && !second && !high && !split;
     bool valid = size != 0 && (size <= 16 || wide) && (!first || first_bit != 0) && (!second || second_bit != 0) && (first_bit & second_bit) == 0;
     if (split)
     {
@@ -1565,7 +1567,8 @@ static bool tier0_aggregate_result_valid(AbiReturn result, uint32_t size)
 {
     const bool high = (result.flags & BUSTER_ABI_FLAG_HIGH) != 0;
     const bool vector = tier0_vector_bytes_valid(result.part_bytes) && result.registers[1] == BUSTER_ABI_REGISTER_NONE &&
-                        (result.registers[0] & BUSTER_ABI_REGISTER_VECTOR) != 0 && !high && size == result.part_bytes;
+                        (result.registers[0] & BUSTER_ABI_REGISTER_VECTOR) != 0 && !high &&
+                        (size == result.part_bytes || (result.part_bytes == 16 && size > 16 && size < 24));
     const bool narrow = result.part_bytes != 0 && result.part_bytes < 8 && result.registers[1] == BUSTER_ABI_REGISTER_NONE && !high && size <= 8;
     const bool eightbytes = result.kind == BUSTER_ABI_RESULT_REGISTERS && (result.part_bytes == 8 || narrow || vector) &&
                             result.registers[2] == BUSTER_ABI_REGISTER_NONE && result.registers[3] == BUSTER_ABI_REGISTER_NONE &&

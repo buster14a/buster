@@ -302,9 +302,13 @@ takes its entries.
 
   They cost nothing on the 9700X: T's code is the same, C runs the same
   instructions a node and X ten fewer ([the design](../node-machine.md#step-1-the-shadow)).
-  C reads the comma's and a store's type before it evaluates their operands:
-  after `node_machine_evaluate`, a call, an accessor would load its column's
-  pointer again.
+  C's common cases name their operands (`NodeMachineUse`) and its loop
+  evaluates them inline (`node_machine_evaluate_at`): an out-of-line
+  `node_machine_evaluate`, a call, between a case's reads would make every
+  accessor after it load its column's pointer again. Calls, `&&`, `||`, `?:`
+  and updates evaluate theirs by `node_machine_evaluate`, which takes the
+  consumer. C classifies by one case an operator and X writes a record's row
+  by one case a template ([the design](../node-machine.md#cs-and-xs-dispatch-one-case-an-operator-one-a-template)).
 - **T's records** are the design's columns, not a whole `CheckValue` a record:
   a value's type, flags and object, a standing byte (its category, its
   constant kind and which field its 64-bit payload holds: its integer, its

@@ -176,10 +176,11 @@ static bool check_test_driver_read_file(int descriptor, char** text)
     return read;
 }
 
-// Runs `arguments` as a child, capturing the selected stream into *text (the caller frees it) and discarding the other:
-// with `exec`, the program arguments[0] names; without, this process's run_check_command in the forked child. Returns the
-// exit status, or -1 if it didn't exit.
-static int check_test_driver_child(char* const* arguments, char** text, bool stdout_capture, bool exec)
+// Runs `arguments` as a child, capturing the selected stream into *text (the caller frees it). The other is discarded,
+// except with inherit_errors: a runtime probe's stderr still reaches the test log while its stdout is checked alone.
+// With `exec`, the program arguments[0] names; without, this process's run_check_command in the forked child. Returns
+// the exit status, or -1 if it didn't exit.
+static int check_test_driver_child_streams(char* const* arguments, char** text, bool stdout_capture, bool exec, bool inherit_errors)
 {
     FILE* captured = tmpfile();
     int status = 0;
@@ -196,7 +197,7 @@ static int check_test_driver_child(char* const* arguments, char** text, bool std
         {
             const int output = open("/dev/null", O_WRONLY | O_CLOEXEC);
             if (output >= 0 && dup2(stdout_capture ? fileno(captured) : output, STDOUT_FILENO) >= 0 &&
-                dup2(stdout_capture ? output : fileno(captured), STDERR_FILENO) >= 0)
+                (inherit_errors || dup2(stdout_capture ? output : fileno(captured), STDERR_FILENO) >= 0))
             {
                 if (exec)
                 {
@@ -236,6 +237,11 @@ static int check_test_driver_child(char* const* arguments, char** text, bool std
         fclose(captured);
     }
     return read && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static int check_test_driver_child(char* const* arguments, char** text, bool stdout_capture, bool exec)
+{
+    return check_test_driver_child_streams(arguments, text, stdout_capture, exec, false);
 }
 
 // Whether --in-process takes buster's command line `arguments` (arguments[0] buster's name): a source command, an option
@@ -8579,6 +8585,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_unused_local_typedef_driver_test.c"
 #include "c_check_alignment_builtin_driver_test.c"
 #include "c_check_lvalue_cast_driver_test.c"
+#include "c_check_operand_diagnostic_driver_test.c"
 #include "c_check_default_error_driver_test.c"
 #include "c_check_shift_sign_overflow_driver_test.c"
 #include "c_check_assign_enum_driver_test.c"
@@ -8760,6 +8767,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool target_versions_only = false;
     // --semantic-recovery-only: the semantic error recovery section alone (#1447).
     bool semantic_recovery_only = false;
+    // --operand-diagnostics-only: rejected record and atomic operands, including constant contexts (#2441).
+    bool operand_diagnostics_only = false;
     // --type-sugar-only: the type sugar section alone (#1447).
     bool type_sugar_only = false;
     // --asm-definitions-only: what inline assembly defines, against clang's objects and builds, alone (#1848).
@@ -8794,6 +8803,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--semantic-recovery-only") == 0)
         {
             semantic_recovery_only = true;
+        }
+        else if (strcmp(argv[i], "--operand-diagnostics-only") == 0)
+        {
+            operand_diagnostics_only = true;
         }
         else if (strcmp(argv[i], "--type-sugar-only") == 0)
         {
@@ -8842,7 +8855,8 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
     }
     const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
-                             (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only;
+                             (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only +
+                             (uint32_t)operand_diagnostics_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -9359,6 +9373,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_type_sugar(&test, clang, executable, directory);
     }
+    if (temporary && operand_diagnostics_only)
+    {
+        check_test_driver_operand_diagnostics(&test, clang, executable, directory);
+    }
     if (temporary && call_counts_only)
     {
         check_test_driver_call_counts(&test, clang, executable, directory);
@@ -9565,6 +9583,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_unused_local_typedef,
             check_test_driver_alignment_builtins,
             check_test_driver_lvalue_casts,
+            check_test_driver_operand_diagnostics,
             check_test_driver_default_errors,
             check_test_driver_shift_sign_overflow,
             check_test_driver_assign_enum,
@@ -9930,6 +9949,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_tier1_gvn(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_passes(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

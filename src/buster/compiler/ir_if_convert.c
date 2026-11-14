@@ -180,14 +180,15 @@ struct IrIfConvertWork
     bool scalar;
 };
 
-_Static_assert(IR_OP_COUNT == 66, "a new operation needs its class in ir_if_convert_barriers");
-// Everything not listed is neither: pure operations, constants, plain loads (an observable one is a write, below),
-// phis, allocation and the stack save. A call may free or unmap memory; a stack restore and a lifetime's end release a
+_Static_assert(IR_OP_COUNT == 68, "a new operation needs its class in ir_if_convert_barriers");
+// Everything not listed is neither: pure operations, constants, loads (plain, masked and gathered; an observable plain
+// one is a write, below), phis, allocation and the stack save. A call may free or unmap memory; a stack restore and a lifetime's end release a
 // frame's; IR_INVALID never verifies but stays conservative.
 static const uint8_t ir_if_convert_barriers[BUSTER_IR_OP_TABLE] = {
     [IR_INVALID] = BUSTER_IR_IF_CONVERT_WRITE | BUSTER_IR_IF_CONVERT_RELEASE,
     [IR_STORE] = BUSTER_IR_IF_CONVERT_WRITE,
     [IR_MASKED_STORE] = BUSTER_IR_IF_CONVERT_WRITE,
+    [IR_COMPRESS_STORE] = BUSTER_IR_IF_CONVERT_WRITE,
     [IR_ATOMIC_RMW] = BUSTER_IR_IF_CONVERT_WRITE,
     [IR_FENCE] = BUSTER_IR_IF_CONVERT_WRITE,
     [IR_CALL] = BUSTER_IR_IF_CONVERT_WRITE | BUSTER_IR_IF_CONVERT_RELEASE,

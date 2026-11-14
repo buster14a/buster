@@ -72,7 +72,7 @@ tools/ci/costs/ROW.costs`: the runner deals the commands to the shards by the
 row's own costs on a hosted runner, the costliest first, each to the shard that
 would end the earliest with it, the same deal on every shard's runner, so that
 a row's shards run every command once (docs/commands/parallel.md). The plain
-rows run as 4 shards, the `x86-64` TSan and MSan rows as 6 and its ASan row as
+rows run as 4 shards, the `x86-64` TSan and MSan rows as 7 and its ASan row as
 4 (#2031; [Shard costs](commands/ci.md#shard-costs)
 has the tables and the plans). Unsharded, a plain row's test step took 14.6
 minutes of its 18-minute job on one 4-CPU runner, and the MSan rows took up to

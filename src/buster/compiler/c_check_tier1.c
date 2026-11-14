@@ -179,13 +179,25 @@ static void check_tier1_lane_release(CheckTier1Lane* lane)
     *lane = (CheckTier1Lane){ 0 };
 }
 
-// The lane's arenas, reserved at its first body and emptied for each, and the forms `target` allows, built again only
-// for a target other than the last one's. The solver's arena (#866, step 7) is reserved only when `gvn` asks for it, so
-// that --tier1 alone maps no address space it never uses. Returns false if one can't be reserved.
-static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* target, bool gvn)
+_Static_assert(BUSTER_CHECK_TIER1_PASS_SCCP == BUSTER_IR_OPTIMIZE_SCCP && BUSTER_CHECK_TIER1_PASS_DCE == BUSTER_IR_OPTIMIZE_DCE &&
+                   BUSTER_CHECK_TIER1_PASS_CFG == BUSTER_IR_OPTIMIZE_CFG && BUSTER_CHECK_TIER1_PASS_MERGE == BUSTER_IR_OPTIMIZE_MERGE,
+               "--tier1-passes= passes the optimizer's own bits");
+
+// The passes `lane`'s bodies run (BUSTER_CHECK_TIER1_PASS_*): the default pipeline's, turned over where --tier1-passes=
+// turned them (CheckTier1Lane.passes, #139).
+static uint32_t check_tier1_passes_on(const CheckTier1Lane* lane)
 {
-    const uint32_t steps = gvn ? BUSTER_CHECK_TIER1_STEPS : BUSTER_CHECK_TIER1_STEPS - 1;
-    if (!lane->reserved || lane->gvn_reserved != gvn)
+    return (BUSTER_CHECK_TIER1_PASSES_DEFAULT ^ lane->passes) & BUSTER_CHECK_TIER1_PASSES_ALL;
+}
+
+// The lane's arenas, reserved at its first body and emptied for each, and the forms `target` allows, built again only
+// for a target other than the last one's. The optional passes' arenas (#866's solver's, step 7, and SROA's and LICM's
+// from --tier1-passes=, steps 8 and 9) are reserved only where `optional` asks for them (bit k for step
+// BUSTER_CHECK_TIER1_STEPS_ALWAYS + k), so that --tier1 alone maps no address space it never uses. Returns false if one
+// can't be reserved.
+static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* target, uint8_t optional)
+{
+    if (!lane->reserved || lane->optional_reserved != optional)
     {
         for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_STEPS; k += 1)
         {
@@ -193,22 +205,24 @@ static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* targ
         }
         arena_release(&lane->scratch);
         arena_release(&lane->forms);
-        for (uint32_t k = 0; k < steps; k += 1)
+        for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_STEPS; k += 1)
         {
-            lane->steps[k] = arena_reserve(UINT64_C(1) << 34);
+            const bool reserve = k < BUSTER_CHECK_TIER1_STEPS_ALWAYS || ((optional >> (k - BUSTER_CHECK_TIER1_STEPS_ALWAYS)) & 1) != 0;
+            lane->steps[k] = reserve ? arena_reserve(UINT64_C(1) << 34) : (Arena){ 0 };
         }
         lane->scratch = arena_reserve(UINT64_C(1) << 36);
         lane->forms = arena_reserve_small(X86_FORM_COUNT, X86_FORM_COUNT);
         lane->allowed = BUSTER_ARENA_PUSH_ARRAY(&lane->forms, uint8_t, X86_FORM_COUNT);
         lane->reserved = true;
-        lane->gvn_reserved = gvn;
+        lane->optional_reserved = optional;
         // The new forms arena is empty: the target's forms must be built again even for the same target.
         lane->targeted = false;
     }
     bool valid = lane->scratch.base != 0 && lane->allowed != 0;
-    for (uint32_t k = 0; k < steps; k += 1)
+    for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_STEPS; k += 1)
     {
-        valid = valid && lane->steps[k].base != 0;
+        const bool reserved = k < BUSTER_CHECK_TIER1_STEPS_ALWAYS || ((optional >> (k - BUSTER_CHECK_TIER1_STEPS_ALWAYS)) & 1) != 0;
+        valid = valid && (!reserved || lane->steps[k].base != 0);
         arena_pop_to(&lane->steps[k], 0);
     }
     arena_pop_to(&lane->scratch, 0);
@@ -294,6 +308,8 @@ struct CheckTier1Passes
     uint32_t pre_moved;
     // The operand sink's expressions (#2592).
     uint32_t sunk;
+    // --tier1-passes=+licm's moved values (#139).
+    uint32_t licm_moved;
     bool unexpanded;
 };
 
@@ -388,6 +404,23 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         stage = outcome.stage;
         wide.function = stage == CHECK_TIER1_COMPILED ? converted.function : wide.function;
     }
+    // --tier1-passes=+licm (#139's measurement): loop-invariant motion, in steps[9], before the optimizer, whose dead-code
+    // removal, CFG cleanup and final verification then take its result. A function it refuses (IR_ERROR_UNSUPPORTED:
+    // vectors, and the constructs ir_optimize_licm.c names) goes on as it was; any other error is the function's.
+    const uint32_t on = check_tier1_passes_on(lane);
+    if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_LICM) != 0)
+    {
+        IrLicmOptions options = ir_licm_options();
+        options.scalar = scalar;
+        IrLicmResult moved = { 0 };
+        const IrCheck check = ir_optimize_licm(&wide.function, &lane->steps[9], scratch, options, &moved);
+        const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;
+        outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, error, check.instruction, check.detail, NULL);
+        outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
+        stage = outcome.stage;
+        wide.function = stage == CHECK_TIER1_COMPILED && check.error == IR_OK ? moved.function : wide.function;
+        passes->licm_moved = check.error == IR_OK ? moved.moved : 0;
+    }
     // --tier1-schedule=pre (#172): each block's instructions reordered on the same owned columns, before the optimizer's
     // final verification, which then covers the new order. No room for the pass's scratch is a resource failure.
     if (stage == CHECK_TIER1_COMPILED && lane->schedule == BUSTER_CHECK_TIER1_SCHEDULE_PRE)
@@ -426,8 +459,11 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     }
     if (stage == CHECK_TIER1_COMPILED)
     {
+        // SCCP, dead-code removal, CFG cleanup and its merges as --tier1-passes= leaves them; the rewrite and its
+        // verification run whatever they are.
         IrOptimizeOptions options = ir_optimize_options();
-        options.passes |= BUSTER_IR_OPTIMIZE_LAYOUT | BUSTER_IR_OPTIMIZE_IDENTITY;
+        options.passes = (on & (BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_MERGE)) | BUSTER_IR_OPTIMIZE_LAYOUT |
+                        BUSTER_IR_OPTIMIZE_IDENTITY;
         options.scalar = scalar;
         const IrCheck check = ir_optimize_verified(&wide.function, output, analyses, scratch, options, revision, &passes->optimized, &passes->analysis);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
@@ -446,8 +482,12 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
 {
     *code = (EmittedCode){ 0 };
     *counts = (CheckTier1Counts){ 0 };
+    // --tier1-passes='s SROA on every body, and LICM, each with an arena of its own.
+    const uint32_t on = check_tier1_passes_on(lane);
+    const bool sroa = (on & BUSTER_CHECK_TIER1_PASS_SROA) != 0;
+    const uint8_t optional = (uint8_t)((gvn ? 1u : 0) | (sroa ? 2u : 0) | ((on & BUSTER_CHECK_TIER1_PASS_LICM) != 0 ? 4u : 0));
     CheckTier1Outcome outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA,
-                                                check_tier1_lane_prepare(lane, target, gvn) ? 0 : BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, fault);
+                                                check_tier1_lane_prepare(lane, target, optional) ? 0 : BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, fault);
     CheckTier1Stage stage = outcome.stage;
     Arena* scratch = &lane->scratch;
     const IrType result_type = result_class == UINT8_MAX ? IR_VOID : (IrType)ir_typed_types[result_class];
@@ -462,14 +502,14 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     }
     // A candidate whose summary is ready (#2541, c_check_tier1_inline.c's check_tier1_inline_own) goes on from it to
     // selection: the summary was its lowering, its calls' expansion and Tier 1's passes (check_tier1_passes), done once
-    // for the unit. Not with source rows, which the summary has none of, the solver, which runs before promotion, or a
-    // fault, which may be any pass's.
+    // for the unit. Not with source rows, which the summary has none of, the solver or --tier1-passes=+sroa, which run
+    // before promotion, or a fault, which may be any pass's.
     const CheckTier1Inline* inlining = lane->inlining;
     const uint64_t body = inlining != NULL ? (uint64_t)(function - inlining->lowered->functions) : UINT64_MAX;
     const bool member = inlining != NULL && function >= inlining->lowered->functions && body < inlining->program->body_count;
     CheckTier1Passes passes = { 0 };
     uint32_t inlined_calls = 0;
-    const bool own = stage == CHECK_TIER1_COMPILED && member && !function->calls_returns_twice && !sources && !gvn && fault == NULL &&
+    const bool own = stage == CHECK_TIER1_COMPILED && member && !function->calls_returns_twice && !sources && !gvn && !sroa && fault == NULL &&
                      check_tier1_inline_own(lane, (uint32_t)body, scalar, certify, &passes, &inlined_calls);
     if (stage == CHECK_TIER1_COMPILED && !own)
     {
@@ -492,6 +532,30 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     {
         lowered = expanded;
         lowered_verified = expanded_verified;
+    }
+    // --tier1-passes=+sroa (#139's measurement): SROA on every body, the expansion where there is one, in steps[8], with
+    // the inlining's options (#1282's simd and flagged), before the solver and promotion. A body it refuses
+    // (IR_ERROR_UNSUPPORTED) goes on as it was; any other error is the body's, as the solver's are.
+    uint32_t sroa_split = 0;
+    if (stage == CHECK_TIER1_COMPILED && sroa)
+    {
+        IrSroaOptions options = ir_sroa_options();
+        options.scalar = scalar;
+        options.simd = true;
+        options.flagged = true;
+        IrSroaResult split = { 0 };
+        const IrCheck check = ir_optimize_sroa(&lowered, &lane->steps[8], scratch, options, &split);
+        const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;
+        outcome = check_tier1_step(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, error, check.instruction, check.detail, NULL);
+        outcome.operation = check.instruction < lowered.instruction_count ? lowered.op[check.instruction] : IR_OP_COUNT;
+        stage = outcome.stage;
+        if (check.error == IR_OK)
+        {
+            // SROA verifies its input as it prepares and its output as it ends.
+            lowered = split.function;
+            lowered_verified = true;
+            sroa_split = split.split_slots;
+        }
     }
     // #866's congruence solver, before promotion, so that promotion's phi placement decides what its merged values
     // need: on promoted SSA its class representatives lengthen live ranges across blocks, which Tier 1's allocation then
@@ -674,6 +738,13 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .schedule_blocks = pre_blocks,
             .schedule_moved = pre_moved,
             .sunk = sunk,
+            .folded = passes.optimized.folded,
+            .removed_instructions = passes.optimized.removed_instructions,
+            .removed_blocks = passes.optimized.removed_blocks,
+            .merged_blocks = passes.optimized.merged_blocks,
+            .licm_moved = passes.licm_moved,
+            .sroa_split = sroa_split,
+            .gvn_removed = gvn_applied ? gvn_result.removed : 0,
         };
         if (emitted.frame_event_count != 0)
         {
@@ -842,9 +913,11 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
     fprintf(stream, "\trecords=%" PRIu64 "\tspill_stores=%" PRIu64 "\tspill_loads=%" PRIu64 "\tcall_stores=%" PRIu64 "\tcall_loads=%" PRIu64 "\trematerializations=%" PRIu64
                     "\tdropped_definitions=%" PRIu64 "\tedge_moves=%" PRIu64 "\tspill_slots=%" PRIu64 "\tframe_bytes=%" PRIu64 "\topen_frames=%" PRIu64
                     "\treturn_tails=%" PRIu64 "\tred_zones=%" PRIu64 "\tcode_certified=%" PRIu64 "\tcode_uncertified=%" PRIu64 "\tmachine_rows=%" PRIu64 "\trow_moves=%" PRIu64 "\tinlined=%" PRIu64
-                    "\tschedule_blocks=%" PRIu64 "\tschedule_moved=%" PRIu64 "\tsunk=%" PRIu64 "\n",
+                    "\tschedule_blocks=%" PRIu64 "\tschedule_moved=%" PRIu64 "\tsunk=%" PRIu64 "\tfolded=%" PRIu64 "\tremoved_instructions=%" PRIu64
+                    "\tremoved_blocks=%" PRIu64 "\tmerged_blocks=%" PRIu64 "\tlicm_moved=%" PRIu64 "\tsroa_split=%" PRIu64 "\tgvn_removed=%" PRIu64 "\n",
             report->records, report->spill_stores, report->spill_loads, report->call_stores, report->call_loads, report->rematerializations,
             report->dropped_definitions, report->edge_moves, report->spill_slots, report->frame_bytes, report->open_frames, report->return_tails, report->red_zones,
             report->code_certified, report->code_uncertified, report->machine_rows, report->row_moves, report->inlined_calls, report->schedule_blocks,
-            report->schedule_moved, report->sunk);
+            report->schedule_moved, report->sunk, report->folded, report->removed_instructions, report->removed_blocks, report->merged_blocks, report->licm_moved,
+            report->sroa_split, report->gvn_removed);
 }

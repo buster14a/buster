@@ -564,6 +564,9 @@ static bool ir_source_exhausted(const char* file, char** options, uint32_t optio
 
 // Defined with the benchmark: its corpus admission and both measured lowering paths, without a timing report.
 static int run_ir_source_benchmark_tests(int count, char** arguments);
+// #139's passes on real C (ir_source_passes.c): test-ir-source --passes and benchmark-ir-source --passes.
+static int run_ir_source_passes_tests(int count, char** arguments);
+static int run_ir_source_passes_benchmark(int count, char** arguments);
 
 static int ir_source_tests_command(int count, char** arguments)
 {
@@ -756,7 +759,10 @@ static int ir_source_tests_command(int count, char** arguments)
 static int run_ir_source_tests(int count, char** arguments)
 {
     const bool benchmark = count > 0 && strcmp(arguments[0], "--benchmark-self-test") == 0;
-    return benchmark ? run_ir_source_benchmark_tests(count - 1, arguments + 1) : ir_source_tests_command(count, arguments);
+    const bool passes = count > 0 && strcmp(arguments[0], "--passes") == 0;
+    return benchmark ? run_ir_source_benchmark_tests(count - 1, arguments + 1) :
+           passes    ? run_ir_source_passes_tests(count - 1, arguments + 1) :
+                       ir_source_tests_command(count, arguments);
 }
 
 #endif

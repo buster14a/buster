@@ -541,6 +541,7 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
     arena_pop_to(&lane->steps[4], 0);
     arena_pop_to(&lane->steps[5], 0);
     arena_pop_to(&lane->steps[6], 0);
+    arena_pop_to(&lane->steps[9], 0);
     arena_pop_to(scratch, scratch_mark);
     lane_publish(&inlining->states[b], built ? BUSTER_CHECK_TIER1_INLINE_READY : BUSTER_CHECK_TIER1_INLINE_REFUSED);
 }

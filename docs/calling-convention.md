@@ -153,7 +153,7 @@ what it is (`abi_finish`):
 | 10, 11 | `SIGN`, `ZERO` | clang's `Extend`: the caller extends the value to 32 bits; for a result, what clang's IR asks of the callee, which LLVM's x86-64 code doesn't do (see "Extension") |
 | 12 | `AGGREGATE` | clang's `byval`: in memory as an argument, a copy on the stack (or an integer value: see "Two counts") |
 | 13 | `END_MEMORY` | a type of no size that is MEMORY at offset 16 though not at 0 |
-| 14 | `UNSUPPORTED` | what the module doesn't place as clang and LLVM do, which the code generator refuses: an `UNCOUNTED` value LLVM splits into more parts than a location holds, as no class says (an `_Atomic` vector wider than 16 bytes and than the target's vector registers, or one LLVM breaks into its elements, and an integer of more than 128 bits); a vector SSE, SSEUP by its classes that LLVM breaks up (of bools or of `_BitInt`s narrower than a byte, of long doubles, of two or more `__float128`s, of `_BitInt`s wider than 128 bits), and a record or an array of one such member, which clang passes as it; and one of `_BitInt(128)`s, whose `i64`s LLVM puts in general registers once clang has no vector register for it; a record SSE, SSEUP of a size no vector register has, which clang passes as `<size / 8 x double>`; a type holding a `LARGER` one that clang lays out otherwise than the C type, or whose LLVM size the module doesn't keep; and one whose INTEGER high eightbyte clang reads as an `i128` from offset 8, under an SSE or NO_CLASS low one (see "Where clang's LLVM types decide") |
+| 14 | `UNSUPPORTED` | what the module doesn't place as clang and LLVM do, which the code generator refuses: an `UNCOUNTED` value LLVM splits into more parts than a location holds, as no class says (an `_Atomic` vector wider than 16 bytes and than the target's vector registers, or one LLVM breaks into its elements, and an integer of more than 128 bits); a vector SSE, SSEUP by its classes that LLVM breaks up (of bools or of `_BitInt`s narrower than a byte, of long doubles, of two or more `__float128`s, of `_BitInt`s wider than 128 bits), and a record or an array of one such member, which clang passes as it; and one of `_BitInt(128)`s, whose `i64`s LLVM puts in general registers once clang has no vector register for it; a record SSE, SSEUP of a size past 23 bytes that no vector register has, which clang passes as `<size / 8 x double>`; a type holding a `LARGER` one that clang lays out otherwise than the C type, or whose LLVM size the module doesn't keep; and one whose INTEGER high eightbyte clang reads as an `i128` from offset 8, under an SSE or NO_CLASS low one (see "Where clang's LLVM types decide") |
 | 15 | `CLASSIFIED` | the row and these bits are in the table |
 | 16 to 18 | `VALUE` | the kind of value a scalar in memory passes as: a general register (`GENERAL`), two (`PAIR`), a vector register (`VECTOR`), x87's (`X87`), which always goes on the stack, so that such a type isn't `UNCOUNTED`, or two halves, each in a general register while one is left and then on the stack (`HALVES`: a `<1 x i128>`, which LLVM splits as it never does an `i128`) |
 | 20 to 25 | `ALIGNMENT` | the log2 of the stack slot's alignment: 3, or the type's own if larger (an aggregate's own, an `_Atomic` one's canonical type's, a scalar's value's natural one) |
@@ -321,7 +321,9 @@ clang's LLVM types decide").
   what a vector register holds of it, or for an x87 register 16 bytes for an
   80-bit value, 10 for one of a vector of long doubles (packed 10 bytes
   apart), and 8 for a double (the third of a `<3 x double>`, after xmm0 and
-  xmm1);
+  xmm1). For a 17–23-byte record classified SSE, SSEUP, `part_bytes` is 16:
+  only the first 16 bytes travel in xmm0, while its local storage and stack
+  copies keep the C size;
 - **flags:** `SIGN` or `ZERO` (clang's IR has the callee extend to 32 bits,
   which neither its x86-64 code nor GCC's does: a caller extends a narrow
   result itself, as "Extension" says), `HIGH` (the
@@ -1039,10 +1041,16 @@ and has a fixture:
   bytes: 17 to 23 bytes as `<2 x double>` in xmm0, losing the rest; 24 to 31
   as `<3 x double>` in ymm0 (on the stack in a variadic call, in a 32-byte
   slot aligned to 32); 33 to 39 in a ymm register and 40 to 63 in a zmm one.
-  Each size would need its register width apart from the type's size, which
-  Tier 0's parts don't have, so the module refuses them (`UNSUPPORTED`, still
-  `VECTOR` and `WIDE` as their classes say), and the producer refuses them in
-  calls and in `va_arg`, whose save area clang reads as that vector.
+  The 17–23-byte case is supported (#2113): `VECTOR` without `WIDE` or
+  `SMALLER`, a 16-byte register payload in either tier and a 24-byte stack
+  slot holding the complete C object when vector registers are exhausted.
+  `va_arg` consumes one 16-byte save-area slot or advances 24 bytes in the
+  overflow area. Keeping the C size is necessary: clang's local objects and
+  exhausted `byval` arguments still contain all 17–23 bytes. At x86-64's
+  16-byte target width these records are MEMORY and keep every byte for
+  arguments and results. The larger irregular widths remain refused
+  (`UNSUPPORTED`, still `VECTOR` and `WIDE`), including in calls and `va_arg`;
+  they need wider register payloads and stack rules beyond this bounded case.
 - **`i128` storage.** An `i128` at a record's offset 0 makes the record one
   `i128` value (`PAIR`), which LLVM never splits, in a stack slot aligned to
   16 whatever the record's alignment. With a NO_CLASS high eightbyte too, as
@@ -1568,7 +1576,7 @@ no signature passes. For a `SMALLER` type the C side copies and checks LLVM's
 bytes, as clang's own objects of it are no larger, and our callee stores those
 through a hidden pointer. The unnamed arguments leave out the types the
 default argument promotions change, `nullptr_t` and `_Atomic` ones, types
-wider than 16 bytes that are SSE, SSEUP as unnamed arguments, types of no
+wider than 23 bytes that are SSE, SSEUP as unnamed arguments, types of no
 size, `SMALLER` ones and `WIDE` vectors of `_BitInt(128)`s, whose calls and
 `va_arg`s clang passes differently (see "va_arg"), and `LOW_GENERAL` ones. Two
 kinds of argument become `long`s, since clang disagrees with itself on them:
