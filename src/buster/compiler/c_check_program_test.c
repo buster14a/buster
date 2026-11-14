@@ -2173,7 +2173,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                 check_test_expect(test, same, "experimental node templates retain the exact power-of-two task stream");
             }
             // #2678's fixtures: their constants' conversions folded, on both lowerings and by the node templates.
-            if (strcmp(name, "constant-conversions") == 0 || strcmp(name, "constant-conversion-code") == 0)
+            if (strcmp(name, "constant-conversions") == 0 || strcmp(name, "constant-conversion-code") == 0 || strcmp(name, "constant-conversion-controls") == 0)
             {
                 check_test_constant_conversion_lowered(test, name, lower, &program, &output, &scratch);
             }

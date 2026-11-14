@@ -68,15 +68,28 @@ static void check_test_constant_conversion_code(CheckTest* test, const CheckProg
     }
 }
 
+// Whether `function` has an integer CONST holding `value` that a CONVERT to `class` follows: a conversion kept.
+static bool check_test_constant_conversion_kept(const Tier0Function* function, uint64_t value, uint8_t class)
+{
+    bool found = false;
+    for (uint32_t e = 0; e < function->count; e += 1)
+    {
+        found |= check_test_constant_conversion_pair(function, e) && function->values[e] == value && function->classes[e + 1] == class;
+    }
+    return found;
+}
+
 // Both lowerings' functions of #2678's fixtures, by the fixture's name (`lowered` the harness's two lowerings of one
 // checked program), and its node templates' (check_program_lower_templates), which must write the tasks' entries.
 // "constant-conversions" folds every integer constant's conversion: no integer CONST a CONVERT follows, F32's and F64's
 // CONSTs where the source writes integers, and _Bool's U8 1; "constant-conversion-code" is the issue's four functions'
-// code (check_test_constant_conversion_code).
+// code (check_test_constant_conversion_code); "constant-conversion-controls" keeps the conversions that round: 16777217
+// and 4294967295 to float, 2^53 + 1 and 2^64 - 1 to double.
 static void check_test_constant_conversion_lowered(CheckTest* test, const char* name, const CheckProgramLowered lowered[2], const CheckProgram* program, Arena* output,
                                                    Arena* scratch)
 {
     const bool code = strcmp(name, "constant-conversion-code") == 0;
+    const bool controls = strcmp(name, "constant-conversion-controls") == 0;
     char description[256];
     for (uint32_t p = 0; p < 2; p += 1)
     {
@@ -86,6 +99,7 @@ static void check_test_constant_conversion_lowered(CheckTest* test, const char* 
         bool double_one = false;
         bool double_two = false;
         bool bool_one = false;
+        uint32_t rounding = 0;
         for (uint32_t b = 0; b < lowered[p].count; b += 1)
         {
             const Tier0Function* function = lowered[p].functions + b;
@@ -97,10 +111,19 @@ static void check_test_constant_conversion_lowered(CheckTest* test, const char* 
             double_one |= check_test_constant_conversion_has(function, BUSTER_TYPED_CLASS_F64, UINT64_C(0x3ff0000000000000));
             double_two |= check_test_constant_conversion_has(function, BUSTER_TYPED_CLASS_F64, UINT64_C(0xc000000000000000));
             bool_one |= check_test_constant_conversion_has(function, BUSTER_TYPED_CLASS_U8, 1);
+            rounding |= check_test_constant_conversion_kept(function, 16777217, BUSTER_TYPED_CLASS_F32) ? 1u : 0u;
+            rounding |= check_test_constant_conversion_kept(function, UINT64_C(9007199254740993), BUSTER_TYPED_CLASS_F64) ? 2u : 0u;
+            rounding |= check_test_constant_conversion_kept(function, UINT64_MAX, BUSTER_TYPED_CLASS_F64) ? 4u : 0u;
+            rounding |= check_test_constant_conversion_kept(function, UINT32_MAX, BUSTER_TYPED_CLASS_F32) ? 8u : 0u;
         }
         if (code)
         {
             check_test_constant_conversion_code(test, lowered + p, way, scratch);
+        }
+        else if (controls)
+        {
+            snprintf(description, sizeof(description), "%s (%s): the four constants a conversion rounds keep their CONVERT (found %#x of 0xf)", name, way, rounding);
+            check_test_expect(test, rounding == 0xf, description);
         }
         else
         {
