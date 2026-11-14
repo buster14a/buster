@@ -1425,6 +1425,7 @@ swaps:
   division, so the records save and restore it besides moving it.
   Only the allocation avoiding `rax` and `rdx` for a divisor would
   remove them, as fixed ranges keep values out of a call's clobbers.
+  #2767 does ("Values live across fixed sequences" below).
 - **1.48 M: `OP_GETTABUP`'s fetch.** It swaps `pc` and `i` (as main
   does): the handler spills `pc` around its call, and reloads it into
   another register than the dispatch's.
