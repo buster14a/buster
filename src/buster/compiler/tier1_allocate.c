@@ -597,8 +597,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             const bool recomputed = tier1_allocation_spill_kind(&columns, interval) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
             // An unused recipe may keep an unclaimed free register, preserving a hoisted definition without taking
             // a continuing value's register. It never evicts one; an unused value last in memory stays there, and so
-            // does an unused recipe whose hint names no register (#2618): the edges into its block then recompute nothing
-            // for it, where they moved it into the register it idled in (luaV_execute's frame objects' addresses).
+            // does an unused recipe hinted to a range's opening that took no register (#2618, `rests` below).
             const bool idle = !use_event && !required && columns.use_offsets[interval] == columns.use_offsets[interval + 1] && (recomputed || follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT);
             const bool starting = !use_event && position == claims_at;
             // A value without a recipe takes its value's hinted register (no static hint of its own overriding it) from a
@@ -619,7 +618,13 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             const uint32_t open = free & ~(starting ? claimed & ~mine : 0);
             claimed &= ~mine;
             uint32_t chosen = UINT32_MAX;
-            if (idle && (!recomputed || open == 0 || follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT))
+            // An unused recipe rests where its hint is another range's opening that took no register: the convention of the
+            // block it takes, whose edges then recompute nothing for it (hexFunc's header, after its body). A range's
+            // closing after a call took the register isn't one: luaV_execute's dispatch join then took no register for
+            // disptab, which every dispatch recomputed.
+            const uint32_t named = last != 0 && columns.hint_intervals != 0 ? columns.hint_intervals[interval] : UINT32_MAX;
+            const bool rests = follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT && named != UINT32_MAX && (named & BUSTER_TIER1_ALLOCATE_HINT_EXIT) == 0;
+            if (idle && (!recomputed || open == 0 || rests))
             {
             }
             else if (open != 0 || (free != 0 && required))
