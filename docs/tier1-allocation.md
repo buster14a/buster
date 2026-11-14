@@ -1426,6 +1426,29 @@ swaps:
   does): the handler spills `pc` around its call, and reloads it into
   another register than the dispatch's.
 
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-carried-recipes-2734-2026-11-14),
+#2553's method, a hold of the lock per round), main `21e0d999` against this
+change, the time follows the instructions, unlike #2592's earlier steps,
+whose removed moves Zen 5 eliminates at rename:
+
+| Program | Metric | change / main | 95% interval |
+| --- | --- | ---: | ---: |
+| Lua's five scripts, 33 link orders | user cycles | −1.40% | −1.75% to −1.04% |
+| | user instructions | −2.08% | −2.10% to −2.06% |
+| speedtest1, 8 layouts | user cycles | −0.60% | −0.92% to −0.27% |
+| | user instructions | −1.20% | |
+
+- **Lua.** It is faster at 29 of the 33 orders. By script, `arithmetic`
+  runs −3.07% and `calls` −2.25%. `closures` and `tables` are within their
+  intervals of zero.
+- **speedtest1.** It is faster at all eight layouts.
+- **Static reports.** Lua's objects move 2,530 values at edges instead of
+  3,056 (`lvm.o` 881 instead of 1,196), and speedtest1's 35,590 instead of
+  39,235. Spills don't change.
+- **Compile cost.** `sqlite3.c`'s `--tier1 -c` takes 0.66% more cycles
+  (0.61% more time) for 0.33% more instructions, and `lvm.c`'s 0.61% more
+  cycles at the same time.
+
 Tests:
 
 - `test-tier1-cfg` counts the ranges the proof takes in its random
