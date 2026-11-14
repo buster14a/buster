@@ -1185,7 +1185,14 @@ build's parallel split, put the list's functions of that section first in it.
   script (`cmake/BusterStartOrder.cmake` writes `start-order.ld` into the
   tree at configuration) names each function by its unit's object, the unit's
   own (`*/UNIT.c.o`) or its parallel parts' join (`*/UNIT/native.o`), and its
-  section (`.text.NAME`, `.text.unlikely.NAME`, `.text.hot.NAME`). The
+  section (`.text.NAME`, `.text.unlikely.NAME`, `.text.hot.NAME`). In a join
+  a local function that another part calls can have its alias's name alone,
+  where its own part's optimizer folded the two (`.text.NAME.buster_split`),
+  which the script names too: naming the first alone, it left 368 of the
+  list's 511 functions in `.text` (the start's section 197 KB, against the
+  whole build's 787 KB). `build-regression`'s compiler in parts checks that
+  every listed function whose section its unit's join holds is in
+  `.text.buster_start`. The
   others go by name in a symbol ordering file (`start-order.symbols`), which
   puts their sections first in `.text`, right after; `start-order` leaves out
   any whose name a unit's static shares, which the name would move too.

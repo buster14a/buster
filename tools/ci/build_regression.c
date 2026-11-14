@@ -4016,6 +4016,97 @@ static void check_join_unreferenced(void)
     pass("the join discards the parts' aliased functions no live code calls, with what only they reach, and keeps the rest");
 }
 
+// Whether `text`, nm's listing, defines a function `name` (or its alias, NAME.buster_split) in [start, end).
+static bool start_order_placed(const char* text, const char* name, unsigned long long start, unsigned long long end)
+{
+    bool placed = false;
+    const size_t length = strlen(name);
+    for (const char* cursor = text; !placed && (cursor = strstr(cursor, name)) != 0; cursor += length)
+    {
+        const bool whole = cursor[length] == '\n' || strncmp(cursor + length, ".buster_split\n", 14) == 0;
+        // "ADDRESS t NAME": the name starts a line's third field.
+        if (whole && cursor >= text + 2 && cursor[-1] == ' ' && (cursor[-2] == 't' || cursor[-2] == 'T'))
+        {
+            const char* line = cursor;
+            while (line != text && line[-1] != '\n')
+            {
+                line -= 1;
+            }
+            const unsigned long long address = strtoull(line, 0, 16);
+            placed = address >= start && address < end;
+        }
+    }
+    return placed;
+}
+
+// The start's code order in the compiler in parts (#1444, BusterStartOrder.cmake): every function the list names
+// whose section its unit's join holds (.text.NAME, or .text.NAME.buster_split where a part's optimizer left it its
+// alias's name alone) is in .text.buster_start. The link script named the first alone, and 368 of the list's 511
+// functions stayed in .text, where the start's faults spread over more of the executable. `tree` is the configuration's
+// directory (TREE/Release).
+static void check_parallel_codegen_start_order(const char* executable, const char* tree)
+{
+    char* headers[] = { "readelf", "-SW", (char*)executable, 0 };
+    Text table = capture(headers);
+    char line[512];
+    unsigned long long start = 0;
+    unsigned long long size = 0;
+    const char* field = line_holding(table.data, " .text.buster_start ", line, sizeof(line)) ? strstr(line, "PROGBITS") : 0;
+    free(table.data);
+    if (field == 0 || sscanf(field, "PROGBITS %llx %*s %llx", &start, &size) != 2)
+    {
+        // A build without the start's order (not static) has nothing to check.
+        return;
+    }
+    char* listing[] = { "nm", (char*)executable, 0 };
+    Text symbols = capture(listing);
+    Text list = read_file("cmake/BusterStartOrder.txt");
+    char unit[128] = "";
+    Text joined = { 0 };
+    uint32_t checked = 0;
+    for (char* row = strtok(list.data, "\n"); row != 0; row = strtok(0, "\n"))
+    {
+        char stem[128];
+        char name[256];
+        if (sscanf(row, "%127[a-z0-9_].c %255s", stem, name) != 2)
+        {
+            continue;
+        }
+        if (strcmp(stem, unit) != 0)
+        {
+            free(joined.data);
+            joined = (Text){ 0 };
+            snprintf(unit, sizeof(unit), "%s", stem);
+            char object[PATH_MAX + 256];
+            snprintf(object, sizeof(object), "%s/parts/%s/native.o", tree, stem);
+            if (access(object, F_OK) == 0)
+            {
+                char* sections[] = { "readelf", "-SW", object, 0 };
+                joined = capture(sections);
+            }
+        }
+        char plain[300];
+        char aliased[320];
+        snprintf(plain, sizeof(plain), " .text.%s ", name);
+        snprintf(aliased, sizeof(aliased), " .text.%s.buster_split ", name);
+        if (joined.data != 0 && (strstr(joined.data, plain) != 0 || strstr(joined.data, aliased) != 0))
+        {
+            if (!start_order_placed(symbols.data, name, start, start + size))
+            {
+                fail("the compiler in parts left %s's %s, which its join holds, out of .text.buster_start", stem, name);
+            }
+            checked += 1;
+        }
+    }
+    free(joined.data);
+    free(list.data);
+    free(symbols.data);
+    if (checked == 0)
+    {
+        fail("the compiler in parts' joins hold none of the start's functions");
+    }
+}
+
 // The parts of a sanitizer build's units (#2639), on the fixture's two units: AddressSanitizer's joined objects keep
 // their module constructor's comdat group, which llvm-objcopy clears and the join restores (tools/codegen/comdat.c),
 // so that the executable has one constructor for every unit, as single compiles give it; MemorySanitizer's keep their
@@ -4130,6 +4221,9 @@ static void check_parallel_codegen_compiler(void)
     {
         fail("the Release build compiled main_unit_checker.c whole, not in parts: no %s or %s", stamp, part);
     }
+    char tree[PATH_MAX];
+    snprintf(tree, sizeof(tree), "%.*s", directory, path);
+    check_parallel_codegen_start_order(path, tree);
     char* baked[] = { path, "test-baked-tables", 0 };
     output = capture(baked);
     free(output.data);
@@ -4139,7 +4233,7 @@ static void check_parallel_codegen_compiler(void)
     {
         fail("an unchanged build of the compiler in parts regenerated or failed to publish its executable");
     }
-    pass("the full compiler in parts links its units, passes baking/canary checks and reuses its unchanged executable");
+    pass("the full compiler in parts links its units, puts the start's functions first, passes baking/canary checks and reuses its unchanged executable");
 }
 
 int main(int argc, char** argv)
