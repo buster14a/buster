@@ -2,8 +2,10 @@
 
 Every change reaches `main` through the merge queue (#1430). The queue's
 candidate for it runs the complete hosted contract on its exact commit before
-it merges: both host architectures with all four O3 build modes (plain and
-three sanitizer configurations) across each row's shards, the vector pool, the
+it merges: the portable `x86-64` architecture with all four O3 build modes
+(plain and three sanitizer configurations) and the `native` plain row, across
+each row's shards, the vector pool (whose sanitizer configurations replaced the
+`native` sanitizer rows, #2032), the
 three fuzz campaigns, and each auxiliary workflow its change touches (see "The
 merge queue"). Documentation-only changes run it too. Main's ruleset requires
 the queue, with no bypass, and main is fast-forwarded to the commit the queue
@@ -70,15 +72,21 @@ tools/ci/costs/ROW.costs`: the runner deals the commands to the shards by the
 row's own costs on a hosted runner, the costliest first, each to the shard that
 would end the earliest with it, the same deal on every shard's runner, so that
 a row's shards run every command once (docs/commands/parallel.md). The plain
-rows run as 4 shards, the `x86-64` TSan and MSan rows as 6, the `native` MSan
-row as 5 and the others as 4 (#2031; [Shard costs](commands/ci.md#shard-costs)
+rows run as 4 shards, the `x86-64` TSan and MSan rows as 6 and its ASan row as
+4 (#2031; [Shard costs](commands/ci.md#shard-costs)
 has the tables and the plans). Unsharded, a plain row's test step took 14.6
 minutes of its 18-minute job on one 4-CPU runner, and the MSan rows took up to
 98 minutes. A portable `x86-64` row builds its compiler once, in a job of its
 own, and its shards run that verified product (see "Shared row products"
-below). A `native` row's shards each build the compiler themselves, since a
-native build must run on the CPU model it was built for, which hosted runners
-don't share. A row's once-only steps (the baseline fallback checks, the QEMU
+below). The `native` plain row's shards each build the compiler themselves,
+since a native build must run on the CPU model it was built for, which hosted
+runners don't share. That was why the `native` sanitizer rows went (#2032, the
+owner's go-ahead on 2026-11-14): their 13 shards each built an instrumented
+compiler, 5 to 11 minutes, and on 160 merge-queue candidates the `native`
+shards took 316 of a merged candidate's 912 runner-minutes, its MSan or TSan
+row finishing last in 18 of 43 (#2703). The vector row's sanitizer
+configurations test the vector path under each detector, and the `x86-64`
+rows the scalar one. A row's once-only steps (the baseline fallback checks, the QEMU
 smoke test, the constrained arenas, the parser smoke test, the performance
 readers and the TSan/MSan `main.c` compiles) run in its shard 1, which the deal
 gives that much less of the inventory (its table's `#: first-shard`), and each
@@ -102,7 +110,8 @@ transparent huge pages off (#1109, `arena_page_policy` in `lane.c`), and the
 9700X with them as its system has them.
 Baseline memory boundary tests also run with undefined-behavior checks.
 The hosted matrix additionally builds the entire compiler with each of
-`BUSTER_SANITIZER=address|thread|memory`, for both host architectures.
+`BUSTER_SANITIZER=address|thread|memory`, for the `x86-64` architecture and the
+vector row's configurations (the `native` sanitizer rows went in #2032).
 Every variant runs `tools/ci/correctness.tests`, including the same corpus,
 seeds, lane counts, generated-code execution and external cross-checks. These
 are full suites, a row's shards together; the TSan and MSan rows are not
@@ -301,11 +310,17 @@ required aggregate waits for. In the evidence job they held every row back by
 about 4 minutes (merge-queue run 43481767714: 236 s of its 246 s, the rows
 starting at 298 s), when neither a pull request nor a candidate uses the
 9700X; a candidate's pull request has passed the same fixtures.
+Within a shard, a pull request's or a candidate's runner stops at its first
+failing command too (`parallel --fail-fast`, #2703): it starts nothing more and
+kills the commands running beside the failure, so the failure ends its job at
+once rather than when the shard's last command does.
 GitHub has no fail-fast across jobs. A job that cancels the run through the API
-was considered (#1195) and dropped: it needs a token with `actions: write`,
-which fork pull requests don't get; on a pull request, once the policy checks
-gate the tests, nothing would remain for it to stop; and on the other runs it
-would cut the coverage above.
+was considered (#1195) and dropped for pull requests and the other runs: it
+needs a token with `actions: write`, which fork pull requests don't get; on a
+pull request, once the policy checks gate the tests, nothing would remain for it
+to stop; and on the other runs it would cut the coverage above. A merge-queue
+candidate has none of those reasons, and its run is cancelled at its first
+failure (#2703; see "The merge queue").
 
 To check CI edits locally, run the selector's self-test and validate the shell
 and workflow syntax. To exercise fallback code on a capable machine, set
@@ -451,7 +466,8 @@ its shards, which one pool of draws holds:
 - The runs that run the sanitizer rows (merge-queue candidates, full
   dispatches, the nightly snapshot's deferred run; before the queue, pushes
   before the nightly mode): the plain and the three sanitizer configurations
-  (`none address thread memory`, 16 items), beside the `native` rows.
+  (`none address thread memory`, 16 items), beside the `native` plain row,
+  which alone of the `native` rows stays (#2032).
 - Elsewhere (nightly backlog runs and admitted snapshot runs, the `plain`
   scope; before the queue, pushes in the nightly mode): no vector row. Their `native` rows stay,
   and `tools/ci/nightly.c` counts the plain rows' shards by their names, which
@@ -804,8 +820,8 @@ A candidate's run is the only per-merge correctness run (the owner's decision
 on 2026-11-10). It works like this:
 
 - **Scope.** The full hosted contract runs on the candidate's exact commit:
-  - both host architectures, each with its plain, ASan, TSan and MSan O3
-    builds and every row's shards;
+  - `x86-64` with its plain, ASan, TSan and MSan O3 builds, and the `native`
+    plain row (#2032), every row's shards;
   - the vector pool's 16 items;
   - the three fuzz campaigns.
 
@@ -828,11 +844,22 @@ on 2026-11-10). It works like this:
   - Its first failing row cancels the other rows, and within a row its first
     failing shard or vector draw cancels the rest.
   - Its first failing fuzz campaign cancels the other campaigns.
+  - Within a shard, its first failing command stops the shard (`parallel
+    --fail-fast`, #2703): nothing more starts, and the commands beside it are
+    killed.
+  - Once its test rows or its fuzz campaigns have failed, `stop-tests` or
+    `stop-fuzz` cancels its run (#2703). GitHub's fail-fast works within one
+    matrix only, so the aggregate used to wait for the other matrix, the glue
+    fixtures and the auxiliary workflows: the fuzz campaigns alone take about
+    21 minutes (`frontend`). Its `Integration qualification` still runs
+    (`always()`) and fails, as in the 68 runs `stale` had cancelled by 14
+    November, and GitHub rebuilds the entries behind it at once.
 
-  GitHub's fail-fast works within one matrix only. So a test failure doesn't
-  stop the fuzz campaigns, nor a fuzz failure the test rows, and the aggregate
-  reports when both have ended. In the full dispatch 43261314947 the longest
-  campaign (`frontend`) took 19 minutes and the longest test shards about 21.
+  Before #2703, a failing candidate's first failed job ended 22.5 minutes in,
+  on average, over 15 failures (13–14 November), though its failing command
+  ran for 0.7 to 82 s. Each held about 790 runner-minutes, near a passing
+  candidate's 912. Failures were 18.3% of the queue's runner time, and the
+  entries cancelled behind them another 11.2%.
 - **Auxiliary workflows.** A candidate also calls `build.yml`, `build-pgo.yml`,
   `selfhost.yml` and `tier1-problem.yml`, each whole (`workflow_call`, job
   `auxiliary-NAME`), where its own change touches a path that workflow's
@@ -859,9 +886,10 @@ on 2026-11-10). It works like this:
   - The coverage step (`nightly.sh coverage`, `nightly coverage`) reads the
     run's own jobs, because a test job's result alone stays green when a shard
     or a row is skipped.
-  - It requires every shard 1..N of every row and sanitizer (one N per row),
-    the vector pool's verdict and each fuzz campaign to have completed
-    successfully.
+  - It requires every shard 1..N of every row of the contract (one N per
+    row): `x86-64`'s four and `native`'s plain one. A `native` sanitizer row
+    counts for nothing either way (#2032). It also requires the vector pool's
+    verdict and each fuzz campaign to have completed successfully.
   - Each auxiliary workflow the selector named must have run at least one job,
     and every job it ran must have succeeded. One the selector didn't name must
     have run none. A missing list (no selector) fails.
@@ -1308,7 +1336,7 @@ a 16 GiB hosted runner with any other command. The `-c` commands peak at
 10 GiB under TSan and 6.6 GiB under MSan (`-O3`, `--lanes 1`), so those rows
 run them in the workflow's separate "Compile main.c alone under TSan or MSan"
 step after the suite, where the runner is otherwise idle; the plain and ASan
-rows of both host architectures, plus the 9700X, run them in the suite. The
+rows, plus the 9700X, run them in the suite. The
 plain and ASan rows and the 9700X also run the checking comparison, so
 the self-check remains required wherever the runner has the memory. Every other
 command runs in every row.

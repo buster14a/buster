@@ -1370,6 +1370,11 @@ static void check_units_test_shared(CheckUnitsTestTally* tally, const char* exec
     int64_t expected = 0;
     for (uint32_t f = 0; written && f < BUSTER_CHECK_UNITS_TEST_SHARED_FUNCTIONS; f += 1)
     {
+        // The board may otherwise assign copies of this function to different lowering writers.
+        if (f == BUSTER_CHECK_UNITS_TEST_SHARED_FUNCTIONS / 2)
+        {
+            fprintf(big, "__attribute__((target_clones(\"default\", \"sse4.2\", \"avx2\")))\n");
+        }
         fprintf(big, "int big_%u(int x)\n{\n    int s = x + %u;\n    for (int i = 0; i < 4; i += 1)\n    {\n        s = (s * 3 + i) & 0xffff;\n    }\n    return s;\n}\n", f, f);
         int64_t s = 3 + (int64_t)f;
         for (int64_t i = 0; i < 4; i += 1)

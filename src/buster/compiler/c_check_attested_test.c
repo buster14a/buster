@@ -227,7 +227,8 @@ static bool check_attested_test_command(CheckAttested* census, const char* direc
 // are --attested=off's bytes, which reads every declaration.
 
 // The compile fixture's header: the main one's kinds of declaration, with the runtime functions a struct's copy and its
-// zeroing call by name (memcpy, memset) and a prototype whose name a unit's undeclared call is a typo of.
+// zeroing call by name (memcpy, memset), a prototype whose name a unit's undeclared call is a typo of, and pragmas
+// between declarations, whose places a unit's view moves down past the skipped ones (#2531's step 3).
 static const char check_attested_test_compile_header[] =
     "typedef unsigned long size_t;\n"
     "typedef struct _IO_FILE FILE;\n"
@@ -237,9 +238,11 @@ static const char check_attested_test_compile_header[] =
     "int abs(int);\n"
     "void *memcpy(void *, const void *, size_t);\n"
     "void *memset(void *, int, size_t);\n"
+    "#pragma pack(push, 2)\n"
     "enum color { RED, GREEN = RED + 2, BLUE };\n"
     "struct later;\n"
     "struct later { int a; };\n"
+    "#pragma pack(pop)\n"
     "struct later *make_later(void);\n"
     "struct made *make(void);\n"
     "static int hidden(void);\n"
@@ -253,14 +256,18 @@ static const char check_attested_test_compile_header[] =
     "extern int shared_counter;\n";
 
 // Its units: the first learns; the others call by name, by a builtin, by an asm label, copy and zero a struct, name an
-// enumerator; the last two call an undeclared function whose name is a typo of a skipped prototype's (clang's note
-// suggests it, which only a reading with nothing skipped finds) and name an undeclared identifier.
+// enumerator, and name string literals, __func__ and labels by address after skipped declarations (whose local symbols a
+// token's index numbers, the parse's in a view, Parser.origins) under a pragma that a view moves; the last two call an
+// undeclared function whose name is a typo of a skipped prototype's (clang's note suggests it, which only a reading with
+// nothing skipped finds) and name an undeclared identifier.
 static const char* const check_attested_test_compile_units[] =
 {
     "int one(void) { return puts(\"one\") + shared_counter; }\n",
     "int two(FILE *f) { return fclose(f) + __builtin_abs(-2) + labelled(); }\n",
     "struct big { char b[300]; };\nvoid copy(struct big *x, const struct big *y) { *x = *y; }\nstruct big zero(void) { struct big z = { 0 }; return z; }\n",
     "int four(int x) { if (x == BLUE) die(); return make_later() != 0; }\n",
+    "#pragma pack(push, 1)\nstruct packed_here { char c; int i; };\n#pragma pack(pop)\n"
+    "int seven(int x) { static void *where[] = { &&a, &&b }; goto *where[x & 1]; a: return puts(\"seven\"); b: return (int)sizeof(struct packed_here) + (int)sizeof(__func__); }\n",
     "int five(void) { return prototypex(); }\n",
     "int six(void) { return undeclared_name; }\n",
 };
@@ -292,17 +299,18 @@ static bool check_attested_test_same(const char* first, const char* second)
     return equal;
 }
 
-// The compile fixture's first `count` units (written in `directory`, padded so that the first is the costliest) compiled
-// as one command with `options` and --attested=`mode`, in `directory`'s subdirectory `name`, its diagnostics into
-// `name`.err there: whether it ran with status `status`. The command's counts stay in check_units_attested_last.
-static bool check_attested_test_compile(const char* directory, const char* name, const char* mode, const char* const* options, uint32_t option_count, uint32_t count,
-                                        int status)
+// The compile fixture's units [`first`, `first` + `count`) (written in `directory`, padded so that the first is the
+// costliest) compiled as one command with `options` and --attested=`mode`, in `directory`'s subdirectory `name`, its
+// diagnostics appended to diagnostics.err there: whether it ran with status `status`. The command's counts stay in
+// check_units_attested_last.
+static bool check_attested_test_unit_range(const char* directory, const char* name, const char* mode, const char* const* options, uint32_t option_count, uint32_t first,
+                                      uint32_t count, int status)
 {
     char paths[8][24];
     char* arguments[24];
     char attested[32];
     uint32_t argument_count = 0;
-    bool valid = count <= 8 && option_count + count + 1 < 24;
+    bool valid = first + count <= 8 && option_count + count + 1 < 24;
     snprintf(attested, sizeof(attested), "--attested=%s", mode);
     arguments[argument_count] = attested;
     argument_count += 1;
@@ -311,7 +319,7 @@ static bool check_attested_test_compile(const char* directory, const char* name,
         arguments[argument_count] = (char*)options[o];
         argument_count += 1;
     }
-    for (uint32_t u = 0; valid && u < count; u += 1)
+    for (uint32_t u = first; valid && u < first + count; u += 1)
     {
         char text[4096];
         const int padding = (int)(count - u) * 256;
@@ -330,7 +338,7 @@ static bool check_attested_test_compile(const char* directory, const char* name,
     valid = valid && saved >= 0 && chdir(subdirectory) == 0;
     fflush(stderr);
     const int errors = valid ? dup(STDERR_FILENO) : -1;
-    const int captured = valid ? open("diagnostics.err", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600) : -1;
+    const int captured = valid ? open("diagnostics.err", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600) : -1;
     const bool redirected = errors >= 0 && captured >= 0 && dup2(captured, STDERR_FILENO) >= 0;
     const int result = valid && redirected ? run_check_command_mode((int)argument_count, arguments, true, true) : -1;
     fflush(stderr);
@@ -353,6 +361,17 @@ static bool check_attested_test_compile(const char* directory, const char* name,
         fprintf(stderr, "test-checker: attested: --attested=%s's command %s ended with status %d (expected %d)\n", mode, name, result, status);
     }
     return valid && result == status;
+}
+
+// The compile fixture's first `count` units as one command (check_attested_test_unit_range), into a subdirectory `name` whose
+// diagnostics.err starts empty.
+static bool check_attested_test_compile(const char* directory, const char* name, const char* mode, const char* const* options, uint32_t option_count, uint32_t count,
+                                        int status)
+{
+    char path[700];
+    snprintf(path, sizeof(path), "%s/%s/diagnostics.err", directory, name);
+    unlink(path);
+    return check_attested_test_unit_range(directory, name, mode, options, option_count, 0, count, status);
 }
 
 // Whether directory `first`'s `count` objects and diagnostics are directory `second`'s bytes (both in `directory`).
@@ -418,6 +437,8 @@ static __attribute__((noinline)) void check_test_attested_compile(CheckTest* tes
                                     counts[CHECK_ATTESTED_SUMMARY_AGAIN] == 2 && counts[CHECK_ATTESTED_SUMMARY_CONTRADICTIONS] == 0 &&
                                     counts[CHECK_ATTESTED_SUMMARY_UNLISTED] == 0,
                           "--attested=on skips in every unit after the first, and reads each unit with an error again with nothing skipped");
+        check_test_expect(test, on && counts[CHECK_ATTESTED_SUMMARY_VIEWS] == counts[CHECK_ATTESTED_SUMMARY_SKIPPING],
+                          "--attested=on reads every unit that skips as its view, the parse without its skipped declarations");
         check_test_expect(test, verify && check_units_attested_last[CHECK_ATTESTED_SUMMARY_SKIPPING] == 0 && check_units_attested_last[CHECK_ATTESTED_SUMMARY_SKIPPED] != 0 &&
                                     check_units_attested_last[CHECK_ATTESTED_SUMMARY_AGAIN] == 0 && check_units_attested_last[CHECK_ATTESTED_SUMMARY_CONTRADICTIONS] == 0,
                           "--attested=verify reads what it would skip, and no hit's reading contradicts its memo");
@@ -468,6 +489,137 @@ static __attribute__((noinline)) void check_test_attested_compile(CheckTest* tes
     for (uint32_t u = 0; u < units; u += 1)
     {
         char path[640];
+        snprintf(path, sizeof(path), "%s/unit%u.c", directory, u + 1);
+        unlink(path);
+    }
+    unlink(header);
+}
+
+// The memo files in `memo` (step 4's directory): how many, and their bytes in all; with `scramble`, each one's header
+// overwritten first, as a torn or foreign file's would be.
+static uint32_t check_attested_test_memos(const char* memo, bool scramble, uint64_t* bytes)
+{
+    uint32_t files = 0;
+    *bytes = 0;
+    DIR* listing = opendir(memo);
+    for (struct dirent* entry = listing != NULL ? readdir(listing) : NULL; entry != NULL; entry = readdir(listing))
+    {
+        char path[800];
+        snprintf(path, sizeof(path), "%s/%s", memo, entry->d_name);
+        struct stat status;
+        const bool file = entry->d_name[0] != '.' && stat(path, &status) == 0 && S_ISREG(status.st_mode);
+        files += file ? 1u : 0u;
+        *bytes += file ? (uint64_t)status.st_size : 0;
+        const int handle = file && scramble ? open(path, O_WRONLY | O_CLOEXEC) : -1;
+        if (handle >= 0)
+        {
+            const char garbage[8] = "garbage!";
+            const bool wrote = pwrite(handle, garbage, sizeof(garbage), 0) == (ssize_t)sizeof(garbage);
+            (void)wrote;
+            close(handle);
+        }
+    }
+    if (listing != NULL)
+    {
+        closedir(listing);
+    }
+    return files;
+}
+
+// Removes step 4's memo directory `memo` and its files.
+static void check_attested_test_memos_remove(const char* memo)
+{
+    DIR* listing = opendir(memo);
+    for (struct dirent* entry = listing != NULL ? readdir(listing) : NULL; entry != NULL; entry = readdir(listing))
+    {
+        char path[800];
+        snprintf(path, sizeof(path), "%s/%s", memo, entry->d_name);
+        if (entry->d_name[0] != '.')
+        {
+            unlink(path);
+        }
+    }
+    if (listing != NULL)
+    {
+        closedir(listing);
+    }
+    rmdir(memo);
+}
+
+// Step 4, a memo kept across processes (--attested-memo): each of the compile fixture's units without an error compiled
+// alone, by -c, first with no memo (--attested=off), then twice with the memo: a command of one source file runs the passes
+// with it, and the second time each unit skips what the units before it, and its own first time, attested. Then the units
+// as one command with the memo, which its first unit takes too; a memo of other options, a file of its own; and a file
+// scrambled, which is a memo of nothing and is written again.
+static __attribute__((noinline)) void check_test_attested_memo(CheckTest* test, const char* directory)
+{
+    char header[640];
+    snprintf(header, sizeof(header), "%s/p.h", directory);
+    const bool written = parse_test_write(header, check_attested_test_compile_header, strlen(check_attested_test_compile_header));
+    const uint32_t units = BUSTER_ARRAY_LENGTH(check_attested_test_compile_units) - 2;
+    char memo[700];
+    snprintf(memo, sizeof(memo), "%s/memo", directory);
+    char memo_option[720];
+    snprintf(memo_option, sizeof(memo_option), "--attested-memo=%s", memo);
+    const char* plain[] = { "-nostdinc", "-std=gnu17", "-c" };
+    const char* kept[] = { "-nostdinc", "-std=gnu17", memo_option, "-c" };
+    const char* warned[] = { "-nostdinc", "-std=gnu17", "-Wall", memo_option, "-c" };
+    char path[700];
+    const char* const names[] = { "off", "cold", "warm", "on" };
+    for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(names); n += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s/diagnostics.err", directory, names[n]);
+        unlink(path);
+    }
+    bool off = written;
+    bool cold = written;
+    bool warm = written;
+    uint64_t skipped_cold = 0;
+    uint64_t skipped_warm = 0;
+    uint64_t views = 0;
+    for (uint32_t u = 0; u < units; u += 1)
+    {
+        off = off && check_attested_test_unit_range(directory, "off", "off", plain, BUSTER_ARRAY_LENGTH(plain), u, 1, 0);
+        cold = cold && check_attested_test_unit_range(directory, "cold", "on", kept, BUSTER_ARRAY_LENGTH(kept), u, 1, 0);
+        skipped_cold += check_units_attested_last[CHECK_ATTESTED_SUMMARY_SKIPPED];
+    }
+    uint64_t bytes = 0;
+    const uint32_t files = check_attested_test_memos(memo, false, &bytes);
+    for (uint32_t u = 0; u < units; u += 1)
+    {
+        warm = warm && check_attested_test_unit_range(directory, "warm", "on", kept, BUSTER_ARRAY_LENGTH(kept), u, 1, 0);
+        skipped_warm += check_units_attested_last[CHECK_ATTESTED_SUMMARY_SKIPPED];
+        views += check_units_attested_last[CHECK_ATTESTED_SUMMARY_VIEWS];
+    }
+    check_test_expect(test, off && cold && warm && check_attested_test_compiled_same(directory, "cold", "off", units, true) &&
+                                check_attested_test_compiled_same(directory, "warm", "off", units, true),
+                      "--attested-memo: each unit's object and diagnostics by its own command, with the memo cold and warm, are --attested=off's");
+    check_test_expect(test, files == 1 && bytes > BUSTER_ATTESTED_MEMO_HEADER && (bytes - BUSTER_ATTESTED_MEMO_HEADER) % sizeof(CheckAttestedHash) == 0 &&
+                                skipped_cold != 0 && skipped_warm > skipped_cold && views == units,
+                      "--attested-memo: one file, whole records; a command of one source file skips what earlier commands learned, every one of them warm");
+    // The units as one command: its first unit skips too.
+    const bool on = written && check_attested_test_compile(directory, "on", "on", kept, BUSTER_ARRAY_LENGTH(kept), units, 0);
+    check_test_expect(test, on && check_attested_test_compiled_same(directory, "on", "off", units, true) &&
+                                check_units_attested_last[CHECK_ATTESTED_SUMMARY_SKIPPING] == units,
+                      "--attested-memo: a command of several source files loads the memo, so that its first unit skips too");
+    // Other options: a file of their own.
+    const bool other = written && check_attested_test_compile(directory, "on", "on", warned, BUSTER_ARRAY_LENGTH(warned), 1, 0);
+    check_test_expect(test, other && check_attested_test_memos(memo, false, &bytes) == 2 && check_units_attested_last[CHECK_ATTESTED_SUMMARY_SKIPPED] == 0,
+                      "--attested-memo: a command of other options keeps a memo of its own");
+    // A scrambled file: a memo of nothing, written again whole.
+    check_attested_test_memos(memo, true, &bytes);
+    const bool scrambled = written && check_attested_test_unit_range(directory, "on", "on", kept, BUSTER_ARRAY_LENGTH(kept), 1, 1, 0);
+    const uint64_t scrambled_skips = check_units_attested_last[CHECK_ATTESTED_SUMMARY_SKIPPED];
+    const bool again = written && check_attested_test_unit_range(directory, "on", "on", kept, BUSTER_ARRAY_LENGTH(kept), 1, 1, 0);
+    check_test_expect(test, scrambled && again && scrambled_skips == 0 && check_units_attested_last[CHECK_ATTESTED_SUMMARY_SKIPPED] != 0,
+                      "--attested-memo: a scrambled file is a memo of nothing, and is written again");
+    for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(names); n += 1)
+    {
+        check_attested_test_compiled_remove(directory, names[n], units);
+    }
+    check_attested_test_memos_remove(memo);
+    for (uint32_t u = 0; u < units; u += 1)
+    {
         snprintf(path, sizeof(path), "%s/unit%u.c", directory, u + 1);
         unlink(path);
     }
@@ -572,6 +724,7 @@ static __attribute__((noinline)) void check_test_attested(CheckTest* test)
     if (ready)
     {
         check_test_attested_compile(test, directory);
+        check_test_attested_memo(test, directory);
         rmdir(directory);
     }
 }

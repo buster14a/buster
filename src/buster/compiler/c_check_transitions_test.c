@@ -99,7 +99,8 @@ static void check_test_transition_statics(CheckTest* test, const char* name, con
         for (uint32_t node = 0; valid && node < graph->count; node += 1)
         {
             keyed += variant == 0 && scalar[node] > BUSTER_CHECK_TRANSITION_LEAF;
-            system += scalar[node] > BUSTER_CHECK_TRANSITION_LEAF && (scalar[node] >> 8 & BUSTER_CHECK_EXTENSION_SYSTEM_HEADER) != 0;
+            system += scalar[node] > BUSTER_CHECK_TRANSITION_LEAF &&
+                      (scalar[node] >> BUSTER_CHECK_KEY_EXTENSIONS_SHIFT & BUSTER_CHECK_EXTENSION_SYSTEM_HEADER) != 0;
         }
     }
     char description[256];
@@ -107,6 +108,122 @@ static void check_test_transition_statics(CheckTest* test, const char* name, con
              graph->count, keyed, system);
     check_test_expect(test, valid, description);
     arena_pop_to(scratch, mark);
+}
+
+// The environment, operand-object pattern and call count must remain independent in a key. These first three pairs
+// collided in the previous header layout; FAST also made a 64-argument call read a 65th argument. Extra sentinel words
+// make that failure observable without an out-of-bounds access. The graph spans two full vector blocks and a tail.
+static void check_test_transition_policy_keys(CheckTest* test)
+{
+    enum { COUNT = 35, NODE = 3, WORDS = 128 };
+    const struct
+    {
+        CheckOp op;
+        uint8_t environment;
+        uint32_t objects[3];
+        uint32_t arguments;
+    } cases[] =
+    {
+        { CHECK_OP_SELECT, BUSTER_CHECK_FP_EVAL_DOUBLE, { 0, 0, 0 }, 0 },
+        { CHECK_OP_SELECT, 0, { 17, 0, 0 }, 0 },
+        { CHECK_OP_SELECT, BUSTER_CHECK_FP_CONTRACT_ON, { 0, 18, 0 }, 0 },
+        { CHECK_OP_SELECT, 0, { 0, 18, 18 }, 0 },
+        { CHECK_OP_CALL, BUSTER_CHECK_FP_CONTRACT_FAST, { 0, 0, 0 }, 0 },
+        { CHECK_OP_CALL, 0, { 0, 0, 0 }, 1 },
+        { CHECK_OP_CALL, BUSTER_CHECK_FP_CONTRACT_FAST, { 0, 0, 0 }, BUSTER_CHECK_TRANSITION_ARGUMENTS },
+        { CHECK_OP_CALL, BUSTER_CHECK_FP_ENV_ACCESS | BUSTER_CHECK_FP_EVAL_EXTENDED | BUSTER_CHECK_FP_CONTRACT_ON,
+          { 0, 0, 0 }, BUSTER_CHECK_TRANSITION_ARGUMENTS },
+        { CHECK_OP_SELECT, 0, { 0, 0, 0 }, 0 },
+        { CHECK_OP_SELECT, BUSTER_CHECK_FP_CONTRACT_ON, { 0, 0, 0 }, 0 },
+        { CHECK_OP_SELECT, BUSTER_CHECK_FP_CONTRACT_FAST, { 0, 0, 0 }, 0 },
+    };
+    CheckOp ops[COUNT];
+    TypeId types[COUNT];
+    uint32_t members[COUNT] = { 0 };
+    uint32_t operand0[COUNT];
+    uint32_t operand1[COUNT];
+    uint32_t operand2[COUNT];
+    uint32_t argument_counts[COUNT] = { 0 };
+    uint32_t argument_offsets[COUNT] = { 0 };
+    uint32_t argument_nodes[WORDS] = { 0 };
+    uint32_t objects[COUNT] = { 0 };
+    uint32_t classes[COUNT];
+    uint8_t environments[COUNT];
+    uint32_t scalar[COUNT];
+    uint32_t vector[COUNT];
+    uint32_t inherited[COUNT];
+    uint64_t keys[BUSTER_ARRAY_LENGTH(cases)][4];
+    CheckGraph graph =
+    {
+        .count = COUNT,
+        .ops = ops,
+        .types = types,
+        .members = members,
+        .operand0 = operand0,
+        .operand1 = operand1,
+        .operand2 = operand2,
+        .argument_counts = argument_counts,
+        .argument_offsets = argument_offsets,
+        .argument_nodes = argument_nodes,
+    };
+    const CheckStream stream = { .value_objects = objects };
+    for (uint32_t node = 0; node < COUNT; node += 1)
+    {
+        ops[node] = node < 3 ? CHECK_OP_VALUE : CHECK_OP_SELECT;
+        types[node] = BUSTER_TYPE_INT;
+        operand0[node] = node < 3 ? BUSTER_CHECK_NONE : 0;
+        operand1[node] = node < 3 ? BUSTER_CHECK_NONE : 1;
+        operand2[node] = node < 3 ? BUSTER_CHECK_NONE : 2;
+        classes[node] = node + 1;
+    }
+    for (uint32_t variant = 0; variant < BUSTER_ARRAY_LENGTH(cases); variant += 1)
+    {
+        graph.fp_environments = environments;
+        graph.fp_contract_default = BUSTER_CHECK_FP_CONTRACT_FAST;
+        graph.argument_count = cases[variant].arguments;
+        ops[NODE] = cases[variant].op;
+        operand1[NODE] = ops[NODE] == CHECK_OP_CALL ? BUSTER_CHECK_NONE : 1;
+        operand2[NODE] = ops[NODE] == CHECK_OP_CALL ? BUSTER_CHECK_NONE : 2;
+        argument_counts[NODE] = cases[variant].arguments;
+        memcpy(objects, cases[variant].objects, sizeof(cases[variant].objects));
+        memset(environments, cases[variant].environment, sizeof(environments));
+        check_transition_statics(&graph, &stream, scalar, true);
+        check_transition_statics(&graph, &stream, vector, false);
+        check_test_expect(test, memcmp(scalar, vector, sizeof(scalar)) == 0,
+                          "scalar and vector transition statics preserve contraction, evaluation and call-count fields");
+        const uint32_t sentinel = UINT32_C(0xa5a5a5a5);
+        uint32_t words[WORDS];
+        for (uint32_t i = 0; i < WORDS; i += 1)
+        {
+            words[i] = sentinel;
+        }
+        CheckTransitionMiss miss = { 0 };
+        const CheckTransitionKind kind = check_transition_key(&graph, &stream, classes, NODE, scalar[NODE], &miss, words);
+        bool bounded = true;
+        for (uint32_t i = 0; i < WORDS; i += 1)
+        {
+            bounded &= words[i] == (i < cases[variant].arguments ? classes[0] : sentinel);
+        }
+        check_test_expect(test, kind == CHECK_TRANSITION_KEYED && bounded,
+                          "floating policy never adds or removes an argument while building a transition key");
+        memcpy(keys[variant], miss.key, sizeof(miss.key));
+        for (uint32_t previous = 0; previous < variant; previous += 1)
+        {
+            check_test_expect(test, memcmp(keys[previous], miss.key, sizeof(miss.key)) != 0,
+                              "distinct floating policies, operand objects and argument counts cannot alias transition keys");
+        }
+        if ((cases[variant].environment & ~BUSTER_CHECK_FP_CONTRACT_MASK) == 0)
+        {
+            graph.fp_environments = NULL;
+            graph.fp_contract_default = cases[variant].environment;
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                check_transition_statics(&graph, &stream, inherited, path != 0);
+                check_test_expect(test, memcmp(scalar, inherited, sizeof(scalar)) == 0,
+                                  "a graph's contraction default keys exactly as the same explicit lexical policy");
+            }
+        }
+    }
 }
 
 // A source through the scalar oracle and every vector variant (CheckOptions' transitions in node order by batches of 32, 3
@@ -342,6 +459,7 @@ static void check_test_transition_limit(CheckTest* test)
 
 static void check_test_transitions(CheckTest* test)
 {
+    check_test_transition_policy_keys(test);
     static const CheckTransitionFixture fixtures[] =
     {
         {
