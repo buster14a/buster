@@ -3,10 +3,12 @@
 Status: design only. The measurements are main
 `c471f32f0136bbb21cfe083c9947f86346de2a0a` on the 9700X (Release, CPU 2,
 under the lock), except where the desktop's preliminary Zen 4 result is named.
-The 9700X's x86-64 runs cover the four builds and placements used below; the
-shorter znver5 run and the remaining build matrix are still being collected.
+The 9700X's x86-64 runs cover four builds at four placements. Its completed
+znver5 short run covers six builds as linked, including both explicit-vector
+builds and clang's scalar comparisons; the other build configurations were
+not run.
 The measurement sources, raw lines, counters, placements and tables are in
-[the record](https://github.com/buster14a/buster-performance/tree/8118cbb9496c4259991acee67ab1f775c098bc78/docs/measurements/tier1-array-loops-2743-2026-11-14)
+[the record](https://github.com/buster14a/buster-performance/tree/21eb224efc366eaa1ca1bb7a1426d95fcdc9fc2b/docs/measurements/tier1-array-loops-2743-2026-11-14)
 (buster-performance#535). The issue is
 [#2743](https://github.com/buster14a/buster/issues/2743).
 [#2750](https://github.com/buster14a/buster/issues/2750)'s independent fix for
@@ -15,20 +17,22 @@ good vector code below AVX-512, not an implementation of this design.
 
 **In one paragraph.** On the 9700X at `-march=x86-64`, `--tier1` takes 3.32
 times clang -O2's time, geometrically averaged over 19 array loops that clang
-vectorizes, and 1.08 times on six scalar controls. Taking clang's pieces apart
-puts 1.41 of the 3.32 on unrolling and 2.18 on vectorization: `--tier1` is only
-1.08 times clang -O2 with its vectorizer and unroller disabled. The back end is
-not the missing 3.32. In a preliminary desktop znver4 probe, Tier 1 runs 12
-loops written explicitly with AVX-512 vector operations 13.25 times faster
-than the same C loops, and within 1.10 of clang -O2 compiling the same vector
-source. The largest unowned lever is therefore a loop vectorizer over the
-existing vector IR, not another instruction selector. This design recognizes
-countable innermost natural loops and affine array accesses in parallel over
-IR rows, clones the accepted body into vector lanes, guards it with exact trip
-count and run-time overlap checks, and leaves the original loop as the scalar
-fallback. Integer reductions use the existing reduction operations; strict
-floating-point reductions are never reassociated. An exact scalar twin is the
-oracle for every data-parallel analysis and rewrite.
+vectorizes, and 1.08 times on six scalar controls; at `-march=znver5` those
+ratios are 17.50 and 1.09. Taking clang's pieces apart puts 2.18 of the x86-64
+gap on vectorization and 1.41 on unrolling, and 9.36 and 1.64 respectively at
+znver5. Tier 1 is only 1.08 and 1.14 times clang with its vectorizer and
+unroller disabled. On the completed znver5 explicit-vector probe, Tier 1 runs
+12 vector loops 13.53 times faster than the same C loops, but still takes
+1.29 times clang compiling the same vector source. The largest unowned lever
+is therefore a loop vectorizer over the existing vector IR, with the measured
+same-source back-end residual tracked separately rather than mistaken for the
+main gap. This design recognizes countable innermost natural loops and affine
+array accesses in parallel over IR rows, clones the accepted body into vector
+lanes, guards it with exact trip count and run-time overlap checks, and leaves
+the original loop as the scalar fallback. Integer reductions use the existing
+reduction operations; strict floating-point reductions are never reassociated.
+An exact scalar twin is the oracle for every data-parallel analysis and
+rewrite.
 
 ## What the measurements rank
 
@@ -66,19 +70,40 @@ Two examples make the instruction consequence concrete. `add_i32` retires
 and 1.941 through clang, so it must stay scalar without permission to
 reassociate.
 
+### The cause split on the 9700X, znver5
+
+The shorter znver5 run used the same kernels and counters as linked (placement
+0). All 150 timing runs and 150 counter runs completed with status 0, and all
+six builds produced the same digests. Tier 1 compiled all 25 C kernels and all
+85 functions in the explicit-vector unit with no fallback.
+
+| Ratio | 19 vectorized loops | 6 scalar controls |
+| --- | ---: | ---: |
+| Tier 1 / clang -O2 | 17.50 | 1.09 |
+| Tier 1 / clang -O2, no vectorizer or unroller | 1.14 | 1.03 |
+| clang without vectorizer or unroller / clang without vectorizer | 1.64 | 1.05 |
+| clang without vectorizer / clang -O2 | 9.36 | 1.01 |
+
+The wider target makes the missing vectorizer more valuable, not less. It
+also leaves a small scalar-loop difference (1.14 against clang without its
+vectorizer and unroller) that must not be hidden by reporting only the 17.50.
+
 The design consequently ranks the work as follows:
 
-1. **Loop vectorization:** the 2.18 vectorization component, and the only
-   change that can turn the suite's scalar memory and arithmetic rows into the
-   vector rows Tier 1 already emits.
-2. **Loop unrolling:** the separate 1.41 component in clang's scalar loops.
-   It should be designed and measured on the vector loops after step 1, not
-   hidden inside their legality rules. Filed as the unowned follow-up #2755.
-3. **Back-end residuals in explicit vector loops:** constants and splats,
-   rematerialized loop bounds, unfolded loads, extra moves around masked
-   operations and the clamp/max shapes. The owned issues remain separate:
-   #1344, #2676, #2718 and #2719. This design emits IR; it does not take over
-   their instruction-selection or allocation work.
+1. **Loop vectorization:** the 2.18 vectorization component at x86-64 and
+   9.36 at znver5, and the only change that can turn the suite's scalar memory
+   and arithmetic rows into the vector rows Tier 1 already emits.
+2. **Loop unrolling:** the separate 1.41 and 1.64 components in clang's
+   scalar loops. It should be designed and measured on the vector loops after
+   step 1, not hidden inside their legality rules. Filed as the unowned
+   follow-up #2755.
+3. **Back-end residuals in explicit vector loops:** the 1.29 same-source gap
+   at znver5, including constants and splats, rematerialized loop bounds,
+   unfolded loads, extra moves around masked operations and the clamp/max
+   shapes. The owned issues remain separate: #1344, #2676, #2718 and #2719.
+   This design emits IR; it does not take over their instruction-selection or
+   allocation work, and does not claim the whole 1.29 for those issues without
+   a further decomposition.
 4. **Code placement:** not yet a rule. The desktop showed large losses when a
    tiny loop crossed a 64-byte line. The 9700X does not reproduce that simple
    rule: most Tier 1 loops vary by only a few percent, while `saxpy_f32`,
@@ -86,23 +111,26 @@ The design consequently ranks the work as follows:
    recorded crossing bit. No loop alignment change is justified until those
    placements are repeated and their cause is isolated.
 
-### The back end is ready for a first vectorizer
+### The back end carries a first vectorizer, with a measured residual
 
 `src/kernels_hand.c` in the record writes 12 of the loops as a vectorizer
 would: whole AVX-512 vectors, a masked final partial vector, and a run-time
-overlap check before loops that store. It does not unroll. On the desktop at
-znver4, geometrically over those 12:
+overlap check before loops that store. It does not unroll. On the 9700X at
+znver5, geometrically over those 12:
 
 | Ratio | Geometric mean |
 | --- | ---: |
-| Tier 1 on the C loop / Tier 1 on explicit vector source | 13.25 |
-| Tier 1 on vector source / clang -O2 on the C loop | 0.94 |
-| Tier 1 on vector source / clang -O2 on the same vector source | 1.10 |
+| Tier 1 on the C loop / Tier 1 on explicit vector source | 13.53 |
+| Tier 1 on vector source / clang -O2 on the C loop | 1.34 |
+| Tier 1 on vector source / clang -O2 on the same vector source | 1.29 |
 
-These are preliminary Zen 4 numbers, not the acceptance measurement. Their
-purpose is narrow: the existing back end can carry vector loops at roughly
-clang's speed, so an IR loop vectorizer addresses the dominant missing piece.
-The znver5 version of this probe is part of the issue's remaining evidence.
+This is the acceptance measurement for the design's premise: the existing
+back end carries explicit vector loops at 1.29 times clang on identical
+source, so an IR loop vectorizer addresses the dominant missing piece without
+being assumed to close the whole gap. Clamp (2.51), maximum (1.84) and byte
+sum (1.68) have the larger same-source residuals; the record keeps every row.
+The earlier desktop znver4 probe was directionally similar (13.25, 0.94 and
+1.10 respectively), but remains preliminary and is not used for acceptance.
 
 #2750 explains a second prerequisite. Before #2752, Tier 1 copied an inlined
 intrinsic wrapper's by-value vectors as 8-byte integers below AVX-512. SROA
