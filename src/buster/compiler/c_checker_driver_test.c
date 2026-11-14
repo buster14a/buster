@@ -176,10 +176,11 @@ static bool check_test_driver_read_file(int descriptor, char** text)
     return read;
 }
 
-// Runs `arguments` as a child, capturing the selected stream into *text (the caller frees it) and discarding the other:
-// with `exec`, the program arguments[0] names; without, this process's run_check_command in the forked child. Returns the
-// exit status, or -1 if it didn't exit.
-static int check_test_driver_child(char* const* arguments, char** text, bool stdout_capture, bool exec)
+// Runs `arguments` as a child, capturing the selected stream into *text (the caller frees it). The other is discarded,
+// except with inherit_errors: a runtime probe's stderr still reaches the test log while its stdout is checked alone.
+// With `exec`, the program arguments[0] names; without, this process's run_check_command in the forked child. Returns
+// the exit status, or -1 if it didn't exit.
+static int check_test_driver_child_streams(char* const* arguments, char** text, bool stdout_capture, bool exec, bool inherit_errors)
 {
     FILE* captured = tmpfile();
     int status = 0;
@@ -196,7 +197,7 @@ static int check_test_driver_child(char* const* arguments, char** text, bool std
         {
             const int output = open("/dev/null", O_WRONLY | O_CLOEXEC);
             if (output >= 0 && dup2(stdout_capture ? fileno(captured) : output, STDOUT_FILENO) >= 0 &&
-                dup2(stdout_capture ? output : fileno(captured), STDERR_FILENO) >= 0)
+                (inherit_errors || dup2(stdout_capture ? output : fileno(captured), STDERR_FILENO) >= 0))
             {
                 if (exec)
                 {
@@ -236,6 +237,11 @@ static int check_test_driver_child(char* const* arguments, char** text, bool std
         fclose(captured);
     }
     return read && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static int check_test_driver_child(char* const* arguments, char** text, bool stdout_capture, bool exec)
+{
+    return check_test_driver_child_streams(arguments, text, stdout_capture, exec, false);
 }
 
 // Whether --in-process takes buster's command line `arguments` (arguments[0] buster's name): a source command, an option

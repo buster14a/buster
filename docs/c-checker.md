@@ -4905,6 +4905,17 @@ its value is clang's error, and so is a definition (`void v;`, `extern void v = 
 
 #### Semantic error recovery (#1447)
 
+For #2406's semicolon-bounded malformed block items, the parser retains the
+original diagnostic and records a deletion range for the checker's private
+resume view. This covers a stray `else`, a control keyword followed immediately
+by `;` instead of an opening parenthesis, and plain declaration specifiers
+without a first declarator.
+The range stops before the semicolon and never discards a preceding declarator
+or tag definition. Later complete statements are checked in the same scope;
+the original unit remains rejected and `-c` writes no object. Runtime fixtures
+compare complete diagnostics with Clang in GNU C17 and C23, through both readers
+and deferred-body compilation, with warning suppression and error limits.
+
 Translation-unit-wide recovery after semantic errors comes in phases. The plan
 is [on #1447](https://github.com/buster14a/buster/issues/1447#issuecomment-6719193112).
 Phase 1 covers the errors that clang's `handleDeclAttribute` gives and then

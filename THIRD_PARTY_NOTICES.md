@@ -17,6 +17,14 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The malformed-block-item resume metadata in `c_parser_impl.c` (#2406), its
+semantic-driver checks and the original runtime fixtures under
+`tests/checker/parse-recovery/` use the project default terms. LLVM revision
+`7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s `clang/lib/Parse/ParseStmt.cpp`
+was consulted for behavioral facts about recovery after invalid expressions
+and missing control-statement parentheses. Clang is an external diagnostic
+oracle; no upstream implementation or test fixture is imported.
+
 The production implementation-boundary changes keep existing material under
 its recorded terms. `c_preprocessor_impl.c` and
 `c_preprocessor_history_impl.c` contain definitions moved from

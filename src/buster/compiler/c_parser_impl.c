@@ -4837,6 +4837,53 @@ static void parse_scalar_reset(ParseScalar* parser)
     parser->error_probe = false;
 }
 
+// A malformed block item whose parser recovery stops at its semicolon (#2406). Keep the original diagnostic, but let
+// the checker's private view drop the item before checking later statements. A missing control head and a stray else
+// have no expression to retain; a declaration before its first declarator has no name to bind. Restrict that last
+// case to plain specifiers at a block-item boundary, so a tag definition or a preceding declarator is never discarded.
+static void parse_scalar_resume_block_item(ParseScalar* parser)
+{
+    const uint32_t at = parser->error_token;
+    const ParseFrame* frame = parser->frame_count != 0 ? parser->frames + parser->frame_count - 1 : NULL;
+    const bool block = frame != NULL && parse_frame_is_block(frame) && at < parser->count && !parser->error_resumed && !parser->error_resume_colon;
+    const bool stray_else = block && parser->error_message == PARSE_MESSAGE_EXPECTED_EXPRESSION && parser->kinds[at] == PARSE_KIND_ELSE;
+    const bool missing_head = block && parser->error_message == PARSE_MESSAGE_EXPECTED_L_PAREN_AFTER && parser->kinds[at] == PARSE_KIND_SEMI && at != 0 &&
+                              (frame->mode == PARSE_MODE_CONDITION_PAREN || frame->mode == PARSE_MODE_FOR_PAREN);
+    const bool declarator = block && parser->error_message == PARSE_MESSAGE_EXPECTED_IDENTIFIER_OR_PAREN && frame->mode == PARSE_MODE_DECLARATOR &&
+                            frame->name == BUSTER_PARSE_NONE && (frame->flags & BUSTER_PARSE_FRAME_DECLARATION) != 0;
+    uint32_t begin = missing_head ? at - 1 : at;
+    while (declarator && begin > frame->opener + 1 && parser->roles[begin - 1] == PARSE_ROLE_SPECIFIER)
+    {
+        begin -= 1;
+    }
+    const uint8_t before = begin != 0 && begin <= parser->count ? parser->kinds[begin - 1] : PARSE_KIND_END;
+    const bool boundary = block && (begin == frame->opener + 1 || before == PARSE_KIND_SEMI ||
+                                    (before == PARSE_KIND_R_BRACE && parser->roles[begin - 1] == PARSE_ROLE_CLOSE_BLOCK));
+    const bool candidate = stray_else || missing_head || (declarator && begin < at && boundary);
+    uint32_t end = begin;
+    bool balanced = candidate;
+    while (balanced && end < parser->count && parser->kinds[end] != PARSE_KIND_SEMI)
+    {
+        const uint8_t kind = parser->kinds[end];
+        if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
+        {
+            end = parse_scalar_skip_group(parser, end, &balanced);
+        }
+        else
+        {
+            balanced = !parse_kind_is_closer(kind);
+            end += 1;
+        }
+    }
+    if (balanced && end < parser->count && parser->kinds[end] == PARSE_KIND_SEMI && end > begin)
+    {
+        parser->error_resumed = true;
+        parser->error_resume_delete = true;
+        parser->error_resume_begin = begin;
+        parser->error_resume_end = end;
+    }
+}
+
 // The first error of the current top-level declaration, stopped at token `stopped`: its diagnostic, then the rest of
 // the declaration skipped. Its tokens become ERROR leaves of the root, the parse goes on at file scope, and the names
 // it bound are unbound. Returns the declaration's last token. A file-scope declaration's missing `;` before a declaration
@@ -4844,6 +4891,7 @@ static void parse_scalar_reset(ParseScalar* parser)
 // declaration's (#147): the parse goes on there, so that the next declaration's errors are clang's too.
 static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
 {
+    parse_scalar_resume_block_item(parser);
     const bool resumed = parser->error_resumed && parser->error_resume_end == 0 && parser->frame_count == 1 &&
                          stopped == parser->error_token && stopped > parser->item_begin;
     if (parser->diagnostic_count < parser->diagnostic_capacity)
