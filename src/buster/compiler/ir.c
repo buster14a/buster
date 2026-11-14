@@ -195,6 +195,30 @@ typedef enum IrOp
     // masked load's and its alignment_log2 a store's. It writes the vector's lane i at the address's lane i where c's bit
     // i is set, and no byte of a lane whose bit is clear (vmovdqu8 to vmovdqu64 [p]{k}, zmm). A store's effect.
     IR_MASKED_STORE,
+    // A compressing store (#1840): `a` the address, `b` the stored vector and `c` the mask, its flags the lanes and its
+    // alignment_log2 a store's, as a masked store's. It writes the lanes whose bits are set one after another from the
+    // address, in the lanes' order, and no other byte (vpcompressb to vpcompressq [p]{k}, zmm): the mask's population
+    // count of lanes. A store's effect, of the vector's bytes at the address at most.
+    IR_COMPRESS_STORE,
+    // A gather (#1840): `a` the base address, `b` the index vector and `c` the mask of the result's lanes, its flags the
+    // lanes (an IrSimdLane of integers, as a masked load's) and its alignment_log2 the scale's log2 (0 to 3). Its lane i is
+    // the lane's bytes at a + sext(b's element i) * scale where c's bit i is set, and 0 where it isn't; the index's
+    // elements are its bits over the result's lanes, dwords or qwords. A lane whose bit is clear is never read, so it
+    // can't fault, as a masked load's (vpgatherdd to vpgatherqq zmm{k}, [a + zmm * scale], into a zeroed register). A
+    // load's effect, of any memory.
+    IR_GATHER,
+    // A fused multiply-add (#1840) of floats or doubles: a * b + c, rounded once at the current rounding. Where a, b or c
+    // is a NaN, the first of them in that order, quieted; where the product or the sum is invalid (an infinity times zero,
+    // or infinities of opposite signs) of no NaN, the default NaN, a negative quiet NaN of no payload. x86's FMA3 forms
+    // compute this in each of their orders, 132, 213 and 231 (vfmadd213sd b, a, c's a * b + c), on Intel's and AMD's
+    // (#1840's check over 3,375 operand triples): the product's operands in the formula's order, then the addend's.
+    IR_FMA,
+    // A scatter (#1840): `a` the base address and `b` the index vector, as a gather's, and in the extra array at `c`
+    // (ir_extra_value) the stored vector, then the mask of its lanes; its flags the lanes (i32 or i64) and its
+    // alignment_log2 the scale's log2 (0 to 3). Lane i, where the mask's bit i is set, is written at a + sext(b's element
+    // i) * scale, the lanes in order from lane 0, so that of two set lanes at one address the higher lane's bytes stay; a
+    // clear lane writes nothing (vpscatterdd to vpscatterqq [a + zmm * scale]{k}, zmm). A store's effect, of any memory.
+    IR_SCATTER,
     IR_OP_COUNT,
 } IrOp;
 
@@ -564,9 +588,25 @@ struct IrDebugRegion
     uint8_t type;
 };
 
+// An expanded callee's instance (#2541 step 3): the origins [first, first + count) are its typed entries (its entry k
+// is origin first + k), past the function's own (IrDebugInfo.entry_count); its callee is the unit's symbol `symbol`,
+// expanded at the call whose origin is `call` (the function's own entry, or one of the instance `parent`'s, NONE for
+// the function's), so that instances nest as their expansions did. Its callee's own instances follow it, each nested.
+typedef struct IrDebugInline IrDebugInline;
+struct IrDebugInline
+{
+    uint32_t symbol;
+    uint32_t first;
+    uint32_t count;
+    uint32_t parent;
+    uint32_t call;
+};
+
 // Optional source identities (#1114), separate from the instruction/slot columns that execution consumes. An origin
 // is a typed-stream entry; a local is its original typed local. NONE means generated/unknown, never a nearby source.
-// Rewriters keep the original bounds and rebuild the current lengths before their old arenas can be retired.
+// Rewriters keep the original bounds and rebuild the current lengths before their old arenas can be retired. An origin
+// at or past entry_count names an expanded callee's entry (`inlines`, #2541 step 3), below origin_count; a sidecar
+// without instances may leave origin_count 0 (ir_debug_origin_limit).
 typedef struct IrDebugInfo IrDebugInfo;
 struct IrDebugInfo
 {
@@ -587,7 +627,27 @@ struct IrDebugInfo
     // witnessed source regions. The flags are mutually exclusive; neither flag admits an escaped/volatile local.
     uint8_t* binding_flags;
     uint32_t first_block_end;
+    uint32_t origin_count;
+    const IrDebugInline* inlines;
+    uint32_t inline_count;
 };
+
+// The origins a sidecar's instructions may have: its own entries and its expanded callees' (IrDebugInline).
+static uint32_t ir_debug_origin_limit(const IrDebugInfo* debug)
+{
+    return debug->origin_count > debug->entry_count ? debug->origin_count : debug->entry_count;
+}
+
+// The instance of `debug`'s whose own entries include `origin`, or NONE for the function's own entry (or none).
+static uint32_t ir_debug_instance(const IrDebugInfo* debug, uint32_t origin)
+{
+    uint32_t found = BUSTER_IR_NONE;
+    for (uint32_t k = 0; origin != BUSTER_IR_NONE && origin >= debug->entry_count && k < debug->inline_count; k += 1)
+    {
+        found = origin - debug->inlines[k].first < debug->inlines[k].count ? k : found;
+    }
+    return found;
+}
 
 struct IrFunction
 {
@@ -849,6 +909,10 @@ static const char* const ir_op_names[IR_OP_COUNT] = {
     "rmw",
     "masked_load",
     "masked_store",
+    "compress_store",
+    "gather",
+    "fma",
+    "scatter",
 };
 
 // The text form's names of a machine row's classes (#141, IrFunction.rows): the typed stream's, a vector's and a mask's
@@ -957,6 +1021,49 @@ static bool ir_access_flags_valid(uint32_t op, uint8_t flags)
 static bool ir_masked_lanes_valid(uint8_t flags)
 {
     return flags == IR_SIMD_LANE_I8 || flags == IR_SIMD_LANE_I16 || flags == IR_SIMD_LANE_I32 || flags == IR_SIMD_LANE_I64;
+}
+
+// How an operation's flags and alignment_log2 are checked (#1840): a plain operation's flags are none or its lanes, as
+// ir_check_metadata says, and its alignment_log2 is 0; a load's or a store's flags are an access's and an atomic
+// read/modify/write's its own, both aligned up to 2^31; a masked access's flags are its lanes, whose mask is a mask of
+// them, and its alignment_log2 an access's or, a gather's and a scatter's, its scale's. A table, so that the verifier's
+// check of every instruction it defers is a load and not a chain of compares as long as the accesses' list.
+typedef enum IrMetadata
+{
+    IR_METADATA_PLAIN,
+    IR_METADATA_ACCESS,
+    IR_METADATA_RMW,
+    IR_METADATA_MASKED,
+    IR_METADATA_GATHER,
+    IR_METADATA_COUNT,
+} IrMetadata;
+
+static const uint8_t ir_metadata_table[BUSTER_IR_OP_TABLE] = {
+    [IR_LOAD] = IR_METADATA_ACCESS,
+    [IR_STORE] = IR_METADATA_ACCESS,
+    [IR_ATOMIC_RMW] = IR_METADATA_RMW,
+    [IR_MASKED_LOAD] = IR_METADATA_MASKED,
+    [IR_MASKED_STORE] = IR_METADATA_MASKED,
+    [IR_COMPRESS_STORE] = IR_METADATA_MASKED,
+    [IR_GATHER] = IR_METADATA_GATHER,
+    [IR_SCATTER] = IR_METADATA_GATHER,
+};
+
+// The largest alignment_log2 of each IrMetadata.
+static const uint8_t ir_metadata_alignment[IR_METADATA_COUNT] = {
+    [IR_METADATA_PLAIN] = 0,
+    [IR_METADATA_ACCESS] = 31,
+    [IR_METADATA_RMW] = 31,
+    [IR_METADATA_MASKED] = 31,
+    [IR_METADATA_GATHER] = 3,
+};
+
+// Whether an operation is a masked access (#1840): a masked load or store, a compressing store, a gather or a scatter,
+// whose flags are its lanes, whose mask is a mask of them, and whose alignment_log2 is an access's (a gather's and a
+// scatter's, its scale's).
+static bool ir_masked_access(uint32_t op)
+{
+    return op < BUSTER_IR_OP_TABLE && ir_metadata_table[op] >= IR_METADATA_MASKED;
 }
 
 // Whether an atomic read/modify/write's flags are an atomic access's of a C order, any of them (#1059): the locked access
@@ -1083,6 +1190,8 @@ static bool ir_debug_create(Arena* arena, IrFunction* function, const IrDebugInf
         IrDebugBinding* bindings = ir_allocate(arena, source->binding_count, sizeof(IrDebugBinding), &ok);
         IrDebugRegion* regions = ir_allocate(arena, source->region_count, sizeof(IrDebugRegion), &ok);
         uint8_t* binding_flags = ir_allocate(arena, source->binding_flags != NULL ? source->local_count : 0, 1, &ok);
+        // The instances are copied, not shared: the source's arena may be retired before the result's.
+        IrDebugInline* inlines = ir_allocate(arena, source->inline_count, sizeof(IrDebugInline), &ok);
         if (ok)
         {
             *debug = (IrDebugInfo){
@@ -1100,6 +1209,8 @@ static bool ir_debug_create(Arena* arena, IrFunction* function, const IrDebugInf
                 .region_count = source->region_count,
                 .binding_flags = binding_flags,
                 .first_block_end = source->first_block_end,
+                .origin_count = source->origin_count,
+                .inline_count = source->inline_count,
             };
             if (function->instruction_count != 0)
             {
@@ -1125,6 +1236,11 @@ static bool ir_debug_create(Arena* arena, IrFunction* function, const IrDebugInf
             {
                 memcpy(binding_flags, source->binding_flags, source->local_count);
             }
+            if (source->inline_count != 0)
+            {
+                memcpy(inlines, source->inlines, (uint64_t)source->inline_count * sizeof(IrDebugInline));
+            }
+            debug->inlines = source->inline_count != 0 ? inlines : NULL;
         }
     }
     if (ok)
@@ -1236,6 +1352,9 @@ typedef enum IrRule
     IR_RULE_INTRINSIC,
     IR_RULE_MASKED_LOAD,
     IR_RULE_MASKED_STORE,
+    IR_RULE_GATHER,
+    IR_RULE_FMA,
+    IR_RULE_SCATTER,
 } IrRule;
 
 #define BUSTER_IR_INTS (((1u << (IR_I128 + 1)) - 1) & ~1u)
@@ -1310,7 +1429,11 @@ typedef enum IrRule
     X(IR_INTRINSIC,     1, 7, (1u << IR_I32) | (1u << IR_I64) | (1u << IR_F32) | (1u << IR_F64) | (1u << IR_M16) | (1u << IR_M32) | (1u << IR_M64) | BUSTER_IR_VECTORS, IR_RULE_INTRINSIC, 0) \
     X(IR_ATOMIC_RMW,    3, 7, (1u << IR_I8) | (1u << IR_I16) | (1u << IR_I32) | (1u << IR_I64), IR_RULE_ATOMIC_RMW, 0) \
     X(IR_MASKED_LOAD,   7, 7, BUSTER_IR_VECTORS, IR_RULE_MASKED_LOAD, 0) \
-    X(IR_MASKED_STORE,  7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0)
+    X(IR_MASKED_STORE,  7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0) \
+    X(IR_COMPRESS_STORE, 7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0) \
+    X(IR_GATHER,        7, 7, BUSTER_IR_VECTORS, IR_RULE_GATHER, 0) \
+    X(IR_FMA,           7, 7, (1u << IR_F32) | (1u << IR_F64), IR_RULE_FMA, 0) \
+    X(IR_SCATTER,       3, 7, 1u << IR_VOID, IR_RULE_SCATTER, 0)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
 static const uint8_t ir_operand_table[BUSTER_IR_OP_TABLE] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_ROW) };
@@ -1545,6 +1668,20 @@ static bool ir_ternary_instruction(const IrFunction* f, uint32_t i)
     return f->op[i] == IR_INTRINSIC && ir_intrinsic_ternary(f->c[i]);
 }
 
+// How many values instruction i keeps in the extra array past its direct operands, from the index its `c` names
+// (ir_intrinsic_extra): a ternary intrinsic's third operand (1), a scatter's stored vector and its mask (2, #1840); 0 for
+// any other instruction (a phi's and a call's operands are there too, by their own fields).
+static uint32_t ir_extra_value_count(const IrFunction* f, uint32_t i)
+{
+    return ir_ternary_instruction(f, i) ? 1 : f->op[i] == IR_SCATTER ? 2 : 0;
+}
+
+// Instruction i's k-th value in the extra array (ir_extra_value_count's).
+static uint32_t ir_extra_value(const IrFunction* f, uint32_t i, uint32_t k)
+{
+    return f->extra[ir_intrinsic_extra(f->c[i]) + k];
+}
+
 // The mask type of a comparison of vector type `type`'s lanes `lane`, a bit per lane (m8 for 8 lanes or fewer): IR_VOID
 // for a type that isn't a vector.
 static uint32_t ir_lane_mask(uint32_t type, uint32_t lane)
@@ -1559,6 +1696,71 @@ static uint32_t ir_lane_count(uint32_t type, uint32_t lane)
 {
     const uint32_t bits = lane < IR_SIMD_LANE_COUNT ? ir_simd_lane_bits((IrSimdLane)lane) : 0;
     return ir_vector_type(type) && bits != 0 ? ir_type_bits[type] / bits : 0;
+}
+
+// Whether a gather's result of vector type `type` and lanes `lane` may take an index of type `index` (#1840): a gather of
+// dwords or qwords, as x86's are, by a vector of one dword or qword per lane.
+static bool ir_gather_index_valid(uint32_t type, uint32_t lane, uint32_t index)
+{
+    const uint32_t count = ir_lane_count(type, lane);
+    const uint32_t bits = count != 0 && ir_vector_type(index) ? ir_type_bits[index] / count : 0;
+    return (lane == IR_SIMD_LANE_I32 || lane == IR_SIMD_LANE_I64) && (bits == 32 || bits == 64);
+}
+
+// The bits of IR_FMA's a * b + c (#1840) of type IR_F32 (each operand's low 32 bits) or IR_F64: the first NaN of a, b and
+// c quieted, otherwise the product and sum rounded once (the host's fma at its current rounding), and where that is a NaN
+// (an invalid operation of numbers), the default NaN.
+static uint64_t ir_fma_bits(uint32_t type, uint64_t a, uint64_t b, uint64_t c)
+{
+    const bool d = type == IR_F64;
+    const uint64_t exponent = d ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000);
+    const uint64_t mantissa = d ? UINT64_C(0x000fffffffffffff) : UINT64_C(0x007fffff);
+    const uint64_t quiet = d ? UINT64_C(0x0008000000000000) : UINT64_C(0x00400000);
+    const uint64_t operands[3] = {
+        a,
+        b,
+        c,
+    };
+    uint64_t result = 0;
+    bool found = false;
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        const bool nan = (operands[k] & exponent) == exponent && (operands[k] & mantissa) != 0;
+        result = !found && nan ? (operands[k] & (exponent | mantissa | (d ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000)))) | quiet : result;
+        found = found || nan;
+    }
+    if (!found && d)
+    {
+        double x = 0;
+        double y = 0;
+        double z = 0;
+        memcpy(&x, &a, sizeof(x));
+        memcpy(&y, &b, sizeof(y));
+        memcpy(&z, &c, sizeof(z));
+        const double r = __builtin_fma(x, y, z);
+        memcpy(&result, &r, sizeof(r));
+    }
+    else if (!found)
+    {
+        const uint32_t bits[3] = {
+            (uint32_t)a,
+            (uint32_t)b,
+            (uint32_t)c,
+        };
+        float x = 0;
+        float y = 0;
+        float z = 0;
+        memcpy(&x, &bits[0], sizeof(x));
+        memcpy(&y, &bits[1], sizeof(y));
+        memcpy(&z, &bits[2], sizeof(z));
+        const float r = __builtin_fmaf(x, y, z);
+        uint32_t word = 0;
+        memcpy(&word, &r, sizeof(word));
+        result = word;
+    }
+    const bool invalid = !found && (result & exponent) == exponent && (result & mantissa) != 0;
+    result = invalid ? (d ? UINT64_C(0xfff8000000000000) : UINT64_C(0xffc00000)) : result;
+    return result;
 }
 
 #endif
@@ -1837,9 +2039,24 @@ static IrCheck ir_check_shape(const IrFunction* f)
     }
     for (uint32_t i = 0; check.error == IR_OK && debug != NULL && i < n; i += 1)
     {
-        if (debug->origins[i] != BUSTER_IR_NONE && debug->origins[i] >= debug->entry_count)
+        if (debug->origins[i] != BUSTER_IR_NONE && debug->origins[i] >= ir_debug_origin_limit(debug))
         {
             check = ir_check(IR_ERROR_METADATA, i, debug->origins[i]);
+        }
+    }
+    // The instances (IrDebugInline): in order, each past the function's entries and within the origins, its parent an
+    // earlier instance, its call an entry of its parent's (the function's own for none).
+    for (uint32_t k = 0; check.error == IR_OK && debug != NULL && k < debug->inline_count; k += 1)
+    {
+        const IrDebugInline instance = debug->inlines[k];
+        const uint32_t limit = ir_debug_origin_limit(debug);
+        const bool placed = debug->inlines != NULL && instance.first >= debug->entry_count && instance.first <= limit && instance.count <= limit - instance.first &&
+                            (k == 0 || instance.first >= debug->inlines[k - 1].first + debug->inlines[k - 1].count);
+        const bool nested = instance.parent == BUSTER_IR_NONE ? instance.call < debug->entry_count :
+                            instance.parent < k && instance.call - debug->inlines[instance.parent].first < debug->inlines[instance.parent].count;
+        if (!placed || !nested)
+        {
+            check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, k);
         }
     }
     for (uint32_t s = 0; check.error == IR_OK && debug != NULL && s < f->slot_count; s += 1)
@@ -1995,6 +2212,19 @@ static IrCheck ir_check_shape(const IrFunction* f)
 
 // Exact one-instruction oracle. The vector path calls this only for exceptional rules or a failing batch to obtain
 // the same first error. It never reads a value's type until its ID and the enclosing columns have been checked.
+// Whether an operation's flags and alignment_log2 are its IrMetadata's (#1840): a plain operation's flags none, its
+// lanes (ir_lane_valid), an intrinsic's kind's own (checked by its rule) or a stack save's frame flag, and its alignment
+// 0. The opcode is valid.
+static bool ir_check_metadata(uint32_t op, uint8_t flags, uint8_t alignment_log2)
+{
+    const uint32_t metadata = ir_metadata_table[op];
+    const bool flags_valid = metadata == IR_METADATA_PLAIN  ? flags == 0 || op == IR_INTRINSIC || ir_lane_valid(op, flags) || (op == IR_STACK_SAVE && flags == BUSTER_IR_STACK_SAVE_FRAME) :
+                             metadata == IR_METADATA_ACCESS ? ir_access_flags_valid(op, flags) :
+                             metadata == IR_METADATA_RMW    ? ir_rmw_flags_valid(flags) :
+                                                              ir_masked_lanes_valid(flags);
+    return flags_valid && alignment_log2 <= ir_metadata_alignment[metadata];
+}
+
 static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
 {
     const uint32_t op = f->op[i];
@@ -2015,11 +2245,7 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
     {
         check.error = IR_ERROR_OPERAND;
     }
-    else if (((op == IR_LOAD || op == IR_STORE) && (!ir_access_flags_valid(op, f->flags[i]) || f->alignment_log2[i] > 31)) ||
-             (op == IR_ATOMIC_RMW && (!ir_rmw_flags_valid(f->flags[i]) || f->alignment_log2[i] > 31)) ||
-             ((op == IR_MASKED_LOAD || op == IR_MASKED_STORE) && (!ir_masked_lanes_valid(f->flags[i]) || f->alignment_log2[i] > 31)) ||
-             ((op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW && op != IR_MASKED_LOAD && op != IR_MASKED_STORE) && ((f->flags[i] != 0 && op != IR_INTRINSIC && !ir_lane_valid(op, f->flags[i]) && (op != IR_STACK_SAVE || f->flags[i] != BUSTER_IR_STACK_SAVE_FRAME)) ||
-              f->alignment_log2[i] != 0)))
+    else if (!ir_check_metadata(op, f->flags[i], f->alignment_log2[i]))
     {
         check.error = IR_ERROR_METADATA;
     }
@@ -2277,6 +2503,29 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             // A masked load's mask at its lanes and passthrough of its type, and a masked store's vector and mask so.
             case IR_RULE_MASKED_LOAD: valid = ta == IR_PTR && ir_vector_type(type) && tb == ir_lane_mask(type, f->flags[i]) && operand_types[2] == type; break;
             case IR_RULE_MASKED_STORE: valid = ta == IR_PTR && ir_vector_type(tb) && operand_types[2] == ir_lane_mask(tb, f->flags[i]); break;
+            // A gather's index of an element per lane, of 32 or 64 bits, and its mask at its lanes (#1840).
+            case IR_RULE_GATHER: valid = ta == IR_PTR && ir_vector_type(type) && ir_gather_index_valid(type, f->flags[i], tb) && operand_types[2] == ir_lane_mask(type, f->flags[i]); break;
+            // A fused multiply-add's three operands are its result's type (#1840).
+            case IR_RULE_FMA: valid = ta == type && tb == type && operand_types[2] == type; break;
+            // A scatter's (#1840) `c` is its two extra values' index, no kind's: its stored vector's lanes, a dword's or a
+            // qword's, take b's index elements, and its mask is of those lanes.
+            case IR_RULE_SCATTER:
+            {
+                const bool listed = c <= BUSTER_IR_INTRINSIC_EXTRA_LIMIT << BUSTER_IR_INTRINSIC_EXTRA_SHIFT && ir_intrinsic_kind(c) == 0 &&
+                                    ir_slice(ir_intrinsic_extra(c), 2, f->extra_count);
+                const uint32_t stored = listed ? f->extra[ir_intrinsic_extra(c)] : BUSTER_IR_NONE;
+                const uint32_t mask = listed ? f->extra[ir_intrinsic_extra(c) + 1] : BUSTER_IR_NONE;
+                if (stored >= f->instruction_count || mask >= f->instruction_count)
+                {
+                    check = ir_check(IR_ERROR_OPERAND, i, stored >= f->instruction_count ? 3 : 4);
+                }
+                else
+                {
+                    valid = ta == IR_PTR && ir_vector_type(f->type[stored]) && ir_gather_index_valid(f->type[stored], f->flags[i], tb) &&
+                            f->type[mask] == ir_lane_mask(f->type[stored], f->flags[i]);
+                }
+                break;
+            }
             case IR_RULE_SYMBOL: valid = a != 0 && a < f->symbol_count; break;
             case IR_RULE_ADDRESS:
             {
@@ -2727,20 +2976,36 @@ static uint32_t ir_value_mask3(const IrFunction* f, uint32_t i)
     return ir_value_mask(f, i) | (ir_ternary_instruction(f, i) ? 4u : 0u);
 }
 
+// The operations with operands past their direct ones (ir_operand_count's): a call's arguments, a phi's incoming values,
+// and the values in the extra array (ir_extra_value_count's) of an intrinsic and a scatter. A byte by opcode, so that
+// another instruction's count is its direct operands after one load and test: the chain of compares it replaces took
+// six instructions, and with the scatter's test a jump table.
+static const uint8_t ir_operand_more[256] = {
+    [IR_CALL] = 1,
+    [IR_CALL_INDIRECT] = 1,
+    [IR_PHI] = 1,
+    [IR_INTRINSIC] = 1,
+    [IR_SCATTER] = 1,
+};
+
 static uint64_t ir_operand_count(const IrFunction* f, uint32_t i)
 {
     uint64_t result = (uint32_t)__builtin_popcount(ir_value_mask(f, i));
-    if (f->op[i] == IR_CALL || f->op[i] == IR_CALL_INDIRECT)
+    const uint32_t op = f->op[i];
+    if (ir_operand_more[op] != 0)
     {
-        result += f->calls[f->b[i]].argument_count;
-    }
-    else if (f->op[i] == IR_PHI)
-    {
-        result += f->b[i];
-    }
-    else if (ir_ternary_instruction(f, i))
-    {
-        result += 1;
+        if (op == IR_CALL || op == IR_CALL_INDIRECT)
+        {
+            result += f->calls[f->b[i]].argument_count;
+        }
+        else if (op == IR_PHI)
+        {
+            result += f->b[i];
+        }
+        else
+        {
+            result += ir_extra_value_count(f, i);
+        }
     }
     return result;
 }
@@ -2776,10 +3041,12 @@ static IrOperand ir_operand(const IrFunction* f, uint32_t i, uint32_t number, ui
         result.block = f->extra[f->a[i] + p * 2];
         result.value = f->extra[f->a[i] + p * 2 + 1];
     }
-    else if (f->op[i] == IR_INTRINSIC)
+    else if (f->op[i] == IR_INTRINSIC || f->op[i] == IR_SCATTER)
     {
-        result.position = 3;
-        result.value = ir_intrinsic_third(f, i);
+        // A ternary intrinsic's third operand, or a scatter's stored vector and mask (#1840), in the extra array.
+        const uint32_t p = number - direct;
+        result.position = 3 + p;
+        result.value = ir_extra_value(f, i, p);
     }
     else
     {
@@ -3277,7 +3544,8 @@ static uint64_t ir_uses_batch(const IrFunction* f, uint32_t first, uint32_t coun
     const __m512i kinds = _mm512_and_si512(_mm512_maskz_loadu_epi32(active, f->c + first), _mm512_set1_epi32(BUSTER_IR_INTRINSIC_KIND));
     const __mmask16 ternary = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_INTRINSIC)) & _mm512_cmpge_epu32_mask(kinds, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY)) &
                               _mm512_cmplt_epu32_mask(kinds, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY_END));
-    __mmask16 variadic = active & (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_PHI)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)) | ternary);
+    __mmask16 variadic = active & (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_PHI)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)) | ternary |
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_SCATTER)));
     const uint64_t present = _pdep_u64(use_a, BUSTER_IR_USES_LANE_BITS) | _pdep_u64(use_b, BUSTER_IR_USES_LANE_BITS << 1) | _pdep_u64(use_c, BUSTER_IR_USES_LANE_BITS << 2);
     const uint32_t* const columns[4] = { f->a + first, f->b + first, f->c + first, f->c + first };
     uint64_t total = 0;
@@ -3318,8 +3586,8 @@ static uint64_t ir_uses_batch(const IrFunction* f, uint32_t first, uint32_t coun
         {
             const uint32_t i = first + last;
             const bool phi = f->op[i] == IR_PHI;
-            const bool third = f->op[i] == IR_INTRINSIC;
-            const uint32_t amount = phi ? f->b[i] : third ? 1 : f->calls[f->b[i]].argument_count;
+            const bool third = f->op[i] == IR_INTRINSIC || f->op[i] == IR_SCATTER;
+            const uint32_t amount = phi ? f->b[i] : third ? ir_extra_value_count(f, i) : f->calls[f->b[i]].argument_count;
             const uint32_t* const extra = phi ? f->extra + f->a[i] + 1 : third ? f->extra + ir_intrinsic_extra(f->c[i]) : f->extra + f->calls[f->b[i]].argument_first;
             const uint32_t stride = phi ? 2 : 1;
             for (uint32_t p = 0; p < amount; p += 1)
@@ -3722,6 +3990,11 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                                 fprintf(output, " lanes=%s", f->flags[i] < IR_SIMD_LANE_COUNT ? ir_lane_names[f->flags[i]] : "invalid");
                             }
                         }
+                        // A scatter's stored vector and mask (#1840), its extra values.
+                        if (op == IR_SCATTER && ir_intrinsic_kind(c) == 0 && ir_slice(ir_intrinsic_extra(c), 2, f->extra_count))
+                        {
+                            fprintf(output, ", %%%" PRIu32 ", %%%" PRIu32, ir_extra_value(f, i, 0), ir_extra_value(f, i, 1));
+                        }
                         if (op == IR_INTRINSIC)
                         {
                             if (ir_intrinsic_ternary(c) && ir_slice(ir_intrinsic_extra(c), 1, f->extra_count))
@@ -3752,10 +4025,12 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                                     operation == BUSTER_IR_RMW_ADD ? "add" : operation == BUSTER_IR_RMW_COMPARE ? "cas" : operation == BUSTER_IR_RMW_EXCHANGE ? "xchg" : "invalid",
                                     order <= BUSTER_IR_FENCE_SEQ_CST ? ir_fence_orders[order] : "invalid");
                         }
-                        if (op == IR_MASKED_LOAD || op == IR_MASKED_STORE)
+                        if (ir_masked_access(op))
                         {
-                            // A masked access's alignment and lanes (#1840), always named: its mask's type depends on them.
-                            fprintf(output, " align=%" PRIu32 " lanes=%s", UINT32_C(1) << f->alignment_log2[i], f->flags[i] < IR_SIMD_LANE_COUNT ? ir_lane_names[f->flags[i]] : "invalid");
+                            // A masked access's alignment (a gather's scale) and lanes (#1840), always named: its mask's type
+                            // depends on them.
+                            fprintf(output, " %s=%" PRIu32 " lanes=%s", op == IR_GATHER || op == IR_SCATTER ? "scale" : "align", UINT32_C(1) << f->alignment_log2[i],
+                                    f->flags[i] < IR_SIMD_LANE_COUNT ? ir_lane_names[f->flags[i]] : "invalid");
                         }
                         if (op == IR_LOAD || op == IR_STORE)
                         {

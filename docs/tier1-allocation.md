@@ -32,6 +32,7 @@ Allocating the unfused uses and then folding is unsound.
 | `use_positions` | optional u32 | Nondecreasing positions inside each range |
 | `use_required` | optional u8 | 1 requires a register at that use; 0 permits memory |
 | `clobbers` | optional u32 | Nondecreasing positions where `clobber_registers[class]` lose their values (#2574) |
+| `avoided_registers` | optional u32 | Registers each interval takes only where no other it may take is free (#2767) |
 
 `registers[3]` contains the allocatable physical masks. GPR bits are 0–15;
 vector bits are 0–31; opmask bits are 1–7, k1 to k7 (#179,
@@ -256,7 +257,10 @@ required, keeps an unclaimed free register if it can be rematerialized, but
 never evicts another value or takes a continuing value's claimed register,
 even through a physical-register hint. This preserves hoisted definitions
 through low-pressure blocks, including a jump table's once-per-entry base
-(#1217), while leaving them cheap eviction victims under pressure. Nor does a
+(#1217), while leaving them cheap eviction victims under pressure. It rests
+without one where its hint names no register, and a recipe evicted before any
+use read it gives up its register from its interval's start ("Recipes evicted
+before a read" below). Nor does a
 recipe keep a register from a value without one that starts, or reloads at a
 required use, where its value hint names that register: where no use requires
 the recipe there, it leaves the register as an eviction does, recomputed at its
@@ -537,7 +541,10 @@ take, by exit hints:
   before the value's definition: along the phis that take the phi in turn
   (`tier1_cfg_operand_targets`, up to eight), the first with a range before it,
   whose first range's opening register the definition takes. A dispatch loop's
-  join's phi has its first handler's, the register every handler takes it in.
+  join's phi has its first handler's, the register every handler takes it in;
+- a two-address instruction's result that nothing else hints (#2685), its first
+  operand's place at the end of that operand's range, where the range ends at
+  the definition ("Two-address results" below).
 
 Slot sharing joins phi-to-phi pairs before the others (`tier1_cfg_share_slots`):
 in `sqlite3VdbeExec`, whose latch's join is laid out before its header, an
@@ -768,8 +775,10 @@ Before allocation the frame's reservations count a column for every
 caller-saved register of a function that calls (`call_save_columns`). After it,
 each consumer keeps the rows of those registers whose fragments cover a call's
 or such a sequence's definition phase, other than their own value's definition
+and a shift's count, which its shift reads in `cl` and leaves there
 (`tier1_emit_fragment_saved`: `tier1_emit_saves` and `tier1_emit_cfg_saves`, the
-latter beside the opmask and xmm registers' rows). Every caller-saved register
+latter beside the opmask and xmm registers' rows). Values live across a sequence
+avoid its registers ("Values live across fixed sequences" below), so few take one. Every caller-saved register
 used to have a row in every function that called, used or not: in `sqlite3GetInt32`,
 64 of its 104 bytes. The tests check that the rows are exactly the registers the
 records store to (`tier1_emit_test_general_rows_used`). On the 9700X, Tier 1's
@@ -1038,6 +1047,638 @@ a fresh callee-saved register at its switch, read only in cases' loops that
 rarely run, and its prologue saves one more register on every call (0.89 M more
 than without the hoist).
 
+### Increments after their last reader (#2592)
+
+Lua's `vmfetch` ends every handler with `i = *(pc++)`. The lowering defines
+`pc + 4` before the load that reads `pc`, so `pc` was still live where the
+increment was defined, and the increment took another register: `lea
+0x4(%r14),%rbp` and then `mov (%r14),%r14d`, the loaded `i` in `pc`'s register,
+which the load freed. The dispatch join's phis have `pc` in `r14` and `i` in
+`rbp`, so every dispatch swapped the two through the scratch register: `mov
+%r14,%r11; mov %rbp,%r14; mov %r11,%rbp`. clang loads first and adds in place:
+`mov (%r14),%ecx; add $4,%r14`.
+
+The operand sink (`tier1_schedule_ir_sink`, in `tier1_schedule_ir.c`) gives the
+allocation that order. It runs on every function, on the IR before the optimizer's
+final verification, as `--tier1-schedule=pre` does, and moves an expression to
+right after the last instruction of its block's segment that reads its operand
+`a`. The expression is pure, total and cheap integer and pointer arithmetic,
+constants and conversions included, and its root is a phi's incoming value.
+`a` is the only operand it takes from outside it, besides constants. Nothing
+reads the root before its new place, nor the expression's other values but the
+instruction of it that each feeds. The expression's result is then defined
+where `a` has died, and takes the register its phi's hint names, which is
+`a`'s. Moving it can't raise register pressure:
+over the distance it moves, the root was live and now `a` is, if `a` wasn't
+already. The last reader isn't one of the operations that move, so it keeps its
+place. It is no truth value either, so a branch or extension still finds its
+comparison right before it, and a load still folds into its consumer, since
+nothing moved is a memory access. `--verify` checks the order with the
+preallocation schedule's reference (`tier1_schedule_ir_verify`).
+
+The phi must be `a`'s own: `a` is that phi, a value computed from it by such
+operations, or a join of its values. A Lua handler that may skip a word joins
+`pc`'s paths before its fetch. A list walk shows why the rule is needed:
+`pp = &p->next; p = p->next` makes two values from `p`, and the load is `p`'s
+own next value, which wants `p`'s register. Moving `pp`'s increment past the load
+gave that register to the increment, and the loop's back edge swapped the two:
+speedtest1's `vdbeSorterMerge` ran 2.82 M more instructions in the change's
+first form, which moved any expression of one value.
+
+By callgrind at main `ca1ede6a`, with #1189's `gap.c` and #1217's inputs (Lua's
+five scripts with a fixed string-hash seed, and speedtest1's `--size 5` mix):
+
+| | main | this | clang -O2 |
+| --- | ---: | ---: | ---: |
+| `luaV_execute`'s instructions | 2,365.8 M | 2,250.8 M | |
+| `luaV_execute`'s register moves | 438.8 M | 324.6 M | 322.9 M |
+| of them through `r11` | 81.2 M | 9.7 M | |
+| Lua's five scripts, whole processes | 5,236.6 M | 5,121.1 M | 4,207.3 M |
+| speedtest1, whole process | 2,873.3 M | 2,869.0 M | 2,028.9 M |
+
+clang's column is #2574's. Of the moves through `r11` that are left, 7.9 M are
+one edge of `OP_CALL`'s path into `startfunc`, which swaps `rbx` and `r15`, and
+0.8 M are `OP_NEWTABLE`'s shift by `cl`, which isn't an edge's (both gone since:
+"Recipes no block reads, settled phi places, and the fixed rules' scratch"
+below). 16 of
+`luaV_execute`'s 78 indirect jumps still follow a swap, down from 59, and they
+take 1.0 M of the moves. Some of these handlers increment `pc` inside the handler,
+as `OP_LOADKX` does, so the handler leaves `pc` and `i` in each other's
+registers. Others reload `trap` after a call into a register other than the
+join's, as `OP_POW` does. A loop's backward jump moves `pc` by a variable
+amount, which isn't of the phi's family either. No other function of Lua runs
+more instructions. In speedtest1, two functions run more, `instrFunc` 0.17 M and
+`allocateBtreePage` 0.16 M, where moves change which counters spill. Nine run
+fewer, `sqlite3VdbeExec` 2.18 M of them. The pass moves 76 expressions in
+`lvm.c` and 62 in `sqlite3.c`, whose records fall from 285,832 to 285,492 and
+spill stores from 8,429 to 8,327. `tests/driver/tier1_patterns.c` checks the
+fetch natively: each handler's indirect jump follows the target's load, with no
+move between them.
+
+The pass takes no use counts. Its candidates are the phis' incoming values, and
+a scan of each candidate's window of at most 64 instructions finds the readers
+it needs. A function with nothing to move allocates no per-instruction column
+but the scans' bits, and one with something permutes only the span from its
+lowest moved instruction to its last anchor. The pass's first form, which #2705
+merged, counted every value's uses over every operand and permuted the whole
+function. On the 9700X, against the compiler before the pass:
+
+| `--tier1 -c`, user counts | first form | without use counts |
+| --- | ---: | ---: |
+| `sqlite3.c`'s instructions | +1.07% | +0.18% |
+| `sqlite3.c`'s cycles | +1.57% | +0.29% |
+| `lvm.c`'s instructions | +0.96% | +0.63% |
+| `lvm.c`'s cycles | +0.79% | +0.35% |
+
+On `sqlite3.c` the pass looks at about 11,000 candidates, scans 2,000 windows
+and renames the operands of 48,500 of the 561,500 instructions it sees; how the
+rest of the difference splits between it and the later stages, whose input it
+changes, isn't measured. On `lvm.c` the moved expressions span almost all of
+`luaV_execute`, so limiting the permutation saves nothing there.
+
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-sink-2592-2026-11-14)), with the
+pass as #2705 merged it (its `luaV_execute` is the same), the instructions fall
+but the time doesn't measurably. Lua's five scripts run 2.20%
+fewer instructions at each of 33 link orders, and their user cycles change by
+-0.10% (95% interval -0.64% to +0.44%). Zen 5 eliminates register moves at
+rename, and the dispatch's critical path, the load of `i`, its opcode and the
+table's load, never included them. By script the cycles don't follow the
+instructions: `strings` runs 1.6% faster with 0.17% fewer instructions,
+`closures` 1.2% slower with 1.1% fewer and `arithmetic` 0.5% faster with 5.7%
+fewer. Branch mispredictions are the same in both, and their changes from order
+to order don't follow the cycles'; every order shares `luaV_execute`'s own
+layout, which the change moves, and nothing here separates that layout from the
+removed moves. speedtest1 runs 0.34%
+fewer user cycles over 8 placements (-0.71% to +0.04%).
+
+### Two-address results (#2685)
+
+A two-address instruction writes its first operand's register: `sub`, `and`,
+`imul` with a register or memory operand, `neg`, a copy, a select's `cmov`.
+Its records copy that operand into the destination first where the
+allocation gave the result another register, and the result took the lowest
+free register, the operand's only by chance. #2618's experiment of leaving
+rip-foldable takes out of the hoist found it: without the hoisted address in
+`rax`, `memsys5Unlink`'s second `imul` took `rdx` rather than its dying `edi`,
+and copied `edi` into it on every call.
+
+`tier1_select_ties` names, per node, the operands whose register its result
+may take: the first operand of each rule whose records copy it into the
+destination, a commutative operation's second too (its records swap the two
+where the destination is the second's), and a select's arms. Each consumer
+hints the result's definition to one of them whose range ends at the
+definition, where nothing else hints it:
+
+- the CFG consumer's problem by `Tier1CfgInput.ties`, two values per value,
+  which `tier1_cfg_ties` makes an exit hint to the operand's range
+  (`BUSTER_TIER1_ALLOCATE_HINT_EXIT`): its register as it ended, wherever the
+  scan moved it;
+- the straight-line consumer's by the allocator's value hints, which its input
+  had none of (`tier1_emit_prepare`): the hinted allocator then takes it.
+
+An operand live past the definition still holds its register there, so only a
+dying one can be taken; an addition of two registers is a three-operand `lea`
+and ties nothing. A value a return reads takes no tie
+(`tier1_select_returned`): the return wants it in `rax`, where the lowest free
+register usually is, and `memsys5Size`'s product, whose two operands end at its
+`imul`, took the first one's `rcx` and was then copied into `eax` (0.48 M more
+on speedtest1). `tier1_ties_test.c` checks both consumers' registers and runs
+their code.
+
+By callgrind (#1189's `gap.c`, #1217's inputs) at #2688's head `01a2d0b3`,
+speedtest1 runs 7.80 M fewer instructions (2,991.51 M to 2,983.71 M), the
+straight-line consumer's 0.43 M of it, and Lua's five scripts 21.85 M fewer
+(5,300.87 M to 5,279.02 M): `sqlite3AddInt64` −1.31 M, `index2value` −9.14 M,
+`luaV_execute` −3.87 M. Without the returned-value rule, `memsys5Size` lost
+0.48 M; with it, no function loses more than 23 K.
+
+### Recipes evicted before a read (#2618)
+
+A recipe often enters a block in a register its range's hint names and loses
+it to the block's first values before any use reads it. `tier1_cfg_entry_unread`
+already enters such a value as its recipe, so that the edges into the block
+move nothing for it; but the scan still noted the register as the range's
+opening, and a range that takes the block's entry convention took it again.
+`hexFunc`'s loop is laid out body first: the header, after it, takes the body's
+convention (#2553), so its range of `hexdigits`, which reads nothing there,
+took the register the body's range had opened in before its first value
+evicted it, and the back edge moved the table into it on every iteration.
+
+- **Evicted before a read.** A recipe evicted where it has held its register
+  since its range's start and no use has read it there is recomputed from that
+  start instead (`tier1_allocation_evict`), and its opening becomes the memory
+  hint. An eviction by a required value and by a hinted value without a recipe
+  does so; a call's clobber doesn't: a dispatch loop's handler that calls
+  before its first read would leave the table without a register at every
+  handler's entry, as each takes the first one's convention (`luaV_execute`
+  ran 93.5 M more instructions that way).
+- **Resting.** A recipe's range with no use, starting where nothing requires
+  it, takes no free register where its hint is another range's opening that
+  took none: the convention of a block it takes, as `hexFunc`'s header takes
+  its body's. It took one, and the edges into its block then moved or
+  recomputed the value into it, though the block never read it. A range
+  hinted to a closing that a call left without a register keeps taking one
+  (below).
+- **Definitions no edge reads.** A definition whose register fragment reaches
+  its block's end is left out where no edge leaving the block reads it: each
+  successor the value is live into enters with its recipe, and no phi takes it
+  along the edge (`tier1_emit_cfg_dead_definition`, "Rematerialization"
+  below). `hexFunc` computed `hexdigits` before its loop on every call for a
+  header that rests. `tier1_dropped_test.c`'s `r` is that loop.
+
+By callgrind (#1189's `gap.c`, #1217's inputs) at #2688's head `01a2d0b3`, with
+#2685's ties before it, the two rules took speedtest1 from 2,983.71 M to
+2,969.60 M instructions and Lua's five scripts from 5,279.02 M to 5,151.74 M,
+the resting rule 12.54 M and 127.28 M of it alone: `luaV_execute` −125.8 M,
+68.0 M fewer register moves and 48.2 M fewer frame `lea`s, and
+`sqlite3VdbeExec` −7.19 M. The variants measured on the way:
+
+| Variant | speedtest1 | Lua's scripts |
+| --- | ---: | ---: |
+| evicted before a read, by a required value | −1.99 M | −0.24 M |
+| the same, and by a hinted value | −2.27 M | −0.31 M |
+| the same, and by a call's clobber | −1.53 M | +92.9 M |
+| resting alone, on openings and closings | −12.54 M | −127.28 M |
+| both, with the opening's memory hint | −14.11 M | −127.28 M |
+
+Main's #2592 (the operand sink, "Increments after their last reader" above)
+removed much of the same traffic in `luaV_execute` since. On main `98186d5e`,
+resting on closings too gained speedtest1 8.90 M but cost Lua's scripts 7.64 M:
+`luaV_execute`'s dispatch join, whose ranges then rested where a handler's call
+had taken `disptab`'s register, recomputed it on every dispatch (14.3 M more
+`lea`s, and 45 M more moves). Resting on openings alone gains speedtest1 1.73 M
+and Lua 0.34 M there, and keeps `hexFunc`'s header without a register.
+
+`tier1_allocate_hints_test.c`'s traces check the three eviction sites and the
+resting range, and its quiet-range trace now gives its register up.
+
+With #2685's ties, the IR guide's folded takes (#2618), the eviction before a
+read, resting on openings and the definitions no edge reads, by callgrind at
+main `98186d5e` (after #2592) against it, speedtest1 runs 2,865.62 M
+instructions instead of 2,878.38 M (−0.44%) and Lua's five scripts 5,100.92 M
+instead of 5,122.80 M (−0.43%; each script −0.14% to −0.88%): `luaV_execute`
+−7.04 M, `index2value` −9.14 M, and no Lua function more. speedtest1's largest
+losses are `allocateBtreePage` +0.22 M and `sqlite3BtreeIndexMoveto` +0.09 M,
+against `sqlite3VdbeExec` −3.02 M, `sqlite3AddInt64` −0.96 M and
+`insertCellFast` −0.96 M. Before #2592, at main `389d25b9` and with resting on
+closings too, the change took speedtest1 from 2,871.10 M to 2,851.20 M (−0.69%)
+and Lua's scripts from 5,235.80 M to 5,080.78 M (−2.96%; `luaV_execute`
+−139.3 M); #2592 took most of `luaV_execute`'s part on its own.
+
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/4cbed5edd1ca723aabb3c523bc024b59e78c2440/docs/measurements/tier1-ties-unread-2618-2685-2026-11-14),
+#2593's method, a hold of the lock per round), main `389d25b9` against the
+change's first form (`282d1157`: resting on closings too, without the
+definitions no edge reads, before #2592): Lua's five scripts take 0.9875 of
+the time (95% interval 0.9599 to 1.0160) over six link orders, with 2.75% fewer
+instructions at each, faster at five of them and 3.3% slower at one; speedtest1
+takes 0.9941 (0.9907 to 0.9974) over six layouts, its cycles lower at all six.
+That head's `--tier1 -c` of `sqlite3.c` took 1.24% more cycles for 0.22% more
+instructions: the ties and the returned values' marks read each node's
+selection pattern again after the problem's first pass had (+10.2 M cycles in
+`tier1_emit_cfg_problem`), and every straight-line function took the hinted
+allocator (+4.0 M). The first pass now records them, the values' pass maps
+them to values, and the straight-line consumer hints only where a tie exists,
+with the same code out: over six placements of the backend unit and two fresh
+copies of each, the compile takes 0.60% to 0.73% more cycles than main's in
+three rounds, against 0.98% to 1.07% before; main against itself, within 0.07%.
+The ties' work stays scalar: one test of a node's rule and two loads of its
+pattern, in a pass that reads the pattern anyway.
+
+After #2592, on the 9700X ([the record's section 6](https://github.com/buster14a/buster-performance/tree/01844589ee71fe62c8eea4e0cfd3c87b201a3de6/docs/measurements/tier1-ties-unread-2618-2685-2026-11-14),
+the same method), main `98186d5e` against the change as merged (`c6900890`'s
+code): Lua's five scripts take 1.0022 of the time (95% interval 0.9912 to
+1.0133) over six link orders and speedtest1 1.0003 (0.9934 to 1.0073) over
+six layouts, for 0.44% and 0.45% fewer instructions; `sqlite3.c`'s
+`--tier1 -c` takes 0.69% more cycles for 0.42% more instructions. What the
+change gains after #2592 is those instructions; the time doesn't resolve it.
+Lua's `arithmetic` script moves with the link order (0.973 to 1.079): at order
+1, linked after pads that move all the code by whole 64-byte lines, the change's
+build mispredicts 330 K more branches and runs 7.9% to 9.0% more cycles at one
+phase of address bit 6, and 0.5% to 0.7% more at the other, where main's is
+the same at both. The extra mispredictions fall in `luaV_mod`, whose code the
+change leaves the same, and in `luaV_execute`'s dispatch: the predictor's
+aliasing at the change's branch addresses, not instructions it adds.
+
+### Recipes that wait (#2618, #2735)
+
+On main `56b5864`, against the same compiler with no hoist at all, the hoisted
+addresses (the IR guide's #2618) still cost `jsonLookupStep` 295 K and
+`speedtest1_run` 141 K by callgrind, through the registers their recipes held.
+Two rules of the scan take them back, with the IR guide's argument takes:
+
+- **A closing a call emptied.** A range that ends without a register notes
+  memory as its closing, and a range its hint names there followed it. Where a
+  call's clobber took the register (#2574's preferred problem), that would make
+  `luaV_execute`'s dispatch join leave `disptab` in memory once a handler's call
+  had evicted it (#2735). The clobber site marks the closing
+  (`BUSTER_TIER1_ALLOCATE_CLOBBERED`), any other eviction clears the mark, and
+  `tier1_allocation_note_closing` then notes no hint: the next range follows
+  its value's last register.
+- **Waiting for a read.** A recipe whose hint is memory takes no register at
+  its start, read or not; a required use gives it one there.
+  `jsonLookupStep`'s `sqlite3CtypeMap`, defined before its loops and read past
+  one of them, took the lowest free register at that loop's latch, `rbp`,
+  which the loop's frame address followed: every iteration parked the address
+  in `r8`, recomputed the table into `rbp` and moved the address back (three
+  instructions, 98 K times). An unused one rests at a closing that held no
+  register too, #2735's first ask, which `speedtest1_run`'s loop join needs
+  for its counter to keep `r14`.
+
+By callgrind on main `45cd9ae` (#1189's `gap.c`, #1217's inputs), the change
+takes speedtest1 from 2,626.66 M instructions to 2,625.62 M (−0.04%) and Lua's
+five scripts from 4,773.9 M to 4,768.9 M (−0.10%); with no hoist at all it runs
+2,633.84 M and 4,812.5 M. Main's #2734 ("Recipes no block reads, settled phi
+places" below) had taken most of what these rules gained before it: on main
+`56b5864` they took speedtest1 0.13% and Lua's scripts 1.44%. Each rule's part,
+turning it off:
+
+| Without | speedtest1 | Lua's five scripts |
+| --- | ---: | ---: |
+| (all) | 2,625.62 M | 4,768.9 M |
+| the clobber's closing | 2,625.34 M | 4,821.2 M |
+| waiting | 2,626.65 M | 4,771.4 M |
+| waiting for unused recipes | 2,625.92 M | 4,769.3 M |
+| the argument takes | 2,625.63 M | 4,768.9 M |
+
+The clobber's closing gains Lua 52.3 M (`disptab`'s dispatch join) and costs
+speedtest1 0.28 M; waiting gains `jsonLookupStep` 294 K and `str_gsub` 3.4 M, and costs
+`sqlite3VdbeExec` 2.44 M: at its unused recipes' resting, the registers they
+left took other values, and a handler's block swaps two loaded values through
+`r11` on the way to its join. Without waiting for unused recipes,
+`sqlite3VdbeExec` runs as on main, but `speedtest1_run` keeps 70 K against no
+hoist and speedtest1 loses 0.30 M in all. `tier1_allocate_hints_test.c`'s
+traces check the clobber's closing and the wait on the three paths.
+
+A third rule, measured on main `56b5864` and left out, rested an unused recipe
+at the entry of a join of three or more predecessors: each edge into the join
+recomputed it, where its reads past the join, on fewer paths, would. It took
+`sqlite3VdbeExec`'s dispatch join's frame address out of `r15` (−11 M there),
+but needed #2574's hot test over every recipe and cost `sqlite3Parser` 1.2 M;
+#2734's proof that no block reads a register now enters such recipes as recipes
+after the allocation, and on `45cd9ae` the rule gains speedtest1 0.58 M and
+costs Lua 0.2 M.
+
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/cc05fb63e9bf0c495940bd6918d18e03a077cc31/docs/measurements/tier1-hoist-finish-2618-2026-11-14),
+#2593's method, a hold of the lock per round), main `45cd9ae` against the
+change: speedtest1 takes 0.9954 of the cycles (95% interval 0.9922 to 0.9986)
+over six layouts, for 0.04% fewer instructions; Lua's five scripts take 1.0002
+of the time (0.9926 to 1.0079) over six link orders for 0.10% fewer
+instructions, each script's cycles moving with the link order for the same
+instructions (`closures` 0.981 to 1.035). `sqlite3.c`'s `--tier1 -c` runs 0.05%
+more instructions.
+
+### Recipes no block reads, settled phi places, and the fixed rules' scratch (#2734, #2592)
+
+What #2592's operand sink left of `luaV_execute`'s moves through `r11` was
+mostly one edge. Lua's `OP_CALL` enters `startfunc` with the callee's `ci`:
+
+```
+lea 0x68(%rsp),%rbx; lea 0x68(%rsp),%rbp; lea 0x58(%rsp),%r12
+lea 0x58(%rsp),%r13; lea 0x58(%rsp),%r14; lea disptab(%rip),%r8
+mov 0xc0(%rdi),%ebx            # trap = L->hookmask
+mov %r12,%r14
+mov %rbx,%r11; mov %r15,%rbx; mov %r11,%r15
+```
+
+Two things went wrong there:
+
+- **Frame addresses that nothing read.** The five frame addresses
+  are recipes whose ranges have no use in `startfunc` or in
+  `returning` after it. Each block took a free register for them
+  and lost it to `ci`'s state before any read. `tier1_cfg_entry_unread`
+  enters such a range as its recipe only where it is evicted in its
+  own block. Here the ranges carried the value to the next block in
+  their registers, so every edge into the chain recomputed it.
+- **`ci` and `trap` crossing.** `startfunc`'s `ci` phi followed its
+  operand from the chosen predecessor, the new `ci` that
+  `luaD_precall` returned into `r15`. `trap`'s load then took `rbx`,
+  the lowest free register, and the edge into `returning`, whose
+  phis hold `ci` in `rbx` and `trap` in `r15`, swapped them.
+
+**Ranges carried to recipes** (`tier1_cfg_carried_unread`). The proof
+runs after the assignment. It covers a recomputed value's range
+that spans whole blocks (from one's start to the end of the last
+that continues it in layout), has one register fragment, no use,
+and whose value is no phi's operand. That range enters as its
+recipe where every successor takes the value as its recipe: a
+recipe's fragment, `tier1_cfg_entry_unread`'s case, or another
+range this proof holds. A worklist starts from every such range.
+It unmarks each that has a successor reading its register, and
+puts its value's marked ranges in the predecessors back on the
+list. The result is the greatest such set, so a loop that carries
+a recipe it never reads is proven too.
+`tier1_cfg_interval_entry` gives these ranges the recipe's
+location, and the edges into them move nothing. Nothing changes
+in the assignment, so the change can only remove edge moves. The
+CFG verifier's walk checks it independently: an edge that read
+such a register would find nothing there.
+
+**A phi's settled place** (`Tier1AllocationInput.alternate_intervals`).
+A block with one successor runs its edge to it every time it runs,
+at least as often as all its incoming edges together. A phi there
+that a phi of the successor takes now takes first the register that
+phi's first range opened with, the successor's convention. It does
+so only where that phi still holds the register last and the
+register is free at the block's start. Otherwise the operand's exit
+register stays the hint (#2553). Two looser forms each lost
+elsewhere:
+
+- following the successor phi's latest register gave Lua's handlers
+  swaps of their own, where that phi had moved;
+- following its first range without the check spilled phis in
+  `sqlite3VdbeExec` (13.5 M more stack loads and as many stores),
+  where that phi had moved to memory.
+
+The edge now reads `lea disptab(%rip),%r8; mov %r15,%rbx; mov
+0xc0(%rdi),%r15d`: 4 instructions with its jump, down from 13.
+
+Three fixed sequences used the scratch register on their own.
+Each is a register choice or a record's order, not an edge:
+
+- **Address ties.** An address from a register, with no rip-relative
+  part and no frame object, ties its base (`tier1_select_ties`, #2685):
+  `lea d(%r),%r` costs what a `lea` into another register does.
+  `OP_LFALSESKIP`'s `pc + 1` took another register than `pc`'s, and
+  its fetch then swapped `pc` and `i`. It now takes `pc`'s, as `add
+  $4,%r14`.
+- **Shift by `cl`.** A shift by a register shifts in its destination.
+  It goes through the scratch register only where the destination
+  is `rcx`, or holds the count while the value is in `rcx`.
+  `OP_NEWTABLE`'s `1 << (b - 1)` and Lua's `<<` and `>>` went
+  through it every time.
+- **Division by a register.** A division by a register divides from
+  the divisor's own register. It goes through the scratch register
+  only where the divisor is in `rax` or `rdx`, which the dividend's
+  move and the extension write. #2541's unit inlining put Lua's
+  integer `%` and `//` into `luaV_execute`, where the divisor's move
+  ran 4.01 M times.
+
+By callgrind (#1189's `gap.c`, #1217's inputs, Lua's hash seed fixed)
+at main `21e0d999`:
+
+| | main | this |
+| --- | ---: | ---: |
+| `luaV_execute`'s instructions | 2,311.8 M | 2,225.5 M |
+| its register moves | 344.9 M | 322.2 M |
+| of them through `r11` | 17.7 M | 5.0 M |
+| its frame addresses' `lea`s | 58.3 M | 0.2 M |
+| Lua's five scripts, whole processes | 4,878.4 M | 4,774.1 M (−2.14%) |
+| speedtest1, whole process | 2,657.7 M | 2,626.7 M (−1.17%) |
+
+- **By script.** Every script runs fewer instructions: `calls` −3.87%,
+  `arithmetic` −3.15%, `closures` −1.96%, `tables` −1.94%, `strings`
+  −0.65%.
+- **By function.** No Lua function runs more than 50 K more. Besides
+  `luaV_execute`, `luaH_getshortstr` runs −9.11 M and `match` −4.06 M.
+  speedtest1's `sqlite3VdbeExec` runs −22.23 M. Its only function
+  that runs over 50 K more is `resolveP2Values`, +0.31 M; 30 run
+  over 50 K fewer.
+- **Each rule's share.** Taking each one out of the change at its
+  last commit before the division (speedtest1 2,627.26 M, Lua
+  4,778.8 M):
+
+| Without | speedtest1 | Lua's scripts |
+| --- | ---: | ---: |
+| the carried ranges' proof | +28.02 M | +79.2 M |
+| the phis' settled places | −0.11 M | +15.2 M |
+| the address ties | +0.06 M | +0.3 M |
+| the shifts in place | +2.68 M | +12.6 M |
+
+The division's own share is −0.61 M on speedtest1 and −4.7 M on Lua.
+
+`luaV_execute`'s moves through `r11` that are left aren't edges'
+swaps:
+
+- **3.49 M: a divisor in `rax`.** The value is live past the
+  division, so the records save and restore it besides moving it.
+  Only the allocation avoiding `rax` and `rdx` for a divisor would
+  remove them, as fixed ranges keep values out of a call's clobbers.
+  #2767 does ("Values live across fixed sequences" below).
+- **1.48 M: `OP_GETTABUP`'s fetch.** It swaps `pc` and `i` (as main
+  does): the handler spills `pc` around its call, and reloads it into
+  another register than the dispatch's.
+
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-carried-recipes-2734-2026-11-14),
+#2553's method, a hold of the lock per round), main `21e0d999` against this
+change, the time follows the instructions, unlike #2592's earlier steps,
+whose removed moves Zen 5 eliminates at rename:
+
+| Program | Metric | change / main | 95% interval |
+| --- | --- | ---: | ---: |
+| Lua's five scripts, 33 link orders | user cycles | −1.40% | −1.75% to −1.04% |
+| | user instructions | −2.08% | −2.10% to −2.06% |
+| speedtest1, 8 layouts | user cycles | −0.60% | −0.92% to −0.27% |
+| | user instructions | −1.20% | |
+
+- **Lua.** It is faster at 29 of the 33 orders. By script, `arithmetic`
+  runs −3.07% and `calls` −2.25%. `closures` and `tables` are within their
+  intervals of zero.
+- **speedtest1.** It is faster at all eight layouts.
+- **Static reports.** Lua's objects move 2,530 values at edges instead of
+  3,056 (`lvm.o` 881 instead of 1,196), and speedtest1's 35,590 instead of
+  39,235. Spills don't change.
+- **Compile cost.** `sqlite3.c`'s `--tier1 -c` takes 0.66% more cycles
+  (0.61% more time) for 0.33% more instructions, and `lvm.c`'s 0.61% more
+  cycles at the same time.
+
+Tests:
+
+- `test-tier1-cfg` counts the ranges the proof takes in its random
+  cases and fails if they reach none. It marks ranges the proof
+  refused, and every one fails the verifier.
+- `tier1_allocate_hints_test.c` traces an alternate taken, and one
+  whose phi moved or whose register another holds. Its random inputs
+  give some ranges alternates, which its independent reference of
+  the coloring rule models.
+- `tier1_ties_test.c` checks an address's register.
+- `test-tier1-select` runs every value, count and destination
+  register's shift, and every dividend, divisor and destination
+  register's division and remainder, natively against C.
+
+### Values live across fixed sequences (#2767)
+
+The CFG consumer's fixed sequences (`tier1_select_fixed`) write registers of
+their own: a division by a register, a division by a constant's reciprocal and a
+high multiplication write `rax` and `rdx`, and a shift by `cl` writes `rcx`.
+Their consumer saves every other value live past one in those registers around
+its records, in the register's call-save row (`tier1_emit_cfg_fixed`). Nothing
+kept values out of them, and the scan takes the lowest free register, `rax`
+first. Lua's integer `//` (`luaV_idiv`, which #2541 inlined into
+`luaV_execute`) kept its divisor in `rax`, live past the division:
+
+```
+mov %rax,(%rsp); mov %rax,%r11; mov %r13,%rax; cqto; idiv %r11
+mov %rax,%rcx; mov (%rsp),%rax
+```
+
+`luaH_getshortstr` kept a string's hash in `rcx` across `1 << lsizenode`. Such
+saves ran 7.32 M times on Lua's scripts and 5.83 M on speedtest1, each a store
+and a load. A divisor in `rax` or `rdx` that ends at its division, and a shift's
+destination in `rcx`, also went through the scratch register.
+
+**Sequences** (`Tier1CfgInput.sequences`). The consumer names each sequence by
+its definition phase, the registers it writes that values may take, and three
+values:
+
+- its reader (`tier1_select_fixed_reader`): a shift's count, which the shift
+  reads in `cl` and leaves there;
+- its operand (`tier1_select_fixed_operand`): a division's divisor, and a
+  shift's other operand, which its destination takes where it dies;
+- its result (`tier1_select_fixed_result`): a shift's destination, which shifts
+  in the scratch register where it is `rcx`.
+
+**The registers a range avoids** (`tier1_cfg_crossed`).
+
+- A general range lives across a sequence where the sequence is after its start
+  and before its end. The sequence's own value starts there and its dying
+  operands end there, so neither avoids its registers by living across it: a
+  quotient may still take `rax`, a dividend end in it.
+- A range of a sequence's reader doesn't avoid that sequence's registers.
+- A sequence's operand and result avoid its registers.
+- A whole phi web avoids the union, in all its ranges.
+- Each position's count of the sequences before it and a prefix count per
+  register over the sequences find a range's in two loads, so a range over a
+  long run of sequences costs no more.
+
+**Avoided, not refused** (`Tier1AllocationInput.avoided_registers`). The scan
+takes a register an interval avoids only where no other register it may take is
+free. It doesn't do so for the interval's hint, and it evicts no value to keep
+out of one. The common path's hinted copy, which the CFG's problems take, does
+the same with its own swap: a start whose level's register it avoids takes,
+among the free registers it doesn't avoid, its hint, else the lowest, from a
+free level above or the never-taken registers, as it takes a hint. Without
+hints, a class with an interval that avoids a register it may take goes to the
+scan. A function whose ranges cross a sequence so keeps the allocation it had
+but for those swaps. Sending every such class to the scan instead gave Lua the
+same objects and speedtest1 61 more instructions, and compiled `sqlite3.c` in
+the same time on the 9700X.
+
+**Readers.** A shift whose count is in `rcx` writes nothing of `rcx` but its
+destination. Its consumer no longer saves the count around it, and the frame
+gives it no row (`tier1_emit_save_positions`' readers). `memsys5Free`'s loop had
+saved `iLogsize` around its `sar %cl` on every iteration.
+
+Lua's division now reads:
+
+```
+mov (%r14,%rcx,1),%rcx   # the divisor, loaded where it divides from
+...
+mov %r13,%rax; cqto; idiv %rcx
+```
+
+and `luaH_getshortstr`'s mask is `mov $0x1,%r8d; movzbl 0xb(%rdi),%ecx; mov
+%r8,%rdi; shl %cl,%edi`.
+
+**Measured.** By callgrind (#1189's `gap.c`, #1217's inputs, Lua's hash seed
+fixed), #2766's head `3652581` against this rule:
+
+| | base | this |
+| --- | ---: | ---: |
+| Lua's five scripts, whole processes | 4,774.6 M | 4,752.8 M (−0.46%) |
+| `luaV_execute` | 2,225.5 M | 2,215.0 M |
+| its moves through `r11` | 5.0 M | 1.5 M |
+| saves around Lua's sequences | 7.32 M | 0 |
+| speedtest1, whole process | 2,626.71 M | 2,613.07 M (−0.52%) |
+| saves around speedtest1's sequences | 5.83 M | 0.44 M |
+| divisors moved through `r11` in speedtest1 | 1.79 M | 0 |
+
+- **By function.** On Lua, `luaV_execute` −10.47 M, `luaH_getshortstr`
+  −5.78 M, `mainpositionTV` −2.42 M, `luaH_free` −1.20 M, `luaH_resize`
+  −0.80 M, `luaH_newkey` −0.80 M; none runs more. On speedtest1,
+  `sqlite3BtreeIndexMoveto` runs +0.97 M: its hot loop has every register busy,
+  and a division that speedtest1 never runs moved its `pRes` out of `rdx`, which
+  reshuffled the loop's registers.
+- **What's left.** speedtest1's saves are of parameters whose first range is
+  bound to its incoming register (`pcache1Fetch`'s `createFlag` in `rdx`).
+  `luaV_execute`'s moves through `r11` are #2768's `OP_GETTABUP` fetch.
+
+**What lost** (against the base, before the operand and result rule):
+
+| Form | speedtest1 | Lua's scripts |
+| --- | ---: | ---: |
+| ranges refused the registers (allowed sets), no readers | −2.85 M | −6.9 M |
+| the same, with readers | −5.65 M | −6.9 M |
+| ranges avoid the registers, each on its own | −4.89 M | −6.9 M |
+| ranges avoid them, but a hint to one wins | −3.38 M | 0.0 M |
+| each value's ranges avoid them together | −10.71 M | −10.4 M |
+| each phi web's ranges avoid them together | −11.13 M | −11.2 M |
+| the same, with the operand and result (this rule) | −13.64 M | −21.8 M |
+
+- **Refusing the registers** spilled `sqlite3BtreeIndexMoveto`'s `pRes`. Its
+  range in the block of that never-run division found every other register
+  held, and the slot then followed it into its hot loop: +3.84 M.
+- **Each range on its own** moved Lua's divisor out of `rax` on the edge into
+  its division's block. A range in a cold block also took a free register that
+  its value's later ranges then followed by their hints, which the loop's
+  values were already using.
+- **A hint first** kept Lua's divisor in `rax`: its range enters the division's
+  block hinted there.
+- **Without readers** (the first row), `memsys5Free` ran +1.13 M: `iLogsize`
+  moved out of `rcx` in its loop, where it is the shift's count, and back on its
+  edges.
+- **Without the result,** Lua ran 6.3 M more: `luaH_getshortstr`'s count dies at
+  the shift, and its destination took the `rcx` it left.
+
+**Compile cost.** On the 9700X (`measure-compile`, CPU 2, `--tier1 --lanes 1 -c
+sqlite3.c`, 21 runs a revision in a Williams order against base), the first form
+of the change took +0.80% wall time and +0.70% instructions: two halvings per
+range, two passes over every node, and the scan. Finding the sequences by a
+count per position and filling them in one pass over the functions that have
+any took that to +0.39% and +0.45%. The rule as it stands, with the operands
+and results, takes +0.44% wall time (618.7 against 616.0 ms) and +0.43%
+instructions; Lua's `lvm.c` compiles in the same time. In callgrind's count of
+the scalar host build, the same compile runs +0.25% (`tier1_cfg_prepare`'s
+sequences, the consumer's pass and the allocator's avoidance).
+
+**Run time on the 9700X** (#2553's method: Lua's objects in 33 link orders,
+speedtest1 after 8 pads, 5 and 7 rounds, each a hold of the lock, `perf stat` on
+CPU 2; 1,762 runs, none failed). Lua's five scripts run −0.44% instructions and
+−0.36% cycles, an interval of −0.79% to +0.08%; `arithmetic`, whose loops run
+`//` and `%`, takes −1.51% cycles (−1.94% to −1.08%) and is faster at 30 of the
+33 orders. speedtest1 runs −0.53% instructions in the same time: +0.09% cycles,
+−0.66% to +0.83%. Statically, speedtest1's edge moves go from 35,590 to 36,035,
+where values move out of the registers their webs avoid; Lua's don't change.
+
 ## Rematerialization
 
 `Tier1RematerializationInput` is a borrowed column view of selection facts,
@@ -1118,7 +1759,11 @@ recomputed value's definition whose first register fragment no use reads
 before a recomputation takes over, or that only definitions left out read, is
 left out (`tier1_emit_cfg_dead_definition`, decided from the last node back):
 the C front end's address chains define each link right before the allocator
-evicts it, a write nothing read.
+evicts it, a write nothing read. A fragment that reaches the block's end is one
+too where no edge leaving the block reads its register (#2618): every
+successor the value is live into enters with its recipe, and no phi there takes
+the value along the edge. Otherwise an edge reads it: a move from the
+register, or none where the successor keeps the value (or the phi) in it.
 
 A recomputed value's definition needs no register at all (#2618): its own use
 isn't required, so where values read sooner hold every register the allocator

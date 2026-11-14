@@ -106,7 +106,7 @@ static bool check_input_cleanup_declaration(CheckInputReader* reader, const Chec
             check_input_report(reader, argument, CHECK_INPUT_CLEANUP_PARAMETERS);
             valid = false;
         }
-        else if (applies && function != BUSTER_CHECK_NONE && !check_input_auto_type(type) &&
+        else if (applies && function != BUSTER_CHECK_NONE && !check_input_auto_type(reader->types, type) &&
                  !check_input_cleanup_parameter(reader, parameter_types[0], type))
         {
             check_input_report(reader, argument, CHECK_INPUT_CLEANUP_TYPE);

@@ -14,10 +14,13 @@
 // (#141, #1450) keeps its one or two values in `a,b`, with its operation in `c`, and a ternary kind's third value in the
 // extra array, its place in `c` past the kind (#1840), which ir_source_text_function compares by value; IR_ATOMIC_RMW
 // (#1059) keeps its operation and its order in the flags, which the rows' default comparison and mutation take, and a
-// compare-exchange's desired value in `c`, an optional use as a call's is. IR_MASKED_LOAD and IR_MASKED_STORE (#1840),
-// the last added, keep three values in `a,b,c`, their lanes in the flags and their alignment as a load's, all of which
-// the rows' default comparison and mutation take.
-_Static_assert(IR_OP_COUNT == 66, "audit the text round-trip oracle when adding an IR operation");
+// compare-exchange's desired value in `c`, an optional use as a call's is. IR_MASKED_LOAD and IR_MASKED_STORE (#1840)
+// keep three values in `a,b,c`, their lanes in the flags and their alignment as a load's, all of which the rows' default
+// comparison and mutation take; so do IR_COMPRESS_STORE and IR_GATHER (#1840), a gather's scale as its alignment.
+// IR_FMA (#1840) keeps its three values in `a,b,c` and no metadata, as IR_SELECT does. IR_SCATTER (#1840), the last
+// added, keeps its base and index in `a,b` and its stored vector and mask in the extra array, its place in `c`, which
+// ir_source_text_function compares by value.
+_Static_assert(IR_OP_COUNT == 70, "audit the text round-trip oracle when adding an IR operation");
 
 typedef struct IrSourceTextCheck IrSourceTextCheck;
 struct IrSourceTextCheck
@@ -176,6 +179,11 @@ static bool ir_source_text_equal(const IrFunction* a, const IrFunction* b)
                 // operand's value are what the text says.
                 equal = a->a[i] == b->a[i] && a->b[i] == b->b[i] && ir_intrinsic_kind(a->c[i]) == ir_intrinsic_kind(b->c[i]) &&
                         ir_value_third(a, i) == ir_value_third(b, i) && (ir_intrinsic_ternary(a->c[i]) || a->c[i] == b->c[i]);
+            } break;
+            case IR_SCATTER:
+            {
+                // A scatter's `c` is its extra values' place (#1840): its stored vector and mask are what the text says.
+                equal = a->a[i] == b->a[i] && a->b[i] == b->b[i] && ir_extra_value(a, i, 0) == ir_extra_value(b, i, 0) && ir_extra_value(a, i, 1) == ir_extra_value(b, i, 1);
             } break;
             case IR_BR_INDIRECT:
             {

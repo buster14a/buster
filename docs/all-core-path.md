@@ -3,8 +3,10 @@
 Status: design. Step 0, the gauge, is built: `tools/allcore/allcore.c`
 ([its guide](commands/all-core.md)), measured against its gate in
 [its record](https://github.com/buster14a/buster-performance/tree/359dcadc4a98855be571e0e7b64c50c44d82c9c9/docs/measurements/all-core-gauge-2536-2026-11-12).
-Nothing else below is implemented, and its gains are a model's that its first
-steps exist to confirm or refute. It is
+Step 1, the back half by parts, is built as `--emit-window=N` and measured
+(["Step 1's result"](#step-1s-result)): the emission meets its gate and the
+lowering doesn't; the owner made W = 2,048 the driver's default all the same. Nothing else below is implemented,
+and its gains are a model's that its first steps exist to confirm or refute. It is
 [#672](https://github.com/buster14a/buster/issues/672)'s all-core target's
 design: what eight workers cost a compile on the 9700X, what the designs
 already in hand remove of that, and the change that removes the rest. The issue
@@ -618,11 +620,208 @@ tests' twin.
 | --- | --- | --- | ---: |
 | 0. The gauge | The record's cohort runner in `tools/`, and a step of the 9700X job on main's pushes: a compile's cycles of both modes, its peak and its faults at one worker and at eight, by stage from the workers' own reports. No compile changes. | Reproduces this record's stage table within 3% at `4c8c3c9c`, in two holds of under 30 s. | a table |
 | 1. The back half by parts | One lane's emission cuts the bodies into parts of W tokens, as the lanes' does, and takes each part's lowering and its code before the next part's; the writer's columns and a part's typed stream are reused; `always_inline` callees' streams are kept. | `lower` and the emission at most 1.25 times their one-worker user cycles (1.59 and 1.30 today). Instructions a token within 2% of `W = ∞`. Objects the same bytes on every corpus. One worker not slower. | 298 MB/s, 1.03 times |
-| 2. The chain from the graph's run | `check_graph_run`, the warnings' passes, `check_program` and the references for a body's range, before step 1's parts; the stream's and the program's rows in the window's arena; the selection by names, exact in the epilogue. | `check-expressions` to `lower` at most 1.3 times their one-worker cycles (1.49 to 2.43). Those stages fault under 1,000 pages (12,673). | 336, 1.16 |
+| 2. The chain from the graph's run | `check_graph_run`, the warnings' passes, `check_program` and the references for a body's range, before step 1's parts; the stream's and the program's rows in the window's arena; a provisional selection over candidates before the windows, the exact one in the epilogue and a remap in the merge. | `check-expressions` to `lower` at most 1.3 times their one-worker cycles (1.49 to 2.43). Those stages fault under 1,000 pages (12,673). | 336, 1.16 |
 | 3. The chain from the reader | A body's reading joins the chain: its token columns and its graph are the window's, by biased bases, and it binds file-scope names through the environment at its position. With #2524's step 4, which needs the same reading. | The bodies' part of `check-input` at most 1.3 times its one-worker cycles (2.4 in time today). Peak RSS under 100 MB (190.7). Objects and diagnostics the same at W of 1, 2,048 and ∞, on both paths. | 441, 1.53 |
 | 4. The tree and the file scope by windows | The parser yields external declarations; the spine reads a window's declarations into the environment before its bodies; the tree's columns are the window's. | The parse at most 1.3 times its one-worker cycles (3.43). The unit without its bodies at most 1.3 times (1.70). Peak under 60 MB. | 538, 1.86 |
 | 5. The tokens by windows | The preprocessor yields; the unit's own file is lexed in blocks. | The preprocessor at most 1.2 times (1.40). Peak under 30 MB. Under 25 DRAM bytes moved a source byte (146). | 567, 1.96 |
 | 6. Windows on lanes | The spine on one lane and the chain's windows on the others; a units' lane keeps its window arena across its units. | `--lanes 8` of `sqlite3.c` alone: the chain's stages scale as the emission's lanes do today. musl's command on 8 lanes: kernel cycles a pass at most eight processes' (1,417 M; 2,265 M today). | one unit's latency; musl's pass 1.1 |
+
+### Step 1's result
+
+Step 1 is built as `--emit-window=N` ([function lanes](commands/function-lanes.md#windows-2536)),
+and measured on the 9700X at main `ca1ede6a` with step
+0's gauge, no strays in any cohort
+([its record](https://github.com/buster14a/buster-performance/tree/5bb1edae9d4a01dff7e53dcba81699de2b4841a3/docs/measurements/all-core-step1-2536-2026-11-14)):
+
+| `sqlite3.c` | main | `W = ∞` | W = 2,048 |
+| --- | ---: | ---: | ---: |
+| eight workers, MB/s | 287.6 | 289.3 | 292.9 |
+| their user cycles | 1,076.8 M | 1,070.7 M | 1,053.8 M |
+| one worker, MB/s | 76.5 | 76.6 | 76.5 |
+| user instructions | 1,361.4 M | 1,361.4 M | 1,363.3 M |
+| `lower`, times its one-worker user cycles | 1.59 | 1.60 | 1.49 |
+| the emission, the same | 1.32 | 1.33 | 1.15 |
+| `lower`'s faults at eight workers | 2,140 | 2,139 | 933 |
+
+- **The premise holds where the record was the boundary.** Tier 0 reads the
+  typed stream a window after the lowering wrote it: `tier0_validate_accepts`
+  went from 6.1 times its one-worker cycles to 1.05, `tier0_compile_entries`
+  from 2.1 to 1.18, `tier0_generate` from 1.24 to 1.03 (a profile by function
+  at one worker and beside seven). The emission meets the gate.
+- **The lowering doesn't**, and not for its output. Its statements' loop
+  (`check_lower_drain`) still costs 2.0 times its one-worker cycles: it reads
+  the program's rows, which `check_program` writes for the whole unit before
+  the lowering starts. That is step 2's boundary. The rest is
+  `check_lower_prepare`'s unit-wide work before any window (three times its
+  one-worker time): tables of one entry a token, set for all 716,136 tokens,
+  and passes over the graph, whose code is #1048's redesign.
+- **The window's size.** Every W from 512 to 8,192 takes 1.2 to 1.6% of the
+  user cycles at eight workers; below 2,048 a window's own cost shows at one
+  worker (512: 0.5% more user cycles).
+- **Objects are the same bytes** at W of 1, 2,048 and ∞, with and without
+  `-g`, by the vector and the scalar paths and with poisoned windows, on
+  `sqlite3.c`, Lua's 34 sources, c-testsuite's 220 programs, `main.c` and
+  musl's 1,336 units. musl's command on one lane is unchanged.
+- **The default.** This table's rule keeps a step whose gate misses behind
+  its option; the owner made W = 2,048 the driver's default all the same
+  (2026-11-14), for its 1.3% at eight workers and nothing lost at one
+  ([its check](https://github.com/buster14a/buster-performance/tree/8643d3b382134849cca850a6a78803ff1b1f3dc5/docs/measurements/all-core-step1-default-2536-2026-11-14):
+  one worker's user cycles the same by an interleaved comparison).
+  `--emit-window=0` is the twin. The step was expected to give 298 MB/s (1.03
+  times); it gives 292.9 (1.013 times `W = ∞` on the same executable).
+
+### Step 2: the selection after the windows
+
+Step 2 is claimed (2026-11-14). Its inventory, and what it found in the way of
+the chain, change the step's order before any code.
+
+**The territory, pass by pass.** A probe of TSC laps around each pass from the
+graph's run to `select` (a patch of the host's, never on main) ran under step
+0's counted cohorts on `sqlite3.c`, by default windows. These are medians of 36
+compiles alone and 288 beside seven workers, from two runs of the probe
+(`check_program`'s rows from the second, which split it further); the cycles'
+ratio is the time's times the frequencies' (5.261/5.545):
+
+| pass | ms, one → eight | cycles' ratio |
+| --- | --- | ---: |
+| `check_graph_run` | 9.33 → 15.67 | 1.59 |
+| `check_input_warning_graph` | 2.01 → 4.25 | 2.01 |
+| check-declarations' passes | 1.99 → 3.16 | 1.51 |
+| `check_program`'s setup | 3.23 → 8.37 | 2.46 |
+| — its return facts, a pass over every node | 1.63 → 3.39 | 1.98 |
+| — its case tables, clears, node-to-token chains, plans | 0.99 → 3.35 | 3.21 |
+| `check_program`'s per-body loop: controls, return flow, references | 9.26 → 15.16 | 1.55 |
+| `check_program`'s tail: two clears of a token each, aliases, static objects | 0.86 → 3.58 | 3.95 |
+| the common warnings | 10.74 → 18.67 | 1.65 |
+| `select` | 1.04 → 2.88 | 2.64 |
+| the whole territory | 38.7 → 73.4 | 1.80 |
+
+Every pass inflates for the reason the design gives: its inputs are records
+of the unit that an earlier pass wrote. Windowing one pass alone removes its
+own clears and faults, not its cold reads. For `check_program` that's about 2%
+at eight workers. The gate needs the passes chained, a window's bodies from
+the graph's run to their code.
+
+**The chain needs the selection after the windows.** The selection
+(`check_program_select_mode`) walks every body's references. Those come from
+`check_program`'s per-body loop, from the entries of the body's controls that
+are reached: dead branches and unevaluated operands are left out. And the
+lowering takes the selection's symbols: it numbers the selected objects
+densely, in object order (`check_program_needed_number`), and the helpers,
+initializers, runtime functions, jump tables and labels after them. So a
+window that lowers before every body's references are known needs a numbering
+of its own:
+
+- **The candidates.** Before the windows, the same planner selects over
+  references that are a superset of the exact ones, and tight: a body the
+  candidates keep and the exact selection doesn't is lowered and compiled for
+  nothing. On `main.c`, `--lower-all`'s every definition is 8,693 functions
+  against the 1,403 the exact selection keeps, which would cost 81 ms of
+  lowering and 157 of Tier 0.
+- **The exact selection in the epilogue**, from the references the windows'
+  loop finds, as today's from the program's.
+- **The remap** where the two differ: the merge maps the candidates'
+  numbering to the selection's, and leaves out what only the candidates kept.
+
+**The census (2.1).** `--selection-census`, a test option, reports beside each
+unit's exact references three supersets that a pass before the windows could
+take, each body's compared with its own, and the selection over each compared
+with the exact one, by how many bodies and symbols more it keeps:
+
+- **the walk**: `check_program_references` started from every expression root
+  of a body (a node no node takes as an operand) rather than from the controls
+  it reaches, and from its automatic objects' plans and its cleanups;
+- **the scan**: one pass over the graph's VALUE nodes, every object of static
+  storage that a body's tokens name, whatever evaluates it;
+- **the pruned scan**: the scan less the nodes under the operands the walk
+  leaves out (sizeof's and `_Alignof`'s, the one a constant condition of `&&`,
+  `||` or `?:` skips, a computed call's callee: a scan of the ops finds the
+  few nodes that leave operands out, and a walk of those operands marks them),
+  and less the arms and conditions of the constant `if`s that the controls
+  leave out (`CheckProgram.dropped_ranges`, the writer's).
+
+On the 9700X, at main `c471f32f`
+([its record](https://github.com/buster14a/buster-performance/tree/ce52234167f8871f4236fb71ee3d75a7a03ffa88/docs/measurements/all-core-step2-census-2536-2026-11-14)):
+
+| corpus | units | bodies | exact: bodies, symbols | walk: units off, extra bodies, symbols | scan: the same | pruned scan: the same |
+| --- | ---: | ---: | --- | --- | --- | --- |
+| `sqlite3.c` | 1 | 2,674 | 2,668, 6,951 | 1, 0, 2 | 1, 0, 13 | 1, 0, 10 |
+| `main.c` | 1 | 8,621 | 1,398, 49,589 | 1, 756, 4,335 | 1, 756, 4,983 | 1, 0, 156 |
+| Lua | 34 | 1,097 | 1,097, 4,769 | 0, 0, 0 | 16, 0, 73 | 0, 0, 0 |
+| c-testsuite | 220 | 449 | 430, 2,116 | 8, 0, 58 | 9, 0, 60 | 4, 0, 34 |
+| musl | 1,336 | 18,584 | 2,756, 8,754 | 60, 108, 121 | 139, 190, 329 | 12, 0, 54 |
+
+"Units off" are those whose selection over the candidates isn't the exact
+one; the symbols are the program's and its data's.
+
+- **All three are supersets.** No body of any corpus has a reference its
+  candidates miss.
+- **The constant `if`s decide the tightness.** `main.c`'s commands are an
+  `else if` chain whose conditions start with `BUSTER_IN_UNIT(...)`, a constant
+  0 for the units that don't hold the command; the walk and the scan keep
+  those arms, and with them the commands' call trees: 756 more bodies
+  than the 1,398 selected, compiled for nothing. musl's `isnan` and
+  `signbit` choose a width by a constant `?:`, whose other arms call
+  `__FLOAT_BITS` and `__DOUBLE_BITS`. Less those arms and operands, no corpus
+  keeps a body the exact selection doesn't.
+- **What stays is symbols**, and in most large units: operands no node takes
+  once the checker has folded the node that did, a string literal under
+  `sizeof` or a function in `_Generic`'s other association. They are roots of
+  their own, which the scan and the walk can't tell from a statement's. So
+  the numbering differs from the exact one on `sqlite3.c` and `main.c`: the
+  remap is the normal path, and `W = ∞` again on a difference would compile
+  `sqlite3.c` twice.
+- **The cost.** On `sqlite3.c`, today's references pass takes 3.52 ms of a
+  122.7 ms compile; the walk 5.29 ms (1.50 times): it finds the roots in the
+  tokens' node chains, which costs about what the walk does. The pruned scan
+  takes 1.55 ms (0.44 times), without the finding of the constant `if`s, and
+  leaves the references pass where it is. On `main.c`, 7.48 ms, 13.61 (1.82)
+  and 4.37 (0.58).
+
+So the step's design, by the census:
+
+- **The candidates are the pruned scan**, before the windows. It finds the
+  constant `if`s itself (`check_program_constant_arms`, 2.2a): a scan of the
+  ops for the conditions whose operand is a constant integer rvalue or a
+  statement expression, then, in those bodies alone, the writer's own test
+  (`check_control_fold_truth`, labeled, enterable) after the body's children
+  are set up as its build sets them. A constant `switch`'s dead cases it
+  keeps, a superset still. A unit with overloads or CFStrings, whose
+  references come from what no VALUE node names, has no scan, and keeps
+  `W = ∞`. The selection over its references numbers the symbols
+  provisionally, and the windows lower the bodies it keeps.
+- **The remap is one monotone compaction** where the two selections keep the
+  same bodies, as they do on every corpus: the exact selection's objects are
+  a subset of the candidates', in the same order, so an object's symbol is
+  its provisional one less the candidates' objects before it that the exact
+  selection leaves out, a prefix count over one mark an object, and every
+  symbol the lowering numbers after the objects (helpers, initializers,
+  runtime functions, jump tables, labels) moves down by all of them. The
+  merge maps every reference's symbol through it, as it maps the runtime
+  functions' and the jump tables' provisional symbols today
+  (`check_lower_finish` and the emission's merge).
+- **An extra body**, one the candidates keep and the exact selection
+  doesn't, is not a compaction: the helpers and the runtime functions are
+  numbered in the order the bodies first use them, so the extra body's first
+  uses can reorder them. Such a unit, like one with a missing reference (a
+  label in a left-out operand, or a condition the pass folds and the writer
+  doesn't), compiles again by `W = ∞`, as the design's epilogue table says of
+  what the chain can't finish. Neither occurs on the corpora.
+- **What moves with the loop.** The diagnostics that `check_program`'s loop
+  feeds (the return reports, the common warnings' reads of the program) run
+  after their window, their order kept; a unit that doesn't emit
+  (`-fsyntax-only`, an error) keeps today's order of the passes. Bodies that
+  aren't candidates get the loop for their warnings alone.
+
+**Its sub-steps**, each a PR with a 9700X record:
+
+| sub-step | what is built | gate |
+| --- | --- | --- |
+| 2.1 The census | `--selection-census`: the walk's, the scan's and the pruned scan's candidates beside the exact references; their selections where they differ; no change to an object. | Done ([its record](https://github.com/buster14a/buster-performance/tree/ce52234167f8871f4236fb71ee3d75a7a03ffa88/docs/measurements/all-core-step2-census-2536-2026-11-14)). The pruned scan is a superset on every corpus and keeps no extra body; its cost is the next sub-step's to cut. |
+| 2.2a The pass before the windows | `check_program_constant_arms` and the pruned scan from the bodies' openings, before `check_program`'s loop; `--selection-census` reports it as its fourth census, "pass"; no change to an object. | Done ([its record](https://github.com/buster14a/buster-performance/tree/28fb041ee3b9c9d0ca9471653a5108287706999b/docs/measurements/all-core-step2a-pass-2536-2026-11-14)): its candidates are the pruned scan's by the writer's arms on every corpus; on the 9700X it costs 0.57 times the references pass on `sqlite3.c` (1.92 ms of a 123.3 ms compile) and 0.61 on `main.c`, its finding 0.45 ms of that. Half the references pass is 2.2c's to reach: the leaves gathered 16 at a time, and one scan of the ops for both the pruned operands and the conditions. |
+| 2.2b The provisional numbering | The lowering takes the pass's selection; the exact one follows; where they differ by objects alone, the merge remaps every symbol; `W = ∞` again on an extra body or a missing reference. `check_program` is still whole, so every corpus checks the remap. | Objects the same bytes at W of 1, 2,048 and ∞, with the pass's selection forced different. One worker not slower by more than the pass. |
+| 2.2c The program's loop in the windows | `check_program` split into its unit-wide part and its per-body loop, which runs in each window before its lowering; the diagnostics the loop feeds after their window, in today's order. | Objects and diagnostics the same bytes at W of 1, 2,048 and ∞. One worker not slower by more than the pass before the windows, which costs at most half the references pass. The lowering reads its controls a window after they were written; its stream stays cold until 2.3, so this sub-step's own gain is small and its gate is the step's after 2.3. |
+| 2.3 The graph's run and the warnings by windows | `check_graph_run`'s range entry (#1050 keeps its internals), `check_input_warning_graph` and the common warnings for a window's nodes, their diagnostics in today's order. | The step's gate: `check-expressions` to `lower` at most 1.3 times; under 1,000 pages faulted. |
 
 **Across the three designs**, by what each next step gives eight workers on
 `sqlite3.c` (the model's expected case, cumulative): the node machine's step

@@ -409,6 +409,8 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
     uint32_t* positions = 0;
     uint8_t* required = 0;
     uint8_t* interval_remat = 0;
+    uint32_t* hints = 0;
+    uint8_t* returned = 0;
     uint8_t* operations = 0;
     uint8_t* widths = 0;
     uint8_t* flags = 0;
@@ -429,6 +431,8 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
         positions = ir_allocate(output, uses, 4, &ok);
         required = ir_allocate(output, uses, 1, &ok);
         interval_remat = ir_allocate(output, source->count, 1, &ok);
+        hints = ir_allocate(output, (uint64_t)source->count + 1, 4, &ok);
+        returned = ir_allocate(output, (uint64_t)count + 1, 1, &ok);
         operations = ir_allocate(output, count, 1, &ok);
         widths = ir_allocate(output, count, 1, &ok);
         flags = ir_allocate(output, count, 1, &ok);
@@ -497,6 +501,28 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
             }
         }
         offsets[source->count] = use;
+        // A two-address result takes its first operand's register where that operand's interval ends at its definition
+        // (#2685, tier1_select_ties), which leaves out the copy into the destination: the hinted allocator's value hints.
+        // A returned value takes none (tier1_select_returned).
+        tier1_select_returned(plan, returned);
+        bool tied = false;
+        for (uint32_t interval = 0; interval < source->count; interval += 1)
+        {
+            const uint32_t value = source->values[interval];
+            uint32_t ties[2] = { BUSTER_IR_NONE, BUSTER_IR_NONE };
+            if (returned[value] == 0)
+            {
+                tier1_select_ties(plan, value, &ties[0], &ties[1]);
+            }
+            hints[interval] = BUSTER_IR_NONE;
+            for (uint32_t k = 0; k < 2; k += 1)
+            {
+                const uint32_t tied = ties[k] < count ? prepared.value_intervals[ties[k]] : BUSTER_IR_NONE;
+                const bool ends = tied != BUSTER_IR_NONE && source->ends[tied] == source->starts[interval];
+                hints[interval] = hints[interval] == BUSTER_IR_NONE && ends ? ties[k] : hints[interval];
+            }
+            tied |= hints[interval] != BUSTER_IR_NONE;
+        }
         // The prospective spill set contains every selected definition. Its alignment determines frame-base
         // reservations before allocation; reducing it to actual spills later cannot add a reservation.
         const Tier1FrameRequest prospective = {
@@ -532,6 +558,8 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
             prepared.allocation.use_required = required;
             prepared.allocation.use_count = use;
             prepared.allocation.rematerializable = interval_remat;
+            // Without a tie, no hints: the allocator's copy without them is the cheaper.
+            prepared.allocation.hint_values = tied ? hints : 0;
         }
     }
     if (error == TIER1_EMIT_OK)
@@ -1046,17 +1074,23 @@ static uint32_t tier1_emit_first_at(const uint32_t* positions, uint32_t count, u
 }
 
 // Whether a fragment from `start` to `end` covers one of the positions, other than `own` (its value's definition: a call's
-// result, or a fixed register's sequence's, which its node doesn't save).
-static bool tier1_emit_covers(const uint32_t* positions, uint32_t count, uint32_t start, uint32_t end, uint32_t own)
+// result, or a fixed register's sequence's, which its node doesn't save), and with `readers`, other than those whose
+// reader is the fragment's value's node `node` (tier1_select_fixed_reader, #2767: a shift's count, which its shift leaves
+// in rcx): each such is a use of that value, so the walk past them is as long as its uses.
+static bool tier1_emit_covers(const uint32_t* positions, const uint32_t* readers, uint32_t count, uint32_t start, uint32_t end, uint32_t own, uint32_t node)
 {
     uint32_t first = tier1_emit_first_at(positions, count, start);
-    first += first < count && positions[first] == own ? 1 : 0;
+    while (first < count && positions[first] < end && (positions[first] == own || (readers != 0 && readers[first] == node)))
+    {
+        first += 1;
+    }
     return first < count && positions[first] < end;
 }
 
 // The calls' definition phases, and each fixed register's sequences' (a division's rax and rdx, a shift's rcx, of the
 // registers in `columns`), `base` past the plan's node positions, in position order: the calls' in `positions` from 0, then
-// each register's run from `offsets[reg]` to `offsets[reg + 1]`, the registers in order. Their room on `scratch`. The
+// each register's run from `offsets[reg]` to `offsets[reg + 1]`, the registers in order; and beside each in `readers` the
+// node its sequence leaves in its register (tier1_select_fixed_reader, #2767), or BUSTER_IR_NONE. Their room on `scratch`. The
 // function's `calls` and `fixed` nodes (Tier1EmitPrepared.call_count, the fixed registers' sequences' count) say how many:
 // a function with neither, most leaves, has no positions and takes no pass over its nodes, and one without fixed
 // registers' sequences one; a node's registers are its mask's set bits alone (#177's measurement: a loop over all 16 for
@@ -1065,6 +1099,7 @@ typedef struct Tier1EmitSavePositions Tier1EmitSavePositions;
 struct Tier1EmitSavePositions
 {
     uint32_t* positions;
+    uint32_t* readers;
     uint32_t call_count;
     uint32_t offsets[BUSTER_TIER1_EMIT_GENERAL_REGISTERS + 1];
 };
@@ -1091,6 +1126,7 @@ static bool tier1_emit_save_positions(const Tier1SelectPlan* plan, uint32_t colu
     bool ok = true;
     const uint32_t total = saves->offsets[BUSTER_TIER1_EMIT_GENERAL_REGISTERS];
     saves->positions = total != 0 ? ir_allocate(scratch, total, 4, &ok) : 0;
+    saves->readers = total != 0 ? ir_allocate(scratch, total, 4, &ok) : 0;
     uint32_t cursors[BUSTER_TIER1_EMIT_GENERAL_REGISTERS];
     memcpy(cursors, saves->offsets, sizeof(cursors));
     for (uint32_t node = 0; ok && saves->positions != 0 && node < count; node += 1)
@@ -1100,12 +1136,15 @@ static bool tier1_emit_save_positions(const Tier1SelectPlan* plan, uint32_t colu
         ok = !call || saves->call_count < calls;
         if (ok && call)
         {
+            saves->readers[saves->call_count] = BUSTER_IR_NONE;
             saves->positions[saves->call_count++] = position;
         }
         uint32_t fixed = fixed_nodes == 0 || plan->covered[node] ? 0 : tier1_select_node_fixed(function, &plan->patterns[node]) & columns;
+        const uint32_t reader = fixed != 0 ? tier1_select_fixed_reader(&plan->patterns[node]) : BUSTER_IR_NONE;
         while (fixed != 0)
         {
             const uint32_t reg = (uint32_t)__builtin_ctz(fixed);
+            saves->readers[cursors[reg]] = reader;
             saves->positions[cursors[reg]++] = position;
             fixed &= fixed - 1;
         }
@@ -1115,20 +1154,21 @@ static bool tier1_emit_save_positions(const Tier1SelectPlan* plan, uint32_t colu
 
 // Whether general register fragment `f`, in a register of `columns`, covers a call's definition phase, where its register
 // isn't one of `callee` (whose values survive a call), or one of a fixed register's sequence that takes its register, a
-// callee-saved one among them (an asm body's, #1839), but its own value's definition `own`: the values
-// tier1_emit_call_saved and the CFG consumer's calls save, and those a fixed register's sequence saves around it
-// (tier1_emit_fixed, tier1_emit_cfg_asm), each in its register's call-save row.
-static bool tier1_emit_fragment_saved(const Tier1Allocation* allocation, uint32_t f, uint32_t own, uint32_t columns, uint32_t callee, const Tier1EmitSavePositions* saves)
+// callee-saved one among them (an asm body's, #1839), but its own value's definition `own` and a sequence that leaves its
+// value, of node `node`, there (a shift's count in rcx, #2767): the values tier1_emit_call_saved and the CFG consumer's
+// calls save, and those a fixed register's sequence saves around it (tier1_emit_fixed, tier1_emit_cfg_fixed,
+// tier1_emit_cfg_asm), each in its register's call-save row.
+static bool tier1_emit_fragment_saved(const Tier1Allocation* allocation, uint32_t f, uint32_t own, uint32_t node, uint32_t columns, uint32_t callee, const Tier1EmitSavePositions* saves)
 {
     const uint32_t reg = allocation->registers[f];
     const bool held = allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS && ((columns >> reg) & 1) != 0;
     const bool caller = held && ((callee >> reg) & 1) == 0;
     const uint32_t start = allocation->starts[f];
     const uint32_t end = allocation->ends[f];
-    const bool across_call = caller && tier1_emit_covers(saves->positions, saves->call_count, start, end, own);
+    const bool across_call = caller && tier1_emit_covers(saves->positions, 0, saves->call_count, start, end, own, node);
     const uint32_t first = held ? saves->offsets[reg] : 0;
     const uint32_t last = held ? saves->offsets[reg + 1] : 0;
-    const bool across_fixed = held && first < last && tier1_emit_covers(saves->positions + first, last - first, start, end, own);
+    const bool across_fixed = held && first < last && tier1_emit_covers(saves->positions + first, saves->readers + first, last - first, start, end, own, node);
     return across_call || across_fixed;
 }
 
@@ -1150,7 +1190,7 @@ static Tier1EmitError tier1_emit_saves(const Tier1SelectPlan* plan, Arena* scrat
         const uint32_t own = 2 * input->values[i] + 1;
         for (uint32_t f = allocation->fragment_offsets[i]; f < allocation->fragment_offsets[i + 1]; f += 1)
         {
-            saved |= tier1_emit_fragment_saved(allocation, f, own, columns & ~saved, 0, &saves) ? 1u << allocation->registers[f] : 0;
+            saved |= tier1_emit_fragment_saved(allocation, f, own, input->values[i], columns & ~saved, 0, &saves) ? 1u << allocation->registers[f] : 0;
         }
     }
     emitted->prepared.call_save_mask = saved & columns;

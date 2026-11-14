@@ -783,8 +783,14 @@ struct ParseDiagnostic
     // A parameter's missing or unknown type. A diagnostic-only view may recover it as int after proving the whole
     // enclosing declaration structurally complete, while preserving the original tokens and error.
     bool parameter_type;
+    // An attributed block declaration with no type. `argument` is its first GNU attribute; a diagnostic-only view
+    // keeps the declarator with implicit int, as Sema does, while the original missing-type error still rejects it.
+    bool declaration_type;
     // A balanced malformed type-name tail is removed without inserting a declaration terminator.
     bool resume_delete;
+    // A rejected GNU-attribute-led call retains only its callee and parentheses for lookup in the diagnostic view.
+    // The original parse error stays; the callee's source is marked invalid before expression checking (#2406).
+    bool resume_call;
     // A K&R parameter declaration's missing semicolon skips its malformed tail through the next semicolon, or up
     // to the mandatory body brace. Its recovery view replaces [token, resume_end) with one semicolon; zero means
     // the ordinary insertion before token. This is diagnostic-only metadata, never acceptance of the input.
@@ -1155,7 +1161,7 @@ struct ParseTree
 };
 
 // The spellings of the attributes whose arguments clang's parser reads its own way (parse_scalar_custom_attribute).
-#define BUSTER_PARSE_CUSTOM_ATTRIBUTES 12u
+#define BUSTER_PARSE_CUSTOM_ATTRIBUTES 14u
 
 // The bindings a parse starts from: a meaning for every IdentId, PARSE_MEANING_ORDINARY but for clang's predeclared
 // typedef names, which every parse leaves as it found them.
@@ -1167,7 +1173,7 @@ struct ParseMeanings
     // The scalar parser reads attribute spellings only where they decide declaration versus statement syntax.
     const InternTable* table;
     // availability's, external_source_symbol's, type_tag_for_datatype's, objc_bridge_related's, swift_newtype's and
-    // swift_wrapper's names, and their keyword spellings (#1447), found once in `table` where the meanings are made (0 for a name the unit doesn't have):
+    // swift_wrapper's and suppress's names, and their keyword spellings (#1447, #2332), found once in `table` where the meanings are made (0 for a name the unit doesn't have):
     // parse_flag_custom_attributes reads these, not the table, which a caller may have released by then (the parser
     // benchmark's is).
     IdentId custom_attributes[BUSTER_PARSE_CUSTOM_ATTRIBUTES];
@@ -2676,6 +2682,14 @@ struct ParseStatistics
     bool whole;
 };
 
+// Why a specifier in a private diagnostic view can be read after its original parse failed.
+typedef enum ParseRecoveredType
+{
+    PARSE_RECOVERED_TYPE_NONE,
+    PARSE_RECOVERED_TYPE_UNKNOWN,
+    PARSE_RECOVERED_TYPE_IMPLICIT_INT,
+} ParseRecoveredType;
+
 typedef struct Parser Parser;
 struct Parser
 {
@@ -2688,8 +2702,16 @@ struct Parser
     // the driver's edit list, so another typo search counts them toward the same unit's spell-checking limit.
     const uint32_t* typo_sources;
     uint32_t typo_count;
+    // Callees retained only for name lookup by a failed parse's private view (#2406), sorted by preprocessor source index.
+    // Their calls are invalid even when the name resolves, so checking must not diagnose their erased arguments.
+    const uint32_t* invalid_call_sources;
+    uint32_t invalid_call_count;
     // Borrowed through checking and emission, like the tokens' source indices. Resource bytes stay owned by pp.
     const Preprocessor* preprocessor;
+    // Beside each token of a view that leaves a parse's tokens out (#2531's step 3, c_check_attested.c's
+    // check_attested_view), its index in that parse, which names the objects a token numbers (parse_origin); or NULL
+    // where the indices are the parse's own.
+    const uint32_t* origins;
     ParseTokens tokens;
     ParseTree tree;
     // The tree in postorder, for a unit without errors: the token at each position, and with ParseOptions.sizes its
@@ -2723,8 +2745,8 @@ struct Parser
     // A checked diagnostic prefix includes already diagnosed parameter types. This enables typo searches for
     // their stand-in int specifiers; ordinary parses and emission never enable it.
     bool recovered_parameter_types;
-    // Private diagnostic-view specifiers recovered from already diagnosed unknown non-parameter types. Their
-    // declarations remain invalid, so initializer conversions and later uses cannot treat the stand-in int as real.
+    // Private diagnostic-view specifiers (ParseRecoveredType): an unknown type's declaration remains invalid;
+    // an attributed declaration's already diagnosed implicit int keeps its remaining checks.
     const uint8_t* recovered_types;
     // What stopped the parse where no diagnostic says it: PARSE_MESSAGE_OUT_OF_MEMORY or PARSE_MESSAGE_TOO_MANY_TOKENS,
     // or PARSE_MESSAGE_NONE.
@@ -2744,6 +2766,14 @@ struct Parser
     ParseVectorBuffers buffers;
     IdentId predeclared[BUSTER_PARSE_PREDECLARED_TYPEDEFS];
 };
+
+// Token `token`'s index in the parse `parser` was made from (Parser.origins): its own, but in a view that leaves tokens
+// out. The local labels numbered by a token (a string literal's, .Lbuster_string_N) take it, so that a view's object is
+// the parse's to the byte.
+static inline __attribute__((unused)) uint32_t parse_origin(const Parser* parser, uint32_t token)
+{
+    return parser->origins != NULL ? parser->origins[token] : token;
+}
 
 // A compact #embed operand's immutable bytes. Synthetic parsers have no preprocessor and therefore no resources.
 static __attribute__((unused)) const uint8_t* parse_embed_bytes(const Parser* parser, uint32_t token, uint32_t* length)

@@ -391,11 +391,13 @@ macro intrinsic's: `_mm256_extract_epi32`, `_mm256_shuffle_epi32`,
 builtin on each half at that half's immediate, `vec_ext`'s and `vec_set`'s on
 the index's half, and the lane and quarter moves (`vextractf128`,
 `vinsertf128`, `vperm2f128`, `vpermq`, `vpermpd`) as moves of the halves and
-quarters. A builtin whose 128-bit form the copy can't lower either stays
-refused by name: at the x86-64 baseline, those of SSE3 to SSE4.1 and AVX that
-have no SSE2 form here (`palignr`, the blends, `round`, `dpps`, `mpsadbw`,
-`pextrb`, `pinsrb`, `pinsrd`, `pinsrq`, `vpermilpd`, and compares by predicates
-past 7), which LLVM expands into SSE2 sequences (#1834).
+quarters. The 128-bit builtins of SSSE3, SSE4.1, AVX and AVX2 that a copy's
+features lack run as LLVM expands them into SSE2's sequences
+(`check_x86_lower_sse2_row`, #1834): `palignr`, the blends, `pextrb`, `pinsrb`,
+`pinsrd`, `pinsrq`, `vpermilpd` and the compares by predicates past 7 (in a
+function without FENV_ACCESS), and so their 256-bit builtins on halves of them.
+`roundps`, `roundpd`, `dpps` and `mpsadbw` stay refused by name there: clang's
+backend can't select them without SSE4.1 and stops.
 Such a call's wide vector arguments and results take the AVX calling-convention
 check below, against the same first version's features.
 

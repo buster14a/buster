@@ -720,6 +720,146 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
     unlink(object);
 }
 
+// Keep the first failed command's status and complete captured output (#2226). The caller owns text; later commands
+// must not run after a failure, or a stale object/executable could make the control appear to have passed.
+typedef struct CheckInterruptProbe CheckInterruptProbe;
+struct CheckInterruptProbe
+{
+    const char* stage;
+    int status;
+    char* text;
+};
+
+static CheckInterruptProbe check_test_interrupt_probe(char* const* compile, char* const* link, char* const* run)
+{
+    char* const* const commands[] = { compile, link, run };
+    static const char* const stages[] = { "compile", "link", "run" };
+    CheckInterruptProbe result = { 0 };
+    for (uint32_t stage = 0; stage < BUSTER_ARRAY_LENGTH(commands); stage += 1)
+    {
+        free(result.text);
+        result.text = NULL;
+        result.stage = stages[stage];
+        // Runtime loader/assertion diagnostics still go to the log; only stdout determines the probe's expected output.
+        result.status = stage == 2 ? check_test_driver_child_streams(commands[stage], &result.text, true, true, true) :
+                                    check_test_driver_spawn(commands[stage], &result.text);
+        if (result.status != 0)
+        {
+            break;
+        }
+    }
+    return result;
+}
+
+static bool check_test_interrupt_probe_passed(const CheckInterruptProbe* probe)
+{
+    return probe->status == 0 && probe->text != NULL && strcmp(probe->text, "ok\n") == 0;
+}
+
+static void check_test_interrupt_probe_report(FILE* output, const CheckInterruptProbe* probe, const char* version)
+{
+    fprintf(output, "interrupt handlers: clang control %s failed (status %d; expected clang %s, found %s):\n%s",
+            probe->stage, probe->status, BUSTER_CLANG_REFERENCE_VERSION, version[0] != 0 ? version : "unknown",
+            probe->text != NULL && probe->text[0] != 0 ? probe->text : "(no captured output)\n");
+}
+
+// A deterministic process fixture covers failures at each stage, successful empty/wrong output, and the success
+// control independently of the host's interrupt support or Clang version. Its trace proves later stages did not run.
+static void check_test_interrupt_probe_failures(CheckTest* test, const char* clang, const char* directory)
+{
+    char fixture[512];
+    char trace[512];
+    snprintf(fixture, sizeof(fixture), "%s/interrupt-probe-control", directory);
+    snprintf(trace, sizeof(trace), "%s/interrupt-probe-trace", directory);
+    char* build[] = { (char*)clang, "-std=gnu17", "tests/driver/interrupt_probe_control.c", "-o", fixture, NULL };
+    char* diagnostic = NULL;
+    const int built = check_test_driver_spawn(build, &diagnostic);
+    check_test_expect(test, built == 0, "interrupt control: failure fixture builds");
+    if (built != 0 && diagnostic != NULL)
+    {
+        fprintf(stderr, "%s", diagnostic);
+    }
+    free(diagnostic);
+    static const struct
+    {
+        const char* mode;
+        const char* stage;
+        int status;
+        const char* output;
+        const char* trace;
+        const char* errors;
+    } cases[] = {
+        { "compile", "compile", 41, "compile diagnostic\n", "compile\n", "" },
+        { "link", "link", 42, "link diagnostic\n", "compile\nlink\n", "" },
+        { "run", "run", 43, "run diagnostic\n", "compile\nlink\nrun\n", "" },
+        { "stderr", "run", 44, "", "compile\nlink\nrun\n", "runtime diagnostic\n" },
+        { "stderr-pass", "run", 0, "ok\n", "compile\nlink\nrun\n", "runtime diagnostic\n" },
+        { "empty", "run", 0, "", "compile\nlink\nrun\n", "" },
+        { "wrong", "run", 0, "wrong\n", "compile\nlink\nrun\n", "" },
+        { "pass", "run", 0, "ok\n", "compile\nlink\nrun\n", "" },
+    };
+    for (uint32_t c = 0; built == 0 && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        unlink(trace);
+        char* compile[] = { fixture, "compile", (char*)cases[c].mode, trace, NULL };
+        char* link[] = { fixture, "link", (char*)cases[c].mode, trace, NULL };
+        char* run[] = { fixture, "run", (char*)cases[c].mode, trace, NULL };
+        FILE* errors = tmpfile();
+        fflush(stderr);
+        const int saved_errors = dup(STDERR_FILENO);
+        const bool redirected = errors != NULL && saved_errors >= 0 && dup2(fileno(errors), STDERR_FILENO) >= 0;
+        CheckInterruptProbe probe = check_test_interrupt_probe(compile, link, run);
+        fflush(stderr);
+        const bool restored = saved_errors >= 0 && dup2(saved_errors, STDERR_FILENO) >= 0;
+        if (saved_errors >= 0)
+        {
+            close(saved_errors);
+        }
+        char* error_text = NULL;
+        const bool read_errors = errors != NULL && check_test_driver_read_file(fileno(errors), &error_text);
+        if (errors != NULL)
+        {
+            fclose(errors);
+        }
+        check_test_expect(test, redirected && restored && read_errors && strcmp(error_text, cases[c].errors) == 0,
+                          "interrupt control: runtime stderr reaches the test log without replacing stdout");
+        free(error_text);
+        char description[512];
+        snprintf(description, sizeof(description), "interrupt control: %s preserves its stage, status and complete output", cases[c].mode);
+        check_test_expect(test, strcmp(probe.stage, cases[c].stage) == 0 && probe.status == cases[c].status && probe.text != NULL &&
+                                strcmp(probe.text, cases[c].output) == 0, description);
+        const bool expected_pass = strcmp(cases[c].mode, "pass") == 0 || strcmp(cases[c].mode, "stderr-pass") == 0;
+        check_test_expect(test, check_test_interrupt_probe_passed(&probe) == expected_pass, "interrupt control: only successful expected output passes");
+        uint64_t length = 0;
+        uint8_t* visited = check_test_driver_read_aligned(trace, &length);
+        check_test_expect(test, visited != NULL && length == strlen(cases[c].trace) && memcmp(visited, cases[c].trace, length) == 0,
+                          "interrupt control: no command runs after the first failure");
+        free(visited);
+        free(probe.text);
+    }
+    CheckInterruptProbe failed = {
+        .stage = "compile",
+        .status = 41,
+        .text = "compile diagnostic\n",
+    };
+    FILE* report = tmpfile();
+    char* reported = NULL;
+    check_test_expect(test, report != NULL, "interrupt control: failure report capture opens");
+    if (report != NULL)
+    {
+        check_test_interrupt_probe_report(report, &failed, "23.1.1");
+        const bool flushed = fflush(report) == 0;
+        const bool read = flushed && check_test_driver_read_file(fileno(report), &reported);
+        check_test_expect(test, read && strstr(reported, "compile failed (status 41;") != NULL &&
+                                strstr(reported, "expected clang " BUSTER_CLANG_REFERENCE_VERSION ", found 23.1.1") != NULL &&
+                                strstr(reported, "compile diagnostic\n") != NULL, "interrupt control: failure report retains the non-reference version and diagnostic");
+        fclose(report);
+    }
+    free(reported);
+    unlink(trace);
+    unlink(fixture);
+}
+
 // Tier 0's interrupt service routines (#147, Tier0Function.interrupt), by each path, run in user mode as the processor would:
 // a probe clang builds loads every register, zmm0 to zmm31 and k0 to k7 with AVX-512 (whole YMMs with AVX, XMMs
 // without), sets the direction flag, pushes an interrupt's frame (ss, rsp, rflags, cs and its own resume address, and an
@@ -732,6 +872,7 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
 // x86-64-v4 where it has AVX-512.
 static void check_test_driver_interrupt_handlers(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+    check_test_interrupt_probe_failures(test, clang, directory);
     static const char harness[] =
         "#include <stdint.h>\n"
         "#include <stdio.h>\n"
@@ -932,25 +1073,25 @@ static void check_test_driver_interrupt_handlers(CheckTest* test, const char* cl
         // overflow area the checks expect are LLVM's x86_intrcc's, end to end.
         if (runs)
         {
-            char* text = NULL;
             char* reference[] = { (char*)clang, "-std=gnu17", "-w", "-O0", (char*)configurations[c][0], "-c", handler_path, "-o", object, NULL, NULL, NULL, NULL };
             uint32_t at = 9;
             for (uint32_t k = 1; k < 4 && configurations[c][k] != NULL; k += 1)
             {
                 reference[at++] = (char*)configurations[c][k];
             }
-            const bool compiled = check_test_driver_spawn(reference, &text) == 0;
-            free(text);
-            text = NULL;
             char* link[] = { (char*)clang, (char*)configurations[c][0], "-O0", "-w", harness_path, object, "-o", linked, NULL };
-            const bool built = compiled && check_test_driver_spawn(link, &text) == 0;
-            free(text);
-            char ran[4096] = { 0 };
-            const bool running = built && check_test_driver_capture(linked, ran, sizeof(ran));
+            char* run[] = { linked, NULL };
+            CheckInterruptProbe probe = check_test_interrupt_probe(reference, link, run);
+            const bool passed = check_test_interrupt_probe_passed(&probe);
             char description[2048];
-            snprintf(description, sizeof(description), "interrupt handlers: %s%s by clang's objects pass the same probe: %s", configurations[c][0],
-                     configurations[c][1] != NULL ? " with probes, frame pointers and -g" : "", running ? ran : "(nothing ran)");
-            check_test_expect(test, running && strcmp(ran, "ok\n") == 0, description);
+            snprintf(description, sizeof(description), "interrupt handlers: %s%s by clang's objects pass the same probe (%s status %d)", configurations[c][0],
+                     configurations[c][1] != NULL ? " with probes, frame pointers and -g" : "", probe.stage, probe.status);
+            check_test_expect(test, passed, description);
+            if (!passed)
+            {
+                check_test_interrupt_probe_report(stderr, &probe, check_driver_clang_version);
+            }
+            free(probe.text);
             unlink(object);
             unlink(linked);
         }

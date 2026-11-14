@@ -16,6 +16,14 @@
 // ir_truth_simplify mutates exclusively owned, already verified columns. No use lists or verified-analysis handles
 // may be live across this call. Input columns are disjoint, have exactly instruction_count elements with no padding,
 // and remain allocated throughout. The caller runs the ordinary optimizer and final SSA verifier afterwards.
+//
+// ir_truth_simplify_values, which if-conversion runs on its rounds' own columns (#1382), also takes the truth values
+// it makes: a select of truth values tested against zero, and a test of an extended i1 value that is no comparison.
+// The test itself becomes, in its row and type, an i1 select or a copy: `select c, (ext x), 0` tested nonzero is
+// `select c, x, c` (c && x), `select c, 1, (ext y)` is `select c, c, y` (c || y), `select c, (ext x), (ext y)` is
+// `select c, x, y`, and `select c, 1, 0` is c (tested equal to zero, `select c, 0, 1` is c too); `(ext v)` tested
+// nonzero is v. A form that would need c's or a value's complement stays. Tier 1 selects i1 selects as it does wider
+// ones, while its integer rules take no i1 and/or (#1382's follow-up). The operation changes, and nothing else does.
 
 #ifndef BUSTER_IR_TRUTH_C
 #define BUSTER_IR_TRUTH_C
@@ -91,7 +99,71 @@ static bool ir_truth_rewrite(IrFunction* function, uint32_t root)
     return changed;
 }
 
-static uint32_t ir_truth_simplify(IrFunction* function, bool scalar)
+// A select arm's truth: 1 a zero constant, 2 a nonzero one, 3 an i1 value (*value), 0 none, through extensions.
+static uint32_t ir_truth_kind(const IrFunction* function, uint32_t value, uint32_t* truth)
+{
+    const uint32_t inner = ir_truth_unextend(function, value);
+    uint32_t kind = 0;
+    if (inner < function->instruction_count && function->op[inner] == IR_CONST)
+    {
+        const IrConstant constant = function->constants[function->a[inner]];
+        kind = constant.low == 0 && constant.high == 0 ? 1 : 2;
+    }
+    else if (inner < function->instruction_count && function->type[inner] == IR_I1)
+    {
+        kind = 3;
+        *truth = inner;
+    }
+    return kind;
+}
+
+static bool ir_truth_rewrite_value(IrFunction* function, uint32_t root)
+{
+    const uint32_t predicate = function->c[root];
+    bool changed = false;
+    if (predicate == IR_EQ || predicate == IR_NE)
+    {
+        const uint32_t left = function->a[root];
+        const uint32_t right = function->b[root];
+        const uint32_t operand = ir_truth_zero(function, right) ? left : ir_truth_zero(function, left) ? right : BUSTER_IR_NONE;
+        const uint32_t value = ir_truth_unextend(function, operand);
+        uint32_t op = IR_OP_COUNT;
+        uint32_t a = BUSTER_IR_NONE;
+        uint32_t b = BUSTER_IR_NONE;
+        uint32_t c = BUSTER_IR_NONE;
+        if (value < function->instruction_count && value != root && function->op[value] == IR_SELECT)
+        {
+            const uint32_t condition = function->a[value];
+            uint32_t x = BUSTER_IR_NONE;
+            uint32_t y = BUSTER_IR_NONE;
+            const uint32_t kx = ir_truth_kind(function, function->b[value], &x);
+            const uint32_t ky = ir_truth_kind(function, function->c[value], &y);
+            const uint32_t shape = kx << 2 | ky;
+            const bool nonzero = predicate == IR_NE;
+            op = nonzero && (shape == (3u << 2 | 1u) || shape == (2u << 2 | 3u) || shape == (3u << 2 | 3u)) ? IR_SELECT :
+                 (nonzero && shape == (2u << 2 | 1u)) || (!nonzero && shape == (1u << 2 | 2u)) ? IR_COPY : IR_OP_COUNT;
+            a = condition;
+            b = op != IR_SELECT ? BUSTER_IR_NONE : kx == 3 ? x : condition;
+            c = op != IR_SELECT ? BUSTER_IR_NONE : ky == 3 ? y : condition;
+        }
+        else if (value < function->instruction_count && value != root && function->op[value] != IR_ICMP && function->type[value] == IR_I1 && predicate == IR_NE)
+        {
+            op = IR_COPY;
+            a = value;
+        }
+        changed = op != IR_OP_COUNT && a != root && b != root && c != root;
+        if (changed)
+        {
+            function->op[root] = (uint8_t)op;
+            function->a[root] = a;
+            function->b[root] = b;
+            function->c[root] = c;
+        }
+    }
+    return changed;
+}
+
+static uint32_t ir_truth_simplify_rules(IrFunction* function, bool scalar, bool values)
 {
     const uint32_t count = function->instruction_count;
     const uint8_t* const operations = function->op;
@@ -121,12 +193,24 @@ static uint32_t ir_truth_simplify(IrFunction* function, bool scalar)
         while (candidates != 0)
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(candidates);
-            changed += ir_truth_rewrite(function, (uint32_t)first + lane);
+            const uint32_t root = (uint32_t)first + lane;
+            const bool rewritten = ir_truth_rewrite(function, root);
+            changed += rewritten || (values && ir_truth_rewrite_value(function, root));
             candidates &= candidates - 1;
         }
     }
     (void)scalar;
     return changed;
+}
+
+static __attribute__((unused)) uint32_t ir_truth_simplify(IrFunction* function, bool scalar)
+{
+    return ir_truth_simplify_rules(function, scalar, false);
+}
+
+static __attribute__((unused)) uint32_t ir_truth_simplify_values(IrFunction* function, bool scalar)
+{
+    return ir_truth_simplify_rules(function, scalar, true);
 }
 
 #endif

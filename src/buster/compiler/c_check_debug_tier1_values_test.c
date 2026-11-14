@@ -5,7 +5,9 @@
 // boundary, changes them through aliases, and keeps them alive across calls. GDB stops inside the callee and reads
 // its caller, so a location must also be valid at the suspended caller's adjusted PC. Snapshots must keep their old
 // values after alias mutation; an assignment cannot show a call's result until it returns. An inlined callee's local
-// must never become one of the caller's declarations.
+// must never become one of the caller's declarations. The functions gdb stops in or reads as callers are noinline, and
+// so are the other unit's, with which the relocatable variant compiles them: #2541 step 2 expands an external
+// definition into its callers.
 
 // The late publication boundary rejects bad source IDs and record ranges before publishing a count. Interleaved
 // source locals become separate sorted lists; a record interval whose instructions encode to no bytes disappears.
@@ -109,7 +111,7 @@ static const char check_debug_tier1_values_source[] =
     "    int inline_only=value+2;\n"
     "    return inline_only;\n"
     "}\n"
-    "int t1_values(int number)\n"
+    "__attribute__((noinline)) int t1_values(int number)\n"
     "{\n"
     "    volatile int frame=9;\n"
     "    int escaped=number+7;\n"
@@ -146,7 +148,7 @@ static const char check_debug_tier1_values_source[] =
     "    }\n"
     "    return number!=15 || frame!=-12 || escaped!=37 || record.first!=51 || record.small!=-7 || *record.pointer!=37 || array[2]!=66 || *pointer!=37 || shadow!=11 || promoted!=17 || mutable_value!=101 || inlined!=12 || total!=141;\n"
     "}\n"
-    "int t1_aligned(void)\n"
+    "__attribute__((noinline)) int t1_aligned(void)\n"
     "{\n"
     "    _Alignas(64) volatile int aligned[16];\n"
     "    aligned[0]=29;\n"
@@ -156,19 +158,19 @@ static const char check_debug_tier1_values_source[] =
     "    printf(\"T1-ALIGNED %d %d\\n\",aligned[0],aligned[15]);\n"
     "    return aligned[0]+aligned[15];\n"
     "}\n"
-    "int t1_saved(long number)\n"
+    "__attribute__((noinline)) int t1_saved(long number)\n"
     "{\n"
     "    int result=t1_checkpoint(7);\n"
     "    return (int)number+result;\n"
     "}\n"
-    "int t1_leaf(int number)\n"
+    "__attribute__((noinline)) int t1_leaf(int number)\n"
     "{\n"
     "    volatile int leaf=number+3;\n"
     "#line 700 \"dbg_tier1_values.c\"\n"
     "    return leaf;\n"
     "}\n"
     "int t1_global=41;\n"
-    "int t1_scalars(int number,long wide,float fraction,double precision,int *pointer)\n"
+    "__attribute__((noinline)) int t1_scalars(int number,long wide,float fraction,double precision,int *pointer)\n"
     "{\n"
     "    int literal=29;\n"
     "    signed char negative=-5;\n"
@@ -177,7 +179,7 @@ static const char check_debug_tier1_values_source[] =
     "#line 800 \"dbg_tier1_values.c\"\n"
     "    return number+barrier+(int)wide+(int)fraction+(int)precision+*pointer+literal+negative+(int)(literal_bits&15);\n"
     "}\n"
-    "int t1_straight(int input)\n"
+    "__attribute__((noinline)) int t1_straight(int input)\n"
     "{\n"
     "    int computed=input*3+2;\n"
     "#line 900 \"dbg_tier1_values.c\"\n"
@@ -252,11 +254,11 @@ static const char check_debug_tier1_values_support[] =
     "#line 1 \"dbg_tier1_support.c\"\n"
     "struct DebugRecord { int first; signed char small; int *pointer; };\n"
     "volatile int t1_sink;\n"
-    "void t1_keep(int *number,volatile int *frame,int *escaped,struct DebugRecord *record,int *array,int **pointer)\n"
+    "__attribute__((noinline)) void t1_keep(int *number,volatile int *frame,int *escaped,struct DebugRecord *record,int *array,int **pointer)\n"
     "{\n"
     "    t1_sink=*number+*frame+*escaped+record->first+record->small+array[2]+**pointer;\n"
     "}\n"
-    "void t1_mutate(int *number,volatile int *frame,int *escaped,struct DebugRecord *record,int *array,int **pointer)\n"
+    "__attribute__((noinline)) void t1_mutate(int *number,volatile int *frame,int *escaped,struct DebugRecord *record,int *array,int **pointer)\n"
     "{\n"
     "    *number=15;\n"
     "    *frame=-12;\n"
@@ -266,15 +268,15 @@ static const char check_debug_tier1_values_support[] =
     "    array[2]=66;\n"
     "    *pointer=escaped;\n"
     "}\n"
-    "void t1_keep_scalar(volatile int *value)\n"
+    "__attribute__((noinline)) void t1_keep_scalar(volatile int *value)\n"
     "{\n"
     "    t1_sink=*value;\n"
     "}\n"
-    "void t1_keep_aligned(volatile int *array)\n"
+    "__attribute__((noinline)) void t1_keep_aligned(volatile int *array)\n"
     "{\n"
     "    t1_sink=array[0]+array[15];\n"
     "}\n"
-    "int t1_checkpoint(int phase)\n"
+    "__attribute__((noinline)) int t1_checkpoint(int phase)\n"
     "{\n"
     "    t1_sink+=phase;\n"
     "    return phase+100;\n"
@@ -665,5 +667,134 @@ static void check_debug_tier1_values_test(CheckDebugTestTally* tally, const char
         {
             check_debug_tier1_values_read(tally, program, script, directory, arena);
         }
+    }
+}
+
+// #2541 step 3: Tier 1's expanded callees under -g. Two static callees, one expanded into the other and both into main;
+// the inner one calls a noinline function, where gdb stops: each expansion is a DW_TAG_inlined_subroutine nested as it
+// was expanded, its rows its callee's lines, so that the backtrace from there shows the inner callee at its call's line,
+// the outer at its call of the inner, and main at its own. The stop is a real frame's, with the expansions' code around
+// its return address: a stop at an instance's first address is one gdb may show as its caller's, by version. By both
+// paths and by one lane and eight (the same bytes); -g changes no code; llvm-dwarfdump --verify passes.
+static const char check_debug_tier1_inline_source[] =
+    "#line 1 \"dbg_tier1_inline.c\"\n"
+    "int printf(const char *, ...);\n"
+    "volatile int t1i_sink;\n"
+    "__attribute__((noinline)) void t1i_mark(int y)\n"
+    "{\n"
+    "    t1i_sink = y;\n"
+    "}\n"
+    "static int t1i_square(int x)\n"
+    "{\n"
+    "    int y = x * x;\n"
+    "    t1i_mark(y);\n"
+    "    return y + 1;\n"
+    "}\n"
+    "static int t1i_twice(int x)\n"
+    "{\n"
+    "    return t1i_square(x) + t1i_square(x + 1);\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    int total = 0;\n"
+    "    for (int i = 0; i < 3; i += 1)\n"
+    "    {\n"
+    "        total += t1i_twice(i);\n"
+    "    }\n"
+    "    printf(\"T1I %d\\n\", total);\n"
+    "    return total != 25;\n"
+    "}\n";
+
+static const char check_debug_tier1_inline_script[] =
+    "set pagination off\n"
+    "break t1i_mark\n"
+    "run\n"
+    "bt\n"
+    "printf \"GDB-T1I-DONE\\n\"\n"
+    "kill\n";
+
+// Whether gdb's backtrace in `transcript` has frame `frame` as `function` at `line` of the fixture: "#N  ", the frame's
+// address and " in " where gdb prints them (a frame's pc past its line's start), the function, its arguments, and the
+// file (its directory where gdb shows one) at the line.
+static bool check_debug_tier1_inline_frame(const char* transcript, uint32_t frame, const char* function, uint32_t line)
+{
+    char start[32];
+    char place[64];
+    snprintf(start, sizeof(start), "\n#%u  ", frame);
+    snprintf(place, sizeof(place), "dbg_tier1_inline.c:%u\n", line);
+    const char* found = transcript != NULL ? strstr(transcript, start) : NULL;
+    const char* name = found != NULL ? found + strlen(start) : NULL;
+    if (name != NULL && name[0] == '0' && name[1] == 'x')
+    {
+        const char* in = strstr(name, " in ");
+        const char* end = strchr(name, '\n');
+        name = in != NULL && (end == NULL || in < end) ? in + strlen(" in ") : NULL;
+    }
+    const size_t length = strlen(function);
+    const char* end = name != NULL ? strchr(name, '\n') : NULL;
+    const char* at = name != NULL ? strstr(name, place) : NULL;
+    return name != NULL && strncmp(name, function, length) == 0 && name[length] == ' ' && name[length + 1] == '(' && end != NULL && at != NULL &&
+           at + strlen(place) - 1 == end;
+}
+
+static void check_debug_tier1_inline_test(CheckDebugTestTally* tally, const char* directory, Arena* arena)
+{
+    char source[PATH_MAX];
+    char script[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/dbg_tier1_inline.c", directory);
+    snprintf(script, sizeof(script), "%s/dbg_tier1_inline.gdb", directory);
+    const bool written = foreign_test_write(source, check_debug_tier1_inline_source, sizeof(check_debug_tier1_inline_source) - 1) &&
+                         foreign_test_write(script, check_debug_tier1_inline_script, sizeof(check_debug_tier1_inline_script) - 1);
+    check_debug_test_expect(tally, written, "write the Tier 1 inline-instance fixture and its debugger script", directory);
+    static const CheckDebugTier1ValuesVariant variants[] = {
+        { .name = "default" },
+        { .name = "scalar", .scalar = true },
+    };
+    String8 baseline = { 0 };
+    for (uint32_t v = 0; written && v < BUSTER_ARRAY_LENGTH(variants); v += 1)
+    {
+        char program[PATH_MAX];
+        char plain[PATH_MAX];
+        char wide[PATH_MAX];
+        snprintf(program, sizeof(program), "%s/dbg_t1_inline_%s", directory, variants[v].name);
+        snprintf(plain, sizeof(plain), "%s/dbg_t1_inline_%s_plain", directory, variants[v].name);
+        snprintf(wide, sizeof(wide), "%s/dbg_t1_inline_%s_lanes8", directory, variants[v].name);
+        const bool built = check_debug_tier1_values_compile(tally, source, NULL, program, variants + v, "1", true, false, arena);
+        const bool unadorned = check_debug_tier1_values_compile(tally, source, NULL, plain, variants + v, "1", false, false, arena);
+        const bool laned = check_debug_tier1_values_compile(tally, source, NULL, wide, variants + v, "8", true, false, arena);
+        const String8 debug = built ? foreign_test_read(arena, program) : (String8){ 0 };
+        const String8 other = unadorned ? foreign_test_read(arena, plain) : (String8){ 0 };
+        const String8 eight = laned ? foreign_test_read(arena, wide) : (String8){ 0 };
+        check_debug_test_expect(tally, built && unadorned && check_debug_tier1_values_same_code(debug, other), "-g changes no code of Tier 1's expanded callees", program);
+        check_debug_test_expect(tally, debug.pointer != NULL && eight.pointer != NULL && debug.length == eight.length && memcmp(debug.pointer, eight.pointer, debug.length) == 0,
+                                "the inline instances' DWARF is byte-identical by one lane and eight", wide);
+        check_debug_test_expect(tally, v == 0 || (baseline.pointer != NULL && debug.pointer != NULL && baseline.length == debug.length &&
+                                                  memcmp(baseline.pointer, debug.pointer, debug.length) == 0),
+                                "the inline instances' DWARF is byte-identical by both paths", program);
+        baseline = v == 0 ? debug : baseline;
+        char report[PATH_MAX + 24];
+        char errors[PATH_MAX + 24];
+        snprintf(report, sizeof(report), "%s.t1-verify", program);
+        snprintf(errors, sizeof(errors), "%s.t1-errors", program);
+        char* verify[] = { (char*)"llvm-dwarfdump", (char*)"--verify", (char*)program, NULL };
+        const bool verified = built && object_test_run(verify, report, errors) == 0;
+        const String8 verification = verified ? foreign_test_read(arena, report) : (String8){ 0 };
+        check_debug_test_expect(tally, verification.pointer != NULL && strstr(verification.pointer, "No errors.") != NULL,
+                                "the inline instances' DWARF passes llvm-dwarfdump --verify", report);
+        snprintf(report, sizeof(report), "%s.t1-run", program);
+        char* run[] = { (char*)program, NULL };
+        const bool ran = built && object_test_run(run, report, errors) == 0;
+        const String8 output = ran ? foreign_test_read(arena, report) : (String8){ 0 };
+        check_debug_test_expect(tally, output.pointer != NULL && strstr(output.pointer, "T1I 25\n") != NULL, "the inline-instance fixture runs as written", report);
+        snprintf(report, sizeof(report), "%s.t1-gdb", program);
+        char* gdb[] = { (char*)"gdb", (char*)"-nx", (char*)"-batch", (char*)"-directory", (char*)directory, (char*)"-x", script, program, NULL };
+        const bool inspected = built && object_test_run(gdb, report, errors) == 0;
+        const String8 transcript = inspected ? foreign_test_read(arena, report) : (String8){ 0 };
+        const bool done = transcript.pointer != NULL && strstr(transcript.pointer, "GDB-T1I-DONE\n") != NULL;
+        check_debug_test_expect(tally, done && check_debug_tier1_inline_frame(transcript.pointer, 0, "t1i_mark", 5) &&
+                                      check_debug_tier1_inline_frame(transcript.pointer, 1, "t1i_square", 10) &&
+                                      check_debug_tier1_inline_frame(transcript.pointer, 2, "t1i_twice", 15) &&
+                                      check_debug_tier1_inline_frame(transcript.pointer, 3, "main", 22),
+                                "gdb's backtrace in main's code shows the expanded callees' frames at their calls' lines", report);
     }
 }

@@ -335,9 +335,9 @@ static IrError ir_licm_reorder(IrLicmWork* work, Arena* scratch, IrFunction* res
             extras += f->calls[f->b[i]].argument_count;
             calls += 1;
         }
-        else if (ir_ternary_instruction(f, i))
+        else if (ir_extra_value_count(f, i) != 0)
         {
-            extras += 1;
+            extras += ir_extra_value_count(f, i);
         }
     }
     if (error == IR_OK && (extras > UINT32_MAX || calls > UINT32_MAX))
@@ -450,11 +450,14 @@ static IrError ir_licm_reorder(IrLicmWork* work, Arena* scratch, IrFunction* res
                 }
                 call += 1;
             }
-            else if (ir_ternary_instruction(f, i))
+            else if (ir_extra_value_count(f, i) != 0)
             {
-                // A ternary intrinsic's third operand (#1840), at its new place in the extra array.
+                // A ternary intrinsic's third operand, or a scatter's stored vector and mask (#1840), at its new place in the extra array.
                 view.c[out] = ir_intrinsic_ternary_c(f->c[i], extra);
-                view.extra[extra++] = values[ir_intrinsic_third(f, i)];
+                for (uint32_t k = 0, extra_values = ir_extra_value_count(f, i); k < extra_values; k += 1)
+                {
+                    view.extra[extra++] = values[ir_extra_value(f, i, k)];
+                }
             }
         }
         *result = view;

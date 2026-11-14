@@ -14,6 +14,15 @@ requirements. [Command index](README.md).
   `schedule_moved` count what they did, and `--verify` checks every scheduled
   block against its scalar reference. [The scheduling guide](../../docs/tier1-scheduling.md)
   has the contracts, the 9700X's measurements and #172's decision.
+- The operand sink (#2592, `tier1_schedule_ir_sink`) runs on every `--tier1`
+  function: a phi's next value moves past the last reader of the value it comes
+  from, whose register it then takes. `--tier1-report`'s `sunk` counts its
+  expressions; `--verify` checks its order with `tier1_schedule_ir_verify`.
+  `test-ir-optimize` runs its IR fixtures (`tier1_sink_ir_test.c`) by both
+  paths, which must agree, through the verifier and the independent executor,
+  with refusals; `tests/driver/tier1_patterns.c`'s fetch checks Lua's
+  `i = *(pc++)` natively. [The allocation guide](../../docs/tier1-allocation.md)
+  has the rule and its measurements.
 - `test-tier1-schedule [--seed N]` checks the postallocation scheduler's
   scalar/vector twins, dependencies, barriers, flags and the verifier;
   `benchmark-tier1-schedule` times scheduling plus encoding and a synthetic

@@ -1466,15 +1466,19 @@ static bool pp_directive_test_location_option(const char* directory, bool with_c
             char* output = 0;
             char* errors = 0;
             const int status = pp_directive_test_command(argv, &output, &errors);
-            // benchmark-preprocessor's refusal by a scalar build, which runs no benchmark, or by Develop's stand-in, which
-            // leaves its unit out (docs/commands/build.md, "Develop"): Release's and Debug's executables check the option.
+            // benchmark-preprocessor's refusal by a scalar build, which runs no benchmark, or by the stand-in of Develop or
+            // a sanitizer build (#2639), which leave its unit out (docs/commands/build.md, "Develop"): Release's and
+            // Debug's executables without a sanitizer check the option.
             static const char scalar_refusal[] = "benchmarks require an AVX-512 host build; run tests with this scalar build\n";
             static const char develop_refusal[] =
                 "buster: this command is in the Release and Debug configurations' executables; Develop's leaves c_preprocessor_benchmark.c "
                 "out (docs/commands/build.md, \"Develop\"): build Release with ./build.sh --config Release\n";
+            static const char sanitizer_refusal[] =
+                "buster: this command is in the executables built without a sanitizer; a sanitizer build leaves c_preprocessor_benchmark.c "
+                "out (docs/commands/build.md, \"Develop\"): build without BUSTER_SANITIZER\n";
             const bool benchmark = strcmp(runs[r].command, "benchmark-preprocessor") == 0;
             const bool refused = status == 1 && output != 0 && output[0] == 0 && errors != 0;
-            const bool develop = benchmark && refused && strcmp(errors, develop_refusal) == 0;
+            const bool develop = benchmark && refused && (strcmp(errors, develop_refusal) == 0 || strcmp(errors, sanitizer_refusal) == 0);
             const bool unavailable = develop || (!BUSTER_HOST_VECTOR && benchmark);
             const char* text = runs[r].status == 0 ? output : errors;
             // clang's driver reports an option it doesn't know, or a value it takes for an input, as an error.

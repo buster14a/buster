@@ -475,6 +475,15 @@ set(BUSTER_DEBUG_CONFIGURATION_OPTIMIZATION -O0)
 # so that an edit changed every part that mentions its file (docs/stage1-build-design.md).
 set(BUSTER_DEVELOP_CONFIGURATION_DEBUG -gdwarf-4 -gline-tables-only)
 
+# The code generator's option for a compile whose debug information is line tables alone: Develop's, and a sanitizer
+# build's Release (#2739). Such a compile has no variable locations, yet LLVM's instruction-referencing LiveDebugValues
+# ran its analysis of the machine values on every function regardless: 188 s of the 1,815 s an x86-64 MSan build's
+# compiles took (-ftime-trace's "Live DEBUG_VALUE analysis"), 17% of a part of the checker's unit. The older pass,
+# with nothing to track either, takes none of it, and the objects are the same, byte for byte. With -g there are
+# variables, which the two passes locate differently, so a -g compile keeps LLVM's default. A build option rather than
+# one of the code's flags, as -fmacro-prefix-map is: print-compile-flags leaves it out.
+set(BUSTER_LINE_TABLES_CODEGEN -mllvm -experimental-debug-variable-locations=false)
+
 # The units of their own that the Develop configuration leaves out of its executable (#2559's step 2), built on demand
 # by Release and Debug: the benchmark units whose only entry is a benchmark command's run_* function and that no test
 # runs, which BusterDevelopAbsent.cmake's stand-ins replace in Develop. test-preprocessor's location option runs
@@ -489,6 +498,14 @@ set(BUSTER_DEVELOP_ON_DEMAND
     tier1_frame_benchmark.c snapshot_benchmark.c link_benchmark.c foreign_benchmark.c x86_64_disassembler_benchmark.c
     x86_semantics_benchmark.c tier0_benchmark.c tier1_schedule_benchmark.c tier1_select_benchmark.c
     c_preprocessor_benchmark.c)
+
+# The units a sanitizer tree leaves out of every configuration's executable (#2639): Develop's on-demand units but
+# c_lexer_benchmark.c, whose benchmark-lexer is each vector item's evidence that its CPU runs the vector kernels, in the
+# sanitizer configurations too (hosted-correctness.yml, "Confirm the vector kernels run on this CPU"). The correctness
+# inventory runs none of the others' commands, and on the hosted runners they were 29% of a vector or native sanitizer
+# build's unit time (387.4 of 1,324.0 s with 4 jobs), which the vector rows' builders and the fuzz jobs wait for.
+set(BUSTER_SANITIZER_ON_DEMAND ${BUSTER_DEVELOP_ON_DEMAND})
+list(REMOVE_ITEM BUSTER_SANITIZER_ON_DEMAND c_lexer_benchmark.c)
 
 # The linker for the executable's link alone (compilation and IR capture keep their flags), from BUSTER_LINKER, into
 # buster_linker_flags (--ld-path=PATH, or none for clang's default) and buster_linker (its description).

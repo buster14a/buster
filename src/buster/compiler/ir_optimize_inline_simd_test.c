@@ -358,9 +358,170 @@ static void ir_inline_test_permute2(IrInlineTest* test, Arena* input, Arena* out
     arena_pop_to(input, 0);
 }
 
+// One more line of a fixture's text, or nothing once it has overflowed (the caller checks the length).
+static void ir_inline_assembled_line(char* text, uint64_t capacity, uint64_t* length, const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    const int written = *length < capacity ? vsnprintf(text + *length, capacity - *length, format, arguments) : -1;
+    va_end(arguments);
+    *length = written >= 0 && (uint64_t)written < capacity - *length ? *length + (uint64_t)written : capacity;
+}
+
+// #1344's fixtures: a vector assembled in memory, as the typed stream initializes a vector compound literal (clang's
+// _mm512_set1_epi8, _mm512_setzero_si512 and _mm512_set_epi64 are such literals): each element's store into the
+// literal's object, then one load of the whole vector, here stored at p + 64. SROA's #1282 options make the load the
+// value the stores wrote where the block's stores decide it, and promotion then leaves no slot:
+// - kind 0, a splat: 64 bytes, each a load of the parameter's object (the typed stream reads a local again for each
+//   use), and a second load of 16 of the object's bytes, stored at p + 128;
+// - kind 1, a constant: the object zeroed by quadwords, then eight quadword constants;
+// - kind 2, quadwords with the parameter's object written between the fourth and the fifth load: two scalars, so the
+//   vector stays in memory;
+// - kind 3, quadwords of which the first is another scalar: memory too.
+// Each runs on the interpreter before SROA and after promotion, on both twins, against the bytes computed here.
+static void ir_inline_test_assembled(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
+{
+    for (uint32_t kind = 0; kind < 4; kind += 1)
+    {
+        enum { CAPACITY = 16384 };
+        char text[CAPACITY];
+        uint64_t length = 0;
+        uint32_t next = 0;
+        ir_inline_assembled_line(text, CAPACITY, &length, "function (ptr) -> void {\n  slot $0 size=8 align=8 type=void flags=0x01\n  slot $1 size=64 align=64 type=void flags=0x01\nb0:\n");
+        ir_inline_assembled_line(text, CAPACITY, &length, "  %%0 = stack_addr.ptr $0\n  %%1 = stack_addr.ptr $1\n  %%2 = param.ptr 0\n");
+        next = 3;
+        const uint32_t lanes = kind == 0 ? 64 : 8;
+        const char* lane_type = kind == 0 ? "i8" : "i64";
+        const uint32_t lane_bytes = kind == 0 ? 1 : 8;
+        uint32_t second = BUSTER_IR_NONE;
+        if (kind == 1)
+        {
+            // The zeroing a literal's object starts with, which the element stores then cover.
+            ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = const.i64 0x00000000000000000000000000000000\n", next);
+            const uint32_t zero = next++;
+            for (uint32_t lane = 0; lane < 8; lane += 1)
+            {
+                ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = address.ptr %%1 offset=%u\n  %%%u = store.void %%%u, %%%u align=8\n", next, lane * 8, next + 1, next, zero);
+                next += 2;
+            }
+        }
+        else
+        {
+            // The parameter's object: p's first scalar.
+            ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = load.%s %%2 align=1\n  %%%u = store.void %%0, %%%u align=1\n", next, lane_type, next + 1, next);
+            next += 2;
+            if (kind == 3)
+            {
+                ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = address.ptr %%2 offset=8\n  %%%u = load.i64 %%%u align=1\n", next, next + 1, next);
+                second = next + 1;
+                next += 2;
+            }
+        }
+        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        {
+            if (kind == 2 && lane == 4)
+            {
+                ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = address.ptr %%2 offset=8\n  %%%u = load.i64 %%%u align=1\n  %%%u = store.void %%0, %%%u align=1\n", next, next + 1, next, next + 2,
+                                         next + 1);
+                next += 3;
+            }
+            uint32_t value = next;
+            if (kind == 1)
+            {
+                ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = const.i64 0x0000000000000000%016" PRIx64 "\n", next, UINT64_C(0x0123456789abcdef) * (lane + 1));
+                next += 1;
+            }
+            else if (kind == 3 && lane == 0)
+            {
+                value = second;
+            }
+            else
+            {
+                ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = load.%s %%0 align=1\n", next, lane_type);
+                next += 1;
+            }
+            ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = address.ptr %%1 offset=%u\n  %%%u = store.void %%%u, %%%u align=1\n", next, lane * lane_bytes, next + 1, next, value);
+            next += 2;
+        }
+        ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = load.v16i32 %%1 align=64\n  %%%u = address.ptr %%2 offset=64\n  %%%u = store.void %%%u, %%%u align=1\n", next, next + 1, next + 2, next + 1, next);
+        next += 3;
+        if (kind == 0)
+        {
+            ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = address.ptr %%1 offset=16\n  %%%u = load.v4i32 %%%u align=16\n  %%%u = address.ptr %%2 offset=128\n  %%%u = store.void %%%u, %%%u align=1\n", next,
+                                     next + 1, next, next + 2, next + 3, next + 2, next + 1);
+            next += 4;
+        }
+        ir_inline_assembled_line(text, CAPACITY, &length, "  %%%u = ret.void\n}\n", next);
+        ir_inline_test_expect(test, length < CAPACITY, "an assembled vector's fixture fits its text");
+        IrFunction function;
+        if (length < CAPACITY && ir_inline_simd_parse(test, text, input, scratch, &function))
+        {
+            uint8_t seed[128];
+            for (uint32_t i = 0; i < sizeof(seed); i += 1)
+            {
+                seed[i] = (uint8_t)ir_inline_test_random(test);
+            }
+            uint8_t expected[192];
+            memcpy(expected, seed, 128);
+            memset(expected + 128, 0x5a, 64);
+            for (uint32_t lane = 0; lane < lanes; lane += 1)
+            {
+                const uint64_t constant = UINT64_C(0x0123456789abcdef) * (lane + 1);
+                const uint8_t* source = kind == 1 ? (const uint8_t*)&constant : kind == 2 && lane >= 4 ? seed + 8 : kind == 3 && lane == 0 ? seed + 8 : seed;
+                memcpy(expected + 64 + lane * lane_bytes, source, lane_bytes);
+            }
+            if (kind == 0)
+            {
+                memset(expected + 128, seed[0], 16);
+            }
+            uint8_t bytes[192];
+            ir_inline_test_expect(test, ir_inline_simd_run(&function, 1, seed, bytes, scratch) && memcmp(bytes, expected, sizeof(bytes)) == 0, "an assembled vector's fixture runs as its lanes say");
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                IrSroaOptions sroa = ir_sroa_options();
+                sroa.scalar = path == 1;
+                sroa.simd = true;
+                sroa.flagged = true;
+                IrSroaResult split = { 0 };
+                const IrCheck checked = ir_optimize_sroa(&function, output, scratch, sroa, &split);
+                IrFunction promoted = { 0 };
+                const IrCheck promotion = checked.error == IR_OK ? (path == 1 ? ssa_ir_promote_scalar(&split.function, twin, scratch, &promoted) : ssa_ir_promote(&split.function, twin, scratch, &promoted)) : checked;
+                ir_inline_test_expect(test, checked.error == IR_OK && promotion.error == IR_OK, "SROA and promotion take an assembled vector's function");
+                if (checked.error == IR_OK && promotion.error == IR_OK)
+                {
+                    ir_inline_test_expect(test, split.assembled == (kind == 0 ? 2u : kind == 1 ? 1u : 0u), "the block's stores decide a vector load where they are constants or one scalar, and only there");
+                    if (kind == 0)
+                    {
+                        // The parameter's load, two splats of it and their stores.
+                        ir_inline_test_expect(test, promoted.slot_count == 0 && ir_inline_simd_count(&promoted, IR_LOAD) == 1 && ir_inline_simd_count(&promoted, IR_STORE) == 2 &&
+                                                  ir_inline_simd_count(&promoted, IR_INTRINSIC) == 2,
+                                              "a splat's 64 stores and its loads are two splats of the scalar");
+                    }
+                    else if (kind == 1)
+                    {
+                        ir_inline_test_expect(test, promoted.slot_count == 0 && ir_inline_simd_count(&promoted, IR_LOAD) == 0 && ir_inline_simd_count(&promoted, IR_STORE) == 1 &&
+                                                  ir_inline_simd_count(&promoted, IR_VCONST) == 1 && promoted.vector_constant_count == 1 &&
+                                                  memcmp(promoted.vector_constants[0].words, expected + 64, 64) == 0,
+                                              "a zeroed object's constant stores are one vector constant of their bytes");
+                    }
+                    else
+                    {
+                        ir_inline_test_expect(test, ir_inline_simd_count(&promoted, IR_VCONST) == 0 && ir_inline_simd_count(&promoted, IR_INTRINSIC) == 0, "two scalars' lanes stay stores and a load");
+                    }
+                    ir_inline_test_expect(test, ir_inline_simd_run(&promoted, 1, seed, bytes, scratch) && memcmp(bytes, expected, sizeof(bytes)) == 0, "the promoted function runs as the fixture");
+                }
+                arena_pop_to(twin, 0);
+                arena_pop_to(output, 0);
+            }
+        }
+        arena_pop_to(input, 0);
+    }
+}
+
 static void ir_inline_test_simd(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
 {
     ir_inline_test_by_value(test, input, output, twin, scratch);
     ir_inline_test_rows(test, input, output, twin, scratch);
     ir_inline_test_permute2(test, input, output, twin, scratch);
+    ir_inline_test_assembled(test, input, output, twin, scratch);
 }

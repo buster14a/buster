@@ -192,6 +192,11 @@ predicates. The pass changes only comparison operands and predicates in the
 lane-owned IR, before use lists and verified-analysis revisions exist. The
 optimizer then removes dead chains and verifies the resulting SSA. Its
 64-byte opcode/type candidate scan has an exact scalar twin and masked tails.
+If-conversion (#1382) runs `ir_truth_simplify_values` on its own rounds'
+columns, which also turns a select of truth values tested against zero into an
+i1 select (`c && x` as `select c, x, c`), as
+[the IR optimization guide](ir-optimization.md#bounded-scalar-if-conversion-1382)
+says.
 
 `tests/driver/tier1_truth.c` is the standalone native regression, also run by
 `tools/ci/correctness.tests`. From the repository root with a built compiler:
@@ -329,7 +334,10 @@ functions by `--tier1-strict --verify` on both host paths and runs them
 against Clang's oracle. objdump must find no setcc in the truth functions, six
 immediate stores and no constant in a register in the store function, and no
 shift by zero. In the computed goto, it must find at least four indirect jumps
-and no jump to one:
+and no jump to one. In #2592's fetch, `i = *pc++` at each handler's end, at
+least three indirect jumps must follow the target's load with no register move
+between them, and at least three increments of `pc` must be in place (`add
+$0x4`):
 
 ```sh
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns && ./build/test-driver-tier1-patterns build/compiler "$(command -v clang)"
@@ -424,12 +432,31 @@ Its in-place cases run a base plus each class of displacement (one, imm8,
 imm32, both signs) in the base's own register, an `add` (or `inc`, `sub`), and
 in another register or with no displacement, a `lea`, and a signed
 power-of-two quotient and remainder at both widths with the bias added in the
-dividend's register or by a `lea` into another, all natively against C.
+dividend's register or by a `lea` into another, all natively against C. Its
+fixed-register cases run a shift by `cl` from every value, count and
+destination register, and a division and remainder by a register from every
+dividend, divisor and destination register, at both widths, natively against C,
+and check that only the cases that need it go through the scratch register
+(#2592).
 
 `test-tier1-cfg` counts the block entries where a recomputed value's register
 reads nothing before its recipe takes over (`tier1_cfg_entry_unread`), which
 its edges leave unfilled, and fails if its generated cases reach none; the CFG
-verifier and the certificate check every such entry the cases reach.
+verifier and the certificate check every such entry the cases reach. It counts
+too the ranges `tier1_cfg_carried_unread` proves, which carry their value only
+to blocks that take it as their recipe (#2734), fails if the cases reach none,
+and marks ranges the proof refused, each of which must fail the verifier. Half
+its generated cases have fixed registers' sequences (#2767,
+`Tier1CfgInput.sequences`), some with readers, operands and results, from a
+generator of their own; it recomputes each range's avoided registers apart from
+`tier1_cfg_crossed` and fails if the cases reach no range that avoids one or no
+reader's range across its own sequence. `test-tier1-emit`'s
+`tier1_sequences_test.c` compiles values that live past a division and a shift,
+a shift's count that lives past its own shift, a divisor and a shifted value
+that end at their sequences and a shift whose count ends at it; it checks that
+nothing is saved around a sequence, no row is given for one and nothing moves
+into the scratch register, and runs the function natively against C with every
+register and with seven.
 
 The immediate-multiply candidate and both corresponding BURS productions
 have cost 3, versus 2 for a copy and shift and 1 for a 3/5/9 multiply's lea.

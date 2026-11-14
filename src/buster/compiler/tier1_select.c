@@ -158,6 +158,10 @@ typedef enum Tier1SelectRule
     TIER1_RULE_FLOAT_BINARY,
     TIER1_RULE_FLOAT_LOAD_OPERAND,
     TIER1_RULE_FLOAT_NEGATE,
+    // A fused multiply-add (#1840, IR_FMA): values[0] times values[1] plus values[2], rounded once, by FMA3's VEX form whose
+    // destination holds an operand already (TIER1_RULE_FLOAT_FMA's expansion); the decoder admits IR_FMA where the target
+    // has FMA alone.
+    TIER1_RULE_FLOAT_FMA,
     TIER1_RULE_FLOAT_LOAD,
     TIER1_RULE_FLOAT_LOAD_ADDRESS,
     TIER1_RULE_FLOAT_STORE,
@@ -244,7 +248,8 @@ typedef enum Tier1SelectRule
 // - ONES (every bit): vpternlogd of the destination with itself, 0xff;
 // - SPLAT (every lane `immediate`): the lane into the scratch general register and vpbroadcastd from it;
 // - CONSTANT (any other, its index in `immediate`): its words as immediates into the red zone below rsp and a load, which
-//   the CFG consumer writes (tier1_emit_cfg_vector_constant), having the constant's payload;
+//   the CFG consumer writes (tier1_emit_cfg_vector_constant), having the constant's payload; or, where its quadwords are
+//   one value and the target has EVEX's forms, the quadword into the scratch general register and vpbroadcastq (#2744);
 // - COPY of values[0], vmovdqa64 at the width, none where the allocation gave both one register;
 // - BINARY of values[0] and values[1], `operation` its index among add, sub, mul, and, or and xor (vpaddd, vpsubd,
 //   vpmulld, vpandq, vporq, vpxord: unmasked, a quadword's and and or are the doublewords' bits): three operands, so the
@@ -364,6 +369,14 @@ typedef enum Tier1SelectRule
 // half, values[1] the low half and values[2] the counts; or, where the halves are one value and the counts a constant
 // in every lane (`condition` 1), a rotate by that count, `immediate`, of values[0] alone.
 #define BUSTER_TIER1_VECTOR_FUNNEL 31
+// A gather (#1840, tier1_select_gather): `operation` its lanes (IrSimdLane: I32 or I64), `immediate` its scale's log2,
+// `source_width` its index's bytes; values[0] the base, values[1] the index, values[2] the mask and values[3] the
+// passthrough a select of it merges into, none for its own zeros.
+#define BUSTER_TIER1_VECTOR_GATHER 32
+// A scatter (#1840, tier1_select_scatter), no value's: `operation` its lanes (IrSimdLane: I32 or I64), `immediate` its
+// scale's log2, `width` its stored vector's bytes and `source_width` its index's; values[0] the base, values[1] the
+// index, values[2] the mask and values[3] the stored vector.
+#define BUSTER_TIER1_VECTOR_SCATTER 33
 // A floating operation at its own rounding of values[0] and values[1] (#1840): `immediate` the IR's flags, one record of
 // ir_simd_fround_forms' with the rounding in its decorations.
 #define BUSTER_TIER1_VECTOR_FROUND 26
@@ -1699,7 +1712,10 @@ static void tier1_select_masked_binary(Tier1SelectRecords* result, const Tier1Se
 
 // A masked load or store (#1840, TIER1_RULE_FLOAT_LOAD's or _STORE's of `condition` nonzero): vmovdqu8 to vmovdqu64 by
 // the lanes, under the mask's k register. A load merges into the destination, which takes the passthrough first unless
-// it holds it; a store writes the vector in `third` to the address alone.
+// it holds it; a store writes the vector in `third` to the address alone. A store's `operation` 1 is a compressing
+// store's, vpcompressb to vpcompressq; 2 a truncating store's of the truncation's source, its flags in `immediate` and its
+// bytes in `source_width` (tier1_select_convert_form's form, vpmovwb to vpmovusqd, whose memory form writes the lanes).
+static uint16_t tier1_select_convert_form(uint32_t kind, uint32_t flags, uint32_t width, uint32_t source_width);
 static void tier1_select_masked_move(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
 {
     const uint32_t width = holes->width;
@@ -1711,11 +1727,80 @@ static void tier1_select_masked_move(Tier1SelectRecords* result, const Tier1Sele
     {
         tier1_select_append(result, tier1_select_class_move(x, passthrough, width, false));
     }
+    const uint32_t size = (holes->condition - 1u) & 3;
     X86Instruction record = holes->memory;
-    record.form = ir_simd_masked_moves[(holes->condition - 1u) & 3][store][at];
+    record.form = !store || holes->operation == 0 ? ir_simd_masked_moves[size][store][at] : holes->operation == 1 ? ir_simd_compress_forms[size][at] :
+                  tier1_select_convert_form(1, (uint32_t)holes->immediate, width, holes->source_width);
     record.reg = store ? passthrough : x;
     record.decorations = (uint8_t)(holes->right & BUSTER_X86_DECORATION_MASK);
     tier1_select_append(result, record);
+}
+
+// A gather (#1840, BUSTER_TIER1_VECTOR_GATHER): vpgatherdd to vpgatherqq (ir_simd_gather_forms) of the lanes at
+// [base + index * scale] under the mask's k register into the destination, which takes the passthrough first unless it
+// holds it, or is zeroed (vpxor) where there is none: its masked-off lanes are then 0, and the instruction doesn't wait for
+// the register's last writer. The instruction's destination may not be its index's register, whose index moves into the
+// vector class's scratch register first; and it clears its mask register as it completes, which keeps the mask in the
+// general scratch register (kmovw, the 16 bits of up to 16 lanes) to reload it after.
+static void tier1_select_gather(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
+{
+    const uint32_t width = holes->width;
+    const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
+    const uint32_t lane = (uint32_t)holes->operation == (uint32_t)IR_SIMD_LANE_I64 ? 1 : 0;
+    const uint32_t count = width >> (2 + lane);
+    const uint32_t index_size = count != 0 && holes->source_width == count * 8 ? 1 : 0;
+    const uint8_t x = destination & 15;
+    const uint8_t mask = holes->third & BUSTER_X86_DECORATION_MASK;
+    uint8_t index = holes->right & 15;
+    if (index == x)
+    {
+        tier1_select_append(result, tier1_select_class_move(BUSTER_TIER1_SELECT_FLOAT_SCRATCH, index, holes->source_width, false));
+        index = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+    }
+    if (holes->has_fourth && x != (holes->fourth & 15))
+    {
+        tier1_select_append(result, tier1_select_class_move(x, holes->fourth & 15, width, false));
+    }
+    else if (!holes->has_fourth)
+    {
+        const X86Instruction zero = { .form = X86_FORM_VPXOR_X_X_XM128, .reg = x, .vvvv = x, .rm = x, .mode = BUSTER_X86_REGISTER_DIRECT };
+        tier1_select_append(result, zero);
+    }
+    tier1_select_append(result, tier1_select_register_record(X86_FORM_KMOVW_R32_K, BUSTER_TIER1_SELECT_SCRATCH, mask));
+    const X86Instruction record = {
+        .form = ir_simd_gather_forms[0][lane][index_size][at],
+        .reg = x,
+        .rm = holes->left,
+        .index = index,
+        .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(holes->immediate & 3),
+        .decorations = mask,
+    };
+    tier1_select_append(result, record);
+    tier1_select_append(result, tier1_select_register_record(X86_FORM_KMOVW_K_R32, mask, BUSTER_TIER1_SELECT_SCRATCH));
+}
+
+// A scatter (#1840, BUSTER_TIER1_VECTOR_SCATTER): vpscatterdd to vpscatterqq (ir_simd_scatter_forms) of the stored
+// vector's lanes at [base + index * scale] under the mask, which the instruction clears as it writes each lane: its bits
+// kept in the scratch general register around it (kmovw r11d, k; the scatter; kmovw k, r11d), as a gather's are.
+static void tier1_select_scatter(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
+{
+    const uint32_t width = holes->width;
+    const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
+    const uint32_t lane = (uint32_t)holes->operation == (uint32_t)IR_SIMD_LANE_I64 ? 1 : 0;
+    const uint32_t count = width >> (2 + lane);
+    const uint32_t index_size = count != 0 && holes->source_width == count * 8 ? 1 : 0;
+    const uint8_t mask = holes->third & BUSTER_X86_DECORATION_MASK;
+    tier1_select_append(result, tier1_select_register_record(X86_FORM_KMOVW_R32_K, BUSTER_TIER1_SELECT_SCRATCH, mask));
+    const X86Instruction record = {
+        .form = ir_simd_scatter_forms[0][lane][index_size][at],
+        .reg = (uint8_t)(holes->fourth & 15),
+        .rm = holes->left,
+        .index = (uint8_t)(holes->right & 15),
+        .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(holes->immediate & 3),
+        .decorations = mask,
+    };
+    tier1_select_append(result, record);
+    tier1_select_append(result, tier1_select_register_record(X86_FORM_KMOVW_K_R32, mask, BUSTER_TIER1_SELECT_SCRATCH));
 }
 
 // One lane of a vector or its lanes' sign bits (#1840, BUSTER_TIER1_VECTOR_LANE_EXTRACT, _LANE_INSERT and _MOVEMASK).
@@ -2485,6 +2570,14 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         {
             tier1_select_compress(&result, holes, destination);
         }
+        else if (kind == BUSTER_TIER1_VECTOR_GATHER)
+        {
+            tier1_select_gather(&result, holes, destination);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_SCATTER)
+        {
+            tier1_select_scatter(&result, holes);
+        }
         else if (kind == BUSTER_TIER1_VECTOR_LANE_EXTRACT || kind == BUSTER_TIER1_VECTOR_LANE_INSERT || kind == BUSTER_TIER1_VECTOR_MOVEMASK)
         {
             tier1_select_lane(&result, holes, destination);
@@ -2725,6 +2818,36 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         memory.reg = x;
         memory.form = tier1_select_float_forms(width)->arithmetic[(uint32_t)holes->operation & 3];
         tier1_select_append(&result, memory);
+        break;
+    }
+    case TIER1_RULE_FLOAT_FMA:
+    {
+        // a * b + c: x86's FMA3 forms take a NaN in the formula's order whatever their form (IR_FMA), so the form is the
+        // one whose destination holds an operand already: 213 where it is b's (x = a * x + c), 231 where it
+        // is c's (x = a * b + x) and 132 where it is a's (x = x * b + c); otherwise b's copy into the destination, then
+        // 213. vvvv and rm are the other two, in the formula's order.
+        static const uint16_t forms[2][3] = {
+            { X86_FORM_VFMADD213SS_X_X_XM32, X86_FORM_VFMADD231SS_X_X_XM32, X86_FORM_VFMADD132SS_X_X_XM32 },
+            { X86_FORM_VFMADD213SD_X_X_XM64, X86_FORM_VFMADD231SD_X_X_XM64, X86_FORM_VFMADD132SD_X_X_XM64 },
+        };
+        const uint8_t x = destination & 15;
+        const uint8_t a = holes->left & 15;
+        const uint8_t b = holes->right & 15;
+        const uint8_t c = holes->third & 15;
+        const uint32_t d = width == 8 ? 1 : 0;
+        const uint32_t kind = x == b ? 0 : x == c ? 1 : x == a ? 2 : 0;
+        if (x != b && x != c && x != a)
+        {
+            tier1_select_append(&result, tier1_select_float_move(x, b));
+        }
+        const X86Instruction record = {
+            .form = forms[d][kind],
+            .reg = x,
+            .vvvv = kind == 2 ? c : a,
+            .rm = kind == 0 ? c : b,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+        };
+        tier1_select_append(&result, record);
         break;
     }
     case TIER1_RULE_FLOAT_NEGATE:
@@ -2989,8 +3112,9 @@ static uint32_t tier1_select_reciprocal_records(const Tier1SelectHoles* holes, X
 // for BUSTER_TIER1_SELECT_FIXED_RECORDS; none for any other rule. They read every operand before writing a fixed
 // register, through the scratch register where they must, and write the destination last; their consumers save the other
 // values that live past the node in those registers around them, in their call-save rows (tier1_emit_fixed). A division
-// or remainder by a register (TIER1_RULE_DIVIDE): the divisor in the scratch register, the dividend in rax, its sign or
-// zero through rdx, then div or idiv. A shift by a register (TIER1_RULE_SHIFT): the value in the scratch register, the
+// or remainder by a register (TIER1_RULE_DIVIDE): the divisor in the scratch register where it is in rax or rdx, the
+// dividend in rax, its sign or zero through rdx, then div or idiv. A shift by a register (TIER1_RULE_SHIFT): the value in
+// the destination, or in the scratch register where the count's move or the value's would overwrite the other, the
 // count in cl. A division by a constant's reciprocal: tier1_select_reciprocal_records.
 static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction* records)
 {
@@ -3001,13 +3125,20 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
     {
         const bool signed_divide = (holes->immediate & 1) != 0;
         const uint8_t result = (holes->immediate & 2) != 0 ? X86_REGISTER_RDX : X86_REGISTER_RAX;
-        records[count++] = tier1_select_move(8, scratch, holes->right);
+        // The divisor divides from its own register where neither the dividend's move into rax nor rdx's extension writes
+        // it (#2592: Lua's integer `%` and `//`, which #2541 inlined into luaV_execute, moved it on every one).
+        const bool direct = holes->right != X86_REGISTER_RAX && holes->right != X86_REGISTER_RDX;
+        const uint8_t divisor = direct ? holes->right : scratch;
+        if (!direct)
+        {
+            records[count++] = tier1_select_move(8, scratch, holes->right);
+        }
         if (holes->left != X86_REGISTER_RAX)
         {
             records[count++] = tier1_select_move(8, X86_REGISTER_RAX, holes->left);
         }
         records[count++] = signed_divide ? (X86Instruction){ .form = width == 8 ? X86_FORM_CQO : X86_FORM_CDQ } : tier1_select_register_record(X86_FORM_XOR_R32_RM32, X86_REGISTER_RDX, X86_REGISTER_RDX);
-        records[count++] = (X86Instruction){ .rm = scratch, .form = width == 8 ? (signed_divide ? X86_FORM_IDIV_RM64 : X86_FORM_DIV_RM64) : (signed_divide ? X86_FORM_IDIV_RM32 : X86_FORM_DIV_RM32) };
+        records[count++] = (X86Instruction){ .rm = divisor, .form = width == 8 ? (signed_divide ? X86_FORM_IDIV_RM64 : X86_FORM_DIV_RM64) : (signed_divide ? X86_FORM_IDIV_RM32 : X86_FORM_DIV_RM32) };
         if (holes->destination != result)
         {
             records[count++] = tier1_select_move(width, holes->destination, result);
@@ -3018,13 +3149,30 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
         const uint16_t form = holes->operation == X86_OPERATION_SHL ? (width == 8 ? X86_FORM_SHL_RM64_CL : X86_FORM_SHL_RM32_CL) :
                               holes->operation == X86_OPERATION_SHR ? (width == 8 ? X86_FORM_SHR_RM64_CL : X86_FORM_SHR_RM32_CL) :
                                                                       (width == 8 ? X86_FORM_SAR_RM64_CL : X86_FORM_SAR_RM32_CL);
-        records[count++] = tier1_select_move(8, scratch, holes->left);
-        if (holes->right != X86_REGISTER_RCX)
+        // The value shifts in the destination itself (#2592: OP_NEWTABLE's `1 << (b - 1)` went through the scratch register
+        // on every table), but where the destination is rcx, which the count takes, or holds the count while the value is in
+        // rcx: then either first move would overwrite the other's source. Else the count goes to cl first where the value
+        // isn't there, and the value is read before the destination, where the count may be, is written.
+        const uint8_t rcx = X86_REGISTER_RCX;
+        const bool direct = holes->destination != rcx && !(holes->left == rcx && holes->destination == holes->right);
+        const uint8_t shifted = direct ? holes->destination : scratch;
+        if (holes->right != rcx && holes->left != rcx)
         {
-            records[count++] = tier1_select_move(4, X86_REGISTER_RCX, holes->right);
+            records[count++] = tier1_select_move(4, rcx, holes->right);
         }
-        records[count++] = (X86Instruction){ .rm = scratch, .form = form };
-        records[count++] = tier1_select_move(width, holes->destination, scratch);
+        if (shifted != holes->left)
+        {
+            records[count++] = tier1_select_move(8, shifted, holes->left);
+        }
+        if (holes->right != rcx && holes->left == rcx)
+        {
+            records[count++] = tier1_select_move(4, rcx, holes->right);
+        }
+        records[count++] = (X86Instruction){ .rm = shifted, .form = form };
+        if (!direct)
+        {
+            records[count++] = tier1_select_move(width, holes->destination, scratch);
+        }
     }
     else if (holes->rule == TIER1_RULE_DIVIDE_RECIPROCAL)
     {
@@ -3178,6 +3326,30 @@ static uint32_t tier1_select_node_fixed(const IrFunction* function, const Tier1S
     return body ? function->asm_bodies[pattern->immediate].touched & 0xffffu : tier1_select_fixed_registers(pattern->rule);
 }
 
+// The operand a fixed-register rule reads in its fixed register and leaves there (#2767): a shift's count, in cl, which
+// tier1_select_fixed reads in place where it is in rcx and then writes nothing of rcx but a destination there. Its
+// consumers save no count around its own shift, and its range may keep rcx across it. BUSTER_IR_NONE for another rule.
+static uint32_t tier1_select_fixed_reader(const Tier1SelectPattern* pattern)
+{
+    return pattern->rule == TIER1_RULE_SHIFT ? pattern->values[1] : BUSTER_IR_NONE;
+}
+
+// The operand a fixed-register rule's records move out of its fixed registers, through the scratch register, where it is
+// in one (#2767): a division's divisor, and a shift's other operand, whose register its destination takes where it dies
+// there; BUSTER_IR_NONE for another rule and for a shift by its own value. Its web avoids those registers.
+static uint32_t tier1_select_fixed_operand(const Tier1SelectPattern* pattern)
+{
+    const bool shift = pattern->rule == TIER1_RULE_SHIFT && pattern->values[0] != pattern->values[1];
+    return pattern->rule == TIER1_RULE_DIVIDE ? pattern->values[1] : shift ? pattern->values[0] : BUSTER_IR_NONE;
+}
+
+// Whether a fixed-register rule's own value avoids its fixed registers (#2767): a shift's destination, which shifts in
+// the scratch register where it is rcx. A quotient and a remainder are written where the division leaves them.
+static bool tier1_select_fixed_result(const Tier1SelectPattern* pattern)
+{
+    return pattern->rule == TIER1_RULE_SHIFT;
+}
+
 typedef struct Tier1SelectPlan Tier1SelectPlan;
 struct Tier1SelectPlan
 {
@@ -3283,10 +3455,10 @@ static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
     // An allocation and a restore move rsp (#141): no load folds past either, so none reads memory a restore released.
     // A fence of any order and scope (#1059), a signal fence's too, is a compiler barrier: no load folds into a consumer
     // past it, so that the access stays on the fence's side the program put it. A volatile or atomic load is one too, and
-    // an atomic read/modify/write, and a masked store (#1840). These are the nodes with an effect, which the plan
-    // materializes whatever their uses.
+    // an atomic read/modify/write, and a masked or compressing store (#1840). These are the nodes with an effect, which
+    // the plan materializes whatever their uses.
     return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA || op == IR_STACK_RESTORE || op == IR_FENCE || op == IR_ATOMIC_RMW ||
-           op == IR_MASKED_STORE || (op == IR_LOAD && (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0);
+           op == IR_MASKED_STORE || op == IR_COMPRESS_STORE || op == IR_SCATTER || (op == IR_LOAD && (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0);
 }
 
 // Whether a fold may not move a load past `node` (#1059's audit): a barrier, or any other load, since the typed stream
@@ -3295,7 +3467,7 @@ static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
 // the last of these before the consumer the load itself), but past no other load.
 static bool tier1_select_fold_barrier(const IrFunction* function, uint32_t node)
 {
-    return tier1_select_barrier(function, node) || function->op[node] == IR_LOAD || function->op[node] == IR_MASKED_LOAD;
+    return tier1_select_barrier(function, node) || function->op[node] == IR_LOAD || function->op[node] == IR_MASKED_LOAD || function->op[node] == IR_GATHER;
 }
 
 // Each node's barriers entry (Tier1SelectForest.barriers), a running maximum of the barriers' positions plus one: the
@@ -3328,7 +3500,9 @@ static void tier1_select_barriers(const IrFunction* function, uint32_t count, ui
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ALLOCA)) |
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_RESTORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FENCE)) |
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ATOMIC_RMW)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) |
-                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_MASKED_LOAD)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_MASKED_STORE))) & active;
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_MASKED_LOAD)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_MASKED_STORE)) |
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_COMPRESS_STORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_GATHER)) |
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_SCATTER))) & active;
         __m512i at = _mm512_maskz_add_epi32(barrier, lanes, _mm512_set1_epi32((int)first));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 15));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 14));
@@ -3946,7 +4120,8 @@ static uint32_t tier1_select_parts_of(const uint8_t* registers, bool high, bool 
     // copy keeps them as padding.
     const bool vector_first = first && (registers[0] & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
     const uint32_t whole = !one && !slot && vector_first && !second && size >= 16 ? (size >= 64 ? 64 : size >= 32 ? 32 : 16) : 0;
-    bool valid = size != 0 && (size <= 16 || (whole != 0 && whole == size)) && shape;
+    // GetByteVectorType's two doubles carry a 17--23-byte record's first 16 bytes; stack copies retain its C size.
+    bool valid = size != 0 && (size <= 16 || (whole != 0 && (whole == size || (whole == 16 && size < 24)))) && shape;
     uint32_t count = 0;
     for (uint32_t k = 0; valid && k < (one ? 1u : 2u); k += 1)
     {
@@ -4568,6 +4743,34 @@ static X86Operation tier1_select_operation(uint32_t op)
         break;
     }
     return result;
+}
+
+// A gather's pattern (#1840, BUSTER_TIER1_VECTOR_GATHER) of node `gather` merged into `passthrough` (none for its zeros),
+// into `pattern`, whose rule stays as it was where no form takes it.
+static void tier1_select_gather_pattern(const IrFunction* function, uint32_t gather, uint32_t passthrough, Tier1SelectPattern* pattern)
+{
+    const uint32_t width = tier1_select_vector_width(function->type[gather]);
+    const uint32_t index = function->b[gather];
+    const uint32_t index_width = index < function->instruction_count ? tier1_select_vector_width(function->type[index]) : 0;
+    const uint32_t lane = function->flags[gather];
+    const uint32_t count = lane == IR_SIMD_LANE_I32 ? width / 4 : lane == IR_SIMD_LANE_I64 ? width / 8 : 0;
+    const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : width == 64 ? 2 : 3;
+    const bool shaped = count != 0 && at < 3 && (index_width == count * 4 || index_width == count * 8) &&
+                        ir_simd_gather_forms[0][lane == IR_SIMD_LANE_I64 ? 1 : 0][index_width == count * 8 ? 1 : 0][at] != X86_FORM_NONE;
+    if (shaped)
+    {
+        pattern->rule = TIER1_RULE_VECTOR;
+        pattern->width = (uint8_t)width;
+        pattern->scale = BUSTER_TIER1_VECTOR_GATHER;
+        pattern->operation = (uint8_t)lane;
+        pattern->immediate = function->alignment_log2[gather] & 3;
+        pattern->source_width = (uint8_t)index_width;
+        pattern->values[0] = function->a[gather];
+        pattern->values[1] = index;
+        pattern->values[2] = function->c[gather];
+        pattern->values[3] = passthrough;
+        pattern->intrinsic_cost = 1;
+    }
 }
 
 static bool tier1_select_tree_child(const Tier1SelectForest* forest, uint32_t parent, uint32_t value)
@@ -5559,6 +5762,18 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 expand.intrinsic_cost = 1;
                 tier1_select_add_candidate(forest, node, &candidates, expand);
             }
+            // A select of a gather whose only use it is, under the gather's own mask at its lanes (#1840): the gather merged
+            // into w, or into zeros where w is a zero vector.
+            if (tier1_select_tree_child(forest, node, b) && function->op[b] == IR_GATHER && function->c[b] == a && function->flags[b] == function->flags[node])
+            {
+                Tier1SelectPattern merged = base;
+                tier1_select_gather_pattern(function, b, tier1_select_vector_fill(function, c, vector_width) == 0 ? BUSTER_IR_NONE : c, &merged);
+                if (merged.rule == TIER1_RULE_VECTOR)
+                {
+                    tier1_select_fold(forest, node, b, &merged);
+                    tier1_select_add_candidate(forest, node, &candidates, merged);
+                }
+            }
             // A select of an operation whose only use it is (#1840, BUSTER_TIER1_VECTOR_MASKED_BINARY): a BINARY's but the
             // bitwise ones (whose forms' masks have a bit per dword or qword, not per lane) or a LANE_OP's, at the select's
             // lanes, whose EVEX form takes a writemask, and zeroing where w is a zero vector. It folds the operation.
@@ -5774,6 +5989,16 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
     }
+    else if (float_width != 0 && op == IR_FMA)
+    {
+        base.rule = TIER1_RULE_FLOAT_FMA;
+        base.width = (uint8_t)float_width;
+        base.values[0] = a;
+        base.values[1] = b;
+        base.values[2] = c;
+        base.intrinsic_cost = 4;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
     else if (float_width != 0 && op == IR_FNEG)
     {
         base.rule = TIER1_RULE_FLOAT_NEGATE;
@@ -5782,21 +6007,75 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.intrinsic_cost = 3;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if (forest->vectors && (op == IR_MASKED_LOAD || op == IR_MASKED_STORE))
+    else if (forest->vectors && (op == IR_MASKED_LOAD || op == IR_MASKED_STORE || op == IR_COMPRESS_STORE))
     {
         // A masked load or store (#1840): TIER1_RULE_FLOAT_LOAD's or _STORE's with `condition` its lanes' bytes' log2 plus
         // one, the address in values[0], unfolded, the mask in values[1] and the passthrough or the stored vector in
-        // values[2] (tier1_select_masked_move).
+        // values[2] (tier1_select_masked_move); a compressing store's `operation` 1.
         static const uint8_t sizes[4] = { 2, 0, 1, 3 };
-        const bool store = op == IR_MASKED_STORE;
+        const bool store = op != IR_MASKED_LOAD;
         base.rule = store ? TIER1_RULE_FLOAT_STORE : TIER1_RULE_FLOAT_LOAD;
         base.width = (uint8_t)tier1_select_vector_width(store && b < function->instruction_count ? function->type[b] : type);
         base.condition = (uint8_t)(1 + sizes[function->flags[node] & 3]);
+        base.operation = op == IR_COMPRESS_STORE ? 1 : 0;
         base.values[0] = a;
         base.values[1] = store ? c : b;
         base.values[2] = store ? b : c;
         base.intrinsic_cost = 1;
         if (base.width != 0 && function->flags[node] < 4)
+        {
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        // A masked store of a truncation whose only use it is (#1840): the truncation's memory form of its source, under
+        // the mask (`operation` 2), one vpmov* [p]{k} as the truncating store's row was.
+        const bool truncated = op == IR_MASKED_STORE && tier1_select_tree_child(forest, node, b) && function->op[b] == IR_INTRINSIC &&
+                               function->c[b] == BUSTER_IR_INTRINSIC_TRUNCATE && function->a[b] < function->instruction_count;
+        if (truncated && base.width != 0 && function->flags[node] < 4)
+        {
+            Tier1SelectPattern narrowed = base;
+            narrowed.operation = 2;
+            narrowed.immediate = function->flags[b];
+            narrowed.source_width = (uint8_t)tier1_select_vector_width(function->type[function->a[b]]);
+            narrowed.values[2] = function->a[b];
+            if (tier1_select_convert_form(1, function->flags[b], base.width, narrowed.source_width) != X86_FORM_NONE)
+            {
+                tier1_select_fold(forest, node, b, &narrowed);
+                tier1_select_add_candidate(forest, node, &candidates, narrowed);
+            }
+        }
+    }
+    else if (forest->vectors && op == IR_SCATTER)
+    {
+        // A scatter (#1840, BUSTER_TIER1_VECTOR_SCATTER): its stored vector and mask from the extra array.
+        const uint32_t stored = ir_extra_value(function, node, 0);
+        const uint32_t width = stored < function->instruction_count ? tier1_select_vector_width(function->type[stored]) : 0;
+        const uint32_t index_width = b < function->instruction_count ? tier1_select_vector_width(function->type[b]) : 0;
+        const uint32_t lane = function->flags[node];
+        const uint32_t count = lane == IR_SIMD_LANE_I32 ? width / 4 : lane == IR_SIMD_LANE_I64 ? width / 8 : 0;
+        const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : width == 64 ? 2 : 3;
+        const bool shaped = count != 0 && at < 3 && (index_width == count * 4 || index_width == count * 8) &&
+                            ir_simd_scatter_forms[0][lane == IR_SIMD_LANE_I64 ? 1 : 0][index_width == count * 8 ? 1 : 0][at] != X86_FORM_NONE;
+        if (shaped)
+        {
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)width;
+            base.scale = BUSTER_TIER1_VECTOR_SCATTER;
+            base.operation = (uint8_t)lane;
+            base.immediate = function->alignment_log2[node] & 3;
+            base.source_width = (uint8_t)index_width;
+            base.values[0] = a;
+            base.values[1] = b;
+            base.values[2] = ir_extra_value(function, node, 1);
+            base.values[3] = stored;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+    }
+    else if (forest->vectors && op == IR_GATHER)
+    {
+        // A gather (#1840, BUSTER_TIER1_VECTOR_GATHER) into its own zeros: a select of it under its mask is its merge.
+        tier1_select_gather_pattern(function, node, BUSTER_IR_NONE, &base);
+        if (base.rule == TIER1_RULE_VECTOR)
         {
             tier1_select_add_candidate(forest, node, &candidates, base);
         }
@@ -7444,6 +7723,47 @@ static X86Instruction tier1_select_memory_holes(const Tier1SelectPattern* patter
         .mode = rip ? BUSTER_X86_MEMORY_RIP : index == BUSTER_IR_NONE ? BUSTER_X86_MEMORY_BASE : (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(pattern->scale),
     };
     return result;
+}
+
+// The operands whose register a node's result may take to save the copy its records make into the destination otherwise
+// (#2685): a two-address instruction's first operand, and a commutative one's second, which its records swap into the
+// first place; a select's value where its condition holds not, which its cmov keeps, and the other one, which it inverts
+// to keep. BUSTER_IR_NONE where it has none. The allocator takes such a register only where the operand's interval ends
+// there: an operand live past the node holds it.
+static inline __attribute__((always_inline)) void tier1_select_ties(const Tier1SelectPlan* plan, uint32_t node, uint32_t* first, uint32_t* second)
+{
+    const Tier1SelectPattern* pattern = &plan->patterns[node];
+    const uint8_t rule = plan->covered[node] ? TIER1_RULE_NONE : pattern->rule;
+    const bool multiply = pattern->operation == X86_OPERATION_IMUL && rule == TIER1_RULE_IMMEDIATE;
+    const bool swapped = (rule == TIER1_RULE_REGISTER && tier1_select_commutative((X86Operation)pattern->operation)) ||
+                         (rule == TIER1_RULE_FLOAT_BINARY && (((uint32_t)pattern->operation & 3) == IR_FADD - IR_FADD || ((uint32_t)pattern->operation & 3) == IR_FMUL - IR_FADD));
+    const bool left = rule == TIER1_RULE_COPY || (rule == TIER1_RULE_TRUNCATE && pattern->width == 4) || rule == TIER1_RULE_UNARY || rule == TIER1_RULE_REGISTER ||
+                      (rule == TIER1_RULE_IMMEDIATE && !multiply) || rule == TIER1_RULE_MULTIPLY_SHIFT || rule == TIER1_RULE_LOAD_OPERAND ||
+                      (rule == TIER1_RULE_INTRINSIC && pattern->immediate == BUSTER_IR_INTRINSIC_BSWAP) || rule == TIER1_RULE_FLOAT_COPY || rule == TIER1_RULE_FLOAT_BINARY ||
+                      rule == TIER1_RULE_FLOAT_LOAD_OPERAND || rule == TIER1_RULE_FLOAT_NEGATE;
+    const bool select = rule == TIER1_RULE_SELECT;
+    // An address from a register (#2592): `lea d(%r),%r` costs what a lea into another register does, and an incremented
+    // pointer, Lua's `pc + 1` in OP_LFALSESKIP, keeps the register its dispatch takes it in.
+    const bool address = rule == TIER1_RULE_ADDRESS && !pattern->rip && pattern->stack_object == BUSTER_IR_NONE;
+    *first = left || address ? pattern->values[0] : select ? pattern->values[2] : BUSTER_IR_NONE;
+    *second = swapped ? pattern->values[1] : select ? pattern->values[1] : BUSTER_IR_NONE;
+}
+
+// Marks each node whose value a return reads in `returned` (one byte per node, cleared here). Such a value takes no tie
+// (tier1_select_ties): the return wants it in rax, where the lowest free register, which it takes without one, often
+// is; memsys5Size's product, whose operands both end at its imul, took the first one's rcx and was copied into eax.
+static void tier1_select_returned(const Tier1SelectPlan* plan, uint8_t* returned)
+{
+    const uint32_t count = plan->function->instruction_count;
+    memset(returned, 0, count);
+    for (uint32_t node = 0; node < count; node += 1)
+    {
+        const uint32_t value = plan->patterns[node].values[0];
+        if (plan->covered[node] == 0 && plan->patterns[node].rule == TIER1_RULE_RETURN && value < count)
+        {
+            returned[value] = 1;
+        }
+    }
 }
 
 static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const uint8_t* registers, uint32_t node)

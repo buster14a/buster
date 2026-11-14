@@ -80,7 +80,8 @@ if [ -s "$output/locks.tsv" ]; then
 fi
 # The merge queue's candidates (#1430): each completed merge_group run of main's queue (not another branch's, such as
 # the drill's, whose candidates never land on main), what became of its candidate (merged when its
-# commit is on main; otherwise its own conclusion: passed but invalidated, failed or cancelled), its wall time from its
+# commit is on main; otherwise its own conclusion: passed but invalidated, failed or cancelled; a cancelled run in which
+# a job besides the aggregates failed is a failure, which its own stop job cancelled, #2703), its wall time from its
 # start to its last update, and the sum of its jobs' own times. Then its hosted jobs' waits for a runner (#2031), each
 # from its creation to its start, of the jobs a runner took (a skipped job, or one cancelled before it started, has
 # none): the longest, their sum and their count. A candidate whose fate can't be read gives no line.
@@ -96,14 +97,21 @@ jq -r '
 while IFS=$'\t' read -r run sha conclusion wall; do
     [[ "$run" =~ ^[1-9][0-9]*$ && "$sha" =~ ^[0-9a-f]{40}$ ]]
     fate=$(gh api --jq .status "repos/$repository/compare/$sha...main" 2> /dev/null) || fate=unknown
-    case "$fate:$conclusion" in
-        identical:* | ahead:*) outcome=merged ;;
-        behind:success | diverged:success) outcome=passed ;;
-        behind:cancelled | diverged:cancelled) outcome=cancelled ;;
-        behind:* | diverged:*) outcome=failed ;;
+    case "$fate" in
+        identical | ahead | behind | diverged) ;;
         *) continue ;;
     esac
     gh api --paginate "repos/$repository/actions/runs/$run/jobs?per_page=100&filter=latest" > "$output/queue-jobs-$run.json"
+    # A job that failed of its own, besides the aggregates, which fail in every cancelled run.
+    own_failure=$(jq -s '[.[].jobs[]? | select((.conclusion == "failure" or .conclusion == "timed_out")
+        and .name != "Integration qualification" and .name != "Coverage record" and .name != "Build and execute on Ryzen 7 9700X")] | length' \
+        "$output/queue-jobs-$run.json")
+    case "$fate:$conclusion" in
+        identical:* | ahead:*) outcome=merged ;;
+        behind:success | diverged:success) outcome=passed ;;
+        behind:cancelled | diverged:cancelled) outcome=cancelled; [ "$own_failure" -eq 0 ] || outcome=failed ;;
+        *) outcome=failed ;;
+    esac
     runner=$(jq -s '
         def epoch: if type == "string" then try fromdateiso8601 catch null else null end;
         [.[].jobs[]? | (.started_at | epoch) as $a | (.completed_at | epoch) as $b | select($a != null and $b != null and $b >= $a) | $b - $a] | add // 0

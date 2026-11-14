@@ -5,7 +5,8 @@ DWARF 5 function names, ranges and source lines. It emits `.debug_info`,
 `.debug_abbrev`, `.debug_line`, `.debug_addr` and `.debug_rnglists` in DWARF32
 format for Linux x86-64. This core interface remains independent of C types and
 storage allocation. The C producer adds types, variables and lexical scopes for
-`-g` as described below; inline scopes are not represented. Unwind instructions
+`-g` as described below, with Tier 1's expanded callees as inlined subroutines
+(#2541 step 3, "Optimized Tier 1 values"). Unwind instructions
 use the separate frame-event interface.
 
 `debug_write` emits the sections before final layout, with zeroes in address
@@ -76,10 +77,17 @@ written at bases with the same unit alone, byte for byte but the four offsets.
 ## C types and values (`-g`)
 
 `c_check_debug_values.c` enriches the core producer for [#1114](https://github.com/buster14a/buster/issues/1114).
-It emits a DIE for each reachable, qualified `TypeId` in the translation unit:
-base and pointer types, fixed and incomplete arrays, records and unions (with
-byte or bit offsets), enums and enumerators, function signatures, qualifiers,
-and declaration-scoped typedef names. A bounded worklist handles recursive
+It emits a DIE for each qualified `TypeId` the unit's roots reach
+(`check_debug_value_roots`, #2531): its file-scope declarations that define
+what it emits (a function's body, an object's storage) and everything inside
+them, and the file-scope typedefs those bind (the checker's bindings,
+`CheckInput.declarations`), and those that such a typedef binds in turn. As in
+clang's DWARF, a prototype, an extern declaration, a typedef, a tag or an
+enumeration that nothing defined in the unit names gives it nothing, and a
+global variable is described where the unit defines it. The DIEs are base and
+pointer types, fixed and incomplete arrays, records and unions (with byte or
+bit offsets), enums and enumerators, function signatures, qualifiers, and
+declaration-scoped typedef names. A bounded worklist handles recursive
 records without recursion. Two passes measure and then write CU-relative
 `DW_FORM_ref4` references, including forward references; these references need
 no relocation when units are concatenated.
@@ -123,8 +131,8 @@ omitted for producers which supply only the five core sections.
 
 **Limits:** Thread-local, unresolved and common symbols without a published
 ordinary object definition have no location. Values before initialization are
-not guaranteed meaningful. Each function still has one source file, and inline
-callee scopes are not represented. Tier 1's additional bounds are described
+not guaranteed meaningful. Each function still has one source file: an inlined
+subroutine is described where its call is in it. Tier 1's additional bounds are described
 below; a named, typed value without a proved location remains unavailable.
 
 `test-check-debug --cross-check` compares GDB reads against a fixture's own
@@ -145,7 +153,17 @@ each IR instruction's original typed entry, each retained stack object's
 original local, and source assignment identities. SSA promotion, optimization,
 splitting and scheduling preserve or explicitly discard these identities.
 Generated instructions have no invented source position. Inlined callee locals
-do not become caller locals; representing their instances needs inline scopes.
+do not become caller locals. An expanded callee's instructions take origins past
+the function's own entries, an instance's (`IrDebugInline`, #2541 step 3): the
+location proofs read them as the instance's outermost call, the rows as its
+callee's entries (its lines), and `check_debug_values` writes each instance
+whose call is in the function's file as a `DW_TAG_inlined_subroutine` nested in
+the lexical block of its call and in its parent instance, its ranges its code's
+spans. Its abstract origin is the callee's abstract instance (a
+`DW_TAG_subprogram` with `DW_AT_inline`, its parameters and no code, written
+before the out-of-line one), not the out-of-line `DW_TAG_subprogram`: a reader
+takes an attribute an entry lacks from its origin, and gdb 18 (and CI's) takes
+the inherited `DW_AT_low_pc` over the instance's `DW_AT_ranges` and drops it.
 The emitter's record origins and the post-scheduler's final permutation carry
 the surviving identities to the actual machine records. Source rows therefore
 describe surviving statements, including suspended callers' call sites.

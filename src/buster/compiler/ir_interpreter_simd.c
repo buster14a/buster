@@ -96,7 +96,7 @@ static bool ir_interpreter_simd_supported(const IrFunction* function)
         {
             const uint8_t op = function->op[i];
             supported = op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_BITCAST || op == IR_SELECT ||
-                        op == IR_PHI || op == IR_LOAD || op == IR_MASKED_LOAD || (op == IR_INTRINSIC && function->c[i] == BUSTER_IR_INTRINSIC_SPLAT) ||
+                        op == IR_PHI || op == IR_LOAD || op == IR_MASKED_LOAD || op == IR_GATHER || (op == IR_INTRINSIC && function->c[i] == BUSTER_IR_INTRINSIC_SPLAT) ||
                         (op == IR_INTRINSIC && ir_interpreter_simd_intrinsic(ir_intrinsic_kind(function->c[i])) != IR_SIMD_OPERATION_COUNT) ||
                         ir_interpreter_simd_opcode(op) != IR_SIMD_OPERATION_COUNT;
         }
@@ -165,7 +165,8 @@ static InterpreterStatus ir_interpreter_simd_operation(const IrInterpreterFrame*
     }
     else
     {
-        // A ternary intrinsic's third operand (#1840) is in the extra array, its `c` its kind and that place.
+        // A ternary intrinsic's third operand (#1840) is in the extra array, its `c` its kind and that place (a scatter's
+        // values there are no lane operation's: the interpreter's memory case runs it).
         const bool ternary = ir_ternary_instruction(function, i);
         const uint32_t ids[3] = { function->a[i], function->b[i], ternary ? ir_intrinsic_third(function, i) : function->c[i] };
         const uint32_t mask = ir_value_mask(function, i) | (ternary ? 4u : 0u);

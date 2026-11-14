@@ -32,8 +32,19 @@ requirements. [Command index](README.md).
   operation's row staying for its effects.
   `benchmark-ir-optimize`
   and `benchmark-ir-optimize-passes` include preparation and rewriting costs.
-  [The optimization guide](../../docs/ir-optimization.md) records supported inputs
-  and the source-corpus and target measurements still required for #139.
+- #139's acceptance on real C: `test-ir-source --passes` runs every pass's
+  vector and scalar versions on every function of c-testsuite's subset, the
+  frozen `sqlite3.c` and musl in the correctness list, and
+  `benchmark-ir-source --passes` times them on the 9700X ([the IR
+  guide](ir.md)). The C driver's `--tier1-passes=LIST` turns each pass of
+  `--tier1`'s pipeline on or off, for differential campaigns and run-time
+  measurements, and `--tier1-report` counts what each did ([the Tier 1
+  guide](../../docs/tier1.md)'s "The C driver's `--tier1`"). `test-ir-optimize`
+  runs every fixture's pass masks with and without CFG cleanup's merges
+  (`BUSTER_IR_OPTIMIZE_MERGE`), and `ir_optimize_test_merges` checks the merged
+  blocks, the merged joins' phis and the dropped source regions.
+  [The optimization guide](../../docs/ir-optimization.md) records supported inputs,
+  the pass order and #139's measurements.
 
 The optional `BUSTER_IR_OPTIMIZE_LAYOUT` pass (#1218) changes the rewrite's
 block visitation order, using `ir_optimize_layout.c`'s fall-through chains.
@@ -42,6 +53,47 @@ optimizer clients retain their existing order. The ordinary and retained-analysi
 entry points both verify the resulting SSA and remapped CFG. See the
 [Tier 1 command guide](tier1.md#block-placement-and-critical-edge-fall-through-1218)
 for its ordering policy, regression coverage and measurement boundaries.
+
+## Vectors assembled in memory (#1344)
+
+clang's headers write `_mm512_set1_epi8`, `_mm512_setzero_si512`,
+`_mm512_set_epi64` and their kin as vector compound literals, and the typed
+stream initializes such a literal as an object: each element's store, then one
+load of the whole vector. With the `simd` and `flagged` options, SROA's
+`ir_sroa_assemble` turns that load back into a value before the fields are
+made. It walks each reachable block's loads and stores of the slots that are
+not refused and hold at most 64 bytes, and keeps for each slot the bytes the
+block's stores wrote, which of them are constants', and whether every store
+wrote the same scalar. A vector load whose every byte they wrote becomes, in
+place:
+
+- an `IR_VCONST` of the bytes, where each is a constant's (read through the
+  truncations, extensions and copies the typed stream leaves between a literal
+  and its store), appended after the function's own vector constants; or
+- a splat of the scalar, where every store wrote the same one at offsets that
+  are multiples of its size. A slot's repeated loads with no store between
+  count as one scalar, since the typed stream reads a parameter again for each
+  element.
+
+The element stores then reach no load and go with their fields. The walk
+assumes nothing across blocks: a slot that isn't refused has no access but its
+loads and stores, and a dead store's bytes are read by no load, so within a
+block it sees every write of the bytes it decides. A literal whose elements are
+distinct scalars stays in memory. `IrSroaResult.assembled` counts the loads,
+and the C driver's Tier 1 path takes SROA's result when it is nonzero, as when
+a slot was split. `test-ir-inline` runs four fixtures in the typed stream's
+shape through SROA and promotion on both twins and on the interpreter: a splat
+of 64 bytes read from the parameter's object with a second 16-byte load, a
+zeroed object's quadword constants, and two that must stay memory (the
+scalar's object written between its loads, and one lane another scalar's).
+
+On the compiler's own lexer by `--tier1`, `c_tokenize` went from 30.20 to
+14.62 instructions per byte on a 9,076-byte file (clang -O2: 3.06), every
+instruction counted; the record is
+[buster-performance's](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-vector-lexer-breakdown-1344-2026-11-14).
+What it leaves are true constants that Tier 1's constant rule still builds
+below `rsp` (#2744), but for those whose quadwords are one value, which are a
+`mov` and a `vpbroadcastq` at EVEX targets (13.46 instructions per byte).
 
 ## Verification work and retained analyses (#1379)
 
@@ -101,26 +153,44 @@ profiles and paired A/A and A/B qualification on an approved main/scheduled
 
 ## Bounded scalar if-conversion (#1382)
 
-The C Tier 1 driver runs `ir_if_convert.c` after promotion, wide splitting and
-integer truth simplification, before optimizer preparation. Pure scalar
-diamond/triangle joins become `IR_SELECT`; the existing selector emits `cmov`.
-The pass permits sequential join/head regions such as a two-step clamp, while
-keeping general nested decisions and joins with additional predecessors.
-Each arm has at most four rows, each join at most four phis, and combined
-speculation/select cost at most eight. These are policy bounds, not timings.
+The C Tier 1 driver runs `ir_if_convert.c` after promotion, wide splitting,
+integer truth simplification and truth threading, before optimizer
+preparation. Diamonds and triangles whose arms are short chains of
+single-predecessor blocks become `IR_SELECT`; the existing selector emits
+`cmov`. Each arm's rows are numbered against the head's first, so the
+lowering's repeated comparisons, zero extensions and reloads of an element the
+head loaded take the head's values. Only the rows the join's phis need move to
+the head, and they must be total or proven loads; the rest stay in an
+unreachable stub and must be droppable. A join with other predecessors keeps
+its phis and takes new selects in the head. Up to four rounds take nested
+regions (a nested `?:`, `&&` and `||` values), with `ir_truth_simplify_values`
+turning the truth values' selects into i1 selects between them. A condition
+that reads the value the join carries round a loop (a running max) keeps its
+branch, and an accumulation's select sinks below its addition
+(`s + (c ? x : 0)`). Each arm moves
+at most four non-constant rows, each join takes at most four selects, and the
+moved rows' cost plus two per select is at most eight. These are policy bounds,
+not timings; [the design](../ir-optimization.md#scalar-if-conversion-1382) has
+the rules.
 
 `test-ir-optimize` runs `ir_if_convert_test.c`: complete SSA verification,
-independent execution before/after cleanup, exact scalar/vector output,
-every guarded candidate-scan tail, multi-phi edge polarity, both triangle
-orientations, sequential and nested regions, loop-carried values, shared
-switch/call side-table words, allocation rollback, and refusal of unsafe or
-expensive speculation. `test-checker-driver` adds C-source semantic comparison
-against Clang, with both scalar paths and rematerialization settings. Its
-decoded object checks require `cmov` without conditional branches for max,
-clamp and conditional arithmetic, and retain guarding branches for loads,
-division, variable shifts and calls. These use the existing test commands and
-CI shards. Runtime/compile-time measurements on the approved host remain
-necessary; this change makes no measured performance claim.
+independent execution before/after cleanup, exact scalar/vector output, every
+guarded candidate-scan tail, multi-phi edge polarity, both triangle
+orientations, sequential, nested and three-predecessor regions over rounds,
+loop-carried values, shared switch/call side-table words, allocation rollback,
+refusal of unsafe or expensive speculation, the reload and truth fixtures,
+a running maximum kept as a branch (and converted with a constant bound), and
+the loop's conditional sum sunk below its addition.
+The reload fixtures reuse a reload, speculate it behind a store or a fence, and
+refuse it behind a call, as a volatile access or at another offset. The truth
+fixtures reduce `&&` and `||` to i1 selects and refuse a dead division.
+`test-checker-driver` adds C-source semantic comparison against Clang, with
+both scalar paths and rematerialization settings. Its decoded object checks
+require `cmov` without conditional branches for max, the clamps (sequential
+and nested), conditional arithmetic and the `&&`/`||` values, and `cmov` with
+only the loop's branch for the conditional sum and the `?:` sum. They also
+require the branches to remain for loads, division, variable shifts, calls, a
+reload after a call and the running max.
 
 ## Dominator path policy (#1352)
 

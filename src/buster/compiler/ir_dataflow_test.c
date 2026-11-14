@@ -12,9 +12,9 @@
 
 // IR_FENCE (#1059) uses no value: the default case's. IR_INTRINSIC uses a, and b where it has one: splat's (#1450) and
 // the unary kinds' is none. IR_ATOMIC_RMW (#1059) uses its address and its operand, as a store does, and a
-// compare-exchange's desired value too. IR_MASKED_LOAD and IR_MASKED_STORE (#1840), the last added, use a, b and c, as
-// a select does.
-_Static_assert(IR_OP_COUNT == 66, "audit the independent dataflow operand oracle for a new IR operation");
+// compare-exchange's desired value too. IR_MASKED_LOAD and IR_MASKED_STORE (#1840) use a, b and c, as a select does,
+// and so do IR_COMPRESS_STORE and IR_GATHER (#1840), the last added.
+_Static_assert(IR_OP_COUNT == 70, "audit the independent dataflow operand oracle for a new IR operation");
 
 typedef struct IrDataflowTests IrDataflowTests;
 struct IrDataflowTests
@@ -37,7 +37,7 @@ static void ir_dataflow_expect(IrDataflowTests* tests, bool condition, const cha
 }
 
 // Semantic direct operands only. Calls' argument lists and phis' edge uses are enumerated independently below.
-static uint32_t ir_dataflow_test_direct(const IrFunction* f, uint32_t node, uint32_t values[3])
+static uint32_t ir_dataflow_test_direct(const IrFunction* f, uint32_t node, uint32_t values[4])
 {
     uint32_t count = 0;
     switch (f->op[node])
@@ -76,11 +76,19 @@ static uint32_t ir_dataflow_test_direct(const IrFunction* f, uint32_t node, uint
                 values[count++] = f->c[node];
             }
         } break;
-        case IR_SELECT: case IR_VSELECT: case IR_MASKED_LOAD: case IR_MASKED_STORE:
+        case IR_SELECT: case IR_VSELECT: case IR_MASKED_LOAD: case IR_MASKED_STORE: case IR_COMPRESS_STORE: case IR_GATHER: case IR_FMA:
         {
             values[count++] = f->a[node];
             values[count++] = f->b[node];
             values[count++] = f->c[node];
+        } break;
+        case IR_SCATTER:
+        {
+            // A scatter's base and index, and its stored vector and mask in the extra array (#1840).
+            values[count++] = f->a[node];
+            values[count++] = f->b[node];
+            values[count++] = f->extra[f->c[node] >> BUSTER_IR_INTRINSIC_EXTRA_SHIFT];
+            values[count++] = f->extra[(f->c[node] >> BUSTER_IR_INTRINSIC_EXTRA_SHIFT) + 1];
         } break;
         case IR_ADDRESS:
         {
@@ -167,7 +175,7 @@ static bool ir_dataflow_test_equations(const IrFunction* f, const IrDataflow* re
     }
     for (uint32_t node = 0; valid && node < f->instruction_count; node += 1)
     {
-        uint32_t values[3];
+        uint32_t values[4];
         const uint32_t count = ir_dataflow_test_direct(f, node, values);
         for (uint32_t i = 0; i < count; i += 1)
         {
@@ -251,7 +259,7 @@ static bool ir_dataflow_test_equations(const IrFunction* f, const IrDataflow* re
                 live[id >> 6] &= ~(UINT64_C(1) << (id & 63));
                 ir_dataflow_test_bit(def, id);
             }
-            uint32_t values[3];
+            uint32_t values[4];
             const uint32_t count = ir_dataflow_test_direct(f, node, values);
             for (uint32_t i = 0; i < count; i += 1)
             {
@@ -336,7 +344,7 @@ static bool ir_dataflow_test_byte_oracle(const IrFunction* f, const IrDataflow* 
             {
                 const uint32_t node = --after;
                 live[node] = 0;
-                uint32_t values[3];
+                uint32_t values[4];
                 const uint32_t direct = ir_dataflow_test_direct(f, node, values);
                 for (uint32_t i = 0; i < direct; i += 1)
                 {

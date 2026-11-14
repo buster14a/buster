@@ -683,34 +683,55 @@ static void ir_inline_test_compare(IrInlineTest* test, const IrInlineUnit* input
     ir_inline_test_compare_loads(test, input, result, entry, scratch, trials, true);
 }
 
+// Whether a vector run's result is the scalar twin's, column for column.
+static void ir_inline_test_same_result(IrInlineTest* test, const IrInlineUnit* input, const IrInlineResult* result, const IrInlineResult* scalar)
+{
+    ir_inline_test_expect(test, result->function_count == scalar->function_count && result->call_count == scalar->call_count && result->inlined_calls == scalar->inlined_calls && result->component_count == scalar->component_count && result->input_instructions == scalar->input_instructions && result->output_instructions == scalar->output_instructions, "scalar/vector result counts");
+    for (uint32_t f = 0; f < input->count; f += 1)
+    {
+        ir_inline_test_expect(test, ir_inline_test_same_function(&result->functions[f], &scalar->functions[f]), "scalar/vector exact function columns");
+        ir_inline_test_expect(test, result->components[f] == scalar->components[f] && result->recursive[f] == scalar->recursive[f] && result->call_offsets[f] == scalar->call_offsets[f], "scalar/vector graph columns");
+    }
+    for (uint32_t c = 0; c < result->call_count; c += 1)
+    {
+        ir_inline_test_expect(test, result->call_nodes[c] == scalar->call_nodes[c] && result->callees[c] == scalar->callees[c] && result->costs[c] == scalar->costs[c] && result->expanded_sizes[c] == scalar->expanded_sizes[c] && result->decisions[c] == scalar->decisions[c], "scalar/vector exact call decisions");
+    }
+}
+
+// The unit by the scalar twin, and by the vector path twice: its caller's runs by the other form first (the masked adds
+// where `options` gathers, or the gathers where it adds: IrInlineOptions.add_sites, #2541 step 3), then by `options`'s,
+// whose result the caller reads; each column for column the twin's.
 static bool ir_inline_test_run(IrInlineTest* test, const IrInlineUnit* input, IrInlineOptions options, Arena* output, Arena* scalar_output, Arena* scratch, IrInlineResult* result)
 {
     IrInlineResult scalar = { 0 };
     uint32_t failed = 123;
-    options.scalar = false;
     const uint64_t mark = scratch->length;
+    const uint64_t output_mark = output->length;
+    options.scalar = true;
+    const IrCheck scalar_check = ir_optimize_inline(input, scalar_output, scratch, options, &scalar, &failed);
+    ir_inline_test_expect(test, scalar_check.error == IR_OK && failed == UINT32_MAX && scratch->length == mark, "scalar inline and scratch restoration");
+    IrInlineOptions other = options;
+    other.scalar = false;
+    other.add_sites = options.add_sites != 0 ? 0 : BUSTER_IR_INLINE_ADD_SITES;
+    IrInlineResult alternative = { 0 };
+    const IrCheck other_check = ir_optimize_inline(input, output, scratch, other, &alternative, &failed);
+    ir_inline_test_expect(test, other_check.error == scalar_check.error && scratch->length == mark, "the other caller-run form's inline and scratch restoration");
+    if (other_check.error == IR_OK && scalar_check.error == IR_OK)
+    {
+        ir_inline_test_same_result(test, input, &alternative, &scalar);
+    }
+    arena_pop_to(output, output_mark);
+    options.scalar = false;
     const IrCheck vector_check = ir_optimize_inline(input, output, scratch, options, result, &failed);
     ir_inline_test_expect(test, vector_check.error == IR_OK && failed == UINT32_MAX && scratch->length == mark, "vector inline and scratch restoration");
     if (vector_check.error != IR_OK)
     {
         fprintf(stderr, "ir-inline diagnostic error=%u function=%u node=%u detail=%u\n", vector_check.error, failed, vector_check.instruction, vector_check.detail);
     }
-    options.scalar = true;
-    const IrCheck scalar_check = ir_optimize_inline(input, scalar_output, scratch, options, &scalar, &failed);
-    ir_inline_test_expect(test, scalar_check.error == IR_OK && failed == UINT32_MAX && scratch->length == mark, "scalar inline and scratch restoration");
     const bool success = vector_check.error == IR_OK && scalar_check.error == IR_OK;
     if (success)
     {
-        ir_inline_test_expect(test, result->function_count == scalar.function_count && result->call_count == scalar.call_count && result->inlined_calls == scalar.inlined_calls && result->component_count == scalar.component_count && result->input_instructions == scalar.input_instructions && result->output_instructions == scalar.output_instructions, "scalar/vector result counts");
-        for (uint32_t f = 0; f < input->count; f += 1)
-        {
-            ir_inline_test_expect(test, ir_inline_test_same_function(&result->functions[f], &scalar.functions[f]), "scalar/vector exact function columns");
-            ir_inline_test_expect(test, result->components[f] == scalar.components[f] && result->recursive[f] == scalar.recursive[f] && result->call_offsets[f] == scalar.call_offsets[f], "scalar/vector graph columns");
-        }
-        for (uint32_t c = 0; c < result->call_count; c += 1)
-        {
-            ir_inline_test_expect(test, result->call_nodes[c] == scalar.call_nodes[c] && result->callees[c] == scalar.callees[c] && result->costs[c] == scalar.costs[c] && result->expanded_sizes[c] == scalar.expanded_sizes[c] && result->decisions[c] == scalar.decisions[c], "scalar/vector exact call decisions");
-        }
+        ir_inline_test_same_result(test, input, result, &scalar);
     }
     return success;
 }
@@ -1836,6 +1857,166 @@ static void ir_inline_test_side_table_growth(IrInlineTest* test, Arena* input, A
     arena_pop_to(twin, 0);
 }
 
+// A straight-line callee whose side tables hold rows no node names any more, as an optimized summary's may (#2541 step
+// 2: the optimizer deleted a call, whose descriptor, arguments and types stayed): an expansion writes the rows its nodes
+// name alone, so the caller's tables hold its own calls' rows and nothing else, and the result verifies. Sized by the
+// callee's whole tables, the caller's held the stale rows' count of uninitialized ones, which IR_VOID types fail. The
+// callee is copied as it is (IrInlineUnit.only, as a summary is), not rewritten first, which would drop its stale rows.
+static void ir_inline_test_stale_rows(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
+{
+    IrFunction functions[2];
+    // The caller: its parameter, a call of the leaf (expanded), a call of an unknown symbol (kept) and its return.
+    functions[0] = ir_inline_test_function(test, input, (IrSizes){
+                                                            .instruction_count = 4,
+                                                            .block_count = 1,
+                                                            .call_count = 2,
+                                                            .extra_count = 2,
+                                                            .call_type_count = 2,
+                                                            .parameter_count = 1,
+                                                        },
+                                           IR_I32);
+    // The leaf: x + 3, with a deleted call's descriptor, two arguments' slots and two types left in its tables.
+    functions[1] = ir_inline_test_function(test, input, (IrSizes){
+                                                            .instruction_count = 4,
+                                                            .block_count = 1,
+                                                            .constant_count = 1,
+                                                            .parameter_count = 1,
+                                                            .call_count = 1,
+                                                            .extra_count = 2,
+                                                            .call_type_count = 2,
+                                                        },
+                                           IR_I32);
+    if (test->failures == 0)
+    {
+        functions[0].parameter_types[0] = IR_I32;
+        ir_inline_test_node(&functions[0], 0, IR_PARAM, IR_I32, 0, UINT32_MAX, UINT32_MAX);
+        functions[0].extra[0] = 0;
+        functions[0].extra[1] = 1;
+        ir_inline_test_call(&functions[0], 1, 0, 2, 0, 1, IR_I32);
+        ir_inline_test_call(&functions[0], 2, 1, 9, 1, 1, IR_I32);
+        ir_inline_test_node(&functions[0], 3, IR_RET, IR_VOID, 2, UINT32_MAX, UINT32_MAX);
+        functions[1].parameter_types[0] = IR_I32;
+        functions[1].constants[0].low = 3;
+        ir_inline_test_node(&functions[1], 0, IR_PARAM, IR_I32, 0, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_node(&functions[1], 1, IR_CONST, IR_I32, 0, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_node(&functions[1], 2, IR_ADD, IR_I32, 0, 1, UINT32_MAX);
+        ir_inline_test_node(&functions[1], 3, IR_RET, IR_VOID, 2, UINT32_MAX, UINT32_MAX);
+        functions[1].calls[0] = (IrCall){ .argument_first = 0, .argument_count = 2, .type_first = 0, .parameter_count = 2, .result_type = IR_I32 };
+        functions[1].extra[0] = 0;
+        functions[1].extra[1] = 2;
+        functions[1].call_types[0] = IR_I32;
+        functions[1].call_types[1] = IR_I32;
+        const uint32_t symbols[] = {
+            1,
+            2,
+        };
+        const uint8_t flags[] = {
+            0,
+            BUSTER_IR_INLINE_INTERNAL,
+        };
+        // The caller alone rewritten, its callee copied as it is, as Tier 1's driver copies a summary (IrInlineUnit.only).
+        const IrInlineUnit unit = {
+            .functions = functions,
+            .symbols = symbols,
+            .flags = flags,
+            .count = 2,
+            .symbol_count = 128,
+            .only = 1,
+        };
+        IrInlineResult result = { 0 };
+        if (ir_inline_test_run(test, &unit, ir_inline_options(), output, twin, scratch, &result))
+        {
+            const IrFunction* caller = &result.functions[0];
+            ir_inline_test_expect(test, result.inlined_calls == 1 && caller->call_count == 1 && caller->extra_count == 1 && caller->call_type_count == 1,
+                                  "a straight line's stale rows take no rows of its caller's");
+            const uint64_t mark = scratch->length;
+            ir_inline_test_expect(test, ir_verify_path(caller, scratch, 0, true).error == IR_OK, "the caller of a straight line with stale rows verifies");
+            arena_pop_to(scratch, mark);
+        }
+    }
+    arena_pop_to(input, 0);
+    arena_pop_to(output, 0);
+    arena_pop_to(twin, 0);
+}
+
+// #2541 step 3's instances under -g: a caller of five entries whose call (entry 1) expands a callee of four entries, which
+// itself holds an instance (entries 4 and 5, its call at its entry 1, of symbol 9). The caller alone rewritten, as a
+// summary is copied: the callee's origins follow the caller's (5 + o), its instance is the caller's first and the
+// callee's nested one its second, parented by the first and called at 5 + 1; the result verifies.
+static void ir_inline_test_debug_instances(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
+{
+    IrFunction functions[2];
+    functions[0] = ir_inline_test_function(test, input, (IrSizes){
+                                                            .instruction_count = 3,
+                                                            .block_count = 1,
+                                                            .extra_count = 1,
+                                                            .call_count = 1,
+                                                            .call_type_count = 1,
+                                                            .parameter_count = 1,
+                                                        },
+                                           IR_I64);
+    functions[1] = ir_inline_test_leaf(test, input, IR_I64);
+    const IrDebugInfo caller_seed = { .entry_count = 5 };
+    const IrDebugInline nested = { .symbol = 9, .first = 4, .count = 2, .parent = BUSTER_IR_NONE, .call = 1 };
+    const IrDebugInfo callee_seed = { .entry_count = 4, .origin_count = 6, .inlines = &nested, .inline_count = 1 };
+    if (test->failures == 0 && ir_debug_create(input, &functions[0], &caller_seed) && ir_debug_create(input, &functions[1], &callee_seed))
+    {
+        functions[0].parameter_types[0] = IR_I64;
+        functions[0].extra[0] = 0;
+        ir_inline_test_node(&functions[0], 0, IR_PARAM, IR_I64, 0, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_call(&functions[0], 1, 0, 2, 0, 1, IR_I64);
+        ir_inline_test_node(&functions[0], 2, IR_RET, IR_VOID, 1, UINT32_MAX, UINT32_MAX);
+        functions[0].debug->origins[0] = 0;
+        functions[0].debug->origins[1] = 1;
+        functions[0].debug->origins[2] = 4;
+        // The callee's constant at its entry 2, the add at one of its instance's entries (4), its return at its entry 3.
+        functions[1].debug->origins[1] = 2;
+        functions[1].debug->origins[2] = 4;
+        functions[1].debug->origins[3] = 3;
+        const uint32_t symbols[] = {
+            1,
+            2,
+        };
+        const uint8_t flags[] = {
+            0,
+            BUSTER_IR_INLINE_INTERNAL,
+        };
+        const IrInlineUnit unit = {
+            .functions = functions,
+            .symbols = symbols,
+            .flags = flags,
+            .count = 2,
+            .symbol_count = 128,
+            .only = 1,
+        };
+        IrInlineResult result = { 0 };
+        if (ir_inline_test_run(test, &unit, ir_inline_options(), output, twin, scratch, &result))
+        {
+            const IrFunction* caller = &result.functions[0];
+            const IrDebugInfo* debug = caller->debug;
+            const bool tabled = debug != NULL && debug->inline_count == 2 && debug->origin_count == 11 && debug->inlines[0].symbol == 2 &&
+                                debug->inlines[0].first == 5 && debug->inlines[0].count == 4 && debug->inlines[0].parent == BUSTER_IR_NONE &&
+                                debug->inlines[0].call == 1 && debug->inlines[1].symbol == 9 && debug->inlines[1].first == 9 && debug->inlines[1].count == 2 &&
+                                debug->inlines[1].parent == 0 && debug->inlines[1].call == 6;
+            ir_inline_test_expect(test, result.inlined_calls == 1 && tabled, "an expansion's instance and its callee's nested one follow the caller's origins");
+            uint32_t constant = 0;
+            uint32_t add = 0;
+            for (uint32_t n = 0; debug != NULL && n < caller->instruction_count; n += 1)
+            {
+                constant += caller->op[n] == IR_CONST && debug->origins[n] == 7;
+                add += caller->op[n] == IR_ADD && debug->origins[n] == 9;
+            }
+            ir_inline_test_expect(test, constant == 1 && add == 1, "the copied instructions take their callee's origins past the caller's");
+            const uint64_t mark = scratch->length;
+            ir_inline_test_expect(test, ir_verify_path(caller, scratch, 0, true).error == IR_OK, "a caller with instances verifies");
+            arena_pop_to(scratch, mark);
+        }
+    }
+    arena_pop_to(input, 0);
+    arena_pop_to(output, 0);
+    arena_pop_to(twin, 0);
+}
+
 static void ir_inline_test_failures(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
 {
     IrFunction functions[2];
@@ -1987,6 +2168,8 @@ static __attribute__((unused)) int run_ir_optimize_inline_tests(int argc, char**
         ir_inline_test_threshold_guards(&test);
         ir_inline_test_empty_and_identity(&test, &input, &output, &twin, &scratch);
         ir_inline_test_side_table_growth(&test, &input, &output, &twin, &scratch);
+        ir_inline_test_stale_rows(&test, &input, &output, &twin, &scratch);
+        ir_inline_test_debug_instances(&test, &input, &output, &twin, &scratch);
         ir_inline_test_failures(&test, &input, &output, &twin, &scratch);
         ir_inline_test_simd(&test, &input, &output, &twin, &scratch);
         ir_inline_test_general(&test, &input, &output, &twin, &scratch);

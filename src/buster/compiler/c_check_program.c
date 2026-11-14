@@ -238,6 +238,10 @@ struct CheckProgramOptions
     bool unselected_operands;
     // Optional deterministic tally: unit graph-mark initialization plus return-warning expression visits.
     uint64_t* return_flow_work;
+    // The selection census (#2536's step 2.1, --selection-census): each body's candidates' references besides its own, by
+    // a walk from every expression root of the body and by scans of the graph's VALUE nodes (check_program_census_walk and
+    // _scan), into CheckProgram's census_walk, census_scan and census_arms.
+    bool selection_census;
     // The generated code's instruction set (x86_target.c's X86Target, the preprocessor's from -march and the -m flags):
     // which vector types the lowering takes, how wide a vector register the convention passes them in, and which
     // instructions its rows use. Zero is x86-64 baseline.
@@ -277,6 +281,10 @@ struct CheckProgramOptions
     // The scratch gives its pages past this pass's columns back in whole huge pages (arena_discard_huge): a lane of the
     // C driver's units that will compile another unit after this one (#777), whose parse and reader push as far again.
     bool discard_huge;
+    // With discard_huge, the bytes past this pass's columns that it keeps besides: for a unit read as its view (#2531),
+    // what its columns would have taken for the parse's tokens the view leaves out, which its next unit's parse and
+    // reader push as far again (without it, each viewed unit gave back huge pages that the next one took fresh, cleared).
+    uint64_t discard_keep;
 };
 
 typedef struct CheckProgramCase CheckProgramCase;
@@ -439,6 +447,22 @@ struct CheckProgramTargetVersion
     uint32_t declaration;
 };
 
+// One census's candidates' references (#2536's step 2.1, check_program_census_walk's or _scan's): each body's, sorted, from
+// first[body], counts[body] of them; the bodies whose candidates' references aren't their own (differing), those of them
+// without a dropped arm (unarmed) and those whose candidates miss one of their own (missing: none, for the superset the
+// candidates must be); and the census's TSC ticks.
+typedef struct CheckProgramCensus CheckProgramCensus;
+struct CheckProgramCensus
+{
+    uint32_t* references;
+    uint32_t* first;
+    uint32_t* counts;
+    uint32_t differing;
+    uint32_t unarmed;
+    uint32_t missing;
+    uint64_t ticks;
+};
+
 typedef struct CheckProgram CheckProgram;
 struct CheckProgram
 {
@@ -464,6 +488,24 @@ struct CheckProgram
     // and no code emits the block-scope statics it declares (check_program_select_mode). Null in a unit without regions.
     uint8_t* region_reached;
     uint32_t* references;
+    // With CheckProgramOptions.selection_census (#2536's step 2.1), the candidates' references by the walk's census and by
+    // the scan's (check_program_census_walk and _scan), the bodies with a dropped arm, and the TSC ticks of the references
+    // pass (check_program's per-body check_program_references and its sort), which the censuses' ticks are set against.
+    // Zero without the option; the scans' are zero where they have none.
+    CheckProgramCensus census_walk;
+    CheckProgramCensus census_scan;
+    // The scan's without the writer's dropped arms (check_program_census_left_out) and the operands the walk leaves out.
+    CheckProgramCensus census_arms;
+    // The same as the pass before the bodies' controls finds it (#2536's step 2.2): its own constant ifs
+    // (check_program_constant_arms, census_pass_arms ranges of them), not the writer's.
+    CheckProgramCensus census_pass;
+    uint32_t census_pass_arms;
+    uint32_t census_dropped_bodies;
+    uint64_t census_references_ticks;
+    // The objects static data's initializers refer to (CheckProgramOptions.initializer_references, borrowed): what keeps
+    // a function whose calls --tier1 expanded (#2541 step 2, check_tier1_inline_rooted).
+    const uint32_t* initializer_references;
+    uint32_t initializer_reference_count;
     uint32_t* builtin_nodes;
     uint32_t* asm_offsets;
     uint32_t* asm_targets;
@@ -4551,6 +4593,630 @@ static uint64_t check_program_cleanup_room(const Parser* parser, const CheckInpu
     return room;
 }
 
+// A census's body `b` (#2536's step 2.1): its candidates' references, `found` of them in `sorted`'s high halves, kept as
+// census->references' run from census->first[b], each body's pushed after the one before into `output`, which nothing
+// else takes meanwhile. False if there's no room.
+static bool check_program_census_store(CheckProgramCensus* census, uint32_t b, const uint64_t* sorted, uint32_t found, uint32_t* total, Arena* output)
+{
+    uint32_t* kept = found != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, found) : NULL;
+    const bool valid = found == 0 || kept != NULL;
+    if (valid)
+    {
+        census->references = census->references == NULL ? kept : census->references;
+        census->first[b] = *total;
+        census->counts[b] = found;
+        for (uint32_t r = 0; r < found; r += 1)
+        {
+            kept[r] = (uint32_t)(sorted[r] >> 32);
+        }
+        *total += found;
+    }
+    return valid;
+}
+
+// Whether body `b` has an arm of a constant `if` that its controls leave out: one of the writer's `dropped` ranges,
+// `dropped_count` of them, each's first token in its key's high half, inside the body's braces.
+static bool check_program_census_armed(const CheckProgram* program, const Parser* parser, uint32_t b, const uint64_t* dropped, uint32_t dropped_count)
+{
+    const CheckProgramBody* body = program->bodies + b;
+    const uint32_t closing = parser->tree.parents[body->opening];
+    bool arm = false;
+    for (uint32_t d = 0; d < dropped_count; d += 1)
+    {
+        const uint32_t first = (uint32_t)(dropped[d] >> 32);
+        arm = arm || (first > body->opening && first < closing);
+    }
+    return arm;
+}
+
+// A census's comparison with the bodies' own references (CheckProgram.references; both sorted), by one merge a body: a
+// body counts as differing if they aren't the same, as unarmed if so without a dropped arm (check_program_census_armed),
+// and as missing if the candidates leave out one of its own.
+static void check_program_census_compare(const CheckProgram* program, const Parser* parser, CheckProgramCensus* census, const uint64_t* dropped,
+                                         uint32_t dropped_count)
+{
+    for (uint32_t b = 0; census->first != NULL && b < program->body_count; b += 1)
+    {
+        const CheckProgramBody* body = program->bodies + b;
+        const uint32_t* kept = census->references + census->first[b];
+        const uint32_t found = census->counts[b];
+        uint32_t extra = 0;
+        uint32_t missing = 0;
+        uint32_t e = 0;
+        for (uint32_t r = 0; r < found; r += 1)
+        {
+            while (e < body->reference_count && program->references[body->reference_first + e] < kept[r])
+            {
+                missing += 1;
+                e += 1;
+            }
+            const bool matched = e < body->reference_count && program->references[body->reference_first + e] == kept[r];
+            extra += matched ? 0 : 1;
+            e += matched ? 1 : 0;
+        }
+        missing += body->reference_count - e;
+        const bool same = extra == 0 && missing == 0;
+        census->differing += same ? 0 : 1;
+        census->unarmed += !same && !check_program_census_armed(program, parser, b, dropped, dropped_count) ? 1 : 0;
+        census->missing += missing != 0 ? 1 : 0;
+    }
+}
+
+// The walk's census (#2536's step 2.1, docs/all-core-path.md's "Step 2: the selection after the windows"): each body's
+// candidates' references by check_program_references' walk started from every expression root of the body (a node of its
+// tokens, its declaration's to its closing brace's, that no node takes as an operand; token_first and node_next list
+// them), from its automatic objects' initializer plans (`plan_first`'s lists) and from its cleanups, rather than from the
+// controls it reaches. So a body's candidates' references are its own and those of the arms of a constant `if` its
+// controls leave out, and of the operands no node takes once the checker has folded the node that did (`sizeof
+// "literal"`, `_Generic`'s other associations). A static declaration's initializer is its object's data, which the
+// selection reaches through the object: its plan's nodes and the nodes over them are no body's roots. Into
+// program->census_walk, its runs in `output`. The walk's marks in `seen` and `nodes` take epochs past the bodies', its
+// `needed` column is its own, and what it writes besides its references (CheckProgram.region_reached,
+// compound_initializers, the status) is put back. False if there's no room.
+static bool check_program_census_walk(CheckProgram* program, const Parser* parser, const uint32_t* token_first, const uint32_t* node_next, const uint32_t* plan_first,
+                                      const uint64_t* planned, const uint32_t* plan_next, uint32_t* seen,
+                                      uint32_t* nodes, uint32_t* stack, uint64_t* reference_items, uint64_t* reference_sort, bool scalar, Arena* output,
+                                      Arena* scratch)
+{
+    const CheckInput* input = program->input;
+    const CheckGraph* graph = &input->graph;
+    const uint32_t count = input->token_count;
+    const uint32_t node_count = graph->count;
+    const uint32_t plans = program->initializers != NULL ? program->initializers->count : 0;
+    const uint64_t temporary = scratch->length;
+    CheckProgramCensus* census = &program->census_walk;
+    uint8_t* operand = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)node_count + 1);
+    uint8_t* data_nodes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)node_count + 1);
+    uint8_t* needed = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
+    CheckControl* roots = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckControl, (uint64_t)node_count + plans + input->cleanup_count + 1);
+    uint8_t* region_reached = program->region_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, program->region_count) : NULL;
+    uint8_t* compound = program->compound_initializers != NULL && plans != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, plans) : NULL;
+    census->first = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)program->body_count + 1);
+    census->counts = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)program->body_count + 1);
+    bool valid = operand != NULL && data_nodes != NULL && needed != NULL && roots != NULL && (program->region_count == 0 || region_reached != NULL) &&
+                 (program->compound_initializers == NULL || plans == 0 || compound != NULL) && census->first != NULL && census->counts != NULL;
+    const CheckProgramStatus status = program->status;
+    const uint32_t token = program->token;
+    if (valid)
+    {
+        memset(operand, 0, (uint64_t)node_count + 1);
+        memset(data_nodes, 0, (uint64_t)node_count + 1);
+        memset(needed, 0, (uint64_t)count + 1);
+        for (uint32_t plan = 0; plan < plans; plan += 1)
+        {
+            const uint32_t declaration = program->initializers->declaration_tokens[plan];
+            const CheckInitializer* initializer = program->initializers->plans + plan;
+            for (uint32_t part = 0; declaration < count && check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) && part < initializer->count;
+                 part += 1)
+            {
+                const uint32_t node = initializer->parts[part].node;
+                data_nodes[node < node_count ? node : node_count] = 1;
+            }
+        }
+        data_nodes[node_count] = 0;
+        // Operands come before the nodes that take them, so one pass marks the operands and carries the data's mark up.
+        for (uint32_t node = 0; node < node_count; node += 1)
+        {
+            const uint32_t a = graph->operand0[node] < node_count ? graph->operand0[node] : node_count;
+            const uint32_t c = graph->operand1[node] < node_count ? graph->operand1[node] : node_count;
+            const uint32_t d = graph->operand2[node] < node_count ? graph->operand2[node] : node_count;
+            operand[a] = 1;
+            operand[c] = 1;
+            operand[d] = 1;
+            data_nodes[node] |= data_nodes[a] | data_nodes[c] | data_nodes[d];
+        }
+        for (uint32_t node = 0; node < node_count; node += 1)
+        {
+            operand[node] |= data_nodes[node];
+        }
+        if (region_reached != NULL)
+        {
+            memcpy(region_reached, program->region_reached, program->region_count);
+        }
+        if (compound != NULL)
+        {
+            memcpy(compound, program->compound_initializers, plans);
+        }
+    }
+    uint32_t total = 0;
+    for (uint32_t b = 0; valid && b < program->body_count; b += 1)
+    {
+        const CheckProgramBody* body = program->bodies + b;
+        const uint32_t closing = parser->tree.parents[body->opening];
+        uint32_t root_count = 0;
+        for (uint32_t t = body->declaration; t <= closing && t < count; t += 1)
+        {
+            for (uint32_t node = token_first[t]; node < node_count; node = node_next[node])
+            {
+                if (operand[node] == 0)
+                {
+                    roots[root_count++] = (CheckControl){ .node = node, .token = t, .target = 0, .kind = CHECK_CONTROL_EVALUATE };
+                }
+            }
+            if (check_program_bit(planned, t))
+            {
+                for (uint32_t plan = plan_first[t]; plan < plans; plan = plan_next[plan])
+                {
+                    const uint32_t declaration = program->initializers->declaration_tokens[plan];
+                    if (declaration < count && !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC))
+                    {
+                        roots[root_count++] = (CheckControl){ .node = BUSTER_CHECK_NONE, .token = t, .target = plan, .kind = CHECK_CONTROL_INITIALIZE };
+                    }
+                }
+            }
+        }
+        for (uint32_t r = 0; r < body->cleanup_count; r += 1)
+        {
+            roots[root_count++] = (CheckControl){ .node = BUSTER_CHECK_NONE, .token = 0, .target = body->cleanup_first + r, .kind = CHECK_CONTROL_CLEANUP };
+        }
+        const uint32_t epoch = program->body_count + 1 + b;
+        const uint32_t found = check_program_references(program, roots, root_count, epoch, seen, nodes, stack, reference_items, needed);
+        uint32_t varying = 0;
+        for (uint32_t r = 1; r < found; r += 1)
+        {
+            varying |= (uint32_t)((reference_items[0] ^ reference_items[r]) >> 32);
+        }
+        const uint64_t* sorted = c_bindings_sort(reference_items, reference_sort, found, !BUSTER_SCALAR_PATH(scalar), varying);
+        valid = check_program_census_store(census, b, sorted, found, &total, output);
+    }
+    if (region_reached != NULL)
+    {
+        memcpy(program->region_reached, region_reached, program->region_count);
+    }
+    if (compound != NULL)
+    {
+        memcpy(program->compound_initializers, compound, plans);
+    }
+    program->status = status;
+    program->token = token;
+    arena_pop_to(scratch, temporary);
+    return valid;
+}
+
+// Whether token `t` is in one of `arms`, `arm_count` token ranges sorted and apart, each's first token in its key's high
+// half and its last in its low half: a binary search for the last range that starts at or before it.
+static bool check_program_census_left_out(const uint64_t* arms, uint32_t arm_count, uint32_t t)
+{
+    uint32_t low = 0;
+    uint32_t high = arm_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = (uint32_t)(arms[middle] >> 32) <= t;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    return low != 0 && t <= (uint32_t)arms[low - 1];
+}
+
+// The pruned scan's marks (check_program_census_scan): the operands that `node` leaves out, as check_program_references
+// does (all of sizeof's and _Alignof's, the one a constant condition of &&, || or ?: skips, a computed call's callee), and
+// every node below them, in `dead`, by a walk on `stack` (room for every node: a node is pushed once, as it's marked).
+static void check_program_census_prune(const CheckProgram* program, uint32_t node, uint8_t* dead, uint32_t* stack)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CheckOp op = graph->ops[node];
+    const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+    bool drop[] = { false, false, false };
+    bool truth = false;
+    if (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF)
+    {
+        drop[0] = true;
+        drop[1] = true;
+        drop[2] = true;
+    }
+    else if (op == CHECK_OP_CALL)
+    {
+        drop[0] = check_program_call_computed(program, node) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
+    }
+    else if (!program->unselected_operands && operands[0] < graph->count && check_program_runtime_truth(program, node, operands[0], &truth))
+    {
+        const uint32_t dropped = op == CHECK_OP_CONDITIONAL ? (truth ? 2 : 1) : 1;
+        drop[dropped] = op == CHECK_OP_CONDITIONAL || (op == CHECK_OP_LOGICAL_AND && !truth) || (op == CHECK_OP_LOGICAL_OR && truth);
+    }
+    uint32_t depth = 0;
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(operands); k += 1)
+    {
+        if (drop[k] && operands[k] < graph->count && dead[operands[k]] == 0)
+        {
+            dead[operands[k]] = 1;
+            stack[depth++] = operands[k];
+        }
+    }
+    while (depth != 0)
+    {
+        const uint32_t at = stack[--depth];
+        const uint32_t below[] = { graph->operand0[at], graph->operand1[at], graph->operand2[at] };
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(below); k += 1)
+        {
+            if (below[k] < graph->count && dead[below[k]] == 0)
+            {
+                dead[below[k]] = 1;
+                stack[depth++] = below[k];
+            }
+        }
+        for (uint32_t a = 0; check_graph_has_arguments(graph->ops[at]) && a < graph->argument_counts[at]; a += 1)
+        {
+            const uint32_t argument = graph->argument_nodes[graph->argument_offsets[at] + a];
+            if (dead[argument] == 0)
+            {
+                dead[argument] = 1;
+                stack[depth++] = argument;
+            }
+        }
+    }
+}
+
+// The cleanups of the body between `opening` and `closing`, as check_control_begin finds them: the first of its records
+// (CheckInput.cleanups, in declaration order) in *first and how many in *count.
+static void check_program_body_cleanups(const CheckInput* input, uint32_t opening, uint32_t closing, uint32_t* first, uint32_t* count)
+{
+    const CheckInputCleanup* cleanups = input->cleanups;
+    uint32_t low = 0;
+    uint32_t high = input->cleanup_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        low = cleanups[middle].declaration < opening ? middle + 1 : low;
+        high = cleanups[middle].declaration < opening ? high : middle;
+    }
+    uint32_t end = low;
+    while (end < input->cleanup_count && cleanups[end].declaration < closing)
+    {
+        end += 1;
+    }
+    *first = low;
+    *count = end - low;
+}
+
+// One VALUE node of the scan (check_program_census_scan): where its object has static storage, the node isn't `dead` and
+// no range of `arms` holds its token, the object's pair with the body whose tokens hold the node (a declaration's to its
+// closing brace's: `declarations` and `closings`, body_count of them), the cursor *b moved to that body.
+static inline __attribute__((always_inline)) void check_program_census_leaf(const CheckProgram* program, const uint32_t* declarations, const uint32_t* closings,
+                                                                           uint32_t body_count, const uint8_t* dead, const uint64_t* arms, uint32_t arm_count,
+                                                                           uint32_t node, uint32_t* b, uint64_t* pairs, uint32_t* pair_count, uint32_t* starts)
+{
+    const CheckInput* input = program->input;
+    const CheckGraph* graph = &input->graph;
+    const uint32_t object = check_graph_leaf_object(graph, node);
+    const bool fixed = object != 0 && object < program->object_count && (dead == NULL || dead[node] == 0) &&
+                       ((check_graph_leaf_flags(graph, node) & BUSTER_CHECK_STATIC_OBJECT) != 0 ||
+                        check_input_bit(input->declaration_bits, object - 1, BUSTER_CHECK_BITS_STATIC));
+    const uint32_t t = graph->tokens[node];
+    uint32_t at = *b;
+    while (fixed && at + 1 < body_count && declarations[at + 1] <= t)
+    {
+        at += 1;
+    }
+    while (fixed && at > 0 && declarations[at] > t)
+    {
+        at -= 1;
+    }
+    const bool inside = fixed && at < body_count && declarations[at] <= t && t <= closings[at] && !check_program_census_left_out(arms, arm_count, t);
+    pairs[*pair_count] = (uint64_t)at << 32 | object;
+    *pair_count += inside ? 1 : 0;
+    starts[at < body_count ? at : body_count] += inside ? 1 : 0;
+    *b = at;
+}
+
+// The scan's census (#2536's step 2.1): each body's candidates' references by one pass over the graph's VALUE nodes
+// rather than a walk: every one of the body's tokens (its declaration's to its closing brace's) that names an object of
+// static storage, as check_program_references' leaves do, whatever control evaluates it or doesn't, and its cleanups'
+// functions. The bodies are the ones `openings` opens, `body_count` of them, so the scan needs no body's controls. Node
+// order is token order but for an expression's operands, so one cursor finds each node's body. A body's candidates are
+// its walk's and what an operand of sizeof, typeof or _Alignof, a computed call's callee and a static local's initializer
+// name. A unit with overloads or CFStrings, whose references come from what no VALUE node names, has none: the walk's
+// census stands for it. With `arms` (check_program_census_left_out's ranges), it leaves out their tokens' nodes, and with
+// `prune` the operands the walk leaves out: of sizeof and _Alignof, a constant condition's, a computed call's callee. Into
+// `census`, its runs in `output`; `seen` takes epochs from `epochs`, past the bodies'. AVX-512 tests 16 nodes' slots at a
+// time, the rest and the `scalar` path one at a time. False if there's no room.
+static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus* census, const Parser* parser, const uint32_t* openings, uint32_t body_count,
+                                      const uint64_t* arms, uint32_t arm_count, bool prune, uint32_t epochs, uint32_t* seen, uint64_t* reference_items,
+                                      uint64_t* reference_sort, bool scalar, Arena* output, Arena* scratch)
+{
+    (void)scalar;
+
+    const CheckInput* input = program->input;
+    const CheckGraph* graph = &input->graph;
+    const uint32_t node_count = graph->count;
+    const uint64_t temporary = scratch->length;
+    // A pair a VALUE node at most, each a leaf (CheckGraph.leaf_count).
+    const uint64_t leaves = (uint64_t)graph->leaf_count + 1;
+    uint64_t* pairs = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, leaves);
+    uint32_t* starts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)body_count + 1);
+    uint32_t* objects = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, leaves);
+    uint32_t* declarations = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)body_count + 1);
+    uint32_t* closings = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)body_count + 1);
+    census->first = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)body_count + 1);
+    census->counts = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)body_count + 1);
+    uint8_t* dead = prune ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)node_count + 1) : NULL;
+    uint32_t* walk = prune ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : NULL;
+    bool valid = pairs != NULL && starts != NULL && objects != NULL && declarations != NULL && closings != NULL && census->first != NULL && census->counts != NULL &&
+                 (!prune || (dead != NULL && walk != NULL));
+    uint32_t pair_count = 0;
+    uint32_t b = 0;
+    for (uint32_t k = 0; valid && k < body_count; k += 1)
+    {
+        declarations[k] = check_sparse_get(input->body_declarations, openings[k]);
+        closings[k] = parser->tree.parents[openings[k]];
+    }
+    if (valid && prune)
+    {
+        // The operands check_program_references leaves out and every node below them: the nodes that leave operands out
+        // are few (sizeof, _Alignof, &&, || and ?: of a constant condition, a computed call), so a scan of the ops finds
+        // them, 16 at a time with AVX-512, and a walk from each of their left-out operands marks its nodes. A label in a
+        // left-out operand, for which the walk keeps it, isn't looked for: the census's missing references would say so.
+        memset(dead, 0, (uint64_t)node_count + 1);
+        uint32_t node = 0;
+        for (; !BUSTER_SCALAR_PATH(scalar) && node_count - node >= 16; node += 16)
+        {
+            const __m512i ops = _mm512_loadu_si512(graph->ops + node);
+            const __mmask16 special = _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_SIZEOF)) | _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_ALIGNOF)) |
+                                      _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_LOGICAL_AND)) |
+                                      _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_LOGICAL_OR)) |
+                                      _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_CONDITIONAL)) | _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_CALL));
+            for (uint32_t lanes = special; lanes != 0; lanes &= lanes - 1)
+            {
+                check_program_census_prune(program, node + (uint32_t)__builtin_ctz(lanes), dead, walk);
+            }
+        }
+        for (; node < node_count; node += 1)
+        {
+            const CheckOp op = graph->ops[node];
+            if (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL || op == CHECK_OP_CALL)
+            {
+                check_program_census_prune(program, node, dead, walk);
+            }
+        }
+        dead[node_count] = 0;
+    }
+    if (valid)
+    {
+        memset(starts, 0, ((uint64_t)body_count + 1) * sizeof(uint32_t));
+        uint32_t node = 0;
+        for (; !BUSTER_SCALAR_PATH(scalar) && node_count - node >= 16; node += 16)
+        {
+            const __mmask16 leaves = _mm512_cmpneq_epi32_mask(_mm512_loadu_si512(graph->leaf_slots + node), _mm512_set1_epi32((int)BUSTER_CHECK_NONE));
+            for (uint32_t lanes = leaves; lanes != 0; lanes &= lanes - 1)
+            {
+                check_program_census_leaf(program, declarations, closings, body_count, dead, arms, arm_count, node + (uint32_t)__builtin_ctz(lanes), &b, pairs,
+                                          &pair_count, starts);
+            }
+        }
+        for (; node < node_count; node += 1)
+        {
+            if (graph->leaf_slots[node] != BUSTER_CHECK_NONE)
+            {
+                check_program_census_leaf(program, declarations, closings, body_count, dead, arms, arm_count, node, &b, pairs, &pair_count, starts);
+            }
+        }
+        // Each body's objects together, in node order: the counts' exclusive prefix sums, then one scatter.
+        uint32_t sum = 0;
+        for (uint32_t k = 0; k < body_count; k += 1)
+        {
+            const uint32_t here = starts[k];
+            starts[k] = sum;
+            census->first[k] = sum;
+            sum += here;
+        }
+        for (uint32_t p = 0; p < pair_count; p += 1)
+        {
+            objects[starts[pairs[p] >> 32]++] = (uint32_t)pairs[p];
+        }
+    }
+    uint32_t total = 0;
+    for (uint32_t k = 0; valid && k < body_count; k += 1)
+    {
+        const uint32_t epoch = epochs + k;
+        uint32_t found = 0;
+        for (uint32_t p = census->first[k]; p < starts[k]; p += 1)
+        {
+            const uint32_t object = objects[p];
+            const bool fresh = seen[object] != epoch;
+            seen[object] = epoch;
+            reference_items[found] = (uint64_t)object << 32;
+            found += fresh ? 1 : 0;
+        }
+        uint32_t cleanup_first = 0;
+        uint32_t cleanup_count = 0;
+        check_program_body_cleanups(input, openings[k], closings[k], &cleanup_first, &cleanup_count);
+        for (uint32_t r = 0; r < cleanup_count; r += 1)
+        {
+            const uint32_t function = input->cleanups[cleanup_first + r].function;
+            const uint32_t object = function < input->token_count ? input->objects[function] : 0;
+            const bool fresh = object != 0 && object < program->object_count && seen[object] != epoch;
+            seen[object < program->object_count ? object : 0] = fresh ? epoch : seen[object < program->object_count ? object : 0];
+            reference_items[found] = (uint64_t)object << 32;
+            found += fresh ? 1 : 0;
+        }
+        uint32_t varying = 0;
+        for (uint32_t r = 1; r < found; r += 1)
+        {
+            varying |= (uint32_t)((reference_items[0] ^ reference_items[r]) >> 32);
+        }
+        const uint64_t* sorted = c_bindings_sort(reference_items, reference_sort, found, !BUSTER_SCALAR_PATH(scalar), varying);
+        valid = check_program_census_store(census, k, sorted, found, &total, output);
+    }
+    arena_pop_to(scratch, temporary);
+    return valid;
+}
+
+// The if keyword whose condition is CHECK_OP_CONDITION node `node` and whose writer could fold it (check_control_fold_truth):
+// a condition that is a constant rvalue of an integer type, or a statement expression. An object's lvalue, whose address
+// is constant, is no such question. The keyword is the one token before the condition's closing parenthesis (the node's
+// token) whose parent the parenthesis is. BUSTER_CHECK_NONE for any other condition.
+static uint32_t check_program_constant_if(const CheckProgram* program, const Parser* parser, uint32_t node)
+{
+    const CheckInput* input = program->input;
+    const CheckGraph* graph = &input->graph;
+    const uint32_t expression = graph->operand0[node];
+    const bool constant = expression < graph->count && check_stream_constant_kind(program->stream, expression) != CHECK_CONSTANT_NONE;
+    const CheckValue value = constant ? check_stream_value(program->stream, expression) : (CheckValue){ 0 };
+    uint32_t width = 0;
+    bool sign = false;
+    const bool asked = expression < graph->count && ((constant && value.category == CHECK_RVALUE && check_action_integer_type(program->types, value.type, &width, &sign)) ||
+                                                     graph->ops[expression] == CHECK_OP_STATEMENT_VALUE);
+    const uint32_t close = graph->tokens[node];
+    uint32_t keyword = BUSTER_CHECK_NONE;
+    for (uint32_t t = close; asked && keyword == BUSTER_CHECK_NONE && t-- > 0 && close < input->token_count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CONDITION;)
+    {
+        keyword = parser->tree.parents[t] == close && parser->tree.roles[t] == PARSE_ROLE_LEAF_RIGHT ? t : keyword;
+    }
+    return keyword < input->token_count && parser->tokens.kinds[keyword] == PARSE_KIND_IF ? keyword : BUSTER_CHECK_NONE;
+}
+
+// The left-out tokens of the constant ifs (#2536's step 2.2), as the bodies' controls (check_control_statement's if) leave
+// them out, found before any body's controls are built. An if whose condition could fold (check_program_constant_if,
+// asked of every CHECK_OP_CONDITION node: a scan of the ops, 16 at a time with AVX-512) is the writer's question, which only
+// such a body asks. That body's children and cleanups are set up as its build sets them (check_control_children, which the
+// build makes again, and check_program_body_cleanups), then each such if takes the writer's own test
+// (check_control_fold_truth, labeled, enterable) and, where it folds, leaves out its condition's tokens and its skipped
+// arm's extent. An if the writer never reaches lies in a range it leaves out itself, so these ranges are among the
+// writer's (constant switches' aside, which this keeps). Into *found, in `scratch`, sorted and joined where one holds
+// another; their count (0 where there's no room). Calls `writer` before its first body, whose label count it leaves as it
+// found it.
+static uint32_t check_program_constant_arms(CheckControlWriter* writer, const uint32_t* openings, uint32_t body_count, uint64_t** found, bool scalar,
+                                            Arena* scratch)
+{
+    (void)scalar;
+
+    const Parser* parser = writer->parser;
+    const CheckProgram* program = writer->program;
+    const CheckInput* input = program->input;
+    const CheckGraph* graph = &input->graph;
+    const uint32_t node_count = graph->count;
+    const uint8_t* roles = parser->tree.roles;
+    const uint32_t* parents = parser->tree.parents;
+    // The ifs' keys, few, each pushed after the one before (nothing else takes `scratch` meanwhile).
+    uint64_t* keys = NULL;
+    uint32_t key_count = 0;
+    bool room = true;
+    uint32_t node = 0;
+    for (; !BUSTER_SCALAR_PATH(scalar) && node_count - node >= 16; node += 16)
+    {
+        const __mmask16 conditions = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(graph->ops + node), _mm512_set1_epi32(CHECK_OP_CONDITION));
+        for (uint32_t lanes = conditions; lanes != 0; lanes &= lanes - 1)
+        {
+            const uint32_t keyword = check_program_constant_if(program, parser, node + (uint32_t)__builtin_ctz(lanes));
+            uint64_t* key = keyword != BUSTER_CHECK_NONE ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, 1) : NULL;
+            room = room && (keyword == BUSTER_CHECK_NONE || key != NULL);
+            if (key != NULL)
+            {
+                *key = (uint64_t)keyword << 32;
+                keys = keys == NULL ? key : keys;
+                key_count += 1;
+            }
+        }
+    }
+    for (; node < node_count; node += 1)
+    {
+        const uint32_t keyword = graph->ops[node] == CHECK_OP_CONDITION ? check_program_constant_if(program, parser, node) : BUSTER_CHECK_NONE;
+        uint64_t* key = keyword != BUSTER_CHECK_NONE ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, 1) : NULL;
+        room = room && (keyword == BUSTER_CHECK_NONE || key != NULL);
+        if (key != NULL)
+        {
+            *key = (uint64_t)keyword << 32;
+            keys = keys == NULL ? key : keys;
+            key_count += 1;
+        }
+    }
+    // Two ranges an if, and a sort's room for them.
+    uint64_t* arms = room && key_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, 2 * (uint64_t)key_count) : NULL;
+    uint64_t* sort = arms != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, 2 * (uint64_t)key_count) : NULL;
+    key_count = sort != NULL ? key_count : 0;
+    // The ifs in token order, so that each body's set-up is made once.
+    uint32_t varying = 0;
+    for (uint32_t i = 1; i < key_count; i += 1)
+    {
+        varying |= (uint32_t)((keys[0] ^ keys[i]) >> 32);
+    }
+    const uint64_t* ordered = c_bindings_sort(keys, sort, key_count, !BUSTER_SCALAR_PATH(scalar), varying);
+    uint32_t arm_count = 0;
+    uint32_t b = 0;
+    uint32_t prepared = BUSTER_CHECK_NONE;
+    for (uint32_t i = 0; i < key_count; i += 1)
+    {
+        const uint32_t keyword = (uint32_t)(ordered[i] >> 32);
+        const uint32_t close = parents[keyword];
+        while (b + 1 < body_count && openings[b + 1] < keyword)
+        {
+            b += 1;
+        }
+        const bool inside = b < body_count && openings[b] < keyword && keyword < parents[openings[b]];
+        if (inside && prepared != b)
+        {
+            const uint32_t labels = writer->label_count;
+            writer->label_count = 0;
+            check_control_children(writer, openings[b], parents[openings[b]]);
+            writer->label_count = labels;
+            check_program_body_cleanups(input, openings[b], parents[openings[b]], &writer->cleanup_first, &writer->cleanup_count);
+            prepared = b;
+        }
+        uint32_t body = BUSTER_CHECK_NONE;
+        uint32_t alternate = BUSTER_CHECK_NONE;
+        for (uint32_t child = inside ? writer->first[close] : BUSTER_CHECK_NONE; child != BUSTER_CHECK_NONE; child = writer->next[child])
+        {
+            alternate = child > close && roles[child] == PARSE_ROLE_ELSE ? child : alternate;
+            body = child > close && roles[child] != PARSE_ROLE_ELSE ? child : body;
+        }
+        const uint32_t condition = input->token_nodes[close];
+        const uint32_t expression = condition < node_count && graph->ops[condition] == CHECK_OP_CONDITION ? graph->operand0[condition] : condition;
+        bool truth = false;
+        const bool folded = inside && body != BUSTER_CHECK_NONE && check_control_fold_truth(writer, expression, &truth) &&
+                            !check_control_labeled(writer, keyword + 1, close) && !check_control_enterable(writer, truth ? alternate : body);
+        const uint32_t skipped = truth ? alternate : body;
+        if (folded)
+        {
+            arms[arm_count++] = ((uint64_t)(keyword + 1) << 32) | close;
+        }
+        if (folded && skipped != BUSTER_CHECK_NONE)
+        {
+            uint32_t low = 0;
+            uint32_t high = 0;
+            check_control_extent(writer, skipped, &low, &high);
+            arms[arm_count++] = ((uint64_t)low << 32) | high;
+        }
+    }
+    // Sorted by first token, then joined: a range another holds goes, as check_program_census_left_out takes them apart.
+    varying = 0;
+    for (uint32_t i = 1; i < arm_count; i += 1)
+    {
+        varying |= (uint32_t)((arms[0] ^ arms[i]) >> 32);
+    }
+    const uint64_t* sorted = c_bindings_sort(arms, sort, arm_count, !BUSTER_SCALAR_PATH(scalar), varying);
+    uint32_t joined = 0;
+    for (uint32_t i = 0; i < arm_count; i += 1)
+    {
+        const uint32_t high = (uint32_t)sorted[i];
+        const uint32_t before = joined != 0 ? (uint32_t)arms[joined - 1] : 0;
+        const bool held = joined != 0 && (uint32_t)(sorted[i] >> 32) <= before;
+        arms[held ? joined - 1 : joined] = held ? (arms[joined - 1] & ~(uint64_t)UINT32_MAX) | (high > before ? high : before) : sorted[i];
+        joined += held ? 0 : 1;
+    }
+    *found = arms;
+    return joined;
+}
+
 static bool check_program(CheckProgram* program, const Parser* parser, const CheckInput* input, CheckStream* stream,
                           const TypeTable* types, CheckProgramOptions options, Arena* output, Arena* scratch)
 {
@@ -4558,7 +5224,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
                                .asm_helpers = options.asm_helpers, .asm_bodies = options.asm_bodies, .helper_forms = options.helper_forms, .target = options.target, .frame_pointer = options.frame_pointer,
                                .probe_stack = options.probe_stack, .patchable_count = options.patchable_count, .patchable_offset = options.patchable_offset,
-                               .patchable_section = options.patchable_section, .token = BUSTER_CHECK_NONE,
+                               .patchable_section = options.patchable_section, .initializer_references = options.initializer_references,
+                               .initializer_reference_count = options.initializer_reference_count, .token = BUSTER_CHECK_NONE,
                                .diagnostic_position = BUSTER_CHECK_NONE };
     // The constant CFStrings' calls (#148), which the bodies' references read (check_program_references).
     if (options.prepared_data != NULL)
@@ -4688,7 +5355,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     // parse and reader fault the part in again a base page at a time, as each later unit does.
     if (valid && options.discard_huge)
     {
-        arena_discard_huge(scratch);
+        arena_discard_past(scratch, scratch->length + options.discard_keep, true);
     }
     else if (valid)
     {
@@ -4933,6 +5600,21 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     valid = valid && (!options.return_warnings || node_count == 0 || return_facts != NULL) && program->status == CHECK_PROGRAM_OK;
     // The labelled library declarations, which a computed call's test reads in the references' pass below.
     valid = valid && check_program_labelled_objects(program, output, BUSTER_SCALAR_PATH(options.scalar));
+    // The candidates as the pass before the bodies' controls finds them (#2536's step 2.2, census_pass): the constant ifs'
+    // left-out tokens (check_program_constant_arms), then the pruned scan without them, timed together.
+    if (valid && options.selection_census && program->status == CHECK_PROGRAM_OK)
+    {
+        const uint64_t pass_start = __rdtsc();
+        const uint64_t mark = scratch->length;
+        const bool scanned = stream->overload_count == 0 && stream->overload_address_count == 0 && program->cfstring_count == 0;
+        uint64_t* arms = NULL;
+        const uint32_t arm_count = scanned ? check_program_constant_arms(&writer, openings, body_count, &arms, options.scalar, scratch) : 0;
+        valid = valid && (!scanned || check_program_census_scan(program, &program->census_pass, parser, openings, body_count, arms, arm_count, true,
+                                                                4 * body_count + 4, seen, reference_items, reference_sort, options.scalar, output, scratch));
+        program->census_pass.ticks = scanned ? __rdtsc() - pass_start : 0;
+        program->census_pass_arms = arm_count;
+        arena_pop_to(scratch, mark);
+    }
     uint32_t reference_count = 0;
     for (uint32_t b = 0; valid && b < body_count && program->status == CHECK_PROGRAM_OK; b += 1)
     {
@@ -4974,6 +5656,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         {
             check_program_chains(&writer, body, exit_start, scratch);
         }
+        const uint64_t references_start = options.selection_census ? __rdtsc() : 0;
         body->reference_count = check_program_references(program, entries + start, body->entry_count, program->body_count, seen, nodes, stack, reference_items, needed);
         if (body->reference_count > UINT32_MAX - reference_count)
         {
@@ -5006,6 +5689,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 }
             }
             reference_count += body->reference_count;
+            program->census_references_ticks += options.selection_census ? __rdtsc() - references_start : 0;
         }
     }
     valid = valid && program->status == CHECK_PROGRAM_OK;
@@ -5015,6 +5699,51 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     if (valid && program->builtin_count != 0)
     {
         check_program_builtins(&input->graph, nodes, program->builtin_nodes, BUSTER_SCALAR_PATH(options.scalar));
+    }
+    // The selection census (#2536's step 2.1), past the builtins' count, which reads the references' marks.
+    if (valid && options.selection_census && program->status == CHECK_PROGRAM_OK)
+    {
+        const uint64_t walk_start = __rdtsc();
+        valid = check_program_census_walk(program, parser, token_first, node_next, plan_first, planned, plan_next, seen, nodes, stack, reference_items, reference_sort,
+                                          options.scalar, output, scratch);
+        program->census_walk.ticks = __rdtsc() - walk_start;
+        const uint64_t scan_start = __rdtsc();
+        const bool scanned = stream->overload_count == 0 && stream->overload_address_count == 0 && program->cfstring_count == 0;
+        valid = valid && (!scanned || check_program_census_scan(program, &program->census_scan, parser, openings, program->body_count, NULL, 0, false,
+                                                                2 * program->body_count + 2, seen, reference_items, reference_sort, options.scalar, output,
+                                                                scratch));
+        program->census_scan.ticks = scanned ? __rdtsc() - scan_start : 0;
+        // The scan without the writer's dropped arms and conditions, sorted, and the operands the walk leaves out: the
+        // candidates of a pass before the windows that finds every constant if and switch the writer does. Its ticks don't
+        // count the finding.
+        const uint32_t arm_count = writer.dropped_range_count;
+        uint64_t* arm_keys = valid && arm_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, 2 * (uint64_t)arm_count) : NULL;
+        valid = valid && (arm_count == 0 || arm_keys != NULL);
+        const uint64_t* arms = NULL;
+        if (valid && arm_count != 0)
+        {
+            uint32_t varying = 0;
+            memcpy(arm_keys, writer.dropped_ranges, arm_count * sizeof(uint64_t));
+            for (uint32_t i = 1; i < arm_count; i += 1)
+            {
+                varying |= (uint32_t)((arm_keys[0] ^ arm_keys[i]) >> 32);
+            }
+            arms = c_bindings_sort(arm_keys, arm_keys + arm_count, arm_count, !BUSTER_SCALAR_PATH(options.scalar), varying);
+        }
+        const uint64_t arms_start = __rdtsc();
+        valid = valid && (!scanned || check_program_census_scan(program, &program->census_arms, parser, openings, program->body_count, arms, arm_count, true,
+                                                                3 * program->body_count + 3, seen, reference_items, reference_sort, options.scalar, output,
+                                                                scratch));
+        program->census_arms.ticks = scanned ? __rdtsc() - arms_start : 0;
+        CheckProgramCensus* censuses[] = { &program->census_walk, &program->census_scan, &program->census_arms, &program->census_pass };
+        for (uint32_t c = 0; valid && c < BUSTER_ARRAY_LENGTH(censuses); c += 1)
+        {
+            check_program_census_compare(program, parser, censuses[c], writer.dropped_ranges, writer.dropped_range_count);
+        }
+        for (uint32_t b = 0; valid && b < program->body_count; b += 1)
+        {
+            program->census_dropped_bodies += check_program_census_armed(program, parser, b, writer.dropped_ranges, writer.dropped_range_count) ? 1 : 0;
+        }
     }
     program->controls = valid && writer.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckControl, writer.count) : 0;
     program->label_positions = valid && writer.label_position_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, writer.label_position_count) : 0;

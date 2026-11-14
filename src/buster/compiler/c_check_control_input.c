@@ -170,74 +170,36 @@ static bool check_input_declaration_after(const Parser* parser, uint32_t token)
            (kind == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_SPECIFIER);
 }
 
-// Whether the suppress named at `name`, an attribute list's item before `after`, has an argument that is no string literal
-// (#2332, check_input_attribute_suppress_literal; an empty list has none): clang's parser gives its "expected string
-// literal" and drops the attribute before Sema meets the label's.
-static bool check_input_label_suppress_literal(const Parser* parser, uint32_t name, uint32_t after)
-{
-    const uint8_t* kinds = parser->tokens.kinds;
-    const uint32_t close = name + 1 < after && kinds[name + 1] == PARSE_KIND_L_PAREN ? parser->tree.parents[name + 1] : 0;
-    const bool listed = close > name + 2 && close < after;
-    bool result = false;
-    for (uint32_t argument = name + 2; listed && !result && argument <= close;)
-    {
-        uint32_t stop = argument;
-        while (stop < close && kinds[stop] != PARSE_KIND_COMMA)
-        {
-            const uint32_t group = kinds[stop] == PARSE_KIND_L_PAREN ? parser->tree.parents[stop] : stop;
-            stop = group > stop && group < close ? group + 1 : stop + 1;
-        }
-        result = check_input_attribute_suppress_literal(parser, argument, stop) != BUSTER_CHECK_NONE;
-        argument = stop + 1;
-    }
-    return result;
-}
-
 // A label's attributes from `first` to `after` (#147): GNU ones right after a named label's colon, as clang's parser takes
 // every GNU attribute there in C, whatever follows it (a null statement, another statement, a declaration, C23's
 // attributes, which are the next item's), and a statement's before a label's name (`[[x]] l:`), which clang's labeled
-// statement gives its label. Each is read as a declaration's are; clang's error is reported for the first that clang
-// refuses on a label (check_input_label_refusal; musttail's by its reading, check_input_attribute_musttail), and clang
-// takes the others, which mean nothing for a label here. Their tokens are then the label's, which no declaration or
-// statement reads again.
+// statement gives its label. The ordinary attribute reader checks their arguments before their label subject, so an
+// attribute the parser drops cannot hide another's subject error or acquire one of its own. A handler's recovered
+// subject error is not diagnosed again by the label-only refusal checks. Their tokens are then the label's, which no
+// declaration or statement reads again.
 static void check_input_label_attributes(CheckInputReader* reader, uint32_t first, uint32_t after)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
-    // A name clang refuses on a label is its error whatever the reading would make of the attributes (several of them,
-    // minsize and nomerge among them, this reads nowhere else): each list item's name, after its opener or a comma.
-    uint32_t refused = BUSTER_CHECK_NONE;
-    uint32_t items = BUSTER_CHECK_NONE;
-    for (uint32_t token = first; refused == BUSTER_CHECK_NONE && token < after; token += 1)
-    {
-        const uint8_t role = parser->tree.roles[token];
-        const bool item = token > first && (parser->tree.roles[token - 1] == PARSE_ROLE_OPEN_ATTRIBUTE_LIST ||
-                                            (parser->tokens.kinds[token - 1] == PARSE_KIND_COMMA && parser->tree.depths[token - 1] == items));
-        items = role == PARSE_ROLE_OPEN_ATTRIBUTE_LIST ? parser->tree.depths[token] + 1 : items;
-        const bool named = item && parser->tokens.kinds[token] != PARSE_KIND_COMMA && role != PARSE_ROLE_CLOSE_ATTRIBUTE_LIST && parser->tokens.names[token] != 0;
-        const String8 name = named ? check_input_attribute_name(reader, parser->tokens.names[token]) : (String8){ 0 };
-        // (suppress's arguments are clang's parser's string literals first, whose error drops it before Sema meets the
-        // label, #2332: the reading's error.)
-        const bool dropped = named && check_input_attribute_suppress_name(name) && check_input_label_suppress_literal(parser, token, after);
-        refused = named && !dropped && check_input_label_refusal(name) != NULL ? token : BUSTER_CHECK_NONE;
-    }
-    if (refused != BUSTER_CHECK_NONE)
-    {
-        check_input_report(reader, refused, CHECK_INPUT_LABEL_ATTRIBUTE);
-    }
+    // Clang parses every list before applying its attributes to the label (#2332). In particular suppress's string
+    // errors precede any subject errors, even when the refused attribute occurs first in the list.
     uint32_t cursor = first;
     CheckInputAttributes* attributes = 0;
-    bool valid = refused == BUSTER_CHECK_NONE && after > first && after < count && check_input_read_attributes(reader, &cursor, after, &attributes) && cursor == after;
+    bool valid = after > first && after < count && check_input_read_attributes(reader, &cursor, after, &attributes) && cursor == after;
     // A label's subject as clang's attributes name it (#147): the warning for those that apply elsewhere.
     // The label's name: before its colon, or after the attributes before it.
     const bool colon = first >= 2 && parser->tokens.kinds[first - 1] == PARSE_KIND_COLON;
     reader->attribute_declaration = colon ? first - 1 : after + 1;
-    valid = valid && check_input_attribute_subjects(reader, attributes, BUSTER_CHECK_SUBJECT_LABEL, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+    // Complete after the lists, before the following label's own checks (including a redefinition).
+    const uint32_t completion = reader->attribute_completion;
+    reader->attribute_completion = after;
+    valid = valid && check_input_attribute_subjects(reader, attributes, BUSTER_CHECK_SUBJECT_LABEL, 0, first, BUSTER_CHECK_NONE);
+    reader->attribute_completion = completion;
     reader->attribute_declaration = 0;
     for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
     {
         const CheckInputAttribute* attribute = attributes->records + i;
-        valid = attribute->keyword || check_input_label_refusal(check_input_attribute_name(reader, attribute->name)) == NULL;
+        valid = attribute->keyword || attribute->ignored || attribute->subject_ignored || check_input_label_refusal(check_input_attribute_name(reader, attribute->name)) == NULL;
         if (!valid)
         {
             check_input_report(reader, attribute->first, CHECK_INPUT_LABEL_ATTRIBUTE);
@@ -1097,6 +1059,7 @@ static bool check_input_suppress_dropped(CheckInputReader* reader, uint32_t firs
                 bool done = suppress && (end == item + 1 || (at < end && parser->tokens.kinds[at] == PARSE_KIND_R_PAREN));
                 while (suppress && !done && !malformed && at < end)
                 {
+                    const uint32_t argument = at;
                     uint32_t level = 0;
                     while (at < end && parser->tokens.kinds[at] == PARSE_KIND_L_PAREN)
                     {
@@ -1108,14 +1071,18 @@ static bool check_input_suppress_dropped(CheckInputReader* reader, uint32_t firs
                     {
                         at += 1;
                     }
-                    while (string && level != 0 && at < end && parser->tokens.kinds[at] == PARSE_KIND_R_PAREN)
+                    while (string && level != 0)
                     {
                         level -= 1;
-                        at += 1;
+                        // A valid literal with a malformed inner tail survives its pair's recovery. Only an invalid
+                        // literal or a tail outside all its pairs drops suppress (#2332).
+                        at = parser->tree.parents[argument + level] + 1;
                     }
                     const uint8_t next = at < end ? parser->tokens.kinds[at] : PARSE_KIND_END;
-                    malformed = !string || level != 0 || (next != PARSE_KIND_COMMA && next != PARSE_KIND_R_PAREN);
-                    done = next == PARSE_KIND_R_PAREN;
+                    // A tail outside the literal's pairs has already reported the leftover attribute delimiter as
+                    // an invalid declaration start. It does not also diagnose the following statement's token.
+                    malformed = !string;
+                    done = next != PARSE_KIND_COMMA;
                     at += 1;
                 }
                 all = suppress && malformed && parser->tokens.kinds[item + 1] == PARSE_KIND_L_PAREN;
@@ -1212,7 +1179,12 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
         // an implicit int's declarator, whose errors and Sema's that follow are left out.)
         if (expression && gnu && !head && next != PARSE_KIND_L_PAREN && next != PARSE_KIND_STAR && check_input_suppress_dropped(reader, first, after))
         {
+            const uint32_t reports = reader->output->report_count;
             check_input_report(reader, after, CHECK_INPUT_DROPPED_SUPPRESS_DECLARATION);
+            if (reader->output->report_count > reports)
+            {
+                check_input_recover_reports(reader, reports);
+            }
         }
         uint32_t musttail = BUSTER_CHECK_NONE;
         valid = valid && check_input_statement_attribute_kinds(reader, attributes, empty, returns, after, &musttail);

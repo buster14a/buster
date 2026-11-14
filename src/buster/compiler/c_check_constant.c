@@ -1885,7 +1885,9 @@ static void check_constant_source_regions(CheckConstantInput* input)
         if (token < region_end)
         {
             const uint32_t index = token - input->first;
-            if (reader->ignored[token])
+            // The graph omits an intrinsic's callee in favor of its call record. A cached type query still needs
+            // that callee's function type; treating it as declaration syntax loses the call inside ({ ... }).
+            if (reader->ignored[token] && check_input_intrinsic_type(reader, token) == 0)
             {
                 input->statement_syntax[index] |= 1;
                 input->syntax[index] = true;

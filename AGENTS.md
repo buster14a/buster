@@ -165,12 +165,12 @@ provenance is separate from human authorship and DCO sign-off.
 
 Raw measurement evidence lives in
 [buster-performance/docs/measurements](https://github.com/buster14a/buster-performance/tree/main/docs/measurements).
-Put new logs, captures, receipts, measurement harnesses and campaign artifacts
-there. Keep design summaries and links here. Do not recreate `docs/measurements`
-in this repository; the required `Measurement storage policy` check rejects
-every tracked path there, including force-added ignored files. When updating an
-older branch or PR, migrate its evidence to buster-performance before merging it.
-CI consumers must pin external harnesses to an exact reviewed commit, and a
+Put new logs, captures, receipts, harnesses and campaign artifacts there.
+Push buster-performance and `davidgmbb/llm-memory` work straight to `main`
+(rebase, `git push origin HEAD:main`); open no pull requests there. Keep design
+summaries and links here. The `Measurement storage policy` check rejects any
+`docs/measurements` path here. Migrate an older PR's evidence there before
+merging it. CI consumers must pin external harnesses to an exact commit, and a
 harness-pin update must enable the affected qualification in `9700x.yml`.
 
 Every issue being investigated, tackled or fixed must be claimed in the issue

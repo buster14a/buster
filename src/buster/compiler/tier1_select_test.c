@@ -1144,6 +1144,64 @@ static void tier1_select_test_sse_vectors(Tier1SelectTest* test)
     }
 }
 
+// IR_FMA's expansion (#1840, TIER1_RULE_FLOAT_FMA): the FMA3 form whose destination holds an operand already, 213 for b,
+// 231 for c and 132 for a, the other two in the formula's order (a * b + c), and b's copy then 213 where none does. Each
+// form takes a NaN in the formula's order (IR_FMA, ir_fma_bits), so the four compute the same bits.
+static void tier1_select_test_fma(Tier1SelectTest* test)
+{
+    typedef struct Tier1SelectTestFma Tier1SelectTestFma;
+    struct Tier1SelectTestFma
+    {
+        uint8_t x;
+        uint8_t a;
+        uint8_t b;
+        uint8_t c;
+        uint8_t kind;
+        bool move;
+        const char* name;
+    };
+    static const Tier1SelectTestFma cases[] = {
+        { 2, 1, 2, 3, 0, false, "an fma into b's register is 213 of a and c" },
+        { 3, 1, 2, 3, 1, false, "an fma into c's register is 231 of a and b" },
+        { 1, 1, 2, 3, 2, false, "an fma into a's register is 132 of c and b" },
+        { 4, 1, 2, 3, 0, true, "an fma into a fourth register copies b, then 213" },
+        { 2, 2, 2, 3, 0, false, "an fma of a == b into their register is 213" },
+        { 3, 1, 3, 3, 0, false, "an fma of b == c into their register is 213" },
+        { 5, 6, 7, 6, 0, true, "an fma of a == c into another register copies b, then 213" },
+    };
+    static const uint16_t forms[2][3] = {
+        { X86_FORM_VFMADD213SS_X_X_XM32, X86_FORM_VFMADD231SS_X_X_XM32, X86_FORM_VFMADD132SS_X_X_XM32 },
+        { X86_FORM_VFMADD213SD_X_X_XM64, X86_FORM_VFMADD231SD_X_X_XM64, X86_FORM_VFMADD132SD_X_X_XM64 },
+    };
+    for (uint32_t d = 0; d < 2; d += 1)
+    {
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(cases); k += 1)
+        {
+            const Tier1SelectTestFma* fma = &cases[k];
+            const Tier1SelectHoles holes = {
+                .rule = TIER1_RULE_FLOAT_FMA,
+                .width = (uint8_t)(d == 0 ? 4 : 8),
+                .destination = fma->x,
+                .left = fma->a,
+                .right = fma->b,
+                .third = fma->c,
+            };
+            const Tier1SelectRecords records = tier1_select_expand(&holes);
+            const uint32_t at = fma->move ? 1 : 0;
+            const X86Instruction* record = &records.records[at];
+            const uint8_t vvvv = fma->kind == 2 ? fma->c : fma->a;
+            const uint8_t rm = fma->kind == 0 ? fma->c : fma->b;
+            bool exact = records.count == at + 1 && record->form == forms[d][fma->kind] && record->reg == fma->x && record->vvvv == vvvv && record->rm == rm &&
+                         record->mode == BUSTER_X86_REGISTER_DIRECT && record->decorations == 0;
+            if (fma->move)
+            {
+                exact = exact && records.records[0].form == X86_FORM_MOVAPS_X_XM && records.records[0].reg == fma->x && records.records[0].rm == fma->b;
+            }
+            tier1_select_test_expect(test, exact, fma->name);
+        }
+    }
+}
+
 static void tier1_select_test_intrinsics(Tier1SelectTest* test)
 {
     Arena input = arena_reserve(1u << 20);
@@ -1523,8 +1581,11 @@ static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
     uint32_t* scalar = calloc(most, sizeof(uint32_t));
     uint32_t* oracle = calloc(most, sizeof(uint32_t));
     tier1_select_test_expect(test, ready && scalar != 0 && oracle != 0, "barrier scan's guarded columns");
-    static const uint8_t kinds[] = { IR_STORE, IR_CALL, IR_CALL_INDIRECT, IR_ALLOCA, IR_STACK_RESTORE, IR_FENCE, IR_ATOMIC_RMW, IR_LOAD, IR_LOAD, IR_LOAD, IR_ADD, IR_CONST, IR_ADDRESS, IR_PARAM, IR_BR, IR_RET };
-    const uint32_t barrier_kinds = 7;
+    // The masked and compressing stores and the scatters are barriers, and the masked loads and gathers fold barriers as
+    // loads are (#1840).
+    static const uint8_t kinds[] = { IR_STORE, IR_CALL, IR_CALL_INDIRECT, IR_ALLOCA, IR_STACK_RESTORE, IR_FENCE, IR_ATOMIC_RMW, IR_MASKED_STORE, IR_COMPRESS_STORE, IR_SCATTER,
+                                     IR_LOAD, IR_LOAD, IR_LOAD, IR_MASKED_LOAD, IR_GATHER, IR_ADD, IR_CONST, IR_ADDRESS, IR_PARAM, IR_BR, IR_RET };
+    const uint32_t barrier_kinds = 10;
     static const uint32_t counts[] = { 255, 256, 257, 1000, 4095, 4096 };
     uint64_t random = UINT64_C(0x2c1b3c6dd9b0f6a1);
     bool same = ready && scalar != 0 && oracle != 0;
@@ -1550,7 +1611,8 @@ static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
             uint32_t before = node;
             const uint8_t* ops = op;
             while (before != 0 && !(ops[before - 1] == IR_STORE || ops[before - 1] == IR_CALL || ops[before - 1] == IR_CALL_INDIRECT || ops[before - 1] == IR_ALLOCA || ops[before - 1] == IR_STACK_RESTORE ||
-                                    ops[before - 1] == IR_FENCE || ops[before - 1] == IR_ATOMIC_RMW || ops[before - 1] == IR_LOAD))
+                                    ops[before - 1] == IR_FENCE || ops[before - 1] == IR_ATOMIC_RMW || ops[before - 1] == IR_LOAD || ops[before - 1] == IR_MASKED_STORE ||
+                                    ops[before - 1] == IR_COMPRESS_STORE || ops[before - 1] == IR_SCATTER || ops[before - 1] == IR_MASKED_LOAD || ops[before - 1] == IR_GATHER))
             {
                 before -= 1;
             }
@@ -4093,6 +4155,175 @@ static uint32_t tier1_select_test_reciprocal_walk(Tier1SelectTest* test, uint8_t
     return longest;
 }
 
+// A shift by a register's records (tier1_select_fixed, TIER1_RULE_SHIFT) run natively at both widths, from each value
+// register and count register to each destination: rcx, which the count takes, and the value's or the count's own among
+// them, against C's shifts (#2592). The value shifts in the destination itself, and in the scratch register only where
+// the destination is rcx, or holds the count while the value is in rcx. The arguments arrive in rdi and rsi, and moves
+// before the records put them in the registers under test.
+static void tier1_select_test_shift_records(Tier1SelectTest* test, uint64_t* random)
+{
+    const uint8_t operations[] = { X86_OPERATION_SHL, X86_OPERATION_SHR, X86_OPERATION_SAR };
+    const uint8_t sources[] = { X86_REGISTER_RDI, X86_REGISTER_RCX, X86_REGISTER_RAX };
+    const uint8_t counts[] = { X86_REGISTER_RSI, X86_REGISTER_RCX, X86_REGISTER_RDX };
+    const uint8_t destinations[] = { X86_REGISTER_RAX, X86_REGISTER_RCX, X86_REGISTER_RDX, X86_REGISTER_R10, X86_REGISTER_RDI, X86_REGISTER_RSI };
+    for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(operations); o += 1)
+    {
+        for (uint32_t width = 4; width <= 8; width += 4)
+        {
+            for (uint32_t v = 0; v < BUSTER_ARRAY_LENGTH(sources); v += 1)
+            {
+                for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
+                {
+                    for (uint32_t d = 0; sources[v] != counts[c] && d < BUSTER_ARRAY_LENGTH(destinations); d += 1)
+                    {
+                        const Tier1SelectHoles holes = {
+                            .rule = TIER1_RULE_SHIFT,
+                            .operation = (X86Operation)operations[o],
+                            .width = (uint8_t)width,
+                            .destination = destinations[d],
+                            .left = sources[v],
+                            .right = counts[c],
+                        };
+                        X86Instruction records[BUSTER_TIER1_SELECT_FIXED_RECORDS + 6];
+                        uint32_t count = 0;
+                        records[count++] = tier1_select_move(8, X86_REGISTER_RAX, X86_REGISTER_RDI);
+                        records[count++] = tier1_select_move(8, X86_REGISTER_RDX, X86_REGISTER_RSI);
+                        if (sources[v] != X86_REGISTER_RAX)
+                        {
+                            records[count++] = tier1_select_move(8, sources[v], X86_REGISTER_RAX);
+                        }
+                        if (counts[c] != X86_REGISTER_RDX)
+                        {
+                            records[count++] = tier1_select_move(8, counts[c], X86_REGISTER_RDX);
+                        }
+                        const uint32_t first = count;
+                        const uint32_t sequence = tier1_select_fixed(&holes, records + first);
+                        tier1_select_test_expect(test, sequence != 0 && sequence <= BUSTER_TIER1_SELECT_FIXED_RECORDS, "a shift's records fit a fixed-register rule's room");
+                        bool through = false;
+                        for (uint32_t i = first; i < first + sequence; i += 1)
+                        {
+                            through = through || records[i].reg == BUSTER_TIER1_SELECT_SCRATCH || records[i].rm == BUSTER_TIER1_SELECT_SCRATCH;
+                        }
+                        const bool needed = destinations[d] == X86_REGISTER_RCX || (sources[v] == X86_REGISTER_RCX && destinations[d] == counts[c]);
+                        tier1_select_test_expect(test, through == needed, "a shift goes through the scratch register only where the destination is rcx or holds the count while the value is in rcx");
+                        count = first + sequence;
+                        records[count++] = tier1_select_move(8, X86_REGISTER_RAX, destinations[d]);
+                        records[count++] = (X86Instruction){ .form = X86_FORM_RET };
+                        if (tier1_select_test_load_records(test, records, count, first, first + sequence, false))
+                        {
+                            const uint32_t bits = width * 8;
+                            for (uint32_t sample = 0; sample < 16; sample += 1)
+                            {
+                                const uint64_t a = tier1_select_test_random(random);
+                                const uint64_t b = sample < 3 ? (sample == 0 ? 0 : sample == 1 ? 1 : bits - 1) : tier1_select_test_random(random) % bits;
+                                const uint64_t narrow = width == 4 ? (uint64_t)(uint32_t)a : a;
+                                const uint64_t shl = width == 4 ? (uint64_t)(uint32_t)(narrow << b) : narrow << b;
+                                const uint64_t shr = narrow >> b;
+                                const uint64_t sar = width == 4 ? (uint64_t)(uint32_t)((int32_t)(uint32_t)a >> b) : (uint64_t)((int64_t)a >> b);
+                                const uint64_t expected = operations[o] == X86_OPERATION_SHL ? shl : operations[o] == X86_OPERATION_SHR ? shr : sar;
+                                const uint64_t actual = tier1_select_test_call(test, a, b, 0);
+                                if (actual != expected && test->failures < 20)
+                                {
+                                    fprintf(stderr, "shift operation=%u width=%u value=%u count=%u destination=%u a=%016" PRIx64 " b=%" PRIu64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", operations[o], width,
+                                            sources[v], counts[c], destinations[d], a, b, actual, expected);
+                                }
+                                tier1_select_test_expect(test, actual == expected, "a shift by a register shifts as C does from every register");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A division or remainder by a register's records (tier1_select_fixed, TIER1_RULE_DIVIDE) run natively, signed and
+// unsigned at both widths, from each dividend register and divisor register to each destination, against C's (#2592).
+// The divisor divides from its own register, and through the scratch register only where it is in rax or rdx, which the
+// dividend's move and the extension write. The arguments arrive in rdi and rsi, and moves before the records put them in
+// the registers under test.
+static void tier1_select_test_divide_records(Tier1SelectTest* test, uint64_t* random)
+{
+    const uint8_t dividends[] = { X86_REGISTER_RDI, X86_REGISTER_RAX, X86_REGISTER_RCX };
+    const uint8_t divisors[] = { X86_REGISTER_RSI, X86_REGISTER_RCX, X86_REGISTER_RDX, X86_REGISTER_RAX };
+    const uint8_t destinations[] = { X86_REGISTER_RAX, X86_REGISTER_RDX, X86_REGISTER_RCX, X86_REGISTER_R10, X86_REGISTER_RDI, X86_REGISTER_RSI };
+    for (uint32_t flags = 0; flags < 4; flags += 1)
+    {
+        for (uint32_t width = 4; width <= 8; width += 4)
+        {
+            for (uint32_t x = 0; x < BUSTER_ARRAY_LENGTH(dividends); x += 1)
+            {
+                for (uint32_t y = 0; y < BUSTER_ARRAY_LENGTH(divisors); y += 1)
+                {
+                    for (uint32_t d = 0; dividends[x] != divisors[y] && d < BUSTER_ARRAY_LENGTH(destinations); d += 1)
+                    {
+                        const Tier1SelectHoles holes = {
+                            .rule = TIER1_RULE_DIVIDE,
+                            .immediate = flags,
+                            .width = (uint8_t)width,
+                            .destination = destinations[d],
+                            .left = dividends[x],
+                            .right = divisors[y],
+                        };
+                        // a to r8 and b to r9 first, then each to its register, so that neither move overwrites the other.
+                        X86Instruction records[BUSTER_TIER1_SELECT_FIXED_RECORDS + 6];
+                        uint32_t count = 0;
+                        records[count++] = tier1_select_move(8, X86_REGISTER_R8, X86_REGISTER_RDI);
+                        records[count++] = tier1_select_move(8, X86_REGISTER_R9, X86_REGISTER_RSI);
+                        records[count++] = tier1_select_move(8, dividends[x], X86_REGISTER_R8);
+                        records[count++] = tier1_select_move(8, divisors[y], X86_REGISTER_R9);
+                        const uint32_t first = count;
+                        const uint32_t sequence = tier1_select_fixed(&holes, records + first);
+                        tier1_select_test_expect(test, sequence != 0 && sequence <= BUSTER_TIER1_SELECT_FIXED_RECORDS, "a division's records fit a fixed-register rule's room");
+                        bool through = false;
+                        for (uint32_t i = first; i < first + sequence; i += 1)
+                        {
+                            through = through || records[i].reg == BUSTER_TIER1_SELECT_SCRATCH || records[i].rm == BUSTER_TIER1_SELECT_SCRATCH;
+                        }
+                        const bool needed = divisors[y] == X86_REGISTER_RAX || divisors[y] == X86_REGISTER_RDX;
+                        tier1_select_test_expect(test, through == needed, "a division goes through the scratch register only where its divisor is in rax or rdx");
+                        count = first + sequence;
+                        records[count++] = tier1_select_move(8, X86_REGISTER_RAX, destinations[d]);
+                        records[count++] = (X86Instruction){ .form = X86_FORM_RET };
+                        if (tier1_select_test_load_records(test, records, count, first, first + sequence, false))
+                        {
+                            const bool is_signed = (flags & 1) != 0;
+                            const bool remainder = (flags & 2) != 0;
+                            for (uint32_t sample = 0; sample < 16; sample += 1)
+                            {
+                                const uint64_t a = tier1_select_test_random(random);
+                                uint64_t b = tier1_select_test_random(random) >> (tier1_select_test_random(random) % 64);
+                                b = (width == 4 ? (uint64_t)(uint32_t)b : b) == 0 ? 7 : b;
+                                // INT_MIN / -1 traps: a divisor of -1 divides 5 instead.
+                                const bool negative_one = width == 4 ? (uint32_t)b == UINT32_MAX : b == UINT64_MAX;
+                                const uint64_t n = is_signed && negative_one ? 5 : a;
+                                uint64_t expected = 0;
+                                if (width == 4)
+                                {
+                                    const uint32_t u = (uint32_t)n;
+                                    const uint32_t v = (uint32_t)b;
+                                    expected = is_signed ? (uint64_t)(uint32_t)(remainder ? (int32_t)u % (int32_t)v : (int32_t)u / (int32_t)v) : (uint64_t)(remainder ? u % v : u / v);
+                                }
+                                else
+                                {
+                                    expected = is_signed ? (uint64_t)(remainder ? (int64_t)n % (int64_t)b : (int64_t)n / (int64_t)b) : remainder ? n % b : n / b;
+                                }
+                                const uint64_t actual = tier1_select_test_call(test, n, b, 0);
+                                if (actual != expected && test->failures < 20)
+                                {
+                                    fprintf(stderr, "divide flags=%u width=%u dividend=%u divisor=%u destination=%u a=%016" PRIx64 " b=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", flags, width,
+                                            dividends[x], divisors[y], destinations[d], n, b, actual, expected);
+                                }
+                                tier1_select_test_expect(test, actual == expected, "a division by a register divides as C does from every register");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Two divisions of a and b by one constant `divisor` at `width`, whose constant, used twice, folds into neither as a tree
 // child: both costed paths and the independent maximal-munch reference must still choose the constant divisor's rule
 // over div and idiv, for a power of two's rules and a reciprocal alike.
@@ -5272,6 +5503,8 @@ static void tier1_select_test_walks(Tier1SelectTest* test)
             }
         }
     }
+    tier1_select_test_shift_records(test, &random);
+    tier1_select_test_divide_records(test, &random);
     const uint8_t divisions[] = { IR_UDIV, IR_UREM, IR_SDIV, IR_SREM };
     for (uint32_t operation = 0; operation < BUSTER_ARRAY_LENGTH(divisions); operation += 1)
     {
@@ -5357,6 +5590,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_compare_memory(&test);
             tier1_select_test_branches(&test);
             tier1_select_test_plans(&test);
+            tier1_select_test_fma(&test);
             tier1_select_test_intrinsics(&test);
             tier1_select_test_lane_forms(&test);
             tier1_select_test_sse_vectors(&test);

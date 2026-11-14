@@ -865,6 +865,92 @@ static void parallel_test_processes(ParallelTest* test)
     test->arena.length = 0;
 }
 
+// --fail-fast (#2703): the first failure stops the run. The command running beside it is killed and reported as stopped,
+// apart from the failures, the one after it never starts, and only the failure gets an annotation. A skipped command
+// doesn't stop the run, and a command that can't start or runs past its timeout does.
+static void parallel_test_fail_fast(ParallelTest* test)
+{
+    ParallelSummary summary;
+    ParallelResult* results = 0;
+    const ParallelOptions two = { .jobs = 2, .fail_fast = true, .github = true };
+    String8 report = parallel_test_run(test, parallel_test_string("== fails\nsleep 0.05\necho broken\nexit 3\n== beside\nexec sleep 30\n== after\ntrue\n"), two, &summary, &results);
+    parallel_test_check(test, "fail-fast: the first failure stops the run",
+                        !summary.succeeded && summary.failed_fast && summary.failed == 1 && summary.stopped == 1 && summary.not_started == 1 &&
+                            summary.elapsed < 10 * BUSTER_PARALLEL_NANOSECONDS && results != 0 && results[1].stopped,
+                        report,
+                        "parallel: 3 commands, at most 2 CPUs at once\n"
+                        "::group::fails: failed (exit status 3) in * s, * s of CPU, * MiB peak\n"
+                        "broken\n"
+                        "::endgroup::\n"
+                        "::group::beside: failed (stopped: another command failed) in * s, * s of CPU, * MiB peak\n"
+                        "::endgroup::\n"
+                        "::group::after: not started\n"
+                        "::endgroup::\n"
+                        "parallel: 3 commands in * s, * s of CPU, at most 2 CPUs at once: 0 passed, 1 failed, 0 skipped, 1 not started, stopped at the first failure (1 running "
+                        "commands stopped)\n"
+                        "::error title=fails::failed (exit status 3) in * s, * s of CPU, * MiB peak\n");
+    test->arena.length = 0;
+
+    // Without the option the same failure runs every command to its end.
+    const ParallelOptions plain = { .jobs = 2 };
+    report = parallel_test_run(test, parallel_test_string("== fails\nexit 3\n== beside\nsleep 0.1\n== after\ntrue\n"), plain, &summary, &results);
+    parallel_test_check(test, "fail-fast: off by default", !summary.succeeded && !summary.failed_fast && summary.failed == 1 && summary.passed == 2 && summary.stopped == 0, report,
+                        "parallel: 3 commands, at most 2 CPUs at once\n"
+                        "== fails: failed (exit status 3) in * s, * s of CPU, * MiB peak\n"
+                        "== beside: passed in * s, * s of CPU, * MiB peak\n"
+                        "== after: passed in * s, * s of CPU, * MiB peak\n"
+                        "parallel: 3 commands in * s, * s of CPU, at most 2 CPUs at once: 2 passed, 1 failed, 0 skipped, 0 not started\n"
+                        "parallel: fails failed (exit status 3) in * s, * s of CPU, * MiB peak\n");
+    test->arena.length = 0;
+
+    // A skipped command is no failure; a command that passes beside a failure keeps its own outcome.
+    const ParallelOptions one = { .jobs = 1, .fail_fast = true };
+    report = parallel_test_run(test, parallel_test_string("== skipped\nexit 77\n== passes\ntrue\n== fails\nexit 5\n== after\ntrue\n"), one, &summary, &results);
+    parallel_test_check(test, "fail-fast: a skip doesn't stop the run",
+                        !summary.succeeded && summary.failed_fast && summary.skipped == 1 && summary.passed == 1 && summary.failed == 1 && summary.not_started == 1 &&
+                            summary.stopped == 0,
+                        report,
+                        "parallel: 4 commands, at most 1 CPUs at once\n"
+                        "== skipped: skipped in * s, * s of CPU, * MiB peak\n"
+                        "== passes: passed in * s, * s of CPU, * MiB peak\n"
+                        "== fails: failed (exit status 5) in * s, * s of CPU, * MiB peak\n"
+                        "== after: not started\n"
+                        "parallel: 4 commands in * s, * s of CPU, at most 1 CPUs at once: 1 passed, 1 failed, 1 skipped, 1 not started, stopped at the first failure (0 running "
+                        "commands stopped)\n"
+                        "parallel: fails failed (exit status 5) in * s, * s of CPU, * MiB peak\n");
+    test->arena.length = 0;
+
+    // Every command passing: the option changes nothing.
+    report = parallel_test_run(test, parallel_test_string("== a\ntrue\n== b\ntrue\n"), one, &summary, &results);
+    parallel_test_check(test, "fail-fast: every command passing", summary.succeeded && !summary.failed_fast && summary.passed == 2, report,
+                        "parallel: 2 commands, at most 1 CPUs at once\n"
+                        "== a: passed in * s, * s of CPU, * MiB peak\n"
+                        "== b: passed in * s, * s of CPU, * MiB peak\n"
+                        "parallel: 2 commands in * s, * s of CPU, at most 1 CPUs at once: 2 passed, 0 failed, 0 skipped, 0 not started\n");
+    test->arena.length = 0;
+
+    // A command that can't start has failed: the next one doesn't start.
+    const ParallelOptions missing = { .jobs = 1, .shell = "/nonexistent/bash", .fail_fast = true };
+    report = parallel_test_run(test, parallel_test_string("== a\ntrue\n== b\ntrue\n"), missing, &summary, &results);
+    parallel_test_check(test, "fail-fast: a shell that can't start", !summary.succeeded && summary.failed_fast && summary.failed == 1 && summary.not_started == 1, report,
+                        "parallel: 2 commands, at most 1 CPUs at once\n"
+                        "== a: failed (can't start /nonexistent/bash: No such file or directory) in * s\n"
+                        "== b: not started\n"
+                        "parallel: 2 commands in * s, * s of CPU, at most 1 CPUs at once: 0 passed, 1 failed, 0 skipped, 1 not started, stopped at the first failure (0 running "
+                        "commands stopped)\n"
+                        "parallel: a failed (can't start /nonexistent/bash: No such file or directory) in * s\n");
+    test->arena.length = 0;
+
+    // A timeout is a failure of its own command, which stops the one beside it; the timed-out one stays "timed out".
+    const ParallelOptions timeout = { .jobs = 2, .timeout = BUSTER_PARALLEL_NANOSECONDS, .fail_fast = true };
+    report = parallel_test_run(test, parallel_test_string("== stuck\nexec sleep 30\n== beside\nexec sleep 30\n"), timeout, &summary, &results);
+    parallel_test_check(test, "fail-fast: a timeout",
+                        !summary.succeeded && summary.failed_fast && summary.failed + summary.stopped == 2 && summary.elapsed < 10 * BUSTER_PARALLEL_NANOSECONDS && results != 0 &&
+                            results[0].timed_out,
+                        (String8){ 0 }, 0);
+    test->arena.length = 0;
+}
+
 // Runs a list with its report into a pipe whose reader, `sh -c 'DELAY; cat > FILE'`, takes nothing while DELAY runs (a
 // sleep), so that the report's writes would wait for it; returns the report as the reader got it, with its times written
 // as `*`, and the run's own time in *run_time.
@@ -1340,7 +1426,7 @@ static void parallel_test_command_line(ParallelTest* test)
     parallel_test_check(test, "the command, a list that can't be read", status == 1, parallel_test_read(&test->arena, errors), "parallel: can't read /nonexistent/list\n");
     test->arena.length = 0;
 
-    static const char usage[] = "usage: parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [--memory MIB] [LIST]\n";
+    static const char usage[] = "usage: parallel [--jobs N] [--timeout SECONDS] [--github] [--fail-fast] [--shard K/N [--costs FILE]] [--memory MIB] [LIST]\n";
     char* const option_cases[][5] = {
         { "compiler", "parallel", "--jobs", "0", 0 },
         { "compiler", "parallel", "--jobs", "x", 0 },
@@ -1501,7 +1587,7 @@ static void parallel_test_shards(ParallelTest* test)
     }
 
     // The options' errors print the usage; the costs' print the file, the line and the problem.
-    static const char usage[] = "usage: parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [--memory MIB] [LIST]\n";
+    static const char usage[] = "usage: parallel [--jobs N] [--timeout SECONDS] [--github] [--fail-fast] [--shard K/N [--costs FILE]] [--memory MIB] [LIST]\n";
     char* const option_cases[][7] = {
         { "compiler", "parallel", "--shard", "0/2", list, 0 },
         { "compiler", "parallel", "--shard", "3/2", list, 0 },
@@ -1821,6 +1907,7 @@ static int run_parallel_tests(int argc, char** argv)
             parallel_test_overcommitted(&test);
             parallel_test_output(&test);
             parallel_test_processes(&test);
+            parallel_test_fail_fast(&test);
             parallel_test_slow_reader(&test);
             parallel_test_signals(&test);
             parallel_test_command_line(&test);

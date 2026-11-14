@@ -676,6 +676,22 @@ BUSTER_INLINE bool parse_scalar_gnu_attribute_group(const ParseScalar* parser, c
     return list || arguments;
 }
 
+static uint32_t parse_scalar_first_gnu_attribute(const ParseScalar* parser, uint32_t i);
+
+// GNU attributes immediately before an implicit int's grouped or pointer declarator (#2332). The missing-type
+// diagnostic is at its name; only its declaration's own prefix may enable the checker's recovery.
+static uint32_t parse_scalar_typeless_attributes(const ParseScalar* parser, uint32_t name)
+{
+    uint32_t start = name;
+    while (start > 0 && (parser->kinds[start - 1] == PARSE_KIND_L_PAREN || parser->kinds[start - 1] == PARSE_KIND_STAR ||
+                         parser->kinds[start - 1] == PARSE_KIND_QUALIFIER))
+    {
+        start -= 1;
+    }
+    const uint32_t first = start < name ? parse_scalar_first_gnu_attribute(parser, start) : name;
+    return first < start ? first : name;
+}
+
 // The missing type of the declarator in declaration frame `frame`, if it has one, which clang's Sema reports as it takes
 // the declarator, so before any error at what follows it (#1127).
 static void parse_scalar_typeless_note(ParseScalar* parser, ParseFrame* frame)
@@ -688,6 +704,13 @@ static void parse_scalar_typeless_note(ParseScalar* parser, ParseFrame* frame)
         if (parser->diagnostic_count > before && frame->role == PARSE_ROLE_OPEN_FUNCTION)
         {
             parser->diagnostics[before].parameter_type = true;
+        }
+        else if (parser->diagnostic_count > before && parse_frame_is_block(frame) && parser->language.standard < 2023)
+        {
+            const uint32_t name = frame->typeless_name - 1;
+            const uint32_t first = parse_scalar_typeless_attributes(parser, name);
+            parser->diagnostics[before].declaration_type = first < name;
+            parser->diagnostics[before].argument = first < name ? first : BUSTER_PARSE_NONE;
         }
         frame->typeless_name = 0;
     }
@@ -3160,6 +3183,9 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         // before the parser looks for the `,`, `;` or `)` due, but after it asks for a function's body, at the end of
         // the file too (ParseDeclGroup), and after a keyword it takes for a parameter's name (#1127). In the
         // declarator's own parentheses it hasn't ended: their `)` is due, and clang's parser says so first.
+        const bool implicit_attribute = parser->language.standard >= 1999 && parser->language.standard < 2023 &&
+                                        parse_frame_is_block(declaration) && (declaration->flags & BUSTER_PARSE_FRAME_TYPE_SEEN) == 0 &&
+                                        declaration->name < parser->count && parse_scalar_typeless_attributes(parser, declaration->name) < declaration->name;
         if (group != PARSE_ROLE_OPEN_GROUP && !parse_scalar_fn_body_due(parser, i, frame) && !parse_scalar_keyword_parameter(parser, i, frame))
         {
             parse_scalar_typeless_note(parser, declaration);
@@ -3171,6 +3197,37 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         else
         {
             parse_scalar_unexpected(parser, i, frame);
+            // After an attributed implicit declarator, Clang keeps the declaration and skips the malformed suffix
+            // through its semicolon. Reparse only a proven balanced tail; the original error remains final.
+            uint32_t tail = i;
+            uint32_t depth = 0;
+            bool balanced = implicit_attribute && parser->error_token == i &&
+                            parser->error_message == PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION;
+            while (balanced && tail < parser->count && (depth != 0 || parser->kinds[tail] != PARSE_KIND_SEMI))
+            {
+                const uint8_t next = parser->kinds[tail];
+                if (next == PARSE_KIND_L_PAREN || next == PARSE_KIND_L_SQUARE)
+                {
+                    parser->brackets[depth++] = next;
+                }
+                else if (next == PARSE_KIND_R_PAREN || next == PARSE_KIND_R_SQUARE)
+                {
+                    const uint8_t expected = next == PARSE_KIND_R_PAREN ? PARSE_KIND_L_PAREN : PARSE_KIND_L_SQUARE;
+                    balanced = depth != 0 && parser->brackets[depth - 1] == expected;
+                    depth -= balanced;
+                }
+                else
+                {
+                    // No brace belongs to this bounded suffix repair, including inside a parenthesized tail.
+                    balanced = next != PARSE_KIND_R_BRACE && next != PARSE_KIND_L_BRACE;
+                }
+                tail += balanced;
+            }
+            if (balanced && depth == 0 && tail < parser->count)
+            {
+                parser->error_resumed = true;
+                parser->error_resume_end = tail + 1;
+            }
         }
     }
 }
@@ -3372,15 +3429,15 @@ static bool parse_scalar_counted_member(const ParseScalar* parser, const ParseFr
 // clang's attributes whose arguments its parser reads its own way, as no expressions (#1447): availability's
 // (ParseAvailabilityAttribute), external_source_symbol's (ParseExternalSourceSymbolAttribute) and type_tag_for_datatype's
 // (ParseTypeTagForDatatypeAttribute: a kind, a type name and flags), objc_bridge_related's (ParseObjCBridgeRelatedAttribute:
-// a class and selectors) and swift_newtype's and swift_wrapper's (ParseSwiftNewTypeAttribute: `struct` or `enum`), by their
-// GNU names, a keyword's underscores too. Their arguments are a balanced run of tokens,
+// a class and selectors), swift_newtype's and swift_wrapper's (ParseSwiftNewTypeAttribute: `struct` or `enum`), and
+// suppress's parenthesized string list (#2332), by their GNU names, a keyword's underscores too. Their arguments are a balanced run of tokens,
 // which the checker reads as clang's parser does.
 static bool parse_scalar_custom_attribute(const ParseScalar* parser, IdentId name)
 {
     return parse_scalar_attribute_spelled(parser, name, true, "availability") || parse_scalar_attribute_spelled(parser, name, true, "external_source_symbol") ||
            parse_scalar_attribute_spelled(parser, name, true, "type_tag_for_datatype") ||
            parse_scalar_attribute_spelled(parser, name, true, "objc_bridge_related") || parse_scalar_attribute_spelled(parser, name, true, "swift_newtype") ||
-           parse_scalar_attribute_spelled(parser, name, true, "swift_wrapper");
+           parse_scalar_attribute_spelled(parser, name, true, "swift_wrapper") || parse_scalar_attribute_spelled(parser, name, true, "suppress");
 }
 
 // An expression parse failure inside a GNU attribute can follow an earlier malformed string slot. Clang's
@@ -4837,6 +4894,54 @@ static void parse_scalar_reset(ParseScalar* parser)
     parser->error_probe = false;
 }
 
+// A malformed block item whose parser recovery stops at its semicolon (#2406). Keep the original diagnostic, but let
+// the checker's private view drop the item before checking later statements. A missing control head and a stray else
+// have no expression to retain; a declaration before its first declarator has no name to bind. Restrict that last
+// case to plain specifiers at a block-item boundary, so a tag definition or a preceding declarator is never discarded.
+static void parse_scalar_resume_block_item(ParseScalar* parser)
+{
+    const uint32_t at = parser->error_token;
+    const ParseFrame* frame = parser->frame_count != 0 ? parser->frames + parser->frame_count - 1 : NULL;
+    const bool block = frame != NULL && parse_frame_is_block(frame) && at < parser->count && !parser->error_resumed && !parser->error_resume_colon;
+    const bool stray_else = block && frame->mode == PARSE_MODE_ITEM && parser->error_message == PARSE_MESSAGE_EXPECTED_EXPRESSION &&
+                            parser->kinds[at] == PARSE_KIND_ELSE;
+    const bool missing_head = block && parser->error_message == PARSE_MESSAGE_EXPECTED_L_PAREN_AFTER && parser->kinds[at] == PARSE_KIND_SEMI && at != 0 &&
+                              (frame->mode == PARSE_MODE_CONDITION_PAREN || frame->mode == PARSE_MODE_FOR_PAREN);
+    const bool declarator = block && parser->error_message == PARSE_MESSAGE_EXPECTED_IDENTIFIER_OR_PAREN && frame->mode == PARSE_MODE_DECLARATOR &&
+                            frame->name == BUSTER_PARSE_NONE && (frame->flags & BUSTER_PARSE_FRAME_DECLARATION) != 0;
+    uint32_t begin = missing_head ? at - 1 : at;
+    while (declarator && begin > frame->opener + 1 && parser->roles[begin - 1] == PARSE_ROLE_SPECIFIER)
+    {
+        begin -= 1;
+    }
+    const uint8_t before = begin != 0 && begin <= parser->count ? parser->kinds[begin - 1] : PARSE_KIND_END;
+    const bool boundary = block && (begin == frame->opener + 1 || before == PARSE_KIND_SEMI ||
+                                    (before == PARSE_KIND_R_BRACE && parser->roles[begin - 1] == PARSE_ROLE_CLOSE_BLOCK));
+    const bool candidate = stray_else || missing_head || (declarator && begin < at && boundary);
+    uint32_t end = begin;
+    bool balanced = candidate;
+    while (balanced && end < parser->count && parser->kinds[end] != PARSE_KIND_SEMI)
+    {
+        const uint8_t kind = parser->kinds[end];
+        if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
+        {
+            end = parse_scalar_skip_group(parser, end, &balanced);
+        }
+        else
+        {
+            balanced = !parse_kind_is_closer(kind);
+            end += 1;
+        }
+    }
+    if (balanced && end < parser->count && parser->kinds[end] == PARSE_KIND_SEMI && end > begin)
+    {
+        parser->error_resumed = true;
+        parser->error_resume_delete = true;
+        parser->error_resume_begin = begin;
+        parser->error_resume_end = end;
+    }
+}
+
 // The first error of the current top-level declaration, stopped at token `stopped`: its diagnostic, then the rest of
 // the declaration skipped. Its tokens become ERROR leaves of the root, the parse goes on at file scope, and the names
 // it bound are unbound. Returns the declaration's last token. A file-scope declaration's missing `;` before a declaration
@@ -4844,6 +4949,7 @@ static void parse_scalar_reset(ParseScalar* parser)
 // declaration's (#147): the parse goes on there, so that the next declaration's errors are clang's too.
 static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
 {
+    parse_scalar_resume_block_item(parser);
     const bool resumed = parser->error_resumed && parser->error_resume_end == 0 && parser->frame_count == 1 &&
                          stopped == parser->error_token && stopped > parser->item_begin;
     if (parser->diagnostic_count < parser->diagnostic_capacity)
@@ -10965,6 +11071,7 @@ static bool parse_prepare_meanings(Parser* parser, InternTable* table)
     static const char* const custom_spellings[BUSTER_PARSE_CUSTOM_ATTRIBUTES] = {
         "availability", "__availability__", "external_source_symbol", "__external_source_symbol__", "type_tag_for_datatype", "__type_tag_for_datatype__",
         "objc_bridge_related", "__objc_bridge_related__", "swift_newtype", "__swift_newtype__", "swift_wrapper", "__swift_wrapper__",
+        "suppress", "__suppress__",
     };
     for (uint32_t s = 0; s < BUSTER_PARSE_CUSTOM_ATTRIBUTES; s += 1)
     {
@@ -11179,7 +11286,15 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
             const uint32_t source = parser->tokens.sources[diagnostic->token];
             // Published where the parser knew it (ParseDiagnostic.publication), after an earlier error of its token's.
             const uint32_t known = diagnostic->publication != 0 && diagnostic->publication < parser->tokens.count ? parser->tokens.sources[diagnostic->publication] : source;
-            pp_diagnose_output_notes_at(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, source, known, &note, opener_kind != PARSE_KIND_END ? 1u : 0u, "%s", text);
+            if (diagnostic->declaration_type)
+            {
+                // The missing type is known before this declarator's attributes and redeclaration are checked.
+                pp_diagnose_output_phase(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, source, known, PP_DIAGNOSTIC_TYPE, "%s", text);
+            }
+            else
+            {
+                pp_diagnose_output_notes_at(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, source, known, &note, opener_kind != PARSE_KIND_END ? 1u : 0u, "%s", text);
+            }
         }
         else
         {

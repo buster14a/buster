@@ -68,22 +68,25 @@ include(cmake/BusterSettings.cmake)
 buster_settings_normalize()
 buster_settings_tools("${CMAKE_C_COMPILER}")
 buster_settings_linker()
-# The start's code order (#1444, cmake/BusterStartOrder.cmake): in a static link, every unit's functions in sections of
-# their own, whatever the linker, so that switching it relinks alone; and with lld, the ones small compiles run
-# (cmake/BusterStartOrder.txt) placed together before .text.
+# The start's code order (#1444, cmake/BusterStartOrder.cmake): in a static link, whatever the linker, so that switching
+# it relinks alone, every unit's functions in sections of their own, and the parallel split's units with the functions
+# small compiles run (cmake/BusterStartOrder.txt) first in .text.buster_checker, which is the object's own order; and
+# with lld, those functions placed together before .text.
 set(buster_start_order FALSE)
+set(buster_split_order FALSE)
 if(buster_static)
     list(APPEND buster_host_flags -ffunction-sections)
     list(APPEND buster_flags -ffunction-sections)
+    set(buster_split_order TRUE)
+    include(cmake/BusterStartOrder.cmake)
+    set(start_order_list "${CMAKE_SOURCE_DIR}/cmake/BusterStartOrder.txt")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${start_order_list}" "${CMAKE_SOURCE_DIR}/cmake/BusterStartOrder.cmake")
 endif()
 if(buster_static AND buster_lld)
     set(buster_start_order TRUE)
-    include(cmake/BusterStartOrder.cmake)
-    set(start_order_list "${CMAKE_SOURCE_DIR}/cmake/BusterStartOrder.txt")
     set(start_order_script "${CMAKE_BINARY_DIR}/start-order.ld")
     set(start_order_symbols "${CMAKE_BINARY_DIR}/start-order.symbols")
     buster_start_order_files("${start_order_list}" "${start_order_script}" "${start_order_symbols}" "${BUSTER_SHIFT_SOURCE}")
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${start_order_list}" "${CMAKE_SOURCE_DIR}/cmake/BusterStartOrder.cmake")
     list(APPEND buster_linker_flags "-Wl,-T,${start_order_script}" "-Wl,--symbol-ordering-file=${start_order_symbols}" -Wl,--no-warn-symbol-ordering)
 endif()
 message(STATUS "buster: variant ${buster_variant}, stage 1 linker: ${buster_linker}, static: ${buster_static}, start order: ${buster_start_order}")
@@ -175,10 +178,18 @@ set(profile_use "")
 if(buster_pgo)
     set(profile_use "-fprofile-instr-use=${pgo}/compiler.profdata")
 endif()
-buster_shell_group(develop_debug_group ${BUSTER_DEVELOP_CONFIGURATION_DEBUG})
+buster_shell_group(develop_debug_group ${BUSTER_DEVELOP_CONFIGURATION_DEBUG} ${BUSTER_LINE_TABLES_CODEGEN})
+# The configurations whose debug information is line tables alone take BUSTER_LINE_TABLES_CODEGEN
+# (BusterSettings.cmake): Develop always, and Release in a sanitizer build; buster_release_line_tables is Release's,
+# for its parts' jobs too.
+set(buster_release_line_tables "")
+if(buster_debug STREQUAL "-gline-tables-only")
+    set(buster_release_line_tables ${BUSTER_LINE_TABLES_CODEGEN})
+endif()
+buster_shell_group(release_debug_group ${buster_debug} ${buster_release_line_tables})
 function(buster_unit_options target definitions)
     target_compile_options(${target} PRIVATE
-        "$<$<CONFIG:Release>:${buster_debug}>"
+        "$<$<CONFIG:Release>:${release_debug_group}>"
         "$<$<CONFIG:Debug>:${BUSTER_DEBUG_CONFIGURATION_DEBUG}>"
         "$<$<CONFIG:Develop>:${develop_debug_group}>"
         "${flags_group}"
@@ -216,6 +227,18 @@ if(buster_develop AND buster_parallel_codegen AND buster_sanitizer STREQUAL "non
 endif()
 message(STATUS "buster: Develop configuration: ${buster_develop}, in parts: ${buster_develop_parts}")
 
+# The benchmark units a tree leaves out, which stand-ins replace (cmake/BusterDevelopAbsent.cmake): a sanitizer tree's
+# BUSTER_SANITIZER_ON_DEMAND in every configuration (#2639), else Develop's BUSTER_DEVELOP_ON_DEMAND in Develop alone.
+set(absent_reason "")
+set(absent_units "")
+if(NOT buster_sanitizer STREQUAL "none")
+    set(absent_reason sanitizer)
+    set(absent_units ${BUSTER_SANITIZER_ON_DEMAND})
+elseif(buster_develop)
+    set(absent_reason develop)
+    set(absent_units ${BUSTER_DEVELOP_ON_DEMAND})
+endif()
+
 # Each source is an object library of its own, defined in the compile order, which is the order a clean build starts
 # them in; the executable links their objects in the sources' order.
 buster_compile_order(order)
@@ -224,7 +247,12 @@ foreach(index IN LISTS order)
     list(GET BUSTER_SOURCES ${index} source)
     get_filename_component(name "${source}" NAME_WE)
     get_filename_component(file "${source}" NAME)
-    if(buster_develop AND file IN_LIST BUSTER_DEVELOP_ON_DEMAND)
+    if(absent_reason STREQUAL "sanitizer" AND file IN_LIST absent_units)
+        # No object library in a sanitizer tree, and no object in its link (unit_names below): no configuration
+        # compiles the unit.
+        list(APPEND develop_absent_sources "${CMAKE_SOURCE_DIR}/${source}")
+        continue()
+    elseif(absent_reason STREQUAL "develop" AND file IN_LIST absent_units)
         # No source in Develop: the link names this object library's objects in every configuration, which would
         # otherwise make Develop's executable wait for the unit's compile, though it doesn't link it.
         add_library(buster_${name} OBJECT "$<$<NOT:$<CONFIG:Develop>>:${CMAKE_SOURCE_DIR}/${source}>")
@@ -250,9 +278,16 @@ foreach(index IN LISTS order)
     endif()
 endforeach()
 set(unit_names "")
+# The units the executable links: all but those a sanitizer tree leaves out (#2639). unit_names stays BUSTER_SOURCES'
+# names, index for index.
+set(linked_names "")
 foreach(source IN LISTS BUSTER_SOURCES)
     get_filename_component(name "${source}" NAME_WE)
+    get_filename_component(file "${source}" NAME)
     list(APPEND unit_names ${name})
+    if(NOT (absent_reason STREQUAL "sanitizer" AND file IN_LIST absent_units))
+        list(APPEND linked_names ${name})
+    endif()
 endforeach()
 
 
@@ -417,29 +452,37 @@ if(buster_pgo)
         list(FIND unit_names "${name}" index)
         list(GET BUSTER_SOURCES ${index} source)
         set_source_files_properties("${source}" PROPERTIES OBJECT_DEPENDS "${pgo}/compiler.profdata")
-        add_dependencies(buster_${name} pgo-profile)
+        # A unit a sanitizer tree leaves out has no target (#2639).
+        if(TARGET buster_${name})
+            add_dependencies(buster_${name} pgo-profile)
+        endif()
     endforeach()
 endif()
 
 set(objects "")
-foreach(name IN LISTS unit_names)
+foreach(name IN LISTS linked_names)
     buster_native_object(object "${name}")
     list(APPEND objects "${object}")
 endforeach()
-# Develop's stand-ins for the benchmark units it leaves out (cmake/BusterDevelopAbsent.cmake): each of their run_*
-# entry points says which configurations have its command.
+# The stand-ins for the benchmark units the tree leaves out (cmake/BusterDevelopAbsent.cmake): each of their run_*
+# entry points says which builds have its command. Develop's in Develop alone; a sanitizer tree's in every
+# configuration (#2639).
 if(develop_absent_sources)
     set(absent "${CMAKE_BINARY_DIR}/$<CONFIG>/develop/absent.o")
     add_custom_command(OUTPUT "${absent}"
         COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${absent}" "-DSOURCES=${develop_absent_sources}" "-DCLANG=${CMAKE_C_COMPILER}"
-            "-DFLAGS=${flags};${buster_optimization}" -P "${CMAKE_SOURCE_DIR}/cmake/BusterDevelopAbsent.cmake"
+            "-DFLAGS=${flags};${buster_optimization}" "-DREASON=${absent_reason}" -P "${CMAKE_SOURCE_DIR}/cmake/BusterDevelopAbsent.cmake"
         DEPENDS ${develop_absent_sources} "${CMAKE_SOURCE_DIR}/cmake/BusterDevelopAbsent.cmake"
-        COMMENT "Writing Develop's stand-ins for the benchmark units"
+        COMMENT "Writing the stand-ins for the benchmark units the build leaves out"
         VERBATIM)
     # Joined to the last object, so that Release's and Debug's lists, the post-link step's argument among them, stay
-    # as they were rather than gain an empty element.
+    # as they were rather than gain an empty element (in a tree that isn't a sanitizer's).
     list(POP_BACK objects last)
-    list(APPEND objects "${last}$<$<CONFIG:Develop>:$<SEMICOLON>${CMAKE_BINARY_DIR}/Develop/develop/absent.o>")
+    if(absent_reason STREQUAL "sanitizer")
+        list(APPEND objects "${last}" "${absent}")
+    else()
+        list(APPEND objects "${last}$<$<CONFIG:Develop>:$<SEMICOLON>${CMAKE_BINARY_DIR}/Develop/develop/absent.o>")
+    endif()
 endif()
 set(compiler "${CMAKE_BINARY_DIR}/$<CONFIG>/compiler")
 add_executable(compiler_link ${objects} ${lexer_objects})
@@ -487,9 +530,15 @@ if(NOT BUSTER_SHIFTS STREQUAL "")
         endif()
         set(directory "${CMAKE_BINARY_DIR}/$<CONFIG>/shifts")
         set(padding "${directory}/padding-${bytes}.o")
+        # Where the start's code order puts the padding before the source's start-ordered functions, the padding also
+        # goes first in .text, which every unit's other code sits in (#2728).
+        set(text_padding 0)
+        if(buster_start_order AND buster_start_order_shift_padded)
+            set(text_padding 1)
+        endif()
         add_custom_command(OUTPUT "${padding}"
             COMMAND "${CMAKE_COMMAND}" "-DOBJECT=${shift_object}" "-DSOURCE=${BUSTER_SHIFT_SOURCE}" "-DSHIFT=${bytes}"
-                "-DOUTPUT=${padding}" "-DCLANG=${CMAKE_C_COMPILER}" "-DREADELF=${BUSTER_READELF}"
+                "-DOUTPUT=${padding}" "-DCLANG=${CMAKE_C_COMPILER}" "-DREADELF=${BUSTER_READELF}" "-DTEXT=${text_padding}"
                 -P "${CMAKE_SOURCE_DIR}/cmake/BusterShiftPadding.cmake"
             DEPENDS "${shift_object}" "${CMAKE_SOURCE_DIR}/cmake/BusterShiftPadding.cmake"
             VERBATIM)
@@ -504,7 +553,7 @@ if(NOT BUSTER_SHIFTS STREQUAL "")
             buster_post_link(compiler_shift_${bytes} "${output}" ARGUMENTS -DPADDING=1 OBJECTS ${shift_objects})
         else()
             buster_post_link(compiler_shift_${bytes} "${output}" ARGUMENTS -DPADDING=1 "-DUNSHIFTED=${compiler}"
-                DEPENDS "${compiler}" OBJECTS ${shift_objects})
+                "-DMOVED=${text_padding}" "-DSHIFT=${bytes}" DEPENDS "${compiler}" OBJECTS ${shift_objects})
         endif()
         list(APPEND shifted "${output}")
     endforeach()

@@ -1689,6 +1689,35 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
         check_warning_graph_constant_queries(&reader);
         valid = !staged.resource;
     }
+    // A rejected assertion's condition is removed by error recovery. Keep its comma-operand warnings from the original
+    // expression, through the same source events used for enumerators and constant bounds (#2441), before that removal.
+    for (uint32_t i = 0; valid && i < stream->report_count; i += 1)
+    {
+        const CheckReport* report = stream->reports + i;
+        const uint32_t node = report->node;
+        const bool assertion = report->message == CHECK_MESSAGE_ICE && node < graph->count && graph->contexts != NULL &&
+                               (graph->contexts[node] & BUSTER_CHECK_CONTEXT_ASSERT) != 0;
+        const CheckValue value = assertion ? check_graph_context_value(types, graph, stream, node) : (CheckValue){ 0 };
+        if (assertion && !check_graph_constant_type(types, BUSTER_CHECK_CONTEXT_ASSERT, value.type))
+        {
+            const uint32_t token = graph->tokens[node];
+            uint32_t keyword = token;
+            while (keyword != 0 && keyword < parser->tokens.count &&
+                   !(parser->tokens.kinds[keyword] == PARSE_KIND_STATIC_ASSERT && keyword + 1 < parser->tokens.count &&
+                     parser->tree.parents[keyword + 1] > token))
+            {
+                keyword -= 1;
+            }
+            if (keyword < parser->tokens.count && keyword + 1 < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_STATIC_ASSERT &&
+                parser->tree.parents[keyword + 1] > token)
+            {
+                const uint32_t close = parser->tree.parents[keyword + 1];
+                const uint32_t end = close < parser->tokens.count ? check_constant_punctuation(parser, keyword + 2, close, PARSE_KIND_COMMA) : keyword + 2;
+                check_input_attribute_unused(&reader, keyword + 2, end, true);
+                valid = !staged.resource;
+            }
+        }
+    }
     if (valid && check_sparse_wide_present(input->noderef_types))
     {
         check_input_noderef_graph(&reader, stream);

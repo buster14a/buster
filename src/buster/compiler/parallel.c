@@ -3,7 +3,7 @@
 //
 // The runner the 9700X job runs its tests through, for the parallel command:
 //
-//   build/compiler parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [--memory MIB] [LIST]
+//   build/compiler parallel [--jobs N] [--timeout SECONDS] [--github] [--fail-fast] [--shard K/N [--costs FILE]] [--memory MIB] [LIST]
 //
 // LIST (standard input without one) is a list of commands. Each starts at a heading, a line `== TITLE`, and its script
 // is the lines after it, up to the next heading; before the first heading there may be blank lines and comments (`#`).
@@ -22,7 +22,9 @@
 // comes a summary line, and a line naming each command that failed. A command that exits with status 77 (Automake's
 // skip code) is reported as skipped, counted apart, and doesn't fail the run; a test that leaves a check to another
 // stage says so in its output and exits 77. The exit status is 0 when every command passed or was skipped, and 1
-// otherwise.
+// otherwise. With --fail-fast (#2703), the first command that fails stops the run: nothing more starts, and the running
+// commands' groups are killed, each reported as `failed (stopped: another command failed)` and counted apart, without an
+// annotation of its own.
 //
 // --shard K/N runs the K-th of N shards of the list, for N machines that each run one (a CI job's matrix): the runner
 // deals the commands to the shards, the costliest first, each to the shard whose commands cost the least so far
@@ -678,6 +680,9 @@ struct ParallelOptions
     // The memory, in MiB, that the commands running at once may hold by their peaks (#2031): 90% of the machine's. 0 is
     // no limit.
     uint64_t memory;
+    // --fail-fast (#2703): the first command that fails stops the run. Nothing more starts, and the running commands'
+    // groups are killed.
+    bool fail_fast;
 };
 
 typedef enum ParallelState
@@ -717,6 +722,8 @@ struct ParallelResult
     // The runner killed it at its timeout, or sent its group the signal that stopped the run.
     bool timed_out;
     bool interrupted;
+    // --fail-fast killed it, after another command failed, and its shell died of that (#2703): it didn't fail itself.
+    bool stopped;
     // It ended with exit status 0, before its timeout, or with the skip status, which leaves its check to another
     // stage.
     bool passed;
@@ -733,6 +740,10 @@ struct ParallelSummary
     uint64_t failed;
     uint64_t skipped;
     uint64_t not_started;
+    // The commands --fail-fast killed after another failed (#2703), which `failed` doesn't count.
+    uint64_t stopped;
+    // --fail-fast stopped the run at its first failure.
+    bool failed_fast;
     // The most commands that ran at once.
     uint64_t peak;
     // The run's time, and its commands' CPU time, in nanoseconds.
@@ -747,6 +758,12 @@ struct ParallelSummary
     // Every command passed, no signal stopped the run, and the report went out whole.
     bool succeeded;
 };
+
+// A command that ended and failed of its own: neither passed nor skipped, nor stopped by --fail-fast.
+static bool parallel_failed(const ParallelResult* result)
+{
+    return result->state == PARALLEL_STATE_ENDED && !result->passed && !result->skipped && !result->stopped;
+}
 
 static uint64_t parallel_clock(void)
 {
@@ -821,6 +838,10 @@ static void parallel_outcome(const ParallelResult* result, const ParallelOptions
     else if (result->timed_out)
     {
         snprintf(reason, sizeof(reason), "failed (timed out)");
+    }
+    else if (result->stopped)
+    {
+        snprintf(reason, sizeof(reason), "failed (stopped: another command failed)");
     }
     else if (WIFSIGNALED(result->status))
     {
@@ -1074,6 +1095,11 @@ static String8 parallel_render_summary(Arena* arena, const ParallelList* list, c
                           (unsigned long long)list->count, parallel_seconds(summary->elapsed), parallel_seconds(summary->cpu), (unsigned long long)jobs,
                           (unsigned long long)summary->passed, (unsigned long long)summary->failed, (unsigned long long)summary->skipped, (unsigned long long)summary->not_started);
     bool built = length > 0 && parallel_append(arena, line, (uint64_t)length);
+    if (summary->failed_fast)
+    {
+        length = snprintf(line, sizeof(line), ", stopped at the first failure (%llu running commands stopped)", (unsigned long long)summary->stopped);
+        built = built && length > 0 && parallel_append(arena, line, (uint64_t)length);
+    }
     if (summary->signal != 0)
     {
         length = snprintf(line, sizeof(line), ", stopped by signal %d: %s", summary->signal, strsignal(summary->signal));
@@ -1087,7 +1113,7 @@ static String8 parallel_render_summary(Arena* arena, const ParallelList* list, c
     built = built && parallel_append(arena, "\n", 1);
     for (uint64_t i = 0; i < list->count; i += 1)
     {
-        if (!results[i].passed && !results[i].skipped && results[i].state == PARALLEL_STATE_ENDED)
+        if (parallel_failed(&results[i]))
         {
             char outcome[BUSTER_PARALLEL_OUTCOME_BYTES];
             parallel_outcome(&results[i], options, outcome, sizeof(outcome));
@@ -1229,6 +1255,9 @@ static uint64_t parallel_reap(Arena* arena, const ParallelList* list, const Para
             result->memory = waited == result->pid && usage.ru_maxrss > 0 ? (uint64_t)usage.ru_maxrss : 0;
             result->skipped = waited == result->pid && WIFEXITED(status) && WEXITSTATUS(status) == BUSTER_PARALLEL_SKIP_STATUS && !result->timed_out;
             result->passed = waited == result->pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 && !result->timed_out;
+            // A command --fail-fast killed was stopped only when that killed its shell: one that had ended of its own
+            // keeps its own outcome.
+            result->stopped = result->stopped && waited == result->pid && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL && !result->timed_out;
             result->state = PARALLEL_STATE_ENDED;
             result->end = now;
             *used -= result->cpus;
@@ -1279,6 +1308,27 @@ static void parallel_take_signals(int signal_fd, ParallelResult* results, uint64
             }
         }
     }
+}
+
+// --fail-fast's stop (#2703): once a started command has failed, every running command's group is killed, and the run
+// starts nothing more. A pull request's or a merge-queue candidate's shard can't pass after its first failure, and the
+// rest of its commands would only hold its runner, and the failure's report, until they end. Whether one has failed.
+static bool parallel_fail_fast(ParallelResult* results, uint64_t started)
+{
+    bool failed = false;
+    for (uint64_t i = 0; i < started; i += 1)
+    {
+        failed = failed || parallel_failed(&results[i]);
+    }
+    for (uint64_t i = 0; failed && i < started; i += 1)
+    {
+        if (results[i].state == PARALLEL_STATE_RUNNING)
+        {
+            kill(-results[i].pid, SIGKILL);
+            results[i].stopped = true;
+        }
+    }
+    return failed;
 }
 
 // The CPUs a command holds while it runs: its own, or all of the `jobs` when it has more.
@@ -1366,13 +1416,15 @@ static ParallelSummary parallel_run(Arena* arena, const ParallelList* list, cons
     bool finished = false;
     // The report was lost while commands ran, which were then killed.
     bool killed = false;
+    // A command failed, and --fail-fast stopped the run (#2703).
+    bool failing = false;
     bool done = false;
     while (!done)
     {
         // The next command in the list's order, once the running commands' CPUs leave room for its own (all of --jobs,
         // for one of more: it runs alone), and their peaks room for its peak in the memory they may hold (#2031: one
         // past it runs alone); until then, the commands after it wait too.
-        while (stops == 0 && !killed && signal_fd >= 0 && started < list->count && used + parallel_held(&list->commands[started], jobs) <= jobs &&
+        while (stops == 0 && !killed && !failing && signal_fd >= 0 && started < list->count && used + parallel_held(&list->commands[started], jobs) <= jobs &&
                test_deal_memory_fits(list->commands[started].peak, memory_used, running, options->memory))
         {
             ParallelResult* result = &results[started];
@@ -1388,8 +1440,10 @@ static ParallelSummary parallel_run(Arena* arena, const ParallelList* list, cons
                 summary.memory_full = !parallel_render(arena, &list->commands[started], options, result) || summary.memory_full;
             }
             started += 1;
+            // One that couldn't start has failed.
+            failing = options->fail_fast && parallel_fail_fast(results, started);
         }
-        if (!finished && running == 0 && (stops != 0 || killed || signal_fd < 0 || started == list->count))
+        if (!finished && running == 0 && (stops != 0 || killed || failing || signal_fd < 0 || started == list->count))
         {
             // The run's end: what didn't start, a stop signal that came as the last command ended, then the summary.
             for (uint64_t i = started; i < list->count; i += 1)
@@ -1403,9 +1457,11 @@ static ParallelSummary parallel_run(Arena* arena, const ParallelList* list, cons
                 summary.passed += results[i].passed;
                 summary.skipped += results[i].skipped;
                 summary.not_started += results[i].state == PARALLEL_STATE_WAITING;
+                summary.stopped += results[i].stopped;
                 summary.cpu += results[i].cpu;
             }
-            summary.failed = list->count - summary.passed - summary.skipped - summary.not_started;
+            summary.failed = list->count - summary.passed - summary.skipped - summary.not_started - summary.stopped;
+            summary.failed_fast = failing;
             closing = parallel_render_summary(arena, list, options, results, &summary, jobs, signal_error, &summary.memory_full);
             finished = true;
         }
@@ -1454,6 +1510,7 @@ static ParallelSummary parallel_run(Arena* arena, const ParallelList* list, cons
                 }
             }
             running -= parallel_reap(arena, list, options, results, started, after, &used, &memory_used, &summary.memory_full);
+            failing = failing || (options->fail_fast && !finished && parallel_fail_fast(results, started));
             if (pending && !output.lost && (!polling_output || fds[1].revents != 0))
             {
                 parallel_output_write(&output, next, &offset);
@@ -1601,6 +1658,11 @@ static int run_parallel_command(int argc, char** argv)
             options.github = true;
             i += 1;
         }
+        else if (strcmp(argv[i], "--fail-fast") == 0)
+        {
+            options.fail_fast = true;
+            i += 1;
+        }
         else if (strcmp(argv[i], "--shard") == 0 && options.shards == 0 && i + 1 < argc && parallel_shard_option(argv[i + 1], &options.shard, &options.shards))
         {
             i += 2;
@@ -1629,7 +1691,7 @@ static int run_parallel_command(int argc, char** argv)
     valid = valid && (costs_path == 0 || options.shards != 0);
     if (!valid)
     {
-        fprintf(stderr, "usage: parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [--memory MIB] [LIST]\n");
+        fprintf(stderr, "usage: parallel [--jobs N] [--timeout SECONDS] [--github] [--fail-fast] [--shard K/N [--costs FILE]] [--memory MIB] [LIST]\n");
     }
     else
     {

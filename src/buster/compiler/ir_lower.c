@@ -762,9 +762,25 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
     {
         // A conversion (#1840), its lanes and mode in its flags; a masked truncation's merged into its second operand under
         // its third where the typed stream's writemask hasn't every lane.
-        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], BUSTER_IR_NONE, operation->convert - 1u, 0);
+        uint32_t source = operands[0];
+        if (operation->merge_partial && !unmasked)
+        {
+            // A masked truncation whose lanes leave its result's upper bytes zero (#1840): the passthrough's lanes extended
+            // back to the source's (sign-extended for a signed saturation, zero-extended otherwise, so that the
+            // truncation gives each back), selected under the mask, then truncated: its upper bytes the truncation's 0s.
+            const uint32_t flags = operation->immediate;
+            const uint32_t from = flags & 3;
+            const uint32_t to = (flags >> 2) & 3;
+            const IrType wide = operation->operand_bytes[0] == 64 ? IR_V16I32 : operation->operand_bytes[0] == 32 ? IR_V8I32 : IR_V4I32;
+            const uint32_t extended = ir_typed_emit(sink, IR_INTRINSIC, wide, operands[1], BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_EXTEND, 0);
+            ir_typed_lanes(sink, extended, (IrSimdLane)(to | from << 2 | ((flags >> 4) == 1 ? 1u << 4 : 0)));
+            static const uint8_t lanes[4] = { IR_SIMD_LANE_I8, IR_SIMD_LANE_I16, IR_SIMD_LANE_I32, IR_SIMD_LANE_I64 };
+            source = ir_typed_emit(sink, IR_VSELECT, wide, operands[2], operands[0], extended, 0);
+            ir_typed_lanes(sink, source, (IrSimdLane)lanes[from]);
+        }
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, source, BUSTER_IR_NONE, operation->convert - 1u, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
-        if (operation->merge_mask && !unmasked)
+        if (operation->merge_mask && !operation->merge_partial && !unmasked)
         {
             value = ir_typed_emit(sink, IR_VSELECT, type, operands[2], value, operands[1], 0);
             ir_typed_lanes(sink, value, operation->lane);
@@ -873,6 +889,68 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
             {
                 value = ir_typed_emit(sink, IR_TRUNC, type, value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
             }
+        }
+    }
+    else if (operation->masked_memory == 3)
+    {
+        // A compressing store (#1840) of the vector, the second operand, at the address, the first, under the third, the
+        // mask. Under the typed stream's mask of every lane it is the plain store of the whole vector, which it writes in
+        // order then.
+        const uint32_t address = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, operands[0], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        value = ir_typed_emit(sink, unmasked ? IR_STORE : IR_COMPRESS_STORE, IR_VOID, address, operands[1], unmasked ? BUSTER_IR_NONE : operands[2], 0);
+        if (!unmasked)
+        {
+            ir_typed_lanes(sink, value, operation->lane);
+        }
+    }
+    else if (operation->masked_memory == 5)
+    {
+        // A truncating store (#1840): the truncation of the vector, the second operand, then its masked store at the
+        // address, the first, under the third, the mask, at the truncated lanes; under the typed stream's mask of every lane
+        // the plain store of the truncation, which fills its type.
+        const uint32_t flags = operation->immediate;
+        const uint32_t from = flags & 3;
+        const uint32_t to = (flags >> 2) & 3;
+        const uint32_t bits = 8u * operation->operand_bytes[1] / (8u << from) * (8u << to);
+        const IrType truncated = bits >= 512 ? IR_V16I32 : bits >= 256 ? IR_V8I32 : IR_V4I32;
+        const uint32_t narrow = ir_typed_emit(sink, IR_INTRINSIC, truncated, operands[1], BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_TRUNCATE, 0);
+        ir_typed_lanes(sink, narrow, (IrSimdLane)flags);
+        const uint32_t address = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, operands[0], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        value = ir_typed_emit(sink, unmasked ? IR_STORE : IR_MASKED_STORE, IR_VOID, address, narrow, unmasked ? BUSTER_IR_NONE : operands[2], 0);
+        if (!unmasked)
+        {
+            ir_typed_lanes(sink, value, operation->lane);
+        }
+    }
+    else if (operation->masked_memory == 6)
+    {
+        // A scatter (#1840) of the fourth operand, the stored vector, at the base, the first, by the index, the third,
+        // under the second, the mask: its stored vector and mask in two slots of the extra array, its scale's log2 its
+        // alignment's place.
+        const uint32_t address = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, operands[0], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        const uint32_t slot = (uint32_t)sink->sizes.extra_count;
+        if (sink->output != 0)
+        {
+            sink->output->extra[slot] = operands[3];
+            sink->output->extra[slot + 1] = operands[1];
+        }
+        sink->sizes.extra_count += 2;
+        value = ir_typed_emit(sink, IR_SCATTER, IR_VOID, address, operands[2], ir_intrinsic_ternary_c(0, slot), operation->immediate);
+        ir_typed_lanes(sink, value, operation->lane);
+    }
+    else if (operation->masked_memory == 4)
+    {
+        // A gather (#1840) at the base, the second operand, by the index, the third, under the fourth, the mask, whose
+        // clear lanes are 0, then merged into the passthrough, the first, where the mask's bits are clear; under the typed
+        // stream's mask of every lane the gather alone. Its scale's log2 is its alignment's place.
+        const uint32_t address = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, operands[1], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        const uint32_t gathered = ir_typed_emit(sink, IR_GATHER, type, address, operands[2], operands[3], operation->immediate);
+        ir_typed_lanes(sink, gathered, operation->lane);
+        value = gathered;
+        if (!unmasked)
+        {
+            value = ir_typed_emit(sink, IR_VSELECT, type, operands[3], gathered, operands[0], 0);
+            ir_typed_lanes(sink, value, operation->lane);
         }
     }
     else if (operation->masked_memory != 0)
@@ -1052,9 +1130,15 @@ static bool ir_typed_unmasked(const Tier0Function* input, const IrSimdTypedOpera
 {
     // A comparison's lanes or a bit shuffle's bytes, or a masked extract's or truncation's (#1840): its result's, the
     // merged operand's.
-    const uint32_t lanes = operation->compare_mask || operation->bitshuffle           ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) :
-                           operation->merge_mask || operation->masked_memory != 0 ? 8u * operation->operand_bytes[1] / ir_simd_lane_bits(operation->lane) :
-                                                                                     0;
+    // A gather's, its passthrough's; a truncating store's, its source's (#1840).
+    // A truncation's under a mask, its source's (#1840: a partial one's are fewer than its result's).
+    // A scatter's (#1840): none, its mask no operand at the stream's end, whose last is its stored vector.
+    const uint32_t lanes = operation->masked_memory == 6                                                    ? 0 :
+                           operation->convert == BUSTER_IR_INTRINSIC_TRUNCATE + 1u && operation->merge_mask ? operation->operand_bytes[0] >> (operation->immediate & 3) :
+                           operation->compare_mask || operation->bitshuffle || operation->masked_memory == 4 ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) :
+                           operation->masked_memory == 5                                                    ? operation->operand_bytes[1] >> (operation->immediate & 3) :
+                           operation->merge_mask || operation->masked_memory != 0                          ? 8u * operation->operand_bytes[1] / ir_simd_lane_bits(operation->lane) :
+                                                                                                             0;
     const uint64_t every = lanes >= 64 ? UINT64_MAX : (UINT64_C(1) << lanes) - 1;
     return lanes != 0 && i >= 2 && input->kinds[i - 1] == BUSTER_TYPED_CONVERT && input->classes[i - 1] == BUSTER_TYPED_CLASS_MASK && input->kinds[i - 2] == BUSTER_TYPED_CONST &&
            input->classes[i - 2] >= BUSTER_TYPED_CLASS_I8 && input->classes[i - 2] <= BUSTER_TYPED_CLASS_U64 && (input->values[i - 2] & every) == every;
@@ -1074,6 +1158,12 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_intrinsic(IrTyped
         value = ir_typed_emit(sink, IR_TRUNC, type, value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
     }
     return value;
+}
+
+// A scalar fused multiply-add's row (#1840, ir_simd_typed_fma) as IR_FMA of the operands its record places.
+static __attribute__((always_inline)) inline uint32_t ir_typed_fma(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands)
+{
+    return ir_typed_emit(sink, IR_FMA, type, operands[operation->fma_operands[0]], operands[operation->fma_operands[1]], operands[operation->fma_operands[2]], 0);
 }
 
 static __attribute__((always_inline)) inline uint32_t ir_typed_splat(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, uint32_t scalar)
@@ -1346,14 +1436,30 @@ static __attribute__((always_inline)) inline void ir_typed_spill(IrTypedSink* si
     }
 }
 
+// Whether a take's address is read by a load at a constant offset or written by a store of a one-entry value (a constant
+// or a local), each of a scalar class: Tier 1's selection folds such an access into a rip-relative operand (#2573),
+// which needs no register. Hoisted, the address took one, and where calls took it away the take was recomputed before
+// each access: speedtest1_run's hot `g`, read at constant offsets between calls (#2618).
+static bool ir_typed_folds(const Tier0Function* input, uint32_t entry)
+{
+    uint32_t next = entry + 1;
+    const bool offset = next + 1 < input->count && input->kinds[next] == BUSTER_TYPED_CONST && input->kinds[next + 1] == BUSTER_TYPED_PTR_ADD;
+    next += offset ? 2 : 0;
+    const bool load = next < input->count && input->kinds[next] == BUSTER_TYPED_LOAD && input->classes[next] < BUSTER_TYPED_CLASS_LIMIT;
+    const uint8_t value = next < input->count ? input->kinds[next] : 0;
+    const uint8_t after = next + 1 < input->count ? input->kinds[next + 1] : 0;
+    const bool store = (value == BUSTER_TYPED_CONST || value == BUSTER_TYPED_LOCAL) && (after == BUSTER_TYPED_STORE || after == BUSTER_TYPED_SET) && input->classes[next + 1] < BUSTER_TYPED_CLASS_LIMIT;
+    return load || store;
+}
+
 // A GLOBAL_ADDRESS entry whose address the function may compute once (#2574): a U64 of a symbol accessed directly, as
-// a jump table's base is (tier0_jump_tables_valid), which no load or TLS access is moved for. The tables' own entries
-// stay theirs.
+// a jump table's base is (tier0_jump_tables_valid), which no load or TLS access is moved for, and whose access Tier 1
+// doesn't fold (ir_typed_folds). The tables' own entries stay theirs.
 static bool ir_typed_hoistable(const Tier0Function* input, uint32_t entry)
 {
     const uint64_t symbol = input->values[entry];
     return input->kinds[entry] == BUSTER_TYPED_GLOBAL_ADDRESS && input->classes[entry] == BUSTER_TYPED_CLASS_U64 && symbol != 0 && symbol <= UINT32_MAX &&
-           (input->symbol_access == 0 || (symbol < input->symbol_count && input->symbol_access[symbol] == BUSTER_TIER0_ACCESS_DIRECT));
+           (input->symbol_access == 0 || (symbol < input->symbol_count && input->symbol_access[symbol] == BUSTER_TIER0_ACCESS_DIRECT)) && !ir_typed_folds(input, entry);
 }
 
 // The symbols whose addresses the function computes once (IrTypedPlan.hoisted_symbols, #2574): each one the function
@@ -1365,6 +1471,58 @@ static bool ir_typed_hoistable(const Tier0Function* input, uint32_t entry)
 // are listed once, counted by an open-addressed table of the symbols, sized to twice the takes, and numbered in entry
 // order, which the emission reads with a cursor as it does the tables'. Scalar past the compare: it visits the takes
 // alone, a few in a hundred of a function's entries. False where the arena is short.
+// Whether a take's address is only a call's argument (#2618): the first entry that pops it, within its block, is a call
+// taking it as an argument, not as an indirect call's target. The take's own lea puts the address in the argument's
+// register; a hoisted address would be a move there, no fewer instructions, for a register held from its definition on
+// (sqlite3Select's sqlite3ExprListDeleteGeneric, passed to sqlite3ParserAddCleanup on rare paths, was computed on each
+// call). The walk follows the stack's depth over the entries that push and pop without leaving the block, and stops at
+// anything else; a long argument list past a few dozen entries keeps the take hoistable. Scalar: a few entries per take.
+static bool ir_typed_argument(const Tier0Function* input, const IrTypedPlan* plan, uint32_t entry)
+{
+    uint32_t depth = 1;
+    bool argument = false;
+    bool walking = true;
+    for (uint32_t j = entry + 1; walking && j < input->count && j < entry + 48; j += 1)
+    {
+        const uint8_t kind = input->kinds[j];
+        const bool leader = plan->block_firsts[plan->entry_blocks[j]] == j;
+        const bool push = kind == BUSTER_TYPED_CONST || kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_GLOBAL ||
+                          kind == BUSTER_TYPED_GLOBAL_ADDRESS || kind == BUSTER_TYPED_FRAME_ADDRESS;
+        const bool unary = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_NEG || kind == BUSTER_TYPED_NOT || kind == BUSTER_TYPED_CONVERT ||
+                           kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_STORE_GLOBAL;
+        const bool popping = kind == BUSTER_TYPED_SET_LOCAL || kind == BUSTER_TYPED_SET_GLOBAL || kind == BUSTER_TYPED_DISCARD;
+        const bool binary = kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET || (kind >= BUSTER_TYPED_ADD && kind <= BUSTER_TYPED_GE);
+        if (leader)
+        {
+            walking = false;
+        }
+        else if (push)
+        {
+            depth += 1;
+        }
+        else if (unary)
+        {
+            walking = depth > 1;
+        }
+        else if (popping)
+        {
+            walking = depth > 1;
+            depth -= 1;
+        }
+        else if (binary)
+        {
+            walking = depth > 2;
+            depth -= kind == BUSTER_TYPED_SET ? 2 : 1;
+        }
+        else
+        {
+            argument = kind == BUSTER_TYPED_CALL && depth <= input->call_argument_counts[input->values[j]];
+            walking = false;
+        }
+    }
+    return argument;
+}
+
 static bool ir_typed_plan_hoisted(const Tier0Function* input, IrTypedPlan* plan, Arena* scratch)
 {
     const uint32_t* tables = input->table_addresses;
@@ -1386,7 +1544,7 @@ static bool ir_typed_plan_hoisted(const Tier0Function* input, IrTypedPlan* plan,
         {
             table += 1;
         }
-        if (input->kinds[i] == BUSTER_TYPED_GLOBAL_ADDRESS && ir_typed_hoistable(input, i) && !(table < table_count && tables[table] == i))
+        if (input->kinds[i] == BUSTER_TYPED_GLOBAL_ADDRESS && ir_typed_hoistable(input, i) && !(table < table_count && tables[table] == i) && !ir_typed_argument(input, plan, i))
         {
             taken[addresses] = i;
             addresses += 1;
@@ -1838,6 +1996,45 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan, 
             }
         }
     }
+    // The walks' successors (#2618): those of a block of one constant that goes into a block whose first entries test it
+    // (a `&&`'s or `||`'s alternative, into its truth value's join), the test's choice for it. #2554's threading takes
+    // that edge past the join in Tier 1's IR, but the typed CFG has a path from the alternative through the join into
+    // the `&&`'s body without its right operand: memsys5MallocUnsafe's `iBin<=LOGMAX && mem5.aiFreelist[iBin]<0` loop
+    // then had an iteration without its take. The dominators keep the typed CFG's edges, which the emission's are.
+    uint32_t* walks = successors;
+    if (predecessors != 0)
+    {
+        walks = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)edges + 1);
+        ok = ok && walks != 0;
+        for (uint32_t n = 0; walks != 0 && n < nodes; n += 1)
+        {
+            for (uint32_t e = offsets[n]; e < offsets[n + 1]; e += 1)
+            {
+                walks[e] = successors[e];
+            }
+            const bool source = n != 0 && n <= plan->block_count;
+            const uint32_t first = source ? plan->block_firsts[n - 1] : 0;
+            const uint32_t end = source ? plan->block_firsts[n] : 0;
+            const bool constant = source && end > first && input->kinds[first] == BUSTER_TYPED_CONST &&
+                                  (end - first == 1 || (end - first == 2 && input->kinds[first + 1] == BUSTER_TYPED_JUMP_VALUE)) && offsets[n + 1] - offsets[n] == 1;
+            const uint32_t join = constant ? successors[offsets[n]] : 0;
+            const bool joined = join != 0 && join <= plan->block_count && plan->block_firsts[join - 1] < plan->block_firsts[join];
+            // The join's truth test: its branch, or a comparison with zero first (NE keeps the value's truth, EQ inverts it).
+            const uint32_t at = joined ? plan->block_firsts[join - 1] : 0;
+            const bool compared = joined && plan->block_firsts[join] - at >= 3 && input->kinds[at] == BUSTER_TYPED_CONST && input->values[at] == 0 &&
+                                  (input->kinds[at + 1] == BUSTER_TYPED_NE || input->kinds[at + 1] == BUSTER_TYPED_EQ);
+            const uint32_t branch = compared ? at + 2 : at;
+            const uint8_t kind = joined ? input->kinds[branch] : 0;
+            // The constant's value, read only where the block holds it (an empty block's first is past the stream).
+            const uint64_t value = joined ? input->values[first] : 0;
+            const bool truth = compared && input->kinds[at + 1] == BUSTER_TYPED_EQ ? value == 0 : value != 0;
+            if (kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE)
+            {
+                const bool taken = (kind == BUSTER_TYPED_BRANCH_FALSE) == !truth;
+                walks[offsets[n]] = taken ? plan->entry_blocks[(uint32_t)input->values[branch]] + 1 : join + 1;
+            }
+        }
+    }
     const uint64_t mark = output->length;
     Dominators dominators = { 0 };
     DominatorStatus analyzed = DOMINATOR_INVALID;
@@ -1910,13 +2107,13 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan, 
         bool kept = !placed;
         if (placed)
         {
-            const IrTypedPlace whole = ir_typed_place(plan, &dominators, offsets, successors, calls, order, firsts[k], firsts[k + 1], 2, reads, seen, stack, marks, k + 1, &walk, &budget, &loop_budget);
+            const IrTypedPlace whole = ir_typed_place(plan, &dominators, offsets, walks, calls, order, firsts[k], firsts[k + 1], 2, reads, seen, stack, marks, k + 1, &walk, &budget, &loop_budget);
             const uint32_t top = whole.ancestor;
             kept = whole.kept;
             place = whole.place;
             // Kept at P outside loops for a take in a loop where some path from P takes it nowhere: its takes' groups, by
             // the child of P that dominates each, are placed each as a symbol is.
-            if (kept && whole.loop == BUSTER_DOMINATOR_NONE && whole.looped && !ir_typed_anticipated(offsets, successors, reads, seen, stack, top, k + 1, &budget))
+            if (kept && whole.loop == BUSTER_DOMINATOR_NONE && whole.looped && !ir_typed_anticipated(offsets, walks, reads, seen, stack, top, k + 1, &budget))
             {
                 for (uint32_t x = firsts[k]; x < firsts[k + 1]; x += 1)
                 {
@@ -1972,7 +2169,7 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan, 
                         next += 1;
                     }
                     walk += 1;
-                    const IrTypedPlace part = children[group] != BUSTER_DOMINATOR_NONE ? ir_typed_place(plan, &dominators, offsets, successors, calls, order, group, next, 2, reads, seen, stack, marks, walk, &walk, &budget, &loop_budget) :
+                    const IrTypedPlace part = children[group] != BUSTER_DOMINATOR_NONE ? ir_typed_place(plan, &dominators, offsets, walks, calls, order, group, next, 2, reads, seen, stack, marks, walk, &walk, &budget, &loop_budget) :
                                                                                           (IrTypedPlace){ .ancestor = BUSTER_DOMINATOR_NONE, .loop = BUSTER_DOMINATOR_NONE };
                     below = !part.kept || (part.place != top && ir_typed_dominated(&dominators, top, part.place));
                     if (below && part.kept)
@@ -3034,10 +3231,8 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         plan.operations = operations;
         plan.ignored_arguments = ir_typed_ignored_arguments(input, BUSTER_VECTOR_PATH(vector));
         // A function with vectors copies its whole-vector aggregate parameters by vectors of the widths its target has
-        // (#1282): the lowering admits those widths alone (AVX-512F, and VL for 16 and 32 bytes, as a vector entry's).
-        const uint64_t evex = BUSTER_X86_FEATURE(AVX512F);
-        const uint64_t narrow = evex | BUSTER_X86_FEATURE(AVX512VL);
-        plan.vector_copies = !input->vectors || (target_features & evex) != evex ? 0 : (target_features & narrow) == narrow ? 7 : 4;
+        // (#1282): the lowering admits those widths alone (ir_typed_vector_copies, as a vector entry's).
+        plan.vector_copies = input->vectors ? ir_typed_vector_copies(target_features) : 0;
         if (plan.error == 0 && !ir_typed_plan_depth_slots(&plan, scratch))
         {
             plan.error = "no scratch memory for the depth slots";
@@ -3166,6 +3361,14 @@ static __attribute__((unused)) IrCheck ir_lower_typed_target(const Tier0Function
 static __attribute__((unused)) IrCheck ir_lower_typed_target_scalar(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch, IrFunction* result)
 {
     return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, target_features, false, false);
+}
+
+// ir_lower_typed_target's replay with source identity columns, by the vector path or its scalar twin: #2541 step 3's
+// summaries under -g, whose expansions carry their callee's origins (IrDebugInline).
+static __attribute__((unused)) IrCheck ir_lower_typed_target_sources(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch,
+                                                                     IrFunction* result, bool scalar)
+{
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, !scalar && BUSTER_HOST_VECTOR != 0, target_features, false, true);
 }
 
 // The C driver's --tier1 (#1624): ir_lower_typed_target, but a vector wider than the target moves whole is taken, for

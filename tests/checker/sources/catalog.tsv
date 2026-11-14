@@ -418,3 +418,5 @@ buster-fixtures v1 checker-sources
 0416	0416.c	-	multiversioning: C23-only attributes are ignored in gnu17
 0417	0417.c	gnu23	multiversioning: C23-only attributes are ignored in gnu23
 0418	0418.c	rejected	multiversioning: no_builtin on a declaration still reports the conflict
+auto-type-x86-statement	auto-type-x86-statement.c	-	__auto_type keeps x86 builtin callees in statement expressions (#2717)
+auto-type-x86-statement-ice	auto-type-x86-statement-ice.c	rejected	__auto_type statement expressions still require an x86 builtin's immediate (#2717)

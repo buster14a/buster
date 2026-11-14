@@ -549,10 +549,11 @@ static void ir_simd_typed_test_overflows(IrTestTally* tally)
 // The machine rows (#141, ir_simd_typed_machine_row): rows the IR's own operations don't take decode as the row itself,
 // with their operands' classes and bytes and their features: the union of their forms' (x86_target_requirement's) and
 // of their vectors' and masks' moves' (AVX512F, VL below 64 bytes, DQ for a byte mask, BW for a doubleword or a
-// quadword one), and nothing else: a byte average's of two vectors (the IR has no average), a compress-store's
-// (vpcompressd to memory) of an address, a vector and a mask of no result (the masked stores are the IR's own,
-// ir_simd_typed_test_masked_memory), and a shift's of a 64-bit count from a general register (the builtins' int counts
-// are the IR's shift, ir_simd_typed_test_shifts). Without each feature, TARGET with the result
+// quadword one), and nothing else: a byte average's of two vectors (the IR has no average), a scatter's (vpscatterdd)
+// of an address, a mask of 2 bytes over its 4 lanes, an index and a vector of no result (a scatter whose mask is its
+// lanes' is the IR's own, ir_simd_typed_test_scatters, as the masked and compressing stores are,
+// ir_simd_typed_test_masked_memory and #1840's compress_store), and a shift's of a 64-bit count from a general register
+// (the builtins' int counts are the IR's shift, ir_simd_typed_test_shifts). Without each feature, TARGET with the result
 // untouched. An SSE carrier's (#1280: a vector of 8 or 4 bytes) row decodes with VL's moves. At a target without
 // AVX512VL (#1281), a 16- or 32-byte vector's moves are AVX's VEX ones: AVX2's saturating byte addition of two 32-byte vectors
 // takes AVX and AVX2 there, and nothing of AVX-512. A row of a class no row call takes (a vector of 2 or 12 bytes, a
@@ -571,14 +572,17 @@ static void ir_simd_typed_test_machine(IrTestTally* tally)
     rows[0].operand_bytes[1] = 64;
     rows[0].result_class = BUSTER_TYPED_CLASS_VECTOR;
     rows[0].result_bytes = 64;
-    rows[1].records[0] = (X86Instruction){ .form = X86_FORM_VPCOMPRESSD_XM128_X, .reg = BUSTER_TIER0_ROLE_VECTOR(1), .rm = BUSTER_TIER0_ROLE_INTEGER(0), .mode = BUSTER_X86_MEMORY_BASE, .decorations = BUSTER_TIER0_DECORATION_MASK(2) };
+    rows[1].records[0] = (X86Instruction){ .form = X86_FORM_VPSCATTERDD_VM32X_X, .reg = BUSTER_TIER0_ROLE_VECTOR(3), .rm = BUSTER_TIER0_ROLE_INTEGER(0), .index = BUSTER_TIER0_ROLE_VECTOR(2),
+                                           .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(2), .decorations = BUSTER_TIER0_DECORATION_MASK(1) };
     rows[1].record_count = 1;
-    rows[1].operand_count = 3;
+    rows[1].operand_count = 4;
     rows[1].operand_classes[0] = BUSTER_TYPED_CLASS_U64;
-    rows[1].operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
-    rows[1].operand_classes[2] = BUSTER_TYPED_CLASS_MASK;
-    rows[1].operand_bytes[1] = 16;
-    rows[1].operand_bytes[2] = 2;
+    rows[1].operand_classes[1] = BUSTER_TYPED_CLASS_MASK;
+    rows[1].operand_classes[2] = BUSTER_TYPED_CLASS_VECTOR;
+    rows[1].operand_classes[3] = BUSTER_TYPED_CLASS_VECTOR;
+    rows[1].operand_bytes[1] = 2;
+    rows[1].operand_bytes[2] = 16;
+    rows[1].operand_bytes[3] = 16;
     rows[1].result_class = BUSTER_TYPED_CLASS_VOID;
     rows[2].records[0] = (X86Instruction){ .form = X86_FORM_VMOVQ_X_RM64_EVEX, .reg = BUSTER_TIER0_ROLE_VECTOR(1), .rm = BUSTER_TIER0_ROLE_INTEGER(1), .mode = BUSTER_X86_REGISTER_DIRECT };
     rows[2].records[1] = (X86Instruction){ .form = X86_FORM_VPSRLQ_Y_Y_XM128_EVEX, .reg = BUSTER_TIER0_ROLE_VECTOR(0), .vvvv = BUSTER_TIER0_ROLE_VECTOR(0), .rm = BUSTER_TIER0_ROLE_VECTOR(1), .mode = BUSTER_X86_REGISTER_DIRECT };
@@ -1736,8 +1740,8 @@ static void ir_simd_typed_test_carrier_casts(IrTestTally* tally)
 // producer (check_vector_convert_row) at every pair of sizes and signedness, every result width and the operand widths it
 // takes, decodes as the IR's extend or truncate of its lanes' sizes and sign, written out, at exactly its form's features
 // and AVX512F's and VL's; and every TRUNCATE rule's row (the vpmov, vpmovs and vpmovus builtins under a mask) as the IR's
-// truncate merged under the mask where its lanes fill its result, and a machine row where they don't. Each refused
-// without each feature it needs and under changes.
+// truncate merged under the mask where its lanes fill its result, and where they don't (#1840) the IR's truncate of that
+// merge at the source's lanes (`merge_partial`). Each refused without each feature it needs and under changes.
 static void ir_simd_typed_test_conversions(IrTestTally* tally)
 {
     static const TypeId elements[2][4] = {
@@ -1846,16 +1850,16 @@ static void ir_simd_typed_test_conversions(IrTestTally* tally)
         memset(&decoded, 0xa5, sizeof(decoded));
         const IrSimdTypedStatus status = made ? ir_simd_typed_row(&row, all, &decoded) : IR_SIMD_TYPED_INVALID;
         char description[160];
-        snprintf(description, sizeof(description), "%s: %s", rule->name, fills ? "the IR's truncate merged under its mask" : "a machine row, its lanes not filling its result");
+        // A partial one (#1840), whose lanes leave its result's upper bytes zero, is the IR's truncate of a vselect of the
+        // source and the passthrough extended back (`merge_partial`).
+        snprintf(description, sizeof(description), "%s: %s", rule->name, fills ? "the IR's truncate merged under its mask" : "the IR's truncate of its merge, its lanes not filling its result");
         const uint32_t from = rule->element == 2 ? 1 : rule->element == 4 ? 2 : 3;
         const uint32_t to = to_bytes == 1 ? 0 : to_bytes == 2 ? 1 : 2;
-        ir_test_expect(tally, fills ? status == IR_SIMD_TYPED_OK && decoded.convert == BUSTER_IR_INTRINSIC_TRUNCATE + 1 && decoded.merge_mask &&
-                                          decoded.immediate == (from | to << 2 | mode << 4) && decoded.lane == (to == 0 ? IR_SIMD_LANE_I8 : to == 1 ? IR_SIMD_LANE_I16 : IR_SIMD_LANE_I32) :
-                                      ir_simd_typed_test_undecoded(status, &decoded),
+        ir_test_expect(tally, status == IR_SIMD_TYPED_OK && decoded.convert == BUSTER_IR_INTRINSIC_TRUNCATE + 1 && decoded.merge_mask && decoded.merge_partial == !fills &&
+                                  decoded.immediate == (from | to << 2 | mode << 4) && decoded.lane == (to == 0 ? IR_SIMD_LANE_I8 : to == 1 ? IR_SIMD_LANE_I16 : IR_SIMD_LANE_I32),
                        description);
         masked += fills && status == IR_SIMD_TYPED_OK;
-        partial += !fills;
-        if (fills)
+        partial += !fills && status == IR_SIMD_TYPED_OK;
         {
             Tier0Operation changed = row;
             changed.records[0].decorations = 0;
@@ -1866,7 +1870,7 @@ static void ir_simd_typed_test_conversions(IrTestTally* tally)
         }
     }
     type_test_table_close(&table);
-    ir_test_expect(tally, extends != 0 && truncates != 0 && masked != 0 && partial != 0, "the conversions decode, and partial masked truncations stay rows");
+    ir_test_expect(tally, extends != 0 && truncates != 0 && masked != 0 && partial != 0, "the conversions decode, partial masked truncations among them");
     // The extensions of an SSE carrier's whole lanes (#1840), zero and signed: of 8 bytes into 16 (bytes to words, words to
     // doublewords, doublewords to quadwords), 32 (bytes to doublewords, words to quadwords) and 64 (bytes to quadwords);
     // of 4 bytes into 16 (bytes to doublewords, words to quadwords) and 32 (bytes to quadwords).
@@ -2352,6 +2356,238 @@ static void ir_simd_typed_test_masked_memory(IrTestTally* tally)
     }
     ir_test_expect(tally, decoded_rows == 10 * 2 * 3, "every masked load and store decodes");
     printf("  IR SIMD rows: %u masked loads and stores decode to the IR's masked_load and masked_store\n", decoded_rows);
+}
+
+// The gathers, compressing stores and truncating stores (#1840): vpgatherdd to vpgatherqq (and vgatherdps to vgatherqpd) of
+// each shape whose index has an element per lane at each scale, vpcompressb to vpcompressq to memory at each width, and
+// vpmovwb to vpmovusqd to memory of the sources whose truncated lanes fill 16 bytes or more, decode as the IR's gather,
+// compress_store and truncating masked_store at exactly their features (written out: AVX512F, VL for a vector below 64
+// bytes, VBMI2 and BW for bytes' and words' compresses, BW for bytes' and words' truncations, and the mask's DQ for a
+// byte, BW for 4 bytes), refused without each and under 7 changes.
+static void ir_simd_typed_test_scattered_memory(IrTestTally* tally)
+{
+    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512DQ),
+                                         BUSTER_X86_FEATURE(AVX512VBMI2) };
+    static const uint8_t lanes_of[4] = { IR_SIMD_LANE_I8, IR_SIMD_LANE_I16, IR_SIMD_LANE_I32, IR_SIMD_LANE_I64 };
+    const uint64_t all = UINT64_MAX;
+    uint32_t gathers = 0;
+    uint32_t compresses = 0;
+    uint32_t truncations = 0;
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    // 24 gather kinds (integer or floating, the lanes' and the index's sizes, 3 widths; 20 of them shapes the IR has) at 4
+    // scales, 12 compresses, 54
+    // truncations.
+    for (uint32_t kind = 0; tables && kind < 2 * 2 * 2 * 3 * 4 + 12 + 54; kind += 1)
+    {
+        const uint32_t gather_kinds = 2 * 2 * 2 * 3 * 4;
+        const bool gather = kind < gather_kinds;
+        const bool compress = !gather && kind < gather_kinds + 12;
+        const uint32_t rest = gather ? kind / 4 : compress ? kind - gather_kinds : kind - gather_kinds - 12;
+        const uint32_t width = rest % 3;
+        const uint32_t bytes = 16u << width;
+        Tier0Operation row;
+        memset(&row, 0, sizeof(row));
+        uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | (width < 2 ? BUSTER_X86_FEATURE(AVX512VL) : 0);
+        // Whether the row needs VL itself, past its moves.
+        bool length = width < 2;
+        uint32_t mask_bytes = 0;
+        uint32_t lane = IR_SIMD_LANE_COUNT;
+        uint32_t immediate = 0;
+        uint32_t code = 0;
+        bool admitted = true;
+        if (gather)
+        {
+            const uint32_t floating = rest / 12;
+            const uint32_t size = (rest / 6) % 2;
+            const uint32_t index = (rest / 3) % 2;
+            const uint32_t scale = kind % 4;
+            const uint32_t count = bytes >> (2 + size);
+            const uint32_t index_bytes = count << (2 + index);
+            const uint16_t form = ir_simd_gather_forms[floating][size][index][width];
+            admitted = form != X86_FORM_NONE;
+            mask_bytes = count <= 8 ? 1 : count / 8;
+            row.records[0] = (X86Instruction){ .form = form, .reg = BUSTER_TIER0_ROLE_VECTOR(0), .rm = BUSTER_TIER0_ROLE_INTEGER(1), .index = BUSTER_TIER0_ROLE_VECTOR(2),
+                                               .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(scale), .decorations = BUSTER_TIER0_DECORATION_MASK(3) };
+            row.operand_count = 4;
+            row.operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+            row.operand_classes[1] = BUSTER_TYPED_CLASS_U64;
+            row.operand_classes[2] = BUSTER_TYPED_CLASS_VECTOR;
+            row.operand_classes[3] = BUSTER_TYPED_CLASS_MASK;
+            row.operand_bytes[0] = (uint8_t)bytes;
+            row.operand_bytes[2] = (uint8_t)index_bytes;
+            row.operand_bytes[3] = (uint8_t)mask_bytes;
+            row.result_class = BUSTER_TYPED_CLASS_VECTOR;
+            row.result_bytes = (uint8_t)bytes;
+            expected |= index_bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0;
+            length = width < 2 || index_bytes < 64;
+            lane = size == 0 ? IR_SIMD_LANE_I32 : IR_SIMD_LANE_I64;
+            immediate = scale;
+            code = 4;
+        }
+        else
+        {
+            const uint32_t pair = compress ? 0 : rest / 9;
+            const uint32_t mode = compress ? 0 : (rest / 3) % 3;
+            const uint32_t from = compress ? rest / 3 : ir_simd_typed_truncation_pairs[pair][0];
+            const uint32_t to = compress ? from : ir_simd_typed_truncation_pairs[pair][1];
+            const uint32_t count = bytes >> from;
+            admitted = compress || (count << to) >= 16;
+            mask_bytes = count <= 8 ? 1 : count / 8;
+            row.records[0] = (X86Instruction){ .form = compress ? ir_simd_compress_forms[from][width] : ir_simd_typed_truncations[mode][pair][width], .reg = BUSTER_TIER0_ROLE_VECTOR(1),
+                                               .rm = BUSTER_TIER0_ROLE_INTEGER(0), .mode = BUSTER_X86_MEMORY_BASE, .decorations = BUSTER_TIER0_DECORATION_MASK(2) };
+            row.operand_count = 3;
+            row.operand_classes[0] = BUSTER_TYPED_CLASS_U64;
+            row.operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+            row.operand_classes[2] = BUSTER_TYPED_CLASS_MASK;
+            row.operand_bytes[1] = (uint8_t)bytes;
+            row.operand_bytes[2] = (uint8_t)mask_bytes;
+            row.result_class = BUSTER_TYPED_CLASS_VOID;
+            expected |= compress && from <= 1 ? BUSTER_X86_FEATURE(AVX512VBMI2) | BUSTER_X86_FEATURE(AVX512BW) : 0;
+            length = true;
+            expected |= !compress ? BUSTER_X86_FEATURE(AVX512VL) | (from <= 1 || to <= 1 ? BUSTER_X86_FEATURE(AVX512BW) : 0) : 0;
+            lane = lanes_of[to];
+            immediate = compress ? 0 : from | to << 2 | mode << 4;
+            code = compress ? 3 : 5;
+        }
+        expected |= (mask_bytes == 1 ? BUSTER_X86_FEATURE(AVX512DQ) : 0) | (mask_bytes >= 4 ? BUSTER_X86_FEATURE(AVX512BW) : 0);
+        row.record_count = 1;
+        IrSimdTypedOperation decoded;
+        memset(&decoded, 0xa5, sizeof(decoded));
+        const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+        char description[160];
+        snprintf(description, sizeof(description), "%s %u at %u bytes: the IR's own at exactly its features", gather ? "gather" : compress ? "compressing store" : "truncating store", kind, bytes);
+        if (!admitted)
+        {
+            ir_test_expect(tally, row.records[0].form == X86_FORM_NONE || ir_simd_typed_test_undecoded(status, &decoded) || decoded.machine,
+                           "a shape the IR has no operation of stays a machine row");
+            continue;
+        }
+        ir_test_expect(tally, status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.masked_memory == code && decoded.lane == lane && decoded.immediate == immediate &&
+                                  decoded.operand_count == row.operand_count && (decoded.required_features & ~BUSTER_X86_FEATURE(AVX)) == expected,
+                       description);
+        gathers += gather && status == IR_SIMD_TYPED_OK && decoded.masked_memory == 4;
+        compresses += compress && status == IR_SIMD_TYPED_OK && decoded.masked_memory == 3;
+        truncations += !gather && !compress && status == IR_SIMD_TYPED_OK && decoded.masked_memory == 5;
+        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
+        {
+            IrSimdTypedOperation without;
+            memset(&without, 0x5a, sizeof(without));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
+            const bool required = features[f] == BUSTER_X86_FEATURE(AVX512VL) ? length && (expected & features[f]) != 0 : (expected & features[f]) != 0;
+            ir_test_expect(tally, required ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && without.masked_memory == code,
+                           "a gather or a compressing or truncating store without a feature it needs stays the machine row, and needs no other");
+        }
+        for (uint32_t m = 0; m < 7; m += 1)
+        {
+            Tier0Operation changed = row;
+            const uint32_t mask_operand = gather ? 3 : 2;
+            switch (m)
+            {
+            case 0: changed.records[0].decorations = 0; break;
+            case 1: changed.records[0].mode = BUSTER_X86_REGISTER_DIRECT; break;
+            case 2: changed.records[0].rm = BUSTER_TIER0_ROLE_INTEGER(gather ? 0 : 1); break;
+            case 3: changed.operand_bytes[mask_operand] = (uint8_t)(mask_bytes == 8 ? 4 : mask_bytes * 2); break;
+            case 4: changed.record_count = 2; break;
+            case 5: changed.records[0].decorations = (uint8_t)(BUSTER_TIER0_DECORATION_MASK(mask_operand) | BUSTER_X86_DECORATION_ZEROING); break;
+            case 6: changed.records[0].displacement = 8; break;
+            }
+            memset(&decoded, 0xa5, sizeof(decoded));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
+            ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded) || (refused == IR_SIMD_TYPED_OK && decoded.masked_memory != code),
+                           "a changed gather or compressing or truncating store row is not the IR's operation");
+        }
+    }
+    ir_test_expect(tally, gathers == 20 * 4 && compresses == 12 && truncations == 24, "every gather, compressing store and truncating store decodes");
+    printf("  IR SIMD rows: %u gathers, %u compressing stores and %u truncating stores decode to the IR's gather, compress_store and masked_store of a truncation\n", gathers,
+           compresses, truncations);
+}
+
+// The scatters (#1840): vpscatterdd to vpscatterqq (and vscatterdps to vscatterqpd) of each shape whose index has an
+// element per lane, at each scale, decode as the IR's scatter at exactly their features (written out: AVX512F, VL where
+// the stored vector or the index is below 64 bytes, and the mask's DQ for a byte), refused without each and under 7
+// changes; the shapes the IR has none of (vpscatterdq of 16 bytes, vpscatterqd of 64) stay machine rows.
+static void ir_simd_typed_test_scatters(IrTestTally* tally)
+{
+    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512DQ) };
+    const uint64_t all = UINT64_MAX;
+    uint32_t scatters = 0;
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    for (uint32_t kind = 0; tables && kind < 2 * 2 * 2 * 3 * 4; kind += 1)
+    {
+        const uint32_t rest = kind / 4;
+        const uint32_t scale = kind % 4;
+        const uint32_t width = rest % 3;
+        const uint32_t floating = rest / 12;
+        const uint32_t size = (rest / 6) % 2;
+        const uint32_t index = (rest / 3) % 2;
+        const uint32_t bytes = 16u << width;
+        const uint32_t count = bytes >> (2 + size);
+        const uint32_t index_bytes = count << (2 + index);
+        const uint32_t mask_bytes = count <= 8 ? 1 : count / 8;
+        const uint16_t form = ir_simd_scatter_forms[floating][size][index][width];
+        Tier0Operation row;
+        memset(&row, 0, sizeof(row));
+        row.records[0] = (X86Instruction){ .form = form, .reg = BUSTER_TIER0_ROLE_VECTOR(3), .rm = BUSTER_TIER0_ROLE_INTEGER(0), .index = BUSTER_TIER0_ROLE_VECTOR(2),
+                                           .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(scale), .decorations = BUSTER_TIER0_DECORATION_MASK(1) };
+        row.record_count = 1;
+        row.operand_count = 4;
+        row.operand_classes[0] = BUSTER_TYPED_CLASS_U64;
+        row.operand_classes[1] = BUSTER_TYPED_CLASS_MASK;
+        row.operand_classes[2] = BUSTER_TYPED_CLASS_VECTOR;
+        row.operand_classes[3] = BUSTER_TYPED_CLASS_VECTOR;
+        row.operand_bytes[1] = (uint8_t)mask_bytes;
+        row.operand_bytes[2] = (uint8_t)index_bytes;
+        row.operand_bytes[3] = (uint8_t)bytes;
+        row.result_class = BUSTER_TYPED_CLASS_VOID;
+        const bool length = width < 2 || index_bytes < 64;
+        const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | (length ? BUSTER_X86_FEATURE(AVX512VL) : 0) | (mask_bytes == 1 ? BUSTER_X86_FEATURE(AVX512DQ) : 0);
+        const uint32_t lane = size == 0 ? IR_SIMD_LANE_I32 : IR_SIMD_LANE_I64;
+        IrSimdTypedOperation decoded;
+        memset(&decoded, 0xa5, sizeof(decoded));
+        const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+        if (form == X86_FORM_NONE || (index_bytes != 16 && index_bytes != 32 && index_bytes != 64))
+        {
+            ir_test_expect(tally, form == X86_FORM_NONE || ir_simd_typed_test_undecoded(status, &decoded) || decoded.machine, "a scatter's shape the IR has no operation of stays a machine row");
+            continue;
+        }
+        char description[160];
+        snprintf(description, sizeof(description), "scatter %u at %u bytes: the IR's own at exactly its features", kind, bytes);
+        ir_test_expect(tally, status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.masked_memory == 6 && decoded.lane == lane && decoded.immediate == scale &&
+                                  decoded.operand_count == 4 && (decoded.required_features & ~BUSTER_X86_FEATURE(AVX)) == expected,
+                       description);
+        scatters += status == IR_SIMD_TYPED_OK && decoded.masked_memory == 6;
+        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
+        {
+            IrSimdTypedOperation without;
+            memset(&without, 0x5a, sizeof(without));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
+            const bool required = (expected & features[f]) != 0;
+            ir_test_expect(tally, required ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && without.masked_memory == 6,
+                           "a scatter without a feature it needs stays the machine row, and needs no other");
+        }
+        for (uint32_t m = 0; m < 7; m += 1)
+        {
+            Tier0Operation changed = row;
+            switch (m)
+            {
+            case 0: changed.records[0].decorations = 0; break;
+            case 1: changed.records[0].mode = BUSTER_X86_REGISTER_DIRECT; break;
+            case 2: changed.records[0].rm = BUSTER_TIER0_ROLE_INTEGER(1); break;
+            case 3: changed.operand_bytes[1] = (uint8_t)(mask_bytes == 8 ? 4 : mask_bytes * 2); break;
+            case 4: changed.record_count = 2; break;
+            case 5: changed.records[0].reg = BUSTER_TIER0_ROLE_VECTOR(2); break;
+            case 6: changed.records[0].displacement = 8; break;
+            }
+            memset(&decoded, 0xa5, sizeof(decoded));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
+            ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded) || (refused == IR_SIMD_TYPED_OK && decoded.masked_memory != 6),
+                           "a changed scatter row is not the IR's scatter");
+        }
+    }
+    ir_test_expect(tally, scatters == 20 * 4, "every scatter shape decodes at every scale");
+    printf("  IR SIMD rows: %u scatters decode to the IR's scatter\n", scatters);
 }
 
 // One lane's moves and the lanes' sign bits (#1840): vmovd and vmovq of lane 0 and vpextrb to vpextrq of each lane of
@@ -3009,6 +3245,125 @@ static void ir_simd_typed_test_selects(IrTestTally* tally)
     printf("  IR SIMD rows: %u of the front end's select rows decode to the IR's vselect and %u undefined vectors to its zero vector\n", selects, zeros);
 }
 
+// The scalar fused multiply-adds' rows (#1840): __builtin_elementwise_fma's (check_vector_scalar_row) and a contracted
+// a * b + c's either way round (check_vector_contract_row), of floats and doubles, at x86-64-v3 (VEX), znver5 (EVEX),
+// AVX512F without VL (an EVEX product, a VEX copy) and AVX512F without FMA. Each decodes to IR_FMA of vvvv's, reg's and
+// rm's operands where the target has FMA, its features FMA's, and stays the IR's machine row without it. Then each row
+// changed one way: an immediate, a decoration, memory, a role used twice, the copy of another role or by another form, an
+// operand of another class, a result's bytes, a third record: none IR_FMA's. And ir_fma_bits, IR_FMA's semantics, against
+// vfmadd213sd and ss on the host where it has FMA, over every triple of 16 values each: NaNs of both signs and payloads, a
+// signaling one, infinities, zeros, subnormals and the values whose product rounds.
+static void ir_simd_typed_test_fma(IrTestTally* tally)
+{
+    static const char* const names[4] = { "x86-64-v3", "znver5", "AVX512F without VL", "AVX512F without FMA" };
+    X86Target targets[4] = { 0 };
+    bool parsed = x86_target_parse("x86-64-v3", 9, &targets[0]) && x86_target_parse("znver5", 6, &targets[1]);
+    targets[2] = targets[1];
+    targets[2].features &= ~BUSTER_X86_FEATURE(AVX512VL);
+    targets[3] = targets[1];
+    targets[3].features &= ~BUSTER_X86_FEATURE(FMA);
+    ir_test_expect(tally, parsed, "the FMA rows' targets");
+    uint32_t decodes = 0;
+    for (uint32_t t = 0; parsed && t < 4; t += 1)
+    {
+        const bool fused = (targets[t].features & BUSTER_X86_FEATURE(FMA)) != 0;
+        for (uint32_t d = 0; d < 2; d += 1)
+        {
+            const uint8_t class = d == 0 ? BUSTER_TYPED_CLASS_F32 : BUSTER_TYPED_CLASS_F64;
+            for (uint32_t shape = 0; shape < 3; shape += 1)
+            {
+                Tier0Operation row;
+                const char* reason = shape == 0 ? check_vector_scalar_row(&targets[t], CBUILTIN_ELEMENTWISE_FMA, class, 3, &row) :
+                                                  check_vector_contract_row(&targets[t], class, shape == 2, &row);
+                char description[192];
+                snprintf(description, sizeof(description), "%s: the %s %s row is the front end's", names[t], d == 0 ? "float" : "double",
+                         shape == 0 ? "fma builtin's" : shape == 1 ? "contraction's" : "right-hand contraction's");
+                ir_test_expect(tally, reason == NULL, description);
+                if (reason != NULL)
+                {
+                    continue;
+                }
+                // A contraction of c + a * b keeps a * b's operands second and third: IR_FMA of its operands 1, 2 and 0.
+                const uint8_t order[3] = { shape == 2 ? 1 : 0, shape == 2 ? 2 : 1, shape == 2 ? 0 : 2 };
+                IrSimdTypedOperation decoded;
+                memset(&decoded, 0xa5, sizeof(decoded));
+                const IrSimdTypedStatus status = ir_simd_typed_row(&row, targets[t].features, &decoded);
+                snprintf(description, sizeof(description), "%s: the %s %s row is %s", names[t], d == 0 ? "float" : "double", shape == 0 ? "builtin" : "contraction",
+                         fused ? "IR_FMA of its product's operands then its addend, its features FMA's" : "the IR's machine row without FMA");
+                const bool decoded_fma = status == IR_SIMD_TYPED_OK && decoded.fma;
+                const bool exact = decoded_fma && decoded.fma_operands[0] == order[0] && decoded.fma_operands[1] == order[1] && decoded.fma_operands[2] == order[2] &&
+                                   decoded.required_features == BUSTER_X86_FEATURE(FMA) && decoded.operand_count == 3;
+                ir_test_expect(tally, fused ? exact : (!decoded_fma && ir_simd_typed_test_undecoded(status, &decoded)), description);
+                decodes += exact ? 1 : 0;
+                for (uint32_t m = 0; m < 9; m += 1)
+                {
+                    Tier0Operation changed = row;
+                    switch (m)
+                    {
+                    case 0: changed.records[0].immediate = 1; break;
+                    case 1: changed.records[0].decorations = 1; break;
+                    case 2: changed.records[0].mode = BUSTER_X86_MEMORY_BASE; break;
+                    case 3: changed.records[0].vvvv = changed.records[0].rm; break;
+                    case 4: changed.records[1].rm = changed.records[0].vvvv; break;
+                    case 5: changed.records[1].form = X86_FORM_VMOVAPD_X_XM128; break;
+                    case 6: changed.operand_classes[1] = d == 0 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_F32; break;
+                    case 7: changed.result_bytes = 16; break;
+                    default:
+                        changed.records[2] = changed.records[1];
+                        changed.record_count = 3;
+                        break;
+                    }
+                    IrSimdTypedOperation mutated;
+                    memset(&mutated, 0x3c, sizeof(mutated));
+                    const IrSimdTypedStatus result = ir_simd_typed_row(&changed, UINT64_MAX, &mutated);
+                    snprintf(description, sizeof(description), "%s: the %s row changed one way (%u) isn't IR_FMA", names[t], d == 0 ? "float" : "double", m);
+                    ir_test_expect(tally, !(result == IR_SIMD_TYPED_OK && mutated.fma), description);
+                }
+            }
+        }
+    }
+    ir_test_expect(tally, decodes == 3 * 2 * 3, "every FMA row decodes at every target with FMA");
+    // IR_FMA's semantics against the hardware's.
+    static const uint64_t doubles[16] = { 0x7ff8000000000001, 0xfff8000000000002, 0x7ff0000000000003, 0x7ff0000000000000, 0xfff0000000000000, 0, 0x8000000000000000,
+                                          0x3ff0000000000000, 0x4000000000000000, 0xbff8000000000000, 0x0000000000000001, 0x7fefffffffffffff, 0x3ff0000000000001,
+                                          0xbcb0000000000000, 0x0010000000000000, 0x3fefffffffffffff };
+    static const uint32_t floats[16] = { 0x7fc00001, 0xffc00002, 0x7f800003, 0x7f800000, 0xff800000, 0, 0x80000000, 0x3f800000, 0x40000000, 0xbfc00000, 1,
+                                         0x7f7fffff, 0x3f800001, 0xb3800000, 0x00800000, 0x3f7fffff };
+    const X86Target host = x86_target_native();
+    uint32_t compared = 0;
+    uint32_t differ = 0;
+    for (uint32_t i = 0; (host.features & BUSTER_X86_FEATURE(FMA)) != 0 && i < 16 * 16 * 16; i += 1)
+    {
+        const uint32_t x = i / 256;
+        const uint32_t y = (i / 16) % 16;
+        const uint32_t z = i % 16;
+        double a = 0;
+        double b = 0;
+        double c = 0;
+        memcpy(&a, &doubles[x], 8);
+        memcpy(&b, &doubles[y], 8);
+        memcpy(&c, &doubles[z], 8);
+        __asm__("vfmadd213sd %2, %1, %0" : "+x"(b) : "x"(a), "x"(c));
+        uint64_t hardware = 0;
+        memcpy(&hardware, &b, 8);
+        float p = 0;
+        float q = 0;
+        float r = 0;
+        memcpy(&p, &floats[x], 4);
+        memcpy(&q, &floats[y], 4);
+        memcpy(&r, &floats[z], 4);
+        __asm__("vfmadd213ss %2, %1, %0" : "+x"(q) : "x"(p), "x"(r));
+        uint32_t single = 0;
+        memcpy(&single, &q, 4);
+        differ += ir_fma_bits(IR_F64, doubles[x], doubles[y], doubles[z]) != hardware;
+        differ += ir_fma_bits(IR_F32, floats[x], floats[y], floats[z]) != single;
+        compared += 2;
+    }
+    ir_test_expect(tally, differ == 0, "IR_FMA's bits are vfmadd213's of every triple, NaNs in the formula's order");
+    printf("  IR SIMD rows: %u scalar fused multiply-add rows decode to IR_FMA; its semantics match the host's FMA on %u of %u triples\n", decodes,
+           compared - differ, compared);
+}
+
 static void ir_simd_typed_test(IrTestTally* tally)
 {
     ir_simd_typed_test_selects(tally);
@@ -3027,6 +3382,8 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_simd_typed_test_ternlogs(tally);
     ir_simd_typed_test_compresses(tally);
     ir_simd_typed_test_masked_memory(tally);
+    ir_simd_typed_test_scattered_memory(tally);
+    ir_simd_typed_test_scatters(tally);
     ir_simd_typed_test_lane_moves(tally);
     ir_simd_typed_test_reductions(tally);
     ir_simd_typed_test_lane_unaries(tally);
@@ -3277,6 +3634,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
                    "missing typed operation input is rejected before indexing a record");
     ir_simd_typed_test_masks(tally);
     ir_simd_typed_test_intrinsics(tally);
+    ir_simd_typed_test_fma(tally);
     ir_simd_typed_test_bits(tally);
     ir_simd_typed_test_overflows(tally);
     ir_simd_typed_test_compare_masks(tally);
