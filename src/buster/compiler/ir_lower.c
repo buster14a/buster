@@ -3234,6 +3234,14 @@ static __attribute__((unused)) IrCheck ir_lower_typed_target_scalar(const Tier0F
     return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, target_features, false, false);
 }
 
+// ir_lower_typed_target's replay with source identity columns, by the vector path or its scalar twin: #2541 step 3's
+// summaries under -g, whose expansions carry their callee's origins (IrDebugInline).
+static __attribute__((unused)) IrCheck ir_lower_typed_target_sources(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch,
+                                                                     IrFunction* result, bool scalar)
+{
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, !scalar && BUSTER_HOST_VECTOR != 0, target_features, false, true);
+}
+
 // The C driver's --tier1 (#1624): ir_lower_typed_target, but a vector wider than the target moves whole is taken, for
 // ir_vector_split to split into the target's widest vectors after promotion; by the vector path, or by its scalar twin.
 static __attribute__((unused)) IrCheck ir_lower_typed_target_pieces(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch,

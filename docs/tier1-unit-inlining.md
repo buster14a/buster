@@ -680,8 +680,8 @@ smaller.
   with the parameter count and replaced through a permute of the argument
   row (a gather past 16 arguments). The caller's own operands move by a step
   function of the sites before them: K masked adds for a few sites, a gather
-  through the destination table for many; which, by K, is measured in
-  step 1.
+  through the destination table for many; which, by K, step 3 measured (its
+  section below): the adds up to 8 sites.
 - **The scalar twin** is the existing rewrite's loop, an operand at a time
   through the same tables, and the two must write identical columns.
 
@@ -1026,6 +1026,49 @@ larger hashing and interning functions with several callers
 `intern_find_or_add_hashed`, `refine_gap_is_splices`) and the C library's
 (`memcmp`, `memcpy`): the limits, not the reach, leave them.
 
+### Step 3, measured
+
+- **Inlined subroutines under `-g`** (the gate: gdb's backtrace shows an
+  expanded callee: **met**). Under `-g` the summaries are lowered with their
+  source identities, and an expansion gives its callee's instructions origins
+  past the caller's own typed entries, an instance's (`IrDebugInline`: the
+  callee, its origins, the call's origin and the instance it is nested in, the
+  callee's own instances following it), which every pass carries as it carries
+  origins. The location proofs read an instance's code as its outermost call
+  (`check_tier1_debug`); the rows read its entries as the callee's tokens, so
+  its lines are the callee's; and the DWARF has a `DW_TAG_inlined_subroutine` per
+  instance whose call is in the function's file, nested in the lexical block
+  that holds its call and in the instance it was expanded in, its abstract
+  origin the callee's `DW_TAG_subprogram`, its ranges its code's. On
+  `test-check-debug`'s fixture gdb, stopped at a callee's line in `main`'s code,
+  shows the callee, its caller at its call's line and `main`; `-g` changes no
+  code (an executable's sections are the same bytes, and sqlite3.c's
+  `--tier1 -g -c` passes `llvm-dwarfdump --verify` with 16,708 instances). Not
+  yet: an instance's callee locals (unavailable, as before), a call site in
+  another file than the function's, and gdb's breakpoints by a callee's name,
+  which take its out-of-line copy only (`break file:line` takes every
+  instance). On the way: the rows' room was the typed entries plus two a body,
+  which a body's source events can pass (an instance's entries are its
+  callee's); it is now the rows the bodies have.
+- **Callees in cycles into callers outside them: measured, not adopted.** A
+  cycle's member copied into a caller outside its cycle (its calls of the cycle
+  staying calls, the inliner's `IrInlineUnit.only` rule by component), against
+  step 2's head on the 9700X (nine rounds): speedtest1 +0.14 (-0.27 to +0.54),
+  Lua -0.94 (-3.29 to +1.41; `closures.lua` -3.99, faster at 4 of 4), for
+  `.text` +1.1% and +1.9% and the compile +1.0%; the compiler built by it
+  executes as many returns. No program the gate measures gains; the patch and
+  its numbers are in the record.
+- **The splice's rule for a caller's own operands.** On the 9700X
+  (`splice_rule_bench.c`), a gather through the destination tables costs 5.3 to
+  7.3 cycles a node whatever the sites, and a compare and masked add a site
+  over every site (an operand may name a value laid out after its use) less at
+  every caller size measured up to 8 sites and not at 12; on sqlite3.c, 87% of
+  the callers with expansions have at most 8 sites, 47.5% of the nodes copied.
+  The caller's runs take the masked adds up to 8 sites
+  (`IrInlineOptions.add_sites`) and the gathers past them, the same columns by
+  both and by the scalar twin (`test-ir-inline` runs each unit both ways). It
+  is under 0.1% of a compile either way, which no end-to-end run can see.
+
 ### Expected gains
 
 As changes of `--tier1`'s user cycles, with the measurements each rests on:
@@ -1085,10 +1128,11 @@ prototype's, which leaves the 128-bit calls.
 - **Compile time.** The lever's cost is the code's growth through the whole
   back half, on a pipeline that already takes 3.45 times Tier 0's time. It is
   worth less the slower that pipeline is; #2538's design owns that.
-- **Debugging.** Until step 3, an expanded callee has no frame in a backtrace
-  and its locals no locations. `-g` users who need them have
-  `--tier1-no-inline`; `-O1` and above selecting Tier 1 would need step 3 or
-  an `-Og` that does not inline.
+- **Debugging.** Since step 3 an expanded callee has a frame in a backtrace
+  (its instance's `DW_TAG_inlined_subroutine`) and its lines; its locals still
+  have no locations. `-g` users who need them have `--tier1-no-inline`; `-O1`
+  and above selecting Tier 1 would need those locations or an `-Og` that does
+  not inline.
 - **Code size.** `-Os` and `-Oz`, if they ever select Tier 1, want the
   shrinking and single-site classes alone.
 - **Recursion's stack.** Expanding into a recursive function grows its frame

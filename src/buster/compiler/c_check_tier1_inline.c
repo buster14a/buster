@@ -728,8 +728,10 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
     IrCheck check = ir_check(output != 0 && analyses != 0 && !function->calls_returns_twice ? IR_OK : IR_ERROR_UNSUPPORTED, BUSTER_IR_NONE, 0);
     if (check.error == IR_OK)
     {
-        check = scalar ? ir_lower_typed_target_scalar(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered) :
-                         ir_lower_typed_target(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered);
+        // Under -g with its source identities, which its callers' expansions carry as an instance's (#2541 step 3).
+        check = inlining->sources ? ir_lower_typed_target_sources(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered, scalar) :
+                scalar            ? ir_lower_typed_target_scalar(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered) :
+                                    ir_lower_typed_target(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered);
     }
     IrFunction expanded = lowered;
     uint32_t inlined = 0;

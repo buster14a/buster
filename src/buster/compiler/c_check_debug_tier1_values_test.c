@@ -669,3 +669,115 @@ static void check_debug_tier1_values_test(CheckDebugTestTally* tally, const char
         }
     }
 }
+
+// #2541 step 3: Tier 1's expanded callees under -g. Two static callees, one expanded into the other and both into main,
+// whose code has no call left: each expansion is a DW_TAG_inlined_subroutine nested as it was expanded, its rows its
+// callee's lines, so that gdb, stopped at a line of the innermost callee in main's code, shows that callee's frame, its
+// caller's at its call's line and main's at its own. By both paths and by one lane and eight (the same bytes); -g
+// changes no code; llvm-dwarfdump --verify passes.
+static const char check_debug_tier1_inline_source[] =
+    "#line 1 \"dbg_tier1_inline.c\"\n"
+    "int printf(const char *, ...);\n"
+    "volatile int t1i_sink;\n"
+    "static int t1i_square(int x)\n"
+    "{\n"
+    "    int y = x * x;\n"
+    "    t1i_sink = y;\n"
+    "    return y + 1;\n"
+    "}\n"
+    "static int t1i_twice(int x)\n"
+    "{\n"
+    "    return t1i_square(x) + t1i_square(x + 1);\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    int total = 0;\n"
+    "    for (int i = 0; i < 3; i += 1)\n"
+    "    {\n"
+    "        total += t1i_twice(i);\n"
+    "    }\n"
+    "    printf(\"T1I %d\\n\", total);\n"
+    "    return total != 25;\n"
+    "}\n";
+
+static const char check_debug_tier1_inline_script[] =
+    "set pagination off\n"
+    "break dbg_tier1_inline.c:6\n"
+    "run\n"
+    "bt\n"
+    "printf \"GDB-T1I-DONE\\n\"\n"
+    "kill\n";
+
+// Whether gdb's backtrace in `transcript` has frame `frame` as `function` at `line` of the fixture.
+static bool check_debug_tier1_inline_frame(const char* transcript, uint32_t frame, const char* function, uint32_t line)
+{
+    char start[64];
+    char place[64];
+    snprintf(start, sizeof(start), "#%u  %s (", frame, function);
+    snprintf(place, sizeof(place), "dbg_tier1_inline.c:%u\n", line);
+    const char* found = transcript != NULL ? strstr(transcript, start) : NULL;
+    const char* end = found != NULL ? strchr(found, '\n') : NULL;
+    const char* at = found != NULL ? strstr(found, place) : NULL;
+    return found != NULL && end != NULL && at != NULL && at + strlen(place) - 1 == end;
+}
+
+static void check_debug_tier1_inline_test(CheckDebugTestTally* tally, const char* directory, Arena* arena)
+{
+    char source[PATH_MAX];
+    char script[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/dbg_tier1_inline.c", directory);
+    snprintf(script, sizeof(script), "%s/dbg_tier1_inline.gdb", directory);
+    const bool written = foreign_test_write(source, check_debug_tier1_inline_source, sizeof(check_debug_tier1_inline_source) - 1) &&
+                         foreign_test_write(script, check_debug_tier1_inline_script, sizeof(check_debug_tier1_inline_script) - 1);
+    check_debug_test_expect(tally, written, "write the Tier 1 inline-instance fixture and its debugger script", directory);
+    static const CheckDebugTier1ValuesVariant variants[] = {
+        { .name = "default" },
+        { .name = "scalar", .scalar = true },
+    };
+    String8 baseline = { 0 };
+    for (uint32_t v = 0; written && v < BUSTER_ARRAY_LENGTH(variants); v += 1)
+    {
+        char program[PATH_MAX];
+        char plain[PATH_MAX];
+        char wide[PATH_MAX];
+        snprintf(program, sizeof(program), "%s/dbg_t1_inline_%s", directory, variants[v].name);
+        snprintf(plain, sizeof(plain), "%s/dbg_t1_inline_%s_plain", directory, variants[v].name);
+        snprintf(wide, sizeof(wide), "%s/dbg_t1_inline_%s_lanes8", directory, variants[v].name);
+        const bool built = check_debug_tier1_values_compile(tally, source, NULL, program, variants + v, "1", true, false, arena);
+        const bool unadorned = check_debug_tier1_values_compile(tally, source, NULL, plain, variants + v, "1", false, false, arena);
+        const bool laned = check_debug_tier1_values_compile(tally, source, NULL, wide, variants + v, "8", true, false, arena);
+        const String8 debug = built ? foreign_test_read(arena, program) : (String8){ 0 };
+        const String8 other = unadorned ? foreign_test_read(arena, plain) : (String8){ 0 };
+        const String8 eight = laned ? foreign_test_read(arena, wide) : (String8){ 0 };
+        check_debug_test_expect(tally, built && unadorned && check_debug_tier1_values_same_code(debug, other), "-g changes no code of Tier 1's expanded callees", program);
+        check_debug_test_expect(tally, debug.pointer != NULL && eight.pointer != NULL && debug.length == eight.length && memcmp(debug.pointer, eight.pointer, debug.length) == 0,
+                                "the inline instances' DWARF is byte-identical by one lane and eight", wide);
+        check_debug_test_expect(tally, v == 0 || (baseline.pointer != NULL && debug.pointer != NULL && baseline.length == debug.length &&
+                                                  memcmp(baseline.pointer, debug.pointer, debug.length) == 0),
+                                "the inline instances' DWARF is byte-identical by both paths", program);
+        baseline = v == 0 ? debug : baseline;
+        char report[PATH_MAX + 24];
+        char errors[PATH_MAX + 24];
+        snprintf(report, sizeof(report), "%s.t1-verify", program);
+        snprintf(errors, sizeof(errors), "%s.t1-errors", program);
+        char* verify[] = { (char*)"llvm-dwarfdump", (char*)"--verify", (char*)program, NULL };
+        const bool verified = built && object_test_run(verify, report, errors) == 0;
+        const String8 verification = verified ? foreign_test_read(arena, report) : (String8){ 0 };
+        check_debug_test_expect(tally, verification.pointer != NULL && strstr(verification.pointer, "No errors.") != NULL,
+                                "the inline instances' DWARF passes llvm-dwarfdump --verify", report);
+        snprintf(report, sizeof(report), "%s.t1-run", program);
+        char* run[] = { (char*)program, NULL };
+        const bool ran = built && object_test_run(run, report, errors) == 0;
+        const String8 output = ran ? foreign_test_read(arena, report) : (String8){ 0 };
+        check_debug_test_expect(tally, output.pointer != NULL && strstr(output.pointer, "T1I 25\n") != NULL, "the inline-instance fixture runs as written", report);
+        snprintf(report, sizeof(report), "%s.t1-gdb", program);
+        char* gdb[] = { (char*)"gdb", (char*)"-nx", (char*)"-batch", (char*)"-directory", (char*)directory, (char*)"-x", script, program, NULL };
+        const bool inspected = built && object_test_run(gdb, report, errors) == 0;
+        const String8 transcript = inspected ? foreign_test_read(arena, report) : (String8){ 0 };
+        const bool done = transcript.pointer != NULL && strstr(transcript.pointer, "GDB-T1I-DONE\n") != NULL;
+        check_debug_test_expect(tally, done && check_debug_tier1_inline_frame(transcript.pointer, 0, "t1i_square", 6) &&
+                                      check_debug_tier1_inline_frame(transcript.pointer, 1, "t1i_twice", 11) &&
+                                      check_debug_tier1_inline_frame(transcript.pointer, 2, "main", 18),
+                                "gdb's backtrace in main's code shows the expanded callees' frames at their calls' lines", report);
+    }
+}

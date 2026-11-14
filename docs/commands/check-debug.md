@@ -68,6 +68,13 @@ exit. Real scalar reads after the checkpoints keep each value relevant to the
 program; neither source names nor stale values from a preceding iteration can
 satisfy these positive checks.
 
+Its inline-instance fixture (#2541 step 3, `check_debug_tier1_inline_test`)
+expands a static callee into another and both into `main`, by both paths and
+by one lane and eight (the same bytes), with `-g` and without (the same code):
+`llvm-dwarfdump --verify` passes, the program prints `T1I 25`, and gdb, stopped
+at a line of the innermost callee in `main`'s code, shows that callee's frame,
+its caller's at its call's line and `main`'s at its own.
+
 The bounded variant set covers default, scalar, pre/post scheduling,
 frame-pointer and no-rematerialization native builds, and a `-c -g` object
 linked by GNU ld, lld and `link-foreign`. Each native variant compares its

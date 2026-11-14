@@ -576,9 +576,25 @@ struct IrDebugRegion
     uint8_t type;
 };
 
+// An expanded callee's instance (#2541 step 3): the origins [first, first + count) are its typed entries (its entry k
+// is origin first + k), past the function's own (IrDebugInfo.entry_count); its callee is the unit's symbol `symbol`,
+// expanded at the call whose origin is `call` (the function's own entry, or one of the instance `parent`'s, NONE for
+// the function's), so that instances nest as their expansions did. Its callee's own instances follow it, each nested.
+typedef struct IrDebugInline IrDebugInline;
+struct IrDebugInline
+{
+    uint32_t symbol;
+    uint32_t first;
+    uint32_t count;
+    uint32_t parent;
+    uint32_t call;
+};
+
 // Optional source identities (#1114), separate from the instruction/slot columns that execution consumes. An origin
 // is a typed-stream entry; a local is its original typed local. NONE means generated/unknown, never a nearby source.
-// Rewriters keep the original bounds and rebuild the current lengths before their old arenas can be retired.
+// Rewriters keep the original bounds and rebuild the current lengths before their old arenas can be retired. An origin
+// at or past entry_count names an expanded callee's entry (`inlines`, #2541 step 3), below origin_count; a sidecar
+// without instances may leave origin_count 0 (ir_debug_origin_limit).
 typedef struct IrDebugInfo IrDebugInfo;
 struct IrDebugInfo
 {
@@ -599,7 +615,27 @@ struct IrDebugInfo
     // witnessed source regions. The flags are mutually exclusive; neither flag admits an escaped/volatile local.
     uint8_t* binding_flags;
     uint32_t first_block_end;
+    uint32_t origin_count;
+    const IrDebugInline* inlines;
+    uint32_t inline_count;
 };
+
+// The origins a sidecar's instructions may have: its own entries and its expanded callees' (IrDebugInline).
+static uint32_t ir_debug_origin_limit(const IrDebugInfo* debug)
+{
+    return debug->origin_count > debug->entry_count ? debug->origin_count : debug->entry_count;
+}
+
+// The instance of `debug`'s whose own entries include `origin`, or NONE for the function's own entry (or none).
+static uint32_t ir_debug_instance(const IrDebugInfo* debug, uint32_t origin)
+{
+    uint32_t found = BUSTER_IR_NONE;
+    for (uint32_t k = 0; origin != BUSTER_IR_NONE && origin >= debug->entry_count && k < debug->inline_count; k += 1)
+    {
+        found = origin - debug->inlines[k].first < debug->inlines[k].count ? k : found;
+    }
+    return found;
+}
 
 struct IrFunction
 {
@@ -1104,6 +1140,8 @@ static bool ir_debug_create(Arena* arena, IrFunction* function, const IrDebugInf
         IrDebugBinding* bindings = ir_allocate(arena, source->binding_count, sizeof(IrDebugBinding), &ok);
         IrDebugRegion* regions = ir_allocate(arena, source->region_count, sizeof(IrDebugRegion), &ok);
         uint8_t* binding_flags = ir_allocate(arena, source->binding_flags != NULL ? source->local_count : 0, 1, &ok);
+        // The instances are copied, not shared: the source's arena may be retired before the result's.
+        IrDebugInline* inlines = ir_allocate(arena, source->inline_count, sizeof(IrDebugInline), &ok);
         if (ok)
         {
             *debug = (IrDebugInfo){
@@ -1121,6 +1159,8 @@ static bool ir_debug_create(Arena* arena, IrFunction* function, const IrDebugInf
                 .region_count = source->region_count,
                 .binding_flags = binding_flags,
                 .first_block_end = source->first_block_end,
+                .origin_count = source->origin_count,
+                .inline_count = source->inline_count,
             };
             if (function->instruction_count != 0)
             {
@@ -1146,6 +1186,11 @@ static bool ir_debug_create(Arena* arena, IrFunction* function, const IrDebugInf
             {
                 memcpy(binding_flags, source->binding_flags, source->local_count);
             }
+            if (source->inline_count != 0)
+            {
+                memcpy(inlines, source->inlines, (uint64_t)source->inline_count * sizeof(IrDebugInline));
+            }
+            debug->inlines = source->inline_count != 0 ? inlines : NULL;
         }
     }
     if (ok)
@@ -1870,9 +1915,24 @@ static IrCheck ir_check_shape(const IrFunction* f)
     }
     for (uint32_t i = 0; check.error == IR_OK && debug != NULL && i < n; i += 1)
     {
-        if (debug->origins[i] != BUSTER_IR_NONE && debug->origins[i] >= debug->entry_count)
+        if (debug->origins[i] != BUSTER_IR_NONE && debug->origins[i] >= ir_debug_origin_limit(debug))
         {
             check = ir_check(IR_ERROR_METADATA, i, debug->origins[i]);
+        }
+    }
+    // The instances (IrDebugInline): in order, each past the function's entries and within the origins, its parent an
+    // earlier instance, its call an entry of its parent's (the function's own for none).
+    for (uint32_t k = 0; check.error == IR_OK && debug != NULL && k < debug->inline_count; k += 1)
+    {
+        const IrDebugInline instance = debug->inlines[k];
+        const uint32_t limit = ir_debug_origin_limit(debug);
+        const bool placed = debug->inlines != NULL && instance.first >= debug->entry_count && instance.first <= limit && instance.count <= limit - instance.first &&
+                            (k == 0 || instance.first >= debug->inlines[k - 1].first + debug->inlines[k - 1].count);
+        const bool nested = instance.parent == BUSTER_IR_NONE ? instance.call < debug->entry_count :
+                            instance.parent < k && instance.call - debug->inlines[instance.parent].first < debug->inlines[instance.parent].count;
+        if (!placed || !nested)
+        {
+            check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, k);
         }
     }
     for (uint32_t s = 0; check.error == IR_OK && debug != NULL && s < f->slot_count; s += 1)
