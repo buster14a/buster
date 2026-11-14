@@ -128,6 +128,14 @@ typedef enum IrSimdOperation
     // the IR's flags: vpmultishiftqb's bytes of b's quadword from the bits a's bytes name, or vpsadbw's sums of absolute
     // differences.
     IR_SIMD_QUADWORD_OP,
+    // A dot product into each doubleword (#2780, ir.c's BUSTER_IR_INTRINSIC_DOT), the action's `index` the IR's flags: a,
+    // the accumulator, plus the products of b's and c's 4 bytes (b's unsigned, c's signed) or 2 signed words in it,
+    // wrapping or saturated to a signed doubleword.
+    IR_SIMD_DOT,
+    // An operation of a's and b's lanes in pairs (#2780, ir.c's BUSTER_IR_INTRINSIC_PAIRWISE), the action's `index` the IR's
+    // flags: vpmaddwd's and vpmaddubsw's sums of adjacent products, or a pack's saturating narrowing of each 16-byte lane of
+    // a, then b.
+    IR_SIMD_PAIRWISE,
     IR_SIMD_OPERATION_COUNT,
 } IrSimdOperation;
 
@@ -277,7 +285,7 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                           action->operation == IR_SIMD_LANE_EXTRACT || action->operation == IR_SIMD_LANE_INSERT || action->operation == IR_SIMD_MOVEMASK ||
                           action->operation == IR_SIMD_REDUCE || action->operation == IR_SIMD_LANE_UNARY || action->operation == IR_SIMD_FROUND ||
                           action->operation == IR_SIMD_CVTT || action->operation == IR_SIMD_BITSHUFFLE || action->operation == IR_SIMD_QUADWORD_OP ||
-                          action->operation == IR_SIMD_FUNNEL);
+                          action->operation == IR_SIMD_FUNNEL || action->operation == IR_SIMD_DOT || action->operation == IR_SIMD_PAIRWISE);
         valid = valid && (!action->volatile_memory || action->operation == IR_SIMD_LOAD || action->operation == IR_SIMD_STORE);
         valid = valid && ir_simd_lane_valid(action->operation, lane);
         // A floating comparison's predicates are C's: ==, !=, <, <=, > and >= (no unsigned ones).
@@ -336,6 +344,8 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                 break;
             case IR_SIMD_CVTT: valid = valid && type == IR_SIMD_NONE && a == IR_SIMD_V4I32 && b == IR_SIMD_NONE && c == IR_SIMD_NONE && action->index <= 3; break;
             case IR_SIMD_QUADWORD_OP: valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE && action->index <= 3; break;
+            case IR_SIMD_DOT: valid = valid && ir_simd_vector(type) && a == type && b == type && c == type && action->index <= 3; break;
+            case IR_SIMD_PAIRWISE: valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE && action->index <= 5; break;
             case IR_SIMD_BITSHUFFLE:
                 valid = valid && ir_simd_vector(a) && b == a && c == IR_SIMD_NONE && type == ir_simd_lane_mask(a, IR_SIMD_LANE_I8) && action->index == 0;
                 break;
@@ -928,6 +938,72 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
                 value = action->index == 0 ? value | (rotated & 0xff) << (8 * j) : value + (left > right ? left - right : right - left);
             }
             staged.words[q] = value;
+        }
+    }
+    else if (valid && action->operation == IR_SIMD_DOT)
+    {
+        // Each doubleword: a's plus the products of b's and c's lanes in it, 4 unsigned bytes of b times c's signed ones
+        // (index 0, 1) or 2 signed words each (2, 3); the sum wraps, or (odd index) saturates to a signed doubleword.
+        const uint32_t doublewords = ir_simd_bits(action->result) / 32;
+        const bool words = action->index >= 2;
+        const bool saturated = (action->index & 1) != 0;
+        for (uint32_t d = 0; d < doublewords; d += 1)
+        {
+            int64_t sum = (int32_t)(uint32_t)ir_simd_lane_read(values[0], 32, d);
+            for (uint32_t j = 0; j < (words ? 2u : 4u); j += 1)
+            {
+                const uint64_t left = ir_simd_lane_read(values[1], words ? 16 : 8, (words ? 2 : 4) * d + j);
+                const uint64_t right = ir_simd_lane_read(values[2], words ? 16 : 8, (words ? 2 : 4) * d + j);
+                sum += words ? (int64_t)(int16_t)left * (int16_t)right : (int64_t)left * (int8_t)right;
+            }
+            const int64_t clamped = sum > INT32_MAX ? INT32_MAX : sum < INT32_MIN ? INT32_MIN : sum;
+            ir_simd_lane_write(&staged, 32, d, (uint32_t)(saturated ? clamped : sum));
+        }
+    }
+    else if (valid && action->operation == IR_SIMD_PAIRWISE)
+    {
+        // vpmaddwd's doublewords and vpmaddubsw's saturated words, the sums of adjacent products; or a pack's narrowing of
+        // each 16-byte lane of a, then of b, with saturation of the signed source lanes to the result's signed or unsigned
+        // range.
+        const uint32_t bits = ir_simd_bits(action->result);
+        if (action->index <= 1)
+        {
+            const bool words = action->index == 0;
+            const uint32_t lane_bits = words ? 32 : 16;
+            for (uint32_t lane = 0; lane < bits / lane_bits; lane += 1)
+            {
+                int64_t sum = 0;
+                for (uint32_t j = 0; j < 2; j += 1)
+                {
+                    const uint64_t left = ir_simd_lane_read(values[0], lane_bits / 2, 2 * lane + j);
+                    const uint64_t right = ir_simd_lane_read(values[1], lane_bits / 2, 2 * lane + j);
+                    sum += words ? (int64_t)(int16_t)left * (int16_t)right : (int64_t)left * (int8_t)right;
+                }
+                const int64_t clamped = sum > INT16_MAX ? INT16_MAX : sum < INT16_MIN ? INT16_MIN : sum;
+                ir_simd_lane_write(&staged, lane_bits, lane, words ? (uint32_t)sum : (uint16_t)clamped);
+            }
+        }
+        else
+        {
+            // Packs: 2 and 3 words into bytes, 4 and 5 doublewords into words; even signed, odd unsigned.
+            const uint32_t pack = action->index - 2;
+            const uint32_t source_bits = pack < 2 ? 16 : 32;
+            const uint32_t result_bits = source_bits / 2;
+            const bool unsigned_range = (pack & 1) != 0;
+            const int64_t high = unsigned_range ? (int64_t)((UINT64_C(1) << result_bits) - 1) : (int64_t)((UINT64_C(1) << (result_bits - 1)) - 1);
+            const int64_t low = unsigned_range ? 0 : -(int64_t)(UINT64_C(1) << (result_bits - 1));
+            const uint32_t per_lane = 128 / source_bits;
+            for (uint32_t lane = 0; lane < bits / 128; lane += 1)
+            {
+                for (uint32_t j = 0; j < 2 * per_lane; j += 1)
+                {
+                    const IrSimdValue* from = j < per_lane ? values[0] : values[1];
+                    const uint64_t raw = ir_simd_lane_read(from, source_bits, lane * per_lane + j % per_lane);
+                    const int64_t x = source_bits == 16 ? (int64_t)(int16_t)raw : (int64_t)(int32_t)raw;
+                    const int64_t clamped = x > high ? high : x < low ? low : x;
+                    ir_simd_lane_write(&staged, result_bits, lane * 2 * per_lane + j, (uint64_t)clamped & ((UINT64_C(1) << result_bits) - 1));
+                }
+            }
         }
     }
     else if (valid && action->operation == IR_SIMD_BITSHUFFLE)

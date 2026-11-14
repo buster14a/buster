@@ -377,6 +377,12 @@ typedef enum Tier1SelectRule
 // scale's log2, `width` its stored vector's bytes and `source_width` its index's; values[0] the base, values[1] the
 // index, values[2] the mask and values[3] the stored vector.
 #define BUSTER_TIER1_VECTOR_SCATTER 33
+// A pairwise operation (#2780): `immediate` the IR's flags, its operation; ir_simd_pairwise_forms' form of values[0]
+// (vvvv) and values[1] (rm) into the destination.
+#define BUSTER_TIER1_VECTOR_PAIRWISE 34
+// A dot product (#2780, tier1_select_dot): `immediate` the IR's flags, its operation; values[0] the accumulator, which
+// the destination takes first unless it holds it, values[1] in vvvv and values[2] in rm.
+#define BUSTER_TIER1_VECTOR_DOT 35
 // A floating operation at its own rounding of values[0] and values[1] (#1840): `immediate` the IR's flags, one record of
 // ir_simd_fround_forms' with the rounding in its decorations.
 #define BUSTER_TIER1_VECTOR_FROUND 26
@@ -1545,6 +1551,36 @@ static void tier1_select_permute2(Tier1SelectRecords* result, const Tier1SelectH
 // A bitwise function of three vectors (#1840): vpternlogd (ir_simd_ternlog_forms) computes table bit (reg << 2 | vvvv << 1
 // | rm) into its first operand's register. The operand whose register the destination already holds is the first, the
 // table's bits permuted for the new order; where it holds none of them, the first operand is moved into it first.
+// A dot product (#2780, BUSTER_TIER1_VECTOR_DOT): vpdpbusd to vpdpwssds (ir_simd_dot_forms) of values[1] (vvvv) and
+// values[2] (rm) into the destination, which holds the accumulator, values[0], first: moved there unless it holds it,
+// after an operand the destination holds is saved in the vector class's scratch register, as a funnel shift's.
+static void tier1_select_dot(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
+{
+    const uint8_t scratch = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+    const uint8_t x = destination & 15;
+    const uint8_t accumulator = holes->left & 15;
+    uint8_t first = holes->right & 15;
+    uint8_t second = holes->third & 15;
+    if (x != accumulator)
+    {
+        if (first == x || second == x)
+        {
+            tier1_select_append(result, tier1_select_class_move(scratch, x, holes->width, false));
+        }
+        first = first == x ? scratch : first;
+        second = second == x ? scratch : second;
+        tier1_select_append(result, tier1_select_class_move(x, accumulator, holes->width, false));
+    }
+    const X86Instruction record = {
+        .form = ir_simd_dot_forms[holes->immediate & 3][holes->width == 16 ? 0 : holes->width == 32 ? 1 : 2],
+        .reg = x,
+        .vvvv = first,
+        .rm = second,
+        .mode = BUSTER_X86_REGISTER_DIRECT,
+    };
+    tier1_select_append(result, record);
+}
+
 static void tier1_select_ternlog(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
 {
     const uint8_t x = destination & 15;
@@ -2698,11 +2734,17 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         {
             tier1_select_funnel(&result, holes, destination);
         }
-        else if (kind == BUSTER_TIER1_VECTOR_QUADWORD_OP)
+        else if (kind == BUSTER_TIER1_VECTOR_QUADWORD_OP || kind == BUSTER_TIER1_VECTOR_PAIRWISE)
         {
-            const uint16_t form = ir_simd_quadword_op_forms[holes->immediate & 3][width == 16 ? 0 : width == 32 ? 1 : 2];
+            const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
+            const uint16_t form = kind == BUSTER_TIER1_VECTOR_QUADWORD_OP ? ir_simd_quadword_op_forms[holes->immediate & 3][at] :
+                                                                         ir_simd_pairwise_forms[holes->immediate % BUSTER_IR_PAIRWISE_OPERATIONS][at];
             const X86Instruction record = { .form = form, .reg = x, .vvvv = left, .rm = right, .mode = BUSTER_X86_REGISTER_DIRECT };
             tier1_select_append(&result, record);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_DOT)
+        {
+            tier1_select_dot(&result, holes, destination);
         }
         else if (kind == BUSTER_TIER1_VECTOR_BITSHUFFLE)
         {
@@ -5404,7 +5446,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                                                    op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_LANE_OP) || ir_intrinsic_ternary(c) ||
                                                                            c == BUSTER_IR_INTRINSIC_AES || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_REDUCE ||
                                                                            c == BUSTER_IR_INTRINSIC_LANE_UNARY || c == BUSTER_IR_INTRINSIC_FROUND ||
-                                                                           c == BUSTER_IR_INTRINSIC_QUADWORD_OP)))) ||
+                                                                           c == BUSTER_IR_INTRINSIC_QUADWORD_OP || c == BUSTER_IR_INTRINSIC_PAIRWISE)))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -5599,6 +5641,31 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.immediate = function->flags[node];
             base.values[0] = a;
             base.values[1] = b;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_PAIRWISE)
+        {
+            // A pairwise operation (#2780): its operation in the IR's flags.
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_PAIRWISE;
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            base.values[1] = b;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_DOT && ir_intrinsic_ternary(c))
+        {
+            // A dot product (#2780): its accumulator a, b, and its third operand the extra array's (ir_intrinsic_third).
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_DOT;
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            base.values[1] = b;
+            base.values[2] = ir_intrinsic_third(function, node);
             base.intrinsic_cost = 1;
             tier1_select_add_candidate(forest, node, &candidates, base);
         }

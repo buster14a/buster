@@ -69,12 +69,16 @@ struct Tier1MasksTest
     // x86-64-v4's forms with AVX512-FP16's complex multiplication, which no target of Tier 1's allows yet, for the
     // fixtures of rows of it (Tier1MasksFixture.fp16); and the forms of the fixture that runs.
     uint8_t* fp16;
+    // x86-64-v4's forms with AVX512-VNNI's, for the fixtures of its dot products (#2780, Tier1MasksFixture.vnni).
+    uint8_t* vnni;
     const uint8_t* forms;
     // x86-64-v4's features, which the typed programs' lowering takes as its output target (ir_lower_typed_target).
     uint64_t v4_features;
     bool native;
-    // Whether the host has AVX512-FP16 too, which a fixture of its rows needs to run natively.
+    // Whether the host has AVX512-FP16 too, which a fixture of its rows needs to run natively; and AVX512-VNNI, which a
+    // fixture of dot products needs (#2780).
     bool native_fp16;
+    bool native_vnni;
     // The fixtures that ran natively, by both paths, with and without rematerialization.
     uint32_t native_fixtures;
     // --print: each fixture's records, by the vector path, as GNU as reads them.
@@ -203,6 +207,10 @@ struct Tier1MasksTest
     // IR's quadword_op.
     uint32_t quadword_attempts;
     uint32_t quadword_rows;
+    // The pairwise operations and the dot products (#2780, tier1_masks_test_pairwise_dots): those tried, and those through
+    // every stage as the IR's pairwise or dot.
+    uint32_t pairwise_attempts;
+    uint32_t pairwise_rows;
     // The funnel shifts (#1840, tier1_masks_test_funnels): those tried, and those through every stage as the IR's funnel.
     uint32_t funnel_attempts;
     uint32_t funnel_rows;
@@ -282,6 +290,8 @@ struct Tier1MasksFixture
     // A row of AVX512-FP16's (#1283's review): its forms are test->fp16's, and it runs natively only where the host has
     // AVX512-FP16 (not the 9700X's Zen 5).
     bool fp16;
+    // Dot products of AVX512-VNNI's (#2780): its forms are test->vnni's, and it runs natively only where the host has it.
+    bool vnni;
     // Rows whose destination can't be a source's register (#1283's review): a gather's or a complex multiplication's,
     // whose records the test checks for distinct registers.
     bool exclusive;
@@ -612,9 +622,6 @@ static __attribute__((no_sanitize("function"))) void tier1_masks_test_complex_mo
         munmap(code, 4096);
     }
 }
-
-// The fixtures of AVX512-FP16's rows, the array's last, which run natively only where the host has it.
-#define BUSTER_TIER1_MASKS_TEST_FP16_FIXTURES 1
 
 static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
     {
@@ -1032,6 +1039,43 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
         .count = 1000,
         .calls = true,
         .divisions = true,
+    },
+    // Dot products (#2780) whose accumulators live past them, so that a destination isn't its accumulator's register
+    // and the accumulator is copied there first, and some of whose other operands die at them, so that a destination may
+    // be such an operand's register, which the vector class's scratch register then holds (tier1_select_dot): every
+    // operation at every width, an operand twice.
+    {
+        .name = "dot products whose accumulators live on",
+        .text = "function (ptr) -> void {\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = load.v16i32 %0 align=1\n"
+                "  %2 = address.ptr %0 offset=64\n"
+                "  %3 = load.v16i32 %2 align=1\n"
+                "  %4 = intrinsic.v16i32 %1, %3, %3 dot 0\n"
+                "  %5 = intrinsic.v16i32 %3, %4, %1 dot 1\n"
+                "  %6 = add.v16i32 %1, %3\n"
+                "  %7 = intrinsic.v16i32 %6, %5, %6 dot 2\n"
+                "  %8 = xor.v16i32 %7, %5\n"
+                "  %9 = address.ptr %0 offset=128\n"
+                "  %10 = store.void %9, %8 align=1\n"
+                "  %11 = address.ptr %0 offset=16\n"
+                "  %12 = load.v8i32 %11 align=1\n"
+                "  %13 = address.ptr %0 offset=80\n"
+                "  %14 = load.v8i32 %13 align=1\n"
+                "  %15 = intrinsic.v8i32 %12, %14, %12 dot 3\n"
+                "  %16 = intrinsic.v8i32 %14, %15, %15 dot 0\n"
+                "  %17 = sub.v8i32 %16, %12\n"
+                "  %18 = address.ptr %0 offset=192\n"
+                "  %19 = store.void %18, %17 align=1\n"
+                "  %20 = load.v4i32 %2 align=1\n"
+                "  %21 = intrinsic.v4i32 %20, %20, %20 dot 1\n"
+                "  %22 = intrinsic.v4i32 %21, %20, %21 dot 2\n"
+                "  %23 = address.ptr %0 offset=224\n"
+                "  %24 = store.void %23, %22 align=1\n"
+                "  %25 = ret.void\n"
+                "}\n",
+        .vnni = true,
     },
     // The IR's vectors (#141), v4i32, v8i32 and v16i32, beside the masks their comparisons make: their operations,
     // constants, phis, spills and saves around calls at their widths.
@@ -4186,9 +4230,9 @@ static void tier1_masks_test_fixture(Tier1MasksTest* test, const Tier1MasksFixtu
     const uint64_t output_mark = test->output.length;
     // A fixture of AVX512-FP16's rows runs natively only where the host has it, and its model only then.
     const bool native = test->native;
-    test->native = native && (!fixture->fp16 || test->native_fp16);
+    test->native = native && (!fixture->fp16 || test->native_fp16) && (!fixture->vnni || test->native_vnni);
     test->native_fixtures += test->native ? 1 : 0;
-    test->forms = fixture->fp16 ? test->fp16 : fixture->foundation ? test->foundation : fixture->avx ? test->avx : fixture->v3 ? test->v3 : fixture->v2 ? test->v2 :
+    test->forms = fixture->fp16 ? test->fp16 : fixture->vnni ? test->vnni : fixture->foundation ? test->foundation : fixture->avx ? test->avx : fixture->v3 ? test->v3 : fixture->v2 ? test->v2 :
                   fixture->baseline ? test->baseline : test->v4;
     IrFunction function;
     IrDominance dominance;
@@ -8278,6 +8322,150 @@ static void tier1_masks_test_quadword_ops(Tier1MasksTest* test)
     free(program);
 }
 
+// A pairwise operation's or a dot product's x86 builtin (#2780): whether `name` is __builtin_ia32_pmaddwd, pmaddubsw, one
+// of the packs, vpdpbusd, vpdpbusds, vpdpwssd or vpdpwssds at 128, 256 or 512 bits, and its IR kind (`dot`) and flags.
+static bool tier1_masks_test_pairwise_rule(const char* name, bool* dot, uint32_t* flags)
+{
+    static const struct
+    {
+        const char* prefix;
+        bool dot;
+        uint8_t flags;
+    } names[] = {
+        { "__builtin_ia32_pmaddwd", false, BUSTER_IR_PAIRWISE_MADD_WORDS },
+        { "__builtin_ia32_pmaddubsw", false, BUSTER_IR_PAIRWISE_MADD_BYTES },
+        { "__builtin_ia32_packsswb", false, BUSTER_IR_PAIRWISE_PACK_FIRST },
+        { "__builtin_ia32_packuswb", false, BUSTER_IR_PAIRWISE_PACK_FIRST + 1 },
+        { "__builtin_ia32_packssdw", false, BUSTER_IR_PAIRWISE_PACK_FIRST + 2 },
+        { "__builtin_ia32_packusdw", false, BUSTER_IR_PAIRWISE_PACK_FIRST + 3 },
+        { "__builtin_ia32_vpdpbusd", true, BUSTER_IR_DOT_BYTES },
+        { "__builtin_ia32_vpdpbusds", true, BUSTER_IR_DOT_BYTES_SATURATED },
+        { "__builtin_ia32_vpdpwssd", true, BUSTER_IR_DOT_WORDS },
+        { "__builtin_ia32_vpdpwssds", true, BUSTER_IR_DOT_WORDS_SATURATED },
+    };
+    bool found = false;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(names); i += 1)
+    {
+        const size_t length = strlen(names[i].prefix);
+        const char* bits = name + length;
+        if (strncmp(name, names[i].prefix, length) == 0 && (strcmp(bits, "128") == 0 || strcmp(bits, "256") == 0 || strcmp(bits, "512") == 0))
+        {
+            found = true;
+            *dot = names[i].dot;
+            *flags = names[i].flags;
+        }
+    }
+    return found;
+}
+
+// The pairwise operations and the dot products through the IR to Tier 1 (#2780): each pmaddwd, pmaddubsw, pack, vpdpbusd,
+// vpdpbusds, vpdpwssd and vpdpwssds builtin's row at each width, by the real producer, as the program's only row in 4
+// statements of the input buffer's vectors k, k + 1 (and k + 2 for a dot product) into the output's vector k, inputs whose
+// extreme bytes saturate. tier1_masks_test_typed_pipeline takes each through the IR as its pairwise or dot, which the
+// interpreter runs at every stage, and Tier 1 natively, against the instructions' definitions written out
+// (ir_test_pairwise_oracle). The dot products are AVX512-VNNI's, past x86-64-v4: their output target has it too, and a
+// host that runs Tier 1's code natively must have it, or they are left to test-ir-simd's decoding.
+static void tier1_masks_test_pairwise_dots(Tier1MasksTest* test)
+{
+    const uint64_t v4 = test->v4_features;
+    uint8_t* const v4_forms = test->v4;
+    const uint64_t vnni = BUSTER_X86_FEATURE(AVX512VNNI);
+    const X86Target target = { .features = v4 | vnni };
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
+    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
+    uint8_t* vnni_forms = malloc(X86_FORM_COUNT);
+    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
+    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && vnni_forms != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0,
+                                         "the pairwise operations' memory");
+    if (ready)
+    {
+        x86_target_forms(&target, vnni_forms);
+    }
+    const bool dots = !test->native || (x86_target_native().features & vnni) != 0;
+    uint64_t state = test->random ^ UINT64_C(0x3c6ef372fe94f82b);
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        bool dot = false;
+        uint32_t flags = 0;
+        if (!tier1_masks_test_pairwise_rule(rule->name, &dot, &flags) || (dot && !dots))
+        {
+            continue;
+        }
+        const uint64_t output_mark = test->output.length;
+        test->pairwise_attempts += 1;
+        test->v4_features = v4 | vnni;
+        test->v4 = vnni_forms;
+        Tier0Operation row;
+        const bool made = check_x86_lower_row_of(&target, rule, 0, 4, 0, false, &row) == NULL;
+        const uint32_t bytes = rule->bytes;
+        const uint32_t operands = dot ? 3 : 2;
+        bool ok = tier1_masks_test_expect(test, made && row.operand_count == operands && row.result_class == BUSTER_TYPED_CLASS_VECTOR, "the front end's pairwise operation's row");
+        program->count = 0;
+        program->overflow = false;
+        program->rows = true;
+        program->objects = false;
+        for (uint32_t k = 0; ok && k < 4; k += 1)
+        {
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, k * bytes / 8);
+            for (uint32_t j = 0; j < operands; j += 1)
+            {
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, (k + j) * bytes / 8 % 32);
+                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+            }
+            tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
+            tier0_test_mask_emit(program, BUSTER_TYPED_SET, row.result_class, bytes);
+        }
+        tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+        ok = ok && tier1_masks_test_expect(test, !program->overflow, "the pairwise operation's program fits");
+        Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
+        functions[0].operations = &row;
+        functions[0].operation_count = 1;
+        for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+        {
+            uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
+            uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
+            tier0_test_mask_inputs(in, &state);
+            // Extreme bytes and words, which the products and sums saturate at.
+            uint8_t* raw = (uint8_t*)in;
+            for (uint32_t k = 0; k < BUSTER_TIER1_MASKS_TEST_IN; k += 1)
+            {
+                const uint64_t random = tier0_test_mask_random(&state);
+                raw[k] = (random & 7) == 0 ? 0x80 : (random & 7) == 1 ? 0x7f : (random & 7) == 2 ? 0xff : raw[k];
+            }
+            memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
+            for (uint32_t k = 0; k < 4; k += 1)
+            {
+                const uint8_t* a = raw + k * bytes % 256;
+                const uint8_t* b = raw + (k + 1) * bytes % 256;
+                const uint8_t* c = raw + (k + 2) * bytes % 256;
+                ir_test_pairwise_oracle(dot, flags, a, b, c, bytes, wanted + k * bytes);
+            }
+        }
+        bool machine = false;
+        ok = ok && tier1_masks_test_typed_pipeline(test, rule->name, functions, true, inputs, expected, arenas, &machine);
+        ok = ok && tier1_masks_test_expect(test, !machine, "a pairwise operation or a dot product is the IR's, not a machine row");
+        test->pairwise_rows += ok;
+        test->v4_features = v4;
+        test->v4 = v4_forms;
+        tier1_masks_test_expect(test, test->scratch.length == 0, "the pairwise operations return the scratch arena");
+        arena_pop_to(&test->output, output_mark);
+        for (uint32_t k = 0; k < 3; k += 1)
+        {
+            arena_pop_to(&arenas[k], 0);
+        }
+    }
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        arena_release(&arenas[k]);
+    }
+    free(vnni_forms);
+    free(expected);
+    free(inputs);
+    free(program);
+}
+
 // The bit shuffles into a mask through the IR to Tier 1 (#1840): each vpshufbitqmb builtin's row (16, 32 and 64 bytes, its
 // masks in the mask class by check_x86_lower_masks), as the program's only row in 8 statements: the input's vectors at
 // 16k and 16k + 64 under the input word k in the odd statements and every lane in the even ones, its mask stored into
@@ -8736,6 +8924,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             .v2 = malloc(X86_FORM_COUNT),
             .avx = malloc(X86_FORM_COUNT),
             .fp16 = malloc(X86_FORM_COUNT),
+            .vnni = malloc(X86_FORM_COUNT),
             .output = arena_reserve(64u << 20),
             .scratch = arena_reserve(64u << 20),
             .execution = arena_reserve(64u << 20),
@@ -8743,7 +8932,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
         };
         uint8_t* baseline = malloc(X86_FORM_COUNT);
         uint8_t* foundation = malloc(X86_FORM_COUNT);
-        const bool ready = x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize() && test.v4 != 0 && test.fp16 != 0 && test.v3 != 0 && test.v2 != 0 && test.avx != 0 && baseline != 0 && foundation != 0 && test.output.base != 0 && test.scratch.base != 0 && test.execution.base != 0;
+        const bool ready = x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize() && test.v4 != 0 && test.fp16 != 0 && test.vnni != 0 && test.v3 != 0 && test.v2 != 0 && test.avx != 0 && baseline != 0 && foundation != 0 && test.output.base != 0 && test.scratch.base != 0 && test.execution.base != 0;
         if (tier1_masks_test_expect(&test, ready, "initialize the tables and arenas"))
         {
             X86Target v4 = { 0 };
@@ -8752,6 +8941,9 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             x86_target_forms(&v4, test.v4);
             memcpy(test.fp16, test.v4, X86_FORM_COUNT);
             test.fp16[X86_FORM_VFMULCPH_Z_Z_ZM512] = 1;
+            X86Target vnni = v4;
+            vnni.features |= BUSTER_X86_FEATURE(AVX512VNNI);
+            x86_target_forms(&vnni, test.vnni);
             test.forms = test.v4;
             const X86Target base = { .architecture = X86_ARCH_BASELINE };
             x86_target_forms(&base, baseline);
@@ -8775,6 +8967,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             const X86Target host = x86_target_native();
             test.native = parsed && (host.features & v4.features) == v4.features;
             test.native_fp16 = (host.extensions & BUSTER_X86_EXTENSION(AVX512FP16)) != 0;
+            test.native_vnni = (host.features & BUSTER_X86_FEATURE(AVX512VNNI)) != 0;
             for (uint32_t f_index = 0; f_index < BUSTER_ARRAY_LENGTH(tier1_masks_test_fixtures); f_index += 1)
             {
                 tier1_masks_test_fixture(&test, &tier1_masks_test_fixtures[f_index]);
@@ -8793,6 +8986,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_carriers(&test);
             tier1_masks_test_bitshuffles(&test);
             tier1_masks_test_quadword_ops(&test);
+            tier1_masks_test_pairwise_dots(&test);
             tier1_masks_test_funnels(&test);
             tier1_masks_test_shifts(&test);
             tier1_masks_test_mask_vectors(&test);
@@ -8813,7 +9007,12 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_refusals(&test, baseline, foundation);
             tier1_masks_test_scan(&test);
             tier1_masks_test_forms(&test);
-            const uint32_t runnable = test.native_fp16 ? BUSTER_ARRAY_LENGTH(tier1_masks_test_fixtures) : BUSTER_ARRAY_LENGTH(tier1_masks_test_fixtures) - BUSTER_TIER1_MASKS_TEST_FP16_FIXTURES;
+            uint32_t runnable = 0;
+            for (uint32_t f_index = 0; f_index < BUSTER_ARRAY_LENGTH(tier1_masks_test_fixtures); f_index += 1)
+            {
+                const Tier1MasksFixture* fixture = &tier1_masks_test_fixtures[f_index];
+                runnable += (!fixture->fp16 || test.native_fp16) && (!fixture->vnni || test.native_vnni) ? 1 : 0;
+            }
             const uint64_t expected_runs = test.native ? 4u * runnable * BUSTER_TIER1_MASKS_TEST_INPUTS : 0;
             tier1_masks_test_expect(&test, test.native_fixtures == (test.native ? runnable : 0) && test.native_runs == expected_runs,
                                     "every fixture runs natively on every input by both paths, with rematerialization and without, where the host can");
@@ -8825,7 +9024,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.select_rows + test.width_rows + test.permute_rows + test.convert_rows +
                                                                                test.shift_rows + test.mask_vector_rows + test.lane_op_rows + test.permute2_rows + test.ternlog_rows + test.compress_rows +
                                                                                test.masked_rows + test.gather_rows + test.scatter_rows + test.compress_store_rows + test.truncating_store_rows + test.fma_rows + test.lane_rows + test.reduce_rows + test.unary_rows + test.fround_rows + test.cvtt_rows +
-                                                                               test.shuffle_rows + test.carrier_rows + test.bitshuffle_rows + test.quadword_rows +
+                                                                               test.shuffle_rows + test.carrier_rows + test.bitshuffle_rows + test.quadword_rows + test.pairwise_rows +
                                                                                test.funnel_rows),
                                     "every typed program and front-end row runs natively by both of Tier 1's paths");
             // The comparisons: 24 integer rules (bytes to quadwords, signed and unsigned, at 3 widths) at 8 immediates, 6
@@ -8853,6 +9052,10 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_expect(&test, test.quadword_attempts == 9u + (!test.native || (x86_target_native().features & BUSTER_X86_FEATURE(AVX512VBMI)) != 0 ? 3u : 0u) &&
                                                test.quadword_rows == test.quadword_attempts,
                                     "every multishift, sum of absolute differences and product of doublewords goes through the IR and Tier 1 as the IR's quadword_op");
+            // The pairwise operations (#2780): 6 at 3 widths, and the 4 dot products at 3 on a host that runs them.
+            tier1_masks_test_expect(&test, test.pairwise_attempts == 18u + (!test.native || (x86_target_native().features & BUSTER_X86_FEATURE(AVX512VNNI)) != 0 ? 12u : 0u) &&
+                                               test.pairwise_rows == test.pairwise_attempts,
+                                    "every pairwise operation and dot product goes through the IR and Tier 1 as the IR's pairwise or dot");
             // The bit shuffles into a mask (#1840): vpshufbitqmb at 3 widths, on a host that runs them.
             tier1_masks_test_expect(&test, test.bitshuffle_attempts == (!test.native || (x86_target_native().features & BUSTER_X86_FEATURE(AVX512BITALG)) != 0 ? 3u : 0u) &&
                                                test.bitshuffle_rows == test.bitshuffle_attempts,
@@ -8944,6 +9147,9 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
                test.funnel_rows);
         printf("test-tier1-masks: the quadword operations: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its quadword_op\n",
                test.quadword_rows);
+        printf("test-tier1-masks: the pairwise operations and dot products: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its pairwise "
+               "and dot\n",
+               test.pairwise_rows);
         printf("test-tier1-masks: the bit shuffles into a mask: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its bitshuffle\n",
                test.bitshuffle_rows);
         printf("test-tier1-masks: the SSE carriers: %u casts and extensions through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its lane_extract "
@@ -8981,6 +9187,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
         free(test.v2);
         free(test.avx);
         free(test.fp16);
+        free(test.vnni);
     }
     return result;
 }

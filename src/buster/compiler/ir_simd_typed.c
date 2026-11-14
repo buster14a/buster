@@ -166,6 +166,10 @@ struct IrSimdTypedOperation
     // third operand, the writemask, as a comparison's (`lane` the bytes'), left out where the typed stream's writemask
     // has every lane.
     bool bitshuffle;
+    // A pairwise operation and a dot product (#2780, ir_simd_typed_pairwise): whether the row is one, its flags in
+    // `immediate`.
+    bool pairwise;
+    bool dot;
 };
 
 // The conversions' and the scalar shifts' forms (#1840), shared with Tier 1's selection.
@@ -2565,6 +2569,65 @@ static IrSimdTypedStatus ir_simd_typed_quadword_op(const Tier0Operation* source,
     return status;
 }
 
+// The pairwise operations and the dot products (#2780): a row of two vectors of the result's width (16, 32 or 64 bytes)
+// and one record of an ir_simd_pairwise_forms form at that width, of VECTOR(0) (vvvv) and VECTOR(1) (rm) into VECTOR(0)
+// (reg), register-direct and undecorated: the builtins' __builtin_ia32_pmaddwd128 to 512, pmaddubsw128 to 512 and the
+// packs (packsswb, packuswb, packssdw, packusdw), the IR's pairwise of its operation; or a row of three, one record of
+// an ir_simd_dot_forms form, of VECTOR(0) (reg, the accumulator), VECTOR(1) (vvvv) and VECTOR(2) (rm) into VECTOR(0):
+// __builtin_ia32_vpdpbusd128 to 512, vpdpbusds, vpdpwssd and vpdpwssds, the IR's dot. Their features are their forms'
+// (BW, VNNI), AVX512F's, VL's below 64 bytes and the vectors' moves; otherwise they stay machine rows.
+static IrSimdTypedStatus ir_simd_typed_pairwise(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint8_t v2 = BUSTER_TIER0_ROLE_VECTOR(2);
+    const uint32_t bytes = source->result_bytes;
+    const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+    bool admitted = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 16 || bytes == 32 || bytes == 64) && source->record_count == 1 &&
+                    (source->operand_count == 2 || source->operand_count == 3);
+    for (uint32_t j = 0; admitted && j < source->operand_count; j += 1)
+    {
+        admitted = source->operand_classes[j] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[j] == bytes;
+    }
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    uint16_t form = X86_FORM_NONE;
+    for (uint32_t operation = 0; admitted && source->operand_count == 2 && operation < BUSTER_IR_PAIRWISE_OPERATIONS; operation += 1)
+    {
+        const X86Instruction expected = { .form = ir_simd_pairwise_forms[operation][width], .reg = v0, .vvvv = v0, .rm = v1, .mode = BUSTER_X86_REGISTER_DIRECT };
+        if (memcmp(&source->records[0], &expected, sizeof(expected)) == 0)
+        {
+            candidate.pairwise = true;
+            candidate.immediate = (uint8_t)operation;
+            form = expected.form;
+        }
+    }
+    for (uint32_t operation = 0; admitted && source->operand_count == 3 && operation < 4; operation += 1)
+    {
+        const X86Instruction expected = { .form = ir_simd_dot_forms[operation][width], .reg = v0, .vvvv = v1, .rm = v2, .mode = BUSTER_X86_REGISTER_DIRECT };
+        if (memcmp(&source->records[0], &expected, sizeof(expected)) == 0)
+        {
+            candidate.dot = true;
+            candidate.immediate = (uint8_t)operation;
+            form = expected.form;
+        }
+    }
+    candidate.required_features = candidate.pairwise || candidate.dot ? ir_typed_vector_moves(bytes, target_features) | BUSTER_X86_FEATURE(AVX512F) |
+                                                                            (width < 2 ? BUSTER_X86_FEATURE(AVX512VL) : 0) | (x86_target_requirement(form) & ~BUSTER_X86_TARGET_KNOWN) :
+                                                                        0;
+    const IrSimdTypedStatus status = (candidate.pairwise || candidate.dot) && (target_features & candidate.required_features) == candidate.required_features ?
+                                         IR_SIMD_TYPED_OK :
+                                         IR_SIMD_TYPED_UNSUPPORTED;
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        candidate.operand_count = source->operand_count;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+    }
+    return status;
+}
+
 // A bit shuffle into a mask (#1840): the vpshufbitqmb builtins' row as the opmask conversion leaves it
 // (c_check_program_x86.c's MASK_BINARY), two vectors of one width (16, 32 or 64 bytes) and a writemask of their bytes'
 // lanes, one record of its form at that width from VECTOR(0) (vvvv, the quadwords) and VECTOR(1) (rm, the byte indices)
@@ -2730,6 +2793,10 @@ static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_
     if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
     {
         status = ir_simd_typed_quadword_op(source, target_features, result);
+    }
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
+    {
+        status = ir_simd_typed_pairwise(source, target_features, result);
     }
     if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
     {

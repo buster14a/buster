@@ -322,22 +322,31 @@ typedef enum IrOp
 // vpshldvq, and a rotate left where a is b: vprold and vprolq); 1 right, its low half shifted right (fshr, vpshrdvw to
 // vpshrdvq, vprord, vprorq).
 #define BUSTER_IR_INTRINSIC_FUNNEL 30u
-// One past the ternary kinds, permute2 to funnel.
-#define BUSTER_IR_INTRINSIC_TERNARY_END 31u
+// dot's doubleword i is a's, the accumulator's, plus the sum of the products of b's and the third operand's lanes in it,
+// all of the result's type (#2780): its flags the operation (BUSTER_IR_DOT_*): b's 4 unsigned bytes times the third's 4
+// signed bytes (0: vpdpbusd, _mm512_dpbusd_epi32; 1, the sum saturated to a signed doubleword: vpdpbusds), or b's 2 signed
+// words times the third's (2: vpdpwssd; 3, saturated: vpdpwssds); without saturation the sum wraps.
+#define BUSTER_IR_INTRINSIC_DOT 31u
+#define BUSTER_IR_DOT_BYTES 0u
+#define BUSTER_IR_DOT_BYTES_SATURATED 1u
+#define BUSTER_IR_DOT_WORDS 2u
+#define BUSTER_IR_DOT_WORDS_SATURATED 3u
+// One past the ternary kinds, permute2 to dot.
+#define BUSTER_IR_INTRINSIC_TERNARY_END 32u
 #define BUSTER_IR_FUNNEL_RIGHT 4u
 // An AES round of each 16-byte lane (#1840), binary: a the state and b the round key, both of the result's type, its
 // flags 0 for a round (vaesenc: ShiftRows, SubBytes and MixColumns of a, then b xor'ed) and 1 for the last one
 // (vaesenclast: without MixColumns), as FIPS 197 and x86's VAES define them.
-#define BUSTER_IR_INTRINSIC_AES 31u
+#define BUSTER_IR_INTRINSIC_AES 32u
 // One lane of a vector (#1840), its flags the lane's bytes' log2 in bits 0 and 1 (0 to 3) and its index in bits 2 to 7,
 // below the vector's lanes: lane_extract's result, an I32 for a lane of 1, 2 or 4 bytes and an I64 for one of 8, is a's
 // lane zero-extended (vmovd, vmovq, vpextrb to vpextrq, after vextracti32x4 for a lane past the low 16 bytes); and
 // lane_insert's is a, of its type, with the lane replaced by b's low bits, b an I32 for a lane of 1, 2 or 4 bytes and an
 // I64 for one of 8 (vpinsrb to vpinsrq). movemask's I32 holds, from bit 0, the sign bit of each of a's lanes, a vector
 // of 16 or 32 bytes, its flags the lanes' bytes' log2 (vpmovmskb's bytes 0, vmovmskps's 2 and vmovmskpd's 3).
-#define BUSTER_IR_INTRINSIC_LANE_EXTRACT 32u
-#define BUSTER_IR_INTRINSIC_LANE_INSERT 33u
-#define BUSTER_IR_INTRINSIC_MOVEMASK 34u
+#define BUSTER_IR_INTRINSIC_LANE_EXTRACT 33u
+#define BUSTER_IR_INTRINSIC_LANE_INSERT 34u
+#define BUSTER_IR_INTRINSIC_MOVEMASK 35u
 // A reduction of a vector's integer lanes (#1840), unary: its result a 16-byte vector (V4I32) each of whose lanes is
 // the operation of all of a's lanes, a a vector of 16, 32 or 64 bytes; its flags the lanes' bytes' log2 in bits 0 and 1
 // (2 or 3: doublewords or quadwords) and the operation in bits 2 to 5 (BUSTER_IR_REDUCE_*): the unsigned (0) and signed
@@ -345,7 +354,7 @@ typedef enum IrOp
 // the and (6), or (7) and xor (8). Clang's __builtin_reduce_* code halves the vector (vextracti64x4, vextracti32x4,
 // then vpshufd 0x4e and, of doublewords, 0xb1), each half combined with the other, which leaves every lane of the last
 // 16 bytes the result; lane_extract's lane 0 then takes it.
-#define BUSTER_IR_INTRINSIC_REDUCE 35u
+#define BUSTER_IR_INTRINSIC_REDUCE 36u
 #define BUSTER_IR_REDUCE_ADD 4u
 #define BUSTER_IR_REDUCE_MUL 5u
 #define BUSTER_IR_REDUCE_AND 6u
@@ -357,7 +366,7 @@ typedef enum IrOp
 // vpopcntq), its leading zeros, the lane's bits for a zero lane (1: vplzcntd, vplzcntq), its conflicts, bit j set for
 // each lane j below it that equals it (2: vpconflictd, vpconflictq), the last two of doublewords and quadwords; or its
 // absolute value, the most negative lane itself (3: vpabsb to vpabsq, #2780).
-#define BUSTER_IR_INTRINSIC_LANE_UNARY 36u
+#define BUSTER_IR_INTRINSIC_LANE_UNARY 37u
 #define BUSTER_IR_LANE_UNARY_POPCOUNT 0u
 #define BUSTER_IR_LANE_UNARY_LZCNT 1u
 #define BUSTER_IR_LANE_UNARY_CONFLICT 2u
@@ -367,24 +376,36 @@ typedef enum IrOp
 // bit 2 (0 floats, 1 doubles) and the rounding in bits 3 and 4 (to nearest, down, up, toward zero: EVEX's and MXCSR's
 // order). Each lane is x86's packed operation's, whatever MXCSR holds, and sets none of its flags: vaddps to vdivpd
 // with embedded rounding ({rn-sae} to {rz-sae}, _mm512_add_round_ps to _mm512_div_round_pd).
-#define BUSTER_IR_INTRINSIC_FROUND 37u
+#define BUSTER_IR_INTRINSIC_FROUND 38u
 // A truncating conversion of a 16-byte vector's lane 0 into an integer, x86's (#1840), unary: its flags' bit 0 the lane
 // a double (else a float) and bit 1 the result an I64 (else an I32), rounded toward zero; a NaN or a value past the result's range
 // gives its smallest value, x86's integer indefinite, where C's fptosi would be undefined (vcvttss2si, vcvttsd2si:
 // _mm_cvttss_si32 to _mm_cvttsd_si64).
-#define BUSTER_IR_INTRINSIC_CVTT 38u
+#define BUSTER_IR_INTRINSIC_CVTT 39u
 // A bit shuffle of a vector's quadwords by its byte indices into a mask of its bytes (#1840), binary, a and b vectors of
 // one type, the result the mask of its bytes' lanes (m16, m32 or m64): bit i the bit of a's quadword i / 8 that b's byte
 // i's low 6 bits name (vpshufbitqmb, _mm512_bitshuffle_epi64_mask; its writemask is an AND of the result).
-#define BUSTER_IR_INTRINSIC_BITSHUFFLE 39u
+#define BUSTER_IR_INTRINSIC_BITSHUFFLE 40u
 // An operation of each quadword's bytes of two vectors of the result's type (#1840), binary: its flags the operation
 // (BUSTER_IR_QUADWORD_*): 0, each byte of the result the 8 bits of b's quadword from the bit a's byte's low 6 bits name,
 // wrapping around it (vpmultishiftqb, _mm512_multishift_epi64_epi8); 1, each quadword the sum of the absolute
 // differences of a's and b's 8 unsigned bytes in it (vpsadbw, _mm512_sad_epu8); 2 and 3, each quadword the product of
 // a's and b's low doublewords in it, unsigned (vpmuludq, _mm512_mul_epu32) and signed (vpmuldq, _mm512_mul_epi32), the
 // whole 64 bits of it (#2780).
-#define BUSTER_IR_INTRINSIC_QUADWORD_OP 40u
-#define BUSTER_IR_INTRINSIC_COUNT 41u
+#define BUSTER_IR_INTRINSIC_QUADWORD_OP 41u
+// An operation of two vectors' lanes in pairs (#2780), binary, a and b of the result's type: its flags the operation
+// (BUSTER_IR_PAIRWISE_*): each doubleword the sum of the products of a's and b's two signed words in it, wrapping (0:
+// vpmaddwd, _mm512_madd_epi16); each word the sum of the products of a's two unsigned bytes and b's two signed bytes in
+// it, saturated to a signed word (1: vpmaddubsw, _mm512_maddubs_epi16); or each 16-byte lane a's signed lanes in it,
+// then b's, narrowed to half their size with saturation: words to signed bytes (2: vpacksswb), words to unsigned bytes
+// (3: vpackuswb), doublewords to signed words (4: vpackssdw) and doublewords to unsigned words (5: vpackusdw,
+// _mm_packus_epi32).
+#define BUSTER_IR_INTRINSIC_PAIRWISE 42u
+#define BUSTER_IR_INTRINSIC_COUNT 43u
+#define BUSTER_IR_PAIRWISE_MADD_WORDS 0u
+#define BUSTER_IR_PAIRWISE_MADD_BYTES 1u
+#define BUSTER_IR_PAIRWISE_PACK_FIRST 2u
+#define BUSTER_IR_PAIRWISE_OPERATIONS 6u
 #define BUSTER_IR_QUADWORD_MULTISHIFT 0u
 #define BUSTER_IR_QUADWORD_SAD 1u
 #define BUSTER_IR_QUADWORD_MUL_UNSIGNED 2u
@@ -982,6 +1003,7 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "compress",
     "expand",
     "funnel",
+    "dot",
     "aes",
     "lane_extract",
     "lane_insert",
@@ -992,6 +1014,7 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "cvtt",
     "bitshuffle",
     "quadword_op",
+    "pairwise",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -2338,7 +2361,8 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                     {
                         // permute2's flags its lanes' bytes' log2, b of its type; ternlog's any immediate, b of its type;
                         // compress's and expand's their lanes' bytes' log2, b the mask of those lanes; funnel's its lanes'
-                        // bytes' log2 (words to quadwords) and direction, b of its type.
+                        // bytes' log2 (words to quadwords) and direction, b of its type; dot's its operation, 0 to 3, b of its
+                        // type (#2780).
                         const uint32_t kind = ir_intrinsic_kind(c);
                         const bool masked = kind == BUSTER_IR_INTRINSIC_COMPRESS || kind == BUSTER_IR_INTRINSIC_EXPAND;
                         const uint32_t expected_b = masked && part <= 3 ? ir_lane_mask(type, ir_intrinsic_lanes[part]) : type;
@@ -2448,16 +2472,18 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                         valid = ir_vector_type(type) && ta == type && f->type[b] == (size == 3 ? IR_I64 : IR_I32) && (part >> 2) < ir_type_bits[type] / (8u << size);
                     }
                 }
-                else if (c == BUSTER_IR_INTRINSIC_AES || c == BUSTER_IR_INTRINSIC_QUADWORD_OP)
+                else if (c == BUSTER_IR_INTRINSIC_AES || c == BUSTER_IR_INTRINSIC_QUADWORD_OP || c == BUSTER_IR_INTRINSIC_PAIRWISE)
                 {
-                    // An AES round's flags its round, 0 or 1; a quadword operation's its operation, 0 to 3.
+                    // An AES round's flags its round, 0 or 1; a quadword operation's its operation, 0 to 3; a pairwise one's
+                    // its operation, 0 to 5 (#2780).
                     if (b >= f->instruction_count || f->type[b] == IR_VOID || f->type[b] >= IR_TYPE_COUNT)
                     {
                         check = ir_check(IR_ERROR_OPERAND, i, 1);
                     }
                     else
                     {
-                        valid = ir_vector_type(type) && ta == type && f->type[b] == type && part <= (c == BUSTER_IR_INTRINSIC_AES ? 1u : BUSTER_IR_QUADWORD_MUL_SIGNED);
+                        valid = ir_vector_type(type) && ta == type && f->type[b] == type &&
+                                part < (c == BUSTER_IR_INTRINSIC_AES ? 2u : c == BUSTER_IR_INTRINSIC_QUADWORD_OP ? BUSTER_IR_QUADWORD_MUL_SIGNED + 1 : BUSTER_IR_PAIRWISE_OPERATIONS);
                     }
                 }
                 else if (c == BUSTER_IR_INTRINSIC_SHIFT)
@@ -4015,7 +4041,7 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                                 c == BUSTER_IR_INTRINSIC_SHIFT || c == BUSTER_IR_INTRINSIC_LANE_OP || ir_intrinsic_ternary(c) || c == BUSTER_IR_INTRINSIC_AES ||
                                 c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_MOVEMASK ||
                                 c == BUSTER_IR_INTRINSIC_REDUCE || c == BUSTER_IR_INTRINSIC_LANE_UNARY || c == BUSTER_IR_INTRINSIC_FROUND ||
-                                c == BUSTER_IR_INTRINSIC_CVTT || c == BUSTER_IR_INTRINSIC_QUADWORD_OP)
+                                c == BUSTER_IR_INTRINSIC_CVTT || c == BUSTER_IR_INTRINSIC_QUADWORD_OP || c == BUSTER_IR_INTRINSIC_PAIRWISE)
                             {
                                 fprintf(output, " %u", (unsigned)f->flags[i]);
                             }

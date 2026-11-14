@@ -324,6 +324,28 @@ static const uint16_t ir_simd_quadword_op_forms[4][3] = {
     { X86_FORM_VPMULDQ_X_X_XM128_EVEX, X86_FORM_VPMULDQ_Y_Y_YM256_EVEX, X86_FORM_VPMULDQ_Z_Z_ZM512 },
 };
 
+// The pairwise operations (#2780, BUSTER_IR_INTRINSIC_PAIRWISE), by the operation (BUSTER_IR_PAIRWISE_*) and the width,
+// a's register in vvvv, b's in rm and the destination in reg: BW's EVEX vpmaddwd, vpmaddubsw, vpacksswb, vpackuswb,
+// vpackssdw and vpackusdw.
+static const uint16_t ir_simd_pairwise_forms[6][3] = {
+    { X86_FORM_VPMADDWD_X_X_XM128_EVEX, X86_FORM_VPMADDWD_Y_Y_YM256_EVEX, X86_FORM_VPMADDWD_Z_Z_ZM512 },
+    { X86_FORM_VPMADDUBSW_X_X_XM128_EVEX, X86_FORM_VPMADDUBSW_Y_Y_YM256_EVEX, X86_FORM_VPMADDUBSW_Z_Z_ZM512 },
+    { X86_FORM_VPACKSSWB_X_X_XM128_EVEX, X86_FORM_VPACKSSWB_Y_Y_YM256_EVEX, X86_FORM_VPACKSSWB_Z_Z_ZM512 },
+    { X86_FORM_VPACKUSWB_X_X_XM128_EVEX, X86_FORM_VPACKUSWB_Y_Y_YM256_EVEX, X86_FORM_VPACKUSWB_Z_Z_ZM512 },
+    { X86_FORM_VPACKSSDW_X_X_XM128_EVEX, X86_FORM_VPACKSSDW_Y_Y_YM256_EVEX, X86_FORM_VPACKSSDW_Z_Z_ZM512 },
+    { X86_FORM_VPACKUSDW_X_X_XM128_EVEX, X86_FORM_VPACKUSDW_Y_Y_YM256_EVEX, X86_FORM_VPACKUSDW_Z_Z_ZM512 },
+};
+
+// The dot products (#2780, BUSTER_IR_INTRINSIC_DOT), by the operation (BUSTER_IR_DOT_*) and the width: AVX512-VNNI's EVEX
+// vpdpbusd, vpdpbusds, vpdpwssd and vpdpwssds, the accumulator and destination in reg, b in vvvv and the third operand
+// in rm.
+static const uint16_t ir_simd_dot_forms[4][3] = {
+    { X86_FORM_VPDPBUSD_X_X_XM128_EVEX, X86_FORM_VPDPBUSD_Y_Y_YM256_EVEX, X86_FORM_VPDPBUSD_Z_Z_ZM512 },
+    { X86_FORM_VPDPBUSDS_X_X_XM128_EVEX, X86_FORM_VPDPBUSDS_Y_Y_YM256_EVEX, X86_FORM_VPDPBUSDS_Z_Z_ZM512 },
+    { X86_FORM_VPDPWSSD_X_X_XM128_EVEX, X86_FORM_VPDPWSSD_Y_Y_YM256_EVEX, X86_FORM_VPDPWSSD_Z_Z_ZM512 },
+    { X86_FORM_VPDPWSSDS_X_X_XM128_EVEX, X86_FORM_VPDPWSSDS_Y_Y_YM256_EVEX, X86_FORM_VPDPWSSDS_Z_Z_ZM512 },
+};
+
 // The funnel shifts (#1840, BUSTER_IR_INTRINSIC_FUNNEL), by the direction (left, right), the lanes (words to quadwords)
 // and the width: VBMI2's by a vector of counts, vpshldvw to vpshldvq into the high half's register (reg), the low half
 // in vvvv, and vpshrdvw to vpshrdvq into the low half's (reg), the high half in vvvv, the counts in rm; and by an

@@ -1565,6 +1565,182 @@ static void ir_test_quadword_ops(IrTestTally* test, Arena* output, Arena* scratc
     ir_test_expect(test, exact, "the model's quadword operations give vpmultishiftqb's, vpsadbw's, vpmuludq's and vpmuldq's quadwords");
 }
 
+// The pairwise operations and the dot products (#2780) written out: lane i of the result of `flags` (BUSTER_IR_PAIRWISE_*
+// for a pairwise operation, BUSTER_IR_DOT_* for a dot product, `dot`) of a, b and (a dot product's) c, `bytes` long,
+// through C's integers, a pack one 16-byte lane at a time.
+static void ir_test_pairwise_oracle(bool dot, uint32_t flags, const uint8_t* a, const uint8_t* b, const uint8_t* c, uint32_t bytes, uint8_t* out)
+{
+    if (dot)
+    {
+        // Each doubleword: a's, plus b's 4 unsigned bytes times c's signed ones, or b's 2 signed words times c's.
+        for (uint32_t d = 0; d < bytes / 4; d += 1)
+        {
+            int32_t accumulator = 0;
+            memcpy(&accumulator, a + 4 * d, 4);
+            int64_t sum = accumulator;
+            for (uint32_t j = 0; j < 4; j += 1)
+            {
+                if (flags < BUSTER_IR_DOT_WORDS)
+                {
+                    sum += (int64_t)b[4 * d + j] * (int8_t)c[4 * d + j];
+                }
+                else if (j < 2)
+                {
+                    int16_t x = 0;
+                    int16_t y = 0;
+                    memcpy(&x, b + 4 * d + 2 * j, 2);
+                    memcpy(&y, c + 4 * d + 2 * j, 2);
+                    sum += (int64_t)x * y;
+                }
+            }
+            if ((flags & 1) != 0)
+            {
+                sum = sum > INT32_MAX ? INT32_MAX : sum < INT32_MIN ? INT32_MIN : sum;
+            }
+            const uint32_t word = (uint32_t)(uint64_t)sum;
+            memcpy(out + 4 * d, &word, 4);
+        }
+    }
+    else if (flags == BUSTER_IR_PAIRWISE_MADD_WORDS)
+    {
+        for (uint32_t d = 0; d < bytes / 4; d += 1)
+        {
+            int16_t x[2];
+            int16_t y[2];
+            memcpy(x, a + 4 * d, 4);
+            memcpy(y, b + 4 * d, 4);
+            const uint32_t word = (uint32_t)((int64_t)x[0] * y[0] + (int64_t)x[1] * y[1]);
+            memcpy(out + 4 * d, &word, 4);
+        }
+    }
+    else if (flags == BUSTER_IR_PAIRWISE_MADD_BYTES)
+    {
+        for (uint32_t w = 0; w < bytes / 2; w += 1)
+        {
+            int32_t sum = a[2 * w] * (int8_t)b[2 * w] + a[2 * w + 1] * (int8_t)b[2 * w + 1];
+            sum = sum > INT16_MAX ? INT16_MAX : sum < INT16_MIN ? INT16_MIN : sum;
+            const int16_t word = (int16_t)sum;
+            memcpy(out + 2 * w, &word, 2);
+        }
+    }
+    else
+    {
+        // A pack's 16-byte lane: a's 16 bytes narrowed into its low half, b's into its high half.
+        const bool doublewords = flags >= BUSTER_IR_PAIRWISE_PACK_FIRST + 2;
+        const bool unsigned_range = ((flags - BUSTER_IR_PAIRWISE_PACK_FIRST) & 1) != 0;
+        const uint32_t source = doublewords ? 4 : 2;
+        for (uint32_t lane = 0; lane < bytes / 16; lane += 1)
+        {
+            for (uint32_t k = 0; k < 2 * 16 / source; k += 1)
+            {
+                const uint8_t* from = (k < 16 / source ? a : b) + 16 * lane + (k % (16 / source)) * source;
+                int64_t x = 0;
+                if (doublewords)
+                {
+                    int32_t value = 0;
+                    memcpy(&value, from, 4);
+                    x = value;
+                }
+                else
+                {
+                    int16_t value = 0;
+                    memcpy(&value, from, 2);
+                    x = value;
+                }
+                const int64_t high = doublewords ? (unsigned_range ? 65535 : 32767) : (unsigned_range ? 255 : 127);
+                const int64_t low = unsigned_range ? 0 : doublewords ? -32768 : -128;
+                const int64_t clamped = x > high ? high : x < low ? low : x;
+                const uint16_t narrowed = (uint16_t)clamped;
+                memcpy(out + 16 * lane + k * (source / 2), &narrowed, source / 2);
+            }
+        }
+    }
+}
+
+// The pairwise operations and the dot products (#2780): both verifiers admit pairwise exactly of two vectors of the
+// result's type at flags 0 to 5, and dot exactly of three at flags 0 to 3, refusing another width's operand and other
+// flags; and the model gives vpmaddwd's, vpmaddubsw's, the packs' and vpdpbusd's to vpdpwssds's lanes, as their
+// definitions written out (ir_test_pairwise_oracle), on random vectors whose extreme lanes saturate.
+static void ir_test_pairwise_dots(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    uint64_t state = UINT64_C(0x9b05688c2b3e6c1f);
+    uint32_t admitted_count = 0;
+    for (uint32_t dot = 0; dot < 2; dot += 1)
+    {
+        for (uint32_t width = 0; width < 3; width += 1)
+        {
+            for (uint32_t flags = 0; flags < 256; flags += 1)
+            {
+                for (uint32_t other = 0; other < 2; other += 1)
+                {
+                    const IrType type = (IrType)(IR_V4I32 + width);
+                    const bool admitted = other == 0 && flags < (dot != 0 ? 4u : BUSTER_IR_PAIRWISE_OPERATIONS);
+                    IrFunction function = {0};
+                    const IrSizes sizes = { .instruction_count = 5, .block_count = 1, .extra_count = 1 };
+                    if (ir_create(output, &sizes, &function) != IR_OK)
+                    {
+                        ir_test_expect(test, false, "pairwise verifier fixture allocation");
+                        continue;
+                    }
+                    function.result_type = IR_VOID;
+                    function.block_offsets[1] = 5;
+                    const IrType wrong = (IrType)(IR_V4I32 + (width + 1) % 3);
+                    ir_test_instruction(&function, 0, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, 1, IR_UNDEF, other == 0 || dot != 0 ? type : wrong, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, 2, IR_UNDEF, other == 0 || dot == 0 ? type : wrong, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, 3, IR_INTRINSIC, type, 0, 1, dot != 0 ? ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_DOT, 0) : BUSTER_IR_INTRINSIC_PAIRWISE);
+                    ir_test_instruction(&function, 4, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    function.extra[0] = 2;
+                    function.flags[3] = (uint8_t)flags;
+                    ir_test_pair(test, &function, scratch, NULL, admitted, "a pairwise operation or a dot product is admitted exactly at its operations, of its type");
+                    admitted_count += admitted;
+                    arena_pop_to(output, mark);
+                }
+            }
+        }
+    }
+    ir_test_expect(test, admitted_count == 3 * (6 + 4), "pairwise operations and dot products are admitted at every width and operation");
+    bool exact = true;
+    for (uint32_t trial = 0; trial < 3 * 10 * 6; trial += 1)
+    {
+        const uint32_t width = trial % 3;
+        const uint32_t pick = (trial / 3) % 10;
+        const bool dot = pick >= 6;
+        const uint32_t flags = dot ? pick - 6 : pick;
+        const uint32_t bytes = 16u << width;
+        IrSimdValue values[3] = { 0 };
+        for (uint32_t v = 0; v < 3; v += 1)
+        {
+            for (uint32_t w = 0; w < bytes / 8; w += 1)
+            {
+                values[v].words[w] = ir_test_random(&state);
+            }
+            // Extreme bytes and words, which the products and sums saturate at.
+            uint8_t* raw = (uint8_t*)values[v].words;
+            for (uint32_t k = 0; k < bytes; k += 1)
+            {
+                const uint64_t random = ir_test_random(&state);
+                raw[k] = (random & 7) == 0 ? 0x80 : (random & 7) == 1 ? 0x7f : (random & 7) == 2 ? 0xff : raw[k];
+            }
+        }
+        IrSimdValue wanted = {0};
+        ir_test_pairwise_oracle(dot, flags, (const uint8_t*)values[0].words, (const uint8_t*)values[1].words, (const uint8_t*)values[2].words, bytes, (uint8_t*)wanted.words);
+        const IrSimdShape shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        const IrSimdValue* operands[3] = { &values[0], &values[1], dot ? &values[2] : 0 };
+        const IrSimdAction action = {
+            .operation = dot ? IR_SIMD_DOT : IR_SIMD_PAIRWISE,
+            .result = shape,
+            .operands = { shape, shape, dot ? shape : IR_SIMD_NONE },
+            .index = (uint8_t)flags,
+        };
+        IrSimdValue value;
+        memset(&value, 0xa5, sizeof(value));
+        exact = exact && ir_simd_evaluate(&action, operands, 0, 0, 0, &value) && memcmp(value.words, wanted.words, bytes) == 0;
+    }
+    ir_test_expect(test, exact, "the model's pairwise operations and dot products give the instructions' lanes");
+}
+
 // The bit shuffles into a mask (#1840): both verifiers admit bitshuffle exactly of two vectors of one type into the mask
 // of their bytes (m16, m32 or m64) with flags 0, refusing another vector's operand, another mask and flags; and the
 // model gives each byte's bit of its quadword, as vpshufbitqmb's definition, written out here, on random vectors.
@@ -2258,6 +2434,7 @@ static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_lane_unaries(test, output, scratch);
     ir_test_bitshuffles(test, output, scratch);
     ir_test_quadword_ops(test, output, scratch);
+    ir_test_pairwise_dots(test, output, scratch);
     ir_test_funnels(test, output, scratch);
     ir_test_frounds(test, output, scratch);
     ir_test_cvtts(test, output, scratch);

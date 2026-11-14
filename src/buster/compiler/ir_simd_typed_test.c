@@ -2890,6 +2890,81 @@ static void ir_simd_typed_test_lane_unaries(IrTestTally* tally)
     printf("  IR SIMD rows: %u population counts, leading zero counts, conflicts and absolute values decode to the IR's lane_unary\n", decoded_rows);
 }
 
+// The pairwise operations and the dot products (#2780): the pmaddwd, pmaddubsw, pack, vpdpbusd, vpdpbusds, vpdpwssd and
+// vpdpwssds builtins' rows at each width, by the real producer (tier1_masks_test_pairwise_rule), decode as the IR's
+// pairwise or dot of their operation at exactly AVX512F's, VL's below 64 bytes and BW's (VNNI's for the dot products);
+// refused without each and under 6 changes.
+static void ir_simd_typed_test_pairwise_dots(IrTestTally* tally)
+{
+    const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
+    const uint64_t all = UINT64_MAX;
+    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512VNNI) };
+    uint32_t decoded_rows = 0;
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    for (uint32_t i = 0; tables && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        bool dot = false;
+        uint32_t flags = 0;
+        if (!tier1_masks_test_pairwise_rule(rule->name, &dot, &flags))
+        {
+            continue;
+        }
+        Tier0Operation row;
+        char description[192];
+        const bool made = check_x86_lower_row_of(&every, rule, 0, 4, 0, false, &row) == NULL;
+        snprintf(description, sizeof(description), "%s: its row is the front end's", rule->name);
+        ir_test_expect(tally, made, description);
+        if (!made)
+        {
+            continue;
+        }
+        const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | (rule->bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0) |
+                                  (dot ? BUSTER_X86_FEATURE(AVX512VNNI) : BUSTER_X86_FEATURE(AVX512BW));
+        IrSimdTypedOperation decoded;
+        memset(&decoded, 0xa5, sizeof(decoded));
+        const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+        snprintf(description, sizeof(description), "%s: the IR's %s at exactly its features", rule->name, dot ? "dot" : "pairwise");
+        const bool ok = status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.pairwise == !dot && decoded.dot == dot && decoded.immediate == flags &&
+                        (decoded.required_features & ~BUSTER_X86_FEATURE(AVX)) == expected;
+        ir_test_expect(tally, ok, description);
+        decoded_rows += ok;
+        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
+        {
+            IrSimdTypedOperation without;
+            memset(&without, 0x5a, sizeof(without));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
+            ir_test_expect(tally, (expected & features[f]) != 0 ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && (without.pairwise || without.dot),
+                           "a pairwise operation without a feature it needs stays the machine row, and needs no other");
+        }
+        for (uint32_t m = 0; m < 6; m += 1)
+        {
+            Tier0Operation changed = row;
+            X86Instruction* first = &changed.records[0];
+            switch (m)
+            {
+            case 0: first->decorations = BUSTER_TIER0_DECORATION_MASK(0); break;
+            case 1: first->mode = BUSTER_X86_MEMORY_BASE; break;
+            case 2: first->rm = first->vvvv; break;
+            case 3: changed.operand_bytes[1] = (uint8_t)(rule->bytes == 64 ? 32 : 64); break;
+            case 4: first->reg = BUSTER_TIER0_ROLE_VECTOR(3); break;
+            case 5:
+                changed.records[1] = changed.records[0];
+                changed.record_count = 2;
+                break;
+            }
+            memset(&decoded, 0xa5, sizeof(decoded));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
+            snprintf(description, sizeof(description), "%s (change %u): not the IR's pairwise or dot", rule->name, m);
+            ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded) || (refused == IR_SIMD_TYPED_OK && !decoded.pairwise && !decoded.dot && !decoded.machine),
+                           description);
+        }
+    }
+    ir_test_expect(tally, decoded_rows == 3 * 10, "every multiply-add, pack and dot product decodes");
+    printf("  IR SIMD rows: %u multiply-adds, packs and dot products decode to the IR's pairwise and dot\n", decoded_rows);
+}
+
 // The floating operations at their own rounding (#1840): vaddps to vdivpd with embedded rounding, each rounding
 // (tier1_masks_test_fround_row), decode as the IR's fround of their operation, lanes and rounding, written out, at
 // exactly AVX512F; refused without it and under 6 changes.
@@ -3377,6 +3452,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_simd_typed_test_carrier_casts(tally);
     ir_simd_typed_test_bitshuffles(tally);
     ir_simd_typed_test_quadword_ops(tally);
+    ir_simd_typed_test_pairwise_dots(tally);
     ir_simd_typed_test_funnels(tally);
     ir_simd_typed_test_shuffle_matches(tally);
     ir_simd_typed_test_shifts(tally);
