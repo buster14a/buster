@@ -2805,11 +2805,12 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             {
                 const uint64_t outside = counts[CHECK_ATTESTED_SUMMARY_OUTSIDE_TOKENS];
                 fprintf(stderr, "attested declarations: %" PRIu64 " of %" PRIu64 " units skipped %" PRIu64 " of %" PRIu64 " file-scope declarations, %" PRIu64 " of %" PRIu64
-                                " tokens outside definitions (%.2f%%); %" PRIu64 " units read again; %" PRIu64 " hashes in the memos; %" PRIu64 " contradictions; %" PRIu64
-                                " unlisted events\n",
+                                " tokens outside definitions (%.2f%%); %" PRIu64 " units read as views; %" PRIu64 " units read again; %" PRIu64 " hashes in the memos; %" PRIu64
+                                " contradictions; %" PRIu64 " unlisted events\n",
                         counts[CHECK_ATTESTED_SUMMARY_SKIPPING], counts[CHECK_ATTESTED_SUMMARY_UNITS], counts[CHECK_ATTESTED_SUMMARY_SKIPPED],
                         counts[CHECK_ATTESTED_SUMMARY_DECLARATIONS], counts[CHECK_ATTESTED_SUMMARY_SKIPPED_TOKENS], outside,
-                        outside != 0 ? 100.0 * (double)counts[CHECK_ATTESTED_SUMMARY_SKIPPED_TOKENS] / (double)outside : 0.0, counts[CHECK_ATTESTED_SUMMARY_AGAIN],
+                        outside != 0 ? 100.0 * (double)counts[CHECK_ATTESTED_SUMMARY_SKIPPED_TOKENS] / (double)outside : 0.0, counts[CHECK_ATTESTED_SUMMARY_VIEWS],
+                        counts[CHECK_ATTESTED_SUMMARY_AGAIN],
                         counts[CHECK_ATTESTED_SUMMARY_HASHES], counts[CHECK_ATTESTED_SUMMARY_CONTRADICTIONS], counts[CHECK_ATTESTED_SUMMARY_UNLISTED]);
             }
             if (command->units_memory != 0)

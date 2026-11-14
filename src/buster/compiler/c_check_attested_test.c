@@ -227,7 +227,8 @@ static bool check_attested_test_command(CheckAttested* census, const char* direc
 // are --attested=off's bytes, which reads every declaration.
 
 // The compile fixture's header: the main one's kinds of declaration, with the runtime functions a struct's copy and its
-// zeroing call by name (memcpy, memset) and a prototype whose name a unit's undeclared call is a typo of.
+// zeroing call by name (memcpy, memset), a prototype whose name a unit's undeclared call is a typo of, and pragmas
+// between declarations, whose places a unit's view moves down past the skipped ones (#2531's step 3).
 static const char check_attested_test_compile_header[] =
     "typedef unsigned long size_t;\n"
     "typedef struct _IO_FILE FILE;\n"
@@ -237,9 +238,11 @@ static const char check_attested_test_compile_header[] =
     "int abs(int);\n"
     "void *memcpy(void *, const void *, size_t);\n"
     "void *memset(void *, int, size_t);\n"
+    "#pragma pack(push, 2)\n"
     "enum color { RED, GREEN = RED + 2, BLUE };\n"
     "struct later;\n"
     "struct later { int a; };\n"
+    "#pragma pack(pop)\n"
     "struct later *make_later(void);\n"
     "struct made *make(void);\n"
     "static int hidden(void);\n"
@@ -253,14 +256,18 @@ static const char check_attested_test_compile_header[] =
     "extern int shared_counter;\n";
 
 // Its units: the first learns; the others call by name, by a builtin, by an asm label, copy and zero a struct, name an
-// enumerator; the last two call an undeclared function whose name is a typo of a skipped prototype's (clang's note
-// suggests it, which only a reading with nothing skipped finds) and name an undeclared identifier.
+// enumerator, and name string literals, __func__ and labels by address after skipped declarations (whose local symbols a
+// token's index numbers, the parse's in a view, Parser.origins) under a pragma that a view moves; the last two call an
+// undeclared function whose name is a typo of a skipped prototype's (clang's note suggests it, which only a reading with
+// nothing skipped finds) and name an undeclared identifier.
 static const char* const check_attested_test_compile_units[] =
 {
     "int one(void) { return puts(\"one\") + shared_counter; }\n",
     "int two(FILE *f) { return fclose(f) + __builtin_abs(-2) + labelled(); }\n",
     "struct big { char b[300]; };\nvoid copy(struct big *x, const struct big *y) { *x = *y; }\nstruct big zero(void) { struct big z = { 0 }; return z; }\n",
     "int four(int x) { if (x == BLUE) die(); return make_later() != 0; }\n",
+    "#pragma pack(push, 1)\nstruct packed_here { char c; int i; };\n#pragma pack(pop)\n"
+    "int seven(int x) { static void *where[] = { &&a, &&b }; goto *where[x & 1]; a: return puts(\"seven\"); b: return (int)sizeof(struct packed_here) + (int)sizeof(__func__); }\n",
     "int five(void) { return prototypex(); }\n",
     "int six(void) { return undeclared_name; }\n",
 };
@@ -418,6 +425,8 @@ static __attribute__((noinline)) void check_test_attested_compile(CheckTest* tes
                                     counts[CHECK_ATTESTED_SUMMARY_AGAIN] == 2 && counts[CHECK_ATTESTED_SUMMARY_CONTRADICTIONS] == 0 &&
                                     counts[CHECK_ATTESTED_SUMMARY_UNLISTED] == 0,
                           "--attested=on skips in every unit after the first, and reads each unit with an error again with nothing skipped");
+        check_test_expect(test, on && counts[CHECK_ATTESTED_SUMMARY_VIEWS] == counts[CHECK_ATTESTED_SUMMARY_SKIPPING],
+                          "--attested=on reads every unit that skips as its view, the parse without its skipped declarations");
         check_test_expect(test, verify && check_units_attested_last[CHECK_ATTESTED_SUMMARY_SKIPPING] == 0 && check_units_attested_last[CHECK_ATTESTED_SUMMARY_SKIPPED] != 0 &&
                                     check_units_attested_last[CHECK_ATTESTED_SUMMARY_AGAIN] == 0 && check_units_attested_last[CHECK_ATTESTED_SUMMARY_CONTRADICTIONS] == 0,
                           "--attested=verify reads what it would skip, and no hit's reading contradicts its memo");

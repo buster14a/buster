@@ -10148,13 +10148,15 @@ typedef enum CheckAttestedMode
 } CheckAttestedMode;
 
 // The lanes' counts that --time-stages reports for a command of several source files (check_attested_summary): its units
-// (each once, whether read again or not), those that skipped and those read again; their file-scope declarations, and the
+// (each once, whether read again or not), those that skipped, those read as their view (step 3, check_attested_view) and
+// those read again; their file-scope declarations, and the
 // skipped ones; the tokens outside function definitions, and the skipped ones; the hashes in the lanes' memos; the hits
 // that their readings contradicted; and the readings' binding events outside their declarations' lists.
 typedef enum CheckAttestedSummary
 {
     CHECK_ATTESTED_SUMMARY_UNITS,
     CHECK_ATTESTED_SUMMARY_SKIPPING,
+    CHECK_ATTESTED_SUMMARY_VIEWS,
     CHECK_ATTESTED_SUMMARY_AGAIN,
     CHECK_ATTESTED_SUMMARY_DECLARATIONS,
     CHECK_ATTESTED_SUMMARY_SKIPPED,
@@ -10819,6 +10821,8 @@ static bool check_attested_read(CheckAttested* attested, CheckInput* input, cons
                                 bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens);
 static void check_attested_contradiction(const CheckAttested* attested, Preprocessor* pp, FILE* errors);
 static bool check_attested_verifying(const CheckAttested* attested);
+// The parse a unit's reader took and the stages after it take (step 3's view where the unit skipped, the parse otherwise).
+static const Parser* check_attested_parse(const CheckAttested* attested, const Parser* parser);
 
 static int check_driver_unit(const CheckDriverCommand* command, const PPOptions* options, const char* path, InternTable* identifiers, Preprocessor* pp,
                              Parser* parser, Arena* arena, Arena* scratch, Arena* output_arena, CheckProgramLanes* lanes, CheckClock* stage_clock,
@@ -11075,6 +11079,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             {
                 input_valid = check_attested_read(attested, &input, checking, checking_pp, &types, arena, scratch, !prefix_only,
                                                   repairing ? repair.original_end : checking->tokens.count, selected);
+                // A unit that skipped is its view from here (#2531's step 3): the parse without its skipped declarations, whose
+                // token indices the reader's columns have. The view is a whole unit's, as the parse was (its places end where
+                // the parse's did, publication_end).
+                checking = check_attested_parse(attested, checking);
+                recovered = recovered == parser ? checking : recovered;
+                tokens = checking->tokens.count;
             }
             else
             {
@@ -11083,7 +11093,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             }
             // A statement start's typo correction that clang's parser reads the statement again with (#1447,
             // check_driver_typo_edits): the original's tokens with the corrections, recovered and read again.
+            // (Not for a unit's view, whose token indices aren't its parse's: an error makes it read again whole,
+            // check_attested_again, where the corrections are made.)
             for (uint32_t pass = 1; pass < BUSTER_CHECK_DRIVER_TYPO_PASSES && ready && !input.resource && (input.report_count != 0 || parse_failed) &&
+                                    check_attested_parse(attested, parser) == parser &&
                                     check_driver_typo_edits(&typo_edits, parser, checking, &input, recovered != parser ? resumed.diagnostics : parser->diagnostics,
                                                             recovered != parser ? resumed.diagnostic_count : parser->diagnostic_count, pp->table);
                  pass += 1)

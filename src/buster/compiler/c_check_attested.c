@@ -276,8 +276,20 @@ struct CheckAttested
     // The unit's tree columns that differed from the whole unit's (check_attested_tree_columns' twin), which its record
     // counts among its contradictions.
     uint32_t unit_tree_mismatches;
-    // The lane's units that skipped, and those read again.
+    // Step 3's view (check_attested_view): with --attested=on, the unit's parse without the declarations it skips, which
+    // the reader and every stage after it take in the parse's place (`viewing`), in `unit_arena`. Each declaration's
+    // place there: its first token's index and past its last (a skipped one's empty, at the next read token's index),
+    // and the read tokens' system levels and the pragmas' positions there. Every other array of the unit's is the
+    // parse's, by the parse's token indices.
+    bool viewing;
+    Parser view;
+    uint32_t* view_begins;
+    uint32_t* view_ends;
+    uint8_t* view_levels;
+    uint32_t* view_pragmas;
+    // The lane's units that skipped, those read as their view, and those read again.
     uint64_t units_skipping;
+    uint64_t units_viewing;
     uint64_t units_again;
     // --list N: the first N declarations of each outcome but skipped, and every contradiction, by file and line.
     uint32_t list;
@@ -2428,6 +2440,7 @@ static void check_attested_begin(CheckAttested* attested, bool again)
         attested->units_again += again ? 1 : 0;
         attested->reading_again = again;
         attested->skipped = false;
+        attested->viewing = false;
         attested->again = false;
     }
 }
@@ -2446,6 +2459,7 @@ static void check_attested_summary(const CheckAttested* attested, uint64_t* coun
     {
         counts[CHECK_ATTESTED_SUMMARY_UNITS] += attested->units_observed - attested->units_again;
         counts[CHECK_ATTESTED_SUMMARY_SKIPPING] += attested->units_skipping;
+        counts[CHECK_ATTESTED_SUMMARY_VIEWS] += attested->units_viewing;
         counts[CHECK_ATTESTED_SUMMARY_AGAIN] += attested->units_again;
         counts[CHECK_ATTESTED_SUMMARY_DECLARATIONS] += attested->declarations;
         counts[CHECK_ATTESTED_SUMMARY_SKIPPED] += attested->outcome_declarations[CHECK_ATTESTED_SKIPPED];
@@ -2485,10 +2499,198 @@ static bool check_attested_decide(CheckAttested* attested, const Parser* parser,
     return listed;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Step 3's view: the unit's parse without the declarations its reader skips. A skipped declaration is attested and not
+// reached: no read declaration names what it declares, its reading would report nothing and leave nothing behind, and
+// the walk passed it with no visit. Every pass of the reader and of the stages after it that takes the whole unit took
+// its tokens too (some 20 files read the reader's columns by token): in the view they aren't there, so that a skipped
+// token costs none of them anything. A file-scope declaration is a tree of its own in a valid parse (its root its last
+// token, no sibling), so that leaving whole declarations out leaves the rest a valid forest: a read token's parent, its
+// own declaration's or none, moves down by the tokens left out before it, as the token does. The view's sources are the
+// parse's, so that every location, spelling and diagnostic is the same; the census's arrays stay the parse's, by its token
+// indices, and a declaration's place in the view is view_begins and view_ends.
+
+// A column of the view: `read` entries of `size` bytes and the padding the parser keeps around each column
+// (BUSTER_PARSE_TOKEN_PADDING entries before the first and after the last), the parse's own padding copied, which holds
+// what a kernel reading past a token expects there (PARSE_KIND_END, zeros). Null where the arena has no room.
+static void* check_attested_view_column(Arena* arena, const void* column, uint32_t count, uint32_t read, uint32_t size)
+{
+    const uint64_t padding = (uint64_t)BUSTER_PARSE_TOKEN_PADDING * size;
+    uint8_t* bytes = arena_push_array(arena, (uint64_t)read + 2 * BUSTER_PARSE_TOKEN_PADDING, size, 64);
+    const uint8_t* const from = column;
+    if (bytes != NULL)
+    {
+        memcpy(bytes, from - padding, padding);
+        memcpy(bytes + padding + (uint64_t)read * size, from + (uint64_t)count * size, padding);
+    }
+    return bytes != NULL ? bytes + padding : NULL;
+}
+
+// `length` parents from `from` to `to`, each but a root's (BUSTER_PARSE_ROOT) less `shift`: 16 at a time, the last
+// masked; the scalar path's a token at a time is its twin.
+static void check_attested_view_parents(uint32_t* to, const uint32_t* from, uint32_t length, uint32_t shift, bool scalar)
+{
+    uint32_t k = 0;
+    const __m512i root = _mm512_set1_epi32((int32_t)BUSTER_PARSE_ROOT);
+    const __m512i down = _mm512_set1_epi32((int32_t)shift);
+    for (; !BUSTER_SCALAR_PATH(scalar) && k < length; k += 16)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffffu, length - k < 16 ? length - k : 16);
+        const __m512i parent = _mm512_maskz_loadu_epi32(lanes, from + k);
+        const __mmask16 inner = _mm512_mask_cmpneq_epi32_mask(lanes, parent, root);
+        _mm512_mask_storeu_epi32(to + k, lanes, _mm512_mask_sub_epi32(parent, inner, parent, down));
+    }
+    for (; k < length; k += 1)
+    {
+        to[k] = from[k] != BUSTER_PARSE_ROOT ? from[k] - shift : BUSTER_PARSE_ROOT;
+    }
+}
+
+// `length` tokens' origins into `to`: `from`, then each the last's plus one (Parser.origins), 16 at a time, the last
+// masked; the scalar path's a token at a time is its twin.
+static void check_attested_view_origins(uint32_t* to, uint32_t from, uint32_t length, bool scalar)
+{
+    uint32_t k = 0;
+    const __m512i lane = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    for (; !BUSTER_SCALAR_PATH(scalar) && k < length; k += 16)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffffu, length - k < 16 ? length - k : 16);
+        _mm512_mask_storeu_epi32(to + k, lanes, _mm512_add_epi32(_mm512_set1_epi32((int32_t)(from + k)), lane));
+    }
+    for (; k < length; k += 1)
+    {
+        to[k] = from + k;
+    }
+}
+
+// The view of `parser`'s unit, whose skipped declarations the marks hold (skipped_tokens of its tokens), into
+// CheckAttested.view: its columns copied a run of read declarations at a time (runs between skipped ones), each column's
+// run one copy, its parents moved down; each declaration's place in it; the read tokens' system levels (where the passes
+// mapped them) and the pragmas' positions moved down by the skipped tokens before them (a pragma inside a declaration
+// makes it ineligible, so that none is inside a skipped one). Whether there was room: without it the reader takes the
+// parse with the marks, as step 2's did.
+static bool check_attested_view(CheckAttested* census, const Parser* parser)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t declarations = census->declaration_count;
+    const uint32_t read = count - (uint32_t)census->skipped_tokens;
+    const bool scalar = parser->options.scalar;
+    Arena* const arena = &census->unit_arena;
+    const uint64_t mark = arena->length;
+    Parser* const view = &census->view;
+    *view = (Parser){
+        .options = parser->options,
+        .language = parser->language,
+        .respelled = NULL,
+        .preprocessor = parser->preprocessor,
+        .meanings = parser->meanings,
+        .statistics = parser->statistics,
+    };
+    memcpy(view->predeclared, parser->predeclared, sizeof(view->predeclared));
+    view->tokens.count = read;
+    view->tokens.capacity = read;
+    view->tokens.kinds = check_attested_view_column(arena, parser->tokens.kinds, count, read, sizeof(uint8_t));
+    view->tokens.names = check_attested_view_column(arena, parser->tokens.names, count, read, sizeof(uint32_t));
+    view->tokens.sources = check_attested_view_column(arena, parser->tokens.sources, count, read, sizeof(uint32_t));
+    view->tokens.flags = check_attested_view_column(arena, parser->tokens.flags, count, read, sizeof(uint8_t));
+    view->tree.roles = check_attested_view_column(arena, parser->tree.roles, count, read, sizeof(uint8_t));
+    view->tree.depths = check_attested_view_column(arena, parser->tree.depths, count, read, sizeof(uint32_t));
+    view->tree.parents = check_attested_view_column(arena, parser->tree.parents, count, read, sizeof(uint32_t));
+    uint32_t* const origins = arena_push_array(arena, (uint64_t)read + 1, sizeof(uint32_t), 64);
+    view->origins = origins;
+    census->view_begins = arena_push_array(arena, (uint64_t)declarations + 1, sizeof(uint32_t), 64);
+    census->view_ends = arena_push_array(arena, (uint64_t)declarations + 1, sizeof(uint32_t), 64);
+    census->view_levels = census->levels_ready ? arena_push_array(arena, (uint64_t)read + 1, sizeof(uint8_t), 64) : NULL;
+    census->view_pragmas = arena_push_array(arena, (uint64_t)parser->tokens.pragma_count + 1, sizeof(uint32_t), 64);
+    const bool room = view->tokens.kinds != NULL && view->tokens.names != NULL && view->tokens.sources != NULL && view->tokens.flags != NULL &&
+                      view->tree.roles != NULL && view->tree.depths != NULL && view->tree.parents != NULL && origins != NULL && census->view_begins != NULL &&
+                      census->view_ends != NULL && (census->view_levels != NULL || !census->levels_ready) && census->view_pragmas != NULL &&
+                      (declarations == 0 || census->lasts[declarations - 1] + 1 == count);
+    // A run: declarations [`d`, `e`), read, from token `from` (the first's) to `to` (past the last's), its tokens at `at`
+    // in the view.
+    uint32_t at = 0;
+    uint32_t d = 0;
+    uint32_t pragma = 0;
+    const uint32_t* const positions = parser->tokens.pragma_positions;
+    while (room && d < declarations)
+    {
+        const bool skipped = census->hits[d] != 0 && census->reached[d] == 0;
+        uint32_t e = d;
+        while (e < declarations && (census->hits[e] != 0 && census->reached[e] == 0) == skipped)
+        {
+            census->view_begins[e] = skipped ? at : at + (census->firsts[e] - census->firsts[d]);
+            census->view_ends[e] = skipped ? at : at + (census->lasts[e] + 1 - census->firsts[d]);
+            e += 1;
+        }
+        const uint32_t from = census->firsts[d];
+        const uint32_t to = census->lasts[e - 1] + 1;
+        // The pragmas before the run's end: each at its place less the tokens skipped before it (one before a skipped
+        // run is at the next read token).
+        while (pragma < parser->tokens.pragma_count && positions[pragma] < to)
+        {
+            census->view_pragmas[pragma] = skipped ? at : at + (positions[pragma] - from);
+            pragma += 1;
+        }
+        if (!skipped)
+        {
+            const uint32_t length = to - from;
+            memcpy(view->tokens.kinds + at, parser->tokens.kinds + from, length);
+            memcpy(view->tokens.names + at, parser->tokens.names + from, (uint64_t)length * sizeof(uint32_t));
+            memcpy(view->tokens.sources + at, parser->tokens.sources + from, (uint64_t)length * sizeof(uint32_t));
+            memcpy(view->tokens.flags + at, parser->tokens.flags + from, length);
+            memcpy(view->tree.roles + at, parser->tree.roles + from, length);
+            memcpy(view->tree.depths + at, parser->tree.depths + from, (uint64_t)length * sizeof(uint32_t));
+            check_attested_view_parents(view->tree.parents + at, parser->tree.parents + from, length, from - at, scalar);
+            check_attested_view_origins(origins + at, from, length, scalar);
+            if (census->view_levels != NULL)
+            {
+                memcpy(census->view_levels + at, census->token_levels + from, length);
+            }
+            at += length;
+        }
+        d = e;
+    }
+    // The pragmas at the unit's end.
+    while (room && pragma < parser->tokens.pragma_count)
+    {
+        census->view_pragmas[pragma] = at + (positions[pragma] - count);
+        pragma += 1;
+    }
+    const bool valid = room && at == read;
+    if (valid)
+    {
+        // (A label numbered past the last token, at the unit's end, keeps the parse's number.)
+        origins[read] = count;
+        if (census->view_levels != NULL)
+        {
+            // (check_attested_levels' entry past the last token.)
+            census->view_levels[read] = census->token_levels[count];
+        }
+        view->tokens.pragma_sources = parser->tokens.pragma_sources;
+        view->tokens.pragma_positions = census->view_pragmas;
+        view->tokens.pragma_count = parser->tokens.pragma_count;
+    }
+    else
+    {
+        arena_pop_to(arena, mark);
+        *view = (Parser){ 0 };
+    }
+    return valid;
+}
+
+// The parse a unit's reader and the stages after it take: the view where the unit skips (check_attested_view), the parse
+// itself otherwise.
+static const Parser* check_attested_parse(const CheckAttested* attested, const Parser* parser)
+{
+    return attested != NULL && attested->viewing ? &attested->view : parser;
+}
+
 // check_driver_unit's reader for a unit of a lane with attested declarations: the passes (none for a unit read again,
 // whose first reading skipped and must not, nor for a view of a failed parse), then check_input_run as check_input_compile
-// calls it, which tests each reading's binding events against its list as it ends (check_attested_events), and, with
-// --attested=on, the marks of the declarations attested and not reached, which its walk passes.
+// calls it, which tests each reading's binding events against its list as it ends (check_attested_events). With
+// --attested=on, a unit that skips is read as its view (check_attested_view), which the stages after the reader take too
+// (check_attested_parse); or, where there was no room for the view, as the parse with the marks of the declarations
+// attested and not reached, which its walk passes.
 static bool check_attested_read(CheckAttested* attested, CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                                 bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens)
 {
@@ -2502,6 +2704,7 @@ static bool check_attested_read(CheckAttested* attested, CheckInput* input, cons
     attested->token_count = count;
     attested->skipped_declarations = 0;
     attested->skipped_tokens = 0;
+    attested->viewing = false;
     const bool whole = !attested->reading_again && complete_translation_unit && parser->errors == 0 && parser->fatal == PARSE_MESSAGE_NONE &&
                        parser->tree.roles != NULL && parser->tree.parents != NULL && pp->table->count < BUSTER_ATTESTED_MAX_IDS;
     if (whole && check_attested_unit_arrays(attested, count, parser->tokens.pragma_count, pp->output.count))
@@ -2510,10 +2713,15 @@ static bool check_attested_read(CheckAttested* attested, CheckInput* input, cons
         check_attested_levels(attested, parser, pp);
         attested->unit_ready = check_attested_decide(attested, parser, pp);
         attested->skipped = attested->unit_ready && attested->mode == CHECK_ATTESTED_MODE_ON && attested->skipped_declarations != 0;
+        // The view, where the unit skips the whole of its parse (not a lazily deferred selection's, whose marks are the
+        // parse's): its token indices are the reader's from here, and the unit's.
+        attested->viewing = attested->skipped && deferred_tokens == NULL && original_end == count && check_attested_view(attested, parser);
+        attested->token_count = attested->viewing ? attested->view.tokens.count : count;
     }
     attested->events_checked = false;
-    return check_input_run(input, parser, pp, types, arena, scratch, complete_translation_unit, original_end, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0, false, true,
-                           true, attested);
+    const Parser* const read = check_attested_parse(attested, parser);
+    return check_input_run(input, read, pp, types, arena, scratch, complete_translation_unit, attested->viewing ? read->tokens.count : original_end, deferred_tokens,
+                           CHECK_INPUT_BINDINGS_DEFAULT, 0, false, true, true, attested);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2656,9 +2864,10 @@ static bool check_attested_tree_columns(CheckAttested* census, const uint32_t* p
     bool valid = declarations != 0;
     for (uint32_t d = 0; valid && d < declarations; d += 1)
     {
-        const uint32_t a = census->firsts[d];
-        const uint32_t b = census->lasts[d];
-        const uint32_t length = b - a + 1;
+        // (In a view, a declaration's place there: a skipped one has no tokens, nor columns.)
+        const uint32_t a = census->viewing ? census->view_begins[d] : census->firsts[d];
+        const uint32_t length = census->viewing ? census->view_ends[d] - a : census->lasts[d] - a + 1;
+        const uint32_t b = a + length - 1;
         // The pools are the lane's, mostly out of the first two caches by the next unit: a list's block a few declarations
         // on, and the kept tree of one half as far, are fetched while this one's columns are written.
         if (d + BUSTER_ATTESTED_TREE_AHEAD < declarations && census->list_blocks[d + BUSTER_ATTESTED_TREE_AHEAD] != BUSTER_ATTESTED_NONE)
@@ -2674,7 +2883,7 @@ static bool check_attested_tree_columns(CheckAttested* census, const uint32_t* p
         }
         const uint32_t block = census->list_blocks[d];
         const uint16_t* const kept = check_attested_tree_of(census, d);
-        if (kept != NULL && check_attested_tree_same(parents, kept, a, length))
+        if (length != 0 && kept != NULL && check_attested_tree_same(parents, kept, a, length))
         {
             check_attested_tree_shift(positions, (uint16_t*)kept + length, a, length, true);
             check_attested_tree_shift(postorder, (uint16_t*)kept + 2 * (uint64_t)length, a, length, true);
@@ -2688,7 +2897,7 @@ static bool check_attested_tree_columns(CheckAttested* census, const uint32_t* p
             }
             census->tree_hits += 1;
         }
-        else
+        else if (length != 0)
         {
             valid = check_attested_tree_own(parents, a, b);
             if (valid)
@@ -2771,20 +2980,22 @@ static void check_attested_contradiction(const CheckAttested* attested, Preproce
 // completions and its table, before its scratch goes.
 
 static uint32_t check_attested_declaration_of(const CheckAttested* census, uint32_t token);
+static bool check_attested_holds(const CheckAttested* census, uint32_t d, uint32_t token);
 static bool check_attested_lists_hold(const CheckAttested* census, uint32_t d, uint32_t key, uint8_t classes);
 static void check_attested_list_declaration(CheckAttested* census, Preprocessor* pp, const char* what, uint32_t d);
 
 // The marks of the declarations that the unit's walk passes (check_input_skip), or null where it passes none.
 static const uint64_t* check_attested_skips(const CheckAttested* attested)
 {
-    return attested->skipped ? attested->marks : NULL;
+    // (The view has none of their tokens.)
+    return attested->skipped && !attested->viewing ? attested->marks : NULL;
 }
 
 // Each of the unit's tokens' system level (BUSTER_PP_*_FILE) as check_attested_levels made it before the passes, for the
 // reader's system tokens (check_input_system_tokens), or null where it made none (no system file, or a reading again).
 static const uint8_t* check_attested_token_levels(const CheckAttested* attested)
 {
-    return attested->levels_ready ? attested->token_levels : NULL;
+    return !attested->levels_ready ? NULL : attested->viewing ? attested->view_levels : attested->token_levels;
 }
 
 // Declaration `d`'s list marked by key (CheckAttested.list_marks): each key's mark the unit's stamp, `d` and the classes
@@ -2819,8 +3030,6 @@ static void check_attested_events(CheckAttested* census, Preprocessor* pp, const
         memset(census->unlisted, 0, declarations);
     }
     const uint32_t name_capacity = bindings->name_capacity;
-    const uint32_t* const firsts = census->firsts;
-    const uint32_t* const lasts = census->lasts;
     const uint64_t stamp = (uint64_t)(census->stamp & 0xffffffu) << 40;
     uint32_t d = declarations;
     for (uint32_t e = 0; ready && name_capacity != 0 && e < bindings->count; e += 1)
@@ -2831,7 +3040,7 @@ static void check_attested_events(CheckAttested* census, Preprocessor* pp, const
         const bool file_declare = operation == C_BINDING_DECLARE && bindings->depth[e] == 0 && space <= C_BINDING_TAG;
         const bool use = operation == C_BINDING_USE && space <= C_BINDING_TAG;
         const uint32_t point = bindings->point[e];
-        const bool here = d < declarations && firsts[d] <= point && point <= lasts[d];
+        const bool here = d < declarations && check_attested_holds(census, d, point);
         const uint32_t at = (file_declare || use) && !here ? check_attested_declaration_of(census, point) : d;
         if (at != d && at < declarations)
         {
@@ -2883,7 +3092,15 @@ static void check_attested_events(CheckAttested* census, Preprocessor* pp, const
 // ---------------------------------------------------------------------------------------------------------------------
 // The record, at the unit's end.
 
-// The declaration that holds token `token`, or the count where none does.
+// Whether declaration `d` holds token `token` of the unit's reader: of its view, where it reads one (a skipped
+// declaration's place there is empty), or of its parse.
+static bool check_attested_holds(const CheckAttested* census, uint32_t d, uint32_t token)
+{
+    return census->viewing ? census->view_begins[d] <= token && token < census->view_ends[d] : census->firsts[d] <= token && token <= census->lasts[d];
+}
+
+// The declaration that holds token `token` of the unit's reader, or the count where none does: the first whose end is
+// past it (in a view, a skipped declaration's empty place ends where the next read one starts).
 static uint32_t check_attested_declaration_of(const CheckAttested* census, uint32_t token)
 {
     uint32_t low = 0;
@@ -2891,10 +3108,11 @@ static uint32_t check_attested_declaration_of(const CheckAttested* census, uint3
     while (low < high)
     {
         const uint32_t middle = low + (high - low) / 2;
-        low = census->lasts[middle] < token ? middle + 1 : low;
-        high = census->lasts[middle] < token ? high : middle;
+        const bool before = census->viewing ? census->view_ends[middle] <= token : census->lasts[middle] < token;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
     }
-    return low < census->declaration_count && census->firsts[low] <= token ? low : census->declaration_count;
+    return low < census->declaration_count && check_attested_holds(census, low, token) ? low : census->declaration_count;
 }
 
 // The token at output position `position`: the last whose source is at or before it, or the count past the last's.
@@ -2958,8 +3176,10 @@ static void check_attested_after(CheckAttested* census, const Parser* parser, Pr
                                  bool complete)
 {
     const uint32_t count = parser->tokens.count;
+    // (The parse's tokens: a view's and those it left out.)
+    const uint64_t parsed = count + (census->viewing ? census->skipped_tokens : 0);
     census->units_observed += 1;
-    census->tokens += count;
+    census->tokens += parsed;
     census->unit_contradictions = census->unit_tree_mismatches;
     census->unit_tree_mismatches = 0;
     census->contradicted = 0;
@@ -3010,18 +3230,19 @@ static void check_attested_after(CheckAttested* census, const Parser* parser, Pr
     error |= ready && !arrays;
     const bool learning = !error && unplaced == 0;
     census->units_failed += error ? 1 : 0;
-    census->failed_tokens += error || !ready ? count : 0;
+    census->failed_tokens += error || !ready ? parsed : 0;
     const uint8_t* const bits = input->declaration_bits;
     for (uint32_t d = 0; ready && arrays && d < declarations; d += 1)
     {
-        const uint32_t first = census->firsts[d];
-        const uint32_t last = census->lasts[d];
-        const uint32_t tokens = last - first + 1;
+        const uint32_t tokens = census->lasts[d] - census->firsts[d] + 1;
+        // Its tokens in the reader's parse (in a view, its place there: a skipped one's empty).
+        const uint32_t first = census->viewing ? census->view_begins[d] : census->firsts[d];
+        const uint32_t end = census->viewing ? census->view_ends[d] : census->lasts[d] + 1;
         const uint8_t flags = census->flags[d];
         // Its reading's consequences, by the reader's facts at its tokens (none where the walk passed it: no reading).
         const bool passed = census->skipped && census->hits[d] != 0 && census->reached[d] == 0;
         CheckAttestedOutcome impure = CHECK_ATTESTED_OUTCOMES;
-        for (uint32_t t = first; bits != NULL && !passed && t <= last && impure == CHECK_ATTESTED_OUTCOMES; t += 1)
+        for (uint32_t t = first; bits != NULL && !passed && t < end && impure == CHECK_ATTESTED_OUTCOMES; t += 1)
         {
             const uint8_t b = bits[t];
             const CheckInputAttributes* attributes = (b & (BUSTER_CHECK_BITS_STATIC | BUSTER_CHECK_BITS_DEFINED)) != 0 || check_input_linkage(bits, t) != 0 ?
@@ -3054,7 +3275,7 @@ static void check_attested_after(CheckAttested* census, const Parser* parser, Pr
         // A hit whose reading here wasn't what the memo attests: an input of the reading the hash doesn't cover.
         if (hit && !error && !eligible)
         {
-            const uint32_t source = parser->tokens.sources[first];
+            const uint32_t source = first < count ? parser->tokens.sources[first] : UINT32_MAX;
             census->contradicted = census->unit_contradictions == 0 && source < pp->output.count && pp->output.locations != NULL ? pp->output.locations[source] :
                                    census->contradicted;
             census->unit_contradictions += 1;
@@ -3109,6 +3330,7 @@ static void check_attested_after(CheckAttested* census, const Parser* parser, Pr
     // input of a reading that the hash doesn't cover, which a skipped declaration may have too).
     census->again = census->skipped && (error || !ready || !arrays || unlisted_events != 0 || input->typo_searched || census->unit_contradictions != 0);
     census->units_skipping += census->skipped ? 1 : 0;
+    census->units_viewing += census->viewing ? 1 : 0;
     arena_pop_to(&census->unit_arena, mark);
 }
 
