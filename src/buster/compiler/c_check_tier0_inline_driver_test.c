@@ -230,13 +230,16 @@ static void check_test_driver_tier0_inline_lanes(CheckTest* test, const char* cl
     char expected[256] = { 0 };
     const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
     check_test_expect(test, ran, "clang's build of Tier 0's lanes fixture runs");
-    // Builds 0 to 2 by 4 lanes, build 3 by 1 lane, each an object; then an executable by 4 lanes.
-    char objects[4][512];
-    bool made[4] = { false, false, false, false };
-    for (uint32_t build = 0; ran && build < 4; build += 1)
+    // Builds 0 to 2 by 4 lanes, build 3 by 1 lane, builds 4 and 5 by 1 lane's windows of 1 and 64 tokens (#2536: each
+    // callee lowered before the bodies, which call it before and after its definition), each an object; then an
+    // executable by 4 lanes.
+    static const char* const windows[6] = { "--emit-window=0", "--emit-window=0", "--emit-window=0", "--emit-window=0", "--emit-window=1", "--emit-window=64" };
+    char objects[6][512];
+    bool made[6] = { false, false, false, false, false, false };
+    for (uint32_t build = 0; ran && build < 6; build += 1)
     {
         snprintf(objects[build], sizeof(objects[build]), "%s/tier0-inline-lanes-%u.o", directory, build);
-        char* arguments[] = { (char*)executable, "--lanes", build < 3 ? "4" : "1", "-c", "-o", objects[build], unit, NULL };
+        char* arguments[] = { (char*)executable, "--lanes", build < 3 ? "4" : "1", (char*)windows[build], "-c", "-o", objects[build], unit, NULL };
         text = NULL;
         made[build] = check_test_driver_spawn(arguments, &text) == 0;
         free(text);
@@ -247,6 +250,8 @@ static void check_test_driver_tier0_inline_lanes(CheckTest* test, const char* cl
         same = same && made[build] && check_test_driver_same_files(objects[0], objects[build]);
     }
     check_test_expect(test, ran && same, "Tier 0's lanes fixture is the same object by 4 lanes, three times, and by 1 lane");
+    const bool windowed = made[3] && made[4] && made[5] && check_test_driver_same_files(objects[3], objects[4]) && check_test_driver_same_files(objects[3], objects[5]);
+    check_test_expect(test, ran && windowed, "Tier 0's lanes fixture is the same object by 1 lane's windows of 1 and 64 tokens");
     char program[512];
     snprintf(program, sizeof(program), "%s/tier0-inline-lanes", directory);
     char* arguments[] = { (char*)executable, "--lanes", "4", "-o", program, unit, NULL };
@@ -257,7 +262,7 @@ static void check_test_driver_tier0_inline_lanes(CheckTest* test, const char* cl
     check_test_expect(test, built && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
                       "Tier 0's lanes fixture runs as clang -O0's build does");
     unlink(program);
-    for (uint32_t build = 0; build < 4; build += 1)
+    for (uint32_t build = 0; build < 6; build += 1)
     {
         if (made[build])
         {
@@ -285,14 +290,16 @@ static void check_test_driver_tier0_inline(CheckTest* test, const char* clang, c
     char expected[256] = { 0 };
     const bool ran = referenced && (!host || (check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0));
     check_test_expect(test, ran, "clang's build of Tier 0's inlining fixture runs");
-    // Builds 0 and 1 inline, by the vector path and the scalar twin; build 2 keeps every call (--tier0-no-inline). Each
-    // makes an object and an executable.
-    char objects[3][512];
-    bool made[3] = { false, false, false };
-    for (uint32_t build = 0; ran && build < 3; build += 1)
+    // Builds 0 and 1 inline, by the vector path and the scalar twin; build 2 keeps every call (--tier0-no-inline); builds
+    // 3 and 4 are 0 and 1 by windows of one token (#2536, --emit-window=1: every body a window). Each makes an object and
+    // an executable.
+    char objects[5][512];
+    bool made[5] = { false, false, false, false, false };
+    for (uint32_t build = 0; ran && build < 5; build += 1)
     {
-        const bool scalar = build == 1;
+        const bool scalar = build == 1 || build == 4;
         const bool inlining = build != 2;
+        const bool windowed = build >= 3;
         char program[512];
         char message[256];
         snprintf(program, sizeof(program), "%s/tier0-inline-%u", directory, build);
@@ -308,6 +315,10 @@ static void check_test_driver_tier0_inline(CheckTest* test, const char* clang, c
             if (!inlining)
             {
                 arguments[count++] = "--tier0-no-inline";
+            }
+            if (windowed)
+            {
+                arguments[count++] = "--emit-window=1";
             }
             if (object != 0)
             {
@@ -337,7 +348,9 @@ static void check_test_driver_tier0_inline(CheckTest* test, const char* clang, c
     }
     check_test_expect(test, made[0] && made[1] && check_test_driver_same_files(objects[0], objects[1]), "the splice's vector path and its scalar twin make the same object");
     check_test_expect(test, made[0] && made[2] && !check_test_driver_same_files(objects[0], objects[2]), "--tier0-no-inline keeps the calls the splice inlines");
-    for (uint32_t build = 0; build < 3; build += 1)
+    check_test_expect(test, made[0] && made[3] && made[4] && check_test_driver_same_files(objects[0], objects[3]) && check_test_driver_same_files(objects[0], objects[4]),
+                      "windows of one token make the object of one window, by both paths");
+    for (uint32_t build = 0; build < 5; build += 1)
     {
         if (made[build])
         {

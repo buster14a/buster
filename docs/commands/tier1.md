@@ -192,6 +192,11 @@ predicates. The pass changes only comparison operands and predicates in the
 lane-owned IR, before use lists and verified-analysis revisions exist. The
 optimizer then removes dead chains and verifies the resulting SSA. Its
 64-byte opcode/type candidate scan has an exact scalar twin and masked tails.
+If-conversion (#1382) runs `ir_truth_simplify_values` on its own rounds'
+columns, which also turns a select of truth values tested against zero into an
+i1 select (`c && x` as `select c, x, c`), as
+[the IR optimization guide](ir-optimization.md#bounded-scalar-if-conversion-1382)
+says.
 
 `tests/driver/tier1_truth.c` is the standalone native regression, also run by
 `tools/ci/correctness.tests`. From the repository root with a built compiler:

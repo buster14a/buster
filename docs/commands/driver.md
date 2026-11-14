@@ -37,7 +37,7 @@ requirements. [Command index](README.md).
   calls, which the report's `inlined` counts (#1282): [the Tier 1
   guide](../../docs/tier1.md)'s "The C driver's `--tier1`" and "Inlining", and [Tier 1 failure
   outcomes](../../docs/tier1-outcomes.md)); `-O` flags set only preprocessor
-  optimization macros, not the tier; Tier 0 is the default, and inlines the same calls: `--tier0-no-inline` keeps them, #1398's control, [the Tier 0 guide](tier0.md#inlining-always_inline-functions-1398)), `--id-order N` handing the unit's identifiers their
+  optimization macros, not the tier; Tier 0 is the default, and inlines the same calls: `--tier0-no-inline` keeps them, #1398's control, [the Tier 0 guide](tier0.md#inlining-always_inline-functions-1398)), `--emit-window=N` taking one lane's emission in windows of about N tokens, each window's lowering and code before the next one's, in memory the next one reuses (#2536's step 1; 0, the default, is one window: [function lanes](function-lanes.md#windows-2536)), `--id-order N` handing the unit's identifiers their
   ids in another order, on which nothing it writes may depend (#153's test
   option, `check_driver_id_order`, for each unit of a multi-file command too), and `-g` attaching DWARF of its functions'
   source lines (`c_check_debug.c`, #395), to the executable and with `-c` to the
@@ -116,6 +116,10 @@ requirements. [Command index](README.md).
   earlier units read silently and purely and that their own code doesn't reach
   (#2531, `--attested=on|verify|off`, on by default but with `-g` or
   `--scalar`: the [translation units guide](translation-units.md#attested-declarations---attested-2531)).
+  `--attested-memo=DIRECTORY` keeps their memo across processes, in a file
+  of that directory for the compiler's build and the command's options, so
+  that a command of one source file skips what earlier commands learned too
+  (opt-in, step 4).
   `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
