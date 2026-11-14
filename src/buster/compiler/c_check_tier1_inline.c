@@ -900,13 +900,14 @@ static uint32_t check_tier1_inline_reach(const CheckTier1Inline* inlining, const
 
 // The dead functions (#2541 step 2): the internal candidates that no code the emission keeps refers to, once every body's
 // code is made (`codes`, CheckEmitRun.codes), marked in CheckTier1Inline.dead; returns their count. A candidate may lose
-// its code where it isn't rooted (CheckTier1Inline.rooted) and its code defines no label another object may take the
-// address of; it keeps it where a kept body's code refers to it (a call no caller expanded, a Tier 0 caller's, an
-// address). The kept bodies are the others, with the asm helpers (`helpers`), and their references are followed from each
-// body they reach (an explicit stack). An asm template's references (a helper's or a naked body's, `naked`) are its names'
-// indices, through `asm_symbols` (of `asm_names`). Not under -g (`sources`), whose entries have no form for a function
-// without code yet (#2541 step 3), nor with -fpatchable-function-entry; the emission asks in -c's object alone. Temporaries in `scratch`; none dead where they
-// don't fit.
+// its code where it isn't rooted (CheckTier1Inline.rooted) and has no labels (the lowering numbers them across the unit's
+// functions, Tier0Function.label_count, and the merge defines them in turn: a held body's zeroed code would say it has
+// none); it keeps it where a kept body's code refers to it (a call no caller expanded, a Tier 0 caller's, an address). The
+// kept bodies are the others, with the asm helpers (`helpers`), and their references are followed from each body they
+// reach (an explicit stack). An asm template's references (a helper's or a naked body's, `naked`) are its names' indices,
+// through `asm_symbols` (of `asm_names`). Not under -g (`sources`), whose entries have no form for a function without code
+// yet (#2541 step 3), nor with -fpatchable-function-entry; the emission asks in -c's object alone. Temporaries in
+// `scratch`; none dead where they don't fit.
 static uint32_t check_tier1_inline_dead(CheckTier1Inline* inlining, const EmittedCode* codes, const CheckProgramHelpers* helpers, const CheckProgramNaked* naked,
                                         const SymbolId* asm_symbols, uint32_t asm_names, bool sources, Arena* scratch)
 {
@@ -923,8 +924,11 @@ static uint32_t check_tier1_inline_dead(CheckTier1Inline* inlining, const Emitte
         for (uint32_t b = 0; b < count; b += 1)
         {
             const bool assembly = naked != 0 && naked[b].planned;
-            const bool may = inlining->classes[b] != BUSTER_CHECK_TIER1_INLINE_CLASS_NONE && inlining->rooted[b] == 0 && codes[b].label_count == 0 &&
-                             codes[b].asm_label_count == 0 && !assembly;
+            // Labels are numbered across the unit's functions by the lowering (Tier0Function.label_count: a jump table's
+            // entries, an address taken), which the merge defines in turn: a function with any keeps its code, as a held
+            // one's zeroed code would say it has none.
+            const bool may = inlining->classes[b] != BUSTER_CHECK_TIER1_INLINE_CLASS_NONE && inlining->rooted[b] == 0 && inlining->lowered->functions[b].label_count == 0 &&
+                             codes[b].label_count == 0 && codes[b].asm_label_count == 0 && !assembly;
             reached[b] = may ? 0 : 1;
             if (!may)
             {

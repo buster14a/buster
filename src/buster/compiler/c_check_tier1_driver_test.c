@@ -5649,8 +5649,9 @@ static void check_test_driver_tier1_inline(CheckTest* test, const char* clang, c
 // (another unit's may replace it: its calls stay), a static function with one call past the small class's cost (the
 // single-site class: expanded and dead), a static chain whose only calls are in an expanded function (dead), static
 // functions expanded where called but kept by their address taken in code, by a static table and by a used attribute,
-// and one whose only caller Tier 1 leaves to Tier 0 (it calls setjmp), whose call stays and whose code the emission's
-// last pass makes from its summary. By each path, with and without inlining, the build runs as clang -O0's does; its
+// one whose only caller Tier 1 leaves to Tier 0 (it calls setjmp), whose call stays and whose code the emission's last
+// pass makes from its summary, and one that calls a runtime function (__divti3), whose expansion's call of it takes the
+// runtime's symbol whichever lane lowered the callee (by eight lanes, the parts are apart). By each path, with and without inlining, the build runs as clang -O0's does; its
 // object defines the kept functions and leaves out the dead ones (all of them without inlining); and its object by one
 // lane is its object by eight, and its object without holding the candidates' code for the last pass (--tier1-no-hold).
 // An executable keeps every function: its binding resolves every program symbol.
@@ -5672,6 +5673,7 @@ static const char check_test_tier1_unit_inline_source[] =
     "    }\n"
     "    return s;\n"
     "}\n"
+    "static long quotient(__int128 a, long b) { return (long)(a / b); }\n"
     "static int lead(int x) { return x ^ 0x55; }\n"
     "static int hop(int x) { return lead(x) + lead(x + 1); }\n"
     "static int add1(int x) { return x + 1; }\n"
@@ -5688,7 +5690,8 @@ static const char check_test_tier1_unit_inline_source[] =
     "    for (int i = 0; i < n; i += 1) r += scale(i) + hook(i) + hop(i) + add1(i) + sub1(i) + pinned(i) + f(i) + table[0](i);\n"
     "    return r + jumpy(n);\n"
     "}\n"
-    "int main(void) { printf(\"%ld %d\\n\", run(9, add1), scale(4)); return 0; }\n";
+    "__attribute__((noinline)) long wide(int n) { return quotient((__int128)n << 70, 12345) + quotient(-(__int128)n << 66, 777); }\n"
+    "int main(void) { printf(\"%ld %d\\n\", run(9, add1) + wide(5), scale(4)); return 0; }\n";
 
 static void check_test_driver_tier1_unit_inline(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
@@ -5704,8 +5707,8 @@ static void check_test_driver_tier1_unit_inline(CheckTest* test, const char* cla
     char expected[256] = { 0 };
     const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
     check_test_expect(test, ran, "clang's build of the unit inlining fixture runs");
-    static const char* const kept[] = { "scale", "hook", "add1", "sub1", "pinned", "saved", "jumpy", "run", "main" };
-    static const char* const dead[] = { "crunch", "hop", "lead" };
+    static const char* const kept[] = { "scale", "hook", "add1", "sub1", "pinned", "saved", "jumpy", "run", "wide", "main" };
+    static const char* const dead[] = { "crunch", "hop", "lead", "quotient" };
     for (uint32_t build = 0; ran && build < 4; build += 1)
     {
         // Builds 0 and 1 inline, by the vector path and the scalar twin; 2 and 3 keep every call (--tier1-no-inline).
@@ -5749,7 +5752,7 @@ static void check_test_driver_tier1_unit_inline(CheckTest* test, const char* cla
         }
         snprintf(message, sizeof(message), "--tier1 %s the unit's calls and leaves %s function without code (build %u)", inlining ? "expands" : "keeps",
                  inlining ? "each dead" : "no", build);
-        check_test_expect(test, built && (inlining ? inlined >= 10 && dropped == 3 : inlined == 0 && dropped == 0), message);
+        check_test_expect(test, built && (inlining ? inlined >= 12 && dropped == 4 : inlined == 0 && dropped == 0), message);
         char actual[256] = { 0 };
         snprintf(message, sizeof(message), "the unit inlining fixture by --tier1 runs as clang -O0's build does (build %u)", build);
         check_test_expect(test, built && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0, message);
