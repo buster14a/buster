@@ -15,7 +15,9 @@ direct rules now type nearly every node it sent to the action: a twentieth of
 ([below](#ts-rules-for-the-actions-nodes)). The sweeps are bound by fetching
 their code; with T's rare paths out of its loop's line, the three cost 181
 cycles a taken node on `sqlite3.c`
-([below](#the-sweeps-front-end-ts-rare-paths-out-of-line)). No compile takes it. Its gains are estimates that
+([below](#the-sweeps-front-end-ts-rare-paths-out-of-line)), and with C and X
+choosing a record's case by one `switch` each, 170
+([below](#cs-and-xs-dispatch-one-case-an-operator-one-a-template)). No compile takes it. Its gains are estimates that
 its first two steps exist to confirm or refute; a prototype of its three sweeps
 has been run over the compile's real nodes
 ([below](#what-a-prototype-of-the-sweeps-measured)). It is
@@ -1599,6 +1601,104 @@ node ([the record](https://github.com/buster14a/buster-performance/tree/c5d45b32
   same instructions.
 
 The three now cost 180.9 cycles a node on `sqlite3.c`, against the gate's 120.
+
+### C's and X's dispatch: one case an operator, one a template
+
+C chose each record's template through one chain of tests, the same for every
+operator, and X wrote each record's row through another. A record reached its
+own case only after failing the tests of the cases before it. C also called an
+out-of-line function for each operand it evaluated, and stored the record it
+was classifying into the machine first. After each such call and store, the
+build's `-fno-strict-aliasing` made C load the columns' pointer again.
+The change gives each sweep one case an operator or a template, which runs only
+its own tests:
+
+- **C's operands, in one place.** A common case no longer evaluates its
+  operands itself. It names at most two (`NodeMachineUse`), and C's loop
+  evaluates them inline, below the record's call depth, which it reads once
+  (`node_machine_evaluate_at`). Calls, `&&`, `||`, `?:` and updates still
+  evaluate their own operands, out of line (`node_machine_evaluate`, which now
+  takes the consumer). The machine no longer keeps the record C is classifying
+  (`classified`), and C stores the record it stopped at once, after its loop.
+- **C's classification, one case an operator.** The refusals every operator
+  shares come first, then the folded constant, then a `switch` on the operator.
+  Each case holds its own tests: a cast's class, a member's record, the
+  pointer arithmetic's operands. The order of `check_lower_template_classify`'s
+  rules is kept where it decides: an aggregate or a non-scalar value refuses
+  every operator that rule's chain reached after the leaves, `&&`, `||`, `?:`,
+  the selections, `&`, `*`, `.`, `->` and pointer arithmetic, except a cast, a
+  conversion and a unary plus. A division's and a remainder's power-of-two
+  test (`node_machine_power`) is asked for those two alone: since #2679 clang
+  had left it out of line, a call for every binary operator. The update's case
+  is out of line too (`node_machine_classify_update`).
+- **X's rows, one case a template.** `node_machine_own` is a `switch` on the
+  template, and each case reads only the fields it writes. A `PASS`, a `VOID`
+  and a discarded constant write nothing. Before, they fell through every test.
+- **A call's row from the calls written.** X stored, at every record, the
+  evaluated calls before it (`calls_at`), for the calls' rows alone. X now
+  keeps the calls' records in the order it writes them (`calls_written`,
+  increasing). A call's row counts those below its subtree's least record,
+  from the last.
+
+What C classifies, by operator and template, over the first 250,000 records it
+classified on `sqlite3.c` (a local patch to C's loop, in the record):
+
+| operator, template | share |
+| --- | ---: |
+| a leaf: a local's read | 24.6% |
+| a cast: its operand alone (`PASS`) | 15.3% |
+| a leaf: a constant | 14.3% |
+| `->` and `.` | 11.5% |
+| a call | 5.2% |
+| a condition's test (`TRUTH`) | 4.7% |
+| a store to a named object; through an address | 3.7%; 2.6% |
+| the rest | 18.1% |
+
+On the 9700X, against main `ca1ede6a` (CPU 2, under the lock, `--passes 11`,
+each run its own hold, in turn; [the record](https://github.com/buster14a/buster-performance/tree/569d3e36c443c992b6a899fb913c4519e4888e5f/docs/measurements/node-machine-dispatch-2524-2026-11-14)),
+in cycles and instructions a taken node, medians of six runs:
+
+| | T | C | X | T, C and X | the three, two runs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c`, main | 90.2, 350.9 | 57.6, 209.9 | 35.9, 104.0 | 183.8, 664.8 | 320.4 |
+| `sqlite3.c`, the change | 90.4, 350.9 | **44.7, 169.3** | 35.1, 78.6 | **170.2, 598.8** | **288.2** |
+| Lua, main | 83.2, 444.5 | 49.6, 208.9 | 24.2, 101.4 | 157.1, 754.8 | 297.2 |
+| Lua, the change | 83.2, 444.5 | **37.1, 171.2** | 24.6, 76.1 | **144.9, 691.8** | **271.3** |
+
+- **C** runs 22% fewer cycles on `sqlite3.c` and 25% fewer on Lua, and 41 and
+  38 fewer instructions a node. Most of it is one case an operator: with
+  the operands in one place alone, an intermediate version, C ran 53.6 cycles
+  on `sqlite3.c` against main's 56.9 in the same rounds, on main's
+  instructions. `nm`: `node_machine_contexts` goes from 7,681 bytes to 5,945,
+  and `node_machine_classify_update` (213) is new. Nothing else changes size.
+- **X** runs a quarter fewer instructions, but its cycles barely move: it
+  retires about 2.2 instructions a cycle. Its tape's count, which each entry
+  reads and writes in the machine, isn't what holds it: kept in a local, it
+  didn't move X's cycles either (below). `node_machine_expand` goes from 5,879
+  bytes to 5,714.
+- **The three sweeps** cost 7.4% fewer cycles on `sqlite3.c` and 7.8% fewer on
+  Lua, and 10.0% and 8.7% fewer in two runs, where the second finds its inputs
+  in the caches.
+- **Three levers didn't pay.** Each is a patch in the record:
+  - `restrict` on C's machine took the column reloads out of main's C (16
+    instructions and 6 cycles a node). On top of the operands in one place,
+    which removed those reloads' stores, it gained nothing more.
+  - X's tape in a local, passed by address to its updates' rows (out of line),
+    added 6.6 instructions a node: the updates' copies kept it on the stack.
+    Passed to them by value, it added 6.1 and left X's cycles as they were.
+  - A path for a leaf's read ahead of C's shared refusals added 14
+    instructions a node.
+- **The comparison:** `--verify` on `sqlite3.c`, Lua and musl, with and
+  without `-g`, has no difference, and the same counts of taken expressions
+  and nodes as main. `test-checker` passes. `-c sqlite3.c` doesn't run the
+  shadow and is unchanged: 122.81 ms against main's 122.90, user cycles
+  -0.16%, 229 fewer instructions of 1.36 G.
+
+The three now cost 170.2 cycles a node on `sqlite3.c`, against the gate's 120.
+T is about half of it, C a quarter and X a fifth. C and X stay one record at a
+time: C follows the tree down ([data-parallel first](#data-parallel-first-what-is-vector-and-what-is-ordered)),
+and X's rows written by three vector stores lost to its branches when they
+were measured ([the baked tables](#the-baked-tables-measured)).
 
 ## Expected gains
 
