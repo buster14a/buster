@@ -15,8 +15,96 @@
 // statement's complete operands theirs (#2120).
 // Include after c_check_semantic_recovery_driver_test.c, whose reader this takes.
 
+// #2406: a malformed block item must not hide the complete statements after its semicolon. These are runtime data,
+// compared as complete diagnostic streams, including each first error, keyword correction, later name and error limit.
+static void check_test_driver_parse_statement_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const sources[] =
+    {
+        "tests/checker/parse-recovery/stray-else.c",
+        "tests/checker/parse-recovery/missing-head.c",
+        "tests/checker/parse-recovery/missing-declarator.c",
+        "tests/checker/parse-recovery/mixed.c",
+        "tests/checker/parse-recovery/operand-context.c",
+    };
+    static const uint32_t later_errors[] = { 4, 6, 3, 4, 0 };
+    static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
+    static const char* const policies[] = { "-Wall", "-w", "-ferror-limit=2" };
+    enum { LINES = 16384 };
+    char* expected_lines = malloc(LINES);
+    char* actual_lines = malloc(LINES);
+    char object[PATH_MAX];
+    snprintf(object, sizeof(object), "%s/parse-statement-recovery.o", directory);
+    check_test_expect(test, expected_lines != NULL && actual_lines != NULL, "parse statement recovery: diagnostic buffers allocated");
+    for (uint32_t f = 0; expected_lines != NULL && actual_lines != NULL && f < BUSTER_ARRAY_LENGTH(sources); f += 1)
+    {
+        const bool present = access(sources[f], R_OK) == 0;
+        check_test_expect(test, present, "parse statement recovery: runtime fixture available");
+        for (uint32_t s = 0; present && s < BUSTER_ARRAY_LENGTH(standards); s += 1)
+        {
+            for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(policies); p += 1)
+            {
+                char* reference[] = { (char*)clang, (char*)standards[s], "-fsyntax-only", "-fno-caret-diagnostics", (char*)policies[p], (char*)sources[f], NULL };
+                char* expected = NULL;
+                const int oracle = check_test_driver_spawn(reference, &expected);
+                const bool read = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
+                uint32_t later = 0;
+                const char* found = read ? expected_lines : "";
+                while ((found = strstr(found, "undeclared identifier 'after_")) != NULL)
+                {
+                    later += 1;
+                    found += 1;
+                }
+                check_test_expect(test, read && oracle == 1 && (p == 2 || later == later_errors[f]), "parse statement recovery: clang rejects and reaches the later names");
+                for (uint32_t mode = 0; read && mode < 3; mode += 1)
+                {
+                    const bool compile = mode == 2;
+                    char* arguments[16] =
+                    {
+                        (char*)executable,
+                        (char*)standards[s],
+                        compile ? "-c" : "-fsyntax-only",
+                        "-fno-caret-diagnostics",
+                        (char*)policies[p],
+                        (char*)sources[f],
+                    };
+                    uint32_t count = 6;
+                    if (mode == 1)
+                    {
+                        arguments[count++] = "--scalar";
+                    }
+                    if (compile)
+                    {
+                        arguments[count++] = "-o";
+                        arguments[count++] = object;
+                        arguments[count++] = "--deferred-bodies";
+                        arguments[count++] = "--lanes";
+                        arguments[count++] = "2";
+                        unlink(object);
+                    }
+                    arguments[count] = NULL;
+                    char* actual = NULL;
+                    const int status = check_test_driver_spawn(arguments, &actual);
+                    actual_lines[0] = 0;
+                    const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(actual_lines, expected_lines) == 0;
+                    char description[8192];
+                    snprintf(description, sizeof(description), "parse statement recovery %s, %s %s, mode %u: status %d (clang %d), lines\n%s(clang\n%s)",
+                             sources[f], standards[s], policies[p], mode, status, oracle, actual_lines, expected_lines);
+                    check_test_expect(test, same && status == oracle && (!compile || access(object, F_OK) != 0), description);
+                    free(actual);
+                }
+                free(expected);
+            }
+        }
+    }
+    unlink(object);
+    free(expected_lines);
+    free(actual_lines);
+}
+
 static void check_test_driver_statement_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+    check_test_driver_parse_statement_recovery(test, clang, executable, directory);
     static const char* const fixtures[] = {
         // #2438: a case operand's non-integer type is diagnosed before its constant value, on ordinary and wide
         // switches. Parentheses and range endpoints retain their own beginning; integer nonconstants and faults keep

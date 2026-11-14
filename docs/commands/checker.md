@@ -82,7 +82,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
-  --asm-definitions-only | --call-counts-only | --fp-contract-only] [--in-process] [--clang-server PATH]
+  --asm-definitions-only | --call-counts-only | --fp-contract-only | --operand-diagnostics-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; with
@@ -119,7 +119,17 @@ unused-warning fixtures also check exact scope-completion tokens.
   plain row; `--cpu-dispatch-only` runs the `cpu_specific` and
   `cpu_dispatch` section alone, #1447; `--target-versions-only` runs GNU multiversioning's `target` and
   `target_clones` section alone, #1838; `--asm-definitions-only` runs what
-  inline assembly defines against clang's objects alone, #1848; `--semantic-recovery-only` runs
+  inline assembly defines against clang's objects alone, #1848; `--operand-diagnostics-only` runs
+  the original runtime sources in `tests/driver/operand_diagnostics/` against Clang's complete
+  diagnostics for invalid record and atomic operators, statement conditions, assertions and
+  case labels and enumerators (#2441). Enum controls also check implicit successors,
+  fixed underlying types, overflow and redefinition ordering. It checks gnu17 and C23,
+  error promotion/suppression, scalar/vector
+  readers and one/three requested lanes, deferred bodies, existing output preservation,
+  typedef and qualifier spelling, and valid scalar/record/atomic-lvalue controls. The
+  atomic conditional controls also compile, link and execute selections of integer,
+  floating, pointer and aligned values through Clang and all three Buster routes.
+  `--semantic-recovery-only` runs
   `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,
   `c_check_type_attribute_recovery_driver_test.c`,
   `c_check_structural_recovery_driver_test.c` and `c_check_repaired_view_driver_test.c` alone, the whole output and status
@@ -236,6 +246,13 @@ unused-warning fixtures also check exact scope-completion tokens.
   `c_check_interrupt_driver_test.c` (#147) compares x86's `interrupt` attribute's handler errors (with those clang
   places nowhere), its direct calls and `-Wexcessive-regsave` with pinned Clang through the vector, scalar and
   two-lane deferred paths, and checks that `-c` of a definition is refused by name (`docs/c-checker.md`).
+  The executable interrupt-handler control in `c_check_convention_driver_test.c`
+  retains the first failed compile, link or run stage, its status and captured
+  diagnostics, with the actual and pinned Clang versions (#2226). A version
+  mismatch never turns a failed control into a pass or skip. The original
+  `tests/driver/interrupt_probe_control.c` fixture checks all three failure
+  stages, empty and wrong output, successful output, and that no later stage
+  runs after a failure.
   Bitwise/comparison `-Wparentheses` diagnostics distinguish a single bare comparison from eager logical
   comparison pairs and unparenthesized bitwise chains (#1390). Parenthesized operands retain their explicit
   grouping. Original default-warning fixtures compare complete diagnostics and independent counts against
@@ -552,7 +569,7 @@ Clang's hidden-parameter ABI ([fortify compatibility](../c-builtins-fortify.md#c
 
 ## Runtime fixtures
 
-`test-checker`'s shared source fixtures (`check_test_sources`, 418 cases) are
+`test-checker`'s shared source fixtures (`check_test_sources`, 420 cases) are
 runtime data (#2053): `tests/checker/sources/` holds `catalog.tsv` and one file
 a case, which the test reads when it runs, so that editing a case's source or
 flags, or adding a case, compiles, links and bakes nothing. The catalog's first

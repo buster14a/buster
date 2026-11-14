@@ -1155,7 +1155,7 @@ struct ParseTree
 };
 
 // The spellings of the attributes whose arguments clang's parser reads its own way (parse_scalar_custom_attribute).
-#define BUSTER_PARSE_CUSTOM_ATTRIBUTES 12u
+#define BUSTER_PARSE_CUSTOM_ATTRIBUTES 14u
 
 // The bindings a parse starts from: a meaning for every IdentId, PARSE_MEANING_ORDINARY but for clang's predeclared
 // typedef names, which every parse leaves as it found them.
@@ -1167,7 +1167,7 @@ struct ParseMeanings
     // The scalar parser reads attribute spellings only where they decide declaration versus statement syntax.
     const InternTable* table;
     // availability's, external_source_symbol's, type_tag_for_datatype's, objc_bridge_related's, swift_newtype's and
-    // swift_wrapper's names, and their keyword spellings (#1447), found once in `table` where the meanings are made (0 for a name the unit doesn't have):
+    // swift_wrapper's and suppress's names, and their keyword spellings (#1447, #2332), found once in `table` where the meanings are made (0 for a name the unit doesn't have):
     // parse_flag_custom_attributes reads these, not the table, which a caller may have released by then (the parser
     // benchmark's is).
     IdentId custom_attributes[BUSTER_PARSE_CUSTOM_ATTRIBUTES];
@@ -2690,6 +2690,10 @@ struct Parser
     uint32_t typo_count;
     // Borrowed through checking and emission, like the tokens' source indices. Resource bytes stay owned by pp.
     const Preprocessor* preprocessor;
+    // Beside each token of a view that leaves a parse's tokens out (#2531's step 3, c_check_attested.c's
+    // check_attested_view), its index in that parse, which names the objects a token numbers (parse_origin); or NULL
+    // where the indices are the parse's own.
+    const uint32_t* origins;
     ParseTokens tokens;
     ParseTree tree;
     // The tree in postorder, for a unit without errors: the token at each position, and with ParseOptions.sizes its
@@ -2744,6 +2748,14 @@ struct Parser
     ParseVectorBuffers buffers;
     IdentId predeclared[BUSTER_PARSE_PREDECLARED_TYPEDEFS];
 };
+
+// Token `token`'s index in the parse `parser` was made from (Parser.origins): its own, but in a view that leaves tokens
+// out. The local labels numbered by a token (a string literal's, .Lbuster_string_N) take it, so that a view's object is
+// the parse's to the byte.
+static inline __attribute__((unused)) uint32_t parse_origin(const Parser* parser, uint32_t token)
+{
+    return parser->origins != NULL ? parser->origins[token] : token;
+}
 
 // A compact #embed operand's immutable bytes. Synthetic parsers have no preprocessor and therefore no resources.
 static __attribute__((unused)) const uint8_t* parse_embed_bytes(const Parser* parser, uint32_t token, uint32_t* length)

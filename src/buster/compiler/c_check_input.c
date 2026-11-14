@@ -406,6 +406,9 @@ typedef enum CheckInputMessage
     // clang's "non-integral type 'T' is an invalid underlying type"; a bit-precise type has its own unsupported wording.
     // The recovered enum keeps its fixed state with int as its base.
     CHECK_INPUT_ENUM_INVALID_BASE,
+    // An enumerator's value has a noninteger type, even when its bits were constant (#2441). The rejected value's
+    // type and written typedef are retained; recovery assigns the enumerator its ordinary implicit successor.
+    CHECK_INPUT_ENUM_VALUE_TYPE,
 } CheckInputMessage;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
@@ -577,6 +580,7 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_ASM_LABEL_CONFLICT] = "conflicting asm label",
     [CHECK_INPUT_THREAD_NON_GLOBAL] = "'_Thread_local' variables must have global storage",
     [CHECK_INPUT_ENUM_INVALID_BASE] = "non-integral type is an invalid underlying type",
+    [CHECK_INPUT_ENUM_VALUE_TYPE] = "integer constant expression must have integer type",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -670,7 +674,8 @@ struct CheckInputReport
     uint64_t suborder;
     // The declaration a message located elsewhere names, or a redeclaration's prior declaration, plus one; 0 for none.
     uint32_t subject;
-    // The attribute a multiversioning message names (its name token), or BUSTER_CHECK_NONE.
+    // The attribute a message names (its name token); a counted argument's syntax error keeps its owner for recovery.
+    // Zero or BUSTER_CHECK_NONE when the message has no attribute.
     uint32_t attribute;
     // An attribute's argument a message names, from 1 (CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS's); two calling conventions
     // (CHECK_INPUT_ATTRIBUTE_CONVENTIONS's, the one asked for in the low byte); or 0.
@@ -11591,7 +11596,37 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         }
         valid = valid && !specifier_errors;
     }
-    bool more = valid && !declares_nothing;
+    // A malformed GNU suppress tail leaves a delimiter before this declaration (#2332). Clang skips its remainder;
+    // retain no binding that could hide a later undeclared-name error. Only a complete semicolon-bounded tail is
+    // discarded, never a following function/block body or an unmatched group.
+    bool discarded = false;
+    if (valid && common_attributes != NULL && common_attributes->suppress_tail)
+    {
+        uint32_t end = i;
+        bool balanced = true;
+        while (balanced && end < count && parser->tokens.kinds[end] != PARSE_KIND_SEMI)
+        {
+            const uint8_t kind = parser->tokens.kinds[end];
+            if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE ||
+                (kind == PARSE_KIND_L_BRACE && parser->tree.roles[end] == PARSE_ROLE_OPEN_INITIALIZER))
+            {
+                const uint32_t close = parser->tree.parents[end];
+                balanced = close > end && close < count;
+                end = balanced ? close + 1 : end;
+            }
+            else
+            {
+                balanced = kind != PARSE_KIND_L_BRACE && kind != PARSE_KIND_R_BRACE && kind != PARSE_KIND_R_PAREN && kind != PARSE_KIND_R_SQUARE;
+                end += balanced;
+            }
+        }
+        discarded = balanced && end < count;
+        if (discarded)
+        {
+            memset(reader->ignored + i, 1, end + 1 - i);
+        }
+    }
+    bool more = valid && !declares_nothing && !discarded;
     while (more && i < count)
     {
         uint32_t name;

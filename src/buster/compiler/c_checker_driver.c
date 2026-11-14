@@ -241,6 +241,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ATTRIBUTES_MISPLACED: result = "misplaced attributes; expected attributes here"; break;
         case CHECK_INPUT_ENUM_NOT_REPRESENTABLE: result = "enumerator value is not representable in the underlying type"; break;
         case CHECK_INPUT_ENUM_INVALID_BASE: result = "non-integral type is an invalid underlying type"; break;
+        case CHECK_INPUT_ENUM_VALUE_TYPE: result = "integer constant expression must have integer type"; break;
         case CHECK_INPUT_ATTRIBUTE_CONVENTIONS: result = "calling convention attributes are not compatible"; break;
         case CHECK_INPUT_CONVENTION_CHANGE: result = "function declared here was previously declared with another calling convention"; break;
         case CHECK_INPUT_VECTOR_ELEMENT: result = "invalid vector element type"; break;
@@ -452,6 +453,7 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_UNKNOWN_TYPE: snprintf(text, capacity, "unknown type name '%.*s'", (int)argument.length, argument.pointer); break;
         case CHECK_ARGUMENT_EXPECTED_TYPE: snprintf(text, capacity, "expected a type"); break;
         case CHECK_ARGUMENT_EXPECTED_PAREN: snprintf(text, capacity, "expected ')'"); break;
+        case CHECK_ARGUMENT_EXPECTED_DECLARATOR: snprintf(text, capacity, "expected identifier or '('"); break;
         case CHECK_ARGUMENT_PCS_TYPE: snprintf(text, capacity, "invalid PCS type"); break;
         case CHECK_ARGUMENT_CONVENTION_UNSUPPORTED: snprintf(text, capacity, "'%s' calling convention is not supported for this target", parsed); break;
         case CHECK_ARGUMENT_FUNCTIONS_METHODS: snprintf(text, capacity, "'%s' attribute only applies to functions and methods", parsed); break;
@@ -5690,7 +5692,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "definition of builtin function '%.*s'", (int)intern_length(pp->table, name),
                                                   (const char*)intern_bytes(pp->table, name));
                         }
-                        else if (phase == 0 && (kind == CHECK_INPUT_ENUM_NOT_REPRESENTABLE || kind == CHECK_INPUT_ENUM_INVALID_BASE))
+                        else if (phase == 0 && (kind == CHECK_INPUT_ENUM_NOT_REPRESENTABLE || kind == CHECK_INPUT_ENUM_INVALID_BASE || kind == CHECK_INPUT_ENUM_VALUE_TYPE))
                         {
                             // The underlying type as clang prints it, its typedef's name first (check_driver_warning_type).
                             const CheckInputReport* report = input->reports + index;
@@ -5706,7 +5708,12 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
                             const String8 type = spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, report->type_spelling) :
                                                            (String8){ 0 };
-                            if (kind == CHECK_INPUT_ENUM_INVALID_BASE)
+                            if (kind == CHECK_INPUT_ENUM_VALUE_TYPE)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                                      "integer constant expression must have integer type, not %.*s", (int)type.length, type.pointer);
+                            }
+                            else if (kind == CHECK_INPUT_ENUM_INVALID_BASE)
                             {
                                 pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
                                                       report->detail != 0 ? "%.*s is an invalid underlying type" :
@@ -6364,10 +6371,20 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                            report->note_kind == CHECK_INPUT_NOTE_CONSTANT_CONVERSION ? "this conversion is not allowed in a constant expression" :
                                            constant ? "subexpression not valid in a constant expression" : "to match this '('",
                             };
+                            // A missing outer delimiter of suppress's string list (#2332), located just after the
+                            // preceding token by the same adapter as the parser's ExpectAndConsume diagnostics.
+                            const bool delimiter = (argument_error == CHECK_ARGUMENT_EXPECTED_PAREN || argument_error == CHECK_ARGUMENT_EXPECTED_COMMA) &&
+                                                   (report->detail >> 8) != 0;
                             // (A `,` or `=` clang's ExpectAndConsume expects just past the token before: past the identifier's end.)
                             const bool past = (argument_error == CHECK_ARGUMENT_AVAILABILITY_COMMA || argument_error == CHECK_ARGUMENT_SOURCE_EQUAL) && token < count &&
                                               parser->tokens.names[token] != 0;
-                            if (past)
+                            if (delimiter)
+                            {
+                                const ParseDiagnostic diagnostic = { .token = token, .place = BUSTER_PARSE_AFTER_PREVIOUS };
+                                pp_diagnose_output_location_at(pp, PP_SEVERITY_ERROR, source, parse_diagnostic_location(parser, pp, &diagnostic), publication,
+                                                               PP_DIAGNOSTIC_SEMANTIC, "%s", text);
+                            }
+                            else if (past)
                             {
                                 pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, intern_length(pp->table, parser->tokens.names[token]), publication, "%s", text);
                             }
@@ -10314,13 +10331,15 @@ typedef enum CheckAttestedMode
 } CheckAttestedMode;
 
 // The lanes' counts that --time-stages reports for a command of several source files (check_attested_summary): its units
-// (each once, whether read again or not), those that skipped and those read again; their file-scope declarations, and the
+// (each once, whether read again or not), those that skipped, those read as their view (step 3, check_attested_view) and
+// those read again; their file-scope declarations, and the
 // skipped ones; the tokens outside function definitions, and the skipped ones; the hashes in the lanes' memos; the hits
 // that their readings contradicted; and the readings' binding events outside their declarations' lists.
 typedef enum CheckAttestedSummary
 {
     CHECK_ATTESTED_SUMMARY_UNITS,
     CHECK_ATTESTED_SUMMARY_SKIPPING,
+    CHECK_ATTESTED_SUMMARY_VIEWS,
     CHECK_ATTESTED_SUMMARY_AGAIN,
     CHECK_ATTESTED_SUMMARY_DECLARATIONS,
     CHECK_ATTESTED_SUMMARY_SKIPPED,
@@ -10352,6 +10371,11 @@ struct CheckDriverCommand
     // --attested=MODE (#2531): what a command of several source files does with the file-scope declarations its lanes'
     // earlier units read silently and purely (CheckAttestedMode, c_check_attested.c).
     uint8_t attested;
+    // --attested-memo=DIRECTORY (#2531's step 4): the directory of the memos kept across processes, where a command of
+    // any number of source files loads its lanes' memos and keeps what they learn, or null; and its file's key, the
+    // compiler's build and the command's options (check_attested_memo_key).
+    const char* attested_memo;
+    uint64_t attested_key[2];
     // -Wreturn-type's: whether to warn, whether -Werror promotes it, and -Werror=return-type's (1) or
     // -Wno-error=return-type's (-1) say.
     bool return_warning;
@@ -10399,8 +10423,12 @@ struct CheckDriverCommand
     bool tier1_no_hold;
     // --tier0-no-inline keeps Tier 0's calls of always_inline functions (#1398).
     bool tier0_no_inline;
+    // --emit-window=N: each unit's one-lane emission by windows of about N tokens (#2536, CheckProgramLanes.window_tokens).
+    uint32_t window_tokens;
     // --tier1-schedule=post|pre (#172): BUSTER_CHECK_TIER1_SCHEDULE_*.
     uint8_t tier1_schedule;
+    // --tier1-passes='s turned passes (#139): BUSTER_CHECK_TIER1_PASS_*.
+    uint8_t tier1_passes;
     CheckTier1Report* tier1_report;
     FILE* tier1_refusals;
     FILE* tier1_function_sizes;
@@ -10426,6 +10454,58 @@ struct CheckDriverDeferred
     WorkerBudgetLease lease;
     bool return_failed;
 };
+
+// --tier1-passes='s list (#139's measurement): comma-separated items, each + or - and then a pass's name (sccp, dce, cfg,
+// merge, licm, sroa, gvn or inline) or all, applied in turn to the passes the earlier options left on: the default
+// pipeline's (SCCP, dead-code removal, CFG cleanup, its merges and the inlining), with --tier1-gvn's and --tier1-no-inline's changes where they
+// came first. `toggled` holds the BUSTER_CHECK_TIER1_PASS_* bits that differ from the default; `gvn` and `no_inline` are
+// the two passes with options of their own. Returns false, and leaves all three as they were, for an empty list or item,
+// an item without its sign, or an unknown name.
+#define BUSTER_CHECK_DRIVER_PASS_GVN 64u
+#define BUSTER_CHECK_DRIVER_PASS_INLINE 128u
+static bool check_driver_tier1_passes(const char* list, uint8_t* toggled, bool* gvn, bool* no_inline)
+{
+    static const char* const names[] = { "sccp", "dce", "cfg", "merge", "licm", "sroa", "gvn", "inline", "all" };
+    static const uint32_t bits[] = {
+        BUSTER_CHECK_TIER1_PASS_SCCP,
+        BUSTER_CHECK_TIER1_PASS_DCE,
+        BUSTER_CHECK_TIER1_PASS_CFG,
+        BUSTER_CHECK_TIER1_PASS_MERGE,
+        BUSTER_CHECK_TIER1_PASS_LICM,
+        BUSTER_CHECK_TIER1_PASS_SROA,
+        BUSTER_CHECK_DRIVER_PASS_GVN,
+        BUSTER_CHECK_DRIVER_PASS_INLINE,
+        BUSTER_CHECK_TIER1_PASSES_ALL | BUSTER_CHECK_DRIVER_PASS_GVN | BUSTER_CHECK_DRIVER_PASS_INLINE,
+    };
+    _Static_assert(BUSTER_ARRAY_LENGTH(names) == BUSTER_ARRAY_LENGTH(bits), "a bit for each name");
+    _Static_assert((BUSTER_CHECK_TIER1_PASSES_ALL & (BUSTER_CHECK_DRIVER_PASS_GVN | BUSTER_CHECK_DRIVER_PASS_INLINE)) == 0, "the driver's own bits are apart");
+    uint32_t on = (BUSTER_CHECK_TIER1_PASSES_DEFAULT ^ *toggled) | (*gvn ? BUSTER_CHECK_DRIVER_PASS_GVN : 0) | (*no_inline ? 0 : BUSTER_CHECK_DRIVER_PASS_INLINE);
+    bool valid = *list != 0;
+    const char* item = list;
+    while (valid && *item != 0)
+    {
+        const char* comma = strchr(item, ',');
+        const uint64_t length = comma != NULL ? (uint64_t)(comma - item) : strlen(item);
+        const bool signed_item = length > 1 && (item[0] == '+' || item[0] == '-');
+        uint32_t found = 0;
+        for (uint32_t k = 0; signed_item && k < BUSTER_ARRAY_LENGTH(names); k += 1)
+        {
+            found = strlen(names[k]) == length - 1 && memcmp(names[k], item + 1, length - 1) == 0 ? bits[k] : found;
+        }
+        valid = found != 0;
+        on = !valid ? on : item[0] == '+' ? on | found : on & ~found;
+        item = comma != NULL ? comma + 1 : item + length;
+        // A comma ends an item and starts another: none may follow the last one.
+        valid = valid && (comma == NULL || *item != 0);
+    }
+    if (valid)
+    {
+        *toggled = (uint8_t)((on ^ BUSTER_CHECK_TIER1_PASSES_DEFAULT) & BUSTER_CHECK_TIER1_PASSES_ALL);
+        *gvn = (on & BUSTER_CHECK_DRIVER_PASS_GVN) != 0;
+        *no_inline = (on & BUSTER_CHECK_DRIVER_PASS_INLINE) == 0;
+    }
+    return valid;
+}
 
 // A strict, ordered list of distinct CPUs already in the caller's affinity mask. A CPU list is an opt-in control
 // for a reproducible campaign, so malformed or unavailable entries must not silently select a different placement.
@@ -11022,6 +11102,19 @@ static bool check_attested_read(CheckAttested* attested, CheckInput* input, cons
                                 bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens);
 static void check_attested_contradiction(const CheckAttested* attested, Preprocessor* pp, FILE* errors);
 static bool check_attested_verifying(const CheckAttested* attested);
+// The parse a unit's reader took and the stages after it take (step 3's view where the unit skipped, the parse otherwise).
+static Parser* check_attested_parse(CheckAttested* attested, Parser* parser);
+// Step 4's memo kept across processes: its key for a command, and a command of one source file's state (a units' run's
+// lanes open theirs, c_checker_units.c), whose unit is read again where it skipped and failed.
+static bool check_attested_memo_key(int count, char** arguments, char* const* inputs, uint32_t input_count, uint64_t* key);
+static CheckAttested* check_attested_lane_open(uint8_t mode, const char* memo, const uint64_t* key, bool alone);
+static void check_attested_lane_close(CheckAttested* attested);
+static void check_attested_begin(CheckAttested* attested, bool again);
+static bool check_attested_again(const CheckAttested* attested, bool failed);
+static void check_attested_summary(const CheckAttested* attested, uint64_t* counts);
+// The last command's counts of attested declarations (c_checker_units.c), which a command of one source file with a memo
+// kept across processes gives too, for the tests.
+static uint64_t check_units_attested_last[CHECK_ATTESTED_SUMMARY];
 
 static int check_driver_unit(const CheckDriverCommand* command, const PPOptions* options, const char* path, InternTable* identifiers, Preprocessor* pp,
                              Parser* parser, Arena* arena, Arena* scratch, Arena* output_arena, CheckProgramLanes* lanes, CheckClock* stage_clock,
@@ -11035,7 +11128,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     // The thread's last arena failure as the unit starts, against which its end tells a commit the unit was refused.
     const ArenaFailure failure_before = arena_failure;
     // #2531's attested declarations: the lane's state where the unit is one of a command's several (none for the census's).
-    CheckAttested* const attested = check_driver_attested == NULL && lanes != NULL && lanes->units_lane != NULL ? check_units_attested(lanes->units_lane) : NULL;
+    CheckAttested* const attested = check_driver_attested != NULL || lanes == NULL ? NULL :
+                                    lanes->units_lane != NULL ? check_units_attested(lanes->units_lane) : lanes->attested;
     const bool scalar = command->scalar;
     const bool verify = command->verify;
     const bool dump = command->dump;
@@ -11280,6 +11374,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             {
                 input_valid = check_attested_read(attested, &input, checking, checking_pp, &types, arena, scratch, !prefix_only,
                                                   repairing ? repair.original_end : checking->tokens.count, selected);
+                // A unit that skipped is its view from here (#2531's step 3): the parse without its skipped declarations, whose
+                // token indices the reader's columns have. The view is a whole unit's, as the parse was (its places end where
+                // the parse's did, publication_end).
+                checking = check_attested_parse(attested, checking);
+                recovered = recovered == parser ? checking : recovered;
+                tokens = checking->tokens.count;
             }
             else
             {
@@ -11288,7 +11388,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             }
             // A statement start's typo correction that clang's parser reads the statement again with (#1447,
             // check_driver_typo_edits): the original's tokens with the corrections, recovered and read again.
+            // (Not for a unit's view, whose token indices aren't its parse's: an error makes it read again whole,
+            // check_attested_again, where the corrections are made.)
             for (uint32_t pass = 1; pass < BUSTER_CHECK_DRIVER_TYPO_PASSES && ready && !input.resource && (input.report_count != 0 || parse_failed) &&
+                                    check_attested_parse(attested, parser) == parser &&
                                     check_driver_typo_edits(&typo_edits, parser, checking, &input, recovered != parser ? resumed.diagnostics : parser->diagnostics,
                                                             recovered != parser ? resumed.diagnostic_count : parser->diagnostic_count, pp->table);
                  pass += 1)
@@ -12263,9 +12366,52 @@ static int check_driver_one_unit(const CheckDriverRun* run)
     DependencyOutput dependency = { 0 };
     PPOptions options = run->command->options;
     options.preprocessed = run->command->inputs != NULL && run->command->inputs[0].preprocessed;
+    // A memo kept across processes (#2531's step 4): the unit's attested declarations' state, and its diagnostics into a
+    // stream of their own, which a unit that skipped and failed is read into again from its start with nothing skipped (as
+    // a units' run's lanes read theirs, check_units_compile), then given to stderr.
+    CheckAttested* const attested = run->command->attested_memo != NULL && !run->command->deferred_bodies ?
+                                    check_attested_lane_open(run->command->attested, run->command->attested_memo, run->command->attested_key, true) : NULL;
+    FILE* const stream = attested != NULL ? tmpfile() : NULL;
+    FILE* const errors = stream != NULL ? stream : stderr;
+    run->lanes->attested = stream != NULL ? attested : NULL;
+    const uint64_t marks[3] = { run->arena->length, run->scratch->length, run->output_arena->length };
+    check_attested_begin(run->lanes->attested, false);
     int result = check_driver_unit(run->command, &options, run->path, interned ? &identifiers : NULL, &pp, &parser, run->arena, run->scratch,
-                                  run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, stderr, NULL, run->release, &dependency, run->arena,
+                                  run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, errors, NULL, run->release, &dependency, run->arena,
                                   run->command->deferred_bodies ? &deferred : NULL, NULL);
+    if (check_attested_again(run->lanes->attested, result != 0))
+    {
+        fflush(errors);
+        result = fseeko(errors, 0, SEEK_SET) == 0 && ftruncate(fileno(errors), 0) == 0 ? result : 1;
+        arena_pop_to(run->arena, marks[0]);
+        arena_pop_to(run->scratch, marks[1]);
+        arena_pop_to(run->output_arena, marks[2]);
+        dependency = (DependencyOutput){ 0 };
+        check_attested_begin(run->lanes->attested, true);
+        result = check_driver_unit(run->command, &options, run->path, interned ? &identifiers : NULL, &pp, &parser, run->arena, run->scratch,
+                                   run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, errors, NULL, run->release, &dependency, run->arena, NULL, NULL);
+    }
+    if (stream != NULL)
+    {
+        // The unit's diagnostics, the last reading's.
+        fflush(stream);
+        rewind(stream);
+        char block[4096];
+        size_t length = fread(block, 1, sizeof(block), stream);
+        while (length != 0)
+        {
+            fwrite(block, 1, length, stderr);
+            length = fread(block, 1, sizeof(block), stream);
+        }
+        fclose(stream);
+    }
+    run->lanes->attested = NULL;
+    if (attested != NULL)
+    {
+        memset(check_units_attested_last, 0, sizeof(check_units_attested_last));
+        check_attested_summary(attested, check_units_attested_last);
+    }
+    check_attested_lane_close(attested);
     if (result == 0)
     {
         result = dependency_publish(&dependency, stderr) ? 0 : 1;
@@ -12486,6 +12632,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // --attested=on|verify|off (CheckAttestedMode).
     CheckAttestedMode attested = CHECK_ATTESTED_MODE_ON;
     bool invalid_attested = false;
+    const char* attested_memo = NULL;
     // --lower-all lowers every definition that may be emitted, referenced or not: #129's test option, to measure what
     // lowering only the referenced ones saves.
     bool lower_all = false;
@@ -12542,6 +12689,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     check_driver_lanes_taken = true;
     lanes->lanes = check_driver_cpus();
+    // One lane's emission by windows (#2536's step 1, check_program_emit_windows): the owner's default since 2026-11-14;
+    // --emit-window=0 is one window as long as the unit.
+    lanes->window_tokens = BUSTER_CHECK_EMIT_WINDOW_TOKENS;
     // The caller is one worker. A build system can cap this process explicitly; GNU make supplies shared ownership
     // of additional workers at emission time. No external budget changes the body's profitability decision itself.
     lanes->budget = &worker_budget;
@@ -12569,6 +12719,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool tier1_gvn = false;
     bool tier1_schedule_seen = false;
     bool invalid_tier1_schedule = false;
+    bool tier1_passes_seen = false;
+    bool invalid_tier1_passes = false;
     // --helper-report prints, on standard error, how many uses of each helper family the lowering took directly and how
     // many call their helper, the helpers planned and the units refused (#1059, CheckHelperReport).
     bool helper_report = false;
@@ -12807,6 +12959,18 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             lanes->tier1_no_lifetimes = true;
         }
+        else if (match.joined == C_OPTION_TIER1_PASSES_EQ)
+        {
+            // #139's measurement: Tier 1's passes turned on (+NAME) or off (-NAME), item by item, from the default pipeline.
+            const bool known = check_driver_tier1_passes(arguments[i] + 15, &lanes->tier1_passes, &lanes->tier1_gvn, &lanes->tier1_no_inline);
+            tier1_gvn = lanes->tier1_gvn;
+            tier1_passes_seen = true;
+            if (!known)
+            {
+                fprintf(stderr, "error: --tier1-passes= takes a comma-separated list of +NAME and -NAME, NAME being sccp, dce, cfg, merge, licm, sroa, gvn, inline or all\n");
+            }
+            invalid_tier1_passes |= !known;
+        }
         else if (match.joined == C_OPTION_TIER1_SCHEDULE_EQ)
         {
             // #172's measurement: Tier 1's code scheduled block by block after allocation (post) or before selection
@@ -12840,6 +13004,21 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             lanes->lanes = (uint32_t)lane_count;
             lanes->every_lane = true;
         }
+        else if (match.joined == C_OPTION_EMIT_WINDOW_EQ)
+        {
+            // #2536's step 1: one lane's emission by windows of about N tokens (check_program_emit_windows); 0 is one
+            // window as long as the unit, and BUSTER_CHECK_EMIT_WINDOW_TOKENS the default.
+            const char* value = arguments[i] + 14;
+            char* end = NULL;
+            const unsigned long tokens = strtoul(value, &end, 10);
+            const bool known = end != value && *end == 0 && tokens <= UINT32_MAX;
+            if (!known)
+            {
+                fprintf(stderr, "error: --emit-window= takes a count of tokens\n");
+            }
+            invalid_lanes |= !known;
+            lanes->window_tokens = known ? (uint32_t)tokens : 0;
+        }
         else if (match.exact == C_OPTION_WORKER_BUDGET || match.joined == C_OPTION_WORKER_BUDGET_EQ)
         {
             const char* value = arguments[i][15] == '=' ? arguments[i] + 16 : i + 1 < count ? arguments[++i] : NULL;
@@ -12863,6 +13042,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else if (match.exact == C_OPTION_POISON_ARENAS)
         {
             poison_arenas = true;
+            lanes->poison_windows = true;
         }
         else if (match.exact == C_OPTION_SHARED_PARTS)
         {
@@ -12873,6 +13053,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             const char* mode = arguments[i] + 11;
             attested = strcmp(mode, "on") == 0 ? CHECK_ATTESTED_MODE_ON : strcmp(mode, "verify") == 0 ? CHECK_ATTESTED_MODE_VERIFY : CHECK_ATTESTED_MODE_OFF;
             invalid_attested |= strcmp(mode, "on") != 0 && strcmp(mode, "verify") != 0 && strcmp(mode, "off") != 0;
+        }
+        else if (match.joined == C_OPTION_ATTESTED_MEMO_EQ)
+        {
+            attested_memo = arguments[i] + 16;
+            invalid_attested |= attested_memo[0] == 0;
         }
         else if (match.joined == C_OPTION_UNITS_MEMORY_EQ)
         {
@@ -13018,7 +13203,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL && linker_ready;
     invalid_lanes |= pinned_cpus_seen && (!lanes->every_lane || pinned_cpu_count != lanes->lanes);
     bool parsed = reserved && arguments_ready && linker_valid && !runtime_path_refused && codegen.error == CHECK_REQUEST_ACCEPTED && !missing_value &&
-                  !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_attested && !invalid_helper_forms && !invalid_tier1_schedule && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+                  !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_attested && !invalid_helper_forms && !invalid_tier1_schedule && !invalid_tier1_passes && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     if (parsed && (stdin_count > 1 || invalid_stdin))
     {
         fprintf(stderr, "error: standard input may appear once and requires -x c, assembler or assembler-with-cpp when compiling\n");
@@ -13042,7 +13227,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // instrumentation, ABI layouts and the language/target. The Tier 1 combination check has no source dependency.
     const CheckRequestRefusal refusal = parsed ? check_request_refusal(&request, &options, emit_object || link) : codegen;
     const bool invalid_tier1 = !lanes->tier1 && (lanes->tier1_strict || tier1_report || lanes->tier1_refusals != NULL || lanes->tier1_no_rematerialize ||
-                                               tier1_gvn || lanes->tier1_no_lifetimes || lanes->tier1_no_inline || lanes->tier1_no_hold || tier1_schedule_seen);
+                                               tier1_gvn || lanes->tier1_no_lifetimes || lanes->tier1_no_inline || lanes->tier1_no_hold || tier1_schedule_seen || tier1_passes_seen);
     const bool libraries_ready = !parsed || refusal.error != CHECK_REQUEST_ACCEPTED || !link || mixed_inputs || libraries.count == 0 ||
                                  worker_budget.dry_run || invalid_tier1 || check_driver_named_archives(&libraries, runtime_kind, &arena, &mixed_inputs);
     if (parsed && libraries_ready && stdin_count != 0)
@@ -13080,6 +13265,18 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // The functions' unwind tables, as clang has them: by default, unless freestanding or an option turns them off.
     const bool unwind_tables = parsed && predefines_unwind_tables(&options.predefines, options.freestanding);
     options.defer_history = !lazy_system_headers && !scalar && !source_rows;
+    // With -g a unit's DWARF describes every type its table holds (c_check_debug_values.c), a skipped declaration's too, so
+    // -g skips nothing; --attested=verify, which skips nothing, still runs.
+    const uint8_t command_attested = (uint8_t)(scalar || (attested == CHECK_ATTESTED_MODE_ON && (options.predefines.debug || options.predefines.debug_modules)) ?
+                                               CHECK_ATTESTED_MODE_OFF : attested);
+    // A memo kept across processes is keyed by the compiler's build: one that can't be identified keeps none.
+    uint64_t attested_key[2] = { 0 };
+    const bool memo_keyed = parsed && attested_memo != NULL && command_attested != CHECK_ATTESTED_MODE_OFF &&
+                            check_attested_memo_key(count, arguments, inputs, input_count, attested_key);
+    if (parsed && attested_memo != NULL && command_attested != CHECK_ATTESTED_MODE_OFF && !memo_keyed)
+    {
+        fprintf(stderr, "warning: --attested-memo keeps no memo: the compiler's build can't be identified\n");
+    }
     const CheckDriverCommand command = {
         .options = options,
         .scalar = scalar,
@@ -13092,10 +13289,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .lower_all = lower_all,
         // The scalar path keeps source order's reader, the twin the deferred one is checked against.
         .deferred_bodies = deferred_bodies && !scalar,
-        // With -g a unit's DWARF describes every type its table holds (c_check_debug_values.c), a skipped declaration's
-        // too, so -g skips nothing; --attested=verify, which skips nothing, still runs.
-        .attested = (uint8_t)(scalar || (attested == CHECK_ATTESTED_MODE_ON && (options.predefines.debug || options.predefines.debug_modules)) ? CHECK_ATTESTED_MODE_OFF :
-                              attested),
+        .attested = command_attested,
+        .attested_memo = command_attested != CHECK_ATTESTED_MODE_OFF && memo_keyed ? attested_memo : NULL,
+        .attested_key = { attested_key[0], attested_key[1] },
         .return_warning = return_warning,
         .warning_errors = warning_errors,
         .return_error = return_error,
@@ -13123,7 +13319,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier1_no_inline = lanes->tier1_no_inline,
         .tier1_no_hold = lanes->tier1_no_hold,
         .tier0_no_inline = lanes->tier0_no_inline,
+        .window_tokens = lanes->window_tokens,
         .tier1_schedule = lanes->tier1_schedule,
+        .tier1_passes = lanes->tier1_passes,
         .tier1_report = &lanes->tier1_report,
         .tier1_refusals = lanes->tier1_refusals,
         .tier1_function_sizes = lanes->tier1_function_sizes,
@@ -13158,8 +13356,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
-                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-function-sizes] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
+                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-function-sizes] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre] [--tier1-passes=LIST]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }
     // The rest of the request's refusals (check_request_refusal), before any source, worker session or output is
@@ -13185,7 +13383,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                                                     tier1_report ? "--tier1-report" : lanes->tier1_refusals != NULL ? "--tier1-refusals" :
                                                     lanes->tier1_no_rematerialize ? "--tier1-no-rematerialize" : tier1_gvn ? "--tier1-gvn" :
                                                     lanes->tier1_no_lifetimes ? "--tier1-no-lifetimes" : lanes->tier1_no_inline ? "--tier1-no-inline" :
-                                                    lanes->tier1_no_hold ? "--tier1-no-hold" : "--tier1-schedule");
+                                                    lanes->tier1_no_hold ? "--tier1-no-hold" : tier1_passes_seen ? "--tier1-passes=" : "--tier1-schedule");
     }
     else
     {

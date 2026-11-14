@@ -263,7 +263,7 @@ static Tier1CfgIrStatus tier1_cfg_from_ir(const IrFunction* function, Arena* are
                     if (function->op[user] != IR_PHI)
                     {
                         use_positions[use] = use_positions_of[user];
-                        use_required[use] = uses.uses[u].operand == 0 || function->op[user] == IR_STORE || function->op[user] == IR_MASKED_LOAD || function->op[user] == IR_MASKED_STORE ||
+                        use_required[use] = uses.uses[u].operand == 0 || function->op[user] == IR_STORE || ir_masked_access(function->op[user]) ||
                                             classes[v] == BUSTER_TIER1_ALLOCATE_MASK;
                         use += 1;
                     }

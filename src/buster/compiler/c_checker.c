@@ -3578,6 +3578,16 @@ static bool check_graph_inherited_error(const CheckGraph* graph, const CheckStre
     return result;
 }
 
+// A static assertion requires a scalar condition before constant evaluation; an array is convertible by decay. Other
+// ICE consumers require an integer.
+// The GNU folding extension does not waive this type constraint: an atomic cast retains its atomic rvalue type even
+// when its payload is a known integer or floating constant (#2441).
+static bool check_graph_constant_type(const TypeTable* types, uint32_t context, TypeId type)
+{
+    return (context & BUSTER_CHECK_CONTEXT_ASSERT) != 0 ? check_action_is_scalar(types, type) || type_kind_is_array(check_action_kind(types, type)) :
+                                                        check_action_is_integer(types, type);
+}
+
 // Whether `value`, a static assertion's in its GNU context, is a real floating constant, which clang folds and converts to
 // _Bool there (`_Static_assert(0.5, "")` holds), as a GNU constant. Its discarded operand's read the evaluator can't take
 // fails it too (BUSTER_CHECK_DISCARDED_UNEVALUABLE: `(s, 0.5)`), as the integer-constant rejection already has it.
@@ -3590,10 +3600,10 @@ static bool check_graph_floating_assertion(uint32_t context, const CheckValue* v
 
 // Whether `value`, in `context`, is a GNU constant where an ICE is required: an integer constant that isn't an ICE, or a
 // static assertion's floating constant.
-static bool check_graph_gnu_constant(uint32_t context, const CheckValue* value)
+static bool check_graph_gnu_constant(const TypeTable* types, uint32_t context, const CheckValue* value)
 {
     return (context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 && (context & BUSTER_CHECK_CONTEXT_GNU_CONSTANT) != 0 &&
-           (value->flags & BUSTER_CHECK_ICE) == 0 &&
+           (value->flags & BUSTER_CHECK_ICE) == 0 && check_graph_constant_type(types, context, value->type) &&
            (check_action_integer_constant(value, BUSTER_CHECK_EXTENSION_GNU_CONSTANT) || check_graph_floating_assertion(context, value));
 }
 
@@ -3602,7 +3612,7 @@ static bool check_graph_warning_needed(TypeTable* types, const CheckGraph* graph
 {
     const uint32_t context = graph->contexts != NULL ? graph->contexts[node] : 0;
     const CheckValue value = context != 0 ? check_graph_context_value(types, graph, stream, node) : check_stream_value(stream, node);
-    return stream->warnings[node] != 0 || check_graph_gnu_constant(context, &value);
+    return stream->warnings[node] != 0 || check_graph_gnu_constant(types, context, &value);
 }
 
 static void check_graph_warning_contexts(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* states, bool scalar)
@@ -3670,7 +3680,7 @@ static void check_graph_warning_contexts(TypeTable* types, const CheckGraph* gra
         stream->warnings[node] &= ~(graph->warning_suppressed != NULL ? graph->warning_suppressed[node] : 0);
         const CheckValue converted = context != 0 ? check_graph_context_value(types, graph, stream, node) : check_stream_value(stream, node);
         const CheckValue* value = &converted;
-        if (check_graph_gnu_constant(context, value) && (value->flags & BUSTER_CHECK_GNU_OBJECT_READ) == 0)
+        if (check_graph_gnu_constant(types, context, value) && (value->flags & BUSTER_CHECK_GNU_OBJECT_READ) == 0)
         {
             stream->warnings[node] |= CHECK_WARNING_GNU_CONSTANT;
             stream->warning_ignored[node] |= CHECK_WARNING_GNU_CONSTANT;
@@ -3724,7 +3734,7 @@ static bool check_graph_const_warnings(const TypeTable* types, const CheckGraph*
         if (valid && stream->diagnostics[request->node] == CHECK_DIAG_NONE)
         {
             const CheckValue value = check_graph_context_value(types, graph, stream, request->node);
-            if ((value.flags & BUSTER_CHECK_GNU_OBJECT_READ) != 0 && check_graph_gnu_constant(graph->contexts[request->node], &value))
+            if ((value.flags & BUSTER_CHECK_GNU_OBJECT_READ) != 0 && check_graph_gnu_constant(types, graph->contexts[request->node], &value))
             {
                 valid = check_warning_append(&warnings, &request->event, NULL, 0);
                 status = valid ? status : CHECK_STATUS_RESOURCE;
@@ -3829,7 +3839,11 @@ static void check_graph_report_node(TypeTable* types, const CheckGraph* graph, C
     else if (context != 0 && value->type != 0)
     {
         const uint32_t extensions = (context & BUSTER_CHECK_CONTEXT_GNU_CONSTANT) != 0 ? BUSTER_CHECK_EXTENSION_GNU_CONSTANT : 0;
-        if (value->fault != CHECK_FAULT_NONE)
+        if ((context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 && !check_graph_constant_type(types, context, value->type))
+        {
+            check_graph_report(graph, stream, node, CHECK_MESSAGE_ICE, CHECK_DIAG_NONE, CHECK_FAULT_NONE);
+        }
+        else if (value->fault != CHECK_FAULT_NONE)
         {
             const uint32_t source = value->fault_node < graph->count ? value->fault_node : node;
             check_graph_report(graph, stream, source, CHECK_MESSAGE_CONSTANT, CHECK_DIAG_NONE, value->fault);

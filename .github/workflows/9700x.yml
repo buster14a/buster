@@ -341,11 +341,12 @@ jobs:
       optimization: ${{ matrix.optimization }}
       # How many shards the row runs as (#2031), by its own costs (tools/ci/costs/, `costs plan`): the plain rows 4, both
       # host architectures alike (tools/ci/nightly.c counts their shards as one N). A portable row's shards share its one
-      # build and a shard costs it about a minute of setup, so its TSan and MSan rows run as 6, near their longest
-      # commands; its ASan row runs as 4. The vector row's N is each configuration's items' count (4,
+      # build and a shard costs it about a minute of setup, so its TSan and MSan rows run as 7, at their longest
+      # commands (#2703: the x86-64 MSan row finished last in every candidate after #2708, and `costs plan` gives its
+      # longest shard 975 s as 6 and 841 s as 7, TSan's 909 and 872 s, the same runner-minutes); its ASan row runs as 4. The vector row's N is each configuration's items' count (4,
       # BUSTER_VECTOR_ITEMS), which its draws are sized for. tools/ci/changes.c's self-test checks each number against
       # the row workflow's lookup (changes_shard_policy).
-      shards: ${{ matrix.host_arch == 'x86-64' && (matrix.sanitizer == 'thread' || matrix.sanitizer == 'memory') && 6 || 4 }}
+      shards: ${{ matrix.host_arch == 'x86-64' && (matrix.sanitizer == 'thread' || matrix.sanitizer == 'memory') && 7 || 4 }}
       hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
       performance: ${{ needs.changes.outputs.performance }}
 

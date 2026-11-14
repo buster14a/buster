@@ -122,8 +122,8 @@ changing the mapping requires updating that test and re-evaluating these gates.
 compiles each function the pipeline takes by Tier 1 and every other function by
 Tier 0, as without the option, into one System V program
 (`c_check_tier1.c`, #138's piece for #140). Each function's typed stream is
-lowered to the shared IR, promoted to SSA, optimized (SCCP, dead code and CFG
-cleanup), whose final verification retains the CFG and dominators for selection
+lowered to the shared IR, promoted to SSA, optimized (SCCP, dead code, CFG
+cleanup and its merges), whose final verification retains the CFG and dominators for selection
 (#1055), selected and emitted, the CFG consumer allocating it over its CFG
 (`tier1_cfg.c`); with `--scalar`, every step
 by its scalar twin. Its records, branch columns and references take Tier 0's
@@ -164,6 +164,39 @@ promotion, so that promotion's phi placement decides what its merged values
 need. It is a measurement option, off by default, and the measurement says to
 keep it off: its class representatives lengthen live ranges that Tier 1's
 allocation pays for in moves and spills.
+
+`--tier1-passes=LIST` (#139) turns each of the pipeline's optimization passes
+on or off, for the differential campaigns with each pass off and the
+measurements of what each one gains. LIST is a comma-separated list of items
+applied in turn, each `+` or `-` and then a pass's name: `sccp`, `dce`, `cfg`
+(the jump threading), `merge` (CFG cleanup's merges, below), `licm`, `sroa`
+(on every function, with #1282's options, before the solver and promotion),
+`gvn` (as `--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or
+`all`. The default is SCCP, dead-code removal, CFG cleanup, its merges and
+the inlining. LICM runs after if-conversion, before the optimizer, which
+cleans up after it. A function that LICM or SROA refuses goes on as it was.
+The summaries the unit's inlining builds run the same passes, and with SROA,
+as with the solver, a candidate compiles from its own pipeline.
+`--tier1-report` gives each pass's counts: `folded` constants,
+`removed_instructions` and `removed_blocks` (the optimizer's output against
+its input, merges included), `merged_blocks`, `licm_moved`, `sroa_split`
+(slots) and `gvn_removed`.
+
+CFG cleanup's merges join a block to its predecessor when that predecessor is
+its only one and it is the predecessor's only executable successor. The block
+must not be the entry, must carry no label, and must be reached through a
+`br`, or a `cbr` or `switch` that SCCP left one way. A chain of such blocks
+becomes one block. Each block's chain head comes from pointer jumping, the
+threading's kernel with its vector and scalar twins (`ir_optimize_merges`).
+A merged block's phis each have one executable incoming value, which their
+users read in their place, as an identity's do. Its source regions are
+dropped and its head's kept, the rule the debug-region consumer sets for a
+merger. Only Tier 1 asks for the merges (`BUSTER_IR_OPTIMIZE_MERGE`); the
+shared optimizer's default keeps every block. On the frozen `sqlite3.c`,
+9,125 of the 52,642 blocks Tier 1's optimizer kept had such a predecessor.
+Most came from the inlining's splice, which ends a call's block in a jump to
+the callee's entry and each return in a jump to a continuation block.
+Without the inlining there are 3,072 of 37,887.
 
 `--tier1-schedule=post` and `--tier1-schedule=pre` schedule Tier 1's code block
 by block, after allocation on its machine records or before selection on its IR

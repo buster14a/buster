@@ -441,4 +441,31 @@ static bool ir_simd_shuffle_immediate_match(const uint8_t* bytes, uint32_t width
     return found;
 }
 
+// The gathers' forms (#1840, IR_GATHER) by kind (integer, then floating, whose lanes' bits are the same), the lanes'
+// elements (dwords, qwords), the index's (dwords, qwords) and the result's width (16, 32 and 64 bytes): the EVEX forms
+// whose index has an element per lane, which the decoder admits (ir_simd_typed_gather); Tier 1 selects the integer
+// ones (tier1_select_gather). X86_FORM_NONE where the index's register holds more elements than the lanes.
+static const uint16_t ir_simd_gather_forms[2][2][2][3] = {
+    {
+        {
+            { X86_FORM_VPGATHERDD_X_VM32X, X86_FORM_VPGATHERDD_Y_VM32Y, X86_FORM_VPGATHERDD_Z_VM32Z },
+            { X86_FORM_VPGATHERQD_X_VM64Y, X86_FORM_VPGATHERQD_Y_VM64Z, X86_FORM_NONE },
+        },
+        {
+            { X86_FORM_NONE, X86_FORM_VPGATHERDQ_Y_VM32X, X86_FORM_VPGATHERDQ_Z_VM32Y },
+            { X86_FORM_VPGATHERQQ_X_VM64X, X86_FORM_VPGATHERQQ_Y_VM64Y, X86_FORM_VPGATHERQQ_Z_VM64Z },
+        },
+    },
+    {
+        {
+            { X86_FORM_VGATHERDPS_X_VM32X, X86_FORM_VGATHERDPS_Y_VM32Y, X86_FORM_VGATHERDPS_Z_VM32Z },
+            { X86_FORM_VGATHERQPS_X_VM64Y, X86_FORM_VGATHERQPS_Y_VM64Z, X86_FORM_NONE },
+        },
+        {
+            { X86_FORM_NONE, X86_FORM_VGATHERDPD_Y_VM32X, X86_FORM_VGATHERDPD_Z_VM32Y },
+            { X86_FORM_VGATHERQPD_X_VM64X, X86_FORM_VGATHERQPD_Y_VM64Y, X86_FORM_VGATHERQPD_Z_VM64Z },
+        },
+    },
+};
+
 #endif

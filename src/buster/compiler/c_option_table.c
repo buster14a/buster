@@ -37,6 +37,7 @@
 #define BUSTER_C_OPTIONS(ENTRY) \
     ENTRY(STANDARD_INPUT, "-") \
     ENTRY(END_OF_OPTIONS, "--") \
+    ENTRY(ATTESTED_MEMO_EQ, "--attested-memo=") \
     ENTRY(ATTESTED_EQ, "--attested=") \
     ENTRY(BUSTER_HEADERS, "--buster-headers") \
     ENTRY(CHECK_TRANSITIONS, "--check-transitions") \
@@ -46,6 +47,7 @@
     ENTRY(DUMP_STATIC, "--dump-static") \
     ENTRY(DUMP_TYPED, "--dump-typed") \
     ENTRY(EMBED_DIR_EQ, "--embed-dir=") \
+    ENTRY(EMIT_WINDOW_EQ, "--emit-window=") \
     ENTRY(HELPER_FORMS_EQ, "--helper-forms=") \
     ENTRY(HELPER_REPORT, "--helper-report") \
     ENTRY(ID_ORDER, "--id-order") \
@@ -71,6 +73,7 @@
     ENTRY(TIER1_NO_INLINE, "--tier1-no-inline") \
     ENTRY(TIER1_NO_LIFETIMES, "--tier1-no-lifetimes") \
     ENTRY(TIER1_NO_REMATERIALIZE, "--tier1-no-rematerialize") \
+    ENTRY(TIER1_PASSES_EQ, "--tier1-passes=") \
     ENTRY(TIER1_REFUSALS, "--tier1-refusals") \
     ENTRY(TIER1_REPORT, "--tier1-report") \
     ENTRY(TIER1_SCHEDULE_EQ, "--tier1-schedule=") \

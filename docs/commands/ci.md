@@ -428,6 +428,17 @@ build/costs --self-test --root .
   `build/costs refresh --tests tools/ci/correctness.tests --costs
   tools/ci/costs`. It keeps every measurement, estimates the new commands and
   drops the removed ones; no logs are needed.
+- **Split.** A pull request that splits a heading into several, finer parts
+  for the deal (#2658), runs `build/costs split --tests
+  tools/ci/correctness.tests --costs tools/ci/costs --map FILE` instead. FILE's
+  lines are `HEADING<TAB>NEW<TAB>WEIGHT`, one per new heading, and a heading
+  may keep its title for one of them. In every row's table, each new heading
+  takes its weight's share of its heading's cost, and its heading's peak,
+  marked `#: derived`. Refresh keeps a derived cost as it is, and the row's
+  median leaves it out. The next collect over logs that have the new heading
+  measures it. Without the split, refresh would give a new part the row's median
+  per CPU, a few seconds, and the deal would put a heading's parts on one shard.
+  An unmeasured heading's parts stay estimates.
 - **Plan.** `build/costs plan --tests tools/ci/correctness.tests --costs
   tools/ci/costs/ROW.costs --shards 2-8 [--setup S] [--first S] [--deal
   FILE]` predicts the runner's deal and schedule for each shard count, adding
@@ -454,7 +465,7 @@ The test job in `9700x.yml` gives each row its count (`shards`):
 | Row | Shards | Why |
 | --- | ---: | --- |
 | plain, both | 4 | `tools/ci/nightly.c` counts the plain rows' shards as one N; more native shards each rebuild the compiler for under a minute less |
-| `x86-64` TSan, MSan | 6 | a portable row's extra shard costs a minute of setup; 6 reach the rows' longest commands |
+| `x86-64` TSan, MSan | 7 | a portable row's extra shard costs a minute of setup; 7 reach the rows' longest commands (#2703: with #2712's finer parts, `costs plan` gives MSan 975 s as 6 and 841 s as 7, TSan 909 and 872 s, at the same runner-minutes) |
 | `vector`, each configuration | 4 | its items, `BUSTER_VECTOR_ITEMS`, which its draws are sized for; the take gives the run step its configuration's count |
 | others | 4 | already shorter than the run's longest row |
 

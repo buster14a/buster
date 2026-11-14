@@ -1523,8 +1523,10 @@ static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
     uint32_t* scalar = calloc(most, sizeof(uint32_t));
     uint32_t* oracle = calloc(most, sizeof(uint32_t));
     tier1_select_test_expect(test, ready && scalar != 0 && oracle != 0, "barrier scan's guarded columns");
-    static const uint8_t kinds[] = { IR_STORE, IR_CALL, IR_CALL_INDIRECT, IR_ALLOCA, IR_STACK_RESTORE, IR_FENCE, IR_ATOMIC_RMW, IR_LOAD, IR_LOAD, IR_LOAD, IR_ADD, IR_CONST, IR_ADDRESS, IR_PARAM, IR_BR, IR_RET };
-    const uint32_t barrier_kinds = 7;
+    // The masked and compressing stores are barriers, and the masked loads and gathers fold barriers as loads are (#1840).
+    static const uint8_t kinds[] = { IR_STORE, IR_CALL, IR_CALL_INDIRECT, IR_ALLOCA, IR_STACK_RESTORE, IR_FENCE, IR_ATOMIC_RMW, IR_MASKED_STORE, IR_COMPRESS_STORE,
+                                     IR_LOAD, IR_LOAD, IR_LOAD, IR_MASKED_LOAD, IR_GATHER, IR_ADD, IR_CONST, IR_ADDRESS, IR_PARAM, IR_BR, IR_RET };
+    const uint32_t barrier_kinds = 9;
     static const uint32_t counts[] = { 255, 256, 257, 1000, 4095, 4096 };
     uint64_t random = UINT64_C(0x2c1b3c6dd9b0f6a1);
     bool same = ready && scalar != 0 && oracle != 0;
@@ -1550,7 +1552,8 @@ static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
             uint32_t before = node;
             const uint8_t* ops = op;
             while (before != 0 && !(ops[before - 1] == IR_STORE || ops[before - 1] == IR_CALL || ops[before - 1] == IR_CALL_INDIRECT || ops[before - 1] == IR_ALLOCA || ops[before - 1] == IR_STACK_RESTORE ||
-                                    ops[before - 1] == IR_FENCE || ops[before - 1] == IR_ATOMIC_RMW || ops[before - 1] == IR_LOAD))
+                                    ops[before - 1] == IR_FENCE || ops[before - 1] == IR_ATOMIC_RMW || ops[before - 1] == IR_LOAD || ops[before - 1] == IR_MASKED_STORE ||
+                                    ops[before - 1] == IR_COMPRESS_STORE || ops[before - 1] == IR_MASKED_LOAD || ops[before - 1] == IR_GATHER))
             {
                 before -= 1;
             }

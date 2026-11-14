@@ -445,6 +445,8 @@ struct CheckInputAttributes
     CheckInputCallingConvention calling_convention;
     bool packed;
     bool has_alignas;
+    // A GNU suppress argument tail leaves an outer `)` before the following declaration (#2332), which is dropped.
+    bool suppress_tail;
     // A counted_by family attribute among the records (#148), which a member's declaration checks.
     bool counted;
     // A const, pure, warn_unused_result or nodiscard among the records (#1447), which a discarded call's result warns of
@@ -1033,6 +1035,8 @@ typedef enum CheckAttributeArgumentError
     // cfi_salt on a function type without a prototype (#1447, check_input_attribute_salt), "'X' attribute only applies to
     // non-K&R-style functions", at the attribute.
     CHECK_ARGUMENT_NON_KR,
+    // A suppress argument tail that leaves a GNU attribute's outer `)` as a declaration's first token (#2332).
+    CHECK_ARGUMENT_EXPECTED_DECLARATOR,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -1538,6 +1542,7 @@ static bool check_input_attribute_merge(CheckInputReader* reader, const CheckInp
     {
         output->packed |= suffix->packed;
         output->has_alignas |= suffix->has_alignas;
+        output->suppress_tail |= suffix->suppress_tail;
         output->function_chunk |= suffix->function_chunk;
         output->object_sizes = suffix->object_sizes != NULL ? suffix->object_sizes : output->object_sizes;
         output->object_size_count = suffix->object_sizes != NULL ? suffix->object_size_count : output->object_size_count;
@@ -2372,6 +2377,122 @@ static bool check_input_attribute_suppress_name(String8 name)
     return check_input_attribute_equal(name, "suppress") || check_input_attribute_equal(name, "__suppress__");
 }
 
+// A suppress string-list parser's diagnostic (#2332). Each delimiter is reported, even at a token that already has
+// another error. `after` locates a missing outer delimiter after the preceding token, as clang's ExpectAndConsume does;
+// `open` gives an inner pair's matching note, or BUSTER_CHECK_NONE. All are attribute-reading errors, so the ordinary
+// item recovery can retain the declaration and later independent diagnostics.
+static void check_input_attribute_suppress_error(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute,
+                                                 uint32_t token, CheckAttributeArgumentError error, bool after, uint32_t open)
+{
+    CheckInputAttributes one = { 0 };
+    const uint32_t before = reader->output->report_count;
+    check_input_attribute_argument_error(reader, &one, attribute, token, error, after ? 1u : 0u);
+    if (attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+    {
+        attributes->error = one.error;
+        attributes->error_first = one.error_first;
+        attributes->error_end = one.error_end;
+    }
+    if (reader->output->report_count > before)
+    {
+        CheckInputReport* report = reader->output->reports + before;
+        report->repeated = true;
+        report->note_token = open;
+        report->note_kind = open != BUSTER_CHECK_NONE ? CHECK_INPUT_NOTE_MATCH_PAREN : CHECK_INPUT_NOTE_NONE;
+    }
+}
+
+// suppress's balanced arguments, retained by both parser paths for this reading (#2332). Clang takes a sequence of
+// string literals, each optionally parenthesized, separated by commas. An inner pair can recover to its own closing
+// token; a missing separator at the argument-list level drops the attribute. GNU's outer parentheses each expect `)`,
+// while C23's attribute-list parser expects `,` before and after the skipped argument tail.
+static bool check_input_attribute_suppress_parse(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute,
+                                                 uint32_t* cursor, uint32_t list_end, bool* escaped)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t end = attribute->argument_end;
+    uint32_t token = attribute->argument_first;
+    bool valid = true;
+    bool done = token == end;
+    while (!done && token <= end)
+    {
+        const uint32_t first = token;
+        while (token < end && parser->tokens.kinds[token] == PARSE_KIND_L_PAREN)
+        {
+            token += 1;
+        }
+        uint32_t open = token;
+        const bool string = token < end && parser->tokens.kinds[token] == PARSE_KIND_STRING;
+        if (!string)
+        {
+            check_input_attribute_suppress_error(reader, attributes, attribute, token, CHECK_ARGUMENT_STRING_LITERAL, false, BUSTER_CHECK_NONE);
+            if (open > first && token != parser->tree.parents[open - 1])
+            {
+                check_input_attribute_suppress_error(reader, attributes, attribute, token, CHECK_ARGUMENT_EXPECTED_PAREN, false, open - 1);
+            }
+            valid = false;
+            done = true;
+        }
+        else
+        {
+            const uint32_t literal = token;
+            while (token < end && parser->tokens.kinds[token] == PARSE_KIND_STRING)
+            {
+                token += 1;
+            }
+            *escaped = check_input_unevaluated_strings(reader, literal, token, BUSTER_CHECK_NONE);
+            valid &= !*escaped;
+            done = *escaped;
+            while (!done && open > first)
+            {
+                open -= 1;
+                const uint32_t close = parser->tree.parents[open];
+                if (token != close)
+                {
+                    check_input_attribute_suppress_error(reader, attributes, attribute, token, CHECK_ARGUMENT_EXPECTED_PAREN, false, open);
+                    valid = false;
+                }
+                token = close + 1;
+            }
+            if (!done && token < end && parser->tokens.kinds[token] != PARSE_KIND_COMMA)
+            {
+                check_input_attribute_suppress_error(reader, attributes, attribute, token, CHECK_ARGUMENT_EXPECTED_PAREN, true, BUSTER_CHECK_NONE);
+                check_input_attribute_suppress_error(reader, attributes, attribute, token,
+                                                     attribute->standard ? CHECK_ARGUMENT_EXPECTED_COMMA : CHECK_ARGUMENT_EXPECTED_PAREN, true, BUSTER_CHECK_NONE);
+                if (attribute->standard)
+                {
+                    check_input_attribute_suppress_error(reader, attributes, attribute, end, CHECK_ARGUMENT_EXPECTED_COMMA, false, BUSTER_CHECK_NONE);
+                }
+                else
+                {
+                    if (end + 1 != list_end)
+                    {
+                        check_input_attribute_suppress_error(reader, attributes, attribute, end + 1, CHECK_ARGUMENT_EXPECTED_PAREN, true, BUSTER_CHECK_NONE);
+                    }
+                    uint32_t start = attribute->first;
+                    while (start > 0 && parser->tree.roles[start] != PARSE_ROLE_OPEN_ATTRIBUTE_LIST)
+                    {
+                        start -= 1;
+                    }
+                    start = start >= 2 ? start - 2 : start;
+                    const uint8_t before = start != 0 ? parser->tree.roles[start - 1] : PARSE_ROLE_NONE;
+                    const bool expression = before == PARSE_ROLE_LABEL || before == PARSE_ROLE_CLOSE_CONDITION || before == PARSE_ROLE_CLOSE_FOR ||
+                                            before == PARSE_ROLE_ELSE || before == PARSE_ROLE_DO;
+                    check_input_attribute_suppress_error(reader, attributes, attribute, list_end + 1,
+                                                         expression ? CHECK_ARGUMENT_EXPECTED_EXPRESSION : CHECK_ARGUMENT_EXPECTED_DECLARATOR, false, BUSTER_CHECK_NONE);
+                    attributes->suppress_tail = true;
+                    *cursor = list_end;
+                }
+                valid = false;
+                done = true;
+            }
+            done |= token == end;
+            token += !done;
+        }
+    }
+    return valid;
+}
+
 static uint8_t check_input_attribute_parsed(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute)
 {
     const Parser* parser = reader->parser;
@@ -2536,6 +2657,7 @@ static bool check_input_attribute_counted_shape(CheckInputReader* reader, CheckI
         comma = parser->tokens.kinds[i] == PARSE_KIND_COMMA ? i : BUSTER_CHECK_NONE;
     }
     const bool valid = parenthesized && first < end && comma == BUSTER_CHECK_NONE;
+    const uint32_t reported = reader->output->report_count;
     if (!parenthesized)
     {
         check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, BUSTER_CHECK_COUNT_LEAST | 1u << 8);
@@ -2553,6 +2675,12 @@ static bool check_input_attribute_counted_shape(CheckInputReader* reader, CheckI
             reader->output->reports[before].note_token = first - 1;
             reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_MATCH_PAREN;
         }
+    }
+    if (!valid && reader->output->report_count > reported)
+    {
+        // The parser drops this attribute and continues the declaration (#1842). Keep its owner so the shared
+        // expected-')' message can recover here without also recovering a different attribute's syntax error.
+        reader->output->reports[reported].attribute = attribute->first;
     }
     if (!valid && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
     {
@@ -3060,7 +3188,8 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
                 const bool type_tag = check_input_attribute_equal(spelled, "type_tag_for_datatype");
                 const bool related = check_input_attribute_equal(spelled, "objc_bridge_related");
                 const bool newtype = check_input_attribute_equal(spelled, "swift_newtype") || check_input_attribute_equal(spelled, "swift_wrapper");
-                const bool custom = availability || type_tag || related || newtype || check_input_attribute_equal(spelled, "external_source_symbol");
+                const bool suppress = check_input_attribute_suppress_name(check_input_attribute_name(reader, parser->tokens.names[name]));
+                const bool custom = availability || type_tag || related || newtype || suppress || check_input_attribute_equal(spelled, "external_source_symbol");
                 if (pass == 0 && valid && custom)
                 {
                     CheckInputAttributes holder = { 0 };
@@ -3072,14 +3201,15 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
                         .argument_first = arguments_first,
                         .argument_end = arguments_end,
                     };
-                    valid = (availability ? check_input_availability_parse(reader, &holder, &item) :
-                             type_tag ? check_input_type_tag_parse(reader, &holder, &item) :
-                             related ? check_input_objc_bridge_related_parse(reader, &holder, &item) :
-                             newtype ? check_input_swift_newtype_parse(reader, &holder, &item) : check_input_external_source_parse(reader, &holder, &item)) !=
-                            BUSTER_CHECK_CUSTOM_ERROR;
+                    bool escaped = false;
+                    valid = suppress ? !argued || check_input_attribute_suppress_parse(reader, &holder, &item, &k, items_end, &escaped) :
+                                       (availability ? check_input_availability_parse(reader, &holder, &item) :
+                                        type_tag ? check_input_type_tag_parse(reader, &holder, &item) :
+                                        related ? check_input_objc_bridge_related_parse(reader, &holder, &item) :
+                                        newtype ? check_input_swift_newtype_parse(reader, &holder, &item) : check_input_external_source_parse(reader, &holder, &item)) !=
+                                           BUSTER_CHECK_CUSTOM_ERROR;
                 }
                 uint32_t index = 0;
-                const bool suppress = check_input_attribute_suppress_name(check_input_attribute_name(reader, parser->tokens.names[name]));
                 for (uint32_t argument = arguments_first; pass == 0 && valid && !typed && !custom && argument < arguments_end; index += 1)
                 {
                     uint32_t stop = argument;
@@ -3888,6 +4018,7 @@ struct CheckInputAttributeRecovery
 // a mutual exclusion's, x86's interrupt handler's (#1447), and an alias's or ifunc's on a definition (#2449: handleAliasAttr
 // and handleIFuncAttr return, the declaration staying a valid definition); and a vector type's element or size, which clang's
 // HandleVectorSizeAttr and HandleNeonVectorTypeAttr give and then leave the type as it was (check_input_attribute_type).
+// The counted family's parser likewise drops a malformed argument list and continues its declaration (#1842).
 // Others stop the reader as before: an undeclared name's, a pragma's, conflicting calling conventions' (a type's, which
 // clang makes invalid) and a list's place (its parser's).
 static bool check_input_attribute_recoverable(const CheckInputReport* report)
@@ -3905,7 +4036,9 @@ static bool check_input_attribute_recoverable(const CheckInputReport* report)
     const bool vector = message == CHECK_INPUT_VECTOR_ELEMENT || message == CHECK_INPUT_VECTOR_BIT_INT || message == CHECK_INPUT_VECTOR_CONSTANT ||
                         message == CHECK_INPUT_VECTOR_NEGATIVE || message == CHECK_INPUT_VECTOR_TOO_LARGE || message == CHECK_INPUT_VECTOR_ZERO ||
                         message == CHECK_INPUT_VECTOR_MULTIPLE;
-    return (attribute || vector) && report->pragma == 0;
+    const bool counted = (message == CHECK_INPUT_COUNTED_REQUIRED || message == CHECK_INPUT_COUNTED_PAREN) &&
+                         report->attribute != 0 && report->attribute != BUSTER_CHECK_NONE;
+    return (attribute || vector || counted) && report->pragma == 0;
 }
 
 // Whether the errors an attribute's reading or handler gave since `recovery` moved past (#1447): each is one clang gives and
@@ -4164,10 +4297,14 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         const CheckInputArgumentsRow* read = valid && (known || !standard) && !custom ? check_input_attribute_gnu_arguments(reader, attribute.name) : NULL;
         const uint32_t identifiers = BUSTER_CHECK_ARGUMENTS_VARIADIC_IDENTIFIER | BUSTER_CHECK_ARGUMENTS_STRICT_IDENTIFIER;
         const bool suppress = check_input_attribute_suppress_name(name);
+        if (valid && suppress && read != NULL)
+        {
+            valid = check_input_attribute_suppress_parse(reader, attributes, &attribute, &i, end, &escaped);
+        }
         uint32_t literal = BUSTER_CHECK_NONE;
         uint32_t literal_argument = BUSTER_CHECK_NONE;
         uint32_t index = 0;
-        for (uint32_t argument = attribute.argument_first; read != NULL && literal == BUSTER_CHECK_NONE && !escaped && argument < attribute.argument_end; index += 1)
+        for (uint32_t argument = attribute.argument_first; valid && !suppress && read != NULL && literal == BUSTER_CHECK_NONE && !escaped && argument < attribute.argument_end; index += 1)
         {
             uint32_t stop = argument;
             bool strings = true;
@@ -4877,7 +5014,8 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
                         {
                             reader->output->recovered_reports[r].pending = false;
                         }
-                        i = check_input_attribute_item_end(parser, item, list_end);
+                        const uint32_t item_end = check_input_attribute_item_end(parser, item, list_end);
+                        i = i > item_end ? i : item_end;
                         valid = true;
                     }
                 }

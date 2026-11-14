@@ -1025,6 +1025,21 @@ static bool check_semantic_value_text(char* output, uint64_t capacity, const Typ
     return result;
 }
 
+// The keyword of the static assertion containing a report's token. Its written condition starts two tokens later,
+// including grouping parentheses which the expression graph does not retain.
+static uint32_t check_semantic_assertion_keyword(const Parser* parser, uint32_t token)
+{
+    uint32_t result = BUSTER_CHECK_NONE;
+    for (uint32_t at = 0; at < token && at + 1 < parser->tokens.count; at += 1)
+    {
+        if (parser->tokens.kinds[at] == PARSE_KIND_STATIC_ASSERT && parser->tree.parents[at + 1] > token)
+        {
+            result = at;
+        }
+    }
+    return result;
+}
+
 // A failed static assertion's error, as clang's CheckStaticAssert gives it (#1447). Its requirement is the first term of
 // the condition's conjunction that is no integer literal and is false (findFailedBooleanCondition), else the whole
 // condition, printed as clang's printer prints it; an integer literal's is the plain "static assertion failed" at the
@@ -1035,16 +1050,8 @@ static const char* check_semantic_assert(const Parser* parser, Preprocessor* pp,
                                         uint32_t* note_count, Arena* scratch)
 {
     const uint32_t count = parser->tokens.count;
-    uint32_t keyword = BUSTER_CHECK_NONE;
-    uint32_t close = count;
-    for (uint32_t token = 0; token < report->token && token + 1 < count; token += 1)
-    {
-        if (parser->tokens.kinds[token] == PARSE_KIND_STATIC_ASSERT && parser->tree.parents[token + 1] > report->token)
-        {
-            keyword = token;
-            close = parser->tree.parents[token + 1];
-        }
-    }
+    const uint32_t keyword = check_semantic_assertion_keyword(parser, report->token);
+    const uint32_t close = keyword < count && keyword + 1 < count ? parser->tree.parents[keyword + 1] : count;
     const char* result = "static assertion failed";
     if (keyword < count && close < count)
     {
@@ -1377,6 +1384,77 @@ static uint32_t check_semantic_operand_spelling(const Parser* parser, const Chec
     return result;
 }
 
+// Invalid operators keep an operand's written type, including a cast's type name and a call's return typedef. This
+// spelling is needed only after an action has rejected the expression; it does not change the typed stream.
+static uint32_t check_semantic_operator_spelling(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types, uint32_t node)
+{
+    const CheckGraph* graph = &input->graph;
+    uint32_t pending[64];
+    uint32_t pending_count = 1;
+    pending[0] = node;
+    uint32_t steps = 0;
+    uint32_t spelling = 0;
+    uint32_t declared = 0;
+    bool same = true;
+    while (same && pending_count != 0 && steps < graph->count)
+    {
+        node = pending[--pending_count];
+        uint32_t value_spelling = 0;
+        while (same && value_spelling == 0 && node < graph->count && steps < graph->count)
+        {
+            steps += 1;
+            value_spelling = check_input_operand_type_spelling(input, parser, node);
+            const CheckOp op = graph->ops[node];
+            if (value_spelling == 0 && op == CHECK_OP_CALL)
+            {
+                const uint32_t callee = check_driver_operand_declaration(input, stream, graph->operand0[node]);
+                value_spelling = callee != 0 && callee < input->token_count ? check_input_specifier_spelling(input, parser, callee) : 0;
+            }
+            value_spelling = value_spelling != 0 ? value_spelling : check_semantic_operand_spelling(parser, input, stream, types, node);
+            if (value_spelling == 0 && op == CHECK_OP_CONDITIONAL)
+            {
+                // A conditional keeps sugar only when both arms spell the same typedef. A bounded worklist handles
+                // nested selections; exhaustion leaves the canonical type spelling, never a guessed alias.
+                same = pending_count < BUSTER_ARRAY_LENGTH(pending);
+                if (same)
+                {
+                    pending[pending_count++] = graph->operand2[node];
+                }
+                node = graph->operand1[node];
+            }
+            else
+            {
+                // Grouping, a comma's right operand and a generic's selected value keep their sugar.
+                node = op == CHECK_OP_COMMA ? graph->operand1[node] : op == CHECK_OP_VALUE || op == CHECK_OP_SELECT ? graph->operand0[node] : BUSTER_CHECK_NONE;
+            }
+        }
+        uint32_t written = 0;
+        const uint32_t value_declared = check_input_sugar_declaration(input, parser, value_spelling, &written);
+        same &= value_spelling != 0 && (declared == 0 || value_declared == declared);
+        spelling = declared == 0 ? value_spelling : spelling;
+        declared = value_declared;
+    }
+    return same && pending_count == 0 ? spelling : 0;
+}
+
+// Clang expands an identical typedef only once in one diagnostic. Distinct spellings of the same underlying type each
+// keep their own expansion; this only shortens the second of two identical quoted type descriptions.
+static String8 check_semantic_repeated_type(TypeId first_type, String8 first, TypeId second_type, String8 second)
+{
+    if (first_type == second_type && first.length != 0 && first.length == second.length && memcmp(first.pointer, second.pointer, first.length) == 0)
+    {
+        for (uint64_t i = 0; i + 6 < second.length; i += 1)
+        {
+            if (memcmp(second.pointer + i, " (aka ", 6) == 0)
+            {
+                second.length = i;
+                break;
+            }
+        }
+    }
+    return second;
+}
+
 // A swizzle adopts the matching extended-vector typedef's name even when that declaration carries alignment.
 // Supply its underlying type as the alias key without changing the result's type or generic typedef printing.
 static String8 check_semantic_vector_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
@@ -1657,6 +1735,14 @@ static TypeId check_semantic_value_type(const TypeTable* types, TypeId type, boo
     return value;
 }
 
+// The type an action actually read, before its rejection. Its conversion receipt distinguishes an atomic lvalue's
+// loaded value type from the atomic type a cast rvalue retains, while preserving the ordinary decay and qualifier rules.
+static TypeId check_semantic_operand_value_type(const TypeTable* types, const CheckStream* stream, uint32_t node, uint32_t operand, TypeId type)
+{
+    const TypeId converted = node < stream->count && stream->conversions != NULL ? stream->conversions[node].operands[operand].type : 0;
+    return converted != 0 ? converted : check_semantic_value_type(types, type, true);
+}
+
 // clang's note at a called function's parameter (#1447, its "passing argument to parameter 'x' here"), where the callee is a
 // function's name: at the `argument`-th parameter's name in the declaration the name finds, or just past an unnamed one,
 // as clang places an abstract declarator's parameter.
@@ -1849,6 +1935,54 @@ static uint32_t check_semantic_switch(const Parser* parser, uint32_t close)
     }
     const bool found = open != 0 && parser->tokens.kinds[open - 1] == PARSE_KIND_SWITCH && parser->tree.parents[open - 1] == close;
     return found ? open - 1 : BUSTER_CHECK_NONE;
+}
+
+// A rejected scalar condition is diagnosed at its statement keyword. A for's condition is its second semicolon; a
+// do's closing condition and its `do` head are children of the same final semicolon.
+static uint32_t check_semantic_condition_keyword(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t close = token;
+    if (close < count && parser->tree.roles[close] == PARSE_ROLE_TERMINATOR && parser->tree.parents[close] < count &&
+        parser->tree.roles[parser->tree.parents[close]] == PARSE_ROLE_CLOSE_FOR)
+    {
+        close = parser->tree.parents[close];
+    }
+    uint32_t result = BUSTER_CHECK_NONE;
+    for (uint32_t at = close; result == BUSTER_CHECK_NONE && at != 0 && at < count;)
+    {
+        at -= 1;
+        const uint8_t kind = parser->tokens.kinds[at];
+        const bool keyword = kind == PARSE_KIND_IF || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_FOR;
+        result = keyword && parser->tree.parents[at] == close ? at : result;
+    }
+    const uint32_t parent = close < count ? parser->tree.parents[close] : count;
+    if (result < count && parser->tokens.kinds[result] == PARSE_KIND_WHILE && parent < count &&
+        parser->tree.roles[parent] == PARSE_ROLE_TERMINATOR)
+    {
+        for (uint32_t at = result; at != 0;)
+        {
+            at -= 1;
+            if (parser->tree.roles[at] == PARSE_ROLE_DO && parser->tree.parents[at] == parent)
+            {
+                result = at;
+                break;
+            }
+        }
+    }
+    return result != BUSTER_CHECK_NONE ? result : token;
+}
+
+static uint32_t check_semantic_conditional_question(const Parser* parser, uint32_t token)
+{
+    uint32_t question = token;
+    while (question != 0 && question < parser->tokens.count &&
+           !(parser->tree.roles[question] == PARSE_ROLE_OPEN_TERNARY && parser->tree.parents[question] == token))
+    {
+        question -= 1;
+    }
+    return question < parser->tokens.count && parser->tree.roles[question] == PARSE_ROLE_OPEN_TERNARY &&
+           parser->tree.parents[question] == token ? question : token;
 }
 
 // `note`, where the message has one (its message NULL where not): a const variable's "declared const here" (#147).
@@ -2436,6 +2570,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
     const CheckOp op = node < count ? graph->ops[node] : CHECK_OP_COUNT;
     const uint32_t operand = node < count ? graph->operand0[node] : BUSTER_CHECK_NONE;
     const TypeId operand_type = operand < stream->count ? check_stream_type(stream, operand) : 0;
+    const TypeId operand_value_type = check_semantic_operand_value_type(types, stream, node, 0, operand_type);
     const char* result = check_driver_report_message(report);
     *location = token;
     *character_offset = 0;
@@ -2487,7 +2622,17 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
         uint32_t root = BUSTER_CHECK_NONE;
         const uint32_t first = check_semantic_case_begin(parser, input, stream, node, &root);
         const CheckValue value = root < stream->count ? check_graph_context_value(types, graph, stream, root) : (CheckValue){ 0 };
-        if (first < parser->tokens.count)
+        const CheckValue asserted = graph->contexts != NULL && (graph->contexts[node] & BUSTER_CHECK_CONTEXT_ASSERT) != 0 ?
+                                    check_graph_context_value(types, graph, stream, node) : (CheckValue){ 0 };
+        if (asserted.type != 0 && !check_graph_constant_type(types, BUSTER_CHECK_CONTEXT_ASSERT, asserted.type))
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, asserted.type,
+                                                           check_semantic_operator_spelling(parser, input, stream, types, node));
+            result = type.length != 0 ? check_warning_text(scratch, "value of type %.*s is not contextually convertible to 'bool'", (int)type.length, type.pointer) : NULL;
+            const uint32_t keyword = check_semantic_assertion_keyword(parser, graph->tokens[node]);
+            *location = keyword < parser->tokens.count ? keyword + 2 : check_semantic_first_token(parser, graph->tokens[node]);
+        }
+        else if (first < parser->tokens.count)
         {
             if (!check_program_switch_type(types, value.type))
             {
@@ -2582,13 +2727,52 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
         {
             // A switch's condition of no arithmetic type, which its promotion (a unary plus) refuses: clang's
             // err_typecheck_statement_requires_integer at the switch (#1447), as check_semantic_constraint's.
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_type, check_input_operand_type_spelling(input, parser, operand));
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_value_type,
+                                                           check_semantic_operator_spelling(parser, input, stream, types, operand));
             *location = check_semantic_switch(parser, graph->tokens[node]);
             result = type.length != 0 ? check_warning_text(scratch, "statement requires expression of integer type (%.*s invalid)", (int)type.length, type.pointer) :
                                         NULL;
         }
-        else if ((report->diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED || report->diagnostic == CHECK_DIAG_INTEGER_REQUIRED) &&
-                 ((op >= CHECK_OP_ADD && op <= CHECK_OP_SHIFT_RIGHT) || (op >= CHECK_OP_BIT_AND && op <= CHECK_OP_BIT_XOR) ||
+        else if ((report->diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED || report->diagnostic == CHECK_DIAG_INTEGER_REQUIRED ||
+                  report->diagnostic == CHECK_DIAG_SCALAR_REQUIRED) && op >= CHECK_OP_POSITIVE && op <= CHECK_OP_BIT_NOT && operand_type != 0)
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_value_type,
+                                                           check_semantic_operator_spelling(parser, input, stream, types, operand));
+            result = type.length != 0 ? check_warning_text(scratch, "invalid argument type %.*s to unary expression", (int)type.length, type.pointer) : NULL;
+        }
+        else if (report->diagnostic == CHECK_DIAG_SCALAR_REQUIRED && op == CHECK_OP_CONDITION && operand_type != 0)
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_value_type,
+                                                           check_semantic_operator_spelling(parser, input, stream, types, operand));
+            result = type.length != 0 ? check_warning_text(scratch, "statement requires expression of scalar type (%.*s invalid)", (int)type.length, type.pointer) : NULL;
+            *location = check_semantic_condition_keyword(parser, graph->tokens[node]);
+        }
+        else if (report->diagnostic == CHECK_DIAG_SCALAR_REQUIRED && op == CHECK_OP_CONDITIONAL && operand_type != 0)
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_value_type,
+                                                           check_semantic_operator_spelling(parser, input, stream, types, operand));
+            result = type.length != 0 ? check_warning_text(scratch, "used type %.*s where arithmetic or pointer type is required", (int)type.length, type.pointer) : NULL;
+            *location = check_semantic_conditional_question(parser, graph->tokens[node]);
+        }
+        else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_CONDITIONAL &&
+                 graph->operand1[node] < stream->count && graph->operand2[node] < stream->count)
+        {
+            const uint32_t first = graph->operand1[node];
+            const uint32_t second = graph->operand2[node];
+            const String8 left = check_driver_warning_type(parser, pp, input, types, spell, scratch,
+                                                           check_semantic_operand_value_type(types, stream, node, 1, check_stream_type(stream, first)),
+                                                           check_semantic_operator_spelling(parser, input, stream, types, first));
+            const String8 right = check_driver_warning_type(parser, pp, input, types, spell, scratch,
+                                                            check_semantic_operand_value_type(types, stream, node, 2, check_stream_type(stream, second)),
+                                                            check_semantic_operator_spelling(parser, input, stream, types, second));
+            result = left.length != 0 && right.length != 0 ? check_warning_text(scratch, "incompatible operand types (%.*s and %.*s)",
+                                                                               (int)left.length, left.pointer, (int)right.length, right.pointer) : NULL;
+            *location = check_semantic_conditional_question(parser, graph->tokens[node]);
+        }
+        else if ((report->diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED || report->diagnostic == CHECK_DIAG_INTEGER_REQUIRED ||
+                  report->diagnostic == CHECK_DIAG_SCALAR_REQUIRED ||
+                  (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL)) &&
+                 ((op >= CHECK_OP_ADD && op <= CHECK_OP_LOGICAL_OR) ||
                   (op >= CHECK_OP_ADD_ASSIGN && op <= CHECK_OP_BIT_XOR_ASSIGN)) && operand_type != 0 && graph->operand1[node] < stream->count &&
                  !check_vector_type(types, type_strip_aligned(types, operand_type)) &&
                  !check_vector_type(types, type_strip_aligned(types, check_stream_type(stream, graph->operand1[node]))))
@@ -2598,9 +2782,10 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             // vector's operands have clang's vector errors.
             const uint32_t second = graph->operand1[node];
             const String8 left = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_type,
-                                                           check_semantic_operand_spelling(parser, input, stream, types, operand));
-            const String8 right = check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, second),
-                                                            check_semantic_operand_spelling(parser, input, stream, types, second));
+                                                           check_semantic_operator_spelling(parser, input, stream, types, operand));
+            const String8 right = check_semantic_repeated_type(operand_type, left, check_stream_type(stream, second),
+                                                              check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, second),
+                                                                                        check_semantic_operator_spelling(parser, input, stream, types, second)));
             result = left.length != 0 && right.length != 0 ? check_warning_text(scratch, "invalid operands to binary expression (%.*s and %.*s)", (int)left.length,
                                                                                 left.pointer, (int)right.length, right.pointer) : NULL;
         }
@@ -2710,16 +2895,30 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                 *note = function ? *note : check_semantic_forward_note(parser, pp, input, types, spell, bare, scratch);
             }
         }
-        else if (report->diagnostic == CHECK_DIAG_POINTER_REQUIRED && op == CHECK_OP_SUBSCRIPT && token < parser->tokens.count)
+        else if (report->diagnostic == CHECK_DIAG_POINTER_REQUIRED && op == CHECK_OP_DEREFERENCE && operand_type != 0)
         {
-            // A subscript of neither an array, a pointer nor a vector: clang's err_typecheck_subscript_value at its `[` (#2406).
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_value_type,
+                                                           check_semantic_operator_spelling(parser, input, stream, types, operand));
+            result = type.length != 0 ? check_warning_text(scratch, "indirection requires pointer operand (%.*s invalid)", (int)type.length, type.pointer) : NULL;
+        }
+        else if ((report->diagnostic == CHECK_DIAG_POINTER_REQUIRED || report->diagnostic == CHECK_DIAG_INTEGER_REQUIRED) &&
+                 op == CHECK_OP_SUBSCRIPT && token < parser->tokens.count)
+        {
+            // Both refusals point to `[`: an invalid index where either operand supplies a pointer (or the base a
+            // vector), otherwise no subscriptable value. The action can reject a reversed noninteger index before
+            // checking its base, so `1[s]` still needs the latter message (#2441, #2406).
+            const uint32_t second = graph->operand1[node];
+            const TypeId second_type = second < stream->count ? check_semantic_operand_value_type(types, stream, node, 1, check_stream_type(stream, second)) : 0;
+            const bool subscriptable = check_action_kind(types, operand_value_type) == BUSTER_TYPE_KIND_POINTER ||
+                                       check_action_kind(types, second_type) == BUSTER_TYPE_KIND_POINTER || check_vector_type(types, operand_value_type);
             uint32_t open = token;
             while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_SQUARE && parser->tree.parents[open] == token))
             {
                 open -= 1;
             }
             *location = open;
-            result = "subscripted value is not an array, pointer, or vector";
+            result = subscriptable && report->diagnostic == CHECK_DIAG_INTEGER_REQUIRED ? "array subscript is not an integer" :
+                                                                                         "subscripted value is not an array, pointer, or vector";
         }
         else if (report->diagnostic == CHECK_DIAG_INCOMPLETE && (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF) && token < parser->tokens.count &&
                  graph->tokens[node] == token)
@@ -2789,6 +2988,12 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                                                                  check_semantic_operand_spelling(parser, input, stream, types, operand), operand);
                 result = type.length != 0 ? check_warning_text(scratch, "cannot take the address of an rvalue of type %.*s", (int)type.length, type.pointer) : NULL;
             }
+        }
+        else if (report->diagnostic == CHECK_DIAG_LVALUE_REQUIRED && op == CHECK_OP_ADDRESS && operand_type != 0)
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_type,
+                                                           check_semantic_operator_spelling(parser, input, stream, types, operand));
+            result = type.length != 0 ? check_warning_text(scratch, "cannot take the address of an rvalue of type %.*s", (int)type.length, type.pointer) : NULL;
         }
         else if (report->diagnostic == CHECK_DIAG_LVALUE_REQUIRED &&
                  (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)))

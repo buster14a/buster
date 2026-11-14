@@ -316,6 +316,11 @@ none), and the `REGISTER` rows of the EVEX variable shifts' doubleword forms, wh
 A merging opmask adds a cycle of latency to the integer sums (3 cycles, 4 per cycle, as `vpaddd`'s
 64-byte row had it) and leaves the products', the floating operations' and the divisions' at their unmasked
 values ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-masked-operations-1840-2026-11-12)).
+Its gathers, compressing stores and truncating stores then added 45: 9 `MEMORY_INDEX` rows of `vpgatherdd` to `vpgatherqq`
+(16 to 25 cycles' latency by width, one every 3 to 7 cycles, 13 to 40 macro-ops; the harness's gather now takes quadword
+indices too, the element's bytes its scale), 12 `MASKED_MEMORY` rows of `vpcompressb` to `vpcompressq` to memory (one every
+3 cycles, 7 or 8 macro-ops, where the register form is one a cycle and 2) and 24 of `vpmov`, `vpmovs` and `vpmovus` to memory
+(2 per cycle, 2 macro-ops) ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-gathers-1840-2026-11-14)).
 
 What the rows say, a few families (cycles; derived values in italics):
 

@@ -19,7 +19,7 @@ static bool check_input_enum_fits_int(const TypeTable* types, const CheckValue* 
 // An implicit successor retains the preceding enumerator's provisional type. Overflow widens to the next
 // standard integer type with the same signedness; long long has the same width as long on this target. At the
 // largest available width Clang warns and retains the wrapped value, rather than introducing __int128.
-static bool check_input_enum_successor(CheckInputReader* reader, const CheckTagFrame* frame, CheckValue* value)
+static bool check_input_enum_successor(CheckInputReader* reader, const CheckTagFrame* frame, CheckValue* value, uint32_t completion)
 {
     uint32_t width = 0;
     bool sign = false;
@@ -59,7 +59,7 @@ static bool check_input_enum_successor(CheckInputReader* reader, const CheckTagF
                 }
                 if (width == previous_width)
                 {
-                    check_input_warning_add_at(reader, frame->cursor, CHECK_WARNING_ENUM_TOO_LARGE, frame->cursor + 1u);
+                    check_input_warning_add_at(reader, frame->cursor, CHECK_WARNING_ENUM_TOO_LARGE, completion != 0 ? completion : frame->cursor + 1u);
                 }
             }
             value->integer = (previous + 1) & check_action_mask(width);
@@ -369,6 +369,44 @@ static bool check_tag_enum_compatible(CheckInputReader* reader, const CheckTagFr
     return valid;
 }
 
+// A rejected enumerator's type spelling follows parentheses and selected expressions to the value's own cast or
+// declaration. This is diagnostic work only, bounded by the constant job's token range.
+static uint32_t check_input_enum_value_spelling(const CheckConstantInput* job)
+{
+    const CheckInputReader* reader = job->reader;
+    const Parser* parser = reader->parser;
+    uint32_t root = check_constant_range_root(job, job->first, job->end);
+    for (uint32_t steps = 0; root >= job->first && root < job->end && steps < job->end - job->first; steps += 1)
+    {
+        const uint32_t chosen = reader->selected_tokens != NULL ? reader->selected_tokens[root] : BUSTER_CHECK_NONE;
+        const uint32_t selected = chosen & ~CHECK_INPUT_SOURCE_SELECTION;
+        if (chosen != BUSTER_CHECK_NONE && selected >= job->first && selected < job->end && selected != root)
+        {
+            root = selected;
+        }
+        else if (parser->tree.roles[root] == PARSE_ROLE_CLOSE_GROUP || parser->tokens.kinds[root] == PARSE_KIND_COMMA)
+        {
+            uint32_t value = BUSTER_CHECK_NONE;
+            bool unique = true;
+            const bool comma = parser->tokens.kinds[root] == PARSE_KIND_COMMA;
+            for (uint32_t child = reader->first_child[root]; child != BUSTER_CHECK_NONE && unique; child = reader->next_child[child])
+            {
+                if (child >= job->first && child < job->end && job->present[child - job->first])
+                {
+                    unique = comma || value == BUSTER_CHECK_NONE;
+                    value = child;
+                }
+            }
+            root = unique && value != root ? value : BUSTER_CHECK_NONE;
+        }
+        else
+        {
+            break;
+        }
+    }
+    return check_input_token_type_spelling(reader->output, parser, root, true);
+}
+
 static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame, CheckTagMember* members, uint32_t* member_count, uint32_t* nested_tag)
 {
     const Parser* parser = reader->parser;
@@ -379,6 +417,7 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
     bool valid = name < frame->close && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER;
     CheckValue value = { 0 };
     bool missing = false;
+    uint32_t type_report = BUSTER_CHECK_NONE;
     // The value's failure evidence, for its error in clang's words (#1447), and its first token.
     CheckConstantFailure failure = { .token = BUSTER_CHECK_NONE, .callee = BUSTER_CHECK_NONE };
     uint32_t value_first = name;
@@ -452,11 +491,36 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
             value_first = job->first;
             if (*nested_tag == BUSTER_CHECK_NONE)
             {
-                valid = !missing && valid && check_input_const_rvalue(reader, i, &value) && check_input_integer_constant(reader, &value);
+                valid = !missing && valid && check_input_const_rvalue(reader, i, &value);
                 if (valid)
                 {
-                    // Its comma operators' left operands' -Wunused-value, as a constant array bound's (#2202).
+                    // An unused comma operand is still diagnosed when the final value has a rejected type.
                     check_input_attribute_unused(reader, job->first, i, true);
+                }
+                if (valid && !check_action_is_integer(reader->types, value.type))
+                {
+                    const uint32_t before = reader->output->report_count;
+                    const uint32_t root = check_constant_range_root(job, job->first, job->end);
+                    // Clang names a function or array expression before its required-value conversion decays it.
+                    const TypeId original = root != BUSTER_CHECK_NONE ? job->values[root - job->first].type : value.type;
+                    const uint8_t kind = type_kind(reader->types, type_strip_aligned(reader->types, original));
+                    const TypeId type = type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_FUNCTION ? original : value.type;
+                    check_input_report_typed(reader, job->first, CHECK_INPUT_ENUM_VALUE_TYPE, type, BUSTER_CHECK_NONE, 0);
+                    if (reader->output->report_count > before)
+                    {
+                        CheckInputReport* report = reader->output->reports + before;
+                        report->type_spelling = check_input_enum_value_spelling(job);
+                        report->note_kind = CHECK_INPUT_NOTE_NONE;
+                        report->completion = i;
+                        type_report = reader->output->recovered_count;
+                        missing = check_input_recover_reports(reader, before);
+                        type_report = missing ? type_report : BUSTER_CHECK_NONE;
+                    }
+                    valid = false;
+                }
+                valid = valid && check_input_integer_constant(reader, &value);
+                if (valid)
+                {
                     check_input_constant_warning(reader, job->first, i, &value, true);
                 }
                 const uint64_t mark = job->mark;
@@ -468,7 +532,8 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
         if (missing)
         {
             value = (CheckValue){ 0 };
-            valid = fixed ? check_input_enum_fixed_value(reader, frame, name, false, &value, false) : check_input_enum_successor(reader, frame, &value);
+            valid = fixed ? check_input_enum_fixed_value(reader, frame, name, false, &value, false) :
+                            check_input_enum_successor(reader, frame, &value, type_report != BUSTER_CHECK_NONE ? i + 1u : 0);
         }
         else if (valid && *nested_tag == BUSTER_CHECK_NONE && fixed)
         {
@@ -489,7 +554,7 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
     }
     else if (valid)
     {
-        valid = check_input_enum_successor(reader, frame, &value);
+        valid = check_input_enum_successor(reader, frame, &value, 0);
     }
     if (*nested_tag == BUSTER_CHECK_NONE)
     {
@@ -596,6 +661,17 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
     if (!valid && reader->output->report_count == report_count)
     {
         check_input_constant_failure_report(reader, &failure, value_first, failed_token);
+    }
+    // An invalid value's type is checked before its recovered successor or name. Keep those follow-on errors after
+    // it even though their source location is the earlier enumerator name, and keep expression warnings first.
+    if (type_report != BUSTER_CHECK_NONE)
+    {
+        const uint32_t completion = reader->output->recovered_reports[type_report].completion;
+        for (uint32_t r = type_report; r < reader->output->recovered_count; r += 1)
+        {
+            reader->output->recovered_reports[r].completion = completion;
+            reader->output->recovered_reports[r].suborder = 1u + r - type_report;
+        }
     }
     return valid;
 }
