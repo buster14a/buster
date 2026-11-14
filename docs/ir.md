@@ -136,6 +136,8 @@ column comparisons deterministic.
 | `masked_store` | `a:ptr`, `b` the stored vector, `c` the mask of the lanes in flags; result is `void`. A lane whose bit is clear is never written |
 | `compress_store` | as `masked_store`; the set lanes are written one after another from the address, and no other byte ([gathers and compressing stores](ir-simd.md#gathers-compressing-stores-and-truncating-stores-1840)) |
 | `gather` | `a:ptr` the base, `b` the index vector of a dword or a qword per lane, `c` the mask of the lanes in flags (i32 or i64), `alignment_log2` the scale's log2; lane i is the lane's bytes at `a + sext(b[i]) * scale` where the bit is set, 0 elsewhere, and a clear lane is never read |
+| `scatter` | `a:ptr` the base, `b` the index vector as a gather's, and in `extra` at `c`'s index the stored vector (lanes in flags, i32 or i64) and its mask; `alignment_log2` the scale's log2; result is `void`. Lane i is written at `a + sext(b[i]) * scale` where its bit is set, from lane 0 up, and a clear lane is never written ([scatters](ir-simd.md#scatters-1840)) |
+| `fma` | `a,b,c` of the result's type, `f32` or `f64`; `a * b + c` rounded once, the first NaN of `a`, `b` and `c` quieted, or the default NaN for an invalid product or sum of numbers ([scalar fused multiply-adds](ir-simd.md#scalar-fused-multiply-adds-1840)) |
 | `call`, `call_indirect` | `a` is a symbol or a pointer value; `b` indexes `calls`; `c` an aggregate result's destination (a `ptr`), or absent |
 | `phi` | `a` is an extra-word offset, `b` the incoming count; pairs are `(predecessor, value)` |
 | `br` | `a` is a block ID |
@@ -1178,6 +1180,36 @@ loop's first value evicts before any read, was still computed on each of its
 and `hexFunc` runs the same instructions too. No function loses more than 30 K
 to the hoist (`sqlite3Atoi64` +29.6 K, `sqlite3Select` +13.1 K,
 `sqlite3_strnicmp` +11.5 K, `sqlite3GetInt32` +10.7 K).
+
+A take whose address is only a call's argument stays its own too
+(`ir_typed_argument`, #2618): the first entry that pops it, within its block,
+is a call taking it as an argument, not as an indirect call's target. The
+take's own `lea` puts the address in the argument's register, where a hoisted
+one would be a move there: no fewer instructions, for a register held from the
+definition on. `sqlite3Select` passes `sqlite3ExprListDeleteGeneric` to
+`sqlite3ParserAddCleanup` on rare paths, and computed it on each of its 13,012
+calls, the swaps its register cost included (+26.6 K against no hoist). The
+walk follows the stack's depth over the entries that push and pop without
+leaving the block, and stops at anything else, past 48 entries at most.
+
+On main `45cd9ae`, with this and [the allocation guide](tier1-allocation.md)'s
+"Recipes that wait", the hoist against the same compiler with no hoist at all
+(callgrind, #1189's `gap.c`, #1217's inputs): speedtest1 runs 8.2 M fewer
+instructions and Lua's scripts 43.6 M fewer, every Lua function the same or
+fewer, `jsonLookupStep` and `speedtest1_run` too. The functions that run more:
+- `jsonParseFree` +126 K: with the hoist, unit inlining (#2541) inlines
+  `jsonParseReset` into it, where it inlined `jsonParseFree` into its callers;
+  `jsonParseReset` and those callers run 124 K fewer, +2.4 K in all;
+- `sqlite3_randomness` +3.7 K: `sqlite3Prng.s[0]`'s takes, a constant index
+  converted to the pointer's width before its `PTR_ADD`, which
+  `ir_typed_folds` doesn't match. Matching conversions of constants moved
+  `powerOfTen`'s allocation for +196 K, and stays out;
+- `sqlite3GetInt32` +5.4 K and `sqlite3HashClear` +2.1 K, addresses defined
+  before a loop that mostly runs no iteration (`sqlite3GetInt32`'s whitespace
+  skip reads `sqlite3CtypeMap`, whose register also costs its exit a move and
+  a jump);
+- `sqlite3PcacheTruncate` +2.8 K, an if-conversion of the shifted blocks; and
+  functions under 1.4 K each.
 `test-ir-lowering` checks both lowering paths, the verifiers, the interpreter's
 results and promotion for a symbol taken three times, one taken once and one
 through its GOT slot, and each of the rules above: a definition past an early

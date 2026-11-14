@@ -445,6 +445,31 @@ static bool ir_simd_shuffle_immediate_match(const uint8_t* bytes, uint32_t width
 // elements (dwords, qwords), the index's (dwords, qwords) and the result's width (16, 32 and 64 bytes): the EVEX forms
 // whose index has an element per lane, which the decoder admits (ir_simd_typed_gather); Tier 1 selects the integer
 // ones (tier1_select_gather). X86_FORM_NONE where the index's register holds more elements than the lanes.
+// The scatters (#1840), as the gathers above: [float][qword lanes][qword indices][the stored vector's width], NONE where
+// the index's elements aren't one per lane.
+static const uint16_t ir_simd_scatter_forms[2][2][2][3] = {
+    {
+        {
+            { X86_FORM_VPSCATTERDD_VM32X_X, X86_FORM_VPSCATTERDD_VM32Y_Y, X86_FORM_VPSCATTERDD_VM32Z_Z },
+            { X86_FORM_VPSCATTERQD_VM64Y_X, X86_FORM_VPSCATTERQD_VM64Z_Y, X86_FORM_NONE },
+        },
+        {
+            { X86_FORM_NONE, X86_FORM_VPSCATTERDQ_VM32X_Y, X86_FORM_VPSCATTERDQ_VM32Y_Z },
+            { X86_FORM_VPSCATTERQQ_VM64X_X, X86_FORM_VPSCATTERQQ_VM64Y_Y, X86_FORM_VPSCATTERQQ_VM64Z_Z },
+        },
+    },
+    {
+        {
+            { X86_FORM_VSCATTERDPS_VM32X_X, X86_FORM_VSCATTERDPS_VM32Y_Y, X86_FORM_VSCATTERDPS_VM32Z_Z },
+            { X86_FORM_VSCATTERQPS_VM64Y_X, X86_FORM_VSCATTERQPS_VM64Z_Y, X86_FORM_NONE },
+        },
+        {
+            { X86_FORM_NONE, X86_FORM_VSCATTERDPD_VM32X_Y, X86_FORM_VSCATTERDPD_VM32Y_Z },
+            { X86_FORM_VSCATTERQPD_VM64X_X, X86_FORM_VSCATTERQPD_VM64Y_Y, X86_FORM_VSCATTERQPD_VM64Z_Z },
+        },
+    },
+};
+
 static const uint16_t ir_simd_gather_forms[2][2][2][3] = {
     {
         {

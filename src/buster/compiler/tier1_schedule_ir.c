@@ -65,6 +65,7 @@ static const uint8_t tier1_schedule_ir_barriers[BUSTER_IR_OP_TABLE] = {
     [IR_MASKED_STORE] = 1,
     [IR_COMPRESS_STORE] = 1,
     [IR_GATHER] = 1,
+    [IR_SCATTER] = 1,
 };
 
 static bool tier1_schedule_ir_barrier(const IrFunction* f, uint32_t i)
@@ -93,6 +94,7 @@ static uint32_t tier1_schedule_ir_weight(uint32_t op)
             weight = 0;
             break;
         case IR_LOAD:
+        case IR_FMA:
             weight = 4;
             break;
         case IR_MUL:

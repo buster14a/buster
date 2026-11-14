@@ -196,6 +196,20 @@ IDs and predecessor identities unchanged; contiguous block offsets reflect the
 new instruction counts. A general expansion splits its call's block, and every
 later block's ID moves by the blocks it adds (below).
 
+The caller's own nodes move by a step function of the expanded sites before
+them: a caller with at most `IrInlineOptions.add_sites` sites (8, #2541 step 3's
+measurement) rebases its runs 16 nodes a vector by a compare and masked add a
+site, one with more by gathers through its destination tables; both write the
+scalar twin's columns, and `test-ir-inline` runs each unit both ways.
+
+Under `-g` (a caller and a callee with source sidecars and a call with an
+origin), an expansion is an instance (`IrDebugInline`, #2541 step 3): its
+callee's origins move past the caller's (`IrDebugInfo.origin_count`), each
+copied instruction takes its callee origin there, and the instance (the
+callee's symbol, its origins, the call's origin and the instance holding that
+call) and the callee's own instances, re-based and nested in it, follow the
+caller's. A caller's slots take no callee local.
+
 The four byte columns and three operand columns retain their shared IR
 meanings. Constant/address rows from each expanded body are appended with
 rebased indices. Existing caller slots and signature rows are copied, and so
