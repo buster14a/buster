@@ -184,15 +184,20 @@ static uint32_t check_common_next_candidate(const CheckCommonCandidates* candida
     const uint32_t count = candidates->count;
     const uint16_t* masks = candidates->masks;
     const uint64_t column = (uint64_t)kind * candidates->blocks;
-    while (scan->pending == 0 && scan->next < count)
+    if (scan->taken == scan->listed)
     {
-        const uint32_t first = scan->next;
-        const uint32_t live = count - first < 16 ? count - first : 16;
-        scan->base = first;
-        scan->next = first + live;
-        scan->pending = vector ? masks[column + first / 16] :
-                                 live == 16 ? 0xffffu : (1u << live) - 1;
+        scan->taken = 0;
+        scan->listed = 0;
+        while (scan->listed < BUSTER_CHECK_SCAN_ITEMS && scan->next < count)
+        {
+            const uint32_t first = scan->next;
+            const uint32_t live = count - first < 16 ? count - first : 16;
+            const uint32_t selected = vector ? masks[column + first / 16] :
+                                               live == 16 ? 0xffffu : (1u << live) - 1;
+            scan->next = first + live;
+            check_common_scan_list(scan, first, (__mmask16)selected);
+        }
     }
-    const uint32_t result = check_common_scan_take(scan, count);
+    const uint32_t result = check_common_scan_listed(scan, count);
     return result;
 }
