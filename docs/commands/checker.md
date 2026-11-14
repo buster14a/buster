@@ -87,7 +87,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; with
   `--lazy-system-headers`, only the checks that pass the driver
-  `-flazy-system-headers`, since the others run the same either way, and
+  `-flazy-system-headers`, including the real system-header lazy-policy
+  fixtures and eager/lazy object comparisons, since the others run the same either way, and
   `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
   `CheckDriverPart`; #2071's run modes, for every run of buster and of the
   oracle clang that goes through the shared helpers

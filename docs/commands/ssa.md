@@ -7,8 +7,13 @@ requirements. [Command index](README.md).
 ## Module overview
 
 - `src/buster/compiler/ssa.c` promotes eligible locals over a completed CFG:
-  shared dominance/frontier analysis and segmented SIMD renaming, with a nonrecursive
-  predecessor-reading scalar twin and redundant-phi SCC cleanup. `test-ssa`
+  budgeted dominance/frontier analysis and segmented SIMD renaming, with a nonrecursive
+  predecessor-reading scalar twin and redundant-phi SCC cleanup. Large functions
+  use `ssa_bounded.c`'s reusable local workspace and actual retained phi extents;
+  `ssa_verify.c` independently checks symbolic equations with bounded block rows.
+  `test-ssa` forces both bounded kernels on its fixtures and checks large sparse
+  CFGs under fixed scratch capacities, including a blocks-times-locals product
+  exceeding `u32`. It
   checks both against an all-in-memory path interpreter and the SSA verifier;
   `benchmark-ssa [--only scalar|vector] [--after-scalar MS]` measures synthetic
   CFGs, including analysis and allocation. `docs/ssa.md` records the view's
@@ -33,7 +38,8 @@ requirements. [Command index](README.md).
   undefined phi operands).
   `--tier1` also compiles each executable source through the driver's strict
   Tier 1 path, by the default and scalar host paths, then compares both native
-  programs' status and output with the interpreted forms. Compilation must
+  programs' status and output with the interpreted forms, and requires the two
+  executables to be the same bytes (#1395, #2606). Compilation must
   succeed with every emitted function compiled by Tier 1; a refusal or Tier 0
   fallback fails. Native builds and executions follow the interpreter children
   sequentially, so the command keeps the same CPU grant.

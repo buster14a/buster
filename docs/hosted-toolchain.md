@@ -205,7 +205,7 @@ resolve Ubuntu's mirrors failed every hosted job of four main runs in setup.
 | Input | Acquired by | Pinned by |
 | --- | --- | --- |
 | apt closure of `setup-hosted.sh`'s packages | `apt-get install --download-only` on the preparation's runner | the package list (in `hosted-offline.sh`) and the runner image |
-| baseline runtime's 4 `.deb`s | `setup-baseline-runtime.sh`, through `cached-download.sh` | their SHA-256 digests |
+| baseline runtime's 4 `.deb`s | `setup-baseline-runtime.sh`, through `cached-download.sh`, from the archive's snapshot of 2026-11-11 (`snapshot.ubuntu.com`), since the archive drops superseded updates | their SHA-256 digests |
 | frozen corpus | `fetch-corpus.sh`, through `cached-download.sh` | its SHA-256 digest |
 | c-testsuite and SQLite | `fetch-c-testsuite.sh`, `fetch-sqlite.sh` | their commits |
 | Lua 5.4.8 | `hosted-offline.sh lua`, through `cached-download.sh` | the release archive's SHA-256 digest |

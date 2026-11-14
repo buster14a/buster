@@ -1812,7 +1812,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "check") == 0)
     {
-        arena_static_base_pages();
+        // main_driver advised .bss already.
         arena_limits_fix();
         result = run_check_command_mode(argc - 2, argv + 2, false, false);
     }
@@ -1820,7 +1820,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
 #if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "parse") == 0)
     {
-        arena_static_base_pages();
+        // main_driver advised .bss already.
         arena_limits_fix();
         result = run_parse_command(argc - 2, argv + 2);
     }
@@ -2032,7 +2032,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "measure-attested") == 0)
     {
-        arena_static_base_pages();
+        // main_driver advised .bss already.
         arena_limits_fix();
         result = run_attested_census(argc - 2, argv + 2);
     }
@@ -2421,7 +2421,8 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
 #endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 &&
              (strcmp(argv[1], "ab") == 0 || strcmp(argv[1], "hot-loops") == 0 || strcmp(argv[1], "label-spills") == 0 ||
-              strcmp(argv[1], "spill-report") == 0 || strcmp(argv[1], "branch-misses") == 0 || strcmp(argv[1], "time-runs") == 0))
+              strcmp(argv[1], "spill-report") == 0 || strcmp(argv[1], "branch-misses") == 0 || strcmp(argv[1], "time-runs") == 0 ||
+              strcmp(argv[1], "start-order") == 0))
     {
         result = run_profile_command(argc - 1, argv + 1);
     }
@@ -2558,14 +2559,32 @@ extern int LLVMFuzzerRunDriver(int* argc, char*** argv, int (*callback)(const ui
 // Weak: present whenever LeakSanitizer is linked (the fuzz builds' combined `address` mode), null otherwise.
 extern int __lsan_do_recoverable_leak_check(void) __attribute__((weak));
 #endif
+// Whether a command line's first argument is a source command's (#652, #1444): an option (-E, -fsyntax-only, -c, ...),
+// or a byte no command's name has, since every name is lowercase letters, digits and '-': a file first (hello.c, ./a.out,
+// src/x.c) or a response file (@FILE). A first argument made of those bytes alone (a file named `a`) is a source
+// command's only once no unit's command has taken it.
+static bool main_source_first(const char* argument)
+{
+    bool name = argument[0] != '-';
+    for (size_t i = 0; name && argument[i] != 0; i += 1)
+    {
+        const char c = argument[i];
+        name = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+    }
+    return !name;
+}
+
 static int main_driver(int argc, char** argv)
 {
     // A source command's .bss in base pages (arena_static_base_pages) before the process touches any of it (#1444): with
     // transparent huge pages `always`, a read of a 2 MB stretch of .bss maps the huge zero page, and a write to it, even
     // after the advice, then takes a huge page of its own. arena_page_policy's statics shared such a stretch with 220 MB
-    // of others, and took one of an empty file's two huge pages. A test or benchmark keeps its .bss as the kernel gives it.
-    const bool source = argc >= 2 && argv[1][0] == '-';
-    if (source)
+    // of others, and took one of an empty file's two huge pages. `check`, `parse` and `measure-attested` compile a source
+    // as well, through their units' chains, so they are advised here too, and don't advise again. A test or benchmark
+    // keeps its .bss as the kernel gives it.
+    const bool source = argc >= 2 && main_source_first(argv[1]);
+    const bool compiles = argc >= 2 && (strcmp(argv[1], "check") == 0 || strcmp(argv[1], "parse") == 0 || strcmp(argv[1], "measure-attested") == 0);
+    if (source || compiles)
     {
         arena_static_base_pages();
     }
@@ -2587,11 +2606,11 @@ static int main_driver(int argc, char** argv)
     // dispatch, including -E and parse commands that need no worker lease themselves.
     bool found = guardian >= 0 || worker_budget_dry_run(getenv("MAKEFLAGS"));
     int result = guardian >= 0 ? guardian : 0;
-    // An option first (-E, -fsyntax-only, -c, ...) is a source command's (#652), but for the assembler unit's -c of a .s
-    // or .S file (main_assembly_source): no unit's command name starts with '-' (the two that do, --fuzz and the
-    // guardian's, are main's and the guardian's above), so it skips the units' chains of strcmp against every command's
-    // name, which were most of an empty file's 930 strcmp calls and touched pages of the string pool and .text that a
-    // compile needs nothing else of.
+    // An option first (-E, -fsyntax-only, -c, ...) or a file first is a source command's (#652, main_source_first): no
+    // unit's command name starts with '-' (the two that do, --fuzz and the guardian's, are main's and the guardian's
+    // above) or holds any other byte, so it skips the units' chains of strcmp against every command's name, which were
+    // most of an empty file's 930 strcmp calls and touched pages of the string pool and .text that a compile needs
+    // nothing else of.
     if (!found && source)
     {
         result = main_source_command(argc, argv, true);

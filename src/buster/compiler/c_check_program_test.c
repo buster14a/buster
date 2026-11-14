@@ -2128,11 +2128,15 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                                       "the signed longs' overflow builtins are add, imul and cmp rows with seto, on both paths");
                 }
             }
-            if (strcmp(name, "unsigned-power-two-divmod") == 0)
+            // #1386's power-of-two fixtures divide nowhere: their quotients and remainders are shifts and masks, the
+            // signed one's with DUPs (its bias sequence), and its pointer differences shifts.
+            const bool signed_powers = strcmp(name, "signed-power-two-divmod") == 0;
+            if (signed_powers || strcmp(name, "unsigned-power-two-divmod") == 0)
             {
                 uint32_t divides = 0;
                 uint32_t shifts = 0;
                 uint32_t masks = 0;
+                uint32_t dups = 0;
                 for (uint32_t p = 0; p < 2; p += 1)
                 {
                     for (uint32_t b = 0; b < lower[p].count; b += 1)
@@ -2143,11 +2147,13 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                             divides += function->kinds[e] == BUSTER_TYPED_DIV || function->kinds[e] == BUSTER_TYPED_MOD;
                             shifts += function->kinds[e] == BUSTER_TYPED_SHR;
                             masks += function->kinds[e] == BUSTER_TYPED_AND;
+                            dups += function->kinds[e] == BUSTER_TYPED_DUP;
                         }
                     }
                 }
-                check_test_expect(test, divides == 0 && shifts != 0 && masks != 0,
-                                  "unsigned constant powers of two lower to shifts/masks on both paths without division");
+                check_test_expect(test, divides == 0 && shifts != 0 && masks != 0 && (!signed_powers || dups != 0),
+                                  signed_powers ? "signed constant powers of two and pointer differences lower without division on both paths"
+                                                : "unsigned constant powers of two lower to shifts/masks on both paths without division");
                 CheckProgramLowered templated = { 0 };
                 bool same = check_program_lower_templates(&templated, &program, true, &output, &scratch) && templated.count == lower[0].count &&
                             templated.template_mismatches == 0;
