@@ -88,7 +88,8 @@ static bool tier1_allocation_test_hinted_levels(const Tier1AllocationInput* inpu
 
 // An unused recipe can preserve a hoisted definition through quiet blocks, but cannot displace a loop value.
 // Literal traces cover spare registers, another start's claim despite a conflicting physical hint, no free register,
-// eviction by a later required value, and a stored value's unused continuation. Restricted masks force the scan on
+// eviction by a later required value before any use, which leaves the range recomputed from its start (#2618), and a
+// stored value's unused continuation. Restricted masks force the scan on
 // both production paths, so the regular-class coloring path cannot hide a regression in the required-use policy.
 static void tier1_allocation_test_idle(Tier1AllocationTestTally* tally, Arena* arena)
 {
@@ -145,18 +146,18 @@ static void tier1_allocation_test_idle(Tier1AllocationTestTally* tally, Arena* a
         { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER },
         { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER },
         { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, BUSTER_TIER1_ALLOCATE_REGISTER },
-        { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER },
+        { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER },
         { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_SPILL, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_SPILL, BUSTER_TIER1_ALLOCATE_REGISTER },
     };
     const uint8_t expected_registers[][5] = {
         { 0, 0, 0, 0 },
         { 0, 1, 1, 0, 1 },
         { 0, UINT8_MAX, 0 },
-        { 0, 0, UINT8_MAX, 0, 0 },
+        { 0, UINT8_MAX, 0, 0 },
         { 0, UINT8_MAX, 0, UINT8_MAX, 0 },
     };
     const uint32_t counts[] = { 4, 5, 3, 4, 4 };
-    const uint32_t fragments[] = { 4, 5, 3, 5, 5 };
+    const uint32_t fragments[] = { 4, 5, 3, 4, 5 };
     const uint8_t classes[5] = { 0 };
     const uint8_t required[4] = { 1, 1, 1, 1 };
     const uint8_t hints[5] = { UINT8_MAX, UINT8_MAX, 0, UINT8_MAX, UINT8_MAX };
@@ -164,7 +165,7 @@ static void tier1_allocation_test_idle(Tier1AllocationTestTally* tally, Arena* a
         "an unused recipe preserves its required definition through two quiet ranges",
         "an unused recipe's physical hint cannot take another start's claimed register",
         "an unused recipe with no free register never evicts an active value",
-        "a recipe kept through a quiet range remains evictable at a required use",
+        "a recipe kept through a quiet range, evicted before any use, gives its register up from the range's start (#2618)",
         "an unused stored value stays in its slot despite a free register",
     };
     for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(counts); fixture += 1)
@@ -283,10 +284,110 @@ static void tier1_allocation_test_yields(Tier1AllocationTestTally* tally, Arena*
     }
 }
 
+// A recipe evicted before any use read its register gives the register up from its start (#2618): with one register,
+// recipe value 0 starts at 0 and is next read at 8; value 1, without a recipe, starts at 2 and takes r0. In the first
+// trace value 0 is recomputed from 0, its opening the memory hint, so that an unused range of it at 10, hinted to that
+// opening, rests without a register; in the second a use at 1 read r0 first, so it keeps r0 until 2, and the unused
+// range at 10 takes r0, free there. In the third a call's clobber at 2 takes r0 from value 0: it keeps its register
+// fragment there, as the dispatch loop's tables need (tier1_allocation_evict). Value 1 ends at 6, and value 0 takes r0
+// again at its use at 8.
+static void tier1_allocation_test_unread(Tier1AllocationTestTally* tally, Arena* arena)
+{
+    const uint32_t starts[3] = { 0, 2, 10 };
+    const uint32_t ends[3] = { 10, 6, 14 };
+    const uint32_t values[3] = { 0, 1, 0 };
+    const uint32_t allowed[3] = { 1, 1, 1 };
+    const uint8_t classes[3] = { 0 };
+    const uint8_t rematerializable[3] = { 1, 0, 1 };
+    const uint32_t hint_intervals[3] = { UINT32_MAX, UINT32_MAX, 0 };
+    const uint32_t use_offsets[][4] = {
+        { 0, 1, 2, 2 },
+        { 0, 2, 3, 3 },
+        { 0, 1, 2, 2 },
+    };
+    const uint32_t use_positions[][3] = {
+        { 8, 2 },
+        { 1, 8, 2 },
+        { 8, 2 },
+    };
+    const uint32_t clobbers[1] = { 2 };
+    const uint8_t required[3] = { 1, 1, 1 };
+    const uint32_t fragments[] = { 4, 5, 5 };
+    const uint8_t expected_kinds[][5] = {
+        { BUSTER_TIER1_ALLOCATE_REMATERIALIZE, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REMATERIALIZE },
+        { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER },
+        { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER },
+    };
+    const uint8_t expected_registers[][5] = {
+        { UINT8_MAX, 0, 0, UINT8_MAX },
+        { 0, UINT8_MAX, 0, 0, 0 },
+        { 0, UINT8_MAX, 0, 0, 0 },
+    };
+    const uint32_t expected_starts[][5] = {
+        { 0, 8, 2, 10 },
+        { 0, 2, 8, 2, 10 },
+        { 0, 2, 8, 2, 10 },
+    };
+    const char* names[] = {
+        "a recipe evicted before any use read it is recomputed from its start, and a range hinted to it rests",
+        "a recipe a use read keeps its register until its eviction",
+        "a call's clobber keeps a recipe's register fragment before it",
+    };
+    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(names); fixture += 1)
+    {
+        const Tier1AllocationInput input = {
+            .starts = starts,
+            .ends = ends,
+            .values = values,
+            .allowed_registers = allowed,
+            .classes = classes,
+            .hint_values = values,
+            .hint_intervals = hint_intervals,
+            .rematerializable = rematerializable,
+            .use_offsets = use_offsets[fixture],
+            .use_positions = use_positions[fixture],
+            .use_required = required,
+            .use_count = use_offsets[fixture][3],
+            .clobbers = fixture == 2 ? clobbers : 0,
+            .clobber_count = fixture == 2 ? 1 : 0,
+            .clobber_registers = { fixture == 2 ? 1u : 0u },
+            .count = 3,
+            .value_count = 2,
+            .position_count = 14,
+            .registers = { 1 },
+        };
+        Tier1Allocation outputs[3] = { { 0 } };
+        bool produced = true;
+        const uint64_t saved = arena->length;
+        for (uint32_t path = 0; path < 3; path += 1)
+        {
+            const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &outputs[path]) : path == 1 ? tier1_allocate_scalar(&input, arena, &outputs[path]) : tier1_allocate_scan_reference(&input, arena, &outputs[path]);
+            const Tier1Allocation* output = &outputs[path];
+            bool valid = error == TIER1_ALLOCATION_OK && output->fragment_count == fragments[fixture] && output->spill_count == 0 && tier1_allocation_verify(&input, output) && tier1_allocation_test_occupancy(&input, output);
+            valid = valid && memcmp(output->kinds, expected_kinds[fixture], fragments[fixture]) == 0 && memcmp(output->registers, expected_registers[fixture], fragments[fixture]) == 0;
+            valid = valid && memcmp(output->starts, expected_starts[fixture], fragments[fixture] * sizeof(uint32_t)) == 0;
+            produced &= error == TIER1_ALLOCATION_OK;
+            tier1_allocation_test_expect(tally, valid, names[fixture]);
+            if (!valid && error == TIER1_ALLOCATION_OK)
+            {
+                fprintf(stderr, "  path %u: %u fragments:", path, output->fragment_count);
+                for (uint32_t f = 0; f < output->fragment_count; f += 1)
+                {
+                    fprintf(stderr, " %u@%u/r%u", output->kinds[f], output->starts[f], output->registers[f]);
+                }
+                fprintf(stderr, "\n");
+            }
+        }
+        tier1_allocation_test_expect(tally, produced && tier1_allocation_test_equal(&input, &outputs[0], &outputs[1]), "both production paths give up an unread recipe's register alike");
+        arena_pop_to(arena, saved);
+    }
+}
+
 static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* arena, uint64_t seed)
 {
     tier1_allocation_test_idle(tally, arena);
     tier1_allocation_test_yields(tally, arena);
+    tier1_allocation_test_unread(tally, arena);
     // Two values, each with two adjacent ranges: a [0, 10) [10, 20), b [2, 10) [10, 20). Ends come first in input
     // order, a's then b's, so the level rule gives a's second range b's register and b's a's.
     {
