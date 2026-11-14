@@ -10,15 +10,19 @@
 // f(p0, p1), the CFG consumer's: x = p0 - p1, y = x ^ 0x55, then a branch on y's low bit to a return of y + p1 or of y - p1.
 // g(p0, p1), the straight-line one's: x = p0 - p1, y = x ^ 0x55, return y + p1. (An addition of two registers would be a
 // lea, three-operand, which ties nothing.) h(p0, p1), straight-line: return p0 | p1,
-// whose operands both end at it. Each runs natively against its oracle, by both paths.
+// whose operands both end at it. k(p0, p1), straight-line: x = p0 - p1, then the address x + 8, whose dying base it ties
+// (#2592: `lea 8(%r),%r` costs what a lea into another register does, and Lua's OP_LFALSESKIP's `pc + 1` keeps the
+// register its dispatch takes `pc` in), returned xored with 0x55, which folds no address. Each runs natively against its
+// oracle, by both paths.
 
-// f(p0, p1), or with `branch` false g(p0, p1); with `returned`, h(p0, p1).
-static bool tier1_ties_function(Arena* input, IrFunction* function, bool branch, bool returned)
+// f(p0, p1), or with `branch` false g(p0, p1); with `returned`, h(p0, p1); with `address`, k(p0, p1).
+static bool tier1_ties_function(Arena* input, IrFunction* function, bool branch, bool returned, bool address)
 {
     const IrSizes sizes = {
         .instruction_count = 16,
         .block_count = 3,
         .constant_count = 3,
+        .address_count = address ? 1 : 0,
         .parameter_count = 2,
     };
     const bool created = ir_create(input, &sizes, function) == IR_OK;
@@ -34,7 +38,19 @@ static bool tier1_ties_function(Arena* input, IrFunction* function, bool branch,
         uint32_t next = 0;
         const uint32_t p0 = tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         const uint32_t p1 = tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        if (returned)
+        if (address)
+        {
+            function->addresses[0] = (IrAddress){ .scale = 1, .offset = 8 };
+            const uint32_t x = tier1_select_test_append(function, &next, IR_SUB, IR_I64, p0, p1, BUSTER_IR_NONE);
+            const uint32_t pointer = tier1_select_test_append(function, &next, IR_INTTOPTR, IR_PTR, x, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t moved = tier1_select_test_append(function, &next, IR_ADDRESS, IR_PTR, pointer, BUSTER_IR_NONE, 0);
+            const uint32_t integer = tier1_select_test_append(function, &next, IR_PTRTOINT, IR_I64, moved, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t mask = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t flipped = tier1_select_test_append(function, &next, IR_XOR, IR_I64, integer, mask, BUSTER_IR_NONE);
+            tier1_select_test_append(function, &next, IR_RET, IR_VOID, flipped, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            function->block_count = 1;
+        }
+        else if (returned)
         {
             const uint32_t both = tier1_select_test_append(function, &next, IR_OR, IR_I64, p0, p1, BUSTER_IR_NONE);
             tier1_select_test_append(function, &next, IR_RET, IR_VOID, both, BUSTER_IR_NONE, BUSTER_IR_NONE);
@@ -72,10 +88,10 @@ static bool tier1_ties_function(Arena* input, IrFunction* function, bool branch,
     return created;
 }
 
-static uint64_t tier1_ties_oracle(uint64_t p0, uint64_t p1, bool branch, bool returned)
+static uint64_t tier1_ties_oracle(uint64_t p0, uint64_t p1, bool branch, bool returned, bool address)
 {
     const uint64_t y = (p0 - p1) ^ 0x55;
-    return returned ? p0 | p1 : branch && (y & 1) == 0 ? y - p1 : y + p1;
+    return address ? (p0 - p1 + 8) ^ 0x55 : returned ? p0 | p1 : branch && (y & 1) == 0 ? y - p1 : y + p1;
 }
 
 // The register holding node `node`'s value at `position`, or UINT8_MAX: the CFG consumer's allocation where the function
@@ -105,10 +121,10 @@ static uint8_t tier1_ties_register(const Tier1EmitResult* emitted, uint32_t node
     return reg;
 }
 
-static void tier1_ties_compile(Tier1EmitTest* test, bool vector, bool branch, bool returned)
+static void tier1_ties_compile(Tier1EmitTest* test, bool vector, bool branch, bool returned, bool address)
 {
     IrFunction function;
-    const bool created = tier1_ties_function(&test->input, &function, branch, returned);
+    const bool created = tier1_ties_function(&test->input, &function, branch, returned, address);
     const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
     tier1_emit_test_expect(test, valid, "the ties' fixture is valid IR");
     IrDominance dominance;
@@ -127,7 +143,17 @@ static void tier1_ties_compile(Tier1EmitTest* test, bool vector, bool branch, bo
         // IR's entry has predecessors, which f's hasn't.
         const uint8_t p0 = tier1_ties_register(&emitted, 0, 4);
         const uint8_t x = tier1_ties_register(&emitted, 2, 5);
-        if (returned)
+        if (address)
+        {
+            // The address folds into node 5, the ptrtoint, whose pattern is its lea from x.
+            const uint8_t moved = tier1_ties_register(&emitted, 5, 11);
+            tier1_emit_test_expect(test, plan.patterns[5].rule == TIER1_RULE_ADDRESS && plan.patterns[5].values[0] == 2 && x != UINT8_MAX && moved == x, "an address takes its dying base's register");
+            if (moved != x && test->failures < 20)
+            {
+                fprintf(stderr, "  ties vector=%u address: rule %u, x r%u, address r%u\n", vector, plan.patterns[5].rule, x, moved);
+            }
+        }
+        else if (returned)
         {
             tier1_emit_test_expect(test, x == X86_REGISTER_RAX, "a returned result whose operands end at it takes rax, the lowest free register, not its first operand's");
         }
@@ -145,13 +171,13 @@ static void tier1_ties_compile(Tier1EmitTest* test, bool vector, bool branch, bo
         uint64_t bytes = 0;
         if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
         {
-            uint64_t random = UINT64_C(0x3c6ef372fe94f82b) ^ (vector ? 1 : 0) ^ (branch ? 2 : 0) ^ (returned ? 4 : 0);
+            uint64_t random = UINT64_C(0x3c6ef372fe94f82b) ^ (vector ? 1 : 0) ^ (branch ? 2 : 0) ^ (returned ? 4 : 0) ^ (address ? 8 : 0);
             for (uint32_t sample = 0; sample < 32; sample += 1)
             {
                 const uint64_t a = tier1_emit_test_random(&random);
                 const uint64_t b = tier1_emit_test_random(&random);
                 const uint64_t actual = tier1_dropped_call(executable, a, b);
-                const uint64_t expected = tier1_ties_oracle(a, b, branch, returned);
+                const uint64_t expected = tier1_ties_oracle(a, b, branch, returned, address);
                 if (actual != expected && test->failures < 20)
                 {
                     fprintf(stderr, "  ties vector=%u branch=%u returned=%u a=%016" PRIx64 " b=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", vector, branch, returned, a, b, actual, expected);
@@ -173,8 +199,9 @@ static void tier1_ties_tests(Tier1EmitTest* test)
 {
     for (uint32_t vector = 0; vector < 2; vector += 1)
     {
-        tier1_ties_compile(test, vector != 0, true, false);
-        tier1_ties_compile(test, vector != 0, false, false);
-        tier1_ties_compile(test, vector != 0, false, true);
+        tier1_ties_compile(test, vector != 0, true, false, false);
+        tier1_ties_compile(test, vector != 0, false, false, false);
+        tier1_ties_compile(test, vector != 0, false, true, false);
+        tier1_ties_compile(test, vector != 0, false, false, true);
     }
 }

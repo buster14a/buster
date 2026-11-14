@@ -1095,7 +1095,9 @@ five scripts with a fixed string-hash seed, and speedtest1's `--size 5` mix):
 
 clang's column is #2574's. Of the moves through `r11` that are left, 7.9 M are
 one edge of `OP_CALL`'s path into `startfunc`, which swaps `rbx` and `r15`, and
-0.8 M are `OP_NEWTABLE`'s shift by `cl`, which isn't an edge's. 16 of
+0.8 M are `OP_NEWTABLE`'s shift by `cl`, which isn't an edge's (both gone since:
+"Recipes no block reads, settled phi places, and the fixed rules' scratch"
+below). 16 of
 `luaV_execute`'s 78 indirect jumps still follow a swap, down from 59, and they
 take 1.0 M of the moves. Some of these handlers increment `pc` inside the handler,
 as `OP_LOADKX` does, so the handler leaves `pc` and `i` in each other's
@@ -1391,6 +1393,173 @@ analysis serves both of the preference's hot tests (`tier1_emit_cfg_loops`);
 and the resident test takes the recipes with an unused range entering a join
 alone, the only ones it decides (by callgrind on one lane, +131.9 M
 instructions to +22.4 M, of which the scan's checks 13.5 M).
+
+### Recipes no block reads, settled phi places, and the fixed rules' scratch (#2734, #2592)
+
+What #2592's operand sink left of `luaV_execute`'s moves through `r11` was
+mostly one edge. Lua's `OP_CALL` enters `startfunc` with the callee's `ci`:
+
+```
+lea 0x68(%rsp),%rbx; lea 0x68(%rsp),%rbp; lea 0x58(%rsp),%r12
+lea 0x58(%rsp),%r13; lea 0x58(%rsp),%r14; lea disptab(%rip),%r8
+mov 0xc0(%rdi),%ebx            # trap = L->hookmask
+mov %r12,%r14
+mov %rbx,%r11; mov %r15,%rbx; mov %r11,%r15
+```
+
+Two things went wrong there:
+
+- **Frame addresses that nothing read.** The five frame addresses
+  are recipes whose ranges have no use in `startfunc` or in
+  `returning` after it. Each block took a free register for them
+  and lost it to `ci`'s state before any read. `tier1_cfg_entry_unread`
+  enters such a range as its recipe only where it is evicted in its
+  own block. Here the ranges carried the value to the next block in
+  their registers, so every edge into the chain recomputed it.
+- **`ci` and `trap` crossing.** `startfunc`'s `ci` phi followed its
+  operand from the chosen predecessor, the new `ci` that
+  `luaD_precall` returned into `r15`. `trap`'s load then took `rbx`,
+  the lowest free register, and the edge into `returning`, whose
+  phis hold `ci` in `rbx` and `trap` in `r15`, swapped them.
+
+**Ranges carried to recipes** (`tier1_cfg_carried_unread`). The proof
+runs after the assignment. It covers a recomputed value's range
+that spans whole blocks (from one's start to the end of the last
+that continues it in layout), has one register fragment, no use,
+and whose value is no phi's operand. That range enters as its
+recipe where every successor takes the value as its recipe: a
+recipe's fragment, `tier1_cfg_entry_unread`'s case, or another
+range this proof holds. A worklist starts from every such range.
+It unmarks each that has a successor reading its register, and
+puts its value's marked ranges in the predecessors back on the
+list. The result is the greatest such set, so a loop that carries
+a recipe it never reads is proven too.
+`tier1_cfg_interval_entry` gives these ranges the recipe's
+location, and the edges into them move nothing. Nothing changes
+in the assignment, so the change can only remove edge moves. The
+CFG verifier's walk checks it independently: an edge that read
+such a register would find nothing there.
+
+**A phi's settled place** (`Tier1AllocationInput.alternate_intervals`).
+A block with one successor runs its edge to it every time it runs,
+at least as often as all its incoming edges together. A phi there
+that a phi of the successor takes now takes first the register that
+phi's first range opened with, the successor's convention. It does
+so only where that phi still holds the register last and the
+register is free at the block's start. Otherwise the operand's exit
+register stays the hint (#2553). Two looser forms each lost
+elsewhere:
+
+- following the successor phi's latest register gave Lua's handlers
+  swaps of their own, where that phi had moved;
+- following its first range without the check spilled phis in
+  `sqlite3VdbeExec` (13.5 M more stack loads and as many stores),
+  where that phi had moved to memory.
+
+The edge now reads `lea disptab(%rip),%r8; mov %r15,%rbx; mov
+0xc0(%rdi),%r15d`: 4 instructions with its jump, down from 13.
+
+Three fixed sequences used the scratch register on their own.
+Each is a register choice or a record's order, not an edge:
+
+- **Address ties.** An address from a register, with no rip-relative
+  part and no frame object, ties its base (`tier1_select_ties`, #2685):
+  `lea d(%r),%r` costs what a `lea` into another register does.
+  `OP_LFALSESKIP`'s `pc + 1` took another register than `pc`'s, and
+  its fetch then swapped `pc` and `i`. It now takes `pc`'s, as `add
+  $4,%r14`.
+- **Shift by `cl`.** A shift by a register shifts in its destination.
+  It goes through the scratch register only where the destination
+  is `rcx`, or holds the count while the value is in `rcx`.
+  `OP_NEWTABLE`'s `1 << (b - 1)` and Lua's `<<` and `>>` went
+  through it every time.
+- **Division by a register.** A division by a register divides from
+  the divisor's own register. It goes through the scratch register
+  only where the divisor is in `rax` or `rdx`, which the dividend's
+  move and the extension write. #2541's unit inlining put Lua's
+  integer `%` and `//` into `luaV_execute`, where the divisor's move
+  ran 4.01 M times.
+
+By callgrind (#1189's `gap.c`, #1217's inputs, Lua's hash seed fixed)
+at main `21e0d999`:
+
+| | main | this |
+| --- | ---: | ---: |
+| `luaV_execute`'s instructions | 2,311.8 M | 2,225.5 M |
+| its register moves | 344.9 M | 322.2 M |
+| of them through `r11` | 17.7 M | 5.0 M |
+| its frame addresses' `lea`s | 58.3 M | 0.2 M |
+| Lua's five scripts, whole processes | 4,878.4 M | 4,774.1 M (−2.14%) |
+| speedtest1, whole process | 2,657.7 M | 2,626.7 M (−1.17%) |
+
+- **By script.** Every script runs fewer instructions: `calls` −3.87%,
+  `arithmetic` −3.15%, `closures` −1.96%, `tables` −1.94%, `strings`
+  −0.65%.
+- **By function.** No Lua function runs more than 50 K more. Besides
+  `luaV_execute`, `luaH_getshortstr` runs −9.11 M and `match` −4.06 M.
+  speedtest1's `sqlite3VdbeExec` runs −22.23 M. Its only function
+  that runs over 50 K more is `resolveP2Values`, +0.31 M; 30 run
+  over 50 K fewer.
+- **Each rule's share.** Taking each one out of the change at its
+  last commit before the division (speedtest1 2,627.26 M, Lua
+  4,778.8 M):
+
+| Without | speedtest1 | Lua's scripts |
+| --- | ---: | ---: |
+| the carried ranges' proof | +28.02 M | +79.2 M |
+| the phis' settled places | −0.11 M | +15.2 M |
+| the address ties | +0.06 M | +0.3 M |
+| the shifts in place | +2.68 M | +12.6 M |
+
+The division's own share is −0.61 M on speedtest1 and −4.7 M on Lua.
+
+`luaV_execute`'s moves through `r11` that are left aren't edges'
+swaps:
+
+- **3.49 M: a divisor in `rax`.** The value is live past the
+  division, so the records save and restore it besides moving it.
+  Only the allocation avoiding `rax` and `rdx` for a divisor would
+  remove them, as fixed ranges keep values out of a call's clobbers.
+- **1.48 M: `OP_GETTABUP`'s fetch.** It swaps `pc` and `i` (as main
+  does): the handler spills `pc` around its call, and reloads it into
+  another register than the dispatch's.
+
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-carried-recipes-2734-2026-11-14),
+#2553's method, a hold of the lock per round), main `21e0d999` against this
+change, the time follows the instructions, unlike #2592's earlier steps,
+whose removed moves Zen 5 eliminates at rename:
+
+| Program | Metric | change / main | 95% interval |
+| --- | --- | ---: | ---: |
+| Lua's five scripts, 33 link orders | user cycles | −1.40% | −1.75% to −1.04% |
+| | user instructions | −2.08% | −2.10% to −2.06% |
+| speedtest1, 8 layouts | user cycles | −0.60% | −0.92% to −0.27% |
+| | user instructions | −1.20% | |
+
+- **Lua.** It is faster at 29 of the 33 orders. By script, `arithmetic`
+  runs −3.07% and `calls` −2.25%. `closures` and `tables` are within their
+  intervals of zero.
+- **speedtest1.** It is faster at all eight layouts.
+- **Static reports.** Lua's objects move 2,530 values at edges instead of
+  3,056 (`lvm.o` 881 instead of 1,196), and speedtest1's 35,590 instead of
+  39,235. Spills don't change.
+- **Compile cost.** `sqlite3.c`'s `--tier1 -c` takes 0.66% more cycles
+  (0.61% more time) for 0.33% more instructions, and `lvm.c`'s 0.61% more
+  cycles at the same time.
+
+Tests:
+
+- `test-tier1-cfg` counts the ranges the proof takes in its random
+  cases and fails if they reach none. It marks ranges the proof
+  refused, and every one fails the verifier.
+- `tier1_allocate_hints_test.c` traces an alternate taken, and one
+  whose phi moved or whose register another holds. Its random inputs
+  give some ranges alternates, which its independent reference of
+  the coloring rule models.
+- `tier1_ties_test.c` checks an address's register.
+- `test-tier1-select` runs every value, count and destination
+  register's shift, and every dividend, divisor and destination
+  register's division and remainder, natively against C.
 
 ## Rematerialization
 

@@ -958,8 +958,10 @@ static void check_test_driver_static_label(CheckTest* test, const char* executab
 // calls (`arm`) and one only an association _Generic doesn't select names (`association`), and leaves out of its symbols
 // a string literal only sizeof reads and memcpy, a call of which the code computes, the report's three censuses, by both
 // paths: each a superset (no body misses a reference); the walk's selection keeps both functions, the scan's both and
-// the two symbols, the pruned scan's the association alone; then the ticks' line. A unit of overloads has no scan, and one
-// of one function the same references everywhere. Each object is the one without the option.
+// the two symbols, the pruned scan's the association alone, by the writer's dropped arms and by its own (the pass before
+// the bodies' controls, #2536's step 2.2); then the ticks' line. A unit of overloads has no scan, one of one function the
+// same references everywhere, and one of constant arms tells the writer's dropped arms from the pass's: a constant
+// switch's dead case, which only the writer leaves out. Each object is the one without the option.
 static void check_test_driver_selection_census(CheckTest* test, const char* executable, const char* directory)
 {
     static const char program[] = "static int arm(void) { return 1; }\n"
@@ -988,31 +990,80 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
                                     "static int __attribute__((overloadable)) pick(double x) { return (int)x; }\n"
                                     "int main(void) { return pick(1); }\n";
     static const char plain[] = "int main(void) { return 0; }\n";
-    static const char* const sources[] = { program, overloads, plain };
-    static const char* const expected[][5] = {
+    // A constant switch's dead case, which the writer leaves out and the pass keeps, a constant if's dead else, which both
+    // leave out, and an if (0)'s arm that a goto enters, which both keep.
+    static const char arms[] = "static int dead_case(void) { return 7; }\n"
+                               "static int live_case(void) { return 8; }\n"
+                               "static int else_arm(void) { return 9; }\n"
+                               "static int entered(void) { return 10; }\n"
+                               "int main(int argc, char** argv)\n"
+                               "{\n"
+                               "    int r = 0;\n"
+                               "    (void)argv;\n"
+                               "    switch (2)\n"
+                               "    {\n"
+                               "    case 1:\n"
+                               "        r = dead_case();\n"
+                               "        break;\n"
+                               "    case 2:\n"
+                               "        r = live_case();\n"
+                               "        break;\n"
+                               "    }\n"
+                               "    if (1)\n"
+                               "    {\n"
+                               "        r += 1;\n"
+                               "    }\n"
+                               "    else\n"
+                               "    {\n"
+                               "        r += else_arm();\n"
+                               "    }\n"
+                               "    if (argc > 5)\n"
+                               "    {\n"
+                               "        goto inside;\n"
+                               "    }\n"
+                               "    if (0)\n"
+                               "    {\n"
+                               "    inside:\n"
+                               "        r += entered();\n"
+                               "    }\n"
+                               "    return r;\n"
+                               "}\n";
+    static const char* const sources[] = { program, overloads, plain, arms };
+    static const char* const expected[][6] = {
         {
             "selection-census\tbodies\t5\tdropped\t1\tselected-bodies\t3\t",
             "\twalk\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t2\textra-symbols\t2\t",
             "\tscan\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t2\textra-symbols\t4\t",
-            "\tarms\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t1\textra-symbols\t1\n",
+            "\tarms\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t1\textra-symbols\t1\t",
+            "\tpass\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t1\textra-symbols\t1\n",
             "\nselection-census-ticks\treferences\t",
         },
         {
             "selection-census\tbodies\t3\tdropped\t0\tselected-bodies\t2\t",
             "\twalk\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\t",
             "\tscan\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tnone\t",
-            "\tarms\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tnone\textra-bodies\t0\textra-symbols\t0\n",
+            "\tarms\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tnone\textra-bodies\t0\textra-symbols\t0\t",
+            "\tpass\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tnone\textra-bodies\t0\textra-symbols\t0\n",
             "\nselection-census-ticks\treferences\t",
         },
         {
             "selection-census\tbodies\t1\tdropped\t0\tselected-bodies\t1\t",
             "\twalk\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\t",
             "\tscan\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\t",
-            "\tarms\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\textra-bodies\t0\textra-symbols\t0\n",
+            "\tarms\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\textra-bodies\t0\textra-symbols\t0\t",
+            "\tpass\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\textra-bodies\t0\textra-symbols\t0\n",
+            "\nselection-census-ticks\treferences\t",
+        },
+        {
+            "selection-census\tbodies\t5\tdropped\t1\tselected-bodies\t3\t",
+            "\twalk\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t2\textra-symbols\t2\t",
+            "\tscan\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t2\textra-symbols\t2\t",
+            "\tarms\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\textra-bodies\t0\textra-symbols\t0\t",
+            "\tpass\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t1\textra-symbols\t1\n",
             "\nselection-census-ticks\treferences\t",
         },
     };
-    static const char* const names[] = { "dead calls", "overloads", "one function" };
+    static const char* const names[] = { "dead calls", "overloads", "one function", "constant arms" };
     char source[256];
     char object[256];
     char reference[256];
