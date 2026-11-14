@@ -222,8 +222,9 @@ keeps every barrier in its place and moves no memory access, so its permutation
 passes the same `tier1_schedule_ir_verify` under `--verify`; `--tier1-report`
 counts its expressions as `sunk`. Two of its scans are data-parallel, with exact
 scalar twins: the instructions' classes and barriers 64 opcode, type and flag
-bytes at a time, and the readers of `a` in the 32 instructions after an
-expression's root, 16 instructions' operands at a time. Its use counts and its
+bytes at a time, and a value's readers among at most 64 instructions, 16
+instructions' operands at a time. It takes no use counts: its candidates are the
+phis' incoming values, and those readers say what a move needs. Its
 expressions' walks are short dependent chains and stay scalar.
 
 ## Tests

@@ -1054,10 +1054,12 @@ allocation that order. It runs on every function, on the IR before the optimizer
 final verification, as `--tier1-schedule=pre` does, and moves an expression to
 right after the last instruction of its block's segment that reads its operand
 `a`. The expression is pure, total and cheap integer and pointer arithmetic,
-constants and conversions included, and its root's one use is a phi's operand.
-`a` is the only operand it takes from outside it, besides constants. The
-expression's result is then defined where `a` has died, and takes the register
-its phi's hint names, which is `a`'s. Moving it can't raise register pressure:
+constants and conversions included, and its root is a phi's incoming value.
+`a` is the only operand it takes from outside it, besides constants. Nothing
+reads the root before its new place, nor the expression's other values but the
+instruction of it that each feeds. The expression's result is then defined
+where `a` has died, and takes the register its phi's hint names, which is
+`a`'s. Moving it can't raise register pressure:
 over the distance it moves, the root was live and now `a` is, if `a` wasn't
 already. The last reader isn't one of the operations that move, so it keeps its
 place. It is no truth value either, so a branch or extension still finds its
@@ -1083,7 +1085,7 @@ five scripts with a fixed string-hash seed, and speedtest1's `--size 5` mix):
 | `luaV_execute`'s register moves | 438.8 M | 324.6 M | 322.9 M |
 | of them through `r11` | 81.2 M | 9.7 M | |
 | Lua's five scripts, whole processes | 5,236.6 M | 5,121.1 M | 4,207.3 M |
-| speedtest1, whole process | 2,873.3 M | 2,871.5 M | 2,028.9 M |
+| speedtest1, whole process | 2,873.3 M | 2,869.0 M | 2,028.9 M |
 
 clang's column is #2574's. Of the moves through `r11` that are left, 7.9 M are
 one edge of `OP_CALL`'s path into `startfunc`, which swaps `rbx` and `r15`, and
@@ -1093,11 +1095,50 @@ take 1.0 M of the moves. Some of these handlers increment `pc` inside the handle
 as `OP_LOADKX` does, so the handler leaves `pc` and `i` in each other's
 registers. Others reload `trap` after a call into a register other than the
 join's, as `OP_POW` does. A loop's backward jump moves `pc` by a variable
-amount, which isn't of the phi's family either. No other function of either
-program runs more instructions. The pass moves 76
-expressions in `lvm.c` and 54 in `sqlite3.c`. `tests/driver/tier1_patterns.c`
-checks the fetch natively: each handler's indirect jump follows the target's
-load, with no move between them.
+amount, which isn't of the phi's family either. No other function of Lua runs
+more instructions. In speedtest1, two functions run more, `instrFunc` 0.17 M and
+`allocateBtreePage` 0.16 M, where moves change which counters spill. Nine run
+fewer, `sqlite3VdbeExec` 2.18 M of them. The pass moves 76 expressions in
+`lvm.c` and 62 in `sqlite3.c`, whose records fall from 285,832 to 285,492 and
+spill stores from 8,429 to 8,327. `tests/driver/tier1_patterns.c` checks the
+fetch natively: each handler's indirect jump follows the target's load, with no
+move between them.
+
+The pass takes no use counts. Its candidates are the phis' incoming values, and
+a scan of each candidate's window of at most 64 instructions finds the readers
+it needs. A function with nothing to move allocates no per-instruction column
+but the scans' bits, and one with something permutes only the span from its
+lowest moved instruction to its last anchor. The pass's first form, which #2705
+merged, counted every value's uses over every operand and permuted the whole
+function. On the 9700X, against the compiler before the pass:
+
+| `--tier1 -c`, user counts | first form | without use counts |
+| --- | ---: | ---: |
+| `sqlite3.c`'s instructions | +1.07% | +0.18% |
+| `sqlite3.c`'s cycles | +1.57% | +0.29% |
+| `lvm.c`'s instructions | +0.96% | +0.63% |
+| `lvm.c`'s cycles | +0.79% | +0.35% |
+
+On `sqlite3.c` the pass looks at about 11,000 candidates, scans 2,000 windows
+and renames the operands of 48,500 of the 561,500 instructions it sees; how the
+rest of the difference splits between it and the later stages, whose input it
+changes, isn't measured. On `lvm.c` the moved expressions span almost all of
+`luaV_execute`, so limiting the permutation saves nothing there.
+
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-sink-2592-2026-11-14)), with the
+pass as #2705 merged it (its `luaV_execute` is the same), the instructions fall
+but the time doesn't measurably. Lua's five scripts run 2.20%
+fewer instructions at each of 33 link orders, and their user cycles change by
+-0.10% (95% interval -0.64% to +0.44%). Zen 5 eliminates register moves at
+rename, and the dispatch's critical path, the load of `i`, its opcode and the
+table's load, never included them. By script the cycles don't follow the
+instructions: `strings` runs 1.6% faster with 0.17% fewer instructions,
+`closures` 1.2% slower with 1.1% fewer and `arithmetic` 0.5% faster with 5.7%
+fewer. Branch mispredictions are the same in both, and their changes from order
+to order don't follow the cycles'; every order shares `luaV_execute`'s own
+layout, which the change moves, and nothing here separates that layout from the
+removed moves. speedtest1 runs 0.34%
+fewer user cycles over 8 placements (-0.71% to +0.04%).
 
 ## Rematerialization
 

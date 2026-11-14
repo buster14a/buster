@@ -322,14 +322,20 @@ static uint32_t tier1_schedule_ir_segment(const IrFunction* f, Tier1ScheduleIrWo
     return moved;
 }
 
-// The value operands of instruction i renamed by `place` (old to new): a, b and c by ir_value_mask, a phi's incomings
+// Value `v` renamed by `place`, the new places of [first, end)'s instructions (`place[old - first]`); others keep theirs.
+static uint32_t tier1_schedule_ir_renamed(uint32_t v, uint32_t first, uint32_t end, const uint32_t* place)
+{
+    return v >= first && v < end ? place[v - first] : v;
+}
+
+// The value operands of instruction i renamed (tier1_schedule_ir_renamed): a, b and c by ir_value_mask, a phi's incomings
 // and a call's arguments in extra. `renamed` marks the extra slots done, so that none is renamed twice.
-static void tier1_schedule_ir_rename(IrFunction* f, uint32_t i, const uint32_t* place, uint64_t* renamed)
+static void tier1_schedule_ir_rename(IrFunction* f, uint32_t i, uint32_t first, uint32_t end, const uint32_t* place, uint64_t* renamed)
 {
     const uint32_t mask = ir_value_mask(f, i);
-    f->a[i] = (mask & 1) ? place[f->a[i]] : f->a[i];
-    f->b[i] = (mask & 2) ? place[f->b[i]] : f->b[i];
-    f->c[i] = (mask & 4) ? place[f->c[i]] : f->c[i];
+    f->a[i] = (mask & 1) ? tier1_schedule_ir_renamed(f->a[i], first, end, place) : f->a[i];
+    f->b[i] = (mask & 2) ? tier1_schedule_ir_renamed(f->b[i], first, end, place) : f->b[i];
+    f->c[i] = (mask & 4) ? tier1_schedule_ir_renamed(f->c[i], first, end, place) : f->c[i];
     const uint32_t op = f->op[i];
     const uint32_t count = op == IR_PHI ? f->b[i] : op == IR_CALL || op == IR_CALL_INDIRECT ? f->calls[f->b[i]].argument_count : 0;
     for (uint32_t p = 0; p < count; p += 1)
@@ -338,61 +344,63 @@ static void tier1_schedule_ir_rename(IrFunction* f, uint32_t i, const uint32_t* 
         const uint64_t bit = UINT64_C(1) << (slot & 63);
         if ((renamed[slot / 64] & bit) == 0)
         {
-            f->extra[slot] = place[f->extra[slot]];
+            f->extra[slot] = tier1_schedule_ir_renamed(f->extra[slot], first, end, place);
             renamed[slot / 64] |= bit;
         }
     }
 }
 
-// Applies the permutation `order` (order[new] = old, within blocks) to `f`'s instruction columns, its debug origins,
-// bindings and regions, and renames every value operand by its inverse, which it writes to `place`. Its columns' copies
-// come from `scratch`, popped before it returns. False, with `f` unchanged, where there's no room.
-static bool tier1_schedule_ir_permute(IrFunction* f, const uint32_t* order, uint32_t* place, Arena* scratch)
+// Applies a permutation of [first, end) within blocks, `order[new - first] = old` (every other instruction keeps its
+// place), to `f`'s instruction columns, its debug origins, bindings and regions, and renames every value operand by its
+// inverse, which it writes to `place` (`place[old - first] = new`). The range's columns' copies come from `scratch`,
+// popped before it returns. False, with `f` unchanged, where there's no room.
+static bool tier1_schedule_ir_permute(IrFunction* f, uint32_t first, uint32_t end, const uint32_t* order, uint32_t* place, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
     const uint32_t n = f->instruction_count;
-    uint8_t* bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)n * 3 + 1);
-    uint32_t* words = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n * 3 + 1);
+    const uint32_t span = end - first;
+    uint8_t* bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)span + 1);
+    uint32_t* words = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)span + 1);
     uint64_t* renamed = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)f->extra_count / 64 + 1);
     const bool ready = bytes != 0 && words != 0 && renamed != 0;
     if (ready)
     {
-        for (uint32_t i = 0; i < n; i += 1)
+        for (uint32_t k = 0; k < span; k += 1)
         {
-            place[order[i]] = i;
+            place[order[k] - first] = first + k;
         }
         uint8_t* byte_columns[] = { f->op, f->type, f->flags, f->alignment_log2 };
         uint32_t* word_columns[] = { f->a, f->b, f->c };
         for (uint32_t c = 0; c < 4; c += 1)
         {
-            memcpy(bytes, byte_columns[c], n);
-            for (uint32_t i = 0; i < n; i += 1)
+            memcpy(bytes, byte_columns[c] + first, span);
+            for (uint32_t k = 0; k < span; k += 1)
             {
-                byte_columns[c][i] = bytes[order[i]];
+                byte_columns[c][first + k] = bytes[order[k] - first];
             }
         }
         for (uint32_t c = 0; c < 3; c += 1)
         {
-            memcpy(words, word_columns[c], (uint64_t)n * sizeof(uint32_t));
-            for (uint32_t i = 0; i < n; i += 1)
+            memcpy(words, word_columns[c] + first, (uint64_t)span * sizeof(uint32_t));
+            for (uint32_t k = 0; k < span; k += 1)
             {
-                word_columns[c][i] = words[order[i]];
+                word_columns[c][first + k] = words[order[k] - first];
             }
         }
         if (f->debug != NULL)
         {
-            memcpy(words, f->debug->origins, (uint64_t)n * sizeof(uint32_t));
-            for (uint32_t i = 0; i < n; i += 1)
+            memcpy(words, f->debug->origins + first, (uint64_t)span * sizeof(uint32_t));
+            for (uint32_t k = 0; k < span; k += 1)
             {
-                f->debug->origins[i] = words[order[i]];
+                f->debug->origins[first + k] = words[order[k] - first];
             }
             for (uint32_t k = 0; k < f->debug->binding_count; k += 1)
             {
                 IrDebugBinding* binding = f->debug->bindings + k;
-                binding->anchor = binding->anchor != BUSTER_IR_NONE ? place[binding->anchor] : BUSTER_IR_NONE;
+                binding->anchor = binding->anchor != BUSTER_IR_NONE ? tier1_schedule_ir_renamed(binding->anchor, first, end, place) : BUSTER_IR_NONE;
                 if (binding->kind == IR_DEBUG_BIND_VALUE)
                 {
-                    binding->value = place[binding->value];
+                    binding->value = tier1_schedule_ir_renamed(binding->value, first, end, place);
                 }
             }
             for (uint32_t k = 0; k < f->debug->region_count; k += 1)
@@ -400,14 +408,14 @@ static bool tier1_schedule_ir_permute(IrFunction* f, const uint32_t* order, uint
                 IrDebugRegion* region = f->debug->regions + k;
                 if (region->kind == IR_DEBUG_BIND_VALUE)
                 {
-                    region->value = place[region->value];
+                    region->value = tier1_schedule_ir_renamed(region->value, first, end, place);
                 }
             }
         }
         memset(renamed, 0, ((uint64_t)f->extra_count / 64 + 1) * sizeof(uint64_t));
         for (uint32_t i = 0; i < n; i += 1)
         {
-            tier1_schedule_ir_rename(f, i, place, renamed);
+            tier1_schedule_ir_rename(f, i, first, end, place, renamed);
         }
     }
     arena_pop_to(scratch, mark);
@@ -465,7 +473,7 @@ static __attribute__((unused)) IrError tier1_schedule_ir_function(IrFunction* f,
         }
     }
     // Each segment's operand edges are at most three an instruction, its memory edge one more: 4n bounds the lists.
-    ready = ready && (stats->moved == 0 || tier1_schedule_ir_permute(f, w.order, w.place, scratch));
+    ready = ready && (stats->moved == 0 || tier1_schedule_ir_permute(f, 0, n, w.order, w.place, scratch));
     if (ready && order != 0 && n != 0)
     {
         memcpy(order, w.order, (uint64_t)n * sizeof(uint32_t));
@@ -480,38 +488,41 @@ static __attribute__((unused)) IrError tier1_schedule_ir_function(IrFunction* f,
 
 // The operand sink (#2592). Tier 1's C driver runs tier1_schedule_ir_sink on every function, after
 // --tier1-schedule=pre's order where that runs and before the optimizer's final verification, on the same owned columns
-// and with the same contract as tier1_schedule_ir_function. An expression is a root and the operands that only it reads,
-// each in the root's segment (the pre-scheduler's: nothing moves across a barrier) and each a pure, total, cheap operation
-// of general integers or pointers (tier1_sink_ir_operations, tier1_sink_ir_types): constants, copies, conversions, address
-// arithmetic and the integer operations that can't trap. A root is such an instruction that no other one reads alone.
-// An expression moves where:
-// - its root's one use is a phi's operand: the root is the phi's next value, on an edge out of its block;
-// - its operands from outside it are one value `a` and constants, and `a` is of that phi's family (tier1_sink_ir_family):
+// and with the same contract as tier1_schedule_ir_function. Its candidates are the phis' incoming values: each such root
+// is its phi's next value, on an edge out of its block. Its expression is the root and the operands in its segment (the
+// pre-scheduler's: nothing moves across a barrier) that no other of its instructions reads, each a pure, total, cheap
+// operation of general integers or pointers (tier1_sink_ir_operations, tier1_sink_ir_types): constants, copies,
+// conversions, address arithmetic and the integer operations that can't trap. An expression moves where:
+// - its operands from outside it are one value `a` and constants, and `a` is of the phi's family (tier1_sink_ir_family):
 //   the phi, a value computed from it, or a join of its values, which takes the phi's register;
-// - some instruction of its segment after the root reads `a`: the last of them, its last reader (through single-use
-//   operations of the set, to the one that consumes them, as selection folds them), is none of the set and no truth value.
-// It then moves to right after its last reader, where `a`'s register is free and the root, defined there, takes it.
-// Lua's `i = *(pc++)` defines pc + 4 before the load that reads pc, so that the incremented pc took another register and
-// every dispatch moved pc and i back to their phis' registers through the scratch register (#2592). Where `a` has its
-// own successor that wants its register more, as a list's `p = p->next` beside `pp = &p->next` does, `a` is no value of
-// the other expression's phi's family, and the expression keeps its place: moving it would give that register to it.
+// - some instruction of its segment after the root reads `a`: the last of them, its anchor (counting the readers of
+//   the set's readers, which selection folds into their consumers), is none of the set and no truth value;
+// - nothing reads the root before the anchor, nor any other of its instructions but the one of them that it is an
+//   operand of: each of their values is defined before every reader that remains in the block.
+// It then moves to right after its anchor, where `a`'s register is free and the root, defined there, takes it. Lua's
+// `i = *(pc++)` defines pc + 4 before the load that reads pc, so that the incremented pc took another register and every
+// dispatch moved pc and i back to their phis' registers through the scratch register (#2592). Where `a` has its own
+// successor that wants its register more, as a list's `p = p->next` beside `pp = &p->next` does, `a` is no value of the
+// other expression's phi's family, and the expression keeps its place: moving it would give that register to it.
 //
 // It never raises register pressure: between the expression's place and its new one, its root was live before and isn't
 // now, and `a` is live now and may have been before; its inner values move with it and stay adjacent. It changes no
-// selection: its last reader stays where it is, a truth value's branch or extension still takes it from right before
-// them (tier1_select_truth), and the expression has no memory access, so a load still folds into its consumer where it
-// did (tier1_select_load_folds). Each expression has at most BUSTER_TIER1_SINK_NODES instructions within
-// BUSTER_TIER1_SINK_WINDOW before its root, its last reader is found in the BUSTER_TIER1_SINK_WINDOW instructions after
-// the root, and each walk up to the phi is bounded too, which bounds the pass's work by the instructions'.
+// selection: its anchor stays where it is, a truth value's branch or extension still takes it from right before them
+// (tier1_select_truth), and the expression has no memory access, so a load still folds into its consumer where it did
+// (tier1_select_load_folds). Each expression has at most BUSTER_TIER1_SINK_NODES instructions within
+// BUSTER_TIER1_SINK_WINDOW before its root, its anchor is in the BUSTER_TIER1_SINK_WINDOW instructions after the root,
+// and each walk up to the phi is bounded too: the pass's work is bounded by the instructions' and the phis' operands.
 //
-// Two scans are data-parallel, each with an exact scalar twin: the classification, 64 instructions' opcode, type and
-// flag bytes at a time into the set's bits and the barriers' bits (tier1_sink_ir_classify); and each root's window, 16
-// instructions' value operands at a time, into the bits of the instructions that read `a` (tier1_sink_ir_readers). The
-// use counts, the expressions' walks and their last readers' chains are short dependent walks, scalar.
+// No use count is taken: the window's readers say what the moves need. Two scans are data-parallel, each with an exact
+// scalar twin: the classification, 64 instructions' opcode, type and flag bytes at a time into the set's, the barriers'
+// and the phis' bits (tier1_sink_ir_classify); and a value's readers among at most 64 instructions, 16 instructions'
+// value operands at a time (tier1_sink_ir_readers). The expressions' walks are short dependent chains, scalar. A function
+// with nothing to move allocates nothing per instruction but those bits; one with something permutes only the span from
+// its lowest moved instruction to its last anchor.
 
 #define BUSTER_TIER1_SINK_NODES 8u
 #define BUSTER_TIER1_SINK_WINDOW 32u
-// The longest chain of single-use operations followed from a reader to the one that consumes it.
+// The longest chain of operations tier1_sink_ir_origin walks up from a value to the one it comes from.
 #define BUSTER_TIER1_SINK_FOLLOW 8u
 
 typedef struct Tier1SinkIrStats Tier1SinkIrStats;
@@ -557,25 +568,29 @@ static const uint8_t tier1_sink_ir_types[64] = {
 
 _Static_assert(IR_TYPE_COUNT <= 64, "the operand sink's type table is one byte permute");
 
+// The most expressions a function's sink moves: past it, the rest keep their places.
+#define BUSTER_TIER1_SINK_TREES 4096u
+
+// An expression that moves: its root, its anchor (the last reader it goes after) and its instructions in place order.
+typedef struct Tier1SinkIrTree Tier1SinkIrTree;
+struct Tier1SinkIrTree
+{
+    uint32_t root;
+    uint32_t anchor;
+    uint32_t count;
+    uint32_t nodes[BUSTER_TIER1_SINK_NODES];
+};
+
 typedef struct Tier1SinkIrWork Tier1SinkIrWork;
 struct Tier1SinkIrWork
 {
-    // Each value's uses, every operand slot (a phi's and a call's too), and its last user: its one user where it has one.
-    uint32_t* uses;
-    uint32_t* users;
-    // A bit per instruction: an operation of the set of a general type, and a barrier.
+    // A bit per instruction: an operation of the set of a general type, a barrier, a phi, and an instruction that moves.
     uint64_t* pure;
     uint64_t* barriers;
-    // Per moved instruction, its expression's root; per root, the lowest of its instructions and the next root of its
-    // anchor; per anchor (a last reader), its first and last roots.
-    uint32_t* roots;
-    uint32_t* lows;
-    uint32_t* next;
-    uint32_t* first;
-    uint32_t* last;
-    // The new order, order[new] = old, and its inverse.
-    uint32_t* order;
-    uint32_t* place;
+    uint64_t* phis;
+    uint64_t* moved;
+    Tier1SinkIrTree* trees;
+    uint32_t capacity;
 };
 
 static bool tier1_sink_ir_bit(const uint64_t* bits, uint32_t i)
@@ -583,7 +598,7 @@ static bool tier1_sink_ir_bit(const uint64_t* bits, uint32_t i)
     return ((bits[i / 64] >> (i % 64)) & 1) != 0;
 }
 
-// The first set bit of `bits` at or after `i`, or `count`.
+// The first set bit of `bits` at or after `i` and before `count`, or `count`.
 static uint32_t tier1_sink_ir_next(const uint64_t* bits, uint32_t i, uint32_t count)
 {
     uint32_t word = i / 64;
@@ -598,8 +613,22 @@ static uint32_t tier1_sink_ir_next(const uint64_t* bits, uint32_t i, uint32_t co
     return found < count ? found : count;
 }
 
-// The bits of the set and of the barriers, 64 instructions at a time; a word's bits past the count are clear.
-static void tier1_sink_ir_classify(const IrFunction* f, uint64_t* pure, uint64_t* barriers, bool scalar)
+// The last set bit of `bits` before `i` and at or after `floor`, or BUSTER_IR_NONE.
+static uint32_t tier1_sink_ir_previous(const uint64_t* bits, uint32_t i, uint32_t floor)
+{
+    uint32_t word = i / 64;
+    uint64_t rest = i % 64 != 0 ? bits[word] & (UINT64_MAX >> (64 - i % 64)) : 0;
+    while (rest == 0 && word != 0 && word * 64 > floor)
+    {
+        word -= 1;
+        rest = bits[word];
+    }
+    const uint32_t found = rest != 0 ? word * 64 + 63 - (uint32_t)__builtin_clzll(rest) : BUSTER_IR_NONE;
+    return found != BUSTER_IR_NONE && found >= floor ? found : BUSTER_IR_NONE;
+}
+
+// The bits of the set, of the barriers and of the phis, 64 instructions at a time; a word's bits past the count are clear.
+static void tier1_sink_ir_classify(const IrFunction* f, uint64_t* pure, uint64_t* barriers, uint64_t* phis, bool scalar)
 {
     const uint32_t count = f->instruction_count;
     for (uint32_t first = 0; first < count; first += 64)
@@ -607,6 +636,7 @@ static void tier1_sink_ir_classify(const IrFunction* f, uint64_t* pure, uint64_t
         const uint32_t lanes = count - first < 64 ? count - first : 64;
         uint64_t set = 0;
         uint64_t cut = 0;
+        uint64_t joins = 0;
 #if BUSTER_HOST_VECTOR
         if (!scalar)
         {
@@ -621,6 +651,7 @@ static void tier1_sink_ir_classify(const IrFunction* f, uint64_t* pure, uint64_t
             const __mmask64 observable = _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_LOAD)) & _mm512_test_epi8_mask(flags, _mm512_set1_epi8((char)BUSTER_IR_OBSERVABLE));
             set = valid & _mm512_test_epi8_mask(operations, types);
             cut = valid & (_mm512_test_epi8_mask(fixed, fixed) | _mm512_test_epi8_mask(terminators, terminators) | observable);
+            joins = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_PHI));
         }
         else
 #endif
@@ -630,21 +661,24 @@ static void tier1_sink_ir_classify(const IrFunction* f, uint64_t* pure, uint64_t
                 const uint32_t i = first + lane;
                 const uint64_t member = tier1_sink_ir_operations[f->op[i]] != 0 && tier1_sink_ir_types[f->type[i]] != 0;
                 const uint64_t barrier = tier1_schedule_ir_barrier(f, i);
+                const uint64_t join = f->op[i] == IR_PHI;
                 set |= member << lane;
                 cut |= barrier << lane;
+                joins |= join << lane;
             }
         }
         pure[first / 64] = set;
         barriers[first / 64] = cut;
+        phis[first / 64] = joins;
     }
     (void)scalar;
 }
 
-// The instructions of [from, to), at most 32 of a segment's (whose operands are their a, b and c alone, by their value
+// The instructions of [from, to), at most 64 of a segment's (whose operands are their a, b and c alone, by their value
 // masks), that read `value`, as bits from `from`; 16 at a time.
-static uint32_t tier1_sink_ir_readers(const IrFunction* f, uint32_t from, uint32_t to, uint32_t value, bool scalar)
+static uint64_t tier1_sink_ir_readers(const IrFunction* f, uint32_t from, uint32_t to, uint32_t value, bool scalar)
 {
-    uint32_t read = 0;
+    uint64_t read = 0;
 #if BUSTER_HOST_VECTOR
     if (!scalar)
     {
@@ -665,7 +699,7 @@ static uint32_t tier1_sink_ir_readers(const IrFunction* f, uint32_t from, uint32
                 const __mmask16 live = valid & (_mm512_test_epi32_mask(fixed, bit) | (_mm512_test_epi32_mask(optional, bit) & present));
                 reads |= live & _mm512_cmpeq_epi32_mask(operand, _mm512_set1_epi32((int)value));
             }
-            read |= (uint32_t)reads << (first - from);
+            read |= (uint64_t)reads << (first - from);
         }
     }
     else
@@ -675,7 +709,7 @@ static uint32_t tier1_sink_ir_readers(const IrFunction* f, uint32_t from, uint32
         {
             const uint32_t mask = ir_value_mask(f, j);
             const bool reads = ((mask & 1) != 0 && f->a[j] == value) || ((mask & 2) != 0 && f->b[j] == value) || ((mask & 4) != 0 && f->c[j] == value);
-            read |= (uint32_t)reads << (j - from);
+            read |= (uint64_t)reads << (j - from);
         }
     }
     (void)scalar;
@@ -720,20 +754,20 @@ static bool tier1_sink_ir_family(const IrFunction* f, uint32_t a, uint32_t phi)
     return family;
 }
 
-// Root's expression, in the segment [start, end), moved after its last reader where it can be (see the section's
-// comment): its instructions take the root as theirs and the root joins its anchor's list.
-static void tier1_sink_ir_expression(const IrFunction* f, Tier1SinkIrWork* w, uint32_t root, uint32_t start, uint32_t end, bool scalar, Tier1SinkIrStats* stats)
+// Root's expression as `phi`'s next value, recorded where it moves (see the section's comment). Its instructions are in
+// [start, root], start past the last barrier before the root, at most BUSTER_TIER1_SINK_WINDOW before it; its readers
+// are found in [root + 1, to), to the next barrier, at most BUSTER_TIER1_SINK_WINDOW after it.
+static void tier1_sink_ir_candidate(const IrFunction* f, Tier1SinkIrWork* w, uint32_t root, uint32_t phi, uint32_t start, uint32_t to, bool scalar, Tier1SinkIrStats* stats)
 {
-    // The root is a phi's next value alone: its one use is that phi's operand (a phi is none of the set, so the root is no
-    // other expression's operand). Most of the set's instructions aren't, and end here.
-    const uint32_t user = w->users[root];
-    const uint32_t phi = w->uses[root] == 1 && f->op[user] == IR_PHI ? user : BUSTER_IR_NONE;
+    // The expression: the root and the operands of the set in its segment that no other of its instructions reads; each
+    // one's parent is the instruction of it that reads it.
     uint32_t nodes[BUSTER_TIER1_SINK_NODES];
+    uint32_t parents[BUSTER_TIER1_SINK_NODES];
     uint32_t count = 1;
     nodes[0] = root;
+    parents[0] = BUSTER_IR_NONE;
     uint32_t leaf = BUSTER_IR_NONE;
-    uint32_t low = root;
-    bool valid = phi != BUSTER_IR_NONE;
+    bool valid = true;
     for (uint32_t k = 0; valid && k < count; k += 1)
     {
         const uint32_t node = nodes[k];
@@ -742,14 +776,19 @@ static void tier1_sink_ir_expression(const IrFunction* f, Tier1SinkIrWork* w, ui
         {
             const uint32_t v = p == 0 ? f->a[node] : p == 1 ? f->b[node] : f->c[node];
             const bool operand = ((mask >> p) & 1) != 0;
-            const bool own = operand && v >= start && v < node && tier1_sink_ir_bit(w->pure, v) && w->uses[v] == 1 && w->roots[v] == BUSTER_IR_NONE;
+            bool repeated = false;
+            for (uint32_t q = 0; operand && q < count; q += 1)
+            {
+                repeated |= nodes[q] == v;
+            }
+            const bool own = operand && !repeated && v >= start && v < node && tier1_sink_ir_bit(w->pure, v) && !tier1_sink_ir_bit(w->moved, v);
             const bool constant = operand && !own && (f->op[v] == IR_CONST || f->op[v] == IR_UNDEF);
-            valid = !operand || (tier1_sink_ir_types[f->type[v]] != 0 && (own ? count < BUSTER_TIER1_SINK_NODES : constant || leaf == BUSTER_IR_NONE || leaf == v));
+            valid = !operand || (tier1_sink_ir_types[f->type[v]] != 0 && !repeated && (own ? count < BUSTER_TIER1_SINK_NODES : constant || leaf == BUSTER_IR_NONE || leaf == v));
             if (valid && own)
             {
                 nodes[count] = v;
+                parents[count] = node;
                 count += 1;
-                low = v < low ? v : low;
             }
             leaf = valid && operand && !own && !constant ? v : leaf;
         }
@@ -757,37 +796,62 @@ static void tier1_sink_ir_expression(const IrFunction* f, Tier1SinkIrWork* w, ui
     // `a` is of the phi's family (tier1_sink_ir_family): the register the expression's result wants is the phi's, which
     // `a` holds. Where another value wants `a`'s register more, as a list's `p = p->next` beside `pp = &p->next` does,
     // the expression keeps its place.
-    valid = valid && leaf != BUSTER_IR_NONE && root - low <= BUSTER_TIER1_SINK_WINDOW && tier1_sink_ir_family(f, leaf, phi);
-    // The last reader of `a` after the root, in the window.
-    const uint32_t to = end - root - 1 < BUSTER_TIER1_SINK_WINDOW ? end : root + 1 + BUSTER_TIER1_SINK_WINDOW;
-    const uint32_t readers = valid ? tier1_sink_ir_readers(f, root + 1, to, leaf, scalar) : 0;
-    uint32_t anchor = root;
-    for (uint32_t left = readers; left != 0; left &= left - 1)
+    valid = valid && leaf != BUSTER_IR_NONE && tier1_sink_ir_family(f, leaf, phi);
+    // `a`'s readers after the root, and the readers of those of the set, as selection folds them into their consumers:
+    // the last of them is the anchor.
+    uint32_t members[BUSTER_TIER1_SINK_NODES];
+    uint32_t known = 1;
+    members[0] = leaf;
+    uint64_t read = 0;
+    for (uint32_t k = 0; valid && k < known; k += 1)
     {
-        uint32_t consumer = root + 1 + (uint32_t)__builtin_ctz(left);
-        for (uint32_t step = 0; step < BUSTER_TIER1_SINK_FOLLOW && tier1_sink_ir_bit(w->pure, consumer) && w->uses[consumer] == 1 && w->users[consumer] > consumer && w->users[consumer] < end; step += 1)
+        const uint64_t readers = tier1_sink_ir_readers(f, root + 1, to, members[k], scalar);
+        read |= readers;
+        for (uint64_t left = readers; valid && left != 0; left &= left - 1)
         {
-            consumer = w->users[consumer];
+            const uint32_t x = root + 1 + (uint32_t)__builtin_ctzll(left);
+            bool listed = false;
+            for (uint32_t q = 0; q < known; q += 1)
+            {
+                listed |= members[q] == x;
+            }
+            const bool member = tier1_sink_ir_bit(w->pure, x) && !listed;
+            valid = !member || known < BUSTER_TIER1_SINK_NODES;
+            if (valid && member)
+            {
+                members[known] = x;
+                known += 1;
+            }
         }
-        anchor = consumer > anchor ? consumer : anchor;
     }
+    const uint32_t anchor = read != 0 ? root + 1 + 63 - (uint32_t)__builtin_clzll(read) : root;
     valid = valid && anchor != root && !tier1_sink_ir_bit(w->pure, anchor) && f->type[anchor] != IR_I1;
+    // Nothing reads the expression's values before their new place but their parents in it, and nothing the root: each
+    // instruction's readers up to the anchor, at most 2 * BUSTER_TIER1_SINK_WINDOW + 1 of them.
+    for (uint32_t k = 0; valid && k < count; k += 1)
+    {
+        const uint64_t readers = tier1_sink_ir_readers(f, nodes[k] + 1, anchor + 1, nodes[k], scalar);
+        valid = readers == (parents[k] != BUSTER_IR_NONE ? UINT64_C(1) << (parents[k] - nodes[k] - 1) : 0);
+    }
+    valid = valid && stats->trees < w->capacity;
     if (valid)
     {
+        Tier1SinkIrTree* tree = &w->trees[stats->trees];
+        tree->root = root;
+        tree->anchor = anchor;
+        tree->count = count;
+        // Place order: an insertion sort of at most BUSTER_TIER1_SINK_NODES.
         for (uint32_t k = 0; k < count; k += 1)
         {
-            w->roots[nodes[k]] = root;
+            uint32_t at = k;
+            while (at != 0 && tree->nodes[at - 1] > nodes[k])
+            {
+                tree->nodes[at] = tree->nodes[at - 1];
+                at -= 1;
+            }
+            tree->nodes[at] = nodes[k];
+            w->moved[nodes[k] / 64] |= UINT64_C(1) << (nodes[k] % 64);
         }
-        w->lows[root] = low;
-        if (w->first[anchor] == BUSTER_IR_NONE)
-        {
-            w->first[anchor] = root;
-        }
-        else
-        {
-            w->next[w->last[anchor]] = root;
-        }
-        w->last[anchor] = root;
         stats->trees += 1;
         stats->moved += count;
     }
@@ -803,78 +867,86 @@ static __attribute__((unused)) IrError tier1_schedule_ir_sink(IrFunction* f, Are
     const uint64_t words = (uint64_t)n / 64 + 1;
     *stats = (Tier1SinkIrStats){ 0 };
     Tier1SinkIrWork w = {
-        .uses = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
-        .users = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
         .pure = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, words),
         .barriers = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, words),
-        .roots = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
-        .lows = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
-        .next = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
-        .first = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
-        .last = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
-        .order = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
-        .place = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
+        .phis = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, words),
+        .moved = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, words),
+        .capacity = n < BUSTER_TIER1_SINK_TREES ? n : BUSTER_TIER1_SINK_TREES,
     };
-    bool ready = w.uses != 0 && w.users != 0 && w.pure != 0 && w.barriers != 0 && w.roots != 0 && w.lows != 0 && w.next != 0 && w.first != 0 && w.last != 0 && w.order != 0 &&
-                 w.place != 0;
+    w.trees = BUSTER_ARENA_PUSH_ARRAY(scratch, Tier1SinkIrTree, (uint64_t)w.capacity + 1);
+    bool ready = w.pure != 0 && w.barriers != 0 && w.phis != 0 && w.moved != 0 && w.trees != 0;
     if (ready && n != 0)
     {
-        memset(w.uses, 0, (uint64_t)n * sizeof(uint32_t));
-        memset(w.users, 0xff, (uint64_t)n * sizeof(uint32_t));
-        memset(w.roots, 0xff, (uint64_t)n * sizeof(uint32_t));
-        memset(w.next, 0xff, (uint64_t)n * sizeof(uint32_t));
-        memset(w.first, 0xff, (uint64_t)n * sizeof(uint32_t));
-        for (uint32_t i = 0; i < n; i += 1)
+        memset(w.moved, 0, words * sizeof(uint64_t));
+        tier1_sink_ir_classify(f, w.pure, w.barriers, w.phis, scalar);
+        // Each phi's incoming values of the set, in place order: a value that already moved, as another phi's, stays.
+        for (uint32_t phi = tier1_sink_ir_next(w.phis, 0, n); phi < n; phi = tier1_sink_ir_next(w.phis, phi + 1, n))
         {
-            const uint64_t count = ir_operand_count(f, i);
-            for (uint32_t p = 0; p < count; p += 1)
+            for (uint32_t p = 0; p < f->b[phi]; p += 1)
             {
-                const uint32_t value = ir_operand(f, i, p, 0).value;
-                w.uses[value] += 1;
-                w.users[value] = i;
-            }
-        }
-        tier1_sink_ir_classify(f, w.pure, w.barriers, scalar);
-        // The segment [start, end) of each root, in order: end is the next barrier, which every block's terminator is.
-        uint32_t start = 0;
-        uint32_t end = tier1_sink_ir_next(w.barriers, 0, n);
-        for (uint32_t root = tier1_sink_ir_next(w.pure, 0, n); root < n; root = tier1_sink_ir_next(w.pure, root + 1, n))
-        {
-            while (end < root)
-            {
-                start = end + 1;
-                end = tier1_sink_ir_next(w.barriers, end + 1, n);
-            }
-            tier1_sink_ir_expression(f, &w, root, start, end, scalar, stats);
-        }
-    }
-    if (ready && stats->trees != 0)
-    {
-        uint32_t output = 0;
-        for (uint32_t i = 0; i < n; i += 1)
-        {
-            if (w.roots[i] == BUSTER_IR_NONE)
-            {
-                w.order[output] = i;
-                output += 1;
-            }
-            for (uint32_t root = w.first[i]; root != BUSTER_IR_NONE; root = w.next[root])
-            {
-                for (uint32_t p = w.lows[root]; p <= root; p += 1)
+                const uint32_t root = f->extra[f->a[phi] + p * 2 + 1];
+                if (root < n && tier1_sink_ir_bit(w.pure, root) && !tier1_sink_ir_bit(w.moved, root))
                 {
-                    if (w.roots[p] == root)
-                    {
-                        w.order[output] = p;
-                        output += 1;
-                    }
+                    const uint32_t floor = root > BUSTER_TIER1_SINK_WINDOW ? root - BUSTER_TIER1_SINK_WINDOW : 0;
+                    const uint32_t previous = tier1_sink_ir_previous(w.barriers, root, floor);
+                    const uint32_t start = previous != BUSTER_IR_NONE ? previous + 1 : floor;
+                    const uint32_t limit = n - root - 1 < BUSTER_TIER1_SINK_WINDOW ? n : root + 1 + BUSTER_TIER1_SINK_WINDOW;
+                    const uint32_t to = tier1_sink_ir_next(w.barriers, root + 1, limit);
+                    tier1_sink_ir_candidate(f, &w, root, phi, start, to, scalar, stats);
                 }
             }
         }
-        ready = tier1_schedule_ir_permute(f, w.order, w.place, scratch);
     }
-    if (ready && order != 0 && stats->trees != 0)
+    // The new order of [low, high], from the lowest instruction that moves to the last anchor, every other instruction
+    // keeping its place: each one that stays, each anchor followed by its expressions, by their roots.
+    uint32_t low = n;
+    uint32_t high = 0;
+    for (uint32_t t = 0; t < stats->trees; t += 1)
     {
-        memcpy(order, w.order, (uint64_t)n * sizeof(uint32_t));
+        low = w.trees[t].nodes[0] < low ? w.trees[t].nodes[0] : low;
+        high = w.trees[t].anchor > high ? w.trees[t].anchor : high;
+    }
+    const uint32_t span = stats->trees != 0 ? high - low + 1 : 0;
+    uint32_t* first = ready && span != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)span + 1) : 0;
+    uint32_t* next = first != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)stats->trees + 1) : 0;
+    uint32_t* moves = next != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)span + 1) : 0;
+    uint32_t* place = moves != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)span + 1) : 0;
+    ready = ready && (span == 0 || place != 0);
+    if (ready && span != 0)
+    {
+        memset(first, 0xff, (uint64_t)span * sizeof(uint32_t));
+        for (uint32_t t = 0; t < stats->trees; t += 1)
+        {
+            uint32_t* link = &first[w.trees[t].anchor - low];
+            while (*link != BUSTER_IR_NONE && w.trees[*link].root < w.trees[t].root)
+            {
+                link = &next[*link];
+            }
+            next[t] = *link;
+            *link = t;
+        }
+        uint32_t output = 0;
+        for (uint32_t i = low; i <= high; i += 1)
+        {
+            if (!tier1_sink_ir_bit(w.moved, i))
+            {
+                moves[output] = i;
+                output += 1;
+            }
+            for (uint32_t t = first[i - low]; t != BUSTER_IR_NONE; t = next[t])
+            {
+                for (uint32_t k = 0; k < w.trees[t].count; k += 1)
+                {
+                    moves[output] = w.trees[t].nodes[k];
+                    output += 1;
+                }
+            }
+        }
+        ready = tier1_schedule_ir_permute(f, low, high + 1, moves, place, scratch);
+        for (uint32_t i = 0; ready && order != 0 && i < n; i += 1)
+        {
+            order[i] = i >= low && i <= high ? moves[i - low] : i;
+        }
     }
     arena_pop_to(scratch, mark);
     if (!ready)
