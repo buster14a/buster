@@ -987,8 +987,31 @@ functions"). Where it departs from the design above:
 - **#1116's size bound** is measured with `--tier1-no-inline`: it compares each
   function with clang -O0's same function, of which an expanded body has none.
 
-The sweep, on the 9700X (5 rounds; user cycles against `--tier1
---tier1-no-inline`; speedtest1 over eight placements, Lua over four orders):
+The gate, on the 9700X, by the PR's head merged with main (`583e2499`, against
+main `3482ab88`; the record is buster-performance's
+`tier1-unit-inlining-step2-2541-2026-11-14`; 6 rounds; user cycles as 100 ln(head / control), speedtest1
+over eight placements and Lua over four link orders, with each one's 95%
+interval):
+
+| Gate | Result |
+| --- | --- |
+| speedtest1 at least 12% fewer cycles | **met**: -14.61 (-15.06 to -14.16) against `--tier1-no-inline`, faster at 8 of 8; -8.42 against main |
+| Lua at least 7.5% fewer cycles | **met**: -8.81 (-10.79 to -6.82), faster at 4 of 4; -7.17 against main |
+| no more `.text` than the prototype's (+64.6%, +66.3%) | **met**: +59.8% and +47.0%; the target, the gain at half that growth, is not reached |
+| the compiler built by `--tier1` at most 60 M returns | **at the edge**: 60.8 M and 60.1 M by two builds of the head (59.8 M by `71e9ee75`), from 481.7 M without inlining and 139.4 M by main's |
+| and at least 8% fewer cycles | **met**: -10.9% against `--tier1-no-inline`'s build (7,534 M against 8,458 M; -2.2% against main's) |
+| a Csmith and YARPGen campaign of at least 1,000 programs | **met**: of 1,400 generated, 1,157 run by `--tier1`, `--tier1 --tier1-no-inline` and clang alike, none differing; the 243 others clang -O0's own failures (YARPGen's arrays past the small code model at its link, timeouts, output past the harness's limit) |
+
+The compile (`--tier1 -c sqlite3.c`, one lane): 3,474 M cycles against
+2,163 M without inlining (+60.6%) for `.text` 988,824 to 1,584,072 bytes
+(+60.2%): the compile's growth is the code's, as the design claimed. Holding
+takes 8.8% of it (3,808 M with `--tier1-no-hold`). Against main's 2,545 M,
++36.5%. Objects are the same bytes by one lane and eight, with and without
+holding, by both twins (72 of 72 pairs). Lua's `calls.lua` alone is slower than
+main's (+5.4%, with 1.2% fewer instructions, fewer branches and as many misses):
+an IPC loss of `luaV_execute`'s that its other four scripts' gains outweigh.
+
+The sweep before (5 rounds, against `--tier1-no-inline`):
 
 | Limit (cost, size) | speedtest1 | Lua | speedtest1 `.text` | Lua `.text` | `-c sqlite3.c` cycles |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -997,16 +1020,11 @@ The sweep, on the 9700X (5 rounds; user cycles against `--tier1
 | 192, 768 | -13.93 | -7.66 | +48.9% | +36.0% | +52.3% |
 | 256, 1,024 | -14.46 | -7.99 | +60.0% | +47.0% | +61.2% |
 
-Holding cut the compile at 256 from +68.8% to +55.2% of the no-inlining
-compile's cycles (+53.0% with every eligible body held), against +55.7% of
-`.text`: the compile's growth follows the code's, as the design claimed.
-Lua's `calls.lua` alone is slower than main's at every limit (+5.4% at 256,
-with 1.2% fewer instructions, fewer branches and as many misses), an IPC loss
-of `luaV_execute`'s that its other four scripts' gains outweigh.
-
-The compiler built by `--tier1` (scalar host) compiling `sqlite3.c` executes
-60.4 M returns (main's build 143.2 M, without inlining 483.4 M) in 11.3% fewer
-cycles than without inlining (3.7% fewer than main's).
+The calls left in the self-built compiler (`perf record -j any_call`) are
+larger hashing and interning functions with several callers
+(`intern_hash_bytes_scalar`, `refine_intern_identifier`,
+`intern_find_or_add_hashed`, `refine_gap_is_splices`) and the C library's
+(`memcmp`, `memcpy`): the limits, not the reach, leave them.
 
 ### Expected gains
 
