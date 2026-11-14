@@ -546,8 +546,9 @@ of a function that takes or returns a vector by value, which its frame emitter
 stores into and reloads from frame objects, are unchanged. The typed stream's
 lowering copies an aggregate parameter that a vector register holds whole by
 one vector load and store rather than eight `i64`s (`ir_typed_vector_whole`), in
-a function with vectors and at a target with AVX-512, so that its object is one
-field.
+a function with vectors and at the widths whose moves its target has (16 bytes
+at every target, 32 with AVX, 64 with AVX-512F: `ir_typed_vector_copies`,
+#2750), so that its object is one field.
 
 The passes from promotion to the optimizer are one function,
 `check_tier1_passes` (in `c_check_tier1.c`), which a body's own pipeline and a
