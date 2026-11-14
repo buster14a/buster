@@ -192,7 +192,8 @@ _Static_assert(sizeof(AbiVaList) == 24, "the psABI's va_list element is 24 bytes
 // How a classified type is passed (AbiTable.pass), from its classes and what it is:
 //   - LOW_INTEGER ... HIGH_SSE: the register class of each eightbyte passed in a register (none for a MEMORY or
 //     IGNORE type). A high eightbyte without a low one (the low one is padding) passes the high one alone.
-//   - VECTOR: SSE then SSEUP: one vector register holds the whole value (XMM, or a YMM or ZMM register when WIDE).
+//   - VECTOR: SSE then SSEUP: one vector register holds the ABI payload (XMM, or a YMM or ZMM register when WIDE).
+//     A 17--23-byte record carries its first 16 bytes, while its object and stack copies keep the full C size.
 //   - WIDE: a VECTOR of 32 or 64 bytes. LLVM passes it in a YMM or ZMM register only in a call that isn't variadic, and
 //     on the stack otherwise: named, after clang has counted a vector register for it; unnamed, MEMORY, uncounted.
 //     (clang classifies a WIDE union of a 16-byte member and a long array SSE, SSEUP as an unnamed argument too, counts
@@ -219,7 +220,7 @@ _Static_assert(sizeof(AbiVaList) == 24, "the psABI's va_list element is 24 bytes
 //     of more than 128 bits); a type holding a LARGER one that clang lays out otherwise than the C type, or whose LLVM
 //     size the module doesn't keep (abi_copy_bytes); one whose INTEGER high eightbyte clang reads as an i128 from
 //     offset 8, under an SSE or NO_CLASS low one (abi_finish); and an aggregate SSE, SSEUP of a size no vector register
-//     has, which clang passes as <size / 8 x double> (abi_finish_passing).
+//     has past 23 bytes, which clang passes as <size / 8 x double> (abi_finish_passing).
 //   - CLASSIFIED: the type's row and these bits are in the table.
 //   - VALUE (bits 16 to 18): an UNCOUNTED value's kind: a general register (GENERAL), two (PAIR), a vector register
 //     (VECTOR), x87's, always on the stack (X87), or two halves, each in a general register while one is left and
@@ -1981,7 +1982,10 @@ static AbiReturn abi_result(const AbiTable* abi, const TypeTable* table, uint32_
     {
         result.kind = BUSTER_ABI_RESULT_REGISTERS;
         result.registers[0] = BUSTER_ABI_REGISTER_VECTOR;
-        result.part_bytes = (uint8_t)size;
+        // GetByteVectorType truncates a 17--23-byte record to two doubles. Its object and byval stack copy still
+        // keep the C size; only the register payload is 16 bytes (#2113).
+        const bool short_record = abi_is_aggregate(table, index) && size > BUSTER_ABI_REGISTER_BYTES && size < BUSTER_ABI_REGISTER_BYTES + BUSTER_ABI_SLOT_BYTES;
+        result.part_bytes = (uint8_t)(short_record ? BUSTER_ABI_REGISTER_BYTES : size);
     }
     else
     {
@@ -2411,11 +2415,13 @@ static void abi_finish_passing(AbiTable* abi, const TypeTable* table, uint32_t i
         pass |= high == BUSTER_ABI_INTEGER || pair ? BUSTER_ABI_PASS_HIGH_INTEGER : 0;
         pass |= (high == BUSTER_ABI_SSE || high == BUSTER_ABI_X87UP) && !pair ? BUSTER_ABI_PASS_HIGH_SSE : 0;
         pass |= high == BUSTER_ABI_SSEUP ? BUSTER_ABI_PASS_VECTOR : 0;
-        pass |= high == BUSTER_ABI_SSEUP && size > BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_PASS_WIDE : 0;
+        const bool short_record = aggregate && size > BUSTER_ABI_REGISTER_BYTES && size < BUSTER_ABI_REGISTER_BYTES + BUSTER_ABI_SLOT_BYTES;
+        pass |= high == BUSTER_ABI_SSEUP && size > BUSTER_ABI_REGISTER_BYTES && !short_record ? BUSTER_ABI_PASS_WIDE : 0;
         // An aggregate SSE, SSEUP of a size no vector register has (a union of a 16-byte vector and a longer array,
         // packed or aligned below its size, of 17 to 63 bytes): clang's GetByteVectorType gives it <size / 8 x double>,
-        // which LLVM passes in the register of the next power of two, with only those doubles' bytes (refused).
-        pass |= high == BUSTER_ABI_SSEUP && aggregate && size != 16 && size != 32 && size != 64 ? BUSTER_ABI_PASS_UNSUPPORTED : 0;
+        // which LLVM passes in the register of the next power of two, with only those doubles' bytes. A 17--23-byte
+        // record takes an XMM register, even as an unnamed argument; larger irregular widths remain refused.
+        pass |= high == BUSTER_ABI_SSEUP && aggregate && size != 16 && size != 32 && size != 64 && !short_record ? BUSTER_ABI_PASS_UNSUPPORTED : 0;
         pass |= pair ? BUSTER_ABI_PASS_PAIR : 0;
         pass |= i128 && !pair && high == BUSTER_ABI_INTEGER ? BUSTER_ABI_PASS_UNSUPPORTED : 0;
         pass |= low == BUSTER_ABI_INTEGER && high == BUSTER_ABI_NO_CLASS ? abi_extension(table, index) : 0;

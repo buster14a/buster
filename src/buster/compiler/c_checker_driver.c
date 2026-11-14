@@ -5202,6 +5202,12 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                 phase == 2 && extra[index].completion != 0 ? extra[index].completion :
                                                 phase == 2 && extra[index].position != located ? extra[index].position :
                                                 node < input->graph.count && input->graph.source_positions != NULL ? input->graph.source_positions[node] : 0;
+                    // A false assertion's root is omitted from the rejected unit's warning walk (#2409). Its conversion
+                    // to bool still warns before the assertion fails, at the same expression boundary as the error.
+                    if (show_warnings && phase == 1 && stream->reports[index].message == CHECK_MESSAGE_STATIC_ASSERT && node < input->graph.count)
+                    {
+                        check_common_int_in_bool(parser, pp, input, stream, types, node, NULL, completion != 0 ? completion : located, scratch);
+                    }
                     // An x86 builtin's call whose hard immediate constraint failed: clang's message at the call's begin,
                     // published where the report's own token puts it (#1066).
                     char x86_text[BUSTER_CHECK_DIAGNOSTIC_X86_TEXT];
@@ -5745,7 +5751,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
                             // An __auto_type placeholder's (#1844) as clang prints the undeduced type.
                             const bool placeholder = kind == CHECK_INPUT_VECTOR_ELEMENT && check_input_auto_type_level(types, report->type);
-                            const String8 type = placeholder ? check_semantic_auto_type_spelling(types, report->type, scratch) :
+                            const String8 type = placeholder ? check_semantic_auto_type_spelling(parser, pp, input, types, &spell, report->type, BUSTER_CHECK_NONE, scratch) :
                                                  spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, report->type_spelling) :
                                                            (String8){ 0 };
                             const bool forward = report->note_kind == CHECK_INPUT_NOTE_FORWARD_DECLARATION && report->note_token < count && spelled;

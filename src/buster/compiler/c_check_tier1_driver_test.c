@@ -3228,7 +3228,10 @@ static void check_test_driver_tier1_asm(CheckTest* test, const char* clang, cons
             unlink(program);
         }
     }
-    for (uint32_t path = 0; written && path < 2; path += 1)
+    // A driver part may run this suite before any other decoder user (#2737).
+    const bool decoder_ready = x86_disassembler_initialize();
+    check_test_expect(test, decoder_ready, "asm bodies' object decoder initializes");
+    for (uint32_t path = 0; written && decoder_ready && path < 2; path += 1)
     {
         CheckTestTier1Build build;
         const bool compiled = check_test_tier1_build(executable, unit, "", object, true, path != 0, true, false, NULL, &build);

@@ -45,8 +45,8 @@
 //     each side checks every argument, result, hidden pointer, al and va_arg value against the bytes. GCC's worlds
 //     leave out what GCC lays out or passes otherwise (each named where it is left out, GCC's own bugs among them), and
 //     clang's a type in registers that holds an array of elements of no size, which crashes it now and then
-//     (abi_test_empty_arrays), an _Atomic vector of bools, whose atomic loads crash it, a record SSE, SSEUP of a size
-//     other than 16, 32 or 64 and one SSE, SSE that holds a __float128, which the module doesn't model yet, and a union
+//     (abi_test_empty_arrays), an _Atomic vector of bools, whose atomic loads crash it, a record SSE, SSEUP of an
+//     irregular size past 23 bytes and one SSE, SSE that holds a __float128, which the module doesn't model yet, and a union
 //     of a vector LLVM packs into fewer bits than its bytes, whose copies lose the other members' bits
 //     (abi_test_holds); an argument clang would pass as an i0 becomes a long, as does an unnamed one clang's va_arg
 //     reads elsewhere than its call puts it (abi_test_va_disagreement); bytes clang doesn't pass aren't checked
@@ -54,6 +54,8 @@
 //     hold (abi_test_c_size). Then the extension runs, with plain char signed and unsigned (abi_test_cross_extension):
 //     the types clang extends, passed and returned between clang's code and the records' and this compiler's, both
 //     ways, at values with bits set past the type's.
+//     The fixed short-SSE fixture also crosses clang with both compiler tiers and both paths at all three targets:
+//     17--23-byte records carry 16 bytes in registers and their full C size on the stack (abi_test_short_sse, #2113).
 // The exit status is 1 if the arguments are invalid or a check fails.
 // With --cross-check, bounded child processes also check capture ownership with closed standard descriptors and
 // descriptor exhaustion, before running the ordinary six configurations.
@@ -1708,11 +1710,17 @@ static void abi_test_build_records(AbiTestBuilder* builder)
     // vector register has where the target's vectors are as wide: clang passes it as <size / 8 x double> (GetByteVectorType),
     // which LLVM widens to the next power of two, with only those doubles' bytes: 17 to 23 bytes in an xmm register, 24
     // to 31 in a ymm one, 33 to 39 in a ymm one too and 40 to 63 in a zmm one (on the stack, aligned to their register's
-    // size, in a variadic call). The module refuses them, and what holds one as its only member.
+    // size, in a variadic call). The module takes 17--23 bytes in one XMM register, with the full C-sized byval slot,
+    // and refuses the larger irregular widths, including what holds one as its only member.
     const TypeId float4 = type_vector_size(table, BUSTER_TYPE_FLOAT, 16);
     const uint64_t odd_sizes[] = {
         17,
+        18,
+        19,
+        20,
+        21,
         22,
+        23,
         24,
         31,
         33,
@@ -1721,7 +1729,12 @@ static void abi_test_build_records(AbiTestBuilder* builder)
     };
     const char* odd_names[] = {
         "packed union {float x4, char[17]}",
+        "packed union {float x4, char[18]}",
+        "packed union {float x4, char[19]}",
+        "packed union {float x4, char[20]}",
+        "packed union {float x4, char[21]}",
         "packed union {float x4, char[22]}",
+        "packed union {float x4, char[23]}",
         "packed aligned(8) union {float x4, char[18]}",
         "packed union {float x4, char[31]}",
         "packed union {float x4, char[33]}",
@@ -1733,8 +1746,15 @@ static void abi_test_build_records(AbiTestBuilder* builder)
         const bool aligned = odd_sizes[i] == 24;
         m[0] = abi_test_member(builder, float4);
         m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, aligned ? 18 : odd_sizes[i]));
-        const TypeId odd = abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, true, aligned ? 3 : 0);
-        if (odd_sizes[i] <= builder->vector_bytes)
+        const TypeId odd = abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, true, aligned ? 4 : 0);
+        if (odd_sizes[i] < 24 && odd_sizes[i] <= builder->vector_bytes)
+        {
+            abi_test_in_registers(builder, odd_names[i], odd, BUSTER_ABI_TEST_VECTOR, BUSTER_ABI_PASS_VECTOR,
+                                  BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_UNSUPPORTED | BUSTER_ABI_PASS_SMALLER, BUSTER_ABI_TEST_XMM(0), BUSTER_ABI_TEST_NONE);
+            abi_test_slot(builder, 24);
+            abi_test_result_detail(builder, 0, 16, BUSTER_ABI_TEST_NONE);
+        }
+        else if (odd_sizes[i] <= builder->vector_bytes)
         {
             abi_test_vector_refused(builder, odd_names[i], odd, BUSTER_ABI_RESULT_REGISTERS, BUSTER_ABI_TEST_XMM(0), BUSTER_ABI_TEST_NONE);
         }
@@ -1748,14 +1768,31 @@ static void abi_test_build_records(AbiTestBuilder* builder)
             const TypeId holder = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0);
             if (builder->vector_bytes >= 32)
             {
-                abi_test_vector_refused(builder, "{packed union {float x4, char[22]}[1]}", holder, BUSTER_ABI_RESULT_REGISTERS, BUSTER_ABI_TEST_XMM(0),
-                                        BUSTER_ABI_TEST_NONE);
+                abi_test_in_registers(builder, "{packed union {float x4, char[22]}[1]}", holder, BUSTER_ABI_TEST_VECTOR, BUSTER_ABI_PASS_VECTOR,
+                                      BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_UNSUPPORTED | BUSTER_ABI_PASS_SMALLER, BUSTER_ABI_TEST_XMM(0), BUSTER_ABI_TEST_NONE);
+                abi_test_slot(builder, 24);
+                abi_test_result_detail(builder, 0, 16, BUSTER_ABI_TEST_NONE);
             }
             else
             {
                 abi_test_in_memory(builder, "{packed union {float x4, char[22]}[1]}", holder);
             }
         }
+    }
+    // Keep the old aligned(4), 20-byte shape too; alignment inputs store log2 + 1, so aligned(8) above is 4.
+    m[0] = abi_test_member(builder, float4);
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 18));
+    const TypeId aligned20 = abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, true, 3);
+    if (builder->vector_bytes >= 32)
+    {
+        abi_test_in_registers(builder, "packed aligned(4) union {float x4, char[18]}", aligned20, BUSTER_ABI_TEST_VECTOR, BUSTER_ABI_PASS_VECTOR,
+                              BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_UNSUPPORTED | BUSTER_ABI_PASS_SMALLER, BUSTER_ABI_TEST_XMM(0), BUSTER_ABI_TEST_NONE);
+        abi_test_slot(builder, 24);
+        abi_test_result_detail(builder, 0, 16, BUSTER_ABI_TEST_NONE);
+    }
+    else
+    {
+        abi_test_in_memory(builder, "packed aligned(4) union {float x4, char[18]}", aligned20);
     }
     // Nested at a nonzero offset: {int; struct {short, short}} is one INTEGER eightbyte; {int; struct {float, float}}
     // puts the inner struct's halves in different eightbytes.
@@ -5737,7 +5774,7 @@ static bool abi_test_unnamed_ok(const AbiTable* abi, const TypeTable* table, Typ
                            code != BUSTER_TYPE_CODE_FLOAT128);
     const bool scalar_memory = kind == BUSTER_TYPE_KIND_NULLPTR || kind == BUSTER_TYPE_KIND_ATOMIC;
     const bool wide_without_vector = abi_test_classify(table, abi->vector_bytes, false, type, 0, frames) == BUSTER_ABI_TEST_VECTOR &&
-                                     table->types.size[index] > BUSTER_ABI_REGISTER_BYTES;
+                                     table->types.size[index] >= BUSTER_ABI_REGISTER_BYTES + BUSTER_ABI_SLOT_BYTES;
     // clang's call passes a value of no size in an 8-byte slot, and its va_arg skips none; and a LOW_GENERAL one's low
     // eightbyte in a general register, which its va_arg reads from the save area's vector part.
     const bool empty = table->types.size[index] == 0;
@@ -5858,7 +5895,8 @@ static uint64_t abi_test_round(uint64_t value, uint64_t alignment)
 // __attribute__((vector_size(16))) z[0]; _Complex float c; float f; } s; long __attribute__((vector_size(16))) w; }` is
 // stored as its struct, which the array aligns to 16 in LLVM, and passes as (<2 x float>, float): none of the vector's
 // bytes 12 to 15 (GCC passes the eightbyte whole: `clang` says whose). Clears those bytes' mask. Our side passes and
-// stores every byte of its registers' eightbytes, so the mask never hides a register the module gives wrongly.
+// stores every byte of its registers' eightbytes, so the mask never hides a register the module gives wrongly. A
+// 17--23-byte SSE/SSEUP record passes only <2 x double>, so its register mask stops at 16; stack masks stay complete.
 static void abi_test_mask_unpassed(const AbiTable* abi, const TypeTable* table, TypeId type, uint8_t* mask, bool clang)
 {
     const uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
@@ -5875,6 +5913,10 @@ static void abi_test_mask_unpassed(const AbiTable* abi, const TypeTable* table, 
     if (high == BUSTER_ABI_NO_CLASS && size > 8)
     {
         memset(mask + 8, 0, high_end - 8);
+    }
+    if (clang && high == BUSTER_ABI_SSEUP && abi_is_aggregate(table, index) && size > 16 && size < 24)
+    {
+        memset(mask + 16, 0, size - 16);
     }
     if (clang && (low == BUSTER_ABI_SSE || high == BUSTER_ABI_SSE) && size <= 16)
     {
@@ -6667,11 +6709,12 @@ static uint32_t abi_test_parts(const AbiTable* abi, const TypeTable* table, Type
     }
     else if ((pass & BUSTER_ABI_PASS_VECTOR) != 0 || ((pass & BUSTER_ABI_PASS_UNCOUNTED) != 0 && value == BUSTER_ABI_VALUE_VECTOR))
     {
+        const bool short_record = abi_is_aggregate(table, index) && size > 16 && size < 24;
         parts[0] = (AbiTestPart){
             .reg = location.registers[0],
             .extension = 0,
             .offset = 0,
-            .bytes = size <= 8 ? 8 : (uint32_t)size,
+            .bytes = size <= 8 ? 8 : short_record ? 16 : (uint32_t)size,
         };
         count = 1;
     }
@@ -7081,6 +7124,169 @@ static int abi_test_compile(char* const* arguments, const char* object, const ch
     return result;
 }
 
+// #2113's original fixture crosses in both directions: the other compiler owns either main or its callees. The
+// baseline target uses full C-sized MEMORY copies; v3 and v4 use 16-byte register payloads for 17--23-byte records.
+// Both tiers and the vector/scalar paths must pass, with strict Tier 1 so a refusal can't silently fall back.
+static bool abi_test_short_sse(const char* clang, const char* buster, bool keep)
+{
+    AbiTestTally tally = { 0 };
+    Arena arena = arena_reserve(1u << 20);
+    char directory[BUSTER_ABI_TEST_PATH_BYTES];
+    const int length = snprintf(directory, sizeof(directory), "%s/buster-abi-short-sse-XXXXXX", oracle_temporary_directory());
+    const bool ready = arena.base != 0 && length > 0 && (uint64_t)length < sizeof(directory) && mkdtemp(directory) != 0;
+    if (abi_test_expect(&tally, ready, "short SSE cross-check", "can't make the test directory"))
+    {
+        const char* architectures[] = {
+            "x86-64",
+            "x86-64-v3",
+            "x86-64-v4",
+        };
+        const char* source = "tests/calling-convention/short-sse.c";
+        const X86Target native = x86_target_native();
+        char output[BUSTER_ABI_TEST_PATH_BYTES + 32];
+        char errors[BUSTER_ABI_TEST_PATH_BYTES + 32];
+        char detail[1024];
+        snprintf(output, sizeof(output), "%s/output", directory);
+        snprintf(errors, sizeof(errors), "%s/errors", directory);
+        for (uint32_t target = 0; target < BUSTER_ARRAY_LENGTH(architectures); target += 1)
+        {
+            char march[32];
+            snprintf(march, sizeof(march), "-march=%s", architectures[target]);
+            char* registers = target == 0 ? "-DBUSTER_SHORT_SSE_REGISTERS=0" : "-DBUSTER_SHORT_SSE_REGISTERS=1";
+            X86Target required = { 0 };
+            const bool parsed = x86_target_parse(architectures[target], strlen(architectures[target]), &required);
+            const bool supported = parsed && (native.features & required.features) == required.features;
+            bool compiled = abi_test_expect(&tally, parsed, "short SSE cross-check", "unknown target");
+            char c_objects[2][BUSTER_ABI_TEST_PATH_BYTES + 32];
+            for (uint32_t side = 0; side < 2; side += 1)
+            {
+                snprintf(c_objects[side], sizeof(c_objects[side]), "%s/clang_%u_%u.o", directory, target, side);
+                char* compile[] = {
+                    (char*)clang,
+                    "-std=gnu23",
+                    "-O1",
+                    march,
+                    registers,
+                    side == 0 ? "-DBUSTER_SHORT_SSE_CALLEE=0" : "-DBUSTER_SHORT_SSE_CALLEE=1",
+                    "-c",
+                    (char*)source,
+                    "-o",
+                    c_objects[side],
+                    0,
+                };
+                const int status = abi_test_compile(compile, c_objects[side], output, errors);
+                const String8 complaints = type_test_read_file(&arena, errors);
+                snprintf(detail, sizeof(detail), "%s, clang %s: compile status %d: %.700s", architectures[target], side == 0 ? "caller" : "callee", status,
+                         complaints.length != 0 ? complaints.pointer : "");
+                compiled = abi_test_expect(&tally, status == 0, "short SSE cross-check", detail) && compiled;
+            }
+            // Check the fixture with clang on both sides before crossing its translation units with ours.
+            char reference[BUSTER_ABI_TEST_PATH_BYTES + 32];
+            snprintf(reference, sizeof(reference), "%s/reference_%u", directory, target);
+            if (compiled)
+            {
+                char* link[] = {
+                    (char*)clang,
+                    c_objects[0],
+                    c_objects[1],
+                    "-o",
+                    reference,
+                    0,
+                };
+                char* execute[] = {
+                    reference,
+                    0,
+                };
+                const int linked = type_test_run(link, output, errors);
+                const int ran = linked == 0 && supported ? type_test_run(execute, output, errors) : linked;
+                const String8 complaints = type_test_read_file(&arena, errors);
+                snprintf(detail, sizeof(detail), "%s, clang control: link status %d, run status %d: %.700s", architectures[target], linked, ran,
+                         complaints.length != 0 ? complaints.pointer : "");
+                compiled = abi_test_expect(&tally, ran == 0, "short SSE cross-check", detail) && compiled;
+            }
+            for (uint32_t variant = 0; compiled && variant < 8; variant += 1)
+            {
+                const uint32_t side = variant & 1;
+                const bool scalar = (variant & 2) != 0;
+                const bool tier1 = (variant & 4) != 0;
+                char object[BUSTER_ABI_TEST_PATH_BYTES + 32];
+                char program[BUSTER_ABI_TEST_PATH_BYTES + 32];
+                snprintf(object, sizeof(object), "%s/buster_%u_%u.o", directory, target, variant);
+                snprintf(program, sizeof(program), "%s/cross_%u_%u", directory, target, variant);
+                char* build[20];
+                uint32_t count = 0;
+                build[count++] = (char*)buster;
+                build[count++] = "--verify";
+                if (scalar)
+                {
+                    build[count++] = "--scalar";
+                }
+                if (tier1)
+                {
+                    build[count++] = "--tier1";
+                    build[count++] = "--tier1-strict";
+                }
+                build[count++] = "-std=gnu23";
+                build[count++] = march;
+                build[count++] = registers;
+                build[count++] = side == 0 ? "-DBUSTER_SHORT_SSE_CALLEE=0" : "-DBUSTER_SHORT_SSE_CALLEE=1";
+                build[count++] = "-c";
+                build[count++] = (char*)source;
+                build[count++] = "-o";
+                build[count++] = object;
+                build[count] = 0;
+                const int built = type_test_run(build, output, errors);
+                char* link[] = {
+                    (char*)clang,
+                    object,
+                    c_objects[1 - side],
+                    "-o",
+                    program,
+                    0,
+                };
+                char* execute[] = {
+                    program,
+                    0,
+                };
+                const int linked = built == 0 ? type_test_run(link, output, errors) : built;
+                const int ran = linked == 0 && supported ? type_test_run(execute, output, errors) : linked;
+                const String8 complaints = type_test_read_file(&arena, errors);
+                snprintf(detail, sizeof(detail), "%s, Tier %u, %s, buster %s: build %d, link %d, run %d: %.700s", architectures[target], tier1 ? 1 : 0,
+                         scalar ? "scalar" : "vector", side == 0 ? "caller" : "callee", built, linked, ran, complaints.length != 0 ? complaints.pointer : "");
+                abi_test_expect(&tally, ran == 0, "short SSE cross-check", detail);
+                if (!keep && tally.failures == 0)
+                {
+                    unlink(object);
+                    unlink(program);
+                }
+            }
+            if (parsed && !supported)
+            {
+                printf("short SSE cross-check              %s: compiled and linked; native execution skipped\n", architectures[target]);
+            }
+            if (!keep && tally.failures == 0)
+            {
+                unlink(c_objects[0]);
+                unlink(c_objects[1]);
+                unlink(reference);
+            }
+        }
+        if (keep || tally.failures != 0)
+        {
+            printf("the short SSE files are in %s\n", directory);
+        }
+        else
+        {
+            unlink(output);
+            unlink(errors);
+            rmdir(directory);
+        }
+    }
+    arena_release(&arena);
+    abi_test_report("short SSE cross-check", tally);
+    return tally.failures == 0;
+}
+
 // Run `index` (clang's at 16-, 32- and 64-byte vectors, then GCC's, then a compiled world's against clang and against
 // GCC, at 16 bytes, then at 64, then the extension runs with signed and with unsigned char), not started.
 static AbiTestCrossRun abi_test_cross_run(uint32_t index)
@@ -7186,7 +7392,8 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 const TypeId type = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
                 const bool spelled = world.types.spellings[index].spellable && world.types.spellings[index].number != UINT32_MAX;
                 const bool small = table->types.size[abi_resolved_index(table, type)] <= 256;
-                const bool wide_aggregate = (abi.pass[index] & (BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_AGGREGATE)) == (BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_AGGREGATE);
+                const bool wide_aggregate = (abi.pass[index] & (BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_AGGREGATE)) == (BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_AGGREGATE) &&
+                                            table->types.size[abi_resolved_index(table, type)] > 16;
                 // GCC passes a LOW_GENERAL type's low eightbyte in a vector register, as the psABI says.
                 const bool low_general = (abi.pass[index] & BUSTER_ABI_PASS_LOW_GENERAL) != 0;
                 const bool gcc_differs = gcc && (abi_test_gcc_enum_differs(&world, type) || (wide_aggregate && !abi_test_single_vector(table, type)) || low_general);
@@ -8298,6 +8505,7 @@ static int run_calling_convention_tests(int argc, char** argv)
         }
         // The oracle cache, set up before the cross-check's runs fork, so that their counts reach its report.
         OracleCache* oracle = oracle_cache();
+        passed = (!cross_check || abi_test_short_sse(clang, buster, keep)) && passed;
         passed = (!cross_check || abi_test_cross_check(seed, (uint32_t)signatures, clang, gcc, buster, keep, gcc_ready)) && passed;
         oracle_cache_report(oracle, "test-calling-convention");
         result = passed ? 0 : 1;
