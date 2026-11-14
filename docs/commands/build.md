@@ -748,7 +748,18 @@ part*.o --join--> native.o --link--> CONFIG/compiler.link --bake--> CONFIG/compi
 4. `cmake/BusterCodegenMerge.cmake` (`Combining UNIT's parts`) joins them in
    order with a relocatable link and makes local again everything the unit
    didn't export, before the ordinary final link. It fails when any of the
-   unit's local names (the split's `locals.txt`) is still undefined.
+   unit's local names (the split's `locals.txt`) is still undefined. The link
+   discards what no live code refers to (`codegen-tools/unreferenced`,
+   `tools/codegen/unreferenced.c`): a local function another part names keeps
+   its alias, and so its body in its own part, even where every part inlined
+   it or folded its calls away, which the whole unit's optimizer drops. The
+   tool follows the parts' relocations from every allocated section but the
+   local functions' and the data the code generator named for one object
+   (`.rodata.NAME`, a function's jump tables), and the link discards the
+   sections it doesn't reach, with their unwind entries and their debug
+   information's addresses (0, as `--gc-sections` leaves): 170 sections,
+   115 KB, in the checker's unit (`tier1_select_cover_munch`, 65 KB, whose
+   one call folds away after inlining).
 
 Each unit's parts start once its own split is done: with CMake 3.27 and later
 these commands take `DEPENDS_EXPLICIT_ONLY`, without which CMake makes a
@@ -829,14 +840,21 @@ below). Its options (`BUSTER_RELEASE_SPLIT_OPTIONS`) add:
   unit doesn't (`arena_reserve_small` into `scratch_begin` made that too big to
   inline into the assembler's layout and emission).
 - **Copies in two parts or more only where they pay** (`--copy-limit 40`):
-  a function the whole module calls once, or one of up to 40 instructions as
-  SROA leaves it; a larger one goes `available_externally`, through its
-  alias. Each part's inliner leaves its own copy outlined where it doesn't
-  inline it: the checker's unit held `arena_commit` 46 times and
-  `arena_reserve_policy` 33, 1.2 MB more code than the whole unit, and its
-  sources ran 15% to 27% more instruction cache misses than the whole
-  build's. With the limit the duplicates are 0.31 MB, and the whole unit's
-  inlining loses 12 pairs.
+  a function the whole module calls once, an `always_inline` one, or one of
+  up to 40 instructions as SROA leaves it with the `always_inline` bodies it
+  calls; a larger one goes `available_externally`, through its alias. Each
+  part's inliner leaves its own copy outlined where it doesn't inline it: the
+  checker's unit held `arena_commit` 46 times and `arena_reserve_policy` 33,
+  1.2 MB more code than the whole unit, and its sources ran 15% to 27% more
+  instruction cache misses than the whole build's. An `always_inline`
+  function's copies inline at every call and go: limited, they kept the
+  owner's body, through its alias, dead (99 bodies, 342 KB of the checker's
+  unit: `tier1_select_candidates` 57 KB, `tier1_allocate_body` 30 KB).
+  Weighed without the `always_inline` body it calls, `tier1_allocate_impl`
+  measured 7 and stayed outlined, 22 KB, in three parts. The checker's
+  unit, 11.35 MB of code whole, was 12.50 MB in parts without the limit,
+  12.09 MB with it, and is 11.49 MB with these and the join's discards
+  (above).
 - **A benchmark's own file reads the bodies it calls**, whatever their size
   (`--benchmark-bodies`): a benchmark measures its kernel inlined into its
   loop, as the whole unit compiles it.

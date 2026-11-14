@@ -839,6 +839,19 @@ instructions by function:
   had let the parts promote them too, but the copies stayed outlined, and the
   checker's and the backend's sources ran up to 12% more instruction cache
   misses.
+- **The parts kept code the whole unit drops.** With copies in two parts or
+  more only of a function of up to 40 instructions (`--copy-limit 40`), the
+  checker's unit still had 0.74 MB more code than the whole unit's 11.35 MB,
+  and none of it ran: the `always_inline` bodies the limit no longer copied
+  (99, 342 KB) kept their owner's copy, which their alias names, after every
+  part inlined them; `tier1_allocate_impl`, a call to the 30 KB
+  `always_inline` `tier1_allocate_body`, measured 7 and was copied, outlined,
+  into three parts; and a local function whose calls every part inlined or
+  folded away stayed for its alias (`tier1_select_cover_munch`, 65 KB). So
+  an `always_inline` function is copied whatever its size, the limit weighs
+  a function with the `always_inline` bodies it calls, and the join discards
+  the sections no live code refers to (`tools/codegen/unreferenced.c`: 170
+  sections, 115 KB): 11.49 MB.
 
 TODO-MEASURE
 

@@ -3569,6 +3569,7 @@ static void check_codegen_system_libraries(void)
 // Exercise the real CMake split/merge helpers on two independent translation units with colliding private names.
 // Copies keep the source edits, malformed IR and export-manifest failures inside the disposable fixture tree.
 static void check_split_first(void);
+static void check_join_unreferenced(void);
 
 static void check_parallel_codegen(void)
 {
@@ -3818,6 +3819,7 @@ static void check_parallel_codegen(void)
     }
     free(log.data);
     check_split_first();
+    check_join_unreferenced();
     if (chdir(root) != 0)
     {
         fail("can't return to %s", root);
@@ -3928,6 +3930,90 @@ static void check_split_first(void)
         fail("the split's start list didn't put first_c and first_a first in .text.fixture_first, the rest in order: %s", order);
     }
     pass("the split puts a start list's functions of a named section first in it, in the list's order, and refuses a stale list");
+}
+
+// The join's unreferenced sections (tools/codegen/unreferenced.c, #2559), run in the parallel-codegen fixture's
+// directory with the tool it built, on two parts as presplit leaves them: an aliased function (NAME.buster_split) that
+// no part calls goes, with the static function only it calls and the jump table it alone reads; one another part calls
+// stays, as do the parts' exports and what they call; and an aliased function that only dead code calls goes too.
+static void check_join_unreferenced(void)
+{
+    write_file("unreferenced_a.c",
+               "__attribute__((noinline)) static int lone(int x) { return x * 5; }\n"
+               "__attribute__((noinline)) static int kept(int x) { return x + 2; }\n"
+               "__attribute__((visibility(\"hidden\"))) int dead(int x) __asm__(\"dead.buster_split\");\n"
+               "__attribute__((visibility(\"hidden\"))) int live(int x) __asm__(\"live.buster_split\");\n"
+               "int dead(int x)\n"
+               "{\n"
+               "    switch (x)\n"
+               "    {\n"
+               "    case 0: return lone(x);\n"
+               "    case 1: return lone(x + 3) ^ 9;\n"
+               "    case 2: return x * x + 7;\n"
+               "    case 3: return lone(x) - 11;\n"
+               "    case 4: return x << 3;\n"
+               "    case 5: return lone(x * 7);\n"
+               "    case 6: return 99 - x;\n"
+               "    default: return 0;\n"
+               "    }\n"
+               "}\n"
+               "int unreferenced_entry(int x) { return kept(x) + live(x); }\n",
+               0644);
+    write_file("unreferenced_b.c",
+               "__attribute__((noinline)) static int orphan(int x) { return x - 4; }\n"
+               "__attribute__((visibility(\"hidden\"))) int dead_too(int x) __asm__(\"dead_too.buster_split\");\n"
+               "__attribute__((visibility(\"hidden\"))) int chained(int x) __asm__(\"chained.buster_split\");\n"
+               "__attribute__((visibility(\"hidden\"))) int live(int x) __asm__(\"live.buster_split\");\n"
+               "__attribute__((noinline)) int chained(int x) { return x * 11; }\n"
+               "int dead_too(int x) { return orphan(x) + chained(x); }\n"
+               "int live(int x) { return x ^ 3; }\n",
+               0644);
+    // The fixture's units split after the optimizer, whose join doesn't run the tool: its target builds it.
+    char* tools[] = { "cmake", "--build", "out", "--config", "Release", "--target", "buster_codegen_splitter", 0 };
+    char* compile_a[] = { "clang", "-O2", "-ffunction-sections", "-c", "unreferenced_a.c", "-o", "unreferenced_a.o", 0 };
+    char* compile_b[] = { "clang", "-O2", "-ffunction-sections", "-c", "unreferenced_b.c", "-o", "unreferenced_b.o", 0 };
+    char* find[] = { "out/codegen-tools/unreferenced", "unreferenced.lines", "unreferenced_a.o", "unreferenced_b.o", 0 };
+    char* sections[] = { "readelf", "-SW", "unreferenced_a.o", 0 };
+    Text log = capture(tools);
+    free(log.data);
+    log = capture(compile_a);
+    free(log.data);
+    log = capture(compile_b);
+    free(log.data);
+    log = capture(find);
+    free(log.data);
+    Text lines = read_file("unreferenced.lines");
+    const char* const gone[] = {
+        "\"unreferenced_a.o\"(.text.dead.buster_split)",
+        "\"unreferenced_a.o\"(.text.lone)",
+        "\"unreferenced_b.o\"(.text.dead_too.buster_split)",
+        "\"unreferenced_b.o\"(.text.orphan)",
+        "\"unreferenced_b.o\"(.text.chained.buster_split)",
+    };
+    const char* const kept[] = { "(.text.kept)", "(.text.live.buster_split)", "(.text.unreferenced_entry)" };
+    for (uint32_t i = 0; i < sizeof(gone) / sizeof(gone[0]); i += 1)
+    {
+        if (strstr(lines.data, gone[i]) == 0)
+        {
+            fail("the join's unreferenced sections lack %s: %s", gone[i], lines.data);
+        }
+    }
+    for (uint32_t i = 0; i < sizeof(kept) / sizeof(kept[0]); i += 1)
+    {
+        if (strstr(lines.data, kept[i]) != 0)
+        {
+            fail("the join's unreferenced sections name the live %s: %s", kept[i], lines.data);
+        }
+    }
+    // The dead function's jump table, where the code generator gave it one.
+    Text table = capture(sections);
+    if (strstr(table.data, " .rodata.dead.buster_split ") != 0 && strstr(lines.data, "\"unreferenced_a.o\"(.rodata.dead.buster_split)") == 0)
+    {
+        fail("the join's unreferenced sections keep the dead function's jump table: %s", lines.data);
+    }
+    free(table.data);
+    free(lines.data);
+    pass("the join discards the parts' aliased functions no live code calls, with what only they reach, and keeps the rest");
 }
 
 // The parts of a sanitizer build's units (#2639), on the fixture's two units: AddressSanitizer's joined objects keep

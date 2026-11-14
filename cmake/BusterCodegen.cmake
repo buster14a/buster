@@ -182,18 +182,25 @@ endfunction()
 
 # The splitters, built once for every configuration with the LLVM they read, at configure-time flags llvm-config gives:
 # split (a sanitizer build's Release, after the optimizer) and presplit (the units in parts, before it), which share
-# split_bitcode.cpp; and comdat, which the join runs and which reads ELF alone.
+# split_bitcode.cpp; and comdat and unreferenced, which the join runs and which read ELF alone.
 function(buster_codegen_splitter)
     set(directory "${CMAKE_BINARY_DIR}/codegen-tools")
     set(splitter "${directory}/split")
     set(presplitter "${directory}/presplit")
     set(comdat "${directory}/comdat")
+    set(unreferenced "${directory}/unreferenced")
     get_filename_component(tools "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../tools/codegen" ABSOLUTE)
     add_custom_command(OUTPUT "${comdat}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${directory}"
         COMMAND "${CMAKE_C_COMPILER}" -O2 -Wall -Wextra -Werror "${tools}/comdat.c" -o "${comdat}"
         DEPENDS "${tools}/comdat.c"
         COMMENT "Building the joins' comdat restorer"
+        VERBATIM)
+    add_custom_command(OUTPUT "${unreferenced}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${directory}"
+        COMMAND "${CMAKE_C_COMPILER}" -O2 -Wall -Wextra -Werror "${tools}/unreferenced.c" -o "${unreferenced}"
+        DEPENDS "${tools}/unreferenced.c"
+        COMMENT "Building the joins' unreferenced-section finder"
         VERBATIM)
     set(link "${BUSTER_CODEGEN_LLVM_ldflags}" "${BUSTER_CODEGEN_LLVM_libs}" "${BUSTER_CODEGEN_LLVM_system_libs}")
     add_custom_command(OUTPUT "${directory}/split_bitcode.o"
@@ -214,10 +221,11 @@ function(buster_codegen_splitter)
             COMMAND_EXPAND_LISTS
             VERBATIM)
     endforeach()
-    add_custom_target(buster_codegen_splitter DEPENDS "${splitter}" "${presplitter}" "${comdat}")
+    add_custom_target(buster_codegen_splitter DEPENDS "${splitter}" "${presplitter}" "${comdat}" "${unreferenced}")
     set(BUSTER_CODEGEN_SPLIT "${splitter}" PARENT_SCOPE)
     set(BUSTER_CODEGEN_PRESPLIT "${presplitter}" PARENT_SCOPE)
     set(BUSTER_CODEGEN_COMDAT "${comdat}" PARENT_SCOPE)
+    set(BUSTER_CODEGEN_UNREFERENCED "${unreferenced}" PARENT_SCOPE)
 endfunction()
 
 # Whether unit `name` is split after the optimizer (split.c), into `output`: the two longest units of a sanitizer build's
@@ -438,14 +446,17 @@ function(buster_parts_unit name)
             VERBATIM)
         list(APPEND objects "${object}")
     endforeach()
+    # The join drops what no part's live code refers to (unreferenced.c): a local function presplit's alias kept that
+    # every part inlined or folded away, as the whole unit's optimizer drops it.
     set(native "${directory}/native.o")
     add_custom_command(OUTPUT "${native}"
         COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${native}" "-DEXPORTS=${exports}" "-DLOCALS=${locals}" "-DOBJECTS=${objects}"
             "-DLLD=${BUSTER_CODEGEN_LLD}" "-DOBJCOPY=${BUSTER_CODEGEN_OBJCOPY}" "-DNM=${BUSTER_CODEGEN_NM}"
             "-DREADELF=${BUSTER_CODEGEN_READELF}" "-DCOMDAT=${BUSTER_CODEGEN_COMDAT}" "-DMERGES=${merges}"
-            "-DSECTIONS=${sections}" -P "${scripts}/BusterCodegenMerge.cmake"
+            "-DSECTIONS=${sections}" "-DUNREFERENCED=${BUSTER_CODEGEN_UNREFERENCED}" -P "${scripts}/BusterCodegenMerge.cmake"
         DEPENDS ${objects} "${exports}" "${locals}" "${sections}" "${BUSTER_CODEGEN_LLD}" "${BUSTER_CODEGEN_OBJCOPY}"
-            "${BUSTER_CODEGEN_NM}" "${BUSTER_CODEGEN_READELF}" "${BUSTER_CODEGEN_COMDAT}" "${scripts}/BusterCodegenMerge.cmake"
+            "${BUSTER_CODEGEN_NM}" "${BUSTER_CODEGEN_READELF}" "${BUSTER_CODEGEN_COMDAT}" "${BUSTER_CODEGEN_UNREFERENCED}"
+            "${scripts}/BusterCodegenMerge.cmake"
         COMMENT "Combining ${name}'s parts"
         ${explicit}
         VERBATIM)
