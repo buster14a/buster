@@ -1202,16 +1202,18 @@ static void x86_zen5_x87_unit(const X86CostShape* shape, X86CostExperiment exper
     }
 }
 
-// Unit `i` of a gather: kxnorw sets the unit's mask (the gather clears it), then the gather of 16 dwords at
-// [rsi + index * 4] into the unit's destination. The chain runs through the index: the next unit's index is this unit's
-// result, whose elements (the data's 3s) stay valid offsets.
+// Unit `i` of a gather: kxnorw sets the unit's mask (the gather clears it), then the gather of its elements at
+// [rsi + index * element] into the unit's destination (the element's bytes the scale, so that each reads a whole slot).
+// The chain runs through the index: the next unit's index is this unit's result, whose elements (the data's 3s, or 0s,
+// x86_zen5_fill) stay valid offsets.
 static void x86_zen5_gather_unit(const X86CostShape* shape, X86CostExperiment experiment, uint32_t i, X86CostBuilder* builder)
 {
     const bool chain = experiment == X86_COST_CHAIN_INDEX;
     const uint32_t ring = x86_zen5_ring(experiment == X86_COST_INDEPENDENT ? BUSTER_X86_COST_POOL : BUSTER_X86_COST_POOL - 1);
     const uint8_t mask = (uint8_t)(1 + i % BUSTER_X86_COST_OPMASKS);
+    const uint32_t scale = shape->effects->width == 8 ? 3 : 2;
     x86_zen5_helper(builder, (X86Instruction){ .form = X86_FORM_KXNORW_K_K_K, .reg = mask, .vvvv = mask, .rm = mask });
-    X86Instruction record = { .form = (uint16_t)shape->form, .rm = BUSTER_X86_COST_DATA, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .decorations = mask };
+    X86Instruction record = { .form = (uint16_t)shape->form, .rm = BUSTER_X86_COST_DATA, .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(scale), .decorations = mask };
     record.reg = (uint8_t)(chain ? (i + 1) % 12 : i % ring);
     record.index = (uint8_t)(chain ? i % 12 : BUSTER_X86_COST_VECTOR_RM);
     x86_zen5_push(builder, record);
@@ -1576,11 +1578,26 @@ static void x86_zen5_fill(const X86CostShape* shape)
         initial = UINT64_C(0x3ff0000000000000);
         size = 8;
     }
+    // A gather's (#1840) index of quadwords (vpgatherqd and vpgatherqq: its VSIB register's bytes over its destination's
+    // lanes) starts at quadwords of 3; one of doublewords into quadwords' results reads 0s, so that the chain's next index,
+    // its result, stays a valid offset whatever the lanes' sizes.
+    const X86FormDescription* description = shape->description;
+    const uint32_t index_class = description->rm & BUSTER_X86_OPERAND_CLASS;
+    const uint32_t data_class = description->reg & BUSTER_X86_OPERAND_CLASS;
+    const uint32_t index_bytes = index_class == BUSTER_X86_CLASS_ZMM ? 64 : index_class == BUSTER_X86_CLASS_YMM ? 32 : 16;
+    const uint32_t data_bytes = data_class == BUSTER_X86_CLASS_ZMM ? 64 : data_class == BUSTER_X86_CLASS_YMM ? 32 : 16;
+    const bool quadword_index = shape->special == X86_COST_GATHER && index_bytes * width == data_bytes * 8;
+    const bool narrow_data = quadword_index && width == 4;
+    size = quadword_index ? 8 : size;
     const uint64_t source = shape->additive ? 0 : initial;
     for (uint32_t offset = 0; offset < BUSTER_X86_COST_DATA_CONSTANTS; offset += 8)
     {
         // The slots: the constant source at the operation's width (an integer's 3 at its width too).
-        if (shape->fill == X86_COST_FILL_INTEGER)
+        if (narrow_data)
+        {
+            x86_zen5_store(data, offset, 0, 8);
+        }
+        else if (shape->fill == X86_COST_FILL_INTEGER)
         {
             for (uint32_t part = 0; part < 8; part += width)
             {

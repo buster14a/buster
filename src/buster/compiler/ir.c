@@ -195,6 +195,18 @@ typedef enum IrOp
     // masked load's and its alignment_log2 a store's. It writes the vector's lane i at the address's lane i where c's bit
     // i is set, and no byte of a lane whose bit is clear (vmovdqu8 to vmovdqu64 [p]{k}, zmm). A store's effect.
     IR_MASKED_STORE,
+    // A compressing store (#1840): `a` the address, `b` the stored vector and `c` the mask, its flags the lanes and its
+    // alignment_log2 a store's, as a masked store's. It writes the lanes whose bits are set one after another from the
+    // address, in the lanes' order, and no other byte (vpcompressb to vpcompressq [p]{k}, zmm): the mask's population
+    // count of lanes. A store's effect, of the vector's bytes at the address at most.
+    IR_COMPRESS_STORE,
+    // A gather (#1840): `a` the base address, `b` the index vector and `c` the mask of the result's lanes, its flags the
+    // lanes (an IrSimdLane of integers, as a masked load's) and its alignment_log2 the scale's log2 (0 to 3). Its lane i is
+    // the lane's bytes at a + sext(b's element i) * scale where c's bit i is set, and 0 where it isn't; the index's
+    // elements are its bits over the result's lanes, dwords or qwords. A lane whose bit is clear is never read, so it
+    // can't fault, as a masked load's (vpgatherdd to vpgatherqq zmm{k}, [a + zmm * scale], into a zeroed register). A
+    // load's effect, of any memory.
+    IR_GATHER,
     IR_OP_COUNT,
 } IrOp;
 
@@ -849,6 +861,8 @@ static const char* const ir_op_names[IR_OP_COUNT] = {
     "rmw",
     "masked_load",
     "masked_store",
+    "compress_store",
+    "gather",
 };
 
 // The text form's names of a machine row's classes (#141, IrFunction.rows): the typed stream's, a vector's and a mask's
@@ -957,6 +971,13 @@ static bool ir_access_flags_valid(uint32_t op, uint8_t flags)
 static bool ir_masked_lanes_valid(uint8_t flags)
 {
     return flags == IR_SIMD_LANE_I8 || flags == IR_SIMD_LANE_I16 || flags == IR_SIMD_LANE_I32 || flags == IR_SIMD_LANE_I64;
+}
+
+// Whether an operation is a masked access (#1840): a masked load or store, a compressing store or a gather, whose flags
+// are its lanes, whose mask is a mask of them, and whose alignment_log2 is an access's (a gather's, its scale's).
+static bool ir_masked_access(uint32_t op)
+{
+    return op == IR_MASKED_LOAD || op == IR_MASKED_STORE || op == IR_COMPRESS_STORE || op == IR_GATHER;
 }
 
 // Whether an atomic read/modify/write's flags are an atomic access's of a C order, any of them (#1059): the locked access
@@ -1236,6 +1257,7 @@ typedef enum IrRule
     IR_RULE_INTRINSIC,
     IR_RULE_MASKED_LOAD,
     IR_RULE_MASKED_STORE,
+    IR_RULE_GATHER,
 } IrRule;
 
 #define BUSTER_IR_INTS (((1u << (IR_I128 + 1)) - 1) & ~1u)
@@ -1310,7 +1332,9 @@ typedef enum IrRule
     X(IR_INTRINSIC,     1, 7, (1u << IR_I32) | (1u << IR_I64) | (1u << IR_F32) | (1u << IR_F64) | (1u << IR_M16) | (1u << IR_M32) | (1u << IR_M64) | BUSTER_IR_VECTORS, IR_RULE_INTRINSIC, 0) \
     X(IR_ATOMIC_RMW,    3, 7, (1u << IR_I8) | (1u << IR_I16) | (1u << IR_I32) | (1u << IR_I64), IR_RULE_ATOMIC_RMW, 0) \
     X(IR_MASKED_LOAD,   7, 7, BUSTER_IR_VECTORS, IR_RULE_MASKED_LOAD, 0) \
-    X(IR_MASKED_STORE,  7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0)
+    X(IR_MASKED_STORE,  7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0) \
+    X(IR_COMPRESS_STORE, 7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0) \
+    X(IR_GATHER,        7, 7, BUSTER_IR_VECTORS, IR_RULE_GATHER, 0)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
 static const uint8_t ir_operand_table[BUSTER_IR_OP_TABLE] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_ROW) };
@@ -1559,6 +1583,15 @@ static uint32_t ir_lane_count(uint32_t type, uint32_t lane)
 {
     const uint32_t bits = lane < IR_SIMD_LANE_COUNT ? ir_simd_lane_bits((IrSimdLane)lane) : 0;
     return ir_vector_type(type) && bits != 0 ? ir_type_bits[type] / bits : 0;
+}
+
+// Whether a gather's result of vector type `type` and lanes `lane` may take an index of type `index` (#1840): a gather of
+// dwords or qwords, as x86's are, by a vector of one dword or qword per lane.
+static bool ir_gather_index_valid(uint32_t type, uint32_t lane, uint32_t index)
+{
+    const uint32_t count = ir_lane_count(type, lane);
+    const uint32_t bits = count != 0 && ir_vector_type(index) ? ir_type_bits[index] / count : 0;
+    return (lane == IR_SIMD_LANE_I32 || lane == IR_SIMD_LANE_I64) && (bits == 32 || bits == 64);
 }
 
 #endif
@@ -2017,8 +2050,9 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
     }
     else if (((op == IR_LOAD || op == IR_STORE) && (!ir_access_flags_valid(op, f->flags[i]) || f->alignment_log2[i] > 31)) ||
              (op == IR_ATOMIC_RMW && (!ir_rmw_flags_valid(f->flags[i]) || f->alignment_log2[i] > 31)) ||
-             ((op == IR_MASKED_LOAD || op == IR_MASKED_STORE) && (!ir_masked_lanes_valid(f->flags[i]) || f->alignment_log2[i] > 31)) ||
-             ((op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW && op != IR_MASKED_LOAD && op != IR_MASKED_STORE) && ((f->flags[i] != 0 && op != IR_INTRINSIC && !ir_lane_valid(op, f->flags[i]) && (op != IR_STACK_SAVE || f->flags[i] != BUSTER_IR_STACK_SAVE_FRAME)) ||
+             ((op == IR_MASKED_LOAD || op == IR_MASKED_STORE || op == IR_COMPRESS_STORE) && (!ir_masked_lanes_valid(f->flags[i]) || f->alignment_log2[i] > 31)) ||
+             (op == IR_GATHER && (!ir_masked_lanes_valid(f->flags[i]) || f->alignment_log2[i] > 3)) ||
+             (!ir_masked_access(op) && op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW && ((f->flags[i] != 0 && op != IR_INTRINSIC && !ir_lane_valid(op, f->flags[i]) && (op != IR_STACK_SAVE || f->flags[i] != BUSTER_IR_STACK_SAVE_FRAME)) ||
               f->alignment_log2[i] != 0)))
     {
         check.error = IR_ERROR_METADATA;
@@ -2277,6 +2311,8 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             // A masked load's mask at its lanes and passthrough of its type, and a masked store's vector and mask so.
             case IR_RULE_MASKED_LOAD: valid = ta == IR_PTR && ir_vector_type(type) && tb == ir_lane_mask(type, f->flags[i]) && operand_types[2] == type; break;
             case IR_RULE_MASKED_STORE: valid = ta == IR_PTR && ir_vector_type(tb) && operand_types[2] == ir_lane_mask(tb, f->flags[i]); break;
+            // A gather's index of an element per lane, of 32 or 64 bits, and its mask at its lanes (#1840).
+            case IR_RULE_GATHER: valid = ta == IR_PTR && ir_vector_type(type) && ir_gather_index_valid(type, f->flags[i], tb) && operand_types[2] == ir_lane_mask(type, f->flags[i]); break;
             case IR_RULE_SYMBOL: valid = a != 0 && a < f->symbol_count; break;
             case IR_RULE_ADDRESS:
             {
@@ -3752,10 +3788,12 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                                     operation == BUSTER_IR_RMW_ADD ? "add" : operation == BUSTER_IR_RMW_COMPARE ? "cas" : operation == BUSTER_IR_RMW_EXCHANGE ? "xchg" : "invalid",
                                     order <= BUSTER_IR_FENCE_SEQ_CST ? ir_fence_orders[order] : "invalid");
                         }
-                        if (op == IR_MASKED_LOAD || op == IR_MASKED_STORE)
+                        if (ir_masked_access(op))
                         {
-                            // A masked access's alignment and lanes (#1840), always named: its mask's type depends on them.
-                            fprintf(output, " align=%" PRIu32 " lanes=%s", UINT32_C(1) << f->alignment_log2[i], f->flags[i] < IR_SIMD_LANE_COUNT ? ir_lane_names[f->flags[i]] : "invalid");
+                            // A masked access's alignment (a gather's scale) and lanes (#1840), always named: its mask's type
+                            // depends on them.
+                            fprintf(output, " %s=%" PRIu32 " lanes=%s", op == IR_GATHER ? "scale" : "align", UINT32_C(1) << f->alignment_log2[i],
+                                    f->flags[i] < IR_SIMD_LANE_COUNT ? ir_lane_names[f->flags[i]] : "invalid");
                         }
                         if (op == IR_LOAD || op == IR_STORE)
                         {

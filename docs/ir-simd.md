@@ -1417,8 +1417,8 @@ The tests:
   width and both opcodes among it.
 - **`test-ir-simd`:** the 60 rows (10 moves, load and store, 3 widths) decode
   at exactly their features. Each is refused without a feature it needs and
-  under 7 changes. A compress-store is now the machine-row test's row of no
-  result.
+  under 7 changes. A scatter is now the machine-row test's row of no result
+  (a compress-store was, until compressing stores became the IR's own, below).
 - **`test-tier1-masks`:** `vmovdqu8` to `vmovdqu64` at each width, load and
   store (24 rows), under a mask from the input, through both lowering paths,
   the interpreter at every stage and Tier 1 natively, against C's lanes. Each
@@ -1426,6 +1426,161 @@ The tests:
   its mask's upper half cleared, so the interpreter's binding checks prove a
   masked-off lane is never read or written. An interpreter that read every
   lane is refused on every one of them.
+
+## Gathers, compressing stores and truncating stores (#1840)
+
+Item 4's last machine rows in `main_unit_backend.c` (75 gathers and a scatter,
+13 compressing stores and 4 masked truncations at `--tier1 -march=znver5`, main
+`8023523`) are memory effects, so they follow the owner's Option B as the
+masked loads and stores do: opcodes of their own, an intrinsic staying pure and
+total ([the design](https://github.com/buster14a/buster/issues/1840#issuecomment-6875721515)).
+
+```text
+%6 = gather.v16i32 %0, %1, %3 scale=4 lanes=i32
+%11 = compress_store.void %0, %10, %3 align=1 lanes=i32
+```
+
+**`gather`** (`IR_GATHER`) loads like a masked load, from an address per lane:
+
+- **Operands:** `a` the base address, `b` the index vector and `c` the mask
+  of the result's lanes. The index has one element per lane, a dword or a
+  qword: its bits over the result's lanes (`ir_gather_index_valid`).
+- **Flags:** the lanes, `i32` or `i64` (x86's gathers have no others). The
+  `alignment_log2` place holds the scale's log2, 0 to 3, which the text
+  prints as `scale=`.
+- **Semantics:** lane i is the lane's bytes at `a + sext(b[i]) * scale`
+  where the mask's bit i is set, and 0 where it isn't. A lane whose bit is
+  clear is never read, so it can't fault.
+- **The passthrough** is a `vselect` of the gather under the same mask.
+  Nearly all of the sources' masked gathers merge into
+  `_mm512_setzero_si512()`, which then needs no `vselect` at all, and a
+  passthrough is a fourth value, which no IR instruction's direct operands
+  hold.
+
+**`compress_store`** (`IR_COMPRESS_STORE`) is laid out as `masked_store` (`a`
+the address, `b` the vector, `c` the mask, its flags the lanes, its alignment
+a store's). It writes the lanes whose bits are set one after another from the
+address, in the lanes' order, and no other byte: the mask's population count of
+lanes. For aliasing it is a store of the vector's bytes at the address.
+
+**Truncating stores** need no opcode: the `truncate` intrinsic, then a
+`masked_store` of its lanes. Only those whose truncated lanes fill 16 bytes or
+more decode (a truncation's result is at least a 16-byte vector,
+`ir_convert_flags_valid`); `vpmovqw [p]{k}` of a zmm is the backend's.
+
+**Masked truncations into fewer bytes than their result** (`vpmovqb xmm{k},
+zmm`: 8 bytes merged under the mask, the upper 8 zeroed) aren't a `vselect` of
+the result's lanes, which would take the upper bytes from the passthrough. They
+decode as `truncate(vselect(k, a, extend(w)))` (`merge_partial`): the
+passthrough's lanes extended back to the source's, selected under the mask at
+the source's lanes, then truncated, whose upper bytes are the truncation's 0s.
+The extension is a sign extension for a signed saturation and a zero extension
+otherwise, so the truncation gives each passthrough lane back unchanged. Under
+the typed stream's mask of every lane (`_mm512_cvtepi64_epi8`'s, the backend's
+two) it is the truncation alone.
+
+**Passes.** Both opcodes join the masked accesses (`ir_masked_access`): their
+verifiers' metadata, the text form, SCCP's roots, the dead-code roots, the
+rebuild's and the dataflow's operands, Tier 1's scheduler barriers and its
+operands in registers. A gather is a load's effect and a compressing store a
+store's. The interpreter checks and touches each set lane's bytes alone; a
+gather's masked-off lanes are 0.
+
+**Decoder.**
+
+- `ir_simd_typed_gather` decodes the gather builtins' rows: one record of
+  `vpgatherdd` to `vpgatherqq` (or `vgatherdps` to `vgatherqpd`, the same
+  bits) into VECTOR(0), the passthrough, under MASK(3) at `[INTEGER(1) +
+  VECTOR(2) * scale]`.
+  - The shapes are those whose index has an element per lane
+    (`ir_simd_gather_forms`): every width of `dd` and `qq`, `dq` of 32 and 64
+    bytes, and `qd` of 16 and 32.
+  - The other two (`vpgatherdq xmm`, `vpgatherqd` into 8 bytes) read only part
+    of their index's register and stay machine rows, as do AVX2's gathers by a
+    vector mask.
+  - The target needs AVX512F, VL where either vector is below 64 bytes (Tier
+    1's EVEX moves), and DQ for a byte's mask.
+- `ir_simd_typed_masked_memory` also decodes `vpcompressb` to `vpcompressq`
+  to `[INTEGER(0)]` under MASK(2): VBMI2 and BW for bytes and words, VL below
+  64 bytes.
+- It decodes the truncations' memory forms (`vpmovwb` to `vpmovusqd`) the same
+  way, their flags a truncation's, which need VL and BW for bytes' and words'
+  lanes.
+- Under the typed stream's mask of every lane, the lowering emits the gather
+  alone, the plain store of the whole vector, and the plain store of the
+  truncation.
+
+**Tier 1.**
+
+- A gather (`BUSTER_TIER1_VECTOR_GATHER`, `tier1_select_gather`) is
+  `vpgatherdd` to `vpgatherqq` into the destination.
+  - `vselect m, gather(a, b, m), w` of a gather whose only use it is folds
+    into it, the destination taking w first unless it holds it. A gather
+    alone, or merged into a zero vector, has its destination zeroed (`vpxor`):
+    its masked-off lanes are 0, and the instruction doesn't wait on the
+    register's last writer.
+  - The instruction clears its mask register as it completes. Tier 1 has no
+    scratch opmask register (the row path borrows them), so the mask is kept
+    in the general scratch register around it: `kmovw r11d, k` and back, two
+    instructions of 16 bits for up to 16 lanes.
+  - Its destination may not be its index's register: an index the allocation
+    put there moves into the vector scratch register first.
+- A compressing store is `TIER1_RULE_FLOAT_STORE`'s masked move, `operation`
+  1: `vpcompressb` to `vpcompressq [p]{k}`.
+- A `masked_store` of a `truncate` whose only use it is folds into the
+  truncation's memory form, `operation` 2: one `vpmov* [p]{k}`, as the row was.
+
+**Zen 5 rows.** The 45 forms Tier 1 now emits were measured on the 9700X
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-gathers-1840-2026-11-14)):
+
+| Forms | Latency | Throughput | Macro-ops |
+| --- | ---: | ---: | ---: |
+| `vpgather*` of 16 bytes (`dd`, `qd` by a ymm, `qq`) | 16 to 18.5 | 3 to 4 | 13 to 19 |
+| `vpgather*` of 32 bytes (`dd`, `dq` by an xmm, `qd` by a zmm, `qq`) | 17.4 to 25 | 4 to 6.75 | 19 to 35 |
+| `vpgatherdq zmm`, `vpgatherqq zmm` (`vpgatherdd zmm`: 30.1, 12.6) | 22.6, 24.75 | 7, 7 | 38, 40 |
+| `vpcompress* [p]{k}` (the register form: 1 a cycle, 2) | — | 3 | 7 to 8 |
+| `vpmov* [p]{k}` | — | 0.5 | 2 |
+
+The memory compress is no Zen 4-like slow path: at one every 3 cycles it stays
+Tier 1's selection, one instruction, where a register compress, the mask's
+population count into a prefix mask and a masked store would take five or six
+instructions.
+
+Machine rows at `--tier1 -march=znver5`, both compilers compiling this change's
+sources, against main `8023523`:
+
+| Unit | Rows before | Rows after |
+| --- | ---: | ---: |
+| `main_unit_backend.c` | 93 | 1 |
+
+The one left is the scatter, whose four values (base, index, vector, mask)
+need a fourth operand no IR instruction has.
+
+The tests:
+
+- **`test-ir-parse`:** `tests/ir/gathers.ir` round-trips: every gather shape
+  but the 64-byte `qd`, three scales, and compressing stores of three lanes.
+- **`test-ir-simd`:** 80 gather rows (20 shapes, both kinds, 4 scales), 12
+  compressing stores and 24 truncating stores decode at exactly their features,
+  each refused without a feature it needs and under 7 changes; the two partial
+  gather shapes stay machine rows. Every masked truncation builtin's row
+  decodes, those whose lanes leave their result's upper bytes zero as
+  `merge_partial`'s.
+- **`test-tier1-masks`:** 10 gathers (every integer shape, each at a scale of
+  its own), 6 compressing stores and 24 truncating stores run under a mask from
+  the input, through both lowering paths, the interpreter at every stage and
+  Tier 1 natively, against C's lanes. Each gather program's third statement
+  has a constant mask of every lane, and its fourth statement's index points
+  far past every buffer in each masked-off lane, so the interpreter's binding
+  checks prove such a lane is never read. Each store program's fourth statement
+  ends at the output's end. The conversions' programs now take every masked
+  truncation, the partial ones among them, under an input mask and under one of
+  every lane.
+- **The compiler itself:** its backend unit, built by `--tier1` with these
+  operations, linked with the clang-built rest, gives the clang-built
+  compiler's results on `test-ir`, `test-tier1-masks`, `test-tier1-select`,
+  `test-tier1-pipeline`, `test-ssa-ir`, `test-ir-parse`, `test-tier1-cfg` and
+  `test-dataflow`, and the same object for `--tier1 -c main_unit_backend.c`.
 
 ## One lane's moves and movemasks (#1840)
 
