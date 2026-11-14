@@ -559,7 +559,7 @@ Clang's hidden-parameter ABI ([fortify compatibility](../c-builtins-fortify.md#c
 
 ## Runtime fixtures
 
-`test-checker`'s shared source fixtures (`check_test_sources`, 418 cases) are
+`test-checker`'s shared source fixtures (`check_test_sources`, 420 cases) are
 runtime data (#2053): `tests/checker/sources/` holds `catalog.tsv` and one file
 a case, which the test reads when it runs, so that editing a case's source or
 flags, or adding a case, compiles, links and bakes nothing. The catalog's first

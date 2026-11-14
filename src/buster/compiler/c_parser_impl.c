@@ -4846,7 +4846,8 @@ static void parse_scalar_resume_block_item(ParseScalar* parser)
     const uint32_t at = parser->error_token;
     const ParseFrame* frame = parser->frame_count != 0 ? parser->frames + parser->frame_count - 1 : NULL;
     const bool block = frame != NULL && parse_frame_is_block(frame) && at < parser->count && !parser->error_resumed && !parser->error_resume_colon;
-    const bool stray_else = block && parser->error_message == PARSE_MESSAGE_EXPECTED_EXPRESSION && parser->kinds[at] == PARSE_KIND_ELSE;
+    const bool stray_else = block && frame->mode == PARSE_MODE_ITEM && parser->error_message == PARSE_MESSAGE_EXPECTED_EXPRESSION &&
+                            parser->kinds[at] == PARSE_KIND_ELSE;
     const bool missing_head = block && parser->error_message == PARSE_MESSAGE_EXPECTED_L_PAREN_AFTER && parser->kinds[at] == PARSE_KIND_SEMI && at != 0 &&
                               (frame->mode == PARSE_MODE_CONDITION_PAREN || frame->mode == PARSE_MODE_FOR_PAREN);
     const bool declarator = block && parser->error_message == PARSE_MESSAGE_EXPECTED_IDENTIFIER_OR_PAREN && frame->mode == PARSE_MODE_DECLARATOR &&
