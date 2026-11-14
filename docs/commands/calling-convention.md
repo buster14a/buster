@@ -44,7 +44,8 @@ its compiled runs) checks
   rules alone among them), the narrow low parts clang widens into a general
   register and the unions stored as a `__float128` whose `fp128` low part it
   widens, and the records SSE, SSEUP of 17 to 63 bytes it passes as `<size /
-  8 x double>`, refused;
+  8 x double>`: 17–23 bytes in xmm0, with full C-sized stack copies, and the
+  larger irregular widths refused;
   and the `_Atomic` types whose LLVM types decide: of types of no size, which
   LLVM makes larger (to 32 KB, and refused past the alignment the module
   keeps), as the records ending in one, with their slots, the records it lays
@@ -99,7 +100,18 @@ its compiled runs) checks
   register sums count (`BUSTER_ABI_COUNTED_ARGUMENTS`), past which it leaves a
   call to its twin.
 
-With `--cross-check`, which needs clang 23 and GCC 15 or later on `PATH` (or
+With `--cross-check`, `tests/calling-convention/short-sse.c` first checks
+#2113's 17–23-byte SSE/SSEUP records against clang in both directions, with
+Tier 0 and strict Tier 1, by vector and scalar paths, at x86-64, x86-64-v3
+and x86-64-v4. Its 16-byte control, 17/23-byte boundaries, aligned20 and
+wrapped23 records check arguments, returns, exhausted vector registers and
+`va_arg`. Register transport compares the first 16 bytes clang defines;
+stack transport compares every C byte and following scalars check the
+24-byte overflow stride. Every target is compiled and linked; execution is
+skipped only when the host lacks its features. Run from the repository root
+so the fixture path resolves.
+
+The remaining `--cross-check` runs need clang 23 and GCC 15 or later on `PATH` (or
 `--clang PATH` and `--gcc PATH`; 16.2.1 is the qualified 9700X version) and
 libatomic: for each compiler and vector width (the C built with `-march=x86-64`,
 `x86-64-v3` and `x86-64-v4`), a world and

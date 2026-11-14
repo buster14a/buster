@@ -273,44 +273,96 @@ static uint32_t check_semantic_enum_base_spelling(const Parser* parser, const Ch
 // An __auto_type redeclaration's type as clang's TypePrinter prints it before deduction (#1844,
 // CHECK_REDECLARATION_AUTO_TYPE), quoted: the placeholder with its qualifiers (`const __auto_type`, `_Atomic(__auto_type)`,
 // `restrict __auto_type`), then each pointer level's `*` and its qualifiers (`__auto_type *const`, `const __auto_type **`).
-static String8 check_semantic_auto_type_spelling(const TypeTable* types, TypeId type, Arena* scratch)
+static String8 check_semantic_auto_type_spelling(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                                CheckWarningSpelling* spell, TypeId type, uint32_t declaration, Arena* scratch)
 {
-    TypeId levels[64];
-    uint32_t depth = 0;
-    TypeId level = type_strip_aligned(types, type);
-    while (depth < BUSTER_ARRAY_LENGTH(levels) && !check_input_auto_type(level) && type_kind(types, level) == BUSTER_TYPE_KIND_POINTER)
+    TypeId aliases[] =
     {
-        levels[depth++] = level;
-        level = type_strip_aligned(types, type_element(types, level));
-    }
-    char text[512];
-    uint32_t length = 0;
-    String8 result = { 0 };
-    if (check_input_auto_type(level))
+        BUSTER_CHECK_AUTO_TYPE,
+        BUSTER_CHECK_AUTO_TYPE_ATOMIC,
+        BUSTER_CHECK_AUTO_TYPE_RESTRICT,
+        0,
+    };
+    String8 names[] =
     {
-        const TypeId marker = level & ~(TypeId)(BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
-        const uint32_t qualifiers = type_qualifiers(level);
-        length = (uint32_t)snprintf(text, sizeof(text), "'%s%s%s%s", (qualifiers & BUSTER_TYPE_CONST) != 0 ? "const " : "",
-                                    (qualifiers & BUSTER_TYPE_VOLATILE) != 0 ? "volatile " : "", marker == BUSTER_CHECK_AUTO_TYPE_RESTRICT ? "restrict " : "",
-                                    marker == BUSTER_CHECK_AUTO_TYPE_ATOMIC ? "_Atomic(__auto_type)" : "__auto_type");
-        for (uint32_t d = depth; d > 0 && length < sizeof(text); d -= 1)
         {
-            const uint32_t pointer = type_qualifiers(levels[d - 1]);
-            const char* qualified[3] = { (pointer & BUSTER_TYPE_CONST) != 0 ? "const" : NULL, (pointer & BUSTER_TYPE_VOLATILE) != 0 ? "volatile" : NULL,
-                                         (pointer & BUSTER_TYPE_RESTRICT) != 0 ? "restrict" : NULL };
-            length += (uint32_t)snprintf(text + length, sizeof(text) - length, "%s", text[length - 1] == '*' ? "*" : " *");
-            bool first = true;
-            for (uint32_t q = 0; q < 3 && length < sizeof(text); q += 1)
-            {
-                if (qualified[q] != NULL)
-                {
-                    length += (uint32_t)snprintf(text + length, sizeof(text) - length, "%s%s", first ? "" : " ", qualified[q]);
-                    first = false;
-                }
-            }
+            .pointer = "__auto_type",
+            .length = 11,
+        },
+        {
+            .pointer = "_Atomic(__auto_type)",
+            .length = 20,
+        },
+        {
+            .pointer = "restrict __auto_type",
+            .length = 20,
+        },
+        { 0 },
+    };
+    String8 result = { 0 };
+    if (check_driver_spelling_ready(parser, pp, input, types, spell, scratch))
+    {
+        // Reuse the type printer's declarator and extended-qualifier rules; aliases hide only the private markers.
+        // In particular, a pointer's address space must stay on that pointer rather than its deduced pointee.
+        CheckDriverSpaceScope saved = { 0 };
+        check_driver_space_scope(parser, pp, input, types, spell, declaration, &saved, scratch);
+        TypeNames spelling =
+        {
+            .alias_types = aliases,
+            .alias_names = names,
+            .alias_count = BUSTER_ARRAY_LENGTH(aliases) - 1,
+            .space_macro_spaces = spell->space_macro_spaces,
+            .space_macro_texts = spell->space_macro_texts,
+            .space_macro_count = spell->space_macro_count,
+        };
+        TypeId level = type;
+        for (uint32_t steps = 0; !check_input_auto_type(types, level) && type_kind(types, type_strip_aligned(types, level)) == BUSTER_TYPE_KIND_POINTER && steps < 64; steps += 1)
+        {
+            level = type_element(types, type_strip_aligned(types, level));
         }
-        const char* quoted = length + 1 < sizeof(text) ? check_warning_text(scratch, "%.*s'", (int)length, text) : NULL;
+        const TypeId bare = type_strip_aligned(types, level);
+        const TypeId marker = bare & ~(TypeId)(BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
+        const uint32_t space = type_address_space(type_extended_qualifiers(types, level));
+        uint32_t macro = spell->space_macro_count;
+        bool spelled = true;
+        for (uint32_t i = 0; check_input_auto_type(types, level) && macro == spell->space_macro_count && i < spell->space_macro_count; i += 1)
+        {
+            macro = spell->space_macro_spaces[i] == space ? i : macro;
+        }
+        if (macro < spell->space_macro_count)
+        {
+            // A macro's specifier-level placeholder puts cv after itself; an _Atomic specifier rebuilds it without
+            // the macro's sugar. A trailing attribute instead wraps the already-qualified placeholder. Keep these
+            // rules local to the private marker aliases, without changing how real typedef aliases print.
+            uint32_t begin = 0;
+            uint32_t end = 0;
+            if (declaration < parser->tokens.count)
+            {
+                check_driver_place_extent(parser, declaration, &begin, &end);
+            }
+            bool trailing = false;
+            for (uint32_t t = declaration < end ? declaration + 1 : end; t < end; t += 1)
+            {
+                trailing |= check_driver_space_name(parser, pp, t);
+            }
+            TypeNames plain = spelling;
+            plain.space_macro_count = 0;
+            const bool atomic = marker == BUSTER_CHECK_AUTO_TYPE_ATOMIC;
+            const String8 inner = type_print(types, scratch, atomic && !trailing ? level : trailing ? bare : marker, (String8){ 0 }, &plain, 0);
+            const String8 word = spell->space_macro_texts[macro];
+            const char* text = atomic && !trailing ? check_warning_text(scratch, "%.*s", (int)inner.length, inner.pointer) :
+                                check_warning_text(scratch, "%.*s %.*s%s%s", (int)word.length, word.pointer, (int)inner.length, inner.pointer,
+                                                   !trailing && (bare & BUSTER_TYPE_CONST) != 0 ? " const" : "",
+                                                   !trailing && (bare & BUSTER_TYPE_VOLATILE) != 0 ? " volatile" : "");
+            aliases[3] = type_strip_alignment(types, level);
+            names[3] = text != NULL ? (String8){ .pointer = (char*)text, .length = strlen(text) } : (String8){ 0 };
+            spelled = inner.length != 0 && text != NULL;
+            spelling.alias_count += 1;
+        }
+        const String8 text = spelled ? type_print(types, scratch, type, (String8){ 0 }, &spelling, 0) : (String8){ 0 };
+        const char* quoted = text.length != 0 ? check_warning_text(scratch, "'%.*s'", (int)text.length, text.pointer) : NULL;
         result = quoted != NULL ? (String8){ .pointer = (char*)quoted, .length = strlen(quoted) } : (String8){ 0 };
+        check_driver_space_restore(spell, &saved);
     }
     return result;
 }
@@ -368,6 +420,11 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
         result = array.length == 0 || literal.length == 0 ? NULL : check_warning_text(scratch, "cannot initialize array of type %.*s with array of type %.*s",
                                                                                      (int)array.length, array.pointer, (int)literal.length, literal.pointer);
     }
+    else if (report->message == CHECK_INPUT_RESTRICT_NOT_POINTER && report->type != 0)
+    {
+        const String8 type = check_semantic_auto_type_spelling(parser, pp, input, types, spell, report->type, BUSTER_CHECK_NONE, scratch);
+        result = type.length == 0 ? NULL : check_warning_text(scratch, "restrict requires a pointer or reference (%.*s is invalid)", (int)type.length, type.pointer);
+    }
     else if ((report->message == CHECK_INPUT_REDECLARATION || report->message == CHECK_INPUT_CONFLICTING_TYPES) && token < count && name.length != 0)
     {
         const uint32_t previous = report->subject - 1;
@@ -376,7 +433,7 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
             report->detail == CHECK_REDECLARATION_AUTO_TYPE || report->detail == CHECK_REDECLARATION_AUTO_TYPE_EXTERN)
         {
             const bool placeholder = report->detail == CHECK_REDECLARATION_AUTO_TYPE || report->detail == CHECK_REDECLARATION_AUTO_TYPE_EXTERN;
-            const String8 current = placeholder ? check_semantic_auto_type_spelling(types, report->type, scratch) :
+            const String8 current = placeholder ? check_semantic_auto_type_spelling(parser, pp, input, types, spell, report->type, token, scratch) :
                                                   check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, report->type_spelling);
             // The prior type is the noted declaration's, spelled as that one spells it (review on #1453).
             const uint32_t noted = report->note_token < count ? report->note_token : previous;
