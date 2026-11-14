@@ -32,7 +32,8 @@ set(BUSTER_DEFAULT_PARTITIONS 8)
 # instructions, each file's functions over a run of parts sized at half the unit's mean. Release reads bodies of up to
 # 300 instructions and keeps the whole unit's inlining of static functions and benchmarks' kernels (step 5's gate);
 # Develop up to 100, for a shorter edit, with the tests' functions optnone.
-set(BUSTER_RELEASE_SPLIT_OPTIONS --import 200 --simplified-size --anchor 24 --cohere 150000 --spread 2 --keep-statics --benchmark-bodies)
+set(BUSTER_RELEASE_SPLIT_OPTIONS --import 200 --simplified-size --simplify-first --anchor 24 --cohere 150000 --spread 2 --keep-statics
+    --benchmark-bodies)
 set(BUSTER_DEVELOP_SPLIT_OPTIONS --import 100 --anchor 24 --cohere 150000 --spread 2 --tests-optnone)
 
 # The directories buster_codegen_system_libraries looks in for a library: the linker's default search path on the

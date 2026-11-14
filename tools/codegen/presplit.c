@@ -212,6 +212,7 @@ struct PresplitPlan
     bool keep_statics;
     bool benchmark_bodies;
     bool simplified_size;
+    bool simplify_first;
     bool verify;
     bool report;
 };
@@ -1786,6 +1787,39 @@ static void presplit_report(const PresplitPlan* plan)
             total != 0 ? 100.0 * (double)imported_total / (double)total : 0.0, plan->global_count, moved, hidden);
 }
 
+// --simplify-first (Release's): the whole module's simplification before LLVM's inliner, as the -O3 pipeline runs it
+// (clang 23's default<O3> up to its always-inline, without the passes that do nothing to a C unit: coroutines, OpenMP,
+// memory profiles), before the plan. Its interprocedural constant propagation then sees every call of a local function,
+// which a part's doesn't see of one other parts call (an alias names it): the whole unit's folded the encoder mode's
+// flags that instruction_is_valid passes mode_register_is_valid, which cost the parts' inliner 70 to 90 more and kept
+// it outlined, and benchmark-assembler ran 6.3% more instructions. A part's job then runs the whole -O3 pipeline again,
+// from the simplified module. Whether it ran.
+static bool presplit_simplify(LLVMModuleRef module)
+{
+    static const char pipeline[] =
+        "annotation2metadata,forceattrs,inferattrs,"
+        "function<eager-inv>(lower-expect,"
+        "simplifycfg<bonus-inst-threshold=1;no-forward-switch-cond;no-switch-range-to-icmp;no-switch-to-arithmetic;no-switch-to-lookup;"
+        "keep-loops;no-hoist-common-insts;no-hoist-loads-stores-with-cond-faulting;no-sink-common-insts;speculate-blocks;"
+        "simplify-cond-branch;no-speculate-unpredictables>,"
+        "sroa<modify-cfg>,early-cse<>,callsite-splitting),"
+        "ipsccp,called-value-propagation,globalopt,"
+        "function<eager-inv>(mem2reg,instcombine<max-iterations=1;no-verify-fixpoint>,"
+        "simplifycfg<bonus-inst-threshold=1;no-forward-switch-cond;switch-range-to-icmp;no-switch-to-arithmetic;no-switch-to-lookup;"
+        "keep-loops;no-hoist-common-insts;no-hoist-loads-stores-with-cond-faulting;no-sink-common-insts;speculate-blocks;"
+        "simplify-cond-branch;no-speculate-unpredictables>)";
+    LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
+    LLVMErrorRef error = LLVMRunPasses(module, pipeline, 0, options);
+    LLVMDisposePassBuilderOptions(options);
+    if (error != 0)
+    {
+        char* message = LLVMGetErrorMessage(error);
+        fprintf(stderr, "presplit: the simplification before the split: %s\n", message);
+        LLVMDisposeErrorMessage(message);
+    }
+    return error == 0;
+}
+
 static double presplit_seconds(void)
 {
     struct timespec now;
@@ -1826,6 +1860,10 @@ static bool presplit_options(PresplitPlan* plan, int argc, char** argv)
         else if (strcmp(argv[i], "--simplified-size") == 0)
         {
             plan->simplified_size = true;
+        }
+        else if (strcmp(argv[i], "--simplify-first") == 0)
+        {
+            plan->simplify_first = true;
         }
         else if ((strcmp(argv[i], "--anchor") == 0 || strcmp(argv[i], "--import") == 0 || strcmp(argv[i], "--cohere") == 0 || strcmp(argv[i], "--spread") == 0) && i + 1 < argc)
         {
@@ -1875,7 +1913,7 @@ int main(int argc, char** argv)
     const unsigned long parts = argc >= 4 ? strtoul(argv[2], &end, 10) : 0;
     if (!valid || end == argv[2] || *end != 0 || parts == 0 || parts > PRESPLIT_MAXIMUM_PARTS)
     {
-        fprintf(stderr, "usage: presplit INPUT.bc PARTS DIRECTORY [--import LIMIT] [--anchor M] [--cohere CAP] [--spread S] [--tests-optnone] [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--verify] [--report]  (PARTS from 1 to %u)\n",
+        fprintf(stderr, "usage: presplit INPUT.bc PARTS DIRECTORY [--import LIMIT] [--anchor M] [--cohere CAP] [--spread S] [--tests-optnone] [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--simplify-first] [--verify] [--report]  (PARTS from 1 to %u)\n",
                 PRESPLIT_MAXIMUM_PARTS);
     }
     else
@@ -1900,17 +1938,22 @@ int main(int argc, char** argv)
             plan.parts = (uint32_t)parts;
             plan.srcloc = LLVMGetMDKindIDInContext(context, "srcloc", 6);
             const double parsed = presplit_seconds();
-            presplit_plan(&plan);
+            const bool simplified = !plan.simplify_first || presplit_simplify(module);
+            const double prepared = presplit_seconds();
+            if (simplified)
+            {
+                presplit_plan(&plan);
+            }
             const double planned = presplit_seconds();
-            if (plan.report)
+            if (simplified && plan.report)
             {
                 presplit_report(&plan);
             }
-            status = presplit_locals(&plan, argv[3]) && presplit_parts(&plan, argv[3]) ? 0 : 1;
+            status = simplified && presplit_locals(&plan, argv[3]) && presplit_parts(&plan, argv[3]) ? 0 : 1;
             if (plan.report)
             {
-                fprintf(stderr, "presplit: reading %.2f s, planning %.2f s, writing the parts %.2f s\n", parsed - started, planned - parsed,
-                        presplit_seconds() - planned);
+                fprintf(stderr, "presplit: reading %.2f s, simplifying %.2f s, planning %.2f s, writing the parts %.2f s\n", parsed - started,
+                        prepared - parsed, planned - prepared, presplit_seconds() - planned);
             }
         }
     }
