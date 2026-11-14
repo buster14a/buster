@@ -4003,7 +4003,8 @@ static uint32_t tier1_select_parts_of(const uint8_t* registers, bool high, bool 
     // copy keeps them as padding.
     const bool vector_first = first && (registers[0] & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
     const uint32_t whole = !one && !slot && vector_first && !second && size >= 16 ? (size >= 64 ? 64 : size >= 32 ? 32 : 16) : 0;
-    bool valid = size != 0 && (size <= 16 || (whole != 0 && whole == size)) && shape;
+    // GetByteVectorType's two doubles carry a 17--23-byte record's first 16 bytes; stack copies retain its C size.
+    bool valid = size != 0 && (size <= 16 || (whole != 0 && (whole == size || (whole == 16 && size < 24)))) && shape;
     uint32_t count = 0;
     for (uint32_t k = 0; valid && k < (one ? 1u : 2u); k += 1)
     {

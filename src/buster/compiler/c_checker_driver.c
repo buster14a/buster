@@ -5204,6 +5204,12 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                 phase == 2 && extra[index].completion != 0 ? extra[index].completion :
                                                 phase == 2 && extra[index].position != located ? extra[index].position :
                                                 node < input->graph.count && input->graph.source_positions != NULL ? input->graph.source_positions[node] : 0;
+                    // A false assertion's root is omitted from the rejected unit's warning walk (#2409). Its conversion
+                    // to bool still warns before the assertion fails, at the same expression boundary as the error.
+                    if (show_warnings && phase == 1 && stream->reports[index].message == CHECK_MESSAGE_STATIC_ASSERT && node < input->graph.count)
+                    {
+                        check_common_int_in_bool(parser, pp, input, stream, types, node, NULL, completion != 0 ? completion : located, scratch);
+                    }
                     // An x86 builtin's call whose hard immediate constraint failed: clang's message at the call's begin,
                     // published where the report's own token puts it (#1066).
                     char x86_text[BUSTER_CHECK_DIAGNOSTIC_X86_TEXT];
@@ -5752,7 +5758,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
                             // An __auto_type placeholder's (#1844) as clang prints the undeduced type.
                             const bool placeholder = kind == CHECK_INPUT_VECTOR_ELEMENT && check_input_auto_type_level(types, report->type);
-                            const String8 type = placeholder ? check_semantic_auto_type_spelling(types, report->type, scratch) :
+                            const String8 type = placeholder ? check_semantic_auto_type_spelling(parser, pp, input, types, &spell, report->type, BUSTER_CHECK_NONE, scratch) :
                                                  spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, report->type_spelling) :
                                                            (String8){ 0 };
                             const bool forward = report->note_kind == CHECK_INPUT_NOTE_FORWARD_DECLARATION && report->note_token < count && spelled;
@@ -9389,8 +9395,8 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     CheckDebug dwarf = { 0 };
     check_clock_mark(stage_clock, CHECK_STAGE_EMIT_SETUP);
     bool valid = output.base != 0 && bytes.base != 0 &&
-                 check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output, &bytes, scratch, NULL, debug ? &rows : NULL,
-                                          unwind, verify, lanes, stage_clock);
+                 check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output, &bytes, scratch, NULL, kept != NULL && !foreign,
+                                          debug ? &rows : NULL, unwind, verify, lanes, stage_clock);
     check_driver_lower_report(&code, stage_clock);
     if (!valid)
     {
@@ -10054,7 +10060,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                                                                                     scratch, merge_lanes, lanes->units_flow, &merge_lease) :
                                         units != NULL     ? check_units_merge(&code.link, units, unit_count, &binding, debug ? &dwarf.attach : NULL, &output, &bytes, scratch) :
                                                             check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output,
-                                                                                     &bytes, scratch, &binding, debug ? &rows : NULL, unwind, verify, lanes, stage_clock));
+                                                                                     &bytes, scratch, &binding, false, debug ? &rows : NULL, unwind, verify, lanes, stage_clock));
         check_units_slots_back(lanes->units_flow, &merge_lease);
         if (units != NULL)
         {
@@ -10494,13 +10500,14 @@ struct CheckDriverCommand
     // --tier1 (c_check_tier1.c), and the report its units' emissions sum into, atomically: units compile on lanes; and
     // --tier1-refusals' stream, or null; and --tier1-no-rematerialize; and --tier1-gvn, which each unit's lanes take
     // too (check_units_compile), so that a command of several files runs the solver its option asked for; and
-    // --tier1-no-lifetimes; and --tier1-no-inline (#1282).
+    // --tier1-no-lifetimes; and --tier1-no-inline (#1282); and --tier1-no-hold (#2541 step 2).
     bool tier1;
     bool tier1_strict;
     bool tier1_no_rematerialize;
     bool tier1_gvn;
     bool tier1_no_lifetimes;
     bool tier1_no_inline;
+    bool tier1_no_hold;
     // --tier0-no-inline keeps Tier 0's calls of always_inline functions (#1398).
     bool tier0_no_inline;
     // --emit-window=N: each unit's one-lane emission by windows of about N tokens (#2536, CheckProgramLanes.window_tokens).
@@ -11189,6 +11196,7 @@ static Parser* check_attested_parse(CheckAttested* attested, Parser* parser);
 static bool check_attested_memo_key(int count, char** arguments, char* const* inputs, uint32_t input_count, uint64_t* key);
 static CheckAttested* check_attested_lane_open(uint8_t mode, const char* memo, const uint64_t* key, bool alone);
 static void check_attested_lane_close(CheckAttested* attested);
+static void check_attested_lane_leave(CheckAttested* attested);
 static void check_attested_begin(CheckAttested* attested, bool again);
 static bool check_attested_again(const CheckAttested* attested, bool failed);
 static void check_attested_summary(const CheckAttested* attested, uint64_t* counts);
@@ -12459,11 +12467,18 @@ static int check_driver_one_unit(const CheckDriverRun* run)
     options.preprocessed = run->command->inputs != NULL && run->command->inputs[0].preprocessed;
     // A memo kept across processes (#2531's step 4): the unit's attested declarations' state, and its diagnostics into a
     // stream of their own, which a unit that skipped and failed is read into again from its start with nothing skipped (as
-    // a units' run's lanes read theirs, check_units_compile), then given to stderr.
+    // a units' run's lanes read theirs, check_units_compile), then given to stderr. The stream is the heap's (no file to
+    // make, and to free as the process ends): its text is what it holds up to its position, so that a reading again
+    // writes over the first's from its start.
     CheckAttested* const attested = run->command->attested_memo != NULL && !run->command->deferred_bodies ?
                                     check_attested_lane_open(run->command->attested, run->command->attested_memo, run->command->attested_key, true) : NULL;
-    FILE* const stream = attested != NULL ? tmpfile() : NULL;
+    char* text = NULL;
+    size_t text_length = 0;
+    FILE* const stream = attested != NULL ? open_memstream(&text, &text_length) : NULL;
     FILE* const errors = stream != NULL ? stream : stderr;
+    // Every diagnostic into it: the preprocessor's and the checker's, which print to the options' stream (as a units'
+    // lane's do, check_units_compile).
+    options.diagnostics = stream != NULL ? stream : options.diagnostics;
     run->lanes->attested = stream != NULL ? attested : NULL;
     const uint64_t marks[3] = { run->arena->length, run->scratch->length, run->output_arena->length };
     check_attested_begin(run->lanes->attested, false);
@@ -12472,8 +12487,7 @@ static int check_driver_one_unit(const CheckDriverRun* run)
                                   run->command->deferred_bodies ? &deferred : NULL, NULL);
     if (check_attested_again(run->lanes->attested, result != 0))
     {
-        fflush(errors);
-        result = fseeko(errors, 0, SEEK_SET) == 0 && ftruncate(fileno(errors), 0) == 0 ? result : 1;
+        result = fseeko(errors, 0, SEEK_SET) == 0 ? result : 1;
         arena_pop_to(run->arena, marks[0]);
         arena_pop_to(run->scratch, marks[1]);
         arena_pop_to(run->output_arena, marks[2]);
@@ -12484,17 +12498,11 @@ static int check_driver_one_unit(const CheckDriverRun* run)
     }
     if (stream != NULL)
     {
-        // The unit's diagnostics, the last reading's.
-        fflush(stream);
-        rewind(stream);
-        char block[4096];
-        size_t length = fread(block, 1, sizeof(block), stream);
-        while (length != 0)
-        {
-            fwrite(block, 1, length, stderr);
-            length = fread(block, 1, sizeof(block), stream);
-        }
+        // The unit's diagnostics, the last reading's: the stream's text up to its position.
+        const off_t end = fflush(stream) == 0 ? ftello(stream) : 0;
         fclose(stream);
+        fwrite(text, 1, text != NULL && end > 0 && (size_t)end <= text_length ? (size_t)end : 0, stderr);
+        free(text);
     }
     run->lanes->attested = NULL;
     if (attested != NULL)
@@ -12502,7 +12510,15 @@ static int check_driver_one_unit(const CheckDriverRun* run)
         memset(check_units_attested_last, 0, sizeof(check_units_attested_last));
         check_attested_summary(attested, check_units_attested_last);
     }
-    check_attested_lane_close(attested);
+    // The state's arenas stay to the exit where the command leaves its own memory to it (as a units' run's last lanes do).
+    if (run->release)
+    {
+        check_attested_lane_close(attested);
+    }
+    else
+    {
+        check_attested_lane_leave(attested);
+    }
     if (result == 0)
     {
         result = dependency_publish(&dependency, stderr) ? 0 : 1;
@@ -13034,6 +13050,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             lanes->tier1_no_inline = true;
         }
+        else if (match.exact == C_OPTION_TIER1_NO_HOLD)
+        {
+            lanes->tier1_no_hold = true;
+        }
         else if (match.exact == C_OPTION_TIER0_NO_INLINE)
         {
             lanes->tier0_no_inline = true;
@@ -13319,7 +13339,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // instrumentation, ABI layouts and the language/target. The Tier 1 combination check has no source dependency.
     const CheckRequestRefusal refusal = parsed ? check_request_refusal(&request, &options, emit_object || link) : codegen;
     const bool invalid_tier1 = !lanes->tier1 && (lanes->tier1_strict || tier1_report || lanes->tier1_refusals != NULL || lanes->tier1_no_rematerialize ||
-                                               tier1_gvn || lanes->tier1_no_lifetimes || lanes->tier1_no_inline || tier1_schedule_seen || tier1_passes_seen);
+                                               tier1_gvn || lanes->tier1_no_lifetimes || lanes->tier1_no_inline || lanes->tier1_no_hold || tier1_schedule_seen || tier1_passes_seen);
     const bool libraries_ready = !parsed || refusal.error != CHECK_REQUEST_ACCEPTED || !link || mixed_inputs || libraries.count == 0 ||
                                  worker_budget.dry_run || invalid_tier1 || check_driver_named_archives(&libraries, runtime_kind, &arena, &mixed_inputs);
     if (parsed && libraries_ready && stdin_count != 0)
@@ -13410,6 +13430,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier1_gvn = lanes->tier1_gvn,
         .tier1_no_lifetimes = lanes->tier1_no_lifetimes,
         .tier1_no_inline = lanes->tier1_no_inline,
+        .tier1_no_hold = lanes->tier1_no_hold,
         .tier0_no_inline = lanes->tier0_no_inline,
         .window_tokens = lanes->window_tokens,
         .tier1_schedule = lanes->tier1_schedule,
@@ -13475,7 +13496,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                                                     tier1_report ? "--tier1-report" : lanes->tier1_refusals != NULL ? "--tier1-refusals" :
                                                     lanes->tier1_no_rematerialize ? "--tier1-no-rematerialize" : tier1_gvn ? "--tier1-gvn" :
                                                     lanes->tier1_no_lifetimes ? "--tier1-no-lifetimes" : lanes->tier1_no_inline ? "--tier1-no-inline" :
-                                                    tier1_passes_seen ? "--tier1-passes=" : "--tier1-schedule");
+                                                    lanes->tier1_no_hold ? "--tier1-no-hold" : tier1_passes_seen ? "--tier1-passes=" : "--tier1-schedule");
     }
     else
     {

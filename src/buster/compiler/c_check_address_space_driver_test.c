@@ -374,4 +374,108 @@ static void check_test_driver_address_spaces(CheckTest* test, const char* clang,
 {
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_address_space_fixtures,
                                        BUSTER_ARRAY_LENGTH(check_driver_address_space_fixtures));
+    // #1844: the specifiers' space survives deduction at its own level, with the same storage and redeclaration
+    // errors as an explicitly spelled type. Sources remain runtime data, so adding cases does not bake them into the
+    // compiler. The shared reader fails on missing, truncated or NUL-containing input.
+    static const CheckDriverDefaultWarningFixture cases[] =
+    {
+        {
+            .name = "valid",
+        },
+        {
+            .name = "automatic",
+            .errors = 3,
+        },
+        {
+            .name = "redeclaration",
+            .errors = 1,
+            .notes = 1,
+        },
+        {
+            .name = "redeclaration-macro",
+            .errors = 1,
+            .notes = 1,
+        },
+        {
+            .name = "redeclaration-pointer",
+            .errors = 1,
+            .notes = 1,
+        },
+        {
+            .name = "redeclaration-drop",
+            .errors = 1,
+            .notes = 1,
+        },
+        {
+            .name = "redeclaration-macro-qualified",
+            .errors = 1,
+            .notes = 1,
+        },
+        {
+            .name = "redeclaration-macro-atomic",
+            .errors = 1,
+            .notes = 1,
+        },
+        {
+            .name = "redeclaration-macro-trailing",
+            .errors = 1,
+            .notes = 1,
+        },
+        {
+            .name = "redeclaration-macro-trailing-atomic",
+            .errors = 1,
+            .notes = 1,
+        },
+        {
+            .name = "redeclaration-qualified",
+            .errors = 1,
+            .notes = 1,
+        },
+        {
+            .name = "restrict-specifier",
+            .errors = 1,
+        },
+        {
+            .name = "negative",
+            .errors = 1,
+        },
+        {
+            .name = "too-large",
+            .errors = 1,
+        },
+        {
+            .name = "nonconstant",
+            .errors = 1,
+        },
+        {
+            .name = "noninteger",
+            .errors = 1,
+        },
+        {
+            .name = "conflicting",
+            .errors = 1,
+        },
+        {
+            .name = "duplicate",
+            .warnings = 1,
+        },
+    };
+    CheckTestFixtures files = { .storage = arena_reserve(CHECK_TEST_FIXTURE_BYTES + 4096) };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "tests/driver/auto-address/%s.c", cases[i].name);
+        uint64_t length = 0;
+        CheckDriverDefaultWarningFixture fixture = cases[i];
+        fixture.source = files.storage.base != NULL ? check_test_fixture_read(&files, path, &length) : NULL;
+        check_test_expect(test, fixture.source != NULL, path);
+        if (fixture.source != NULL)
+        {
+            check_test_driver_warning_fixtures(test, clang, executable, directory, &fixture, 1);
+            fixture.c23 = true;
+            check_test_driver_warning_fixtures(test, clang, executable, directory, &fixture, 1);
+        }
+        arena_pop_to(&files.storage, 0);
+    }
+    arena_release(&files.storage);
 }

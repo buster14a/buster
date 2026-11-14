@@ -109,7 +109,13 @@ actual argument. All other
 operations, including faulting arithmetic, memory accesses and volatile
 annotations, remain in their original order. Any other body is the general
 splice's where `control_flow` is set and `IR_INLINE_BODY` where it isn't.
-Neither expands recursive or variadic calls.
+Neither expands recursive or variadic calls. Either takes, of the callee's
+side tables of descriptors, arguments and fixed types, the rows its nodes name
+(`IrInlineBody.descriptors`, `extra`, `types`), which are what an expansion
+writes: an optimized callee copied as it is (`IrInlineUnit.only`, #2541's
+summaries) may hold rows no node names any more, a deleted call's, which sized
+by its whole tables would have left the caller's uninitialized (#2541 step 2,
+`test-ir-inline`'s stale rows).
 
 Each eligible call receives separate `uint32_t` cost and expansion-size
 columns. Its structural cost is the number of cloned instructions, including
