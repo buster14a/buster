@@ -3372,15 +3372,15 @@ static bool parse_scalar_counted_member(const ParseScalar* parser, const ParseFr
 // clang's attributes whose arguments its parser reads its own way, as no expressions (#1447): availability's
 // (ParseAvailabilityAttribute), external_source_symbol's (ParseExternalSourceSymbolAttribute) and type_tag_for_datatype's
 // (ParseTypeTagForDatatypeAttribute: a kind, a type name and flags), objc_bridge_related's (ParseObjCBridgeRelatedAttribute:
-// a class and selectors) and swift_newtype's and swift_wrapper's (ParseSwiftNewTypeAttribute: `struct` or `enum`), by their
-// GNU names, a keyword's underscores too. Their arguments are a balanced run of tokens,
+// a class and selectors), swift_newtype's and swift_wrapper's (ParseSwiftNewTypeAttribute: `struct` or `enum`), and
+// suppress's parenthesized string list (#2332), by their GNU names, a keyword's underscores too. Their arguments are a balanced run of tokens,
 // which the checker reads as clang's parser does.
 static bool parse_scalar_custom_attribute(const ParseScalar* parser, IdentId name)
 {
     return parse_scalar_attribute_spelled(parser, name, true, "availability") || parse_scalar_attribute_spelled(parser, name, true, "external_source_symbol") ||
            parse_scalar_attribute_spelled(parser, name, true, "type_tag_for_datatype") ||
            parse_scalar_attribute_spelled(parser, name, true, "objc_bridge_related") || parse_scalar_attribute_spelled(parser, name, true, "swift_newtype") ||
-           parse_scalar_attribute_spelled(parser, name, true, "swift_wrapper");
+           parse_scalar_attribute_spelled(parser, name, true, "swift_wrapper") || parse_scalar_attribute_spelled(parser, name, true, "suppress");
 }
 
 // An expression parse failure inside a GNU attribute can follow an earlier malformed string slot. Clang's
@@ -10965,6 +10965,7 @@ static bool parse_prepare_meanings(Parser* parser, InternTable* table)
     static const char* const custom_spellings[BUSTER_PARSE_CUSTOM_ATTRIBUTES] = {
         "availability", "__availability__", "external_source_symbol", "__external_source_symbol__", "type_tag_for_datatype", "__type_tag_for_datatype__",
         "objc_bridge_related", "__objc_bridge_related__", "swift_newtype", "__swift_newtype__", "swift_wrapper", "__swift_wrapper__",
+        "suppress", "__suppress__",
     };
     for (uint32_t s = 0; s < BUSTER_PARSE_CUSTOM_ATTRIBUTES; s += 1)
     {

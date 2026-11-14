@@ -241,6 +241,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ATTRIBUTES_MISPLACED: result = "misplaced attributes; expected attributes here"; break;
         case CHECK_INPUT_ENUM_NOT_REPRESENTABLE: result = "enumerator value is not representable in the underlying type"; break;
         case CHECK_INPUT_ENUM_INVALID_BASE: result = "non-integral type is an invalid underlying type"; break;
+        case CHECK_INPUT_ENUM_VALUE_TYPE: result = "integer constant expression must have integer type"; break;
         case CHECK_INPUT_ATTRIBUTE_CONVENTIONS: result = "calling convention attributes are not compatible"; break;
         case CHECK_INPUT_CONVENTION_CHANGE: result = "function declared here was previously declared with another calling convention"; break;
         case CHECK_INPUT_VECTOR_ELEMENT: result = "invalid vector element type"; break;
@@ -452,6 +453,7 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_UNKNOWN_TYPE: snprintf(text, capacity, "unknown type name '%.*s'", (int)argument.length, argument.pointer); break;
         case CHECK_ARGUMENT_EXPECTED_TYPE: snprintf(text, capacity, "expected a type"); break;
         case CHECK_ARGUMENT_EXPECTED_PAREN: snprintf(text, capacity, "expected ')'"); break;
+        case CHECK_ARGUMENT_EXPECTED_DECLARATOR: snprintf(text, capacity, "expected identifier or '('"); break;
         case CHECK_ARGUMENT_PCS_TYPE: snprintf(text, capacity, "invalid PCS type"); break;
         case CHECK_ARGUMENT_CONVENTION_UNSUPPORTED: snprintf(text, capacity, "'%s' calling convention is not supported for this target", parsed); break;
         case CHECK_ARGUMENT_FUNCTIONS_METHODS: snprintf(text, capacity, "'%s' attribute only applies to functions and methods", parsed); break;
@@ -5690,7 +5692,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "definition of builtin function '%.*s'", (int)intern_length(pp->table, name),
                                                   (const char*)intern_bytes(pp->table, name));
                         }
-                        else if (phase == 0 && (kind == CHECK_INPUT_ENUM_NOT_REPRESENTABLE || kind == CHECK_INPUT_ENUM_INVALID_BASE))
+                        else if (phase == 0 && (kind == CHECK_INPUT_ENUM_NOT_REPRESENTABLE || kind == CHECK_INPUT_ENUM_INVALID_BASE || kind == CHECK_INPUT_ENUM_VALUE_TYPE))
                         {
                             // The underlying type as clang prints it, its typedef's name first (check_driver_warning_type).
                             const CheckInputReport* report = input->reports + index;
@@ -5706,7 +5708,12 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
                             const String8 type = spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, report->type_spelling) :
                                                            (String8){ 0 };
-                            if (kind == CHECK_INPUT_ENUM_INVALID_BASE)
+                            if (kind == CHECK_INPUT_ENUM_VALUE_TYPE)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                                      "integer constant expression must have integer type, not %.*s", (int)type.length, type.pointer);
+                            }
+                            else if (kind == CHECK_INPUT_ENUM_INVALID_BASE)
                             {
                                 pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
                                                       report->detail != 0 ? "%.*s is an invalid underlying type" :
@@ -6364,10 +6371,20 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                            report->note_kind == CHECK_INPUT_NOTE_CONSTANT_CONVERSION ? "this conversion is not allowed in a constant expression" :
                                            constant ? "subexpression not valid in a constant expression" : "to match this '('",
                             };
+                            // A missing outer delimiter of suppress's string list (#2332), located just after the
+                            // preceding token by the same adapter as the parser's ExpectAndConsume diagnostics.
+                            const bool delimiter = (argument_error == CHECK_ARGUMENT_EXPECTED_PAREN || argument_error == CHECK_ARGUMENT_EXPECTED_COMMA) &&
+                                                   (report->detail >> 8) != 0;
                             // (A `,` or `=` clang's ExpectAndConsume expects just past the token before: past the identifier's end.)
                             const bool past = (argument_error == CHECK_ARGUMENT_AVAILABILITY_COMMA || argument_error == CHECK_ARGUMENT_SOURCE_EQUAL) && token < count &&
                                               parser->tokens.names[token] != 0;
-                            if (past)
+                            if (delimiter)
+                            {
+                                const ParseDiagnostic diagnostic = { .token = token, .place = BUSTER_PARSE_AFTER_PREVIOUS };
+                                pp_diagnose_output_location_at(pp, PP_SEVERITY_ERROR, source, parse_diagnostic_location(parser, pp, &diagnostic), publication,
+                                                               PP_DIAGNOSTIC_SEMANTIC, "%s", text);
+                            }
+                            else if (past)
                             {
                                 pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, intern_length(pp->table, parser->tokens.names[token]), publication, "%s", text);
                             }

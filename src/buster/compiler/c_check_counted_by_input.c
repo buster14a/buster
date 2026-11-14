@@ -352,6 +352,9 @@ static bool check_input_counted_by_member(CheckInputReader* reader, const CheckT
         else if (undeclared != BUSTER_CHECK_NONE)
         {
             check_input_report(reader, undeclared, CHECK_INPUT_UNDECLARED);
+            // The normal reader's final pass cannot see reports after this member recovers them (#1842). Publish
+            // alignof's expression warning now, after its undeclared operand's error, using the same syntax walk.
+            check_input_alignof_undeclared(reader);
             valid = false;
         }
         else if (type_kind(types, record) == BUSTER_TYPE_KIND_UNION)
@@ -422,12 +425,14 @@ static bool check_input_counted_by_member(CheckInputReader* reader, const CheckT
             member->count_name = name;
         }
         // Clang's attribute errors come once its argument is parsed, after the warnings and errors its expression gave
-        // (#1842), which keep their places.
+        // (#1842), which keep their places. A final member name's error completes at argument_end too: publish the
+        // attribute's error after consuming the closing ')' so source order cannot put it ahead of the member's.
+        const uint32_t completion = attribute->argument_end + (uint32_t)expression_error;
         for (uint32_t r = reported; r < reader->output->report_count; r += 1)
         {
             CheckInputReport* report = reader->output->reports + r;
             const bool parsed = report->message == CHECK_INPUT_ATTRIBUTE_ARGUMENT || report->message == CHECK_INPUT_UNDECLARED;
-            report->completion = !parsed && report->completion < attribute->argument_end ? attribute->argument_end : report->completion;
+            report->completion = !parsed && report->completion < completion ? completion : report->completion;
         }
     }
     return valid;

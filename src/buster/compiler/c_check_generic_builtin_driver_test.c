@@ -257,6 +257,96 @@ static void check_test_driver_availability(CheckTest* test, const char* clang, c
     free(actual_lines);
 }
 
+// #1842's argument diagnostics and recovery, from an original runtime fixture: independent error/warning counts,
+// then Clang's complete output and status through both readers, in syntax-only and object mode. Rejected units
+// retain an existing output; malformed attributes leave later valid members and independent errors reachable.
+static void check_test_driver_counted_diagnostics(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    const char* const source = "tests/driver/counted_by_diagnostics.c";
+    static const struct
+    {
+        const char* name;
+        uint32_t unit;
+        const char* language;
+        const char* option;
+        uint32_t errors;
+        uint32_t warnings;
+        uint32_t notes;
+    } cases[] = {
+        { "valid members", 0, "-std=gnu23", NULL, 0, 0, 0 },
+        { "C17 valid members", 0, "-std=gnu17", NULL, 0, 0, 0 },
+        { "alignof expressions", 1, "-std=gnu23", NULL, 5, 4, 0 },
+        { "suppressed alignof expressions", 1, "-std=gnu23", "-Wno-gnu-alignof-expression", 5, 0, 0 },
+        { "promoted alignof expressions", 1, "-std=gnu23", "-Werror=gnu-alignof-expression", 9, 0, 0 },
+        { "member expression errors", 2, "-std=gnu23", NULL, 9, 0, 0 },
+        { "extra arguments", 3, "-std=gnu23", NULL, 5, 0, 4 },
+        { "empty arguments", 4, "-std=gnu23", NULL, 5, 0, 0 },
+        { "type and GNU alignof operands", 5, "-std=gnu23", NULL, 4, 0, 0 },
+        { "lexical warning policy", 6, "-std=gnu23", NULL, 2, 1, 0 },
+    };
+    static const char sentinel[] = "previous counted object\n";
+    char object[PATH_MAX];
+    snprintf(object, sizeof(object), "%s/counted-diagnostics.o", directory);
+    const bool available = access(source, R_OK) == 0;
+    check_test_expect(test, available, "counted diagnostics external fixture is available (run from the repository root)");
+    for (uint32_t c = 0; available && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        char define[64];
+        snprintf(define, sizeof(define), "-DCOUNTED_CASE=%u", cases[c].unit);
+        for (uint32_t mode = 0; mode < 2; mode += 1)
+        {
+            char* arguments[12] = { (char*)clang, (char*)cases[c].language, "-fno-caret-diagnostics", "-ferror-limit=0",
+                                    mode == 0 ? "-fsyntax-only" : "-c", define, (char*)source, "-o", object };
+            uint32_t count = 9;
+            if (cases[c].option != NULL)
+            {
+                arguments[count++] = (char*)cases[c].option;
+            }
+            char* expected = NULL;
+            const int oracle = check_test_driver_spawn(arguments, &expected);
+            const CheckDriverDiagnosticCounts counts = check_test_driver_diagnostic_counts(expected);
+            char description[512];
+            snprintf(description, sizeof(description), "counted diagnostics %s, mode %u: Clang's independent diagnostic counts", cases[c].name, mode);
+            check_test_expect(test, expected != NULL && (oracle != 0) == (cases[c].errors != 0) && counts.errors == cases[c].errors &&
+                                   counts.warnings == cases[c].warnings && counts.notes == cases[c].notes && counts.fatal == 0, description);
+            for (uint32_t scalar = 0; expected != NULL && scalar < 2; scalar += 1)
+            {
+                const bool saved = parse_test_write(object, sentinel, sizeof(sentinel) - 1);
+                check_test_expect(test, saved, "counted diagnostics existing output is installed");
+                arguments[0] = (char*)executable;
+                arguments[count] = scalar != 0 ? "--scalar" : NULL;
+                char* actual = NULL;
+                const int status = check_test_driver_spawn(arguments, &actual);
+                const bool same = actual != NULL && (status != 0) == (oracle != 0) && strcmp(actual, expected) == 0;
+                if (!same)
+                {
+                    fprintf(stderr, "counted diagnostics %s, mode %u, %s: clang=%d buster=%d\nclang: %s\nbuster: %s\n",
+                            cases[c].name, mode, scalar != 0 ? "scalar" : "vector", oracle, status, expected, actual != NULL ? actual : "");
+                }
+                snprintf(description, sizeof(description), "counted diagnostics %s, mode %u, %s: complete output and status", cases[c].name, mode,
+                         scalar != 0 ? "scalar" : "vector");
+                check_test_expect(test, same, description);
+                if (cases[c].errors != 0)
+                {
+                    char bytes[sizeof(sentinel)] = { 0 };
+                    FILE* file = fopen(object, "rb");
+                    const size_t length = file != NULL ? fread(bytes, 1, sizeof(bytes), file) : 0;
+                    const bool preserved = file != NULL && !ferror(file) && length == sizeof(sentinel) - 1 &&
+                                           memcmp(bytes, sentinel, sizeof(sentinel) - 1) == 0;
+                    if (file != NULL)
+                    {
+                        fclose(file);
+                    }
+                    check_test_expect(test, preserved, "a rejected counted argument leaves the existing output intact");
+                }
+                free(actual);
+            }
+            free(expected);
+        }
+    }
+    unlink(object);
+}
+
 // clang's counted_by family (#148, c_check_counted_by_input.c) and __builtin_counted_by_ref, by the driver against clang:
 // the whole output, line for line, with the exit status, by both paths of -fsyntax-only, a unit each (most of them have
 // one error): the attribute's places and argument forms, valid and not, with clang's errors of its member,
@@ -268,6 +358,7 @@ static void check_test_driver_availability(CheckTest* test, const char* clang, c
 // expression) beside those it takes.
 static void check_test_driver_counted_by(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+    check_test_driver_counted_diagnostics(test, clang, executable, directory);
     static const char* const units[] = {
         "struct S { int n; int fam[] __attribute__((counted_by(n))); };\n",
         "struct S { int n; int *p __attribute__((counted_by(n))); };\n",

@@ -62,6 +62,82 @@ static uint64_t check_test_builtin_typo_stress(char* text, uint64_t capacity)
     return fits ? length : 0;
 }
 
+// Attribute parser recovery (#2332), from an external original program. Compare the whole diagnostic stream, including
+// duplicates and notes, and the later independent error under both language modes, readers and deferred-body lanes.
+static void check_test_driver_attribute_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    const char* source = "tests/driver/attribute_recovery.c";
+    const bool available = access(source, R_OK) == 0;
+    check_test_expect(test, available, "attribute recovery fixture is available (run from the repository root)");
+    static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
+    static const char* const options[] = { "-ferror-limit=0", "-ferror-limit=2", "-w", "-Werror=ignored-attributes" };
+    static const char sentinel[] = "preserve the existing object\n";
+    char object[PATH_MAX];
+    snprintf(object, sizeof(object), "%s/attribute-recovery.o", directory);
+    for (uint32_t c = 0; available && c < 17; c += 1)
+    {
+        char define[64];
+        snprintf(define, sizeof(define), "-DBUSTER_CASE=%u", c);
+        for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(standards); s += 1)
+        {
+            for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(options); o += 1)
+            {
+                char* arguments[16] = { (char*)clang, (char*)standards[s], "-fsyntax-only", "-fno-caret-diagnostics", (char*)source, define, (char*)options[o], NULL };
+                char* expected = NULL;
+                const int oracle = check_test_driver_spawn(arguments, &expected);
+                char expected_lines[8192] = { 0 };
+                const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, sizeof(expected_lines));
+                check_test_expect(test, lines && (oracle == 0) == (c == 9), "attribute recovery oracle status");
+                if (lines && c != 9 && o != 1)
+                {
+                    check_test_expect(test, strstr(expected_lines, "use of undeclared identifier 'undeclared_after'") != NULL,
+                                      "attribute recovery oracle retains the later independent error");
+                }
+                for (uint32_t mode = 0; lines && mode < 3; mode += 1)
+                {
+                    arguments[0] = (char*)executable;
+                    arguments[7] = mode == 1 ? "--scalar" : NULL;
+                    bool preserved = true;
+                    if (mode == 2)
+                    {
+                        arguments[2] = "-c";
+                        arguments[7] = "--deferred-bodies";
+                        arguments[8] = "--lanes";
+                        arguments[9] = "2";
+                        arguments[10] = "-o";
+                        arguments[11] = object;
+                        arguments[12] = NULL;
+                        preserved = parse_test_write(object, sentinel, sizeof(sentinel) - 1);
+                    }
+                    char* actual = NULL;
+                    const int status = check_test_driver_spawn(arguments, &actual);
+                    char actual_lines[8192] = { 0 };
+                    const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, sizeof(actual_lines)) &&
+                                      strcmp(expected_lines, actual_lines) == 0;
+                    if (mode == 2 && c != 9)
+                    {
+                        char* contents = NULL;
+                        const int descriptor = open(object, O_RDONLY);
+                        preserved &= descriptor >= 0 && check_test_driver_read_file(descriptor, &contents) && contents != NULL && strcmp(contents, sentinel) == 0;
+                        if (descriptor >= 0)
+                        {
+                            close(descriptor);
+                        }
+                        free(contents);
+                    }
+                    char description[4096];
+                    snprintf(description, sizeof(description), "attribute recovery %u, %s %s, mode %u: status %d (clang %d), lines\n%s(clang\n%s)",
+                             c, standards[s], options[o], mode, status, oracle, actual_lines, expected_lines);
+                    check_test_expect(test, same && status == oracle && preserved, description);
+                    free(actual);
+                }
+                free(expected);
+            }
+        }
+    }
+    unlink(object);
+}
+
 static void check_test_driver_semantic_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char* const fixtures[] = {
@@ -1429,4 +1505,5 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
     unlink(object);
     free(expected_lines);
     free(actual_lines);
+    check_test_driver_attribute_recovery(test, clang, executable, directory);
 }

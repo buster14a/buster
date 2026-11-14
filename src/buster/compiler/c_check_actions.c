@@ -2155,6 +2155,18 @@ static void check_action_conditional(TypeTable* table, const CheckAction* action
     {
         common = left.type;
     }
+    else if (check_action_kind(table, left.type) == BUSTER_TYPE_KIND_ATOMIC && check_action_kind(table, right.type) == BUSTER_TYPE_KIND_ATOMIC)
+    {
+        // Two atomic rvalues with the same canonical type retain it (#2441). Merely compatible types do not suffice:
+        // an atomic enum and its compatible integer are distinct here. Alignment inside the atomic type is sugar.
+        // An atomic lvalue's earlier conversion removed _Atomic.
+        const TypeAnswer same = type_same_canonical(table, type_unqualified(left.type), type_unqualified(right.type));
+        common = same == TYPE_ANSWER_YES ? left.type : 0;
+        if (same == TYPE_ANSWER_FULL)
+        {
+            check_action_diagnose(result, CHECK_DIAG_RESOURCE, 1);
+        }
+    }
     else
     {
         // GCC's softening, which clang keeps with a warning each: pointers to incompatible types (void and a
