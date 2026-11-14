@@ -56,6 +56,10 @@
 #define BUSTER_IR_INLINE_MAX_FUNCTIONS (1u << 16)
 #define BUSTER_IR_INLINE_MAX_ITEMS (1u << 20)
 #define BUSTER_IR_INLINE_MAX_TOTAL (1u << 22)
+// IrInlineOptions.add_sites's default: on the 9700X the masked adds over every site take fewer cycles than the gathers'
+// flat 5.3 to 7.3 a node at every caller size measured up to 8 sites, and not at 12 (#2541 step 3's record,
+// splice_rule_bench.c's `all` form).
+#define BUSTER_IR_INLINE_ADD_SITES 8u
 
 typedef struct IrInlineUnit IrInlineUnit;
 struct IrInlineUnit
@@ -90,6 +94,9 @@ struct IrInlineOptions
     // before anything reads it (#2541's driver: SROA or promotion): neither is verified here, which would make each
     // expansion's function be verified four times over.
     bool trusted;
+    // The most expanded sites a caller's own operands move past by masked adds (IrInlineSites, #2541 step 3), the vector
+    // path's: a caller with more takes a gather through its destination tables. 0 gathers always.
+    uint8_t add_sites;
 };
 
 typedef enum IrInlineDecision
@@ -207,6 +214,7 @@ static __attribute__((unused)) IrInlineOptions ir_inline_options(void)
         .maximum_function_growth = 256,
         .maximum_unit_instructions = BUSTER_IR_INLINE_MAX_TOTAL,
         .enabled = true,
+        .add_sites = BUSTER_IR_INLINE_ADD_SITES,
     };
     return options;
 }
@@ -1063,6 +1071,21 @@ struct IrInlineBases
     uint32_t passed;
 };
 
+// A caller's expanded sites, in node order, where it has at most IrInlineOptions.add_sites of them (#2541 step 3): what
+// its own operands' destinations are a step function of. A node after site k moves by `growth[k]` (the expansion's nodes
+// less the call's one) and the site's own value is `result[k]` (its destination table's); a block after `block[k]` moves
+// by `blocks[k]` (the expansion's blocks and its continuation's, none for a straight line).
+typedef struct IrInlineSites IrInlineSites;
+struct IrInlineSites
+{
+    uint32_t node[16];
+    uint32_t growth[16];
+    uint32_t result[16];
+    uint32_t block[16];
+    uint32_t blocks[16];
+    uint32_t count;
+};
+
 typedef struct IrInlineCursor IrInlineCursor;
 struct IrInlineCursor
 {
@@ -1601,15 +1624,70 @@ static void ir_inline_expand_general(const IrFunction* source, uint32_t node, co
     }
 }
 
+// Whether the expansion of `callee` at `source`'s call `node` is described under -g (#2541 step 3): the caller and the
+// callee have sidecars and the call an origin, where the expansion's instance (IrDebugInline) is placed.
+static bool ir_inline_described(const IrFunction* source, uint32_t node, const IrFunction* callee)
+{
+    return source->debug != NULL && callee->debug != NULL && source->debug->origins[node] != BUSTER_IR_NONE;
+}
+
+// A described expansion's identities (#2541 step 3), after it: its callee's origins move past the caller's so far
+// (`rewritten`'s origin_count, which grows by the callee's), each copied instruction (`inner_values`: every one of a
+// general body's, a straight line's but its parameters, branches and last return) takes its callee origin there, and
+// the instance and the callee's own instances, nested in it, are appended.
+static void ir_inline_describe(const IrFunction* source, uint32_t node, const IrFunction* callee, uint32_t symbol, const uint32_t* inner_values, bool general,
+                               IrFunction* rewritten)
+{
+    if (ir_inline_described(source, node, callee))
+    {
+        IrDebugInfo* debug = rewritten->debug;
+        const IrDebugInfo* inner = callee->debug;
+        const uint32_t base = debug->origin_count;
+        const uint32_t call = source->debug->origins[node];
+        for (uint32_t k = 0; k < callee->instruction_count; k += 1)
+        {
+            const bool copied = callee->op[k] != IR_PARAM && (general || (callee->op[k] != IR_BR && k + 1 < callee->instruction_count));
+            if (copied && inner_values[k] < rewritten->instruction_count)
+            {
+                debug->origins[inner_values[k]] = inner->origins[k] != BUSTER_IR_NONE ? base + inner->origins[k] : BUSTER_IR_NONE;
+            }
+        }
+        IrDebugInline* table = (IrDebugInline*)debug->inlines;
+        const uint32_t at = debug->inline_count;
+        table[at] = (IrDebugInline){
+            .symbol = symbol,
+            .first = base,
+            .count = inner->entry_count,
+            .parent = ir_debug_instance(source->debug, call),
+            .call = call,
+        };
+        for (uint32_t j = 0; j < inner->inline_count; j += 1)
+        {
+            const IrDebugInline nested = inner->inlines[j];
+            table[at + 1 + j] = (IrDebugInline){
+                .symbol = nested.symbol,
+                .first = base + nested.first,
+                .count = nested.count,
+                .parent = nested.parent == BUSTER_IR_NONE ? at : at + 1 + nested.parent,
+                .call = base + nested.call,
+            };
+        }
+        debug->inline_count = at + 1 + inner->inline_count;
+        debug->origin_count = base + ir_debug_origin_limit(inner);
+    }
+}
+
 // The caller's nodes [first, end) of one block, between its expanded calls, copied to the cursor (#2541's design, "The
 // splice's columns"): each operand column rebased by its kind from the IR's operand tables (IrInlineKinds), a value to
 // its new place (`values`), a branch's block to its target's first part (`block_first`) and any other row kept, the
 // caller's own; then each rebuilt node's slice, in node order: a call's descriptor, a phi's edges (each from its
 // predecessor's last part, `block_last`), a switch's targets, an indirect branch's labels, a ternary intrinsic's third
-// operand. The columns 16 nodes a vector, by a table lookup of the kinds and two masked gathers, or by the scalar twin,
-// ir_inline_node's loop; the slices by both alike.
+// operand. The columns 16 nodes a vector, by a table lookup of the kinds and, where the caller has few expanded sites
+// (`sites`), a compare and masked add a site (a value after it moves by its growth, the site's own value is its result,
+// a block after its block moves by its blocks: the design's step function, #2541 step 3), or else two masked gathers
+// through the destination tables; or by the scalar twin, ir_inline_node's loop. The slices by both alike.
 static void ir_inline_copy_run(const IrFunction* source, uint32_t first, uint32_t end, const IrInlineKinds* kinds, const uint32_t* values, const uint32_t* block_first,
-                               const uint32_t* block_last, IrFunction* rewritten, bool scalar, IrInlineCursor* cursor)
+                               const uint32_t* block_last, const IrInlineSites* sites, IrFunction* rewritten, bool scalar, IrInlineCursor* cursor)
 {
     (void)scalar;
     (void)kinds;
@@ -1644,8 +1722,29 @@ static void ir_inline_copy_run(const IrFunction* source, uint32_t first, uint32_
                 const __mmask16 optional = _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_OPTIONAL)) & _mm512_cmpneq_epi32_mask(operand, none);
                 const __mmask16 value = mask & (_mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_VALUE)) | optional);
                 const __mmask16 target = mask & _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_BLOCK));
-                __m512i rebased = _mm512_mask_i32gather_epi32(operand, value, operand, values, 4);
-                rebased = _mm512_mask_i32gather_epi32(rebased, target, operand, block_first, 4);
+                __m512i rebased = operand;
+                if (sites != NULL)
+                {
+                    // Every site, not only those before the run: an operand may name a value laid out after its use.
+                    for (uint32_t k = 0; value != 0 && k < sites->count; k += 1)
+                    {
+                        const __m512i site = _mm512_set1_epi32((int32_t)sites->node[k]);
+                        const __mmask16 after = value & _mm512_cmpgt_epu32_mask(operand, site);
+                        const __mmask16 at = value & _mm512_cmpeq_epi32_mask(operand, site);
+                        rebased = _mm512_mask_add_epi32(rebased, after, rebased, _mm512_set1_epi32((int32_t)sites->growth[k]));
+                        rebased = _mm512_mask_mov_epi32(rebased, at, _mm512_set1_epi32((int32_t)sites->result[k]));
+                    }
+                    for (uint32_t k = 0; target != 0 && k < sites->count; k += 1)
+                    {
+                        const __mmask16 later = target & _mm512_cmpgt_epu32_mask(operand, _mm512_set1_epi32((int32_t)sites->block[k]));
+                        rebased = _mm512_mask_add_epi32(rebased, later, rebased, _mm512_set1_epi32((int32_t)sites->blocks[k]));
+                    }
+                }
+                else
+                {
+                    rebased = _mm512_mask_i32gather_epi32(operand, value, operand, values, 4);
+                    rebased = _mm512_mask_i32gather_epi32(rebased, target, operand, block_first, 4);
+                }
                 _mm512_mask_storeu_epi32(outputs[column] + to, mask, rebased);
             }
         }
@@ -1738,6 +1837,13 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
         .asm_body_count = source->asm_body_count,
     };
     uint32_t call = result->call_offsets[function];
+    // The caller's expanded sites (IrInlineSites), while they fit the add form's bound; one more and the gathers take it.
+    IrInlineSites expanded = { 0 };
+    uint32_t site_count = 0;
+    // Under -g, the origins and instances the expanded callees bring (IrDebugInline, #2541 step 3): a site whose call has
+    // an origin and whose callee has a sidecar, each callee's origins past the caller's, its instance and its own.
+    uint64_t debug_origins = source->debug != NULL ? ir_debug_origin_limit(source->debug) : 0;
+    uint64_t debug_inlines = source->debug != NULL ? source->debug->inline_count : 0;
     for (uint32_t block = 0; ok && block < source->block_count; block += 1)
     {
         block_first[block] = (uint32_t)sizes.block_count;
@@ -1764,6 +1870,20 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                     sizes.instruction_count += result->expanded_sizes[call];
                     values[node] = source->type[node] == IR_VOID ? BUSTER_IR_NONE : (uint32_t)sizes.instruction_count - 1;
                 }
+                if (ir_inline_described(source, node, callee))
+                {
+                    debug_origins += ir_debug_origin_limit(callee->debug);
+                    debug_inlines += 1 + (uint64_t)callee->debug->inline_count;
+                }
+                if (site_count < 16)
+                {
+                    expanded.node[site_count] = node;
+                    expanded.growth[site_count] = result->expanded_sizes[call] - 1;
+                    expanded.result[site_count] = values[node];
+                    expanded.block[site_count] = block;
+                    expanded.blocks[site_count] = rows.blocks;
+                }
+                site_count += 1;
                 sizes.block_count += rows.blocks;
                 sizes.constant_count += callee->constant_count;
                 sizes.address_count += callee->address_count + copies.addresses;
@@ -1811,8 +1931,9 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
         }
         block_last[block] = (uint32_t)sizes.block_count - 1;
     }
+    expanded.count = site_count < 16 ? site_count : 16;
     IrError error = ok ? IR_OK : IR_ERROR_MEMORY;
-    if (sizes.instruction_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.constant_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.address_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.extra_count > BUSTER_IR_INLINE_MAX_ITEMS ||
+    if (debug_origins > BUSTER_IR_INLINE_MAX_TOTAL || debug_inlines > BUSTER_IR_INLINE_MAX_ITEMS || sizes.instruction_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.constant_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.address_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.extra_count > BUSTER_IR_INLINE_MAX_ITEMS ||
         sizes.call_type_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.slot_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.vector_constant_count > BUSTER_IR_INLINE_MAX_ITEMS ||
         sizes.row_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.asm_body_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.call_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.block_count > BUSTER_IR_INLINE_MAX_ITEMS ||
         sizes.abi_call_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.passed_count > BUSTER_IR_INLINE_MAX_ITEMS)
@@ -1837,14 +1958,29 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
     {
         error = IR_ERROR_MEMORY;
     }
+    // The caller's instances, then each described expansion's, appended in site order (ir_inline_describe).
+    IrDebugInline* debug_table = error == IR_OK && rewritten.debug != NULL ? ir_allocate(output, debug_inlines, sizeof(IrDebugInline), &ok) : 0;
+    if (!ok)
+    {
+        error = IR_ERROR_MEMORY;
+    }
+    else if (debug_table != 0)
+    {
+        if (source->debug->inline_count != 0)
+        {
+            memcpy(debug_table, source->debug->inlines, (uint64_t)source->debug->inline_count * sizeof(IrDebugInline));
+        }
+        rewritten.debug->inlines = debug_inlines != 0 ? debug_table : NULL;
+        rewritten.debug->origin_count = ir_debug_origin_limit(source->debug);
+    }
     if (error == IR_OK)
     {
         for (uint32_t block = 0; debug_blocks != 0 && block < source->block_count; block += 1)
         {
             debug_blocks[block] = block_first[block] == block_last[block] ? block_first[block] : BUSTER_IR_NONE;
         }
-        // Only the caller's identities survive this interface. Cloned callee slots and instructions remain unknown
-        // until inline-instance identities are represented; they cannot inherit the caller's token or local number.
+        // The caller's identities; a described expansion's instructions take its callee's origins as an instance's
+        // (ir_inline_describe, after each expansion), never the caller's token, and its slots no local of the caller's.
         ir_debug_remap(source, &rewritten, values, NULL, debug_blocks);
         rewritten.result_type = source->result_type;
         rewritten.symbol_count = source->symbol_count;
@@ -1960,6 +2096,7 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                         }
                         ir_inline_expand_general(source, node, callee, shape, kinds, values, inner_values, parameters, &rewritten, bases, options.vector_copies, options.scalar, &cursor,
                                                  &new_block);
+                        ir_inline_describe(source, node, callee, unit->symbols[result->callees[call]], inner_values, true, &rewritten);
                         bases.abi_calls += callee->abi_call_count;
                         bases.passed += callee->passed_count;
                     }
@@ -1969,6 +2106,7 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                         IrInlineBases line = bases;
                         line.abi_calls = 0;
                         ir_inline_expand(source, node, callee, values, inner_values, parameters, &rewritten, line, options.vector_copies, &cursor);
+                        ir_inline_describe(source, node, callee, unit->symbols[result->callees[call]], inner_values, false, &rewritten);
                     }
                     bases.constants += callee->constant_count;
                     bases.vectors += callee->vector_constant_count;
@@ -1985,7 +2123,8 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                         sites += ir_inline_site(source, last);
                         last += 1;
                     }
-                    ir_inline_copy_run(source, node, last, kinds, values, block_first, block_last, &rewritten, options.scalar, &cursor);
+                    ir_inline_copy_run(source, node, last, kinds, values, block_first, block_last, site_count <= options.add_sites && site_count <= 16 ? &expanded : NULL, &rewritten,
+                                       options.scalar, &cursor);
                     node = last - 1;
                     call += sites - site;
                 }

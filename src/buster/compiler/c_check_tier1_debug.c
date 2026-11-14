@@ -30,6 +30,9 @@ struct CheckTier1Debug
     uint32_t* source_records;
     uint32_t* source_origins;
     uint32_t source_count;
+    // The expanded callees' instances the source origins name (the IR's IrDebugInline, #2541 step 3).
+    EmittedInline* inlines;
+    uint32_t inline_count;
     EmittedLocalRange* local_ranges;
     uint32_t local_range_count;
 };
@@ -718,7 +721,11 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
         valid = valid && ((scalar.kind == IR_DEBUG_PARAMETER && scalar.local < function->parameter_count && scalar.entry == BUSTER_IR_NONE) ||
                           (scalar.kind == IR_DEBUG_CONSTANT && scalar.local >= function->parameter_count && scalar.entry < function->count));
     }
+    // Per record, its source origin as the IR has it (`raw`: an expanded callee's entry is an instance's, #2541 step 3),
+    // which the source events carry, and as the function's own entries (`entries`: an instance's code is at its
+    // outermost call), which every location proof reads.
     uint32_t* entries = valid ? ir_allocate(scratch, (uint64_t)count + 1, 4, &valid) : NULL;
+    uint32_t* raw = valid ? ir_allocate(scratch, (uint64_t)count + 1, 4, &valid) : NULL;
     uint8_t* safe = valid ? ir_allocate(scratch, (uint64_t)count + 1, 1, &valid) : NULL;
     uint8_t* seen = valid && record_order != NULL ? ir_allocate(scratch, (uint64_t)count + 1, 1, &valid) : NULL;
     CheckTier1DebugSpan* spans = valid ? ir_allocate(scratch, (uint64_t)count + 1, sizeof(CheckTier1DebugSpan), &valid) : NULL;
@@ -743,9 +750,17 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
             const bool own = kind == TIER1_ORIGIN_NODE || kind == TIER1_ORIGIN_OTHER;
             const bool move = kind == TIER1_ORIGIN_MOVE && payload >= position_base;
             const uint32_t node = own ? payload : move ? (payload - position_base) / 2 : BUSTER_IR_NONE;
-            const uint32_t entry = node < nodes ? debug->origins[node] : BUSTER_EMISSION_NO_ORIGIN;
+            const uint32_t origin_entry = node < nodes ? debug->origins[node] : BUSTER_EMISSION_NO_ORIGIN;
             const uint32_t control = x86_effects_control(x86_effects(emitted->code.records[old].form));
-            valid = kind <= TIER1_ORIGIN_OTHER && (!own || node < nodes) && (entry == BUSTER_EMISSION_NO_ORIGIN || entry < function->count);
+            valid = kind <= TIER1_ORIGIN_OTHER && (!own || node < nodes) && (origin_entry == BUSTER_EMISSION_NO_ORIGIN || origin_entry < ir_debug_origin_limit(debug));
+            uint32_t entry = origin_entry;
+            for (uint32_t depth = 0; valid && entry != BUSTER_EMISSION_NO_ORIGIN && entry >= function->count && depth <= debug->inline_count; depth += 1)
+            {
+                const uint32_t instance = ir_debug_instance(debug, entry);
+                entry = instance != BUSTER_IR_NONE ? debug->inlines[instance].call : BUSTER_EMISSION_NO_ORIGIN;
+            }
+            valid = valid && (entry == BUSTER_EMISSION_NO_ORIGIN || entry < function->count);
+            raw[r] = entry != BUSTER_EMISSION_NO_ORIGIN ? origin_entry : BUSTER_EMISSION_NO_ORIGIN;
             entries[r] = entry;
             safe[r] = entry != BUSTER_EMISSION_NO_ORIGIN && old >= body && r >= body && r < epilogue && kind != TIER1_ORIGIN_FRAME && kind != TIER1_ORIGIN_ENTRY && control != BUSTER_X86_CONTROL_RETURN;
         }
@@ -832,11 +847,24 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
     {
         candidate.source_records = ir_allocate(output, (uint64_t)count + 1, 4, &valid);
         candidate.source_origins = ir_allocate(output, (uint64_t)count + 1, 4, &valid);
+        candidate.inlines = debug->inline_count != 0 ? ir_allocate(output, debug->inline_count, sizeof(EmittedInline), &valid) : NULL;
         candidate.local_ranges = ranges != 0 ? ir_allocate(output, ranges, sizeof(EmittedLocalRange), &valid) : NULL;
     }
     if (valid)
     {
-        candidate.source_count = check_tier1_debug_sources(entries, body, epilogue, vector, candidate.source_records, candidate.source_origins);
+        candidate.source_count = check_tier1_debug_sources(raw, body, epilogue, vector, candidate.source_records, candidate.source_origins);
+        for (uint32_t k = 0; k < debug->inline_count; k += 1)
+        {
+            const IrDebugInline instance = debug->inlines[k];
+            candidate.inlines[k] = (EmittedInline){
+                .symbol = instance.symbol,
+                .first = instance.first,
+                .count = instance.count,
+                .parent = instance.parent,
+                .call = instance.call,
+            };
+        }
+        candidate.inline_count = debug->inline_count;
         if (object_ranges != 0)
         {
             candidate.local_range_count += (uint32_t)check_tier1_debug_object_ranges(homes, local_slots, locals, spans, span_count, object_clips, candidate.local_ranges);

@@ -406,7 +406,7 @@ static void tier1_allocation_test_unread(Tier1AllocationTestTally* tally, Arena*
 // - hinted to b, as a phi's range is to its operand, the range takes r0, free at 6, as before;
 // - required at 6, it takes r0 there too.
 // The masks keep both production paths on the scan.
-static void tier1_allocation_test_waits(Tier1AllocationTestTally* tally, Arena* arena)
+static void tier1_allocation_test_slot_waits(Tier1AllocationTestTally* tally, Arena* arena)
 {
     const uint32_t starts[4] = { 0, 1, 2, 6 };
     const uint32_t ends[][4] = {
@@ -506,6 +506,96 @@ static void tier1_allocation_test_waits(Tier1AllocationTestTally* tally, Arena* 
         }
         tier1_allocation_test_expect(tally, produced && tier1_allocation_test_equal(&input, &outputs[0], &outputs[1]), "both production paths place a range from its value's slot alike");
         arena_pop_to(arena, saved);
+    }
+}
+
+// The allocation's outputs against one fixture's expected fragments, on the three paths alike.
+static void tier1_allocation_test_fragments(Tier1AllocationTestTally* tally, Arena* arena, const Tier1AllocationInput* input, uint32_t fragments, const uint8_t* kinds, const uint8_t* registers, const uint32_t* starts, const char* name)
+{
+    Tier1Allocation outputs[3] = { { 0 } };
+    bool produced = true;
+    const uint64_t saved = arena->length;
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        const Tier1AllocationError error = path == 0 ? tier1_allocate(input, arena, &outputs[path]) : path == 1 ? tier1_allocate_scalar(input, arena, &outputs[path]) : tier1_allocate_scan_reference(input, arena, &outputs[path]);
+        const Tier1Allocation* output = &outputs[path];
+        bool valid = error == TIER1_ALLOCATION_OK && output->fragment_count == fragments && output->spill_count == 0 && tier1_allocation_verify(input, output) && tier1_allocation_test_occupancy(input, output);
+        valid = valid && memcmp(output->kinds, kinds, fragments) == 0 && memcmp(output->registers, registers, fragments) == 0 && memcmp(output->starts, starts, fragments * sizeof(uint32_t)) == 0;
+        produced &= error == TIER1_ALLOCATION_OK;
+        tier1_allocation_test_expect(tally, valid, name);
+        if (!valid && error == TIER1_ALLOCATION_OK)
+        {
+            fprintf(stderr, "  path %u: %u fragments:", path, output->fragment_count);
+            for (uint32_t f = 0; f < output->fragment_count; f += 1)
+            {
+                fprintf(stderr, " %u@%u/r%u", output->kinds[f], output->starts[f], output->registers[f]);
+            }
+            fprintf(stderr, "\n");
+        }
+    }
+    tier1_allocation_test_expect(tally, produced && tier1_allocation_test_equal(input, &outputs[0], &outputs[1]), "both production paths place a recipe's later range alike");
+    arena_pop_to(arena, saved);
+}
+
+// A recipe's range after a closing that held no register (#2618, #2735), with one register: recipe value 0 takes r0 at 0,
+// read at 1, and leaves it at 4; its range at 10, named by the first one's closing, is read at 15. Where a required value
+// 1 took r0 at 4, the closing is memory, and the range at 10 waits for its read at 15 (tier1_allocation's `waits`, where
+// it took r0 at once before). Where a call's clobber at 4 took it, and value 1 then r0, the closing gives no hint
+// (tier1_allocation_note_closing), and the range at 10 takes r0, value 0's last register, at its start.
+static void tier1_allocation_test_waits(Tier1AllocationTestTally* tally, Arena* arena)
+{
+    const uint32_t starts[3] = { 0, 4, 10 };
+    const uint32_t ends[3] = { 10, 8, 20 };
+    const uint32_t values[3] = { 0, 1, 0 };
+    const uint32_t allowed[3] = { 1, 1, 1 };
+    const uint8_t classes[3] = { 0 };
+    const uint8_t rematerializable[3] = { 1, 0, 1 };
+    const uint32_t hint_intervals[3] = { UINT32_MAX, UINT32_MAX, 0 | BUSTER_TIER1_ALLOCATE_HINT_EXIT };
+    const uint32_t use_offsets[4] = { 0, 1, 2, 3 };
+    const uint32_t use_positions[3] = { 1, 4, 15 };
+    const uint32_t clobbers[1] = { 4 };
+    const uint8_t required[3] = { 1, 1, 1 };
+    const uint8_t kinds[][5] = {
+        { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, BUSTER_TIER1_ALLOCATE_REGISTER },
+        { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER },
+    };
+    const uint8_t registers[][5] = {
+        { 0, UINT8_MAX, 0, UINT8_MAX, 0 },
+        { 0, UINT8_MAX, 0, 0 },
+    };
+    const uint32_t fragment_starts[][5] = {
+        { 0, 4, 4, 10, 15 },
+        { 0, 4, 4, 10 },
+    };
+    const uint32_t fragments[2] = { 5, 4 };
+    const char* names[2] = {
+        "a recipe's range after a closing in memory waits for its read",
+        "a recipe's range after a closing a call emptied takes its register at its start",
+    };
+    for (uint32_t fixture = 0; fixture < 2; fixture += 1)
+    {
+        const Tier1AllocationInput input = {
+            .starts = starts,
+            .ends = ends,
+            .values = values,
+            .allowed_registers = allowed,
+            .classes = classes,
+            .hint_values = values,
+            .hint_intervals = hint_intervals,
+            .rematerializable = rematerializable,
+            .use_offsets = use_offsets,
+            .use_positions = use_positions,
+            .use_required = required,
+            .use_count = 3,
+            .clobbers = fixture == 1 ? clobbers : 0,
+            .clobber_count = fixture == 1 ? 1 : 0,
+            .clobber_registers = { fixture == 1 ? 1u : 0u },
+            .count = 3,
+            .value_count = 2,
+            .position_count = 20,
+            .registers = { 1 },
+        };
+        tier1_allocation_test_fragments(tally, arena, &input, fragments[fixture], kinds[fixture], registers[fixture], fragment_starts[fixture], names[fixture]);
     }
 }
 
@@ -679,6 +769,7 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
     tier1_allocation_test_yields(tally, arena);
     tier1_allocation_test_unread(tally, arena);
     tier1_allocation_test_waits(tally, arena);
+    tier1_allocation_test_slot_waits(tally, arena);
     tier1_allocation_test_stored_victims(tally, arena);
     tier1_allocation_test_empty_openings(tally, arena);
     // Two values, each with two adjacent ranges: a [0, 10) [10, 20), b [2, 10) [10, 20). Ends come first in input
