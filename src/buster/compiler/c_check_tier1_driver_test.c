@@ -1879,13 +1879,15 @@ static void check_test_driver_tier1_gvn(CheckTest* test, const char* clang, cons
 // The --tier1-passes= fixture (#139): tier1_passes gives each pass of Tier 1's pipeline something to do: a constant
 // compare (SCCP), an unused product (dead-code removal), a branch whose arms only call, leaving an empty block that jumps
 // to a join without phis (CFG cleanup), a loop-invariant sum (LICM), a struct local (SROA), a repeated sum (#866's
-// solver) and two small static callees (the inlining).
+// solver) and two small static callees (the inlining). It is noinline itself: expanded into main twice (#2541 step 2
+// expands external definitions), its blocks are the merge's whether or not CFG cleanup runs, and the counts no longer
+// tell the passes apart.
 static const char check_test_tier1_passes_source[] =
     "#include <stdio.h>\n"
     "struct tier1_passes_pair { long low; long high; };\n"
     "static long tier1_passes_twice(long x) { return x * 2 + 1; }\n"
     "static struct tier1_passes_pair tier1_passes_make(long a) { struct tier1_passes_pair p = { a, a * 2 }; return p; }\n"
-    "long tier1_passes(const long* values, long n, long k)\n"
+    "__attribute__((noinline)) long tier1_passes(const long* values, long n, long k)\n"
     "{\n"
     "    struct tier1_passes_pair pair = tier1_passes_make(k + 4);\n"
     "    const long scale = 3;\n"
