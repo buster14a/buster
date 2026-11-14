@@ -6215,10 +6215,21 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             check_test_program_boundary_target(test, "union __attribute__((packed)) U{float v __attribute__((vector_size(16)));char c[22];};"
                                                      "union U make(int n){union U u={0};u.c[0]=(char)n;return u;}int tested(int n){return make(n).c[0];}",
                                                "odd-vector-union-result", true, true, 1, 1, NULL, &v3);
-            // At 24 bytes the <3 x double> coercion still needs an unsupported wider register payload (#2113).
+            // At 24 to 31 bytes clang returns <3 x double> in ymm0, Tier 0's payload of 24 bytes (#2113).
             check_test_program_boundary_target(test, "union __attribute__((packed)) U{float v __attribute__((vector_size(16)));char c[24];};"
                                                      "union U make(int n){union U u={0};u.c[0]=(char)n;return u;}int tested(int n){return make(n).c[0];}",
-                                               "odd-vector-union-result-24", true, false, 1, 1, "structs and unions returned in these registers", &v3);
+                                               "odd-vector-union-result-24", true, true, 1, 1, NULL, &v3);
+        }
+        // And at x86-64-v4 from 33 bytes in a ymm or a zmm register: <4 x double> at 39 bytes, <5 x double> at 47.
+        X86Target v4 = { 0 };
+        if (x86_target_parse("x86-64-v4", 9, &v4))
+        {
+            check_test_program_boundary_target(test, "union __attribute__((packed)) U{float v __attribute__((vector_size(16)));char c[39];};"
+                                                     "union U make(int n){union U u={0};u.c[0]=(char)n;return u;}int tested(int n){return make(n).c[0];}",
+                                               "odd-vector-union-result-39", true, true, 1, 1, NULL, &v4);
+            check_test_program_boundary_target(test, "union __attribute__((packed)) U{float v __attribute__((vector_size(16)));char c[47];};"
+                                                     "union U make(int n){union U u={0};u.c[0]=(char)n;return u;}int tested(int n){return make(n).c[0];}",
+                                               "odd-vector-union-result-47", true, true, 1, 1, NULL, &v4);
         }
         check_test_program_boundary(test, "struct W{unsigned __int128 x:100;};int tested(int n){struct W w;w.x=n;return w.x>1;}", "int128-bit-field-past-8-bytes", true,
                                     false, 0, 0);
