@@ -10657,11 +10657,11 @@ struct CheckDriverDeferred
 // came first. `toggled` holds the BUSTER_CHECK_TIER1_PASS_* bits that differ from the default; `gvn` and `no_inline` are
 // the two passes with options of their own. Returns false, and leaves all three as they were, for an empty list or item,
 // an item without its sign, or an unknown name.
-#define BUSTER_CHECK_DRIVER_PASS_GVN 64u
-#define BUSTER_CHECK_DRIVER_PASS_INLINE 128u
+#define BUSTER_CHECK_DRIVER_PASS_GVN 256u
+#define BUSTER_CHECK_DRIVER_PASS_INLINE 512u
 static bool check_driver_tier1_passes(const char* list, uint8_t* toggled, bool* gvn, bool* no_inline)
 {
-    static const char* const names[] = { "sccp", "dce", "cfg", "merge", "licm", "sroa", "gvn", "inline", "all" };
+    static const char* const names[] = { "sccp", "dce", "cfg", "merge", "licm", "sroa", "memory", "gvn", "inline", "all" };
     static const uint32_t bits[] = {
         BUSTER_CHECK_TIER1_PASS_SCCP,
         BUSTER_CHECK_TIER1_PASS_DCE,
@@ -10669,6 +10669,7 @@ static bool check_driver_tier1_passes(const char* list, uint8_t* toggled, bool* 
         BUSTER_CHECK_TIER1_PASS_MERGE,
         BUSTER_CHECK_TIER1_PASS_LICM,
         BUSTER_CHECK_TIER1_PASS_SROA,
+        BUSTER_CHECK_TIER1_PASS_MEMORY,
         BUSTER_CHECK_DRIVER_PASS_GVN,
         BUSTER_CHECK_DRIVER_PASS_INLINE,
         BUSTER_CHECK_TIER1_PASSES_ALL | BUSTER_CHECK_DRIVER_PASS_GVN | BUSTER_CHECK_DRIVER_PASS_INLINE,

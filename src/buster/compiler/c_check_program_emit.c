@@ -510,8 +510,9 @@ struct CheckEmitGrowth
 #define BUSTER_CHECK_TIER1_PASS_LICM 8u
 #define BUSTER_CHECK_TIER1_PASS_SROA 16u
 #define BUSTER_CHECK_TIER1_PASS_MERGE 32u
+#define BUSTER_CHECK_TIER1_PASS_MEMORY 64u
 #define BUSTER_CHECK_TIER1_PASSES_DEFAULT (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE)
-#define BUSTER_CHECK_TIER1_PASSES_ALL (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA)
+#define BUSTER_CHECK_TIER1_PASSES_ALL (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_MEMORY)
 
 typedef struct CheckTier1Lane CheckTier1Lane;
 struct CheckTier1Lane
@@ -634,6 +635,8 @@ struct CheckTier1Counts
     uint32_t licm_moved;
     uint32_t sroa_split;
     uint32_t gvn_removed;
+    // The loads value numbering with memory forwarded (#2718).
+    uint32_t loads_forwarded;
 };
 
 #define BUSTER_CHECK_TIER1_OPERATIONS 256
@@ -679,6 +682,7 @@ struct CheckTier1Report
     uint64_t licm_moved;
     uint64_t sroa_split;
     uint64_t gvn_removed;
+    uint64_t loads_forwarded;
     // The functions the inlining left without code (#2541 step 2, CheckProgramCode.dead_functions).
     uint64_t dead_functions;
 };
@@ -5499,6 +5503,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->tier1_report.licm_moved += compiled ? counts->licm_moved : 0;
         lanes->tier1_report.sroa_split += compiled ? counts->sroa_split : 0;
         lanes->tier1_report.gvn_removed += compiled ? counts->gvn_removed : 0;
+        lanes->tier1_report.loads_forwarded += compiled ? counts->loads_forwarded : 0;
     }
     if (!valid)
     {

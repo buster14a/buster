@@ -24,7 +24,8 @@
 // CFG cleanup's merges (#139, ir_optimize_merges): a block whose single predecessor has it as its single successor joins
 // it. The C driver's Tier 1 requests it; the shared optimizer's default keeps each block, as its other clients expect.
 #define BUSTER_IR_OPTIMIZE_MERGE 32u
-#define BUSTER_IR_OPTIMIZE_PASSES (BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_LAYOUT | BUSTER_IR_OPTIMIZE_IDENTITY | BUSTER_IR_OPTIMIZE_MERGE)
+#define BUSTER_IR_OPTIMIZE_MEMORY 64u
+#define BUSTER_IR_OPTIMIZE_PASSES (BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_LAYOUT | BUSTER_IR_OPTIMIZE_IDENTITY | BUSTER_IR_OPTIMIZE_MERGE | BUSTER_IR_OPTIMIZE_MEMORY)
 #define BUSTER_IR_OPTIMIZE_AUTO 0u
 #define BUSTER_IR_OPTIMIZE_VECTOR 1u
 #define BUSTER_IR_OPTIMIZE_SCALAR 2u
@@ -62,6 +63,7 @@ struct IrOptimizeResult
     uint32_t removed_blocks;
     // CFG cleanup's merged blocks (ir_optimize_merges): each joins its single predecessor; removed_blocks counts them too.
     uint32_t merged_blocks;
+    uint32_t forwarded_loads;
     bool worklist_fallback;
 };
 
@@ -2242,6 +2244,8 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
     return error;
 }
 
+#include "ir_optimize_memory.c"
+
 static IrCheck ir_optimize_verify_twins(const IrFunction* function, Arena* output, Arena* scratch, bool scalar, bool verify_scalar)
 {
     (void)scalar;
@@ -2370,6 +2374,10 @@ static __attribute__((aligned(64))) IrCheck ir_optimize(const IrFunction* functi
         }
         check.error = work.simd_error;
         if (check.error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_IDENTITY) != 0 && !ir_optimize_identities(&work, scratch))
+        {
+            check.error = IR_ERROR_MEMORY;
+        }
+        if (check.error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_MEMORY) != 0 && !ir_optimize_memory(&work, scratch, &work.statistics.forwarded_loads))
         {
             check.error = IR_ERROR_MEMORY;
         }
