@@ -11037,6 +11037,7 @@ static Parser* check_attested_parse(CheckAttested* attested, Parser* parser);
 static bool check_attested_memo_key(int count, char** arguments, char* const* inputs, uint32_t input_count, uint64_t* key);
 static CheckAttested* check_attested_lane_open(uint8_t mode, const char* memo, const uint64_t* key, bool alone);
 static void check_attested_lane_close(CheckAttested* attested);
+static void check_attested_lane_leave(CheckAttested* attested);
 static void check_attested_begin(CheckAttested* attested, bool again);
 static bool check_attested_again(const CheckAttested* attested, bool failed);
 static void check_attested_summary(const CheckAttested* attested, uint64_t* counts);
@@ -12296,11 +12297,18 @@ static int check_driver_one_unit(const CheckDriverRun* run)
     options.preprocessed = run->command->inputs != NULL && run->command->inputs[0].preprocessed;
     // A memo kept across processes (#2531's step 4): the unit's attested declarations' state, and its diagnostics into a
     // stream of their own, which a unit that skipped and failed is read into again from its start with nothing skipped (as
-    // a units' run's lanes read theirs, check_units_compile), then given to stderr.
+    // a units' run's lanes read theirs, check_units_compile), then given to stderr. The stream is the heap's (no file to
+    // make, and to free as the process ends): its text is what it holds up to its position, so that a reading again
+    // writes over the first's from its start.
     CheckAttested* const attested = run->command->attested_memo != NULL && !run->command->deferred_bodies ?
                                     check_attested_lane_open(run->command->attested, run->command->attested_memo, run->command->attested_key, true) : NULL;
-    FILE* const stream = attested != NULL ? tmpfile() : NULL;
+    char* text = NULL;
+    size_t text_length = 0;
+    FILE* const stream = attested != NULL ? open_memstream(&text, &text_length) : NULL;
     FILE* const errors = stream != NULL ? stream : stderr;
+    // Every diagnostic into it: the preprocessor's and the checker's, which print to the options' stream (as a units'
+    // lane's do, check_units_compile).
+    options.diagnostics = stream != NULL ? stream : options.diagnostics;
     run->lanes->attested = stream != NULL ? attested : NULL;
     const uint64_t marks[3] = { run->arena->length, run->scratch->length, run->output_arena->length };
     check_attested_begin(run->lanes->attested, false);
@@ -12309,8 +12317,7 @@ static int check_driver_one_unit(const CheckDriverRun* run)
                                   run->command->deferred_bodies ? &deferred : NULL, NULL);
     if (check_attested_again(run->lanes->attested, result != 0))
     {
-        fflush(errors);
-        result = fseeko(errors, 0, SEEK_SET) == 0 && ftruncate(fileno(errors), 0) == 0 ? result : 1;
+        result = fseeko(errors, 0, SEEK_SET) == 0 ? result : 1;
         arena_pop_to(run->arena, marks[0]);
         arena_pop_to(run->scratch, marks[1]);
         arena_pop_to(run->output_arena, marks[2]);
@@ -12321,17 +12328,11 @@ static int check_driver_one_unit(const CheckDriverRun* run)
     }
     if (stream != NULL)
     {
-        // The unit's diagnostics, the last reading's.
-        fflush(stream);
-        rewind(stream);
-        char block[4096];
-        size_t length = fread(block, 1, sizeof(block), stream);
-        while (length != 0)
-        {
-            fwrite(block, 1, length, stderr);
-            length = fread(block, 1, sizeof(block), stream);
-        }
+        // The unit's diagnostics, the last reading's: the stream's text up to its position.
+        const off_t end = fflush(stream) == 0 ? ftello(stream) : 0;
         fclose(stream);
+        fwrite(text, 1, text != NULL && end > 0 && (size_t)end <= text_length ? (size_t)end : 0, stderr);
+        free(text);
     }
     run->lanes->attested = NULL;
     if (attested != NULL)
@@ -12339,7 +12340,15 @@ static int check_driver_one_unit(const CheckDriverRun* run)
         memset(check_units_attested_last, 0, sizeof(check_units_attested_last));
         check_attested_summary(attested, check_units_attested_last);
     }
-    check_attested_lane_close(attested);
+    // The state's arenas stay to the exit where the command leaves its own memory to it (as a units' run's last lanes do).
+    if (run->release)
+    {
+        check_attested_lane_close(attested);
+    }
+    else
+    {
+        check_attested_lane_leave(attested);
+    }
     if (result == 0)
     {
         result = dependency_publish(&dependency, stderr) ? 0 : 1;
