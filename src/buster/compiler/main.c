@@ -2085,10 +2085,6 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_ir_source_benchmark(argc - 2, argv + 2);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir-source-passes") == 0)
-    {
-        result = run_ir_source_passes_benchmark(argc - 2, argv + 2);
-    }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-tier0-inline") == 0)
