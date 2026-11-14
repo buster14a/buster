@@ -12371,8 +12371,8 @@ static void check_common_rejected_initializer_commas(const Parser* parser, Prepr
                 const uint32_t initializer = root < graph->count ? facts.parents[root] : BUSTER_CHECK_NONE;
                 const PPDiagnosticRecord* previous = pp->diagnostic_last;
                 check_common_comma_marker(&emission, node);
-                if (pp->diagnostic_last != previous && initializer < graph->count && graph->ops[initializer] == CHECK_OP_INITIALIZE &&
-                    graph->source_positions != NULL)
+                if (pp->diagnostic_last != previous && pp->diagnostic_last->position % PP_DIAGNOSTIC_PHASE_COUNT == PP_DIAGNOSTIC_RUNTIME &&
+                    initializer < graph->count && graph->ops[initializer] == CHECK_OP_INITIALIZE && graph->source_positions != NULL)
                 {
                     const uint32_t completion = graph->source_positions[initializer];
                     const uint64_t position = (uint64_t)check_common_publication_source(parser, pp, completion) * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_RUNTIME;
