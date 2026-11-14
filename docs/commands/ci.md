@@ -418,6 +418,17 @@ build/costs --self-test --root .
   `build/costs refresh --tests tools/ci/correctness.tests --costs
   tools/ci/costs`. It keeps every measurement, estimates the new commands and
   drops the removed ones; no logs are needed.
+- **Split.** A pull request that splits a heading into several, finer parts
+  for the deal (#2658), runs `build/costs split --tests
+  tools/ci/correctness.tests --costs tools/ci/costs --map FILE` instead. FILE's
+  lines are `HEADING<TAB>NEW<TAB>WEIGHT`, one per new heading, and a heading
+  may keep its title for one of them. In every row's table, each new heading
+  takes its weight's share of its heading's cost, and its heading's peak,
+  marked `#: derived`. Refresh keeps a derived cost as it is, and the row's
+  median leaves it out. The next collect over logs that have the new heading
+  measures it. Without the split, refresh would give a new part the row's median
+  per CPU, a few seconds, and the deal would put a heading's parts on one shard.
+  An unmeasured heading's parts stay estimates.
 - **Plan.** `build/costs plan --tests tools/ci/correctness.tests --costs
   tools/ci/costs/ROW.costs --shards 2-8 [--setup S] [--first S] [--deal
   FILE]` predicts the runner's deal and schedule for each shard count, adding

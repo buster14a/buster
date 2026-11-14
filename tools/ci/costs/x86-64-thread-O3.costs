@@ -8,6 +8,8 @@
 # failure, a lower bound (`lower-bound`); where it has none, the row's median per CPU times its CPUs (`unmeasured`),
 # which `costs refresh` also gives a command the inventory adds. The costs only deal the commands to the shards: a
 # stale cost makes a shard longer, never a test go missing.
+# `derived` is a share of the cost of a heading the inventory split into several (`costs split`, #2658), its weight's,
+# until a collect over logs that have the new heading measures it.
 # `first-shard` is how much longer shard 1's job ran than the others' besides their commands, the medians' difference
 # with each job scaled as its samples are: the steps the row runs once, which the deal adds to shard 1's schedule.
 # `peak` is a command's largest peak memory over its samples, in MiB, and `runner-memory` the smallest memory of the
@@ -29,7 +31,18 @@
 #: cpu 15 0.81 AMD EPYC 9V74 80-Core Processor
 #: cpu 1 0.81 INTEL(R) XEON(R) PLATINUM 8573C
 #: cpu 1 0.91 Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+#: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 8)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 2 of 8)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 3 of 8)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 4 of 8)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 5 of 8)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 6 of 8)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 7 of 8)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 8 of 8)
 #: unmeasured Test differential harness accounting, subprocesses and failure preservation [2 CPUs]
+#: derived Test the C lexer as C++
+#: derived Test the C lexer with C11's raw-string prefixes
+#: derived Test the C lexer with the R and LR raw-string prefixes
 #: unmeasured Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
 #: unmeasured Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes
 #: peak 44 Check unity fixture ownership without rebuilding
@@ -68,10 +81,14 @@
 #: peak 186 Test the preprocessor's cases against clang (part 3 of 4)
 #: peak 100 Test the preprocessor's cases against clang (part 4 of 4)
 #: peak 829 Test the parser's snippets against clang
-#: peak 1408 Test the semantic driver's diagnostics and emission against clang (part 1 of 4)
-#: peak 1567 Test the semantic driver's diagnostics and emission against clang (part 2 of 4)
-#: peak 2134 Test the semantic driver's diagnostics and emission against clang (part 3 of 4)
-#: peak 1400 Test the semantic driver's diagnostics and emission against clang (part 4 of 4)
+#: peak 1408 Test the semantic driver's diagnostics and emission against clang (part 1 of 8)
+#: peak 1567 Test the semantic driver's diagnostics and emission against clang (part 2 of 8)
+#: peak 2134 Test the semantic driver's diagnostics and emission against clang (part 3 of 8)
+#: peak 1400 Test the semantic driver's diagnostics and emission against clang (part 4 of 8)
+#: peak 1408 Test the semantic driver's diagnostics and emission against clang (part 5 of 8)
+#: peak 1567 Test the semantic driver's diagnostics and emission against clang (part 6 of 8)
+#: peak 2134 Test the semantic driver's diagnostics and emission against clang (part 7 of 8)
+#: peak 1400 Test the semantic driver's diagnostics and emission against clang (part 8 of 8)
 #: peak 83 Check narrow-unsigned sign comparisons and admitted deferred diagnostics [2 CPUs]
 #: peak 758 Test the per-file jobs on the frozen musl units
 #: peak 2861 Test the per-file jobs on the repository's translation units
@@ -90,6 +107,8 @@
 #: peak 834 Lower c-testsuite's programs and the frozen SQLite source with node templates as the tasks do
 #: peak 824 Lower every function of c-testsuite's programs and the frozen SQLite and musl sources into the IR
 #: peak 53 Test the C lexer as C++
+#: peak 53 Test the C lexer with C11's raw-string prefixes
+#: peak 53 Test the C lexer with the R and LR raw-string prefixes
 #: peak 51 Compare main.c's checking and its functions and objects with clang's
 #: peak 1958 Check semantic mutants of the frozen SQLite and musl sources against Clang
 #: peak 51 Compile main.c by -c, its referenced definitions and all of them, by both paths
@@ -209,10 +228,14 @@
 719.5 Test the preprocessor's cases against clang (part 3 of 4)
 160.1 Test the preprocessor's cases against clang (part 4 of 4)
 1052.0 Test the parser's snippets against clang
-895.5 Test the semantic driver's diagnostics and emission against clang (part 1 of 4)
-959.2 Test the semantic driver's diagnostics and emission against clang (part 2 of 4)
-800.9 Test the semantic driver's diagnostics and emission against clang (part 3 of 4)
-726.1 Test the semantic driver's diagnostics and emission against clang (part 4 of 4)
+606.9 Test the semantic driver's diagnostics and emission against clang (part 1 of 8)
+414.0 Test the semantic driver's diagnostics and emission against clang (part 2 of 8)
+429.0 Test the semantic driver's diagnostics and emission against clang (part 3 of 8)
+337.7 Test the semantic driver's diagnostics and emission against clang (part 4 of 8)
+288.5 Test the semantic driver's diagnostics and emission against clang (part 5 of 8)
+545.1 Test the semantic driver's diagnostics and emission against clang (part 6 of 8)
+371.8 Test the semantic driver's diagnostics and emission against clang (part 7 of 8)
+388.3 Test the semantic driver's diagnostics and emission against clang (part 8 of 8)
 27.3 Check narrow-unsigned sign comparisons and admitted deferred diagnostics [2 CPUs]
 338.9 Test the per-file jobs on the frozen musl units
 386.8 Test the per-file jobs on the repository's translation units
@@ -221,7 +244,7 @@
 152.9 Test Tier 0's inlining of always_inline functions
 333.6 Check the repository's translation units with the checker
 155.7 Compare -c's functions and objects with clang -O0 -c's on frozen musl sources
-88.8 Test differential harness accounting, subprocesses and failure preservation [2 CPUs]
+70.4 Test differential harness accounting, subprocesses and failure preservation [2 CPUs]
 456.7 Test deferred function bodies against source order
 20.1 Test integer builtin actions against Clang (part 1 of 4)
 41.5 Test integer builtin actions against Clang (part 2 of 4)
@@ -230,7 +253,9 @@
 174.1 Test typed postorder checking and source fixtures (part 1 of 8)
 26.0 Lower c-testsuite's programs and the frozen SQLite source with node templates as the tasks do
 259.4 Lower every function of c-testsuite's programs and the frozen SQLite and musl sources into the IR
-256.3 Test the C lexer as C++
+93.9 Test the C lexer as C++
+84.2 Test the C lexer with C11's raw-string prefixes
+78.0 Test the C lexer with the R and LR raw-string prefixes
 0.0 Compare main.c's checking and its functions and objects with clang's
 323.0 Check semantic mutants of the frozen SQLite and musl sources against Clang
 0.0 Compile main.c by -c, its referenced definitions and all of them, by both paths
@@ -312,5 +337,5 @@
 1.6 Test scoped name-resolution kernels
 33.5 Test the partial Zen 5 model and instruction harness
 1.7 Test Tier 1 integer truth round trips against native and instruction-shape oracles
-44.4 Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
-44.4 Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes
+35.2 Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
+35.2 Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes
