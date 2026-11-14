@@ -14,14 +14,17 @@
 // base's copy (R15, one of the pushes). The epilogue releases the subtraction (or resets rsp from rbp, past the pushes)
 // and pops in reverse. The consumer attaches actual instruction PCs to those transitions.
 //
-// The vector path sorts ends before starts within (rounded size, alignment) classes, scans live pressure, finds each
-// start's nearest earlier equal-or-greater pressure by pointer jumping, and inherits the slot of the intervening end.
-// Roots are new pressure maxima; a second pointer-jump resolves inherited colors. Thus each class uses exactly its
-// maximum live pressure. The scalar twin computes the same colors in one ordered pass, each level's last ended color
-// (tier1_frame_color_scalar), so both paths give identical slots and offsets and a Tier 1 object doesn't depend on the
-// compiler's host (#2606); the tests check each plan independently. Preparation, sorting, color resolution and layout
-// are all charged to the benchmark. There is no claim that a synthetic planner timing is a compiler or generated-program
-// speedup.
+// Preparation sorts every item's end and start by (rounded size, alignment) class and position, ends before starts at
+// an equal position. A function's frames are small (half of sqlite3.c's 1,368 have two objects or fewer, 98% at most
+// 32, and all but one at most eight classes; #2699), so the vector path classes items against a register of up to
+// eight distinct class keys (tier1_frame_classes) and sorts up to BUSTER_TIER1_FRAME_RANK_EVENTS events by rank, every
+// key compared with eight others at a time (tier1_frame_rank). The scalar twin, and larger inputs on either path, sort
+// by stable radix passes over the key bytes that differ (tier1_frame_sort); both sorts give one order. One ordered,
+// branch-free pass then colors on both paths (tier1_frame_color): a class's free colors are a stack, so each class uses
+// exactly its maximum live pressure. Both paths give identical slots and offsets, so a Tier 1 object doesn't depend on
+// the compiler's host (#2606); the tests check each plan independently, and the colors against pointer jumping's.
+// Preparation, sorting, coloring and layout are all charged to the benchmark. There is no claim that a synthetic
+// planner timing is a compiler or generated-program speedup.
 //
 // Input columns have column_count u32 elements, indices has count elements, and only those logical elements are read.
 // Without indices the first count rows are used; with indices, every index must be distinct and in range. No padding
@@ -30,8 +33,9 @@
 // Empty inputs permit null columns. On failure the result and both arena lengths are unchanged. Scratch is restored
 // on success too. Displacements and the worst-case stack extent must fit INT32_MAX; no arithmetic is truncated.
 //
-// Layout: API; bounded vector scans; stable radix sorting; preparation; the two colorers; frame layout and steps;
-// transactional drivers. tier1_frame_prepare/color_*/layout are the same phases the benchmark measures separately.
+// Layout: API; bounded vector scans; the sorts and the class register; preparation; the coloring pass; frame layout
+// and steps; transactional drivers. tier1_frame_prepare/color/layout are the same phases the benchmark measures
+// separately.
 
 #include <stdbool.h>
 #include <stdint.h>

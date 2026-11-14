@@ -100,33 +100,57 @@ index mapping and permitted color choices, not the frame extent.
 
 ## Interval coloring
 
-Objects are grouped by alignment and size rounded up to that alignment. A
-stable radix sort orders their start and end events by class and position,
-with ends first at a tie. The vector path then:
+Objects are grouped by alignment and size rounded up to that alignment, and
+their start and end events are sorted by class and position, with ends first
+at a tie and equal events in item order. A function's frame is small: of
+sqlite3.c's 1,368 planned frames, half have two objects or fewer, 98% at most
+32, and all but one at most eight classes (#2699). Preparation is sized for
+that:
 
-1. Scans `+1` at starts and `-1` at ends to obtain live pressure.
-2. Finds the nearest preceding event with equal or greater pressure using
-   simultaneous pointer-jumping rounds. At a start, the event immediately
-   after that predecessor is the free-slot-producing end it matches.
-3. Makes a fresh color only for a new class pressure maximum. Other starts
-   inherit their matched interval's color; pointer jumping resolves those
-   inheritance chains.
-4. Forms the class byte offsets and physical-slot bases with prefix sums.
+1. Indexed inputs must name distinct rows. Each row is stamped with its item,
+   and an item whose row holds another's stamp shares it; only stamped rows are
+   read, so nothing is cleared. Without scratch for a stamp a row the indices
+   are sorted instead.
+2. The vector path keeps up to eight distinct class keys in one register,
+   compares each item's key with all of them at once, and numbers a key by the
+   count of distinct keys below it, its place in the sorted order. A ninth
+   distinct key falls back to the sort.
+3. The vector path sorts up to 64 events by rank. Each event's key is distinct
+   (class, position, place in the input), every key is compared with eight
+   others at a time, and an event's rank is the count of keys below its own:
+   the stable sort's order.
+4. The scalar twin, and larger inputs on either path, sort by stable eight-bit
+   radix passes over the key bytes that differ between keys, so small positions
+   and few classes take two or three passes of the eight.
 
-This is the bracket-matching formulation in #177, expressed in live-pressure
-coordinates. A class uses exactly its maximum simultaneous live count. The
-scalar twin independently scans starts and takes the first class color whose
-previous interval has ended. It reaches the same per-class lower bound, so
-it never produces a smaller frame than the vector path. Neither path claims
-globally optimal packing across different storage classes.
+One ordered pass then colors, on both paths (`tier1_frame_color`). A class's
+free colors are a stack: an end pushes its item's color, and a start pops the
+last one pushed, or takes a new color, its pressure less one, at a new pressure
+maximum of its class. The stack's place is the pressure level, and what it
+holds is the last item that ended there, whose color the start reads. A class
+uses exactly its maximum simultaneous live count. Neither path claims globally
+optimal packing across different storage classes.
+
+The pass is the part of the planner that stays scalar, and it has no branch on
+an event's kind: it selects, and each event makes both stores, a start's color
+and an end's item, one of them to a spare place. Its chain is the stack itself,
+a color going from an item to the next item of its slot. Pointer jumping, the
+data-parallel form (this is the bracket matching of #177 in live-pressure
+coordinates: each start's nearest earlier event of equal or greater pressure,
+then the inherited colors resolved to their roots), does the pass's work once
+per round. It was the vector path's colorer until #2699, and measured 7.7 to 88
+ns per object on the 9700X (16 to 32,768 objects, `benchmark-tier1-frame`'s
+color phase) against the ordered pass's 2.1 to 2.3. It is now
+`test-tier1-frame`'s oracle for the exact colors. The same pass with a branch
+on the event's kind measures 1.7 ns per object while the benchmark repeats one
+frame, which the predictor learns, and 4.3 at 32,768 objects, where it can't;
+a compile's frames never repeat.
 
 Classes are laid out by descending alignment. Each class stride is a multiple
 of that alignment, so a prefix sum after the first class's aligned start
-preserves all later class alignments. The stable radix scatter and the small
-per-function policy decisions are scalar in both paths. Indexed row loads
-and pointer-jump neighbor loads use bounded scalar staging rather than Zen 5's
-expensive wide gathers. Their costs remain in the measurements; a measured
-9700X justification or further optimization remains part of qualification.
+preserves all later class alignments. The radix scatter, the coloring pass and
+the small per-function policy decisions are scalar in both paths. Indexed row
+loads use bounded scalar staging rather than Zen 5's expensive wide gathers.
 
 ## Frame and prologue rules
 
@@ -682,10 +706,11 @@ prefixes may hold inputs. Failure preserves result and arena lengths.
 One function is the semantic batch: independent chunks would miss cross-chunk
 interference. Internal class/event sorting puts ends before starts at ties,
 then color/layout phases produce object-to-slot/offset columns and explicit
-steps. The scalar colorer is the vector one's exact twin, each level's last
-ended color in one ordered pass, so both paths give identical slots and offsets
-(#2606), which `test-tier1-frame` requires besides its independent interference,
-class slot count and frame size checks. Register/stack limits and all displacement bounds
+steps. Both paths color in one ordered pass, each level's last ended item's
+color, over one event order, so they give identical slots and offsets (#2606),
+which `test-tier1-frame` requires besides its independent interference, class
+slot count and frame size checks and its pointer-jumping oracle for the colors
+(#2699). Register/stack limits and all displacement bounds
 are checked; partial-vector tails never create objects.
 
 Disposition: retain explicit preallocation requirements and direct indexed
