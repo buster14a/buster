@@ -803,8 +803,15 @@ static inline __attribute__((always_inline)) void tier1_allocation_color(const T
             {
                 r = (uint8_t)__builtin_ctz(available);
             }
-            const uint8_t follow = tier1_allocation_start_hint(input, last, interval, available | deposited);
-            if (follow < 32 && follow != r && (((available | deposited) >> follow) & 1) != 0)
+            // The free registers it doesn't avoid (#2767), where any is: its hint among them, else the level's where it
+            // doesn't avoid that one, else the lowest of them, each taken as a hint is. Without avoided ones, the hint where
+            // it is free, else the level's.
+            const uint32_t free = available | deposited;
+            const uint32_t avoided = input->avoided_registers != 0 ? input->avoided_registers[interval] : 0;
+            const uint32_t preferred = (free & ~avoided) != 0 ? free & ~avoided : free;
+            const uint8_t hint = tier1_allocation_start_hint(input, last, interval, preferred);
+            const uint8_t follow = hint < 32 && ((preferred >> hint) & 1) != 0 ? hint : ((preferred >> r) & 1) != 0 ? r : (uint8_t)__builtin_ctz(preferred);
+            if (follow != r)
             {
                 if (((deposited >> follow) & 1) != 0)
                 {
@@ -1253,8 +1260,9 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
                 if (columns.classes[i] == class)
                 {
                     class_count += 1;
-                    // An interval that avoids registers (#2767) is the scan's: the rule takes each level's register.
-                    regular &= allowed[i] == columns.registers[class] && (columns.avoided_registers == 0 || (columns.avoided_registers[i] & allowed[i]) == 0);
+                    // An interval that avoids registers (#2767) is the scan's without hints: the rule alone takes each level's
+                    // register, where the hinted copy swaps it for another free one as it does for a hint.
+                    regular &= allowed[i] == columns.registers[class] && (hinted || columns.avoided_registers == 0 || (columns.avoided_registers[i] & allowed[i]) == 0);
                     // A recomputable interval a clobber reaches (#2574) leaves its register there, which only the scan does.
                     if (regular && columns.clobber_registers[class] != 0 && tier1_allocation_spill_kind(&columns, i) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE)
                     {

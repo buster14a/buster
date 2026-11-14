@@ -6,7 +6,8 @@
 // other, of a hint to an avoided register that yields to a free one, and of the path a class with avoided registers takes;
 // then random inputs on all three entry points against the interval verifier, the position occupancy oracle and two
 // independent properties: a range starts in a register it avoids only where every register it may take and doesn't avoid
-// is held there, and a column that avoids nothing changes no allocation. Included by tier1_allocate_test_cases.c.
+// is held there, and a column that avoids nothing changes no allocation. Half the random inputs have hints, whose classes
+// the common path colors where they fit, the other half are the scan's. Included by tier1_allocate_test_cases.c.
 
 // The paths' allocations of `input`, into `outputs`; their errors.
 static void tier1_allocation_test_avoided_paths(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* outputs, Tier1AllocationError* errors)
@@ -115,13 +116,14 @@ static void tier1_allocation_test_avoided_traces(Tier1AllocationTestTally* tally
                     fprintf(stderr, "  avoided trace %u uses=%u path %u: error %u, %u fragments, r%u r%u\n", trace, uses, path, errors[path], output->fragment_count, output->fragment_count > 0 ? output->registers[0] : 99, output->fragment_count > 1 ? output->registers[1] : 99);
                 }
             }
-            // A class that avoids a register some interval may take is the scan's; one that avoids none colors as before.
-            const bool scanned = trace != 3;
+            // A class that avoids a register some interval may take is the scan's without hints, and colors with them, its
+            // starts swapping an avoided register as they do for a hint; one that avoids none colors as before.
+            const bool scanned = trace != 3 && !hinted[trace];
             for (uint32_t path = 0; errors[0] == TIER1_ALLOCATION_OK && errors[1] == TIER1_ALLOCATION_OK && path < 2; path += 1)
             {
                 const bool colored = outputs[path].vector_intervals == count && outputs[path].scalar_intervals == 0;
                 const bool scan = outputs[path].vector_intervals == 0 && outputs[path].scalar_intervals == count;
-                tier1_allocation_test_expect(tally, scanned ? scan : trace == 3 && colored, scanned ? "a class with an avoided register is the scan's" : "a class that avoids no register it may take colors as before");
+                tier1_allocation_test_expect(tally, scanned ? scan : colored, scanned ? "a class with an avoided register is the scan's without hints" : "a class with hints, or that avoids no register it may take, colors");
             }
             tier1_allocation_test_expect(tally, errors[0] == TIER1_ALLOCATION_OK && errors[1] == TIER1_ALLOCATION_OK && tier1_allocation_test_equal(&input, &outputs[0], &outputs[1]), "both production paths avoid alike");
             arena_pop_to(arena, saved);
