@@ -160,11 +160,22 @@ one left set.
   callee's stream; their streams stay for the unit.
 - **What keeps one part:** `--tier1` and `--helper-report`, which read every
   body's stream after every body's code; a unit on lanes, whose parts are the
-  lanes'; and a thread whose window can't be reserved.
+  lanes'; and a thread whose window can't be reserved. A window short of room
+  (a reservation the address space cut short) sends the bodies again as one
+  part, from the arenas as they were, as a lane's part does
+  (`check_program_emit_windows_again`, `CheckProgramLanes.again`).
 - **Poison:** `--poison-arenas` (`CheckProgramLanes.poison_windows`) overwrites
   each popped window, so that a part that read what another part left shows.
+- **What it measures:** on the 9700X, `sqlite3.c` at eight workers by W =
+  2,048: the emission 1.15 times its one-worker user cycles (1.33 in one
+  part), the lowering 1.49 (1.60), 292.9 MB/s (289.3); one worker the same
+  ([the design's "Step 1's result"](../all-core-path.md#step-1s-result)).
+  Measure it with step 0's gauge ([all-core](all-core.md)), whose sampled
+  split of the two stages windows interleave is their sum alone.
 - **The checks:** `test-check-lanes` emits every generated and failing program
   by windows of 1, 64 and 2,048 tokens on one lane, each window poisoned as it
   is popped, by both paths, with `-g`'s rows and unwind tables and without: each
-  one part's object or failure, a part a body at one token. `test-checker-driver`'s Tier 0 inlining fixtures build
-  by `--emit-window=1` (and the lanes' fixture by 64): the objects of one part.
+  one part's object or failure, a part a body at one token; and by windows of
+  64 in 2 KB (`CheckProgramLanes.squeeze_window`), which go again as one part.
+  `test-checker-driver`'s Tier 0 inlining fixtures build by `--emit-window=1`
+  (and the lanes' fixture by 64 too): the objects of one part.
