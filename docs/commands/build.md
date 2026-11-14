@@ -1102,8 +1102,8 @@ go first, together, in a section of their own before `.text`
 (one section of each unit, which starts on a page, `main.c`'s pragmas, #502),
 which held 18 of the empty file's windows and 60 of `hello.c`'s; the script
 puts every unit's together, between `.text.buster_start` and `.text`, and
-can't reorder the functions inside one: Release's parallel split puts the
-list's functions of that section first in it.
+can't reorder the functions inside one: the units in parts, and a sanitizer
+build's parallel split, put the list's functions of that section first in it.
 
 - **The list:** `cmake/BusterStartOrder.txt`, `UNIT NAME` for a local
   function of one of `main.c`'s units and `- NAME` for any other: a global
@@ -1125,18 +1125,26 @@ list's functions of that section first in it.
   any whose name a unit's static shares, which the name would move too.
 - **Inside the checker's section:** in every static build, whatever its
   linker, so that switching `BUSTER_LINKER` relinks alone,
-  `BusterStartOrder.cmake` writes at configuration each Release split unit's
-  names, its own lines' and the `- NAME` ones in the list's order, to
-  `start-order/UNIT.txt` in the tree. The split (`tools/codegen/split.c
-  --first`) puts each function they name that the unit defines in a named
-  section, `.text.buster_checker`, before that section's first unlisted
-  function, in the list's order, before it plans the parts; every other
-  function keeps its order, and every function its instructions. A list that
+  `BusterStartOrder.cmake` writes at configuration the names of each unit in
+  parts (and of each split unit, in a sanitizer build), its own lines' and
+  the `- NAME` ones in the list's order, to `start-order/UNIT.txt` in the
+  tree. The units in parts are dealt by file, not in the module's order:
+  `presplit --first` gives each function they name that the unit defines in
+  a named section, `.text.buster_checker`, a section of its own
+  (`.text.buster_checker.buster_first.N`, N its line) and part 0's other
+  functions of it `.text.buster_checker.buster_rest`, and the join's
+  relocatable link puts part 0's section, which `main.c`'s assembly starts on
+  a page, those in the list's order, part 0's rest and the other parts' into
+  one `.text.buster_checker` again (`sections.txt`,
+  `BusterCodegenMerge.cmake`). Every function keeps its part and its
+  instructions; a unit whose listed functions are all in `.text` moves none.
+  A sanitizer build's split (`tools/codegen/split.c --first`) puts them
+  before that section's first unlisted function, in the list's order, before
+  it plans the parts; every other function keeps its order, and a list that
   moves nothing fails the split, as a stale one would. The checker's unit
-  puts 269 functions, 1.95 MB of its 5.4 MB, there. Develop's parts
-  (`presplit`, dealt by file) and Release's single compiles
-  (`BUSTER_BUILD_DEFINES`, `BUSTER_PGO`, so `BUSTER_CHECKER_OFFSET`'s builds
-  too) keep the section in source order.
+  puts 269 functions, 1.95 MB of its 5.4 MB, there. Release's single
+  compiles (`BUSTER_BUILD_DEFINES`, `BUSTER_PGO`, so `BUSTER_CHECKER_OFFSET`'s
+  builds too) keep the section in source order.
 - **Shifts:** a shifted link's padding (`.text.buster_shift_padding`, above)
   goes in `.text.buster_start` right before the shift source's first
   function when it has one there (`main.c` and the checker's and the front

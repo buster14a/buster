@@ -7,7 +7,7 @@
 // bitcode an edit changed.
 //
 //   presplit INPUT.bc PARTS DIRECTORY [--import LIMIT] [--anchor M] [--cohere CAP] [--spread S] [--tests-optnone]
-//            [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--constant-arguments] [--copy-promoted] [--verify]
+//            [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--constant-arguments] [--copy-promoted] [--first LIST] [--verify]
 //            [--report]
 //
 // writes DIRECTORY/part0.bc to DIRECTORY/partPARTS.bc and DIRECTORY/locals.txt. Parts 0 to PARTS - 1 hold function
@@ -52,8 +52,10 @@
 // --tests-optnone (the design's step 3, Develop's) marks the functions of the tests' files optnone and noinline, as
 // #681's pragma does for the checker's own: a file whose name has _test_, _test., _tests., test_ or fuzz in it.
 // --strip-debug writes the parts without any debug information: a Release build without it (BUSTER_DEBUG_INFO=0)
-// compiles its units with line tables for the plan's files alone. --verify runs LLVM's verifier on each part; --report
-// prints each part's definitions, cost and imports, and the plan's times, to stderr.
+// compiles its units with line tables for the plan's files alone. --first LIST, the start's order (#1444), puts the
+// functions LIST names first in their named section of the joined object (presplit_order_first, DIRECTORY/sections.txt).
+// --verify runs LLVM's verifier on each part; --report prints each part's definitions, cost and imports, and the plan's
+// times, to stderr.
 //
 // Release's options make a part's inliner decide as the whole unit's (#2559's step 5, #2624): --keep-statics gives the
 // parts that read a static function that is only ever called a local copy of it, keeps a body in its part when it calls
@@ -93,6 +95,10 @@
 #include <llvm-c/Transforms/PassBuilder.h>
 
 #define PRESPLIT_ALIAS_SUFFIX ".buster_split"
+// --first's sections (presplit_order_first): a listed function's, and part 0's other functions' of that section.
+#define PRESPLIT_FIRST_SUFFIX ".buster_first."
+#define PRESPLIT_REST_SUFFIX ".buster_rest"
+#define PRESPLIT_FIRST_SECTIONS 4
 // A part is a bit of a 64-bit mask, and the data part one more.
 #define PRESPLIT_MAXIMUM_PARTS 62
 // Each instruction counts one, and each function this much more: a function's own cost to the optimizer.
@@ -225,6 +231,10 @@ struct PresplitPlan
     bool copy_promoted;
     // By the module's function index, the functions the whole module's argument promotion rewrites (--copy-promoted).
     bool* promoted;
+    // --first's list, and the named sections whose functions it put first (presplit_order_first).
+    const char* first;
+    char* first_sections[PRESPLIT_FIRST_SECTIONS];
+    uint32_t first_section_count;
     bool verify;
     bool report;
 };
@@ -1480,6 +1490,22 @@ static bool presplit_part(const PresplitPlan* plan, uint32_t part, const char* p
     LLVMModuleRef module = split_clone_part(plan->module, keep, kept, owned, owned_count, !code);
     free(keep);
     free(owned);
+    // Part 0's functions of a section --first ordered follow the listed ones (presplit_order_first).
+    for (LLVMValueRef function = part == 0 && plan->first_section_count != 0 ? LLVMGetFirstFunction(module) : 0; function != 0;
+         function = LLVMGetNextFunction(function))
+    {
+        const char* section = LLVMIsDeclaration(function) || LLVMGetLinkage(function) == LLVMAvailableExternallyLinkage ? 0 : LLVMGetSection(function);
+        for (uint32_t s = 0; section != 0 && s < plan->first_section_count; s += 1)
+        {
+            if (strcmp(section, plan->first_sections[s]) == 0)
+            {
+                char rest[PRESPLIT_PATH_BYTES];
+                snprintf(rest, sizeof(rest), "%s" PRESPLIT_REST_SUFFIX, plan->first_sections[s]);
+                LLVMSetSection(function, rest);
+                section = 0;
+            }
+        }
+    }
     bool consistent = true;
     for (uint32_t i = 0; i < plan->function_count; i += 1)
     {
@@ -1636,6 +1662,14 @@ static bool presplit_locals(const PresplitPlan* plan, const char* directory)
         }
     }
     written = file != 0 && fclose(file) == 0 && written;
+    // And the sections --first ordered, for the join (presplit_order_first): none without it.
+    const int sections_length = snprintf(path, sizeof(path), "%s/sections.txt", directory);
+    FILE* sections = written && sections_length > 0 && (size_t)sections_length < sizeof(path) ? fopen(path, "w") : 0;
+    for (uint32_t s = 0; sections != 0 && s < plan->first_section_count; s += 1)
+    {
+        fprintf(sections, "%s\n", plan->first_sections[s]);
+    }
+    written = sections != 0 && fclose(sections) == 0 && written;
     return written;
 }
 
@@ -1997,6 +2031,59 @@ static uint32_t presplit_constant_arguments(LLVMModuleRef module, bool* promoted
     return written;
 }
 
+// --first LIST, the start's order (#1444, cmake/BusterStartOrder.cmake), as split.c's: each function LIST names that the
+// module defines in a named section (main.c's .text.buster_checker, one section of each unit, inside which no link
+// script can reorder functions) goes first in that section of the joined object, in LIST's order. The parts are dealt by
+// file, not in the module's order, so such a function keeps its part and takes a section of its own,
+// SECTION.buster_first.N, N its line in LIST; part 0's other functions of SECTION, which follow the module's assembly
+// that starts SECTION on a page, take SECTION.buster_rest (presplit_part); and the join's relocatable link
+// (BusterCodegenMerge.cmake) puts part 0's SECTION, then those named by N, part 0's rest and the other parts' SECTION,
+// in that order, into one SECTION, for each section DIRECTORY/sections.txt lists (presplit_locals). A unit whose listed
+// functions are all in .text, which the final link's script orders, moves none. Returns the functions it moved, or
+// UINT32_MAX when it can't read LIST.
+static uint32_t presplit_order_first(PresplitPlan* plan, const char* path)
+{
+    FILE* file = fopen(path, "r");
+    uint32_t moved = file != 0 ? 0 : UINT32_MAX;
+    uint32_t number = 0;
+    char line[1024];
+    while (file != 0 && fgets(line, sizeof(line), file) != 0)
+    {
+        line[strcspn(line, "\r\n")] = 0;
+        LLVMValueRef function = line[0] != 0 ? LLVMGetNamedFunction(plan->module, line) : 0;
+        const bool defined = function != 0 && !LLVMIsDeclaration(function) && LLVMGetLinkage(function) != LLVMAvailableExternallyLinkage;
+        const char* section = defined ? LLVMGetSection(function) : 0;
+        if (section != 0 && section[0] != 0 && strstr(section, PRESPLIT_FIRST_SUFFIX) == 0)
+        {
+            uint32_t known = 0;
+            while (known < plan->first_section_count && strcmp(plan->first_sections[known], section) != 0)
+            {
+                known += 1;
+            }
+            if (known == plan->first_section_count && known < PRESPLIT_FIRST_SECTIONS)
+            {
+                const size_t length = strlen(section);
+                plan->first_sections[known] = presplit_allocate(length + 1, 1);
+                memcpy(plan->first_sections[known], section, length);
+                plan->first_section_count += 1;
+            }
+            if (known < plan->first_section_count)
+            {
+                char name[PRESPLIT_PATH_BYTES];
+                snprintf(name, sizeof(name), "%s" PRESPLIT_FIRST_SUFFIX "%05u", plan->first_sections[known], number);
+                LLVMSetSection(function, name);
+                moved += 1;
+            }
+        }
+        number += 1;
+    }
+    if (file != 0)
+    {
+        fclose(file);
+    }
+    return moved;
+}
+
 static double presplit_seconds(void)
 {
     struct timespec now;
@@ -2045,6 +2132,11 @@ static bool presplit_options(PresplitPlan* plan, int argc, char** argv)
         else if (strcmp(argv[i], "--copy-promoted") == 0)
         {
             plan->copy_promoted = true;
+        }
+        else if (strcmp(argv[i], "--first") == 0 && i + 1 < argc && plan->first == 0)
+        {
+            plan->first = argv[i + 1];
+            i += 1;
         }
         else if ((strcmp(argv[i], "--anchor") == 0 || strcmp(argv[i], "--import") == 0 || strcmp(argv[i], "--cohere") == 0 || strcmp(argv[i], "--spread") == 0) && i + 1 < argc)
         {
@@ -2095,7 +2187,7 @@ int main(int argc, char** argv)
     const unsigned long parts = argc >= 4 ? strtoul(argv[2], &end, 10) : 0;
     if (!valid || end == argv[2] || *end != 0 || parts == 0 || parts > PRESPLIT_MAXIMUM_PARTS)
     {
-        fprintf(stderr, "usage: presplit INPUT.bc PARTS DIRECTORY [--import LIMIT] [--anchor M] [--cohere CAP] [--spread S] [--tests-optnone] [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--constant-arguments] [--copy-promoted] [--verify] [--report]  (PARTS from 1 to %u)\n",
+        fprintf(stderr, "usage: presplit INPUT.bc PARTS DIRECTORY [--import LIMIT] [--anchor M] [--cohere CAP] [--spread S] [--tests-optnone] [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--constant-arguments] [--copy-promoted] [--first LIST] [--verify] [--report]  (PARTS from 1 to %u)\n",
                 PRESPLIT_MAXIMUM_PARTS);
     }
     else
@@ -2130,7 +2222,12 @@ int main(int argc, char** argv)
                 plan.promoted = presplit_allocate((uint64_t)functions + 1, sizeof(bool));
             }
             const uint32_t constants = plan.constant_arguments ? presplit_constant_arguments(module, plan.promoted) : 0;
-            const bool simplified = constants != UINT32_MAX;
+            const uint32_t moved = plan.first != 0 ? presplit_order_first(&plan, plan.first) : 0;
+            if (moved == UINT32_MAX)
+            {
+                fprintf(stderr, "presplit: can't read %s\n", plan.first);
+            }
+            const bool simplified = constants != UINT32_MAX && moved != UINT32_MAX;
             const double prepared = presplit_seconds();
             if (simplified)
             {

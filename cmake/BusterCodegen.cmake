@@ -8,8 +8,9 @@
 # and restores the source unit's public symbols before the ordinary final link. A rebuild repeats only the parts whose
 # bitcode changed. The configurations differ in what a part reads of the others and in their debug information:
 # Release's options have each part's inliner decide as the whole unit's (BUSTER_RELEASE_SPLIT_OPTIONS, the design's
-# step 5); Develop's read less, with line tables and the tests' own functions optnone (steps 1 to 3). No C boundary
-# or private state moves between source units. The Debug configuration compiles every unit whole.
+# step 5); Develop's read less, with line tables and the tests' own functions optnone (steps 1 to 3). In a static build
+# the functions small compiles run go first in .text.buster_checker (#1444, presplit --first and the join's script). No
+# C boundary or private state moves between source units. The Debug configuration compiles every unit whole.
 #
 # A sanitizer build's Release instead generates the two longest units' native code in parallel after the ordinary O3
 # IR pipeline (#2058, #2639): their object targets compile C through O3 to bitcode, tools/codegen/split.c partitions
@@ -388,15 +389,32 @@ function(buster_parts_unit name)
     endforeach()
     set(exports "${directory}/exports.txt")
     set(locals "${directory}/locals.txt")
+    set(sections "${directory}/sections.txt")
     set(stamp "${directory}/split.stamp")
+    # The start's order (#1444, BusterStartOrder.cmake), as buster_codegen_unit's: in a static build, presplit gives the
+    # unit's functions small compiles run that .text.buster_checker holds sections the join puts first in it, in the
+    # list's order (presplit --first, sections.txt).
+    set(first "")
+    set(first_options "")
+    if(buster_split_order)
+        set(first "${CMAKE_BINARY_DIR}/start-order/${name}.txt")
+        buster_start_order_unit("${start_order_list}" "${name}" "${first}" own)
+        if(own EQUAL 0)
+            set(first "")
+        else()
+            set(first_options --first "${first}")
+        endif()
+    endif()
+    set(develop_options ${BUSTER_DEVELOP_SPLIT_OPTIONS} ${first_options})
+    list(APPEND release_options ${first_options})
     add_custom_command(OUTPUT "${stamp}"
-        BYPRODUCTS ${parts} "${exports}" "${locals}"
+        BYPRODUCTS ${parts} "${exports}" "${locals}" "${sections}"
         COMMAND "${CMAKE_COMMAND}" "-DINPUT=$<TARGET_OBJECTS:buster_${name}>" "-DDIRECTORY=${directory}"
             "-DSPLIT=${BUSTER_CODEGEN_PRESPLIT}" "-DNM=${BUSTER_CODEGEN_NM}" "-DPARTITIONS=${partitions}"
-            "-DOPTIONS=$<IF:$<CONFIG:Develop>,${BUSTER_DEVELOP_SPLIT_OPTIONS},${release_options}>"
+            "-DOPTIONS=$<IF:$<CONFIG:Develop>,${develop_options},${release_options}>"
             -P "${scripts}/BusterCodegenSplit.cmake"
         DEPENDS "$<TARGET_OBJECTS:buster_${name}>" "${BUSTER_CODEGEN_PRESPLIT}" "${BUSTER_CODEGEN_NM}"
-            "${scripts}/BusterCodegenSplit.cmake"
+            "${scripts}/BusterCodegenSplit.cmake" ${first}
         COMMENT "Partitioning ${name}'s IR before the optimizer"
         ${explicit}
         VERBATIM)
@@ -422,9 +440,9 @@ function(buster_parts_unit name)
         COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${native}" "-DEXPORTS=${exports}" "-DLOCALS=${locals}" "-DOBJECTS=${objects}"
             "-DLLD=${BUSTER_CODEGEN_LLD}" "-DOBJCOPY=${BUSTER_CODEGEN_OBJCOPY}" "-DNM=${BUSTER_CODEGEN_NM}"
             "-DREADELF=${BUSTER_CODEGEN_READELF}" "-DCOMDAT=${BUSTER_CODEGEN_COMDAT}" "-DMERGES=${merges}"
-            -P "${scripts}/BusterCodegenMerge.cmake"
-        DEPENDS ${objects} "${exports}" "${locals}" "${BUSTER_CODEGEN_LLD}" "${BUSTER_CODEGEN_OBJCOPY}" "${BUSTER_CODEGEN_NM}"
-            "${BUSTER_CODEGEN_READELF}" "${BUSTER_CODEGEN_COMDAT}" "${scripts}/BusterCodegenMerge.cmake"
+            "-DSECTIONS=${sections}" -P "${scripts}/BusterCodegenMerge.cmake"
+        DEPENDS ${objects} "${exports}" "${locals}" "${sections}" "${BUSTER_CODEGEN_LLD}" "${BUSTER_CODEGEN_OBJCOPY}"
+            "${BUSTER_CODEGEN_NM}" "${BUSTER_CODEGEN_READELF}" "${BUSTER_CODEGEN_COMDAT}" "${scripts}/BusterCodegenMerge.cmake"
         COMMENT "Combining ${name}'s parts"
         ${explicit}
         VERBATIM)

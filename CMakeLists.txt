@@ -69,9 +69,9 @@ buster_settings_normalize()
 buster_settings_tools("${CMAKE_C_COMPILER}")
 buster_settings_linker()
 # The start's code order (#1444, cmake/BusterStartOrder.cmake): in a static link, whatever the linker, so that switching
-# it relinks alone, every unit's functions in sections of their own, and the parallel split's units with the functions
-# small compiles run (cmake/BusterStartOrder.txt) first in .text.buster_checker, which is the object's own order; and
-# with lld, those functions placed together before .text.
+# it relinks alone, every unit's functions in sections of their own, and the units in parts' and the parallel split's
+# with the functions small compiles run (cmake/BusterStartOrder.txt) first in .text.buster_checker, which is the
+# object's own order; and with lld, those functions placed together before .text.
 set(buster_start_order FALSE)
 set(buster_split_order FALSE)
 if(buster_static)

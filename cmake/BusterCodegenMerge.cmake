@@ -13,6 +13,11 @@
 # mold or GNU ld, the sanitizer builds' dynamic links) merges the single object's with every other object's, so the
 # parts keep the flag there: cleared, their 548 KB of strings that other units repeat stayed in an MSan executable.
 #
+# SECTIONS, where given, is presplit's list of the named sections whose start-ordered functions it gave sections of
+# their own (presplit --first, #1444): the relocatable link puts each into one section again, part 0's section first
+# (the module's assembly starts it on a page), then those functions in the list's order, part 0's other functions of it
+# and the other parts' section.
+#
 # llvm-objcopy clears GRP_COMDAT on every section group whose signature symbol is local, as the code generator's
 # sanitizer groups are (AddressSanitizer's module constructor and destructor, which the linker keeps once among the
 # units): COMDAT, tools/codegen/comdat.c, sets it again on the joined object's groups that the parts had as comdats.
@@ -62,7 +67,22 @@ else()
         math(EXPR index "${index} + 1")
     endforeach()
 endif()
-execute_process(COMMAND "${LLD}" -r -O0 --threads=1 ${unmerged} -o "${merged}" RESULT_VARIABLE status)
+set(script "")
+if(DEFINED SECTIONS AND EXISTS "${SECTIONS}")
+    file(STRINGS "${SECTIONS}" named)
+    if(named)
+        list(GET unmerged 0 head)
+        set(text "SECTIONS\n{\n")
+        foreach(section IN LISTS named)
+            string(APPEND text "    ${section} : { \"${head}\"(${section}) *(SORT_BY_NAME(${section}.buster_first.*)) "
+                "*(${section}.buster_rest) *(${section}) }\n")
+        endforeach()
+        string(APPEND text "}\n")
+        file(WRITE "${OUTPUT}.ld" "${text}")
+        set(script -T "${OUTPUT}.ld")
+    endif()
+endif()
+execute_process(COMMAND "${LLD}" -r -O0 --threads=1 ${script} ${unmerged} -o "${merged}" RESULT_VARIABLE status)
 if(copies)
     file(REMOVE ${copies})
 endif()
