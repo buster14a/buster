@@ -3046,8 +3046,9 @@ static uint32_t tier1_select_reciprocal_records(const Tier1SelectHoles* holes, X
 // for BUSTER_TIER1_SELECT_FIXED_RECORDS; none for any other rule. They read every operand before writing a fixed
 // register, through the scratch register where they must, and write the destination last; their consumers save the other
 // values that live past the node in those registers around them, in their call-save rows (tier1_emit_fixed). A division
-// or remainder by a register (TIER1_RULE_DIVIDE): the divisor in the scratch register, the dividend in rax, its sign or
-// zero through rdx, then div or idiv. A shift by a register (TIER1_RULE_SHIFT): the value in the scratch register, the
+// or remainder by a register (TIER1_RULE_DIVIDE): the divisor in the scratch register where it is in rax or rdx, the
+// dividend in rax, its sign or zero through rdx, then div or idiv. A shift by a register (TIER1_RULE_SHIFT): the value in
+// the destination, or in the scratch register where the count's move or the value's would overwrite the other, the
 // count in cl. A division by a constant's reciprocal: tier1_select_reciprocal_records.
 static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction* records)
 {
@@ -3058,13 +3059,20 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
     {
         const bool signed_divide = (holes->immediate & 1) != 0;
         const uint8_t result = (holes->immediate & 2) != 0 ? X86_REGISTER_RDX : X86_REGISTER_RAX;
-        records[count++] = tier1_select_move(8, scratch, holes->right);
+        // The divisor divides from its own register where neither the dividend's move into rax nor rdx's extension writes
+        // it (#2592: Lua's integer `%` and `//`, which #2541 inlined into luaV_execute, moved it on every one).
+        const bool direct = holes->right != X86_REGISTER_RAX && holes->right != X86_REGISTER_RDX;
+        const uint8_t divisor = direct ? holes->right : scratch;
+        if (!direct)
+        {
+            records[count++] = tier1_select_move(8, scratch, holes->right);
+        }
         if (holes->left != X86_REGISTER_RAX)
         {
             records[count++] = tier1_select_move(8, X86_REGISTER_RAX, holes->left);
         }
         records[count++] = signed_divide ? (X86Instruction){ .form = width == 8 ? X86_FORM_CQO : X86_FORM_CDQ } : tier1_select_register_record(X86_FORM_XOR_R32_RM32, X86_REGISTER_RDX, X86_REGISTER_RDX);
-        records[count++] = (X86Instruction){ .rm = scratch, .form = width == 8 ? (signed_divide ? X86_FORM_IDIV_RM64 : X86_FORM_DIV_RM64) : (signed_divide ? X86_FORM_IDIV_RM32 : X86_FORM_DIV_RM32) };
+        records[count++] = (X86Instruction){ .rm = divisor, .form = width == 8 ? (signed_divide ? X86_FORM_IDIV_RM64 : X86_FORM_DIV_RM64) : (signed_divide ? X86_FORM_IDIV_RM32 : X86_FORM_DIV_RM32) };
         if (holes->destination != result)
         {
             records[count++] = tier1_select_move(width, holes->destination, result);

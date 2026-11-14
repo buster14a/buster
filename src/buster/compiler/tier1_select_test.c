@@ -4178,6 +4178,93 @@ static void tier1_select_test_shift_records(Tier1SelectTest* test, uint64_t* ran
     }
 }
 
+// A division or remainder by a register's records (tier1_select_fixed, TIER1_RULE_DIVIDE) run natively, signed and
+// unsigned at both widths, from each dividend register and divisor register to each destination, against C's (#2592).
+// The divisor divides from its own register, and through the scratch register only where it is in rax or rdx, which the
+// dividend's move and the extension write. The arguments arrive in rdi and rsi, and moves before the records put them in
+// the registers under test.
+static void tier1_select_test_divide_records(Tier1SelectTest* test, uint64_t* random)
+{
+    const uint8_t dividends[] = { X86_REGISTER_RDI, X86_REGISTER_RAX, X86_REGISTER_RCX };
+    const uint8_t divisors[] = { X86_REGISTER_RSI, X86_REGISTER_RCX, X86_REGISTER_RDX, X86_REGISTER_RAX };
+    const uint8_t destinations[] = { X86_REGISTER_RAX, X86_REGISTER_RDX, X86_REGISTER_RCX, X86_REGISTER_R10, X86_REGISTER_RDI, X86_REGISTER_RSI };
+    for (uint32_t flags = 0; flags < 4; flags += 1)
+    {
+        for (uint32_t width = 4; width <= 8; width += 4)
+        {
+            for (uint32_t x = 0; x < BUSTER_ARRAY_LENGTH(dividends); x += 1)
+            {
+                for (uint32_t y = 0; y < BUSTER_ARRAY_LENGTH(divisors); y += 1)
+                {
+                    for (uint32_t d = 0; dividends[x] != divisors[y] && d < BUSTER_ARRAY_LENGTH(destinations); d += 1)
+                    {
+                        const Tier1SelectHoles holes = {
+                            .rule = TIER1_RULE_DIVIDE,
+                            .immediate = flags,
+                            .width = (uint8_t)width,
+                            .destination = destinations[d],
+                            .left = dividends[x],
+                            .right = divisors[y],
+                        };
+                        // a to r8 and b to r9 first, then each to its register, so that neither move overwrites the other.
+                        X86Instruction records[BUSTER_TIER1_SELECT_FIXED_RECORDS + 6];
+                        uint32_t count = 0;
+                        records[count++] = tier1_select_move(8, X86_REGISTER_R8, X86_REGISTER_RDI);
+                        records[count++] = tier1_select_move(8, X86_REGISTER_R9, X86_REGISTER_RSI);
+                        records[count++] = tier1_select_move(8, dividends[x], X86_REGISTER_R8);
+                        records[count++] = tier1_select_move(8, divisors[y], X86_REGISTER_R9);
+                        const uint32_t first = count;
+                        const uint32_t sequence = tier1_select_fixed(&holes, records + first);
+                        tier1_select_test_expect(test, sequence != 0 && sequence <= BUSTER_TIER1_SELECT_FIXED_RECORDS, "a division's records fit a fixed-register rule's room");
+                        bool through = false;
+                        for (uint32_t i = first; i < first + sequence; i += 1)
+                        {
+                            through = through || records[i].reg == BUSTER_TIER1_SELECT_SCRATCH || records[i].rm == BUSTER_TIER1_SELECT_SCRATCH;
+                        }
+                        const bool needed = divisors[y] == X86_REGISTER_RAX || divisors[y] == X86_REGISTER_RDX;
+                        tier1_select_test_expect(test, through == needed, "a division goes through the scratch register only where its divisor is in rax or rdx");
+                        count = first + sequence;
+                        records[count++] = tier1_select_move(8, X86_REGISTER_RAX, destinations[d]);
+                        records[count++] = (X86Instruction){ .form = X86_FORM_RET };
+                        if (tier1_select_test_load_records(test, records, count, first, first + sequence, false))
+                        {
+                            const bool is_signed = (flags & 1) != 0;
+                            const bool remainder = (flags & 2) != 0;
+                            for (uint32_t sample = 0; sample < 16; sample += 1)
+                            {
+                                const uint64_t a = tier1_select_test_random(random);
+                                uint64_t b = tier1_select_test_random(random) >> (tier1_select_test_random(random) % 64);
+                                b = (width == 4 ? (uint64_t)(uint32_t)b : b) == 0 ? 7 : b;
+                                // INT_MIN / -1 traps: a divisor of -1 divides 5 instead.
+                                const bool negative_one = width == 4 ? (uint32_t)b == UINT32_MAX : b == UINT64_MAX;
+                                const uint64_t n = is_signed && negative_one ? 5 : a;
+                                uint64_t expected = 0;
+                                if (width == 4)
+                                {
+                                    const uint32_t u = (uint32_t)n;
+                                    const uint32_t v = (uint32_t)b;
+                                    expected = is_signed ? (uint64_t)(uint32_t)(remainder ? (int32_t)u % (int32_t)v : (int32_t)u / (int32_t)v) : (uint64_t)(remainder ? u % v : u / v);
+                                }
+                                else
+                                {
+                                    expected = is_signed ? (uint64_t)(remainder ? (int64_t)n % (int64_t)b : (int64_t)n / (int64_t)b) : remainder ? n % b : n / b;
+                                }
+                                const uint64_t actual = tier1_select_test_call(test, n, b, 0);
+                                if (actual != expected && test->failures < 20)
+                                {
+                                    fprintf(stderr, "divide flags=%u width=%u dividend=%u divisor=%u destination=%u a=%016" PRIx64 " b=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", flags, width,
+                                            dividends[x], divisors[y], destinations[d], n, b, actual, expected);
+                                }
+                                tier1_select_test_expect(test, actual == expected, "a division by a register divides as C does from every register");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Two divisions of a and b by one constant `divisor` at `width`, whose constant, used twice, folds into neither as a tree
 // child: both costed paths and the independent maximal-munch reference must still choose the constant divisor's rule
 // over div and idiv, for a power of two's rules and a reciprocal alike.
@@ -5358,6 +5445,7 @@ static void tier1_select_test_walks(Tier1SelectTest* test)
         }
     }
     tier1_select_test_shift_records(test, &random);
+    tier1_select_test_divide_records(test, &random);
     const uint8_t divisions[] = { IR_UDIV, IR_UREM, IR_SDIV, IR_SREM };
     for (uint32_t operation = 0; operation < BUSTER_ARRAY_LENGTH(divisions); operation += 1)
     {
