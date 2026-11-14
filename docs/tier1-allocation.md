@@ -1145,6 +1145,24 @@ speedtest1's largest losses are `sqlite3BtreeIndexMoveto` +0.09 M and
 `sqlite3_str_vappendf` −2.04 M. The definitions no edge reads are 0.22 M and
 9.62 M of it (`luaV_execute` −9.50 M, `sqlite3ExprCodeTarget` −0.18 M).
 
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/4cbed5edd1ca723aabb3c523bc024b59e78c2440/docs/measurements/tier1-ties-unread-2618-2685-2026-11-14),
+#2593's method, a hold of the lock per round), main `389d25b9` against #2714's
+head, without the definitions no edge reads: Lua's five scripts take 0.9875 of
+the time (95% interval 0.9599 to 1.0160) over six link orders, with 2.75% fewer
+instructions at each, faster at five of them and 3.3% slower at one; speedtest1
+takes 0.9941 (0.9907 to 0.9974) over six layouts, its cycles lower at all six.
+That head's `--tier1 -c` of `sqlite3.c` took 1.24% more cycles for 0.22% more
+instructions: the ties and the returned values' marks read each node's
+selection pattern again after the problem's first pass had (+10.2 M cycles in
+`tier1_emit_cfg_problem`), and every straight-line function took the hinted
+allocator (+4.0 M). The first pass now records them, the values' pass maps
+them to values, and the straight-line consumer hints only where a tie exists,
+with the same code out: over six placements of the backend unit and two fresh
+copies of each, the compile takes 0.60% to 0.73% more cycles than main's in
+three rounds, against 0.98% to 1.07% before; main against itself, within 0.07%.
+The ties' work stays scalar: one test of a node's rule and two loads of its
+pattern, in a pass that reads the pattern anyway.
+
 ## Rematerialization
 
 `Tier1RematerializationInput` is a borrowed column view of selection facts,
