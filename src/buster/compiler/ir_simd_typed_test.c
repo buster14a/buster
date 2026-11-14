@@ -1873,6 +1873,57 @@ static void ir_simd_typed_test_conversions(IrTestTally* tally)
             ir_test_expect(tally, ir_simd_typed_test_undecoded(ir_simd_typed_row(&changed, all, &decoded), &decoded), "a masked truncation's row moving another register isn't the IR's");
         }
     }
+    // The truncations into an SSE carrier (#2780): convertvector's rows of a whole vector of 16, 32 or 64 bytes whose
+    // truncated lanes fill 4 or 8 bytes, the IR's truncate into a 16-byte vector then its lane 0 as the carrier: 9 pairs
+    // of sizes and results at each signedness.
+    uint32_t into_carriers = 0;
+    for (uint32_t sign = 0; ready && sign < 2; sign += 1)
+    {
+        for (uint32_t from = 1; from < 4; from += 1)
+        {
+            for (uint32_t to = 0; to < from; to += 1)
+            {
+                for (uint32_t result_bytes = 4; result_bytes <= 8; result_bytes += 4)
+                {
+                    const uint32_t lanes = result_bytes >> to;
+                    const uint32_t source_bytes = lanes << from;
+                    if (source_bytes != 16 && source_bytes != 32 && source_bytes != 64)
+                    {
+                        continue;
+                    }
+                    const TypeId source = type_vector(&table.table, elements[sign][from], lanes, false);
+                    const TypeId result = type_vector(&table.table, elements[sign][to], lanes, false);
+                    Tier0Operation row;
+                    const char* reason = check_vector_convert_row(&table.table, &every, source, source_bytes, result, &row);
+                    const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | (from == 1 && to == 0 ? BUSTER_X86_FEATURE(AVX512BW) : 0);
+                    IrSimdTypedOperation decoded;
+                    memset(&decoded, 0xa5, sizeof(decoded));
+                    const IrSimdTypedStatus status = reason == NULL ? ir_simd_typed_row(&row, all, &decoded) : IR_SIMD_TYPED_INVALID;
+                    char description[160];
+                    snprintf(description, sizeof(description), "convertvector of %u lanes of %u bytes (signed %u) into a %u-byte carrier: the IR's truncate and lane 0", lanes,
+                             1u << from, sign, result_bytes);
+                    const bool ok = status == IR_SIMD_TYPED_OK && decoded.convert == BUSTER_IR_INTRINSIC_TRUNCATE + 1 && decoded.carrier_result &&
+                                    decoded.immediate == (from | to << 2) && !decoded.merge_mask && !decoded.machine &&
+                                    (decoded.required_features & ~BUSTER_X86_FEATURE(AVX)) == expected;
+                    ir_test_expect(tally, ok, description);
+                    into_carriers += ok;
+                    for (uint32_t f = 0; ok && f < BUSTER_ARRAY_LENGTH(features); f += 1)
+                    {
+                        IrSimdTypedOperation without;
+                        memset(&without, 0x5a, sizeof(without));
+                        const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
+                        ir_test_expect(tally, (expected & features[f]) != 0 ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && without.carrier_result,
+                                       "a truncation into a carrier without a feature it needs stays the machine row, and needs no other");
+                    }
+                    Tier0Operation changed = row;
+                    changed.result_bytes = (uint8_t)(result_bytes == 4 ? 8 : 4);
+                    ir_test_expect(tally, reason != NULL || ir_simd_typed_test_undecoded(ir_simd_typed_row(&changed, all, &decoded), &decoded),
+                                   "a truncation whose lanes don't fill its carrier isn't the IR's");
+                }
+            }
+        }
+    }
+    ir_test_expect(tally, into_carriers == 2 * 9, "every truncation into an SSE carrier decodes");
     type_test_table_close(&table);
     ir_test_expect(tally, extends != 0 && truncates != 0 && masked != 0 && partial != 0, "the conversions decode, partial masked truncations among them");
     // The extensions of an SSE carrier's whole lanes (#1840), zero and signed: of 8 bytes into 16 (bytes to words, words to
@@ -2100,7 +2151,39 @@ static void ir_simd_typed_test_permute2s(IrTestTally* tally)
             }
         }
     }
-    ir_test_expect(tally, decoded_rows == 4 * 2 * 3 && narrow_rows == 4 * (2 * 2 + 1), "every permute of two tables decodes");
+    // Of two SSE carriers (#2780: clang's shuffles of 4- and 8-byte vectors, _mm_cvtepi32_epi8's), the indices VECTOR(2),
+    // each table widened from its carrier.
+    uint32_t carrier_rows = 0;
+    for (uint32_t size = 0; tables && size < 4; size += 1)
+    {
+        for (uint32_t width = 0; width < 3; width += 1)
+        {
+            for (uint32_t carried = 4; carried <= 8; carried += 4)
+            {
+                const uint32_t bytes = 16u << width;
+                Tier0Operation row;
+                memset(&row, 0, sizeof(row));
+                row.records[0] = check_vector_lower_record(ir_simd_permute2_forms[size][width], v0, v2, v1);
+                row.record_count = 1;
+                row.operand_count = 3;
+                for (uint32_t o = 0; o < 3; o += 1)
+                {
+                    row.operand_classes[o] = BUSTER_TYPED_CLASS_VECTOR;
+                    row.operand_bytes[o] = (uint8_t)(o == 2 ? bytes : carried);
+                }
+                row.result_class = BUSTER_TYPED_CLASS_VECTOR;
+                row.result_bytes = (uint8_t)bytes;
+                IrSimdTypedOperation decoded;
+                memset(&decoded, 0xa5, sizeof(decoded));
+                const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+                const bool ok = status == IR_SIMD_TYPED_OK && decoded.permute2 && decoded.permute2_indices == 2 && decoded.permute2_table == 1 && decoded.operand_count == 3 &&
+                                decoded.immediate == size;
+                ir_test_expect(tally, ok, "a permute of two SSE carriers decodes as the IR's permute2 of them widened");
+                carrier_rows += ok;
+            }
+        }
+    }
+    ir_test_expect(tally, decoded_rows == 4 * 2 * 3 && narrow_rows == 4 * (2 * 2 + 1) && carrier_rows == 4 * 3 * 2, "every permute of two tables decodes");
     printf("  IR SIMD rows: %u permutes of two tables decode to the IR's permute2\n", decoded_rows);
 }
 
@@ -2364,7 +2447,8 @@ static void ir_simd_typed_test_masked_memory(IrTestTally* tally)
 
 // The gathers, compressing stores and truncating stores (#1840): vpgatherdd to vpgatherqq (and vgatherdps to vgatherqpd) of
 // each shape whose index has an element per lane at each scale, vpcompressb to vpcompressq to memory at each width, and
-// vpmovwb to vpmovusqd to memory of the sources whose truncated lanes fill 16 bytes or more, decode as the IR's gather,
+// vpmovwb to vpmovusqd to memory of the sources whose truncated lanes fill 16 bytes or more, or whose 8 lanes fill 8
+// bytes (#2780), decode as the IR's gather,
 // compress_store and truncating masked_store at exactly their features (written out: AVX512F, VL for a vector below 64
 // bytes, VBMI2 and BW for bytes' and words' compresses, BW for bytes' and words' truncations, and the mask's DQ for a
 // byte, BW for 4 bytes), refused without each and under 7 changes.
@@ -2398,6 +2482,7 @@ static void ir_simd_typed_test_scattered_memory(IrTestTally* tally)
         uint32_t mask_bytes = 0;
         uint32_t lane = IR_SIMD_LANE_COUNT;
         uint32_t immediate = 0;
+        bool partial = false;
         uint32_t code = 0;
         bool admitted = true;
         if (gather)
@@ -2436,7 +2521,9 @@ static void ir_simd_typed_test_scattered_memory(IrTestTally* tally)
             const uint32_t from = compress ? rest / 3 : ir_simd_typed_truncation_pairs[pair][0];
             const uint32_t to = compress ? from : ir_simd_typed_truncation_pairs[pair][1];
             const uint32_t count = bytes >> from;
-            admitted = compress || (count << to) >= 16;
+            // 8 lanes into 8 bytes too (#2780), their mask widened to the bytes'.
+            admitted = compress || (count << to) >= 16 || (count == 8 && to == 0);
+            partial = !compress && (count << to) < 16;
             mask_bytes = count <= 8 ? 1 : count / 8;
             row.records[0] = (X86Instruction){ .form = compress ? ir_simd_compress_forms[from][width] : ir_simd_typed_truncations[mode][pair][width], .reg = BUSTER_TIER0_ROLE_VECTOR(1),
                                                .rm = BUSTER_TIER0_ROLE_INTEGER(0), .mode = BUSTER_X86_MEMORY_BASE, .decorations = BUSTER_TIER0_DECORATION_MASK(2) };
@@ -2468,7 +2555,8 @@ static void ir_simd_typed_test_scattered_memory(IrTestTally* tally)
             continue;
         }
         ir_test_expect(tally, status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.masked_memory == code && decoded.lane == lane && decoded.immediate == immediate &&
-                                  decoded.operand_count == row.operand_count && (decoded.required_features & ~BUSTER_X86_FEATURE(AVX)) == expected,
+                                  decoded.operand_count == row.operand_count && (decoded.required_features & ~BUSTER_X86_FEATURE(AVX)) == expected &&
+                                  (code != 5 || decoded.carrier_result == partial),
                        description);
         gathers += gather && status == IR_SIMD_TYPED_OK && decoded.masked_memory == 4;
         compresses += compress && status == IR_SIMD_TYPED_OK && decoded.masked_memory == 3;
@@ -2502,7 +2590,7 @@ static void ir_simd_typed_test_scattered_memory(IrTestTally* tally)
                            "a changed gather or compressing or truncating store row is not the IR's operation");
         }
     }
-    ir_test_expect(tally, gathers == 20 * 4 && compresses == 12 && truncations == 24, "every gather, compressing store and truncating store decodes");
+    ir_test_expect(tally, gathers == 20 * 4 && compresses == 12 && truncations == 24 + 9, "every gather, compressing store and truncating store decodes");
     printf("  IR SIMD rows: %u gathers, %u compressing stores and %u truncating stores decode to the IR's gather, compress_store and masked_store of a truncation\n", gathers,
            compresses, truncations);
 }

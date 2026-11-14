@@ -109,6 +109,10 @@ struct IrSimdTypedOperation
     // lanes leave its result's upper bytes zero (`merge_partial`).
     uint8_t convert;
     bool merge_partial;
+    // A truncation into an SSE carrier (#2780: its lanes fill the row's 4 or 8 bytes): the IR's truncate into a 16-byte
+    // vector, then its lane 0 as the carrier (lane_extract). And a truncating store (masked_memory 5) of 8 lanes into 8
+    // bytes (#2780): its masked store's under its mask widened to the 16-byte vector's bytes, or the carrier's store.
+    bool carrier_result;
     // A shift by a scalar count (#1840, ir_simd_typed_shift): whether the row is one, its flags in `immediate`.
     bool shift;
     // A mask to a vector or back (#1840, ir_simd_typed_mask_vector), at `lane`: a vselect of all ones where the mask's bit
@@ -1353,8 +1357,10 @@ static IrSimdTypedStatus ir_simd_typed_permute2(const Tier0Operation* source, ui
         for (uint32_t operand = 0; fits && operand < source->operand_count; operand += 1)
         {
             const uint32_t operand_bytes = source->operand_bytes[operand];
+            // A table may be an SSE carrier too (#2780: clang's shuffles of a 4- or 8-byte vector, its upper bytes the zeros a
+            // row reads it with), widened first.
             fits = source->operand_classes[operand] == BUSTER_TYPED_CLASS_VECTOR &&
-                   (operand == indices ? operand_bytes == bytes : (operand_bytes == 16 || operand_bytes == 32 || operand_bytes == 64) && operand_bytes <= bytes);
+                   (operand == indices ? operand_bytes == bytes : (operand_bytes == 4 || operand_bytes == 8 || operand_bytes == 16 || operand_bytes == 32 || operand_bytes == 64) && operand_bytes <= bytes);
             moves |= fits ? ir_typed_vector_moves(operand_bytes, target_features) : 0;
         }
         for (uint32_t lanes = 0; fits && lanes < 4; lanes += 1)
@@ -1565,6 +1571,9 @@ static IrSimdTypedStatus ir_simd_typed_convert(const Tier0Operation* source, uin
     const bool vectors = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 16 || bytes == 32 || bytes == 64) && source->operand_count != 0 &&
                          source->operand_classes[0] == BUSTER_TYPED_CLASS_VECTOR && (first == 16 || first == 32 || first == 64 || carrier);
     const uint32_t from_type = first == 4 ? IR_F32 : first == 8 ? IR_F64 : IR_V4I32 + (first == 16 ? 0 : first == 32 ? 1 : 2);
+    // A truncation's result may be an SSE carrier (#2780), a vector of 4 or 8 bytes its lanes fill, from a whole vector.
+    const bool into_carrier = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 4 || bytes == 8) && source->operand_count == 1 && source->record_count == 1 &&
+                              source->operand_classes[0] == BUSTER_TYPED_CLASS_VECTOR && (first == 16 || first == 32 || first == 64);
     const bool masked = vectors && !carrier && source->operand_count == 3 && source->record_count == 2 && source->operand_classes[1] == BUSTER_TYPED_CLASS_VECTOR &&
                         source->operand_bytes[1] == bytes && source->operand_classes[2] == BUSTER_TYPED_CLASS_MASK;
     const bool plain = vectors && source->operand_count == 1 && source->record_count == 1;
@@ -1585,7 +1594,7 @@ static IrSimdTypedStatus ir_simd_typed_convert(const Tier0Operation* source, uin
             }
         }
     }
-    for (uint32_t pair = 0; ((plain && !carrier) || masked) && pair < 6; pair += 1)
+    for (uint32_t pair = 0; ((plain && !carrier) || masked || into_carrier) && pair < 6; pair += 1)
     {
         for (uint32_t mode = 0; mode < 3; mode += 1)
         {
@@ -1604,10 +1613,13 @@ static IrSimdTypedStatus ir_simd_typed_convert(const Tier0Operation* source, uin
             const uint32_t mask_bytes = lanes <= 8 ? 1 : lanes / 8;
             // Under a mask, its writemask has a bit for each lane, and its lanes fill its result or (#1840) leave its upper
             // bytes zero, `merge_partial`'s.
-            const bool full = !masked || ((lanes << to) <= bytes && source->operand_bytes[2] == mask_bytes && memcmp(&source->records[1], &moved, sizeof(moved)) == 0);
+            const bool full = into_carrier ? (lanes << to) == bytes :
+                                             !masked || ((lanes << to) <= bytes && source->operand_bytes[2] == mask_bytes && memcmp(&source->records[1], &moved, sizeof(moved)) == 0);
+            const uint32_t truncated = into_carrier || bytes == 16 ? IR_V4I32 : bytes == 32 ? IR_V8I32 : IR_V16I32;
             if (memcmp(record, &expected, sizeof(expected)) == 0 && full &&
-                ir_convert_flags_valid(BUSTER_IR_INTRINSIC_TRUNCATE, IR_V4I32 + (first == 16 ? 0 : first == 32 ? 1 : 2), IR_V4I32 + (bytes == 16 ? 0 : bytes == 32 ? 1 : 2), flags))
+                ir_convert_flags_valid(BUSTER_IR_INTRINSIC_TRUNCATE, IR_V4I32 + (first == 16 ? 0 : first == 32 ? 1 : 2), truncated, flags))
             {
+                candidate.carrier_result = into_carrier;
                 candidate.convert = BUSTER_IR_INTRINSIC_TRUNCATE + 1;
                 candidate.immediate = (uint8_t)flags;
                 candidate.merge_mask = masked;
@@ -1950,8 +1962,10 @@ static IrSimdTypedStatus ir_simd_typed_masked_memory(const Tier0Operation* sourc
     }
     // A truncating store under a mask (#1840): vpmovwb to vpmovqd, signed or unsigned saturating or not, of VECTOR(1) (reg)
     // to [INTEGER(0)] under MASK(2), a mask of the source's lanes, the truncating stores' rows. Its truncated lanes fill
-    // 16 bytes or more (a truncation's result's, ir_convert_flags_valid), which a masked store of those lanes writes; its
-    // features are its form's and the source's moves.
+    // 16 bytes or more (a truncation's result's, ir_convert_flags_valid), which a masked store of those lanes writes; or
+    // (#2780) its 8 lanes fill 8 bytes, vpmovqb of a zmm's and vpmovdb of a ymm's (_mm512_mask_cvtepi64_storeu_epi8):
+    // its mask of 8 lanes all the 16-byte vector's byte lanes', zero-extended (`carrier_result`). Its features are its
+    // form's and the source's moves.
     for (uint32_t pair = 0; admitted && store && candidate.masked_memory == 0 && pair < 6; pair += 1)
     {
         for (uint32_t mode = 0; mode < 3; mode += 1)
@@ -1967,9 +1981,11 @@ static IrSimdTypedStatus ir_simd_typed_masked_memory(const Tier0Operation* sourc
                 .mode = BUSTER_X86_MEMORY_BASE,
                 .decorations = BUSTER_TIER0_DECORATION_MASK(2),
             };
-            if (source->operand_bytes[2] == mask_bytes && (count << to) >= 16 && memcmp(&source->records[0], &expected, sizeof(expected)) == 0)
+            const bool partial = count == 8 && to == 0;
+            if (source->operand_bytes[2] == mask_bytes && ((count << to) >= 16 || partial) && memcmp(&source->records[0], &expected, sizeof(expected)) == 0)
             {
                 candidate.masked_memory = 5;
+                candidate.carrier_result = partial;
                 candidate.lane = (IrSimdLane)lanes[to];
                 candidate.immediate = (uint8_t)(from | to << 2 | mode << 4);
                 const uint64_t mask = (mask_bytes == 1 ? BUSTER_X86_FEATURE(AVX512DQ) : 0) | (mask_bytes >= 4 ? BUSTER_X86_FEATURE(AVX512BW) : 0) |

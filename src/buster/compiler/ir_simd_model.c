@@ -316,7 +316,12 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                 valid = valid && ir_simd_vector(type) && ir_simd_vector(a) && ir_simd_bits(type) < ir_simd_bits(a) && action->index < ir_simd_bits(a) / ir_simd_bits(type) &&
                         b == IR_SIMD_NONE && c == IR_SIMD_NONE;
                 break;
-            case IR_SIMD_WIDEN: valid = valid && ir_simd_vector(type) && ir_simd_vector(a) && ir_simd_bits(a) < ir_simd_bits(type) && b == IR_SIMD_NONE && c == IR_SIMD_NONE; break;
+            // A widen of an SSE carrier (#2780, a scalar to the model: no shape) takes its value's low 8 bytes, an F32's
+            // upper 4 of them zero as every scalar's bits past its type are.
+            case IR_SIMD_WIDEN:
+                valid = valid && ir_simd_vector(type) && (a == IR_SIMD_NONE || (ir_simd_vector(a) && ir_simd_bits(a) < ir_simd_bits(type))) && b == IR_SIMD_NONE &&
+                        c == IR_SIMD_NONE;
+                break;
             case IR_SIMD_INSERT:
                 valid = valid && ir_simd_vector(type) && a == type && ir_simd_vector(b) && ir_simd_bits(b) < ir_simd_bits(type) &&
                         action->index < ir_simd_bits(type) / ir_simd_bits(b) && c == IR_SIMD_NONE;
@@ -709,7 +714,9 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
     {
         // Whole 64-bit words: every vector is 2, 4 or 8 of them.
         const uint32_t result_words = ir_simd_bits(action->result) / 64;
-        const uint32_t part_words = ir_simd_bits(action->operation == IR_SIMD_INSERT ? action->operands[1] : action->operation == IR_SIMD_EXTRACT ? action->result : action->operands[0]) / 64;
+        const uint32_t part_words = action->operation == IR_SIMD_WIDEN && action->operands[0] == IR_SIMD_NONE ?
+                                        1 :
+                                        ir_simd_bits(action->operation == IR_SIMD_INSERT ? action->operands[1] : action->operation == IR_SIMD_EXTRACT ? action->result : action->operands[0]) / 64;
         const uint32_t first = action->index * part_words;
         for (uint32_t word = 0; word < result_words; word += 1)
         {

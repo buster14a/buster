@@ -2372,9 +2372,12 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 }
                 else if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_WIDEN)
                 {
+                    // A widen's source may be an SSE carrier too (#2780: an F32 or F64, its 4 or 8 bytes the vector's low
+                    // ones, as a row reads one zero-extended).
                     const uint32_t narrow = c == BUSTER_IR_INTRINSIC_EXTRACT ? type : ta;
                     const uint32_t wide = c == BUSTER_IR_INTRINSIC_EXTRACT ? ta : type;
-                    valid = ir_vector_type(type) && ir_vector_type(ta) && ir_type_bits[narrow] < ir_type_bits[wide] && b == BUSTER_IR_NONE &&
+                    const bool carrier = c == BUSTER_IR_INTRINSIC_WIDEN && (ta == IR_F32 || ta == IR_F64);
+                    valid = ir_vector_type(type) && (ir_vector_type(ta) || carrier) && ir_type_bits[narrow] < ir_type_bits[wide] && b == BUSTER_IR_NONE &&
                             (c == BUSTER_IR_INTRINSIC_EXTRACT ? part < ir_type_bits[wide] / ir_type_bits[narrow] : part == 0);
                 }
                 else if (c == BUSTER_IR_INTRINSIC_INSERT)

@@ -778,8 +778,14 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
             source = ir_typed_emit(sink, IR_VSELECT, wide, operands[2], operands[0], extended, 0);
             ir_typed_lanes(sink, source, (IrSimdLane)lanes[from]);
         }
-        value = ir_typed_emit(sink, IR_INTRINSIC, type, source, BUSTER_IR_NONE, operation->convert - 1u, 0);
+        // A truncation into an SSE carrier (#2780) is into a 16-byte vector, then its lane 0 at the carrier's type.
+        value = ir_typed_emit(sink, IR_INTRINSIC, operation->carrier_result ? IR_V4I32 : type, source, BUSTER_IR_NONE, operation->convert - 1u, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+        if (operation->carrier_result)
+        {
+            value = ir_typed_emit(sink, IR_INTRINSIC, type, value, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_LANE_EXTRACT, 0);
+            ir_typed_lanes(sink, value, (IrSimdLane)(type == IR_F64 ? 3 : 2));
+        }
         if (operation->merge_mask && !operation->merge_partial && !unmasked)
         {
             value = ir_typed_emit(sink, IR_VSELECT, type, operands[2], value, operands[1], 0);
@@ -916,7 +922,23 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         const uint32_t narrow = ir_typed_emit(sink, IR_INTRINSIC, truncated, operands[1], BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_TRUNCATE, 0);
         ir_typed_lanes(sink, narrow, (IrSimdLane)flags);
         const uint32_t address = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, operands[0], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-        value = ir_typed_emit(sink, unmasked ? IR_STORE : IR_MASKED_STORE, IR_VOID, address, narrow, unmasked ? BUSTER_IR_NONE : operands[2], 0);
+        // 8 lanes into 8 bytes (#2780): unmasked, the store of the truncation's lane 0 as an F64 carrier, its 8 bytes alone;
+        // masked, the mask of 8 lanes zero-extended to the 16-byte vector's byte lanes (an I8's, an I16's), whose upper 8
+        // are clear.
+        uint32_t stored = narrow;
+        uint32_t mask = unmasked ? BUSTER_IR_NONE : operands[2];
+        if (operation->carrier_result && unmasked)
+        {
+            stored = ir_typed_emit(sink, IR_INTRINSIC, IR_F64, narrow, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_LANE_EXTRACT, 0);
+            ir_typed_lanes(sink, stored, (IrSimdLane)3);
+        }
+        else if (operation->carrier_result)
+        {
+            const uint32_t bits = ir_typed_emit(sink, IR_BITCAST, IR_I8, mask, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+            const uint32_t wide = ir_typed_emit(sink, IR_ZEXT, IR_I16, bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+            mask = ir_typed_emit(sink, IR_BITCAST, IR_M16, wide, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        }
+        value = ir_typed_emit(sink, unmasked ? IR_STORE : IR_MASKED_STORE, IR_VOID, address, stored, mask, 0);
         if (!unmasked)
         {
             ir_typed_lanes(sink, value, operation->lane);

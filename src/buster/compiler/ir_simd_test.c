@@ -614,6 +614,57 @@ static void ir_test_width_changes(IrTestTally* test, Arena* output, Arena* scrat
     }
     // Extracts: 16 of 32 (2 parts), 16 of 64 (4), 32 of 64 (2); widens: 3 pairs; inserts: the same 8 parts as extracts.
     ir_test_expect(test, admitted_count == 8 + 3 + 8, "every width change of the IR's vector widths is admitted, and no other");
+    // A widen of an SSE carrier (#2780): an F32's or F64's 4 or 8 bytes into each width, part 0 alone, its bytes past them
+    // zero; an I32, I64 or F32 into an F64 refused.
+    uint32_t carriers = 0;
+    for (uint32_t result = 0; result < 3; result += 1)
+    {
+        for (uint32_t source = 0; source < 4; source += 1)
+        {
+            for (uint32_t part = 0; part < 2; part += 1)
+            {
+                static const IrType sources[4] = { IR_F32, IR_F64, IR_I32, IR_I64 };
+                IrFunction function = {0};
+                const IrSizes sizes = { .instruction_count = 3, .block_count = 1 };
+                if (ir_create(output, &sizes, &function) != IR_OK)
+                {
+                    ir_test_expect(test, false, "carrier widen verifier fixture allocation");
+                    continue;
+                }
+                const IrType type = (IrType)(IR_V4I32 + result);
+                const bool admitted = source < 2 && part == 0;
+                function.result_type = IR_VOID;
+                function.block_offsets[1] = 3;
+                ir_test_instruction(&function, 0, IR_UNDEF, sources[source], BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 1, IR_INTRINSIC, type, 0, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_WIDEN);
+                ir_test_instruction(&function, 2, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                function.flags[1] = (uint8_t)part;
+                ir_test_pair(test, &function, scratch, NULL, admitted, "a widen of an SSE carrier is admitted at part 0 alone, of an F32 or F64");
+                carriers += admitted;
+                arena_pop_to(output, mark);
+                if (admitted)
+                {
+                    // The model: the scalar's low bytes, zero past them (an F32's upper 4 of its 8 zero, as every scalar's).
+                    const uint32_t carrier_bytes = source == 0 ? 4 : 8;
+                    state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                    IrSimdValue scalar = {0};
+                    scalar.words[0] = carrier_bytes == 4 ? (uint32_t)state : state;
+                    const IrSimdValue* operands[3] = { &scalar, 0, 0 };
+                    const IrSimdAction action = { .operation = IR_SIMD_WIDEN, .result = ir_simd_shape(type), .operands = { IR_SIMD_NONE, IR_SIMD_NONE, IR_SIMD_NONE } };
+                    IrSimdValue value;
+                    memset(&value, 0xa5, sizeof(value));
+                    bool exact = ir_simd_evaluate(&action, operands, 0, 0, 0, &value);
+                    for (uint32_t byte = 0; exact && byte < 16u << result; byte += 1)
+                    {
+                        const uint8_t expected = byte < carrier_bytes ? (uint8_t)(scalar.words[0] >> (8 * byte)) : 0;
+                        exact = ((const uint8_t*)value.words)[byte] == expected;
+                    }
+                    ir_test_expect(test, exact, "the model widens a carrier's bytes, zeros past them");
+                }
+            }
+        }
+    }
+    ir_test_expect(test, carriers == 3 * 2, "a widen of an F32 or an F64 is admitted into every width");
 }
 
 // An independent byte model of the permutes (#1840) for the model's check: byte `byte` of a permute of a and b of

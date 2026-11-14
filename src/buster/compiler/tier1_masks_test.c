@@ -199,6 +199,10 @@ struct Tier1MasksTest
     // lane_extract into a carrier and extend of one.
     uint32_t carrier_attempts;
     uint32_t carrier_rows;
+    // The truncations into an SSE carrier and the permutes of two carriers (#2780, tier1_masks_test_carrier_results):
+    // those tried, and those through every stage as the IR's.
+    uint32_t carrier_result_attempts;
+    uint32_t carrier_result_rows;
     // The bit shuffles into a mask (#1840, tier1_masks_test_bitshuffles): those tried, and those through every stage as the
     // IR's bitshuffle under the writemask.
     uint32_t bitshuffle_attempts;
@@ -7560,7 +7564,8 @@ static uint64_t tier1_masks_test_truncate(uint64_t value, uint32_t from, uint32_
 
 // The compressing stores and the truncating stores under a mask through the IR to Tier 1 (#1840): vpcompressd and
 // vpcompressq at each width (bytes and words are VBMI2's, which the x86-64-v4 target hasn't), and vpmovwb to vpmovusqd of the
-// sources whose truncated lanes fill 16 bytes or more, each as the program's only row in 4 statements: the input's vector
+// sources whose truncated lanes fill 16 bytes or more, or whose 8 lanes fill 8 (#2780, whose masked statements Tier 1
+// folds into the truncation's one memory form under the 8 lanes' mask), each as the program's only row in 4 statements: the input's vector
 // s under a mask from the input stored into the output at s, the third statement's mask a constant of every lane (its
 // plain store's), the fourth's ending at the output's end, its mask's upper half cleared so that no lane it leaves out is
 // written past it. tier1_masks_test_typed_pipeline takes each through the IR as its compress_store or its truncation's
@@ -7590,7 +7595,8 @@ static void tier1_masks_test_scattered_stores(Tier1MasksTest* test)
         const uint32_t stored = count << to;
         const uint32_t mask_bytes = count <= 8 ? 1 : count / 8;
         const uint64_t half = (UINT64_C(1) << (count / 2)) - 1;
-        if (stored < 16)
+        const bool partial = !compress && count == 8 && to == 0;
+        if (stored < 16 && !partial)
         {
             continue;
         }
@@ -7620,7 +7626,7 @@ static void tier1_masks_test_scattered_stores(Tier1MasksTest* test)
         uint32_t at[4];
         for (uint32_t s = 0; s < 4; s += 1)
         {
-            at[s] = s < 3 ? s * stored / 8 : 32 - stored / 16;
+            at[s] = s < 3 ? s * stored / 8 : partial ? 31 : 32 - stored / 16;
             tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, at[s]);
             tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, s * bytes / 8 % 32);
             tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
@@ -7667,9 +7673,25 @@ static void tier1_masks_test_scattered_stores(Tier1MasksTest* test)
                 }
             }
         }
+        // VPMOVQB_XM64_Z and the others name the register form too, which the unmasked statement's truncation is: the
+        // fold shows as no masked store of the bytes (vmovdqu8).
+        test->watched_forms[0] = partial ? row.records[0].form : X86_FORM_NONE;
+        test->watched_forms[1] = partial ? ir_simd_masked_moves[0][1][0] : X86_FORM_NONE;
+        test->watched_records[0] = 0;
+        test->watched_records[1] = 0;
         bool machine = false;
         ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, true, inputs, expected, arenas, &machine);
         ok = ok && tier1_masks_test_expect(test, !machine, "a compressing or truncating store is the IR's, not a machine row");
+        // 8 lanes into 8 bytes (#2780): its three masked statements one vpmov* [p]{k} each, by both paths, and the unmasked
+        // one's truncation into a register; no masked store of bytes.
+        ok = ok && tier1_masks_test_expect(test, !partial || (test->watched_records[0] == 2 * 4 && test->watched_records[1] == 0),
+                                           "a truncating store of 8 bytes folds into its one memory form under the narrow mask");
+        if (!ok && partial)
+        {
+            printf("test-tier1-masks: %s: %u truncations, %u masked byte stores\n", name, test->watched_records[0], test->watched_records[1]);
+        }
+        test->watched_forms[0] = X86_FORM_NONE;
+        test->watched_forms[1] = X86_FORM_NONE;
         test->compress_store_rows += ok && compress ? 1 : 0;
         test->truncating_store_rows += ok && !compress ? 1 : 0;
         tier1_masks_test_expect(test, test->scratch.length == 0, "the stores return the scratch arena");
@@ -8908,6 +8930,164 @@ static void tier1_masks_test_carriers(Tier1MasksTest* test)
     free(program);
 }
 
+// The truncations into an SSE carrier and the permutes of two carriers through the IR to Tier 1 (#2780), each as the
+// program's only row in 4 statements:
+// - convertvector of a whole vector of 16, 32 or 64 bytes whose truncated lanes fill 4 or 8 bytes (the producer's
+//   check_vector_convert_row, 18 shapes), its carrier stored whole: the IR's truncate and lane 0 of it;
+// - vpermt2d and vpermt2q of two carriers of 4 or 8 bytes loaded from the input by 16-byte indices from it, the result
+//   stored: the IR's permute2 of the carriers widened, each table's bytes past its carrier zero (as a row reads one).
+// tier1_masks_test_typed_pipeline takes each through the interpreter at every stage and Tier 1 natively, against C's
+// lanes.
+static void tier1_masks_test_carrier_results(Tier1MasksTest* test)
+{
+    static const TypeId elements[2][4] = {
+        { BUSTER_TYPE_UCHAR, BUSTER_TYPE_USHORT, BUSTER_TYPE_UINT, BUSTER_TYPE_ULLONG },
+        { BUSTER_TYPE_SCHAR, BUSTER_TYPE_SHORT, BUSTER_TYPE_INT, BUSTER_TYPE_LLONG },
+    };
+    const X86Target target = { .features = test->v4_features };
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
+    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
+    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
+    TypeTestTable table = {0};
+    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0 &&
+                                                   type_test_table_open(&table, 512),
+                                         "the carrier results' memory and type table");
+    uint64_t state = test->random ^ UINT64_C(0x1f83d9abfb41bd6b);
+    // The truncations: (sign, from, to, result bytes); then the permutes: (lanes, carrier bytes).
+    for (uint32_t c = 0; ready && c < 2 * 4 * 4 * 2 + 2 * 2; c += 1)
+    {
+        const bool permute = c >= 2 * 4 * 4 * 2;
+        const uint32_t sign = c / 32;
+        const uint32_t from = c / 8 % 4;
+        const uint32_t to = c / 2 % 4;
+        const uint32_t carrier = permute ? 4u << (c & 1) : 4u << (c & 1);
+        const uint32_t lanes = carrier >> to;
+        const uint32_t source_bytes = lanes << from;
+        if (!permute && (to >= from || (source_bytes != 16 && source_bytes != 32 && source_bytes != 64)))
+        {
+            continue;
+        }
+        // A permute's lanes: doublewords or quadwords.
+        const uint32_t size = permute ? 2 + (c - 2 * 4 * 4 * 2) / 2 : 0;
+        Tier0Operation row;
+        memset(&row, 0, sizeof(row));
+        bool made = true;
+        char name[128];
+        if (permute)
+        {
+            row.records[0] = check_vector_lower_record(ir_simd_permute2_forms[size][0], BUSTER_TIER0_ROLE_VECTOR(0), BUSTER_TIER0_ROLE_VECTOR(2), BUSTER_TIER0_ROLE_VECTOR(1));
+            row.record_count = 1;
+            row.operand_count = 3;
+            for (uint32_t o = 0; o < 3; o += 1)
+            {
+                row.operand_classes[o] = BUSTER_TYPED_CLASS_VECTOR;
+                row.operand_bytes[o] = (uint8_t)(o == 2 ? 16 : carrier);
+            }
+            row.result_class = BUSTER_TYPED_CLASS_VECTOR;
+            row.result_bytes = 16;
+            snprintf(name, sizeof(name), "a permute of %u-byte lanes of two %u-byte carriers", 1u << size, carrier);
+        }
+        else
+        {
+            const TypeId source = type_vector(&table.table, elements[sign][from], lanes, false);
+            const TypeId result = type_vector(&table.table, elements[sign][to], lanes, false);
+            made = check_vector_convert_row(&table.table, &target, source, source_bytes, result, &row) == NULL;
+            snprintf(name, sizeof(name), "convertvector of %u lanes of %u bytes (signed %u) into a %u-byte carrier", lanes, 1u << from, sign, carrier);
+        }
+        const uint64_t output_mark = test->output.length;
+        test->carrier_result_attempts += 1;
+        bool ok = tier1_masks_test_expect(test, made && row.result_bytes == (permute ? 16 : carrier), "the front end's carrier result rows");
+        program->count = 0;
+        program->overflow = false;
+        program->rows = true;
+        program->objects = false;
+        const uint32_t out_bytes = permute ? 16 : 8;
+        for (uint32_t k = 0; ok && k < 4; k += 1)
+        {
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, k * out_bytes / 8);
+            if (permute)
+            {
+                for (uint32_t j = 0; j < 3; j += 1)
+                {
+                    tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, (k * 6 + j * 2) % 32);
+                    tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, j == 2 ? 16 : carrier);
+                }
+            }
+            else
+            {
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k * source_bytes / 8 % 32);
+                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, source_bytes);
+            }
+            tier0_test_mask_emit(program, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, 0);
+            tier0_test_mask_emit(program, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_VECTOR, permute ? 16 : carrier);
+        }
+        tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+        ok = ok && tier1_masks_test_expect(test, !program->overflow, "the carrier result's program fits");
+        Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
+        functions[0].operations = &row;
+        functions[0].operation_count = 1;
+        for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+        {
+            uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
+            uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
+            tier0_test_mask_inputs(in, &state);
+            memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
+            const uint8_t* raw = (const uint8_t*)in;
+            for (uint32_t k = 0; k < 4; k += 1)
+            {
+                uint8_t* out = wanted + k * out_bytes;
+                if (permute)
+                {
+                    // Each lane: of the first table's 16 bytes then the second's, each zero past its carrier, the one its
+                    // index's low bits name.
+                    uint8_t tables[32] = {0};
+                    memcpy(tables, raw + (k * 6) % 32 * 8, carrier);
+                    memcpy(tables + 16, raw + (k * 6 + 2) % 32 * 8, carrier);
+                    const uint8_t* indices = raw + (k * 6 + 4) % 32 * 8;
+                    const uint32_t element = 1u << size;
+                    for (uint32_t lane = 0; lane < 16 / element; lane += 1)
+                    {
+                        uint64_t index = 0;
+                        memcpy(&index, indices + lane * element, element);
+                        const uint32_t picked = (uint32_t)(index & (2 * 16 / element - 1));
+                        memcpy(out + lane * element, tables + picked * element, element);
+                    }
+                }
+                else
+                {
+                    const uint8_t* a = raw + k * source_bytes % 256;
+                    for (uint32_t lane = 0; lane < lanes; lane += 1)
+                    {
+                        uint64_t value = 0;
+                        memcpy(&value, a + (lane << from), 1u << from);
+                        const uint64_t narrowed = tier1_masks_test_convert_lane(value, 1u << from, 1u << to, sign != 0, 0);
+                        memcpy(out + (lane << to), &narrowed, 1u << to);
+                    }
+                }
+            }
+        }
+        bool machine = false;
+        ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, true, inputs, expected, arenas, &machine);
+        ok = ok && tier1_masks_test_expect(test, !machine, "a truncation into a carrier or a permute of carriers is the IR's, not a machine row");
+        test->carrier_result_rows += ok;
+        tier1_masks_test_expect(test, test->scratch.length == 0, "the carrier results return the scratch arena");
+        arena_pop_to(&test->output, output_mark);
+        for (uint32_t k = 0; k < 3; k += 1)
+        {
+            arena_pop_to(&arenas[k], 0);
+        }
+    }
+    type_test_table_close(&table);
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        arena_release(&arenas[k]);
+    }
+    free(expected);
+    free(inputs);
+    free(program);
+}
+
 // The front end's masked moves' selects and undefined vectors through Tier 0 and the IR to Tier 1 (#1840): every SELECT
 // rule (`__builtin_ia32_select*` of each element and width) as check_x86_lower_masks moves its mask into the mask class,
 // and every UNDEFINED rule, each as the program's only row, in 4 statements: a select of the vectors at k and k + 1
@@ -9109,6 +9289,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_shuffle_immediates(&test);
             tier1_masks_test_conversions(&test);
             tier1_masks_test_carriers(&test);
+            tier1_masks_test_carrier_results(&test);
             tier1_masks_test_bitshuffles(&test);
             tier1_masks_test_quadword_ops(&test);
             tier1_masks_test_pairwise_dots(&test);
@@ -9150,7 +9331,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.select_rows + test.width_rows + test.permute_rows + test.convert_rows +
                                                                                test.shift_rows + test.mask_vector_rows + test.lane_op_rows + test.permute2_rows + test.ternlog_rows + test.compress_rows +
                                                                                test.masked_rows + test.gather_rows + test.scatter_rows + test.compress_store_rows + test.truncating_store_rows + test.fma_rows + test.lane_rows + test.reduce_rows + test.unary_rows + test.fround_rows + test.cvtt_rows +
-                                                                               test.shuffle_rows + test.carrier_rows + test.bitshuffle_rows + test.quadword_rows + test.pairwise_rows + test.blendv_rows +
+                                                                               test.shuffle_rows + test.carrier_rows + test.bitshuffle_rows + test.quadword_rows + test.pairwise_rows + test.blendv_rows + test.carrier_result_rows +
                                                                                test.funnel_rows),
                                     "every typed program and front-end row runs natively by both of Tier 1's paths");
             // The comparisons: 24 integer rules (bytes to quadwords, signed and unsigned, at 3 widths) at 8 immediates, 6
@@ -9182,6 +9363,9 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_expect(&test, test.pairwise_attempts == 18u + (!test.native || (x86_target_native().features & BUSTER_X86_FEATURE(AVX512VNNI)) != 0 ? 12u : 0u) &&
                                                test.pairwise_rows == test.pairwise_attempts,
                                     "every pairwise operation and dot product goes through the IR and Tier 1 as the IR's pairwise or dot");
+            // The truncations into an SSE carrier (#2780): 18 shapes; the permutes of two carriers: 2 lanes, 2 carriers.
+            tier1_masks_test_expect(&test, test.carrier_result_attempts == 18 + 4 && test.carrier_result_rows == test.carrier_result_attempts,
+                                    "every truncation into a carrier and permute of carriers goes through the IR and Tier 1 as the IR's");
             // The blends by a vector's signs (#2780): pblendvb, blendvps and blendvpd at 16 and 32 bytes.
             tier1_masks_test_expect(&test, test.blendv_attempts == 6 && test.blendv_rows == test.blendv_attempts,
                                     "every blend by a vector's signs goes through the IR as its select and Tier 1 as one blend");
@@ -9244,7 +9428,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
         tier1_masks_test_expect(&test, test.scatter_attempts == 10 && test.scatter_rows == test.scatter_attempts, "every scatter goes through the IR and Tier 1 as the IR's");
         printf("test-tier1-masks: the scatters: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its scatter\n", test.scatter_rows);
         tier1_masks_test_expect(&test, test.compress_store_attempts == 6 && test.compress_store_rows == test.compress_store_attempts &&
-                                           test.truncating_store_attempts == 24 && test.truncating_store_rows == test.truncating_store_attempts,
+                                           test.truncating_store_attempts == 24 + 9 && test.truncating_store_rows == test.truncating_store_attempts,
                                 "every compressing and truncating store goes through the IR and Tier 1 as the IR's");
         printf("test-tier1-masks: the gathers, compressing stores and truncating stores: %u, %u and %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively "
                "as its gather, compress_store and masked_store of a truncation\n",

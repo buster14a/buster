@@ -1322,6 +1322,11 @@ static void tier1_select_width_change(Tier1SelectRecords* result, const Tier1Sel
         const uint16_t form = width == 32 ? X86_FORM_VEXTRACTI64X4_YM256_Z_IMM8 : other == 64 ? X86_FORM_VEXTRACTI32X4_XM128_Z_IMM8 : X86_FORM_VEXTRACTI32X4_XM128_Y_IMM8;
         tier1_select_append(result, (X86Instruction){ .form = form, .reg = left, .rm = x, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = (int32_t)part });
     }
+    else if (kind == 1 && other < 16)
+    {
+        // A widen of an SSE carrier (#2780): its 4 or 8 bytes, the rest zeroed (vinsertps, vmovq).
+        tier1_select_append(result, tier1_select_carrier_move(x, left, other, BUSTER_TIER1_ENCODING_EVEX));
+    }
     else if (kind == 1)
     {
         // EVEX's move of the narrower width, never legacy SSE's movaps, which keeps the register's bytes past 16.
@@ -5505,11 +5510,13 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         {
             // A width change (#1840): the other vector's width, and the part in the IR's flags.
             const uint32_t other = c == BUSTER_IR_INTRINSIC_INSERT ? b : a;
+            // A widen of an SSE carrier (#2780): its 4 or 8 bytes.
+            const uint32_t other_type = other < function->instruction_count ? function->type[other] : IR_VOID;
             base.rule = TIER1_RULE_VECTOR;
             base.width = (uint8_t)vector_width;
             base.scale = BUSTER_TIER1_VECTOR_WIDTH_CHANGE;
             base.operation = (uint8_t)(c - BUSTER_IR_INTRINSIC_EXTRACT);
-            base.source_width = other < function->instruction_count ? (uint8_t)tier1_select_vector_width(function->type[other]) : 0;
+            base.source_width = other_type == IR_F32 ? 4 : other_type == IR_F64 ? 8 : other < function->instruction_count ? (uint8_t)tier1_select_vector_width(other_type) : 0;
             base.immediate = function->flags[node];
             base.values[0] = a;
             if (c == BUSTER_IR_INTRINSIC_INSERT)
@@ -6141,6 +6148,25 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             narrowed.immediate = function->flags[b];
             narrowed.source_width = (uint8_t)tier1_select_vector_width(function->type[function->a[b]]);
             narrowed.values[2] = function->a[b];
+            // A truncation of 8 lanes into 8 bytes under a mask of 8 lanes zero-extended to the bytes' 16 (#2780: bitcast,
+            // zext, bitcast, each read by the next alone): the instruction reads the 8 lanes' bits of the narrow mask's
+            // register.
+            const uint32_t widened = c < function->instruction_count && function->op[c] == IR_BITCAST && function->type[c] == IR_M16 && tier1_select_tree_child(forest, node, c) ?
+                                         function->a[c] :
+                                         BUSTER_IR_NONE;
+            const uint32_t bits = widened != BUSTER_IR_NONE && function->op[widened] == IR_ZEXT && function->type[widened] == IR_I16 && tier1_select_tree_child(forest, c, widened) ?
+                                      function->a[widened] :
+                                      BUSTER_IR_NONE;
+            const uint32_t narrow = bits != BUSTER_IR_NONE && function->op[bits] == IR_BITCAST && function->type[bits] == IR_I8 && tier1_select_tree_child(forest, widened, bits) &&
+                                            function->a[bits] < function->instruction_count && function->type[function->a[bits]] == IR_M8 ?
+                                        function->a[bits] :
+                                        BUSTER_IR_NONE;
+            const uint32_t source_lanes = (uint32_t)narrowed.source_width >> (function->flags[b] & 3);
+            if (narrow != BUSTER_IR_NONE && source_lanes == 8 && ((function->flags[b] >> 2) & 3) == 0)
+            {
+                narrowed.values[1] = narrow;
+                narrowed.fold_count += 3;
+            }
             if (tier1_select_convert_form(1, function->flags[b], base.width, narrowed.source_width) != X86_FORM_NONE)
             {
                 tier1_select_fold(forest, node, b, &narrowed);
