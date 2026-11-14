@@ -131,7 +131,8 @@ struct IrTypedPlan
     uint8_t vector_copies;
     // The direct U64 symbol addresses the function takes at least twice (GLOBAL_ADDRESS entries, #2574), each defined once
     // (ir_typed_plan_hoisted): hoisted_symbols[k] in order of first use; and the entries that take one, hoisted_takes of
-    // them in entry order, each's symbol's k in hoisted_numbers. Each definition's block (#2593, ir_typed_plan_places):
+    // them in entry order, each's symbol's k in hoisted_numbers. ir_typed_plan_places then numbers the definitions, a
+    // symbol's split among several (#2618), hoisted_symbols[k] definition k's symbol, and each definition's block (#2593):
     // node n's (0 the preheader, after its jump tables', or b + 1 source block b's start, after its reloads) are
     // hoisted_starts[hoisted_start_offsets[n]] to before hoisted_start_offsets[n + 1]. The emission writes each
     // definition's value in hoisted_values[k] as it emits it.
@@ -850,7 +851,7 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
     else if (operation->lane_move != 0)
     {
         // One lane of a vector or its lanes' sign bits (#1840), its flags the lane: an extraction's I32 or I64 narrowed to
-        // the row's integer, and an insertion's integer widened to its I32 first.
+        // the row's integer (or an SSE carrier's F32 or F64, lane 0's), and an insertion's integer widened to its I32 first.
         const uint32_t kind = operation->lane_move - 1u;
         const uint32_t size = operation->immediate & 3;
         const IrType scalar = size == 3 ? IR_I64 : IR_I32;
@@ -863,7 +864,9 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         }
         else
         {
-            const IrType produced = kind == BUSTER_IR_INTRINSIC_MOVEMASK ? IR_I32 : scalar;
+            // A cast into an SSE carrier (#1840: an F32 or F64) is lane 0's extraction at the carrier's type itself.
+            const bool carrier = type == IR_F32 || type == IR_F64;
+            const IrType produced = kind == BUSTER_IR_INTRINSIC_MOVEMASK ? IR_I32 : carrier ? type : scalar;
             value = ir_typed_emit(sink, IR_INTRINSIC, produced, operands[0], BUSTER_IR_NONE, kind, 0);
             ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
             if (type != produced)
@@ -954,6 +957,45 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], operation->permute - 1u, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
     }
+    else if (operation->funnel)
+    {
+        // A funnel shift (#1840), its flags its lanes and direction, its counts the third operand, in the extra array; a
+        // rotate's of its vector twice by its count, a constant in each lane.
+        uint32_t counts = operation->rotate ? BUSTER_IR_NONE : operands[2];
+        if (operation->rotate)
+        {
+            const uint32_t lane_bytes = 1u << (operation->immediate & 3);
+            uint8_t lanes[64] = {0};
+            for (uint32_t at = 0; at < ir_type_bits[type] / 8; at += lane_bytes)
+            {
+                lanes[at] = operation->part;
+            }
+            uint64_t words[8] = {0};
+            memcpy(words, lanes, sizeof(lanes));
+            counts = ir_typed_vector_constant(sink, type, words);
+        }
+        const uint32_t slot = (uint32_t)sink->sizes.extra_count;
+        if (sink->output != 0)
+        {
+            sink->output->extra[slot] = counts;
+        }
+        sink->sizes.extra_count += 1;
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operation->rotate ? operands[0] : operands[1], ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_FUNNEL, slot), 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+    }
+    else if (operation->quadword_op)
+    {
+        // A quadword operation (#1840), its operation in its flags.
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_QUADWORD_OP, 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+    }
+    else if (operation->bitshuffle)
+    {
+        // A bit shuffle into a mask (#1840), `type` the mask of the vectors' bytes, ANDed with its writemask, the third
+        // operand, but where the typed stream's writemask has every lane.
+        const uint32_t mask = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_BITSHUFFLE, 0);
+        value = unmasked ? mask : ir_typed_emit(sink, IR_AND, type, mask, operands[2], BUSTER_IR_NONE, 0);
+    }
     else if (operation->shuffle_immediate != 0)
     {
         // A byte shuffle by an immediate (#1840): the IR's shuffle of the vector by its kind's indices at the immediate,
@@ -1008,8 +1050,9 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
 // it, so both lowering passes agree.
 static bool ir_typed_unmasked(const Tier0Function* input, const IrSimdTypedOperation* operation, uint32_t i)
 {
-    // A comparison's lanes, or a masked extract's or truncation's (#1840): its result's, the merged operand's.
-    const uint32_t lanes = operation->compare_mask                                    ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) :
+    // A comparison's lanes or a bit shuffle's bytes, or a masked extract's or truncation's (#1840): its result's, the
+    // merged operand's.
+    const uint32_t lanes = operation->compare_mask || operation->bitshuffle           ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) :
                            operation->merge_mask || operation->masked_memory != 0 ? 8u * operation->operand_bytes[1] / ir_simd_lane_bits(operation->lane) :
                                                                                      0;
     const uint64_t every = lanes >= 64 ? UINT64_MAX : (UINT64_C(1) << lanes) - 1;
@@ -1577,28 +1620,117 @@ static bool ir_typed_loop_quiet(const Dominators* dominators, const uint32_t* of
 // read through every conversion of its format loop, which appends each piece); where some iteration doesn't take it,
 // the definition runs on every entry for takes that may never run (sqlite3StrICmp's sqlite3UpperToLower, read where two
 // characters differ, mostly as the loop ends). Lua's disptab passes: its dispatch loop's handlers that call nothing,
-// each ending in the dispatch's take. Each walk takes the next stamp of `*walk`, which stays above every symbol's own.
-static bool ir_typed_loop_resident(const IrTypedPlan* plan, const Dominators* dominators, const uint32_t* offsets, const uint32_t* successors, const uint8_t* calls, const uint32_t* firsts, const uint32_t* order, const uint32_t* reads,
-                                   uint32_t* seen, uint32_t* stack, uint32_t* marks, uint32_t k, uint32_t loop, uint32_t* walk, uint64_t* budget)
+// each ending in the dispatch's take. The takes are order[first] to before order[last], their nodes stamped `stamp` in
+// `reads`, which `marks` takes for the loops tried. Each walk takes the next stamp of `*walk`, which stays above every
+// symbol's own.
+static bool ir_typed_loop_resident(const IrTypedPlan* plan, const Dominators* dominators, const uint32_t* offsets, const uint32_t* successors, const uint8_t* calls, const uint32_t* order, uint32_t first, uint32_t last,
+                                   const uint32_t* reads, uint32_t* seen, uint32_t* stack, uint32_t* marks, uint32_t stamp, uint32_t loop, uint32_t* walk, uint64_t* budget)
 {
     *walk += 1;
-    const bool every = ir_typed_loop_every(dominators, offsets, successors, reads, seen, stack, loop, k + 1, *walk, budget);
+    const bool every = ir_typed_loop_every(dominators, offsets, successors, reads, seen, stack, loop, stamp, *walk, budget);
     bool resident = false;
-    for (uint32_t x = firsts[k]; every && !resident && x < firsts[k + 1]; x += 1)
+    for (uint32_t x = first; every && !resident && x < last; x += 1)
     {
         const uint32_t node = plan->entry_blocks[plan->hoisted_entries[order[x]]] + 1;
         uint32_t inner = dominators_loop_contains(dominators, loop, node) ? dominators->block_loop[node] : BUSTER_DOMINATOR_NONE;
-        while (!resident && inner != BUSTER_DOMINATOR_NONE && marks[inner] != k + 1)
+        while (!resident && inner != BUSTER_DOMINATOR_NONE && marks[inner] != stamp)
         {
-            marks[inner] = k + 1;
+            marks[inner] = stamp;
             *walk += 1;
-            resident = inner == loop || ir_typed_loop_every(dominators, offsets, successors, reads, seen, stack, inner, k + 1, *walk, budget);
+            resident = inner == loop || ir_typed_loop_every(dominators, offsets, successors, reads, seen, stack, inner, stamp, *walk, budget);
             *walk += 1;
             resident = resident && ir_typed_loop_quiet(dominators, offsets, successors, calls, seen, stack, inner, *walk, budget);
             inner = inner == loop ? BUSTER_DOMINATOR_NONE : dominators->loop_parent[inner];
         }
     }
     return resident;
+}
+
+// Where takes order[first] to before order[last] of a hoisted symbol are defined (ir_typed_place): `place` where `kept`,
+// else they stay their own; their nearest common dominator, its outermost loop, and whether a take is in a loop.
+typedef struct IrTypedPlace
+{
+    uint32_t place;
+    uint32_t ancestor;
+    uint32_t loop;
+    bool looped;
+    bool kept;
+} IrTypedPlace;
+
+// The rule of ir_typed_plan_places for takes order[first] to before order[last], at least `minimum` of them reachable,
+// their nodes stamped `stamp` in `reads` (and in `marks`, for the loops tried): the nearest common dominator P of their
+// reachable nodes, by climbing the deeper one in reverse postorder; lifted out of its outermost loop where the value can
+// keep its register there, kept at P where a take is in a loop or every path from P takes it, then raised until it
+// precedes every take in source order.
+static IrTypedPlace ir_typed_place(const IrTypedPlan* plan, const Dominators* dominators, const uint32_t* offsets, const uint32_t* successors, const uint8_t* calls, const uint32_t* order, uint32_t first, uint32_t last, uint32_t minimum,
+                                   uint32_t* reads, uint32_t* seen, uint32_t* stack, uint32_t* marks, uint32_t stamp, uint32_t* walk, uint64_t* budget, uint64_t* loop_budget)
+{
+    IrTypedPlace result = {
+        .place = 0,
+        .ancestor = BUSTER_DOMINATOR_NONE,
+        .loop = BUSTER_DOMINATOR_NONE,
+        .looped = false,
+        .kept = false,
+    };
+    uint32_t low = UINT32_MAX;
+    uint32_t reachable = 0;
+    for (uint32_t x = first; x < last; x += 1)
+    {
+        const uint32_t node = plan->entry_blocks[plan->hoisted_entries[order[x]]] + 1;
+        if (dominators->rpo_index[node] != BUSTER_DOMINATOR_NONE)
+        {
+            uint32_t other = result.ancestor == BUSTER_DOMINATOR_NONE ? node : result.ancestor;
+            uint32_t ancestor = node;
+            while (ancestor != other)
+            {
+                ancestor = dominators->rpo_index[ancestor] > dominators->rpo_index[other] ? dominators->idom[ancestor] : ancestor;
+                other = dominators->rpo_index[other] > dominators->rpo_index[ancestor] ? dominators->idom[other] : other;
+            }
+            result.ancestor = ancestor;
+            low = node < low ? node : low;
+            reachable += 1;
+            reads[node] = stamp;
+            result.looped |= dominators->block_loop != 0 && dominators->block_loop[node] != BUSTER_DOMINATOR_NONE;
+        }
+    }
+    // Its outermost loop, and whether any loop on the way is irreducible.
+    uint32_t loop = reachable >= minimum && dominators->block_loop != 0 ? dominators->block_loop[result.ancestor] : BUSTER_DOMINATOR_NONE;
+    bool irreducible = false;
+    bool climbing = loop != BUSTER_DOMINATOR_NONE;
+    while (climbing)
+    {
+        irreducible |= dominators->loop_irreducible[loop] != 0;
+        const uint32_t parent = dominators->loop_parent[loop];
+        climbing = parent != BUSTER_DOMINATOR_NONE;
+        loop = climbing ? parent : loop;
+    }
+    bool inside = false;
+    for (uint32_t x = first; loop != BUSTER_DOMINATOR_NONE && x < last; x += 1)
+    {
+        inside |= dominators_loop_contains(dominators, loop, plan->entry_blocks[plan->hoisted_entries[order[x]]] + 1);
+    }
+    result.loop = loop;
+    result.kept = reachable >= minimum && (loop != BUSTER_DOMINATOR_NONE ? inside && !irreducible && ir_typed_loop_resident(plan, dominators, offsets, successors, calls, order, first, last, reads, seen, stack, marks, stamp, loop, walk, loop_budget) :
+                                                                         result.looped || ir_typed_anticipated(offsets, successors, reads, seen, stack, result.ancestor, stamp, budget));
+    uint32_t place = loop != BUSTER_DOMINATOR_NONE ? dominators->idom[dominators->loop_header[loop]] : result.ancestor;
+    while (result.kept && place > low)
+    {
+        place = dominators->idom[place];
+    }
+    result.place = place;
+    return result;
+}
+
+// Whether node `node` is `top` or one it dominates, by climbing the immediate dominators while they stay below `top` in
+// reverse postorder.
+static bool ir_typed_dominated(const Dominators* dominators, uint32_t top, uint32_t node)
+{
+    uint32_t up = node;
+    while (up != top && up != 0 && dominators->rpo_index[up] != BUSTER_DOMINATOR_NONE && dominators->rpo_index[up] > dominators->rpo_index[top])
+    {
+        up = dominators->idom[up];
+    }
+    return up == top;
 }
 
 // Where each hoisted address is defined (#2593). The preheader computed every one at the function's entry, so a path
@@ -1616,7 +1748,16 @@ static bool ir_typed_loop_resident(const IrTypedPlan* plan, const Dominators* do
 // - otherwise at P, where some take is inside a loop, or where every path from P takes it before leaving the function
 //   (ir_typed_anticipated): sqlite3GetToken's aiClass, read by its switch. A path that takes it nowhere (powerOfTen's
 //   aBase, sqlite3VdbeMemSetText's destructor compared on two branches) leaves the takes their own, as before #2574,
-//   which #2601's sharing in Tier 1's selection still joins within a block.
+//   which #2601's sharing in Tier 1's selection still joins within a block;
+// - but where P is kept for a take in a loop and some path from P takes it nowhere, the takes split into groups by the
+//   child of P in the dominator tree that dominates each, each group placed by these rules, where no path takes two
+//   groups' (each child entered from P alone, or from itself by a back edge) or P is a value join of the typed stream
+//   (#2618). jsonTranslateBlobToText defined sqlite3CtypeMap at its switch for two rare cases' loops, and the value took
+//   a callee-saved register on every call; its groups' single takes stay their own. sqlite3FindFunction's join of a
+//   truth value, which #2554's threading copies into its predecessors, held sqlite3UpperToLower's definition at its
+//   start, which defeats it. Where a group would be defined at P or above it, P keeps the definition for them all: as
+//   at sqlite3GetToken's join of its switch's cases, which every identifier passes, where a definition at the join and
+//   another in a keyword's case would both run.
 //
 // The definition is at P's start: where Tier 1 keeps no register for it from there to a read, it leaves the definition
 // out (tier1_emit_cfg_dead_definition), which a definition at P's end, whose register an edge then seems to read,
@@ -1634,11 +1775,26 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan, 
     bool ok = true;
     const uint32_t symbols = plan->hoisted_count;
     const uint32_t nodes = plan->block_count + 1 + (plan->indirect != 0);
-    uint32_t* blocks = symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)symbols + 1) : 0;
-    plan->hoisted_values = symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)symbols + 1) : 0;
+    // A symbol split by its takes' groups (#2618) adds a definition for at least two of them, so the definitions number
+    // fewer than the symbols and half the takes: each one's block and symbol, and each take's definition.
+    const uint64_t capacity = (uint64_t)symbols + plan->hoisted_takes / 2 + 1;
+    uint32_t* blocks = symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity) : 0;
+    uint32_t* definitions = blocks != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity) : 0;
+    uint32_t* take_definitions = definitions != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)plan->hoisted_takes + 1) : 0;
+    uint32_t* children = take_definitions != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)plan->hoisted_takes + 1) : 0;
+    plan->hoisted_values = symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity) : 0;
     plan->hoisted_start_offsets = symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 2) : 0;
-    plan->hoisted_starts = symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)symbols + 1) : 0;
-    ok = symbols == 0 || (blocks != 0 && plan->hoisted_values != 0 && plan->hoisted_start_offsets != 0 && plan->hoisted_starts != 0);
+    plan->hoisted_starts = symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity) : 0;
+    ok = symbols == 0 || (children != 0 && plan->hoisted_values != 0 && plan->hoisted_start_offsets != 0 && plan->hoisted_starts != 0);
+    uint32_t added = 0;
+    for (uint32_t k = 0; ok && k < symbols; k += 1)
+    {
+        definitions[k] = plan->hoisted_symbols[k];
+    }
+    for (uint32_t t = 0; ok && t < plan->hoisted_takes; t += 1)
+    {
+        take_definitions[t] = plan->hoisted_numbers[t];
+    }
     // The CFG's two CSR views: the successors by ir_typed_successors, counted and then filled, and the predecessors by a
     // counting sort of them.
     uint32_t* offsets = ok && symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 1) : 0;
@@ -1754,72 +1910,113 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan, 
         bool kept = !placed;
         if (placed)
         {
-            // The nearest common dominator of the reachable takes' nodes, by climbing the deeper one in reverse postorder.
-            uint32_t low = UINT32_MAX;
-            uint32_t reachable = 0;
-            uint32_t ancestor = BUSTER_DOMINATOR_NONE;
-            bool looped = false;
-            for (uint32_t x = firsts[k]; x < firsts[k + 1]; x += 1)
+            const IrTypedPlace whole = ir_typed_place(plan, &dominators, offsets, successors, calls, order, firsts[k], firsts[k + 1], 2, reads, seen, stack, marks, k + 1, &walk, &budget, &loop_budget);
+            const uint32_t top = whole.ancestor;
+            kept = whole.kept;
+            place = whole.place;
+            // Kept at P outside loops for a take in a loop where some path from P takes it nowhere: its takes' groups, by
+            // the child of P that dominates each, are placed each as a symbol is.
+            if (kept && whole.loop == BUSTER_DOMINATOR_NONE && whole.looped && !ir_typed_anticipated(offsets, successors, reads, seen, stack, top, k + 1, &budget))
             {
-                const uint32_t node = plan->entry_blocks[plan->hoisted_entries[order[x]]] + 1;
-                if (dominators.rpo_index[node] != BUSTER_DOMINATOR_NONE)
+                for (uint32_t x = firsts[k]; x < firsts[k + 1]; x += 1)
                 {
-                    uint32_t other = ancestor == BUSTER_DOMINATOR_NONE ? node : ancestor;
-                    ancestor = node;
-                    while (ancestor != other)
+                    const uint32_t node = plan->entry_blocks[plan->hoisted_entries[order[x]]] + 1;
+                    uint32_t child = dominators.rpo_index[node] != BUSTER_DOMINATOR_NONE ? node : BUSTER_DOMINATOR_NONE;
+                    while (child != BUSTER_DOMINATOR_NONE && child != top && dominators.idom[child] != top)
                     {
-                        ancestor = dominators.rpo_index[ancestor] > dominators.rpo_index[other] ? dominators.idom[ancestor] : ancestor;
-                        other = dominators.rpo_index[other] > dominators.rpo_index[ancestor] ? dominators.idom[other] : other;
+                        child = dominators.idom[child];
                     }
-                    low = node < low ? node : low;
-                    reachable += 1;
-                    reads[node] = k + 1;
-                    looped |= dominators.block_loop != 0 && dominators.block_loop[node] != BUSTER_DOMINATOR_NONE;
+                    children[x] = child;
                 }
-            }
-            // Its outermost loop, and whether any loop on the way is irreducible.
-            uint32_t loop = reachable >= 2 && dominators.block_loop != 0 ? dominators.block_loop[ancestor] : BUSTER_DOMINATOR_NONE;
-            bool irreducible = false;
-            bool climbing = loop != BUSTER_DOMINATOR_NONE;
-            while (climbing)
-            {
-                irreducible |= dominators.loop_irreducible[loop] != 0;
-                const uint32_t parent = dominators.loop_parent[loop];
-                climbing = parent != BUSTER_DOMINATOR_NONE;
-                loop = climbing ? parent : loop;
-            }
-            bool inside = false;
-            for (uint32_t x = firsts[k]; loop != BUSTER_DOMINATOR_NONE && x < firsts[k + 1]; x += 1)
-            {
-                inside |= dominators_loop_contains(&dominators, loop, plan->entry_blocks[plan->hoisted_entries[order[x]]] + 1);
-            }
-            kept = reachable >= 2 && (loop != BUSTER_DOMINATOR_NONE ? inside && !irreducible && ir_typed_loop_resident(plan, &dominators, offsets, successors, calls, firsts, order, reads, seen, stack, marks, k, loop, &walk, &loop_budget) :
-                                                                      looped || ir_typed_anticipated(offsets, successors, reads, seen, stack, ancestor, k + 1, &budget));
-            place = loop != BUSTER_DOMINATOR_NONE ? dominators.idom[dominators.loop_header[loop]] : ancestor;
-            while (kept && place > low)
-            {
-                place = dominators.idom[place];
+                // Each group's takes together, in their order: an insertion sort of the symbol's by child.
+                for (uint32_t x = firsts[k] + 1; x < firsts[k + 1]; x += 1)
+                {
+                    const uint32_t take = order[x];
+                    const uint32_t child = children[x];
+                    uint32_t y = x;
+                    while (y > firsts[k] && children[y - 1] > child)
+                    {
+                        order[y] = order[y - 1];
+                        children[y] = children[y - 1];
+                        y -= 1;
+                    }
+                    order[y] = take;
+                    children[y] = child;
+                }
+                // No path takes two groups' where each group's child is entered from P alone, or from below itself by a
+                // back edge: P is in no loop. A value join of the typed stream at P splits all the same, for #2554's
+                // threading of P, which a definition at its start defeats (sqlite3FindFunction's).
+                bool separate = top != 0 && top <= plan->block_count && plan->stack_depths[top - 1] != 0 && plan->stack_depths[top - 1] != UINT32_MAX;
+                bool entered = true;
+                for (uint32_t x = firsts[k]; !separate && x < firsts[k + 1]; x += 1)
+                {
+                    const uint32_t child = children[x];
+                    const bool grouped = child != BUSTER_DOMINATOR_NONE && child != top && (x == firsts[k] || children[x - 1] != child);
+                    for (uint32_t e = grouped ? predecessor_offsets[child] : 0; grouped && e < predecessor_offsets[child + 1]; e += 1)
+                    {
+                        const uint32_t from = predecessors[e];
+                        entered &= from == top || dominators.rpo_index[from] == BUSTER_DOMINATOR_NONE || ir_typed_dominated(&dominators, child, from);
+                    }
+                }
+                separate |= entered;
+                // Each group placed below P adds a definition; one that would be defined at P or above it leaves P's
+                // definition to them all.
+                const uint32_t before = added;
+                bool below = separate;
+                uint32_t group = firsts[k];
+                while (below && group < firsts[k + 1])
+                {
+                    uint32_t next = group + 1;
+                    while (next < firsts[k + 1] && children[next] == children[group])
+                    {
+                        next += 1;
+                    }
+                    walk += 1;
+                    const IrTypedPlace part = children[group] != BUSTER_DOMINATOR_NONE ? ir_typed_place(plan, &dominators, offsets, successors, calls, order, group, next, 2, reads, seen, stack, marks, walk, &walk, &budget, &loop_budget) :
+                                                                                          (IrTypedPlace){ .ancestor = BUSTER_DOMINATOR_NONE, .loop = BUSTER_DOMINATOR_NONE };
+                    below = !part.kept || (part.place != top && ir_typed_dominated(&dominators, top, part.place));
+                    if (below && part.kept)
+                    {
+                        blocks[symbols + added] = part.place;
+                        definitions[symbols + added] = plan->hoisted_symbols[k];
+                        for (uint32_t x = group; x < next; x += 1)
+                        {
+                            take_definitions[order[x]] = symbols + added;
+                        }
+                        added += 1;
+                    }
+                    group = next;
+                }
+                // Undone where a group stays at P: its takes go back to the symbol's definition.
+                for (uint32_t x = firsts[k]; !below && x < firsts[k + 1]; x += 1)
+                {
+                    take_definitions[order[x]] = k;
+                }
+                added = below ? added : before;
+                kept = !below;
             }
         }
         blocks[k] = kept ? place : BUSTER_DOMINATOR_NONE;
     }
     // The takes that stay their own drop out of the lists, in place: their entries, and the symbols they leave without a
     // definition, renumbered in order.
-    uint32_t* numbers = ok && symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)symbols + 1) : 0;
+    const uint32_t total = symbols + added;
+    uint32_t* numbers = ok && symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)total + 1) : 0;
     ok = ok && (symbols == 0 || numbers != 0);
     uint32_t count = 0;
-    for (uint32_t k = 0; numbers != 0 && k < symbols; k += 1)
+    for (uint32_t k = 0; numbers != 0 && k < total; k += 1)
     {
         const bool kept = blocks[k] != BUSTER_DOMINATOR_NONE;
         numbers[k] = kept ? count : BUSTER_DOMINATOR_NONE;
-        plan->hoisted_symbols[count] = plan->hoisted_symbols[k];
+        definitions[count] = definitions[k];
         blocks[count] = blocks[k];
         count += kept;
     }
+    plan->hoisted_symbols = numbers != 0 ? definitions : plan->hoisted_symbols;
     uint32_t takes = 0;
     for (uint32_t t = 0; numbers != 0 && t < plan->hoisted_takes; t += 1)
     {
-        const uint32_t k = numbers[plan->hoisted_numbers[t]];
+        const uint32_t k = numbers[take_definitions[t]];
         // A take in an unreachable block stays its own.
         const bool own = k == BUSTER_DOMINATOR_NONE || (placed && dominators.rpo_index[plan->entry_blocks[plan->hoisted_entries[t]] + 1] == BUSTER_DOMINATOR_NONE);
         plan->hoisted_entries[takes] = plan->hoisted_entries[t];

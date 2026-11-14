@@ -1,0 +1,23 @@
+buster-fixtures v1 checker-sources
+# check_test_library_sources's source fixtures (c_check_program_library_test.c; #2053): ID, FILE, FLAGS, NAME, tab-separated.
+0001	0001.c	-	library folds: comparisons and lengths in constant contexts
+0002	0002.c	-	library folds: strings at offsets and in const arrays
+0003	0003.c	-	library folds: integers and floating values
+0004	0004.c	-	library folds: plain declarations of the builtins
+0005	0005.c	-	library folds: ordinary declarations beside overloads in constant contexts
+0006	0006.c	-	library folds: the selected ordinary declaration precedes its overload
+0007	0007.c	-	library folds: the selected ordinary declaration follows its overload
+0008	0008.c	rejected	library folds: an overloadable declaration of the same prototype is no builtin
+0009	0009.c	rejected	library folds: another prototype beside overloads is no builtin
+0010	0010.c	rejected	library folds: a static declaration beside overloads is no builtin
+0011	0011.c	rejected	library folds: an argument's side effect beside overloads is no constant
+0012	0012.c	rejected	library folds: a builtin clang doesn't fold is no constant
+0013	0013.c	rejected	library folds: a mutable array's string is no constant
+0014	0014.c	rejected	library folds: a declaration of another prototype isn't the builtin
+0015	0015.c	rejected	library folds: a static declaration isn't the builtin
+0016	0016.c	-	FILE builtins: the unit's FILE at file scope
+0017	0017.c	-	FILE builtins: a local object named FILE leaves the file scope's
+0018	0018.c	rejected	FILE builtins: no FILE
+0019	0019.c	rejected	FILE builtins: a FILE of block scope alone
+0020	0020.c	rejected	FILE builtins: FILE declared after the call
+0021	0021.c	rejected	FILE builtins: a FILE of the wrong type

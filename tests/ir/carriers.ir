@@ -1,0 +1,12 @@
+function (ptr) -> void {
+b0:
+  %0 = param.ptr 0
+  %1 = load.v4i32 %0 align=16
+  %2 = load.v16i32 %0 align=64
+  %3 = intrinsic.f64 %1 lane_extract 3
+  %4 = intrinsic.f32 %2 lane_extract 2
+  %5 = intrinsic.v8i32 %3 extend 8
+  %6 = intrinsic.v16i32 %3 extend 28
+  %7 = intrinsic.v4i32 %4 extend 13
+  %8 = ret.void
+}

@@ -232,49 +232,8 @@ static __attribute__((noinline)) void check_test_transparent_types(CheckTest* te
         type_test_table_close(&storage);
     }
 
-    const CheckSourceFixture fixtures[] = {
-        { .name = "transparent function first member both declaration orders", .source = "typedef union __attribute__((transparent_union)){int*i;double*d;}U;int f(U);int f(int*p){return p!=0;}int g(int*);int g(U p){return p.d!=0;}\n" },
-        { .name = "transparent function second member both declaration orders", .source = "typedef union __attribute__((transparent_union)){int*i;double*d;}U;int f(U);int f(double*p){return p!=0;}int g(double*);int g(U p){return p.d!=0;}\n" },
-        { .name = "transparent function pointer and ordinary nominal identity", .source = "typedef union __attribute__((transparent_union)){int*i;double*d;}U;typedef void F(U);typedef void I(int*);typedef void D(double*);_Static_assert(__builtin_types_compatible_p(F,I),\"first\");_Static_assert(__builtin_types_compatible_p(F*,D*),\"second\");_Static_assert(!__builtin_types_compatible_p(U,int*),\"nominal\");\n" },
-        { .name = "transparent unrelated union parameters remain incompatible", .source = "typedef union __attribute__((transparent_union)){int*i;double*d;}U;typedef union __attribute__((transparent_union)){int*i;float*f;}V;typedef void F(U);typedef void G(V);_Static_assert(!__builtin_types_compatible_p(F,G),\"distinct\");\n" },
-        { .name = "transparent top qualifier matching", .source = "typedef union __attribute__((transparent_union)){const int i;unsigned u;}U;typedef void F(U);typedef void I(int);_Static_assert(__builtin_types_compatible_p(F,I),\"top const\");\n" },
-        { .name = "transparent atomic candidate remains distinct", .source = "typedef union __attribute__((transparent_union)){_Atomic(int)i;unsigned u;}U;typedef void F(U);typedef void I(int);typedef void A(_Atomic(int));_Static_assert(!__builtin_types_compatible_p(F,I),\"atomic\");_Static_assert(__builtin_types_compatible_p(F,A),\"atomic match\");\n" },
-        { .name = "transparent array candidate does not decay", .source = "typedef union __attribute__((transparent_union)){int a[2];}U;typedef void F(U);typedef void I(int*);_Static_assert(!__builtin_types_compatible_p(F,I),\"no decay\");\n" },
-        { .name = "transparent first floating member is ignored", .source = "typedef union __attribute__((transparent_union)){float f;int i;}U;void f(U);void g(void){f(1);}\n", .rejected = true },
-        { .name = "transparent later floating member is allowed", .source = "typedef union __attribute__((transparent_union)){int i;float f;}U;void f(U);void f(float);\n" },
-        { .name = "transparent first atomic floating member is allowed", .source = "typedef union __attribute__((transparent_union)){_Atomic(float)f;int i;}U;void f(U);void f(_Atomic(float));\n" },
-        { .name = "transparent member declaration alignment does not change validation", .source = "typedef union __attribute__((transparent_union)){int i;int j __attribute__((aligned(8)));}U;void f(U);void f(int);\n" },
-        { .name = "transparent incomplete forward annotation stays ignored", .source = "union __attribute__((transparent_union)) U;union U{int i;unsigned u;};void f(union U);void g(void){f(1);}\n", .rejected = true },
-        { .name = "transparent composite first order constrains later calls", .source = "typedef union __attribute__((transparent_union)){int*i;double*d;}U;void f(U);void f(int*);void g(double*p){f(p);}\n", .rejected = true },
-        { .name = "transparent composite reverse order constrains later calls", .source = "typedef union __attribute__((transparent_union)){int*i;double*d;}U;void f(int*);void f(U);void g(double*p){f(p);}\n", .rejected = true },
-        { .name = "transparent function pointer before activation stays incompatible", .source = "union U{int*i;double*d;};void f(union U);\nvoid(*p)(int*)=f;\ntypedef union U T __attribute__((transparent_union));\n", .rejected = true },
-        { .name = "transparent function pointer after activation is compatible", .source = "union U{int*i;double*d;};void f(union U);typedef union U T __attribute__((transparent_union));void(*p)(int*)=f;\n" },
-        { .name = "transparent recursive callback relation terminates", .source = "union U;typedef void(*P)(union U);union __attribute__((transparent_union)) U{P p;};typedef void(*Q)(P);typedef void F(union U);typedef void G(Q);_Static_assert(__builtin_types_compatible_p(F,G),\"callback\");\n" },
-    };
-    char directory[] = "/tmp/buster-check-transparent-types-XXXXXX";
-    bool written = mkdtemp(directory) != 0;
-    char paths[BUSTER_ARRAY_LENGTH(fixtures)][160];
-    char* pointers[BUSTER_ARRAY_LENGTH(fixtures)];
-    ParseTestClang outcomes[BUSTER_ARRAY_LENGTH(fixtures)];
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
-    {
-        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
-        pointers[i] = paths[i];
-        written = written && parse_test_write(paths[i], fixtures[i].source, strlen(fixtures[i].source));
-    }
-    const char* option = "-std=gnu17";
-    const bool checked = written && parse_test_clang(clang, &option, 1, pointers, BUSTER_ARRAY_LENGTH(fixtures), outcomes);
-    check_test_expect(test, checked, "independent transparent type oracle runs");
-    for (uint32_t i = 0; checked && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
-    {
-        check_test_expect(test, outcomes[i].rejected == fixtures[i].rejected, fixtures[i].name);
-        check_test_source(test, &fixtures[i], paths[i], &outcomes[i]);
-    }
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
-    {
-        unlink(paths[i]);
-    }
-    rmdir(directory);
+    // Its source fixtures are runtime data (#2053): tests/checker/transparent-types, which check_test_suite reads and runs.
+    check_test_suite(test, clang, "checker/transparent-types", "independent transparent type oracle runs");
 }
 
 #endif
