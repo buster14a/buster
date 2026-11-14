@@ -746,6 +746,7 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
             .function = &expanded,
             .verified = verified,
             .unexpanded = changed && inlined != 0 ? &lowered : NULL,
+            .summary = true,
         };
         IrVerifiedRevision revision = { 0 };
         const CheckTier1Outcome outcome = check_tier1_passes(lane, &input, target, scalar, certify, NULL, &lane->steps[2], output, analyses, &revision, &summary.passes);
@@ -766,6 +767,7 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
     arena_pop_to(&lane->steps[5], 0);
     arena_pop_to(&lane->steps[6], 0);
     arena_pop_to(&lane->steps[9], 0);
+    arena_pop_to(&lane->steps[10], 0);
     arena_pop_to(scratch, scratch_mark);
     lane_publish(&inlining->states[b], built ? BUSTER_CHECK_TIER1_INLINE_READY : BUSTER_CHECK_TIER1_INLINE_REFUSED);
 }

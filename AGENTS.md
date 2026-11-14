@@ -452,7 +452,7 @@ index](docs/commands/README.md#detailed-sections).
 - `test-gnu, benchmark-gnu` — `c_gnu.c` — [guide](docs/commands/gnu.md).
 - `test-import, benchmark-import` — `import.c` — [guide](docs/commands/import.md).
 - `test-ir, test-ir-lowering, benchmark-ir` — `ir.c` — [guide](docs/commands/ir.md).
-- `test-ir-optimize, test-ir-gvn, test-ir-licm` — `ir_optimize.c` — [guide](docs/commands/ir-optimization.md).
+- `test-ir-optimize, test-ir-{gvn,licm,unroll}` — `ir_optimize*.c` — [guide](docs/commands/ir-optimization.md).
 - `test-ir-parse, reduce-ir, interpret-ir, interpret-c` — [IR tools](docs/commands/ir-tools.md).
 - `test-lanes, benchmark-lanes` — `lane.c` — [guide](docs/commands/lanes.md).
 - `test-lexer, benchmark-lexer` — `c_lexer.c` — [guide](docs/commands/lexer.md).

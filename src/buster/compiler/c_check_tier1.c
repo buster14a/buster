@@ -295,6 +295,10 @@ struct CheckTier1PassesInput
     const IrFunction* function;
     bool verified;
     const IrFunction* unexpanded;
+    // A candidate's summary (c_check_tier1_inline.c), which callers expand and then run these passes on again: the
+    // unroller skips it, so that an expanded loop is unrolled once, in its caller, and the summary's size (which the
+    // callers' expansion decisions read) is the loop's own.
+    bool summary;
 };
 
 // What Tier 1's passes made of a function (check_tier1_passes): the optimized function and its verified analysis,
@@ -431,7 +435,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     // --tier1-passes=+unroll (#2755's measurement): counted innermost loops unrolled, in steps[10], after if-conversion and
     // LICM, before the sink and the optimizer, whose SCCP, dead-code removal and merges clean the copies up. A function
     // past the loop analysis' limits (IR_ERROR_UNSUPPORTED) goes on as it was; any other error is the function's.
-    if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_UNROLL) != 0)
+    if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_UNROLL) != 0 && !input->summary)
     {
         IrUnrollOptions options = ir_unroll_options();
         options.scalar = scalar;
@@ -538,7 +542,9 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     const bool member = inlining != NULL && function >= inlining->lowered->functions && body < inlining->program->body_count;
     CheckTier1Passes passes = { 0 };
     uint32_t inlined_calls = 0;
-    const bool own = stage == CHECK_TIER1_COMPILED && member && !function->calls_returns_twice && !sources && !gvn && !sroa && fault == NULL &&
+    // With the unroller, a candidate compiles from its own pipeline, as with SROA: its summary skips the unroller.
+    const bool unroll = (on & BUSTER_CHECK_TIER1_PASS_UNROLL) != 0;
+    const bool own = stage == CHECK_TIER1_COMPILED && member && !function->calls_returns_twice && !sources && !gvn && !sroa && !unroll && fault == NULL &&
                      check_tier1_inline_own(lane, (uint32_t)body, scalar, certify, &passes, &inlined_calls);
     // A candidate whose callers should expand every call of it makes no code now (#2541 step 2, check_tier1_inline_held):
     // it waits for the emission's last pass, which makes it where some emitted code still refers to it.

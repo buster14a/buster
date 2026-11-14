@@ -171,16 +171,25 @@ measurements of what each one gains. LIST is a comma-separated list of items
 applied in turn, each `+` or `-` and then a pass's name: `sccp`, `dce`, `cfg`
 (the jump threading), `merge` (CFG cleanup's merges, below), `licm`, `sroa`
 (on every function, with #1282's options, before the solver and promotion),
-`gvn` (as `--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or
+`unroll` (#2755's [loop unrolling](tier1-loop-unrolling.md)), `gvn` (as
+`--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or
 `all`. The default is SCCP, dead-code removal, CFG cleanup, its merges and
 the inlining. LICM runs after if-conversion, before the optimizer, which
-cleans up after it. A function that LICM or SROA refuses goes on as it was.
-The summaries the unit's inlining builds run the same passes, and with SROA,
-as with the solver, a candidate compiles from its own pipeline.
+cleans up after it, and the unroller after LICM. A function that LICM or SROA
+refuses goes on as it was, and so does one past the unroller's loop analysis.
+The summaries the unit's inlining builds run the same passes but the
+unroller, which their callers run on what they expand (a summary's size is
+the loop's own, and an expanded loop is unrolled once), and with SROA, as
+with the solver and the unroller, a candidate compiles from its own pipeline.
 `--tier1-report` gives each pass's counts: `folded` constants,
 `removed_instructions` and `removed_blocks` (the optimizer's output against
 its input, merges included), `merged_blocks`, `licm_moved`, `sroa_split`
-(slots) and `gvn_removed`.
+(slots) and `gvn_removed`. With `+unroll`, a `tier1-unroll` line follows
+wherever a loop was seen: the natural loops (`loops`), how many were
+`unrolled`, each refusal's count by its name (`outer`, `irreducible`,
+`preheader`, `latch`, `exit`, `call`, `control`, `stack`, `test`, `predicate`,
+`bound`, `induction`, `size`, `growth`), and the main loops' `copies`, the
+`reductions` they split and the instructions they `added`.
 
 CFG cleanup's merges join a block to its predecessor when that predecessor is
 its only one and it is the predecessor's only executable successor. The block
