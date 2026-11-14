@@ -28,7 +28,9 @@
 //    the block's anchor (#2553, tier1_cfg_anchors): its immediate dominator, or a latch laid out before it, of which
 //    every such value is live out at once; each phi to its operand's at the exit of a chosen predecessor; and a value
 //    that a phi takes, to the first register of the phi, or of the next phi along, that has one before it. Each value
-//    then stays where control from its definition brings it, and an edge moves what its own source block changed.
+//    then stays where control from its definition brings it, and an edge moves what its own source block changed. A
+//    range live out of its block names the range whose opening is the value's place at its first successor's entry, where
+//    that one comes first (#2774): a value whose place there is its slot is the first the allocator evicts.
 // 3. tier1_allocate, or its scalar twin, assigns the intervals.
 // 4. Each edge moves its successor's live-in values and phis from their locations at the predecessor's last position
 //    to their entry locations (tier1_cfg_entry_location). A store of the same value to its own slot is omitted where
@@ -1055,6 +1057,7 @@ struct Tier1CfgPieces
     uint32_t* hints;
     uint32_t* hint_intervals;
     uint32_t* alternates;
+    uint32_t* continuations;
     uint32_t* split_positions;
     uint32_t* split_values;
     uint64_t count;
@@ -1079,6 +1082,7 @@ static void tier1_cfg_piece(Tier1CfgPieces* pieces, const Tier1CfgInput* input, 
         pieces->hints[i] = hint;
         pieces->hint_intervals[i] = earlier;
         pieces->alternates[i] = BUSTER_TIER1_CFG_NONE;
+        pieces->continuations[i] = BUSTER_TIER1_CFG_NONE;
         if (split)
         {
             pieces->split_positions[pieces->splits] = start;
@@ -2074,10 +2078,11 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                 pieces.hints = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 pieces.hint_intervals = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 pieces.alternates = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+                pieces.continuations = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 use_offsets = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 pieces.split_positions = ready ? arena_push_array(scratch, split_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 pieces.split_values = ready ? arena_push_array(scratch, split_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-                ready = ready && pieces.starts != 0 && pieces.ends != 0 && pieces.values != 0 && pieces.allowed != 0 && pieces.classes != 0 && pieces.remat != 0 && pieces.hints != 0 && pieces.hint_intervals != 0 && pieces.alternates != 0 && use_offsets != 0 && pieces.split_positions != 0 && pieces.split_values != 0;
+                ready = ready && pieces.starts != 0 && pieces.ends != 0 && pieces.values != 0 && pieces.allowed != 0 && pieces.classes != 0 && pieces.remat != 0 && pieces.hints != 0 && pieces.hint_intervals != 0 && pieces.alternates != 0 && pieces.continuations != 0 && use_offsets != 0 && pieces.split_positions != 0 && pieces.split_values != 0;
                 pieces.fill = ready;
             }
             if (ready)
@@ -2176,6 +2181,18 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                     {
                         exit_stamps[b] = v + 1;
                         exit_pieces[b] = (uint32_t)pieces.count - 1;
+                        // The value's place after the block (#2774), at the entry of the block's first successor in layout: its
+                        // entry range there where that block comes no later than this one, else the range that block's entry
+                        // takes its opening from, as a dispatch loop's join, laid out after its handlers, takes their first
+                        // one's (`joined` above). A range a merged block continues opens before that block, not at it.
+                        const uint32_t next = pieces.fill ? firsts[b] : BUSTER_TIER1_CFG_NONE;
+                        const bool later = next != BUSTER_TIER1_CFG_NONE && next > b && dense[v] != BUSTER_TIER1_CFG_NONE && tier1_cfg_bit(liveness.in + (uint64_t)next * words, dense[v]);
+                        const uint32_t model = !later ? BUSTER_TIER1_CFG_NONE : siblings[next] != BUSTER_TIER1_CFG_NONE ? siblings[next] : firsts[next] < next ? firsts[next] : BUSTER_TIER1_CFG_NONE;
+                        const uint32_t taken = next <= b ? next : model;
+                        if (taken <= b && entry_stamps[taken] == v + 1 && home[v] != taken && (later || pieces.starts[entry_pieces[taken]] == input->block_starts[taken]))
+                        {
+                            pieces.continuations[pieces.count - 1] = entry_pieces[taken];
+                        }
                     }
                 }
                 ready = !stray && use == use_end;
@@ -2216,6 +2233,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                     .classes = pieces.classes,
                     .hint_values = pieces.hints,
                     .alternate_intervals = pieces.alternates,
+                    .continuation_intervals = pieces.continuations,
                     .hint_intervals = pieces.hint_intervals,
                     .rematerializable = input->rematerializable != 0 ? pieces.remat : 0,
                     .use_offsets = use_offsets,
@@ -2890,6 +2908,7 @@ static __attribute__((unused)) uint32_t tier1_cfg_differs(const Tier1CfgInput* i
            tier1_cfg_same_column(a->allowed_registers, b->allowed_registers, count * 4) && tier1_cfg_same_column(a->classes, b->classes, count);
     differs = same || differs != 0 ? differs : 2;
     same = same && tier1_cfg_same_column(a->hint_values, b->hint_values, count * 4) && tier1_cfg_same_column(a->hint_intervals, b->hint_intervals, count * 4) &&
+           tier1_cfg_same_column(a->alternate_intervals, b->alternate_intervals, count * 4) && tier1_cfg_same_column(a->continuation_intervals, b->continuation_intervals, count * 4) &&
            tier1_cfg_same_column(a->rematerializable, b->rematerializable, count) && tier1_cfg_same_column(a->flags, b->flags, count) && tier1_cfg_same_column(a->hints, b->hints, count);
     differs = same || differs != 0 ? differs : 3;
     same = same && tier1_cfg_same_column(a->use_offsets, b->use_offsets, (count + 1) * 4) && a->use_positions == b->use_positions && a->use_required == b->use_required;

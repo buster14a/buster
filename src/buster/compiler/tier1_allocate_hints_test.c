@@ -6,8 +6,10 @@
 // earlier one's opening register over its own value's last, and of one that takes an earlier one's closing register
 // (BUSTER_TIER1_ALLOCATE_HINT_EXIT, #2553) after the scan moved it; and random inputs on both paths against the interval
 // verifier, the position occupancy oracle and an independent reference of the common path's hint rule; traces of a
-// recipe that gives its register to a value its hint names (#2618); and traces of a range that waits in its value's slot
-// for its next required use (#2768). Included by tier1_allocate_test.c.
+// recipe that gives its register to a value its hint names (#2618); traces of a range that waits in its value's slot
+// for its next required use (#2768); and traces of a victim that continues in its slot and of an interval evicted where
+// it starts, whose opening is its slot (#2774), whose random inputs take continuations too. Included by
+// tier1_allocate_test.c.
 
 // The common path's rule with hints, written over positions as tier1_allocation_test_levels writes it, with the free
 // registers as a set per level: a start whose hinted register is free takes it, from the level above that holds it
@@ -507,12 +509,178 @@ static void tier1_allocation_test_waits(Tier1AllocationTestTally* tally, Arena* 
     }
 }
 
+// One trace on all three paths: its fragments' kinds, registers and starts, and its slots, each path's the same.
+static void tier1_allocation_test_trace(Tier1AllocationTestTally* tally, Arena* arena, const Tier1AllocationInput* input, uint32_t fragments, const uint8_t* kinds, const uint8_t* registers, const uint32_t* starts, uint32_t spills,
+                                        const char* name, const char* alike)
+{
+    Tier1Allocation outputs[3] = { { 0 } };
+    bool produced = true;
+    const uint64_t saved = arena->length;
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        const Tier1AllocationError error = path == 0 ? tier1_allocate(input, arena, &outputs[path]) : path == 1 ? tier1_allocate_scalar(input, arena, &outputs[path]) : tier1_allocate_scan_reference(input, arena, &outputs[path]);
+        const Tier1Allocation* output = &outputs[path];
+        bool valid = error == TIER1_ALLOCATION_OK && output->fragment_count == fragments && output->spill_count == spills && tier1_allocation_verify(input, output) && tier1_allocation_test_occupancy(input, output);
+        valid = valid && memcmp(output->kinds, kinds, fragments) == 0 && memcmp(output->registers, registers, fragments) == 0 && memcmp(output->starts, starts, fragments * sizeof(uint32_t)) == 0;
+        produced &= error == TIER1_ALLOCATION_OK;
+        tier1_allocation_test_expect(tally, valid, name);
+        if (!valid && error == TIER1_ALLOCATION_OK)
+        {
+            fprintf(stderr, "  path %u: %u fragments:", path, output->fragment_count);
+            for (uint32_t f = 0; f < output->fragment_count; f += 1)
+            {
+                fprintf(stderr, " %u@%u/r%u", output->kinds[f], output->starts[f], output->registers[f]);
+            }
+            fprintf(stderr, "\n");
+        }
+    }
+    tier1_allocation_test_expect(tally, produced && tier1_allocation_test_equal(input, &outputs[0], &outputs[1]), alike);
+    arena_pop_to(arena, saved);
+}
+
+// #2774: a definition that finds every register held, where no held value has a use left before its interval's end,
+// evicts the one that continues in its slot after the interval (continuation_intervals: an interval of its value whose
+// opening took no register), though another is lighter. Two registers; values 0 and 1 hold them over [0, 4), where value
+// 2's first interval (2) finds none and opens in its slot. Over [4, 10) value 2 (interval 3, two uses) and value 3
+// (interval 4, one use) hold them, and value 4's definition at 6 takes one. Each fixture names interval 3's continuation:
+// interval 2, none, interval 3 itself (its opening a register), and interval 2 where value 2 still has a use at 7.
+static void tier1_allocation_test_stored_victims(Tier1AllocationTestTally* tally, Arena* arena)
+{
+    const uint32_t starts[6] = { 0, 0, 1, 4, 4, 6 };
+    const uint32_t ends[6] = { 4, 4, 4, 10, 10, 8 };
+    const uint32_t values[6] = { 0, 1, 2, 2, 3, 4 };
+    const uint32_t hint_values[6] = { UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX };
+    const uint32_t hint_intervals[6] = { UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX };
+    const uint32_t continuations[][6] = {
+        { UINT32_MAX, UINT32_MAX, UINT32_MAX, 2, UINT32_MAX, UINT32_MAX },
+        { UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX },
+        { UINT32_MAX, UINT32_MAX, UINT32_MAX, 3, UINT32_MAX, UINT32_MAX },
+        { UINT32_MAX, UINT32_MAX, UINT32_MAX, 2, UINT32_MAX, UINT32_MAX },
+    };
+    const uint32_t allowed[6] = { 3, 3, 3, 3, 3, 3 };
+    const uint8_t classes[6] = { 0 };
+    const uint32_t use_offsets[7] = { 0, 2, 4, 4, 6, 7, 9 };
+    const uint32_t use_positions[][9] = {
+        { 0, 3, 0, 3, 4, 5, 4, 6, 7 },
+        { 0, 3, 0, 3, 4, 5, 4, 6, 7 },
+        { 0, 3, 0, 3, 4, 5, 4, 6, 7 },
+        { 0, 3, 0, 3, 4, 7, 4, 6, 7 },
+    };
+    const uint8_t required[9] = { 1, 1, 1, 1, 1, 1, 1, 1, 1 };
+    const bool stored[] = { true, false, false, false };
+    const uint8_t kinds[2][7] = {
+        { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_SPILL, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_SPILL, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER },
+        { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_SPILL, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_SPILL, BUSTER_TIER1_ALLOCATE_REGISTER },
+    };
+    const uint8_t registers[2][7] = {
+        { 0, 1, UINT8_MAX, 0, UINT8_MAX, 1, 0 },
+        { 0, 1, UINT8_MAX, 0, 1, UINT8_MAX, 1 },
+    };
+    const uint32_t fragment_starts[2][7] = {
+        { 0, 0, 1, 4, 6, 4, 6 },
+        { 0, 0, 1, 4, 4, 6, 6 },
+    };
+    const char* names[] = {
+        "a definition evicts a value whose continuation is its slot, though another is lighter",
+        "without a continuation the definition evicts the lighter value",
+        "a continuation that opened in a register is no reason to evict",
+        "a value with a use left keeps its register though its continuation is its slot",
+    };
+    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(names); fixture += 1)
+    {
+        const Tier1AllocationInput input = {
+            .starts = starts,
+            .ends = ends,
+            .values = values,
+            .allowed_registers = allowed,
+            .classes = classes,
+            .hint_values = hint_values,
+            .hint_intervals = hint_intervals,
+            .continuation_intervals = continuations[fixture],
+            .use_offsets = use_offsets,
+            .use_positions = use_positions[fixture],
+            .use_required = required,
+            .use_count = use_offsets[6],
+            .count = 6,
+            .value_count = 5,
+            .position_count = 10,
+            .registers = { 3 },
+        };
+        const uint32_t k = stored[fixture] ? 0 : 1;
+        tier1_allocation_test_trace(tally, arena, &input, 7, kinds[k], registers[k], fragment_starts[k], stored[fixture] ? 1 : 2, names[fixture], "both production paths choose a victim by its continuation alike");
+    }
+}
+
+// #2774: an interval evicted at its own start never held the register it took there, so its opening, which a later range
+// that names it follows, is its slot. Two registers; value 0's interval 0 [0, 10) takes r0 at 0, and value 1 holds r1
+// until 2. Value 2's definition, required at 0 in the first fixture and at 1 in the second, evicts it; it comes back at 8
+// into r1. Value 0's next range, interval 3 [10, 20), names interval 0's opening, where value 2 holds r0 and r1 is free:
+// after the eviction at its start it waits in its slot until its use at 15; after one at 1 it takes r1 at 10.
+static void tier1_allocation_test_empty_openings(Tier1AllocationTestTally* tally, Arena* arena)
+{
+    const uint32_t starts[][4] = {
+        { 0, 0, 0, 10 },
+        { 0, 0, 1, 10 },
+    };
+    const uint32_t ends[4] = { 10, 2, 20, 20 };
+    const uint32_t values[4] = { 0, 1, 2, 0 };
+    const uint32_t hint_values[4] = { UINT32_MAX, UINT32_MAX, UINT32_MAX, 0 };
+    const uint32_t hint_intervals[4] = { UINT32_MAX, UINT32_MAX, UINT32_MAX, 0 };
+    const uint32_t allowed[4] = { 3, 3, 3, 3 };
+    const uint8_t classes[4] = { 0 };
+    const uint32_t use_offsets[5] = { 0, 1, 2, 4, 5 };
+    const uint32_t use_positions[][5] = {
+        { 8, 0, 0, 19, 15 },
+        { 8, 0, 1, 19, 15 },
+    };
+    const uint8_t required[5] = { 1, 1, 1, 1, 1 };
+    const uint8_t kinds[][6] = {
+        { BUSTER_TIER1_ALLOCATE_SPILL, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_SPILL, BUSTER_TIER1_ALLOCATE_REGISTER },
+        { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_SPILL, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER },
+    };
+    const uint8_t registers[][6] = {
+        { UINT8_MAX, 1, 1, 0, UINT8_MAX, 1 },
+        { 0, UINT8_MAX, 1, 1, 0, 1 },
+    };
+    const uint32_t fragment_starts[][6] = {
+        { 0, 8, 0, 0, 10, 15 },
+        { 0, 1, 8, 0, 1, 10 },
+    };
+    const char* names[] = {
+        "a range following an interval evicted at its start waits in its slot",
+        "a range following an interval evicted after its start takes a free register there",
+    };
+    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(names); fixture += 1)
+    {
+        const Tier1AllocationInput input = {
+            .starts = starts[fixture],
+            .ends = ends,
+            .values = values,
+            .allowed_registers = allowed,
+            .classes = classes,
+            .hint_values = hint_values,
+            .hint_intervals = hint_intervals,
+            .use_offsets = use_offsets,
+            .use_positions = use_positions[fixture],
+            .use_required = required,
+            .use_count = use_offsets[4],
+            .count = 4,
+            .value_count = 3,
+            .position_count = 20,
+            .registers = { 3 },
+        };
+        tier1_allocation_test_trace(tally, arena, &input, 6, kinds[fixture], registers[fixture], fragment_starts[fixture], 1, names[fixture], "both production paths open an interval evicted at its start alike");
+    }
+}
+
 static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* arena, uint64_t seed)
 {
     tier1_allocation_test_idle(tally, arena);
     tier1_allocation_test_yields(tally, arena);
     tier1_allocation_test_unread(tally, arena);
     tier1_allocation_test_waits(tally, arena);
+    tier1_allocation_test_stored_victims(tally, arena);
+    tier1_allocation_test_empty_openings(tally, arena);
     // Two values, each with two adjacent ranges: a [0, 10) [10, 20), b [2, 10) [10, 20). Ends come first in input
     // order, a's then b's, so the level rule gives a's second range b's register and b's a's.
     {
@@ -1007,6 +1175,7 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
     uint32_t hint_values[128];
     uint32_t hint_intervals[128];
     uint32_t alternate_intervals[128];
+    uint32_t continuation_intervals[128];
     uint32_t use_offsets[129];
     uint32_t use_positions[128];
     uint8_t required[128];
@@ -1039,6 +1208,8 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
         // k1 up to k7: no mask value takes k0, the class's scratch register.
         const uint32_t mask_mask = ((1u << (1 + iteration % 7)) - 1) << 1;
         const bool constrained = iteration % 4 == 0;
+        // An eighth of the iterations take the scan with required uses with the hinted ranges, and continuations (#2774).
+        const bool continued = iteration % 8 == 3;
         uint8_t value_classes[24];
         uint32_t count = 0;
         for (uint32_t v = 0; v < value_count; v += 1)
@@ -1089,6 +1260,14 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
             const uint32_t other = tier1_allocation_test_random(&seed) % count;
             const bool alternate = iteration % 4 == 1 && tier1_allocation_test_random(&seed) % 4 == 0 && classes[other] == classes[i] && starts[other] < starts[i];
             alternate_intervals[i] = alternate ? other : UINT32_MAX;
+            // A continuation: the range itself or an earlier one of its value, or none, at least a third of the time.
+            uint32_t back = 0;
+            while (back < i && values[i - back - 1] == values[i])
+            {
+                back += 1;
+            }
+            const uint32_t draw = (uint32_t)(tier1_allocation_test_random(&seed) % (3 * (back + 1)));
+            continuation_intervals[i] = draw <= 2 * back ? i - draw / 2 : UINT32_MAX;
             use_offsets[i] = i;
             use_positions[i] = ends[i] - 1;
             required[i] = (uint8_t)(tier1_allocation_test_random(&seed) & 1);
@@ -1103,9 +1282,10 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
             .hint_values = hint_values,
             .hint_intervals = iteration % 2 == 1 ? hint_intervals : 0,
             .alternate_intervals = iteration % 4 == 1 ? alternate_intervals : 0,
+            .continuation_intervals = continued ? continuation_intervals : 0,
             .use_offsets = use_offsets,
             .use_positions = use_positions,
-            .use_required = constrained ? required : 0,
+            .use_required = constrained || continued ? required : 0,
             .use_count = count,
             .count = count,
             .value_count = value_count,
@@ -1130,7 +1310,7 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
         const Tier1AllocationError vector_error = tier1_allocate(&input, arena, &vector);
         const Tier1AllocationError scalar_error = tier1_allocate_scalar(&input, arena, &scalar);
         const Tier1AllocationError scan_error = tier1_allocate_scan_reference(&input, arena, &scan);
-        tier1_allocation_test_expect(tally, vector_error == scalar_error && vector_error == scan_error && (vector_error == TIER1_ALLOCATION_OK || (constrained && vector_error == TIER1_ALLOCATION_CONSTRAINT)), "hinted ranges allocate on both paths and the scan alike");
+        tier1_allocation_test_expect(tally, vector_error == scalar_error && vector_error == scan_error && (vector_error == TIER1_ALLOCATION_OK || ((constrained || continued) && vector_error == TIER1_ALLOCATION_CONSTRAINT)), "hinted ranges allocate on both paths and the scan alike");
         if (vector_error == TIER1_ALLOCATION_OK && scalar_error == TIER1_ALLOCATION_OK && scan_error == TIER1_ALLOCATION_OK)
         {
             tier1_allocation_test_expect(tally, tier1_allocation_verify(&input, &vector) && tier1_allocation_verify(&input, &scalar) && tier1_allocation_verify(&input, &scan), "hinted ranges pass the interval verifier");
