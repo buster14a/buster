@@ -65,15 +65,6 @@ static const uint8_t ir_memory_kinds[BUSTER_IR_OP_TABLE] = {
     [IR_STACK_ADDR] = BUSTER_IR_MEMORY_SLOT,
 };
 
-// The instructions whose operands past their direct ones may be values (ir_operand's): phis, calls, intrinsics (a
-// ternary one's third) and scatters.
-static const uint8_t ir_memory_extras[BUSTER_IR_OP_TABLE] = {
-    [IR_PHI] = 1,
-    [IR_CALL] = 1,
-    [IR_CALL_INDIRECT] = 1,
-    [IR_INTRINSIC] = 1,
-    [IR_SCATTER] = 1,
-};
 
 // An instruction's info word: its kind, its type, whether SCCP knows it as an i64 constant, and whether its block is
 // reachable.
@@ -134,9 +125,14 @@ struct IrMemoryWork
     // A slot's first IR_STACK_ADDR, its addresses' root, and 1 for a private slot.
     uint32_t* slot_first;
     uint32_t* slot_private;
-    // The accesses (plain loads and stores of reachable blocks), in instruction order.
+    // The events (the reachable blocks' accesses, writes and lifetime markers), with each block's first, and the accesses
+    // (plain loads and stores) among them, in instruction order; the walk's undo records they need at most.
+    uint32_t* events;
+    uint32_t event_count;
+    uint32_t* event_first;
     uint32_t* accesses;
     uint32_t access_count;
+    uint64_t undo_bound;
     // By access: its address, class (0 general memory, 1 + s private slot s), family, key and the scalar completion's
     // mark of the vector addresses.
     uint32_t* roots;
@@ -164,6 +160,18 @@ struct IrMemoryWork
     uint8_t* dirty;
     uint8_t* clear;
 };
+
+// Scratch columns that are written whole before they're read: unlike ir_allocate, not zeroed.
+static void* ir_memory_push(Arena* arena, uint64_t count, uint64_t bytes, bool* ok)
+{
+    void* result = 0;
+    if (*ok && count != 0)
+    {
+        result = arena_push_array(arena, count, bytes, 64);
+        *ok = result != 0;
+    }
+    return result;
+}
 
 // The bytes an access of `type` reads or writes.
 static uint32_t ir_memory_bytes(uint32_t type)
@@ -326,7 +334,7 @@ static bool ir_memory_derive_vector(IrMemoryWork* m, Arena* scratch)
     const IrFunction* f = m->ir->function;
     const uint32_t n = f->instruction_count;
     bool ok = true;
-    uint32_t* jump = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
+    uint32_t* jump = ir_memory_push(scratch, n, sizeof(uint32_t), &ok);
     const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
     for (uint64_t first = 0; ok && first < n; first += 16)
     {
@@ -377,95 +385,121 @@ static bool ir_memory_kept(const IrMemoryWork* m, uint32_t i, uint32_t position)
     return (position == 0 && (kind == BUSTER_IR_MEMORY_LOAD || kind == BUSTER_IR_MEMORY_STORE)) || position == followed;
 }
 
-// The slots whose addresses escape: a reachable instruction's operand derived from a slot that it doesn't keep
-// (ir_memory_kept). Scalar twin, by ir_operand's enumeration.
+// The uses of a derived value `v` that escape its slot: a reachable user that doesn't keep it at its operand's position
+// (ir_memory_kept); a phi's incoming value, a call's argument and the extra array's value (positions 3 and past) keep
+// nothing.
+static void ir_memory_escape_uses(IrMemoryWork* m, uint32_t v)
+{
+    const IrUses* uses = &m->ir->uses;
+    bool escaped = false;
+    for (uint32_t use = uses->offsets[v]; use < uses->offsets[(uint64_t)v + 1]; use += 1)
+    {
+        const uint32_t user = uses->uses[use].instruction;
+        const uint32_t position = uses->uses[use].operand;
+        escaped = escaped || ((m->info[user] & BUSTER_IR_MEMORY_REACHABLE) != 0 && !(position < 3 && ir_memory_kept(m, user, position)));
+    }
+    if (escaped)
+    {
+        m->slot_private[m->derived[v]] = 0;
+    }
+}
+
+// The slots whose addresses escape, from the uses of the values derived from them, which are few. Scalar twin.
 static void ir_memory_escapes_scalar(IrMemoryWork* m)
 {
-    const IrOptimizeWork* work = m->ir;
-    const IrFunction* f = work->function;
-    for (uint32_t i = 0; i < f->instruction_count; i += 1)
+    for (uint32_t v = 0; v < m->ir->function->instruction_count; v += 1)
     {
-        const uint64_t count = (m->info[i] & BUSTER_IR_MEMORY_REACHABLE) != 0 ? ir_operand_count(f, i) : 0;
-        for (uint32_t number = 0; number < count; number += 1)
+        if (m->derived[v] != BUSTER_IR_NONE)
         {
-            const IrOperand operand = ir_operand(f, i, number, work->cfg.instruction_blocks[i]);
-            const uint32_t slot = m->derived[operand.value];
-            if (slot != BUSTER_IR_NONE && !(operand.position < 3 && ir_memory_kept(m, i, operand.position)))
-            {
-                m->slot_private[slot] = 0;
-            }
+            ir_memory_escape_uses(m, v);
         }
     }
 }
 
 #if BUSTER_HOST_VECTOR
-// The vector escapes, 16 instructions at a time: the direct operands' places by the operand tables' lookups, their slots
-// gathered, the kept places by masks; the escapes are few and set one by one. A phi's incoming values, a call's
-// arguments and the extra array's values keep nothing, by the scalar enumeration of those instructions alone.
+// The vector escapes: the derived values found 16 at a time, by a mask of their slots.
 static void ir_memory_escapes_vector(IrMemoryWork* m)
 {
-    const IrOptimizeWork* work = m->ir;
-    const IrFunction* f = work->function;
+    const uint32_t n = m->ir->function->instruction_count;
+    for (uint64_t first = 0; first < n; first += 16)
+    {
+        const uint32_t count = n - first < 16 ? (uint32_t)(n - first) : 16;
+        const __mmask16 valid = (__mmask16)((UINT32_C(1) << count) - 1);
+        uint32_t derived = valid & _mm512_cmpneq_epi32_mask(_mm512_maskz_loadu_epi32(valid, m->derived + first), _mm512_set1_epi32((int)BUSTER_IR_NONE));
+        while (derived != 0)
+        {
+            ir_memory_escape_uses(m, (uint32_t)first + (uint32_t)__builtin_ctz(derived));
+            derived &= derived - 1;
+        }
+    }
+}
+#endif
+
+// An event's undo records in the walk: three for a store (its class's and family's counts and its key's entry), one for
+// any other.
+static uint32_t ir_memory_undos(uint32_t kind)
+{
+    return kind == BUSTER_IR_MEMORY_STORE ? 3u : 1u;
+}
+
+// The events and accesses, each block's first event, every slot's first IR_STACK_ADDR and the undo bound. Scalar twin.
+static void ir_memory_events_scalar(IrMemoryWork* m)
+{
+    const IrFunction* f = m->ir->function;
+    for (uint32_t i = 0; i < f->instruction_count; i += 1)
+    {
+        const uint32_t info = m->info[i];
+        const uint32_t kind = info & BUSTER_IR_MEMORY_KIND;
+        const bool reachable = (info & BUSTER_IR_MEMORY_REACHABLE) != 0;
+        if (kind == BUSTER_IR_MEMORY_SLOT && m->slot_first[f->a[i]] == BUSTER_IR_NONE)
+        {
+            m->slot_first[f->a[i]] = i;
+        }
+        if (reachable && kind >= BUSTER_IR_MEMORY_LOAD && kind <= BUSTER_IR_MEMORY_LIFETIME)
+        {
+            m->events[m->event_count] = i;
+            m->event_count += 1;
+            m->undo_bound += ir_memory_undos(kind);
+        }
+        if (reachable && (kind == BUSTER_IR_MEMORY_LOAD || kind == BUSTER_IR_MEMORY_STORE))
+        {
+            m->accesses[m->access_count] = i;
+            m->access_count += 1;
+        }
+    }
+}
+
+#if BUSTER_HOST_VECTOR
+// The vector events: 16 instructions at a time, the events' and the accesses' indices compressed into their lists; the
+// slots' addresses, few, set one by one.
+static void ir_memory_events_vector(IrMemoryWork* m)
+{
+    const IrFunction* f = m->ir->function;
     const uint32_t n = f->instruction_count;
-    const uint32_t* columns[3] = { f->a, f->b, f->c };
-    const __m512i operand_low = _mm512_loadu_si512(ir_operand_table);
-    const __m512i operand_high = _mm512_loadu_si512(ir_operand_table + 64);
-    const __m512i optional_low = _mm512_loadu_si512(ir_optional_table);
-    const __m512i optional_high = _mm512_loadu_si512(ir_optional_table + 64);
-    const __m512i extras_low = _mm512_loadu_si512(ir_memory_extras);
-    const __m512i extras_high = _mm512_loadu_si512(ir_memory_extras + 64);
-    const __m512i none = _mm512_set1_epi32((int)BUSTER_IR_NONE);
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
     for (uint64_t first = 0; first < n; first += 16)
     {
         const uint32_t count = n - first < 16 ? (uint32_t)(n - first) : 16;
         const __mmask16 valid = (__mmask16)((UINT32_C(1) << count) - 1);
         const __m512i info = _mm512_maskz_loadu_epi32(valid, m->info + first);
-        const __mmask16 reachable = valid & _mm512_test_epi32_mask(info, _mm512_set1_epi32((int)BUSTER_IR_MEMORY_REACHABLE));
         const __m512i kind = _mm512_and_si512(info, _mm512_set1_epi32(BUSTER_IR_MEMORY_KIND));
-        const __mmask16 access = _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_LOAD)) | _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_STORE));
-        const __m512i op = _mm512_zextsi128_si512(_mm_maskz_loadu_epi8(valid, f->op + first));
-        const __m512i required = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutex2var_epi8(operand_low, op, operand_high)));
-        const __m512i optional = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutex2var_epi8(optional_low, op, optional_high)));
-        const __mmask16 extra = reachable & _mm512_test_epi32_mask(_mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutex2var_epi8(extras_low, op, extras_high))),
-                                                                  _mm512_set1_epi32(1));
-        const __m512i follow = _mm512_maskz_loadu_epi32(valid, m->follow + first);
-        const __m512i a = _mm512_maskz_loadu_epi32(valid, f->a + first);
-        const __mmask16 linked = _mm512_cmpneq_epi32_mask(follow, none);
-        const __mmask16 follow_a = linked & _mm512_cmpeq_epi32_mask(follow, a);
-        for (uint32_t position = 0; position < 3; position += 1)
+        const __mmask16 reachable = valid & _mm512_test_epi32_mask(info, _mm512_set1_epi32((int)BUSTER_IR_MEMORY_REACHABLE));
+        const __mmask16 event = reachable & _mm512_cmpge_epu32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_LOAD)) &
+                                _mm512_cmple_epu32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_LIFETIME));
+        const __mmask16 access = reachable & _mm512_cmple_epu32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_STORE)) & _mm512_cmpge_epu32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_LOAD));
+        const __mmask16 store = access & _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_STORE));
+        const __m512i index = _mm512_add_epi32(_mm512_set1_epi32((int)first), lanes);
+        _mm512_mask_compressstoreu_epi32(m->events + m->event_count, event, index);
+        _mm512_mask_compressstoreu_epi32(m->accesses + m->access_count, access, index);
+        m->event_count += (uint32_t)__builtin_popcount(event);
+        m->access_count += (uint32_t)__builtin_popcount(access);
+        m->undo_bound += (uint64_t)__builtin_popcount(event) + 2u * (uint64_t)__builtin_popcount(store);
+        uint32_t slots = valid & _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_SLOT));
+        while (slots != 0)
         {
-            const __m512i value = _mm512_maskz_loadu_epi32(valid, columns[position] + first);
-            const __m512i bit = _mm512_set1_epi32((int)(1u << position));
-            const __mmask16 present = reachable & (_mm512_test_epi32_mask(required, bit) | (_mm512_test_epi32_mask(optional, bit) & _mm512_cmpneq_epi32_mask(value, none)));
-            const __m512i slot = _mm512_mask_i32gather_epi32(none, present, value, m->derived, 4);
-            const __mmask16 derived = present & _mm512_cmpneq_epi32_mask(slot, none);
-            const __mmask16 kept = position == 0 ? (access | follow_a) : position == 1 ? (linked & ~follow_a) : 0;
-            uint32_t escapes = derived & ~kept;
-            if (escapes != 0)
-            {
-                uint32_t slots[16];
-                _mm512_storeu_si512(slots, slot);
-                while (escapes != 0)
-                {
-                    m->slot_private[slots[__builtin_ctz(escapes)]] = 0;
-                    escapes &= escapes - 1;
-                }
-            }
-        }
-        uint32_t rest = extra;
-        while (rest != 0)
-        {
-            const uint32_t i = (uint32_t)first + (uint32_t)__builtin_ctz(rest);
-            rest &= rest - 1;
-            const uint64_t operands = ir_operand_count(f, i);
-            for (uint32_t number = (uint32_t)__builtin_popcount(ir_value_mask(f, i)); number < operands; number += 1)
-            {
-                const uint32_t slot = m->derived[ir_operand(f, i, number, work->cfg.instruction_blocks[i]).value];
-                if (slot != BUSTER_IR_NONE)
-                {
-                    m->slot_private[slot] = 0;
-                }
-            }
+            const uint32_t i = (uint32_t)first + (uint32_t)__builtin_ctz(slots);
+            slots &= slots - 1;
+            m->slot_first[f->a[i]] = m->slot_first[f->a[i]] == BUSTER_IR_NONE ? i : m->slot_first[f->a[i]];
         }
     }
 }
@@ -768,58 +802,115 @@ static uint32_t ir_memory_group(IrMemoryWork* m, bool keys, uint32_t* heads, uin
     return made;
 }
 
-// Whether key a orders before key b: by family, offset, then end.
-static bool ir_memory_key_before(const IrMemoryWork* m, uint32_t a, uint32_t b)
+// Where key k's bytes end, at most INT64_MAX.
+static int64_t ir_memory_key_end(const IrMemoryWork* m, uint32_t k)
 {
-    const int64_t end_a = m->key_offsets[a] + (int64_t)ir_memory_bytes(m->key_types[a]);
-    const int64_t end_b = m->key_offsets[b] + (int64_t)ir_memory_bytes(m->key_types[b]);
-    return m->key_families[a] != m->key_families[b] ? m->key_families[a] < m->key_families[b] : m->key_offsets[a] != m->key_offsets[b] ? m->key_offsets[a] < m->key_offsets[b] : end_a < end_b;
+    int64_t end = 0;
+    return __builtin_add_overflow(m->key_offsets[k], (int64_t)ir_memory_bytes(m->key_types[k]), &end) ? INT64_MAX : end;
 }
 
-// The keys another key of their family meets: the keys sorted by family, offset and end (a merge sort), then a sweep of
-// each family with the furthest end so far and its key. A key that starts before that end meets that key, and so does
-// every earlier key whose end is past its start, which then meets that key too and is marked already.
+// Whether key a orders before key b of the same family: by offset, then end.
+static bool ir_memory_key_before(const IrMemoryWork* m, uint32_t a, uint32_t b)
+{
+    const int64_t end_a = ir_memory_key_end(m, a);
+    const int64_t end_b = ir_memory_key_end(m, b);
+    return m->key_offsets[a] != m->key_offsets[b] ? m->key_offsets[a] < m->key_offsets[b] : end_a < end_b;
+}
+
+// One family's keys `keys` (of `count`) by offset and end: an insertion sort of a few, a bottom-up merge sort through
+// `spare` of more. The sorted keys end in `keys`.
+static void ir_memory_sort_family(const IrMemoryWork* m, uint32_t* keys, uint32_t* spare, uint32_t count)
+{
+    if (count <= 16)
+    {
+        for (uint32_t k = 1; k < count; k += 1)
+        {
+            const uint32_t key = keys[k];
+            uint32_t at = k;
+            while (at != 0 && ir_memory_key_before(m, key, keys[at - 1]))
+            {
+                keys[at] = keys[at - 1];
+                at -= 1;
+            }
+            keys[at] = key;
+        }
+    }
+    else
+    {
+        uint32_t* from = keys;
+        uint32_t* to = spare;
+        for (uint32_t width = 1; width < count; width *= 2)
+        {
+            for (uint32_t left = 0; left < count; left += 2 * width)
+            {
+                const uint32_t middle = count - left < width ? count : left + width;
+                const uint32_t end = count - left < 2 * width ? count : left + 2 * width;
+                uint32_t x = left;
+                uint32_t y = middle;
+                for (uint32_t out = left; out < end; out += 1)
+                {
+                    const bool take_y = y < end && (x >= middle || ir_memory_key_before(m, from[y], from[x]));
+                    to[out] = take_y ? from[y++] : from[x++];
+                }
+            }
+            uint32_t* swap = from;
+            from = to;
+            to = swap;
+        }
+        if (from != keys)
+        {
+            memcpy(keys, from, (uint64_t)count * sizeof(uint32_t));
+        }
+    }
+}
+
+// The keys another key of their family meets: none where every family has one key; else the keys by family (a counting
+// sort, in key order), each family's by offset and end, then a sweep of each with the furthest end so far and its key.
+// A key that starts before that end meets that key, and so does every earlier key whose end is past its start, which
+// then meets that key too and is marked already.
 static bool ir_memory_overlaps(IrMemoryWork* m, Arena* scratch)
 {
     bool ok = true;
     const uint32_t count = m->key_count;
-    uint32_t* order = ir_allocate(scratch, count, sizeof(uint32_t), &ok);
-    uint32_t* spare = ir_allocate(scratch, count, sizeof(uint32_t), &ok);
-    for (uint32_t k = 0; ok && k < count; k += 1)
+    if (count != m->family_count)
     {
-        order[k] = k;
-    }
-    for (uint32_t width = 1; ok && width < count; width *= 2)
-    {
-        for (uint32_t left = 0; left < count; left += 2 * width)
+        uint32_t* starts = ir_allocate(scratch, (uint64_t)m->family_count + 1, sizeof(uint32_t), &ok);
+        uint32_t* order = ir_memory_push(scratch, count, sizeof(uint32_t), &ok);
+        uint32_t* spare = ir_memory_push(scratch, count, sizeof(uint32_t), &ok);
+        for (uint32_t key = 0; ok && key < count; key += 1)
         {
-            const uint32_t middle = count - left < width ? count : left + width;
-            const uint32_t end = count - left < 2 * width ? count : left + 2 * width;
-            uint32_t x = left;
-            uint32_t y = middle;
-            for (uint32_t out = left; out < end; out += 1)
+            starts[m->key_families[key] + 1] += 1;
+        }
+        for (uint32_t family = 0; ok && family < m->family_count; family += 1)
+        {
+            starts[family + 1] += starts[family];
+        }
+        for (uint32_t key = 0; ok && key < count; key += 1)
+        {
+            order[starts[m->key_families[key]]] = key;
+            starts[m->key_families[key]] += 1;
+        }
+        uint32_t first = 0;
+        for (uint32_t family = 0; ok && family < m->family_count; family += 1)
+        {
+            const uint32_t end = starts[family];
+            ir_memory_sort_family(m, order + first, spare + first, end - first);
+            uint32_t furthest = BUSTER_IR_NONE;
+            int64_t reach = INT64_MIN;
+            for (uint32_t k = first; k < end; k += 1)
             {
-                const bool take_y = y < end && (x >= middle || ir_memory_key_before(m, order[y], order[x]));
-                spare[out] = take_y ? order[y++] : order[x++];
+                const uint32_t key = order[k];
+                const int64_t key_end = ir_memory_key_end(m, key);
+                if (furthest != BUSTER_IR_NONE && m->key_offsets[key] < reach)
+                {
+                    m->key_overlapped[key] = 1;
+                    m->key_overlapped[furthest] = 1;
+                }
+                furthest = furthest == BUSTER_IR_NONE || key_end > reach ? key : furthest;
+                reach = key_end > reach ? key_end : reach;
             }
+            first = end;
         }
-        uint32_t* swap = order;
-        order = spare;
-        spare = swap;
-    }
-    uint32_t furthest = BUSTER_IR_NONE;
-    for (uint32_t k = 0; ok && k < count; k += 1)
-    {
-        const uint32_t key = order[k];
-        const int64_t end = m->key_offsets[key] + (int64_t)ir_memory_bytes(m->key_types[key]);
-        furthest = furthest != BUSTER_IR_NONE && m->key_families[furthest] != m->key_families[key] ? BUSTER_IR_NONE : furthest;
-        const int64_t reach = furthest != BUSTER_IR_NONE ? m->key_offsets[furthest] + (int64_t)ir_memory_bytes(m->key_types[furthest]) : INT64_MIN;
-        if (furthest != BUSTER_IR_NONE && m->key_offsets[key] < reach)
-        {
-            m->key_overlapped[key] = 1;
-            m->key_overlapped[furthest] = 1;
-        }
-        furthest = furthest == BUSTER_IR_NONE || end > reach ? key : furthest;
     }
     return ok;
 }
@@ -832,13 +923,14 @@ static uint32_t ir_memory_class(const IrMemoryWork* m, uint32_t i)
 }
 
 // Each reachable block's writes: bit 0 for general memory (a write, a store of general memory, a marker of a slot that
-// isn't private), bit 1 for a private slot's (a store to it, its marker). Shared by both versions: a store's class is
-// its address's derivation (ir_memory_class).
+// isn't private), bit 1 for a private slot's (a store to it, its marker), from its events. Shared by both versions: a
+// store's class is its address's derivation (ir_memory_class).
 static void ir_memory_dirty(IrMemoryWork* m)
 {
     const IrFunction* f = m->ir->function;
-    for (uint32_t i = 0; i < f->instruction_count; i += 1)
+    for (uint32_t e = 0; e < m->event_count; e += 1)
     {
+        const uint32_t i = m->events[e];
         const uint32_t kind = m->info[i] & BUSTER_IR_MEMORY_KIND;
         const bool lifetime = kind == BUSTER_IR_MEMORY_LIFETIME;
         const bool store = kind == BUSTER_IR_MEMORY_STORE;
@@ -851,26 +943,46 @@ static void ir_memory_dirty(IrMemoryWork* m)
 // Each reachable block's clear entries (bit 0 general memory, bit 1 the private slots'): no path from the end of its
 // immediate dominator D to its start, without D again, writes that memory. Every such path ends at a predecessor P of the
 // block, which D dominates, and passes through P and through each block between P and D on the dominator tree, entering
-// each by a clear path: the greatest fixed point of these equations, from all clear, in reverse postorder until it
-// holds. Shared by both versions: the blocks are few.
-static void ir_memory_clear(IrMemoryWork* m)
+// each by a clear path: the greatest fixed point of these equations, from all clear, over the blocks with another
+// predecessor than D (`joins`, in reverse postorder) until it holds; a block whose only predecessor is D is clear.
+// Shared by both versions: the blocks are few.
+static bool ir_memory_clear(IrMemoryWork* m, Arena* scratch)
 {
     const IrOptimizeWork* work = m->ir;
     const Dominators* d = &work->dominators;
+    bool ok = true;
+    uint32_t* joins = ir_memory_push(scratch, d->reachable_count, sizeof(uint32_t), &ok);
+    uint32_t join_count = 0;
     for (uint32_t b = 0; b < work->function->block_count; b += 1)
     {
         m->clear[b] = 3;
     }
-    bool changed = true;
+    // Without a back edge into a join, reverse postorder has every block a join's equation reads before it: one pass.
+    bool cyclic = false;
+    for (uint32_t r = 1; ok && r < d->reachable_count; r += 1)
+    {
+        const uint32_t block = d->rpo[r];
+        bool join = false;
+        for (uint32_t edge = work->cfg.predecessor_offsets[block]; edge < work->cfg.predecessor_offsets[(uint64_t)block + 1]; edge += 1)
+        {
+            const uint32_t predecessor = work->cfg.predecessors[edge];
+            const bool reachable = d->rpo_index[predecessor] != BUSTER_DOMINATOR_NONE;
+            join = join || (predecessor != d->idom[block] && reachable);
+            cyclic = cyclic || (reachable && d->rpo_index[predecessor] >= r);
+        }
+        joins[join_count] = block;
+        join_count += join;
+    }
+    bool changed = ok;
     while (changed)
     {
         changed = false;
-        for (uint32_t r = 1; r < d->reachable_count; r += 1)
+        for (uint32_t k = 0; k < join_count; k += 1)
         {
-            const uint32_t block = d->rpo[r];
+            const uint32_t block = joins[k];
             const uint32_t idom = d->idom[block];
             uint8_t value = 3;
-            for (uint32_t edge = work->cfg.predecessor_offsets[block]; edge < work->cfg.predecessor_offsets[(uint64_t)block + 1]; edge += 1)
+            for (uint32_t edge = work->cfg.predecessor_offsets[block]; value != 0 && edge < work->cfg.predecessor_offsets[(uint64_t)block + 1]; edge += 1)
             {
                 uint32_t y = work->cfg.predecessors[edge];
                 while (value != 0 && d->rpo_index[y] != BUSTER_DOMINATOR_NONE && y != idom)
@@ -879,10 +991,11 @@ static void ir_memory_clear(IrMemoryWork* m)
                     y = d->idom[y];
                 }
             }
-            changed = changed || value != m->clear[block];
+            changed = changed || (cyclic && value != m->clear[block]);
             m->clear[block] = value;
         }
     }
+    return ok;
 }
 
 static void ir_memory_count(IrMemoryUndo* undo, uint32_t* undo_count, uint32_t* counter, uint32_t value)
@@ -930,8 +1043,9 @@ static uint32_t ir_memory_walk(IrMemoryWork* m, IrMemoryEntry* entries, uint32_t
             }
             const bool executable = work->blocks[block] != 0;
             uint32_t k = access_first[block];
-            for (uint32_t i = f->block_offsets[block]; i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+            for (uint32_t event = m->event_first[block]; event < m->event_first[(uint64_t)block + 1]; event += 1)
             {
+                const uint32_t i = m->events[event];
                 const uint32_t kind = m->info[i] & BUSTER_IR_MEMORY_KIND;
                 if (kind == BUSTER_IR_MEMORY_WRITE)
                 {
@@ -1010,31 +1124,45 @@ static uint32_t ir_memory_walk(IrMemoryWork* m, IrMemoryEntry* entries, uint32_t
 
 // Value numbering with memory on the optimizer's work, after SCCP and the identities: the loads it forwards go to
 // work->forward (made here where the identities made none), their number to `forwarded`. Its other columns are scratch's
-// and go before it returns. Returns false where scratch has no room for them.
-static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, uint32_t* forwarded)
+// and go before it returns. `scalar` is the caller's explicit request for the scalar twins, not the AUTO policy's size
+// bound (work->scalar): this pass's vector phases have no set-up that small functions don't repay (the verifier's rule
+// too, #786). Returns false where scratch has no room for them.
+static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, bool requested_scalar, uint32_t* forwarded)
 {
     const IrFunction* f = work->function;
     const uint32_t n = f->instruction_count;
     bool ok = true;
+    // The identities' forwards (#2554), which may name a load this pass forwards: then the forwards are resolved again.
+    const bool identities = work->forward != 0;
     if (work->forward == 0 && n != 0)
     {
-        work->forward = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
+        work->forward = ir_memory_push(scratch, n, sizeof(uint32_t), &ok);
         if (ok)
         {
             memset(work->forward, 0xff, (uint64_t)n * sizeof(uint32_t));
         }
     }
     const uint64_t mark = scratch->length;
-    const bool scalar = !BUSTER_VECTOR_PATH(!work->scalar);
-    IrMemoryWork m = { .ir = work };
-    m.info = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
-    m.follow = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
-    m.derived = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
-    m.slot_first = ir_allocate(scratch, f->slot_count, sizeof(uint32_t), &ok);
-    m.slot_private = ir_allocate(scratch, f->slot_count, sizeof(uint32_t), &ok);
+    // AVX-512's gather indices are signed dwords, and the constants' and addresses' gathers double theirs: larger value
+    // spaces take the scalar twin.
+    const bool scalar = !BUSTER_VECTOR_PATH(!requested_scalar) || n >= (UINT32_C(1) << 30) || f->address_count >= (UINT32_C(1) << 30);
+    IrMemoryWork m = { .ir = work, .undo_bound = (uint64_t)f->block_count * 2 };
+    m.info = ir_memory_push(scratch, n, sizeof(uint32_t), &ok);
+    m.follow = ir_memory_push(scratch, n, sizeof(uint32_t), &ok);
+    m.derived = ir_memory_push(scratch, n, sizeof(uint32_t), &ok);
+    m.events = ir_memory_push(scratch, n, sizeof(uint32_t), &ok);
+    m.accesses = ir_memory_push(scratch, n, sizeof(uint32_t), &ok);
+    m.event_first = ir_memory_push(scratch, (uint64_t)f->block_count + 1, sizeof(uint32_t), &ok);
+    uint32_t* access_first = ir_memory_push(scratch, (uint64_t)f->block_count + 1, sizeof(uint32_t), &ok);
+    m.slot_first = ir_memory_push(scratch, f->slot_count, sizeof(uint32_t), &ok);
+    m.slot_private = ir_memory_push(scratch, f->slot_count, sizeof(uint32_t), &ok);
     m.dirty = ir_allocate(scratch, f->block_count, sizeof(uint8_t), &ok);
-    m.clear = ir_allocate(scratch, f->block_count, sizeof(uint8_t), &ok);
-    uint32_t* access_first = ir_allocate(scratch, (uint64_t)f->block_count + 1, sizeof(uint32_t), &ok);
+    m.clear = ir_memory_push(scratch, f->block_count, sizeof(uint8_t), &ok);
+    for (uint32_t s = 0; ok && s < f->slot_count; s += 1)
+    {
+        m.slot_first[s] = BUSTER_IR_NONE;
+        m.slot_private[s] = (f->slots[s].flags & (BUSTER_IR_SLOT_VOLATILE | BUSTER_IR_SLOT_REGISTER_SAVE_AREA | BUSTER_IR_SLOT_OVERFLOW_AREA)) == 0;
+    }
     if (ok)
     {
 #if BUSTER_HOST_VECTOR
@@ -1042,83 +1170,64 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, uint32_t* f
         {
             ir_memory_classify_vector(&m);
             ok = ir_memory_derive_vector(&m, scratch);
+            ir_memory_escapes_vector(&m);
+            ir_memory_events_vector(&m);
         }
         else
 #endif
         {
             ir_memory_classify_scalar(&m);
             ir_memory_derive_scalar(&m);
-        }
-    }
-    for (uint32_t s = 0; ok && s < f->slot_count; s += 1)
-    {
-        m.slot_first[s] = BUSTER_IR_NONE;
-        m.slot_private[s] = (f->slots[s].flags & (BUSTER_IR_SLOT_VOLATILE | BUSTER_IR_SLOT_REGISTER_SAVE_AREA | BUSTER_IR_SLOT_OVERFLOW_AREA)) == 0;
-    }
-    for (uint32_t i = 0; ok && i < n; i += 1)
-    {
-        const uint32_t kind = m.info[i] & BUSTER_IR_MEMORY_KIND;
-        if (kind == BUSTER_IR_MEMORY_SLOT && m.slot_first[f->a[i]] == BUSTER_IR_NONE)
-        {
-            m.slot_first[f->a[i]] = i;
-        }
-        m.access_count += (kind == BUSTER_IR_MEMORY_LOAD || kind == BUSTER_IR_MEMORY_STORE) && (m.info[i] & BUSTER_IR_MEMORY_REACHABLE) != 0;
-    }
-    if (ok)
-    {
-#if BUSTER_HOST_VECTOR
-        if (!scalar)
-        {
-            ir_memory_escapes_vector(&m);
-        }
-        else
-#endif
-        {
             ir_memory_escapes_scalar(&m);
+            ir_memory_events_scalar(&m);
         }
+    }
+    // Each block's first event and first access: the lists are in instruction order, and a block's instructions are a range.
+    uint32_t e = 0;
+    uint32_t k = 0;
+    for (uint32_t b = 0; ok && b <= f->block_count; b += 1)
+    {
+        const uint32_t start = f->block_offsets[b];
+        while (e < m.event_count && m.events[e] < start)
+        {
+            e += 1;
+        }
+        while (k < m.access_count && m.accesses[k] < start)
+        {
+            k += 1;
+        }
+        m.event_first[b] = e;
+        access_first[b] = k;
     }
     const uint32_t a = m.access_count;
-    m.accesses = ir_allocate(scratch, a, sizeof(uint32_t), &ok);
-    m.roots = ir_allocate(scratch, a, sizeof(uint32_t), &ok);
-    m.indices = ir_allocate(scratch, a, sizeof(uint32_t), &ok);
-    m.scales = ir_allocate(scratch, a, sizeof(uint32_t), &ok);
-    m.offsets = ir_allocate(scratch, a, sizeof(int64_t), &ok);
-    m.pending = ir_allocate(scratch, a, sizeof(uint8_t), &ok);
-    m.classes = ir_allocate(scratch, a, sizeof(uint32_t), &ok);
-    m.families = ir_allocate(scratch, a, sizeof(uint32_t), &ok);
-    m.keys = ir_allocate(scratch, a, sizeof(uint32_t), &ok);
-    m.hashes = ir_allocate(scratch, a, sizeof(uint64_t), &ok);
-    m.family_roots = ir_allocate(scratch, a, sizeof(uint32_t), &ok);
-    m.family_indices = ir_allocate(scratch, a, sizeof(uint32_t), &ok);
-    m.family_scales = ir_allocate(scratch, a, sizeof(uint32_t), &ok);
-    m.key_families = ir_allocate(scratch, a, sizeof(uint32_t), &ok);
-    m.key_offsets = ir_allocate(scratch, a, sizeof(int64_t), &ok);
-    m.key_types = ir_allocate(scratch, a, sizeof(uint32_t), &ok);
+    m.roots = ir_memory_push(scratch, a, sizeof(uint32_t), &ok);
+    m.indices = ir_memory_push(scratch, a, sizeof(uint32_t), &ok);
+    m.scales = ir_memory_push(scratch, a, sizeof(uint32_t), &ok);
+    m.offsets = ir_memory_push(scratch, a, sizeof(int64_t), &ok);
+    m.pending = ir_memory_push(scratch, a, sizeof(uint8_t), &ok);
+    m.classes = ir_memory_push(scratch, a, sizeof(uint32_t), &ok);
+    m.families = ir_memory_push(scratch, a, sizeof(uint32_t), &ok);
+    m.keys = ir_memory_push(scratch, a, sizeof(uint32_t), &ok);
+    m.hashes = ir_memory_push(scratch, a, sizeof(uint64_t), &ok);
+    m.family_roots = ir_memory_push(scratch, a, sizeof(uint32_t), &ok);
+    m.family_indices = ir_memory_push(scratch, a, sizeof(uint32_t), &ok);
+    m.family_scales = ir_memory_push(scratch, a, sizeof(uint32_t), &ok);
+    m.key_families = ir_memory_push(scratch, a, sizeof(uint32_t), &ok);
+    m.key_offsets = ir_memory_push(scratch, a, sizeof(int64_t), &ok);
+    m.key_types = ir_memory_push(scratch, a, sizeof(uint32_t), &ok);
     m.key_overlapped = ir_allocate(scratch, a, sizeof(uint8_t), &ok);
     uint64_t buckets = 16;
     while (buckets < (uint64_t)a * 2)
     {
         buckets *= 2;
     }
-    uint32_t* heads = ir_allocate(scratch, buckets, sizeof(uint32_t), &ok);
+    uint32_t* heads = ir_memory_push(scratch, buckets, sizeof(uint32_t), &ok);
     if (ok)
     {
-        uint32_t k = 0;
-        for (uint32_t b = 0; b < f->block_count; b += 1)
+        for (uint32_t access = 0; access < a; access += 1)
         {
-            access_first[b] = k;
-            for (uint32_t i = f->block_offsets[b]; i < f->block_offsets[(uint64_t)b + 1]; i += 1)
-            {
-                const uint32_t kind = m.info[i] & BUSTER_IR_MEMORY_KIND;
-                if ((kind == BUSTER_IR_MEMORY_LOAD || kind == BUSTER_IR_MEMORY_STORE) && (m.info[i] & BUSTER_IR_MEMORY_REACHABLE) != 0)
-                {
-                    m.accesses[k] = i;
-                    m.classes[k] = ir_memory_class(&m, i);
-                    k += 1;
-                }
-            }
+            m.classes[access] = ir_memory_class(&m, m.accesses[access]);
         }
-        access_first[f->block_count] = k;
 #if BUSTER_HOST_VECTOR
         if (!scalar)
         {
@@ -1157,11 +1266,11 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, uint32_t* f
         }
         ok = ir_memory_overlaps(&m, scratch);
     }
-    IrMemoryEntry* entries = ir_allocate(scratch, m.key_count, sizeof(IrMemoryEntry), &ok);
+    IrMemoryEntry* entries = ir_memory_push(scratch, m.key_count, sizeof(IrMemoryEntry), &ok);
     uint32_t* class_counts = ir_allocate(scratch, (uint64_t)f->slot_count + 1, sizeof(uint32_t), &ok);
     uint32_t* family_counts = ir_allocate(scratch, m.family_count, sizeof(uint32_t), &ok);
-    IrMemoryUndo* undo = ir_allocate(scratch, (uint64_t)n * 3 + (uint64_t)f->block_count * 2, sizeof(IrMemoryUndo), &ok);
-    IrMemoryFrame* frames = ir_allocate(scratch, f->block_count, sizeof(IrMemoryFrame), &ok);
+    IrMemoryUndo* undo = ir_memory_push(scratch, m.undo_bound, sizeof(IrMemoryUndo), &ok);
+    IrMemoryFrame* frames = ir_memory_push(scratch, f->block_count, sizeof(IrMemoryFrame), &ok);
     if (ok)
     {
         for (uint32_t key = 0; key < m.key_count; key += 1)
@@ -1169,10 +1278,13 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, uint32_t* f
             entries[key].epoch = UINT32_MAX;
         }
         ir_memory_dirty(&m);
-        ir_memory_clear(&m);
+        ok = ir_memory_clear(&m, scratch);
+    }
+    if (ok)
+    {
         *forwarded += ir_memory_walk(&m, entries, class_counts, family_counts, undo, frames, access_first);
         // An identity's operand may be a load forwarded since: each forward names a value that isn't forwarded.
-        for (uint32_t i = 0; i < n; i += 1)
+        for (uint32_t i = 0; identities && i < n; i += 1)
         {
             uint32_t root = work->forward[i];
             while (root != BUSTER_IR_NONE && work->forward[root] != BUSTER_IR_NONE)

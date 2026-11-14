@@ -2377,7 +2377,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize(const IrFunction* functi
         {
             check.error = IR_ERROR_MEMORY;
         }
-        if (check.error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_MEMORY) != 0 && !ir_optimize_memory(&work, scratch, &work.statistics.forwarded_loads))
+        if (check.error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_MEMORY) != 0 && !ir_optimize_memory(&work, scratch, BUSTER_SCALAR_PATH(verify_scalar), &work.statistics.forwarded_loads))
         {
             check.error = IR_ERROR_MEMORY;
         }
