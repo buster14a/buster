@@ -50,6 +50,10 @@
 #define BUSTER_CHECK_LOWER_TEMPLATE_CLOSED 0x08u
 #define BUSTER_CHECK_LOWER_TEMPLATE_CONVERTED 0x10u
 #define BUSTER_CHECK_LOWER_TEMPLATE_TAKEN_ADDRESS 0x20u
+// An integer constant's node, its own entry one CONST (check_lower_expand's), and whether its conversion folded into it
+// (check_lower_template_conversion, #2678).
+#define BUSTER_CHECK_LOWER_TEMPLATE_CONSTANT 0x40u
+#define BUSTER_CHECK_LOWER_TEMPLATE_FOLDED 0x80u
 
 // A node's context: evaluated for its address, or discarded (check_lower_expression's), as the tasks' flags have them.
 #define BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS 0x01u
@@ -574,17 +578,29 @@ static void check_lower_template_own(const CheckLowerWriter* writer, uint32_t no
 
 // The entries of the conversion from `from` to `to` that check_lower_expression pushes for an operand evaluated with
 // `context` (check_lower_scalar_conversion's for what the table takes): whether the table takes it, with none where the
-// expression pushes none.
-static bool check_lower_template_conversion(const CheckLowerWriter* writer, TypeId from, TypeId to, uint8_t context, CheckLowerTemplateEntries* entries)
+// expression pushes none. An integer constant's (`constant`: its own entry the slot's one CONST) folds into its CONST
+// where it can, as the tasks fold it (check_lower_fold_conversion, #2678): `*folded`.
+static bool check_lower_template_conversion(const CheckLowerWriter* writer, TypeId from, TypeId to, uint8_t context, bool constant, CheckLowerTemplateEntries* entries,
+                                            bool* folded)
 {
     bool takes = true;
+    *folded = false;
     if (context == 0 && to != 0 && from != to && !check_lower_conversion_empty(writer, from, to))
     {
         const uint8_t source = check_lower_value_class(writer, from);
         const uint8_t target = check_lower_value_class(writer, to);
         const bool mixed = (check_lower_aggregate(writer, from) || check_lower_aggregate(writer, to)) && target != BUSTER_TYPED_CLASS_VOID;
         const bool complex = (check_lower_complex(writer, from) || check_lower_complex(writer, to)) && target != BUSTER_TYPED_CLASS_VOID;
-        if (complex || mixed || source >= BUSTER_TYPED_CLASS_F80 || target >= BUSTER_TYPED_CLASS_F80)
+        uint8_t class = 0;
+        uint64_t bits = constant ? entries->values[0] : 0;
+        if (constant && entries->classes[0] == source &&
+            check_lower_constant_conversion(source, check_lower_facts(writer, from), target, check_lower_facts(writer, to), &class, &bits))
+        {
+            entries->classes[0] = class;
+            entries->values[0] = bits;
+            *folded = true;
+        }
+        else if (complex || mixed || source >= BUSTER_TYPED_CLASS_F80 || target >= BUSTER_TYPED_CLASS_F80)
         {
             takes = false;
         }
@@ -849,6 +865,8 @@ struct CheckLowerTemplateFast
     uint32_t children[2];
     uint32_t count;
     bool handled;
+    // An integer constant's one CONST (BUSTER_CHECK_LOWER_TEMPLATE_CONSTANT).
+    bool constant;
 };
 
 static CheckLowerTemplateFast check_lower_template_fast(const CheckLowerWriter* writer, uint32_t node, bool address, CheckLowerTemplateEntries* entries)
@@ -921,6 +939,7 @@ static CheckLowerTemplateFast check_lower_template_fast(const CheckLowerWriter* 
             }
             check_lower_template_put(entries, BUSTER_TYPED_CONST, class, bits);
             fast.handled = true;
+            fast.constant = true;
         }
         else if (constant == CHECK_CONSTANT_ADDRESS && (flags & BUSTER_CHECK_BIT_FIELD) == 0)
         {
@@ -1194,12 +1213,15 @@ static __attribute__((noinline)) void check_lower_template_body(CheckLowerWriter
                                                               (CheckLowerTemplateFast){ .handled = false };
                 CheckLowerTemplateUse use = { .kind = CHECK_LOWER_TEMPLATE_NONE };
                 TypeId type = 0;
+                // An integer constant's node: its own entry one CONST, as the tasks' check_lower_expand writes it.
+                bool constant = false;
                 if (fast.handled)
                 {
                     use.kind = CHECK_LOWER_TEMPLATE_PASS;
                     use.count = fast.count;
                     use.children[0] = fast.children[0];
                     use.children[1] = fast.children[1];
+                    constant = fast.constant;
                     type = stream->value_types[node];
                     writer->template_fast_nodes += 1;
                     if (writer->template_check)
@@ -1218,13 +1240,18 @@ static __attribute__((noinline)) void check_lower_template_body(CheckLowerWriter
                     {
                         check_lower_template_own(writer, node, use.kind, context, &value, &entries);
                     }
+                    constant = use.kind == CHECK_LOWER_TEMPLATE_CONSTANT && value.constant_kind == CHECK_CONSTANT_INTEGER;
                 }
                 if (use.kind != CHECK_LOWER_TEMPLATE_NONE)
                 {
                     own_count = entries.count;
-                    const bool converted = check_lower_template_conversion(writer, type, target, context, &entries);
+                    constant = constant && own_count == 1 && entries.kinds[0] == BUSTER_TYPED_CONST;
+                    bool folded = false;
+                    const bool converted = check_lower_template_conversion(writer, type, target, context, constant, &entries, &folded);
                     total = entries.count;
                     state |= converted ? BUSTER_CHECK_LOWER_TEMPLATE_CONVERTED : 0;
+                    state |= constant ? BUSTER_CHECK_LOWER_TEMPLATE_CONSTANT : 0;
+                    state |= folded ? BUSTER_CHECK_LOWER_TEMPLATE_FOLDED : 0;
                     closed = true;
                     bool taken_address = entries.taken_address;
                     // The offset the next operand's subtree must start at: the node's own entries' for the last.
@@ -1263,14 +1290,17 @@ static __attribute__((noinline)) void check_lower_template_body(CheckLowerWriter
 
 // Splices closed `node`'s entries, popped with the tasks' `flags`, in place of its expansion: whether it did. Its context
 // must be the one the pass gave it (a node no template evaluates takes a value's), the entries' room there, and the
-// writer's state what its tasks would leave: the token its last node's, its locals' addresses taken. The entries are its
+// writer's state what its tasks would leave: the token its last node's, its locals' addresses taken, and an integer
+// constant's CONST, which its own conversion then folds into (CheckLowerWriter.constant_end). The entries are its
 // subtree's nodes' slots in node order, each node's with its conversion, but its own, whose conversion the task under it
-// writes.
+// writes: a constant whose slot holds its conversion folded into its CONST (BUSTER_CHECK_LOWER_TEMPLATE_FOLDED) has no
+// entries of its own apart from it, and is the tasks'.
 static inline __attribute__((always_inline)) bool check_lower_template_splice(CheckLowerWriter* writer, uint32_t node, uint8_t flags)
 {
     const uint32_t r = node - writer->template_first_node;
     bool spliced = false;
-    if (writer->template_ready && r < writer->template_span && (writer->template_states[r] & BUSTER_CHECK_LOWER_TEMPLATE_CLOSED) != 0 &&
+    if (writer->template_ready && r < writer->template_span &&
+        (writer->template_states[r] & (BUSTER_CHECK_LOWER_TEMPLATE_CLOSED | BUSTER_CHECK_LOWER_TEMPLATE_FOLDED)) == BUSTER_CHECK_LOWER_TEMPLATE_CLOSED &&
         flags == writer->template_contexts[r])
     {
         const uint32_t start = writer->template_first[r] - writer->template_first_node;
@@ -1299,6 +1329,11 @@ static inline __attribute__((always_inline)) bool check_lower_template_splice(Ch
                 }
             }
             writer->count = count;
+            if ((writer->template_states[r] & BUSTER_CHECK_LOWER_TEMPLATE_CONSTANT) != 0)
+            {
+                writer->constant_end = count;
+                writer->constant_node = node + 1;
+            }
             writer->token = writer->program->input->graph.tokens[writer->template_last[r]];
             writer->expression_nodes += writer->template_nodes[r];
             writer->template_spliced_nodes += writer->template_nodes[r];

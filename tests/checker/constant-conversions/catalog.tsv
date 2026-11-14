@@ -1,0 +1,9 @@
+buster-fixtures v1 checker-sources
+# check_test_constant_conversions's programs (c_check_constant_conversion_test.c; #2678): ID, FILE, FLAGS, NAME, tab-separated.
+# Each runs natively against clang's build of it; its NAME selects the checks of its entries and code.
+# The issue's four functions, their code checked: first in the unit, then a driver whose own conversions are of no constant.
+code	code.c	-	constant-conversion-code
+# Every kind of conversion that folds into its constant's CONST, which no integer CONST then precedes a CONVERT.
+folds	folds.c	-	constant-conversions
+# Conversions that keep their entries: rounding ones, after a label joining two values, and of the memory classes.
+controls	controls.c	-	constant-conversion-controls
