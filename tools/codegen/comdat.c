@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// The comdat flags of a unit's joined native parts (docs/commands/build.md, "Parallel native generation"):
+// The comdat flags of a unit's joined native parts (docs/commands/build.md, "Units in parts"):
 //
 //   comdat OBJECT PART...
 //

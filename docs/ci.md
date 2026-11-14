@@ -164,9 +164,9 @@ archive as hosted tests. No system packages are modified.
 
 The staged tree also keeps LLVM's static archives (`lib/libLLVM*.a`, 222
 files, 338 MB), as the hosted install does, so that the Release build
-generates the checker's and the backend's native code in parallel parts
-([build guide](commands/build.md#parallel-native-generation)): the splitter
-links them through `llvm-config --link-static`, the release having no shared
+optimizes its `main.c` units in parts
+([build guide](commands/build.md#units-in-parts)): the splitters
+link them through `llvm-config --link-static`, the release having no shared
 `libLLVM`. Its system libraries name the release's build machine's
 `/usr/lib/x86_64-linux-gnu/libzstd.a`, which the Arch host doesn't have;
 the build links that one by name, `-lzstd`, from the host's `libzstd.so`.
