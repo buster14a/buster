@@ -1,0 +1,11 @@
+function (ptr) -> void {
+b0:
+  %0 = param.ptr 0
+  %1 = load.v4i32 %0 align=16
+  %2 = load.v8i32 %0 align=32
+  %3 = load.v16i32 %0 align=64
+  %4 = intrinsic.v4i32 %1, %1, %1 funnel 1
+  %5 = intrinsic.v8i32 %2, %2, %2 funnel 6
+  %6 = intrinsic.v16i32 %3, %3, %3 funnel 7
+  %7 = ret.void
+}

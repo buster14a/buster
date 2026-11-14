@@ -31,7 +31,7 @@ nothing, since the queue tested it before it landed.
 
 - **What a candidate runs.** The full hosted contract on its exact commit,
   documentation alone included:
-  - every row and sanitizer;
+  - every `x86-64` row and sanitizer, and the `native` plain row (#2032);
   - the vector pool;
   - the three fuzz campaigns.
 
@@ -39,7 +39,13 @@ nothing, since the queue tested it before it landed.
   stops at its first failure (the owner's choice on 2026-11-12):
   - its tests and fuzz campaigns wait for the policy job;
   - its rows, shards, vector draws and fuzz campaigns fail fast, each within
-    its own matrix.
+    its own matrix;
+  - each shard stops at its first failing command (`parallel --fail-fast`,
+    #2703), as a pull request's does;
+  - once its test rows or fuzz campaigns have failed, `stop-tests` or
+    `stop-fuzz` cancels its run (#2703), so its aggregate fails at once
+    rather than after the other matrix (the fuzz campaigns take about 21
+    minutes).
   It never uses the 9700X (`hardware=skip`, reason `merge-group`), and
   SQLite's full Tcl suite stays nightly.
 - **Selector.** `changes --event merge_group --files LIST --workflow
@@ -58,7 +64,8 @@ nothing, since the queue tested it before it landed.
 - **Aggregate.** The required aggregate passes a candidate only through its
   coverage step, `bash tools/ci/nightly.sh coverage DIR`. That step reads the
   run's jobs and runs `nightly coverage --run RUN < FACTS`, which needs:
-  - every shard 1..N of every row and sanitizer;
+  - every shard 1..N of every row of the contract (`x86-64`'s four, `native`'s
+    plain one);
   - the vector verdict;
   - each fuzz campaign;
   - every job of each auxiliary workflow the selector named
@@ -121,8 +128,9 @@ each command once ([Shard costs](#shard-costs)). A portable `x86-64` row
 builds its compiler once, and its shards verify and run that product
 (`tools/ci/hosted-product.sh`; [Shared row
 products](../ci.md#shared-row-products), #2032), and so does each vector
-configuration, on a qualifying CPU; a `native` row's shards each
-build their own (a native build must run on the CPU it was built for). Run
+configuration, on a qualifying CPU; the `native` plain row's shards each
+build their own (a native build must run on the CPU it was built for), which is
+why the `native` sanitizer rows went (#2032). Run
 `bash tests/ci/hosted-product.sh` after changing the product's packing, identity
 or checks. A plain row's test step took 14.6 minutes on one 4-CPU runner; its
 4 shards take about 4 to 6. The steps a row needs once (the baseline fallback,
@@ -133,9 +141,10 @@ predefines, while excluding its exact host-only detector and frame controls
 (#1423). The compiler executing the check remains instrumented.
 On merge-queue candidates and the daily and dispatched runs, the nightly
 snapshot's daily run among them (not on pull requests, which they would hold up
-for over an hour; before the queue, on pushes before the nightly mode), each
-host architecture also runs the
-inventory under `BUSTER_SANITIZER=address|thread|memory`, but the
+for over an hour; before the queue, on pushes before the nightly mode), the
+`x86-64` row and the vector row's configurations also run the
+inventory under `BUSTER_SANITIZER=address|thread|memory` (the `native`
+sanitizer rows went in #2032; `native` keeps its plain row), but the
 compiler's own `main.c` checking comparison in the TSan and MSan rows, whose
 measured memory (docs/ci.md) exceeds a hosted runner's; their `-c` compiles run
 in a separate step after the suite. ASan combines UBSan, bounds,
@@ -159,9 +168,10 @@ request on its hosted rows and says so. All correctness builds run
 the same suite inventory, `tools/ci/correctness.tests`. Failed, cancelled or
 skipped hosted tests cannot queue the hardware job; failed native tests cannot
 start benchmarks. A pull request's run stops at its first failure: its test rows
-fail fast, and its tests don't start when the guide-size or DCO hook check
-fails. A merge-queue candidate's run does too, and its fuzz campaigns fail fast
-as well. Pushes to main, the daily and dispatched runs report every row. The
+fail fast, each shard stops at its first failing command (`parallel
+--fail-fast`, #2703), and its tests don't start when the guide-size or DCO hook
+check fails. A merge-queue candidate's run does too, its fuzz campaigns fail
+fast as well, and its first failed test or fuzz matrix cancels the run. Pushes to main, the daily and dispatched runs report every row. The
 existing required check name is retained by a hosted aggregation job that fails
 when either stage fails.
 Draft and ready PRs alike get hosted feedback and never queue hardware.
@@ -418,6 +428,17 @@ build/costs --self-test --root .
   `build/costs refresh --tests tools/ci/correctness.tests --costs
   tools/ci/costs`. It keeps every measurement, estimates the new commands and
   drops the removed ones; no logs are needed.
+- **Split.** A pull request that splits a heading into several, finer parts
+  for the deal (#2658), runs `build/costs split --tests
+  tools/ci/correctness.tests --costs tools/ci/costs --map FILE` instead. FILE's
+  lines are `HEADING<TAB>NEW<TAB>WEIGHT`, one per new heading, and a heading
+  may keep its title for one of them. In every row's table, each new heading
+  takes its weight's share of its heading's cost, and its heading's peak,
+  marked `#: derived`. Refresh keeps a derived cost as it is, and the row's
+  median leaves it out. The next collect over logs that have the new heading
+  measures it. Without the split, refresh would give a new part the row's median
+  per CPU, a few seconds, and the deal would put a heading's parts on one shard.
+  An unmeasured heading's parts stay estimates.
 - **Plan.** `build/costs plan --tests tools/ci/correctness.tests --costs
   tools/ci/costs/ROW.costs --shards 2-8 [--setup S] [--first S] [--deal
   FILE]` predicts the runner's deal and schedule for each shard count, adding
@@ -445,7 +466,6 @@ The test job in `9700x.yml` gives each row its count (`shards`):
 | --- | ---: | --- |
 | plain, both | 4 | `tools/ci/nightly.c` counts the plain rows' shards as one N; more native shards each rebuild the compiler for under a minute less |
 | `x86-64` TSan, MSan | 6 | a portable row's extra shard costs a minute of setup; 6 reach the rows' longest commands |
-| `native` MSan | 5 | each extra native shard rebuilds the instrumented compiler (about 10 minutes) |
 | `vector`, each configuration | 4 | its items, `BUSTER_VECTOR_ITEMS`, which its draws are sized for; the take gives the run step its configuration's count |
 | others | 4 | already shorter than the run's longest row |
 

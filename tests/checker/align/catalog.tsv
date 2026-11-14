@@ -1,0 +1,75 @@
+buster-fixtures v1 checker-sources
+# check_test_align_sources's source fixtures (c_check_program_align_test.c; #2053): ID, FILE, FLAGS, NAME, tab-separated.
+0001	0001.c	-	align: result types
+0002	0002.c	rejected	align: a const source's result is const
+0003	0003.c	-	align: folds in constant contexts
+0004	0004.c	rejected	align: an address no declaration aligns enough
+0005	0005.c	rejected	align: is_aligned of a pointer variable
+0006	0006.c	rejected	align: a bool source
+0007	0007.c	rejected	align: an enumeration source
+0008	0008.c	rejected	align: a float source
+0009	0009.c	rejected	align: a struct source
+0010	0010.c	rejected	align: a function pointer source
+0011	0011.c	rejected	align: a function source
+0012	0012.c	rejected	align: an _Atomic source
+0013	0013.c	rejected	align: a bool alignment
+0014	0014.c	-	align: an enumeration alignment
+0015	0015.c	rejected	align: an enumeration variable's alignment
+0016	0016.c	rejected	align: a double alignment
+0017	0017.c	rejected	align: a pointer alignment
+0018	0018.c	rejected	align: an alignment of 0
+0019	0019.c	rejected	align: a negative alignment
+0020	0020.c	rejected	align: an alignment that isn't a power of 2
+0021	0021.c	rejected	align: an alignment past a char's
+0022	0022.c	rejected	align: an alignment past an int's
+0023	0023.c	-	align: the largest alignment of an int and of a pointer
+# A source past 128 bits (#1447): its constant alignments checked as any source's; an alignment past 128 bits checked
+# by its constant's limbs (zero, negative, past the source's range or no power of 2), at clang's error's line.
+0024	0024.c	rejected	align: a wide source's alignment of 0
+0025	0025.c	rejected	align: a wide source's negative alignment
+0026	0026.c	rejected	align: a wide source's alignment that isn't a power of 2
+0027	0027.c	-	align: a wide source's alignments
+0028	0028.c	rejected	align: a wide alignment that isn't a power of 2
+0029	0029.c	rejected	align: a wide alignment of 0
+0030	0030.c	rejected	align: a negative wide alignment
+0031	0031.c	rejected	align: a wide alignment past an int's
+# Constant alignments past 128 bits (#1447), and their folds of wide and narrow sources, through const objects too.
+0032	0032.c	-	align: folds past 128 bits
+0033	0033.c	rejected	align: a wide alignment past a wide source's
+0034	0034.c	rejected	align: a const object's wide alignment that isn't a power of 2
+0035	0035.c	rejected	align: an alignment past its side effects
+0036	0036.c	-	align: an unknown alignment
+0037	0037.c	rejected	align: a const object's alignment
+0038	0038.c	rejected	align: a const object's alignment of 0
+0039	0039.c	rejected	align: a file-scope const object's alignment
+0040	0040.c	rejected	align: a const object's alignment past an int's
+0041	0041.c	rejected	align: a const object inside an alignment
+0042	0042.c	rejected	align: a const double's alignment
+0043	0043.c	-	align: alignments the evaluator doesn't read
+0044	0044.c	-	align: const objects folded in constant contexts
+# Clang's evaluator fails on a modification it must evaluate, past side effects or not, and then checks no value;
+# a comma's discarded modification it goes past.
+0045	0045.c	-	align: modifications the evaluator doesn't evaluate
+0046	0046.c	rejected	align: a modification's value past a comma
+0047	0047.c	rejected	align: a discarded modification
+0048	0048.c	rejected	align: a discarded read
+0049	0049.c	rejected	align: one argument
+0050	0050.c	rejected	align: three arguments
+0051	0051.c	-	probability: accepted forms
+0052	0052.c	-	probability: const objects in its expression
+0053	0053.c	rejected	probability: a const object's past 1
+0054	0054.c	rejected	probability: a variable
+0055	0055.c	rejected	probability: past 1
+0056	0056.c	rejected	probability: below 0
+0057	0057.c	rejected	probability: a NaN
+0058	0058.c	rejected	probability: an infinity
+0059	0059.c	rejected	probability: a call's
+# A constant expression's evaluation fails on a discarded operand it can't evaluate, where a fold goes on.
+0060	0060.c	rejected	probability: a discarded read
+0061	0061.c	rejected	probability: a discarded read in a condition
+0062	0062.c	rejected	probability: a read cast to void
+0063	0063.c	rejected	probability: a discarded modification
+0064	0064.c	-	probability: discarded operands the evaluator evaluates
+0065	0065.c	rejected	probability: a pointer
+0066	0066.c	rejected	probability: two arguments
+0067	0067.c	-	expect: a folded first argument's effects in constant contexts

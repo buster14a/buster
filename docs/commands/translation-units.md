@@ -204,6 +204,26 @@ the census below measures, run in the compile). `--attested=MODE` picks:
   the semantic hash doesn't cover) fails the unit with a fatal error naming
   its file and line. Step 1's shadow. The unit's tree columns from the cache are
   also made whole and compared, a difference a contradiction.
+- **`--attested-memo=DIRECTORY`** (step 4, opt-in): each lane's memo is kept
+  across processes, in a file of the directory for each key: the compiler's
+  build (its GNU build ID, read from its own program headers, or its
+  executable file's identity) and the
+  command's options but for its inputs, outputs, lanes and reports
+  (`check_attested_memo_key`). A lane loads the file as it opens
+  (`check_attested_memo_load`, the table sized once for its records) and
+  appends the hashes it learned as it closes (`check_attested_memo_save`),
+  each under the file's `flock`, so that a build's processes share it; a file
+  whose header isn't its key's, torn or past its most records is written
+  again with the lane's memo whole. Its hashes are portable: a name's word is
+  its spelling's hash (`CheckAttested.id_words`) where a lane's own memo takes
+  its id, and a function definition's own hash takes the process's nonce. A
+  command of one source file runs the passes with it too
+  (`check_driver_one_unit`): its state's arenas are base pages throughout and
+  it keeps no caches of lists or trees (`CheckAttested.alone`), its
+  diagnostics go to a stream of their own, and a unit that skipped and failed
+  is read again from its start with nothing skipped. A link without a build
+  ID (the CI toolchain's lld adds none) is keyed by its executable file's
+  identity instead: device, inode, size and modification time.
 - **`off`:** no passes and no state. `--scalar` is `off` (its reader is the
   skip's oracle), and so is `on` with `-g`, whose DWARF describes every type
   the unit's table holds (`c_check_debug_values.c`), a skipped declaration's

@@ -37,6 +37,7 @@
 #define BUSTER_C_OPTIONS(ENTRY) \
     ENTRY(STANDARD_INPUT, "-") \
     ENTRY(END_OF_OPTIONS, "--") \
+    ENTRY(ATTESTED_MEMO_EQ, "--attested-memo=") \
     ENTRY(ATTESTED_EQ, "--attested=") \
     ENTRY(BUSTER_HEADERS, "--buster-headers") \
     ENTRY(CHECK_TRANSITIONS, "--check-transitions") \
@@ -46,6 +47,7 @@
     ENTRY(DUMP_STATIC, "--dump-static") \
     ENTRY(DUMP_TYPED, "--dump-typed") \
     ENTRY(EMBED_DIR_EQ, "--embed-dir=") \
+    ENTRY(EMIT_WINDOW_EQ, "--emit-window=") \
     ENTRY(HELPER_FORMS_EQ, "--helper-forms=") \
     ENTRY(HELPER_REPORT, "--helper-report") \
     ENTRY(ID_ORDER, "--id-order") \
@@ -173,7 +175,7 @@
     ENTRY(FFILE_PREFIX_MAP_EQ, "-ffile-prefix-map=") \
     ENTRY(FFINITE_MATH_ONLY, "-ffinite-math-only") \
     ENTRY(FFIXED_POINT, "-ffixed-point") \
-    ENTRY(FFP_CONTRACT_EQ_OFF, "-ffp-contract=off") \
+    ENTRY(FFP_CONTRACT_EQ, "-ffp-contract=") \
     ENTRY(FFP_EVAL_METHOD_EQ, "-ffp-eval-method=") \
     ENTRY(FFP_EXCEPTION_BEHAVIOR_EQ, "-ffp-exception-behavior=") \
     ENTRY(FFP_MODEL_EQ, "-ffp-model=") \

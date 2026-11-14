@@ -1218,10 +1218,16 @@ static CheckTestProgramBuild check_test_program_build;
 static const char* check_test_program_march = "-march=x86-64";
 
 // The target options a program's functions' target attributes resolve against (CheckProgramOptions.predefines): the
-// oracle's -march, whose X86Target the section gives the harness (x86_target_parse's profile of the same name).
+// oracle's -march, whose X86Target the section gives the harness (x86_target_parse's profile of the same name). The
+// source graph also takes the oracle's explicit contraction-off policy; the dedicated driver tests on/default.
 static PredefinesOptions check_test_program_predefines(void)
 {
-    return (PredefinesOptions){ .march = check_test_program_march + strlen("-march=") };
+    static uint8_t floats[] = { PREDEFINES_FLOAT_CONTRACT_OFF };
+    return (PredefinesOptions){
+        .march = check_test_program_march + strlen("-march="),
+        .floats = floats,
+        .float_count = BUSTER_ARRAY_LENGTH(floats),
+    };
 }
 
 // Whether a program's preprocessing searches the system's headers, as the oracle's compile does: off, or while a
@@ -1242,8 +1248,8 @@ static bool check_test_program_cloned(const CheckProgram* program)
 }
 
 // The flags of every compile and link of a program, with plain char as the checker read it (`char_unsigned`), for the
-// oracle and the harness alike. Nothing here contracts a * b + c into one fused operation (docs/c-checker.md), which
-// clang's default (-ffp-contract=on) does even at -O0 where the target has FMA (x86-64-v4's vector programs).
+// oracle and the harness alike. These existing fixtures request contraction off on both sides; tests/driver/fp_contract.c
+// separately checks default/on contraction, its lexical overrides and the target boundary.
 #define BUSTER_CHECK_TEST_PROGRAM_FLAGS(char_unsigned) \
     "-std=gnu17", \
     "-O0", \
@@ -2872,6 +2878,22 @@ static bool check_test_program_switch_run(const CheckLowerWriter* writer, uint64
     return valid && destination == expected && depth == 0;
 }
 
+// Boundaries may fall more than once inside one target_clones body. All of its copies must belong to one part, even
+// when moving the boundaries makes some parts empty; unrelated bodies retain their original boundaries.
+static void check_test_program_clone_parts(CheckTest* test)
+{
+    CheckProgramBody bodies[8] = {
+        { .opening = 1 }, { .opening = 2 }, { .opening = 2 }, { .opening = 2 },
+        { .opening = 3 }, { .opening = 4 }, { .opening = 4 }, { .opening = 5 },
+    };
+    uint64_t boundaries[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
+    const uint64_t expected[] = { 0, 1, 4, 4, 4, 5, 7, 7, 8 };
+    const CheckProgram program = { .bodies = bodies };
+    CheckEmitRun run = { .program = &program, .body_count = 8, .boundaries = boundaries };
+    check_program_emit_group_copies(&run, 8);
+    check_test_expect(test, memcmp(boundaries, expected, sizeof(expected)) == 0, "clone copies stay together across empty parts");
+}
+
 // #1371's checked-case producer contract, without another large source string in the compiler. The source-order
 // records are permuted, contain empty intervals and repeated destinations, and span both ends of each integer type.
 // Real source-to-native coverage, including selector effects and control flow, lives in tests/driver/tier1_sparse_switch.c.
@@ -4084,6 +4106,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     {
         check_test_program_declaring(test);
         check_test_program_refused(test);
+        check_test_program_clone_parts(test);
         check_test_program_sparse_switches(test);
         check_test_program_type_facts(test);
         check_test_program_selection(test, clang);

@@ -242,6 +242,12 @@ static void tier1_schedule_test_examples(Tier1ScheduleTest* test, Tier1ScheduleG
     records[0] = tier1_schedule_test_instruction(X86_FORM_MFENCE, 0, 0);
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "a fence stays pinned");
     tier1_schedule_test_compare(test, input, scalar, vector);
+    records[0] = tier1_schedule_test_instruction(X86_FORM_FLD_ST, 0, 0);
+    tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "a retained x87 result keeps its original spill's waiting boundary");
+    tier1_schedule_test_compare(test, input, scalar, vector);
+    records[0] = tier1_schedule_test_instruction(X86_FORM_FSTP_ST, 0, 0);
+    tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "a retained x87 reload keeps its waiting boundary");
+    tier1_schedule_test_compare(test, input, scalar, vector);
     records[0] = tier1_schedule_test_instruction(X86_FORM_LOCK_CMPXCHG_M64_R64, X86_REGISTER_R9, X86_REGISTER_R8);
     records[0].mode = BUSTER_X86_MEMORY_BASE;
     tier1_schedule_test_expect(test, !tier1_schedule_verify(input, reversed), "a locked compare-exchange stays pinned");

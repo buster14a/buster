@@ -1,0 +1,55 @@
+buster-fixtures v1 checker-sources
+# check_test_const_alias_sources's source fixtures (c_check_const_alias_test.c; #2053): ID, FILE, FLAGS, NAME, tab-separated.
+0001	0001.c	-	literal bytes retain their actual plain char element type
+0002	0002.c	rejected	literal byte storage cannot supply a typed int alias
+0003	0003.c	rejected	signed char pointer casts do not retag literal bytes
+0004	0004.c	rejected	unsigned char arrays cannot be read through plain char casts
+0005	0005.c	-	literal initialization gives an unsigned char array its declared type
+0006	0006.c	rejected	unsigned char pointer casts do not retag literal bytes
+0007	0007.c	rejected	implicit union zeroes do not permit a first-member pointer cast
+0008	0008.c	rejected	implicit integer zeroes cannot supply a byte alias
+0009	0009.c	rejected	character pointer arithmetic cannot recover a typed member read
+0010	0010.c	rejected	first-member layout equivalence does not prove a constant read
+0011	0011.c	rejected	a float pointer roundtrip cannot erase a type-changing cast
+0012	0012.c	rejected	implicit void pointer storage preserves a read-blocking roundtrip
+0013	0013.c	rejected	an inactive member cannot borrow active zeroes through a cast
+0014	0014.c	rejected	implicit zero coverage does not make an inactive union member readable
+0015	0015.c	rejected	a const access type cannot make a mutable defining object constant
+0016	0016.c	rejected	zero padding cannot be consumed as an unsigned char constant
+0017	0017.c	-	implicit float zero uses the selected member's actual type
+0018	0018.c	-	implicit integer zero uses the selected member's actual type
+0019	0019.c	-	a same-type pointer cast permits the actual const integer member read
+0020	0020.c	-	pointer qualifier removal does not change the actual member type
+0021	0021.c	rejected	const pointer-object storage retains a wrong float access type
+0022	0022.c	rejected	an explicit void pointer roundtrip cannot erase a type-changing cast
+0023	0023.c	rejected	casting away a member's volatile qualification cannot permit folding
+0024	0024.c	rejected	implicit integer zero is not a float object representation
+0025	0025.c	rejected	implicit integer zero is not a pointer object representation
+0026	0026.c	rejected	implicit integer zero is not a short subobject
+0027	0027.c	rejected	implicit signed integer zero is not an unsigned integer subobject
+0028	0028.c	rejected	a typed array value cannot supply a byte alias
+0029	0029.c	rejected	an explicit integer zero cannot supply a byte alias
+0030	0030.c	rejected	an explicit integer zero is not a float object representation
+0031	0031.c	-	implicit void roundtrips still publish legal symbolic addresses
+0032	0032.c	-	explicit void roundtrips still publish legal symbolic addresses
+0033	0033.c	-	wrong access types still publish legal symbolic addresses
+0034	0034.c	-	type-changing pointer roundtrips still publish legal symbolic addresses
+0035	0035.c	-	first-member pointer casts still publish legal symbolic addresses
+0036	0036.c	-	pointer arithmetic after a void roundtrip still publishes an address
+0037	0037.c	rejected	stored pointer arithmetic cannot erase a void-roundtrip read restriction
+0038	0038.c	rejected	implicit void conversion survives repeated pointer storage and arithmetic
+0039	0039.c	rejected	stored pointer arithmetic cannot erase literal signedness provenance
+0040	0040.c	-	same-type pointer storage and arithmetic retain readable array provenance
+0041	0041.c	-	qualifier-only pointer storage and arithmetic retain readable array provenance
+0042	0042.c	-	a discarded comma operand cannot taint the selected pointer path
+0043	0043.c	-	a discarded index operand cannot taint the selected array path
+0044	0044.c	rejected	tail padding cannot give a flexible member a readable array bound
+0045	0045.c	rejected	flexible initializer storage does not give a source member a known array bound
+0046	0046.c	rejected	an enclosing tail cannot give a nested flexible member a readable array bound
+0047	0047.c	-	a discarded inactive-member address cannot taint the selected pointer path
+0048	0048.c	-	a discarded inactive-member address cannot taint the selected array path
+0049	0049.c	-	a flexible member's symbolic address remains a static initializer
+0050	0050.c	rejected	pointer storage cannot erase a flexible member's missing declared bound
+0051	0051.c	-	a discarded flexible decay cannot taint the selected pointer path
+0052	0052.c	-	a completed later array declaration supplies its actual bound
+0053	0053.c	-	an earlier symbolic array pointer can read a subsequently completed target

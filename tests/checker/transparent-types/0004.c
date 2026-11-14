@@ -1,0 +1,1 @@
+typedef union __attribute__((transparent_union)){int*i;double*d;}U;typedef union __attribute__((transparent_union)){int*i;float*f;}V;typedef void F(U);typedef void G(V);_Static_assert(!__builtin_types_compatible_p(F,G),"distinct");

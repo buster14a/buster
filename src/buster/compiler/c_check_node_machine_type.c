@@ -2188,7 +2188,8 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
     {
         const uint32_t node = node_machine_node(machine, r);
         const CheckOp op = graph->ops[node];
-        const bool context = (graph->contexts != NULL && graph->contexts[node] != 0) || (graph->fp_environments != NULL && graph->fp_environments[node] != 0);
+        const bool context = (graph->contexts != NULL && graph->contexts[node] != 0) ||
+                             (graph->fp_environments != NULL && (graph->fp_environments[node] & (BUSTER_CHECK_FP_ENV_ACCESS | BUSTER_CHECK_FP_EVAL_MASK)) != 0);
         uint32_t word = 0;
         columns->codes[r] = (uint8_t)op;
         if (op == CHECK_OP_VALUE)

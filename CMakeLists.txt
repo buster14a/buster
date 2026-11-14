@@ -220,6 +220,18 @@ elseif(buster_parallel_codegen)
 endif()
 message(STATUS "buster: Develop configuration: ${buster_develop}, units in parts: ${buster_unit_parts}")
 
+# The benchmark units a tree leaves out, which stand-ins replace (cmake/BusterDevelopAbsent.cmake): a sanitizer tree's
+# BUSTER_SANITIZER_ON_DEMAND in every configuration (#2639), else Develop's BUSTER_DEVELOP_ON_DEMAND in Develop alone.
+set(absent_reason "")
+set(absent_units "")
+if(NOT buster_sanitizer STREQUAL "none")
+    set(absent_reason sanitizer)
+    set(absent_units ${BUSTER_SANITIZER_ON_DEMAND})
+elseif(buster_develop)
+    set(absent_reason develop)
+    set(absent_units ${BUSTER_DEVELOP_ON_DEMAND})
+endif()
+
 # Each source is an object library of its own, defined in the compile order, which is the order a clean build starts
 # them in; the executable links their objects in the sources' order.
 buster_compile_order(order)
@@ -228,7 +240,12 @@ foreach(index IN LISTS order)
     list(GET BUSTER_SOURCES ${index} source)
     get_filename_component(name "${source}" NAME_WE)
     get_filename_component(file "${source}" NAME)
-    if(buster_develop AND file IN_LIST BUSTER_DEVELOP_ON_DEMAND)
+    if(absent_reason STREQUAL "sanitizer" AND file IN_LIST absent_units)
+        # No object library in a sanitizer tree, and no object in its link (unit_names below): no configuration
+        # compiles the unit.
+        list(APPEND develop_absent_sources "${CMAKE_SOURCE_DIR}/${source}")
+        continue()
+    elseif(absent_reason STREQUAL "develop" AND file IN_LIST absent_units)
         # No source in Develop: the link names this object library's objects in every configuration, which would
         # otherwise make Develop's executable wait for the unit's compile, though it doesn't link it.
         add_library(buster_${name} OBJECT "$<$<NOT:$<CONFIG:Develop>>:${CMAKE_SOURCE_DIR}/${source}>")
@@ -251,9 +268,16 @@ foreach(index IN LISTS order)
     endif()
 endforeach()
 set(unit_names "")
+# The units the executable links: all but those a sanitizer tree leaves out (#2639). unit_names stays BUSTER_SOURCES'
+# names, index for index.
+set(linked_names "")
 foreach(source IN LISTS BUSTER_SOURCES)
     get_filename_component(name "${source}" NAME_WE)
+    get_filename_component(file "${source}" NAME)
     list(APPEND unit_names ${name})
+    if(NOT (absent_reason STREQUAL "sanitizer" AND file IN_LIST absent_units))
+        list(APPEND linked_names ${name})
+    endif()
 endforeach()
 
 
@@ -418,29 +442,37 @@ if(buster_pgo)
         list(FIND unit_names "${name}" index)
         list(GET BUSTER_SOURCES ${index} source)
         set_source_files_properties("${source}" PROPERTIES OBJECT_DEPENDS "${pgo}/compiler.profdata")
-        add_dependencies(buster_${name} pgo-profile)
+        # A unit a sanitizer tree leaves out has no target (#2639).
+        if(TARGET buster_${name})
+            add_dependencies(buster_${name} pgo-profile)
+        endif()
     endforeach()
 endif()
 
 set(objects "")
-foreach(name IN LISTS unit_names)
+foreach(name IN LISTS linked_names)
     buster_native_object(object "${name}")
     list(APPEND objects "${object}")
 endforeach()
-# Develop's stand-ins for the benchmark units it leaves out (cmake/BusterDevelopAbsent.cmake): each of their run_*
-# entry points says which configurations have its command.
+# The stand-ins for the benchmark units the tree leaves out (cmake/BusterDevelopAbsent.cmake): each of their run_*
+# entry points says which builds have its command. Develop's in Develop alone; a sanitizer tree's in every
+# configuration (#2639).
 if(develop_absent_sources)
     set(absent "${CMAKE_BINARY_DIR}/$<CONFIG>/develop/absent.o")
     add_custom_command(OUTPUT "${absent}"
         COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${absent}" "-DSOURCES=${develop_absent_sources}" "-DCLANG=${CMAKE_C_COMPILER}"
-            "-DFLAGS=${flags};${buster_optimization}" -P "${CMAKE_SOURCE_DIR}/cmake/BusterDevelopAbsent.cmake"
+            "-DFLAGS=${flags};${buster_optimization}" "-DREASON=${absent_reason}" -P "${CMAKE_SOURCE_DIR}/cmake/BusterDevelopAbsent.cmake"
         DEPENDS ${develop_absent_sources} "${CMAKE_SOURCE_DIR}/cmake/BusterDevelopAbsent.cmake"
-        COMMENT "Writing Develop's stand-ins for the benchmark units"
+        COMMENT "Writing the stand-ins for the benchmark units the build leaves out"
         VERBATIM)
     # Joined to the last object, so that Release's and Debug's lists, the post-link step's argument among them, stay
-    # as they were rather than gain an empty element.
+    # as they were rather than gain an empty element (in a tree that isn't a sanitizer's).
     list(POP_BACK objects last)
-    list(APPEND objects "${last}$<$<CONFIG:Develop>:$<SEMICOLON>${CMAKE_BINARY_DIR}/Develop/develop/absent.o>")
+    if(absent_reason STREQUAL "sanitizer")
+        list(APPEND objects "${last}" "${absent}")
+    else()
+        list(APPEND objects "${last}$<$<CONFIG:Develop>:$<SEMICOLON>${CMAKE_BINARY_DIR}/Develop/develop/absent.o>")
+    endif()
 endif()
 set(compiler "${CMAKE_BINARY_DIR}/$<CONFIG>/compiler")
 add_executable(compiler_link ${objects} ${lexer_objects})

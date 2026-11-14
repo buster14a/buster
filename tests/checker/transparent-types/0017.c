@@ -1,0 +1,1 @@
+union U;typedef void(*P)(union U);union __attribute__((transparent_union)) U{P p;};typedef void(*Q)(P);typedef void F(union U);typedef void G(Q);_Static_assert(__builtin_types_compatible_p(F,G),"callback");

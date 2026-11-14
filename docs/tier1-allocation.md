@@ -1038,6 +1038,67 @@ a fresh callee-saved register at its switch, read only in cases' loops that
 rarely run, and its prologue saves one more register on every call (0.89 M more
 than without the hoist).
 
+### Increments after their last reader (#2592)
+
+Lua's `vmfetch` ends every handler with `i = *(pc++)`. The lowering defines
+`pc + 4` before the load that reads `pc`, so `pc` was still live where the
+increment was defined, and the increment took another register: `lea
+0x4(%r14),%rbp` and then `mov (%r14),%r14d`, the loaded `i` in `pc`'s register,
+which the load freed. The dispatch join's phis have `pc` in `r14` and `i` in
+`rbp`, so every dispatch swapped the two through the scratch register: `mov
+%r14,%r11; mov %rbp,%r14; mov %r11,%rbp`. clang loads first and adds in place:
+`mov (%r14),%ecx; add $4,%r14`.
+
+The operand sink (`tier1_schedule_ir_sink`, in `tier1_schedule_ir.c`) gives the
+allocation that order. It runs on every function, on the IR before the optimizer's
+final verification, as `--tier1-schedule=pre` does, and moves an expression to
+right after the last instruction of its block's segment that reads its operand
+`a`. The expression is pure, total and cheap integer and pointer arithmetic,
+constants and conversions included, and its root's one use is a phi's operand.
+`a` is the only operand it takes from outside it, besides constants. The
+expression's result is then defined where `a` has died, and takes the register
+its phi's hint names, which is `a`'s. Moving it can't raise register pressure:
+over the distance it moves, the root was live and now `a` is, if `a` wasn't
+already. The last reader isn't one of the operations that move, so it keeps its
+place. It is no truth value either, so a branch or extension still finds its
+comparison right before it, and a load still folds into its consumer, since
+nothing moved is a memory access. `--verify` checks the order with the
+preallocation schedule's reference (`tier1_schedule_ir_verify`).
+
+The phi must be `a`'s own: `a` is that phi, a value computed from it by such
+operations, or a join of its values. A Lua handler that may skip a word joins
+`pc`'s paths before its fetch. A list walk shows why the rule is needed:
+`pp = &p->next; p = p->next` makes two values from `p`, and the load is `p`'s
+own next value, which wants `p`'s register. Moving `pp`'s increment past the load
+gave that register to the increment, and the loop's back edge swapped the two:
+speedtest1's `vdbeSorterMerge` ran 2.82 M more instructions in the change's
+first form, which moved any expression of one value.
+
+By callgrind at main `ca1ede6a`, with #1189's `gap.c` and #1217's inputs (Lua's
+five scripts with a fixed string-hash seed, and speedtest1's `--size 5` mix):
+
+| | main | this | clang -O2 |
+| --- | ---: | ---: | ---: |
+| `luaV_execute`'s instructions | 2,365.8 M | 2,250.8 M | |
+| `luaV_execute`'s register moves | 438.8 M | 324.6 M | 322.9 M |
+| of them through `r11` | 81.2 M | 9.7 M | |
+| Lua's five scripts, whole processes | 5,236.6 M | 5,121.1 M | 4,207.3 M |
+| speedtest1, whole process | 2,873.3 M | 2,871.5 M | 2,028.9 M |
+
+clang's column is #2574's. Of the moves through `r11` that are left, 7.9 M are
+one edge of `OP_CALL`'s path into `startfunc`, which swaps `rbx` and `r15`, and
+0.8 M are `OP_NEWTABLE`'s shift by `cl`, which isn't an edge's. 16 of
+`luaV_execute`'s 78 indirect jumps still follow a swap, down from 59, and they
+take 1.0 M of the moves. Some of these handlers increment `pc` inside the handler,
+as `OP_LOADKX` does, so the handler leaves `pc` and `i` in each other's
+registers. Others reload `trap` after a call into a register other than the
+join's, as `OP_POW` does. A loop's backward jump moves `pc` by a variable
+amount, which isn't of the phi's family either. No other function of either
+program runs more instructions. The pass moves 76
+expressions in `lvm.c` and 54 in `sqlite3.c`. `tests/driver/tier1_patterns.c`
+checks the fetch natively: each handler's indirect jump follows the target's
+load, with no move between them.
+
 ## Rematerialization
 
 `Tier1RematerializationInput` is a borrowed column view of selection facts,
@@ -1119,6 +1180,25 @@ before a recomputation takes over, or that only definitions left out read, is
 left out (`tier1_emit_cfg_dead_definition`, decided from the last node back):
 the C front end's address chains define each link right before the allocator
 evicts it, a write nothing read.
+
+A recomputed value's definition needs no register at all (#2618): its own use
+isn't required, so where values read sooner hold every register the allocator
+gives it none, the cheapest choice, and the recipe's fragment starts at the
+definition, which is left out too. While that use was required, the
+assignment found no register for it and failed, and the second, with every
+definition freed, spilled a value around it (`tier1_dropped_test.c`'s `g`). In
+a `sqlite3VdbeExec` handler run 288,561 times on speedtest1, two frame
+objects' addresses no longer take registers, and a value in `r14` no longer
+spills and reloads around them: four instructions fewer a run. By callgrind at main
+`b7a95eed` (#1189's `gap.c`, #1217's inputs), speedtest1 runs 1.50 M fewer
+instructions: `sqlite3VdbeExec` −0.71 M (0.29 M fewer `lea`s, 0.39 M fewer
+moves), `sqlite3Atoi64` −0.23 M, `sqlite3_str_vappendf` −0.21 M,
+`pageFreeArray` −0.13 M; `instrFunc` +0.17 M, its loop's spills moved from one
+value to another. Lua's scripts run the same instructions. On the 9700X, with
+#2618's split of hoisted addresses (`docs/ir.md`), speedtest1's user cycles
+are 0.9976 over six layouts (95% interval 0.9895 to 1.0058). The emitter accepts
+a definition whose first fragment is its recipe's for a recomputed value alone,
+and records no register for it.
 
 The same holds where control enters a block (`tier1_cfg_entry_unread`, #1217):
 a recomputed value whose register fragment at the block's start serves no use

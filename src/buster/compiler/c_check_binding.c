@@ -475,20 +475,16 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
     output->resource |= !valid;
 }
 
-// An undeclared name's error, with the keyword or the type name its typo's search suggested (#1447,
-// check_typo_suggestion): the report's detail (the keyword's index + 1) and subject (the typedef's token + 1).
+// An undeclared name's error with the keyword, type or builtin its typo search suggested (#1447, #2250), encoded by
+// check_typo_suggestion in the report's detail and subject for the driver to print and, where needed, reread.
 static void check_input_binding_undeclared(CheckInputReader* reader, uint32_t token)
 {
     CheckInput* output = reader->output;
     const uint32_t before = output->report_count;
     check_input_report(reader, token, CHECK_INPUT_UNDECLARED);
-    uint32_t keyword = 0;
-    uint32_t type = BUSTER_CHECK_NONE;
-    check_typo_suggestion(reader, token, &keyword, &type);
     if (output->report_count == before + 1 && !output->resource)
     {
-        output->reports[before].detail = keyword;
-        output->reports[before].subject = type < reader->parser->tokens.count ? type + 1 : 0;
+        check_typo_suggestion(reader, token, &output->reports[before].detail, &output->reports[before].subject);
     }
 }
 

@@ -1752,7 +1752,8 @@ static void check_test_program_x86_refusals(CheckTest* test)
                                            "x86 builtins whose instructions the target hasn't", &baseline);
     }
     // Baseline SSE success is covered by --program-vectors. A 32-byte AVX2 builtin runs on its halves where their 128-bit
-    // builtin's row does (#2426, check_lower_x86_split): pshufd's at the baseline, but not palignr's, which needs SSSE3.
+    // builtin's row does (#2426, check_lower_x86_split): pshufd's at the baseline, and palignr's by SSE2's shifts
+    // (#1834), but not roundps's, which clang's backend can't select without SSE4.1.
     if (baseline_parsed)
     {
         check_test_program_boundary_target(test, "typedef int v8si __attribute__((vector_size(32)));int tested(int n){v8si a={n,1};"
@@ -1760,7 +1761,10 @@ static void check_test_program_x86_refusals(CheckTest* test)
                                            "avx2-pshufd-without-avx", true, true, 0, 2, NULL, &baseline);
         check_test_program_boundary_target(test, "typedef char v32qi __attribute__((vector_size(32)));int tested(int n){v32qi a={(char)n,1};"
                                                  "v32qi b=__builtin_ia32_palignr256(a,a,3);return b[0];}",
-                                           "avx2-palignr-without-ssse3", true, false, 0, 2, "x86 builtins whose instructions the target hasn't", &baseline);
+                                           "avx2-palignr-without-ssse3", true, true, 0, 2, NULL, &baseline);
+        check_test_program_boundary_target(test, "typedef float v8sf __attribute__((vector_size(32)));int tested(int n){v8sf a={(float)n,1};"
+                                                 "v8sf b=__builtin_ia32_roundps256(a,1);return (int)b[0];}",
+                                           "avx-roundps-without-sse41", true, false, 0, 2, "x86 builtins whose instructions the target hasn't", &baseline);
     }
     X86Target v4 = { 0 };
     const bool parsed = x86_target_parse("x86-64-v4", strlen("x86-64-v4"), &v4);
@@ -2093,6 +2097,56 @@ static void check_test_program_x86_target_attributes(CheckTest* test, const char
                                                 "int tested(int n){unsigned h=0;for(int i=0;i<16;i++){h=h*16777619u^halves(n*37+i);}return (int)h;}",
                                                 "target-clones-halves", clang, false, -1, 0, &baseline, true);
         check_test_program_build_release();
+        // The 128-bit builtins a baseline copy runs as SSE2's sequences (#1834, check_x86_lower_sse2_row), as LLVM expands
+        // them: palignr's shifts, the blends' masks, pextrb's and pinsrb's words, pinsrd's and pinsrq's, vpermilpd's SHUFPD
+        // and the compares by every predicate, of NaNs too; and their 256-bit builtins on halves of them. At x86-64, then
+        // at x86-64-v2, which has SSE4.1's blends and inserts but not AVX2's pblendd, AVX's vpermilpd or its predicates.
+        static const char sse2[] =
+            "typedef char c16 __attribute__((vector_size(16)));typedef short s8 __attribute__((vector_size(16)));"
+            "typedef int i4 __attribute__((vector_size(16)));typedef long long q2 __attribute__((vector_size(16)));"
+            "typedef float f4 __attribute__((vector_size(16)));typedef double d2 __attribute__((vector_size(16)));"
+            "typedef char c32 __attribute__((vector_size(32)));typedef short s16 __attribute__((vector_size(32)));"
+            "typedef int i8 __attribute__((vector_size(32)));typedef long long q4 __attribute__((vector_size(32)));"
+            "typedef float f8 __attribute__((vector_size(32)));typedef double d4 __attribute__((vector_size(32)));\n"
+            "#define M(v) do{for(unsigned k=0;k<sizeof(v);k++)h=(h^((unsigned char*)&(v))[k])*16777619u;}while(0)\n"
+            "__attribute__((target_clones(\"avx10.2\",\"default\"))) static unsigned older(int n){unsigned h=2166136261u;"
+            "c32 w;for(int i=0;i<32;i++)w[i]=(char)(n*37+i*101+(i*n>>3));c16 a=__builtin_shufflevector(w,w,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15),"
+            "b=__builtin_shufflevector(w,w,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31);"
+            "f4 x={(float)(n%7)-3.0f,__builtin_nanf(\"\"),(float)(n&3),-0.0f},y={(float)(n%5)-2.0f,(n&1)?__builtin_nanf(\"\"):1.0f,(float)(n&3),0.0f};"
+            "d2 p={(double)(n%3)-1.0,(n&2)?__builtin_nan(\"\"):2.0},q={(double)(n%3)-1.0,-2.0};"
+            "f8 x8=__builtin_shufflevector(x,y,0,1,2,3,4,5,6,7),y8=__builtin_shufflevector(y,x,0,1,2,3,4,5,6,7);"
+            "d4 pw=__builtin_shufflevector(p,q,0,1,2,3),qw=__builtin_shufflevector(q,p,0,1,2,3);"
+            "{q2 r=__builtin_ia32_palignr128((q2)a,(q2)b,0);M(r);r=__builtin_ia32_palignr128((q2)a,(q2)b,5);M(r);"
+            "r=__builtin_ia32_palignr128((q2)a,(q2)b,16);M(r);r=__builtin_ia32_palignr128((q2)a,(q2)b,21);M(r);"
+            "r=__builtin_ia32_palignr128((q2)a,(q2)b,40);M(r);q4 t=__builtin_ia32_palignr256((q4)w,(q4)w,7);M(t);}"
+            "{s8 r=__builtin_ia32_pblendw128((s8)a,(s8)b,0x5a);M(r);r=__builtin_ia32_pblendw128((s8)a,(s8)b,0x0f);M(r);"
+            "r=__builtin_ia32_pblendw128((s8)a,(s8)b,0xff);M(r);s16 t=__builtin_ia32_pblendw256((s16)w,(s16)w,0xc3);M(t);}"
+            "{f4 r=__builtin_ia32_blendps(x,y,5);M(r);r=__builtin_ia32_blendps(x,y,14);M(r);i4 s=__builtin_ia32_pblendd128((i4)a,(i4)b,9);M(s);"
+            "f8 t=__builtin_ia32_blendps256(x8,y8,0x96);M(t);i8 u=__builtin_ia32_pblendd256((i8)w,(i8)w,0x3c);M(u);"
+            "d2 v=__builtin_ia32_blendpd(p,q,1);M(v);v=__builtin_ia32_blendpd(p,q,2);M(v);d4 z=__builtin_ia32_blendpd256(pw,qw,6);M(z);"
+            "v=__builtin_ia32_vpermilpd(p,1);M(v);v=__builtin_ia32_vpermilpd(p,2);M(v);z=__builtin_ia32_vpermilpd256(pw,9);M(z);}"
+            "{int e=__builtin_ia32_vec_ext_v16qi(a,4)+__builtin_ia32_vec_ext_v16qi(a,11)*3+__builtin_ia32_vec_ext_v32qi(w,27)*5;M(e);"
+            "c16 r=__builtin_ia32_vec_set_v16qi(a,(char)n,6);M(r);r=__builtin_ia32_vec_set_v16qi(a,(char)(n*3),13);M(r);"
+            "c32 t=__builtin_ia32_vec_set_v32qi(w,(char)n,21);M(t);i4 s=__builtin_ia32_vec_set_v4si((i4)a,n*65537,2);M(s);"
+            "i8 u=__builtin_ia32_vec_set_v8si((i8)w,~n,5);M(u);q2 v=__builtin_ia32_vec_set_v2di((q2)a,(long long)n<<40,0);M(v);"
+            "v=__builtin_ia32_vec_set_v2di((q2)a,-(long long)n,1);M(v);q4 z=__builtin_ia32_vec_set_v4di((q4)w,n,3);M(z);}"
+            "{f4 r=__builtin_ia32_cmpps(x,y,0);M(r);r=__builtin_ia32_cmpps(x,y,8);M(r);r=__builtin_ia32_cmpps(x,y,9);M(r);"
+            "r=__builtin_ia32_cmpps(x,y,10);M(r);r=__builtin_ia32_cmpps(x,y,11);M(r);r=__builtin_ia32_cmpps(x,y,12);M(r);"
+            "r=__builtin_ia32_cmpps(x,y,13);M(r);r=__builtin_ia32_cmpps(x,y,14);M(r);r=__builtin_ia32_cmpps(x,y,15);M(r);"
+            "r=__builtin_ia32_cmpps(x,y,28);M(r);d2 s=__builtin_ia32_cmppd(p,q,24);M(s);s=__builtin_ia32_cmppd(p,q,29);M(s);"
+            "s=__builtin_ia32_cmppd(p,q,6);M(s);f8 t=__builtin_ia32_cmpps256(x8,y8,12);M(t);d4 u=__builtin_ia32_cmppd256(pw,qw,30);M(u);}"
+            "return h;}"
+            "int tested(int n){unsigned h=0;for(int i=0;i<16;i++){h=h*16777619u^older(n*37+i);}return (int)h;}";
+        check_test_program_source_native_limits(test, sse2, "target-clones-sse2", clang, false, -1, 0, &baseline, true);
+        check_test_program_build_release();
+        X86Target v2 = { 0 };
+        if (x86_target_parse("x86-64-v2", strlen("x86-64-v2"), &v2))
+        {
+            check_test_program_march = "-march=x86-64-v2";
+            check_test_program_source_native_limits(test, sse2, "target-clones-sse2-v2", clang, false, -1, 0, &v2,
+                                                    (native.features & v2.features) == v2.features);
+            check_test_program_build_release();
+        }
         check_test_program_march = "-march=x86-64-v3";
         check_test_program_boundary_target(test, "__attribute__((target(\"no-bmi2\"))) int tested(int n){return (int)__builtin_ia32_bzhi_si((unsigned)n,3u);}",
                                            "target-attribute-off", true, false, 0, 0, "x86 builtins whose instructions the target hasn't", &v3);

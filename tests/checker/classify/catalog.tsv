@@ -1,0 +1,23 @@
+buster-fixtures v1 checker-sources
+# check_test_classify_sources's source fixtures (c_check_program_classify_test.c; #2053): ID, FILE, FLAGS, NAME, tab-separated.
+0001	0001.c	-	classify: folds in constant expressions
+0002	0002.c	-	classify: result types
+0003	0003.c	-	classify: masks of other integer types
+0004	0004.c	-	classify: isfpclass of a vector
+0005	0005.c	rejected	classify: a mask that isn't constant
+0006	0006.c	rejected	classify: a mask past 1023
+0007	0007.c	rejected	classify: a negative mask
+# clang sign-extends the mask from its type's width, whatever its signedness.
+0008	0008.c	rejected	classify: a bool mask of 1
+0009	0009.c	rejected	classify: an unsigned char mask of 200
+0010	0010.c	rejected	classify: a floating mask
+0011	0011.c	rejected	classify: a comma's mask
+0012	0012.c	rejected	classify: isfpclass of an int
+0013	0013.c	rejected	classify: isfpclass of a complex
+0014	0014.c	rejected	classify: isfpclass without its mask
+0015	0015.c	rejected	classify: isnormal of an int
+0016	0016.c	rejected	classify: iszero of two
+0017	0017.c	rejected	classify: issubnormal of a struct
+0018	0018.c	rejected	classify: signbitf of a pointer
+0019	0019.c	rejected	classify: canonicalize of a pointer
+0020	0020.c	rejected	classify: canonicalize in a static initializer
