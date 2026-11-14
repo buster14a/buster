@@ -278,8 +278,17 @@ static bool check_test_cleanup_chain_shapes(char* text, size_t capacity, uint32_
         BUSTER_CHECK_TEST_CHAIN_PRINT("int c%u __attribute__((cleanup(rel))) = a + %u; s += ({ if (a == %u) return s; c%u; });\n", i, i, i, i);
     }
     BUSTER_CHECK_TEST_CHAIN_PRINT("return s; }\n");
+    // Tier 1's sparse tree consumes the CASE controls while the selector's statement expression can exit through
+    // cleanup chains. Exercise both users of the lowering's shared control-skip field in one function.
+    BUSTER_CHECK_TEST_CHAIN_PRINT("static int sparse_region(int n) { int o __attribute__((cleanup(rel))) = 10; return 7 + ({ int a __attribute__((cleanup(rel))) = 20; int z = 0;\n"
+                                  "switch (({ int b __attribute__((cleanup(rel))) = 30; if (n < 0) return 77; (n %% 128) * 1000; })) {\n");
+    for (uint32_t i = 0; i < 128; i += 1)
+    {
+        BUSTER_CHECK_TEST_CHAIN_PRINT("case %u: z = %u; break;\n", i * 1000, i);
+    }
+    BUSTER_CHECK_TEST_CHAIN_PRINT("default: z = 9; } z + a; }); }\n");
     BUSTER_CHECK_TEST_CHAIN_PRINT("int main(void) { unsigned h = 0; for (int a = -1; a < %u; a++) { trace = 0; int r = returns(a) + 3 * nested(a) + 5 * loop(a) + 7 * jumps(a) + 11 * region(a);\n"
-                                  "r += 13 * region_own(a); r += 17 * region_outer(a);\n"
+                                  "r += 13 * region_own(a); r += 17 * region_outer(a); r += 19 * sparse_region(a);\n"
                                   "h = h * 31u + (unsigned)r + trace; } printf(\"%%u\\n\", h); return 0; }\n", count + 3);
 #undef BUSTER_CHECK_TEST_CHAIN_PRINT
     return valid;
