@@ -6906,6 +6906,39 @@ probe's climb stopping at a token shallower than the operand
 token's start. `test-checker-driver` checks the parents by both paths and the
 starts against their definitions on random graphs and trees whose columns end
 at `PROT_NONE` pages (`c_check_common_tree_test.c`).
+
+The vector warning driver classifies its immutable operator column once
+(`c_check_common_candidates.c`, #1340). Eight classes cover reach, comparisons,
+returned addresses, calls, static selections, evaluation masks, discarded
+values and shifts. Each class has one 16-bit mask per 16 nodes, with the
+classes in separate contiguous columns: one byte per node, rounded to 16
+nodes. Full batches classify 64 operators with one byte-table lookup; the
+last loads are masked to the logical count. The reach, format, return-stack,
+static-selection, operand-mask, discarded-value and detached-shift passes
+consume these masks in ascending node order and retain their semantic tests.
+The comparison masks also supply the existing 16-comparison batches.
+
+The parent pass retains immutable parentless membership while counting its
+distinct children, at one bit per node, rounded to 64 nodes. The tree path
+expands it into the initial evaluated and used bytes, and the evaluation and
+emission scans reuse it instead of reloading four bytes of parent per node.
+Control flow and selections still change their separate evaluated marks.
+Displaced roots, statement expressions and initializer publication still use
+the existing root-order machinery. A graph that fails the tree check keeps
+the original fallback; the scalar driver allocates neither index and still
+visits every node as its independent oracle. Empty graphs allocate nothing,
+and allocation failure reports the existing common-warning capacity error.
+Both indexes belong to the warning driver's scratch region and expire before
+backend processing. Their combined payload is about 1.125 bytes per node;
+this is a storage and scan-work description, not a measured timing result.
+
+`c_check_common_candidates_test.c` compares the lookup and scalar classifier
+with independent operator predicates, every operator across lane boundaries,
+invalid operator IDs, protected input and exact-capacity output tails,
+independent readers, and allocation failure. The tree tests also compare the
+root bitmap with an independent edge walk on valid and rejected trees and
+verify cached, uncached and scalar root enumeration.
+
 The expression walk starts only at a root that reaches something or whose
 discarded expression may get the statement's unused-value warning, and enters
 only the subtrees that hold its walk's bit; every warning keeps its order. The default-ignored warnings' work runs only
