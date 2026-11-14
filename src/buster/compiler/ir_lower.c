@@ -922,6 +922,22 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
             ir_typed_lanes(sink, value, operation->lane);
         }
     }
+    else if (operation->masked_memory == 6)
+    {
+        // A scatter (#1840) of the fourth operand, the stored vector, at the base, the first, by the index, the third,
+        // under the second, the mask: its stored vector and mask in two slots of the extra array, its scale's log2 its
+        // alignment's place.
+        const uint32_t address = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, operands[0], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        const uint32_t slot = (uint32_t)sink->sizes.extra_count;
+        if (sink->output != 0)
+        {
+            sink->output->extra[slot] = operands[3];
+            sink->output->extra[slot + 1] = operands[1];
+        }
+        sink->sizes.extra_count += 2;
+        value = ir_typed_emit(sink, IR_SCATTER, IR_VOID, address, operands[2], ir_intrinsic_ternary_c(0, slot), operation->immediate);
+        ir_typed_lanes(sink, value, operation->lane);
+    }
     else if (operation->masked_memory == 4)
     {
         // A gather (#1840) at the base, the second operand, by the index, the third, under the fourth, the mask, whose
@@ -1116,7 +1132,9 @@ static bool ir_typed_unmasked(const Tier0Function* input, const IrSimdTypedOpera
     // merged operand's.
     // A gather's, its passthrough's; a truncating store's, its source's (#1840).
     // A truncation's under a mask, its source's (#1840: a partial one's are fewer than its result's).
-    const uint32_t lanes = operation->convert == BUSTER_IR_INTRINSIC_TRUNCATE + 1u && operation->merge_mask ? operation->operand_bytes[0] >> (operation->immediate & 3) :
+    // A scatter's (#1840): none, its mask no operand at the stream's end, whose last is its stored vector.
+    const uint32_t lanes = operation->masked_memory == 6                                                    ? 0 :
+                           operation->convert == BUSTER_IR_INTRINSIC_TRUNCATE + 1u && operation->merge_mask ? operation->operand_bytes[0] >> (operation->immediate & 3) :
                            operation->compare_mask || operation->bitshuffle || operation->masked_memory == 4 ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) :
                            operation->masked_memory == 5                                                    ? operation->operand_bytes[1] >> (operation->immediate & 3) :
                            operation->merge_mask || operation->masked_memory != 0                          ? 8u * operation->operand_bytes[1] / ir_simd_lane_bits(operation->lane) :

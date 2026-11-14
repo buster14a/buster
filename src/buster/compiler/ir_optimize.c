@@ -1231,6 +1231,7 @@ static const uint8_t ir_optimize_roots[BUSTER_IR_OP_TABLE] = {
         [IR_MASKED_STORE] = 1,
         [IR_COMPRESS_STORE] = 1,
         [IR_GATHER] = 1,
+        [IR_SCATTER] = 1,
         [IR_BR] = 1,
         [IR_CBR] = 1,
         [IR_SWITCH] = 1,
@@ -1913,9 +1914,9 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                         {
                             sizes.extra_count += f->c[i];
                         }
-                        else if (ir_ternary_instruction(f, i))
+                        else if (ir_extra_value_count(f, i) != 0)
                         {
-                            sizes.extra_count += 1;
+                            sizes.extra_count += ir_extra_value_count(f, i);
                         }
                     }
                 }
@@ -2140,11 +2141,14 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                                         candidate.extra[extra++] = f->extra[f->b[i] + entry];
                                     }
                                 }
-                                else if (ir_ternary_instruction(f, i))
+                                else if (ir_extra_value_count(f, i) != 0)
                                 {
-                                    // A ternary intrinsic's third operand (#1840), at its new place in the extra array.
+                                    // A ternary intrinsic's third operand, or a scatter's stored vector and mask (#1840), at its new place in the extra array.
                                     candidate.c[out] = ir_intrinsic_ternary_c(f->c[i], extra);
-                                    candidate.extra[extra++] = operands[ir_intrinsic_third(f, i)];
+                                    for (uint32_t k = 0, extra_values = ir_extra_value_count(f, i); k < extra_values; k += 1)
+                                    {
+                                        candidate.extra[extra++] = operands[ir_extra_value(f, i, k)];
+                                    }
                                 }
                             }
                             instructions += 1;

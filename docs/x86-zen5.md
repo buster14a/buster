@@ -324,6 +324,9 @@ indices too, the element's bytes its scale), 12 `MASKED_MEMORY` rows of `vpcompr
 Its scalar fused multiply-adds then added 6: the VEX `vfmadd132`, `vfmadd213` and `vfmadd231` of single and double
 precision on registers, each 4 cycles' latency, 2 per cycle and one macro-op
 ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-fma-scatters-1840-2026-11-14)).
+Its scatters then added 10 `MEMORY_INDEX` rows, `vpscatterdd` to `vpscatterqq` at every width x86 has: one every 3
+(`vpscatterqq` of 16 bytes) to 17 cycles (`vpscatterdd` of 64), 16 to 88 macro-ops, and no latency, as a scatter has
+no result (the harness's scatter takes no chain through its index) (the same record).
 
 What the rows say, a few families (cycles; derived values in italics):
 

@@ -180,7 +180,7 @@ struct IrIfConvertWork
     bool scalar;
 };
 
-_Static_assert(IR_OP_COUNT == 69, "a new operation needs its class in ir_if_convert_barriers");
+_Static_assert(IR_OP_COUNT == 70, "a new operation needs its class in ir_if_convert_barriers");
 // Everything not listed is neither: pure operations, constants, loads (plain, masked and gathered; an observable plain
 // one is a write, below), phis, allocation and the stack save. A call may free or unmap memory; a stack restore and a lifetime's end release a
 // frame's; IR_INVALID never verifies but stays conservative.
@@ -189,6 +189,7 @@ static const uint8_t ir_if_convert_barriers[BUSTER_IR_OP_TABLE] = {
     [IR_STORE] = BUSTER_IR_IF_CONVERT_WRITE,
     [IR_MASKED_STORE] = BUSTER_IR_IF_CONVERT_WRITE,
     [IR_COMPRESS_STORE] = BUSTER_IR_IF_CONVERT_WRITE,
+    [IR_SCATTER] = BUSTER_IR_IF_CONVERT_WRITE,
     [IR_ATOMIC_RMW] = BUSTER_IR_IF_CONVERT_WRITE,
     [IR_FENCE] = BUSTER_IR_IF_CONVERT_WRITE,
     [IR_CALL] = BUSTER_IR_IF_CONVERT_WRITE | BUSTER_IR_IF_CONVERT_RELEASE,
@@ -1041,11 +1042,14 @@ static uint32_t ir_if_convert_row(const IrIfConvertWork* work, IrFunction* view,
             view->extra[extra++] = values[alias[f->extra[call.argument_first + a]]];
         }
     }
-    else if (ir_ternary_instruction(f, i))
+    else if (ir_extra_value_count(f, i) != 0)
     {
-        // A ternary intrinsic's third operand (#1840), in its own appended slot.
+        // A ternary intrinsic's third operand, or a scatter's stored vector and mask (#1840), in its own appended slot.
         view->c[out] = ir_intrinsic_ternary_c(f->c[i], extra);
-        view->extra[extra++] = values[alias[ir_intrinsic_third(f, i)]];
+        for (uint32_t k = 0, extra_values = ir_extra_value_count(f, i); k < extra_values; k += 1)
+        {
+            view->extra[extra++] = values[alias[ir_extra_value(f, i, k)]];
+        }
     }
     return extra;
 }
@@ -1084,9 +1088,9 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
         {
             extras += f->calls[f->b[i]].argument_count;
         }
-        else if (ir_ternary_instruction(f, i))
+        else if (ir_extra_value_count(f, i) != 0)
         {
-            extras += 1;
+            extras += ir_extra_value_count(f, i);
         }
     }
     IrError error = !ok ? (total < UINT32_MAX ? IR_ERROR_MEMORY : IR_ERROR_LIMIT) : extras > UINT32_MAX ? IR_ERROR_LIMIT : IR_OK;

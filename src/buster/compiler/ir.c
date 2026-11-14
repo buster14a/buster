@@ -213,6 +213,12 @@ typedef enum IrOp
     // compute this in each of their orders, 132, 213 and 231 (vfmadd213sd b, a, c's a * b + c), on Intel's and AMD's
     // (#1840's check over 3,375 operand triples): the product's operands in the formula's order, then the addend's.
     IR_FMA,
+    // A scatter (#1840): `a` the base address and `b` the index vector, as a gather's, and in the extra array at `c`
+    // (ir_extra_value) the stored vector, then the mask of its lanes; its flags the lanes (i32 or i64) and its
+    // alignment_log2 the scale's log2 (0 to 3). Lane i, where the mask's bit i is set, is written at a + sext(b's element
+    // i) * scale, the lanes in order from lane 0, so that of two set lanes at one address the higher lane's bytes stay; a
+    // clear lane writes nothing (vpscatterdd to vpscatterqq [a + zmm * scale]{k}, zmm). A store's effect, of any memory.
+    IR_SCATTER,
     IR_OP_COUNT,
 } IrOp;
 
@@ -870,6 +876,7 @@ static const char* const ir_op_names[IR_OP_COUNT] = {
     "compress_store",
     "gather",
     "fma",
+    "scatter",
 };
 
 // The text form's names of a machine row's classes (#141, IrFunction.rows): the typed stream's, a vector's and a mask's
@@ -983,8 +990,8 @@ static bool ir_masked_lanes_valid(uint8_t flags)
 // How an operation's flags and alignment_log2 are checked (#1840): a plain operation's flags are none or its lanes, as
 // ir_check_metadata says, and its alignment_log2 is 0; a load's or a store's flags are an access's and an atomic
 // read/modify/write's its own, both aligned up to 2^31; a masked access's flags are its lanes, whose mask is a mask of
-// them, and its alignment_log2 an access's or, a gather's, its scale's. A table, so that the verifier's check of every
-// instruction it defers is a load and not a chain of compares as long as the accesses' list.
+// them, and its alignment_log2 an access's or, a gather's and a scatter's, its scale's. A table, so that the verifier's
+// check of every instruction it defers is a load and not a chain of compares as long as the accesses' list.
 typedef enum IrMetadata
 {
     IR_METADATA_PLAIN,
@@ -1003,6 +1010,7 @@ static const uint8_t ir_metadata_table[BUSTER_IR_OP_TABLE] = {
     [IR_MASKED_STORE] = IR_METADATA_MASKED,
     [IR_COMPRESS_STORE] = IR_METADATA_MASKED,
     [IR_GATHER] = IR_METADATA_GATHER,
+    [IR_SCATTER] = IR_METADATA_GATHER,
 };
 
 // The largest alignment_log2 of each IrMetadata.
@@ -1014,8 +1022,9 @@ static const uint8_t ir_metadata_alignment[IR_METADATA_COUNT] = {
     [IR_METADATA_GATHER] = 3,
 };
 
-// Whether an operation is a masked access (#1840): a masked load or store, a compressing store or a gather, whose flags
-// are its lanes, whose mask is a mask of them, and whose alignment_log2 is an access's (a gather's, its scale's).
+// Whether an operation is a masked access (#1840): a masked load or store, a compressing store, a gather or a scatter,
+// whose flags are its lanes, whose mask is a mask of them, and whose alignment_log2 is an access's (a gather's and a
+// scatter's, its scale's).
 static bool ir_masked_access(uint32_t op)
 {
     return op < BUSTER_IR_OP_TABLE && ir_metadata_table[op] >= IR_METADATA_MASKED;
@@ -1300,6 +1309,7 @@ typedef enum IrRule
     IR_RULE_MASKED_STORE,
     IR_RULE_GATHER,
     IR_RULE_FMA,
+    IR_RULE_SCATTER,
 } IrRule;
 
 #define BUSTER_IR_INTS (((1u << (IR_I128 + 1)) - 1) & ~1u)
@@ -1377,7 +1387,8 @@ typedef enum IrRule
     X(IR_MASKED_STORE,  7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0) \
     X(IR_COMPRESS_STORE, 7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0) \
     X(IR_GATHER,        7, 7, BUSTER_IR_VECTORS, IR_RULE_GATHER, 0) \
-    X(IR_FMA,           7, 7, (1u << IR_F32) | (1u << IR_F64), IR_RULE_FMA, 0)
+    X(IR_FMA,           7, 7, (1u << IR_F32) | (1u << IR_F64), IR_RULE_FMA, 0) \
+    X(IR_SCATTER,       3, 7, 1u << IR_VOID, IR_RULE_SCATTER, 0)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
 static const uint8_t ir_operand_table[BUSTER_IR_OP_TABLE] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_ROW) };
@@ -1610,6 +1621,20 @@ static uint32_t ir_intrinsic_third(const IrFunction* f, uint32_t i)
 static bool ir_ternary_instruction(const IrFunction* f, uint32_t i)
 {
     return f->op[i] == IR_INTRINSIC && ir_intrinsic_ternary(f->c[i]);
+}
+
+// How many values instruction i keeps in the extra array past its direct operands, from the index its `c` names
+// (ir_intrinsic_extra): a ternary intrinsic's third operand (1), a scatter's stored vector and its mask (2, #1840); 0 for
+// any other instruction (a phi's and a call's operands are there too, by their own fields).
+static uint32_t ir_extra_value_count(const IrFunction* f, uint32_t i)
+{
+    return ir_ternary_instruction(f, i) ? 1 : f->op[i] == IR_SCATTER ? 2 : 0;
+}
+
+// Instruction i's k-th value in the extra array (ir_extra_value_count's).
+static uint32_t ir_extra_value(const IrFunction* f, uint32_t i, uint32_t k)
+{
+    return f->extra[ir_intrinsic_extra(f->c[i]) + k];
 }
 
 // The mask type of a comparison of vector type `type`'s lanes `lane`, a bit per lane (m8 for 8 lanes or fewer): IR_VOID
@@ -2422,6 +2447,25 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_GATHER: valid = ta == IR_PTR && ir_vector_type(type) && ir_gather_index_valid(type, f->flags[i], tb) && operand_types[2] == ir_lane_mask(type, f->flags[i]); break;
             // A fused multiply-add's three operands are its result's type (#1840).
             case IR_RULE_FMA: valid = ta == type && tb == type && operand_types[2] == type; break;
+            // A scatter's (#1840) `c` is its two extra values' index, no kind's: its stored vector's lanes, a dword's or a
+            // qword's, take b's index elements, and its mask is of those lanes.
+            case IR_RULE_SCATTER:
+            {
+                const bool listed = c <= BUSTER_IR_INTRINSIC_EXTRA_LIMIT << BUSTER_IR_INTRINSIC_EXTRA_SHIFT && ir_intrinsic_kind(c) == 0 &&
+                                    ir_slice(ir_intrinsic_extra(c), 2, f->extra_count);
+                const uint32_t stored = listed ? f->extra[ir_intrinsic_extra(c)] : BUSTER_IR_NONE;
+                const uint32_t mask = listed ? f->extra[ir_intrinsic_extra(c) + 1] : BUSTER_IR_NONE;
+                if (stored >= f->instruction_count || mask >= f->instruction_count)
+                {
+                    check = ir_check(IR_ERROR_OPERAND, i, stored >= f->instruction_count ? 3 : 4);
+                }
+                else
+                {
+                    valid = ta == IR_PTR && ir_vector_type(f->type[stored]) && ir_gather_index_valid(f->type[stored], f->flags[i], tb) &&
+                            f->type[mask] == ir_lane_mask(f->type[stored], f->flags[i]);
+                }
+                break;
+            }
             case IR_RULE_SYMBOL: valid = a != 0 && a < f->symbol_count; break;
             case IR_RULE_ADDRESS:
             {
@@ -2872,20 +2916,36 @@ static uint32_t ir_value_mask3(const IrFunction* f, uint32_t i)
     return ir_value_mask(f, i) | (ir_ternary_instruction(f, i) ? 4u : 0u);
 }
 
+// The operations with operands past their direct ones (ir_operand_count's): a call's arguments, a phi's incoming values,
+// and the values in the extra array (ir_extra_value_count's) of an intrinsic and a scatter. A byte by opcode, so that
+// another instruction's count is its direct operands after one load and test: the chain of compares it replaces took
+// six instructions, and with the scatter's test a jump table.
+static const uint8_t ir_operand_more[256] = {
+    [IR_CALL] = 1,
+    [IR_CALL_INDIRECT] = 1,
+    [IR_PHI] = 1,
+    [IR_INTRINSIC] = 1,
+    [IR_SCATTER] = 1,
+};
+
 static uint64_t ir_operand_count(const IrFunction* f, uint32_t i)
 {
     uint64_t result = (uint32_t)__builtin_popcount(ir_value_mask(f, i));
-    if (f->op[i] == IR_CALL || f->op[i] == IR_CALL_INDIRECT)
+    const uint32_t op = f->op[i];
+    if (ir_operand_more[op] != 0)
     {
-        result += f->calls[f->b[i]].argument_count;
-    }
-    else if (f->op[i] == IR_PHI)
-    {
-        result += f->b[i];
-    }
-    else if (ir_ternary_instruction(f, i))
-    {
-        result += 1;
+        if (op == IR_CALL || op == IR_CALL_INDIRECT)
+        {
+            result += f->calls[f->b[i]].argument_count;
+        }
+        else if (op == IR_PHI)
+        {
+            result += f->b[i];
+        }
+        else
+        {
+            result += ir_extra_value_count(f, i);
+        }
     }
     return result;
 }
@@ -2921,10 +2981,12 @@ static IrOperand ir_operand(const IrFunction* f, uint32_t i, uint32_t number, ui
         result.block = f->extra[f->a[i] + p * 2];
         result.value = f->extra[f->a[i] + p * 2 + 1];
     }
-    else if (f->op[i] == IR_INTRINSIC)
+    else if (f->op[i] == IR_INTRINSIC || f->op[i] == IR_SCATTER)
     {
-        result.position = 3;
-        result.value = ir_intrinsic_third(f, i);
+        // A ternary intrinsic's third operand, or a scatter's stored vector and mask (#1840), in the extra array.
+        const uint32_t p = number - direct;
+        result.position = 3 + p;
+        result.value = ir_extra_value(f, i, p);
     }
     else
     {
@@ -3422,7 +3484,8 @@ static uint64_t ir_uses_batch(const IrFunction* f, uint32_t first, uint32_t coun
     const __m512i kinds = _mm512_and_si512(_mm512_maskz_loadu_epi32(active, f->c + first), _mm512_set1_epi32(BUSTER_IR_INTRINSIC_KIND));
     const __mmask16 ternary = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_INTRINSIC)) & _mm512_cmpge_epu32_mask(kinds, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY)) &
                               _mm512_cmplt_epu32_mask(kinds, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY_END));
-    __mmask16 variadic = active & (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_PHI)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)) | ternary);
+    __mmask16 variadic = active & (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_PHI)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)) | ternary |
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_SCATTER)));
     const uint64_t present = _pdep_u64(use_a, BUSTER_IR_USES_LANE_BITS) | _pdep_u64(use_b, BUSTER_IR_USES_LANE_BITS << 1) | _pdep_u64(use_c, BUSTER_IR_USES_LANE_BITS << 2);
     const uint32_t* const columns[4] = { f->a + first, f->b + first, f->c + first, f->c + first };
     uint64_t total = 0;
@@ -3463,8 +3526,8 @@ static uint64_t ir_uses_batch(const IrFunction* f, uint32_t first, uint32_t coun
         {
             const uint32_t i = first + last;
             const bool phi = f->op[i] == IR_PHI;
-            const bool third = f->op[i] == IR_INTRINSIC;
-            const uint32_t amount = phi ? f->b[i] : third ? 1 : f->calls[f->b[i]].argument_count;
+            const bool third = f->op[i] == IR_INTRINSIC || f->op[i] == IR_SCATTER;
+            const uint32_t amount = phi ? f->b[i] : third ? ir_extra_value_count(f, i) : f->calls[f->b[i]].argument_count;
             const uint32_t* const extra = phi ? f->extra + f->a[i] + 1 : third ? f->extra + ir_intrinsic_extra(f->c[i]) : f->extra + f->calls[f->b[i]].argument_first;
             const uint32_t stride = phi ? 2 : 1;
             for (uint32_t p = 0; p < amount; p += 1)
@@ -3867,6 +3930,11 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                                 fprintf(output, " lanes=%s", f->flags[i] < IR_SIMD_LANE_COUNT ? ir_lane_names[f->flags[i]] : "invalid");
                             }
                         }
+                        // A scatter's stored vector and mask (#1840), its extra values.
+                        if (op == IR_SCATTER && ir_intrinsic_kind(c) == 0 && ir_slice(ir_intrinsic_extra(c), 2, f->extra_count))
+                        {
+                            fprintf(output, ", %%%" PRIu32 ", %%%" PRIu32, ir_extra_value(f, i, 0), ir_extra_value(f, i, 1));
+                        }
                         if (op == IR_INTRINSIC)
                         {
                             if (ir_intrinsic_ternary(c) && ir_slice(ir_intrinsic_extra(c), 1, f->extra_count))
@@ -3901,7 +3969,7 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                         {
                             // A masked access's alignment (a gather's scale) and lanes (#1840), always named: its mask's type
                             // depends on them.
-                            fprintf(output, " %s=%" PRIu32 " lanes=%s", op == IR_GATHER ? "scale" : "align", UINT32_C(1) << f->alignment_log2[i],
+                            fprintf(output, " %s=%" PRIu32 " lanes=%s", op == IR_GATHER || op == IR_SCATTER ? "scale" : "align", UINT32_C(1) << f->alignment_log2[i],
                                     f->flags[i] < IR_SIMD_LANE_COUNT ? ir_lane_names[f->flags[i]] : "invalid");
                         }
                         if (op == IR_LOAD || op == IR_STORE)

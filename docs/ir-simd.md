@@ -1417,8 +1417,9 @@ The tests:
   width and both opcodes among it.
 - **`test-ir-simd`:** the 60 rows (10 moves, load and store, 3 widths) decode
   at exactly their features. Each is refused without a feature it needs and
-  under 7 changes. A scatter is now the machine-row test's row of no result
-  (a compress-store was, until compressing stores became the IR's own, below).
+  under 7 changes. A scatter whose 2-byte mask isn't its 4 lanes' is now the
+  machine-row test's row of no result (a compress-store was, until compressing
+  stores became the IR's own, and then a scatter, until scatters did, below).
 - **`test-tier1-masks`:** `vmovdqu8` to `vmovdqu64` at each width, load and
   store (24 rows), under a mask from the input, through both lowering paths,
   the interpreter at every stage and Tier 1 natively, against C's lanes. Each
@@ -1553,8 +1554,9 @@ sources, against main `8023523`:
 | --- | ---: | ---: |
 | `main_unit_backend.c` | 93 | 1 |
 
-The one left is the scatter, whose four values (base, index, vector, mask)
-need a fourth operand no IR instruction has.
+The one left was the scatter, whose four values (base, index, vector, mask)
+needed a fourth operand no IR instruction had; [scatters](#scatters-1840)
+below give it one.
 
 The tests:
 
@@ -1639,6 +1641,70 @@ next statement.
 
 `main_unit_backend.c`'s 20 rows of #2644's contractions are `fma` now: at
 `--tier1 -march=znver5` its machine rows fall from 21 to 1, the scatter.
+
+## Scatters (#1840)
+
+The scatter is a store of four values, a base, an index vector, the stored
+vector and a mask, where every IR instruction had three operand fields. It
+takes the ternary intrinsics' extra operands (`ir_intrinsic_ternary_c`): its
+`c` holds the extra array's index, kind 0, and the extra array the stored
+vector and then the mask.
+
+```text
+scatter.void %0, %1, %4, %3 scale=4 lanes=i32
+```
+
+- **Operands:** `a:ptr` the base and `b` the index vector of a dword or a
+  qword per lane, as a gather's; then the stored vector, whose lanes the flags
+  name (i32 or i64), and the mask of those lanes. `alignment_log2` is the
+  scale's log2 (0 to 3), as a gather's. No result.
+- **Semantics:** lane i, where the mask's bit i is set, is written at
+  `a + sext(b[i]) * scale`, the lanes in order from lane 0, so that of two
+  set lanes at one address the higher lane's bytes stay (x86's order); a clear
+  lane writes nothing and can't fault. A store's effect, of any memory.
+- **Operands beyond three:** `ir_extra_value_count` and `ir_extra_value` give
+  an instruction's values in the extra array, one for a ternary intrinsic and
+  two for a scatter, and every pass that walked a ternary intrinsic's third
+  value walks them: operand counts and positions (3 and 4), the uses, the
+  verifier, the interpreter's definedness, the rebuild, GVN, LICM, inlining,
+  if-conversion, threading, SSA, the vector splits and the wide lowering.
+- **Passes:** a barrier and an optimizer root, as a masked store; if-conversion
+  takes it as a write.
+
+**Decoder** (`ir_simd_typed_scatter`): one record of `vpscatterdd` to
+`vpscatterqq` (or `vscatterdps` to `vscatterqpd`) of a U64 base, a mask, an
+index vector and a stored vector, whose index has an element per lane
+(`ir_simd_scatter_forms`, 10 shapes, all of x86's): the 16-byte `dq` and the
+64-byte `qd` have none. It needs AVX512F, VL where a vector is below 64 bytes,
+and DQ for a byte mask, as the masked stores' moves do.
+
+**Tier 1** (`tier1_select_scatter`): the scatter clears its mask register as
+it goes, so Tier 1 copies the mask into `r11d` first and back after
+(`kmovw`), as the gathers do; the form is the shape's `vpscatter`.
+
+**Zen 5:** 10 `MEMORY_INDEX` rows, measured on the 9700X with a scatter shape
+in the harness (no chain through its index: a scatter has no result): one
+every 3 to 17 cycles by width, 16 to 88 macro-ops.
+
+**Tests:**
+
+- **`test-ir-parse`:** `tests/ir/gathers.ir` adds three scatters, dwords and
+  qwords by both index widths, round-tripping.
+- **`test-ir-simd`:** 80 scatter rows (10 shapes, integers and floats, 4
+  scales) decode at exactly their features, each refused without one it needs
+  and under 7 changes.
+- **`test-tier1-select`:** the scatter is a barrier in both scans; dropping it
+  from the vector scan's barriers fails the barrier oracle.
+- **`test-tier1-masks`:** 10 scatters (every integer shape, each at its own
+  scale) under a mask from the input, through the IR's interpreter at every
+  stage and Tier 1 natively, against C's lanes. The indices repeat, so the
+  higher lane's bytes must win; in the fourth statement every masked-off
+  lane's index points far past every buffer, so the interpreter's binding
+  checks prove a clear lane is never written. An interpreter that wrote the
+  lanes from the highest down fails it.
+
+With scatters `main_unit_backend.c` has no machine rows left at `--tier1
+-march=znver5` (21 before this change's FMA and scatters).
 
 ## One lane's moves and movemasks (#1840)
 
