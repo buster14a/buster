@@ -134,6 +134,8 @@ column comparisons deterministic.
 | `store` | `a:ptr`, `b` is the stored value; result is `void` |
 | `masked_load` | `a:ptr`, `b` the mask of the lanes in flags (integer lanes alone), `c` the passthrough of the vector result's type; alignment a load's. A lane whose bit is clear is the passthrough's and is never read ([masked loads and stores](ir-simd.md#masked-loads-and-stores-1840)) |
 | `masked_store` | `a:ptr`, `b` the stored vector, `c` the mask of the lanes in flags; result is `void`. A lane whose bit is clear is never written |
+| `compress_store` | as `masked_store`; the set lanes are written one after another from the address, and no other byte ([gathers and compressing stores](ir-simd.md#gathers-compressing-stores-and-truncating-stores-1840)) |
+| `gather` | `a:ptr` the base, `b` the index vector of a dword or a qword per lane, `c` the mask of the lanes in flags (i32 or i64), `alignment_log2` the scale's log2; lane i is the lane's bytes at `a + sext(b[i]) * scale` where the bit is set, 0 elsewhere, and a clear lane is never read |
 | `call`, `call_indirect` | `a` is a symbol or a pointer value; `b` indexes `calls`; `c` an aggregate result's destination (a `ptr`), or absent |
 | `phi` | `a` is an extra-word offset, `b` the incoming count; pairs are `(predecessor, value)` |
 | `br` | `a` is a block ID |

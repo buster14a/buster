@@ -7425,8 +7425,8 @@ static uint64_t tier1_masks_test_convert_lane(uint64_t raw, uint32_t from, uint3
 
 // The conversions through the IR to Tier 1 (#1840): __builtin_convertvector's rows between integer vectors of other
 // element sizes (check_vector_convert_row's, every pair, signedness and result width, the operand the source's or 16
-// bytes where those are fewer), and every TRUNCATE rule's row whose lanes fill its result, merged under an input word in
-// the odd statements and unmasked in the even ones, each as the program's only row in 4 statements of the input buffer's
+// bytes where those are fewer), and every TRUNCATE rule's row (those whose lanes leave their result's upper bytes zero
+// too, #1840's partial merges), merged under an input word in the odd statements and unmasked in the even ones, each as the program's only row in 4 statements of the input buffer's
 // vectors, stored into the output's; through the IR as its extend or truncate, which the interpreter runs at every stage,
 // and Tier 1 natively, against tier1_masks_test_convert_lane lane by lane. Tier 0 doesn't run them here, as the selects'.
 static void tier1_masks_test_conversions(Tier1MasksTest* test)
@@ -7491,10 +7491,6 @@ static void tier1_masks_test_conversions(Tier1MasksTest* test)
             from = rule->element;
             to = last == 'b' ? 1 : last == 'w' ? 2 : 4;
             mode = strncmp(mnemonic, "vpmovus", 7) == 0 ? 2 : strncmp(mnemonic, "vpmovs", 6) == 0 ? 1 : 0;
-            if ((uint32_t)rule->bytes / from * to != rule->other)
-            {
-                continue;
-            }
             masked = true;
             made = check_x86_lower_row_of(&target, rule, 0, 4, 0, false, &row) == NULL && check_x86_lower_masks(&row, &target);
             snprintf(name, sizeof(name), "%s", rule->name);
@@ -8510,7 +8506,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
                                     "every front-end byte shuffle by an immediate goes through the IR and Tier 1 as the IR's shuffle by a constant, and back to its immediate form");
         printf("test-tier1-masks: the front end's selects and undefined vectors: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its vselect and zero vector\n",
                test.select_rows);
-            // The conversions (#1840): convertvector's and the masked truncations whose lanes fill their results.
+            // The conversions (#1840): convertvector's and every masked truncation.
             tier1_masks_test_expect(&test, test.convert_attempts > 40 && test.convert_rows == test.convert_attempts,
                                     "every front-end conversion goes through the IR and Tier 1 as the IR's extend or truncate");
             // The front end's rows: every rule of the five families, the shifts at every count.

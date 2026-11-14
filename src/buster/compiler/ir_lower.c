@@ -762,9 +762,25 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
     {
         // A conversion (#1840), its lanes and mode in its flags; a masked truncation's merged into its second operand under
         // its third where the typed stream's writemask hasn't every lane.
-        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], BUSTER_IR_NONE, operation->convert - 1u, 0);
+        uint32_t source = operands[0];
+        if (operation->merge_partial && !unmasked)
+        {
+            // A masked truncation whose lanes leave its result's upper bytes zero (#1840): the passthrough's lanes extended
+            // back to the source's (sign-extended for a signed saturation, zero-extended otherwise, so that the
+            // truncation gives each back), selected under the mask, then truncated: its upper bytes the truncation's 0s.
+            const uint32_t flags = operation->immediate;
+            const uint32_t from = flags & 3;
+            const uint32_t to = (flags >> 2) & 3;
+            const IrType wide = operation->operand_bytes[0] == 64 ? IR_V16I32 : operation->operand_bytes[0] == 32 ? IR_V8I32 : IR_V4I32;
+            const uint32_t extended = ir_typed_emit(sink, IR_INTRINSIC, wide, operands[1], BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_EXTEND, 0);
+            ir_typed_lanes(sink, extended, (IrSimdLane)(to | from << 2 | ((flags >> 4) == 1 ? 1u << 4 : 0)));
+            static const uint8_t lanes[4] = { IR_SIMD_LANE_I8, IR_SIMD_LANE_I16, IR_SIMD_LANE_I32, IR_SIMD_LANE_I64 };
+            source = ir_typed_emit(sink, IR_VSELECT, wide, operands[2], operands[0], extended, 0);
+            ir_typed_lanes(sink, source, (IrSimdLane)lanes[from]);
+        }
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, source, BUSTER_IR_NONE, operation->convert - 1u, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
-        if (operation->merge_mask && !unmasked)
+        if (operation->merge_mask && !operation->merge_partial && !unmasked)
         {
             value = ir_typed_emit(sink, IR_VSELECT, type, operands[2], value, operands[1], 0);
             ir_typed_lanes(sink, value, operation->lane);
@@ -1099,7 +1115,9 @@ static bool ir_typed_unmasked(const Tier0Function* input, const IrSimdTypedOpera
     // A comparison's lanes or a bit shuffle's bytes, or a masked extract's or truncation's (#1840): its result's, the
     // merged operand's.
     // A gather's, its passthrough's; a truncating store's, its source's (#1840).
-    const uint32_t lanes = operation->compare_mask || operation->bitshuffle || operation->masked_memory == 4 ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) :
+    // A truncation's under a mask, its source's (#1840: a partial one's are fewer than its result's).
+    const uint32_t lanes = operation->convert == BUSTER_IR_INTRINSIC_TRUNCATE + 1u && operation->merge_mask ? operation->operand_bytes[0] >> (operation->immediate & 3) :
+                           operation->compare_mask || operation->bitshuffle || operation->masked_memory == 4 ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) :
                            operation->masked_memory == 5                                                    ? operation->operand_bytes[1] >> (operation->immediate & 3) :
                            operation->merge_mask || operation->masked_memory != 0                          ? 8u * operation->operand_bytes[1] / ir_simd_lane_bits(operation->lane) :
                                                                                                              0;

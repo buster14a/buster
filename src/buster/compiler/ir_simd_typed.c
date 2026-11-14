@@ -102,8 +102,10 @@ struct IrSimdTypedOperation
     uint8_t permute;
     uint8_t immediate;
     // A conversion (#1840, ir_simd_typed_convert): its IR intrinsic (BUSTER_IR_INTRINSIC_EXTEND or _TRUNCATE) plus one, 0
-    // for any other row, its flags in `immediate`; a masked truncation's merge in `merge_mask` and `lane`.
+    // for any other row, its flags in `immediate`; a masked truncation's merge in `merge_mask` and `lane`, and whether its
+    // lanes leave its result's upper bytes zero (`merge_partial`).
     uint8_t convert;
+    bool merge_partial;
     // A shift by a scalar count (#1840, ir_simd_typed_shift): whether the row is one, its flags in `immediate`.
     bool shift;
     // A mask to a vector or back (#1840, ir_simd_typed_mask_vector), at `lane`: a vselect of all ones where the mask's bit
@@ -1468,8 +1470,9 @@ static IrSimdTypedStatus ir_simd_typed_compress(const Tier0Operation* source, ui
 // VECTOR(1)'s register under MASK(2), its second VECTOR(1) moved whole into VECTOR(0), its result merged under the
 // writemask into its second operand at the result's lanes, which Tier 1 selects as a vselect, or not where the typed
 // stream's writemask has every lane. Its flags are the pair's sizes and the sign or mode. Its features are its form's
-// (BW for words' lanes) and AVX512F's and VL's; otherwise, and for a truncation under a mask whose lanes leave its
-// result's upper bytes zero (whose merge isn't a vselect of the result's lanes), it stays a machine row.
+// (BW for words' lanes) and AVX512F's and VL's; otherwise it stays a machine row. A truncation under a mask whose lanes
+// leave its result's upper bytes zero (#1840, `merge_partial`: vpmovqb of a zmm into 8 bytes), whose merge is no vselect of
+// the result's lanes, is the truncation of a vselect of the source's lanes and the passthrough's, extended back to them.
 static IrSimdTypedStatus ir_simd_typed_convert(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
 {
     const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
@@ -1519,15 +1522,16 @@ static IrSimdTypedStatus ir_simd_typed_convert(const Tier0Operation* source, uin
             const uint32_t flags = from | to << 2 | mode << 4;
             const uint32_t lanes = first >> from;
             const uint32_t mask_bytes = lanes <= 8 ? 1 : lanes / 8;
-            // Under a mask, its lanes fill its result (no upper bytes the instruction zeroes), and its writemask has a bit
-            // for each.
-            const bool full = !masked || (lanes << to == bytes && source->operand_bytes[2] == mask_bytes && memcmp(&source->records[1], &moved, sizeof(moved)) == 0);
+            // Under a mask, its writemask has a bit for each lane, and its lanes fill its result or (#1840) leave its upper
+            // bytes zero, `merge_partial`'s.
+            const bool full = !masked || ((lanes << to) <= bytes && source->operand_bytes[2] == mask_bytes && memcmp(&source->records[1], &moved, sizeof(moved)) == 0);
             if (memcmp(record, &expected, sizeof(expected)) == 0 && full &&
                 ir_convert_flags_valid(BUSTER_IR_INTRINSIC_TRUNCATE, IR_V4I32 + (first == 16 ? 0 : first == 32 ? 1 : 2), IR_V4I32 + (bytes == 16 ? 0 : bytes == 32 ? 1 : 2), flags))
             {
                 candidate.convert = BUSTER_IR_INTRINSIC_TRUNCATE + 1;
                 candidate.immediate = (uint8_t)flags;
                 candidate.merge_mask = masked;
+                candidate.merge_partial = masked && (lanes << to) < bytes;
                 candidate.lane = to == 0 ? IR_SIMD_LANE_I8 : to == 1 ? IR_SIMD_LANE_I16 : IR_SIMD_LANE_I32;
             }
         }
@@ -1913,8 +1917,8 @@ static IrSimdTypedStatus ir_simd_typed_masked_memory(const Tier0Operation* sourc
 // scale] (the gather builtins' rows). It is the IR's gather of the lanes, dwords or qwords, by the index's elements, one
 // per lane, merged into the passthrough where the mask's bits are clear by a vselect: the shapes whose index has exactly
 // those elements (vpgatherdq of 32 and 64 bytes, vpgatherqd of 16 and 32, and the others at each width). Its features
-// are its form's (VL below 64 bytes), its vectors' moves and its mask's (DQ for a byte's); otherwise it stays a machine
-// row, as the AVX2 gathers by a vector mask do.
+// are its form's, VL's where either vector is below 64 bytes (Tier 1's EVEX moves), and its mask's (DQ for a byte's);
+// otherwise it stays a machine row, as the AVX2 gathers by a vector mask do.
 static IrSimdTypedStatus ir_simd_typed_gather(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
 {
     const uint32_t bytes = source->result_bytes;
@@ -1941,9 +1945,11 @@ static IrSimdTypedStatus ir_simd_typed_gather(const Tier0Operation* source, uint
             candidate.masked_memory = 4;
             candidate.lane = lane == 0 ? IR_SIMD_LANE_I32 : IR_SIMD_LANE_I64;
             candidate.immediate = (uint8_t)(record->mode & 3);
+            // Tier 1 moves the index and the passthrough by EVEX's moves, VL's below 64 bytes.
             const uint64_t mask = mask_bytes == 1 ? BUSTER_X86_FEATURE(AVX512DQ) : 0;
+            const uint64_t length = bytes < 64 || index_bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0;
             candidate.required_features = ir_typed_vector_moves(bytes, target_features) | ir_typed_vector_moves(index_bytes, target_features) | BUSTER_X86_FEATURE(AVX512F) |
-                                          (x86_target_requirement(form) & ~BUSTER_X86_TARGET_KNOWN) | mask;
+                                          (x86_target_requirement(form) & ~BUSTER_X86_TARGET_KNOWN) | mask | length;
         }
     }
     const IrSimdTypedStatus status = candidate.masked_memory != 0 && (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_UNSUPPORTED;
