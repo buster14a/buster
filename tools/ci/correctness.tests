@@ -414,7 +414,8 @@ musl="$corpus/libc/musl"
   "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
 == Run #139's passes by both versions on every function of c-testsuite's programs and the frozen SQLite and musl sources
 # #139: each function lowered and promoted as test-ir-source does, then SROA, #866's solver, the optimizer's SCCP, dead-code
-# removal and CFG cleanup alone and together (and with Tier 1's layout and identities), LICM, and each caller's unit
+# removal and CFG cleanup alone and together (and with Tier 1's layout and identities), value numbering with memory (#2718)
+# alone and with Tier 1's set, LICM, and each caller's unit
 # inlining, each by its vector and scalar versions, which must agree: exactly, and the solver against its exact oracle
 # and, semantically, its scalar twin (ir_source_passes.c).
 unset CPATH C_INCLUDE_PATH

@@ -22,6 +22,7 @@ typedef enum IrOptimizeTextPass
     IR_OPTIMIZE_TEXT_GVN,
     IR_OPTIMIZE_TEXT_LICM,
     IR_OPTIMIZE_TEXT_SROA,
+    IR_OPTIMIZE_TEXT_MEMORY,
 } IrOptimizeTextPass;
 
 typedef struct IrOptimizeTextFixture IrOptimizeTextFixture;
@@ -46,6 +47,11 @@ static const IrOptimizeTextFixture ir_optimize_text_fixtures[] = {
     { .name = "sroa-lifetimes", .pass = IR_OPTIMIZE_TEXT_SROA, .effects = false },
     { .name = "fence-dce", .pass = IR_OPTIMIZE_TEXT_DCE, .effects = true },
     { .name = "fence-licm", .pass = IR_OPTIMIZE_TEXT_LICM, .effects = true },
+    { .name = "memory-forwarding", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
+    { .name = "memory-clobbers", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
+    { .name = "memory-private", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
+    { .name = "memory-blocks", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
+    { .name = "memory-addresses", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
 };
 
 // A fixture's diagnostic names the pair, so that a failure points at the file to read without a printout of the
@@ -155,15 +161,17 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, 
     else
     {
         IrOptimizeOptions options = ir_optimize_options();
+        // Value numbering with memory (#2718) with dead-code removal, which takes the forwarded loads' address chains.
         options.passes = fixture->pass == IR_OPTIMIZE_TEXT_SCCP ? BUSTER_IR_OPTIMIZE_SCCP :
                          fixture->pass == IR_OPTIMIZE_TEXT_DCE ? BUSTER_IR_OPTIMIZE_DCE :
                          fixture->pass == IR_OPTIMIZE_TEXT_CFG ? BUSTER_IR_OPTIMIZE_CFG :
+                         fixture->pass == IR_OPTIMIZE_TEXT_MEMORY ? BUSTER_IR_OPTIMIZE_MEMORY | BUSTER_IR_OPTIMIZE_DCE :
                                                                  BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG;
         options.path = scalar ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
         IrOptimizeResult pass = { 0 };
         check = ir_optimize(input, output, scratch, options, &pass);
         result = pass.function;
-        changed = (uint64_t)pass.folded + pass.removed_instructions + pass.removed_blocks;
+        changed = fixture->pass == IR_OPTIMIZE_TEXT_MEMORY ? pass.forwarded_loads : (uint64_t)pass.folded + pass.removed_instructions + pass.removed_blocks;
     }
     *function = result;
     *change = changed;
@@ -390,3 +398,5 @@ static __attribute__((unused)) int ir_optimize_text_print_fixtures(void)
 }
 
 #endif
+
+#include "ir_optimize_memory_test.c"

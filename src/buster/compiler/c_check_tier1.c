@@ -465,7 +465,6 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         IrOptimizeOptions options = ir_optimize_options();
         options.passes = (on & (BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_MERGE | BUSTER_IR_OPTIMIZE_MEMORY)) |
                          BUSTER_IR_OPTIMIZE_LAYOUT | BUSTER_IR_OPTIMIZE_IDENTITY;
-        options.passes |= getenv("BUSTER_MEM") != NULL ? BUSTER_IR_OPTIMIZE_MEMORY : 0;
         options.scalar = scalar;
         const IrCheck check = ir_optimize_verified(&wide.function, output, analyses, scratch, options, revision, &passes->optimized, &passes->analysis);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
