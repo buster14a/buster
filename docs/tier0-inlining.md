@@ -1,8 +1,8 @@
 # Tier 0 inlining of always_inline functions (#1398): design
 
-Status: plan steps 1 and 2 are implemented, with argument and result forwarding
-(step 4) in the form "Implementation" describes; dropping callees (step 3) and
-more callee shapes (step 5) are not. The issue's claims and this document's
+Status: plan steps 1 to 3 are implemented, with argument and result forwarding
+(step 4) in the form "Implementation" describes; more callee shapes (step 5)
+are not. The issue's claims and this document's
 revisions are on [#1398](https://github.com/buster14a/buster/issues/1398). The
 names of existing code below are main's at `8a29955f`. The command and its
 files are in [the Tier 0 guide](commands/tier0.md#inlining-always_inline-functions-1398).
@@ -659,9 +659,42 @@ and a body with a planned naked function isn't one. `test-checker-driver`'s
 lanes fixture builds such a graph by 4 lanes, three times, and by 1 lane, and
 compares the objects.
 
-**Callees aren't dropped yet** (plan step 3): each callee's code stays in the
-object, which on `main.c` makes it 12% larger (34.5 MB against 30.7 MB). Clang
--O0 emits none of them.
+**Callees nothing refers to are left out** (plan step 3), by Tier 1's dead
+functions' machinery (#2541 step 2) rather than the scan at the merge that
+"Dropping callees" above designs, so that a dead callee costs no Tier 0 code
+either. Without `--tier1`, the inline table (`check_tier1_inline_table`) has
+Tier 0's callees as its candidates, with Tier 1's columns: whether something
+roots a callee (an attribute, a section, static data, an alias), whether its
+code is held back, and whether it is dead. In `-c`'s object, a callee nothing
+roots whose stream the splice takes makes no code on its lane
+(`check_tier0_inline_held`). Once the lanes are done, the emission's last pass
+(`check_program_emit_last`) makes the code of each held callee that emitted code
+still refers to, until none is left: a call a caller kept (a cycle's, past the
+depth bound, a target its caller lacks) or an address. The merge leaves the
+others out (`check_tier1_inline_dead`): no atom, symbol, frame or jump table.
+`--tier0-no-hold` makes every callee's code on its lane, and the objects are
+the same, as they are by any lane count and by windows (the driver fixture).
+What isn't done as designed:
+
+- **Not under `-g`**, `-fpatchable-function-entry` or in an executable, as
+  Tier 1's dead functions aren't: `-g`'s entries have no form for a function
+  without code yet, and an executable's binding resolves every program symbol.
+  In a unit with asm the callees' code is made, since the templates name
+  symbols, and the dead ones are still left out.
+- **`--lower-all` drops them too**, as Tier 1's dead candidates are: it still
+  lowers every callee, and their entries are compiled in their callers' code.
+- **A target attribute no longer roots a candidate**, in either tier. #2541
+  step 2 kept every candidate with one, as a multiversioned function's; but a
+  function of several versions is `CheckProgram.body_targets`' own case
+  (`BUSTER_CHECK_PROGRAM_TARGET_VERSIONS`), and every `<immintrin.h>` wrapper
+  has a target attribute, so none would have been left out. LLVM's GlobalDCE
+  drops a dead internal function whatever its target. Under `--tier1` the
+  wrappers whose calls it expanded everywhere are now left out too.
+
+The callees that stay are those whose call Tier 0 keeps where clang inlines it:
+a cycle's members (clang unrolls a cycle once) and the shapes the splice
+refuses (step 5: two returns, a result in memory). On the driver fixture the
+object defines 5 local functions where it defined 37; clang -O0's defines 3.
 
 ### First measurements
 

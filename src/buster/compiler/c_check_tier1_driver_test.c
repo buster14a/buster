@@ -4857,7 +4857,9 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
     // AES rounds: 24; its masked loads and stores: 16; its one-lane moves: 13; its reductions: 9; its lanes' population
     // counts, leading zero counts and conflicts: 7; its byte shuffles by an immediate: 6, AVX2's VEX rows alone), so the
     // bound counts the unit's 45 rows as of the conversions, as it
-    // counts the compares. The floor of 5 rows keeps the unit a machine rows' test as #1840 decodes more of them.
+    // counts the compares. Since #1398's step 3 the object leaves out the 58 wrappers that every call expanded, whose own
+    // copies held 3 of the 6 rows left: the unit's functions keep 3 (AVX2's VEX forms among them). The floor of 2 rows
+    // keeps the unit a machine rows' test as #1840 decodes more of them.
     const uint64_t compares = 11;
     const uint64_t rows = 45;
     char header[512];
@@ -4877,7 +4879,7 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
         snprintf(message, sizeof(message),
                  "the machine rows' unit takes at most a move into or out of place for every two rows and compares (path %u, rematerialize %u: %llu rows, %llu moves)", run & 1,
                  (run & 2) == 0 ? 1u : 0u, (unsigned long long)build.machine_rows, (unsigned long long)build.row_moves);
-        check_test_expect(test, compiled && build.machine_rows >= 5 && build.machine_rows <= rows && 2 * build.row_moves <= rows + compares, message);
+        check_test_expect(test, compiled && build.machine_rows >= 2 && build.machine_rows <= rows && 2 * build.row_moves <= rows + compares, message);
         unlink(object);
     }
     unlink(unit);
@@ -5780,15 +5782,16 @@ static void check_test_driver_tier1_vector_copies(CheckTest* test, const char* c
         check_test_expect(test, ran, message);
         for (uint32_t path = 0; ran && path < 2; path += 1)
         {
-            // Build 0 is the target's; build 1 is x86-64-v4's, whose copies were vectors before #2750: its frame bounds the
-            // target's.
-            uint64_t frames[2] = { UINT64_MAX, 0 };
+            // Build 0 is the target's executable, which runs; build 1 is the target's -c object, and build 2 x86-64-v4's,
+            // whose copies were vectors before #2750: its frame bounds the target's. Both are objects, which leave out the
+            // wrappers that every call expanded (#1398 step 3), where an executable keeps every function.
+            uint64_t frames[3] = { 0, UINT64_MAX, 0 };
             bool clean = true;
             char program[512];
             snprintf(program, sizeof(program), "%s/tier1-vector-copies-%u-%u", directory, t, path);
-            for (uint32_t build = 0; build < 2; build += 1)
+            for (uint32_t build = 0; build < 3; build += 1)
             {
-                char* arguments[12] = { (char*)executable, "--tier1", "--tier1-report", "--verify", build == 0 ? march : "-march=x86-64-v4" };
+                char* arguments[12] = { (char*)executable, "--tier1", "--tier1-report", "--verify", build != 2 ? march : "-march=x86-64-v4" };
                 uint32_t count = 5;
                 if (wide)
                 {
@@ -5814,9 +5817,9 @@ static void check_test_driver_tier1_vector_copies(CheckTest* test, const char* c
                         check_test_tier1_field(text, "fallbacks", &fallbacks) && fallbacks == 0 && clean;
                 free(text);
             }
-            snprintf(message, sizeof(message), "the wrappers' vectors leave no more frame at %s than at x86-64-v4: %llu bytes against %llu (%s path)", targets[t], (unsigned long long)frames[0],
-                     (unsigned long long)frames[1], path != 0 ? "scalar" : "vector");
-            check_test_expect(test, clean && frames[0] <= frames[1], message);
+            snprintf(message, sizeof(message), "the wrappers' vectors leave no more frame at %s than at x86-64-v4: %llu bytes against %llu (%s path)", targets[t], (unsigned long long)frames[1],
+                     (unsigned long long)frames[2], path != 0 ? "scalar" : "vector");
+            check_test_expect(test, clean && frames[1] <= frames[2], message);
             char actual[256] = { 0 };
             snprintf(message, sizeof(message), "the vector copies' fixture by --tier1 runs as clang -O0's build does (%s, %s path)", targets[t], path != 0 ? "scalar" : "vector");
             check_test_expect(test, clean && (!host || (check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0)), message);

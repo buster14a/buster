@@ -570,11 +570,17 @@ compiled, and `dead` counts the functions left without code (below);
 refers to once its callers have expanded its calls gets no code, symbol, frame
 or jump table (`check_tier1_inline_dead`), as LLVM's GlobalDCE drops it. A
 candidate is *rooted*, and keeps its code whatever its callers do, where an
-attribute keeps it (used, constructor, destructor, interrupt, target, an
-alias's, ifunc's or weakref's, section, retain, patchable_function_entry,
-weak, selectany), a section placement, static data's initializers
-(`CheckProgram.initializer_references`) or an alias names it, or where it has
-several versions. The others are alive where a kept body's code refers to them
+attribute keeps it (used, constructor, destructor, interrupt, target_clones,
+cpu_specific, cpu_dispatch, an alias's, ifunc's or weakref's, section, retain,
+patchable_function_entry, weak, selectany), a section placement, static data's
+initializers (`CheckProgram.initializer_references`) or an alias names it, or
+where it has several versions (target attributes of other strings,
+`BUSTER_CHECK_PROGRAM_TARGET_VERSIONS`). A target attribute alone roots
+nothing since #1398's step 3: LLVM's GlobalDCE drops a dead internal function
+whatever its target, and every `<immintrin.h>` wrapper has one, so an expanded
+wrapper kept its code until then. Without `--tier1` the same columns, last pass
+and dead set serve Tier 0's callees ([the Tier 0 guide](commands/tier0.md#inlining-always_inline-functions-1398)).
+The others are alive where a kept body's code refers to them
 (a call no caller expanded, a Tier 0 fallback's, an address taken), followed
 from each body reached. So that a dead function costs no selection,
 allocation or emission, the unit stage marks the candidates that may die (not

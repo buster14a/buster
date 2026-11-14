@@ -917,8 +917,10 @@ struct CheckProgramLanes
     // --tier1-no-hold makes every candidate's code on its lane, none in the last pass (#2541 step 2, CheckTier1Inline.held):
     // the objects are the same, which the comparison checks.
     bool tier1_no_hold;
-    // --tier0-no-inline keeps Tier 0's (#1398's comparison, c_check_tier0_inline.c).
+    // --tier0-no-inline keeps Tier 0's (#1398's comparison, c_check_tier0_inline.c); --tier0-no-hold makes each callee's
+    // code on its lane, none in the last pass (#1398 step 3, check_tier0_inline_held): the objects are the same.
     bool tier0_no_inline;
+    bool tier0_no_hold;
     // --emit-window=N (#2536's step 1, docs/all-core-path.md): one lane's emission takes its bodies in windows of about
     // N tokens, each window's lowering and code before the next window's, in memory the next window reuses
     // (check_program_emit_windows); the driver's default is BUSTER_CHECK_EMIT_WINDOW_TOKENS. 0, a caller's without the
@@ -1883,8 +1885,10 @@ typedef enum CheckEmitHalf
 } CheckEmitHalf;
 
 // Defined in c_check_tier0_inline.c (#1398): body `b`'s typed stream with its calls of the unit's inline callees spliced
-// in (tier0_inline), into *result in `arena`, or false where it has none or the splice refuses it.
+// in (tier0_inline), into *result in `arena`, or false where it has none or the splice refuses it; and whether callee
+// body `b`'s own code waits for the last pass (step 3).
 static bool check_tier0_inline_body(CheckEmitRun* run, CheckEmitLane* lane, uint32_t b, Arena* arena, Tier0Inlined* result);
+static bool check_tier0_inline_held(const CheckEmitRun* run, uint32_t b);
 
 // A part's lowering (check_lower_part) on lane `lane`.
 static void check_program_emit_lower_half(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part)
@@ -1953,13 +1957,17 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
         {
             outcome = lane->tier1 != NULL ? check_program_emit_tier1(run, lane, b, naked != 0) : (CheckTier1Outcome){ 0 };
         }
-        // A candidate whose code waits for the last pass (#2541 step 2, check_tier1_inline_held): none yet, which the last
-        // pass makes where emitted code still refers to it, and the merge leaves out where none does.
-        if (outcome.held)
+        // A candidate whose code waits for the last pass (#2541 step 2, check_tier1_inline_held; without --tier1, Tier 0's
+        // callee, #1398 step 3, check_tier0_inline_held): none yet, which the last pass makes where emitted code still
+        // refers to it, and the merge leaves out where none does.
+        if (outcome.held || (lane->tier1 == NULL && naked == 0 && run->tier0_inline != NULL && check_tier0_inline_held(run, b)))
         {
             run->codes[b] = (EmittedCode){ 0 };
             run->bodies[b] = (CheckEmitBody){ .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
-            run->tier1_counts[b] = (CheckTier1Counts){ 0 };
+            if (run->tier1_counts != NULL)
+            {
+                run->tier1_counts[b] = (CheckTier1Counts){ 0 };
+            }
             continue;
         }
         const bool tier1 = outcome.category == CHECK_TIER1_SUCCESS;
@@ -3656,9 +3664,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         // object alone, whose symbols nothing refers to are left out (an executable's binding resolves every program
         // symbol, a direct one's or, with `kept`, that of a link of several units); not under -g, whose
         // entries have no form for a function without code yet, -fpatchable-function-entry or in a unit with asm, whose
-        // templates refer to names.
-        tier1_inline.holding = tier1_inlines && tier1_inline.held != NULL && binding == NULL && !kept && rows == NULL && program->patchable_count == 0 &&
-                               program->input->asm_count == 0 && !lanes->tier1_no_hold;
+        // templates refer to names. Without --tier1, Tier 0's callees (#1398 step 3), but under --tier0-no-hold.
+        const bool hold = tier1_inline.held != NULL && binding == NULL && !kept && rows == NULL && program->patchable_count == 0 && program->input->asm_count == 0;
+        tier1_inline.holding = hold && (tier1_inlines ? !lanes->tier1_no_hold : !tier1 && (lanes == NULL || !lanes->tier0_no_hold));
         tier1_inline.sources = run.sources;
     }
     if (tier1 && run.tier1_outcomes != 0 && !check_tier1_ready)
@@ -4898,8 +4906,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // Declarations whose asm labels name the made symbols of those groups (#2204).
     valid = valid && ((program->target_group_count == 0 && program->cpu_group_count == 0) || check_program_label_forwards(result, program, output));
     // The candidates whose every call --tier1 expanded and that nothing else refers to (#2541 step 2,
-    // check_tier1_inline_dead): no atom, symbol, frame or jump table of theirs is published. `dead` is null for none.
-    const uint32_t dead_count = valid && run.tier1_inline != NULL && binding == NULL && !kept ?
+    // check_tier1_inline_dead), or without --tier1 Tier 0's callees whose every call it spliced (#1398 step 3): no atom,
+    // symbol, frame or jump table of theirs is published. `dead` is null for none.
+    const uint32_t dead_count = valid && run.inline_table != NULL && binding == NULL && !kept ?
                                 check_tier1_inline_dead(&tier1_inline, run.codes, helpers, asms->naked, asm_symbols, asms->name_count, run.sources, scratch) : 0;
     const uint8_t* dead = dead_count != 0 ? tier1_inline.dead : NULL;
     result->dead_functions = dead_count;

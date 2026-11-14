@@ -10618,8 +10618,10 @@ struct CheckDriverCommand
     bool tier1_no_lifetimes;
     bool tier1_no_inline;
     bool tier1_no_hold;
-    // --tier0-no-inline keeps Tier 0's calls of always_inline functions (#1398).
+    // --tier0-no-inline keeps Tier 0's calls of always_inline functions (#1398); --tier0-no-hold makes each callee's code
+    // on its lane, none in the last pass (#1398 step 3).
     bool tier0_no_inline;
+    bool tier0_no_hold;
     // --emit-window=N: each unit's one-lane emission by windows of about N tokens (#2536, CheckProgramLanes.window_tokens).
     uint32_t window_tokens;
     // --tier1-schedule=post|pre (#172): BUSTER_CHECK_TIER1_SCHEDULE_*.
@@ -13262,6 +13264,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             lanes->tier0_no_inline = true;
         }
+        else if (match.exact == C_OPTION_TIER0_NO_HOLD)
+        {
+            lanes->tier0_no_hold = true;
+        }
         else if (match.exact == C_OPTION_TIER1_GVN)
         {
             lanes->tier1_gvn = true;
@@ -13640,6 +13646,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier1_no_inline = lanes->tier1_no_inline,
         .tier1_no_hold = lanes->tier1_no_hold,
         .tier0_no_inline = lanes->tier0_no_inline,
+        .tier0_no_hold = lanes->tier0_no_hold,
         .window_tokens = lanes->window_tokens,
         .tier1_schedule = lanes->tier1_schedule,
         .tier1_passes = lanes->tier1_passes,
