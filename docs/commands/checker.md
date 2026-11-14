@@ -273,12 +273,21 @@ unused-warning fixtures also check exact scope-completion tokens.
   fixtures compare independent counts, severity and complete diagnostic lines with Clang through default,
   scalar and deferred reader routes, including warning flags and source diagnostic pragmas.
   `-Wsign-compare` retains the original unsignedness of both operands before narrow integer promotion (#1391).
-  An `unsigned char` or `unsigned short` promoted to `int` cannot become negative; signed casts, arithmetic
+  An `unsigned char` or `unsigned short` promoted to `int` cannot become negative. An ordinary conditional's
+  result is also nonnegative when both arms are nonnegative integer constant expressions, unsigned values, boolean results or
+  nested such conditionals (`check_common_conditional_nonnegative`). An integer constant expression's condition
+  selects only its taken arm; a folded assignment or statement expression alone does not. The bounded walk
+  borrows only the emission worklist's unused node slots and preserves every live warning frame; exhausted
+  space or work budget keeps the warning. Explicit signed casts, GNU shared-middle conditionals, arithmetic
   results and genuine signed operands keep their existing diagnostics. `c_check_sign_compare_driver_test.c`
   compares independent counts, severity and complete Clang diagnostic lines through default/scalar compilation
   and a deferred route that requires two admitted reader lanes. Run `test-checker-driver --sign-compare-only`
   with `--executable build/compiler` under a two-CPU grant; the shared correctness inventory
-  supplies that grant. This is a type-local fix; general expression ranges and bitfield ranges remain separate.
+  supplies that grant. `tests/driver/sign_compare_conditional.c` covers both operand orientations, every comparison,
+  nested/selected arms, casts, side-effecting conditions, GNU controls, a balanced 128-leaf tree and live sibling
+  diagnostics. General arithmetic expression ranges and bitfield ranges remain separate, as does the existing
+  fully folded conditional gap: `((y = 0) ? -1 : 3) < u` still loses Clang's warning because the older constant
+  shortcut accepts its folded result. This change leaves that shortcut and the global evaluation facts intact.
   `c_check_noderef_driver_test.c`, in the attribute-effects driver section,
   compares original GNU `noderef` placement, propagation, conversion,
   address-cancellation and unevaluated-expression fixtures with pinned Clang
