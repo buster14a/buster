@@ -6,7 +6,8 @@
 // split.c's bitcode output (split_write_bitcode). Clang's -emit-llvm keeps the module's use-list order, and code
 // generation follows it (a block's predecessors, a value's users): a partition written without it compiles to different
 // instructions. LLVM's C API writes bitcode without it, so this call takes the choice as an argument. split.c's parts
-// also erase the aliases they don't emit (split_erase_alias), which LLVM's C API can't.
+// also erase the aliases they don't emit (split_erase_alias), and its start order moves a function within the module's
+// list (split_move_function), which LLVM's C API can't.
 //
 // presplit.c's parts (split_clone_part, split_write_part): a module's clone with chosen definitions alone, and its
 // bitcode without the use-list order, which the optimizer that follows each part doesn't need (the part's object then
@@ -63,6 +64,17 @@ extern "C" bool split_erase_alias(LLVMValueRef alias)
         value->eraseFromParent();
     }
     return unused;
+}
+
+// split.c's start order (split_order_first): `function` goes right before `before` in their module's list of functions,
+// the order the code generator emits them in. The written bitcode keeps the use-list order whatever the functions'
+// order, so each function's code stays what it was.
+extern "C" void split_move_function(LLVMValueRef function, LLVMValueRef before)
+{
+    llvm::Function* moved = llvm::cast<llvm::Function>(llvm::unwrap(function));
+    llvm::Function* next = llvm::cast<llvm::Function>(llvm::unwrap(before));
+    llvm::Module::FunctionListType& list = moved->getParent()->getFunctionList();
+    list.splice(next->getIterator(), list, moved->getIterator());
 }
 
 // `module`'s clone in the same context: every global value declared, and the `count` in `keep` defined as they are.

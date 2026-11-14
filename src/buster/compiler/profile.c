@@ -37,9 +37,10 @@
 //   by their mispredictions, at addresses less the load bias (where a PIE was mapped, from --show-mmap-events), so
 //   that `addr2line` and objdump of the file take them; with the file's disassembly, each with its instruction.
 // - start-order reads `readelf -sW` of the executable and `perf script -F ip,brstack` of its samples (one file per command
-//   profiled) and writes the functions they ran in address order: a local function of one of main.c's units as its unit
-//   and name, and any other (a global one, the C library's) as `-` and its name: cmake/BusterStartOrder.txt, which the
-//   link places before .text (build.md, "The start's code order", #1444).
+//   profiled, the smallest command first) and writes the functions they ran, by the first file that ran each, each
+//   file's in address order: a local function of one of main.c's units as its unit and name, and any other (a global
+//   one, the C library's) as `-` and its name: cmake/BusterStartOrder.txt, which the link places before .text, and the
+//   parallel split first in .text.buster_checker (build.md, "The start's code order", #1444).
 // - time-runs times whole processes of this executable (or of each --executable, and of each --build's placements),
 //   one per argument list, executable and copy in each run, in each run's order of a Williams design (profile_ab_tree:
 //   each slot follows each other equally often), after warm-up runs in slot order: each one's wall time from its exec's release to wait4's return, its user and system time, peak
@@ -1540,6 +1541,8 @@ struct ProfileFunction
     String8 name;
     String8 unit;
     bool hit;
+    // The first sample file that ran it, when hit.
+    uint32_t first;
 };
 
 // start-order's sample files, one per command profiled.
@@ -1664,21 +1667,23 @@ static uint64_t profile_function_at(const ProfileFunction* functions, uint64_t c
     return inside ? low - 1 : count;
 }
 
-// Marks the function that holds `address` as run; counts it, and in *outside if none holds it.
-static void profile_start_hit(ProfileFunction* functions, uint64_t count, uint64_t address, uint64_t* addresses, uint64_t* outside)
+// Marks the function that holds `address` as run, by sample file `sample` if none ran it before; counts it, and in
+// *outside if none holds it.
+static void profile_start_hit(ProfileFunction* functions, uint64_t count, uint64_t address, uint32_t sample, uint64_t* addresses, uint64_t* outside)
 {
     const uint64_t index = profile_function_at(functions, count, address);
     *addresses += 1;
     *outside += index == count;
-    if (index != count)
+    if (index != count && !functions[index].hit)
     {
         functions[index].hit = true;
+        functions[index].first = sample;
     }
 }
 
-// Marks the function that holds each address of `samples` (perf script -F ip,brstack: each line's ip, then its records,
-// 0xFROM/0xTO/...) as run. Returns the addresses read, and in *outside those no function holds.
-static uint64_t profile_start_hits(ProfileFunction* functions, uint64_t count, String8 samples, uint64_t* outside)
+// Marks the function that holds each address of `samples`, sample file `sample` (perf script -F ip,brstack: each line's
+// ip, then its records, 0xFROM/0xTO/...) as run. Returns the addresses read, and in *outside those no function holds.
+static uint64_t profile_start_hits(ProfileFunction* functions, uint64_t count, String8 samples, uint32_t sample, uint64_t* outside)
 {
     uint64_t addresses = 0;
     uint64_t position = 0;
@@ -1693,12 +1698,12 @@ static uint64_t profile_start_hits(ProfileFunction* functions, uint64_t count, S
             uint64_t address = 0;
             if (field.length != 0 && profile_hex(field, &i, &address))
             {
-                profile_start_hit(functions, count, address, &addresses, outside);
+                profile_start_hit(functions, count, address, sample, &addresses, outside);
                 // A record's branch target, after the '/' that ends its source.
                 i += i < field.length && field.pointer[i] == '/';
                 if (i < field.length && field.pointer[i - 1] == '/' && profile_hex(field, &i, &address))
                 {
-                    profile_start_hit(functions, count, address, &addresses, outside);
+                    profile_start_hit(functions, count, address, sample, &addresses, outside);
                 }
             }
         }
@@ -1707,12 +1712,15 @@ static uint64_t profile_start_hits(ProfileFunction* functions, uint64_t count, S
 }
 
 // start-order: the functions that `samples` ran (perf script -F ip,brstack of user instructions, one text per command
-// profiled), by their copies in `symbols` (readelf -sW of the same executable), in address order, one a line: `UNIT
-// NAME` for a local function of one of main.c's units, which the link script places by its unit's object and its
+// profiled, the smallest command first), by their copies in `symbols` (readelf -sW of the same executable), one a line:
+// `UNIT NAME` for a local function of one of main.c's units, which the link script places by its unit's object and its
 // section (-ffunction-sections' .text.NAME), so that one unit's copy of a static helper moves and the others' don't;
 // and `- NAME` for any other, a global function (whose name is the link's alone) or the C library's, which the symbol
 // ordering file places by name. One whose name a unit's local function has too, which the name would move as well, is
-// left out.
+// left out. They go by the first file that ran each, each file's in address order: the smallest command's functions
+// are together, in the fewest of the 64 KB windows the kernel's fault-around maps, and each larger command's add to
+// them (#1444: an empty file's -fsyntax-only ran its 31 functions of .text.buster_checker in 15 windows of 248 functions
+// in address order, and in 7 so).
 static bool profile_start_order(Arena* arena, ProfileReport* report, String8 symbols, const String8* samples, uint32_t sample_count)
 {
     uint64_t count = 0;
@@ -1722,7 +1730,7 @@ static bool profile_start_order(Arena* arena, ProfileReport* report, String8 sym
     uint64_t outside = 0;
     for (uint32_t s = 0; valid && s < sample_count; s += 1)
     {
-        addresses += profile_start_hits(functions, count, samples[s], &outside);
+        addresses += profile_start_hits(functions, count, samples[s], s, &outside);
     }
     // A function placed by name whose name a unit's local function has too is left out, as its name would move both:
     // each run one is looked for among all the functions, which a refresh does once.
@@ -1756,13 +1764,16 @@ static bool profile_start_order(Arena* arena, ProfileReport* report, String8 sym
             profile_print(report, ", %llu left out that share a unit's function's name", (unsigned long long)shared);
         }
         profile_print(report, "\n");
-        for (uint64_t f = 0; f < count; f += 1)
+        for (uint32_t s = 0; s < sample_count; s += 1)
         {
-            const ProfileFunction* function = &functions[f];
-            if (function->hit)
+            for (uint64_t f = 0; f < count; f += 1)
             {
-                const String8 unit = function->unit.length != 0 ? function->unit : profile_string("-");
-                profile_print(report, "%.*s %.*s\n", (int)unit.length, unit.pointer, (int)function->name.length, function->name.pointer);
+                const ProfileFunction* function = &functions[f];
+                if (function->hit && function->first == s)
+                {
+                    const String8 unit = function->unit.length != 0 ? function->unit : profile_string("-");
+                    profile_print(report, "%.*s %.*s\n", (int)unit.length, unit.pointer, (int)function->name.length, function->name.pointer);
+                }
             }
         }
     }

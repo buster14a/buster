@@ -21,7 +21,7 @@
 //     numbered in order;
 //   - start-order: local functions of main.c's units by their FILE symbols (two parts of one), a unit's global and the C
 //     library's functions by name, a split's alias, a benchmark's function whose name a unit's static shares (left out),
-//     two sample files that repeat functions, and symbols without functions;
+//     two sample files that repeat functions, the second's new one after the first's, and symbols without functions;
 //   - branch-misses: records with M, P and neither, a field that isn't one and one of a branch at 0, with the load bias
 //     and the disassembly's instructions, and an address the disassembly doesn't have; then 10,000 branches, which grow
 //     the table, without a disassembly;
@@ -529,19 +529,20 @@ static void profile_test_text_tools(ProfileTest* test)
     ok = profile_branch_misses(&test->arena, &test->report, profile_test_string(profile_test_brstack), 0x400000, profile_test_string(profile_test_branch_disassembly), 30);
     profile_test_check(test, "branch-misses", ok, true, profile_report_text(&test->report), profile_test_branch_misses);
 
-    // Two sample files, the second one repeating the first's _start and memset: each function once.
+    // Two sample files, the second one adding _start, at the lowest address, and repeating the first's memset: each
+    // function once, the first file's in address order, then the second's _start.
     const String8 start_samples[] = { profile_test_string(profile_test_start_samples), profile_test_string("400104 0x405008/0x400100/P/-/-/0//\n") };
     ok = profile_start_order(&test->arena, &test->report, profile_test_string(profile_test_start_symbols), start_samples, 2);
     profile_test_check(test, "start-order", ok, true, profile_report_text(&test->report),
                        "# start-order: 12 addresses, 1 of them in no function; 3 local functions of main.c's units (0 KB) and 4 by name (0 KB), "
                        "1 left out that share a unit's function's name\n"
-                       "- _start\n"
                        "main.c helper\n"
                        "main_unit_checker.c check_one\n"
                        "main_unit_checker.c check_two\n"
                        "- check_entry\n"
                        "- _int_malloc\n"
-                       "- memset\n");
+                       "- memset\n"
+                       "- _start\n");
     ok = profile_start_order(&test->arena, &test->report, profile_test_string(profile_test_start_symbols), start_samples, 1);
     profile_test_check(test, "start-order of one file", ok, true, profile_report_text(&test->report), profile_test_start_order);
     ok = profile_start_order(&test->arena, &test->report, profile_test_string("Symbol table '.symtab' contains 0 entries:\n"), start_samples, 1);
