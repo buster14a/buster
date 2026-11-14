@@ -6630,6 +6630,24 @@ static CheckCommonInitializerKeys check_common_initializer_roots(const Parser* p
     return result;
 }
 
+// Whether no literal context (check_common_literal_contexts) can reach `node`, a node of a tree graph (each node read once,
+// by its parent): its readers up to its root pass through a sizeof's or an alignof's operand, which that pass carries no
+// context into but a variable length array's bound, the query's first operand.
+static bool check_common_literal_blocked(const CheckGraph* graph, const uint32_t* parents, uint32_t node)
+{
+    bool blocked = false;
+    uint32_t at = node;
+    for (uint32_t steps = 0; !blocked && at < graph->count && parents[at] < graph->count && steps < graph->count; steps += 1)
+    {
+        const uint32_t reader = parents[at];
+        const CheckOp op = graph->ops[reader];
+        const bool bound = graph->operand0[reader] == at && (graph->ops[at] == CHECK_OP_VLA_BOUND || graph->ops[at] == CHECK_OP_VLA_EXTENT);
+        blocked = (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF) && !bound;
+        at = reader;
+    }
+    return blocked;
+}
+
 // Literal conversions are source checks even in unreachable statements and short-circuited operands. They still
 // exclude sizeof/alignof operands and static selections' unchosen arms. Only a skipped conversion with a floating
 // value or branching source builds this context, reusing visit bytes and keeping runtime reachability unchanged.
@@ -7439,40 +7457,46 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         // Only an unevaluated conversion, call or truth-context node can need a literal-only source context. Unevaluated
         // nodes are few: the vector path skips the evaluated ones 64 at a time; the scalar twin visits all nodes and applies
         // the same tests.
+        // A candidate in a sizeof's or an alignof's operand needs none, which no literal context reaches
+        // (check_common_literal_blocked): every glibc assert has one, `sizeof ((e) ? 1 : 0)` (#1360). Its readers say so where
+        // the graph is a tree, each node's one reader its parent (facts->roots); the scalar twin takes every candidate.
         const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
+        const bool tree = facts->roots != NULL && parents != NULL;
         CheckCommonScan scan = { 0 };
         for (uint32_t node = check_common_next_unevaluated(evaluated, graph->count, &scan, vector); node < graph->count && !source_contexts;
              node = check_common_next_unevaluated(evaluated, graph->count, &scan, vector))
         {
             const CheckOp op = graph->ops[node];
+            bool candidate = false;
             if (evaluated[node] == 0 && (op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN || op == CHECK_OP_CONVERT))
             {
                 const uint32_t source = op == CHECK_OP_ASSIGN ? graph->operand1[node] : graph->operand0[node];
-                source_contexts |= source < graph->count &&
-                                   (check_stream_constant_kind(stream, source) == CHECK_CONSTANT_FLOATING || check_common_conversion_arms(graph, source) ||
-                                    check_common_bool_candidate(graph, source));
+                candidate |= source < graph->count &&
+                             (check_stream_constant_kind(stream, source) == CHECK_CONSTANT_FLOATING || check_common_conversion_arms(graph, source) ||
+                              check_common_bool_candidate(graph, source));
                 // A bit-field's truncation, which clang's Diag gives in unreachable code too (#1447).
                 uint32_t bit_width = 0;
                 __int128 original = 0;
                 __int128 truncated = 0;
-                source_contexts |= check_common_bitfield_assignment(graph, stream, types, node, &bit_width, &original, &truncated);
+                candidate |= check_common_bitfield_assignment(graph, stream, types, node, &bit_width, &original, &truncated);
                 // A conversion between enumerations (#1447, check_common_enum_cast), also clang's Diag.
-                source_contexts |= check_common_enum_cast_candidate(input->enum_names, parser, graph, stream, types, source, check_stream_type(stream, node));
+                candidate |= check_common_enum_cast_candidate(input->enum_names, parser, graph, stream, types, source, check_stream_type(stream, node));
             }
-            source_contexts |= evaluated[node] == 0 && check_common_truth_candidate(graph, stream, node);
+            candidate |= evaluated[node] == 0 && check_common_truth_candidate(graph, stream, node);
             if (evaluated[node] == 0 && op == CHECK_OP_CALL && graph->argument_offsets != NULL && graph->argument_counts != NULL)
             {
                 for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
                 {
                     const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + i];
-                    source_contexts |= argument < graph->count &&
-                                       (check_stream_constant_kind(stream, argument) == CHECK_CONSTANT_FLOATING || check_common_conversion_arms(graph, argument) ||
-                                        check_common_bool_candidate(graph, argument));
-                    source_contexts |= stream->argument_conversions != NULL &&
-                                       check_common_enum_cast_candidate(input->enum_names, parser, graph, stream, types, argument,
-                                                                        stream->argument_conversions[graph->argument_offsets[node] + i].type);
+                    candidate |= argument < graph->count &&
+                                 (check_stream_constant_kind(stream, argument) == CHECK_CONSTANT_FLOATING || check_common_conversion_arms(graph, argument) ||
+                                  check_common_bool_candidate(graph, argument));
+                    candidate |= stream->argument_conversions != NULL &&
+                                 check_common_enum_cast_candidate(input->enum_names, parser, graph, stream, types, argument,
+                                                                  stream->argument_conversions[graph->argument_offsets[node] + i].type);
                 }
             }
+            source_contexts = candidate && !(tree && check_common_literal_blocked(graph, parents, node));
         }
     }
     // A static assertion's operand is no runtime operator's: each has a constant-warning entry (check_input_const_warning).

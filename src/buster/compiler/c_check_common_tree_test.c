@@ -8,7 +8,8 @@
 // tails are zero, and cached/uncached scans give the same roots while the scalar scan still gives every node.
 // check_common_emission_subtree_start against each token's subtree's first token, on
 // random trees whose subtrees are runs of tokens, with parents as deep as their children now and then. The reach walk's
-// per-body lists of statement expressions (check_common_body_regions, #1360) against their definition and its scan. Included
+// per-body lists of statement expressions (check_common_body_regions, #1360) against their definition and its scan, and
+// check_common_literal_blocked against check_common_literal_contexts' marks. Included
 // by c_checker_driver_test.c, after c_check_common_selection_test.c, whose guarded columns it takes.
 
 static uint32_t check_test_tree_random(uint64_t* state)
@@ -457,9 +458,69 @@ static void check_test_driver_body_regions(CheckTest* test)
     check_test_expect(test, same && listed > 500, "common body regions: each body's statement expressions listed, and its reach with them as with the scan");
 }
 
+// check_common_literal_blocked against check_common_literal_contexts' marks (#1360): on random tree graphs
+// (check_test_tree_generate) whose nodes without arguments are now and then a sizeof, an alignof or a variable length
+// array's bound or extent, with every root eligible (no node suppressed, no selection), a node is blocked exactly where
+// the pass leaves it without a literal context.
+static void check_test_driver_literal_blocked(CheckTest* test)
+{
+    static const uint32_t sizes[] = { 1, 2, 3, 16, 17, 64, 65, 257, 1000, 5000 };
+    static const CheckOp queries[] = { CHECK_OP_SIZEOF, CHECK_OP_ALIGNOF, CHECK_OP_VLA_BOUND, CHECK_OP_VLA_EXTENT };
+    uint64_t state = UINT64_C(13600);
+    Arena scratch = arena_reserve(UINT64_C(1) << 24);
+    bool same = scratch.base != NULL;
+    uint32_t blocked = 0;
+    uint32_t reached = 0;
+    for (uint32_t round = 0; same && round < 6 * BUSTER_ARRAY_LENGTH(sizes); round += 1)
+    {
+        const uint32_t count = sizes[round % BUSTER_ARRAY_LENGTH(sizes)];
+        const uint32_t argument_room = count * 4 + 1;
+        CheckTestTreeGraph input;
+        same = check_test_tree_graph(&input, count, argument_room);
+        uint32_t* open = malloc(((uint64_t)count + 1) * sizeof(uint32_t));
+        uint32_t* parents = malloc(((uint64_t)count + 1) * sizeof(uint32_t));
+        uint32_t* tokens = malloc(((uint64_t)count + 1) * sizeof(uint32_t));
+        uint8_t* marks = malloc((uint64_t)count + 1);
+        same = same && open != NULL && parents != NULL && tokens != NULL && marks != NULL;
+        if (same)
+        {
+            check_test_tree_generate(&input.graph, argument_room, open, &state);
+            for (uint32_t node = 0; node < count; node += 1)
+            {
+                const uint32_t r = check_test_tree_random(&state);
+                const bool plain = !check_graph_has_arguments(input.graph.ops[node]) && (r & 3) == 0;
+                input.graph.ops[node] = plain ? queries[(r >> 2) % BUSTER_ARRAY_LENGTH(queries)] : input.graph.ops[node];
+                // (No token: no selection is a static one.)
+                tokens[node] = BUSTER_CHECK_NONE;
+            }
+            input.graph.tokens = tokens;
+            same = check_test_tree_parents(&input.graph, parents);
+            Parser parser = { 0 };
+            const uint64_t length = scratch.length;
+            same = same && check_common_literal_contexts(&input.graph, &parser, parents, marks, &scratch) && scratch.length == length;
+            for (uint32_t node = 0; same && node < count; node += 1)
+            {
+                const bool marked = (marks[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0;
+                same = check_common_literal_blocked(&input.graph, parents, node) == !marked;
+                blocked += !marked;
+                reached += marked && parents[node] != BUSTER_CHECK_NONE;
+            }
+        }
+        free(open);
+        free(parents);
+        free(tokens);
+        free(marks);
+        check_test_tree_release(&input);
+    }
+    arena_release(&scratch);
+    check_test_expect(test, same && blocked > 1000 && reached > 1000,
+                      "common literal contexts: a node is blocked exactly where no literal context reaches it, on random trees with queries");
+}
+
 static void check_test_driver_common_trees(CheckTest* test)
 {
     check_test_driver_common_parents(test);
     check_test_driver_common_subtree_starts(test);
     check_test_driver_body_regions(test);
+    check_test_driver_literal_blocked(test);
 }
