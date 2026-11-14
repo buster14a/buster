@@ -783,8 +783,14 @@ struct ParseDiagnostic
     // A parameter's missing or unknown type. A diagnostic-only view may recover it as int after proving the whole
     // enclosing declaration structurally complete, while preserving the original tokens and error.
     bool parameter_type;
+    // An attributed block declaration with no type. `argument` is its first GNU attribute; a diagnostic-only view
+    // keeps the declarator with implicit int, as Sema does, while the original missing-type error still rejects it.
+    bool declaration_type;
     // A balanced malformed type-name tail is removed without inserting a declaration terminator.
     bool resume_delete;
+    // A rejected GNU-attribute-led call retains only its callee and parentheses for lookup in the diagnostic view.
+    // The original parse error stays; the callee's source is marked invalid before expression checking (#2406).
+    bool resume_call;
     // A K&R parameter declaration's missing semicolon skips its malformed tail through the next semicolon, or up
     // to the mandatory body brace. Its recovery view replaces [token, resume_end) with one semicolon; zero means
     // the ordinary insertion before token. This is diagnostic-only metadata, never acceptance of the input.
@@ -2676,6 +2682,14 @@ struct ParseStatistics
     bool whole;
 };
 
+// Why a specifier in a private diagnostic view can be read after its original parse failed.
+typedef enum ParseRecoveredType
+{
+    PARSE_RECOVERED_TYPE_NONE,
+    PARSE_RECOVERED_TYPE_UNKNOWN,
+    PARSE_RECOVERED_TYPE_IMPLICIT_INT,
+} ParseRecoveredType;
+
 typedef struct Parser Parser;
 struct Parser
 {
@@ -2688,6 +2702,10 @@ struct Parser
     // the driver's edit list, so another typo search counts them toward the same unit's spell-checking limit.
     const uint32_t* typo_sources;
     uint32_t typo_count;
+    // Callees retained only for name lookup by a failed parse's private view (#2406), sorted by preprocessor source index.
+    // Their calls are invalid even when the name resolves, so checking must not diagnose their erased arguments.
+    const uint32_t* invalid_call_sources;
+    uint32_t invalid_call_count;
     // Borrowed through checking and emission, like the tokens' source indices. Resource bytes stay owned by pp.
     const Preprocessor* preprocessor;
     // Beside each token of a view that leaves a parse's tokens out (#2531's step 3, c_check_attested.c's
@@ -2727,8 +2745,8 @@ struct Parser
     // A checked diagnostic prefix includes already diagnosed parameter types. This enables typo searches for
     // their stand-in int specifiers; ordinary parses and emission never enable it.
     bool recovered_parameter_types;
-    // Private diagnostic-view specifiers recovered from already diagnosed unknown non-parameter types. Their
-    // declarations remain invalid, so initializer conversions and later uses cannot treat the stand-in int as real.
+    // Private diagnostic-view specifiers (ParseRecoveredType): an unknown type's declaration remains invalid;
+    // an attributed declaration's already diagnosed implicit int keeps its remaining checks.
     const uint8_t* recovered_types;
     // What stopped the parse where no diagnostic says it: PARSE_MESSAGE_OUT_OF_MEMORY or PARSE_MESSAGE_TOO_MANY_TOKENS,
     // or PARSE_MESSAGE_NONE.

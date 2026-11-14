@@ -336,8 +336,8 @@ function(buster_codegen_unit name)
     foreach(part RANGE ${BUSTER_CODEGEN_PARTITIONS})
         set(object "${directory}/part${part}.o")
         add_custom_command(OUTPUT "${object}"
-            COMMAND "${CMAKE_C_COMPILER}" -x ir ${buster_host_flags} ${debug} -fno-stack-protector ${buster_sanitizer_flags}
-                ${optimization} -Wall -Werror -Xclang -disable-llvm-passes -Wno-unused-command-line-argument
+            COMMAND "${CMAKE_C_COMPILER}" -x ir ${buster_host_flags} ${debug} ${buster_release_line_tables} -fno-stack-protector
+                ${buster_sanitizer_flags} ${optimization} -Wall -Werror -Xclang -disable-llvm-passes -Wno-unused-command-line-argument
                 -c "${directory}/part${part}.bc" -o "${object}"
             DEPENDS "${directory}/part${part}.bc"
             COMMENT "Generating ${name}'s native part ${part}"
@@ -422,12 +422,15 @@ function(buster_parts_unit name)
     # their bitcode alone.
     add_custom_target(buster_${name}_parts_split DEPENDS "${stamp}")
     set(debug "$<IF:$<CONFIG:Develop>,${BUSTER_DEVELOP_CONFIGURATION_DEBUG},${buster_debug}>")
+    # Line tables' code generator option (#2739, BusterSettings.cmake): Develop's parts, and Release's where its debug
+    # information is line tables alone; Release's parts without debug information (--strip-debug) have none to track.
+    set(line_tables "$<IF:$<CONFIG:Develop>,${BUSTER_LINE_TABLES_CODEGEN},${buster_release_line_tables}>")
     set(objects "")
     foreach(part RANGE ${partitions})
         set(object "${directory}/part${part}.o")
         add_custom_command(OUTPUT "${object}"
-            COMMAND "${CMAKE_C_COMPILER}" -x ir ${buster_host_flags} "${debug}" -fno-stack-protector ${buster_optimization}
-                -Wall -Werror -Wno-unused-command-line-argument -c "${directory}/part${part}.bc" -o "${object}"
+            COMMAND "${CMAKE_C_COMPILER}" -x ir ${buster_host_flags} "${debug}" "${line_tables}" -fno-stack-protector
+                ${buster_optimization} -Wall -Werror -Wno-unused-command-line-argument -c "${directory}/part${part}.bc" -o "${object}"
             DEPENDS "${directory}/part${part}.bc"
             COMMENT "Optimizing and generating ${name}'s part ${part}"
             COMMAND_EXPAND_LISTS
