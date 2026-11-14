@@ -6430,13 +6430,13 @@ static Tier0Operation tier1_masks_test_lane_unary_row(uint32_t kind, uint32_t wi
     };
     const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
     const uint32_t bytes = 16u << width;
-    const uint32_t size = kind < 4 ? kind : 2 + kind % 2;
-    const uint32_t operation = kind < 4 ? 0 : kind < 8 ? 1 : 2;
+    const uint32_t size = kind < 4 ? kind : kind < 10 ? 2 + kind % 2 : kind - 10;
+    const uint32_t operation = kind < 4 ? 0 : kind < 8 ? 1 : kind < 10 ? 2 : 3;
     const bool fallback = kind == 6 || kind == 7;
-    const CheckVectorShape shape = { .lanes = bytes >> size, .bytes = bytes, .element = (uint8_t)(1u << size), .integer = true };
+    const CheckVectorShape shape = { .lanes = bytes >> size, .bytes = bytes, .element = (uint8_t)(1u << size), .integer = true, .is_signed = operation == 3 };
     uint64_t needed = 0;
-    const uint16_t form = operation == 2 ? ir_simd_lane_unary_forms[2][size][width] :
-                                           (uint16_t)check_vector_elementwise_forms(operation == 0 ? CBUILTIN_ELEMENTWISE_POPCOUNT : CBUILTIN_ELEMENTWISE_CLZG, shape, &needed).forms[width];
+    static const CBuiltinId builtins[4] = { CBUILTIN_ELEMENTWISE_POPCOUNT, CBUILTIN_ELEMENTWISE_CLZG, CBUILTIN_ELEMENTWISE_POPCOUNT, CBUILTIN_ELEMENTWISE_ABS };
+    const uint16_t form = operation == 2 ? ir_simd_lane_unary_forms[2][size][width] : (uint16_t)check_vector_elementwise_forms(builtins[operation], shape, &needed).forms[width];
     Tier0Operation row;
     memset(&row, 0, sizeof(row));
     if (fallback)
@@ -6491,7 +6491,7 @@ static void tier1_masks_test_lane_unaries(Tier1MasksTest* test)
     }
     uint64_t state = test->random ^ UINT64_C(0x5be0cd19137e2179);
     const bool counted = !test->native || (x86_target_native().features & counts) == counts;
-    for (uint32_t form = counted ? 0 : 4 * 3; ready && form < 10 * 3; form += 1)
+    for (uint32_t form = counted ? 0 : 4 * 3; ready && form < 14 * 3; form += 1)
     {
         const uint32_t kind = form / 3;
         test->v4_features = kind < 4 ? v4 | counts : v4;
@@ -6574,6 +6574,12 @@ static void tier1_masks_test_lane_unaries(Tier1MasksTest* test)
                         uint64_t y = 0;
                         memcpy(&y, vector + below * element, element);
                         value |= (uint64_t)(x == y) << below;
+                    }
+                    if (operation == 3)
+                    {
+                        // The absolute value of the lane's two's complement, the most negative lane itself (#2780).
+                        const bool negative = ((x >> (element * 8 - 1)) & 1) != 0;
+                        value = negative ? 0 - x : x;
                     }
                     if (fallback && x == 0)
                     {
@@ -8140,8 +8146,9 @@ static void tier1_masks_test_funnels(Tier1MasksTest* test)
     free(program);
 }
 
-// The quadword operations through the IR to Tier 1 (#1840): each vpmultishiftqb and psadbw builtin's row at each width as
-// the program's only row in 4 statements of the input buffer's vectors k and k + 1 into the output's vector k.
+// The quadword operations through the IR to Tier 1 (#1840): each vpmultishiftqb, psadbw, pmuludq and pmuldq (#2780)
+// builtin's row at each width as the program's only row in 4 statements of the input buffer's vectors k and k + 1 into
+// the output's vector k.
 // tier1_masks_test_typed_pipeline takes each through the IR as its quadword_op, which the interpreter runs at every stage,
 // and Tier 1 natively, against the instructions' definitions written out here. vpmultishiftqb is VBMI's, past
 // x86-64-v4: its output target has it too, and a host that runs Tier 1's code natively must have it, or it is left to
@@ -8170,7 +8177,9 @@ static void tier1_masks_test_quadword_ops(Tier1MasksTest* test)
         const CheckX86LowerRule* rule = check_x86_lower_rules + i;
         const bool multishift = strncmp(rule->name, "__builtin_ia32_vpmultishiftqb", sizeof("__builtin_ia32_vpmultishiftqb") - 1) == 0;
         const bool sad = strncmp(rule->name, "__builtin_ia32_psadbw", sizeof("__builtin_ia32_psadbw") - 1) == 0;
-        if ((!multishift && !sad) || (multishift && !multishifts))
+        const bool unsigned_product = strncmp(rule->name, "__builtin_ia32_pmuludq", sizeof("__builtin_ia32_pmuludq") - 1) == 0;
+        const bool signed_product = strncmp(rule->name, "__builtin_ia32_pmuldq", sizeof("__builtin_ia32_pmuldq") - 1) == 0;
+        if ((!multishift && !sad && !unsigned_product && !signed_product) || (multishift && !multishifts))
         {
             continue;
         }
@@ -8232,6 +8241,16 @@ static void tier1_masks_test_quadword_ops(Tier1MasksTest* test)
                     if (sad)
                     {
                         memcpy(out + 8 * q, &sum, 8);
+                    }
+                    // vpmuludq and vpmuldq: the whole product of the quadword's low doublewords, unsigned and signed.
+                    uint32_t low_a = 0;
+                    uint32_t low_b = 0;
+                    memcpy(&low_a, a + 8 * q, 4);
+                    memcpy(&low_b, b + 8 * q, 4);
+                    const uint64_t product = unsigned_product ? (uint64_t)low_a * low_b : (uint64_t)((int64_t)(int32_t)low_a * (int64_t)(int32_t)low_b);
+                    if (unsigned_product || signed_product)
+                    {
+                        memcpy(out + 8 * q, &product, 8);
                     }
                 }
             }
@@ -8829,10 +8848,11 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_expect(&test, test.funnel_attempts == 4u * 3 * 6 + (!test.native || (x86_target_native().features & BUSTER_X86_FEATURE(AVX512VBMI2)) != 0 ? 18u : 0u) &&
                                                test.funnel_rows == test.funnel_attempts,
                                     "every funnel shift and rotate goes through the IR and Tier 1 as the IR's funnel");
-            // The quadword operations (#1840): vpsadbw at 3 widths, and vpmultishiftqb at 3 on a host that runs it.
-            tier1_masks_test_expect(&test, test.quadword_attempts == 3u + (!test.native || (x86_target_native().features & BUSTER_X86_FEATURE(AVX512VBMI)) != 0 ? 3u : 0u) &&
+            // The quadword operations (#1840): vpsadbw, vpmuludq and vpmuldq (#2780) at 3 widths, and vpmultishiftqb at 3 on a
+            // host that runs it.
+            tier1_masks_test_expect(&test, test.quadword_attempts == 9u + (!test.native || (x86_target_native().features & BUSTER_X86_FEATURE(AVX512VBMI)) != 0 ? 3u : 0u) &&
                                                test.quadword_rows == test.quadword_attempts,
-                                    "every multishift and sum of absolute differences goes through the IR and Tier 1 as the IR's quadword_op");
+                                    "every multishift, sum of absolute differences and product of doublewords goes through the IR and Tier 1 as the IR's quadword_op");
             // The bit shuffles into a mask (#1840): vpshufbitqmb at 3 widths, on a host that runs them.
             tier1_masks_test_expect(&test, test.bitshuffle_attempts == (!test.native || (x86_target_native().features & BUSTER_X86_FEATURE(AVX512BITALG)) != 0 ? 3u : 0u) &&
                                                test.bitshuffle_rows == test.bitshuffle_attempts,
@@ -8906,7 +8926,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
         tier1_masks_test_expect(&test, test.reduce_attempts == 54 && test.reduce_rows == test.reduce_attempts, "every reduction goes through the IR and Tier 1 as the IR's");
         printf("test-tier1-masks: the reductions: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its reduce\n", test.reduce_rows);
         tier1_masks_test_expect(&test, test.unary_attempts >= 18 && test.unary_rows == test.unary_attempts, "every lane unary operation goes through the IR and Tier 1 as the IR's");
-        printf("test-tier1-masks: the lanes' population counts, leading zero counts and conflicts: %u through the IR's interpreter, SSA, the optimizer and Tier 1 "
+        printf("test-tier1-masks: the lanes' population counts, leading zero counts, conflicts and absolute values: %u through the IR's interpreter, SSA, the optimizer and Tier 1 "
                "natively as its lane_unary\n",
                test.unary_rows);
         tier1_masks_test_expect(&test, test.fround_attempts == 32 && test.fround_rows == test.fround_attempts, "every floating operation at its own rounding goes through the IR and Tier 1");

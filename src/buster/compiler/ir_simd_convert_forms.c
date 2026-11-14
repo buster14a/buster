@@ -268,10 +268,11 @@ static uint16_t ir_simd_reduce_form(uint32_t operation, uint32_t size, uint32_t 
 }
 
 // The lanes' unary operations (#1840, BUSTER_IR_INTRINSIC_LANE_UNARY), by the operation (population count, leading zero
-// count, conflicts), the lanes (bytes to quadwords) and the width, the destination in reg and the source in rm:
-// vpopcntb to vpopcntq (BITALG's bytes and words, VPOPCNTDQ's doublewords and quadwords), AVX-512CD's vplzcntd,
-// vplzcntq, vpconflictd and vpconflictq, X86_FORM_NONE where AVX-512 has none.
-static const uint16_t ir_simd_lane_unary_forms[3][4][3] = {
+// count, conflicts, absolute value), the lanes (bytes to quadwords) and the width, the destination in reg and the source
+// in rm: vpopcntb to vpopcntq (BITALG's bytes and words, VPOPCNTDQ's doublewords and quadwords), AVX-512CD's vplzcntd,
+// vplzcntq, vpconflictd and vpconflictq, the EVEX vpabsb to vpabsq (#2780: BW's bytes and words), X86_FORM_NONE where
+// AVX-512 has none.
+static const uint16_t ir_simd_lane_unary_forms[4][4][3] = {
     {
         { X86_FORM_VPOPCNTB_X_XM128, X86_FORM_VPOPCNTB_Y_YM256, X86_FORM_VPOPCNTB_Z_ZM512 },
         { X86_FORM_VPOPCNTW_X_XM128, X86_FORM_VPOPCNTW_Y_YM256, X86_FORM_VPOPCNTW_Z_ZM512 },
@@ -289,6 +290,12 @@ static const uint16_t ir_simd_lane_unary_forms[3][4][3] = {
         { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_NONE },
         { X86_FORM_VPCONFLICTD_X_XM128, X86_FORM_VPCONFLICTD_Y_YM256, X86_FORM_VPCONFLICTD_Z_ZM512 },
         { X86_FORM_VPCONFLICTQ_X_XM128, X86_FORM_VPCONFLICTQ_Y_YM256, X86_FORM_VPCONFLICTQ_Z_ZM512 },
+    },
+    {
+        { X86_FORM_VPABSB_X_XM128_EVEX, X86_FORM_VPABSB_Y_YM256_EVEX, X86_FORM_VPABSB_Z_ZM512 },
+        { X86_FORM_VPABSW_X_XM128_EVEX, X86_FORM_VPABSW_Y_YM256_EVEX, X86_FORM_VPABSW_Z_ZM512 },
+        { X86_FORM_VPABSD_X_XM128_EVEX, X86_FORM_VPABSD_Y_YM256_EVEX, X86_FORM_VPABSD_Z_ZM512 },
+        { X86_FORM_VPABSQ_X_XM128, X86_FORM_VPABSQ_Y_YM256, X86_FORM_VPABSQ_Z_ZM512 },
     },
 };
 // The floating operations at their own rounding (#1840, BUSTER_IR_INTRINSIC_FROUND), by the operation (add, sub, mul,
@@ -308,10 +315,13 @@ static const uint16_t ir_simd_fround_forms[4][2] = {
 };
 
 // The quadword operations (#1840, BUSTER_IR_INTRINSIC_QUADWORD_OP), by the operation (BUSTER_IR_QUADWORD_*) and the width,
-// a's register in vvvv, b's in rm and the destination in reg: VBMI's vpmultishiftqb, BW's EVEX vpsadbw.
-static const uint16_t ir_simd_quadword_op_forms[2][3] = {
+// a's register in vvvv, b's in rm and the destination in reg: VBMI's vpmultishiftqb, BW's EVEX vpsadbw, and AVX512F's
+// EVEX vpmuludq and vpmuldq (#2780).
+static const uint16_t ir_simd_quadword_op_forms[4][3] = {
     { X86_FORM_VPMULTISHIFTQB_X_X_XM128, X86_FORM_VPMULTISHIFTQB_Y_Y_YM256, X86_FORM_VPMULTISHIFTQB_Z_Z_ZM512 },
     { X86_FORM_VPSADBW_X_X_XM128_EVEX, X86_FORM_VPSADBW_Y_Y_YM256_EVEX, X86_FORM_VPSADBW_Z_Z_ZM512 },
+    { X86_FORM_VPMULUDQ_X_X_XM128_EVEX, X86_FORM_VPMULUDQ_Y_Y_YM256_EVEX, X86_FORM_VPMULUDQ_Z_Z_ZM512 },
+    { X86_FORM_VPMULDQ_X_X_XM128_EVEX, X86_FORM_VPMULDQ_Y_Y_YM256_EVEX, X86_FORM_VPMULDQ_Z_Z_ZM512 },
 };
 
 // The funnel shifts (#1840, BUSTER_IR_INTRINSIC_FUNNEL), by the direction (left, right), the lanes (words to quadwords)

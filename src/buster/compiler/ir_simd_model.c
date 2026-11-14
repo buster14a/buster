@@ -331,11 +331,11 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                         (uint32_t)(action->index >> 2) < 9;
                 break;
             case IR_SIMD_LANE_UNARY:
-                valid = valid && ir_simd_vector(type) && a == type && b == IR_SIMD_NONE && c == IR_SIMD_NONE && (action->index >> 2) <= 2 &&
-                        ((action->index >> 2) == 0 || (action->index & 3) >= 2);
+                valid = valid && ir_simd_vector(type) && a == type && b == IR_SIMD_NONE && c == IR_SIMD_NONE && (action->index >> 2) <= 3 &&
+                        ((action->index >> 2) == 0 || (action->index >> 2) == 3 || (action->index & 3) >= 2);
                 break;
             case IR_SIMD_CVTT: valid = valid && type == IR_SIMD_NONE && a == IR_SIMD_V4I32 && b == IR_SIMD_NONE && c == IR_SIMD_NONE && action->index <= 3; break;
-            case IR_SIMD_QUADWORD_OP: valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE && action->index <= 1; break;
+            case IR_SIMD_QUADWORD_OP: valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE && action->index <= 3; break;
             case IR_SIMD_BITSHUFFLE:
                 valid = valid && ir_simd_vector(a) && b == a && c == IR_SIMD_NONE && type == ir_simd_lane_mask(a, IR_SIMD_LANE_I8) && action->index == 0;
                 break;
@@ -855,10 +855,12 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
     }
     else if (valid && action->operation == IR_SIMD_LANE_UNARY)
     {
-        // Each lane's set bits, its leading zeros (its bits for zero), or the bits of the lanes below it equal to it.
+        // Each lane's set bits, its leading zeros (its bits for zero), the bits of the lanes below it equal to it, or its
+        // absolute value, which the most negative lane is itself.
         const uint32_t lane_bits = 8u << (action->index & 3);
         const uint32_t operation = (uint32_t)(action->index >> 2);
         const uint32_t lanes = ir_simd_bits(action->result) / lane_bits;
+        const uint64_t all = lane_bits == 64 ? UINT64_MAX : (UINT64_C(1) << lane_bits) - 1;
         for (uint32_t lane = 0; lane < lanes; lane += 1)
         {
             const uint64_t x = ir_simd_lane_read(values[0], lane_bits, lane);
@@ -870,6 +872,10 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
             else if (operation == 1)
             {
                 value = x == 0 ? lane_bits : (uint64_t)__builtin_clzll(x) - (64 - lane_bits);
+            }
+            else if (operation == 3)
+            {
+                value = ((x >> (lane_bits - 1)) & 1) != 0 ? (0 - x) & all : x;
             }
             else
             {
@@ -899,10 +905,16 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
     }
     else if (valid && action->operation == IR_SIMD_QUADWORD_OP)
     {
-        // Each quadword: its 8 bytes from b's quadword, rotated right by a's byte's low 6 bits; or the sum of the absolute
-        // differences of a's and b's bytes in it.
+        // Each quadword: its 8 bytes from b's quadword, rotated right by a's byte's low 6 bits; the sum of the absolute
+        // differences of a's and b's bytes in it; or the product of a's and b's low doublewords in it, unsigned or signed.
         const uint32_t quadwords = ir_simd_bits(action->result) / 64;
-        for (uint32_t q = 0; q < quadwords; q += 1)
+        for (uint32_t q = 0; action->index >= 2 && q < quadwords; q += 1)
+        {
+            const uint32_t left = (uint32_t)values[0]->words[q];
+            const uint32_t right = (uint32_t)values[1]->words[q];
+            staged.words[q] = action->index == 2 ? (uint64_t)left * right : (uint64_t)((int64_t)(int32_t)left * (int32_t)right);
+        }
+        for (uint32_t q = 0; action->index < 2 && q < quadwords; q += 1)
         {
             const uint64_t data = values[1]->words[q];
             uint64_t value = 0;

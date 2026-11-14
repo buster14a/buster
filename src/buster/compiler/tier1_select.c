@@ -2589,7 +2589,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         else if (kind == BUSTER_TIER1_VECTOR_LANE_UNARY)
         {
             const uint32_t flags = (uint32_t)holes->immediate;
-            const uint16_t form = ir_simd_lane_unary_forms[(flags >> 2) % 3][flags & 3][width == 16 ? 0 : width == 32 ? 1 : 2];
+            const uint16_t form = ir_simd_lane_unary_forms[(flags >> 2) & 3][flags & 3][width == 16 ? 0 : width == 32 ? 1 : 2];
             tier1_select_append(&result, tier1_select_register_record(form, x, left));
         }
         else if (kind == BUSTER_TIER1_VECTOR_CVTT)
@@ -2700,7 +2700,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         }
         else if (kind == BUSTER_TIER1_VECTOR_QUADWORD_OP)
         {
-            const uint16_t form = ir_simd_quadword_op_forms[holes->immediate & 1][width == 16 ? 0 : width == 32 ? 1 : 2];
+            const uint16_t form = ir_simd_quadword_op_forms[holes->immediate & 3][width == 16 ? 0 : width == 32 ? 1 : 2];
             const X86Instruction record = { .form = form, .reg = x, .vvvv = left, .rm = right, .mode = BUSTER_X86_REGISTER_DIRECT };
             tier1_select_append(&result, record);
         }

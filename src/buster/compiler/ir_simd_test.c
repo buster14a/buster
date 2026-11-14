@@ -1471,8 +1471,8 @@ static void ir_test_reductions(IrTestTally* test, Arena* output, Arena* scratch)
 }
 
 // The quadword operations (#1840): both verifiers admit quadword_op exactly of two vectors of the result's type at flags 0
-// and 1, refusing another width's b and other flags; and the model gives vpmultishiftqb's and vpsadbw's quadwords, as
-// their definitions written out here, on random vectors.
+// to 3, refusing another width's b and other flags; and the model gives vpmultishiftqb's, vpsadbw's, vpmuludq's and
+// vpmuldq's quadwords (#2780), as their definitions written out here, on random vectors.
 static void ir_test_quadword_ops(IrTestTally* test, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
@@ -1485,7 +1485,7 @@ static void ir_test_quadword_ops(IrTestTally* test, Arena* output, Arena* scratc
             for (uint32_t other = 0; other < 2; other += 1)
             {
                 const IrType vector = (IrType)(IR_V4I32 + width);
-                const bool admitted = other == 0 && flags <= 1;
+                const bool admitted = other == 0 && flags <= 3;
                 IrFunction function = {0};
                 const IrSizes sizes = { .instruction_count = 4, .block_count = 1 };
                 if (ir_create(output, &sizes, &function) != IR_OK)
@@ -1506,12 +1506,12 @@ static void ir_test_quadword_ops(IrTestTally* test, Arena* output, Arena* scratc
             }
         }
     }
-    ir_test_expect(test, admitted_count == 3 * 2, "quadword operations are admitted at every width and operation");
+    ir_test_expect(test, admitted_count == 3 * 4, "quadword operations are admitted at every width and operation");
     bool exact = true;
-    for (uint32_t trial = 0; trial < 3 * 2 * 8; trial += 1)
+    for (uint32_t trial = 0; trial < 3 * 4 * 8; trial += 1)
     {
         const uint32_t width = trial % 3;
-        const uint32_t operation = (trial / 3) % 2;
+        const uint32_t operation = (trial / 3) % 4;
         const uint32_t bytes = 16u << width;
         IrSimdValue a = {0};
         IrSimdValue b = {0};
@@ -1544,6 +1544,16 @@ static void ir_test_quadword_ops(IrTestTally* test, Arena* output, Arena* scratc
             {
                 memcpy(out + 8 * q, &sum, 8);
             }
+            // vpmuludq and vpmuldq: the whole product of the quadword's low doublewords, unsigned and signed.
+            uint32_t low_left = 0;
+            uint32_t low_right = 0;
+            memcpy(&low_left, left + 8 * q, 4);
+            memcpy(&low_right, right + 8 * q, 4);
+            const uint64_t product = operation == 2 ? (uint64_t)low_left * low_right : (uint64_t)((int64_t)(int32_t)low_left * (int64_t)(int32_t)low_right);
+            if (operation >= 2)
+            {
+                memcpy(out + 8 * q, &product, 8);
+            }
         }
         const IrSimdShape shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
         const IrSimdValue* operands[3] = { &a, &b, 0 };
@@ -1552,7 +1562,7 @@ static void ir_test_quadword_ops(IrTestTally* test, Arena* output, Arena* scratc
         memset(&value, 0xa5, sizeof(value));
         exact = exact && ir_simd_evaluate(&action, operands, 0, 0, 0, &value) && memcmp(value.words, wanted.words, bytes) == 0;
     }
-    ir_test_expect(test, exact, "the model's quadword operations give vpmultishiftqb's and vpsadbw's quadwords");
+    ir_test_expect(test, exact, "the model's quadword operations give vpmultishiftqb's, vpsadbw's, vpmuludq's and vpmuldq's quadwords");
 }
 
 // The bit shuffles into a mask (#1840): both verifiers admit bitshuffle exactly of two vectors of one type into the mask
@@ -1625,9 +1635,9 @@ static void ir_test_bitshuffles(IrTestTally* test, Arena* output, Arena* scratch
 }
 
 // The lanes' unary operations (#1840): both verifiers admit lane_unary exactly where its operand is of its type and its
-// flags a population count of any lanes, or a leading zero count or conflicts of doublewords or quadwords, for every
-// flags byte at each width; and the model gives C's counts and conflicts of each lane on random vectors whose lanes
-// repeat.
+// flags a population count or an absolute value (#2780) of any lanes, or a leading zero count or conflicts of
+// doublewords or quadwords, for every flags byte at each width; and the model gives C's counts, conflicts and absolute
+// values of each lane on random vectors whose lanes repeat.
 static void ir_test_lane_unaries(IrTestTally* test, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
@@ -1641,7 +1651,7 @@ static void ir_test_lane_unaries(IrTestTally* test, Arena* output, Arena* scratc
             {
                 const IrType vector = (IrType)(IR_V4I32 + width);
                 const IrType source = other == 0 ? vector : (IrType)(IR_V4I32 + (width + 1) % 3);
-                const bool admitted = other == 0 && (flags >> 2) <= 2 && ((flags >> 2) == 0 || (flags & 3) >= 2);
+                const bool admitted = other == 0 && (flags >> 2) <= 3 && ((flags >> 2) == 0 || (flags >> 2) == 3 || (flags & 3) >= 2);
                 IrFunction function = {0};
                 const IrSizes sizes = { .instruction_count = 3, .block_count = 1 };
                 if (ir_create(output, &sizes, &function) != IR_OK)
@@ -1661,15 +1671,15 @@ static void ir_test_lane_unaries(IrTestTally* test, Arena* output, Arena* scratc
             }
         }
     }
-    ir_test_expect(test, admitted_count == 3 * (4 + 2 + 2), "lane unary operations are admitted at every width, lanes and operation");
-    // The model against C's counts and conflicts, lane by lane.
+    ir_test_expect(test, admitted_count == 3 * (4 + 2 + 2 + 4), "lane unary operations are admitted at every width, lanes and operation");
+    // The model against C's counts, conflicts and absolute values, lane by lane.
     bool exact = true;
-    for (uint32_t trial = 0; trial < 3 * 8 * 4; trial += 1)
+    for (uint32_t trial = 0; trial < 3 * 12 * 4; trial += 1)
     {
         const uint32_t width = trial % 3;
-        const uint32_t pick = (trial / 3) % 8;
-        const uint32_t operation = pick < 4 ? 0 : pick < 6 ? 1 : 2;
-        const uint32_t size = pick < 4 ? pick : 2 + pick % 2;
+        const uint32_t pick = (trial / 3) % 12;
+        const uint32_t operation = pick < 4 ? 0 : pick < 6 ? 1 : pick < 8 ? 2 : 3;
+        const uint32_t size = pick < 4 ? pick : pick < 8 ? 2 + pick % 2 : pick - 8;
         const uint32_t bytes = 16u << width;
         const uint32_t element = 1u << size;
         const uint32_t lanes = bytes / element;
@@ -1713,6 +1723,13 @@ static void ir_test_lane_unaries(IrTestTally* test, Arena* output, Arena* scratc
                 memcpy(&y, raw + below * element, element);
                 value |= (uint64_t)(x == y) << below;
             }
+            if (operation == 3)
+            {
+                // C's absolute value of the lane's signed integer, through the next wider one; the most negative lane
+                // stays itself, as x86's vpabs* gives it.
+                const int64_t lane_value = element == 1 ? (int8_t)x : element == 2 ? (int16_t)x : element == 4 ? (int32_t)x : (int64_t)x;
+                value = lane_value < 0 ? 0 - (uint64_t)lane_value : (uint64_t)lane_value;
+            }
             memcpy((uint8_t*)expected.words + lane * element, &value, element);
         }
         const IrSimdShape shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
@@ -1721,7 +1738,7 @@ static void ir_test_lane_unaries(IrTestTally* test, Arena* output, Arena* scratc
         IrSimdValue got = {0};
         exact = exact && ir_simd_evaluate(&action, operands, 0, 0, 0, &got) && memcmp(&got, &expected, sizeof(got)) == 0;
     }
-    ir_test_expect(test, exact, "the model's lane counts and conflicts are C's");
+    ir_test_expect(test, exact, "the model's lane counts, conflicts and absolute values are C's");
 }
 
 // C's operation of two lanes in the rounding mode the flags name (#1840's fround), by host_fesetround and volatile

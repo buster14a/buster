@@ -354,12 +354,14 @@ typedef enum IrOp
 #define BUSTER_IR_REDUCE_OPERATIONS 9u
 // A unary operation of each of a vector's integer lanes (#1840), a of the result's type: its flags the lanes' bytes'
 // log2 in bits 0 and 1 and the operation in bits 2 and 3 (BUSTER_IR_LANE_UNARY_*): each lane's set bits (0: vpopcntb to
-// vpopcntq), its leading zeros, the lane's bits for a zero lane (1: vplzcntd, vplzcntq), or its conflicts, bit j set
-// for each lane j below it that equals it (2: vpconflictd, vpconflictq); the last two of doublewords and quadwords.
+// vpopcntq), its leading zeros, the lane's bits for a zero lane (1: vplzcntd, vplzcntq), its conflicts, bit j set for
+// each lane j below it that equals it (2: vpconflictd, vpconflictq), the last two of doublewords and quadwords; or its
+// absolute value, the most negative lane itself (3: vpabsb to vpabsq, #2780).
 #define BUSTER_IR_INTRINSIC_LANE_UNARY 36u
 #define BUSTER_IR_LANE_UNARY_POPCOUNT 0u
 #define BUSTER_IR_LANE_UNARY_LZCNT 1u
 #define BUSTER_IR_LANE_UNARY_CONFLICT 2u
+#define BUSTER_IR_LANE_UNARY_ABS 3u
 // A floating operation of two 64-byte vectors' lanes at a rounding of its own, its exceptions suppressed (#1840), a and
 // b of the result's type: its flags the operation in bits 0 and 1 (0 a + b, 1 a - b, 2 a * b, 3 a / b), the lanes in
 // bit 2 (0 floats, 1 doubles) and the rounding in bits 3 and 4 (to nearest, down, up, toward zero: EVEX's and MXCSR's
@@ -378,11 +380,15 @@ typedef enum IrOp
 // An operation of each quadword's bytes of two vectors of the result's type (#1840), binary: its flags the operation
 // (BUSTER_IR_QUADWORD_*): 0, each byte of the result the 8 bits of b's quadword from the bit a's byte's low 6 bits name,
 // wrapping around it (vpmultishiftqb, _mm512_multishift_epi64_epi8); 1, each quadword the sum of the absolute
-// differences of a's and b's 8 unsigned bytes in it (vpsadbw, _mm512_sad_epu8).
+// differences of a's and b's 8 unsigned bytes in it (vpsadbw, _mm512_sad_epu8); 2 and 3, each quadword the product of
+// a's and b's low doublewords in it, unsigned (vpmuludq, _mm512_mul_epu32) and signed (vpmuldq, _mm512_mul_epi32), the
+// whole 64 bits of it (#2780).
 #define BUSTER_IR_INTRINSIC_QUADWORD_OP 40u
 #define BUSTER_IR_INTRINSIC_COUNT 41u
 #define BUSTER_IR_QUADWORD_MULTISHIFT 0u
 #define BUSTER_IR_QUADWORD_SAD 1u
+#define BUSTER_IR_QUADWORD_MUL_UNSIGNED 2u
+#define BUSTER_IR_QUADWORD_MUL_SIGNED 3u
 #define BUSTER_IR_INTRINSIC_TERNARY BUSTER_IR_INTRINSIC_PERMUTE2
 #define BUSTER_IR_INTRINSIC_KIND 0xffu
 #define BUSTER_IR_INTRINSIC_EXTRA_SHIFT 8u
@@ -2408,9 +2414,10 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 }
                 else if (c == BUSTER_IR_INTRINSIC_LANE_UNARY)
                 {
-                    // A population count of any lanes; a leading zero count or conflicts of doublewords or quadwords.
-                    valid = b == BUSTER_IR_NONE && ir_vector_type(type) && ta == type && (part >> 2) <= BUSTER_IR_LANE_UNARY_CONFLICT &&
-                            ((part >> 2) == BUSTER_IR_LANE_UNARY_POPCOUNT || (part & 3) >= 2);
+                    // A population count or an absolute value of any lanes; a leading zero count or conflicts of doublewords or
+                    // quadwords.
+                    valid = b == BUSTER_IR_NONE && ir_vector_type(type) && ta == type && (part >> 2) <= BUSTER_IR_LANE_UNARY_ABS &&
+                            ((part >> 2) == BUSTER_IR_LANE_UNARY_POPCOUNT || (part >> 2) == BUSTER_IR_LANE_UNARY_ABS || (part & 3) >= 2);
                 }
                 else if (c == BUSTER_IR_INTRINSIC_CVTT)
                 {
@@ -2443,14 +2450,14 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 }
                 else if (c == BUSTER_IR_INTRINSIC_AES || c == BUSTER_IR_INTRINSIC_QUADWORD_OP)
                 {
-                    // An AES round's flags its round, a quadword operation's its operation: 0 or 1 each.
+                    // An AES round's flags its round, 0 or 1; a quadword operation's its operation, 0 to 3.
                     if (b >= f->instruction_count || f->type[b] == IR_VOID || f->type[b] >= IR_TYPE_COUNT)
                     {
                         check = ir_check(IR_ERROR_OPERAND, i, 1);
                     }
                     else
                     {
-                        valid = ir_vector_type(type) && ta == type && f->type[b] == type && part <= 1;
+                        valid = ir_vector_type(type) && ta == type && f->type[b] == type && part <= (c == BUSTER_IR_INTRINSIC_AES ? 1u : BUSTER_IR_QUADWORD_MUL_SIGNED);
                     }
                 }
                 else if (c == BUSTER_IR_INTRINSIC_SHIFT)

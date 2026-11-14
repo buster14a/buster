@@ -1524,10 +1524,9 @@ static void ir_simd_typed_test_funnels(IrTestTally* tally)
     printf("  IR SIMD rows: %u funnel shifts and %u rotates by an immediate decode to the IR's funnel\n", funnels, rotates);
 }
 
-// The quadword operations (#1840): the vpmultishiftqb and psadbw builtins' rows at each width, by the real producer,
-// decode as the IR's quadword_op of their operation at exactly BW's (and VBMI's for the multishifts), AVX512F's and VL's
-// below 64 bytes; refused
-// without each and under 6 changes.
+// The quadword operations (#1840): the vpmultishiftqb, psadbw, pmuludq and pmuldq builtins' rows at each width, by the
+// real producer, decode as the IR's quadword_op of their operation at exactly AVX512F's, VL's below 64 bytes, BW's (and
+// VBMI's for the multishifts) for the byte operations; refused without each and under 6 changes.
 static void ir_simd_typed_test_quadword_ops(IrTestTally* tally)
 {
     const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
@@ -1541,10 +1540,15 @@ static void ir_simd_typed_test_quadword_ops(IrTestTally* tally)
         const CheckX86LowerRule* rule = check_x86_lower_rules + i;
         const bool multishift = strncmp(rule->name, "__builtin_ia32_vpmultishiftqb", sizeof("__builtin_ia32_vpmultishiftqb") - 1) == 0;
         const bool sad = strncmp(rule->name, "__builtin_ia32_psadbw", sizeof("__builtin_ia32_psadbw") - 1) == 0;
-        if (!multishift && !sad)
+        // The products of the quadwords' low doublewords (#2780).
+        const bool unsigned_product = strncmp(rule->name, "__builtin_ia32_pmuludq", sizeof("__builtin_ia32_pmuludq") - 1) == 0;
+        const bool signed_product = strncmp(rule->name, "__builtin_ia32_pmuldq", sizeof("__builtin_ia32_pmuldq") - 1) == 0;
+        if (!multishift && !sad && !unsigned_product && !signed_product)
         {
             continue;
         }
+        const uint32_t operation = multishift ? BUSTER_IR_QUADWORD_MULTISHIFT : sad ? BUSTER_IR_QUADWORD_SAD : unsigned_product ? BUSTER_IR_QUADWORD_MUL_UNSIGNED :
+                                                                                                    BUSTER_IR_QUADWORD_MUL_SIGNED;
         Tier0Operation row;
         char description[192];
         const bool made = check_x86_lower_row_of(&every, rule, 0, 4, 0, false, &row) == NULL;
@@ -1554,14 +1558,14 @@ static void ir_simd_typed_test_quadword_ops(IrTestTally* tally)
         {
             continue;
         }
-        // vpmultishiftqb's target rows have BW with VBMI.
-        const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | (rule->bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0) |
-                                  (multishift ? BUSTER_X86_FEATURE(AVX512VBMI) : 0);
+        // vpmultishiftqb's target rows have BW with VBMI; the products need neither.
+        const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | (operation < BUSTER_IR_QUADWORD_MUL_UNSIGNED ? BUSTER_X86_FEATURE(AVX512BW) : 0) |
+                                  (rule->bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0) | (multishift ? BUSTER_X86_FEATURE(AVX512VBMI) : 0);
         IrSimdTypedOperation decoded;
         memset(&decoded, 0xa5, sizeof(decoded));
         const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
         snprintf(description, sizeof(description), "%s: the IR's quadword_op at exactly its features", rule->name);
-        const bool ok = status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.quadword_op && decoded.immediate == (multishift ? BUSTER_IR_QUADWORD_MULTISHIFT : BUSTER_IR_QUADWORD_SAD) &&
+        const bool ok = status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.quadword_op && decoded.immediate == operation &&
                         (decoded.required_features & ~BUSTER_X86_FEATURE(AVX)) == expected;
         ir_test_expect(tally, ok, description);
         decoded_rows += ok;
@@ -1595,8 +1599,8 @@ static void ir_simd_typed_test_quadword_ops(IrTestTally* tally)
             ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded) || (refused == IR_SIMD_TYPED_OK && !decoded.quadword_op && !decoded.machine), description);
         }
     }
-    ir_test_expect(tally, decoded_rows == 6, "every multishift and sum of absolute differences decodes");
-    printf("  IR SIMD rows: %u multishifts and sums of absolute differences decode to the IR's quadword_op\n", decoded_rows);
+    ir_test_expect(tally, decoded_rows == 12, "every multishift, sum of absolute differences and product of doublewords decodes");
+    printf("  IR SIMD rows: %u multishifts, sums of absolute differences and products of doublewords decode to the IR's quadword_op\n", decoded_rows);
 }
 
 // The bit shuffles into a mask (#1840): the vpshufbitqmb builtins' rows (__builtin_ia32_vpshufbitqmb128_mask to 512's, by
@@ -2831,7 +2835,7 @@ static void ir_simd_typed_test_lane_unaries(IrTestTally* tally)
     uint32_t decoded_rows = 0;
     const bool tables = x86_encoder_initialize() && tier0_initialize();
     ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
-    for (uint32_t kind = 0; tables && kind < 10; kind += 1)
+    for (uint32_t kind = 0; tables && kind < 14; kind += 1)
     {
         for (uint32_t width = 0; width < 3; width += 1)
         {
@@ -2882,8 +2886,8 @@ static void ir_simd_typed_test_lane_unaries(IrTestTally* tally)
             }
         }
     }
-    ir_test_expect(tally, decoded_rows == 10 * 3, "every lane count and conflict decodes");
-    printf("  IR SIMD rows: %u population counts, leading zero counts and conflicts decode to the IR's lane_unary\n", decoded_rows);
+    ir_test_expect(tally, decoded_rows == 14 * 3, "every lane count, conflict and absolute value decodes");
+    printf("  IR SIMD rows: %u population counts, leading zero counts, conflicts and absolute values decode to the IR's lane_unary\n", decoded_rows);
 }
 
 // The floating operations at their own rounding (#1840): vaddps to vdivpd with embedded rounding, each rounding

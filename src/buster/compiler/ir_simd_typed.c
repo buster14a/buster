@@ -2324,7 +2324,7 @@ static IrSimdTypedStatus ir_simd_typed_lane_unary(const Tier0Operation* source, 
     const bool plain = shaped && source->operand_count == 1 && source->record_count == 1;
     IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
     uint64_t required = 0;
-    for (uint32_t operation = 0; (plain || fallback) && operation < 3; operation += 1)
+    for (uint32_t operation = 0; (plain || fallback) && operation < 4; operation += 1)
     {
         for (uint32_t size = 0; size < 4; size += 1)
         {
@@ -2528,8 +2528,9 @@ static IrSimdTypedStatus ir_simd_typed_funnel(const Tier0Operation* source, uint
 // The quadword operations (#1840): a row of two vectors of the result's width (16, 32 or 64 bytes) and one record of an
 // ir_simd_quadword_op_forms form at that width, register-direct and undecorated, of VECTOR(0) (vvvv) and VECTOR(1) (rm)
 // into VECTOR(0) (reg): the builtins' __builtin_ia32_vpmultishiftqb128 to 512 (a's bytes the bits' positions, b the
-// quadwords) and __builtin_ia32_psadbw128 to 512. It is the IR's quadword_op of its operation; its features are its form's
-// (VBMI, BW), AVX512F's, VL's below 64 bytes and the vectors' moves; otherwise it stays a machine row.
+// quadwords), __builtin_ia32_psadbw128 to 512, and __builtin_ia32_pmuludq128 to 512 and pmuldq128 to 512 (#2780). It is
+// the IR's quadword_op of its operation; its features are its form's (VBMI, BW), AVX512F's, VL's below 64 bytes and the
+// vectors' moves; otherwise it stays a machine row.
 static IrSimdTypedStatus ir_simd_typed_quadword_op(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
 {
     const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
@@ -2540,7 +2541,7 @@ static IrSimdTypedStatus ir_simd_typed_quadword_op(const Tier0Operation* source,
                           source->operand_count == 2 && source->operand_classes[0] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[0] == bytes &&
                           source->operand_classes[1] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[1] == bytes;
     IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
-    for (uint32_t operation = 0; admitted && operation < 2; operation += 1)
+    for (uint32_t operation = 0; admitted && operation < 4; operation += 1)
     {
         const X86Instruction expected = { .form = ir_simd_quadword_op_forms[operation][width], .reg = v0, .vvvv = v0, .rm = v1, .mode = BUSTER_X86_REGISTER_DIRECT };
         if (memcmp(&source->records[0], &expected, sizeof(expected)) == 0)
