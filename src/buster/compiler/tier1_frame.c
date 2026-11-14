@@ -46,6 +46,8 @@
 #define BUSTER_TIER1_FRAME_PAGE_BYTES 4096u
 #define BUSTER_TIER1_FRAME_STEP_CAPACITY 32u
 #define BUSTER_TIER1_FRAME_REALIGN_BASE BUSTER_ABI_R15
+// The most events the vector path sorts by rank (tier1_frame_rank), a multiple of 8 and at most 64.
+#define BUSTER_TIER1_FRAME_RANK_EVENTS 64u
 
 #define BUSTER_TIER1_FRAME_VARIADIC (1u << 0)
 #define BUSTER_TIER1_FRAME_DYNAMIC_STACK (1u << 1)
@@ -167,25 +169,18 @@ struct Tier1Frame
 };
 
 // Scratch belongs to one prepared function. It is reusable for repeated coloring/layout and has no retained pointers
-// into an output frame. All arrays have count elements except the event/sort/search arrays, which have 2 * count.
+// into an output frame. `event` has 2 * count elements, the sorted ends (item * 2) and starts (item * 2 + 1); `last`
+// has count + 1, a pressure level's last ended item; every other array has count.
 typedef struct Tier1FrameWork Tier1FrameWork;
 struct Tier1FrameWork
 {
     Tier1FrameRequirements requirements;
     uint32_t count;
     uint32_t class_count;
-    uint64_t* key;
-    uint64_t* temporary_key;
     uint32_t* event;
-    uint32_t* temporary_event;
-    uint32_t* pressure;
-    uint32_t* nearest;
-    uint32_t* next_nearest;
-    uint32_t* object_class;
-    uint32_t* parent;
-    uint32_t* next_parent;
-    uint32_t* root_color;
+    uint32_t* last;
     uint32_t* color;
+    uint32_t* object_class;
     uint32_t* class_stride;
     uint32_t* class_alignment;
     uint32_t* class_colors;
@@ -207,16 +202,6 @@ static uint64_t tier1_frame_align(uint64_t value, uint32_t alignment)
     return (value + alignment - 1) & ~((uint64_t)alignment - 1);
 }
 
-static __m512i tier1_frame_scan32(__m512i values)
-{
-    const __m512i lane = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-    values = _mm512_add_epi32(values, _mm512_maskz_permutexvar_epi32(0xfffe, _mm512_sub_epi32(lane, _mm512_set1_epi32(1)), values));
-    values = _mm512_add_epi32(values, _mm512_maskz_permutexvar_epi32(0xfffc, _mm512_sub_epi32(lane, _mm512_set1_epi32(2)), values));
-    values = _mm512_add_epi32(values, _mm512_maskz_permutexvar_epi32(0xfff0, _mm512_sub_epi32(lane, _mm512_set1_epi32(4)), values));
-    values = _mm512_add_epi32(values, _mm512_maskz_permutexvar_epi32(0xff00, _mm512_sub_epi32(lane, _mm512_set1_epi32(8)), values));
-    return values;
-}
-
 static __m512i tier1_frame_scan64(__m512i values)
 {
     const __m512i lane = _mm512_setr_epi64(0, 1, 2, 3, 4, 5, 6, 7);
@@ -226,41 +211,156 @@ static __m512i tier1_frame_scan64(__m512i values)
     return values;
 }
 
-// Stable eight-bit radix passes. Event positions have the full u32 range: a dense counting table would make memory
-// depend on the producer's position numbering. The ordered scatter is shared; its cost is included in preparation.
-static void tier1_frame_sort(uint64_t* key, uint32_t* id, uint64_t* temporary_key, uint32_t* temporary_id, uint32_t count, uint32_t passes)
+// Stable eight-bit radix passes over the key bytes that differ between keys, so a function's small positions and few
+// classes take two or three passes of the eight (#2699). Event positions have the full u32 range: a dense counting
+// table would make memory depend on the producer's position numbering. The ordered scatter is shared; its cost is
+// included in preparation. Returns whether the sorted columns are the temporary ones: an odd number of passes ran.
+static bool tier1_frame_sort(uint64_t* key, uint32_t* id, uint64_t* temporary_key, uint32_t* temporary_id, uint32_t count)
 {
-    for (uint32_t pass = 0; pass < passes; pass += 1)
+    uint64_t differing = 0;
+    for (uint32_t i = 1; i < count; i += 1)
     {
-        uint32_t offsets[256] = {0};
-        const uint32_t shift = pass * 8;
-        for (uint32_t i = 0; i < count; i += 1)
-        {
-            offsets[(key[i] >> shift) & 255] += 1;
-        }
-        uint32_t sum = 0;
-        for (uint32_t bucket = 0; bucket < 256; bucket += 1)
-        {
-            const uint32_t amount = offsets[bucket];
-            offsets[bucket] = sum;
-            sum += amount;
-        }
-        for (uint32_t i = 0; i < count; i += 1)
-        {
-            const uint32_t bucket = (key[i] >> shift) & 255;
-            const uint32_t at = offsets[bucket];
-            offsets[bucket] += 1;
-            temporary_key[at] = key[i];
-            temporary_id[at] = id[i];
-        }
-        uint64_t* swap_key = key;
-        key = temporary_key;
-        temporary_key = swap_key;
-        uint32_t* swap_id = id;
-        id = temporary_id;
-        temporary_id = swap_id;
+        differing |= key[i] ^ key[0];
     }
-    // Every caller uses an even number of passes, so the sorted columns are back in the caller's original arrays.
+    bool swapped = false;
+    for (uint32_t shift = 0; shift < 64; shift += 8)
+    {
+        if (((differing >> shift) & 255) != 0)
+        {
+            uint32_t offsets[256] = {0};
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                offsets[(key[i] >> shift) & 255] += 1;
+            }
+            uint32_t sum = 0;
+            for (uint32_t bucket = 0; bucket < 256; bucket += 1)
+            {
+                const uint32_t amount = offsets[bucket];
+                offsets[bucket] = sum;
+                sum += amount;
+            }
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const uint32_t bucket = (key[i] >> shift) & 255;
+                const uint32_t at = offsets[bucket];
+                offsets[bucket] += 1;
+                temporary_key[at] = key[i];
+                temporary_id[at] = id[i];
+            }
+            uint64_t* swap_key = key;
+            key = temporary_key;
+            temporary_key = swap_key;
+            uint32_t* swap_id = id;
+            id = temporary_id;
+            temporary_id = swap_id;
+            swapped = !swapped;
+        }
+    }
+    return swapped;
+}
+
+// The vector path's sort of up to BUSTER_TIER1_FRAME_RANK_EVENTS events (#2699): an event's rank is the count of keys
+// below its own, and every key is compared with eight others at a time. The keys are distinct, each event's class,
+// position and input place (tier1_frame_prepare), so the ranks are the stable radix sort's order. `vectors` is a
+// constant at each call, which keeps the keys and the ranks in registers; the lanes past `events` hold key 0, below
+// nothing, and their ranks aren't read.
+static inline __attribute__((always_inline)) void tier1_frame_rank_vectors(const uint64_t* key, uint32_t events, uint32_t vectors, uint32_t* rank)
+{
+    __m512i keys[BUSTER_TIER1_FRAME_RANK_EVENTS / 8];
+    __m512i ranks[BUSTER_TIER1_FRAME_RANK_EVENTS / 8];
+    for (uint32_t vector = 0; vector < vectors; vector += 1)
+    {
+        const uint32_t first = vector * 8;
+        const uint32_t live = events <= first ? 0 : (events - first < 8 ? events - first : 8);
+        keys[vector] = _mm512_maskz_loadu_epi64((__mmask8)((1u << live) - 1), key + (live != 0 ? first : 0));
+        ranks[vector] = _mm512_setzero_si512();
+    }
+    for (uint32_t other = 0; other < events; other += 1)
+    {
+        const __m512i value = _mm512_set1_epi64((long long)key[other]);
+        for (uint32_t vector = 0; vector < vectors; vector += 1)
+        {
+            ranks[vector] = _mm512_mask_add_epi64(ranks[vector], _mm512_cmpgt_epu64_mask(keys[vector], value), ranks[vector], _mm512_set1_epi64(1));
+        }
+    }
+    for (uint32_t vector = 0; vector < vectors; vector += 1)
+    {
+        _mm256_storeu_si256((__m256i*)(rank + vector * 8), _mm512_cvtepi64_epi32(ranks[vector]));
+    }
+}
+
+// `key` holds count ends' keys, then count starts'; `event` takes the sorted event IDs.
+static void tier1_frame_rank(const uint64_t* key, uint32_t count, uint32_t* event)
+{
+    const uint32_t events = count * 2;
+    uint32_t rank[BUSTER_TIER1_FRAME_RANK_EVENTS];
+    if (events <= 8)
+    {
+        tier1_frame_rank_vectors(key, events, 1, rank);
+    }
+    else if (events <= 16)
+    {
+        tier1_frame_rank_vectors(key, events, 2, rank);
+    }
+    else if (events <= 32)
+    {
+        tier1_frame_rank_vectors(key, events, 4, rank);
+    }
+    else
+    {
+        tier1_frame_rank_vectors(key, events, 8, rank);
+    }
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        event[rank[i]] = i * 2;
+        event[rank[count + i]] = i * 2 + 1;
+    }
+}
+
+// The vector path's classes while a function has at most eight (all but one of sqlite3.c's 1,034 frames with objects,
+// #2699): the distinct class keys stay in one register, each item's key is compared with all of them at once, and a
+// key's class is the count of distinct keys below it, its place in the sorted order. Each item takes its key's lane,
+// which `remap` turns into its class. False at a ninth distinct key: the caller sorts instead, and keeps nothing of this.
+static bool tier1_frame_classes(Tier1FrameWork* work, const uint64_t* key, uint32_t* remap)
+{
+    uint32_t* const object_class = work->object_class;
+    // No key equals an unused lane's: a key's high half is UINT32_MAX less its alignment, which is at least 1.
+    __m512i table = _mm512_set1_epi64(-1);
+    uint32_t used = 0;
+    bool fits = true;
+    for (uint32_t i = 0; fits && i < work->count; i += 1)
+    {
+        const __m512i value = _mm512_set1_epi64((long long)key[i]);
+        const uint32_t equal = _mm512_cmpeq_epi64_mask(table, value);
+        if (equal != 0)
+        {
+            object_class[i] = (uint32_t)__builtin_ctz(equal);
+        }
+        else if (used < 8)
+        {
+            table = _mm512_mask_mov_epi64(table, (__mmask8)(1u << used), value);
+            object_class[i] = used;
+            used += 1;
+        }
+        else
+        {
+            fits = false;
+        }
+    }
+    if (fits)
+    {
+        uint64_t distinct[8];
+        _mm512_storeu_si512(distinct, table);
+        for (uint32_t i = 0; i < used; i += 1)
+        {
+            const uint32_t group = (uint32_t)__builtin_popcount(_mm512_cmplt_epu64_mask(table, _mm512_set1_epi64((long long)distinct[i])));
+            remap[i] = group;
+            work->class_stride[group] = (uint32_t)distinct[i];
+            work->class_alignment[group] = UINT32_MAX - (uint32_t)(distinct[i] >> 32);
+        }
+        work->class_count = used;
+    }
+    return fits;
 }
 
 static Tier1FrameError tier1_frame_header(const Tier1FrameRequest* request)
@@ -461,55 +561,76 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
         .count = request->slots.count,
     };
     const uint32_t count = candidate.count;
-    const uint64_t events = (uint64_t)count * 2;
+    const uint32_t events = count * 2;
+    uint64_t* key = 0;
+    uint64_t* temporary_key = 0;
+    uint32_t* temporary_event = 0;
     if (error == TIER1_FRAME_OK && count != 0)
     {
-        candidate.key = arena_push_array(scratch, events, 8, 8);
-        candidate.temporary_key = arena_push_array(scratch, events, 8, 8);
-        candidate.event = arena_push_array(scratch, events, 4, 4);
-        candidate.temporary_event = arena_push_array(scratch, events, 4, 4);
-        candidate.pressure = arena_push_array(scratch, events, 4, 4);
-        candidate.nearest = arena_push_array(scratch, events, 4, 4);
-        candidate.next_nearest = arena_push_array(scratch, events, 4, 4);
-        candidate.object_class = arena_push_array(scratch, count, 4, 4);
-        candidate.parent = arena_push_array(scratch, count, 4, 4);
-        candidate.next_parent = arena_push_array(scratch, count, 4, 4);
-        candidate.root_color = arena_push_array(scratch, count, 4, 4);
-        candidate.color = arena_push_array(scratch, count, 4, 4);
-        candidate.class_stride = arena_push_array(scratch, count, 4, 4);
-        candidate.class_alignment = arena_push_array(scratch, count, 4, 4);
-        candidate.class_colors = arena_push_array(scratch, count, 4, 4);
-        candidate.class_slot = arena_push_array(scratch, count, 4, 4);
-        candidate.class_offset = arena_push_array(scratch, count, 8, 8);
-        if (candidate.key == 0 || candidate.temporary_key == 0 || candidate.event == 0 || candidate.temporary_event == 0 ||
-            candidate.pressure == 0 || candidate.nearest == 0 || candidate.next_nearest == 0 || candidate.object_class == 0 ||
-            candidate.parent == 0 || candidate.next_parent == 0 || candidate.root_color == 0 || candidate.color == 0 ||
-            candidate.class_stride == 0 || candidate.class_alignment == 0 || candidate.class_colors == 0 ||
-            candidate.class_slot == 0 || candidate.class_offset == 0)
+        // One push: the sort's two key columns and the classes' offsets, then the dword columns.
+        const uint64_t dwords = (uint64_t)events * 2 + count + 1 + (uint64_t)count * 6;
+        key = arena_push_array(scratch, (uint64_t)events * 2 + count + (dwords + 1) / 2, 8, 8);
+        if (key == 0)
         {
             error = TIER1_FRAME_CAPACITY;
+        }
+        else
+        {
+            temporary_key = key + events;
+            candidate.class_offset = temporary_key + events;
+            candidate.event = (uint32_t*)(candidate.class_offset + count);
+            temporary_event = candidate.event + events;
+            candidate.last = temporary_event + events;
+            candidate.color = candidate.last + count + 1;
+            candidate.object_class = candidate.color + count;
+            candidate.class_stride = candidate.object_class + count;
+            candidate.class_alignment = candidate.class_stride + count;
+            candidate.class_colors = candidate.class_alignment + count;
+            candidate.class_slot = candidate.class_colors + count;
         }
     }
     if (error == TIER1_FRAME_OK && request->slots.indices != 0 && count != 0)
     {
-        for (uint32_t i = 0; i < count; i += 1)
+        // Distinct indices: each row is stamped with its item, and an item whose row holds another's stamp shares it.
+        // Only stamped rows are read, so the column isn't cleared. Without room for a stamp a row, the indices are sorted.
+        const uint32_t* const indices = request->slots.indices;
+        const uint64_t stamps = scratch->length;
+        uint32_t* const stamp = arena_push_array(scratch, request->slots.column_count, 4, 4);
+        uint64_t different = 0;
+        if (stamp != 0)
         {
-            candidate.key[i] = request->slots.indices[i];
-            candidate.event[i] = i;
-        }
-        tier1_frame_sort(candidate.key, candidate.event, candidate.temporary_key, candidate.temporary_event, count, 4);
-        for (uint32_t i = 1; error == TIER1_FRAME_OK && i < count; i += 1)
-        {
-            if (candidate.key[i] == candidate.key[i - 1])
+            for (uint32_t i = 0; i < count; i += 1)
             {
-                error = TIER1_FRAME_INVALID;
+                stamp[indices[i]] = i;
             }
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                different |= stamp[indices[i]] ^ i;
+            }
+            arena_pop_to(scratch, stamps);
+        }
+        else
+        {
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                key[i] = indices[i];
+                candidate.event[i] = i;
+            }
+            const uint64_t* const sorted = tier1_frame_sort(key, candidate.event, temporary_key, temporary_event, count) ? temporary_key : key;
+            for (uint32_t i = 1; i < count; i += 1)
+            {
+                different |= sorted[i] == sorted[i - 1];
+            }
+        }
+        if (different != 0)
+        {
+            error = TIER1_FRAME_INVALID;
         }
     }
     uint32_t alignment = 1;
     if (error == TIER1_FRAME_OK)
     {
-        error = tier1_frame_rows(&request->slots, BUSTER_SCALAR_PATH(scalar), candidate.key, &alignment);
+        error = tier1_frame_rows(&request->slots, BUSTER_SCALAR_PATH(scalar), key, &alignment);
     }
     if (error == TIER1_FRAME_OK)
     {
@@ -521,33 +642,65 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
     }
     if (error == TIER1_FRAME_OK && count != 0)
     {
-        for (uint32_t i = 0; i < count; i += 1)
+        uint32_t lanes[8];
+        const uint32_t* remap = 0;
+        if (!BUSTER_SCALAR_PATH(scalar) && tier1_frame_classes(&candidate, key, lanes))
         {
-            candidate.event[i] = i;
+            remap = lanes;
         }
-        tier1_frame_sort(candidate.key, candidate.event, candidate.temporary_key, candidate.temporary_event, count, 8);
-        for (uint32_t i = 0; i < count; i += 1)
+        else
         {
-            if (i == 0 || candidate.key[i] != candidate.key[i - 1])
+            for (uint32_t i = 0; i < count; i += 1)
             {
-                const uint32_t group = candidate.class_count;
-                candidate.class_stride[group] = (uint32_t)candidate.key[i];
-                candidate.class_alignment[group] = UINT32_MAX - (uint32_t)(candidate.key[i] >> 32);
-                candidate.class_count += 1;
+                candidate.event[i] = i;
             }
-            candidate.object_class[candidate.event[i]] = candidate.class_count - 1;
+            const bool swapped = tier1_frame_sort(key, candidate.event, temporary_key, temporary_event, count);
+            const uint64_t* const sorted_key = swapped ? temporary_key : key;
+            const uint32_t* const sorted_item = swapped ? temporary_event : candidate.event;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                if (i == 0 || sorted_key[i] != sorted_key[i - 1])
+                {
+                    const uint32_t group = candidate.class_count;
+                    candidate.class_stride[group] = (uint32_t)sorted_key[i];
+                    candidate.class_alignment[group] = UINT32_MAX - (uint32_t)(sorted_key[i] >> 32);
+                    candidate.class_count += 1;
+                }
+                candidate.object_class[sorted_item[i]] = candidate.class_count - 1;
+            }
         }
-        for (uint32_t i = 0; i < count; i += 1)
+        // Either sort keeps all ends before starts at an equal position, allowing adjacent lifetimes to share, and
+        // equal events in item order.
+        if (!BUSTER_SCALAR_PATH(scalar) && events <= BUSTER_TIER1_FRAME_RANK_EVENTS)
         {
-            const uint32_t row = tier1_frame_row(&request->slots, i);
-            const uint64_t group = (uint64_t)candidate.object_class[i] << 32;
-            candidate.key[i] = group | request->slots.end[row];
-            candidate.event[i] = i * 2;
-            candidate.key[count + i] = group | request->slots.start[row];
-            candidate.event[count + i] = i * 2 + 1;
+            // Distinct keys: under 64 events' places in 6 bits, a position in 32, and a class under 32.
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const uint32_t row = tier1_frame_row(&request->slots, i);
+                const uint32_t group = remap != 0 ? remap[candidate.object_class[i]] : candidate.object_class[i];
+                candidate.object_class[i] = group;
+                key[i] = (uint64_t)group << 38 | (uint64_t)request->slots.end[row] << 6 | i;
+                key[count + i] = (uint64_t)group << 38 | (uint64_t)request->slots.start[row] << 6 | (count + i);
+            }
+            tier1_frame_rank(key, count, candidate.event);
         }
-        // The stable sort keeps all ends before starts at an equal position, allowing adjacent lifetimes to share.
-        tier1_frame_sort(candidate.key, candidate.event, candidate.temporary_key, candidate.temporary_event, count * 2, 8);
+        else
+        {
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const uint32_t row = tier1_frame_row(&request->slots, i);
+                const uint32_t group = remap != 0 ? remap[candidate.object_class[i]] : candidate.object_class[i];
+                candidate.object_class[i] = group;
+                key[i] = (uint64_t)group << 32 | request->slots.end[row];
+                candidate.event[i] = i * 2;
+                key[count + i] = (uint64_t)group << 32 | request->slots.start[row];
+                candidate.event[count + i] = i * 2 + 1;
+            }
+            if (tier1_frame_sort(key, candidate.event, temporary_key, temporary_event, events))
+            {
+                candidate.event = temporary_event;
+            }
+        }
     }
     if (error == TIER1_FRAME_OK)
     {
@@ -560,132 +713,49 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
     return error;
 }
 
-// The vector colorer's exact twin, in one pass over the same sorted events (#2606): a start whose pressure is a new
-// maximum of its class takes that pressure less one; any other start takes the color of the item whose end last took
-// the class's pressure down from the start's level, which is the end right after the start's nearest earlier event of
-// equal or greater pressure. `nearest` holds each level's last such color; a start reads its level only after an end
-// of its own class wrote it, since the class's pressure rose to that level before and has fallen below it since.
-static void tier1_frame_color_scalar(Tier1FrameWork* work)
+// Each class uses exactly its maximum live pressure: the free colors are a stack, an end pushes its item's color and a
+// start pops the last one pushed, or takes a new color, its pressure less one, when the pressure is a new maximum of
+// its class. The stack's place is the pressure level, a start's pressure after it and an end's before it, and what it
+// holds is the last item that ended there, whose color the start reads; a class's levels are written by its own ends
+// before its starts read them, since its pressure rose to the level before and has fallen below it since.
+//
+// This is one ordered pass on both paths, with no branch on the event's kind: a start stores its color and an end its
+// item through one selected address. The pass is the part that stays scalar (#2699). Its chain is the stack: a color
+// goes from an item to the next item of its slot, so pointer jumping, the data-parallel form (test-tier1-frame's
+// oracle, tier1_frame_test_color_jumping), does the pass's work once per round.
+static void tier1_frame_color(Tier1FrameWork* work)
 {
-    if (work->class_count != 0)
+    const uint32_t events = work->count * 2;
+    const uint32_t* const event = work->event;
+    const uint32_t* const object_class = work->object_class;
+    uint32_t* const last = work->last;
+    uint32_t* const color = work->color;
+    uint32_t* const class_colors = work->class_colors;
+    if (events != 0)
     {
-        memset(work->class_colors, 0, (uint64_t)work->class_count * 4);
+        // Every level names an item: a level read before its class wrote it gives a color that isn't taken.
+        memset(last, 0, ((uint64_t)work->count + 1) * 4);
     }
     // Every class's events balance, so each class starts at pressure 0.
     uint32_t pressure = 0;
-    for (uint32_t i = 0; i < work->count * 2; i += 1)
-    {
-        const uint32_t item = work->event[i] >> 1;
-        const uint32_t group = work->object_class[item];
-        if ((work->event[i] & 1) != 0)
-        {
-            pressure += 1;
-            const bool maximum = pressure > work->class_colors[group];
-            work->color[item] = maximum ? pressure - 1 : work->nearest[pressure];
-            work->class_colors[group] = maximum ? pressure : work->class_colors[group];
-        }
-        else
-        {
-            work->nearest[pressure] = work->color[item];
-            pressure -= 1;
-        }
-    }
-}
-
-static void tier1_frame_color_vector(Tier1FrameWork* work)
-{
-    const uint32_t events = work->count * 2;
-    uint32_t carry = 0;
-    for (uint32_t i = 0; i < events; i += 16)
-    {
-        const uint32_t live = events - i < 16 ? events - i : 16;
-        const __mmask16 mask = (__mmask16)((1u << live) - 1);
-        const __m512i ids = _mm512_maskz_loadu_epi32(mask, work->event + i);
-        const __m512i is_start = _mm512_and_si512(ids, _mm512_set1_epi32(1));
-        const __m512i delta = _mm512_maskz_mov_epi32(mask, _mm512_sub_epi32(_mm512_slli_epi32(is_start, 1), _mm512_set1_epi32(1)));
-        const __m512i pressure = _mm512_add_epi32(tier1_frame_scan32(delta), _mm512_set1_epi32(carry));
-        _mm512_mask_storeu_epi32(work->pressure + i, mask, pressure);
-        carry += (uint32_t)_mm512_reduce_add_epi32(delta);
-    }
+    uint32_t maximum = 0;
+    uint32_t previous_group = 0;
     for (uint32_t i = 0; i < events; i += 1)
     {
-        work->nearest[i] = i == 0 || (work->key[i] >> 32) != (work->key[i - 1] >> 32) ? BUSTER_TIER1_FRAME_NONE : i - 1;
-    }
-    bool changed = events != 0;
-    uint32_t* nearest = work->nearest;
-    uint32_t* next = work->next_nearest;
-    while (changed)
-    {
-        changed = false;
-        for (uint32_t i = 0; i < events; i += 16)
-        {
-            const uint32_t live = events - i < 16 ? events - i : 16;
-            const __mmask16 mask = (__mmask16)((1u << live) - 1);
-            uint32_t previous_pressure[16];
-            uint32_t predecessor[16];
-            for (uint32_t lane = 0; lane < live; lane += 1)
-            {
-                const uint32_t previous = nearest[i + lane];
-                previous_pressure[lane] = previous == BUSTER_TIER1_FRAME_NONE ? UINT32_MAX : work->pressure[previous];
-                predecessor[lane] = previous == BUSTER_TIER1_FRAME_NONE ? BUSTER_TIER1_FRAME_NONE : nearest[previous];
-            }
-            const __m512i previous = _mm512_maskz_loadu_epi32(mask, previous_pressure);
-            const __m512i pressure = _mm512_maskz_loadu_epi32(mask, work->pressure + i);
-            const __mmask16 skip = _mm512_cmplt_epu32_mask(previous, pressure) & mask;
-            const __m512i parents = _mm512_maskz_loadu_epi32(mask, nearest + i);
-            const __m512i grandparents = _mm512_maskz_loadu_epi32(mask, predecessor);
-            _mm512_mask_storeu_epi32(next + i, mask, _mm512_mask_mov_epi32(parents, skip, grandparents));
-            changed |= skip != 0;
-        }
-        uint32_t* swap = nearest;
-        nearest = next;
-        next = swap;
-    }
-    if (work->class_count != 0)
-    {
-        memset(work->class_colors, 0, (uint64_t)work->class_count * 4);
-    }
-    for (uint32_t i = 0; i < events; i += 1)
-    {
-        if ((work->event[i] & 1) != 0)
-        {
-            const uint32_t item = work->event[i] >> 1;
-            const uint32_t previous = nearest[i];
-            work->parent[item] = previous == BUSTER_TIER1_FRAME_NONE ? item : work->event[previous + 1] >> 1;
-            work->root_color[item] = work->pressure[i] - 1;
-            if (previous == BUSTER_TIER1_FRAME_NONE)
-            {
-                work->class_colors[work->object_class[item]] = work->pressure[i];
-            }
-        }
-    }
-    uint32_t* parent = work->parent;
-    uint32_t* next_parent = work->next_parent;
-    changed = work->count != 0;
-    while (changed)
-    {
-        changed = false;
-        for (uint32_t i = 0; i < work->count; i += 16)
-        {
-            const uint32_t live = work->count - i < 16 ? work->count - i : 16;
-            const __mmask16 mask = (__mmask16)((1u << live) - 1);
-            uint32_t grandparents[16];
-            for (uint32_t lane = 0; lane < live; lane += 1)
-            {
-                grandparents[lane] = parent[parent[i + lane]];
-            }
-            const __m512i before = _mm512_maskz_loadu_epi32(mask, parent + i);
-            const __m512i after = _mm512_maskz_loadu_epi32(mask, grandparents);
-            _mm512_mask_storeu_epi32(next_parent + i, mask, after);
-            changed |= (_mm512_cmpneq_epi32_mask(before, after) & mask) != 0;
-        }
-        uint32_t* swap = parent;
-        parent = next_parent;
-        next_parent = swap;
-    }
-    for (uint32_t i = 0; i < work->count; i += 1)
-    {
-        work->color[i] = work->root_color[parent[i]];
+        const uint32_t item = event[i] >> 1;
+        const uint32_t start = event[i] & 1;
+        const uint32_t group = object_class[item];
+        const uint32_t level = pressure + start;
+        maximum = group != previous_group ? 0 : maximum;
+        previous_group = group;
+        // Only a start's level passes the maximum: an end's is the pressure before it.
+        const bool root = level > maximum;
+        maximum = root ? level : maximum;
+        class_colors[group] = maximum;
+        const uint32_t inherited = color[last[level]];
+        uint32_t* const slot = start != 0 ? color + item : last + level;
+        *slot = start != 0 ? (root ? level - 1 : inherited) : item;
+        pressure += start * 2 - 1;
     }
 }
 
@@ -929,14 +999,7 @@ static Tier1FrameError tier1_frame_plan_path(const Tier1FrameRequest* request, A
     }
     if (error == TIER1_FRAME_OK)
     {
-        if (BUSTER_SCALAR_PATH(scalar))
-        {
-            tier1_frame_color_scalar(&work);
-        }
-        else
-        {
-            tier1_frame_color_vector(&work);
-        }
+        tier1_frame_color(&work);
         error = tier1_frame_layout(request, &work, output, BUSTER_SCALAR_PATH(scalar), result);
     }
     arena_pop_to(scratch, scratch_mark);

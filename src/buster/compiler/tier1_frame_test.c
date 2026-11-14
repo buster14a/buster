@@ -355,6 +355,100 @@ static bool tier1_frame_test_same_metadata(const Tier1Frame* left, const Tier1Fr
     return same;
 }
 
+// The colors by pointer jumping, the data-parallel form that tier1_frame_color's ordered pass replaced as the planner's
+// colorer (#2699), kept as its independent oracle. Each start's nearest earlier event of equal or greater pressure in
+// its class, found by jumping over the events of lower pressure, is followed by the end whose color the start inherits;
+// a start with none is a new pressure maximum, a root, whose color is its pressure less one. A second jump resolves
+// every item's color to its root's. `color` has work->count elements.
+static bool tier1_frame_test_color_jumping(const Tier1FrameWork* work, Arena* scratch, uint32_t* color)
+{
+    const uint64_t mark = scratch->length;
+    const uint32_t count = work->count;
+    const uint32_t events = count * 2;
+    uint32_t* pressure = arena_push_array(scratch, events, 4, 4);
+    uint32_t* nearest = arena_push_array(scratch, events, 4, 4);
+    uint32_t* next_nearest = arena_push_array(scratch, events, 4, 4);
+    uint32_t* parent = arena_push_array(scratch, count, 4, 4);
+    uint32_t* next_parent = arena_push_array(scratch, count, 4, 4);
+    uint32_t* root_color = arena_push_array(scratch, count, 4, 4);
+    const bool ready = pressure != 0 && nearest != 0 && next_nearest != 0 && parent != 0 && next_parent != 0 && root_color != 0;
+    if (ready)
+    {
+        uint32_t running = 0;
+        for (uint32_t i = 0; i < events; i += 1)
+        {
+            running += (work->event[i] & 1) != 0 ? 1 : UINT32_MAX;
+            pressure[i] = running;
+            const bool same_class = i != 0 && work->object_class[work->event[i] >> 1] == work->object_class[work->event[i - 1] >> 1];
+            nearest[i] = same_class ? i - 1 : BUSTER_TIER1_FRAME_NONE;
+        }
+        bool changed = events != 0;
+        while (changed)
+        {
+            changed = false;
+            for (uint32_t i = 0; i < events; i += 1)
+            {
+                const uint32_t previous = nearest[i];
+                const bool skip = previous != BUSTER_TIER1_FRAME_NONE && pressure[previous] < pressure[i];
+                next_nearest[i] = skip ? nearest[previous] : previous;
+                changed |= skip;
+            }
+            uint32_t* swap = nearest;
+            nearest = next_nearest;
+            next_nearest = swap;
+        }
+        for (uint32_t i = 0; i < events; i += 1)
+        {
+            if ((work->event[i] & 1) != 0)
+            {
+                const uint32_t item = work->event[i] >> 1;
+                const uint32_t previous = nearest[i];
+                parent[item] = previous == BUSTER_TIER1_FRAME_NONE ? item : work->event[previous + 1] >> 1;
+                root_color[item] = pressure[i] - 1;
+            }
+        }
+        changed = count != 0;
+        while (changed)
+        {
+            changed = false;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                next_parent[i] = parent[parent[i]];
+                changed |= next_parent[i] != parent[i];
+            }
+            uint32_t* swap = parent;
+            parent = next_parent;
+            next_parent = swap;
+        }
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            color[i] = root_color[parent[i]];
+        }
+    }
+    arena_pop_to(scratch, mark);
+    return ready;
+}
+
+// Both paths' preparations, colored by the planner's pass and by the oracle.
+static void tier1_frame_test_colors_agree(Tier1FrameTest* test, const Tier1FrameRequest* request, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        Tier1FrameWork work;
+        const bool prepared = tier1_frame_prepare(request, scratch, scalar != 0, &work) == TIER1_FRAME_OK;
+        uint32_t* const expected = prepared ? arena_push_array(scratch, (uint64_t)work.count + 1, 4, 4) : 0;
+        tier1_frame_test_expect(test, expected != 0, "prepared for the coloring oracle");
+        if (expected != 0)
+        {
+            tier1_frame_color(&work);
+            const bool jumped = tier1_frame_test_color_jumping(&work, scratch, expected);
+            tier1_frame_test_expect(test, jumped && (work.count == 0 || memcmp(work.color, expected, (uint64_t)work.count * 4) == 0), "the ordered pass's colors are the pointer-jumping oracle's");
+        }
+        arena_pop_to(scratch, mark);
+    }
+}
+
 static void tier1_frame_test_case(Tier1FrameTest* test, const Tier1FrameRequest* request, Arena* output, Arena* scratch, bool execute)
 {
     const uint64_t output_mark = output->length;
@@ -372,6 +466,7 @@ static void tier1_frame_test_case(Tier1FrameTest* test, const Tier1FrameRequest*
             memcmp(frame[0].offset, frame[1].offset, request->slots.count * 4) == 0), "scalar and vector slot identities and offsets agree");
         tier1_frame_test_valid(test, request, &frame[0]);
         tier1_frame_test_valid(test, request, &frame[1]);
+        tier1_frame_test_colors_agree(test, request, scratch);
         if (execute)
         {
             tier1_frame_test_steps(test, request, &frame[0], 0);
@@ -488,7 +583,20 @@ static void tier1_frame_test_limits(Tier1FrameTest* test, Arena* output, Arena* 
     const uint64_t scratch_capacity = scratch->capacity;
     scratch->capacity = scratch->length + 32;
     tier1_frame_test_refusal(test, &request, output, scratch, TIER1_FRAME_CAPACITY);
+    // Scratch with room for the columns but not for a stamp a row: the indices are sorted instead, to the same answers.
+    request.slots.column_count = 1u << 20;
+    indices[1] = (1u << 20) - 1;
+    scratch->capacity = scratch->length + 4096;
+    tier1_frame_test_case(test, &request, output, scratch, true);
+    indices[1] = 0;
+    tier1_frame_test_refusal(test, &request, output, scratch, TIER1_FRAME_INVALID);
+    indices[1] = 1u << 20;
+    tier1_frame_test_refusal(test, &request, output, scratch, TIER1_FRAME_INVALID);
     scratch->capacity = scratch_capacity;
+    indices[1] = (1u << 20) - 1;
+    tier1_frame_test_case(test, &request, output, scratch, true);
+    indices[1] = 1;
+    request.slots.column_count = 2;
     tier1_frame_test_refusal(test, &request, output, output, TIER1_FRAME_INVALID);
     AbiCall call = {
         .stack_alignment_log2 = 3,
