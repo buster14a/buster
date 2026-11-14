@@ -46,6 +46,9 @@
 #define BUSTER_TIER1_ALLOCATE_MEMORY_HINT 0xfeu
 // In a hint_intervals entry: the named interval's register at its end, rather than at its start (#2553).
 #define BUSTER_TIER1_ALLOCATE_HINT_EXIT 0x80000000u
+// A closing's byte in `last` while its interval, evicted by a clobber, is out of its register (#2735): noted as no hint at
+// its end, not as BUSTER_TIER1_ALLOCATE_MEMORY_HINT. Never a register or a hint a reader takes.
+#define BUSTER_TIER1_ALLOCATE_CLOBBERED 0xfdu
 
 typedef struct Tier1FixedIntervals Tier1FixedIntervals;
 struct Tier1FixedIntervals
@@ -285,7 +288,8 @@ static uint8_t tier1_allocation_value_hint(const Tier1AllocationInput* columns, 
     // A hinted interval whose own value already had a place, in an interval earlier in layout, keeps it: a loop's header
     // after its body takes the register the body gave its phi, not its operand's.
     const uint8_t own = value != UINT32_MAX ? last[columns->values[interval]] : UINT8_MAX;
-    return opening != UINT8_MAX ? opening : own != UINT8_MAX ? own : value != UINT32_MAX ? last[value] : UINT8_MAX;
+    const bool named_place = opening != UINT8_MAX && opening != BUSTER_TIER1_ALLOCATE_CLOBBERED;
+    return named_place ? opening : own != UINT8_MAX ? own : value != UINT32_MAX ? last[value] : UINT8_MAX;
 }
 
 // An interval's hinted register at its start: the register its alternate interval opened with, where its value holds
@@ -307,11 +311,14 @@ static void tier1_allocation_note_opening(const Tier1AllocationInput* columns, u
 }
 
 // An interval's register as it ends, or none (#2553): read by the intervals that name it with BUSTER_TIER1_ALLOCATE_HINT_EXIT.
+// An interval a clobber last evicted ends with no hint (#2735): the range after it shouldn't wait in memory because a call
+// took the register, as luaV_execute's dispatch join would for disptab, which a handler's call evicts.
 static void tier1_allocation_note_closing(const Tier1AllocationInput* columns, uint8_t* last, uint32_t interval, uint32_t held)
 {
     if (last != 0 && columns->hint_intervals != 0)
     {
-        last[(uint64_t)columns->value_count + 1 + columns->count + interval] = held < 32 ? (uint8_t)held : BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
+        uint8_t* closing = &last[(uint64_t)columns->value_count + 1 + columns->count + interval];
+        *closing = held < 32 ? (uint8_t)held : *closing == BUSTER_TIER1_ALLOCATE_CLOBBERED ? UINT8_MAX : BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
     }
 }
 
@@ -483,6 +490,12 @@ static void tier1_allocation_evict(const Tier1AllocationInput* columns, Tier1All
     }
     kinds[victim] = kind;
     regs[victim] = UINT8_MAX;
+    // A later eviction is no clobber's: the closing is noted as usual unless the clobber site marks it again.
+    uint8_t* closing = last != 0 && columns->hint_intervals != 0 ? &last[(uint64_t)columns->value_count + 1 + columns->count + victim] : 0;
+    if (closing != 0 && *closing == BUSTER_TIER1_ALLOCATE_CLOBBERED)
+    {
+        *closing = UINT8_MAX;
+    }
 }
 
 static bool tier1_allocation_required_at(const Tier1AllocationInput* input, uint32_t interval, uint32_t position)
@@ -570,6 +583,10 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
                 if (tier1_allocation_spill_kind(&columns, victim) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && !tier1_allocation_required_at(&columns, victim, position))
                 {
                     tier1_allocation_evict(&columns, pieces, victim, position, begins, kinds, regs, last, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, false);
+                    if (last != 0 && columns.hint_intervals != 0)
+                    {
+                        last[(uint64_t)columns.value_count + 1 + columns.count + victim] = BUSTER_TIER1_ALLOCATE_CLOBBERED;
+                    }
                     active[r] = UINT32_MAX;
                     occupied &= ~(1u << r);
                 }
@@ -641,12 +658,15 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             claimed &= ~mine;
             uint32_t chosen = UINT32_MAX;
             // An unused recipe rests where its hint is another range's opening that took no register: the convention of the
-            // block it takes, whose edges then recompute nothing for it (hexFunc's header, after its body). A range's
-            // closing after a call took the register isn't one: luaV_execute's dispatch join then took no register for
-            // disptab, which every dispatch recomputed.
+            // block it takes, whose edges then recompute nothing for it (hexFunc's header, after its body).
             const uint32_t named = last != 0 && columns.hint_intervals != 0 ? columns.hint_intervals[interval] : UINT32_MAX;
             const bool rests = follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT && named != UINT32_MAX && (named & BUSTER_TIER1_ALLOCATE_HINT_EXIT) == 0;
-            if (idle && (!recomputed || open == 0 || rests))
+            // A recipe whose hint is memory, which its last range ended in, takes no register at its start either: it
+            // waits for its first read, where a required use gives it one. jsonLookupStep's sqlite3CtypeMap, read past a
+            // loop, otherwise took the register the loop's frame address followed and made each iteration swap them
+            // (#2618). A closing a call emptied gives no such hint (tier1_allocation_note_closing).
+            const bool waits = recomputed && !use_event && !required && follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
+            if ((idle && (!recomputed || open == 0 || rests)) || waits)
             {
             }
             else if (open != 0 || (free != 0 && required))

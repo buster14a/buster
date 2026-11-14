@@ -1296,6 +1296,74 @@ the same at both. The extra mispredictions fall in `luaV_mod`, whose code the
 change leaves the same, and in `luaV_execute`'s dispatch: the predictor's
 aliasing at the change's branch addresses, not instructions it adds.
 
+### Recipes that wait (#2618, #2735)
+
+On main `56b5864`, against the same compiler with no hoist at all, the hoisted
+addresses (the IR guide's #2618) still cost `jsonLookupStep` 295 K and
+`speedtest1_run` 141 K by callgrind, through the registers their recipes held.
+Two rules of the scan take them back, with the IR guide's argument takes:
+
+- **A closing a call emptied.** A range that ends without a register notes
+  memory as its closing, and a range its hint names there followed it. Where a
+  call's clobber took the register (#2574's preferred problem), that would make
+  `luaV_execute`'s dispatch join leave `disptab` in memory once a handler's call
+  had evicted it (#2735). The clobber site marks the closing
+  (`BUSTER_TIER1_ALLOCATE_CLOBBERED`), any other eviction clears the mark, and
+  `tier1_allocation_note_closing` then notes no hint: the next range follows
+  its value's last register.
+- **Waiting for a read.** A recipe whose hint is memory takes no register at
+  its start, read or not; a required use gives it one there.
+  `jsonLookupStep`'s `sqlite3CtypeMap`, defined before its loops and read past
+  one of them, took the lowest free register at that loop's latch, `rbp`,
+  which the loop's frame address followed: every iteration parked the address
+  in `r8`, recomputed the table into `rbp` and moved the address back (three
+  instructions, 98 K times). An unused one rests at a closing that held no
+  register too, #2735's first ask, which `speedtest1_run`'s loop join needs
+  for its counter to keep `r14`.
+
+By callgrind on main `45cd9ae` (#1189's `gap.c`, #1217's inputs), the change
+takes speedtest1 from 2,626.66 M instructions to 2,625.62 M (−0.04%) and Lua's
+five scripts from 4,773.9 M to 4,768.9 M (−0.10%); with no hoist at all it runs
+2,633.84 M and 4,812.5 M. Main's #2734 ("Recipes no block reads, settled phi
+places" below) had taken most of what these rules gained before it: on main
+`56b5864` they took speedtest1 0.13% and Lua's scripts 1.44%. Each rule's part,
+turning it off:
+
+| Without | speedtest1 | Lua's five scripts |
+| --- | ---: | ---: |
+| (all) | 2,625.62 M | 4,768.9 M |
+| the clobber's closing | 2,625.34 M | 4,821.2 M |
+| waiting | 2,626.65 M | 4,771.4 M |
+| waiting for unused recipes | 2,625.92 M | 4,769.3 M |
+| the argument takes | 2,625.63 M | 4,768.9 M |
+
+The clobber's closing gains Lua 52.3 M (`disptab`'s dispatch join) and costs
+speedtest1 0.28 M; waiting gains `jsonLookupStep` 294 K and `str_gsub` 3.4 M, and costs
+`sqlite3VdbeExec` 2.44 M: at its unused recipes' resting, the registers they
+left took other values, and a handler's block swaps two loaded values through
+`r11` on the way to its join. Without waiting for unused recipes,
+`sqlite3VdbeExec` runs as on main, but `speedtest1_run` keeps 70 K against no
+hoist and speedtest1 loses 0.30 M in all. `tier1_allocate_hints_test.c`'s
+traces check the clobber's closing and the wait on the three paths.
+
+A third rule, measured on main `56b5864` and left out, rested an unused recipe
+at the entry of a join of three or more predecessors: each edge into the join
+recomputed it, where its reads past the join, on fewer paths, would. It took
+`sqlite3VdbeExec`'s dispatch join's frame address out of `r15` (−11 M there),
+but needed #2574's hot test over every recipe and cost `sqlite3Parser` 1.2 M;
+#2734's proof that no block reads a register now enters such recipes as recipes
+after the allocation, and on `45cd9ae` the rule gains speedtest1 0.58 M and
+costs Lua 0.2 M.
+
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/cc05fb63e9bf0c495940bd6918d18e03a077cc31/docs/measurements/tier1-hoist-finish-2618-2026-11-14),
+#2593's method, a hold of the lock per round), main `45cd9ae` against the
+change: speedtest1 takes 0.9954 of the cycles (95% interval 0.9922 to 0.9986)
+over six layouts, for 0.04% fewer instructions; Lua's five scripts take 1.0002
+of the time (0.9926 to 1.0079) over six link orders for 0.10% fewer
+instructions, each script's cycles moving with the link order for the same
+instructions (`closures` 0.981 to 1.035). `sqlite3.c`'s `--tier1 -c` runs 0.05%
+more instructions.
+
 ### Recipes no block reads, settled phi places, and the fixed rules' scratch (#2734, #2592)
 
 What #2592's operand sink left of `luaV_execute`'s moves through `r11` was
