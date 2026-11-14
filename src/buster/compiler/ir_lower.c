@@ -1883,7 +1883,9 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan, 
                                   (input->kinds[at + 1] == BUSTER_TYPED_NE || input->kinds[at + 1] == BUSTER_TYPED_EQ);
             const uint32_t branch = compared ? at + 2 : at;
             const uint8_t kind = joined ? input->kinds[branch] : 0;
-            const bool truth = compared && input->kinds[at + 1] == BUSTER_TYPED_EQ ? input->values[first] == 0 : input->values[first] != 0;
+            // The constant's value, read only where the block holds it (an empty block's first is past the stream).
+            const uint64_t value = joined ? input->values[first] : 0;
+            const bool truth = compared && input->kinds[at + 1] == BUSTER_TYPED_EQ ? value == 0 : value != 0;
             if (kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE)
             {
                 const bool taken = (kind == BUSTER_TYPED_BRANCH_FALSE) == !truth;
