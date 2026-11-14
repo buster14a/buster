@@ -23,7 +23,10 @@ requirements. [Command index](README.md).
   value from a caller-saved register, have their traces, refusals and random
   properties in `tier1_allocate_clobbers_test.c`, and a recipe that gives its
   register to a value its hint names (#2618), a range that waits in its value's
-  slot for its next required use (#2768), and a range's alternate (#2734:
+  slot for its next required use (#2768), a victim that continues in its slot and
+  a range following an interval evicted where it starts (#2774:
+  `continuation_intervals`, which the random inputs take with required uses too),
+  and a range's alternate (#2734:
   `alternate_intervals`, taken where its interval's value still holds the
   register and it is free), which the random inputs and their reference model
   too, have their traces in `tier1_allocate_hints_test.c`; `test-tier1-emit` checks
