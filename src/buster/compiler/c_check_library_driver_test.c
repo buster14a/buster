@@ -661,6 +661,21 @@ static void check_test_library_run(CheckTest* test, const char* clang, const cha
     "int main(void){volatile double z=0.0,n=-0.0;union{unsigned long long u;double d;}s={0x7ff0000000000001ull};volatile double v=s.d;\n" \
     "printf(\"%llx %llx %llx %llx\\n\",bits(fmax(n,z)),bits(fmin(z,n)),bits(fmax(v,1.0)),bits(fmin(1.0,v)));return 0;}\n"
 
+// The unit's own definitions of memcpy, memmove, abs, labs, fabs and copysign, which count their calls (#1373): clang's
+// code computes a call of a declaration that is the builtin in its place, memcpy's and memmove's of a constant size of at
+// most 32 bytes, so that the counts tell computed calls from called ones; memcpy of 33 bytes and of a size that is no
+// constant, and memmove of one, call the definitions. memset stays out: clang -O0's code calls it whatever its size, where
+// this compiler stores a small one's bytes.
+#define BUSTER_CHECK_TEST_COMPUTED_PROGRAM \
+    "int printf(const char*,...);typedef unsigned long size_t;static int calls;\n" \
+    "void*memcpy(void*d,const void*s,size_t n){calls+=1;char*a=d;const char*b=s;while(n--)*a++=*b++;return d;}\n" \
+    "void*memmove(void*d,const void*s,size_t n){calls+=10;char*a=d;const char*b=s;if(a<b)while(n--)*a++=*b++;else while(n--)a[n]=b[n];return d;}\n" \
+    "int abs(int x){calls+=100;return x<0?-x:x;}long labs(long x){calls+=1000;return x<0?-x:x;}\n" \
+    "double fabs(double x){calls+=10000;return x<0?-x:x;}double copysign(double x,double y){calls+=100000;return (y<0)!=(x<0)?-x:x;}\n" \
+    "int main(void){char a[48],b[48];for(int i=0;i<48;i++){a[i]=(char)('a'+i%26);b[i]='.';}volatile size_t n=4;volatile int v=-3;volatile double d=-2.5;\n" \
+    "memcpy(b,a,8);memcpy(b+8,a,n);memcpy(b+12,a+5,33);memmove(b+1,b,12);memmove(b+30,b+29,n);memmove(b+3,b+4,32);\n" \
+    "int r=abs(v)+(int)labs(v)*10;double f=fabs(d)+copysign(1.0,d);printf(\"%d %d %.1f %.45s\\n\",calls,r,f,b);return 0;}\n"
+
 static void check_test_library_runs(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const struct
@@ -773,6 +788,36 @@ static void check_test_library_runs(CheckTest* test, const char* clang, const ch
             "printf(\"%d %d\\n\",__builtin_signbit(fmax(n,z))!=0,__builtin_signbit(fmin(z,n))!=0);return 0;}\n",
             "-std=gnu17",
             NULL,
+        },
+        {
+            "a plain declaration's memcpy, memmove, abs, labs, fabs and copysign compute inline (#1373)",
+            BUSTER_CHECK_TEST_COMPUTED_PROGRAM,
+            "-std=gnu17",
+            NULL,
+        },
+        {
+            "-fno-builtin keeps a plain declaration's memcpy, memmove, abs and fabs calls",
+            BUSTER_CHECK_TEST_COMPUTED_PROGRAM,
+            "-std=gnu17",
+            "-fno-builtin",
+        },
+        {
+            "-fno-builtin-memcpy keeps a plain declaration's memcpy a call, its memmove and abs inline",
+            BUSTER_CHECK_TEST_COMPUTED_PROGRAM,
+            "-std=gnu17",
+            "-fno-builtin-memcpy",
+        },
+        {
+            "-fno-builtin-labs keeps a plain declaration's labs a call, its abs inline",
+            BUSTER_CHECK_TEST_COMPUTED_PROGRAM,
+            "-std=gnu17",
+            "-fno-builtin-labs",
+        },
+        {
+            "-ffreestanding keeps a plain declaration's memcpy, memmove, abs and fabs calls",
+            BUSTER_CHECK_TEST_COMPUTED_PROGRAM,
+            "-std=gnu17",
+            "-ffreestanding",
         },
         {
             "no_builtin keeps every plain library builtin's call a call, but its __builtin_ form's",

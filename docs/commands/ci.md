@@ -112,7 +112,7 @@ reruns use bounded identity reads and refuse unknown state. The verdict
 reports request ledgers and shared-quota headers; see [Vector REST
 budget](../ci.md#vector-rest-budget-2309). After changes, run the shell
 fixture above and `node tests/ci/vector-runtime.cjs`; both run in the PR's
-hosted evidence job.
+`CI glue fixtures` job.
 Each row (`.github/workflows/hosted-correctness.yml`, which the test job calls
 per row) runs its inventory as its own number of shards, a runner each:
 `parallel --shard K/N --costs tools/ci/costs/ROW.costs` deals the commands by
@@ -370,6 +370,20 @@ build/costs --self-test --root .
   scaled to the slowest CPU as samples are. Only jobs whose commands all passed
   count (a failure skips the later steps), and not the vector row's draws, which
   also wait for their collector; without both kinds of job the line is left out.
+- **Peak memory (#2031).** `#: peak MIB TITLE` is a command's largest peak
+  memory over the row's samples, failed ones included (a command that ran out of
+  memory peaked where it failed), from the runner's `, N MiB peak`. `#:
+  runner-memory MIB` is the smallest MemTotal any log's runner reported (the
+  sanitizer rows' host report, `memory: N kB`); every hosted row draws the same
+  runners, so each table takes it. `parallel` holds the commands running at once
+  to 90% of the runner's memory by their peaks, and the deal simulates the same
+  ([parallel](parallel.md#the-parallel-runner)). The first peaks came from three
+  queue candidates after #2651 (43481775079, 43486864508, 43487074169), 159 logs
+  over every row. The largest were 7,813 MiB (Tier 0's inlining test under TSan
+  and in the vector draws) and 4.5–5.1 GiB (`main.c`'s comparison with clang, the
+  parser and the per-file jobs on the repository's units). The runners had
+  15,982 MiB. Without the bound, one vector draw's four largest commands would
+  have needed 15,922 MiB at once.
 - **Provenance.** The `#:` lines record the row, the runner's CPUs, the
   revisions measured and the CPUs drawn, each with its jobs.
 - **Collect.** After a full run (the nightly snapshot's, or a dispatched
@@ -386,6 +400,13 @@ build/costs --self-test --root .
   without the line, from its caller's one configuration), and its shard from its
   report, which must be the item's; a candidate that took no item has no
   report, and `costs.sh` skips it.
+- **Peaks.** `bash tools/ci/costs.sh --peaks LOGS_DIRECTORY RUN...` fetches the
+  runs' logs as a collect does and runs `costs peaks --tests
+  tools/ci/correctness.tests --costs tools/ci/costs LOG...`. It writes each row's
+  peaks and the runners' memory into the existing tables and keeps their costs,
+  for logs from runs since #2651, whose headings carry `MiB peak`. A command the
+  logs don't sample keeps its peak. A later collect over such logs writes the
+  peaks itself.
 - **Seed.** A row without logs yet takes another row's measurements: `build/costs
   seed --tests tools/ci/correctness.tests --costs tools/ci/costs --row
   vector-address-O3 --from native-address-O3`. Its `#: seeded ROW` line, first
@@ -516,7 +537,7 @@ never ones that failed, so green keeps meaning the tests passed.
   job and test step keep their names, and `rerun.yml` watches exactly the
   workflows that call `hosted-correctness.yml` and re-runs only failed first
   attempts. A renamed setup step fails it until the list follows.
-  `bash tests/ci/rerun.sh`, in the `evidence` job's fixtures step, also runs
+  `bash tests/ci/rerun.sh`, in the `CI glue fixtures` job, also runs
   the cases recorded from the API in `tests/ci/rerun/cases.tsv` against their
   reports and Markdown: the 2026-11-11 outage's push and pull request, test,
   build, timeout, fail-fast, lost-runner and self-hosted failures. It checks
@@ -584,8 +605,10 @@ the policy. In short:
   snapshot's comprehensive run is the daily run.
 - Tests: `bash tests/ci/nightly.sh` (the self-test, also under ASan and UBSan,
   and the glue against a fake `gh` and a merge history) and
-  `bash tests/ci/caches.sh` (the 9700X's caches). Pull requests run both in
-  the `evidence` job before any hardware; `changes` runs
+  `bash tests/ci/caches.sh` (the 9700X's caches). Pull requests and
+  merge-queue candidates run both in the `glue` job (`CI glue fixtures`),
+  beside the rows, which don't wait for them, and the required aggregate
+  requires them (#2658); `changes` runs
   `nightly --self-test`, which also fails if the build or the inventory ever
   calls `git`.
 

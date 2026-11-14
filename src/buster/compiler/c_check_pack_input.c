@@ -95,6 +95,7 @@ struct CheckInputPackPragma
     bool align;
     bool options;
     bool native_mode;
+    bool error;
     uint8_t align_warning;
     bool custom_before;
     bool custom_after;
@@ -113,6 +114,8 @@ struct CheckInputPackPragmas
 {
     CheckInputPackPragma* records;
     uint32_t count;
+    // Handled, state-free target errors; ordinary packing histories do not enter the driver's error merge.
+    uint32_t error_count;
     uint32_t maximum_depth;
     uint32_t unmatched_pushes;
     uint8_t final_log2;
@@ -324,7 +327,7 @@ static bool check_input_pack_align_name(CheckInputReader* reader, uint32_t sourc
 // `#pragma options align=X` and `#pragma align=X` (#1849, clang's ParseAlignPragma and Sema::ActOnPragmaOptionsAlign):
 // packed pushes the current value and packs to 1, as `#pragma pack(push, 1)` does; natural, native and power push it and
 // set the default (on x86-64 they are the default's layout); reset pops (CHECK_PACK_ALIGN_RESET); mac68k is clang's error
-// on this target, left unhandled for the checker's refusal. A malformed one is ignored with clang's warning, at the token
+// on this target, retained without changing the stack. A malformed one is ignored with clang's warning, at the token
 // it names or past the last one. A raw client's operand that a macro spells is left unhandled, as ms_struct's is.
 static CheckInputPackPragma check_input_pack_align_record(CheckInputReader* reader, uint32_t pragma, uint32_t source, uint32_t end, uint32_t token, uint64_t** macros)
 {
@@ -388,13 +391,17 @@ static CheckInputPackPragma check_input_pack_align_record(CheckInputReader* read
             record.diagnostic_location = output->locations[last] + (named ? intern_length(reader->pp->table, output->values[last]) : 1);
         }
     }
+    else if (mac68k)
+    {
+        record.error = true;
+        record.diagnostic_source = source + 2;
+    }
     else
     {
         record.operation = reset ? CHECK_PACK_ALIGN_RESET : CHECK_PACK_PUSH;
         record.has_alignment = !reset;
         record.alignment_log2 = packed ? 1 : 0;
         record.native_mode = natural && !pp_token_is_name(reader->pp, output, at - 1, end, "natural");
-        record.handled = mac68k ? 0 : 1;
     }
     for (uint32_t s = source + 3; !reader->pp->options.semantic_pragmas && record.handled != 0 && s < end; s += 1)
     {
@@ -704,6 +711,7 @@ static bool check_input_pack_pragmas(CheckInputReader* reader, uint8_t* handled)
         {
             const CheckInputPackPragma* item = &history->records[record];
             handled[item->pragma] = item->handled;
+            history->error_count += item->handled == 1 && item->error;
         }
     }
     else if (!valid)

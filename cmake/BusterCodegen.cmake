@@ -27,15 +27,39 @@ set(BUSTER_DEVELOP_DEFAULT_PARTITIONS 8)
 # instructions, each file's functions over a run of parts sized at half the unit's mean, the tests' functions optnone.
 set(BUSTER_DEVELOP_SPLIT_OPTIONS --import 100 --anchor 24 --cohere 150000 --spread 2 --tests-optnone)
 
+# The directories buster_codegen_system_libraries looks in for a library: the linker's default search path on the
+# Linux/x86-64 hosts the build supports. build-regression sets its own.
+if(NOT DEFINED BUSTER_CODEGEN_LIBRARY_DIRECTORIES)
+    set(BUSTER_CODEGEN_LIBRARY_DIRECTORIES /usr/local/lib /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib /lib/x86_64-linux-gnu /lib64 /lib)
+endif()
+
 # llvm-config's system libraries (ARGN) as this host links them, into `output`: one it names by a path the host lacks
-# links by its name, from the host's library path. The official release's llvm-config names its build machine's static
-# zstd, /usr/lib/x86_64-linux-gnu/libzstd.a (Ubuntu's), which the 9700X, an Arch host, has as /usr/lib/libzstd.so.
-# buster_codegen_tools' probe decides whether the result links; build-regression checks the mapping.
+# links by its name, from the host's library path, where the host has its development file (libNAME.so or .a);
+# without one, a host with its runtime library alone (libNAME.so.N) links that file by its path, as a session's
+# container with zstd's runtime and not its development package does (#2628). The official release's llvm-config names
+# its build machine's static zstd, /usr/lib/x86_64-linux-gnu/libzstd.a (Ubuntu's), which the 9700X, an Arch host, has
+# as /usr/lib/libzstd.so. buster_codegen_tools' probe decides whether the result links; build-regression checks the
+# mapping.
 function(buster_codegen_system_libraries output)
     set(libraries "")
     foreach(library IN LISTS ARGN)
         if(IS_ABSOLUTE "${library}" AND NOT EXISTS "${library}" AND library MATCHES "/lib([^/]+)\\.(a|so)(\\.[0-9]+)*$")
-            set(library "-l${CMAKE_MATCH_1}")
+            set(name "${CMAKE_MATCH_1}")
+            set(library "-l${name}")
+            set(development FALSE)
+            set(runtime "")
+            foreach(directory IN LISTS BUSTER_CODEGEN_LIBRARY_DIRECTORIES)
+                if(EXISTS "${directory}/lib${name}.so" OR EXISTS "${directory}/lib${name}.a")
+                    set(development TRUE)
+                endif()
+                if(runtime STREQUAL "")
+                    file(GLOB runtime "${directory}/lib${name}.so.[0-9]*")
+                    list(SORT runtime)
+                endif()
+            endforeach()
+            if(NOT development AND NOT runtime STREQUAL "")
+                list(GET runtime 0 library)
+            endif()
         endif()
         list(APPEND libraries "${library}")
     endforeach()

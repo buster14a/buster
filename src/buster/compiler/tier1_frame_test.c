@@ -367,6 +367,9 @@ static void tier1_frame_test_case(Tier1FrameTest* test, const Tier1FrameRequest*
     if (vector_error == TIER1_FRAME_OK && scalar_error == TIER1_FRAME_OK)
     {
         tier1_frame_test_expect(test, tier1_frame_test_same_metadata(&frame[0], &frame[1]), "scalar and vector frame sizes and plans agree");
+        // The twins color alike, so a Tier 1 object doesn't depend on the host (#2606).
+        tier1_frame_test_expect(test, request->slots.count == 0 || (memcmp(frame[0].slot, frame[1].slot, request->slots.count * 4) == 0 &&
+            memcmp(frame[0].offset, frame[1].offset, request->slots.count * 4) == 0), "scalar and vector slot identities and offsets agree");
         tier1_frame_test_valid(test, request, &frame[0]);
         tier1_frame_test_valid(test, request, &frame[1]);
         if (execute)
@@ -581,6 +584,39 @@ static void tier1_frame_test_guards(Tier1FrameTest* test, Arena* output, Arena* 
     }
 }
 
+// #2606: the colors themselves, where lifetimes don't nest. a, b and c take slots 0, 1 and 2; b's end, then c's, take
+// the pressure down from 3 and from 2; d starts at pressure 2 and takes c's slot, the last one freed at its level. The
+// first free slot would be b's (the scalar colorer's rule before #2606), so the paths' objects differed.
+static void tier1_frame_test_colors(Tier1FrameTest* test, Arena* output, Arena* scratch)
+{
+    const uint32_t starts[] = {0, 1, 2, 7};
+    const uint32_t ends[] = {10, 4, 6, 9};
+    const uint32_t sizes[] = {8, 8, 8, 8};
+    const uint32_t alignments[] = {8, 8, 8, 8};
+    const Tier1FrameRequest request = {
+        .slots = {
+            .start = starts,
+            .end = ends,
+            .size = sizes,
+            .alignment = alignments,
+            .count = 4,
+            .column_count = 4,
+        },
+    };
+    test->count = 4;
+    test->shape = 0;
+    tier1_frame_test_case(test, &request, output, scratch, true);
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        const uint64_t mark = output->length;
+        Tier1Frame frame;
+        const Tier1FrameError error = scalar ? tier1_frame_plan_scalar(&request, output, scratch, &frame) : tier1_frame_plan(&request, output, scratch, &frame);
+        tier1_frame_test_expect(test, error == TIER1_FRAME_OK && frame.slot_count == 3 && frame.slot[0] == 0 && frame.slot[1] == 1 && frame.slot[2] == 2 && frame.slot[3] == 2,
+                                "a start takes the slot freed last at its pressure");
+        arena_pop_to(output, mark);
+    }
+}
+
 static void tier1_frame_test_boundaries(Tier1FrameTest* test, Arena* output, Arena* scratch)
 {
     const uint32_t start = 0;
@@ -755,6 +791,7 @@ static int run_tier1_frame_tests(int argc, char** argv)
         tier1_frame_test_limits(&test, &output, &scratch);
         tier1_frame_test_guards(&test, &output, &scratch);
         tier1_frame_test_boundaries(&test, &output, &scratch);
+        tier1_frame_test_colors(&test, &output, &scratch);
     }
     arena_release(&scratch);
     arena_release(&output);

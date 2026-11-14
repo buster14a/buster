@@ -371,6 +371,34 @@ static void ir_verified_test_malformed(IrOptimizeTest* test, Arena* input, Arena
         .leave = leave,
         .block_count = 4,
     };
+    // An unreachable backedge supplies a syntactically complete entry phi, but initial entry has no incoming value.
+    // Both final-verification paths must retain the shared structural rejection before publishing analysis.
+    if (prefixed)
+    {
+        const uint64_t input_mark = input->length;
+        const IrSizes sizes = { .instruction_count = 4, .block_count = 2, .constant_count = 1, .extra_count = 2 };
+        IrFunction function = { 0 };
+        const bool created = ir_create(input, &sizes, &function) == IR_OK;
+        ir_optimize_test_expect(test, created, "verification reuse: entry phi allocation");
+        if (created)
+        {
+            function.result_type = IR_I64;
+            function.block_offsets[1] = 2;
+            function.block_offsets[2] = 4;
+            function.constants[0].low = 7;
+            function.extra[0] = 1;
+            function.extra[1] = 2;
+            ir_optimize_test_instruction(&function, 0, IR_PHI, IR_I64, 0, 1, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&function, 1, IR_RET, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&function, 2, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&function, 3, IR_BR, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t entry[] = { 0, 0 };
+            const uint32_t exit[] = { 1, 0 };
+            const IrDominance dominance = { .enter = entry, .leave = exit, .block_count = 2 };
+            ir_verified_test_boundaries(test, &function, &dominance, IR_ERROR_PHI, 0, IR_ERROR_PHI, analyses, reference, scratch);
+        }
+        arena_pop_to(input, input_mark);
+    }
     for (uint32_t kind = 0; prefixed && kind < 10; kind += 1)
     {
         const uint64_t input_mark = input->length;

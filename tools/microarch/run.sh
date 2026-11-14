@@ -70,6 +70,13 @@ SCRATCH=scratch/$HOST
 UARCH=$ROOT/uarch
 export LC_ALL=C LC_NUMERIC=C SOURCE_DATE_EPOCH=1792454400
 unset CPATH C_INCLUDE_PATH
+# Every build, of this checkout and of the commits it compares, with CI's toolchain first on PATH (#2628;
+# docs/commands/build.md, "The toolchain"): an older commit's build.sh takes PATH's clang where a newer one's takes CI's,
+# and two compilers would confound the comparison.
+if [[ -f $repository/tools/ci/session-toolchain.sh ]]; then
+    toolchain=$(bash "$repository/tools/ci/session-toolchain.sh" stage) || { echo "run.sh: can't stage CI's toolchain" >&2; exit 2; }
+    PATH=$toolchain:$PATH
+fi
 mkdir -p "$OUT" "$SCRATCH"
 if [[ ! -x $UARCH || $here/uarch.c -nt $UARCH ]]; then
     clang -std=c17 -O2 -Wall -Wextra -Werror -o "$UARCH" "$here/uarch.c" -lm || exit 2
@@ -615,7 +622,7 @@ step_setup()
             continue
         fi
         log "setup: build $arch"
-        hold_build env BUSTER_HOST_ARCH="$arch" "$repository/build.sh" > "$SCRATCH/build-$arch.log" 2>&1 || { log "setup: build $arch failed"; exit 2; }
+        hold_build env BUSTER_HOST_ARCH="$arch" "$repository/build.sh" --config Release > "$SCRATCH/build-$arch.log" 2>&1 || { log "setup: build $arch failed"; exit 2; }
         cp "$repository/build/compiler" "bin/compiler-$arch"
         echo "$identity" > "bin/compiler-$arch.commit"
     done
@@ -699,7 +706,7 @@ step_build_commit()
             continue
         fi
         log "build-commit: $name $arch ($(cat "$tree/COMMIT"))"
-        hold_build env BUSTER_HOST_ARCH="$arch" "$tree/build.sh" > "$SCRATCH/build-$name-$arch.log" 2>&1 || { log "build-commit: $name $arch failed"; exit 2; }
+        hold_build env BUSTER_HOST_ARCH="$arch" "$tree/build.sh" --config Release > "$SCRATCH/build-$name-$arch.log" 2>&1 || { log "build-commit: $name $arch failed"; exit 2; }
         cp "$tree/build/compiler" "bin/compiler-$name-$arch"
         cp "$tree/COMMIT" "bin/compiler-$name-$arch.commit"
     done

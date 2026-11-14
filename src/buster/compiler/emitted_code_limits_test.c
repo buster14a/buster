@@ -87,11 +87,11 @@ static void emitted_test_wide_rows(EmittedTest* test)
         { .offset = 4, .kind = EMISSION_FRAME_OFFSET, .reg = 3, .value = INT64_MIN },
     };
     const uint8_t expected[] = {
-        4, 1, 0, 0, 0, 0x0e, 0x88, 0x80, 0x80, 0x80, 0x10,
+        0x41, 0x0e, 0x88, 0x80, 0x80, 0x80, 0x10,
         0x0a,
-        4, 1, 0, 0, 0, 0x0e, 8,
-        4, 1, 0, 0, 0, 0x0b,
-        4, 1, 0, 0, 0, 0x0d, 6,
+        0x41, 0x0e, 8,
+        0x41, 0x0b,
+        0x41, 0x0d, 6,
         0x83, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x10,
     };
     const UnwindFunction program = {
@@ -103,7 +103,8 @@ static void emitted_test_wide_rows(EmittedTest* test)
     uint8_t bytes[256];
     const uint64_t size = emitted_test_write(&program, false, true, bytes, sizeof(bytes));
     const uint32_t instructions = BUSTER_UNWIND_CIE_BYTES + 17;
-    emitted_test_expect(test, size >= instructions + sizeof(expected) && memcmp(bytes + instructions, expected, sizeof(expected)) == 0,
+    // Four one-byte advances leave 26 instruction bytes: the 17-byte FDE header and those bytes align to 48.
+    emitted_test_expect(test, size == BUSTER_UNWIND_CIE_BYTES + 48 && memcmp(bytes + instructions, expected, sizeof(expected)) == 0,
                         "wide rows preserve ULEBs, saved CFA state and factored signed slots", 0);
     const EmissionFrameRow simple[] = {
         { .offset = 1, .kind = EMISSION_FRAME_CFA_OFFSET, .value = INT64_MAX },
@@ -114,8 +115,11 @@ static void emitted_test_wide_rows(EmittedTest* test)
     emitted_test_expect(test, valid && lowered.open == BUSTER_UNWIND_ROWS && lowered.frame_size == 0,
                         "a row beyond the imm32 allocation range is not narrowed into a fixed frame", 0);
     const uint64_t large_size = valid ? emitted_test_write(&lowered, false, true, bytes, sizeof(bytes)) : 0;
-    const uint8_t largest[] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f };
-    emitted_test_expect(test, large_size >= instructions + 6 + sizeof(largest) && memcmp(bytes + instructions + 6, largest, sizeof(largest)) == 0,
+    const uint8_t largest[] = {
+        0x41, 0x0e, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
+        0x41, 0x0e, 8,
+    };
+    emitted_test_expect(test, large_size == BUSTER_UNWIND_CIE_BYTES + 32 && memcmp(bytes + instructions, largest, sizeof(largest)) == 0,
                         "the row writer retains INT64_MAX's nine-byte ULEB", 0);
 }
 

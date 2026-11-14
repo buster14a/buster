@@ -18,6 +18,35 @@
 static void check_test_driver_statement_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char* const fixtures[] = {
+        // #2438: a case operand's non-integer type is diagnosed before its constant value, on ordinary and wide
+        // switches. Parentheses and range endpoints retain their own beginning; integer nonconstants and faults keep
+        // their existing diagnostics, and a floating-to-integer constant cast remains accepted.
+        "typedef double D;\n"
+        "void plain(int x) { switch (x) { case 1.5: break; } }\n"
+        "void wide(_BitInt(257) x) { switch (x) { case (1.5): break; } }\n"
+        "void range(int x) { switch (x) { case 1 ... (1.5): break; } }\n"
+        "void variadic(int x) { switch (x) { case sizeof(int (*)(int, ...)) ... 1.5: break; } }\n"
+        "void cast(int x) { switch (x) { case ((D)1.5): break; } }\n"
+        "void variable(int x, int y) { switch (x) { case y: break; } }\n"
+        "void divide(int x) { switch (x) { case 1 / 0: break; } }\n"
+        "void nested_divide(int x) { switch (x) { case (3 + (1 / 0)): break; } }\n"
+        "void valid(int x) { switch (x) { case (int)1.5: break; } }\n",
+        // #2498: a conflicting switch is dropped before the function's jump-scope analysis. Both statement
+        // expressions' case jumps disappear, while the duplicate case and its previous-case note remain.
+        "int g(int x) { switch (x) { case 0: ({ case 1: x = 2; }); ({ case 1: x = 3; }); break; } return x; }\n",
+        "int g(_BitInt(257) x) { switch (x) { case 0: ({ case 1: x = 2; }); ({ case 1: x = 3; }); break; } return (int)x; }\n",
+        // An invalid outer switch discards its inner switch's jumps and a goto originating in its body too.
+        "int g(int x, int y) { switch (x) { case 1: case 1: switch (y) { case 0: ({ case 2: x = 3; }); } break; } return x; }\n",
+        "int g(int x) { switch (x) { case 1: case 1: goto lab; } ({ lab: x = 3; }); return x; }\n",
+        // A direct goto's exact destination may disappear with the invalid switch even when the goto precedes it.
+        // A sibling destination stays in the function and retains its initialization-bypass diagnostic.
+        "void f(int n) { goto L; switch (n) { case 0: case 0: { int a[n]; L: a[0] = 1; } } }\n",
+        "void f(int n) { goto L; switch (n) { case 0: case 0: break; } { int a[n]; L: a[0] = 1; } }\n",
+        // A different, valid switch retains its jump error in the same body; discarding an inner switch does not
+        // discard a case jump owned by the enclosing switch.
+        "int g(int x) { switch (x) { case 0: ({ case 1: x = 2; }); ({ case 1: x = 3; }); break; }\n"
+        "switch (x) { case 0: ({ case 2: x = 4; }); } return x; }\n",
+        "int g(int x) { switch (x) { case 0: ({ case 2: switch (x) { case 1: case 1: break; } x = 3; }); } return x; }\n",
         // Two control errors in two bodies, and a later body's runtime warning.
         "void f(void) { break; }\nvoid g(void) { continue; }\nint h(int x) { return x << 40; }\n",
         // Two in one body, after a switch whose own `break` is valid.

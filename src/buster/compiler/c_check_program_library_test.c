@@ -65,12 +65,19 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
         const CBuiltinLibraryPlainFold* fold = cbuiltin_library_plain_folds + f;
         const uint32_t length = (uint32_t)strlen(fold->name);
         const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup(fold->name, length);
-        // A fold's row has attribute E; an inline one's (#967) none, and its library builtin is the same function's.
+        // A fold's row has attribute E; a computed one's (#967, #1373) none, or C++'s constant evaluation's alone (memcpy's and
+        // memmove's), and its library builtin is its __builtin_ form's where the list has that (__builtin_fmax's,
+        // __builtin_abs's), none where that form is another family's (__builtin_fabs's, __builtin_memcpy's).
         const bool inline_call = fold->fold == CBUILTIN_LIBRARY_FOLD_NONE;
-        folds &= info != NULL && strcmp(info->encoding, fold->prototype) == 0 && info->constant_evaluable_attribute != inline_call &&
+        const bool cplusplus = fold->computed == CBUILTIN_LIBRARY_COMPUTED_COPY || fold->computed == CBUILTIN_LIBRARY_COMPUTED_MOVE;
+        char builtin[64];
+        const int builtin_length = snprintf(builtin, sizeof(builtin), "__builtin_%s", fold->name);
+        const CBuiltinLibraryId own = cbuiltin_library_id(builtin, (uint32_t)builtin_length);
+        folds &= info != NULL && strcmp(info->encoding, fold->prototype) == 0 &&
+                 (inline_call ? !info->constant_evaluable_attribute || cplusplus : info->constant_evaluable_attribute) &&
                  cbuiltin_library_plain(fold->name, length) != NULL && cbuiltin_library_plain_fold(fold->name, length) == f &&
-                 (inline_call ? fold->library < CBUILTIN_LIBRARY_COUNT && strcmp(cbuiltin_library_names[fold->library], fold->name) == 0 :
-                                fold->library == CBUILTIN_LIBRARY_COUNT);
+                 (inline_call ? fold->computed != CBUILTIN_LIBRARY_COMPUTED_NONE && fold->library == own :
+                                fold->library == CBUILTIN_LIBRARY_COUNT && fold->computed == CBUILTIN_LIBRARY_COMPUTED_NONE);
     }
     // Every fold of a listed call is of a row with attribute E, which clang's evaluator folds.
     for (uint32_t l = 0; l < CBUILTIN_LIBRARY_COUNT; l += 1)
@@ -574,6 +581,34 @@ static __attribute__((noinline)) void check_test_library_programs(CheckTest* tes
         "__builtin_free(p);long*q=__builtin_calloc(8,sizeof(long));r+=(int)q[7];__builtin_free(q);"
         "return r+__builtin_abs(n-7)*3+(int)__builtin_labs(-(long)n)*5+(int)__builtin_llabs((long long)n*-3)*7;}",
         "library-memory-and-absolutes", clang);
+    // The plain library builtins the code computes in place of their calls (#1373), as clang -O0's code computes their
+    // intrinsics: memcpy, memmove and memset of each constant size to one past BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES, whose
+    // bytes and values must be the library's, memmove's ranges overlapping by up to 9 bytes in either direction and
+    // memset's values negative and wider than a byte, constant and not; a musttail return of a memcpy; abs, labs and
+    // llabs, plain and __builtin_, of their extremes but the undefined ones; and fabs, fabsf, fabsl, copysign, copysignf
+    // and copysignl, plain, and __builtin_copysignl, of the harness's special values, signaling NaNs among them, bit for bit.
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_LIBRARY_FOLD
+        "typedef unsigned long size_t;void*memcpy(void*,const void*,size_t);void*memmove(void*,const void*,size_t);void*memset(void*,int,size_t);"
+        "int abs(int);long labs(long);long long llabs(long long);double fabs(double);float fabsf(float);long double fabsl(long double);"
+        "double copysign(double,double);float copysignf(float,float);long double copysignl(long double,long double);"
+        "double fp_special(int);float fp_specialf(int);"
+        "static void*tail(void*d,const void*s,size_t k){(void)k;__attribute__((musttail)) return memcpy(d,s,8);}"
+        "static unsigned long at(const void*p,const char*a){return (unsigned long)((const char*)p-a);}\n"
+        "#define M(k) h+=at(memmove(b+40+o,b+40,k),b);h+=at(memcpy(c+3,b+(o&7)+8,k),c);h+=at(memset(c+60+(o&7),v,k),c);memset(c+90,-2,k);"
+        "h=hash(hash(h,b,128),c,128);\n"
+        "int tested(int n){unsigned long h=14695981039346656037UL;char b[128],c[128];int o=(int)((unsigned)n%19)-9;int v=n*37-200;"
+        "for(int i=0;i<128;i++){b[i]=(char)(i*7+n);c[i]=(char)(i*5+1);}"
+        "M(0)M(1)M(2)M(3)M(4)M(5)M(6)M(7)M(8)M(9)M(10)M(11)M(12)M(13)M(14)M(15)M(16)M(17)M(18)M(19)M(20)M(21)M(22)M(23)M(24)M(25)M(26)M(27)M(28)M(29)M(30)M(31)M(32)M(33)"
+        "h+=at(tail(c,b+(unsigned)n%5,0),c);h=hash(h,c,16);"
+        "int x=(int)((unsigned)n*123456789u);long l=(long)n*1099511627776L;long long q=-(long long)n*1000000007LL;"
+        "h+=(unsigned long)abs(x)*3+(unsigned long)labs(l)*5+(unsigned long)llabs(q)*7+(unsigned long)__builtin_abs(-x)+(unsigned long)__builtin_labs(l-1)*11"
+        "+(unsigned long)__builtin_llabs(q+3)*13+(unsigned long)abs(-2147483647+n%2)+(unsigned long)labs(-9223372036854775807L+n%2)*17+(unsigned long)llabs(n<0?-1:1);"
+        "for(int i=0;i<9;i++){double a=fp_special(n),d=fp_special(i);float f=fp_specialf(n),g=fp_specialf(i);long double la=a,ld=-d;"
+        "h=hd(h,fabs(a));h=hd(h,copysign(a,d));h=hd(h,copysign(d,-a));h=hf(h,fabsf(f));h=hf(h,copysignf(g,f));h=hl(h,fabsl(la));h=hl(h,copysignl(la,ld));"
+        "h=hl(h,__builtin_copysignl(ld,la));h=hd(h,fabs(a)+copysign(1.0,d));}"
+        "long double s=n%2?__builtin_nansl(\"\"):-__builtin_nansl(\"1\");h=hl(hl(hl(h,fabsl(s)),copysignl(s,-1.0L*n)),copysignl(2.5L,s));return out(h);}",
+        "library-computed-inline", clang);
     // The folds in code: clang's -1, 0 or 1 of constant strings, where the library's functions return the differences
     // (glibc's strcmp("a", "c") is -2), through __builtin_X and the plain declarations; a const array's string; and a
     // call with a side effect, which neither folds.

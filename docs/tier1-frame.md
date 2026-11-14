@@ -682,8 +682,10 @@ prefixes may hold inputs. Failure preserves result and arena lengths.
 One function is the semantic batch: independent chunks would miss cross-chunk
 interference. Internal class/event sorting puts ends before starts at ties,
 then color/layout phases produce object-to-slot/offset columns and explicit
-steps. Scalar/vector colors may differ but must preserve interference, class
-slot counts and frame sizes. Register/stack limits and all displacement bounds
+steps. The scalar colorer is the vector one's exact twin, each level's last
+ended color in one ordered pass, so both paths give identical slots and offsets
+(#2606), which `test-tier1-frame` requires besides its independent interference,
+class slot count and frame size checks. Register/stack limits and all displacement bounds
 are checked; partial-vector tails never create objects.
 
 Disposition: retain explicit preallocation requirements and direct indexed

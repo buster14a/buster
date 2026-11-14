@@ -275,8 +275,9 @@ struct NodeMachineColumns
 // destination's type (the lvalue's), its computation's (its operand 0's conversion, which check_lower_update converts
 // the old value through) and operand 1's target (its conversion's type, or long for a pointer's); a direct update's
 // local (its object) or global (its symbol), its read's and its store's kinds; and the constant its operation takes in
-// place of operand 1, an increment's one or an unsigned power of two's count or mask. The updates' functions are out of
-// line: about one evaluated node in forty is an update, and the sweeps' loops stay as they are for the others.
+// place of operand 1, an increment's one or a power of two's count or mask (check_lower_power's MASK). The updates'
+// functions are out of line: about one evaluated node in forty is an update, and the sweeps' loops stay as they are for
+// the others.
 typedef struct NodeMachineUpdate NodeMachineUpdate;
 struct NodeMachineUpdate
 {
