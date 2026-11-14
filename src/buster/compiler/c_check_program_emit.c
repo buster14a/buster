@@ -573,6 +573,8 @@ struct CheckTier1Counts
     // With --tier1-schedule (#172), the blocks scheduled and the records or IR instructions that changed places.
     uint32_t schedule_blocks;
     uint32_t schedule_moved;
+    // The expressions the operand sink moved (#2592, tier1_schedule_ir_sink).
+    uint32_t sunk;
 };
 
 #define BUSTER_CHECK_TIER1_OPERATIONS 256
@@ -610,6 +612,7 @@ struct CheckTier1Report
     uint64_t inlined_calls;
     uint64_t schedule_blocks;
     uint64_t schedule_moved;
+    uint64_t sunk;
 };
 
 // #1059's coverage of the operations a helper may implement, summed over a command's units (--helper-report): each
@@ -4889,6 +4892,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->tier1_report.inlined_calls += compiled ? counts->inlined_calls : 0;
         lanes->tier1_report.schedule_blocks += compiled ? counts->schedule_blocks : 0;
         lanes->tier1_report.schedule_moved += compiled ? counts->schedule_moved : 0;
+        lanes->tier1_report.sunk += compiled ? counts->sunk : 0;
     }
     if (!valid)
     {
