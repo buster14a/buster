@@ -1144,8 +1144,10 @@ static uint32_t check_test_tier1_function(const char* path, const char* name, X8
         function = named ? symbol : NULL;
     }
     const Elf64_Shdr* text = function != NULL ? &elf.sections[function->st_shndx] : NULL;
+    // The decoder's tables are this helper's to set up: which tests ran before it in this process (a part's deal) is
+    // no precondition.
     valid = valid && text != NULL && function->st_size != 0 && function->st_value <= text->sh_size && function->st_size <= text->sh_size - function->st_value &&
-            check_test_elf_range(elf.file, text->sh_offset, text->sh_size);
+            check_test_elf_range(elf.file, text->sh_offset, text->sh_size) && x86_disassembler_initialize();
     const X86DecodeResult decoded = valid ? x86_disassemble_scalar((const uint8_t*)bytes + text->sh_offset + function->st_value, function->st_size, records, capacity)
                                           : (X86DecodeResult){ .status = X86_DECODE_BAD_ARGUMENT };
     valid = valid && decoded.status == X86_DECODE_OK && decoded.consumed == function->st_size;
