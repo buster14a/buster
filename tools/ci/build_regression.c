@@ -2430,7 +2430,7 @@ static void check_develop(void)
         fail("the Develop build changed the Release executable");
     }
     char stamp[PATH_MAX];
-    snprintf(stamp, sizeof(stamp), "%s/Develop/develop/main_unit_checker/split.stamp", tree);
+    snprintf(stamp, sizeof(stamp), "%s/Develop/parts/main_unit_checker/split.stamp", tree);
     if (access(stamp, F_OK) != 0)
     {
         fail("Develop compiled main_unit_checker.c whole: its parts need parallel native generation's tools (the configure step names what is missing)");
@@ -3926,7 +3926,7 @@ static void check_parallel_codegen_compiler(void)
     snprintf(log, sizeof(log), "%s/parallel-codegen-output.log", work);
     if (run(log, settings, print) != 0)
     {
-        fail("can't find the opt-in compiler");
+        fail("can't find the compiler in parts");
     }
     Text output = read_file(log);
     char* newline = strchr(output.data, '\n');
@@ -3936,6 +3936,18 @@ static void check_parallel_codegen_compiler(void)
     }
     snprintf(path, sizeof(path), "%s", output.data);
     free(output.data);
+    // The executable's tree (TREE/Release/compiler) split every main.c unit before the optimizer (presplit.c, #2559):
+    // the checker's unit into 48 code parts, a part's job each, and their join.
+    char stamp[PATH_MAX];
+    char part[PATH_MAX];
+    char* release = strrchr(path, '/');
+    const int directory = release != 0 ? (int)(release - path) : 0;
+    snprintf(stamp, sizeof(stamp), "%.*s/parts/main_unit_checker/split.stamp", directory, path);
+    snprintf(part, sizeof(part), "%.*s/parts/main_unit_checker/part47.o", directory, path);
+    if (access(stamp, F_OK) != 0 || access(part, F_OK) != 0)
+    {
+        fail("the Release build compiled main_unit_checker.c whole, not in parts: no %s or %s", stamp, part);
+    }
     char* baked[] = { path, "test-baked-tables", 0 };
     output = capture(baked);
     free(output.data);
@@ -3943,9 +3955,9 @@ static void check_parallel_codegen_compiler(void)
     BUILD_ENV(settings, "build", "--config", "Release");
     if (!same_time(status_of(path), compiler) || !same_file("build/compiler", path))
     {
-        fail("an unchanged opt-in compiler build regenerated or failed to publish its executable");
+        fail("an unchanged build of the compiler in parts regenerated or failed to publish its executable");
     }
-    pass("the full opt-in compiler links native units, passes baking/canary checks and reuses its unchanged executable");
+    pass("the full compiler in parts links its units, passes baking/canary checks and reuses its unchanged executable");
 }
 
 int main(int argc, char** argv)

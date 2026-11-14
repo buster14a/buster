@@ -201,20 +201,24 @@ if(buster_parallel_codegen)
     endif()
 endif()
 message(STATUS "buster: parallel native generation: ${buster_parallel_codegen}")
-# The Develop configuration (docs/commands/build.md, "Develop"): its main.c units in parts before the optimizer where
-# the parts' tools are (BusterCodegen.cmake), else whole, and the benchmark units BUSTER_DEVELOP_ON_DEMAND names left
-# out of its executable, whose commands then name the configurations that have them.
+# The Develop configuration (docs/commands/build.md, "Develop"): its main.c units in parts as Release's are, where the
+# parts' tools are (BusterCodegen.cmake), else whole, and the benchmark units BUSTER_DEVELOP_ON_DEMAND names left out
+# of its executable, whose commands then name the configurations that have them.
 set(buster_develop FALSE)
 if("Develop" IN_LIST CMAKE_CONFIGURATION_TYPES)
     set(buster_develop TRUE)
 endif()
-# A sanitizer tree's Develop units compile whole: its parts would be instrumented apart, after inlining across parts was
-# lost, which Release's parts (after the whole module's pipeline) aren't.
-set(buster_develop_parts FALSE)
-if(buster_develop AND buster_parallel_codegen AND buster_sanitizer STREQUAL "none")
-    set(buster_develop_parts TRUE)
+# The units in parts (BusterCodegen.cmake, #2559): Release's and Develop's main.c units split before the optimizer. A
+# sanitizer tree's would be instrumented apart, after inlining across parts was lost: its Release splits the two longest
+# units after the whole module's pipeline instead (split.c, #2639), and its Develop compiles every unit whole.
+set(buster_unit_parts FALSE)
+set(buster_split_parts FALSE)
+if(buster_parallel_codegen AND buster_sanitizer STREQUAL "none")
+    set(buster_unit_parts TRUE)
+elseif(buster_parallel_codegen)
+    set(buster_split_parts TRUE)
 endif()
-message(STATUS "buster: Develop configuration: ${buster_develop}, in parts: ${buster_develop_parts}")
+message(STATUS "buster: Develop configuration: ${buster_develop}, units in parts: ${buster_unit_parts}")
 
 # Each source is an object library of its own, defined in the compile order, which is the order a clean build starts
 # them in; the executable links their objects in the sources' order.
@@ -235,18 +239,15 @@ foreach(index IN LISTS order)
     endif()
     buster_unit_options(buster_${name} "${defines_group}")
     buster_codegen_split_unit("${name}" split)
+    buster_unit_partitions("${name}" partitions)
     if(split)
         # This is the ordinary O3 pipeline through optimized IR, not LTO's pre-link pipeline. The source target
         # remains the dependency owner and the sole compile database entry for this C translation unit.
         target_compile_options(buster_${name} PRIVATE "$<$<CONFIG:Release>:-emit-llvm>")
         buster_codegen_unit("${name}")
-    endif()
-    buster_develop_partitions("${name}" develop_partitions)
-    if(NOT develop_partitions EQUAL 0)
-        # Develop's unit stops before LLVM's optimizer, which its parts' jobs run (BusterCodegen.cmake).
-        target_compile_options(buster_${name} PRIVATE "$<$<CONFIG:Develop>:SHELL:-Xclang -disable-llvm-passes>"
-            "$<$<CONFIG:Develop>:-emit-llvm>")
-        buster_develop_unit("${name}")
+    elseif(NOT partitions EQUAL 0)
+        # Release's and Develop's unit stops before LLVM's optimizer, which its parts' jobs run (BusterCodegen.cmake).
+        buster_parts_unit("${name}")
     endif()
 endforeach()
 set(unit_names "")
