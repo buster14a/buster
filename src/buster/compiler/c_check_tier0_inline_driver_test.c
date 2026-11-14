@@ -11,11 +11,12 @@
 // argument and result in registers, a chain of wrappers (_mm256_mask_add_epi32's), intrinsics of 16, 32 and 64
 // bytes, and a callee that calls a runtime function (an __int128 division's __divti3), which a caller in another part,
 // with no runtime call of its own, takes by its final symbol (the default windows lower each callee as a part of its
-// own: its provisional symbol named no symbol, #1398). Built at x86-64-v4 by the vector path, the scalar twin and --tier0-no-inline: each runs as clang -O0's build
-// does where the host has x86-64-v4, the two paths' objects are the same bytes, and the control's differs. The object
-// leaves out the callees spliced at every call (#1398 step 3) and keeps those a call or an address still refers to (the
-// cycle's, the one of two returns, the one whose address is taken), as the control keeps every one; and it is the same
-// bytes by 4 lanes and without holding the callees' code for the last pass (--tier0-no-hold).
+// own: its provisional symbol named no symbol, #1398). Built at x86-64-v4 by the vector path, the scalar twin and
+// --tier0-no-inline: each runs as clang -O0's build does where the host has x86-64-v4, the two paths' objects are the
+// same bytes, and the control's differs. The object leaves out the callees spliced at every call (#1398 step 3) and keeps
+// those a call or an address still refers to (the cycle's, the one of two returns, the one whose address is taken), as
+// the control keeps every one; and it is the same bytes by 4 lanes and without holding the callees' code for the last
+// pass (--tier0-no-hold).
 //
 // The lanes' fixture (#1398's review): a chain of 20 always_inline functions, past the expansion's depth bound, and a
 // cycle of two, reached from 40 roots at every depth, which the lanes take in an order their timing decides. Which
