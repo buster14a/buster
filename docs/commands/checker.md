@@ -82,7 +82,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
-  --asm-definitions-only | --call-counts-only | --fp-contract-only | --operand-diagnostics-only] [--in-process] [--clang-server PATH]
+  --asm-definitions-only | --call-counts-only | --fp-contract-only | --operand-diagnostics-only | --label-attributes-only |
+  --attribute-recovery-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; with
@@ -131,11 +132,33 @@ unused-warning fixtures also check exact scope-completion tokens.
   floating, pointer and aligned values through Clang and all three Buster routes.
   `--semantic-recovery-only` runs
   `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,
-  `c_check_type_attribute_recovery_driver_test.c`,
+  `c_check_attribute_call_recovery_driver_test.c`,
+  `c_check_type_attribute_recovery_driver_test.c`, `c_check_attribute_declaration_driver_test.c`,
   `c_check_structural_recovery_driver_test.c` and `c_check_repaired_view_driver_test.c` alone, the whole output and status
   of semantic error recovery's fixtures against clang's on the vector, scalar
   and two-lane deferred paths, and `-c`'s refusal of each: `docs/c-checker.md`'s
-  "Semantic error recovery", #1447; `--type-sugar-only` runs
+  "Semantic error recovery", #1447. Its runtime `suppress_label_order.c`
+  cases compare parser errors before label-subject errors under both language
+  modes, warning policies and a one-error limit, with macros, split lists,
+  valid controls, later errors and old-output preservation. The adjacent
+  `.cases` file records case number, expected exit status and whether the first
+  error must be the string-literal error. `--label-attributes-only` runs these
+  cases plus the existing label and unknown-attribute suites, including the
+  label execution controls. Attributed implicit-int declarations (#2332)
+  compare complete GNU99/GNU17 diagnostics on both readers and deferred checking
+  with one, two and three lanes; C23's unsupported cases retain a frozen baseline
+  stream instead of claiming Clang parity. Typed controls include GNU89/C23 and
+  require an ELF object that links and runs. Invalid inputs preserve existing
+  output or create none. Prefix/reparse contract checks also retain the complete
+  meaning metadata and a separate mutable table for each reparse (#2748).
+  `--attribute-recovery-only` runs the mixed-label, implicit-int-declaration and
+  attribute-led-call fixtures together. Its `attribute-recovery-integration.c`
+  combines their recovery paths in two functions, preserving the complete
+  diagnostic order and later independent errors. The declaration portion runs
+  in C99–C17, the call portion before C23, and the label portion in every
+  tested standard. This focused section supports sanitizer and in-process/child
+  differential checks without running the unrelated recovery fixtures.
+  `--type-sugar-only` runs
   `c_check_type_sugar_driver_test.c` alone, the typedef sugar diagnostics keep
   through typedef chains, members and qualified arrays, and const assignment's
   notes, `docs/c-checker.md`'s "Type sugar" and "Const assignment", #1447;

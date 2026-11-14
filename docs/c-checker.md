@@ -5010,6 +5010,31 @@ The fixtures cover each pass above, shared records, two errors in one list,
 missing names and a control error after a recovered error, block declarations,
 exclusions, `_Alignas`, a dropped `format`, and enumerators.
 
+GNU-attribute-led calls before C23 have a bounded diagnostic recovery (#2406).
+For `__attribute__((unused)) missing(1);`, Clang classifies `missing` before
+reporting "expected identifier or '('", but never reads the arguments. A
+private parser view retains the callee and its parentheses, erases the leading
+attributes and unread arguments, and keeps the original parse error after the
+callee's lookup diagnostic. The ordinary binding and implicit declaration
+survive for later statements. A silent invalid-use report then cuts the
+synthetic call before expression checking, so it cannot invent an arity,
+noncallable or deprecation diagnostic. The view retains preprocessor source
+indices across recovery rounds and repeated macro expansions. It applies only
+to a balanced call followed by a semicolon; catalog-recognized builtin spellings
+(including library names) and a semicolon within the outer argument list keep
+the existing recovery.
+
+`c_check_attribute_call_recovery_driver_test.c` reads the original runtime
+fixtures in `tests/checker/parse-recovery/attributed-call*.c`. It compares the
+whole diagnostic stream and status with Clang in GNU89 and GNU17, through both
+readers, syntax-only and object output, and one/three requested lanes with
+deferred bodies. The cases cover ordinary prototypes, noncallable and annotated
+callees, preserved implicit declarations, repeated macros, prior recovery
+rounds, deeply nested unread arguments, and builtin exclusion. Warning
+promotion/suppression and the error limit are checked; rejected compilations
+preserve an existing output, while accepted controls replace it with an ELF
+object. A separate control keeps C23's declaration grammar.
+
 Phase 2 covers redeclarations that conflict with a declaration of the same
 name: the visible one in `check_input_bind`'s first test, or its entity's
 linked one in the second (`int k = 1; int k = 2;`). Clang marks such a
@@ -5626,6 +5651,11 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   quiets its invalid uses, with that status carried across comma declarators.
   An actual structural error
   still cuts the view, and the original error always rejects the unit.
+  A prefix retains the complete borrowed `ParseMeanings` metadata (#2748):
+  capacity, spelling table, custom attribute names and the original meanings
+  array. A later rejected-warning view copies that metadata and allocates its
+  own mutable meanings array before reparsing, preserving the original bindings
+  and source-origin maps.
 - **A statement's start** (`StatementFilterCCC`): a keyword is offered by the
   next token as within an expression, and a type keyword or a typedef name
   before a name, `(`, `[`, `*` or `&`; an object alone before `=`. Clang's
@@ -5751,9 +5781,10 @@ Left as they were:
   missing `;` after `return 0`): its name's error is the parser's.
 - After a block item's GNU attributes, a builtin's name without a call
   (`__builtin_abs;`, clang's "expected identifier or '('") is still an
-  implicit int's declarator, and before C23 an undeclared function's call
-  there lacks clang's "call to undeclared function" error before its "expected
-  identifier or '('", whose parse error ends the body's checking.
+  implicit int's declarator. A catalog-recognized builtin spelling's call there still keeps
+  the existing parse error and may end the body's checking. The bounded
+  pre-C23 recovery for ordinary calls is described under semantic error
+  recovery above (#2406).
 - A declaration's type name outside a statement's start is clang's parser's
   to correct (`DiagnoseUnknownTypeName`): a parameter's `myin v` keeps
   buster's "unknown type name" with no suggestion, and its prefix view
@@ -8759,11 +8790,13 @@ change, it refused such a declaration by name.
   (`[[x]] l:`), read as GNU ones after its colon are
   (`check_input_label_attributes`); their closer is the name's parent in the
   tree, so a label's name is the token before its colon there
-  (`check_input_label_name`). A name clang refuses on a label is its error
-  before the attributes are read, but a `suppress` whose argument is no string
-  literal (`check_input_label_suppress_literal`, #2332): clang's parser drops
-  it with its string error first, which the reading gives. A refused attribute
-  before it in the list still gives its subject error instead. The parser reports clang's errors for C23
+  (`check_input_label_name`). The ordinary attribute reader first checks every
+  list's arguments, then the label's subject checks complete after the lists
+  (#2332). Thus a malformed `suppress` gives its parser errors before a
+  `minsize` subject error in either textual order, including separate lists,
+  GNU and C23 spellings, and macro expansions. A dropped attribute has no
+  subject error, and a recovered subject error is not given again by the
+  label-only refusal checks. The parser reports clang's errors for C23
   attributes after GNU ones and before a block's `}`. Specifiers of
   attributes alone have no type: an implicit int's error at an unbound
   declarator's name. In a block, an already-declared ordinary name after GNU
@@ -8830,10 +8863,17 @@ change, it refused such a declaration by name.
   declaration. The original `tests/driver/attribute_recovery.c` fixtures compare
   both language modes, readers, warning policy, deferred checking and output
   preservation. Mixed statement/nonstatement attributes, string subscripts and
-  unmatched outer lists still have recovery gaps. So does an implicit int's
-  declaration after a statement's attributes (`__attribute__((unused))
-  (x)++;`), whose redeclaration errors and `-Wignored-attributes` warning
-  clang's Sema gives after the parser's errors, which stop buster (#2332). The calls
+  unmatched outer lists still have recovery gaps. In C99 through C17, an
+  attributed grouped or pointer declarator with no type
+  (`__attribute__((unused)) (x)++;`, or `*p = 1;`) now retains its missing-type
+  error while a private view checks the declaration (#2332). A suffix is removed
+  only through a semicolon with matching parentheses and brackets and no brace.
+  The missing type, late-attribute warning and previous-definition note,
+  redefinition, and suffix error keep Clang's order. An invalid redeclaration
+  retains the earlier binding and checks its initializer expression without
+  converting it to the invalid declaration's type. Later independent errors and
+  deferred warnings remain visible. GNU89 and C23 keep their existing behavior;
+  C23's invalid declarations do not have pre-C23 implicit-int recovery. The calls
   are clang's `CallExprFinder`'s (`check_input_statement_call`): a call's
   `(` (not a declarator's parameters') or an asm statement's, outside
   `sizeof`'s, `_Alignof`'s and `typeof`'s operands and GNU attributes'
