@@ -1133,7 +1133,9 @@ spills and reloads around them: four instructions fewer a run. By callgrind at m
 instructions: `sqlite3VdbeExec` −0.71 M (0.29 M fewer `lea`s, 0.39 M fewer
 moves), `sqlite3Atoi64` −0.23 M, `sqlite3_str_vappendf` −0.21 M,
 `pageFreeArray` −0.13 M; `instrFunc` +0.17 M, its loop's spills moved from one
-value to another. Lua's scripts run the same instructions. The emitter accepts
+value to another. Lua's scripts run the same instructions. On the 9700X, with
+#2618's split of hoisted addresses (`docs/ir.md`), speedtest1's user cycles
+are 0.9976 over six layouts (95% interval 0.9895 to 1.0058). The emitter accepts
 a definition whose first fragment is its recipe's for a recomputed value alone,
 and records no register for it.
 
