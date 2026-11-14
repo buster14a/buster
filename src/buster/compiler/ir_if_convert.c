@@ -542,13 +542,17 @@ static IrIfConvertChain ir_if_convert_chain(const IrIfConvertWork* work, uint32_
     return chain;
 }
 
-// The value phi row `phi` takes on the edge from `block`.
+// The value phi row `phi` takes on the edge from `block`: its first entry from there, the scan stopping at it. Without
+// the early exit, clang vectorized the scan of the entries' alternate words into masked gathers, whose unselected
+// lanes MemorySanitizer reads as uninitialized (the merge queue's MSan shard on #1382's sparse switches).
 static uint32_t ir_if_convert_incoming(const IrFunction* f, uint32_t phi, uint32_t block)
 {
+    const uint32_t first = f->a[phi];
+    const uint32_t count = f->b[phi];
     uint32_t value = BUSTER_IR_NONE;
-    for (uint32_t p = f->b[phi]; p > 0; p -= 1)
+    for (uint32_t p = 0; p < count && value == BUSTER_IR_NONE; p += 1)
     {
-        value = f->extra[f->a[phi] + (p - 1) * 2] == block ? f->extra[f->a[phi] + (p - 1) * 2 + 1] : value;
+        value = f->extra[first + p * 2] == block ? f->extra[first + p * 2 + 1] : BUSTER_IR_NONE;
     }
     return value;
 }
