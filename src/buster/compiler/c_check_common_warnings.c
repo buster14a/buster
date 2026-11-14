@@ -2630,6 +2630,69 @@ static bool check_common_out_of_range(CheckCommonEmission* emission, uint32_t no
     return decided;
 }
 
+// An ordinary conditional has a nonnegative result when both possible arms do. Its usual arithmetic conversions
+// preserve each arm's nonnegative value whenever its result is signed; an unsigned result needs no further proof.
+// Follow only conditionals and the existing nonnegative leaves, not arithmetic or explicit signed casts. GNU's
+// shared middle operand is clang's promoted opaque value, so its original unsigned/boolean range is not a proof.
+static bool check_common_conditional_nonnegative(const CheckCommonEmission* emission, uint32_t node)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    const CheckStream* stream = emission->stream;
+    const uint32_t count = graph->count < stream->count ? graph->count : stream->count;
+    // Borrow only the emission worklist's unused node slots. This walk invokes no emitter, changes no live frame
+    // or work_count, and its local top never escapes. A full tail or repeated-DAG work budget leaves the warning.
+    uint32_t* const nodes = emission->work_nodes;
+    const uint32_t first = emission->work_count;
+    const uint32_t capacity = emission->work_capacity;
+    uint32_t top = first;
+    uint32_t remaining = node < count ? node + 1 : 0;
+    bool nonnegative = node < count && graph->ops[node] == CHECK_OP_CONDITIONAL;
+    while (nonnegative && node < count && remaining != 0)
+    {
+        remaining -= 1;
+        const CheckOp op = graph->ops[node];
+        uint32_t width = 0;
+        bool is_signed = false;
+        const bool integer = check_common_integer(emission->types, check_stream_type(stream, node), &width, &is_signed);
+        const bool boolean = op == CHECK_OP_NOT || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR ||
+                             (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL);
+        const bool constant = integer && check_common_integer_constant(stream, node);
+        const CheckValue value = constant ? check_stream_value(stream, node) : (CheckValue){ 0 };
+        const bool source_constant = constant && (value.flags & BUSTER_CHECK_ICE) != 0;
+        const bool leaf = integer && (!is_signed || boolean || (source_constant && check_common_integer_value(&value, width, true) >= 0));
+        if (leaf)
+        {
+            node = top != first ? nodes[--top] : BUSTER_CHECK_NONE;
+        }
+        else if (integer && op == CHECK_OP_CONDITIONAL && graph->operand0[node] < node &&
+                 graph->operand1[node] < node && graph->operand2[node] < node && graph->operand1[node] != graph->operand0[node])
+        {
+            const CheckValue condition = check_stream_value(stream, graph->operand0[node]);
+            bool truth = false;
+            // A folded assignment or statement-expression result is not source constant-condition evidence.
+            const bool known = (condition.flags & BUSTER_CHECK_ICE) != 0 && check_action_truth(emission->types, &condition, &truth);
+            if (known)
+            {
+                node = truth ? graph->operand1[node] : graph->operand2[node];
+            }
+            else if (nodes != NULL && top < capacity)
+            {
+                nodes[top++] = graph->operand2[node];
+                node = graph->operand1[node];
+            }
+            else
+            {
+                nonnegative = false;
+            }
+        }
+        else
+        {
+            nonnegative = false;
+        }
+    }
+    return nonnegative && node == BUSTER_CHECK_NONE && top == first;
+}
+
 // The sign-mismatch visit one scan frame runs after its subtree: these warnings follow every other
 // warning the expression produces.
 static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
@@ -2703,7 +2766,9 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
             }
             const CheckOp signed_op = graph->ops[signed_operand];
             constant_suppressed = constant_suppressed || signed_op == CHECK_OP_NOT || (signed_op >= CHECK_OP_LESS && signed_op <= CHECK_OP_NOT_EQUAL) ||
-                                  signed_op == CHECK_OP_LOGICAL_AND || signed_op == CHECK_OP_LOGICAL_OR;
+                                  signed_op == CHECK_OP_LOGICAL_AND || signed_op == CHECK_OP_LOGICAL_OR ||
+                                  (signed_op == CHECK_OP_CONDITIONAL && signed_width <= unsigned_width &&
+                                   check_common_conditional_nonnegative(emission, signed_operand));
         }
         if (integer && !unsigned_operands && left_signed != right_signed && !constant_suppressed && (left_signed ? left_width <= right_width : right_width <= left_width))
         {

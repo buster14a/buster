@@ -398,6 +398,55 @@ features lack run as LLVM expands them into SSE2's sequences
 function without FENV_ACCESS), and so their 256-bit builtins on halves of them.
 `roundps`, `roundpd`, `dpps` and `mpsadbw` stay refused by name there: clang's
 backend can't select them without SSE4.1 and stops.
+
+A copy without AVX-512F and AVX-512VL computes its AVX-512 macros' builtins, and
+AVX2's gathers by a vector mask below AVX2, element by element where their rows
+can't run (#2716, `check_lower_x86_lanes` in `c_check_program_x86_lanes.c`), as
+`check_lower_vector_lanewise` computes C's operators no row takes. The arguments
+go into frame temporaries; each element of the result (or each bit of a mask)
+is the typed stream's own operations on theirs; the result is read whole. Each
+is what clang's legalized code computes, whatever instructions that takes:
+
+- **Compares into masks**: VPCMP's and VPCMPU's of every element size, and
+  VCMPPS's and VCMPPD's by clang's fcmp predicates (`check_x86_lower_float_predicate`).
+  The typed compares' C semantics give the unordered ones: a NaN is the value
+  unequal to itself. A function with FENV_ACCESS keeps the float ones' refusal.
+- **Rotates and funnel shifts**: `vprold` to `vprorq`, `vpshld` and `vpshrd`.
+- **Ternary logic**: `vpternlog` of 16 bytes, and of 32 with AVX, as the OR of
+  its immediate's minterms (or the complement of its absent ones'), merged by
+  the mask. Clang's default copy keeps AVX-512VL's `vpternlog` itself, so its
+  code needs that instruction where ours doesn't; the values are the same.
+- **Element and lane moves**: `valignd` and `valignq`, the 64-byte `vpalignr`
+  and byte shifts, the 128-bit lanes' shuffles, the 64-byte `shufps`, `shufpd`,
+  `vpermilps`, `vpermilpd`, `pshufd`, `pshufhw`, `pshuflw`, `vpermq` and
+  `vpermpd`, the 128- and 256-bit lanes' inserts, and the masked extracts.
+- **AVX2's 16-byte gathers below AVX2**: each element's load from the address
+  that its mask element's sign selects, either the gathered one or w's own
+  element in its temporary, so that a masked-off element reads no memory of the
+  program's and takes no branch. Clang's default copy emits AVX2's `vpgather`
+  itself; the values are the same.
+- **Round-scales of a constant mask**: `rndscaless` and `rndscalesd` with
+  SSE4.1, the 32-byte `rndscaleps` with AVX. They are ROUNDSS's, ROUNDSD's or
+  VROUNDPS's row of the whole immediate, as clang's legalized code takes it
+  (those instructions ignore its scale bits), then the mask's merge.
+
+The rest stay refused by name, where clang's backend fails:
+
+- the 32-byte ternary logic without AVX, and the 64-byte one at every level
+  ("Do not know how to split the result of this operator");
+- a round-scale whose mask isn't a constant ("Cannot select" its `vselect` or
+  its `v1i1` load), below SSE4.1, or with an exception's suppression;
+- the 32-byte gathers without AVX2.
+
+The lowering's entry room (`check_x86_lanes_room`) adds each such call's bound,
+`check_x86_lanes_entries`, at a target without AVX-512F and AVX-512VL. `test-checker
+--program-vectors` runs a `target_clones("avx10.2","default")` body of each
+family natively against clang 23 -O0, at x86-64, -v2 and -v3 where clang takes
+it (the ternary logic's and the gathers' only on a host with the AVX-512VL or
+AVX2 that clang's copy keeps), and refuses each of clang's failures above by
+name. buster-performance's
+`target-clones-sweep-1834-2026-11-14` record listed 150 such refusals at
+x86-64, 152 at -v2 and 150 at -v3; this change compiles every one of them.
 Such a call's wide vector arguments and results take the AVX calling-convention
 check below, against the same first version's features.
 

@@ -267,6 +267,7 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
         view->typo_sources = parser->typo_sources;
         view->typo_count = parser->typo_count;
         view->invalid_call_sources = parser->invalid_call_sources;
+        view->invalid_call_values = parser->invalid_call_values;
         view->invalid_call_count = parser->invalid_call_count;
         view->prefix_view = true;
         view->recovered_parameter_types = parameter_types && end > first_error;
@@ -497,10 +498,11 @@ static bool check_prefix_resumes(const Parser* view, const ParseDiagnostic* diag
     }
     valid &= !diagnostic->resume_delete || diagnostic->resume_end != 0;
     valid &= diagnostic->resume_begin == 0 || (diagnostic->resume_delete && diagnostic->resume_end != 0);
-    valid = valid && (!diagnostic->resume_call || (diagnostic->resume_delete && begin < diagnostic->token && diagnostic->token + 2 < diagnostic->resume_end &&
+    const uint32_t callee = diagnostic->resume_callee;
+    valid = valid && (!diagnostic->resume_call || (diagnostic->resume_delete && begin <= callee && callee <= diagnostic->token && callee + 2 < diagnostic->resume_end &&
                                          diagnostic->resume_end <= view->tokens.count &&
-                                         view->tokens.kinds[diagnostic->token] == PARSE_KIND_IDENTIFIER &&
-                                         view->tokens.kinds[diagnostic->token + 1] == PARSE_KIND_L_PAREN &&
+                                         view->tokens.kinds[callee] == PARSE_KIND_IDENTIFIER &&
+                                         view->tokens.kinds[callee + 1] == PARSE_KIND_L_PAREN &&
                                          view->tokens.kinds[diagnostic->resume_end - 1] == PARSE_KIND_R_PAREN));
     return valid;
 }
@@ -516,6 +518,7 @@ static ParseDiagnostic check_prefix_original_diagnostic(const ParseDiagnostic* d
         result.argument = diagnostic->argument < count ? origin[diagnostic->argument] : diagnostic->argument;
         result.note = diagnostic->note < count ? origin[diagnostic->note] : diagnostic->note;
         result.publication = diagnostic->publication != 0 ? (diagnostic->publication < count ? origin[diagnostic->publication] : original_count) : 0;
+        result.resume_callee = diagnostic->resume_call && diagnostic->resume_callee < count ? origin[diagnostic->resume_callee] : diagnostic->resume_callee;
     }
     result.resumed = false;
     result.resume_delete = false;
@@ -670,6 +673,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             .typo_sources = original->typo_sources,
             .typo_count = original->typo_count,
             .invalid_call_sources = original->invalid_call_sources,
+            .invalid_call_values = original->invalid_call_values,
             .invalid_call_count = original->invalid_call_count,
         };
         view->options.tree_only = false;
@@ -828,7 +832,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                     {
                         if (diagnostic->resume_call)
                         {
-                            const uint32_t call[] = { diagnostic->token, diagnostic->token + 1, diagnostic->resume_end - 1 };
+                            const uint32_t call[] = { diagnostic->resume_callee, diagnostic->resume_callee + 1, diagnostic->resume_end - 1 };
                             for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(call); c += 1)
                             {
                                 const uint32_t token = call[c];
@@ -901,8 +905,9 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                 calls += resumed->diagnostics[d].resume_call;
             }
             uint32_t* sources = calls != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, calls) : NULL;
-            resumed->status = calls == 0 || sources != NULL ? CHECK_PREFIX_READY : CHECK_PREFIX_RESOURCE;
-            if (sources != NULL)
+            uint8_t* values = calls != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, calls) : NULL;
+            resumed->status = calls == 0 || (sources != NULL && values != NULL) ? CHECK_PREFIX_READY : CHECK_PREFIX_RESOURCE;
+            if (sources != NULL && values != NULL)
             {
                 const uint32_t inherited = original->invalid_call_count;
                 uint32_t prior = 0;
@@ -910,23 +915,29 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                 for (uint32_t d = 0; d < total; d += 1)
                 {
                     const ParseDiagnostic* diagnostic = resumed->diagnostics + d;
-                    if (diagnostic->resume_call && diagnostic->token < original_count)
+                    if (diagnostic->resume_call && diagnostic->resume_callee < original_count)
                     {
-                        const uint32_t source = original->tokens.sources[diagnostic->token];
+                        const uint32_t source = original->tokens.sources[diagnostic->resume_callee];
                         // Diagnostics have original token order; merge inherited callee sources in the same order.
                         while (prior < inherited && original->invalid_call_sources[prior] <= source)
                         {
-                            sources[written++] = original->invalid_call_sources[prior++];
+                            sources[written] = original->invalid_call_sources[prior];
+                            values[written++] = original->invalid_call_values != NULL ? original->invalid_call_values[prior] : 0;
+                            prior += 1;
                         }
-                        sources[written++] = source;
+                        sources[written] = source;
+                        values[written++] = diagnostic->resume_call_value;
                     }
                 }
                 while (prior < inherited)
                 {
-                    sources[written++] = original->invalid_call_sources[prior++];
+                    sources[written] = original->invalid_call_sources[prior];
+                    values[written++] = original->invalid_call_values != NULL ? original->invalid_call_values[prior] : 0;
+                    prior += 1;
                 }
                 Parser* view = (Parser*)current;
                 view->invalid_call_sources = sources;
+                view->invalid_call_values = values;
                 view->invalid_call_count = written;
             }
         }

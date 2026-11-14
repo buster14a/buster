@@ -2147,6 +2147,378 @@ static void check_test_program_x86_target_attributes(CheckTest* test, const char
                                                     (native.features & v2.features) == v2.features);
             check_test_program_build_release();
         }
+        // A target_clones body's AVX-512 macros and AVX2's gathers by a vector mask, which its baseline copy computes lane
+        // by lane (#2716, check_lower_x86_lanes) as LLVM's legalized code computes them, against clang's at x86-64, -v2 and
+        // -v3: the compares into masks of every element type, width and predicate (and the float ones' of NaNs), the
+        // rotates, funnel shifts, element and lane moves, inserts and masked extracts; the 16-byte ternary logic; the
+        // gathers below AVX2, whose masked-off elements' indices point past every mapping; the round-scales of a constant
+        // mask with SSE4.1 and AVX; and the 32-byte ternary logic with AVX. Clang's own copy isn't all of its target's
+        // instructions: it keeps the ternary logic as AVX-512VL's vpternlog and the gathers as AVX2's vpgather, so those
+        // fixtures run natively only where the host has them too (each one's `oracle` features).
+        static const char avx512_masks[] =
+            "typedef char v64qi __attribute__((vector_size(64)));typedef short v32hi __attribute__((vector_size(64)));"
+            "typedef int v16si __attribute__((vector_size(64)));typedef long long v8di __attribute__((vector_size(64)));"
+            "typedef char v32qi __attribute__((vector_size(32)));typedef short v16hi __attribute__((vector_size(32)));"
+            "typedef int v8si __attribute__((vector_size(32)));typedef long long v4di __attribute__((vector_size(32)));"
+            "typedef char v16qi __attribute__((vector_size(16)));typedef short v8hi __attribute__((vector_size(16)));"
+            "typedef int v4si __attribute__((vector_size(16)));typedef long long v2di __attribute__((vector_size(16)));"
+            "typedef float v8sf __attribute__((vector_size(32)));typedef double v4df __attribute__((vector_size(32)));"
+            "typedef float v4sf __attribute__((vector_size(16)));typedef double v2df __attribute__((vector_size(16)));\n"
+            "#define M(v) do{for(unsigned k_=0;k_<sizeof(v);k_++)h=(h^((unsigned char*)&(v))[k_])*16777619u;}while(0)\n"
+            "#define I8(f,T,x,y,m) {__auto_type r=f((T)x,(T)y,0,m);M(r);r=f((T)x,(T)y,1,m);M(r);r=f((T)x,(T)y,2,m);M(r);r=f((T)x,(T)y,3,m);M(r);r=f((T)x,(T)y,4,m);M(r);r=f((T)x,(T)y,5,m);M(r);r=f((T)x,(T)y,6,m);M(r);r=f((T)x,(T)y,7,m);M(r);}\n"
+            "#define B(f,T,x,y) I8(f,T,x,y,-1)I8(f,T,x,y,k)\n"
+            "__attribute__((target_clones(\"avx10.2\",\"default\"))) static unsigned masks(int n){unsigned h=2166136261u;"
+            "unsigned char in[256];for(int i=0;i<256;i++)in[i]=(unsigned char)(n*37+i*101+(i*n>>3));if(n&1)for(int i=0;"
+            "i<64;i+=3)in[64+i]=in[i];"
+            "v8di a,b;__builtin_memcpy(&a,in,64);__builtin_memcpy(&b,in+64,64);v4di a2,b2;__builtin_memcpy(&a2,in,32);"
+            "__builtin_memcpy(&b2,in+64,32);v2di a1,b1;__builtin_memcpy(&a1,in+16,16);__builtin_memcpy(&b1,in+80,16);"
+            "unsigned long long k;__builtin_memcpy(&k,in+128,8);"
+            "v8sf f={(float)(n%7)-3.0f,__builtin_nanf(\"\"),(float)(n&3),-0.0f,(float)(n%5)-2.0f,1.0f,(n&2)?__builtin_nanf(\"\"):2.0f,0.0f}"
+            ";"
+            "v8sf g={(float)(n%5)-2.0f,(n&1)?__builtin_nanf(\"\"):1.0f,(float)(n&3),0.0f,(float)(n%7)-3.0f,__builtin_nanf(\"\"),2.0f,-1.0f}"
+            ";"
+            "v4df d={(double)(n%3)-1.0,(n&2)?__builtin_nan(\"\"):2.0,-0.0,(double)(n&1)},e={(double)(n%3)-1.0,-2.0,0.0,__builtin_nan(\"\")}"
+            ";"
+            "v4sf f1={f[0],f[1],f[2],f[3]},g1={g[0],g[1],g[2],g[3]};v2df d1={d[0],d[1]},e1={e[0],e[1]};"
+            "B(__builtin_ia32_cmpb512_mask,v64qi,a,b)B(__builtin_ia32_ucmpb512_mask,v64qi,a,b)"
+            "B(__builtin_ia32_cmpw512_mask,v32hi,a,b)B(__builtin_ia32_ucmpw512_mask,v32hi,a,b)"
+            "B(__builtin_ia32_cmpd512_mask,v16si,a,b)B(__builtin_ia32_ucmpd512_mask,v16si,a,b)"
+            "B(__builtin_ia32_cmpq512_mask,v8di,a,b)B(__builtin_ia32_ucmpq512_mask,v8di,a,b)"
+            "B(__builtin_ia32_cmpb256_mask,v32qi,a2,b2)B(__builtin_ia32_ucmpb256_mask,v32qi,a2,b2)"
+            "B(__builtin_ia32_cmpw256_mask,v16hi,a2,b2)B(__builtin_ia32_ucmpw256_mask,v16hi,a2,b2)"
+            "B(__builtin_ia32_cmpd256_mask,v8si,a2,b2)B(__builtin_ia32_ucmpd256_mask,v8si,a2,b2)"
+            "B(__builtin_ia32_cmpq256_mask,v4di,a2,b2)B(__builtin_ia32_ucmpq256_mask,v4di,a2,b2)"
+            "B(__builtin_ia32_cmpb128_mask,v16qi,a1,b1)B(__builtin_ia32_ucmpb128_mask,v16qi,a1,b1)"
+            "B(__builtin_ia32_cmpw128_mask,v8hi,a1,b1)B(__builtin_ia32_ucmpw128_mask,v8hi,a1,b1)"
+            "B(__builtin_ia32_cmpd128_mask,v4si,a1,b1)B(__builtin_ia32_ucmpd128_mask,v4si,a1,b1)"
+            "B(__builtin_ia32_cmpq128_mask,v2di,a1,b1)B(__builtin_ia32_ucmpq128_mask,v2di,a1,b1)"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,0,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,0,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,0,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,1,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,1,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,1,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,2,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,2,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,2,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,3,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,3,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,3,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,4,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,4,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,4,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,5,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,5,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,5,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,6,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,6,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,6,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,7,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,7,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,7,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,8,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,8,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,8,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,9,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,9,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,9,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,10,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,10,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,10,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,11,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,11,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,11,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,12,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,12,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,12,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,13,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,13,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,13,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,14,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,14,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,14,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,15,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,15,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,15,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,16,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,16,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,16,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,17,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,17,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,17,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,18,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,18,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,18,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,19,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,19,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,19,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,20,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,20,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,20,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,21,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,21,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,21,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,22,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,22,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,22,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,23,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,23,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,23,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,24,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,24,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,24,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,25,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,25,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,25,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,26,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,26,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,26,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,27,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,27,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,27,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,28,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,28,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,28,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,29,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,29,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,29,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,30,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,30,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,30,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps256_mask(f,g,31,-1);M(r);r=__builtin_ia32_cmpps256_mask(f,g,31,k);"
+            "M(r);__auto_type s=__builtin_ia32_cmppd256_mask(d,e,31,-1);M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps128_mask(f1,g1,0,-1);M(r);__auto_type s=__builtin_ia32_cmppd128_mask(d1,e1,0,k);"
+            "M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps128_mask(f1,g1,3,-1);M(r);__auto_type s=__builtin_ia32_cmppd128_mask(d1,e1,3,k);"
+            "M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps128_mask(f1,g1,6,-1);M(r);__auto_type s=__builtin_ia32_cmppd128_mask(d1,e1,6,k);"
+            "M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps128_mask(f1,g1,9,-1);M(r);__auto_type s=__builtin_ia32_cmppd128_mask(d1,e1,9,k);"
+            "M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps128_mask(f1,g1,12,-1);M(r);__auto_type s=__builtin_ia32_cmppd128_mask(d1,e1,12,k);"
+            "M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps128_mask(f1,g1,15,-1);M(r);__auto_type s=__builtin_ia32_cmppd128_mask(d1,e1,15,k);"
+            "M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps128_mask(f1,g1,18,-1);M(r);__auto_type s=__builtin_ia32_cmppd128_mask(d1,e1,18,k);"
+            "M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps128_mask(f1,g1,21,-1);M(r);__auto_type s=__builtin_ia32_cmppd128_mask(d1,e1,21,k);"
+            "M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps128_mask(f1,g1,24,-1);M(r);__auto_type s=__builtin_ia32_cmppd128_mask(d1,e1,24,k);"
+            "M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps128_mask(f1,g1,27,-1);M(r);__auto_type s=__builtin_ia32_cmppd128_mask(d1,e1,27,k);"
+            "M(s);}"
+            "{__auto_type r=__builtin_ia32_cmpps128_mask(f1,g1,30,-1);M(r);__auto_type s=__builtin_ia32_cmppd128_mask(d1,e1,30,k);"
+            "M(s);}"
+            "return h;}"
+            "int tested(int n){unsigned h=0;for(int i=0;i<16;i++){h=h*16777619u^masks(n*37+i);}return (int)h;"
+            "}\n";
+        // The narrower views are copies of the input, not the header's _mm512_cast* functions: clang -O0 calls those
+        // out of line from its default copy, compiled for AVX-512F, which a host without it can't run.
+        static const char avx512_lanes[] =
+            "#include <immintrin.h>\n"
+            "#define M(v) do{for(unsigned k_=0;k_<sizeof(v);k_++)h=(h^((unsigned char*)&(v))[k_])*16777619u;}while(0)\n"
+            "__attribute__((target_clones(\"avx10.2\",\"default\"))) static unsigned lanes(int n){unsigned h=2166136261u;"
+            "unsigned char in[256];for(int i=0;i<256;i++)in[i]=(unsigned char)(n*37+i*101+(i*n>>3));"
+            "if(n&1)for(int i=0;i<64;i+=3)in[64+i]=in[i];"
+            "__m512i a,b;__builtin_memcpy(&a,in,64);__builtin_memcpy(&b,in+64,64);__m256i a2,b2;__builtin_memcpy(&a2,in,32);__builtin_memcpy(&b2,in+64,32);"
+            "__m128i a1,b1;__builtin_memcpy(&a1,in,16);__builtin_memcpy(&b1,in+64,16);"
+            "unsigned long long k;__builtin_memcpy(&k,in+128,8);"
+            "__m512i c;__builtin_memcpy(&c,in+136,64);__m512 f,g;__builtin_memcpy(&f,in,64);__builtin_memcpy(&g,in+64,64);__m256 f2,g2;__builtin_memcpy(&f2,in,32);"
+            "__builtin_memcpy(&g2,in+64,32);__m512d d,e;__builtin_memcpy(&d,in+64,64);__builtin_memcpy(&e,in+136,64);__m256d d2,e2;__m128d e1;"
+            "__builtin_memcpy(&d2,in+64,32);__builtin_memcpy(&e2,in+136,32);__builtin_memcpy(&e1,in+136,16);"
+            "{__auto_type r=_mm512_rol_epi32(a,5);M(r);r=_mm512_ror_epi64(a,17);M(r);r=_mm512_rol_epi64(a,0);"
+            "M(r);r=_mm512_ror_epi32(a,31);M(r);}"
+            "{__auto_type r=_mm512_shldi_epi16(a,b,3);M(r);r=_mm512_shrdi_epi16(a,b,15);M(r);r=_mm512_shldi_epi32(a,b,9);"
+            "M(r);r=_mm512_shrdi_epi32(a,b,33);M(r);r=_mm512_shldi_epi64(a,b,40);M(r);r=_mm512_shrdi_epi64(a,b,0);"
+            "M(r);}"
+            "{__auto_type r=_mm512_alignr_epi32(a,b,3);M(r);r=_mm512_alignr_epi64(a,b,1);M(r);r=_mm512_alignr_epi32(a,b,13);"
+            "M(r);}"
+            "{__auto_type r=_mm256_rol_epi32(a2,5);M(r);r=_mm256_ror_epi64(a2,17);M(r);r=_mm256_rol_epi64(a2,0);"
+            "M(r);r=_mm256_ror_epi32(a2,31);M(r);}"
+            "{__auto_type r=_mm256_shldi_epi16(a2,b2,3);M(r);r=_mm256_shrdi_epi16(a2,b2,15);M(r);r=_mm256_shldi_epi32(a2,b2,9);"
+            "M(r);r=_mm256_shrdi_epi32(a2,b2,33);M(r);r=_mm256_shldi_epi64(a2,b2,40);M(r);r=_mm256_shrdi_epi64(a2,b2,0);"
+            "M(r);}"
+            "{__auto_type r=_mm256_alignr_epi32(a2,b2,3);M(r);r=_mm256_alignr_epi64(a2,b2,1);M(r);r=_mm256_alignr_epi32(a2,b2,13);"
+            "M(r);}"
+            "{__auto_type r=_mm_rol_epi32(a1,5);M(r);r=_mm_ror_epi64(a1,17);M(r);r=_mm_rol_epi64(a1,0);"
+            "M(r);r=_mm_ror_epi32(a1,31);M(r);}"
+            "{__auto_type r=_mm_shldi_epi16(a1,b1,3);M(r);r=_mm_shrdi_epi16(a1,b1,15);M(r);r=_mm_shldi_epi32(a1,b1,9);"
+            "M(r);r=_mm_shrdi_epi32(a1,b1,33);M(r);r=_mm_shldi_epi64(a1,b1,40);M(r);r=_mm_shrdi_epi64(a1,b1,0);"
+            "M(r);}"
+            "{__auto_type r=_mm_alignr_epi32(a1,b1,3);M(r);r=_mm_alignr_epi64(a1,b1,1);M(r);r=_mm_alignr_epi32(a1,b1,13);"
+            "M(r);}"
+            "{__auto_type r=_mm512_alignr_epi8(a,b,5);M(r);r=_mm512_alignr_epi8(a,b,20);M(r);r=_mm512_bslli_epi128(a,3);"
+            "M(r);r=_mm512_bsrli_epi128(a,9);M(r);r=_mm512_bsrli_epi128(a,17);M(r);}"
+            "{__auto_type r=_mm512_shuffle_i32x4(a,b,0x1b);M(r);r=_mm512_shuffle_i64x2(a,b,0x93);M(r);__auto_type s=_mm512_shuffle_f32x4(f,g,0x4e);"
+            "M(s);__auto_type t=_mm512_shuffle_f64x2(d,e,0xe4);M(t);}"
+            "{__auto_type r=_mm256_shuffle_i32x4(a2,b2,1);M(r);r=_mm256_shuffle_i64x2(a2,b2,2);M(r);__auto_type s=_mm256_shuffle_f32x4(f2,g2,3);"
+            "M(s);__auto_type t=_mm256_shuffle_f64x2(d2,e2,0);"
+            "M(t);}"
+            "{__auto_type r=_mm512_shuffle_ps(f,g,0x36);M(r);__auto_type s=_mm512_shuffle_pd(d,e,0x5a);"
+            "M(s);r=_mm512_permute_ps(f,0x1b);M(r);s=_mm512_permute_pd(d,0xa5);M(s);s=_mm512_permutex_pd(d,0x93);"
+            "M(s);}"
+            "{__auto_type r=_mm512_shuffle_epi32(a,0x4e);M(r);r=_mm512_shufflehi_epi16(a,0x1b);M(r);r=_mm512_shufflelo_epi16(a,0xb1);"
+            "M(r);r=_mm512_permutex_epi64(a,0x39);M(r);}"
+            "{__auto_type r=_mm512_inserti32x4(a,b1,2);M(r);r=_mm512_inserti64x4(a,b2,1);M(r);__auto_type s=_mm512_insertf64x2(d,e1,3);"
+            "M(s);__auto_type t=_mm512_insertf32x8(f,g2,0);M(t);__auto_type u=_mm256_inserti64x2(a2,b1,1);"
+            "M(u);}"
+            "{__auto_type r=_mm512_mask_extracti32x4_epi32(b1,(__mmask8)k,a,3);M(r);__auto_type s=_mm512_mask_extractf64x4_pd(e2,(__mmask8)(k>>3),d,1);"
+            "M(s);__auto_type t=_mm256_mask_extracti64x2_epi64(a1,(__mmask8)(k>>5),b2,1);M(t);__auto_type u=_mm512_mask_extracti32x8_epi32(a2,(__mmask8)(k>>9),c,0);"
+            "M(u);}"
+            "return h;}"
+            "int tested(int n){unsigned h=0;for(int i=0;i<16;i++){h=h*16777619u^lanes(n*37+i);}return (int)h;"
+            "}\n";
+        static const char avx512_ternary[] =
+            "#include <immintrin.h>\n"
+            "#define M(v) do{for(unsigned k_=0;k_<sizeof(v);k_++)h=(h^((unsigned char*)&(v))[k_])*16777619u;}while(0)\n"
+            "__attribute__((target_clones(\"avx10.2\",\"default\"))) static unsigned ternary(int n){unsigned h=2166136261u;"
+            "unsigned char in[96];for(int i=0;i<96;i++)in[i]=(unsigned char)(n*37+i*101+(i*n>>3));__m128i a1,b1,c1;"
+            "__builtin_memcpy(&a1,in,16);__builtin_memcpy(&b1,in+32,16);__builtin_memcpy(&c1,in+64,16);"
+            "unsigned long long k;__builtin_memcpy(&k,in+80,8);"
+            "{__auto_type r=_mm_ternarylogic_epi32(a1,b1,c1,0);M(r);r=_mm_mask_ternarylogic_epi32(a1,(__mmask8)k,b1,c1,0);"
+            "M(r);r=_mm_maskz_ternarylogic_epi32((__mmask8)(k>>8),a1,b1,c1,0);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi32(a1,b1,c1,1);M(r);r=_mm_mask_ternarylogic_epi32(a1,(__mmask8)k,b1,c1,1);"
+            "M(r);r=_mm_maskz_ternarylogic_epi32((__mmask8)(k>>8),a1,b1,c1,1);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi32(a1,b1,c1,150);M(r);r=_mm_mask_ternarylogic_epi32(a1,(__mmask8)k,b1,c1,150);"
+            "M(r);r=_mm_maskz_ternarylogic_epi32((__mmask8)(k>>8),a1,b1,c1,150);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi32(a1,b1,c1,202);M(r);r=_mm_mask_ternarylogic_epi32(a1,(__mmask8)k,b1,c1,202);"
+            "M(r);r=_mm_maskz_ternarylogic_epi32((__mmask8)(k>>8),a1,b1,c1,202);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi32(a1,b1,c1,232);M(r);r=_mm_mask_ternarylogic_epi32(a1,(__mmask8)k,b1,c1,232);"
+            "M(r);r=_mm_maskz_ternarylogic_epi32((__mmask8)(k>>8),a1,b1,c1,232);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi32(a1,b1,c1,255);M(r);r=_mm_mask_ternarylogic_epi32(a1,(__mmask8)k,b1,c1,255);"
+            "M(r);r=_mm_maskz_ternarylogic_epi32((__mmask8)(k>>8),a1,b1,c1,255);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi32(a1,b1,c1,60);M(r);r=_mm_mask_ternarylogic_epi32(a1,(__mmask8)k,b1,c1,60);"
+            "M(r);r=_mm_maskz_ternarylogic_epi32((__mmask8)(k>>8),a1,b1,c1,60);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi32(a1,b1,c1,128);M(r);r=_mm_mask_ternarylogic_epi32(a1,(__mmask8)k,b1,c1,128);"
+            "M(r);r=_mm_maskz_ternarylogic_epi32((__mmask8)(k>>8),a1,b1,c1,128);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi32(a1,b1,c1,127);M(r);r=_mm_mask_ternarylogic_epi32(a1,(__mmask8)k,b1,c1,127);"
+            "M(r);r=_mm_maskz_ternarylogic_epi32((__mmask8)(k>>8),a1,b1,c1,127);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi32(a1,b1,c1,15);M(r);r=_mm_mask_ternarylogic_epi32(a1,(__mmask8)k,b1,c1,15);"
+            "M(r);r=_mm_maskz_ternarylogic_epi32((__mmask8)(k>>8),a1,b1,c1,15);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi32(a1,b1,c1,85);M(r);r=_mm_mask_ternarylogic_epi32(a1,(__mmask8)k,b1,c1,85);"
+            "M(r);r=_mm_maskz_ternarylogic_epi32((__mmask8)(k>>8),a1,b1,c1,85);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi64(a1,b1,c1,0);M(r);r=_mm_mask_ternarylogic_epi64(a1,(__mmask8)k,b1,c1,0);"
+            "M(r);r=_mm_maskz_ternarylogic_epi64((__mmask8)(k>>8),a1,b1,c1,0);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi64(a1,b1,c1,1);M(r);r=_mm_mask_ternarylogic_epi64(a1,(__mmask8)k,b1,c1,1);"
+            "M(r);r=_mm_maskz_ternarylogic_epi64((__mmask8)(k>>8),a1,b1,c1,1);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi64(a1,b1,c1,150);M(r);r=_mm_mask_ternarylogic_epi64(a1,(__mmask8)k,b1,c1,150);"
+            "M(r);r=_mm_maskz_ternarylogic_epi64((__mmask8)(k>>8),a1,b1,c1,150);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi64(a1,b1,c1,202);M(r);r=_mm_mask_ternarylogic_epi64(a1,(__mmask8)k,b1,c1,202);"
+            "M(r);r=_mm_maskz_ternarylogic_epi64((__mmask8)(k>>8),a1,b1,c1,202);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi64(a1,b1,c1,232);M(r);r=_mm_mask_ternarylogic_epi64(a1,(__mmask8)k,b1,c1,232);"
+            "M(r);r=_mm_maskz_ternarylogic_epi64((__mmask8)(k>>8),a1,b1,c1,232);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi64(a1,b1,c1,255);M(r);r=_mm_mask_ternarylogic_epi64(a1,(__mmask8)k,b1,c1,255);"
+            "M(r);r=_mm_maskz_ternarylogic_epi64((__mmask8)(k>>8),a1,b1,c1,255);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi64(a1,b1,c1,60);M(r);r=_mm_mask_ternarylogic_epi64(a1,(__mmask8)k,b1,c1,60);"
+            "M(r);r=_mm_maskz_ternarylogic_epi64((__mmask8)(k>>8),a1,b1,c1,60);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi64(a1,b1,c1,128);M(r);r=_mm_mask_ternarylogic_epi64(a1,(__mmask8)k,b1,c1,128);"
+            "M(r);r=_mm_maskz_ternarylogic_epi64((__mmask8)(k>>8),a1,b1,c1,128);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi64(a1,b1,c1,127);M(r);r=_mm_mask_ternarylogic_epi64(a1,(__mmask8)k,b1,c1,127);"
+            "M(r);r=_mm_maskz_ternarylogic_epi64((__mmask8)(k>>8),a1,b1,c1,127);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi64(a1,b1,c1,15);M(r);r=_mm_mask_ternarylogic_epi64(a1,(__mmask8)k,b1,c1,15);"
+            "M(r);r=_mm_maskz_ternarylogic_epi64((__mmask8)(k>>8),a1,b1,c1,15);M(r);}"
+            "{__auto_type r=_mm_ternarylogic_epi64(a1,b1,c1,85);M(r);r=_mm_mask_ternarylogic_epi64(a1,(__mmask8)k,b1,c1,85);"
+            "M(r);r=_mm_maskz_ternarylogic_epi64((__mmask8)(k>>8),a1,b1,c1,85);M(r);}"
+            "return h;}"
+            "int tested(int n){unsigned h=0;for(int i=0;i<16;i++){h=h*16777619u^ternary(n*37+i);}return (int)h;"
+            "}\n";
+        static const char avx2_gathers[] =
+            "#include <immintrin.h>\n"
+            "#define M(v) do{for(unsigned k_=0;k_<sizeof(v);k_++)h=(h^((unsigned char*)&(v))[k_])*16777619u;}while(0)\n"
+            "static int t32[64];static long long t64[64];"
+            "__attribute__((target_clones(\"avx10.2\",\"default\"))) static unsigned gathers(int n){unsigned h=2166136261u;"
+            "__m128i w=_mm_setr_epi32(n,~n,n*3,n^0x55),m=_mm_setr_epi32((n&1)?-1:0,(n&2)?-1:0,(n&4)?-1:0,(n&8)?-1:0);"
+            "__m128i mq=_mm_setr_epi32(0,(n&1)?-1:0,0,(n&4)?-1:0),mh=_mm_setr_epi32((n&1)?-1:0,(n&4)?-1:0,-1,-1);"
+            "__m128i far=_mm_set1_epi32(0x40000000);"
+            "__m128i i=_mm_or_si128(_mm_setr_epi32(n&63,(n*7)&63,(n*13)&63,(n*29)&63),_mm_andnot_si128(m,far));"
+            "__m128i iq=_mm_or_si128(_mm_setr_epi32(n&31,(n*5)&31,0,0),_mm_andnot_si128(mh,far));"
+            "__m128i q=_mm_or_si128(_mm_setr_epi32(n&31,0,(n*11)&31,0),_mm_andnot_si128(_mm_shuffle_epi32(mq,0xf5),_mm_set1_epi64x(0x4000000000ll)));"
+            "{__auto_type r=_mm_mask_i32gather_epi32(w,t32,i,m,4);M(r);r=_mm_mask_i32gather_epi32(w,t32,_mm_and_si128(i,_mm_set1_epi32(31)),_mm_set1_epi32(-1),2);"
+            "M(r);}"
+            "{__auto_type r=_mm_mask_i32gather_epi64(w,t64,iq,mq,8);M(r);__auto_type f=_mm_mask_i32gather_ps(_mm_castsi128_ps(w),(const float*)t32,i,_mm_castsi128_ps(m),4);"
+            "M(f);__auto_type d=_mm_mask_i32gather_pd(_mm_castsi128_pd(w),(const double*)t64,iq,_mm_castsi128_pd(mq),8);"
+            "M(d);}"
+            "{__auto_type r=_mm_mask_i64gather_epi32(w,t32,q,_mm_shuffle_epi32(mq,0xfd),4);M(r);r=_mm_mask_i64gather_epi64(w,t64,q,mq,8);"
+            "M(r);__auto_type f=_mm_mask_i64gather_ps(_mm_castsi128_ps(w),(const float*)t32,q,_mm_castsi128_ps(_mm_shuffle_epi32(mq,0xfd)),4);"
+            "M(f);__auto_type d=_mm_mask_i64gather_pd(_mm_castsi128_pd(w),(const double*)t64,q,_mm_castsi128_pd(mq),8);"
+            "M(d);}"
+            "return h;}"
+            "int tested(int n){for(int i=0;i<64;i++){t32[i]=i*(n|1)*-1640531535;t64[i]=(long long)i*0x9e3779b97f4a7c15ll+n;"
+            "}unsigned h=0;for(int i=0;i<16;i++){h=h*16777619u^gathers(n*37+i);}return (int)h;}\n";
+        static const char round_scales[] =
+            "#include <immintrin.h>\n"
+            "#define M(v) do{for(unsigned k_=0;k_<sizeof(v);k_++)h=(h^((unsigned char*)&(v))[k_])*16777619u;}while(0)\n"
+            "__attribute__((target_clones(\"avx10.2\",\"default\"))) static unsigned rounds(int n){unsigned h=2166136261u;"
+            "__m128 a=_mm_setr_ps((float)n/3.0f,-2.5f,7.0f,(float)(n%9)-4.5f),b=_mm_setr_ps((float)(n*5)/7.0f-1.5f,0.5f,-0.5f,1.0f),w=_mm_setr_ps(9.0f,8.0f,7.0f,6.0f);"
+            "__m128d c=_mm_setr_pd((double)n/7.0,-3.5),d=_mm_setr_pd(-(double)(n*3)/11.0+0.5,2.5),x=_mm_setr_pd(-1.0,-2.0);"
+            "{__auto_type r=_mm_mask_roundscale_ss(w,1,a,b,0x00);M(r);r=_mm_mask_roundscale_ss(w,1,a,b,0x01);"
+            "M(r);r=_mm_mask_roundscale_ss(w,0,a,b,0x02);M(r);r=_mm_mask_roundscale_ss(w,3,a,b,0x13);M(r);"
+            "r=_mm_mask_roundscale_ss(w,1,a,b,0x24);M(r);}"
+            "{__auto_type r=_mm_mask_roundscale_sd(x,1,c,d,0x01);M(r);r=_mm_mask_roundscale_sd(x,0,c,d,0x02);"
+            "M(r);r=_mm_mask_roundscale_sd(x,1,c,d,0xf3);M(r);r=_mm_mask_roundscale_sd(x,1,c,d,0x0c);M(r);"
+            "}"
+            "return h;}"
+            "int tested(int n){unsigned h=0;for(int i=0;i<16;i++){h=h*16777619u^rounds(n*37+i);}return (int)h;"
+            "}\n";
+        static const char avx_wide[] =
+            "#include <immintrin.h>\n"
+            "#define M(v) do{for(unsigned k_=0;k_<sizeof(v);k_++)h=(h^((unsigned char*)&(v))[k_])*16777619u;}while(0)\n"
+            "__attribute__((target_clones(\"avx10.2\",\"default\"))) static unsigned wide(int n){unsigned h=2166136261u;"
+            "unsigned char in[96];for(int i=0;i<96;i++)in[i]=(unsigned char)(n*37+i*101+(i*n>>3));__m256i a,b,c;"
+            "__builtin_memcpy(&a,in,32);__builtin_memcpy(&b,in+32,32);__builtin_memcpy(&c,in+64,32);"
+            "__m256 f=_mm256_setr_ps((float)n/3.0f,-2.5f,7.25f,(float)(n%9)-4.5f,0.5f,-0.5f,1.5f,(float)(n*5)/7.0f),w=_mm256_set1_ps(42.0f);"
+            "{__auto_type r=_mm256_ternarylogic_epi32(a,b,c,0x96);M(r);r=_mm256_mask_ternarylogic_epi64(a,(__mmask8)n,b,c,0xca);"
+            "M(r);r=_mm256_maskz_ternarylogic_epi32((__mmask8)(n>>2),a,b,c,0x7e);M(r);}"
+            "{__auto_type r=_mm256_mask_roundscale_ps(w,1,f,1);M(r);r=_mm256_mask_roundscale_ps(w,0x5a,f,0x12);"
+            "M(r);r=_mm256_mask_roundscale_ps(w,0xff,f,0x03);M(r);}"
+            "return h;}"
+            "int tested(int n){unsigned h=0;for(int i=0;i<16;i++){h=h*16777619u^wide(n*37+i);}return (int)h;"
+            "}\n";
+        X86Target v3_level = { 0 };
+        const bool v3_parsed = x86_target_parse("x86-64-v3", strlen("x86-64-v3"), &v3_level);
+        const bool parsed[3] = { true, v2.features != 0, v3_parsed };
+        static const struct
+        {
+            const char* name;
+            const char* source;
+            uint32_t levels;
+            uint64_t oracle;
+        } lanes[] = {
+            { "target-clones-avx512-masks", avx512_masks, 7, 0 },
+            { "target-clones-avx512-lanes", avx512_lanes, 7, 0 },
+            { "target-clones-avx512-ternary", avx512_ternary, 7, BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) },
+            { "target-clones-avx2-gathers", avx2_gathers, 3, BUSTER_X86_FEATURE(AVX2) },
+            { "target-clones-round-scales", round_scales, 6, 0 },
+            { "target-clones-avx-wide", avx_wide, 4, BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) },
+        };
+        check_test_program_includes = true;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(lanes); i += 1)
+        {
+            // Bit 0 x86-64, bit 1 -v2, bit 2 -v3.
+            static const char* const marches[3] = { "-march=x86-64", "-march=x86-64-v2", "-march=x86-64-v3" };
+            const X86Target* targets[3] = { &baseline, &v2, &v3_level };
+            for (uint32_t level = 0; level < 3; level += 1)
+            {
+                if ((lanes[i].levels >> level & 1) != 0 && parsed[level])
+                {
+                    char name[64];
+                    snprintf(name, sizeof(name), "%s%s", lanes[i].name, level == 0 ? "" : level == 1 ? "-v2" : "-v3");
+                    check_test_program_march = marches[level];
+                    const uint64_t needed = targets[level]->features | lanes[i].oracle;
+                    check_test_program_source_native_limits(test, lanes[i].source, name, clang, false, -1, 0, targets[level], (native.features & needed) == needed);
+                    check_test_program_build_release();
+                }
+            }
+        }
+        check_test_program_includes = false;
+        // Where clang's backend fails on such a builtin in a baseline copy, it stays refused (#2716): the 32-byte ternary
+        // logic without AVX and the 64-byte one everywhere ("Do not know how to split the result of this operator"), a
+        // round-scale of a mask that isn't a constant, and the 32-byte gathers without AVX2. As the refusals above, of the
+        // builtin in a function of the unit's target.
+        static const struct
+        {
+            const char* name;
+            uint32_t level;
+            const char* source;
+            const char* reason;
+            uint32_t references;
+        } backend[] = {
+            { "lanes-ternary-logic-32-bytes-without-avx", 1,
+              "typedef int v8si __attribute__((vector_size(32)));int tested(int n){v8si a={n,1};"
+              "v8si b=__builtin_ia32_pternlogd256_mask(a,a,a,0x96,(unsigned char)-1);return b[0];}",
+              "vector machine operation unavailable at this target", 0 },
+            { "lanes-ternary-logic-64-bytes", 2,
+              "typedef int v16si __attribute__((vector_size(64)));int tested(int n){v16si a={n,1};"
+              "v16si b=__builtin_ia32_pternlogd512_mask(a,a,a,0x96,(unsigned short)-1);return b[0];}",
+              "vector machine operation unavailable at this target", 0 },
+            { "lanes-round-scale-of-a-variable-mask", 2,
+              "typedef double v2df __attribute__((vector_size(16)));int tested(int n){v2df a={(double)n,1.0};"
+              "v2df b=__builtin_ia32_rndscalesd_round_mask(a,a,a,(unsigned char)n,1,4);return (int)b[0];}",
+              "vector machine operation unavailable at this target", 0 },
+            { "lanes-gather-32-bytes-without-avx2", 1,
+              "typedef int v8si __attribute__((vector_size(32)));static int table[8];int tested(int n){v8si a={n&7,1};"
+              "v8si b=__builtin_ia32_gatherd_d256(a,table,a,a,4);return b[0];}",
+              "x86 builtins whose instructions the target hasn't", 1 },
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(backend); i += 1)
+        {
+            // Level 1 -v2, 2 -v3.
+            const X86Target* targets[3] = { &baseline, &v2, &v3_level };
+            if (parsed[backend[i].level])
+            {
+                check_test_program_boundary_target(test, backend[i].source, backend[i].name, true, false, backend[i].references, 2, backend[i].reason,
+                                                   targets[backend[i].level]);
+            }
+        }
         check_test_program_march = "-march=x86-64-v3";
         check_test_program_boundary_target(test, "__attribute__((target(\"no-bmi2\"))) int tested(int n){return (int)__builtin_ia32_bzhi_si((unsigned)n,3u);}",
                                            "target-attribute-off", true, false, 0, 0, "x86 builtins whose instructions the target hasn't", &v3);
