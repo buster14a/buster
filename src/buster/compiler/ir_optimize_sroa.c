@@ -422,7 +422,12 @@ static void ir_sroa_assemble(IrSroaWork* work, IrSroaAssembly* states, uint32_t*
                 if (state->seen == 0)
                 {
                     touched[touched_count++] = root;
-                    *state = (IrSroaAssembly){ .value = BUSTER_IR_NONE, .load = BUSTER_IR_NONE, .uniform = 1, .seen = 1 };
+                    *state = (IrSroaAssembly){
+                        .value = BUSTER_IR_NONE,
+                        .load = BUSTER_IR_NONE,
+                        .uniform = 1,
+                        .seen = 1,
+                    };
                 }
                 const uint64_t range = (bytes == 64 ? UINT64_MAX : (UINT64_C(1) << bytes) - 1) << offset;
                 if (op == IR_STORE)
