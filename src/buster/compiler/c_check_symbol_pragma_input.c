@@ -340,7 +340,7 @@ static CheckInputSymbolNamed check_input_symbol_named(const CheckInputReader* re
 // (the latest before the pragma, or else the first after it): weak and alias("T"), which the emission makes clang's weak
 // alias of. One whose A the unit defined before it, or made an alias of its own, is clang's no-op. Where clang's clone
 // is A's only declaration the emission makes, the record's alias_target is T's declaration. The others, at which clang's
-// Sema errors, are refused by name.
+// Sema errors, receive the supported ambiguity and object redeclaration diagnostics or are refused by name.
 static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolPragma* record, uint32_t index, const uint64_t* ordered, uint32_t count,
                                      bool complete)
 {

@@ -8492,11 +8492,13 @@ tentative one (`CHECK_REDECLARATION_AUTO_TYPE`). The reader stops there, as at
 other initialized invalid declarations, so clang's later errors aren't given.
 Refused by name: `_Atomic` and `restrict` through a declarator
 (`_Atomic __auto_type *p`, whose initializer clang finds incompatible) or
-together (clang's restrict error names `_Atomic(__auto_type)`), `_Atomic` of an
-atomic value (clang's error names the placeholder's type), `restrict` of a value
+together (clang's restrict error names `_Atomic(__auto_type)`), `restrict` of a value
 that is no pointer to an object (clang's `restrict int`, which the placeholder
 can't be told from), and type attributes with `__auto_type` but a vector's and a
-mode's. A redeclaration of an atomic entity takes its type, as clang's
+mode's. An `_Atomic` placeholder initialized by an atomic value reports the
+incompatible initializer with both types, keeps its expression's warnings, and
+recovers the invalid declaration without cascading errors from later uses. A
+redeclaration of an atomic entity takes its type, as clang's
 `mergeTypes` merges it (#1844): a plain placeholder any atomic type
 (`_Atomic int r; __auto_type r = 1;` is an `_Atomic int`, and so is
 `__auto_type *p` after `_Atomic int *p`), and an `_Atomic` one an atomic type
@@ -11446,12 +11448,14 @@ thread-local storage or a section (`CheckInputSymbolPragma.alias_target`): the
 selection keeps TARGET's definition as an alias's base, and
 `check_program_define_pragma_aliases` adds a weak symbol of ALIAS's name at
 it, of its type and size, after the aliases' (in the unit of several lanes
-that has TARGET's definition). The rest stay refused by name where clang's
-Sema errors: an ALIAS declared before the pragma and named after it ("reference
-to 'ALIAS' is ambiguous", clang's lookup then finds two declarations), defined
-after it ("redefinition of 'ALIAS'"), declared after it with another kind or
-type, and a TARGET the unit doesn't define ("alias must point to a defined
-variable or function"); and an ALIAS of internal linkage. This is separate
+that has TARGET's definition). Once the clone is visible, references to an
+earlier function or object declaration report clang's ambiguity and candidate
+notes, including when ALIAS was already defined; local shadows and references
+before a later TARGET declaration keep their own lookup. Later object
+redeclarations report clang's redefinition and prior-definition notes. Other
+unmodeled shapes remain refused by name, including declarations with another
+kind or type, a TARGET the unit doesn't define, and an ALIAS of internal linkage.
+This is separate
 from ordinary weak binding. `test-checker-driver`
 (`c_check_symbol_pragma_driver_test.c`) compares the supported shapes'
 symbols and programs with clang's, by both paths.

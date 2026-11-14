@@ -253,8 +253,7 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
     const bool evaluated = self == BUSTER_CHECK_NONE && check_input_evaluate_cached_at(reader, begin, end, &value, &failed);
     // The specifiers' _Atomic and restrict, the deduced type's (#1844, check_input_auto_type_qualifiers; their declarators'
     // deductions, check_input_c23_auto_deduce, apply them). Refused by name: either through a declarator (`_Atomic
-    // __auto_type *p`, whose initializer clang always finds incompatible), an _Atomic of an atomic value (clang's error
-    // names the placeholder's type), and a restrict of a value that is no pointer to an object, whose `restrict int` the
+    // __auto_type *p`, whose initializer clang always finds incompatible), and a restrict of a value that is no pointer to an object, whose `restrict int` the
     // placeholder can't be told from.
     // The placeholder itself, or under a declarator's pointers and arrays.
     TypeId marker = placeholder;
