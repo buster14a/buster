@@ -1544,6 +1544,16 @@ more cycles for 0.29% more instructions, and `lvm.c`'s the same cycles: the
 scan's checks and its reloads at uses cost about what the fewer records and
 edge moves save later.
 
+With #2766 ("Recipes no block reads, settled phi places, and the fixed rules'
+scratch" above), which merged first, by the same callgrind method ([the
+record's section 4](https://github.com/buster14a/buster-performance/tree/296a5e536c79297214c215dbb9402d88b86094fc/docs/measurements/tier1-waiting-ranges-2768-2026-11-14)),
+its head `c3c9fb69` against it merged with this change: Lua's five scripts run
+4,756.0 M instructions instead of 4,778.2 M (−0.46%), `luaV_execute` 2,206.3 M
+instead of 2,225.5 M with 3.6 M moves through `r11` instead of 5.0 M (#2767's
+divisor in `rax` is 3.49 M of them), and speedtest1 2,603.53 M instead of
+2,626.65 M (−0.88%). No Lua function runs more, and speedtest1's only loss over
+0.1 M is `sqlite3WhereEnd` (+0.42 M).
+
 Every Lua build printed clang -O0's output and every speedtest1 gave its
 verification hash. `tier1_allocate_hints_test.c`'s traces check a range that
 waits and reloads into its value's first register, one that takes that
