@@ -242,6 +242,9 @@ struct CheckProgramOptions
     // a walk from every expression root of the body and by scans of the graph's VALUE nodes (check_program_census_walk and
     // _scan), into CheckProgram's census_walk, census_scan and census_arms.
     bool selection_census;
+    // The candidates' pass alone (#2536's step 2.2b, --provisional-selection): CheckProgram.census_pass, for a provisional
+    // selection the emission numbers its symbols by (check_driver_provisional), without the other censuses.
+    bool candidates;
     // The generated code's instruction set (x86_target.c's X86Target, the preprocessor's from -march and the -m flags):
     // which vector types the lowering takes, how wide a vector register the convention passes them in, and which
     // instructions its rows use. Zero is x86-64 baseline.
@@ -5602,7 +5605,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     valid = valid && check_program_labelled_objects(program, output, BUSTER_SCALAR_PATH(options.scalar));
     // The candidates as the pass before the bodies' controls finds them (#2536's step 2.2, census_pass): the constant ifs'
     // left-out tokens (check_program_constant_arms), then the pruned scan without them, timed together.
-    if (valid && options.selection_census && program->status == CHECK_PROGRAM_OK)
+    if (valid && (options.selection_census || options.candidates) && program->status == CHECK_PROGRAM_OK)
     {
         const uint64_t pass_start = __rdtsc();
         const uint64_t mark = scratch->length;

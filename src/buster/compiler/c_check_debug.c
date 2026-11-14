@@ -59,6 +59,23 @@ struct CheckDebugValueSpan
     uint32_t begin;
     uint32_t end;
     uint32_t token;
+    // 1 + the innermost expanded callee's instance (CheckDebugInline) whose code the span is, 0 for the function's own
+    // (#2541 step 3): `token` is then the instance's outermost call's, where the function's scopes place its code.
+    uint32_t inline_instance;
+};
+
+// An expanded callee's instance in a Tier 1 function's code under -g (#2541 step 3, EmittedInline): its callee's body,
+// the instance it is nested in (UINT32_MAX for none, the function itself), the token of its call, which is the
+// function's own or its parent's callee's, and that call's line where check_debug_build places it in the function's
+// file (`described`), whose DW_TAG_inlined_subroutine the values' producer writes.
+typedef struct CheckDebugInline CheckDebugInline;
+struct CheckDebugInline
+{
+    uint32_t body;
+    uint32_t parent;
+    uint32_t call_token;
+    uint32_t call_line;
+    bool described;
 };
 
 // Final function-relative byte locations, grouped by source local through location_first[local..local + 1].
@@ -85,6 +102,8 @@ struct CheckDebugBody
     uint32_t local_count;
     uint32_t span_count;
     uint32_t location_count;
+    CheckDebugInline* inlines;
+    uint32_t inline_count;
 };
 
 typedef struct CheckProgramRows CheckProgramRows;
@@ -773,6 +792,19 @@ static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, co
         uint32_t line = 0;
         check_debug_line_scalar(&source, body->declaration, &key, &line);
         const uint32_t file = key != BUSTER_CHECK_DEBUG_NO_FILE ? check_debug_file(pp, key, files, &file_count, by_file, by_directive) : 0;
+        // Its expanded callees' instances (#2541 step 3): each one's call line, described where the call is in the
+        // function's file (its DW_AT_call_file is the function's) as its parent is, and its callee a body.
+        CheckDebugBody* value = rows->values != NULL ? rows->values + b : NULL;
+        for (uint32_t k = 0; value != NULL && k < value->inline_count; k += 1)
+        {
+            CheckDebugInline* instance = value->inlines + k;
+            uint32_t call_key = BUSTER_CHECK_DEBUG_NO_FILE;
+            uint32_t call_line = 0;
+            check_debug_line_scalar(&source, instance->call_token, &call_key, &call_line);
+            const bool nested = instance->parent == BUSTER_CHECK_NONE || (instance->parent < k && value->inlines[instance->parent].described);
+            instance->described = nested && instance->body < count && key != BUSTER_CHECK_DEBUG_NO_FILE && call_key == key && call_line <= INT32_MAX;
+            instance->call_line = instance->described ? call_line : 0;
+        }
         const uint32_t start = rows->bodies[b];
         const uint32_t row_count = exact ? check_debug_keep_scalar(rows->offsets + first, keys + first, lines + first, rows->counts[b], key, start, kept_offsets + kept, kept_lines + kept) :
                                            check_debug_keep(rows->offsets + first, keys + first, lines + first, rows->counts[b], key, start, kept_offsets + kept, kept_lines + kept);

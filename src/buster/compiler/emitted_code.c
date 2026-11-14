@@ -21,7 +21,8 @@
 //   (Tier 0's: an event per typed entry), or BUSTER_EMISSION_NO_ORIGIN for generated code, which the rows give the
 //   declaration's line (c_check_debug.c); and one more boundary, source_records[source_count], where the epilogue's
 //   closing row starts (the record count for none). The declaration's row at (0, LEFT) is the consumer's, which knows
-//   the declaration;
+//   the declaration. An origin past the body's own entries is an expanded callee's (Tier 1's under -g, #2541 step 3):
+//   instance k of `source_inlines` owns the origins [first, first + count), its callee's entries;
 // - frame events (emission_metadata.c's EmissionFrameEvent, in the x86-64 unwind-register namespace): the CFA's and the
 //   saved registers' rule changes at record boundaries, in order, from the CIE's initial rules (the CFA rsp + 8, the
 //   return address at CFA - 8, the six callee-saved registers their own), with remembered and restored states around
@@ -68,6 +69,19 @@ struct EmittedLocalRange
     uint8_t value_bytes;
 };
 
+// An expanded callee's instance in a body's source events (#2541 step 3; the IR's IrDebugInline): the origins
+// [first, first + count) are callee `symbol`'s typed entries, expanded at the call whose origin is `call`, one of the
+// body's own entries or, for an instance nested in instance `parent` (UINT32_MAX for none), one of its.
+typedef struct EmittedInline EmittedInline;
+struct EmittedInline
+{
+    uint32_t symbol;
+    uint32_t first;
+    uint32_t count;
+    uint32_t parent;
+    uint32_t call;
+};
+
 typedef struct EmittedCode EmittedCode;
 struct EmittedCode
 {
@@ -93,6 +107,8 @@ struct EmittedCode
     const uint32_t* source_records;
     const uint32_t* source_origins;
     uint32_t source_count;
+    const EmittedInline* source_inlines;
+    uint32_t source_inline_count;
     const EmissionFrameEvent* frames;
     uint32_t frame_count;
     uint8_t frame_status;

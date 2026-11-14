@@ -4240,6 +4240,67 @@ static void ir_lower_test_hoisted_folds(IrLowerTestTally* tally)
     arena_release(&execution);
 }
 
+// #2618: a take whose address is only a call's argument stays its own (ir_typed_argument). Five streams of one block, each
+// a take at entry 0: (a) the second argument of a call of two; (b) an address an addition consumes, then loaded; (c) an
+// indirect call's target, under its arguments; (d) a value a call of one doesn't reach, two entries above its argument;
+// (e) a take its block ends at. Only (a) is an argument.
+static void ir_lower_test_arguments(IrLowerTestTally* tally)
+{
+    static const uint8_t kinds[][4] = {
+        { BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CALL, BUSTER_TYPED_RETURN },
+        { BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CONST, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_LOAD },
+        { BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CALL, BUSTER_TYPED_RETURN, BUSTER_TYPED_NONE },
+        { BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_LOCAL, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CALL },
+        { BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CALL, BUSTER_TYPED_RETURN },
+    };
+    static const uint64_t values[][4] = {
+        { 1, 0, 0, 0 },
+        { 1, 8, 1, 0 },
+        { 1, 1, 0, 0 },
+        { 1, 0, 0, 0 },
+        { 1, 0, 0, 0 },
+    };
+    // Calls 0 and 1: two arguments, then none (the indirect call's, whose target is under them).
+    static const uint32_t argument_counts[] = { 2, 0 };
+    static const uint32_t one[] = { 1 };
+    static const uint32_t block_firsts[][3] = {
+        { 0, 4, 4 },
+        { 0, 4, 4 },
+        { 0, 4, 4 },
+        { 0, 4, 4 },
+        { 0, 1, 4 },
+    };
+    static const uint32_t entry_blocks[][5] = {
+        { 0, 0, 0, 0, 1 },
+        { 0, 0, 0, 0, 1 },
+        { 0, 0, 0, 0, 1 },
+        { 0, 0, 0, 0, 1 },
+        { 0, 1, 1, 1, 2 },
+    };
+    static const bool expected[] = { true, false, false, false, false };
+    const char* names[] = {
+        "a take a call passes as an argument is an argument",
+        "a take an addition consumes is no argument",
+        "an indirect call's target is no argument",
+        "a take below a call's arguments is no argument",
+        "a take its block ends at is no argument",
+    };
+    for (uint32_t which = 0; which < BUSTER_ARRAY_LENGTH(names); which += 1)
+    {
+        const Tier0Function input = {
+            .kinds = kinds[which],
+            .values = values[which],
+            .count = 4,
+            .call_argument_counts = which == 3 ? one : argument_counts,
+        };
+        IrTypedPlan plan = { 0 };
+        plan.block_firsts = (uint32_t*)block_firsts[which];
+        plan.entry_blocks = (uint32_t*)entry_blocks[which];
+        plan.block_count = which == 4 ? 2 : 1;
+        ir_lower_test_expect(tally, ir_typed_argument(&input, &plan, 0) == expected[which], names[which], 0, which);
+    }
+}
+
 // #2618: a symbol defined at P for its takes in a loop, where some path from P takes it nowhere, splits into groups by the
 // child of P (in the dominator tree) that dominates each take, where no path takes two groups' or P is a value join. Three
 // functions of p (local 0), with r (local 1) and j (local 2), each taking one symbol twice in each of its groups:
@@ -5325,6 +5386,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         ir_lower_test_hoisted_loops(&tally);
         ir_lower_test_hoisted_split(&tally);
         ir_lower_test_hoisted_folds(&tally);
+        ir_lower_test_arguments(&tally);
         ir_lower_test_depth_types(&tally);
         ir_lower_test_guarded(&tally);
         const Tier0ProgramOptions values =

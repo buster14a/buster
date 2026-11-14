@@ -10822,7 +10822,11 @@ static void check_input_deprecated_use(CheckInputReader* reader, CheckInputDepre
     // The attribute's message, its first argument's string.
     const uint32_t message = attribute != NULL && attribute->argument_first < attribute->argument_end &&
                              parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_STRING ? attribute->argument_first : BUSTER_CHECK_WARNING_NO_SOURCE;
-    if (attribute != NULL && attribute->kind == CHECK_ATTRIBUTE_UNAVAILABLE && pass->errors)
+    // Ordinary malformed calls still use their callee before the parser rejects an argument (#2406). Diagnostic
+    // views suppress general availability errors, but must retain this original use's; attribute-only lookups do not.
+    const uint32_t invalid_call = attribute != NULL && attribute->kind == CHECK_ATTRIBUTE_UNAVAILABLE ? check_input_invalid_call_index(parser, t) : BUSTER_CHECK_NONE;
+    const bool retained_call = invalid_call < parser->invalid_call_count && parser->invalid_call_values != NULL && parser->invalid_call_values[invalid_call] != 0;
+    if (attribute != NULL && attribute->kind == CHECK_ATTRIBUTE_UNAVAILABLE && (pass->errors || retained_call))
     {
         // Its note is at the declaration, not the attribute: at the name of the one the use's lookup finds, or a
         // tag's latest declaration, which an enumerator's note names; an anonymous tag's keyword, whose type the
@@ -10837,6 +10841,7 @@ static void check_input_deprecated_use(CheckInputReader* reader, CheckInputDepre
             reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_UNAVAILABLE_HERE;
             reader->output->reports[before].detail = message != BUSTER_CHECK_WARNING_NO_SOURCE ? message + 1 : 0;
             reader->output->reports[before].completion = completion;
+            reader->output->reports[before].repeated = retained_call;
             // A token's reports print its first alone: the copies after it ride on it.
             reader->output->reports[before].value = copies - 1;
         }

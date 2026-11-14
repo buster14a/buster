@@ -1106,6 +1106,80 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
     unlink(reference);
 }
 
+// --provisional-selection (#2536's step 2.2b): -c's code numbered by the candidates' selection, its extra symbols left
+// out of the object as placeholders. On a unit whose extra symbols are an extern and a literal that only _Generic's other
+// association names, and one whose extra ones are static objects (by -g too): the selection serves, with its extra
+// symbols reported; on one whose candidates keep a body the exact selection doesn't (a function only _Generic's other
+// association names), the exact selection serves; on a plain one it serves without extras. By both paths, each object
+// the one without the option.
+static void check_test_driver_provisional_selection(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char externs[] = "extern int unused_extern(void);\n"
+                                  "static const char kept_text[] = \"kept\";\n"
+                                  "static int helper(int x) { return x + 1; }\n"
+                                  "int main(int argc, char** argv)\n"
+                                  "{\n"
+                                  "    (void)argv;\n"
+                                  "    int r = _Generic(argc, long: unused_extern, default: helper)(argc);\n"
+                                  "    const char* s = _Generic(argc, long: \"only in an unselected association\", default: kept_text);\n"
+                                  "    return r + s[0];\n"
+                                  "}\n";
+    static const char statics[] = "static int counter = 7;\n"
+                                  "static int other[4];\n"
+                                  "int main(int argc, char** argv)\n"
+                                  "{\n"
+                                  "    (void)argv;\n"
+                                  "    int* p = _Generic(argc, long: &counter, default: other);\n"
+                                  "    return p[0];\n"
+                                  "}\n";
+    static const char body[] = "static int association(void) { return 2; }\n"
+                               "static int operand(void) { return 3; }\n"
+                               "int main(void) { return _Generic(1, long: association, default: operand)(); }\n";
+    static const char plain[] = "int main(void) { return 0; }\n";
+    static const char* const sources[] = { externs, statics, statics, body, plain };
+    static const bool debug[] = { false, false, true, false, false };
+    static const char* const expected[] = {
+        "provisional-selection\tused\t1\textra-symbols\t2\n",
+        "provisional-selection\tused\t1\textra-symbols\t1\n",
+        "provisional-selection\tused\t1\textra-symbols\t1\n",
+        "provisional-selection\tused\t0\textra-symbols\t0\n",
+        "provisional-selection\tused\t1\textra-symbols\t0\n",
+    };
+    static const char* const names[] = { "extern and literal extras", "static extras", "static extras by -g", "an extra body", "no extras" };
+    char source[256];
+    char object[256];
+    char reference[256];
+    snprintf(source, sizeof(source), "%s/provisional_selection.c", directory);
+    snprintf(object, sizeof(object), "%s/provisional_selection.o", directory);
+    snprintf(reference, sizeof(reference), "%s/provisional_selection_reference.o", directory);
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+    {
+        const bool written = parse_test_write(source, sources[s], strlen(sources[s]));
+        check_test_expect(test, written, "the provisional selection's fixture is written");
+        for (uint32_t path = 0; written && path < 2; path += 1)
+        {
+            const char* g = debug[s] ? "-g" : "-w";
+            const char* scalar = path == 0 ? "-w" : "--scalar";
+            char* const provisional[] = { (char*)executable, "--provisional-selection", (char*)scalar, (char*)g, "-c", "-o", object, source, NULL };
+            char* const exact[] = { (char*)executable, (char*)scalar, (char*)g, "-c", "-o", reference, source, NULL };
+            char* text = NULL;
+            const int status = check_test_driver_spawn(provisional, &text);
+            const bool reported = status == 0 && text != NULL && strstr(text, expected[s]) != NULL;
+            free(text);
+            text = NULL;
+            const int exact_status = check_test_driver_spawn(exact, &text);
+            free(text);
+            char description[160];
+            snprintf(description, sizeof(description), "--provisional-selection on %s%s: its report, and the object without it", names[s],
+                     path == 0 ? "" : ", scalar");
+            check_test_expect(test, reported && exact_status == 0 && check_test_driver_same_files(object, reference), description);
+        }
+    }
+    unlink(source);
+    unlink(object);
+    unlink(reference);
+}
+
 // Builtins clang's Sema takes and its code generation refuses for x86 (#148), which -c refuses by name on both paths:
 // BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding of an element past 4 GiB; an NSString of
 // no literal, which clang's code reads as one
@@ -8928,6 +9002,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool label_attributes_only = false;
     // --attribute-recovery-only: the label, declaration and call recovery fixtures and their combined source.
     bool attribute_recovery_only = false;
+    // --malformed-calls-only: type-first balanced malformed calls and their independent later diagnostics (#2406).
+    bool malformed_calls_only = false;
     // --operand-diagnostics-only: rejected record and atomic operands, including constant contexts (#2441).
     bool operand_diagnostics_only = false;
     // --assert-bool-only: static assertion boolean conversions, including rejected trees (#2409).
@@ -8976,6 +9052,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--attribute-recovery-only") == 0)
         {
             attribute_recovery_only = true;
+        }
+        else if (strcmp(argv[i], "--malformed-calls-only") == 0)
+        {
+            malformed_calls_only = true;
         }
         else if (strcmp(argv[i], "--operand-diagnostics-only") == 0)
         {
@@ -9038,7 +9118,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
                              (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only +
                              (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only +
-                             (uint32_t)run_modes_only;
+                             (uint32_t)run_modes_only + (uint32_t)malformed_calls_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -9560,9 +9640,14 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     if (temporary && attribute_recovery_only)
     {
+        check_test_driver_attribute_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_label_order(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_attribute_calls(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_attribute_declarations(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+    }
+    if (temporary && malformed_calls_only)
+    {
+        check_test_driver_malformed_calls(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
     }
     if (temporary && type_sugar_only)
     {
@@ -10369,6 +10454,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                 check_test_driver_setjmp_held(&test, executable, directory);
                 check_test_driver_static_label(&test, executable, directory);
                 check_test_driver_selection_census(&test, executable, directory);
+                check_test_driver_provisional_selection(&test, executable, directory);
                 check_test_driver_codegen_refusals(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
