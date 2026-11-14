@@ -20,6 +20,7 @@
 #: cpu 4 0.64 AMD EPYC 9V45 96-Core Processor
 #: cpu 7 0.81 AMD EPYC 9V74 80-Core Processor
 #: unmeasured Test differential harness accounting, subprocesses and failure preservation [2 CPUs]
+#: unmeasured Run #139's passes by both versions on every function of c-testsuite's programs and the frozen SQLite and musl sources
 #: unmeasured Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
 #: unmeasured Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes
 #: peak 55 Check unity fixture ownership without rebuilding
@@ -220,6 +221,7 @@
 136.7 Test typed postorder checking and source fixtures (part 1 of 8)
 13.4 Lower c-testsuite's programs and the frozen SQLite source with node templates as the tasks do
 182.4 Lower every function of c-testsuite's programs and the frozen SQLite and musl sources into the IR
+22.4 Run #139's passes by both versions on every function of c-testsuite's programs and the frozen SQLite and musl sources
 166.4 Test the C lexer as C++
 0.0 Compare main.c's checking and its functions and objects with clang's
 196.8 Check semantic mutants of the frozen SQLite and musl sources against Clang

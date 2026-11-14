@@ -402,6 +402,20 @@ musl="$corpus/libc/musl"
 "$BUSTER_COMPILER" test-ir-source --dominators --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
   -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
   "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
+== Run #139's passes by both versions on every function of c-testsuite's programs and the frozen SQLite and musl sources
+# #139: each function lowered and promoted as test-ir-source does, then SROA, #866's solver, the optimizer's SCCP, dead-code
+# removal and CFG cleanup alone and together (and with Tier 1's layout and identities), LICM, and each caller's unit
+# inlining, each by its vector and scalar versions, which must agree: exactly, and the solver against its exact oracle
+# and, semantically, its scalar twin (ir_source_passes.c).
+unset CPATH C_INCLUDE_PATH
+export SOURCE_DATE_EPOCH=1792454400
+corpus=$BUSTER_CORPUS
+musl="$corpus/libc/musl"
+"$BUSTER_COMPILER" test-ir-source --passes $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+"$BUSTER_COMPILER" test-ir-source --passes --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+"$BUSTER_COMPILER" test-ir-source --passes --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
+  -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
+  "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
 == Test the C lexer as C++
 "$BUSTER_COMPILER" test-lexer --cplusplus
 "$BUSTER_COMPILER" test-lexer --raw-strings
