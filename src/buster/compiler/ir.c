@@ -980,11 +980,45 @@ static bool ir_masked_lanes_valid(uint8_t flags)
     return flags == IR_SIMD_LANE_I8 || flags == IR_SIMD_LANE_I16 || flags == IR_SIMD_LANE_I32 || flags == IR_SIMD_LANE_I64;
 }
 
+// How an operation's flags and alignment_log2 are checked (#1840): a plain operation's flags are none or its lanes, as
+// ir_check_metadata says, and its alignment_log2 is 0; a load's or a store's flags are an access's and an atomic
+// read/modify/write's its own, both aligned up to 2^31; a masked access's flags are its lanes, whose mask is a mask of
+// them, and its alignment_log2 an access's or, a gather's, its scale's. A table, so that the verifier's check of every
+// instruction it defers is a load and not a chain of compares as long as the accesses' list.
+typedef enum IrMetadata
+{
+    IR_METADATA_PLAIN,
+    IR_METADATA_ACCESS,
+    IR_METADATA_RMW,
+    IR_METADATA_MASKED,
+    IR_METADATA_GATHER,
+    IR_METADATA_COUNT,
+} IrMetadata;
+
+static const uint8_t ir_metadata_table[BUSTER_IR_OP_TABLE] = {
+    [IR_LOAD] = IR_METADATA_ACCESS,
+    [IR_STORE] = IR_METADATA_ACCESS,
+    [IR_ATOMIC_RMW] = IR_METADATA_RMW,
+    [IR_MASKED_LOAD] = IR_METADATA_MASKED,
+    [IR_MASKED_STORE] = IR_METADATA_MASKED,
+    [IR_COMPRESS_STORE] = IR_METADATA_MASKED,
+    [IR_GATHER] = IR_METADATA_GATHER,
+};
+
+// The largest alignment_log2 of each IrMetadata.
+static const uint8_t ir_metadata_alignment[IR_METADATA_COUNT] = {
+    [IR_METADATA_PLAIN] = 0,
+    [IR_METADATA_ACCESS] = 31,
+    [IR_METADATA_RMW] = 31,
+    [IR_METADATA_MASKED] = 31,
+    [IR_METADATA_GATHER] = 3,
+};
+
 // Whether an operation is a masked access (#1840): a masked load or store, a compressing store or a gather, whose flags
 // are its lanes, whose mask is a mask of them, and whose alignment_log2 is an access's (a gather's, its scale's).
 static bool ir_masked_access(uint32_t op)
 {
-    return op == IR_MASKED_LOAD || op == IR_MASKED_STORE || op == IR_COMPRESS_STORE || op == IR_GATHER;
+    return op < BUSTER_IR_OP_TABLE && ir_metadata_table[op] >= IR_METADATA_MASKED;
 }
 
 // Whether an atomic read/modify/write's flags are an atomic access's of a C order, any of them (#1059): the locked access
@@ -2093,6 +2127,19 @@ static IrCheck ir_check_shape(const IrFunction* f)
 
 // Exact one-instruction oracle. The vector path calls this only for exceptional rules or a failing batch to obtain
 // the same first error. It never reads a value's type until its ID and the enclosing columns have been checked.
+// Whether an operation's flags and alignment_log2 are its IrMetadata's (#1840): a plain operation's flags none, its
+// lanes (ir_lane_valid), an intrinsic's kind's own (checked by its rule) or a stack save's frame flag, and its alignment
+// 0. The opcode is valid.
+static bool ir_check_metadata(uint32_t op, uint8_t flags, uint8_t alignment_log2)
+{
+    const uint32_t metadata = ir_metadata_table[op];
+    const bool flags_valid = metadata == IR_METADATA_PLAIN  ? flags == 0 || op == IR_INTRINSIC || ir_lane_valid(op, flags) || (op == IR_STACK_SAVE && flags == BUSTER_IR_STACK_SAVE_FRAME) :
+                             metadata == IR_METADATA_ACCESS ? ir_access_flags_valid(op, flags) :
+                             metadata == IR_METADATA_RMW    ? ir_rmw_flags_valid(flags) :
+                                                              ir_masked_lanes_valid(flags);
+    return flags_valid && alignment_log2 <= ir_metadata_alignment[metadata];
+}
+
 static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
 {
     const uint32_t op = f->op[i];
@@ -2113,12 +2160,7 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
     {
         check.error = IR_ERROR_OPERAND;
     }
-    else if (((op == IR_LOAD || op == IR_STORE) && (!ir_access_flags_valid(op, f->flags[i]) || f->alignment_log2[i] > 31)) ||
-             (op == IR_ATOMIC_RMW && (!ir_rmw_flags_valid(f->flags[i]) || f->alignment_log2[i] > 31)) ||
-             ((op == IR_MASKED_LOAD || op == IR_MASKED_STORE || op == IR_COMPRESS_STORE) && (!ir_masked_lanes_valid(f->flags[i]) || f->alignment_log2[i] > 31)) ||
-             (op == IR_GATHER && (!ir_masked_lanes_valid(f->flags[i]) || f->alignment_log2[i] > 3)) ||
-             (!ir_masked_access(op) && op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW && ((f->flags[i] != 0 && op != IR_INTRINSIC && !ir_lane_valid(op, f->flags[i]) && (op != IR_STACK_SAVE || f->flags[i] != BUSTER_IR_STACK_SAVE_FRAME)) ||
-              f->alignment_log2[i] != 0)))
+    else if (!ir_check_metadata(op, f->flags[i], f->alignment_log2[i]))
     {
         check.error = IR_ERROR_METADATA;
     }
