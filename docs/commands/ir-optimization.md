@@ -32,6 +32,13 @@ requirements. [Command index](README.md).
   operation's row staying for its effects.
   `benchmark-ir-optimize`
   and `benchmark-ir-optimize-passes` include preparation and rewriting costs.
+- Value numbering with memory (#2718, `ir_optimize_memory.c`, the optimizer's
+  `BUSTER_IR_OPTIMIZE_MEMORY`): `test-ir-optimize` runs its five
+  `tests/ir/optimize/memory-*.ir` pairs and `ir_optimize_memory_test.c`'s 400
+  generated programs, whose interpreter's calls rewrite every escaped byte,
+  through both twins (exact) and an overflow fixture.
+  [Its guide](../../docs/ir-memory-value-numbering.md) has the rules, the twins
+  and the measurements.
 - #139's acceptance on real C: `test-ir-source --passes` runs every pass's
   vector and scalar versions on every function of c-testsuite's subset, the
   frozen `sqlite3.c` and musl in the correctness list, and

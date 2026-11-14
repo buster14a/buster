@@ -13,10 +13,11 @@ an `IrCheck`. `ir_optimize_options()` selects SCCP, dead-code removal and CFG
 cleanup, a 64-sweep limit, and the vector path. The `passes` bits are
 `BUSTER_IR_OPTIMIZE_SCCP`, `BUSTER_IR_OPTIMIZE_DCE` and
 `BUSTER_IR_OPTIMIZE_CFG`; `scalar` selects the worklist twins. Tier 1 also
-asks for `_LAYOUT` (#1218), `_IDENTITY` (#2554) and `_MERGE`, CFG cleanup's
+asks for `_LAYOUT` (#1218), `_IDENTITY` (#2554), `_MERGE`, CFG cleanup's
 merges of single-predecessor chains (#139, `ir_optimize_merges`: "#139's
-acceptance" below and [the Tier 1 guide](tier1.md)), which the default
-leaves off. A zero sweep
+acceptance" below and [the Tier 1 guide](tier1.md)), and `_MEMORY`, value
+numbering with memory (#2718, `ir_optimize_memory.c`: [its
+guide](ir-memory-value-numbering.md)), which the default leaves off. A zero sweep
 limit immediately uses worklist completion. It never publishes a partially
 converged optimistic analysis.
 
@@ -450,6 +451,9 @@ The passes, and the guides that record each one:
 - **[Value numbering](ir-value-numbering.md):** congruence partition
   refinement, with an independent scoped scalar expression table; cyclic
   congruences are compared semantically.
+- **[Value numbering with memory](ir-memory-value-numbering.md):** #2718's
+  repeated loads and loads of stored values, forwarded along the dominator
+  tree in the optimizer.
 - **[Loop-invariant motion](ir-loop-motion.md):** total operations into existing
   dedicated preheaders of #174's loops.
 - **[Private-field scalar replacement](ir-scalar-replacement.md):** nonescaping,
@@ -467,12 +471,15 @@ The record is buster-performance's [`ssa-passes-139-2026-11-14`](https://github.
 `--tier1`'s order is: lowering; the unit's inlining from summaries (#2541);
 SROA (`+sroa`); #866's solver (`+gvn`); promotion; the wide integers'
 halves and the wide vectors' pieces; truth simplification; threading;
-if-conversion; LICM (`+licm`); and the optimizer, which runs SCCP, dead-code
-removal, CFG cleanup and its merges, layout and identities, then the final
-verification that selection reads. `--tier1-passes=` turns each pass on or
-off ([the Tier 1 guide](tier1.md)). By default SCCP, dead-code removal, CFG
-cleanup, the merges and the inlining run; LICM, SROA and the solver don't,
-and none repeats. The measurements below decided this.
+if-conversion; LICM (`+licm`); and the optimizer, which runs SCCP, the
+identities, value numbering with memory (#2718), dead-code removal, CFG
+cleanup and its merges and layout, then the final verification that selection
+reads. `--tier1-passes=` turns each pass on or off ([the Tier 1
+guide](tier1.md)). By default SCCP, dead-code removal, CFG cleanup, the
+merges, the inlining and value numbering with memory run; LICM, SROA and the
+solver don't, and none repeats. The measurements below decided this, and
+[#2718's](ir-memory-value-numbering.md#measurements) value numbering with
+memory's.
 
 ### Agreement of the twins
 
@@ -636,7 +643,7 @@ What the measurements decided:
 Each item #139's design or guide named that this close-out doesn't finish has
 an issue of its own:
 - **Value numbering with memory** (repeated loads, store-to-load forwarding):
-  #2718.
+  #2718, since done ([its guide](ir-memory-value-numbering.md)).
 - **A policy under which LICM and the solver pay** (register pressure, values
   Tier 1 recomputes kept at their users): #2719.
 - **Scalar floating folding** under #1450's floating-environment contract:

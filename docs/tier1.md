@@ -171,16 +171,18 @@ measurements of what each one gains. LIST is a comma-separated list of items
 applied in turn, each `+` or `-` and then a pass's name: `sccp`, `dce`, `cfg`
 (the jump threading), `merge` (CFG cleanup's merges, below), `licm`, `sroa`
 (on every function, with #1282's options, before the solver and promotion),
-`gvn` (as `--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or
-`all`. The default is SCCP, dead-code removal, CFG cleanup, its merges and
-the inlining. LICM runs after if-conversion, before the optimizer, which
+`memory` (value numbering with memory in the optimizer, #2718: [its
+guide](ir-memory-value-numbering.md)), `gvn` (as `--tier1-gvn`), `inline`
+(`-inline` as `--tier1-no-inline`), or `all`. The default is SCCP, dead-code
+removal, CFG cleanup, its merges, value numbering with memory and the
+inlining. LICM runs after if-conversion, before the optimizer, which
 cleans up after it. A function that LICM or SROA refuses goes on as it was.
 The summaries the unit's inlining builds run the same passes, and with SROA,
 as with the solver, a candidate compiles from its own pipeline.
 `--tier1-report` gives each pass's counts: `folded` constants,
 `removed_instructions` and `removed_blocks` (the optimizer's output against
 its input, merges included), `merged_blocks`, `licm_moved`, `sroa_split`
-(slots) and `gvn_removed`.
+(slots), `gvn_removed` and `loads_forwarded` (value numbering with memory's).
 
 CFG cleanup's merges join a block to its predecessor when that predecessor is
 its only one and it is the predecessor's only executable successor. The block

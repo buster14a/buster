@@ -500,9 +500,9 @@ struct CheckEmitGrowth
 #define BUSTER_CHECK_TIER1_SCHEDULE_POST 1
 #define BUSTER_CHECK_TIER1_SCHEDULE_PRE 2
 // --tier1-passes= (#139): the passes of Tier 1's pipeline whose default the option turns over, a bit each, so that 0 is
-// the default pipeline, which runs SCCP, dead-code removal, CFG cleanup and its merges, and neither LICM nor SROA on every
-// function. SCCP's, dead-code removal's, CFG cleanup's and the merges' bits are ir_optimize.c's BUSTER_IR_OPTIMIZE_SCCP,
-// DCE, CFG and MERGE. #866's solver and the inlining keep their own options (--tier1-gvn, --tier1-no-inline), which the
+// the default pipeline, which runs SCCP, dead-code removal, CFG cleanup and its merges and value numbering with memory
+// (#2718), and neither LICM nor SROA on every function. SCCP's, dead-code removal's, CFG cleanup's, the merges' and value
+// numbering with memory's bits are ir_optimize.c's BUSTER_IR_OPTIMIZE_SCCP, DCE, CFG, MERGE and MEMORY. #866's solver and the inlining keep their own options (--tier1-gvn, --tier1-no-inline), which the
 // option's list sets too.
 #define BUSTER_CHECK_TIER1_PASS_SCCP 1u
 #define BUSTER_CHECK_TIER1_PASS_DCE 2u
@@ -511,7 +511,8 @@ struct CheckEmitGrowth
 #define BUSTER_CHECK_TIER1_PASS_SROA 16u
 #define BUSTER_CHECK_TIER1_PASS_MERGE 32u
 #define BUSTER_CHECK_TIER1_PASS_MEMORY 64u
-#define BUSTER_CHECK_TIER1_PASSES_DEFAULT (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE)
+#define BUSTER_CHECK_TIER1_PASSES_DEFAULT \
+    (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_MEMORY)
 #define BUSTER_CHECK_TIER1_PASSES_ALL (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_MEMORY)
 
 typedef struct CheckTier1Lane CheckTier1Lane;
