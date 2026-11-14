@@ -11643,8 +11643,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
             // The parse's and the reader's pages of the scratch, 82 MB of sqlite3.c's, which check-expressions and
             // check-declarations would otherwise hold to static-data's end (check_driver_discard_scratch, #628), but for
-            // what they and check_program push into it again (BUSTER_CHECK_DRIVER_SCRATCH_REUSE).
-            check_driver_discard_scratch(scratch, lanes, scratch->length + BUSTER_CHECK_DRIVER_SCRATCH_REUSE * (uint64_t)checking->tokens.count);
+            // what they and check_program push into it again (BUSTER_CHECK_DRIVER_SCRATCH_REUSE): the parse's tokens, so
+            // that a unit read as its view (#2531) keeps what it would have kept read whole, which its next unit's parse
+            // pushes as far again.
+            check_driver_discard_scratch(scratch, lanes, scratch->length + BUSTER_CHECK_DRIVER_SCRATCH_REUSE * (uint64_t)parser->tokens.count);
             if (stage_clock != NULL && deferring)
             {
                 stage_clock->deferred = true;
@@ -12056,6 +12058,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         // A units lane with a unit left to take gives its scratch's pages back in whole huge pages
                         // (#777).
                         .discard_huge = lanes != NULL && lanes->units_lane != NULL && check_units_discard_huge(lanes->units_lane),
+                        // (A unit read as its view keeps what the parse's tokens the view leaves out would have taken.)
+                        .discard_keep = parser->tokens.count > checking->tokens.count ?
+                                        BUSTER_CHECK_DRIVER_SCRATCH_REUSE * (uint64_t)(parser->tokens.count - checking->tokens.count) : 0,
                     });
                     // A resume that read the whole unit (#147) checks its view as the semantic unit it is, its `prefix_only`
                     // keeping only the emission and the translation unit's end obligations back (`checking` the recovered
