@@ -201,7 +201,7 @@ static bool check_test_common_candidate_case(const CheckOp* ops, uint32_t count)
 // mark all of them, including the final partial vector, instead of testing only the first 16.
 static void check_test_common_candidate_comparison_tail(CheckTest* test)
 {
-    enum { COUNT = 50, BLOCKS = 4 };
+    enum { COUNT = 144, BLOCKS = 9 };
     CheckOp ops[COUNT] = { 0 };
     uint32_t left[COUNT] = { 0 };
     uint32_t right[COUNT] = { 0 };
@@ -213,16 +213,22 @@ static void check_test_common_candidate_comparison_tail(CheckTest* test)
     for (uint32_t node = 0; node < COUNT; node += 1)
     {
         parents[node] = BUSTER_CHECK_NONE;
-        if (node >= 2)
+        if (node % 3 == 0)
+        {
+            values[node].type = BUSTER_TYPE_UCHAR;
+        }
+        else if (node % 3 == 1)
+        {
+            values[node] = (CheckValue){ .type = BUSTER_TYPE_INT, .flags = BUSTER_CHECK_ICE, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = 300 };
+        }
+        else
         {
             ops[node] = CHECK_OP_GREATER;
-            left[node] = 0;
-            right[node] = 1;
+            left[node] = node - 2;
+            right[node] = node - 1;
             masks[CHECK_COMMON_CANDIDATE_COMPARE * BLOCKS + node / 16] |= (uint16_t)(1u << (node % 16));
         }
     }
-    values[0].type = BUSTER_TYPE_UCHAR;
-    values[1] = (CheckValue){ .type = BUSTER_TYPE_INT, .flags = BUSTER_CHECK_ICE, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = 300 };
     const CheckGraph graph = { .count = COUNT, .ops = ops, .operand0 = left, .operand1 = right };
     const CheckStream stream = { .count = COUNT, .dense_values = values };
     const TypeCapacity capacity = { 0 };
@@ -240,7 +246,7 @@ static void check_test_common_candidate_comparison_tail(CheckTest* test)
         check_common_range_drain(&graph, &stream, &types, parents, reach, comparisons, &tested, listed);
     }
     bool same = ready && next == COUNT && listed == 48 && tested == listed;
-    for (uint32_t node = 2; node < COUNT; node += 1)
+    for (uint32_t node = 2; node < COUNT; node += 3)
     {
         same &= (reach[node] & BUSTER_CHECK_REACH_SIGN) != 0;
     }
