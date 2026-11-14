@@ -169,8 +169,9 @@ struct Tier1Frame
 };
 
 // Scratch belongs to one prepared function. It is reusable for repeated coloring/layout and has no retained pointers
-// into an output frame. `event` has 2 * count elements, the sorted ends (item * 2) and starts (item * 2 + 1); `last`
-// has count + 1, a pressure level's last ended item; every other array has count.
+// into an output frame. `event` has 2 * count elements, the sorted ends (item * 2) and starts (item * 2 + 1); `last`,
+// a pressure level's last ended item, and `color` have count + 1, each with a spare element the coloring pass stores to
+// (tier1_frame_color); every other array has count.
 typedef struct Tier1FrameWork Tier1FrameWork;
 struct Tier1FrameWork
 {
@@ -568,7 +569,7 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
     if (error == TIER1_FRAME_OK && count != 0)
     {
         // One push: the sort's two key columns and the classes' offsets, then the dword columns.
-        const uint64_t dwords = (uint64_t)events * 2 + count + 1 + (uint64_t)count * 6;
+        const uint64_t dwords = (uint64_t)events * 2 + ((uint64_t)count + 1) * 2 + (uint64_t)count * 5;
         key = arena_push_array(scratch, (uint64_t)events * 2 + count + (dwords + 1) / 2, 8, 8);
         if (key == 0)
         {
@@ -582,7 +583,7 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
             temporary_event = candidate.event + events;
             candidate.last = temporary_event + events;
             candidate.color = candidate.last + count + 1;
-            candidate.object_class = candidate.color + count;
+            candidate.object_class = candidate.color + count + 1;
             candidate.class_stride = candidate.object_class + count;
             candidate.class_alignment = candidate.class_stride + count;
             candidate.class_colors = candidate.class_alignment + count;
@@ -725,7 +726,8 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
 // oracle, tier1_frame_test_color_jumping), does the pass's work once per round.
 static void tier1_frame_color(Tier1FrameWork* work)
 {
-    const uint32_t events = work->count * 2;
+    const uint32_t count = work->count;
+    const uint32_t events = count * 2;
     const uint32_t* const event = work->event;
     const uint32_t* const object_class = work->object_class;
     uint32_t* const last = work->last;
@@ -734,7 +736,7 @@ static void tier1_frame_color(Tier1FrameWork* work)
     if (events != 0)
     {
         // Every level names an item: a level read before its class wrote it gives a color that isn't taken.
-        memset(last, 0, ((uint64_t)work->count + 1) * 4);
+        memset(last, 0, ((uint64_t)count + 1) * 4);
     }
     // Every class's events balance, so each class starts at pressure 0.
     uint32_t pressure = 0;
@@ -752,9 +754,12 @@ static void tier1_frame_color(Tier1FrameWork* work)
         const bool root = level > maximum;
         maximum = root ? level : maximum;
         class_colors[group] = maximum;
+        // Selects, not branches: the kinds and the roots follow the lifetimes, which nothing predicts. Each event makes
+        // both stores, a start's color and an end's item, one of them to a spare place (color[count], and last[0], which
+        // is no level's), so that an end's item doesn't wait for the color only a start takes.
         const uint32_t inherited = color[last[level]];
-        uint32_t* const slot = start != 0 ? color + item : last + level;
-        *slot = start != 0 ? (root ? level - 1 : inherited) : item;
+        color[__builtin_unpredictable(start != 0) ? item : count] = __builtin_unpredictable(root) ? level - 1 : inherited;
+        last[__builtin_unpredictable(start != 0) ? 0 : level] = item;
         pressure += start * 2 - 1;
     }
 }
