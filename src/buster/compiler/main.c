@@ -909,6 +909,11 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_licm_test.c"
 #endif
+// #2755: Tier 1's loop unroller, --tier1-passes=+unroll.
+#include "buster/compiler/ir_optimize_unroll.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+#include "buster/compiler/ir_optimize_unroll_test.c"
+#endif
 #include "buster/compiler/ir_optimize_sroa.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_sroa_test.c"
@@ -2348,6 +2353,10 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-licm") == 0)
     {
         result = run_ir_licm_tests(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-unroll") == 0)
+    {
+        result = run_ir_unroll_tests(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-sroa") == 0)
     {

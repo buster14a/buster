@@ -931,6 +931,7 @@ test "$("$BUSTER_COMPILER" test-ir-source --print fetched tests/ir-source/atomic
 "$BUSTER_COMPILER" test-ir-optimize
 "$BUSTER_COMPILER" test-ir-gvn
 "$BUSTER_COMPILER" test-ir-licm
+"$BUSTER_COMPILER" test-ir-unroll
 "$BUSTER_COMPILER" test-ir-sroa
 "$BUSTER_COMPILER" test-ir-inline
 == Test dataflow bitsets

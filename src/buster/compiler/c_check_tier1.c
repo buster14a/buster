@@ -310,8 +310,15 @@ struct CheckTier1Passes
     uint32_t sunk;
     // --tier1-passes=+licm's moved values (#139).
     uint32_t licm_moved;
+    // --tier1-passes=+unroll's loops (#2755).
+    uint16_t unroll_outcomes[BUSTER_CHECK_TIER1_UNROLL_OUTCOMES];
+    uint32_t unroll_copies;
+    uint32_t unroll_reductions;
+    uint32_t unroll_added;
     bool unexpanded;
 };
+
+_Static_assert(BUSTER_CHECK_TIER1_UNROLL_OUTCOMES == IR_UNROLL_OUTCOME_COUNT, "a report counter for each of the unroller's outcomes");
 
 // Tier 1's passes from SSA promotion to the optimizer's verified result, which selection reads: promotion in `promotion`,
 // the 128-bit integers' halves, the wide vectors' pieces, truth simplification, threading and if-conversion in steps[6],
@@ -421,6 +428,28 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         wide.function = stage == CHECK_TIER1_COMPILED && check.error == IR_OK ? moved.function : wide.function;
         passes->licm_moved = check.error == IR_OK ? moved.moved : 0;
     }
+    // --tier1-passes=+unroll (#2755's measurement): counted innermost loops unrolled, in steps[10], after if-conversion and
+    // LICM, before the sink and the optimizer, whose SCCP, dead-code removal and merges clean the copies up. A function
+    // past the loop analysis' limits (IR_ERROR_UNSUPPORTED) goes on as it was; any other error is the function's.
+    if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_UNROLL) != 0)
+    {
+        IrUnrollOptions options = ir_unroll_options();
+        options.scalar = scalar;
+        IrUnrollResult unrolled = { 0 };
+        const IrCheck check = ir_optimize_unroll(&wide.function, &lane->steps[10], scratch, options, &unrolled);
+        const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;
+        outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, error, check.instruction, check.detail, NULL);
+        outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
+        stage = outcome.stage;
+        wide.function = stage == CHECK_TIER1_COMPILED && check.error == IR_OK ? unrolled.function : wide.function;
+        for (uint32_t k = 0; check.error == IR_OK && k < IR_UNROLL_OUTCOME_COUNT; k += 1)
+        {
+            passes->unroll_outcomes[k] = (uint16_t)(unrolled.outcomes[k] < UINT16_MAX ? unrolled.outcomes[k] : UINT16_MAX);
+        }
+        passes->unroll_copies = check.error == IR_OK ? unrolled.copies : 0;
+        passes->unroll_reductions = check.error == IR_OK ? unrolled.reductions : 0;
+        passes->unroll_added = check.error == IR_OK ? unrolled.added : 0;
+    }
     // --tier1-schedule=pre (#172): each block's instructions reordered on the same owned columns, before the optimizer's
     // final verification, which then covers the new order. No room for the pass's scratch is a resource failure.
     if (stage == CHECK_TIER1_COMPILED && lane->schedule == BUSTER_CHECK_TIER1_SCHEDULE_PRE)
@@ -485,7 +514,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     // --tier1-passes='s SROA on every body, and LICM, each with an arena of its own.
     const uint32_t on = check_tier1_passes_on(lane);
     const bool sroa = (on & BUSTER_CHECK_TIER1_PASS_SROA) != 0;
-    const uint8_t optional = (uint8_t)((gvn ? 1u : 0) | (sroa ? 2u : 0) | ((on & BUSTER_CHECK_TIER1_PASS_LICM) != 0 ? 4u : 0));
+    const uint8_t optional = (uint8_t)((gvn ? 1u : 0) | (sroa ? 2u : 0) | ((on & BUSTER_CHECK_TIER1_PASS_LICM) != 0 ? 4u : 0) | ((on & BUSTER_CHECK_TIER1_PASS_UNROLL) != 0 ? 8u : 0));
     CheckTier1Outcome outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA,
                                                 check_tier1_lane_prepare(lane, target, optional) ? 0 : BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, fault);
     CheckTier1Stage stage = outcome.stage;
@@ -752,7 +781,11 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .licm_moved = passes.licm_moved,
             .sroa_split = sroa_split,
             .gvn_removed = gvn_applied ? gvn_result.removed : 0,
+            .unroll_copies = passes.unroll_copies,
+            .unroll_reductions = passes.unroll_reductions,
+            .unroll_added = passes.unroll_added,
         };
+        memcpy(counts->unroll_outcomes, passes.unroll_outcomes, sizeof(counts->unroll_outcomes));
         if (emitted.frame_event_count != 0)
         {
             memcpy(frames, emitted.frame_events, (uint64_t)emitted.frame_event_count * sizeof(EmissionFrameEvent));
@@ -929,4 +962,20 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
             report->code_certified, report->code_uncertified, report->machine_rows, report->row_moves, report->inlined_calls, report->schedule_blocks,
             report->schedule_moved, report->sunk, report->folded, report->removed_instructions, report->removed_blocks, report->merged_blocks, report->licm_moved,
             report->sroa_split, report->gvn_removed, report->dead_functions);
+    // --tier1-passes=+unroll's loops (#2755), where it saw one: each outcome's count, then the main loops' copies, the
+    // reductions they split and the instructions they added.
+    uint64_t loops = 0;
+    for (uint32_t k = 0; k < IR_UNROLL_OUTCOME_COUNT; k += 1)
+    {
+        loops += report->unroll_outcomes[k];
+    }
+    if (loops != 0)
+    {
+        fprintf(stream, "tier1-unroll\tloops=%" PRIu64, loops);
+        for (uint32_t k = 0; k < IR_UNROLL_OUTCOME_COUNT; k += 1)
+        {
+            fprintf(stream, "\t%s=%" PRIu64, ir_unroll_outcome_names[k], report->unroll_outcomes[k]);
+        }
+        fprintf(stream, "\tcopies=%" PRIu64 "\treductions=%" PRIu64 "\tadded=%" PRIu64 "\n", report->unroll_copies, report->unroll_reductions, report->unroll_added);
+    }
 }

@@ -19,6 +19,8 @@
 //   the three with the merges and Tier 1's layout and identities (c_check_tier1.c's set), forced vector and forced
 //   scalar: the same function.
 // - LICM on P, vector and scalar: the same function, or the same refusal.
+// - #2755's unroller on P optimized with Tier 1's set and its truth values simplified, vector and scalar: the same
+//   function, outcomes and counts.
 // For each caller among them, the inliner on a unit of it and its direct callees among the file's functions, as the C
 // driver's expansion takes one (every function of internal linkage and #2541's general splice on, so that every such call is
 // a candidate), vector and scalar: the same decisions and the same caller, whose expansion must promote.
@@ -40,6 +42,7 @@ typedef enum IrSourcePass
     IR_SOURCE_PASS_OPTIMIZER,
     IR_SOURCE_PASS_TIER1,
     IR_SOURCE_PASS_LICM,
+    IR_SOURCE_PASS_UNROLL,
     IR_SOURCE_PASS_INLINE,
     IR_SOURCE_PASS_COUNT,
 } IrSourcePass;
@@ -54,6 +57,7 @@ static const char* const ir_source_pass_names[IR_SOURCE_PASS_COUNT] = {
     "optimizer",
     "tier1",
     "licm",
+    "unroll",
     "inline",
 };
 
@@ -206,6 +210,32 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
         const IrCheck scalar_check = ir_optimize_licm(promoted, twin, scratch, options, &scalar);
         const bool same = vector_check.error == IR_OK && scalar_check.error == IR_OK && vector.moved == scalar.moved && ir_source_passes_equal(&vector.function, &scalar.function);
         ir_source_passes_record(totals, IR_SOURCE_PASS_LICM, file, name, vector_check, scalar_check, same, true, vector.moved != 0, vector.moved);
+        arena_pop_to(output, output_mark);
+        arena_pop_to(twin, twin_mark);
+    }
+    // #2755's unroller on Tier 1's form of the function: the optimizer's (Tier 1's set), whose owned columns then have
+    // their truth values simplified, as the C driver's do before the loop passes. The same function, outcomes and counts.
+    // Its effect is the copies made.
+    {
+        IrOptimizeOptions cleanup = ir_optimize_options();
+        cleanup.passes = ir_source_pass_optimizer[IR_SOURCE_PASS_TIER1 - IR_SOURCE_PASS_SCCP];
+        IrOptimizeResult cleaned = { 0 };
+        const IrCheck cleaned_check = ir_optimize(promoted, twin, scratch, cleanup, &cleaned);
+        if (cleaned_check.error == IR_OK)
+        {
+            ir_truth_simplify(&cleaned.function, false);
+        }
+        const IrFunction* input = cleaned_check.error == IR_OK ? &cleaned.function : promoted;
+        IrUnrollOptions options = ir_unroll_options();
+        IrUnrollResult vector = { 0 };
+        IrUnrollResult scalar = { 0 };
+        const IrCheck vector_check = ir_optimize_unroll(input, output, scratch, options, &vector);
+        options.scalar = true;
+        const IrCheck scalar_check = ir_optimize_unroll(input, twin, scratch, options, &scalar);
+        const bool same = vector_check.error == IR_OK && scalar_check.error == IR_OK && memcmp(vector.outcomes, scalar.outcomes, sizeof(vector.outcomes)) == 0 &&
+                          vector.copies == scalar.copies && vector.reductions == scalar.reductions && vector.added == scalar.added &&
+                          ir_source_passes_equal(&vector.function, &scalar.function);
+        ir_source_passes_record(totals, IR_SOURCE_PASS_UNROLL, file, name, vector_check, scalar_check, same, true, vector.outcomes[IR_UNROLL_UNROLLED] != 0, vector.copies);
         arena_pop_to(output, output_mark);
         arena_pop_to(twin, twin_mark);
     }
@@ -539,6 +569,13 @@ static Tier0BenchmarkReading ir_source_passes_run(IrSourcePass pass, bool scalar
             options.scalar = scalar;
             IrLicmResult result = { 0 };
             check = ir_optimize_licm(&corpus->promoted[f], output, scratch, options, &result);
+        }
+        else if (pass == IR_SOURCE_PASS_UNROLL)
+        {
+            IrUnrollOptions options = ir_unroll_options();
+            options.scalar = scalar;
+            IrUnrollResult result = { 0 };
+            check = ir_optimize_unroll(&corpus->promoted[f], output, scratch, options, &result);
         }
         else if (pass == IR_SOURCE_PASS_INLINE)
         {
