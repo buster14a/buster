@@ -1339,16 +1339,18 @@ static InterpreterStatus interpreter_typed_enter(const Tier0Function* function, 
             }
             else
             {
-                // Its cell's 16 bytes undefined, then an argument's value's defined, by fixed-size stores: every call
-                // sets its locals up, and a sanitizer's build makes each memset a call into its runtime (#2758).
-                const uint64_t undefined = 0;
-                locals[index] = l < count ? interpreter_typed_value(function->local_classes[l], arguments[l]) : (InterpreterValue){ 0 };
-                memcpy(initialized, &undefined, sizeof(undefined));
-                memcpy(initialized + sizeof(undefined), &undefined, sizeof(undefined));
-                if (l < count)
-                {
-                    interpreter_define_bytes(initialized, interpreter_typed_bytes(function->local_classes[l]));
-                }
+                // Its cell and the cell's 16 defined bytes, an argument's value's defined and the rest not, as two words
+                // each that depend on the local: every call sets its locals up, and a sanitizer's build makes a memset,
+                // which the compiler makes of constant words, a call into its runtime (#2758).
+                const InterpreterValue initial = l < count ? interpreter_typed_value(function->local_classes[l], arguments[l]) : (InterpreterValue){ 0 };
+                const uint64_t defined_bytes = l < count ? interpreter_typed_bytes(function->local_classes[l]) : 0;
+                const uint64_t ones = UINT64_C(0x0101010101010101);
+                const uint64_t low = defined_bytes >= 8 ? ones : defined_bytes == 0 ? 0 : ones >> (64 - 8 * defined_bytes);
+                const uint64_t high = defined_bytes > 8 ? ones >> (8 * (16 - defined_bytes)) : 0;
+                locals[index].low = initial.low;
+                locals[index].high = initial.high;
+                memcpy(initialized, &low, sizeof(low));
+                memcpy(initialized + sizeof(low), &high, sizeof(high));
             }
             if (!interpreter_memory_add(runtime, bytes + named, size - named, initialized + named, true, owner))
             {

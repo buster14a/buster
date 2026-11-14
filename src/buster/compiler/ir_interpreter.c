@@ -479,7 +479,8 @@ static InterpreterStatus ir_interpreter_arguments(const IrFunction* function, Ir
     for (uint32_t p = 0; status == INTERPRETER_OK && p < named; p += 1)
     {
         const IrPassed parameter = own != 0 ? target->passed[own - 1 + hidden + p] : (IrPassed){ 0 };
-        parameters[hidden + p] = passed[p];
+        parameters[hidden + p].low = passed[p].low;
+        parameters[hidden + p].high = passed[p].high;
         if (parameter.size != 0)
         {
             // The callee's copy of the call's bytes, aligned to 64 or as the call's argument area is (a register's
@@ -581,7 +582,10 @@ static InterpreterStatus ir_interpreter_enter_block(IrInterpreterFrame* frame, u
             }
             else
             {
-                frame->phi_values[phi_end] = frame->values[source];
+                // A value's two words, each by itself: a sanitizer's build makes a copy of the whole 16-byte value,
+                // memory to memory, a call into its runtime at every phi (#2758).
+                frame->phi_values[phi_end].low = frame->values[source].low;
+                frame->phi_values[phi_end].high = frame->values[source].high;
                 if (ir_vector_type(function->type[phi_end]))
                 {
                     frame->vector_phis[vector_phi++] = frame->vector_values[frame->vector_indices[source]];
@@ -596,7 +600,8 @@ static InterpreterStatus ir_interpreter_enter_block(IrInterpreterFrame* frame, u
         vector_phi = 0;
         for (uint32_t p = begin; p < phi_end; p += 1)
         {
-            frame->values[p] = frame->phi_values[p];
+            frame->values[p].low = frame->phi_values[p].low;
+            frame->values[p].high = frame->phi_values[p].high;
             if (ir_vector_type(function->type[p]))
             {
                 frame->vector_values[frame->vector_indices[p]] = frame->vector_phis[vector_phi++];
@@ -1397,7 +1402,9 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     for (uint32_t p = 0; result.status == INTERPRETER_OK && p < call.argument_count; p += 1)
                     {
                         const uint32_t id = function->extra[call.argument_first + p];
-                        passed[p] = frame->values[id];
+                        // Its two words, each by itself (ir_interpreter_enter_block's reason).
+                        passed[p].low = frame->values[id].low;
+                        passed[p].high = frame->values[id].high;
                         types[p] = function->type[id];
                         if (frame->defined[id] == 0 && options->check_undefined)
                         {
