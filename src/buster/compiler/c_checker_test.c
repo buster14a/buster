@@ -2910,6 +2910,56 @@ static bool check_test_fixtures_load(CheckTestFixtures* fixtures, const char* su
     return valid && check_test_fixture_orphans(fixtures, directory);
 }
 
+// A suite of runtime source fixtures (#2053) under the fixture root, checked as the shared ones are but without their
+// generated cases and variants: each case's source in a temporary file, clang -fsyntax-only -std=gnu17 on them all at
+// once, then each case's acceptance against clang's (an unsupported case refuses by name what clang takes, an undecided
+// one what clang rejects) and check_test_source's checks on both paths. `oracle` names clang's run in its check. The
+// suites' runners were test files' own tables and loops: c_check_cleanup_test.c's, c_check_musttail_test.c's and the
+// others that call this.
+static __attribute__((noinline)) void check_test_suite(CheckTest* test, const char* clang, const char* suite, const char* oracle)
+{
+    CheckTestFixtures catalog;
+    const bool loaded = check_test_fixtures_load(&catalog, suite);
+    char problem[sizeof(catalog.problem) + 128];
+    snprintf(problem, sizeof(problem), "%s fixtures (#2053): %s", suite, catalog.problem);
+    check_test_expect(test, loaded, problem);
+    const uint32_t count = loaded ? catalog.count : 0;
+    char directory[4096];
+    const int length = snprintf(directory, sizeof(directory), "%s/buster-checker-suite-XXXXXX", oracle_temporary_directory());
+    char (*paths)[4200] = count != 0 ? arena_push(&catalog.storage, sizeof(*paths) * count, 8) : 0;
+    char** pointers = count != 0 ? arena_push(&catalog.storage, sizeof(char*) * count, 8) : 0;
+    ParseTestClang* outcomes = count != 0 ? arena_push(&catalog.storage, sizeof(ParseTestClang) * count, 8) : 0;
+    const bool made = paths != 0 && pointers != 0 && outcomes != 0 && length > 0 && length < (int)sizeof(directory) && mkdtemp(directory) != 0;
+    bool ready = made;
+    for (uint32_t i = 0; ready && i < count; i += 1)
+    {
+        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
+        pointers[i] = paths[i];
+        ready = parse_test_write(paths[i], catalog.cases[i].source, strlen(catalog.cases[i].source));
+    }
+    const char* arguments[] = { "-std=gnu17" };
+    const bool ran = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), pointers, count, outcomes);
+    check_test_expect(test, ran, oracle);
+    for (uint32_t i = 0; ran && i < count; i += 1)
+    {
+        const CheckSourceFixture* fixture = catalog.cases + i;
+        char description[256];
+        snprintf(description, sizeof(description), "%s: expectation differs from Clang", fixture->name);
+        check_test_expect(test, outcomes[i].rejected == (fixture->rejected && (!fixture->unsupported || fixture->undecided)), description);
+        check_test_source(test, fixture, paths[i], outcomes + i);
+    }
+    for (uint32_t i = 0; made && i < count; i += 1)
+    {
+        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
+        unlink(paths[i]);
+    }
+    if (made)
+    {
+        rmdir(directory);
+    }
+    arena_release(&catalog.storage);
+}
+
 static __attribute__((noinline)) void check_test_sources(CheckTest* test, const char* clang)
 {
     CheckTestFixtures catalog;

@@ -1,0 +1,80 @@
+buster-fixtures v1 checker-sources
+# check_test_cleanup_sources's source fixtures (c_check_cleanup_test.c; #2053): ID, FILE, FLAGS, NAME, tab-separated.
+0001	0001.c	-	cleanup on an automatic variable
+0002	0002.c	-	cleanup on a register variable
+0003	0003.c	-	cleanup of a const variable discards its qualifier
+0004	0004.c	-	cleanup taking a pointer to void
+0005	0005.c	-	cleanup taking a qualified pointer
+0006	0006.c	-	variadic cleanup of one named parameter
+0007	0007.c	-	cleanup function of a result
+0008	0008.c	-	cleanup function through a typedef
+0009	0009.c	-	cleanup of a pointer variable
+0010	0010.c	-	cleanup of a struct variable
+0011	0011.c	-	cleanup of a variable-length array
+0012	0012.c	-	cleanup's function named like its variable
+0013	0013.c	-	cleanups of a specifier's declarators
+# A function declarator among them ignores the specifier's cleanups, which the variables still have (#745's
+# review): the argument's type, the argument count and the last of several.
+0014	0014.c	-	a specifier's cleanup on a function and a variable
+0015	0015.c	rejected	a specifier's cleanup of another pointee after a function
+0016	0016.c	rejected	a specifier's cleanup of two arguments after a function
+0017	0017.c	rejected	the last of a specifier's cleanups after a function
+0018	0018.c	-	the last of two cleanups
+0019	0019.c	-	cleanup in a for statement
+0020	0020.c	-	cleanup in a statement expression
+0021	0021.c	-	cleanup ignored on a file-scope variable
+0022	0022.c	-	cleanup ignored on a static local
+0023	0023.c	-	cleanup ignored on an extern local
+0024	0024.c	-	cleanup ignored on a typedef
+0025	0025.c	-	cleanup ignored on a function
+0026	0026.c	-	cleanup ignored on a parameter
+0027	0027.c	rejected	cleanup undeclared on an ignored parameter
+0028	0028.c	rejected	cleanup undeclared on an ignored field
+0029	0029.c	rejected	an earlier cleanup still resolves its argument
+0030	0030.c	rejected	an earlier cleanup cannot name a type
+0031	0031.c	-	goto out of a cleanup's scope
+0032	0032.c	-	goto within a cleanup's scope
+0033	0033.c	-	case in a block of a cleanup
+0034	0034.c	-	computed goto inside a cleanup's scope
+0035	0035.c	rejected	cleanup of an undeclared function
+0036	0036.c	rejected	cleanup undeclared on a file-scope variable
+0037	0037.c	rejected	cleanup naming its own variable
+0038	0038.c	rejected	cleanup of an object
+0039	0039.c	rejected	cleanup of a function pointer
+0040	0040.c	rejected	cleanup of a type
+0041	0041.c	rejected	cleanup of a parenthesized function
+0042	0042.c	rejected	cleanup of a string
+0043	0043.c	rejected	cleanup without an argument
+0044	0044.c	rejected	cleanup of two arguments
+0045	0045.c	rejected	cleanup function without a prototype
+0046	0046.c	rejected	cleanup function of two parameters
+0047	0047.c	rejected	cleanup function of no parameter
+0048	0048.c	rejected	cleanup of another pointee
+0049	0049.c	rejected	cleanup of another signedness
+0050	0050.c	rejected	cleanup of a character pointer
+0051	0051.c	rejected	cleanup of a pointer to a pointer to void
+0052	0052.c	rejected	cleanup of an integer parameter
+0053	0053.c	rejected	cleanup of an element's pointer
+0054	0054.c	rejected	goto into a cleanup's scope
+0055	0055.c	rejected	goto into a nested cleanup's scope
+0056	0056.c	rejected	switch into a cleanup's scope
+0057	0057.c	rejected	computed goto out of a cleanup's scope
+0058	0058.c	rejected	computed goto into a cleanup's scope
+# An asm goto's targets are its own labels (#1126's review): it may neither leave a cleanup's scope nor enter a
+# cleanup's or a variable-length array's, as clang's JumpScopeChecker has it, but it may leave an array's.
+0059	0059.c	rejected	asm goto out of a cleanup's scope
+0060	0060.c	rejected	asm goto's second label out of a cleanup's scope
+0061	0061.c	rejected	asm goto into a cleanup's scope
+0062	0062.c	rejected	asm goto into an array's scope
+0063	0063.c	-	asm goto out of an array's scope
+0064	0064.c	-	asm goto within a cleanup's scope
+0065	0065.c	-	asm goto beside another function label's address
+# An __auto_type variable's cleanup is checked against the deduced type, not its placeholder's int (#745's
+# review): a double's, by the specifiers too, a decayed array's and a structure's through void *, and
+# pointers to other types.
+0066	0066.c	-	cleanup of an __auto_type double
+0067	0067.c	-	cleanup of an __auto_type double by its specifiers
+0068	0068.c	-	cleanup of an __auto_type decayed array
+0069	0069.c	-	cleanup of an __auto_type structure through void
+0070	0070.c	rejected	cleanup of an __auto_type double by an int pointer
+0071	0071.c	rejected	cleanup of an __auto_type int by a double pointer
