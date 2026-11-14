@@ -235,19 +235,29 @@ if "$BUSTER_COMPILER" test-preprocessor --part 1/4 --part 2/4; then exit 1; fi
 # clang's runs go to the job's clang server where it built one (#2071), compared as the preprocessor's parts are.
 "$BUSTER_COMPILER" test-parser --clang ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 "$BUSTER_COMPILER" test-parser --clang --files-only tests/parser-handoff/pragma-heavy.c ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
-== Test the semantic driver's diagnostics and emission against clang (part 1 of 4)
-# --part deals the driver test's checks (sections, and the cases of its two long sweeps) in turn to 4 parts, one CPU
+== Test the semantic driver's diagnostics and emission against clang (part 1 of 8)
+# --part deals the driver test's checks (sections, and the cases of its two long sweeps) in turn to 8 parts, one CPU
 # each, which the runner packs beside the other commands: alone, the command took 197 s on a hosted runner and 48 s
-# on the 9700X, the list's longest. The four parts together run each check once. Buster's runs are this process's,
-# and the oracle clang's go to the job's clang server where it built one (#2071); with BUSTER_DRIVER_DIFFERENTIAL, each
-# also runs as a child, and a difference fails the command.
-"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 1/4 --in-process ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
-== Test the semantic driver's diagnostics and emission against clang (part 2 of 4)
-"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 2/4 --in-process ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
-== Test the semantic driver's diagnostics and emission against clang (part 3 of 4)
-"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 3/4 --in-process ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
-== Test the semantic driver's diagnostics and emission against clang (part 4 of 4)
-"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 4/4 --in-process ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
+# on the 9700X, the list's longest. The eight parts together run each check once. As 4 parts, the first was the TSan
+# rows' longest command and the x86-64 TSan row's floor (1,287 s on the slowest CPU, #2658's lever 5); part K of 4 is
+# parts K and K + 4 of 8, which `costs split` gave each a share of. Buster's runs are this process's, and the oracle
+# clang's go to the job's clang server where it built one (#2071); with BUSTER_DRIVER_DIFFERENTIAL, each also runs as
+# a child, and a difference fails the command.
+"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 1/8 --in-process ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
+== Test the semantic driver's diagnostics and emission against clang (part 2 of 8)
+"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 2/8 --in-process ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
+== Test the semantic driver's diagnostics and emission against clang (part 3 of 8)
+"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 3/8 --in-process ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
+== Test the semantic driver's diagnostics and emission against clang (part 4 of 8)
+"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 4/8 --in-process ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
+== Test the semantic driver's diagnostics and emission against clang (part 5 of 8)
+"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 5/8 --in-process ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
+== Test the semantic driver's diagnostics and emission against clang (part 6 of 8)
+"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 6/8 --in-process ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
+== Test the semantic driver's diagnostics and emission against clang (part 7 of 8)
+"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 7/8 --in-process ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
+== Test the semantic driver's diagnostics and emission against clang (part 8 of 8)
+"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 8/8 --in-process ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 == Check narrow-unsigned sign comparisons and admitted deferred diagnostics [2 CPUs]
 # This focused route compiles two bodies, requests two lanes and asserts the reported deferred admission.
 "$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --sign-compare-only --in-process ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
@@ -417,8 +427,12 @@ musl="$corpus/libc/musl"
   -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
   "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
 == Test the C lexer as C++
+# The C++ and the two raw-string modes were one heading, the x86-64 MSan row's floor (959 s on the slowest CPU,
+# #2658's lever 5); as three, the runner packs them apart (`costs split` gave each its share of the heading's cost).
 "$BUSTER_COMPILER" test-lexer --cplusplus
+== Test the C lexer with C11's raw-string prefixes
 "$BUSTER_COMPILER" test-lexer --raw-strings
+== Test the C lexer with the R and LR raw-string prefixes
 "$BUSTER_COMPILER" test-lexer --raw-strings-c99
 == Compare main.c's checking and its functions and objects with clang's
 # #129: the compiler's own main.c, with build.sh's flags for a plain -march=znver5 build whatever this run's host,

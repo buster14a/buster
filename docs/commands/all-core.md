@@ -102,6 +102,15 @@ pull requests included.
   ones less the sampling's own, which is estimated from the counted runs' median.
   Below a few million cycles the difference is within the runs' own spread, as
   in the record.
+- **Stages that interleave.** The sampled cycles go to the stage whose time a
+  sample falls in, the stages laid end to end in the report's order. A
+  compile whose stages take turns spreads each one's samples over the others
+  and the stages beside them: by `--emit-window` (step 1) the lowering and the
+  emission alternate window by window. Read their sum from `select` to
+  `object` in the sampled table, or each one's time in the reports (laps,
+  which are exact), not their sampled split. The clock's start holds: Tier 0's
+  anchor then comes early, but it is one of three, and the median takes the
+  other two.
 - **The memory controllers** (DRAM bytes by stage) aren't the gauge's: the
   record's `amd_umc` counts are the whole host's, four counters a controller, and
   a fifth event multiplexes them. They stay a record's measurement.

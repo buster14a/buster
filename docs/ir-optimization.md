@@ -43,64 +43,127 @@ retains the final CFG and dominators in a caller-owned analysis arena for
 [the analysis-handoff guide](ir-analysis-handoff.md). `ir_optimize` remains the
 independent rebuilding control.
 
-### Scalar diamond/triangle if-conversion (#1382)
+### Scalar if-conversion (#1382)
 
-The C driver's `ir_if_convert.c` runs after SSA promotion, wide-value splitting
-and integer truth simplification, before the ordinary optimizer prepares any
-analysis. It finds conditional terminators with a bounded 64-byte opcode mask
-and an exact scalar twin. A function without one needs no CFG or output
-allocation. Reachability and exact predecessor sets then identify local
-diamonds and triangles: each arm has a single entry from the head and an
-unconditional exit to the same two-predecessor join. A join may head a later
-region, so sequential clamps convert in the same pass. An arm cannot overlap
-another accepted region, and joins with extra predecessors or general nested
-decision trees remain control flow.
+The C driver's `ir_if_convert.c` runs after SSA promotion, wide-value splitting,
+integer truth simplification and truth threading, before the ordinary optimizer
+prepares any analysis. It finds conditional terminators with a bounded 64-byte
+opcode mask and an exact scalar twin. A function without one needs no CFG or
+output allocation.
 
-Every initial phi in an accepted join becomes an `IR_SELECT` of the head's
-condition and that phi's true/false incoming values. Arm rows move, in
-dependency order, before these selects; the head branches directly to the
-join. Original arm blocks retain only unreachable branch stubs for the
-ordinary SCCP/DCE/CFG pass to remove. Rows are permuted without duplication,
-and block identities remain stable. The subsequent optimizer validates the
-rewritten SSA and publishes its usual final analysis revision.
+A region is a reachable head ending in a conditional branch whose two sides
+reach one join. Each side is the join itself (a triangle) or an arm: a chain of
+at most four blocks, each with the previous block (or the head) as its only
+reachable predecessor and an unconditional branch to the next. A region's
+blocks overlap no other region's in a round, except that a join may head
+another region, so sequential clamps convert in one round.
+
+The C lowering's arms hold rows that no phi needs: the comparisons truth
+simplification copied, their zero extensions and zeros. They also hold rows the
+head already computed, such as a conditional sum's reloaded element and its
+address. So each arm row is first numbered against the earlier arm rows and the
+head's rows. A row whose operation, type, flags, fields and represented
+operands equal an earlier row's takes that row's value, comparing an address's
+scale and offset by content. The head's rows are filtered 16 at a time
+(AVX-512 compares of the operation, type, flags and operand columns, with a
+scalar twin), latest first, and each candidate is checked whole. A load takes
+an earlier value only from a plain load of the same address and type after the
+head's last write. A write here is a store, an atomic, a fence, a call, a stack
+restore, a lifetime marker or an observable load; no arm row writes. The
+barrier scan is one `vpermi2b` lookup of a 128-entry opcode class table per 64
+rows, with a scalar twin.
+
+Then only the rows the join's phis need, through their represented operands,
+move to the head's end, before its branch. Each needed row must be total:
+constants, copies, wrapping integer arithmetic, bitwise operations, integer
+comparisons, selects, integer and pointer conversions, addresses, and shifts by
+an in-range constant. A plain load is speculated where the head made a plain
+load or store of the same address, of at least its size, after its last
+release. A call, a stack restore or a lifetime marker counts as a release,
+since it could unmap or reuse the memory. Nothing else proves an address.
+Rows no phi needs stay in their arm, which becomes an unreachable stub ending
+in `unreachable` for SCCP/DCE/CFG cleanup to remove. A row left there must be a
+reused one or one that could have moved, so the stub drops no effect and no
+fault: a dead division by a variable, a dead unproven load, a call or a store
+refuses the region.
+
+A join reached only by the region's two edges turns each phi into a select of
+the head's condition in place. A join with other predecessors keeps its phis.
+Each phi takes a new select row in the head for the region's two entries, which
+become one entry from the head. That is the shape of LLVM SimplifyCFG's
+`FoldTwoEntryPHINode` and `SpeculativelyExecuteBB`, for the C lowering's
+nested `?:`. The head then branches to the join. Rows are permuted, and the
+only new rows are the folded selects and the sunk accumulations' zeros (below).
+
+Two cost rules keep a branch or move a select:
+
+- **A recurrence through the condition stays a branch.** The head's condition
+  may read, within 16 rows, a phi that one of the join's phis flows into, as a
+  running maximum's does. Its select would put the comparison on the loop's
+  carried chain: on the 9700X, `cmp; setg; test; cmovne` is four cycles per
+  element against a predicted branch's one, and #1382's running max ran 3.8
+  times main's cycles. LLVM's x86 cmov conversion turns such a `cmov` back into
+  a branch after selection, and clang -O2 keeps branches there.
+- **An accumulation's select sinks below its operation.** An in-place phi may
+  take `s op x` on one edge and `s` on the other: an addition, a subtraction
+  from `s`, an or or a xor of integers, which nothing else reads. The
+  operation's row then selects `x` or zero instead, and the phi becomes
+  `s op select`, as InstCombine folds a select of a binary operation. A
+  conditional sum's accumulator then waits for one addition per element, not
+  for the `cmov` as well, and a predictable condition costs no more than its
+  branch did. The zero is a new constant row in the head that names a zero the
+  constant table already has; a function whose table has none keeps the select
+  outside. A variable binding of the operation's row, whose value changed,
+  becomes unavailable.
+
+A converted head whose single-predecessor chain climbs to a conditional branch
+may now be an outer region's arm (a nested `?:`, `||` inside `&&`). In that
+case the pass runs again, for at most four rounds. Between rounds and after the
+last, `ir_truth_simplify_values` takes the truth values the selects make: a
+select of truth values tested against zero becomes an i1 select in that test's
+row. So `select c, (zext x), 0` tested nonzero is `select c, x, c` (`c && x`),
+and `select c, 1, (zext y)` is `select c, c, y` (`c || y`). Tier 1 selects i1
+selects as it does wider ones. Its integer rules take no i1 `and`/`or`, so the
+truth values stay selects (#1382's follow-up). The earlier truth pass, before
+threading, keeps its comparison rules alone.
 
 The admissible values are `i1`, `i8`, `i16`, `i32`, `i64` and pointers, matching
-the scalar select consumer. Arms may contain constants, copies, wrapping
-integer arithmetic, bitwise operations, integer comparisons, scalar selects
-and integer/pointer conversions. Scalar shifts require a direct constant
-count strictly below the result width. Loads, stores, atomics, calls, division,
-remainder, floating operations and conversions, allocation/stack operations,
-lifetime markers, fences, undefined-value producers and unknown operations
-refuse the whole region. A load needs a dereferenceability proof which this
-pass does not attempt. Functions containing indirect-branch labels remain
+the scalar select consumer. Each arm moves at most four non-constant rows, and
+its blocks hold at most 32 rows in all, needed or not. Each join takes at most
+four selects. The moved rows' cost plus two per select is at most eight: a
+constant costs nothing, an integer multiply three, a select two, and other
+admitted rows (a speculated load among them) one. These conservative bounds
+limit speculation and added live values; they are not measured target
+latencies. The IR has no branch-probability metadata (`__builtin_expect`
+currently lowers to its value), so a predictable branch converts unless the
+recurrence rule keeps it. Functions containing indirect-branch labels remain
 unchanged.
-
-Each arm has at most four rows and each join at most four phis. The combined
-cost limit is eight: an integer multiply costs three, a select costs two,
-and other admitted rows cost one. These conservative bounds limit speculation
-and additional live values; they are not measured target latencies. The IR has
-no branch-probability metadata (`__builtin_expect` currently lowers to its
-value), so there is no retained profile hint for this pass to consult.
 
 `ir_if_convert(function, output, scratch, scalar, result)` requires verified
 SSA and distinct output/scratch arenas; scratch must own none of the input.
 The output arena may already contain the input. A changed result owns fresh
-row columns, block offsets, extra words and call records, borrowing immutable
-tables from the input until the ordinary optimizer materializes its output.
-Both lifetimes must cover that consumption. Shared or overlapping `extra`
-slices are never remapped in place: original switch/label words stay intact,
-and surviving phi/call occurrences get appended value slices. With no accepted
-region the result borrows the input and allocates no output. Failure preserves
-the result and output mark; scratch is restored on every outcome.
+row columns, block offsets, extra words and call records for each round,
+borrowing immutable tables from the input until the ordinary optimizer
+materializes its output. Both lifetimes must cover that consumption. Shared or
+overlapping `extra` slices are never remapped in place: original switch/label
+words stay intact, and surviving phi/call occurrences get appended value
+slices. With no accepted region the result borrows the input and allocates no
+output. Failure preserves the result and output mark; scratch is restored on
+every outcome. The result counts the regions, selects, folded joins, reused
+rows, reused or speculated loads, sunk accumulations, the candidate regions
+each round left for a recurrence, and the rounds.
 
 The existing optimizer command covers the pass with independent execution,
 complete verification, exact twins, hostile speculation cases, guarded tails,
-side-table aliasing and allocation failures. The C driver tests also check
-native results against Clang and decode actual `cmov`/branch shapes. Generated
-code shape and runtime performance are separate evidence: approved-host
-measurements of unpredictable and predictable branches, code size, register
-pressure and compiler throughput remain necessary. No runtime speedup is
-claimed here.
+side-table aliasing and allocation failures. Its fixtures cover nested and
+three-predecessor regions, the reload's reuse, its speculation behind a store
+or a fence, its refusal behind a call, a volatile reload or another offset, and
+the `&&`/`||` truth values with their dead and repeated rows. The C driver
+tests also check native results against Clang and decode actual `cmov`/branch
+shapes. These include #1382's nested clamp, `&&` and `||` values, and loops
+whose only conditional branch is the loop's. A running max and a reload after
+a call keep their branches. Runtime measurements are in
+[the Tier 1 command guide](commands/ir-optimization.md#bounded-scalar-if-conversion-1382).
 
 SCCP tracks a state and two-word constant per instruction and an executable
 byte per deduplicated CFG edge. It sweeps executable blocks in reverse

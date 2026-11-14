@@ -112,26 +112,44 @@ profiles and paired A/A and A/B qualification on an approved main/scheduled
 
 ## Bounded scalar if-conversion (#1382)
 
-The C Tier 1 driver runs `ir_if_convert.c` after promotion, wide splitting and
-integer truth simplification, before optimizer preparation. Pure scalar
-diamond/triangle joins become `IR_SELECT`; the existing selector emits `cmov`.
-The pass permits sequential join/head regions such as a two-step clamp, while
-keeping general nested decisions and joins with additional predecessors.
-Each arm has at most four rows, each join at most four phis, and combined
-speculation/select cost at most eight. These are policy bounds, not timings.
+The C Tier 1 driver runs `ir_if_convert.c` after promotion, wide splitting,
+integer truth simplification and truth threading, before optimizer
+preparation. Diamonds and triangles whose arms are short chains of
+single-predecessor blocks become `IR_SELECT`; the existing selector emits
+`cmov`. Each arm's rows are numbered against the head's first, so the
+lowering's repeated comparisons, zero extensions and reloads of an element the
+head loaded take the head's values. Only the rows the join's phis need move to
+the head, and they must be total or proven loads; the rest stay in an
+unreachable stub and must be droppable. A join with other predecessors keeps
+its phis and takes new selects in the head. Up to four rounds take nested
+regions (a nested `?:`, `&&` and `||` values), with `ir_truth_simplify_values`
+turning the truth values' selects into i1 selects between them. A condition
+that reads the value the join carries round a loop (a running max) keeps its
+branch, and an accumulation's select sinks below its addition
+(`s + (c ? x : 0)`). Each arm moves
+at most four non-constant rows, each join takes at most four selects, and the
+moved rows' cost plus two per select is at most eight. These are policy bounds,
+not timings; [the design](../ir-optimization.md#scalar-if-conversion-1382) has
+the rules.
 
 `test-ir-optimize` runs `ir_if_convert_test.c`: complete SSA verification,
-independent execution before/after cleanup, exact scalar/vector output,
-every guarded candidate-scan tail, multi-phi edge polarity, both triangle
-orientations, sequential and nested regions, loop-carried values, shared
-switch/call side-table words, allocation rollback, and refusal of unsafe or
-expensive speculation. `test-checker-driver` adds C-source semantic comparison
-against Clang, with both scalar paths and rematerialization settings. Its
-decoded object checks require `cmov` without conditional branches for max,
-clamp and conditional arithmetic, and retain guarding branches for loads,
-division, variable shifts and calls. These use the existing test commands and
-CI shards. Runtime/compile-time measurements on the approved host remain
-necessary; this change makes no measured performance claim.
+independent execution before/after cleanup, exact scalar/vector output, every
+guarded candidate-scan tail, multi-phi edge polarity, both triangle
+orientations, sequential, nested and three-predecessor regions over rounds,
+loop-carried values, shared switch/call side-table words, allocation rollback,
+refusal of unsafe or expensive speculation, the reload and truth fixtures,
+a running maximum kept as a branch (and converted with a constant bound), and
+the loop's conditional sum sunk below its addition.
+The reload fixtures reuse a reload, speculate it behind a store or a fence, and
+refuse it behind a call, as a volatile access or at another offset. The truth
+fixtures reduce `&&` and `||` to i1 selects and refuse a dead division.
+`test-checker-driver` adds C-source semantic comparison against Clang, with
+both scalar paths and rematerialization settings. Its decoded object checks
+require `cmov` without conditional branches for max, the clamps (sequential
+and nested), conditional arithmetic and the `&&`/`||` values, and `cmov` with
+only the loop's branch for the conditional sum and the `?:` sum. They also
+require the branches to remain for loads, division, variable shifts, calls, a
+reload after a call and the running max.
 
 ## Dominator path policy (#1352)
 
