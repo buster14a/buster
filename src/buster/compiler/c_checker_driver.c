@@ -9261,6 +9261,17 @@ static uint32_t check_units_group_unkept(const Link* link);
 // Whether `link`'s symbol `s` is a local `.L` label defined in code, which -c's object leaves out as an assembler's
 // temporary (#1845). The helpers' own functions (`.Lbuster_asm_N`, `.Lbuster_builtin_*`), which clang's code has no
 // counterpart of, keep their symbols: the tools that read -c's objects find the helpers' calls by them.
+// Whether link symbol `s` is a placeholder of the provisional selection's (#2536's step 2.2b, check_driver_provisional): a
+// local without an atom named BUSTER_CHECK_PLACEHOLDER_NAME, for an object the exact selection leaves out, which no code
+// or data refers to.
+static bool check_driver_placeholder(const Link* link, uint32_t s)
+{
+    const NameId name = link->symbols.name[s];
+    const uint32_t length = (uint32_t)(sizeof(BUSTER_CHECK_PLACEHOLDER_NAME) - 1);
+    return (link->symbols.flags[s] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL && link->symbols.atom[s] == 0 && name != 0 &&
+           link->names.length[name] == length && memcmp(link->names.bytes[name], BUSTER_CHECK_PLACEHOLDER_NAME, length) == 0;
+}
+
 static bool check_driver_code_temporary(const Link* link, uint32_t s)
 {
     const NameId name = link->symbols.name[s];
@@ -9293,7 +9304,7 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
     bool coded = false;
     for (uint32_t s = 1; valid && !coded && s < link->symbols.count; s += 1)
     {
-        coded = check_driver_code_temporary(link, s);
+        coded = check_driver_code_temporary(link, s) || check_driver_placeholder(link, s);
     }
     const bool temporaries = switch_symbols != 0 || code->unit_temporary_count != 0 || code->patchable_count != 0 || coded;
     uint8_t* temporary = valid && temporaries ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, code->link.symbols.count) : 0;
@@ -9309,7 +9320,7 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
         }
         for (uint32_t s = 1; coded && s < link->symbols.count; s += 1)
         {
-            temporary[s] |= check_driver_code_temporary(link, s);
+            temporary[s] |= check_driver_code_temporary(link, s) || check_driver_placeholder(link, s);
         }
     }
     Object result = { .error = OBJECT_ERROR_FULL };
@@ -9377,6 +9388,66 @@ static const char* check_driver_census_verdict(const CheckProgram* program, cons
     arena_pop_to(output, output_mark);
     arena_pop_to(scratch, scratch_mark);
     return verdict;
+}
+
+// The provisional selection (#2536's step 2.2b, --provisional-selection): the selection over the candidates' references
+// (CheckProgram.census_pass), which numbers the symbols that a window's lowering takes before every body's own references
+// are known, against the exact selection `selected`. It serves where both keep the same bodies in the same order and each
+// symbol of the exact one is the provisional one's of the same object, in the same order: then its program is in
+// *provisional, each extra symbol (one whose object the exact selection leaves out) taking object 0, which the emission
+// makes a placeholder that the object leaves out (check_program_emit's symbols, check_driver_object_build), and their
+// count is in *extra. False otherwise: -c takes the exact selection.
+static bool check_driver_provisional(CheckProgramSelection* provisional, const CheckProgram* program, const CheckDataPrepared* data,
+                                     const CheckProgramSelection* selected, bool scalar, uint32_t* extra, Arena* output, Arena* scratch)
+{
+    const CheckProgramCensus* census = &program->census_pass;
+    const uint64_t scratch_mark = scratch->length;
+    CheckProgram candidates = *program;
+    CheckProgramBody* copies = census->first != NULL && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramBody, program->body_count) : NULL;
+    uint32_t total = 0;
+    for (uint32_t b = 0; copies != NULL && b < program->body_count; b += 1)
+    {
+        copies[b] = program->bodies[b];
+        copies[b].reference_first = census->first[b];
+        copies[b].reference_count = census->counts[b];
+        total += census->counts[b];
+    }
+    candidates.bodies = copies;
+    candidates.references = census->references;
+    candidates.reference_count = total;
+    bool usable = census->first != NULL && (copies != NULL || program->body_count == 0) &&
+                  check_program_select_mode(provisional, &candidates, data, C_LOWERING_REACHABLE, scalar, false, output, scratch) &&
+                  provisional->program.body_count == selected->program.body_count && provisional->program.object_count == selected->program.object_count &&
+                  provisional->program.symbol_count >= selected->program.symbol_count;
+    for (uint32_t b = 0; usable && b < provisional->program.body_count; b += 1)
+    {
+        usable = provisional->program.bodies[b].declaration == selected->program.bodies[b].declaration &&
+                 provisional->program.bodies[b].object == selected->program.bodies[b].object;
+    }
+    // The exact symbols in their order: each the provisional symbol of its object, those rising.
+    SymbolId last = 0;
+    for (uint32_t s = 0; usable && s < selected->program.symbol_count; s += 1)
+    {
+        const SymbolId symbol = provisional->program.object_symbols[selected->program.symbol_objects[s]];
+        usable = symbol > last;
+        last = symbol;
+    }
+    uint32_t* objects = usable ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)provisional->program.symbol_count + 1) : NULL;
+    usable = usable && objects != NULL;
+    *extra = 0;
+    for (uint32_t s = 0; usable && s < provisional->program.symbol_count; s += 1)
+    {
+        const uint32_t object = provisional->program.symbol_objects[s];
+        const bool kept = object != 0 && object < selected->program.object_count && selected->program.object_symbols[object] != 0;
+        objects[s] = kept ? object : 0;
+        *extra += kept ? 0 : 1;
+    }
+    if (usable)
+    {
+        provisional->program.symbol_objects = objects;
+    }
+    arena_pop_to(scratch, scratch_mark);
+    return usable;
 }
 
 // --selection-census's report (#2536's step 2.1, check_program_census_walk and _scan), on stderr, in two lines. The
@@ -10509,6 +10580,9 @@ struct CheckDriverCommand
     // --selection-census (#2536's step 2.1): the candidates' references beside the exact ones, and their selection where
     // they differ, reported on stderr (check_driver_selection_census).
     bool selection_census;
+    // --provisional-selection (#2536's step 2.2b): -c's code numbered by the candidates' selection, its extra symbols left
+    // out of the object (check_driver_provisional).
+    bool provisional_selection;
     // --shared-parts, #777's test option: a unit's emission that shares its functions' parts on the units' board pauses
     // after each part it takes itself, so that the lanes without units take some, and the command reports how many
     // they took and how many lanes left their memory to the exit, after the units' diagnostics (c_checker_units.c).
@@ -12055,6 +12129,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .asm_bodies = lanes != NULL && lanes->tier1,
                         .helper_forms = lanes != NULL ? lanes->helper_forms : 0,
                         .selection_census = command->selection_census,
+                        .candidates = command->provisional_selection,
                         // A units lane with a unit left to take gives its scratch's pages back in whole huge pages
                         // (#777).
                         .discard_huge = lanes != NULL && lanes->units_lane != NULL && check_units_discard_huge(lanes->units_lane),
@@ -12347,11 +12422,23 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             result = check_driver_target_features(&selected.program, checking, recovered, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
                             result = check_driver_aliases(&selected.program, checking, pp, scalar, scratch) ? result : 1;
                         }
+                        // --provisional-selection (#2536's step 2.2b): the code numbered by the candidates' selection, where it
+                        // serves (check_driver_provisional), without --lower-all, a dump or another unit to link with; the exact
+                        // selection's data either way. Its use and its extra symbols are reported on stderr.
+                        CheckProgramSelection provisional;
+                        uint32_t extra = 0;
+                        const bool provisional_used = selection && result == 0 && command->provisional_selection && program.census_pass.first != NULL &&
+                                                      kept == NULL && !lower_all && !dump_static &&
+                                                      check_driver_provisional(&provisional, &program, &data, &selected, scalar, &extra, output_arena, scratch);
+                        if (selection && result == 0 && command->provisional_selection)
+                        {
+                            fprintf(stderr, "provisional-selection\tused\t%d\textra-symbols\t%u\n", (int)provisional_used, extra);
+                        }
                         if (selection && result == 0)
                         {
                             const char* object_path = output != 0 ? output : check_driver_object_name(arena, path);
-                            result = object_path != 0 && check_driver_object(&selected.program, &selected.data, checking, pp, &types, path,
-                                                                           object_path, scalar, verify, dump_static, source_rows, unwind_tables, lanes,
+                            result = object_path != 0 && check_driver_object(provisional_used ? &provisional.program : &selected.program, &selected.data, checking, pp,
+                                                                           &types, path, object_path, scalar, verify, dump_static, source_rows, unwind_tables, lanes,
                                                                            scratch, stage_clock, errors, kept, command->mixed_inputs, &driver_fatal) ? 0 : 1;
                         }
                         else if (!selection)
@@ -12839,6 +12926,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // (CheckDriverCommand's).
     bool poison_arenas = false;
     bool selection_census = false;
+    bool provisional_selection = false;
     bool shared_parts = false;
     uint64_t units_memory = 0;
     bool invalid_units_memory = false;
@@ -13241,6 +13329,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             selection_census = true;
         }
+        else if (match.exact == C_OPTION_PROVISIONAL_SELECTION)
+        {
+            provisional_selection = true;
+        }
         else if (match.exact == C_OPTION_POISON_ARENAS)
         {
             poison_arenas = true;
@@ -13500,6 +13592,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .id_order = id_order,
         .poison_arenas = poison_arenas,
         .selection_census = selection_census,
+        .provisional_selection = provisional_selection,
         .shared_parts = shared_parts,
         .units_memory = units_memory,
         .emit_object = emit_object,
