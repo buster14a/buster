@@ -372,7 +372,11 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
         {
             const bool use = bindings->operation[event] == C_BINDING_USE && bindings->key[event] == record->name;
             named |= use;
-            named_after |= use && alias.previous != BUSTER_CHECK_NONE && bindings->point[event] > record->token;
+            const uint32_t token = bindings->declaration[event];
+            const uint32_t clone = selected > record->token ? selected : record->token;
+            const uint32_t resolved = token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
+            named_after |= use && alias.previous != BUSTER_CHECK_NONE && resolved < input->token_count &&
+                           input->objects[resolved] == input->objects[alias.previous] && bindings->point[event] > clone;
         }
         const TypeId declared = declaration != BUSTER_CHECK_NONE ? input->declared_types[declaration] : 0;
         const TypeAnswer same = declared != 0 ? type_compatible(reader->types, declared, input->declared_types[selected]) : TYPE_ANSWER_NO;
@@ -384,6 +388,42 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
                                 (alias.sectioned || input->declaration_kinds[declaration] != kind || same != TYPE_ANSWER_YES ||
                                  check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) !=
                                      check_input_bit(input->declaration_bits, selected, BUSTER_CHECK_BITS_THREAD_LOCAL));
+        // The clone appears when the target becomes visible. References to an earlier function declaration are then
+        // ambiguous; a local shadow still resolves to its own declaration. A later variable definition conflicts with
+        // the clone. Keep these diagnostics recoverable so subsequent declarations remain visible.
+        bool diagnosed = false;
+        const uint32_t clone = selected > record->token ? selected : record->token;
+        if (!mismatched && defined && alias.previous != BUSTER_CHECK_NONE && kind == C_BINDING_FUNCTION)
+        {
+            for (uint32_t event = 0; event < bindings->count; event += 1)
+            {
+                const uint32_t token = bindings->declaration[event];
+                const uint32_t resolved = token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
+                if (bindings->operation[event] == C_BINDING_USE && bindings->key[event] == record->name && token < input->token_count &&
+                    bindings->point[event] > clone && resolved < input->token_count && input->objects[resolved] == input->objects[alias.previous])
+                {
+                    const uint32_t before = input->report_count;
+                    check_input_report(reader, token, CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS);
+                    if (input->report_count > before)
+                    {
+                        input->reports[before].note_token = alias.previous;
+                        input->reports[before].value = record->source + 3;
+                        diagnosed = check_input_recover_reports(reader, before) || diagnosed;
+                    }
+                }
+            }
+        }
+        if (!no_op && !mismatched && defined && alias.previous != BUSTER_CHECK_NONE && kind == C_BINDING_OBJECT &&
+            alias.next != BUSTER_CHECK_NONE && alias.next > clone && alias.defined_after)
+        {
+            const uint32_t before = input->report_count;
+            check_input_report(reader, alias.next, CHECK_INPUT_WEAK_ALIAS_REDEFINITION);
+            if (input->report_count > before)
+            {
+                input->reports[before].note_token = selected;
+                diagnosed = check_input_recover_reports(reader, before);
+            }
+        }
         // An A the unit never declares, or declares only before the pragma, of external linkage, never defines and never
         // names, of a T it defines (#1849): clang's clone of T's declaration, a weak alias at T's definition of T's kind,
         // type and size, whatever A's own declaration says (its kind, type, thread-local storage or section), which no C
@@ -397,9 +437,9 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
         // ambiguous"), declared after it with another kind or type ("redefinition of 'A' as different kind of symbol",
         // "redeclaration of 'A' with a different type") or defined after it ("redefinition of 'A'"), and T not defined
         // ("alias must point to a defined variable or function"); and A of internal linkage.
-        refused = !no_op && !undeclared && (declaration == BUSTER_CHECK_NONE || alias.defined_after || named_after || alias.aliased || !defined ||
+        refused = !diagnosed && !no_op && !undeclared && (declaration == BUSTER_CHECK_NONE || alias.defined_after || named_after || alias.aliased || !defined ||
                                             mismatched || check_input_linkage(input->declaration_bits, declaration) != 2);
-        if (!no_op && !refused && !undeclared)
+        if (!no_op && !refused && !undeclared && !diagnosed)
         {
             valid = check_input_symbol_attribute(reader, record, declaration);
         }

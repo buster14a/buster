@@ -3,6 +3,7 @@ file-scope.c	1	1	0	comma warning survives a file-scope initializer type error
 local.c	1	1	0	comma warning survives a local initializer type error
 const.c	1	1	0	comma warning survives a const initializer type error
 nested.c	2	1	0	nested comma warnings follow their initializer error
+multiple.c	6	5	0	multiple failed initializers retain comma warnings in order
 effect.c	0	1	0	effectful comma operand stays quiet after an initializer error
 invalid-source.c	0	1	0	an invalid initializer source has no comma warning
 valid.c	1	0	0	a valid initializer retains one comma warning

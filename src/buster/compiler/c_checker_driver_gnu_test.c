@@ -188,6 +188,7 @@ static void check_test_driver_gnu_scopes(CheckTest* test, const char* clang, con
         { "an atomic auto-type keeps its qualifiers in the error", NULL, "atomic-qualified.c" },
         { "an atomic auto-type cannot deduce an atomic pointer", NULL, "atomic-pointer.c" },
         { "an atomic auto-type retains the initializer's typedef", NULL, "atomic-typedef.c" },
+        { "an atomic auto-type retains the initialized object's typedef", NULL, "atomic-typedef-object.c" },
     };
     for (uint32_t i = 0; executable != NULL && i < BUSTER_ARRAY_LENGTH(every); i += 1)
     {

@@ -198,6 +198,9 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_AUTO_TYPE_LIST: result = "cannot use '__auto_type' with initializer list in C"; break;
         case CHECK_INPUT_AUTO_TYPE_ARRAY: result = "cannot use '__auto_type' with array in C"; break;
         case CHECK_INPUT_AUTO_TYPE_BIT_FIELD: result = "cannot pass bit-field as __auto_type initializer in C"; break;
+        case CHECK_INPUT_AUTO_TYPE_ATOMIC_INITIALIZER: result = "incompatible atomic auto type initializer"; break;
+        case CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS: result = "ambiguous weak alias reference"; break;
+        case CHECK_INPUT_WEAK_ALIAS_REDEFINITION: result = "weak alias redefinition"; break;
         case CHECK_INPUT_AUTO_DEDUCED_INITIALIZER: result = "declaration with deduced type 'auto' requires an initializer"; break;
         case CHECK_INPUT_AUTO_DEDUCED_SELF: result = "variable declared with deduced type 'auto' cannot appear in its own initializer"; break;
         case CHECK_INPUT_AUTO_DEDUCED_CONTEXT: result = "'auto' not allowed here"; break;
@@ -6331,6 +6334,43 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                             scoped ? "::" : "", (int)attribute.length, attribute.pointer);
                             }
                         }
+                        else if (phase == 0 && (kind == CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS || kind == CHECK_INPUT_WEAK_ALIAS_REDEFINITION) && token < count)
+                        {
+                            const CheckInputReport* report = input->reports + index;
+                            const uint32_t name = parser->tokens.names[token];
+                            const uint32_t previous = report->note_token;
+                            const PPOutputDiagnosticNote notes[2] = {
+                                { .token = previous < count ? parser->tokens.sources[previous] : 0, .message = kind == CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS ? "candidate function" : "previous definition is here" },
+                                { .token = (uint32_t)report->value, .message = "candidate function" },
+                            };
+                            const bool call = token + 1 < count && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN;
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, notes, kind == CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS ? 2u : 1u,
+                                                        kind == CHECK_INPUT_WEAK_ALIAS_REDEFINITION ? "redefinition of '%.*s' as different kind of symbol" :
+                                                        call ? "call to '%.*s' is ambiguous" : "reference to '%.*s' is ambiguous",
+                                                        (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_AUTO_TYPE_ATOMIC_INITIALIZER && token < count)
+                        {
+                            const CheckInputReport* report = input->reports + index;
+                            const uint64_t mark = scratch->length;
+                            CheckWarningSpelling spell = { .count = pp->table->count };
+                            spell.bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count);
+                            spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;
+                            for (uint32_t s = 0; spell.lengths != NULL && s < spell.count; s += 1)
+                            {
+                                spell.bytes[s] = intern_bytes(pp->table, s);
+                                spell.lengths[s] = intern_length(pp->table, s);
+                            }
+                            const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
+                            const String8 declared = check_semantic_auto_type_spelling(types, report->type, scratch);
+                            const String8 initializer = spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, (TypeId)report->value, report->type_spelling) : (String8){ 0 };
+                            const uint32_t name = parser->tokens.names[token];
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                                  "variable '%.*s' with type %.*s has incompatible initializer of type %.*s",
+                                                  (int)intern_length(pp->table, name), intern_bytes(pp->table, name),
+                                                  (int)declared.length, declared.pointer, (int)initializer.length, initializer.pointer);
+                            arena_pop_to(scratch, mark);
+                        }
                         else if (phase == 0 && input->reports[index].message == CHECK_INPUT_DIRECT_INITIALIZER_DEDUCED && input->reports[index].subject != 0 &&
                                  input->reports[index].subject - 1 < count)
                         {
@@ -11301,6 +11341,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             excess_count = initializers.warning_count;
                         }
                     }
+                    uint8_t* rejected_initializer_roots = NULL;
                     if (!expression_valid || repairing || initializers.status != CHECK_INIT_OK)
                     {
                         CheckInitDiagnostic earlier = { 0 };
@@ -11398,6 +11439,26 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                     check_driver_conversion_source(&types, &stream, failure.failed_source - 1) : 0;
                                 const bool default_error = converted != 0 && !type_kind_is_array(type_kind(&types, type_strip_aligned(&types, failure.failed_type))) &&
                                     check_driver_conversion_kind(&types, failure.failed_type, converted) != CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
+                                if (!repairing && conversion != NULL && !default_error && failure.failed_source != 0 && failure.failed_source - 1 < input.graph.count &&
+                                    stream.diagnostics[failure.failed_source - 1] == CHECK_DIAG_NONE)
+                                {
+                                    if (rejected_initializer_roots == NULL)
+                                    {
+                                        rejected_initializer_roots = BUSTER_ARENA_PUSH_ARRAY(output_arena, uint8_t, input.graph.count);
+                                        if (rejected_initializer_roots != NULL)
+                                        {
+                                            memset(rejected_initializer_roots, 0, input.graph.count);
+                                        }
+                                        else
+                                        {
+                                            check_common_exhausted(pp);
+                                        }
+                                    }
+                                    if (rejected_initializer_roots != NULL)
+                                    {
+                                        rejected_initializer_roots[failure.failed_source - 1] = 1;
+                                    }
+                                }
                                 // (Its node plus one, CheckDriverDiagnostic.default_source.)
                                 additional[additional_count++] = (CheckDriverDiagnostic){
                                     .token = place,
@@ -11477,6 +11538,38 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         fprintf(errors, "fatal error: initializer diagnostic capacity exhausted\n");
                         driver_fatal = true;
                         ready = false;
+                    }
+                    for (uint32_t i = 0; !repairing && i < stream.report_count; i += 1)
+                    {
+                        const CheckReport* report = stream.reports + i;
+                        const uint32_t node = report->node;
+                        uint32_t source = BUSTER_CHECK_NONE;
+                        TypeId target = 0;
+                        const bool default_error = check_driver_report_default_error(checking, &stream, &types, report, &source, &target);
+                        if (!default_error && node < input.graph.count && input.graph.ops[node] == CHECK_OP_INITIALIZE &&
+                            report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE)
+                        {
+                            source = input.graph.operand0[node];
+                            if (source < input.graph.count)
+                            {
+                                if (rejected_initializer_roots == NULL)
+                                {
+                                    rejected_initializer_roots = BUSTER_ARENA_PUSH_ARRAY(output_arena, uint8_t, input.graph.count);
+                                    if (rejected_initializer_roots != NULL)
+                                    {
+                                        memset(rejected_initializer_roots, 0, input.graph.count);
+                                    }
+                                    else
+                                    {
+                                        check_common_exhausted(pp);
+                                    }
+                                }
+                                if (rejected_initializer_roots != NULL)
+                                {
+                                    rejected_initializer_roots[source] = 1;
+                                }
+                            }
+                        }
                     }
                     const CheckWarningEvents initializer_warning_view = initializer_context ? check_warning_view(&initializer_warnings) : (CheckWarningEvents){ 0 };
                     uint32_t promoted_token = BUSTER_CHECK_NONE;
@@ -11652,6 +11745,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         driver_fatal = true;
                         ready = false;
                         result = 1;
+                    }
+                    if (rejected_initializer_roots != NULL && !pp->fatal)
+                    {
+                        check_common_rejected_initializer_commas(checking, pp, &input, &stream, &types, rejected_initializer_roots, scratch);
                     }
                     original_pragmas_printed = true;
                     if (ready && !quiet && !parse_failed && !repairing && !prefix_only && checking == recovered && input.report_count != 0 &&

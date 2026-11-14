@@ -297,7 +297,31 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
     }
     else if (refused)
     {
-        check_input_report(reader, declaration, CHECK_INPUT_UNSUPPORTED);
+        const bool atomic_value = atomic && !declarator && adjusted_kind == BUSTER_TYPE_KIND_ATOMIC;
+        const uint32_t before = reader->output->report_count;
+        check_input_report(reader, declaration, atomic_value ? CHECK_INPUT_AUTO_TYPE_ATOMIC_INITIALIZER : CHECK_INPUT_UNSUPPORTED);
+        if (atomic_value && reader->output->report_count > before)
+        {
+            CheckInputReport* report = reader->output->reports + before;
+            report->type = placeholder;
+            report->value = value.type;
+            if (begin + 1 == end && parser->tokens.kinds[begin] == PARSE_KIND_IDENTIFIER)
+            {
+                report->type_spelling = check_input_token_type_spelling(reader->output, parser, begin, false);
+            }
+            for (uint32_t token = begin; token < end; token += 1)
+            {
+                if (report->type_spelling == 0 && parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST)
+                {
+                    const uint32_t spelling = check_input_token_type_spelling(reader->output, parser, token, true);
+                    if (spelling < reader->output->token_count && spelling != 0 &&
+                        type_same_canonical(types, reader->declared_types[spelling], value.type) == TYPE_ANSWER_YES)
+                    {
+                        report->type_spelling = spelling;
+                    }
+                }
+            }
+        }
     }
     else if ((value.flags & BUSTER_CHECK_BIT_FIELD) != 0)
     {

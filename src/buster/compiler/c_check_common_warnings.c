@@ -12276,6 +12276,66 @@ static void check_common_type_safety(const Parser* parser, Preprocessor* pp, con
 
 // `flushed`: the tokens of the bodies clang ends after the unit's first error (check_common_flush), or null in a unit
 // without one.
+// A failed initializer still built its source expression. Emit its comma operands' warnings before the rejected-view
+// recovery drops the declaration, using the same graph, evaluation facts and warning policy as the normal walk.
+static void check_common_rejected_initializer_commas(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                                      TypeTable* types, const uint8_t* roots, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint64_t mark = scratch->length;
+    const CheckCommonEnabled enabled = { 0 };
+    CheckCommonFacts facts = { 0 };
+    CheckWarningSpelling spell = { 0 };
+    CheckCommonIgnored ignored = { 0 };
+    uint8_t* marked = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    bool ready = marked != NULL && check_common_facts(input, stream, types, parser, NULL, &enabled, NULL, scratch, &facts) &&
+                 check_common_ignored_prepare(&ignored, parser, pp, input, types, scratch);
+    if (ready)
+    {
+        memcpy(marked, roots, graph->count);
+        for (uint32_t node = graph->count; node-- > 0;)
+        {
+            const uint32_t parent = facts.parents[node];
+            marked[node] |= parent < graph->count && marked[parent] != 0;
+        }
+        CheckCommonEmission emission = {
+            .parser = parser, .pp = pp, .input = input, .stream = stream, .types = types, .spell = &spell,
+            .parents = facts.parents, .evaluated = facts.evaluated, .ignored = &ignored, .scratch = scratch,
+            .at_once = BUSTER_CHECK_NONE,
+        };
+        for (uint32_t node = 0; node < graph->count && !pp->fatal; node += 1)
+        {
+            if (marked[node] && facts.evaluated[node] && graph->ops[node] == CHECK_OP_COMMA)
+            {
+                uint32_t root = node;
+                while (root < graph->count && !roots[root] && facts.parents[root] < graph->count)
+                {
+                    root = facts.parents[root];
+                }
+                const uint32_t initializer = root < graph->count ? facts.parents[root] : BUSTER_CHECK_NONE;
+                const PPDiagnosticRecord* previous = pp->diagnostic_last;
+                check_common_comma_marker(&emission, node);
+                if (pp->diagnostic_last != previous && initializer < graph->count && graph->ops[initializer] == CHECK_OP_INITIALIZE &&
+                    graph->source_positions != NULL)
+                {
+                    const uint32_t completion = graph->source_positions[initializer];
+                    const uint64_t position = (uint64_t)check_common_publication_source(parser, pp, completion) * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_RUNTIME;
+                    if (pp->diagnostic_last->position < position)
+                    {
+                        pp->diagnostic_last->position = position;
+                    }
+                }
+            }
+        }
+    }
+    else
+    {
+        check_common_exhausted(pp);
+    }
+    arena_pop_to(scratch, mark);
+    check_common_contexts = (CheckCommonContexts){ 0 };
+}
+
 static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                          TypeTable* types, const CheckProgram* program, const uint8_t* flushed, CheckCommonShiftWarnings* shifts,
                                          Arena* scratch)

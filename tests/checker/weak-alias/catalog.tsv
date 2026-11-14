@@ -6,5 +6,5 @@ variable-existing	variable-existing.c	rejected	weak alias variable redeclaration
 combined	combined.c	rejected	weak alias errors preserve the rest of the translation unit
 before-target	before-target.c	-	a weak alias clone is not visible before its target declaration
 local-shadow	local-shadow.c	-	local shadows do not name the weak alias
-defined-alias	defined-alias.c	-	a defined alias remains the pragma no-op
+defined-alias	defined-alias.c	rejected	a call is ambiguous even when the alias was already defined
 missing-target	missing-target.c	-	a genuinely missing weak alias target still warns

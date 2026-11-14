@@ -226,8 +226,6 @@ static void check_test_driver_weak_aliases(CheckTest* test, const char* clang, c
         "t", "w_storage", "s", "a", "v", "ps", "b", "c", "later", "main", "u1", "u2", "u3", "u4", "k1", "k2", "k3", "k4", "k5", "k6", "st", "other", "tls_t",
     };
     static const char* const refused[] = {
-        // A declared before the pragma and named after it: clang's "reference to 'a' is ambiguous".
-        "int t(void) { return 1; }\nint a(void);\n#pragma weak a = t\nint u(void) { return a(); }\n",
         // T not defined: "alias must point to a defined variable or function".
         "int t(void);\nint a(void);\n#pragma weak a = t\n",
         // A defined after the pragma: "redefinition of 'a'".
