@@ -2399,6 +2399,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             __atomic_fetch_add(&report->inlined_calls, unit_report->inlined_calls, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->schedule_blocks, unit_report->schedule_blocks, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->schedule_moved, unit_report->schedule_moved, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->sunk, unit_report->sunk, __ATOMIC_RELAXED);
         }
         check_program_lanes_settle(&lane->functions);
         Arena* arenas[] = { &lane->output, &lane->scratch, &lane->arena, &lane->functions.arenas[0].scratch };

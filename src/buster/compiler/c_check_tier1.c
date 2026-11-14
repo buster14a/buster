@@ -292,6 +292,8 @@ struct CheckTier1Passes
     IrVerifiedAnalysis analysis;
     uint32_t pre_blocks;
     uint32_t pre_moved;
+    // The operand sink's expressions (#2592).
+    uint32_t sunk;
     bool unexpanded;
 };
 
@@ -404,6 +406,23 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         stage = outcome.stage;
         passes->pre_blocks = schedule_stats.segments;
         passes->pre_moved = schedule_stats.moved;
+    }
+    // #2592's operand sink: an expression of one value moves past that value's last reader in its segment, where its
+    // result can take the value's register. With --verify, its order is checked as the preallocation schedule's is.
+    if (stage == CHECK_TIER1_COMPILED)
+    {
+        const uint64_t mark = scratch->length;
+        Tier1ScheduleIrOriginal original = { 0 };
+        uint32_t* order = certify ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)wide.function.instruction_count + 1) : 0;
+        uint32_t* place = certify ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)wide.function.instruction_count + 1) : 0;
+        const bool copied = !certify || (order != 0 && place != 0 && tier1_schedule_ir_copy(&wide.function, scratch, &original));
+        Tier1SinkIrStats sink_stats = { 0 };
+        IrError error = copied ? tier1_schedule_ir_sink(&wide.function, scratch, order, scalar, &sink_stats) : IR_ERROR_MEMORY;
+        error = error == IR_OK && certify && sink_stats.trees != 0 && !tier1_schedule_ir_verify(&original, &wide.function, order, place) ? IR_ERROR_STRUCTURE : error;
+        arena_pop_to(scratch, mark);
+        outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, error, BUSTER_IR_NONE, 0, NULL);
+        stage = outcome.stage;
+        passes->sunk = sink_stats.trees;
     }
     if (stage == CHECK_TIER1_COMPILED)
     {
@@ -525,6 +544,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     const IrVerifiedAnalysis analysis = passes.analysis;
     const uint32_t pre_blocks = passes.pre_blocks;
     const uint32_t pre_moved = passes.pre_moved;
+    const uint32_t sunk = passes.sunk;
     // #866's congruence solver's result, if it ran, is `unssa`; `ir` is what the plan below reads.
     const IrFunction* ir = &passes.optimized.function;
     if (stage == CHECK_TIER1_COMPILED)
@@ -660,6 +680,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .inlined_calls = inlined_calls,
             .schedule_blocks = pre_blocks,
             .schedule_moved = pre_moved,
+            .sunk = sunk,
         };
         if (emitted.frame_event_count != 0)
         {
@@ -828,9 +849,9 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
     fprintf(stream, "\trecords=%" PRIu64 "\tspill_stores=%" PRIu64 "\tspill_loads=%" PRIu64 "\tcall_stores=%" PRIu64 "\tcall_loads=%" PRIu64 "\trematerializations=%" PRIu64
                     "\tdropped_definitions=%" PRIu64 "\tedge_moves=%" PRIu64 "\tspill_slots=%" PRIu64 "\tframe_bytes=%" PRIu64 "\topen_frames=%" PRIu64
                     "\treturn_tails=%" PRIu64 "\tred_zones=%" PRIu64 "\tcode_certified=%" PRIu64 "\tcode_uncertified=%" PRIu64 "\tmachine_rows=%" PRIu64 "\trow_moves=%" PRIu64 "\tinlined=%" PRIu64
-                    "\tschedule_blocks=%" PRIu64 "\tschedule_moved=%" PRIu64 "\tdead=%" PRIu64 "\n",
+                    "\tschedule_blocks=%" PRIu64 "\tschedule_moved=%" PRIu64 "\tsunk=%" PRIu64 "\tdead=%" PRIu64 "\n",
             report->records, report->spill_stores, report->spill_loads, report->call_stores, report->call_loads, report->rematerializations,
             report->dropped_definitions, report->edge_moves, report->spill_slots, report->frame_bytes, report->open_frames, report->return_tails, report->red_zones,
             report->code_certified, report->code_uncertified, report->machine_rows, report->row_moves, report->inlined_calls, report->schedule_blocks,
-            report->schedule_moved, report->dead_functions);
+            report->schedule_moved, report->sunk, report->dead_functions);
 }

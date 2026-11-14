@@ -937,6 +937,19 @@ the preprocessor waited for (#2624). `floors_benchmark.c` also holds
 two test units. A test that comes to run another benchmark command needs its
 unit taken off the list, or to accept the stand-in where Release covers it.
 
+**A sanitizer tree leaves them out of every configuration** (#2639), local and
+hosted alike: `BUSTER_SANITIZER=address|thread|memory` (and the fuzzing builds,
+which are ASan's) leaves out the units `BUSTER_SANITIZER_ON_DEMAND` names, which
+are Develop's but `c_lexer_benchmark.c`: every vector item runs `benchmark-lexer`
+as its evidence that its CPU runs the vector kernels, in the sanitizer
+configurations too. Their stand-ins say that the command is in the builds
+without a sanitizer. No correctness command runs the others, and on a hosted
+runner's shape (4 jobs) they were 29% of a vector or native sanitizer build's
+unit time, 387.4 of 1,324.0 s ([buster-performance#492](https://github.com/buster14a/buster-performance/pull/492)); in a
+portable `x86-64` build, whose benchmarks compile to their scalar refusal, 1%.
+`test-preprocessor`'s location option takes the sanitizer stand-in's refusal as
+it takes Develop's.
+
 **Measured** on the 9700X, eight jobs, the host's clang 23.1.1 ([the record](https://github.com/buster14a/buster-performance/tree/ba33a36de7aecf915f9ffceb48ea9d5cf666ae8a/docs/measurements/develop-configuration-2559-2026-11-12)):
 
 | Scenario | Develop | Release |

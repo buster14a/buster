@@ -8742,6 +8742,7 @@ static void check_test_driver_float_classify(CheckTest* test, const char* execut
 
 #include "c_check_hardening_driver_test.c"
 #include "c_check_deep_driver_test.c"
+#include "c_check_fp_contract_driver_test.c"
 
 static int run_checker_driver_tests(int argc, char** argv)
 {
@@ -8765,6 +8766,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool asm_definitions_only = false;
     // --call-counts-only: the call argument count section alone (#1860).
     bool call_counts_only = false;
+    // --fp-contract-only: scalar contraction's command-line, pragma and native result matrix alone (#1239).
+    bool fp_contract_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -8804,6 +8807,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             call_counts_only = true;
         }
+        else if (strcmp(argv[i], "--fp-contract-only") == 0)
+        {
+            fp_contract_only = true;
+        }
         else if (strcmp(argv[i], "--lazy-system-headers") == 0)
         {
             lazy = true;
@@ -8835,7 +8842,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
     }
     const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
-                             (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only;
+                             (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -9360,6 +9367,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_asm_definitions(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
     }
+    if (temporary && fp_contract_only)
+    {
+        check_test_driver_fp_contract(&test, clang, executable, directory);
+    }
     const char* clang_arguments[] = { "-std=gnu17", "-w" };
     if (temporary && !focused && !lazy && check_test_driver_takes())
     {
@@ -9453,6 +9464,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_cleanup_errors(&test, clang, executable, directory);
             check_test_driver_cleanup_chains(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_fp_contract(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {

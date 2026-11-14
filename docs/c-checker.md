@@ -463,8 +463,38 @@ does, each rule checked against clang's answers on probes of it:
   The ordinary control walk is specialized without the prefix checks.
   Tier 0 has no loop transformation for the hints to steer.
 - **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
-  or a compound statement's start. Its state changes nothing, since nothing
-  here contracts `a * b + c` into a fused operation.
+  or a compound statement's start. `ON` permits contraction within a source
+  expression, `OFF` forbids it, and `DEFAULT` restores the command-line
+  contraction mode. The command-line default is `-ffp-contract=on`;
+  `off`, `on`, `fast` and `fast-honor-pragmas` are validated, ordered options.
+  Clang 23's `fast-honor-pragmas` is an alias of `fast`, and both allow lexical
+  pragma overrides. Fast mode grants a broader optimization permission;
+  Clang's `-O0` retains separate multiply/add operations in that mode.
+  The optional `CheckGraph.fp_environments` byte carries contraction in bits
+  `BUSTER_CHECK_FP_CONTRACT_ON` and `BUSTER_CHECK_FP_CONTRACT_FAST`, independently
+  of evaluation methods and environment access. Its zero policy is off.
+  Sources without floating pragmas allocate no new column: their immutable
+  `fp_contract_default` carries the argv policy. Handwritten graphs default
+  to off. Scalar and SIMD input publication preserve the same bits, and
+  deferred expression slices retain the source graph's default and column.
+  Shared native lowering (`c_check_program_contract.c`) contracts scalar float
+  and double multiply/add/subtract expressions when both operations permit
+  `on` and the function's effective target has FMA or AVX512F. Parentheses,
+  same-format casts and selected wrappers retain the opportunity; stored
+  products, statement-expression results, dynamic conditional joins and
+  conversions to another floating format are boundaries. Compound `+=` and
+  `-=` keep the ordinary address evaluation and single store. The existing
+  exact x86 operation row carries the fused operation through both tiers;
+  operand order and explicit negations preserve the pinned oracle's NaN bits.
+  Targets without FMA retain separate arithmetic, and `fast` retains the
+  pinned `-O0` behavior rather than adding a cross-statement optimization pass.
+  Constant products retain their prior rounding. A GNU statement expression
+  that supplies a constant floating operand is materialized at runtime in
+  every contraction mode, as Clang does: its source proof remains available,
+  while the inherited source/runtime flag prevents an enclosing expression
+  from folding an unfused answer over a fused result. This correction can
+  change instruction bytes for those previously folded statement expressions
+  even on a non-FMA target; default and explicit `off` still agree there.
 - **The clang and Microsoft floating-point spellings** (`c_check_fp_input.c`):
   `#pragma clang fp` accepts any sequence of `contract(on|off|fast)`,
   `reassociate(on|off)`, `reciprocal(on|off)`, `eval_method(source|double|extended)` and
@@ -475,8 +505,8 @@ does, each rule checked against clang's answers on probes of it:
   Clang's `-Wignored-pragmas` warning with ordinary command-line, source and
   system-header policy. Illegal precision/exception combinations and stack
   operations inside a compound have Clang's diagnostic text and location.
-  Permission to contract, reassociate, use reciprocals or relax precision does
-  not require those transformations; generated evaluation remains precise.
+  Reassociation, reciprocal evaluation and precision relaxation remain
+  independent permissions; they are not implied by contraction.
   `strict` and `maytrap` preserve runtime operations and conversions through the
   existing floating-environment path, including discarded results and constant
   operands. The exception state is separate from STDC `FENV_ACCESS`, so changing
@@ -4194,7 +4224,7 @@ What the lowering covers past scalars (#145's programs):
   function's end, and a statement expression's end, after its value is kept
   (`CheckProgramRegion.cleanups`). Each variable's call is written once
   (#1370), as clang's is: `CHECK_CONTROL_CLEANUP` (whose target is the record)
-  at its scope's end. An exit of the function's statements is one
+  at its scope's end. An exit of the function's or a statement expression's statements is one
   `CHECK_CONTROL_EXIT` instead of a run of calls, which names its first and
   last record (`CheckProgramExit`); its tail (its restore, lifetime ends and
   jump, or its return) follows it, so every walk of the controls sees the
@@ -4202,26 +4232,39 @@ What the lowering covers past scalars (#145's programs):
   body's chains in linear passes (`CheckProgramChain`): the lowering jumps
   from the exit to its first record's call, and after each call a dispatch
   goes on to the destinations that stop there (exits with the same last
-  record and the same tail share one, whose tail the first of them keeps in
+  record and the same tail share one, whose tail the first emitted exit keeps in
   place; a lone jump's is its target), to the parent's call for exits that go
   on, and to the next control. Only a dispatch of two continuations or more
   tests an I32 destination slot, which every exit and fall that crosses one
   stores first (a fall 0, at its run's head, past which exits enter): the
   issue's function of early returns stores none, and its calls are its
-  variables' count. An exit from a statement expression's statements takes
-  the chain through the records within its block, whose calls its region
-  lowers with its statements, from the empty evaluation stack the region
-  starts with: the dispatch's jumps and the exit's agree on the stack, out of
-  the region as within it. An exit that leaves the block's own records (their
-  calls run after its END, once its value is kept) or records outside it, one
-  through a record whose scope's end a constant switch's kept statements leave
-  out, and one whose jump no path reaches keep their runs in place. Code and call rows grow
+  variables' count. Statement expressions share the chain through their own
+  block's records and enclosing records too. Their own calls run after their
+  `END`, once the value has been kept (and an aggregate copied), before any
+  saved outer expression operands are restored. Both a normal completion and
+  an exit therefore reach the calls with an empty evaluation stack. The
+  post-value run has a natural fall, which stores zero when its dispatch
+  needs it; a nested region's earlier exit cannot leave a stale destination.
+  Destinations become active when their exits are lowered
+  (`CheckLowerWriter.chain_destinations`), and a dispatch only names active
+  destinations. This matters when a constant expression skips a region:
+  its return tail is never emitted, and an enclosing cleanup must neither
+  branch to that absent tail nor make an emitted exit share it.
+  An exit through a record whose scope's end a constant switch's kept
+  statements leave out, and one whose jump no path reaches, keeps its run
+  in place. Code and call rows grow
   linearly in exits plus cleanups, where they grew as their product (85
   cleanups with an early return each made 3,825 calls, and 86 exhausted the
   call rows). An exit keeps only the innermost record whose scope holds its
   target; the planner finds its last record in one preorder sweep, and a
   scope's end and `check_control_cleanup_at` skip closed scopes whole, so the
-  planning is linear too. On the 9700X, 10,000 cleanups with an early return
+  planning is linear too. Control room reserves at most one `RESULT` and
+  `EXIT` per jump and one `CLEANUP` per variable, including regions; inline
+  fallbacks expand during lowering and need no repeated control entries.
+  `c_check_cleanup_driver_test.c` checks region-own and enclosing-chain
+  growth, cleanup traces against Clang in both tiers and both reader paths,
+  retained scalar and aggregate values, nested regions, skipped return
+  destinations and VLA cleanup before release. On the 9700X, 10,000 cleanups with an early return
   each compile in 36 ms by Tier 0 (`-c`), and sqlite3.c's compile is
   unchanged ([the measurements](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/cleanup-chains-1370-2026-11-09)).
   The planner stays scalar. It runs only for a body with an exit through a
