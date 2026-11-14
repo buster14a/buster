@@ -691,6 +691,17 @@ What isn't done as designed:
   drops a dead internal function whatever its target. Under `--tier1` the
   wrappers whose calls it expanded everywhere are now left out too.
 
+**A spliced callee's runtime calls take their final symbols in every part.** A
+call of a runtime function (`__divti3`, `memcpy` for a large copy) has a
+provisional symbol in its lowering, which the merge renumbers only in the parts
+that made such a call, and in every part under `--tier1`'s inlining (#2541 step
+2). The default windows (#2536) lower each Tier 0 callee as a part of its own,
+so a caller whose part made no runtime call kept the callee's provisional
+symbol: `-c` failed ("code output capacity exhausted"), an executable's link
+was refused, and where the id named another symbol the call went there. Every
+part is renumbered now where either tier inlines; the driver fixture's
+`__int128` division is the regression.
+
 The callees that stay are those whose call Tier 0 keeps where clang inlines it:
 a cycle's members (clang unrolls a cycle once) and the shapes the splice
 refuses (step 5: two returns, a result in memory). On the driver fixture the
