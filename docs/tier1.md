@@ -874,6 +874,14 @@ the first-ranked lever that no issue owns (inlining the unit's small functions
 whatever their control flow, with a prototype's measurements), and the
 inventory of what stands between Tier 1 and `-O1` and above.
 
+For array loops, [the loop vectorization design](tier1-loop-vectorization.md)
+(#2743) ranks the missing pieces from the 9700X's 25-kernel suite: 3.32 times
+clang -O2 over the 19 loops clang vectorizes, 1.08 over clang without its
+vectorizer and unroller, and a 2.18 vectorization component against 1.41 for
+unrolling. It designs a data-parallel loop vectorizer over the existing vector
+IR, with exact scalar twins, run-time overlap guards and strict floating-point
+reductions left scalar. This is design only; no such pass runs in the pipeline.
+
 ## Current integration boundary
 
 The implementation now consumes the shared IR and the upstream local-SSA
