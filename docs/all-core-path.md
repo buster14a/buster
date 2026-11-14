@@ -3,9 +3,9 @@
 Status: design. Step 0, the gauge, is built: `tools/allcore/allcore.c`
 ([its guide](commands/all-core.md)), measured against its gate in
 [its record](https://github.com/buster14a/buster-performance/tree/359dcadc4a98855be571e0e7b64c50c44d82c9c9/docs/measurements/all-core-gauge-2536-2026-11-12).
-Step 1, the back half by parts, is built behind `--emit-window=N` and measured
+Step 1, the back half by parts, is built as `--emit-window=N` and measured
 (["Step 1's result"](#step-1s-result)): the emission meets its gate and the
-lowering doesn't, so W stays ∞ by default. Nothing else below is implemented,
+lowering doesn't; the owner made W = 2,048 the driver's default all the same. Nothing else below is implemented,
 and its gains are a model's that its first steps exist to confirm or refute. It is
 [#672](https://github.com/buster14a/buster/issues/672)'s all-core target's
 design: what eight workers cost a compile on the 9700X, what the designs
@@ -629,7 +629,7 @@ tests' twin.
 ### Step 1's result
 
 Step 1 is built as `--emit-window=N` ([function lanes](commands/function-lanes.md#windows-2536)),
-`W = ∞` (0) by default, and measured on the 9700X at main `ca1ede6a` with step
+and measured on the 9700X at main `ca1ede6a` with step
 0's gauge, no strays in any cohort
 ([its record](https://github.com/buster14a/buster-performance/tree/5bb1edae9d4a01dff7e53dcba81699de2b4841a3/docs/measurements/all-core-step1-2536-2026-11-14)):
 
@@ -662,9 +662,13 @@ Step 1 is built as `--emit-window=N` ([function lanes](commands/function-lanes.m
   `-g`, by the vector and the scalar paths and with poisoned windows, on
   `sqlite3.c`, Lua's 34 sources, c-testsuite's 220 programs, `main.c` and
   musl's 1,336 units. musl's command on one lane is unchanged.
-- **So W stays ∞ by default**, as this table's rule says. The step was
-  expected to give 298 MB/s (1.03 times); it gives 292.9 (1.013 times `W = ∞`
-  on the same executable).
+- **The default.** This table's rule keeps a step whose gate misses behind
+  its option; the owner made W = 2,048 the driver's default all the same
+  (2026-11-14), for its 1.3% at eight workers and nothing lost at one
+  ([its check](https://github.com/buster14a/buster-performance/tree/8643d3b382134849cca850a6a78803ff1b1f3dc5/docs/measurements/all-core-step1-default-2536-2026-11-14):
+  one worker's user cycles the same by an interleaved comparison).
+  `--emit-window=0` is the twin. The step was expected to give 298 MB/s (1.03
+  times); it gives 292.9 (1.013 times `W = ∞` on the same executable).
 
 **Across the three designs**, by what each next step gives eight workers on
 `sqlite3.c` (the model's expected case, cumulative): the node machine's step

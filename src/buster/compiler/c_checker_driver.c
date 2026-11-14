@@ -12634,6 +12634,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     check_driver_lanes_taken = true;
     lanes->lanes = check_driver_cpus();
+    // One lane's emission by windows (#2536's step 1, check_program_emit_windows): the owner's default since 2026-11-14;
+    // --emit-window=0 is one window as long as the unit.
+    lanes->window_tokens = BUSTER_CHECK_EMIT_WINDOW_TOKENS;
     // The caller is one worker. A build system can cap this process explicitly; GNU make supplies shared ownership
     // of additional workers at emission time. No external budget changes the body's profitability decision itself.
     lanes->budget = &worker_budget;
@@ -12931,7 +12934,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else if (match.joined == C_OPTION_EMIT_WINDOW_EQ)
         {
             // #2536's step 1: one lane's emission by windows of about N tokens (check_program_emit_windows); 0 is one
-            // window as long as the unit, as without the option.
+            // window as long as the unit, and BUSTER_CHECK_EMIT_WINDOW_TOKENS the default.
             const char* value = arguments[i] + 14;
             char* end = NULL;
             const unsigned long tokens = strtoul(value, &end, 10);
