@@ -23,8 +23,10 @@ requirements. [Command index](README.md).
   a test reference, alongside the exact allocation-output comparisons. Bounded
   direct scalar calls preserve live caller registers and publish symbolic CALL
   references. Byte/word memory and integer conversions
-  use canonical 32-bit storage; terminal chains retain explicit traps or empty
-  self-loops. Integer comparisons fold single-use loads at their original
+  use canonical 32-bit storage, as do the `i1`, `i8` and `i16` `and`, `or` and
+  `xor` (#2677), whose whole registers `test-tier1-emit` probes natively, with a
+  byte's or word's load at a guard page that a 32-bit memory operand would cross;
+  terminal chains retain explicit traps or empty self-loops. Integer comparisons fold single-use loads at their original
   access width when the final consumer's memory-order proof permits it
   (#1218), including exact immediate comparisons through zero/sign extension;
   a word's, doubleword's or quadword's constant within a signed byte takes the

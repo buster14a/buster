@@ -120,12 +120,14 @@ A converted head whose single-predecessor chain climbs to a conditional branch
 may now be an outer region's arm (a nested `?:`, `||` inside `&&`). In that
 case the pass runs again, for at most four rounds. Between rounds and after the
 last, `ir_truth_simplify_values` takes the truth values the selects make: a
-select of truth values tested against zero becomes an i1 select in that test's
-row. So `select c, (zext x), 0` tested nonzero is `select c, x, c` (`c && x`),
-and `select c, 1, (zext y)` is `select c, c, y` (`c || y`). Tier 1 selects i1
-selects as it does wider ones. Its integer rules take no i1 `and`/`or`, so the
-truth values stay selects (#1382's follow-up). The earlier truth pass, before
-threading, keeps its comparison rules alone.
+select of truth values tested against zero becomes an i1 operation in that
+test's row. So `select c, (zext x), 0` tested nonzero is `and c, x` (`c && x`),
+and `select c, 1, (zext y)` is `or c, y` (`c || y`); `select c, (zext x),
+(zext y)` stays an i1 select. Tier 1 computes an i1 `and` and `or` as their
+32-bit operations (#2677), as clang does. A truth value used as an integer
+rather than tested, `select c, (zext x), 0` itself, is Tier 1's `and` of the
+condition and the value too ([the selection guide](tier1-selection.md)). The
+earlier truth pass, before threading, keeps its comparison rules alone.
 
 The admissible values are `i1`, `i8`, `i16`, `i32`, `i64` and pointers, matching
 the scalar select consumer. Each arm moves at most four non-constant rows, and
