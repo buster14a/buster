@@ -8891,7 +8891,12 @@ change, it refused such a declaration by name.
   so its name cannot hide a later undeclared-name error; a C23 list keeps its
   declaration. The original `tests/driver/attribute_recovery.c` fixtures compare
   both language modes, readers, warning policy, deferred checking and output
-  preservation. Mixed statement/nonstatement attributes, string subscripts and
+  preservation. GNU statement-attribute classification skips each balanced
+  argument group, so a subscript within a malformed string argument is not
+  mistaken for a C23 attribute list. Its string and delimiter errors are
+  retained without a spurious declaration error at the following expression;
+  nested groups, macros, repeated subscripts, labels, controls and later errors
+  are covered by the same fixtures. Mixed statement/nonstatement attributes and
   unmatched outer lists still have recovery gaps. In C99 through C17, an
   attributed grouped or pointer declarator with no type
   (`__attribute__((unused)) (x)++;`, or `*p = 1;`) now retains its missing-type

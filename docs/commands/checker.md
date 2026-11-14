@@ -157,8 +157,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   require an ELF object that links and runs. Invalid inputs preserve existing
   output or create none. Prefix/reparse contract checks also retain the complete
   meaning metadata and a separate mutable table for each reparse (#2748).
-  `--attribute-recovery-only` runs the mixed-label, implicit-int-declaration and
-  attribute-led-call fixtures together. Its `attribute-recovery-integration.c`
+  `--attribute-recovery-only` runs the balanced string-list, mixed-label,
+  implicit-int-declaration and attribute-led-call fixtures together. The string
+  lists include malformed string subscripts through parentheses and macros,
+  repeated and split lists, valid adjacent-string controls and an assumption
+  with a subscript. Their errors retain later diagnostics and existing object
+  output, and accepted controls must produce an ELF object. Its `attribute-recovery-integration.c`
   combines their recovery paths in two functions, preserving the complete
   diagnostic order and later independent errors. The declaration portion runs
   in C99–C17, the call portion before C23, and the label portion in every
