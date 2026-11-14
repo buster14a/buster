@@ -4,7 +4,7 @@
 // The order-preserving partition of one unit's optimized module for parallel native code generation
 // (docs/commands/build.md, "Parallel native generation"):
 //
-//   split INPUT.bc PARTS DIRECTORY [--verify] [--report]
+//   split INPUT.bc PARTS DIRECTORY [--verify] [--report] [--first LIST]
 //
 // writes DIRECTORY/part0.bc to DIRECTORY/partPARTS.bc. Parts 0 to PARTS - 1 hold contiguous ranges of the module's
 // function definitions in module order, the costliest (by instruction count) as cheap as the alignment rule below
@@ -30,6 +30,12 @@
 // Read-only data keeps its order and each item's alignment, but a part's .rodata takes its greatest item's alignment,
 // so the items after a part boundary can move by less than that alignment. The build's comparison (build-regression) checks the rest: identical functions at
 // identical addresses.
+//
+// --first LIST is the start's order (#1444, cmake/BusterStartOrder.cmake): LIST names functions, one a line, the ones
+// small compiles run. Each the module defines in a named section (main.c's .text.buster_checker, one section of each
+// unit, which the link's script can't reorder) goes first in that section, in LIST's order, before the parts are
+// planned (split_order_first). That is the one change to the single module's order: those functions are together, in
+// fewer of the 64 KB windows the kernel's fault-around maps, and every function's code is what it was.
 //
 // --verify runs LLVM's verifier on each part; --report prints each part's functions and estimated cost to stderr.
 // The input is parsed once; the parts are written by one child process each, forked after the plan, as many at once as
@@ -63,6 +69,8 @@
 bool split_write_bitcode(LLVMModuleRef module, const char* path);
 // split_bitcode.cpp: erases `alias` once its dead constant users are gone, and whether it could (nothing else used it).
 bool split_erase_alias(LLVMValueRef alias);
+// split_bitcode.cpp: moves `function` right before `before` in their module's list of functions.
+void split_move_function(LLVMValueRef function, LLVMValueRef before);
 
 typedef enum SplitSection
 {
@@ -484,6 +492,112 @@ static void split_readable_closure(LLVMModuleRef module)
         }
     }
     free(stack);
+}
+
+// The named sections split_order_first orders at most: main.c has one, .text.buster_checker.
+#define SPLIT_MAXIMUM_SECTIONS 16
+
+// The index of `section` in `sections`, or `count` when it isn't there.
+static uint32_t split_section_index(const char* const* sections, uint32_t count, const char* section)
+{
+    uint32_t index = 0;
+    while (index < count && strcmp(sections[index], section) != 0)
+    {
+        index += 1;
+    }
+    return index;
+}
+
+// The section a definition's code goes to when it is a named one, else 0.
+static const char* split_named_section(LLVMValueRef function)
+{
+    const char* section = LLVMIsDeclaration(function) ? 0 : LLVMGetSection(function);
+    return section != 0 && section[0] != 0 ? section : 0;
+}
+
+// The start's order (--first LIST): each function LIST names that the module defines in a named section goes right
+// before that section's first function LIST doesn't name, in LIST's order, so that the section starts with them, and
+// the rest of the section keeps its order. A name the module doesn't define in a named section (another unit's, a
+// function in a section of its own, which the link's script places, the C library's, a stale one) moves nothing.
+// Returns how many moved, or UINT32_MAX when LIST can't be read or the module has more named sections than it handles.
+static uint32_t split_order_first(LLVMModuleRef module, const char* path)
+{
+    uint32_t moved = UINT32_MAX;
+    FILE* file = fopen(path, "r");
+    if (file == 0)
+    {
+        fprintf(stderr, "split: can't read %s\n", path);
+    }
+    else
+    {
+        uint32_t functions = 0;
+        for (LLVMValueRef function = LLVMGetFirstFunction(module); function != 0; function = LLVMGetNextFunction(function))
+        {
+            functions += 1;
+        }
+        // The listed definitions of named sections, in LIST's order, each once.
+        LLVMValueRef* listed = calloc((size_t)functions + 1, sizeof(LLVMValueRef));
+        uint32_t count = 0;
+        SplitMap seen = split_map_create((uint64_t)functions + 1);
+        char line[4096];
+        while (fgets(line, sizeof(line), file) != 0)
+        {
+            line[strcspn(line, "\r\n")] = 0;
+            LLVMValueRef function = line[0] != 0 ? LLVMGetNamedFunction(module, line) : 0;
+            if (function != 0 && split_named_section(function) != 0 && split_map_get(&seen, function) == UINT32_MAX)
+            {
+                split_map_put(&seen, function, count);
+                listed[count] = function;
+                count += 1;
+            }
+        }
+        const bool read = ferror(file) == 0;
+        fclose(file);
+        // Each named section's first unlisted function, before which its listed ones go.
+        const char* sections[SPLIT_MAXIMUM_SECTIONS];
+        LLVMValueRef anchors[SPLIT_MAXIMUM_SECTIONS];
+        uint32_t section_count = 0;
+        bool fits = true;
+        for (LLVMValueRef function = LLVMGetFirstFunction(module); function != 0 && fits; function = LLVMGetNextFunction(function))
+        {
+            const char* section = split_named_section(function);
+            if (section != 0 && split_map_get(&seen, function) == UINT32_MAX && split_section_index(sections, section_count, section) == section_count)
+            {
+                fits = section_count < SPLIT_MAXIMUM_SECTIONS;
+                if (fits)
+                {
+                    sections[section_count] = section;
+                    anchors[section_count] = function;
+                    section_count += 1;
+                }
+            }
+        }
+        if (!read)
+        {
+            fprintf(stderr, "split: can't read %s\n", path);
+        }
+        else if (!fits)
+        {
+            fprintf(stderr, "split: the module has more than %u named sections to order\n", SPLIT_MAXIMUM_SECTIONS);
+        }
+        else
+        {
+            moved = 0;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const uint32_t index = split_section_index(sections, section_count, split_named_section(listed[i]));
+                if (index < section_count)
+                {
+                    split_move_function(listed[i], anchors[index]);
+                    moved += 1;
+                }
+            }
+        }
+        free(seen.keys);
+        free(seen.values);
+        free(listed);
+    }
+    return moved;
 }
 
 // The plan's decisions every part shares, made before the parts fork: the boundaries; llvm.compiler.used dropped (it
@@ -949,18 +1063,33 @@ int main(int argc, char** argv)
     int status = 2;
     bool verify = false;
     bool report = false;
+    const char* first = 0;
     bool flags = argc >= 4;
     for (int i = 4; i < argc; i += 1)
     {
-        verify = verify || strcmp(argv[i], "--verify") == 0;
-        report = report || strcmp(argv[i], "--report") == 0;
-        flags = flags && (strcmp(argv[i], "--verify") == 0 || strcmp(argv[i], "--report") == 0);
+        if (strcmp(argv[i], "--verify") == 0)
+        {
+            verify = true;
+        }
+        else if (strcmp(argv[i], "--report") == 0)
+        {
+            report = true;
+        }
+        else if (strcmp(argv[i], "--first") == 0 && i + 1 < argc && first == 0)
+        {
+            first = argv[i + 1];
+            i += 1;
+        }
+        else
+        {
+            flags = false;
+        }
     }
     char* end = 0;
     const unsigned long parts = argc >= 4 ? strtoul(argv[2], &end, 10) : 0;
     if (!flags || end == argv[2] || *end != 0 || parts == 0 || parts > SPLIT_MAXIMUM_PARTS)
     {
-        fprintf(stderr, "usage: split INPUT.bc PARTS DIRECTORY [--verify] [--report]  (PARTS from 1 to %u)\n", SPLIT_MAXIMUM_PARTS);
+        fprintf(stderr, "usage: split INPUT.bc PARTS DIRECTORY [--verify] [--report] [--first LIST]  (PARTS from 1 to %u)\n", SPLIT_MAXIMUM_PARTS);
     }
     else
     {
@@ -980,13 +1109,26 @@ int main(int argc, char** argv)
         }
         else
         {
-            SplitPlan plan = { .module = module, .parts = (uint32_t)parts, .verify = verify, .report = report };
-            split_plan(&plan);
-            if (plan.report)
+            // A list that moves nothing no longer names the module's functions (cmake/BusterStartOrder.txt is stale).
+            const uint32_t moved = first != 0 ? split_order_first(module, first) : 0;
+            if (first != 0 && moved == 0)
             {
-                split_report(&plan);
+                fprintf(stderr, "split: %s names no function of %s's named sections: refresh cmake/BusterStartOrder.txt\n", first, argv[1]);
             }
-            status = split_entries_kept(&plan) && split_locals(&plan, argv[3]) && split_parts(&plan, argv[3]) ? 0 : 1;
+            else if (moved != UINT32_MAX)
+            {
+                SplitPlan plan = { .module = module, .parts = (uint32_t)parts, .verify = verify, .report = report };
+                if (plan.report && first != 0)
+                {
+                    fprintf(stderr, "split: %u functions first in their named sections\n", moved);
+                }
+                split_plan(&plan);
+                if (plan.report)
+                {
+                    split_report(&plan);
+                }
+                status = split_entries_kept(&plan) && split_locals(&plan, argv[3]) && split_parts(&plan, argv[3]) ? 0 : 1;
+            }
         }
     }
     return status;
