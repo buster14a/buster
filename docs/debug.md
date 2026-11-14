@@ -5,7 +5,8 @@ DWARF 5 function names, ranges and source lines. It emits `.debug_info`,
 `.debug_abbrev`, `.debug_line`, `.debug_addr` and `.debug_rnglists` in DWARF32
 format for Linux x86-64. This core interface remains independent of C types and
 storage allocation. The C producer adds types, variables and lexical scopes for
-`-g` as described below; inline scopes are not represented. Unwind instructions
+`-g` as described below, with Tier 1's expanded callees as inlined subroutines
+(#2541 step 3, "Optimized Tier 1 values"). Unwind instructions
 use the separate frame-event interface.
 
 `debug_write` emits the sections before final layout, with zeroes in address
@@ -130,8 +131,8 @@ omitted for producers which supply only the five core sections.
 
 **Limits:** Thread-local, unresolved and common symbols without a published
 ordinary object definition have no location. Values before initialization are
-not guaranteed meaningful. Each function still has one source file, and inline
-callee scopes are not represented. Tier 1's additional bounds are described
+not guaranteed meaningful. Each function still has one source file: an inlined
+subroutine is described where its call is in it. Tier 1's additional bounds are described
 below; a named, typed value without a proved location remains unavailable.
 
 `test-check-debug --cross-check` compares GDB reads against a fixture's own
@@ -152,7 +153,17 @@ each IR instruction's original typed entry, each retained stack object's
 original local, and source assignment identities. SSA promotion, optimization,
 splitting and scheduling preserve or explicitly discard these identities.
 Generated instructions have no invented source position. Inlined callee locals
-do not become caller locals; representing their instances needs inline scopes.
+do not become caller locals. An expanded callee's instructions take origins past
+the function's own entries, an instance's (`IrDebugInline`, #2541 step 3): the
+location proofs read them as the instance's outermost call, the rows as its
+callee's entries (its lines), and `check_debug_values` writes each instance
+whose call is in the function's file as a `DW_TAG_inlined_subroutine` nested in
+the lexical block of its call and in its parent instance, its ranges its code's
+spans. Its abstract origin is the callee's abstract instance (a
+`DW_TAG_subprogram` with `DW_AT_inline`, its parameters and no code, written
+before the out-of-line one), not the out-of-line `DW_TAG_subprogram`: a reader
+takes an attribute an entry lacks from its origin, and gdb 18 (and CI's) takes
+the inherited `DW_AT_low_pc` over the instance's `DW_AT_ranges` and drops it.
 The emitter's record origins and the post-scheduler's final permutation carry
 the surviving identities to the actual machine records. Source rows therefore
 describe surviving statements, including suspended callers' call sites.

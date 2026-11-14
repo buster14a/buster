@@ -923,6 +923,24 @@ static void ir_parse_instruction(IrParseState* state)
                         first = false;
                     }
                 }
+                // A scatter's stored vector and mask (#1840), to the extra array, whose index its `c` holds.
+                if (row.op == IR_SCATTER)
+                {
+                    ir_parse_expect(state, ',');
+                    const uint32_t stored = ir_parse_id(state, '%');
+                    ir_parse_expect(state, ',');
+                    const uint32_t mask = ir_parse_id(state, '%');
+                    if (state->result.error == IR_PARSE_OK && state->extra.count > BUSTER_IR_INTRINSIC_EXTRA_LIMIT - 1)
+                    {
+                        ir_parse_fail(state, IR_PARSE_SYNTAX);
+                    }
+                    else if (state->result.error == IR_PARSE_OK)
+                    {
+                        row.c = ir_intrinsic_ternary_c(0, state->extra.count);
+                        ir_parse_append(state, &state->extra, &stored);
+                        ir_parse_append(state, &state->extra, &mask);
+                    }
+                }
                 // A compare-exchange's desired value (#1059), its optional third operand.
                 if (row.op == IR_ATOMIC_RMW && ir_parse_take(state, ','))
                 {
@@ -996,7 +1014,7 @@ static void ir_parse_instruction(IrParseState* state)
                 {
                     row.flags = BUSTER_IR_STACK_SAVE_FRAME;
                 }
-                if (row.op == IR_LOAD || row.op == IR_STORE || row.op == IR_ATOMIC_RMW || (ir_masked_access(row.op) && row.op != IR_GATHER))
+                if (row.op == IR_LOAD || row.op == IR_STORE || row.op == IR_ATOMIC_RMW || (ir_masked_access(row.op) && row.op != IR_GATHER && row.op != IR_SCATTER))
                 {
                     ir_parse_keyword(state, "align=");
                     const uint32_t alignment = (uint32_t)ir_parse_unsigned(state, UINT32_C(1) << 31, false);
@@ -1009,9 +1027,9 @@ static void ir_parse_instruction(IrParseState* state)
                         row.alignment_log2 = (uint8_t)__builtin_ctz(alignment);
                     }
                 }
-                if (row.op == IR_GATHER)
+                if (row.op == IR_GATHER || row.op == IR_SCATTER)
                 {
-                    // A gather's scale (#1840), 1, 2, 4 or 8, as its alignment_log2.
+                    // A gather's or a scatter's scale (#1840), 1, 2, 4 or 8, as its alignment_log2.
                     ir_parse_keyword(state, "scale=");
                     const uint32_t scale = (uint32_t)ir_parse_unsigned(state, 8, false);
                     if (state->result.error == IR_PARSE_OK && (scale == 0 || (scale & (scale - 1)) != 0))

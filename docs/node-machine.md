@@ -17,7 +17,9 @@ their code; with T's rare paths out of its loop's line, the three cost 181
 cycles a taken node on `sqlite3.c`
 ([below](#the-sweeps-front-end-ts-rare-paths-out-of-line)), and with C and X
 choosing a record's case by one `switch` each, 170
-([below](#cs-and-xs-dispatch-one-case-an-operator-one-a-template)). No compile takes it. Its gains are estimates that
+([below](#cs-and-xs-dispatch-one-case-an-operator-one-a-template)); a warm,
+repeated run of an expression costs 124
+([below](#ts-loop-without-its-rules-and-what-a-first-run-costs)). No compile takes it. Its gains are estimates that
 its first two steps exist to confirm or refute; a prototype of its three sweeps
 has been run over the compile's real nodes
 ([below](#what-a-prototype-of-the-sweeps-measured)). It is
@@ -1699,6 +1701,91 @@ T is about half of it, C a quarter and X a fifth. C and X stay one record at a
 time: C follows the tree down ([data-parallel first](#data-parallel-first-what-is-vector-and-what-is-ordered)),
 and X's rows written by three vector stores lost to its branches when they
 were measured ([the baked tables](#the-baked-tables-measured)).
+
+### T's loop without its rules, and what a first run costs
+
+The two levers that cut C in #2727, applied to T (`c_check_node_machine_type.c`):
+
+- **T's rules, one case an operator, out of line.** `node_machine_rule` used to
+  reach a node's rule through a chain of tests on the operator. It is now a
+  `switch`, kept out of T's loop (`noinline`), with the rules it calls inlined
+  into it. T's loop, the leaves' and the rows', is 4.4 KB where it was 11.8
+  KB. The rows still come first, and their `+` and `-` go on to the pointer
+  rule as before.
+- **T's range from its arguments.** T's loop reads the expression's first
+  node, root and count from its own arguments, not from the machine after each
+  of its column stores. It keeps its count of typed nodes and the record it
+  stopped at in locals, and stores them once after the loop.
+
+T runs 14 fewer instructions a node (350.9 to 336.8 on `sqlite3.c`, 444.5 to
+427.4 on Lua), on the same machine results. Its cycles move less than a copy of
+the executable can move them:
+
+- **A copy moves the sweeps.** The exploration's executable and the commit's
+  have byte-identical `.text`, every symbol at the same address, yet ran the
+  three sweeps at 169.4 and 172.9 cycles a node on `sqlite3.c`. Fresh copies of
+  the commit's file ran 169.9, 172.8 and 171.3, one run each, most of the spread
+  in X. Main's four copies agreed within half a cycle (173.2 to 173.7). A
+  difference of a few cycles needs several fresh copies of each side.
+- **Over four copies of each** (the commit's build, six runs, and three fresh
+  copies, one run each; main's the same), against main `c471f32`, medians in
+  cycles a taken node:
+
+  | | T | all three |
+  | --- | ---: | ---: |
+  | `sqlite3.c`, main | 90.6 | 173.3 |
+  | `sqlite3.c`, the change | 90.4 | **172.1** |
+  | Lua, main | 83.9 | 148.4 |
+  | Lua, the change | **82.7** | **146.2** |
+
+  The three sweeps are 1.2 and 2.2 cycles a node faster, and T on Lua 1.2
+  faster at every copy. Most of the rest is C, whose code is unchanged: with
+  T's loop smaller, C finds more of its code in the caches (C 47.2 to 45.4 on
+  `sqlite3.c` in the six runs). At four placements of the checker unit's code
+  (`./build.sh shifts`), the exploration's build ran the three 4.0 to 6.4
+  cycles faster on `sqlite3.c` and 1.0 to 4.5 on Lua.
+- **Neither lever pays alone:**
+  - The `switch` without the range in locals, in the same out-of-line shape,
+    ran T's instructions unchanged and T 1.6 cycles slower.
+  - The range in locals on main's shape cut 6.5 instructions and made T 13
+    cycles slower, with no function's inlining changed: T's code is sensitive
+    to its layout.
+  Each is a patch in [the record](https://github.com/buster14a/buster-performance/tree/f1fdc7e99a21f93ea05209beb96886010ea19b99/docs/measurements/node-machine-t-dispatch-2524-2026-11-14).
+- **The comparison:** `--verify` on `sqlite3.c`, Lua and musl, with and
+  without `-g`, has no difference, and main's reports. `test-checker` passes.
+  `-c sqlite3.c` doesn't run the shadow and is unchanged: 122.68 ms against
+  main's 122.66, the same instructions within 300 of 1.36 G.
+
+**What a first run costs.** Each sweep set timed alone (the front-end record's
+`only.patch`, `perf stat`, 40 passes less a run of none) on `sqlite3.c` at main
+`c471f32`, a taken node:
+
+| | cycles | instructions | dispatch slots the front end left empty | L1i misses | op-cache misses |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| T | 88.5 | 323.9 | 30% | 5.2 | 8.8 |
+| C | 47.6 | 164.9 | 47% | 5.1 | 7.3 |
+| X | 32.1 | 81.2 | 68% | 4.0 | 6.5 |
+
+X is the most front-end bound of the three: two thirds of its slots are
+empty. `--repeat 2` runs each expression's three sweeps twice in a row. The
+second run costs **123.5 cycles a node** against the first's 168.2, on the same
+570 instructions:
+- its front end leaves 267 slots empty against 570;
+- it misses the instruction cache 6.4 times against 14.2, and the op cache 9.1
+  times against 22.6;
+- it mispredicts 0.73 branches against 1.56.
+
+T alone repeated costs 75.6 against 88.5. So about 45 of a first run's 168
+cycles are the expression's own paths through the three sweeps' code, and its
+inputs, coming back into the caches: the operators differ from one expression
+to the next, and the sweeps' code together is larger than the 32 KB
+instruction cache. The gate's 120 is about what a warm run costs now. The lever
+this points to is the sweeps' code staying warm. One way is each sweep run over
+a batch of expressions, a statement list's or a body's, before the next sweep,
+so that C's and X's code isn't refetched after T's at every expression. That
+batching would need wide values, a call's arguments and the updates' plans
+kept per batch, not per expression. It is not built, and whether it keeps
+enough of each sweep's code warm is its first measurement.
 
 ## Expected gains
 

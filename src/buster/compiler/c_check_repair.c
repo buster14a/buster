@@ -260,6 +260,7 @@ static CheckRepairStatus check_repair_make(CheckRepair* repair, const Parser* or
             .typo_sources = original->typo_sources,
             .typo_count = original->typo_count,
             .invalid_call_sources = original->invalid_call_sources,
+            .invalid_call_values = original->invalid_call_values,
             .invalid_call_count = original->invalid_call_count,
         };
         memcpy(view->predeclared, original->predeclared, sizeof(view->predeclared));
@@ -479,6 +480,12 @@ static bool check_repair_input_report(const CheckRepair* repair, const CheckInpu
                  // An unevaluated string literal's escape sequence (#147) is its own spelling's error, whatever follows.
                  (report->message == CHECK_INPUT_UNEVALUATED_ESCAPE && kind == PARSE_KIND_STRING) ||
                  (report->message == CHECK_INPUT_RETURN && kind == PARSE_KIND_RETURN);
+        // A retained ordinary malformed callee's unavailable use and declaration are both original (#2406).
+        // Closing a later body cannot change that lookup; keep other availability errors outside this whitelist.
+        const uint32_t invalid_call = report->message == CHECK_INPUT_UNAVAILABLE_USE && kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND ?
+                                      check_input_invalid_call_index(view, token) : BUSTER_CHECK_NONE;
+        result |= invalid_call < view->invalid_call_count && view->invalid_call_values != NULL && view->invalid_call_values[invalid_call] != 0 &&
+                  report->note_token < repair->original_end;
         // The asm's complete original operands fix a naked parameter reference. A synthetic body closer
         // cannot supply the non-asm body constraint, which remains outside this whitelist.
         result |= report->message == CHECK_INPUT_NAKED_PARAMETER && role == PARSE_ROLE_CLOSE_ASM;

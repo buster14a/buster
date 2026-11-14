@@ -622,10 +622,12 @@ static void ir_wide_copy(IrWideWork* work, uint32_t i)
     const uint32_t op = f->op[i];
     const bool phi = op == IR_PHI;
     const bool call = op == IR_CALL || op == IR_CALL_INDIRECT;
-    // A ternary intrinsic's third operand (#1840) gets a slot of its own too, its `c` naming it.
-    const bool ternary = ir_ternary_instruction(f, i);
+    // A ternary intrinsic's third operand, and a scatter's stored vector and mask (#1840), get slots of their own too,
+    // its `c` naming the first.
+    const uint32_t extras = ir_extra_value_count(f, i);
+    const bool ternary = extras != 0;
     const uint32_t list = (uint32_t)work->extra;
-    work->extra += phi ? (uint64_t)f->b[i] * 2 : call ? f->calls[f->b[i]].argument_count : ternary ? 1 : 0;
+    work->extra += phi ? (uint64_t)f->b[i] * 2 : call ? f->calls[f->b[i]].argument_count : extras;
     const uint32_t mask = ir_value_mask(f, i);
     const uint32_t a = phi ? list : (mask & 1) != 0 ? ir_wide_low(work, f->a[i]) : f->a[i];
     const uint32_t b = (mask & 2) != 0 ? ir_wide_low(work, f->b[i]) : f->b[i];
@@ -657,7 +659,10 @@ static void ir_wide_copy(IrWideWork* work, uint32_t i)
         }
         else if (ternary)
         {
-            output->extra[list] = ir_wide_low(work, ir_intrinsic_third(f, i));
+            for (uint32_t k = 0; k < extras; k += 1)
+            {
+                output->extra[list + k] = ir_wide_low(work, ir_extra_value(f, i, k));
+            }
         }
     }
     ir_wide_place(work, i, id, 0);

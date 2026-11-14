@@ -276,11 +276,13 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 break;
             case BUSTER_TYPED_X86:
                 depth -= input->operations[value].operand_count;
-                // A row of opmask instructions alone (#179), a scalar BMI instruction's (#141), a vector operation, or any
-                // other row as a row call of the IR's machine row (#141), which leaves nothing on the stack for a void one.
+                // A row of opmask instructions alone (#179), a scalar BMI instruction's (#141), a scalar fused multiply-add's
+                // (#1840), a vector operation, or any other row as a row call of the IR's machine row (#141), which leaves
+                // nothing on the stack for a void one.
                 stack[depth] = plan->operations[value].machine         ? ir_typed_machine_row(&sink, input->operations + value, type, stack + depth) :
                                plan->operations[value].mask_bytes != 0 ? ir_typed_mask_row(&sink, plan->operations + value, stack + depth) :
                                plan->operations[value].intrinsic != 0  ? ir_typed_intrinsic(&sink, plan->operations + value, type, stack + depth) :
+                               plan->operations[value].fma             ? ir_typed_fma(&sink, plan->operations + value, type, stack + depth) :
                                plan->operations[value].splat_bytes != 0 ? ir_typed_splat(&sink, plan->operations + value, type, stack[depth]) :
                                                                          ir_typed_vector_operation(&sink, plan->operations + value, type, stack + depth,
                                                                                                    ir_typed_unmasked(input, plan->operations + value, i));

@@ -331,10 +331,12 @@ static void ir_vector_split_copy(IrVectorSplitWork* work, uint32_t i)
     const uint32_t op = f->op[i];
     const bool phi = op == IR_PHI;
     const bool call = op == IR_CALL || op == IR_CALL_INDIRECT;
-    // A ternary intrinsic's third operand (#1840) gets a slot of its own too, its `c` naming it.
-    const bool ternary = ir_ternary_instruction(f, i);
+    // A ternary intrinsic's third operand, and a scatter's stored vector and mask (#1840), get slots of their own too,
+    // its `c` naming the first.
+    const uint32_t extras = ir_extra_value_count(f, i);
+    const bool ternary = extras != 0;
     const uint32_t list = (uint32_t)work->extra;
-    work->extra += phi ? (uint64_t)f->b[i] * 2 : call ? f->calls[f->b[i]].argument_count : ternary ? 1 : 0;
+    work->extra += phi ? (uint64_t)f->b[i] * 2 : call ? f->calls[f->b[i]].argument_count : extras;
     const uint32_t mask = ir_value_mask(f, i);
     const uint32_t a = phi ? list : (mask & 1) != 0 ? ir_vector_split_piece(work, f->a[i], 0) : f->a[i];
     const uint32_t b = (mask & 2) != 0 ? ir_vector_split_piece(work, f->b[i], 0) : f->b[i];
@@ -364,7 +366,10 @@ static void ir_vector_split_copy(IrVectorSplitWork* work, uint32_t i)
         }
         else if (ternary)
         {
-            output->extra[list] = ir_vector_split_piece(work, ir_intrinsic_third(f, i), 0);
+            for (uint32_t k = 0; k < extras; k += 1)
+            {
+                output->extra[list + k] = ir_vector_split_piece(work, ir_extra_value(f, i, k), 0);
+            }
         }
     }
     ir_vector_split_place(work, i, 0, id);

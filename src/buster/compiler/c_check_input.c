@@ -3473,6 +3473,22 @@ static void check_input_recovered_publish(CheckInputReader* reader)
 
 static void check_input_target_versions_calls(CheckInputReader* reader);
 
+// A retained malformed callee's index, or NONE. Original sources survive reparses, synthetic punctuation and macros.
+static uint32_t check_input_invalid_call_index(const Parser* parser, uint32_t token)
+{
+    const uint32_t source = parser->invalid_call_count != 0 ? parser->tokens.sources[token] : 0;
+    uint32_t low = 0;
+    uint32_t high = parser->invalid_call_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = parser->invalid_call_sources[middle] < source;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    return low < parser->invalid_call_count && parser->invalid_call_sources[low] == source ? low : BUSTER_CHECK_NONE;
+}
+
 // A failed parse's call-shaped lookup is never an expression to check (#2406). The private view has already erased
 // its unread arguments; its ordinary binding and implicit declaration must survive for later statements. Append the
 // existing silent invalid-use report after lookup, so the normal subtree cuts suppress only this call and its parents.
@@ -3486,21 +3502,15 @@ static void check_input_invalid_calls(CheckInputReader* reader)
         {
             // Search the sorted original callee sources, not a view's token sources: a repair's synthetic closers
             // have no source, and another diagnostic view may repeat a source for inserted punctuation or casts.
-            const uint32_t source = parser->tokens.sources[token];
-            uint32_t low = 0;
-            uint32_t high = parser->invalid_call_count;
-            while (low < high)
-            {
-                const uint32_t middle = low + (high - low) / 2;
-                const bool before = parser->invalid_call_sources[middle] < source;
-                low = before ? middle + 1 : low;
-                high = before ? high : middle;
-            }
-            if (low < parser->invalid_call_count && parser->invalid_call_sources[low] == source)
+            const uint32_t low = check_input_invalid_call_index(parser, token);
+            if (low < parser->invalid_call_count)
             {
                 // Classification is not a value use: availability/deprecation checks must not read this synthetic call.
                 // Keep the declaration's type and binding events, including an implicit declaration at this same token.
-                reader->output->declarations[token] = BUSTER_CHECK_NONE;
+                if (parser->invalid_call_values == NULL || parser->invalid_call_values[low] == 0)
+                {
+                    reader->output->declarations[token] = BUSTER_CHECK_NONE;
+                }
                 check_input_report(reader, token, CHECK_INPUT_INVALID_USE);
             }
         }
