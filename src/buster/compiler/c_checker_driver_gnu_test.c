@@ -125,6 +125,7 @@ static void check_test_driver_gnu_scopes(CheckTest* test, const char* clang, con
     {
         const char* name;
         const char* source;
+        const char* file;
     } every[] =
     {
         { "a name one list declares twice, defined", "void f(void) {\n    {\n        __label__ a, a;\n    a:;\n    }\n}\n" },
@@ -179,13 +180,32 @@ static void check_test_driver_gnu_scopes(CheckTest* test, const char* clang, con
         { "an atomic cast's rvalue as an operand",
           "int g(int x) {\n    int r = 1 + (_Atomic int)x;\n    r = (_Atomic int)x + (_Atomic int)x;\n    r = (_Atomic long)x * 3 + (_Atomic short)x;\n"
           "    return r + (_Atomic int)x * 2;\n}\n" },
+        { "a block's non-extern auto-type after extern", NULL, "block-extern.c" },
+        { "a block's qualified auto-type after extern", NULL, "block-qualified.c" },
+        { "a block's auto-type pointer after extern", NULL, "block-pointer.c" },
+        { "auto-type shadowing keeps its own deduction", NULL, "block-shadow.c" },
+        { "an atomic auto-type cannot deduce from an atomic rvalue", NULL, "atomic-rvalue.c" },
+        { "an atomic auto-type keeps its qualifiers in the error", NULL, "atomic-qualified.c" },
+        { "an atomic auto-type cannot deduce an atomic pointer", NULL, "atomic-pointer.c" },
+        { "an atomic auto-type retains the initializer's typedef", NULL, "atomic-typedef.c" },
     };
     for (uint32_t i = 0; executable != NULL && i < BUSTER_ARRAY_LENGTH(every); i += 1)
     {
         char source[192];
         char description[9216];
         snprintf(source, sizeof(source), "%s/gnu-every-%u.c", directory, i);
-        const bool written = parse_test_write(source, every[i].source, strlen(every[i].source));
+        CheckTestFixtures fixture = { 0 };
+        const char* bytes = every[i].source;
+        uint64_t length = bytes != NULL ? strlen(bytes) : 0;
+        if (every[i].file != NULL)
+        {
+            char path[PATH_MAX];
+            fixture.storage = arena_reserve(CHECK_TEST_FIXTURE_BYTES + 1);
+            snprintf(path, sizeof(path), "%s/checker/auto-type/%s", check_test_fixture_root, every[i].file);
+            bytes = check_test_fixture_read(&fixture, path, &length);
+        }
+        const bool written = bytes != NULL && parse_test_write(source, bytes, length);
+        arena_release(&fixture.storage);
         char* const clang_arguments[] = { (char*)clang, "-fsyntax-only", "-std=gnu17", "-w", source, NULL };
         char* text = NULL;
         char expected[4096];

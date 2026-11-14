@@ -1,0 +1,10 @@
+buster-fixtures v1 checker-sources
+function-later	function-later.c	rejected	weak alias call after the target is declared
+function-existing	function-existing.c	rejected	weak alias call with an existing target
+variable-later	variable-later.c	rejected	weak alias variable redeclaration after a later target
+variable-existing	variable-existing.c	rejected	weak alias variable redeclaration with an existing target
+combined	combined.c	rejected	weak alias errors preserve the rest of the translation unit
+before-target	before-target.c	-	a weak alias clone is not visible before its target declaration
+local-shadow	local-shadow.c	-	local shadows do not name the weak alias
+defined-alias	defined-alias.c	-	a defined alias remains the pragma no-op
+missing-target	missing-target.c	-	a genuinely missing weak alias target still warns

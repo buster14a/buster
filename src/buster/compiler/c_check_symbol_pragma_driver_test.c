@@ -133,6 +133,75 @@ static void check_test_driver_symbol_pragmas(CheckTest* test, const char* clang,
     unlink(program);
 }
 
+// #2449: late alias targets remain visible after the alias's actual error. Sources and the case inventory are runtime
+// data; the ordinary source-fixture loader owns their bytes and rejects missing, duplicate and orphaned cases.
+static void check_test_driver_weak_alias_diagnostics(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    CheckTestFixtures fixtures;
+    const bool loaded = check_test_fixtures_load(&fixtures, "checker/weak-alias");
+    check_test_expect(test, loaded, loaded ? "weak alias diagnostic fixtures loaded" : fixtures.problem);
+    char source[PATH_MAX];
+    char object[PATH_MAX];
+    char expected_lines[8192];
+    char actual_lines[8192];
+    snprintf(source, sizeof(source), "%s/weak-alias-diagnostic.c", directory);
+    snprintf(object, sizeof(object), "%s/weak-alias-diagnostic.o", directory);
+    static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
+    for (uint32_t f = 0; loaded && f < fixtures.count; f += 1)
+    {
+        const CheckSourceFixture* fixture = fixtures.cases + f;
+        const bool written = parse_test_write(source, fixture->source, strlen(fixture->source));
+        check_test_expect(test, written, "weak alias diagnostic source written");
+        for (uint32_t standard = 0; written && standard < BUSTER_ARRAY_LENGTH(standards); standard += 1)
+        {
+            char* expected = NULL;
+            char* oracle_arguments[] = { (char*)clang, (char*)standards[standard], "-fsyntax-only", "-fno-caret-diagnostics", source, NULL };
+            const int oracle = check_test_driver_spawn(oracle_arguments, &expected);
+            const bool lines = (oracle == 0 || oracle == 1) && expected != NULL && check_test_diagnostic_lines(expected, expected_lines, sizeof(expected_lines));
+            check_test_expect(test, lines && oracle == (fixture->rejected ? 1 : 0), "weak alias oracle agrees with independent acceptance expectation");
+            for (uint32_t mode = 0; lines && mode < 4; mode += 1)
+            {
+                const bool deferred = mode >= 2;
+                char* actual = NULL;
+                char* arguments[16] = { (char*)executable, (char*)standards[standard], deferred ? "-c" : "-fsyntax-only",
+                                       "-fno-caret-diagnostics", source };
+                uint32_t count = 5;
+                if (mode == 1)
+                {
+                    arguments[count++] = "--scalar";
+                }
+                if (deferred)
+                {
+                    arguments[count++] = "-o";
+                    arguments[count++] = object;
+                    arguments[count++] = "--deferred-bodies";
+                    arguments[count++] = "--lanes";
+                    arguments[count++] = mode == 2 ? "1" : "3";
+                }
+                arguments[count] = NULL;
+                unlink(object);
+                const int status = check_test_driver_spawn(arguments, &actual);
+                const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, sizeof(actual_lines)) &&
+                                  strcmp(expected_lines, actual_lines) == 0;
+                const bool correct = same && status == oracle && (!fixture->rejected || access(object, F_OK) != 0);
+                char description[512];
+                snprintf(description, sizeof(description), "%s, %s mode %u: status %d (clang %d), complete diagnostic output and publication", fixture->name,
+                         standards[standard], mode, status, oracle);
+                check_test_expect(test, correct, description);
+                if (!correct)
+                {
+                    fprintf(stderr, "%s\nours:\n%s\nclang:\n%s\n", description, actual != NULL ? actual : "(no output)", expected);
+                }
+                free(actual);
+                unlink(object);
+            }
+            free(expected);
+        }
+    }
+    unlink(source);
+    arena_release(&fixtures.storage);
+}
+
 // `#pragma weak A = T` (#1849): the weak aliases, each symbol's binding and visibility clang's by both paths, whose
 // objects must be the same bytes, linked and run as clang's object: the shapes whose A the unit declares, and clang's
 // clones of T's declaration (an A never declared, of a function or a variable, a static, a T defined later; an A declared
@@ -232,4 +301,5 @@ static void check_test_driver_weak_aliases(CheckTest* test, const char* clang, c
     }
     free(theirs);
     unlink(path);
+    check_test_driver_weak_alias_diagnostics(test, clang, executable, directory);
 }
