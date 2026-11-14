@@ -10682,10 +10682,12 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
                 reach[at] |= bits;
             }
         }
-        // The rest of the comparisons, fewer than 16.
-        if (comparisons != NULL)
+        // The scan may list many comparisons after its last reach candidate. Drain every remaining batch, not just the
+        // first 16, including when no reach candidate was found at all.
+        for (; comparisons != NULL && tested < listed; tested += 16)
         {
-            check_common_range_batch(graph, stream, types, parents, reach, comparisons + tested, listed - tested);
+            const uint32_t remaining = listed - tested;
+            check_common_range_batch(graph, stream, types, parents, reach, comparisons + tested, remaining < 16 ? remaining : 16);
         }
         // (Short of scratch for the list, the facts fail as a whole rather than leave comparisons out.)
         const bool short_of = enabled->out_of_range && !enabled->sign_compare && comparisons == NULL;
