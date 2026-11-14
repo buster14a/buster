@@ -1661,9 +1661,10 @@ static Tier1CfgBoundaries tier1_cfg_boundaries(const Tier1CfgInput* input, const
 // way into one that crosses a sequence (Lua's divisor did, on the edge into its division), or a range of it would take
 // another register from a block the sequence never runs in, which its later ranges follow by their hints
 // (sqlite3BtreeIndexMoveto's pRes, into its hot loop); and a phi in other registers than its operands moves on its edges.
-// Each register some sequence writes has a prefix count over the sequences that write it, on `scratch`, and a range
-// lives across one where the counts at the bounds of its sequences differ, which two halvings find: a range over a long
-// run of sequences costs as little as a short one. Each value's readings, the sequences it is the reader of, are a list
+// Each register some sequence writes has a prefix count over the sequences that write it, and each position the count of
+// the sequences before it, both on `scratch`: a range's sequences are those from the count past its start to the count at
+// its end, two loads, and it lives across one writing a register where that register's counts at those bounds differ,
+// so a range over a long run of sequences costs as little as a short one. Each value's readings, the sequences it is the reader of, are a list
 // in sequence order, where two more halvings find a range's own among its sequences, which its counts then leave out:
 // each reading lies inside at most one range of its value. The webs are the phis' and their operands' union, found with
 // halving paths. False where `scratch` is short; it ends as it began.
@@ -1679,10 +1680,11 @@ static bool tier1_cfg_crossed(const Tier1CfgInput* input, const uint32_t* starts
     }
     const uint32_t kinds = (uint32_t)__builtin_popcount(written);
     uint32_t* prefix = arena_push_array(scratch, (uint64_t)kinds * (sequences + 1) + 1, sizeof(uint32_t), _Alignof(uint32_t));
-    uint32_t* reader_offsets = prefix != 0 && readers != 0 ? arena_push_array(scratch, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    uint32_t* before = prefix != 0 ? arena_push_array(scratch, (uint64_t)input->position_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    uint32_t* reader_offsets = before != 0 && readers != 0 ? arena_push_array(scratch, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     uint32_t* readings = reader_offsets != 0 ? arena_push_array(scratch, (uint64_t)sequences + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     // Each value's web's root, then each root's registers.
-    uint32_t* webs = prefix != 0 ? arena_push_array(scratch, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    uint32_t* webs = before != 0 ? arena_push_array(scratch, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     uint32_t* web_masks = webs != 0 ? arena_push_array(scratch, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     const bool ready = web_masks != 0 && (readers == 0 || readings != 0);
     for (uint32_t v = 0; ready && v < input->value_count; v += 1)
@@ -1722,6 +1724,19 @@ static bool tier1_cfg_crossed(const Tier1CfgInput* input, const uint32_t* starts
             root = webs[root];
         }
         webs[v] = root;
+    }
+    // The sequences before each position: k up to and including the k-th sequence's position.
+    uint32_t q = 0;
+    for (uint32_t k = 0; ready && k < sequences; k += 1)
+    {
+        for (; q <= input->sequences[k]; q += 1)
+        {
+            before[q] = k;
+        }
+    }
+    for (; ready && q <= input->position_count; q += 1)
+    {
+        before[q] = sequences;
     }
     uint32_t row = 0;
     for (uint32_t left = ready ? written : 0; left != 0; left &= left - 1)
@@ -1764,27 +1779,14 @@ static bool tier1_cfg_crossed(const Tier1CfgInput* input, const uint32_t* starts
     }
     for (uint32_t i = 0; ready && i < count; i += 1)
     {
-        // The first sequence past the start, and the first at or past the end.
-        uint32_t low = 0;
-        uint32_t high = sequences;
-        while (low < high)
-        {
-            const uint32_t middle = low + (high - low) / 2;
-            low = input->sequences[middle] <= starts[i] ? middle + 1 : low;
-            high = input->sequences[middle] <= starts[i] ? high : middle;
-        }
-        uint32_t past = low;
-        high = sequences;
-        while (past < high)
-        {
-            const uint32_t middle = past + (high - past) / 2;
-            past = input->sequences[middle] < ends[i] ? middle + 1 : past;
-            high = input->sequences[middle] < ends[i] ? high : middle;
-        }
+        // The first sequence past the start, and the first at or past the end: a range ends past its start.
+        const bool general = classes[i] == BUSTER_TIER1_ALLOCATE_GPR;
+        const uint32_t low = general ? before[starts[i] + 1] : 0;
+        const uint32_t past = general ? before[ends[i]] : 0;
         // The interval's own readings among them: its value's, from the first past its start to the first at its end.
-        const bool general = classes[i] == BUSTER_TIER1_ALLOCATE_GPR && low < past;
-        uint32_t first = general && readers != 0 ? reader_offsets[values[i]] : 0;
-        uint32_t last = general && readers != 0 ? reader_offsets[values[i] + 1] : 0;
+        const bool inside = low < past;
+        uint32_t first = inside && readers != 0 ? reader_offsets[values[i]] : 0;
+        uint32_t last = inside && readers != 0 ? reader_offsets[values[i] + 1] : 0;
         while (first < last)
         {
             const uint32_t middle = first + (last - first) / 2;
@@ -1792,7 +1794,7 @@ static bool tier1_cfg_crossed(const Tier1CfgInput* input, const uint32_t* starts
             last = readings[middle] < low ? last : middle;
         }
         uint32_t through = first;
-        last = general && readers != 0 ? reader_offsets[values[i] + 1] : 0;
+        last = inside && readers != 0 ? reader_offsets[values[i] + 1] : 0;
         while (through < last)
         {
             const uint32_t middle = through + (last - through) / 2;
@@ -1801,16 +1803,16 @@ static bool tier1_cfg_crossed(const Tier1CfgInput* input, const uint32_t* starts
         }
         uint32_t mask = 0;
         row = 0;
-        for (uint32_t left = general ? written : 0; left != 0; left &= left - 1)
+        for (uint32_t left = inside ? written : 0; left != 0; left &= left - 1)
         {
             const uint32_t r = (uint32_t)__builtin_ctz(left);
             const uint32_t* counts = prefix + (uint64_t)row * (sequences + 1);
-            uint32_t inside = counts[past] - counts[low];
+            uint32_t writing = counts[past] - counts[low];
             for (uint32_t e = first; e < through; e += 1)
             {
-                inside -= (input->sequence_registers[readings[e]] >> r) & 1;
+                writing -= (input->sequence_registers[readings[e]] >> r) & 1;
             }
-            mask |= inside != 0 ? 1u << r : 0;
+            mask |= writing != 0 ? 1u << r : 0;
             row += 1;
         }
         web_masks[webs[values[i]]] |= mask;
