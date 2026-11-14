@@ -1294,6 +1294,104 @@ the same at both. The extra mispredictions fall in `luaV_mod`, whose code the
 change leaves the same, and in `luaV_execute`'s dispatch: the predictor's
 aliasing at the change's branch addresses, not instructions it adds.
 
+### Recipes that wait, and recipes at joins (#2618, #2735)
+
+On main `56b5864`, against the same compiler with no hoist at all, the hoisted
+addresses (the IR guide's #2618) still cost `jsonLookupStep` 295 K and
+`speedtest1_run` 141 K by callgrind, through the registers their recipes held.
+Three rules of the scan take them back:
+
+- **A closing a call emptied.** A range that ends without a register notes
+  memory as its closing, and a range its hint names there followed it. Where a
+  call's clobber took the register (#2574's preferred problem), that made
+  `luaV_execute`'s dispatch join leave `disptab` in memory once a handler's
+  call had evicted it (#2735). The clobber site marks the closing
+  (`BUSTER_TIER1_ALLOCATE_CLOBBERED`), any other eviction clears the mark, and
+  `tier1_allocation_note_closing` then notes no hint: the next range follows
+  its value's last register.
+- **Waiting for a read.** A recipe whose hint is memory takes no register at
+  its start, read or not; a required use gives it one there.
+  `jsonLookupStep`'s `sqlite3CtypeMap`, defined before its loops and read past
+  one of them, took the lowest free register at that loop's latch, `rbp`,
+  which the loop's frame address followed: every iteration parked the address
+  in `r8`, recomputed the table into `rbp` and moved the address back (three
+  instructions, 98 K times). It now waits and runs 0.8 K more than with no
+  hoist. Resting on a closing that held no register, #2735's first ask, is
+  this rule's case: on top of it, resting there too changes 81 instructions.
+- **Joins.** A recipe its range doesn't use rests at the entry of a block of
+  `BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM` (three) or more predecessors, where its
+  hint is no predecessor's closing (the block takes a successor's convention,
+  as a dispatch loop's join laid out after its first successor does) or a
+  predecessor is laid out at or after it: every edge in would recompute it,
+  where its reads past the join, on fewer paths, do. `sqlite3VdbeExec`'s
+  dispatch join held a frame address in `r15` that each handler's tail
+  recomputed, 5.84 M `lea`s. Where all the predecessors come before the join
+  and the hint is their closing, they hold the recipe already, and it keeps its
+  register (`lua_getmetatable`'s zero, which cost 0.8 M where it rested).
+  A recipe read on every iteration of the loops it is live across keeps its
+  register at every join (`resident_values`, #2574's test run over every
+  recipe, call or not): each handler's tail of Lua's dispatch holds `disptab`,
+  and each case's of a switch in a loop its table (`tier1_table_loop`'s, which
+  the driver test keeps one relocated base). The rule needs that column, which
+  only the preferred problem has, given by its preference
+  (`Tier1CfgPreference.resident`): a function without calls has no preferred
+  problem, and no recipe rests at its joins. The CFG consumer writes each
+  range's byte as it builds the intervals (`Tier1AllocationInput.join_starts`:
+  the predecessor count, saturating at 127, and
+  `BUSTER_TIER1_ALLOCATE_JOIN_LATER`), and both orders of the two problems
+  (`tier1_emit_cfg_one_call` and its check, which assigns the plain one before
+  any preference) build the same ones.
+
+With the IR guide's argument takes, by callgrind on main `56b5864` (#1189's
+`gap.c`, #1217's inputs), the change takes speedtest1 from 2,657.73 M
+instructions to 2,641.31 M (−0.62%) and Lua's five scripts from 4,875.0 M to
+4,790.3 M (−1.74%); with no hoist at all it runs 2,649.43 M and 4,833.9 M. The
+rules' parts, measured with the experiment's switches, where the joins'
+rule also held in functions without calls and the resident recipes were those
+crossing calls:
+
+| Rules | speedtest1 | Lua's five scripts |
+| --- | ---: | ---: |
+| main | 2,657.73 M | 4,875.0 M |
+| all four | 2,641.34 M (−0.62%) | 4,790.4 M (−1.73%) |
+| without the clobber's closing | 2,641.05 M | 4,843.1 M |
+| without waiting | 2,654.91 M | 4,858.0 M |
+| without the joins | 2,654.27 M | 4,804.8 M |
+| without the argument takes | 2,641.36 M | 4,790.4 M |
+| all four and resting on closings | 2,641.34 M | 4,790.4 M |
+| all four, with no hoist at all | 2,649.47 M | 4,833.9 M |
+
+The joins and the wait are most of it; the clobber's closing costs speedtest1
+0.29 M and gains Lua 52.7 M, `disptab`'s dispatch join.
+
+Keeping the joins' rule out of functions without calls changes `sqlite3Atoi64`
+(−29.6 K) and `sqlite3GetInt32` (−5.4 K) alone. speedtest1's largest gains are
+`sqlite3VdbeExec` −11.1 M,
+`sqlite3_str_vappendf` −1.5 M and `sqlite3BtreeInsert` −1.3 M; Lua's,
+`luaV_execute` −76.2 M, `str_gsub` −3.7 M and `match` −3.3 M, and no Lua
+function more than 65 instructions more. The join rule costs `sqlite3Parser`
+1.23 M, `lookupName` 0.18 M, `resolveP2Values` 0.16 M and `sqlite3Prepare`
+0.14 M: a value starting after a join where a recipe rested takes the lowest
+free register, the recipe's own, and the recipe's next range recomputes it into
+that register after `yy_reduce`'s call on each of `sqlite3Parser`'s
+iterations. `tier1_allocate_hints_test.c`'s traces check the clobber's
+closing, the wait and the join rule's cases on the three paths.
+
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/f836e4e139521bcfbf8fba172446480be892e8cb/docs/measurements/tier1-hoist-finish-2618-2026-11-14),
+#2593's method, a hold of the lock per round), main `56b5864` against the
+change: Lua's five scripts take 0.9868 of the time (95% interval 0.9818 to
+0.9918) over six link orders, faster at all six, for 1.73% fewer instructions;
+speedtest1 takes 0.9985 (0.9907 to 1.0064) over six layouts, for 0.63% fewer.
+`sqlite3.c`'s `--tier1 -c` takes 0.48% more time (paired rounds 1.0028 to
+1.0077) for 0.35% more instructions. The joins' first form cost it 1.65% more
+instructions: the CFG consumer walked a join's predecessors for every range
+entering it, and the resident test ran its own loop analysis over every recipe.
+The byte is each block's now, computed once before the ranges; one loop
+analysis serves both of the preference's hot tests (`tier1_emit_cfg_loops`);
+and the resident test takes the recipes with an unused range entering a join
+alone, the only ones it decides (by callgrind on one lane, +131.9 M
+instructions to +22.4 M, of which the scan's checks 13.5 M).
+
 ## Rematerialization
 
 `Tier1RematerializationInput` is a borrowed column view of selection facts,
