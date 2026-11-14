@@ -37,8 +37,8 @@ static uint32_t ir_rebuild_values(uint32_t op)
         case IR_CALL_INDIRECT: case IR_CBR: case IR_SWITCH: case IR_ALLOCA: case IR_STACK_RESTORE: mask = 1; break;
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_SDIV: case IR_UDIV: case IR_SREM: case IR_UREM:
         case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_LSHR: case IR_ASHR:
-        case IR_FADD: case IR_FSUB: case IR_FMUL: case IR_FDIV: case IR_ICMP: case IR_FCMP: case IR_STORE: case IR_INTRINSIC: case IR_ATOMIC_RMW: mask = 3; break;
-        case IR_SELECT: case IR_MASKED_LOAD: case IR_MASKED_STORE: case IR_COMPRESS_STORE: case IR_GATHER: mask = 7; break;
+        case IR_FADD: case IR_FSUB: case IR_FMUL: case IR_FDIV: case IR_ICMP: case IR_FCMP: case IR_STORE: case IR_INTRINSIC: case IR_ATOMIC_RMW: case IR_SCATTER: mask = 3; break;
+        case IR_SELECT: case IR_MASKED_LOAD: case IR_MASKED_STORE: case IR_COMPRESS_STORE: case IR_GATHER: case IR_FMA: mask = 7; break;
         default: break;
     }
     return mask;
@@ -326,9 +326,9 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
             sizes.extra_count += (uint64_t)c * 2 + 1;
             sizes.constant_count += c;
         }
-        else if (ir_ternary_instruction(source, old))
+        else if (ir_extra_value_count(source, old) != 0)
         {
-            sizes.extra_count += 1;
+            sizes.extra_count += ir_extra_value_count(source, old);
         }
     }
     IrFunction candidate = { 0 };
@@ -406,13 +406,16 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
                 candidate.c[i] = address;
                 candidate.addresses[address++] = source->addresses[c];
             }
-            else if (ir_ternary_instruction(source, old))
+            else if (ir_extra_value_count(source, old) != 0)
             {
-                // A ternary intrinsic's third operand (#1840), in the extra array.
-                const uint32_t value = ir_rebuild_value(source, plan, value_map, ir_intrinsic_third(source, old));
+                // A ternary intrinsic's third operand, or a scatter's stored vector and mask (#1840), in the extra array.
                 candidate.c[i] = ir_intrinsic_ternary_c(c, extra);
-                candidate.extra[extra++] = value;
-                check.error = value != BUSTER_IR_NONE ? IR_OK : IR_ERROR_OPERAND;
+                for (uint32_t k = 0, extra_values = ir_extra_value_count(source, old); k < extra_values; k += 1)
+                {
+                    const uint32_t value = ir_rebuild_value(source, plan, value_map, ir_extra_value(source, old, k));
+                    candidate.extra[extra++] = value;
+                    check.error = value != BUSTER_IR_NONE && check.error == IR_OK ? IR_OK : IR_ERROR_OPERAND;
+                }
             }
             else if (op == IR_CALL || op == IR_CALL_INDIRECT)
             {

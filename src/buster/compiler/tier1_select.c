@@ -158,6 +158,10 @@ typedef enum Tier1SelectRule
     TIER1_RULE_FLOAT_BINARY,
     TIER1_RULE_FLOAT_LOAD_OPERAND,
     TIER1_RULE_FLOAT_NEGATE,
+    // A fused multiply-add (#1840, IR_FMA): values[0] times values[1] plus values[2], rounded once, by FMA3's VEX form whose
+    // destination holds an operand already (TIER1_RULE_FLOAT_FMA's expansion); the decoder admits IR_FMA where the target
+    // has FMA alone.
+    TIER1_RULE_FLOAT_FMA,
     TIER1_RULE_FLOAT_LOAD,
     TIER1_RULE_FLOAT_LOAD_ADDRESS,
     TIER1_RULE_FLOAT_STORE,
@@ -369,6 +373,10 @@ typedef enum Tier1SelectRule
 // `source_width` its index's bytes; values[0] the base, values[1] the index, values[2] the mask and values[3] the
 // passthrough a select of it merges into, none for its own zeros.
 #define BUSTER_TIER1_VECTOR_GATHER 32
+// A scatter (#1840, tier1_select_scatter), no value's: `operation` its lanes (IrSimdLane: I32 or I64), `immediate` its
+// scale's log2, `width` its stored vector's bytes and `source_width` its index's; values[0] the base, values[1] the
+// index, values[2] the mask and values[3] the stored vector.
+#define BUSTER_TIER1_VECTOR_SCATTER 33
 // A floating operation at its own rounding of values[0] and values[1] (#1840): `immediate` the IR's flags, one record of
 // ir_simd_fround_forms' with the rounding in its decorations.
 #define BUSTER_TIER1_VECTOR_FROUND 26
@@ -1771,6 +1779,30 @@ static void tier1_select_gather(Tier1SelectRecords* result, const Tier1SelectHol
     tier1_select_append(result, tier1_select_register_record(X86_FORM_KMOVW_K_R32, mask, BUSTER_TIER1_SELECT_SCRATCH));
 }
 
+// A scatter (#1840, BUSTER_TIER1_VECTOR_SCATTER): vpscatterdd to vpscatterqq (ir_simd_scatter_forms) of the stored
+// vector's lanes at [base + index * scale] under the mask, which the instruction clears as it writes each lane: its bits
+// kept in the scratch general register around it (kmovw r11d, k; the scatter; kmovw k, r11d), as a gather's are.
+static void tier1_select_scatter(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
+{
+    const uint32_t width = holes->width;
+    const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
+    const uint32_t lane = (uint32_t)holes->operation == (uint32_t)IR_SIMD_LANE_I64 ? 1 : 0;
+    const uint32_t count = width >> (2 + lane);
+    const uint32_t index_size = count != 0 && holes->source_width == count * 8 ? 1 : 0;
+    const uint8_t mask = holes->third & BUSTER_X86_DECORATION_MASK;
+    tier1_select_append(result, tier1_select_register_record(X86_FORM_KMOVW_R32_K, BUSTER_TIER1_SELECT_SCRATCH, mask));
+    const X86Instruction record = {
+        .form = ir_simd_scatter_forms[0][lane][index_size][at],
+        .reg = (uint8_t)(holes->fourth & 15),
+        .rm = holes->left,
+        .index = (uint8_t)(holes->right & 15),
+        .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(holes->immediate & 3),
+        .decorations = mask,
+    };
+    tier1_select_append(result, record);
+    tier1_select_append(result, tier1_select_register_record(X86_FORM_KMOVW_K_R32, mask, BUSTER_TIER1_SELECT_SCRATCH));
+}
+
 // One lane of a vector or its lanes' sign bits (#1840, BUSTER_TIER1_VECTOR_LANE_EXTRACT, _LANE_INSERT and _MOVEMASK).
 static void tier1_select_lane(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
 {
@@ -2542,6 +2574,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         {
             tier1_select_gather(&result, holes, destination);
         }
+        else if (kind == BUSTER_TIER1_VECTOR_SCATTER)
+        {
+            tier1_select_scatter(&result, holes);
+        }
         else if (kind == BUSTER_TIER1_VECTOR_LANE_EXTRACT || kind == BUSTER_TIER1_VECTOR_LANE_INSERT || kind == BUSTER_TIER1_VECTOR_MOVEMASK)
         {
             tier1_select_lane(&result, holes, destination);
@@ -2782,6 +2818,36 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         memory.reg = x;
         memory.form = tier1_select_float_forms(width)->arithmetic[(uint32_t)holes->operation & 3];
         tier1_select_append(&result, memory);
+        break;
+    }
+    case TIER1_RULE_FLOAT_FMA:
+    {
+        // a * b + c: x86's FMA3 forms take a NaN in the formula's order whatever their form (IR_FMA), so the form is the
+        // one whose destination holds an operand already: 213 where it is b's (x = a * x + c), 231 where it
+        // is c's (x = a * b + x) and 132 where it is a's (x = x * b + c); otherwise b's copy into the destination, then
+        // 213. vvvv and rm are the other two, in the formula's order.
+        static const uint16_t forms[2][3] = {
+            { X86_FORM_VFMADD213SS_X_X_XM32, X86_FORM_VFMADD231SS_X_X_XM32, X86_FORM_VFMADD132SS_X_X_XM32 },
+            { X86_FORM_VFMADD213SD_X_X_XM64, X86_FORM_VFMADD231SD_X_X_XM64, X86_FORM_VFMADD132SD_X_X_XM64 },
+        };
+        const uint8_t x = destination & 15;
+        const uint8_t a = holes->left & 15;
+        const uint8_t b = holes->right & 15;
+        const uint8_t c = holes->third & 15;
+        const uint32_t d = width == 8 ? 1 : 0;
+        const uint32_t kind = x == b ? 0 : x == c ? 1 : x == a ? 2 : 0;
+        if (x != b && x != c && x != a)
+        {
+            tier1_select_append(&result, tier1_select_float_move(x, b));
+        }
+        const X86Instruction record = {
+            .form = forms[d][kind],
+            .reg = x,
+            .vvvv = kind == 2 ? c : a,
+            .rm = kind == 0 ? c : b,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+        };
+        tier1_select_append(&result, record);
         break;
     }
     case TIER1_RULE_FLOAT_NEGATE:
@@ -3368,7 +3434,7 @@ static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
     // an atomic read/modify/write, and a masked or compressing store (#1840). These are the nodes with an effect, which
     // the plan materializes whatever their uses.
     return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA || op == IR_STACK_RESTORE || op == IR_FENCE || op == IR_ATOMIC_RMW ||
-           op == IR_MASKED_STORE || op == IR_COMPRESS_STORE || (op == IR_LOAD && (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0);
+           op == IR_MASKED_STORE || op == IR_COMPRESS_STORE || op == IR_SCATTER || (op == IR_LOAD && (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0);
 }
 
 // Whether a fold may not move a load past `node` (#1059's audit): a barrier, or any other load, since the typed stream
@@ -3411,7 +3477,8 @@ static void tier1_select_barriers(const IrFunction* function, uint32_t count, ui
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_RESTORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FENCE)) |
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ATOMIC_RMW)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) |
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_MASKED_LOAD)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_MASKED_STORE)) |
-                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_COMPRESS_STORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_GATHER))) & active;
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_COMPRESS_STORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_GATHER)) |
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_SCATTER))) & active;
         __m512i at = _mm512_maskz_add_epi32(barrier, lanes, _mm512_set1_epi32((int)first));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 15));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 14));
@@ -5898,6 +5965,16 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
     }
+    else if (float_width != 0 && op == IR_FMA)
+    {
+        base.rule = TIER1_RULE_FLOAT_FMA;
+        base.width = (uint8_t)float_width;
+        base.values[0] = a;
+        base.values[1] = b;
+        base.values[2] = c;
+        base.intrinsic_cost = 4;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
     else if (float_width != 0 && op == IR_FNEG)
     {
         base.rule = TIER1_RULE_FLOAT_NEGATE;
@@ -5941,6 +6018,33 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 tier1_select_fold(forest, node, b, &narrowed);
                 tier1_select_add_candidate(forest, node, &candidates, narrowed);
             }
+        }
+    }
+    else if (forest->vectors && op == IR_SCATTER)
+    {
+        // A scatter (#1840, BUSTER_TIER1_VECTOR_SCATTER): its stored vector and mask from the extra array.
+        const uint32_t stored = ir_extra_value(function, node, 0);
+        const uint32_t width = stored < function->instruction_count ? tier1_select_vector_width(function->type[stored]) : 0;
+        const uint32_t index_width = b < function->instruction_count ? tier1_select_vector_width(function->type[b]) : 0;
+        const uint32_t lane = function->flags[node];
+        const uint32_t count = lane == IR_SIMD_LANE_I32 ? width / 4 : lane == IR_SIMD_LANE_I64 ? width / 8 : 0;
+        const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : width == 64 ? 2 : 3;
+        const bool shaped = count != 0 && at < 3 && (index_width == count * 4 || index_width == count * 8) &&
+                            ir_simd_scatter_forms[0][lane == IR_SIMD_LANE_I64 ? 1 : 0][index_width == count * 8 ? 1 : 0][at] != X86_FORM_NONE;
+        if (shaped)
+        {
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)width;
+            base.scale = BUSTER_TIER1_VECTOR_SCATTER;
+            base.operation = (uint8_t)lane;
+            base.immediate = function->alignment_log2[node] & 3;
+            base.source_width = (uint8_t)index_width;
+            base.values[0] = a;
+            base.values[1] = b;
+            base.values[2] = ir_extra_value(function, node, 1);
+            base.values[3] = stored;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
         }
     }
     else if (forest->vectors && op == IR_GATHER)

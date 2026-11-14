@@ -14,5 +14,8 @@ b0:
   %11 = compress_store.void %0, %10, %3 align=1 lanes=i32
   %12 = compress_store.void %0, %7, %5 align=1 lanes=i8
   %13 = compress_store.void %0, %9, %4 align=4 lanes=i64
-  %14 = ret.void %10
+  %14 = scatter.void %0, %1, %10, %3 scale=4 lanes=i32
+  %15 = scatter.void %0, %2, %7, %4 scale=8 lanes=i64
+  %16 = scatter.void %0, %2, %9, %4 scale=1 lanes=i32
+  %17 = ret.void %10
 }

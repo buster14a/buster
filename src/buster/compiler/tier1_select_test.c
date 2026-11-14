@@ -1144,6 +1144,64 @@ static void tier1_select_test_sse_vectors(Tier1SelectTest* test)
     }
 }
 
+// IR_FMA's expansion (#1840, TIER1_RULE_FLOAT_FMA): the FMA3 form whose destination holds an operand already, 213 for b,
+// 231 for c and 132 for a, the other two in the formula's order (a * b + c), and b's copy then 213 where none does. Each
+// form takes a NaN in the formula's order (IR_FMA, ir_fma_bits), so the four compute the same bits.
+static void tier1_select_test_fma(Tier1SelectTest* test)
+{
+    typedef struct Tier1SelectTestFma Tier1SelectTestFma;
+    struct Tier1SelectTestFma
+    {
+        uint8_t x;
+        uint8_t a;
+        uint8_t b;
+        uint8_t c;
+        uint8_t kind;
+        bool move;
+        const char* name;
+    };
+    static const Tier1SelectTestFma cases[] = {
+        { 2, 1, 2, 3, 0, false, "an fma into b's register is 213 of a and c" },
+        { 3, 1, 2, 3, 1, false, "an fma into c's register is 231 of a and b" },
+        { 1, 1, 2, 3, 2, false, "an fma into a's register is 132 of c and b" },
+        { 4, 1, 2, 3, 0, true, "an fma into a fourth register copies b, then 213" },
+        { 2, 2, 2, 3, 0, false, "an fma of a == b into their register is 213" },
+        { 3, 1, 3, 3, 0, false, "an fma of b == c into their register is 213" },
+        { 5, 6, 7, 6, 0, true, "an fma of a == c into another register copies b, then 213" },
+    };
+    static const uint16_t forms[2][3] = {
+        { X86_FORM_VFMADD213SS_X_X_XM32, X86_FORM_VFMADD231SS_X_X_XM32, X86_FORM_VFMADD132SS_X_X_XM32 },
+        { X86_FORM_VFMADD213SD_X_X_XM64, X86_FORM_VFMADD231SD_X_X_XM64, X86_FORM_VFMADD132SD_X_X_XM64 },
+    };
+    for (uint32_t d = 0; d < 2; d += 1)
+    {
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(cases); k += 1)
+        {
+            const Tier1SelectTestFma* fma = &cases[k];
+            const Tier1SelectHoles holes = {
+                .rule = TIER1_RULE_FLOAT_FMA,
+                .width = (uint8_t)(d == 0 ? 4 : 8),
+                .destination = fma->x,
+                .left = fma->a,
+                .right = fma->b,
+                .third = fma->c,
+            };
+            const Tier1SelectRecords records = tier1_select_expand(&holes);
+            const uint32_t at = fma->move ? 1 : 0;
+            const X86Instruction* record = &records.records[at];
+            const uint8_t vvvv = fma->kind == 2 ? fma->c : fma->a;
+            const uint8_t rm = fma->kind == 0 ? fma->c : fma->b;
+            bool exact = records.count == at + 1 && record->form == forms[d][fma->kind] && record->reg == fma->x && record->vvvv == vvvv && record->rm == rm &&
+                         record->mode == BUSTER_X86_REGISTER_DIRECT && record->decorations == 0;
+            if (fma->move)
+            {
+                exact = exact && records.records[0].form == X86_FORM_MOVAPS_X_XM && records.records[0].reg == fma->x && records.records[0].rm == fma->b;
+            }
+            tier1_select_test_expect(test, exact, fma->name);
+        }
+    }
+}
+
 static void tier1_select_test_intrinsics(Tier1SelectTest* test)
 {
     Arena input = arena_reserve(1u << 20);
@@ -1523,10 +1581,11 @@ static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
     uint32_t* scalar = calloc(most, sizeof(uint32_t));
     uint32_t* oracle = calloc(most, sizeof(uint32_t));
     tier1_select_test_expect(test, ready && scalar != 0 && oracle != 0, "barrier scan's guarded columns");
-    // The masked and compressing stores are barriers, and the masked loads and gathers fold barriers as loads are (#1840).
-    static const uint8_t kinds[] = { IR_STORE, IR_CALL, IR_CALL_INDIRECT, IR_ALLOCA, IR_STACK_RESTORE, IR_FENCE, IR_ATOMIC_RMW, IR_MASKED_STORE, IR_COMPRESS_STORE,
+    // The masked and compressing stores and the scatters are barriers, and the masked loads and gathers fold barriers as
+    // loads are (#1840).
+    static const uint8_t kinds[] = { IR_STORE, IR_CALL, IR_CALL_INDIRECT, IR_ALLOCA, IR_STACK_RESTORE, IR_FENCE, IR_ATOMIC_RMW, IR_MASKED_STORE, IR_COMPRESS_STORE, IR_SCATTER,
                                      IR_LOAD, IR_LOAD, IR_LOAD, IR_MASKED_LOAD, IR_GATHER, IR_ADD, IR_CONST, IR_ADDRESS, IR_PARAM, IR_BR, IR_RET };
-    const uint32_t barrier_kinds = 9;
+    const uint32_t barrier_kinds = 10;
     static const uint32_t counts[] = { 255, 256, 257, 1000, 4095, 4096 };
     uint64_t random = UINT64_C(0x2c1b3c6dd9b0f6a1);
     bool same = ready && scalar != 0 && oracle != 0;
@@ -1553,7 +1612,7 @@ static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
             const uint8_t* ops = op;
             while (before != 0 && !(ops[before - 1] == IR_STORE || ops[before - 1] == IR_CALL || ops[before - 1] == IR_CALL_INDIRECT || ops[before - 1] == IR_ALLOCA || ops[before - 1] == IR_STACK_RESTORE ||
                                     ops[before - 1] == IR_FENCE || ops[before - 1] == IR_ATOMIC_RMW || ops[before - 1] == IR_LOAD || ops[before - 1] == IR_MASKED_STORE ||
-                                    ops[before - 1] == IR_COMPRESS_STORE || ops[before - 1] == IR_MASKED_LOAD || ops[before - 1] == IR_GATHER))
+                                    ops[before - 1] == IR_COMPRESS_STORE || ops[before - 1] == IR_SCATTER || ops[before - 1] == IR_MASKED_LOAD || ops[before - 1] == IR_GATHER))
             {
                 before -= 1;
             }
@@ -5531,6 +5590,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_compare_memory(&test);
             tier1_select_test_branches(&test);
             tier1_select_test_plans(&test);
+            tier1_select_test_fma(&test);
             tier1_select_test_intrinsics(&test);
             tier1_select_test_lane_forms(&test);
             tier1_select_test_sse_vectors(&test);

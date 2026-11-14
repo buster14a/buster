@@ -632,9 +632,9 @@ static bool ir_inline_general(const IrFunction* function, Arena* scratch, IrInli
         {
             extra += (uint64_t)function->c[node] * 2 + 1;
         }
-        else if (ir_ternary_instruction(function, node))
+        else if (ir_extra_value_count(function, node) != 0)
         {
-            extra += 1;
+            extra += ir_extra_value_count(function, node);
         }
     }
     bool ok = true;
@@ -716,7 +716,7 @@ static bool ir_inline_shape(const IrFunction* function, bool control_flow, Arena
             // names any more.
             const bool call = op == IR_CALL;
             descriptors += call;
-            extra += call ? function->calls[function->b[node]].argument_count : ir_ternary_instruction(function, node) ? 1 : 0;
+            extra += call ? function->calls[function->b[node]].argument_count : ir_extra_value_count(function, node);
             types += call ? function->calls[function->b[node]].parameter_count : 0;
         }
         body.descriptors = descriptors;
@@ -1141,11 +1141,15 @@ static void ir_inline_descriptor(const IrFunction* source, uint32_t old, IrFunct
     destination->b[node] = cursor->descriptors++;
 }
 
-// A ternary intrinsic's third operand (#1840) in a fresh extra slot at the cursor, with its `c` naming that slot.
+// A ternary intrinsic's third operand, or a scatter's stored vector and mask (#1840), in fresh extra slots at the cursor,
+// with its `c` naming the first.
 static void ir_inline_third(const IrFunction* source, uint32_t old, IrFunction* destination, uint32_t node, const uint32_t* values, IrInlineCursor* cursor)
 {
     destination->c[node] = ir_intrinsic_ternary_c(source->c[old], cursor->extra);
-    destination->extra[cursor->extra++] = values[ir_intrinsic_third(source, old)];
+    for (uint32_t k = 0, extra_values = ir_extra_value_count(source, old); k < extra_values; k += 1)
+    {
+        destination->extra[cursor->extra++] = values[ir_extra_value(source, old, k)];
+    }
 }
 
 static uint32_t ir_inline_emit(IrFunction* f, IrInlineCursor* cursor, uint32_t op, uint32_t type, uint32_t a, uint32_t b, uint32_t c)
@@ -1241,7 +1245,7 @@ static void ir_inline_expand(const IrFunction* source, uint32_t node, const IrFu
             {
                 ir_inline_descriptor(callee, inner, rewritten, cursor->node, inner_values, bases, cursor);
             }
-            else if (ir_ternary_instruction(callee, inner))
+            else if (ir_extra_value_count(callee, inner) != 0)
             {
                 ir_inline_third(callee, inner, rewritten, cursor->node, inner_values, cursor);
             }
@@ -1378,7 +1382,7 @@ static void ir_inline_rebuild(const IrFunction* callee, uint32_t inner, uint32_t
     {
         ir_inline_descriptor(callee, inner, rewritten, at, inner_values, bases, cursor);
     }
-    else if (ir_ternary_instruction(callee, inner))
+    else if (ir_extra_value_count(callee, inner) != 0)
     {
         ir_inline_third(callee, inner, rewritten, at, inner_values, cursor);
     }
@@ -1701,7 +1705,7 @@ static void ir_inline_copy_run(const IrFunction* source, uint32_t first, uint32_
             memcpy(rewritten->extra + cursor->extra, source->extra + source->b[i], (uint64_t)source->c[i] * 4);
             cursor->extra += source->c[i];
         }
-        else if (ir_ternary_instruction(source, i))
+        else if (ir_extra_value_count(source, i) != 0)
         {
             ir_inline_third(source, i, rewritten, to, values, cursor);
         }
@@ -1798,9 +1802,9 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                 {
                     sizes.extra_count += source->c[node];
                 }
-                else if (ir_ternary_instruction(source, node))
+                else if (ir_extra_value_count(source, node) != 0)
                 {
-                    sizes.extra_count += 1;
+                    sizes.extra_count += ir_extra_value_count(source, node);
                 }
             }
             call += site;

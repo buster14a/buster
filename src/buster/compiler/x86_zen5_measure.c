@@ -169,6 +169,8 @@ struct X86CostShape
     bool stores;
     bool lea;
     bool is4;
+    // A scatter (#1840): a gather's VSIB shape (X86_COST_GATHER) that writes its lanes and has no result, so no chain.
+    bool scatter;
     // An opmask (BUSTER_X86_COST_OPMASK_MERGE) on the target, and its decorations: merging on registers and stores,
     // zeroing on a load into a vector register (the model's masked load row).
     bool masked;
@@ -482,6 +484,7 @@ static void x86_zen5_shape(uint32_t form, uint32_t operands, X86CostShape* shape
         merged = (reads & BUSTER_X86_RESOURCE_VECTOR(1)) != 0;
     }
     shape->lea = effects->operation == X86_OPERATION_LEA;
+    shape->scatter = effects->operation == X86_OPERATION_VECTOR_SCATTER;
     shape->is4 = description->syntax >= X86_SYNTAX_REG_VVVV_RM_IS4 && description->syntax <= X86_SYNTAX_REG_VVVV_IS4_RM_IMM;
     for (uint32_t role = 0; role < BUSTER_X86_COST_ROLES; role += 1)
     {
@@ -586,8 +589,9 @@ static void x86_zen5_shape(uint32_t form, uint32_t operands, X86CostShape* shape
         const uint32_t operation = effects->operation;
         experiments |= operation == X86_OPERATION_X87_ARITHMETIC || operation == X86_OPERATION_X87_CMOVCC ? 1u << X86_COST_CHAIN_DESTINATION : 0;
     }
-    else if (shape->special == X86_COST_GATHER)
+    else if (shape->special == X86_COST_GATHER && !shape->scatter)
     {
+        // A gather's chain through its index; a scatter's lanes go to memory alone, its throughput its row's.
         experiments |= 1u << X86_COST_CHAIN_INDEX;
     }
     shape->experiments = experiments;
