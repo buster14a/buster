@@ -1196,7 +1196,7 @@ the resting rule 12.54 M and 127.28 M of it alone: `luaV_execute` −125.8 M,
 | both, with the opening's memory hint | −14.11 M | −127.28 M |
 
 Main's #2592 (the operand sink, "Increments after their last reader" above)
-removed much of the same traffic in `luaV_execute` since. On main `98186d5c`,
+removed much of the same traffic in `luaV_execute` since. On main `98186d5e`,
 resting on closings too gained speedtest1 8.90 M but cost Lua's scripts 7.64 M:
 `luaV_execute`'s dispatch join, whose ranges then rested where a handler's call
 had taken `disptab`'s register, recomputed it on every dispatch (14.3 M more
@@ -1208,7 +1208,7 @@ resting range, and its quiet-range trace now gives its register up.
 
 With #2685's ties, the IR guide's folded takes (#2618), the eviction before a
 read, resting on openings and the definitions no edge reads, by callgrind at
-main `98186d5c` (after #2592) against it, speedtest1 runs 2,865.62 M
+main `98186d5e` (after #2592) against it, speedtest1 runs 2,865.62 M
 instructions instead of 2,878.38 M (−0.44%) and Lua's five scripts 5,100.92 M
 instead of 5,122.80 M (−0.43%; each script −0.14% to −0.88%): `luaV_execute`
 −7.04 M, `index2value` −9.14 M, and no Lua function more. speedtest1's largest
