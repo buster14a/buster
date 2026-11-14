@@ -236,6 +236,10 @@ struct IrVectorizeWork
     uint32_t* zeros;
     // The loop's rows in order, and the values whose per-loop entries were set (for their reset).
     uint32_t* rows;
+    // ir_vectorize_start_chain's stack: values and whether their operands were pushed.
+    uint32_t* chain;
+    uint8_t* chain_expanded;
+    uint64_t chain_capacity;
     uint32_t* touched;
     uint32_t touched_count;
     uint8_t* innermost;
@@ -436,36 +440,77 @@ static uint32_t ir_vectorize_root(const IrFunction* f, uint32_t value)
 }
 
 // Whether two values are the same address or index by their chains: one value, equal constants, or one operation of
-// equal operands (an address's scale and offset by content).
+// equal operands (an address's scale and offset by content), at most `depth` operations deep. The pairs still to compare
+// are an explicit stack (the call graph's no-recursion rule): each pair leaves at most one sibling behind, so
+// BUSTER_IR_VECTORIZE_SAME_STACK holds every depth's.
+#define BUSTER_IR_VECTORIZE_SAME_STACK (2u * BUSTER_IR_VECTORIZE_DEPTH + 4u)
 static bool ir_vectorize_same(const IrFunction* f, uint32_t x, uint32_t y, uint32_t depth)
 {
-    const uint32_t a = ir_vectorize_root(f, x);
-    const uint32_t b = ir_vectorize_root(f, y);
-    bool result = a == b;
-    if (!result && depth != 0 && a < f->instruction_count && b < f->instruction_count && f->op[a] == f->op[b] && f->type[a] == f->type[b])
+    uint32_t lefts[BUSTER_IR_VECTORIZE_SAME_STACK] = { 0 };
+    uint32_t rights[BUSTER_IR_VECTORIZE_SAME_STACK] = { 0 };
+    uint32_t depths[BUSTER_IR_VECTORIZE_SAME_STACK] = { 0 };
+    uint32_t count = 1;
+    lefts[0] = x;
+    rights[0] = y;
+    depths[0] = depth;
+    bool result = true;
+    while (result && count != 0)
     {
-        const uint32_t op = f->op[a];
-        uint64_t ka = 0;
-        uint64_t kb = 0;
-        if (op == IR_CONST)
+        count -= 1;
+        const uint32_t a = ir_vectorize_root(f, lefts[count]);
+        const uint32_t b = ir_vectorize_root(f, rights[count]);
+        const uint32_t level = depths[count];
+        if (a != b)
         {
-            result = ir_vectorize_constant(f, a, &ka) && ir_vectorize_constant(f, b, &kb) && ka == kb;
-        }
-        else if (op == IR_ADDRESS)
-        {
-            const IrAddress da = f->addresses[f->c[a]];
-            const IrAddress db = f->addresses[f->c[b]];
-            const bool indices = (f->b[a] == BUSTER_IR_NONE && f->b[b] == BUSTER_IR_NONE) ||
-                                 (f->b[a] != BUSTER_IR_NONE && f->b[b] != BUSTER_IR_NONE && ir_vectorize_same(f, f->b[a], f->b[b], depth - 1));
-            result = da.offset == db.offset && da.scale == db.scale && indices && ir_vectorize_same(f, f->a[a], f->a[b], depth - 1);
-        }
-        else if (op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_SHL)
-        {
-            result = ir_vectorize_same(f, f->a[a], f->a[b], depth - 1) && ir_vectorize_same(f, f->b[a], f->b[b], depth - 1);
-        }
-        else if (op == IR_SEXT || op == IR_ZEXT)
-        {
-            result = ir_vectorize_same(f, f->a[a], f->a[b], depth - 1);
+            const bool comparable = level != 0 && a < f->instruction_count && b < f->instruction_count && f->op[a] == f->op[b] && f->type[a] == f->type[b];
+            const uint32_t op = comparable ? f->op[a] : IR_INVALID;
+            uint64_t ka = 0;
+            uint64_t kb = 0;
+            // The operand pairs this pair needs equal: a, then b where the operation has it.
+            uint32_t pairs = 0;
+            bool second = false;
+            if (op == IR_CONST)
+            {
+                result = ir_vectorize_constant(f, a, &ka) && ir_vectorize_constant(f, b, &kb) && ka == kb;
+            }
+            else if (op == IR_ADDRESS)
+            {
+                const IrAddress da = f->addresses[f->c[a]];
+                const IrAddress db = f->addresses[f->c[b]];
+                const bool indexed = f->b[a] != BUSTER_IR_NONE;
+                result = da.offset == db.offset && da.scale == db.scale && indexed == (f->b[b] != BUSTER_IR_NONE);
+                pairs = 1;
+                second = indexed;
+            }
+            else if (op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_SHL)
+            {
+                pairs = 1;
+                second = true;
+            }
+            else if (op == IR_SEXT || op == IR_ZEXT)
+            {
+                pairs = 1;
+            }
+            else
+            {
+                result = false;
+            }
+            const uint32_t pushes = pairs + (second ? 1u : 0u);
+            result = result && count + pushes <= BUSTER_IR_VECTORIZE_SAME_STACK;
+            if (result && pairs != 0)
+            {
+                lefts[count] = f->a[a];
+                rights[count] = f->a[b];
+                depths[count] = level - 1;
+                count += 1;
+            }
+            if (result && second)
+            {
+                lefts[count] = f->b[a];
+                rights[count] = f->b[b];
+                depths[count] = level - 1;
+                count += 1;
+            }
         }
     }
     return result;
@@ -1428,35 +1473,52 @@ static uint32_t ir_vectorize_clone(IrVectorizeWork* work, IrVectorizeBuild* buil
     return ir_vectorize_row(build, f->op[i], f->type[i], f->flags[i], f->alignment_log2[i], a, b, c, ir_vectorize_origin(f, i));
 }
 
-// The G clones of a guard's pointer chain, the induction at its start, depth first, each once.
+// The G clones of a guard's pointer chain, the induction at its start, each once and after its operands' (an operand's
+// before the next one's, in operand order), by an explicit stack (the call graph's no-recursion rule) of values and
+// whether their operands were pushed; a value is pushed at most once per operand that reads it.
 static void ir_vectorize_start_chain(IrVectorizeWork* work, IrVectorizeBuild* build, uint32_t loop, const IrVectorizeLoop* plan, uint32_t value)
 {
     const IrFunction* f = work->function;
-    const uint32_t class = ir_vectorize_class(work, loop, value);
-    if ((class == IR_VECTORIZE_CLASS_INDEX || class == IR_VECTORIZE_CLASS_POINTER) && work->starts[value] == BUSTER_IR_NONE && ir_vectorize_inside(work, loop, value))
+    uint32_t count = 1;
+    work->chain[0] = value;
+    work->chain_expanded[0] = 0;
+    while (count != 0)
     {
-        if (value == plan->induction)
+        const uint32_t v = work->chain[count - 1];
+        const bool expanded = work->chain_expanded[count - 1] != 0;
+        const uint32_t class = ir_vectorize_class(work, loop, v);
+        const bool pending = (class == IR_VECTORIZE_CLASS_INDEX || class == IR_VECTORIZE_CLASS_POINTER) && ir_vectorize_inside(work, loop, v) && work->starts[v] == BUSTER_IR_NONE;
+        const bool copy = f->op[v] == IR_COPY || f->op[v] == IR_PHI;
+        if (!pending)
         {
-            work->starts[value] = plan->start;
+            count -= 1;
         }
-        else if (f->op[value] == IR_COPY || f->op[value] == IR_PHI)
+        else if (v == plan->induction)
         {
-            const uint32_t source = f->op[value] == IR_PHI ? f->extra[f->a[value] + 1] : f->a[value];
-            ir_vectorize_start_chain(work, build, loop, plan, source);
-            work->starts[value] = ir_vectorize_operand(work, loop, source, true);
+            work->starts[v] = plan->start;
+            count -= 1;
+        }
+        else if (expanded)
+        {
+            // Every operand's start is made: this one's, a copy's its source's.
+            const uint32_t source = f->op[v] == IR_PHI ? f->extra[f->a[v] + 1] : f->a[v];
+            work->starts[v] = copy ? ir_vectorize_operand(work, loop, source, true) : ir_vectorize_clone(work, build, loop, v, true);
+            count -= 1;
         }
         else
         {
-            const uint32_t mask = ir_value_mask(f, value);
-            const uint32_t operands[3] = { f->a[value], f->b[value], f->c[value] };
-            for (uint32_t k = 0; k < 3; k += 1)
+            work->chain_expanded[count - 1] = 1;
+            const uint32_t mask = copy ? 1u : ir_value_mask(f, v);
+            const uint32_t operands[3] = { f->op[v] == IR_PHI ? f->extra[f->a[v] + 1] : f->a[v], f->b[v], f->c[v] };
+            for (uint32_t k = 3; k > 0; k -= 1)
             {
-                if (((mask >> k) & 1) != 0)
+                if (((mask >> (k - 1)) & 1) != 0 && count < work->chain_capacity)
                 {
-                    ir_vectorize_start_chain(work, build, loop, plan, operands[k]);
+                    work->chain[count] = operands[k - 1];
+                    work->chain_expanded[count] = 0;
+                    count += 1;
                 }
             }
-            work->starts[value] = ir_vectorize_clone(work, build, loop, value, true);
         }
     }
 }
@@ -1917,6 +1979,10 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
         work.ones = ir_allocate(scratch, n, 4, &ok);
         work.zeros = ir_allocate(scratch, n, 4, &ok);
         work.rows = ir_allocate(scratch, n, 4, &ok);
+        // Each value of a chain is pushed once and pushes its operands once: at most three per value, and the first.
+        work.chain_capacity = n * 3 + 4;
+        work.chain = ir_allocate(scratch, work.chain_capacity, 4, &ok);
+        work.chain_expanded = ir_allocate(scratch, work.chain_capacity, 1, &ok);
         // Each value is touched at most a few times per loop: its class, its splat and its needed bit.
         work.touched = ir_allocate(scratch, n * 4 + 8, 4, &ok);
         work.innermost = ir_allocate(scratch, (uint64_t)work.loops.loop_count + 1, 1, &ok);
