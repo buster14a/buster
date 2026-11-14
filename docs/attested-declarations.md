@@ -669,8 +669,9 @@ branch's code (buster#2620), CPU 2, `setarch -R`, against main's `df85213e`
   with the rule (and the reader's environment published for the events)
   measured musl's command 1.145 times faster and the glibc units' 1.442, two
   rounds each.
-- **What else the compile needed.** `-g` skips nothing: the unit's DWARF
-  describes every type its table holds ("Risks" below). A diagnostic of the
+- **What else the compile needed.** `-g` skipped nothing then: the unit's
+  DWARF described every declaration's types (since #2531's last part it skips:
+  "Risks" below). A diagnostic of the
   unit's end (`-Wunused-function`'s) is published past its last token, so it
   is placed by its location; placed by its output position, a `-Wall` unit
   learned nothing. A unit that skipped is read again with nothing skipped,
@@ -1164,12 +1165,16 @@ Each ends the work with a record.
   library names, strings that hold symbols); a new one needs its own, and the
   corpus comparison is what finds it.
 - **`-g`.** A unit's DWARF must not describe a skipped declaration, as clang's
-  describes no unused one; if `check_debug_type_reference`'s rule reaches
-  them some other way, `-g` units don't skip until it doesn't. Step 1 found it
-  does: `c_check_debug_values.c` describes every type the unit's table holds
-  (a header's unused `struct` among them, unlike clang), so the objects of
-  `test-check-units`' `-g` programs differed. `-g` skips nothing; `--attested=verify`
-  runs with it.
+  describes no unused one. Step 1 found that `c_check_debug_values.c`
+  described every declaration's types (a header's unused `struct` among them,
+  unlike clang), so the objects of `test-check-units`' `-g` programs differed,
+  and `-g` skipped nothing. Since #2531's last part, its roots are clang's
+  (`check_debug_value_roots`): the declarations that define what the unit
+  emits (a body, an object's storage), the types they reach, and the typedefs
+  they bind, in turn; a prototype, an extern declaration, a typedef or a tag
+  that no definition names gives the DWARF nothing. What a definition binds
+  it also spells, so the reach reaches it: `-g` skips, and every `-g` object is
+  `--attested=off`'s.
 - **Hash collisions.** 128 bits, keyed; a collision could only skip the
   checking of a declaration nothing names.
 - **Order of the lane's units.** A unit's output can't depend on the memo

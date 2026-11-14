@@ -121,8 +121,8 @@ requirements. [Command index](README.md).
   `check_units_merge_lanes`, #778) into one executable, with `-g` of their DWARF
   units, one each (#779). A lane's units skip the file-scope declarations its
   earlier units read silently and purely and that their own code doesn't reach
-  (#2531, `--attested=on|verify|off`, on by default but with `-g` or
-  `--scalar`: the [translation units guide](translation-units.md#attested-declarations---attested-2531)).
+  (#2531, `--attested=on|verify|off`, on by default but with `--scalar`, `-g`
+  too: the [translation units guide](translation-units.md#attested-declarations---attested-2531)).
   `--attested-memo=DIRECTORY` keeps their memo across processes, in a file
   of that directory for the compiler's build and the command's options, so
   that a command of one source file skips what earlier commands learned too
