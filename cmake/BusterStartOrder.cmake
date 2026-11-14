@@ -16,9 +16,9 @@
 # names, a symbol ordering file for the global functions and the C library's (which the static link places after every
 # object): lld puts their sections first in .text, right after the units' local ones. The checker's own code
 # (.text.buster_checker, main.c) is one section of each unit, which the script can't reorder: where a unit's native
-# code is generated in parallel parts (BusterCodegen.cmake), buster_start_order_unit below writes the names the split
-# (tools/codegen/split.c --first) puts first in that section. Each file is written only when its text changes, so that
-# an unchanged list relinks nothing.
+# code is generated in parallel parts (BusterCodegen.cmake), in every static build, whatever its linker,
+# buster_start_order_unit below writes the names the split (tools/codegen/split.c --first) puts first in that section.
+# Each file is written only when its text changes, so that an unchanged list relinks nothing.
 
 function(buster_start_order_write path text)
     set(current "")

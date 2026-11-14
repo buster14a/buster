@@ -1054,9 +1054,10 @@ first in it.
   others go by name in a symbol ordering file (`start-order.symbols`), which
   puts their sections first in `.text`, right after; `start-order` leaves out
   any whose name a unit's static shares, which the name would move too.
-- **Inside the checker's section:** at configuration,
-  `BusterStartOrder.cmake` writes each Release split unit's names, its own
-  lines' and the `- NAME` ones in the list's order, to
+- **Inside the checker's section:** in every static build, whatever its
+  linker, so that switching `BUSTER_LINKER` relinks alone,
+  `BusterStartOrder.cmake` writes at configuration each Release split unit's
+  names, its own lines' and the `- NAME` ones in the list's order, to
   `start-order/UNIT.txt` in the tree. The split (`tools/codegen/split.c
   --first`) puts each function they name that the unit defines in a named
   section, `.text.buster_checker`, before that section's first unlisted
@@ -1072,9 +1073,10 @@ first in it.
   function, so that the shift moves that unit's code there too.
 - **Where:** a static link by lld (`start order: TRUE` in the configure
   step's status line). Every static build compiles with
-  `-ffunction-sections`, whatever its linker, so that switching
-  `BUSTER_LINKER` relinks alone; a static link by mold or GNU ld lays the
-  sections out without the script. The sanitizers', fuzzing and
+  `-ffunction-sections`, and its split units' parts take the list, whatever
+  its linker, so that switching `BUSTER_LINKER` relinks alone; a static link
+  by mold or GNU ld lays the sections out without the script, and keeps the
+  checker's section in the list's order. The sanitizers', fuzzing and
   `BUSTER_HOST_RUNTIME`'s dynamic links compile without it.
   `-ffunction-sections` alone made `.text` 6 KB longer (0.02%): a jump to
   another function's section can't take the assembler's short form.

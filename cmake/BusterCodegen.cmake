@@ -280,11 +280,12 @@ function(buster_codegen_unit name)
     set(exports "${directory}/exports.txt")
     set(locals "${directory}/locals.txt")
     set(stamp "${directory}/split.stamp")
-    # The start's order (#1444, BusterStartOrder.cmake): where the link places the functions small compiles run, the
-    # split puts the unit's ones in .text.buster_checker, which the link can't reorder, first in that section.
+    # The start's order (#1444, BusterStartOrder.cmake): in a static build, whatever its linker, as CMakeLists.txt
+    # decides (buster_split_order), the split puts the unit's functions small compiles run in .text.buster_checker,
+    # which no link script can reorder, first in that section.
     set(first "")
     set(options "")
-    if(buster_start_order)
+    if(buster_split_order)
         set(first "${CMAKE_BINARY_DIR}/start-order/${name}.txt")
         buster_start_order_unit("${start_order_list}" "${name}" "${first}" own)
         if(own EQUAL 0)
