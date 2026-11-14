@@ -4812,10 +4812,80 @@ static bool check_program_census_left_out(const uint64_t* arms, uint32_t arm_cou
     return low != 0 && t <= (uint32_t)arms[low - 1];
 }
 
+// The graph's 64-node chunks that hold a node of a body (bit k of `touched` for nodes 64k to 64k + 63; the last, partial
+// chunk's always): a chunk whose tokens' least to greatest meet one of the bodies `declarations` to `closings` (each's
+// declaration to its closing brace, `body_count` of them, sorted and apart), the last that starts at or before the
+// greatest, which a cursor finds as the chunks go. A chunk with a token past the unit's (none of a body's) counts. No
+// other chunk has a node that names a body's object, takes a body's operand or holds a body's condition, so the pass's
+// scans skip them: on main.c, whose unit has the compiler's tables, more than half its nodes. Four vectors' least and
+// greatest lane by lane, then one reduction of each. AVX-512 only; the scalar path scans every node.
+static void check_program_census_touched(const CheckProgram* program, const uint32_t* declarations, const uint32_t* closings, uint32_t body_count, uint64_t* touched)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const uint32_t chunks = graph->count / 64;
+    const uint32_t count = program->input->token_count;
+    memset(touched, 0, ((uint64_t)chunks / 64 + 1) * sizeof(uint64_t));
+    uint32_t at = 0;
+    for (uint32_t k = 0; k < chunks; k += 1)
+    {
+        const uint32_t* tokens = graph->tokens + (uint64_t)k * 64;
+        const __m512i first = _mm512_loadu_si512(tokens);
+        const __m512i second = _mm512_loadu_si512(tokens + 16);
+        const __m512i third = _mm512_loadu_si512(tokens + 32);
+        const __m512i fourth = _mm512_loadu_si512(tokens + 48);
+        const __m512i least = _mm512_min_epu32(_mm512_min_epu32(first, second), _mm512_min_epu32(third, fourth));
+        const __m512i greatest = _mm512_max_epu32(_mm512_max_epu32(first, second), _mm512_max_epu32(third, fourth));
+        const bool past = _mm512_cmpge_epu32_mask(greatest, _mm512_set1_epi32((int)count)) != 0;
+        const uint32_t low = _mm512_reduce_min_epu32(least);
+        const uint32_t high = _mm512_reduce_max_epu32(greatest);
+        while (!past && at + 1 < body_count && declarations[at + 1] <= high)
+        {
+            at += 1;
+        }
+        while (!past && at > 0 && declarations[at] > high)
+        {
+            at -= 1;
+        }
+        const bool hit = past || (at < body_count && declarations[at] <= high && low <= closings[at]);
+        touched[k / 64] |= (uint64_t)hit << (k % 64);
+    }
+    touched[chunks / 64] |= UINT64_C(1) << (chunks % 64);
+}
+
+// Whether the 16-node block from node `block` is in a chunk `touched` marks (check_program_census_touched); every block
+// without it.
+static inline bool check_program_census_block(const uint64_t* touched, uint64_t block)
+{
+    return touched == NULL || ((touched[block / 4096] >> ((block / 64) % 64)) & 1) != 0;
+}
+
+// Whether one of `arms`, `arm_count` token ranges as check_program_census_left_out takes them, meets tokens `low` to
+// `high`: the last range that starts at or before `high` ends at or after `low`.
+static bool check_program_census_meets(const uint64_t* arms, uint32_t arm_count, uint32_t low, uint32_t high)
+{
+    uint32_t first = 0;
+    uint32_t end = arm_count;
+    while (first < end)
+    {
+        const uint32_t middle = first + (end - first) / 2;
+        const bool before = (uint32_t)(arms[middle] >> 32) <= high;
+        first = before ? middle + 1 : first;
+        end = before ? end : middle;
+    }
+    return first != 0 && low <= (uint32_t)arms[first - 1];
+}
+
+// Whether node `node` has its mark in `dead`, a bit a node (check_program_census_prune).
+static inline bool check_program_census_dead(const uint64_t* dead, uint32_t node)
+{
+    return ((dead[node / 64] >> (node % 64)) & 1) != 0;
+}
+
 // The pruned scan's marks (check_program_census_scan): the operands that `node` leaves out, as check_program_references
 // does (all of sizeof's and _Alignof's, the one a constant condition of &&, || or ?: skips, a computed call's callee), and
-// every node below them, in `dead`, by a walk on `stack` (room for every node: a node is pushed once, as it's marked).
-static void check_program_census_prune(const CheckProgram* program, uint32_t node, uint8_t* dead, uint32_t* stack)
+// every node below them, in `dead` (a bit a node), by a walk on `stack` (room for every node: a node is pushed once, as
+// it's marked).
+static void check_program_census_prune(const CheckProgram* program, uint32_t node, uint64_t* dead, uint32_t* stack)
 {
     const CheckGraph* graph = &program->input->graph;
     const CheckOp op = graph->ops[node];
@@ -4840,9 +4910,9 @@ static void check_program_census_prune(const CheckProgram* program, uint32_t nod
     uint32_t depth = 0;
     for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(operands); k += 1)
     {
-        if (drop[k] && operands[k] < graph->count && dead[operands[k]] == 0)
+        if (drop[k] && operands[k] < graph->count && !check_program_census_dead(dead, operands[k]))
         {
-            dead[operands[k]] = 1;
+            dead[operands[k] / 64] |= UINT64_C(1) << (operands[k] % 64);
             stack[depth++] = operands[k];
         }
     }
@@ -4852,18 +4922,18 @@ static void check_program_census_prune(const CheckProgram* program, uint32_t nod
         const uint32_t below[] = { graph->operand0[at], graph->operand1[at], graph->operand2[at] };
         for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(below); k += 1)
         {
-            if (below[k] < graph->count && dead[below[k]] == 0)
+            if (below[k] < graph->count && !check_program_census_dead(dead, below[k]))
             {
-                dead[below[k]] = 1;
+                dead[below[k] / 64] |= UINT64_C(1) << (below[k] % 64);
                 stack[depth++] = below[k];
             }
         }
         for (uint32_t a = 0; check_graph_has_arguments(graph->ops[at]) && a < graph->argument_counts[at]; a += 1)
         {
             const uint32_t argument = graph->argument_nodes[graph->argument_offsets[at] + a];
-            if (dead[argument] == 0)
+            if (!check_program_census_dead(dead, argument))
             {
-                dead[argument] = 1;
+                dead[argument / 64] |= UINT64_C(1) << (argument % 64);
                 stack[depth++] = argument;
             }
         }
@@ -4892,17 +4962,20 @@ static void check_program_body_cleanups(const CheckInput* input, uint32_t openin
     *count = end - low;
 }
 
+// The scan's vector path gathers a leaf's flags and object as one qword.
+_Static_assert(offsetof(CheckGraphLeaf, object) == offsetof(CheckGraphLeaf, flags) + sizeof(uint32_t), "a leaf's object follows its flags");
+
 // One VALUE node of the scan (check_program_census_scan): where its object has static storage, the node isn't `dead` and
 // no range of `arms` holds its token, the object's pair with the body whose tokens hold the node (a declaration's to its
 // closing brace's: `declarations` and `closings`, body_count of them), the cursor *b moved to that body.
 static inline __attribute__((always_inline)) void check_program_census_leaf(const CheckProgram* program, const uint32_t* declarations, const uint32_t* closings,
-                                                                           uint32_t body_count, const uint8_t* dead, const uint64_t* arms, uint32_t arm_count,
+                                                                           uint32_t body_count, const uint64_t* dead, const uint64_t* arms, uint32_t arm_count,
                                                                            uint32_t node, uint32_t* b, uint64_t* pairs, uint32_t* pair_count, uint32_t* starts)
 {
     const CheckInput* input = program->input;
     const CheckGraph* graph = &input->graph;
     const uint32_t object = check_graph_leaf_object(graph, node);
-    const bool fixed = object != 0 && object < program->object_count && (dead == NULL || dead[node] == 0) &&
+    const bool fixed = object != 0 && object < program->object_count && (dead == NULL || !check_program_census_dead(dead, node)) &&
                        ((check_graph_leaf_flags(graph, node) & BUSTER_CHECK_STATIC_OBJECT) != 0 ||
                         check_input_bit(input->declaration_bits, object - 1, BUSTER_CHECK_BITS_STATIC));
     const uint32_t t = graph->tokens[node];
@@ -4934,8 +5007,8 @@ static inline __attribute__((always_inline)) void check_program_census_leaf(cons
 // `census`, its runs in `output`; `seen` takes epochs from `epochs`, past the bodies'. AVX-512 tests 16 nodes' slots at a
 // time, the rest and the `scalar` path one at a time. False if there's no room.
 static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus* census, const Parser* parser, const uint32_t* openings, uint32_t body_count,
-                                      const uint64_t* arms, uint32_t arm_count, bool prune, uint32_t epochs, uint32_t* seen, uint64_t* reference_items,
-                                      uint64_t* reference_sort, bool scalar, Arena* output, Arena* scratch)
+                                      const uint64_t* arms, uint32_t arm_count, bool prune, const uint64_t* touched, uint32_t epochs, uint32_t* seen,
+                                      uint64_t* reference_items, uint64_t* reference_sort, bool scalar, Arena* output, Arena* scratch)
 {
     (void)scalar;
 
@@ -4943,16 +5016,18 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
     const CheckGraph* graph = &input->graph;
     const uint32_t node_count = graph->count;
     const uint64_t temporary = scratch->length;
-    // A pair a VALUE node at most, each a leaf (CheckGraph.leaf_count).
+    // A pair a VALUE node at most, each a leaf (CheckGraph.leaf_count), and room for a block's 16 stored whole.
     const uint64_t leaves = (uint64_t)graph->leaf_count + 1;
-    uint64_t* pairs = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, leaves);
+    uint64_t* pairs = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, leaves + 16);
     uint32_t* starts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)body_count + 1);
     uint32_t* objects = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, leaves);
     uint32_t* declarations = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)body_count + 1);
     uint32_t* closings = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)body_count + 1);
     census->first = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)body_count + 1);
     census->counts = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)body_count + 1);
-    uint8_t* dead = prune ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)node_count + 1) : NULL;
+    // The dead marks, a bit a node: an eighth of a byte column's pages, each a fault in a fresh scratch.
+    const uint64_t dead_words = (uint64_t)node_count / 64 + 1;
+    uint64_t* dead = prune ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, dead_words) : NULL;
     uint32_t* walk = prune ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : NULL;
     bool valid = pairs != NULL && starts != NULL && objects != NULL && declarations != NULL && closings != NULL && census->first != NULL && census->counts != NULL &&
                  (!prune || (dead != NULL && walk != NULL));
@@ -4969,20 +5044,63 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
         // are few (sizeof, _Alignof, &&, || and ?: of a constant condition, a computed call), so a scan of the ops finds
         // them, 16 at a time with AVX-512, and a walk from each of their left-out operands marks its nodes. A label in a
         // left-out operand, for which the walk keeps it, isn't looked for: the census's missing references would say so.
-        memset(dead, 0, (uint64_t)node_count + 1);
-        uint32_t node = 0;
-        for (; !BUSTER_SCALAR_PATH(scalar) && node_count - node >= 16; node += 16)
+        memset(dead, 0, dead_words * sizeof(uint64_t));
+        // Of the calls, only one the reader marked (BUSTER_CHECK_LIBRARY_CALL in its member) can be computed. Of &&, || and
+        // ?:, only one whose condition is a constant or a builtin's query has a truth (check_program_runtime_truth): their
+        // nodes, compressed into `pending` as the scan finds them, have their conditions' constant kinds and ops gathered
+        // 16 at a time (a kind's byte column read as dwords where 3 bytes past are the column's), and only those, a dense
+        // stream's and one near the column's end take check_program_census_prune. The marks are a union, in any order.
+        const CheckStream* stream = program->stream;
+        uint32_t pending[128 + 16];
+        uint32_t pending_count = 0;
+        const __m512i lane = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+        const __m512i zero = _mm512_setzero_si512();
+        // A gather's index is signed: past 2^31 nodes, the scalar loop takes them all.
+        const uint32_t scanned = BUSTER_SCALAR_PATH(scalar) || node_count >= (UINT32_C(1) << 31) ? 0 : node_count & ~UINT32_C(15);
+        // The last block, `scanned`, scans nothing and takes what is pending.
+        for (uint64_t block = 0; !BUSTER_SCALAR_PATH(scalar) && node_count < (UINT32_C(1) << 31) && block <= scanned; block += 16)
         {
-            const __m512i ops = _mm512_loadu_si512(graph->ops + node);
-            const __mmask16 special = _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_SIZEOF)) | _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_ALIGNOF)) |
-                                      _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_LOGICAL_AND)) |
-                                      _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_LOGICAL_OR)) |
-                                      _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_CONDITIONAL)) | _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_CALL));
-            for (uint32_t lanes = special; lanes != 0; lanes &= lanes - 1)
+            const bool scanning = block < scanned && check_program_census_block(touched, block);
+            const __m512i ops = scanning ? _mm512_loadu_si512(graph->ops + block) : zero;
+            const __mmask16 marked =
+                scanning ? _mm512_test_epi32_mask(_mm512_loadu_si512(graph->members + block), _mm512_set1_epi32((int)BUSTER_CHECK_LIBRARY_CALL)) : (__mmask16)0;
+            const __mmask16 always = scanning ? _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_SIZEOF)) |
+                                                    _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_ALIGNOF)) |
+                                                    (marked & _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_CALL))) :
+                                                (__mmask16)0;
+            const __mmask16 conditional = scanning && !program->unselected_operands ? _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_LOGICAL_AND)) |
+                                                                                          _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_LOGICAL_OR)) |
+                                                                                          _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_CONDITIONAL)) :
+                                                                                      (__mmask16)0;
+            for (uint32_t lanes = always; lanes != 0; lanes &= lanes - 1)
             {
-                check_program_census_prune(program, node + (uint32_t)__builtin_ctz(lanes), dead, walk);
+                check_program_census_prune(program, (uint32_t)block + (uint32_t)__builtin_ctz(lanes), dead, walk);
             }
+            _mm512_mask_compressstoreu_epi32(pending + pending_count, conditional, _mm512_add_epi32(_mm512_set1_epi32((int)block), lane));
+            pending_count += (uint32_t)__builtin_popcount(conditional);
+            uint32_t ready = pending_count >= 128 ? pending_count & ~UINT32_C(15) : 0;
+            ready = block < scanned ? ready : pending_count;
+            for (uint32_t i = 0; i < ready; i += 16)
+            {
+                const __mmask16 present = (__mmask16)(ready - i >= 16 ? 0xffff : (1u << (ready - i)) - 1);
+                const __m512i nodes = _mm512_maskz_loadu_epi32(present, pending + i);
+                const __m512i conditions = _mm512_mask_i32gather_epi32(zero, present, nodes, graph->operand0, 4);
+                const __mmask16 inside = present & _mm512_cmplt_epu32_mask(conditions, _mm512_set1_epi32((int)node_count));
+                const __mmask16 safe =
+                    stream->dense_values == NULL && node_count >= 4 ? inside & _mm512_cmplt_epu32_mask(conditions, _mm512_set1_epi32((int)(node_count - 3))) : 0;
+                const __m512i kinds = _mm512_and_si512(_mm512_mask_i32gather_epi32(zero, safe, conditions, stream->value_constants, 1), _mm512_set1_epi32(0xff));
+                const __m512i operations = _mm512_mask_i32gather_epi32(zero, inside, conditions, graph->ops, 4);
+                const __mmask16 constant = _mm512_cmpneq_epi32_mask(kinds, _mm512_set1_epi32(CHECK_CONSTANT_NONE));
+                const __mmask16 query = _mm512_cmpeq_epi32_mask(operations, _mm512_set1_epi32(CHECK_OP_BUILTIN_QUERY));
+                for (uint32_t lanes = inside & ((safe & constant) | (__mmask16)~safe | query); lanes != 0; lanes &= lanes - 1)
+                {
+                    check_program_census_prune(program, pending[i + (uint32_t)__builtin_ctz(lanes)], dead, walk);
+                }
+            }
+            memmove(pending, pending + ready, (pending_count - ready) * sizeof(uint32_t));
+            pending_count -= ready;
         }
+        uint32_t node = scanned;
         for (; node < node_count; node += 1)
         {
             const CheckOp op = graph->ops[node];
@@ -4991,12 +5109,71 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
                 check_program_census_prune(program, node, dead, walk);
             }
         }
-        dead[node_count] = 0;
+        dead[node_count / 64] &= ~(UINT64_C(1) << (node_count % 64));
     }
     if (valid)
     {
         memset(starts, 0, ((uint64_t)body_count + 1) * sizeof(uint32_t));
         uint32_t node = 0;
+        // 16 nodes at a time with AVX-512: their leaves' objects and flags gathered from the records, their dead marks, and
+        // the static bit (CheckInput.declaration_bits, a byte a token and one past) of the objects the flags don't mark; only
+        // the leaves of static objects, few, take the scalar step that finds their body. An object within 3 tokens of the
+        // end, whose bit a dword gather would read past, takes it too; so does every leaf of a graph whose values are dense.
+        const uint32_t count = input->token_count;
+        const bool gathered = !BUSTER_SCALAR_PATH(scalar) && graph->dense_leaves == NULL && graph->leaf_count < (UINT32_C(1) << 26) && count >= 4;
+        const __m512i zero = _mm512_setzero_si512();
+        for (; gathered && node_count - node >= 16; node += 16)
+        {
+            const __m512i slots = check_program_census_block(touched, node) ? _mm512_loadu_si512(graph->leaf_slots + node) : _mm512_set1_epi32((int)BUSTER_CHECK_NONE);
+            const __mmask16 leaves = _mm512_cmpneq_epi32_mask(slots, _mm512_set1_epi32((int)BUSTER_CHECK_NONE));
+            // Each record's flags and object, adjacent, as one qword: 8 lanes a gather, then the halves apart.
+            const __m512i offsets = _mm512_add_epi32(_mm512_mullo_epi32(slots, _mm512_set1_epi32((int)sizeof(CheckGraphLeaf))),
+                                                     _mm512_set1_epi32((int)offsetof(CheckGraphLeaf, flags)));
+            const __m512i low = _mm512_mask_i32gather_epi64(zero, (__mmask8)leaves, _mm512_castsi512_si256(offsets), graph->leaf_records, 1);
+            const __m512i high = _mm512_mask_i32gather_epi64(zero, (__mmask8)(leaves >> 8), _mm512_extracti64x4_epi64(offsets, 1), graph->leaf_records, 1);
+            const __m512i flags = _mm512_permutex2var_epi32(low, _mm512_set_epi32(30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4, 2, 0), high);
+            const __m512i objects = _mm512_permutex2var_epi32(low, _mm512_set_epi32(31, 29, 27, 25, 23, 21, 19, 17, 15, 13, 11, 9, 7, 5, 3, 1), high);
+            __mmask16 named = leaves & _mm512_cmpneq_epi32_mask(objects, zero) & _mm512_cmplt_epu32_mask(objects, _mm512_set1_epi32((int)program->object_count));
+            // The block's 16 dead marks, one aligned piece of a word.
+            named &= dead != NULL ? (__mmask16)~(dead[node / 64] >> (node % 64)) : (__mmask16)0xffff;
+            const __mmask16 flagged = named & _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_CHECK_STATIC_OBJECT));
+            const __mmask16 asked = named & (__mmask16)~flagged & _mm512_cmple_epu32_mask(objects, _mm512_set1_epi32((int)(count - 3)));
+            const __m512i bits = _mm512_mask_i32gather_epi32(zero, asked, _mm512_sub_epi32(objects, _mm512_set1_epi32(1)), input->declaration_bits, 1);
+            const __mmask16 fixed = flagged | (asked & _mm512_test_epi32_mask(bits, _mm512_set1_epi32(BUSTER_CHECK_BITS_STATIC)));
+            const __mmask16 near_end = named & (__mmask16)~flagged & (__mmask16)~asked;
+            // Where the static leaves' tokens all lie in one body, the cursor's once moved to the first of them, and no
+            // left-out range meets them, their pairs are that body's: two stores of 8, compressed in lane order, as the
+            // scalar steps would write them. Otherwise each takes its scalar step.
+            const __m512i tokens = _mm512_maskz_loadu_epi32(fixed, graph->tokens + node);
+            const uint32_t first_token = _mm512_reduce_min_epu32(_mm512_mask_blend_epi32(fixed, _mm512_set1_epi32(-1), tokens));
+            const uint32_t last_token = _mm512_reduce_max_epu32(tokens);
+            uint32_t at = b;
+            while (fixed != 0 && at + 1 < body_count && declarations[at + 1] <= first_token)
+            {
+                at += 1;
+            }
+            while (fixed != 0 && at > 0 && declarations[at] > first_token)
+            {
+                at -= 1;
+            }
+            const bool one = fixed != 0 && at < body_count && declarations[at] <= first_token && last_token <= closings[at] && (at + 1 >= body_count || declarations[at + 1] > last_token) &&
+                             !check_program_census_meets(arms, arm_count, first_token, last_token);
+            if (one)
+            {
+                const __m512i packed = _mm512_maskz_compress_epi32(fixed, objects);
+                const __m512i body = _mm512_set1_epi64((int64_t)((uint64_t)at << 32));
+                _mm512_storeu_si512(pairs + pair_count, _mm512_or_si512(_mm512_cvtepu32_epi64(_mm512_castsi512_si256(packed)), body));
+                _mm512_storeu_si512(pairs + pair_count + 8, _mm512_or_si512(_mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(packed, 1)), body));
+                pair_count += (uint32_t)__builtin_popcount(fixed);
+                starts[at] += (uint32_t)__builtin_popcount(fixed);
+                b = at;
+            }
+            for (uint32_t lanes = (one ? 0 : fixed) | near_end; lanes != 0; lanes &= lanes - 1)
+            {
+                check_program_census_leaf(program, declarations, closings, body_count, dead, arms, arm_count, node + (uint32_t)__builtin_ctz(lanes), &b, pairs,
+                                          &pair_count, starts);
+            }
+        }
         for (; !BUSTER_SCALAR_PATH(scalar) && node_count - node >= 16; node += 16)
         {
             const __mmask16 leaves = _mm512_cmpneq_epi32_mask(_mm512_loadu_si512(graph->leaf_slots + node), _mm512_set1_epi32((int)BUSTER_CHECK_NONE));
@@ -5052,12 +5229,32 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
             reference_items[found] = (uint64_t)object << 32;
             found += fresh ? 1 : 0;
         }
-        uint32_t varying = 0;
-        for (uint32_t r = 1; r < found; r += 1)
+        // A body's list is short (six on sqlite3.c's average), where an insertion sort takes far less than a radix sort's
+        // histograms; a long one takes the radix sort.
+        const uint64_t* sorted = reference_items;
+        if (found <= 32)
         {
-            varying |= (uint32_t)((reference_items[0] ^ reference_items[r]) >> 32);
+            for (uint32_t r = 1; r < found; r += 1)
+            {
+                const uint64_t item = reference_items[r];
+                uint32_t at = r;
+                while (at > 0 && reference_items[at - 1] > item)
+                {
+                    reference_items[at] = reference_items[at - 1];
+                    at -= 1;
+                }
+                reference_items[at] = item;
+            }
         }
-        const uint64_t* sorted = c_bindings_sort(reference_items, reference_sort, found, !BUSTER_SCALAR_PATH(scalar), varying);
+        else
+        {
+            uint32_t varying = 0;
+            for (uint32_t r = 1; r < found; r += 1)
+            {
+                varying |= (uint32_t)((reference_items[0] ^ reference_items[r]) >> 32);
+            }
+            sorted = c_bindings_sort(reference_items, reference_sort, found, !BUSTER_SCALAR_PATH(scalar), varying);
+        }
         valid = check_program_census_store(census, k, sorted, found, &total, output);
     }
     arena_pop_to(scratch, temporary);
@@ -5073,11 +5270,12 @@ static uint32_t check_program_constant_if(const CheckProgram* program, const Par
     const CheckInput* input = program->input;
     const CheckGraph* graph = &input->graph;
     const uint32_t expression = graph->operand0[node];
+    // The value's columns, not the whole value: most constant conditions are lvalues of static objects, which ask no more.
     const bool constant = expression < graph->count && check_stream_constant_kind(program->stream, expression) != CHECK_CONSTANT_NONE;
-    const CheckValue value = constant ? check_stream_value(program->stream, expression) : (CheckValue){ 0 };
+    const bool rvalue = constant && check_stream_category(program->stream, expression) == CHECK_RVALUE;
     uint32_t width = 0;
     bool sign = false;
-    const bool asked = expression < graph->count && ((constant && value.category == CHECK_RVALUE && check_action_integer_type(program->types, value.type, &width, &sign)) ||
+    const bool asked = expression < graph->count && ((rvalue && check_action_integer_type(program->types, check_stream_type(program->stream, expression), &width, &sign)) ||
                                                      graph->ops[expression] == CHECK_OP_STATEMENT_VALUE);
     const uint32_t close = graph->tokens[node];
     uint32_t keyword = BUSTER_CHECK_NONE;
@@ -5098,8 +5296,8 @@ static uint32_t check_program_constant_if(const CheckProgram* program, const Par
 // writer's (constant switches' aside, which this keeps). Into *found, in `scratch`, sorted and joined where one holds
 // another; their count (0 where there's no room). Calls `writer` before its first body, whose label count it leaves as it
 // found it.
-static uint32_t check_program_constant_arms(CheckControlWriter* writer, const uint32_t* openings, uint32_t body_count, uint64_t** found, bool scalar,
-                                            Arena* scratch)
+static uint32_t check_program_constant_arms(CheckControlWriter* writer, const uint32_t* openings, uint32_t body_count, const uint64_t* touched, uint64_t** found,
+                                            bool scalar, Arena* scratch)
 {
     (void)scalar;
 
@@ -5115,22 +5313,59 @@ static uint32_t check_program_constant_arms(CheckControlWriter* writer, const ui
     uint32_t key_count = 0;
     bool room = true;
     uint32_t node = 0;
-    for (; !BUSTER_SCALAR_PATH(scalar) && node_count - node >= 16; node += 16)
+    // With AVX-512 the conditions' nodes, compressed into `pending` as the scan of the ops finds them, take the cheap part
+    // of the test 16 at a time: their expressions, gathered, then each's op and its constant kind and category (byte
+    // columns, read as dwords where 3 bytes past are the column's). Only an expression that is a constant rvalue, a
+    // statement expression, a dense stream's or one near the column's end takes check_program_constant_if, whose test it is.
+    const CheckStream* stream = program->stream;
+    uint32_t pending[128 + 16];
+    uint32_t pending_count = 0;
+    const __m512i lane = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    const __m512i zero = _mm512_setzero_si512();
+    // A gather's index is signed: past 2^31 nodes, the scalar loop takes them all.
+    const uint32_t scanned = BUSTER_SCALAR_PATH(scalar) || node_count >= (UINT32_C(1) << 31) ? 0 : node_count & ~UINT32_C(15);
+    // The last block, `scanned`, scans nothing and takes what is pending.
+    for (uint64_t block = 0; !BUSTER_SCALAR_PATH(scalar) && node_count < (UINT32_C(1) << 31) && block <= scanned; block += 16)
     {
-        const __mmask16 conditions = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(graph->ops + node), _mm512_set1_epi32(CHECK_OP_CONDITION));
-        for (uint32_t lanes = conditions; lanes != 0; lanes &= lanes - 1)
+        const __mmask16 conditions = block < scanned && check_program_census_block(touched, block) ?
+                                         _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(graph->ops + block), _mm512_set1_epi32(CHECK_OP_CONDITION)) :
+                                         (__mmask16)0;
+        _mm512_mask_compressstoreu_epi32(pending + pending_count, conditions, _mm512_add_epi32(_mm512_set1_epi32((int)block), lane));
+        pending_count += (uint32_t)__builtin_popcount(conditions);
+        uint32_t ready = pending_count >= 128 ? pending_count & ~UINT32_C(15) : 0;
+        ready = block == scanned ? pending_count : ready;
+        for (uint32_t i = 0; i < ready; i += 16)
         {
-            const uint32_t keyword = check_program_constant_if(program, parser, node + (uint32_t)__builtin_ctz(lanes));
-            uint64_t* key = keyword != BUSTER_CHECK_NONE ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, 1) : NULL;
-            room = room && (keyword == BUSTER_CHECK_NONE || key != NULL);
-            if (key != NULL)
+            const __mmask16 present = (__mmask16)(ready - i >= 16 ? 0xffff : (1u << (ready - i)) - 1);
+            const __m512i nodes = _mm512_maskz_loadu_epi32(present, pending + i);
+            const __m512i expressions = _mm512_mask_i32gather_epi32(zero, present, nodes, graph->operand0, 4);
+            const __mmask16 inside = present & _mm512_cmplt_epu32_mask(expressions, _mm512_set1_epi32((int)node_count));
+            const __mmask16 safe =
+                stream->dense_values == NULL && node_count >= 4 ? inside & _mm512_cmplt_epu32_mask(expressions, _mm512_set1_epi32((int)(node_count - 3))) : 0;
+            const __m512i kinds = _mm512_and_si512(_mm512_mask_i32gather_epi32(zero, safe, expressions, stream->value_constants, 1), _mm512_set1_epi32(0xff));
+            const __m512i categories = _mm512_and_si512(_mm512_mask_i32gather_epi32(zero, safe, expressions, stream->value_categories, 1), _mm512_set1_epi32(0xff));
+            const __m512i operations = _mm512_mask_i32gather_epi32(zero, inside, expressions, graph->ops, 4);
+            const __mmask16 constant = _mm512_cmpneq_epi32_mask(kinds, _mm512_set1_epi32(CHECK_CONSTANT_NONE)) &
+                                       _mm512_cmpeq_epi32_mask(categories, _mm512_set1_epi32(CHECK_RVALUE));
+            const __mmask16 statement = _mm512_cmpeq_epi32_mask(operations, _mm512_set1_epi32(CHECK_OP_STATEMENT_VALUE));
+            const __mmask16 asked = inside & ((safe & constant) | (__mmask16)~safe | statement);
+            for (uint32_t lanes = asked; lanes != 0; lanes &= lanes - 1)
             {
-                *key = (uint64_t)keyword << 32;
-                keys = keys == NULL ? key : keys;
-                key_count += 1;
+                const uint32_t keyword = check_program_constant_if(program, parser, pending[i + (uint32_t)__builtin_ctz(lanes)]);
+                uint64_t* key = keyword != BUSTER_CHECK_NONE ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, 1) : NULL;
+                room = room && (keyword == BUSTER_CHECK_NONE || key != NULL);
+                if (key != NULL)
+                {
+                    *key = (uint64_t)keyword << 32;
+                    keys = keys == NULL ? key : keys;
+                    key_count += 1;
+                }
             }
         }
+        memmove(pending, pending + ready, (pending_count - ready) * sizeof(uint32_t));
+        pending_count -= ready;
     }
+    node = scanned;
     for (; node < node_count; node += 1)
     {
         const uint32_t keyword = graph->ops[node] == CHECK_OP_CONDITION ? check_program_constant_if(program, parser, node) : BUSTER_CHECK_NONE;
@@ -5610,9 +5845,23 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         const uint64_t pass_start = __rdtsc();
         const uint64_t mark = scratch->length;
         const bool scanned = stream->overload_count == 0 && stream->overload_address_count == 0 && program->cfstring_count == 0;
+        // The graph's blocks that hold a body's node (check_program_census_touched), which both scans keep to with AVX-512.
+        const bool blocked = scanned && !BUSTER_SCALAR_PATH(options.scalar) && body_count != 0;
+        uint32_t* bounds = blocked ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 2 * (uint64_t)body_count) : NULL;
+        uint64_t* touched = bounds != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count / 4096 + 1) : NULL;
+        valid = valid && (!blocked || touched != NULL);
+        for (uint32_t k = 0; valid && blocked && k < body_count; k += 1)
+        {
+            bounds[k] = check_sparse_get(input->body_declarations, openings[k]);
+            bounds[body_count + k] = parser->tree.parents[openings[k]];
+        }
+        if (valid && blocked)
+        {
+            check_program_census_touched(program, bounds, bounds + body_count, body_count, touched);
+        }
         uint64_t* arms = NULL;
-        const uint32_t arm_count = scanned ? check_program_constant_arms(&writer, openings, body_count, &arms, options.scalar, scratch) : 0;
-        valid = valid && (!scanned || check_program_census_scan(program, &program->census_pass, parser, openings, body_count, arms, arm_count, true,
+        const uint32_t arm_count = valid && scanned ? check_program_constant_arms(&writer, openings, body_count, touched, &arms, options.scalar, scratch) : 0;
+        valid = valid && (!scanned || check_program_census_scan(program, &program->census_pass, parser, openings, body_count, arms, arm_count, true, touched,
                                                                 4 * body_count + 4, seen, reference_items, reference_sort, options.scalar, output, scratch));
         program->census_pass.ticks = scanned ? __rdtsc() - pass_start : 0;
         program->census_pass_arms = arm_count;
@@ -5712,7 +5961,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         program->census_walk.ticks = __rdtsc() - walk_start;
         const uint64_t scan_start = __rdtsc();
         const bool scanned = stream->overload_count == 0 && stream->overload_address_count == 0 && program->cfstring_count == 0;
-        valid = valid && (!scanned || check_program_census_scan(program, &program->census_scan, parser, openings, program->body_count, NULL, 0, false,
+        valid = valid && (!scanned || check_program_census_scan(program, &program->census_scan, parser, openings, program->body_count, NULL, 0, false, NULL,
                                                                 2 * program->body_count + 2, seen, reference_items, reference_sort, options.scalar, output,
                                                                 scratch));
         program->census_scan.ticks = scanned ? __rdtsc() - scan_start : 0;
@@ -5734,7 +5983,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             arms = c_bindings_sort(arm_keys, arm_keys + arm_count, arm_count, !BUSTER_SCALAR_PATH(options.scalar), varying);
         }
         const uint64_t arms_start = __rdtsc();
-        valid = valid && (!scanned || check_program_census_scan(program, &program->census_arms, parser, openings, program->body_count, arms, arm_count, true,
+        valid = valid && (!scanned || check_program_census_scan(program, &program->census_arms, parser, openings, program->body_count, arms, arm_count, true, NULL,
                                                                 3 * program->body_count + 3, seen, reference_items, reference_sort, options.scalar, output,
                                                                 scratch));
         program->census_arms.ticks = scanned ? __rdtsc() - arms_start : 0;
