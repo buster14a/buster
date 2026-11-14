@@ -1030,12 +1030,15 @@ attested.
   the order loaded and learned, read from the file by one call, and a table of
   their indexes at most half full (`check_attested_memo_load_alone`): about 24
   bytes a hash for the process to fault in, where a table of the hashes
-  themselves takes 32 to 64. Its diagnostics, the preprocessor's and the
-  checker's, go to an in-memory stream of their own, and a unit that skipped
-  and failed is read again from its start with nothing skipped, as a units'
-  lane reads its units again, so that only the second reading's diagnostics
-  print. A command of several source files loads the memo in each lane, so
-  that its first units skip too.
+  themselves takes 32 to 64. It reads its unit as its view only where it skips
+  a third of the unit's tokens or more: each page of a view is a fault for the
+  process, so a large unit that skips little (`sqlite3.c`, 6%) would copy more
+  than the view saves, and its walk passes the marks instead. Its diagnostics,
+  the preprocessor's and the checker's, go to an in-memory stream of their
+  own, and a unit that skipped and failed is read again from its start with
+  nothing skipped, as a units' lane reads its units again, so that only the
+  second reading's diagnostics print. A command of several source files loads
+  the memo in each lane, so that its first units skip too.
 - **The tests** (`test-checker --attested`): each of the compile fixture's
   units by a command of its own, with the memo cold and then warm, against
   `--attested=off` (every object and diagnostic the same bytes; a command

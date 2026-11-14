@@ -3214,8 +3214,12 @@ static bool check_attested_read(CheckAttested* attested, CheckInput* input, cons
         attested->unit_ready = check_attested_decide(attested, parser, pp);
         attested->skipped = attested->unit_ready && attested->mode == CHECK_ATTESTED_MODE_ON && attested->skipped_declarations != 0;
         // The view, where the unit skips the whole of its parse (not a lazily deferred selection's, whose marks are the
-        // parse's): its token indices are the reader's from here, and the unit's.
-        attested->viewing = attested->skipped && deferred_tokens == NULL && original_end == count && check_attested_view(attested, parser);
+        // parse's): its token indices are the reader's from here, and the unit's. A command of one source file's
+        // (CheckAttested.alone) only where it skips a third of the unit's tokens or more: each page of its view is a
+        // fault for the process, some 11 cycles a token it copies, where a token read as a view saves the reader about
+        // 26 over one its marks pass (sqlite3.c, which skips 6% of its tokens, took 4,000 more faults with its view).
+        const bool worth = !attested->alone || 3 * (uint64_t)attested->skipped_tokens >= count;
+        attested->viewing = attested->skipped && worth && deferred_tokens == NULL && original_end == count && check_attested_view(attested, parser);
         if (attested->skipped && !attested->viewing)
         {
             // (The parse with the skipped declarations' marks, check_input_skip, where there was no room for the view.)

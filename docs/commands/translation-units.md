@@ -221,12 +221,13 @@ the census below measures, run in the compile). `--attested=MODE` picks:
   state's arenas are base pages throughout and stay mapped to the exit, it
   keeps no caches of lists or trees (`CheckAttested.alone`), and its memo is
   the hashes in an array, read by one call, with a table of their indexes
-  (`check_attested_memo_load_alone`). Its diagnostics, the preprocessor's and
-  the checker's, go to an in-memory stream of their own, and a unit that
-  skipped and failed is read again from its start with nothing skipped, so
-  that only the second reading's diagnostics print. A link without a build ID
-  (the CI toolchain's lld adds none) is keyed by its executable file's
-  identity instead: device, inode, size and modification time.
+  (`check_attested_memo_load_alone`), and it reads its unit as its view only
+  where it skips a third of the unit's tokens or more. Its diagnostics, the
+  preprocessor's and the checker's, go to an in-memory stream of their own,
+  and a unit that skipped and failed is read again from its start with nothing
+  skipped, so that only the second reading's diagnostics print. A link without
+  a build ID (the CI toolchain's lld adds none) is keyed by its executable
+  file's identity instead: device, inode, size and modification time.
 - **`off`:** no passes and no state. `--scalar` is `off` (its reader is the
   skip's oracle), and so is `on` with `-g`, whose DWARF describes every type
   the unit's table holds (`c_check_debug_values.c`), a skipped declaration's
