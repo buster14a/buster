@@ -136,7 +136,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   `tests/driver/fp_contract.c` for float/double result bits, expression
   boundaries, option ordering, scoped pragmas and dynamic rounding. It covers
   both readers, object/direct output and strict Tier 1 without fallback,
-  with transition verification enabled). Its library-builtin comparisons are pinned to Clang
+  with transition verification enabled). The Tier 1 asm-body suite initializes
+  and checks its object decoder before inspecting instructions (#2737,
+  `check_test_driver_tier1_asm`). An initialization failure is reported directly
+  and skips decoding, so partitioned runs do not depend on another suite's setup.
+  Its library-builtin comparisons are pinned to Clang
   23.1.4's official build, CI's reference: it compares `clang --version` with
   it, prints `expected clang 23.1.4, found …` when another build is found, and
   skips only the plain names that build's vendor is known to classify
