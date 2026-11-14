@@ -9289,6 +9289,82 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
     return result;
 }
 
+// One census's verdict for --selection-census (check_driver_selection_census): "same-references" where every body's
+// candidates' references are its own, and otherwise the selection over them (`mode` and `keep_sectioned` as the exact
+// one's, `selected`) compared with the exact one: "same" bodies, symbols, data and objects, or "different", with how many
+// more bodies and objects it keeps in *bodies and *objects; "failed" where it fails. Nothing of it stays in `output` or
+// `scratch`.
+static const char* check_driver_census_verdict(const CheckProgram* program, const CheckProgramCensus* census, const CheckDataPrepared* data,
+                                               const CheckProgramSelection* selected, CLoweringMode mode, bool scalar, bool keep_sectioned, int64_t* bodies,
+                                               int64_t* objects, Arena* output, Arena* scratch)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    const char* verdict = "same-references";
+    *bodies = 0;
+    *objects = 0;
+    if (census->differing != 0)
+    {
+        CheckProgram candidates = *program;
+        CheckProgramBody* copies = program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramBody, program->body_count) : NULL;
+        uint32_t total = 0;
+        for (uint32_t b = 0; copies != NULL && b < program->body_count; b += 1)
+        {
+            copies[b] = program->bodies[b];
+            copies[b].reference_first = census->first[b];
+            copies[b].reference_count = census->counts[b];
+            total += census->counts[b];
+        }
+        candidates.bodies = copies;
+        candidates.references = census->references;
+        candidates.reference_count = total;
+        CheckProgramSelection result;
+        const bool selection = copies != NULL && check_program_select_mode(&result, &candidates, data, mode, scalar, keep_sectioned, output, scratch);
+        bool same = selection && result.program.body_count == selected->program.body_count && result.program.symbol_count == selected->program.symbol_count &&
+                    result.data.count == selected->data.count && result.program.object_count == selected->program.object_count;
+        for (uint32_t b = 0; same && b < result.program.body_count; b += 1)
+        {
+            same = result.program.bodies[b].declaration == selected->program.bodies[b].declaration;
+        }
+        for (uint32_t o = 0; same && o < result.program.object_count; o += 1)
+        {
+            same = result.program.object_symbols[o] == selected->program.object_symbols[o];
+        }
+        verdict = !selection ? "failed" : same ? "same" : "different";
+        *bodies = selection ? (int64_t)result.program.body_count - (int64_t)selected->program.body_count : 0;
+        *objects = selection ? (int64_t)(result.program.symbol_count + result.data.count) - (int64_t)(selected->program.symbol_count + selected->data.count) : 0;
+    }
+    arena_pop_to(output, output_mark);
+    arena_pop_to(scratch, scratch_mark);
+    return verdict;
+}
+
+// --selection-census's report (#2536's step 2.1, check_program_census_walk and _scan), on stderr: the bodies, those with a
+// dropped arm, the exact selection's bodies and symbols (its data's too); for each census (the scan's, where it has one), the bodies whose candidates' references aren't their own,
+// those of them without a dropped arm, those whose candidates miss one of their own, its verdict
+// (check_driver_census_verdict) with the extra bodies and symbols, and its TSC ticks; and the references pass's ticks.
+static void check_driver_selection_census(const CheckProgram* program, const CheckDataPrepared* data, const CheckProgramSelection* selected, CLoweringMode mode,
+                                          bool scalar, bool keep_sectioned, Arena* output, Arena* scratch)
+{
+    fprintf(stderr, "selection-census\tbodies\t%u\tdropped\t%u\tselected-bodies\t%u\tselected-symbols\t%u\treferences-ticks\t%llu", program->body_count,
+            program->census_dropped_bodies, selected->program.body_count, selected->program.symbol_count + selected->data.count,
+            (unsigned long long)program->census_references_ticks);
+    const CheckProgramCensus* censuses[] = { &program->census_walk, &program->census_scan, &program->census_arms };
+    const char* names[] = { "walk", "scan", "arms" };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(censuses); c += 1)
+    {
+        const CheckProgramCensus* census = censuses[c];
+        int64_t bodies = 0;
+        int64_t objects = 0;
+        const char* verdict = census->first != NULL ? check_driver_census_verdict(program, census, data, selected, mode, scalar, keep_sectioned, &bodies, &objects,
+                                                                                  output, scratch) :
+                                                      "none";
+        fprintf(stderr, "\t%s\tdiffering\t%u\tunarmed\t%u\tmissing\t%u\tselection\t%s\textra-bodies\t%lld\textra-symbols\t%lld\tticks\t%llu", names[c],
+                census->differing, census->unarmed, census->missing, verdict, (long long)bodies, (long long)objects, (unsigned long long)census->ticks);
+    }
+    fprintf(stderr, "\n");
+}
+
 // The checked program's code and data, as -c writes them: its object at `output_path`, or with `kept` (one of several
 // units that link into one executable, c_checker_units.c), its link, kept for theirs. Its functions compile on `lanes`
 // (check_program_emit_lanes). With `debug` (-g), the object carries DWARF: the unit the executable's would
@@ -10387,6 +10463,9 @@ struct CheckDriverCommand
     // --poison-arenas, #152's test option: the lanes of several units overwrite what each unit left in their arenas
     // with a pattern, before the next unit reuses them (c_checker_units.c).
     bool poison_arenas;
+    // --selection-census (#2536's step 2.1): the candidates' references beside the exact ones, and their selection where
+    // they differ, reported on stderr (check_driver_selection_census).
+    bool selection_census;
     // --shared-parts, #777's test option: a unit's emission that shares its functions' parts on the units' board pauses
     // after each part it takes itself, so that the lanes without units take some, and the command reports how many
     // they took and how many lanes left their memory to the exit, after the units' diagnostics (c_checker_units.c).
@@ -11878,6 +11957,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         // Tier 1's IR takes asm bodies (#1839), not a statement's row.
                         .asm_bodies = lanes != NULL && lanes->tier1,
                         .helper_forms = lanes != NULL ? lanes->helper_forms : 0,
+                        .selection_census = command->selection_census,
                         // A units lane with a unit left to take gives its scratch's pages back in whole huge pages
                         // (#777).
                         .discard_huge = lanes != NULL && lanes->units_lane != NULL && check_units_discard_huge(lanes->units_lane),
@@ -12157,6 +12237,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         const bool selection = check_program_select_mode(&selected, &program, &data, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar,
                                                                          kept != NULL, output_arena, scratch);
                         check_clock_mark(stage_clock, CHECK_STAGE_SELECT);
+                        if (selection && program.census_walk.first != NULL)
+                        {
+                            check_driver_selection_census(&program, &data, &selected, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar, kept != NULL,
+                                                          output_arena, scratch);
+                        }
                         if (selection)
                         {
                             result = check_driver_target_features(&selected.program, checking, recovered, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
@@ -12181,6 +12266,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         const bool selection = check_program_select_mode(&selected, &program, &data, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar,
                                                                          false, output_arena, scratch);
                         check_clock_mark(stage_clock, CHECK_STAGE_SELECT);
+                        if (selection && program.census_walk.first != NULL)
+                        {
+                            check_driver_selection_census(&program, &data, &selected, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar, false,
+                                                          output_arena, scratch);
+                        }
                         if (selection)
                         {
                             result = check_driver_target_features(&selected.program, checking, recovered, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
@@ -12640,6 +12730,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // --poison-arenas, --shared-parts and --units-memory=BYTES: #152's, #777's and #1109's test options
     // (CheckDriverCommand's).
     bool poison_arenas = false;
+    bool selection_census = false;
     bool shared_parts = false;
     uint64_t units_memory = 0;
     bool invalid_units_memory = false;
@@ -13034,6 +13125,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             lower_all = true;
         }
+        else if (match.exact == C_OPTION_SELECTION_CENSUS)
+        {
+            selection_census = true;
+        }
         else if (match.exact == C_OPTION_POISON_ARENAS)
         {
             poison_arenas = true;
@@ -13293,6 +13388,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .id_ordered = id_ordered,
         .id_order = id_order,
         .poison_arenas = poison_arenas,
+        .selection_census = selection_census,
         .shared_parts = shared_parts,
         .units_memory = units_memory,
         .emit_object = emit_object,
