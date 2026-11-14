@@ -80,6 +80,10 @@ struct EmittedInline
     uint32_t count;
     uint32_t parent;
     uint32_t call;
+    // Its callee's parameters' locals [local, local + local_count) past the function's own (IrDebugInline's, #2541),
+    // whose ranges are among EmittedCode.local_ranges.
+    uint32_t local;
+    uint32_t local_count;
 };
 
 typedef struct EmittedCode EmittedCode;

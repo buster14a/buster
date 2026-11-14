@@ -550,6 +550,10 @@ typedef enum IrDebugBindingKind
 
 #define BUSTER_IR_DEBUG_BIND_ENTRY 1u
 #define BUSTER_IR_DEBUG_BIND_REGIONS 2u
+// An expanded callee's parameter (#2541): a local of the function's past its own, of an instance's
+// (IrDebugInline.local), whose one binding, an initial one, is its argument's value throughout its instance's code, the
+// callee never assigning it nor taking its address.
+#define BUSTER_IR_DEBUG_BIND_INSTANCE 4u
 
 // Source assignments survive even when their value has no reconstruction. `entry` is the original typed completion
 // point; NONE is the initial parameter binding. `value` is a current IR node only for VALUE. `anchor` is an optional
@@ -592,6 +596,8 @@ struct IrDebugRegion
 // is origin first + k), past the function's own (IrDebugInfo.entry_count); its callee is the unit's symbol `symbol`,
 // expanded at the call whose origin is `call` (the function's own entry, or one of the instance `parent`'s, NONE for
 // the function's), so that instances nest as their expansions did. Its callee's own instances follow it, each nested.
+// Its callee's parameters are the function's locals [local, local + local_count), parameter p local + p (#2541,
+// BUSTER_IR_DEBUG_BIND_INSTANCE): none where the function's sidecar has no bindings.
 typedef struct IrDebugInline IrDebugInline;
 struct IrDebugInline
 {
@@ -600,6 +606,8 @@ struct IrDebugInline
     uint32_t count;
     uint32_t parent;
     uint32_t call;
+    uint32_t local;
+    uint32_t local_count;
 };
 
 // Optional source identities (#1114), separate from the instruction/slot columns that execution consumes. An origin
@@ -636,6 +644,17 @@ struct IrDebugInfo
 static uint32_t ir_debug_origin_limit(const IrDebugInfo* debug)
 {
     return debug->origin_count > debug->entry_count ? debug->origin_count : debug->entry_count;
+}
+
+// How many locals `debug`'s instances' parameters take (IrDebugInline.local_count).
+static uint64_t ir_debug_instance_locals(const IrDebugInfo* debug)
+{
+    uint64_t count = 0;
+    for (uint32_t k = 0; k < debug->inline_count; k += 1)
+    {
+        count += debug->inlines[k].local_count;
+    }
+    return count;
 }
 
 // The instance of `debug`'s whose own entries include `origin`, or NONE for the function's own entry (or none).
@@ -2031,7 +2050,7 @@ static IrCheck ir_check_shape(const IrFunction* f)
     if (check.error == IR_OK && debug != NULL && (debug->instruction_count != n || debug->slot_count != f->slot_count ||
         (n != 0 && debug->origins == NULL) || (f->slot_count != 0 && debug->locals == NULL) || debug->scalar_count > debug->local_count ||
         (debug->scalar_count != 0 && debug->scalars == NULL) || debug->first_block_end > debug->entry_count ||
-        debug->binding_count > (uint64_t)debug->entry_count + f->parameter_count ||
+        debug->binding_count > (uint64_t)debug->entry_count + f->parameter_count + ir_debug_instance_locals(debug) ||
         (debug->binding_count != 0 && (debug->bindings == NULL || debug->binding_flags == NULL)) ||
         debug->region_count > debug->entry_count || (debug->region_count != 0 && (debug->regions == NULL || debug->binding_flags == NULL))))
     {
@@ -2045,7 +2064,10 @@ static IrCheck ir_check_shape(const IrFunction* f)
         }
     }
     // The instances (IrDebugInline): in order, each past the function's entries and within the origins, its parent an
-    // earlier instance, its call an entry of its parent's (the function's own for none).
+    // earlier instance, its call an entry of its parent's (the function's own for none); their parameters' locals the
+    // function's last, in the instances' order.
+    const uint64_t instance_total = debug != NULL ? ir_debug_instance_locals(debug) : 0;
+    uint64_t next_local = debug != NULL && instance_total <= debug->local_count ? debug->local_count - instance_total : UINT64_MAX;
     for (uint32_t k = 0; check.error == IR_OK && debug != NULL && k < debug->inline_count; k += 1)
     {
         const IrDebugInline instance = debug->inlines[k];
@@ -2054,7 +2076,14 @@ static IrCheck ir_check_shape(const IrFunction* f)
                             (k == 0 || instance.first >= debug->inlines[k - 1].first + debug->inlines[k - 1].count);
         const bool nested = instance.parent == BUSTER_IR_NONE ? instance.call < debug->entry_count :
                             instance.parent < k && instance.call - debug->inlines[instance.parent].first < debug->inlines[instance.parent].count;
-        if (!placed || !nested)
+        // Its parameters' locals: the next of the function's last ones, each an instance's.
+        bool locals = instance.local_count == 0 || (instance.local == next_local && debug->binding_flags != NULL);
+        next_local += instance.local_count;
+        for (uint32_t p = 0; locals && p < instance.local_count; p += 1)
+        {
+            locals = debug->binding_flags[instance.local + p] == BUSTER_IR_DEBUG_BIND_INSTANCE;
+        }
+        if (!placed || !nested || !locals)
         {
             check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, k);
         }
@@ -2077,20 +2106,33 @@ static IrCheck ir_check_shape(const IrFunction* f)
             check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, s);
         }
     }
+    // Every flag one of the three, and as many instance locals as the instances have.
+    uint64_t instance_locals = 0;
     for (uint32_t local = 0; check.error == IR_OK && debug != NULL && debug->binding_flags != NULL && local < debug->local_count; local += 1)
     {
         const uint32_t flags = debug->binding_flags[local];
-        if (flags != 0 && flags != BUSTER_IR_DEBUG_BIND_ENTRY && flags != BUSTER_IR_DEBUG_BIND_REGIONS)
+        instance_locals += flags == BUSTER_IR_DEBUG_BIND_INSTANCE;
+        if (flags != 0 && flags != BUSTER_IR_DEBUG_BIND_ENTRY && flags != BUSTER_IR_DEBUG_BIND_REGIONS && flags != BUSTER_IR_DEBUG_BIND_INSTANCE)
         {
             check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, local);
         }
+    }
+    if (check.error == IR_OK && debug != NULL && instance_locals != ir_debug_instance_locals(debug))
+    {
+        check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
     }
     for (uint32_t k = 0; check.error == IR_OK && debug != NULL && k < debug->binding_count; k += 1)
     {
         const IrDebugBinding binding = debug->bindings[k];
         const bool initial = binding.entry == BUSTER_IR_NONE;
-        const bool ordered = k == 0 || (initial ? debug->bindings[k - 1].entry == BUSTER_IR_NONE && debug->bindings[k - 1].local < binding.local :
-                                      debug->bindings[k - 1].entry == BUSTER_IR_NONE || debug->bindings[k - 1].entry < binding.entry);
+        // The function's initial bindings, its assignments by entry, then its instances' parameters' (initial) by local.
+        const bool instance = binding.local < debug->local_count && debug->binding_flags != NULL && debug->binding_flags[binding.local] == BUSTER_IR_DEBUG_BIND_INSTANCE;
+        const IrDebugBinding before = k != 0 ? debug->bindings[k - 1] : (IrDebugBinding){ 0 };
+        const bool before_instance = k != 0 && before.local < debug->local_count && debug->binding_flags[before.local] == BUSTER_IR_DEBUG_BIND_INSTANCE;
+        const bool ordered = k == 0 ? true :
+                             instance ? initial && (!before_instance || before.local < binding.local) :
+                             !before_instance && (initial ? before.entry == BUSTER_IR_NONE && before.local < binding.local :
+                                                            before.entry == BUSTER_IR_NONE || before.entry < binding.entry);
         const bool scalar = binding.type == IR_I8 || binding.type == IR_I16 || binding.type == IR_I32 || binding.type == IR_I64 ||
                             binding.type == IR_PTR || binding.type == IR_F32 || binding.type == IR_F64;
         const bool width = scalar && binding.bytes * 8u == ir_type_bits[binding.type];
@@ -2099,7 +2141,7 @@ static IrCheck ir_check_shape(const IrFunction* f)
         const bool kind = value || binding.kind == IR_DEBUG_BIND_CONSTANT || unavailable;
         const bool anchor = binding.anchor == BUSTER_IR_NONE || (binding.anchor < n && f->type[binding.anchor] == binding.type);
         const bool local = binding.local < debug->local_count;
-        const bool entry = initial ? binding.local < f->parameter_count : binding.entry < debug->entry_count;
+        const bool entry = initial ? binding.local < f->parameter_count || instance : binding.entry < debug->entry_count;
         const bool admitted = local && (debug->binding_flags[binding.local] & BUSTER_IR_DEBUG_BIND_ENTRY) != 0;
         if (!kind || !local || !entry || !ordered || !anchor || (!width && !(unavailable && binding.bytes == 0 && binding.type == IR_VOID)) ||
             (!value && binding.value != BUSTER_IR_NONE) || (admitted && !initial && binding.entry >= debug->first_block_end))

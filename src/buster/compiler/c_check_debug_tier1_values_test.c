@@ -706,13 +706,54 @@ static const char check_debug_tier1_inline_source[] =
     "    return total != 25;\n"
     "}\n";
 
+// Each of the six stops' backtrace (#2541: the expanded callees' parameters' values, check_debug_tier1_inline_values).
 static const char check_debug_tier1_inline_script[] =
     "set pagination off\n"
     "break t1i_mark\n"
     "run\n"
     "bt\n"
+    "continue\n"
+    "bt\n"
+    "continue\n"
+    "bt\n"
+    "continue\n"
+    "bt\n"
+    "continue\n"
+    "bt\n"
+    "continue\n"
+    "bt\n"
     "printf \"GDB-T1I-DONE\\n\"\n"
     "kill\n";
+
+// Whether the expanded callees' parameters gdb shows in `transcript`'s six backtraces are the program's (#2541): at stop
+// s (0 to 5), t1i_square's x is s / 2 + s % 2 and t1i_twice's s / 2, each shown or <optimized out> where its location
+// isn't proven, never another value; and both shown at the first stop, where each is live.
+static bool check_debug_tier1_inline_values(const char* transcript)
+{
+    static const char* const functions[] = { "t1i_square (x=", "t1i_twice (x=" };
+    bool valid = transcript != NULL;
+    bool shown[2] = { false, false };
+    for (uint32_t f = 0; valid && f < 2; f += 1)
+    {
+        const char* cursor = transcript;
+        for (uint32_t stop = 0; valid && stop < 6; stop += 1)
+        {
+            cursor = strstr(cursor, functions[f]);
+            valid = cursor != NULL;
+            if (valid)
+            {
+                cursor += strlen(functions[f]);
+                const uint32_t expected = f == 0 ? stop / 2 + stop % 2 : stop / 2;
+                const bool absent = strncmp(cursor, "<optimized out>)", strlen("<optimized out>)")) == 0;
+                char* end = NULL;
+                const unsigned long value = absent ? 0 : strtoul(cursor, &end, 10);
+                valid = absent || (end != NULL && end != cursor && *end == ')' && value == expected);
+                shown[f] |= stop == 0 && !absent;
+            }
+        }
+    }
+    return valid && shown[0] && shown[1];
+}
 
 // A breakpoint by the inner callee's name: gdb takes each of its expanded copies (their instances' abstract origin is its
 // abstract instance) and its out-of-line code where it has any, and stops first at the copy in main's code.
@@ -845,6 +886,7 @@ static void check_debug_tier1_inline_test(CheckDebugTestTally* tally, const char
                                       check_debug_tier1_inline_frame(transcript.pointer, 2, "t1i_twice", 15) &&
                                       check_debug_tier1_inline_frame(transcript.pointer, 3, "main", 22),
                                 "gdb's backtrace in main's code shows the expanded callees' frames at their calls' lines", report);
+        check_debug_test_expect(tally, done && check_debug_tier1_inline_values(transcript.pointer), "gdb shows the expanded callees' parameters' values, each the program's", report);
         // The executable keeps both callees' code (its binding resolves every symbol): the inner one's out-of-line code,
         // its two copies in the outer's and the two in main's.
         check_debug_tier1_inline_break(tally, program, directory, 5, arena);
@@ -894,6 +936,7 @@ static void check_debug_tier1_inline_test(CheckDebugTestTally* tally, const char
                                   check_debug_tier1_inline_frame(transcript.pointer, 2, "t1i_twice", 15) &&
                                   check_debug_tier1_inline_frame(transcript.pointer, 3, "main", 22),
                             "gdb's backtrace shows the dead callees' expanded frames", report);
+    check_debug_test_expect(tally, done && check_debug_tier1_inline_values(transcript.pointer), "gdb shows the dead callees' parameters' values, each the program's", report);
     check_debug_tier1_inline_break(tally, linked, directory, 2, arena);
 }
 

@@ -1075,6 +1075,9 @@ struct CheckEmitBody
     CheckDebugLocation* debug_locations;
     uint32_t* debug_location_first;
     uint32_t debug_location_count;
+    // Its locals' count for debug_location_first: its own, then its expanded callees' parameters' (#2541,
+    // EmittedInline.local).
+    uint32_t debug_local_count;
     uint32_t* fixup_ends;
     uint32_t* label_offsets;
     uint32_t* asm_offsets;
@@ -1601,6 +1604,8 @@ static bool check_program_emit_inline_tokens(const CheckEmitRun* run, const Emit
                 .body = callee,
                 .parent = instance.parent,
                 .call_token = call_row,
+                .local = instance.local,
+                .local_count = instance.local_count,
             };
         }
         *rows = row;
@@ -1642,9 +1647,16 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     // Its frame's rows (#1056, emitted_unwind), which the tables read once the lanes are done.
     EmissionFrameRow* frame_rows = run->unwind && code->frame_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, EmissionFrameRow, code->frame_count) : 0;
     body->debug_spans = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDebugValueSpan, (uint64_t)code->source_count + 1) : NULL;
-    const uint32_t locals = run->lowered->functions[b].local_count;
+    // Its own locals, then its expanded callees' parameters' (#2541), past them.
+    uint32_t locals = run->lowered->functions[b].local_count;
+    for (uint32_t k = 0; run->sources && k < code->source_inline_count; k += 1)
+    {
+        const uint64_t end = (uint64_t)code->source_inlines[k].local + code->source_inlines[k].local_count;
+        locals = code->source_inlines[k].local_count != 0 && end > locals && end <= UINT32_MAX - 1 ? (uint32_t)end : locals;
+    }
     body->debug_locations = run->sources && code->local_range_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDebugLocation, code->local_range_count) : NULL;
     body->debug_location_first = run->sources && code->local_range_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)locals + 1) : NULL;
+    body->debug_local_count = locals;
     // Its expanded callees' instances (#2541 step 3), which the merge copies, before the work mark the code pops to.
     body->debug_inlines = run->sources && code->source_inline_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDebugInline, code->source_inline_count) : NULL;
     const uint64_t work_mark = scratch->length;
@@ -4324,7 +4336,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const EmittedCode* code = run.codes + b;
             CheckDebugBody* value = rows->values + b;
             *value = (CheckDebugBody){ 0 };
-            const uint32_t locals = result->lowered.functions[b].local_count;
+            // Its own locals, then its expanded callees' parameters' (#2541, CheckEmitBody.debug_local_count).
+            const uint32_t own = result->lowered.functions[b].local_count;
+            const uint32_t locals = body->debug_local_count > own ? body->debug_local_count : own;
             CheckDebugBinding* bindings = BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugBinding, (uint64_t)locals + 1);
             Tier0Home* homes = BUSTER_ARENA_PUSH_ARRAY(output, Tier0Home, (uint64_t)locals + 1);
             uint8_t* classes = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, (uint64_t)locals + 1);
@@ -4337,18 +4351,34 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     (body->debug_inline_count == 0 || inlines != NULL);
             if (valid)
             {
-                if (locals != 0)
+                if (own != 0)
                 {
-                    memcpy(bindings, result->lowered.debug_bindings[b], (uint64_t)locals * sizeof(*bindings));
-                    if (code->local_homes != NULL && code->local_count == locals)
+                    memcpy(bindings, result->lowered.debug_bindings[b], (uint64_t)own * sizeof(*bindings));
+                    if (code->local_homes != NULL && code->local_count == own)
                     {
-                        memcpy(homes, code->local_homes, (uint64_t)locals * sizeof(*homes));
+                        memcpy(homes, code->local_homes, (uint64_t)own * sizeof(*homes));
                     }
                     else
                     {
-                        memset(homes, 0, (uint64_t)locals * sizeof(*homes));
+                        memset(homes, 0, (uint64_t)own * sizeof(*homes));
                     }
-                    memcpy(classes, result->lowered.functions[b].local_classes, locals);
+                    memcpy(classes, result->lowered.functions[b].local_classes, own);
+                }
+                // An expanded callee's parameter has no token of the function's and no home, and its callee's class.
+                for (uint32_t local = own; local < locals; local += 1)
+                {
+                    bindings[local] = (CheckDebugBinding){ .token = BUSTER_CHECK_NONE };
+                    homes[local] = (Tier0Home){ 0 };
+                    classes[local] = 0;
+                }
+                for (uint32_t k = 0; k < body->debug_inline_count; k += 1)
+                {
+                    const CheckDebugInline instance = body->debug_inlines[k];
+                    const Tier0Function* callee = instance.body < count ? &result->lowered.functions[instance.body] : NULL;
+                    for (uint32_t p = 0; callee != NULL && p < instance.local_count && p < callee->local_count && instance.local + p < locals; p += 1)
+                    {
+                        classes[instance.local + p] = callee->local_classes[p];
+                    }
                 }
                 if (body->debug_span_count != 0)
                 {

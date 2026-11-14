@@ -76,6 +76,10 @@ struct CheckDebugInline
     uint32_t call_token;
     uint32_t call_file;
     uint32_t call_line;
+    // Its callee's parameters' locals past the function's own (EmittedInline's, #2541): parameter p's location is local
+    // `local + p`'s (CheckDebugBody.location_first).
+    uint32_t local;
+    uint32_t local_count;
     bool described;
 };
 
