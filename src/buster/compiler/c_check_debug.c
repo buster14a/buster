@@ -117,6 +117,9 @@ struct CheckProgramRows
     uint32_t* counts;
     uint32_t* sizes;
     uint32_t* bodies;
+    // Per body, whether it has no code (#2541: a dead function, CheckTier1Inline.dead): no line rows, no address, no
+    // DW_TAG_subprogram of its own, only the abstract instance its expansions refer to. Null for none.
+    const uint8_t* dead;
     uint32_t count;
     uint32_t capacity;
 };
@@ -726,6 +729,9 @@ typedef struct CheckDebug CheckDebug;
 struct CheckDebug
 {
     DebugUnit unit;
+    // Each body's name, file and line (DebugFunction), dead ones' too (CheckProgramRows.dead), which `unit` leaves out: its
+    // functions are the bodies with code, in body order.
+    const DebugFunction* bodies;
     DebugOutput output;
     ExecutableDebug attach;
     ObjectDebug object;
@@ -765,14 +771,18 @@ static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, co
     uint32_t* by_file = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)pp->file_count + 1);
     uint32_t* by_directive = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)pp->line_directive_count + 1);
     String8* files = BUSTER_ARENA_PUSH_ARRAY(arena, String8, (uint64_t)count + 1);
+    const uint8_t* dead = rows->dead;
     DebugFunction* functions = BUSTER_ARENA_PUSH_ARRAY(arena, DebugFunction, (uint64_t)count + 1);
     SymbolId* symbols = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, (uint64_t)count + 1);
+    // The unit's functions, the bodies with code: the same arrays without a dead body.
+    DebugFunction* live_functions = dead != NULL ? BUSTER_ARENA_PUSH_ARRAY(arena, DebugFunction, (uint64_t)count + 1) : functions;
+    SymbolId* live_symbols = dead != NULL ? BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, (uint64_t)count + 1) : symbols;
     uint32_t* kept_offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)rows->count + BUSTER_CHECK_DEBUG_SLACK);
     uint32_t* kept_lines = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)rows->count + BUSTER_CHECK_DEBUG_SLACK);
     char* directory = BUSTER_ARENA_PUSH_ARRAY(arena, char, PATH_MAX);
     CheckDebugSource source;
-    bool valid = keys != 0 && lines != 0 && by_file != 0 && by_directive != 0 && files != 0 && functions != 0 && symbols != 0 && kept_offsets != 0 &&
-                 kept_lines != 0 && directory != 0 && getcwd(directory, PATH_MAX) != 0 && pp->main_file < pp->file_count && check_debug_source(&source, pp, parser, scratch);
+    bool valid = keys != 0 && lines != 0 && by_file != 0 && by_directive != 0 && files != 0 && functions != 0 && symbols != 0 && live_functions != 0 &&
+                 live_symbols != 0 && kept_offsets != 0 && kept_lines != 0 && directory != 0 && getcwd(directory, PATH_MAX) != 0 && pp->main_file < pp->file_count && check_debug_source(&source, pp, parser, scratch);
     uint32_t file_count = 0;
     uint32_t kept = 0;
     if (valid)
@@ -787,14 +797,17 @@ static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, co
         const CheckProgramBody* body = &program->bodies[b];
         const uint32_t first = rows->first[b];
         const uint32_t closing = parser->tree.parents[body->opening];
-        check_debug_lines(&source, body->declaration, closing, rows->tokens + first, rows->counts[b], keys + first, lines + first, exact);
+        // A dead body (CheckProgramRows.dead) has no rows; its name, file and line are its abstract instance's.
+        const bool code = dead == NULL || dead[b] == 0;
+        const uint32_t raw_count = code ? rows->counts[b] : 0;
+        check_debug_lines(&source, body->declaration, closing, rows->tokens + first, raw_count, keys + first, lines + first, exact);
         uint32_t key = BUSTER_CHECK_DEBUG_NO_FILE;
         uint32_t line = 0;
         check_debug_line_scalar(&source, body->declaration, &key, &line);
         const uint32_t file = key != BUSTER_CHECK_DEBUG_NO_FILE ? check_debug_file(pp, key, files, &file_count, by_file, by_directive) : 0;
         // Its expanded callees' instances (#2541 step 3): each one's call line, described where the call is in the
         // function's file (its DW_AT_call_file is the function's) as its parent is, and its callee a body.
-        CheckDebugBody* value = rows->values != NULL ? rows->values + b : NULL;
+        CheckDebugBody* value = rows->values != NULL && code ? rows->values + b : NULL;
         for (uint32_t k = 0; value != NULL && k < value->inline_count; k += 1)
         {
             CheckDebugInline* instance = value->inlines + k;
@@ -806,8 +819,8 @@ static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, co
             instance->call_line = instance->described ? call_line : 0;
         }
         const uint32_t start = rows->bodies[b];
-        const uint32_t row_count = exact ? check_debug_keep_scalar(rows->offsets + first, keys + first, lines + first, rows->counts[b], key, start, kept_offsets + kept, kept_lines + kept) :
-                                           check_debug_keep(rows->offsets + first, keys + first, lines + first, rows->counts[b], key, start, kept_offsets + kept, kept_lines + kept);
+        const uint32_t row_count = exact ? check_debug_keep_scalar(rows->offsets + first, keys + first, lines + first, raw_count, key, start, kept_offsets + kept, kept_lines + kept) :
+                                           check_debug_keep(rows->offsets + first, keys + first, lines + first, raw_count, key, start, kept_offsets + kept, kept_lines + kept);
         // The body's row: the first kept, or the second after the prologue's.
         uint32_t prologue_end = 0;
         for (uint32_t r = row_count < 2 ? row_count : 2; r > 0; r -= 1)
@@ -817,7 +830,7 @@ static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, co
         const uint32_t name = parser->tokens.names[body->declaration];
         functions[b] = (DebugFunction){
             .name = { .pointer = (char*)intern_bytes(pp->table, name), .length = intern_length(pp->table, name) },
-            .size = rows->sizes[b],
+            .size = code ? rows->sizes[b] : 0,
             .first_row = kept,
             .row_count = row_count,
             .file = file,
@@ -827,19 +840,30 @@ static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, co
         symbols[b] = check_program_body_symbol(program, b);
         kept += row_count;
     }
+    uint32_t live = 0;
+    for (uint32_t b = 0; valid && b < count; b += 1)
+    {
+        if (dead == NULL || dead[b] == 0)
+        {
+            live_functions[live] = functions[b];
+            live_symbols[live] = symbols[b];
+            live += 1;
+        }
+    }
+    debug->bodies = functions;
     debug->unit = (DebugUnit){
         .directory = { .pointer = directory, .length = valid ? strlen(directory) : 0 },
         .files = files,
         .file_count = file_count,
-        .functions = functions,
-        .function_count = count,
+        .functions = live_functions,
+        .function_count = live,
         .offsets = kept_offsets,
         .lines = kept_lines,
         .row_count = kept,
     };
-    uint32_t* addresses = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* addresses = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)live + 1) : 0;
     uint32_t* fields = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_OBJECT_DEBUG_FIELDS) : 0;
-    debug->output = (DebugOutput){ .line_addresses = addresses, .address_capacity = count };
+    debug->output = (DebugOutput){ .line_addresses = addresses, .address_capacity = live };
     // The unit and its borrowed slices stay unchanged across allocation: validate and size once, then emit once.
     DebugPlan plan;
     valid = valid && addresses != 0 && fields != 0 && debug_prepare(&debug->unit, debug->output.bases, &plan, exact) == DEBUG_OK;
@@ -854,9 +878,9 @@ static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, co
     if (valid)
     {
         debug->attach = (ExecutableDebug){
-            .functions = symbols,
+            .functions = live_symbols,
             .line_addresses = addresses,
-            .function_count = count,
+            .function_count = live,
         };
         // The fields of .debug_abbrev, .debug_line, .debug_addr and .debug_rnglists, in that order.
         for (uint32_t field = 0; field < BUSTER_OBJECT_DEBUG_FIELDS; field += 1)
@@ -864,9 +888,9 @@ static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, co
             fields[field] = debug->output.fields[DEBUG_SECTION_ABBREV + field];
         }
         debug->object = (ObjectDebug){
-            .functions = symbols,
+            .functions = live_symbols,
             .line_addresses = addresses,
-            .function_count = count,
+            .function_count = live,
             .fields = fields,
         };
         for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)

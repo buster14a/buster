@@ -911,16 +911,16 @@ static uint32_t check_tier1_inline_reach(const CheckTier1Inline* inlining, const
 // none); it keeps it where a kept body's code refers to it (a call no caller expanded, a Tier 0 caller's, an address). The
 // kept bodies are the others, with the asm helpers (`helpers`), and their references are followed from each body they
 // reach (an explicit stack). An asm template's references (a helper's or a naked body's, `naked`) are its names' indices,
-// through `asm_symbols` (of `asm_names`). Not under -g (`sources`), whose entries have no form for a function without code
-// yet (#2541 step 3), nor with -fpatchable-function-entry; the emission asks in -c's object alone. Temporaries in
-// `scratch`; none dead where they don't fit.
+// through `asm_symbols` (of `asm_names`). Not with -fpatchable-function-entry; the emission asks in -c's object alone, and
+// under -g a dead one keeps its abstract instance alone (CheckProgramRows.dead). Temporaries in `scratch`; none dead where
+// they don't fit.
 static uint32_t check_tier1_inline_dead(CheckTier1Inline* inlining, const EmittedCode* codes, const CheckProgramHelpers* helpers, const CheckProgramNaked* naked,
-                                        const SymbolId* asm_symbols, uint32_t asm_names, bool sources, Arena* scratch)
+                                        const SymbolId* asm_symbols, uint32_t asm_names, Arena* scratch)
 {
     const uint32_t count = inlining->body_count;
     const CheckProgram* program = inlining->program;
     const uint64_t mark = scratch->length;
-    uint8_t* reached = inlining->stage != 0 && !sources && program->patchable_count == 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
+    uint8_t* reached = inlining->stage != 0 && program->patchable_count == 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
     uint32_t* stack = reached != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t dead = 0;
     if (stack != 0)

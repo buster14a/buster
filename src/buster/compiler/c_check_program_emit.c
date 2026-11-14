@@ -974,7 +974,7 @@ static void check_tier1_inline_release(CheckTier1Inline* table);
 static void check_tier1_inline_renew(CheckTier1Inline* table);
 // Defined in c_check_tier1_inline.c (#2541 step 2): the candidates the emission gives no code, once every body's is made.
 static uint32_t check_tier1_inline_dead(CheckTier1Inline* inlining, const EmittedCode* codes, const CheckProgramHelpers* helpers, const CheckProgramNaked* naked,
-                                        const SymbolId* asm_symbols, uint32_t asm_names, bool sources, Arena* scratch);
+                                        const SymbolId* asm_symbols, uint32_t asm_names, Arena* scratch);
 static uint32_t check_tier1_operation(CheckTier1Outcome outcome);
 // Prints `report`, a line on `stream`: how many functions each tier compiled, and why Tier 1 refused the others.
 static void check_tier1_print_report(FILE* stream, const CheckTier1Report* report);
@@ -2728,7 +2728,7 @@ static void check_program_emit_last(CheckEmitRun* run, CheckTier1Inline* inlinin
     bool pending = lane->ready;
     while (pending)
     {
-        check_tier1_inline_dead(inlining, run->codes, helpers, naked, NULL, 0, false, lane->scratch);
+        check_tier1_inline_dead(inlining, run->codes, helpers, naked, NULL, 0, lane->scratch);
         pending = false;
         for (uint32_t b = 0; b < run->body_count; b += 1)
         {
@@ -3654,10 +3654,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         run.tier0_inline = tier0_inlines ? &tier1_inline : NULL;
         // The candidates' code held back for the last pass (#2541 step 2), where a dead one may lose its code: in -c's
         // object alone, whose symbols nothing refers to are left out (an executable's binding resolves every program
-        // symbol, a direct one's or, with `kept`, that of a link of several units); not under -g, whose
-        // entries have no form for a function without code yet, -fpatchable-function-entry or in a unit with asm, whose
-        // templates refer to names.
-        tier1_inline.holding = tier1_inlines && tier1_inline.held != NULL && binding == NULL && !kept && rows == NULL && program->patchable_count == 0 &&
+        // symbol, a direct one's or, with `kept`, that of a link of several units); not with -fpatchable-function-entry
+        // or in a unit with asm, whose templates refer to names. Under -g a dead one is its abstract instance alone
+        // (CheckProgramRows.dead).
+        tier1_inline.holding = tier1_inlines && tier1_inline.held != NULL && binding == NULL && !kept && program->patchable_count == 0 &&
                                program->input->asm_count == 0 && !lanes->tier1_no_hold;
         tier1_inline.sources = run.sources;
     }
@@ -4900,9 +4900,20 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // The candidates whose every call --tier1 expanded and that nothing else refers to (#2541 step 2,
     // check_tier1_inline_dead): no atom, symbol, frame or jump table of theirs is published. `dead` is null for none.
     const uint32_t dead_count = valid && run.tier1_inline != NULL && binding == NULL && !kept ?
-                                check_tier1_inline_dead(&tier1_inline, run.codes, helpers, asms->naked, asm_symbols, asms->name_count, run.sources, scratch) : 0;
+                                check_tier1_inline_dead(&tier1_inline, run.codes, helpers, asms->naked, asm_symbols, asms->name_count, scratch) : 0;
     const uint8_t* dead = dead_count != 0 ? tier1_inline.dead : NULL;
     result->dead_functions = dead_count;
+    // Under -g, the debug unit's: a dead function has no rows, address or DW_TAG_subprogram of its own (check_debug_build).
+    if (valid && rows != NULL && dead != NULL)
+    {
+        uint8_t* kept_dead = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, (uint64_t)count + 1);
+        valid = kept_dead != NULL;
+        if (valid)
+        {
+            memcpy(kept_dead, dead, count);
+            rows->dead = kept_dead;
+        }
+    }
     // Every symbol of the program's exists: an executable's runtime joins now, before the program's atoms, with the
     // symbols this emission and the static data will define marked as the program's definitions (bind.c).
     for (uint32_t b = 0; valid && binding != NULL && b < count + helpers->count + binding->data_count; b += 1)

@@ -487,9 +487,10 @@ static bool check_debug_tier1_values_compile(CheckDebugTestTally* tally, const c
 
 // Debug sections are not allocated. The build ID hashes the whole file, so that one allocated note is expected to
 // differ; all runtime sections, including dynamic relocation records and their referenced tables, must be identical.
-static bool check_debug_tier1_values_same_code(String8 debug, String8 plain)
+// `type` is the files' ELF type: an executable's (ET_DYN) or a -c object's (ET_REL).
+static bool check_debug_tier1_values_same_code(String8 debug, String8 plain, uint16_t type)
 {
-    const ExecutableTestImage images[] = { executable_test_image_of(debug, ET_DYN), executable_test_image_of(plain, ET_DYN) };
+    const ExecutableTestImage images[] = { executable_test_image_of(debug, type), executable_test_image_of(plain, type) };
     const String8 files[] = { debug, plain };
     bool same = images[0].valid && images[1].valid && images[0].header->e_entry == images[1].header->e_entry;
     uint32_t counts[2] = { 0 };
@@ -614,7 +615,7 @@ static void check_debug_tier1_values_test(CheckDebugTestTally* tally, const char
         const bool unadorned = check_debug_tier1_values_compile(tally, source, support, plain, variants + v, "1", false, false, arena);
         const String8 debug = built ? foreign_test_read(arena, program) : (String8){ 0 };
         const String8 other = unadorned ? foreign_test_read(arena, plain) : (String8){ 0 };
-        check_debug_test_expect(tally, built && unadorned && check_debug_tier1_values_same_code(debug, other),
+        check_debug_test_expect(tally, built && unadorned && check_debug_tier1_values_same_code(debug, other, ET_DYN),
                                 "-g preserves executable code, data, unwind and runtime relocations for each Tier 1 option", program);
         if (built)
         {
@@ -713,6 +714,25 @@ static const char check_debug_tier1_inline_script[] =
     "printf \"GDB-T1I-DONE\\n\"\n"
     "kill\n";
 
+// A breakpoint by the inner callee's name: gdb takes each of its expanded copies (their instances' abstract origin is its
+// abstract instance) and its out-of-line code where it has any, and stops first at the copy in main's code.
+static const char check_debug_tier1_inline_break_script[] =
+    "set pagination off\n"
+    "break t1i_square\n"
+    "run\n"
+    "bt\n"
+    "printf \"GDB-T1I-DONE\\n\"\n"
+    "kill\n";
+
+// How many locations gdb's `break t1i_square` took in `transcript`: "t1i_square. (N locations)", or 1 for one ("at ...:
+// file, line N."), 0 for none.
+static uint32_t check_debug_tier1_inline_locations(const char* transcript)
+{
+    const char* many = transcript != NULL ? strstr(transcript, ": t1i_square. (") : NULL;
+    const char* one = transcript != NULL ? strstr(transcript, "Breakpoint 1 at ") : NULL;
+    return many != NULL ? (uint32_t)strtoul(many + strlen(": t1i_square. ("), NULL, 10) : one != NULL ? 1 : 0;
+}
+
 // Whether gdb's backtrace in `transcript` has frame `frame` as `function` at `line` of the fixture: "#N  ", the frame's
 // address and " in " where gdb prints them (a frame's pc past its line's start), the function, its arguments, and the
 // file (its directory where gdb shows one) at the line.
@@ -735,6 +755,29 @@ static bool check_debug_tier1_inline_frame(const char* transcript, uint32_t fram
     const char* at = name != NULL ? strstr(name, place) : NULL;
     return name != NULL && strncmp(name, function, length) == 0 && name[length] == ' ' && name[length + 1] == '(' && end != NULL && at != NULL &&
            at + strlen(place) - 1 == end;
+}
+
+// gdb's `break t1i_square` on `program` (check_debug_tier1_inline_break_script, written beside the fixture): `expected`
+// locations, and the first stop in main's code, the inner callee's copy at its first statement inside the outer's.
+static void check_debug_tier1_inline_break(CheckDebugTestTally* tally, const char* program, const char* directory, uint32_t expected, Arena* arena)
+{
+    char script[PATH_MAX];
+    char report[PATH_MAX + 24];
+    char errors[PATH_MAX + 24];
+    snprintf(script, sizeof(script), "%s/dbg_tier1_inline_break.gdb", directory);
+    snprintf(report, sizeof(report), "%s.t1-break", program);
+    snprintf(errors, sizeof(errors), "%s.t1-break-errors", program);
+    const bool written = foreign_test_write(script, check_debug_tier1_inline_break_script, sizeof(check_debug_tier1_inline_break_script) - 1);
+    char* gdb[] = { (char*)"gdb", (char*)"-nx", (char*)"-batch", (char*)"-directory", (char*)directory, (char*)"-x", script, (char*)program, NULL };
+    const bool inspected = written && object_test_run(gdb, report, errors) == 0;
+    const String8 transcript = inspected ? foreign_test_read(arena, report) : (String8){ 0 };
+    const bool done = transcript.pointer != NULL && strstr(transcript.pointer, "GDB-T1I-DONE\n") != NULL;
+    check_debug_test_expect(tally, done && check_debug_tier1_inline_locations(transcript.pointer) == expected,
+                            "gdb's break by an expanded callee's name takes each of its copies", report);
+    check_debug_test_expect(tally, done && check_debug_tier1_inline_frame(transcript.pointer, 0, "t1i_square", 9) &&
+                                  check_debug_tier1_inline_frame(transcript.pointer, 1, "t1i_twice", 15) &&
+                                  check_debug_tier1_inline_frame(transcript.pointer, 2, "main", 22),
+                            "gdb stops first at the expanded callee's copy in main's code", report);
 }
 
 static void check_debug_tier1_inline_test(CheckDebugTestTally* tally, const char* directory, Arena* arena)
@@ -765,7 +808,7 @@ static void check_debug_tier1_inline_test(CheckDebugTestTally* tally, const char
         const String8 debug = built ? foreign_test_read(arena, program) : (String8){ 0 };
         const String8 other = unadorned ? foreign_test_read(arena, plain) : (String8){ 0 };
         const String8 eight = laned ? foreign_test_read(arena, wide) : (String8){ 0 };
-        check_debug_test_expect(tally, built && unadorned && check_debug_tier1_values_same_code(debug, other), "-g changes no code of Tier 1's expanded callees", program);
+        check_debug_test_expect(tally, built && unadorned && check_debug_tier1_values_same_code(debug, other, ET_DYN), "-g changes no code of Tier 1's expanded callees", program);
         check_debug_test_expect(tally, debug.pointer != NULL && eight.pointer != NULL && debug.length == eight.length && memcmp(debug.pointer, eight.pointer, debug.length) == 0,
                                 "the inline instances' DWARF is byte-identical by one lane and eight", wide);
         check_debug_test_expect(tally, v == 0 || (baseline.pointer != NULL && debug.pointer != NULL && baseline.length == debug.length &&
@@ -796,5 +839,54 @@ static void check_debug_tier1_inline_test(CheckDebugTestTally* tally, const char
                                       check_debug_tier1_inline_frame(transcript.pointer, 2, "t1i_twice", 15) &&
                                       check_debug_tier1_inline_frame(transcript.pointer, 3, "main", 22),
                                 "gdb's backtrace in main's code shows the expanded callees' frames at their calls' lines", report);
+        // The executable keeps both callees' code (its binding resolves every symbol): the inner one's out-of-line code,
+        // its two copies in the outer's and the two in main's.
+        check_debug_tier1_inline_break(tally, program, directory, 5, arena);
     }
+    // A -c -g object (#2541): the callees every call expanded are dead, no code or symbol of theirs, their abstract
+    // instances alone; -g changes none of the object's code; linked, gdb shows their frames and breaks at the two copies of
+    // the inner one in main's code.
+    char object[PATH_MAX];
+    char plain[PATH_MAX];
+    char linked[PATH_MAX];
+    snprintf(object, sizeof(object), "%s/dbg_t1_inline.o", directory);
+    snprintf(plain, sizeof(plain), "%s/dbg_t1_inline_plain.o", directory);
+    snprintf(linked, sizeof(linked), "%s/dbg_t1_inline_linked", directory);
+    const bool compiled = written && check_debug_tier1_values_compile(tally, source, NULL, object, variants, "1", true, true, arena);
+    const bool unadorned = written && check_debug_tier1_values_compile(tally, source, NULL, plain, variants, "1", false, true, arena);
+    const String8 debug = compiled ? foreign_test_read(arena, object) : (String8){ 0 };
+    const String8 other = unadorned ? foreign_test_read(arena, plain) : (String8){ 0 };
+    check_debug_test_expect(tally, compiled && unadorned && check_debug_tier1_values_same_code(debug, other, ET_REL), "-g changes no code of a -c object with dead callees",
+                            object);
+    char report[PATH_MAX + 24];
+    char errors[PATH_MAX + 24];
+    snprintf(report, sizeof(report), "%s.t1-symbols", object);
+    snprintf(errors, sizeof(errors), "%s.t1-errors", object);
+    char* symbols[] = { (char*)"nm", (char*)object, NULL };
+    const bool listed = compiled && object_test_run(symbols, report, errors) == 0;
+    const String8 names = listed ? foreign_test_read(arena, report) : (String8){ 0 };
+    check_debug_test_expect(tally, names.pointer != NULL && strstr(names.pointer, " t1i_mark\n") != NULL && strstr(names.pointer, "t1i_square") == NULL &&
+                                       strstr(names.pointer, "t1i_twice") == NULL,
+                            "the callees every call expanded are dead in a -c -g object", report);
+    snprintf(report, sizeof(report), "%s.t1-verify", object);
+    char* verify[] = { (char*)"llvm-dwarfdump", (char*)"--verify", object, NULL };
+    const bool verified = compiled && object_test_run(verify, report, errors) == 0;
+    const String8 verification = verified ? foreign_test_read(arena, report) : (String8){ 0 };
+    check_debug_test_expect(tally, verification.pointer != NULL && strstr(verification.pointer, "No errors.") != NULL,
+                            "a -c -g object with dead callees passes llvm-dwarfdump --verify", report);
+    snprintf(errors, sizeof(errors), "%s.err", linked);
+    char* link[] = { (char*)"cc", (char*)"-o", linked, object, NULL };
+    const bool joined = compiled && object_test_run(link, "/dev/null", errors) == 0;
+    check_debug_test_expect(tally, joined, "the inline-instance object links", errors);
+    snprintf(report, sizeof(report), "%s.t1-gdb", linked);
+    char* gdb[] = { (char*)"gdb", (char*)"-nx", (char*)"-batch", (char*)"-directory", (char*)directory, (char*)"-x", script, linked, NULL };
+    const bool inspected = joined && object_test_run(gdb, report, errors) == 0;
+    const String8 transcript = inspected ? foreign_test_read(arena, report) : (String8){ 0 };
+    const bool done = transcript.pointer != NULL && strstr(transcript.pointer, "GDB-T1I-DONE\n") != NULL;
+    check_debug_test_expect(tally, done && check_debug_tier1_inline_frame(transcript.pointer, 0, "t1i_mark", 5) &&
+                                  check_debug_tier1_inline_frame(transcript.pointer, 1, "t1i_square", 10) &&
+                                  check_debug_tier1_inline_frame(transcript.pointer, 2, "t1i_twice", 15) &&
+                                  check_debug_tier1_inline_frame(transcript.pointer, 3, "main", 22),
+                            "gdb's backtrace shows the dead callees' expanded frames", report);
+    check_debug_tier1_inline_break(tally, linked, directory, 2, arena);
 }
