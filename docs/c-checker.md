@@ -463,8 +463,38 @@ does, each rule checked against clang's answers on probes of it:
   The ordinary control walk is specialized without the prefix checks.
   Tier 0 has no loop transformation for the hints to steer.
 - **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
-  or a compound statement's start. Its state changes nothing, since nothing
-  here contracts `a * b + c` into a fused operation.
+  or a compound statement's start. `ON` permits contraction within a source
+  expression, `OFF` forbids it, and `DEFAULT` restores the command-line
+  contraction mode. The command-line default is `-ffp-contract=on`;
+  `off`, `on`, `fast` and `fast-honor-pragmas` are validated, ordered options.
+  Clang 23's `fast-honor-pragmas` is an alias of `fast`, and both allow lexical
+  pragma overrides. Fast mode grants a broader optimization permission;
+  Clang's `-O0` retains separate multiply/add operations in that mode.
+  The optional `CheckGraph.fp_environments` byte carries contraction in bits
+  `BUSTER_CHECK_FP_CONTRACT_ON` and `BUSTER_CHECK_FP_CONTRACT_FAST`, independently
+  of evaluation methods and environment access. Its zero policy is off.
+  Sources without floating pragmas allocate no new column: their immutable
+  `fp_contract_default` carries the argv policy. Handwritten graphs default
+  to off. Scalar and SIMD input publication preserve the same bits, and
+  deferred expression slices retain the source graph's default and column.
+  Shared native lowering (`c_check_program_contract.c`) contracts scalar float
+  and double multiply/add/subtract expressions when both operations permit
+  `on` and the function's effective target has FMA or AVX512F. Parentheses,
+  same-format casts and selected wrappers retain the opportunity; stored
+  products, statement-expression results, dynamic conditional joins and
+  conversions to another floating format are boundaries. Compound `+=` and
+  `-=` keep the ordinary address evaluation and single store. The existing
+  exact x86 operation row carries the fused operation through both tiers;
+  operand order and explicit negations preserve the pinned oracle's NaN bits.
+  Targets without FMA retain separate arithmetic, and `fast` retains the
+  pinned `-O0` behavior rather than adding a cross-statement optimization pass.
+  Constant products retain their prior rounding. A GNU statement expression
+  that supplies a constant floating operand is materialized at runtime in
+  every contraction mode, as Clang does: its source proof remains available,
+  while the inherited source/runtime flag prevents an enclosing expression
+  from folding an unfused answer over a fused result. This correction can
+  change instruction bytes for those previously folded statement expressions
+  even on a non-FMA target; default and explicit `off` still agree there.
 - **The clang and Microsoft floating-point spellings** (`c_check_fp_input.c`):
   `#pragma clang fp` accepts any sequence of `contract(on|off|fast)`,
   `reassociate(on|off)`, `reciprocal(on|off)`, `eval_method(source|double|extended)` and
@@ -475,8 +505,8 @@ does, each rule checked against clang's answers on probes of it:
   Clang's `-Wignored-pragmas` warning with ordinary command-line, source and
   system-header policy. Illegal precision/exception combinations and stack
   operations inside a compound have Clang's diagnostic text and location.
-  Permission to contract, reassociate, use reciprocals or relax precision does
-  not require those transformations; generated evaluation remains precise.
+  Reassociation, reciprocal evaluation and precision relaxation remain
+  independent permissions; they are not implied by contraction.
   `strict` and `maytrap` preserve runtime operations and conversions through the
   existing floating-environment path, including discarded results and constant
   operands. The exception state is separate from STDC `FENV_ACCESS`, so changing
