@@ -12435,8 +12435,6 @@ static void check_common_type_safety(const Parser* parser, Preprocessor* pp, con
     }
 }
 
-// `flushed`: the tokens of the bodies clang ends after the unit's first error (check_common_flush), or null in a unit
-// without one.
 // A failed initializer still built its source expression. Emit its comma operands' warnings before the rejected-view
 // recovery drops the declaration, using the same graph, evaluation facts and warning policy as the normal walk.
 static void check_common_rejected_initializer_commas(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
@@ -12499,6 +12497,8 @@ static void check_common_rejected_initializer_commas(const Parser* parser, Prepr
     check_common_contexts = (CheckCommonContexts){ 0 };
 }
 
+// `flushed`: the tokens of the bodies clang ends after the unit's first error (check_common_flush), or null in a unit
+// without one.
 static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                          TypeTable* types, const CheckProgram* program, const uint8_t* flushed, CheckCommonShiftWarnings* shifts,
                                          Arena* scratch)
