@@ -11,12 +11,18 @@
 # section, which every unit compiled with -ffunction-sections has (.text.NAME, or .text.unlikely.NAME for a cold one,
 # .text.hot.NAME for a hot one): one unit's copy of a static helper moves, the other units' copies don't, as a symbol
 # ordering file, which names symbols, would move all of them. The object is the unit's own (*/UNIT.c.o) or its parallel
-# parts' join (*/UNIT/native.o). A shifted link's padding (build.sh shifts, .text.buster_shift_padding) goes right before
-# SHIFT_SOURCE's first function, so that its placements move that unit's code here too. And SYMBOLS, the `- NAME` lines'
-# names, a symbol ordering file for the global functions and the C library's (which the static link places after every
-# object): lld puts their sections first in .text, right after the units' local ones. The checker's own code
-# (.text.buster_checker, main.c) is one section of each unit, which stays where it is. Each file is written only when
-# its text changes, so that an unchanged list relinks nothing.
+# parts' join (*/UNIT/native.o). The checker's own code (.text.buster_checker, main.c: one section of each unit, which
+# starts on a page) follows, every unit's together, and then .text. A shifted link's padding (build.sh shifts) goes right
+# before SHIFT_SOURCE's first function here (.text.buster_shift_padding), so that its placements move that unit's code
+# here too, and again first in .text (.text.buster_shift_padding_text, first in SYMBOLS), so that they move every unit's
+# code there by exactly the shift (buster_start_order_shift_padded). In .text, each unit's page-aligned checker section, empty where the unit has none of
+# the checker's code, started its functions on a page, and the page-aligned .text began after the padding: no shift
+# moved .text's code (#2728). And SYMBOLS, the `- NAME` lines' names, a symbol ordering file for the global functions
+# and the C library's (which the static link places after every object): lld puts their sections first in .text. The
+# script can't reorder the functions inside a checker section: where a unit's native code is generated in parallel parts
+# (BusterCodegen.cmake), in every static build, whatever its linker, buster_start_order_unit below writes the names the
+# split (tools/codegen/split.c --first) puts first in that section. Each file is written only when its text changes, so
+# that an unchanged list relinks nothing.
 
 function(buster_start_order_write path text)
     set(current "")
@@ -61,7 +67,37 @@ function(buster_start_order_files list script symbols shift_source)
         "/* The start's code order (cmake/BusterStartOrder.cmake), from ${list}. */\n"
         "SECTIONS\n{\n    .text.buster_start :\n    {\n${sections}    }\n"
         "    ASSERT(SIZEOF(.text.buster_start) > 0, \"the start's code order placed no function: the units' objects or sections aren't the link's\")\n"
+        "    .text.buster_checker :\n    {\n        *(.text.buster_checker)\n    }\n"
         "}\nINSERT BEFORE .text;\n")
     buster_start_order_write("${script}" "${text}")
-    buster_start_order_write("${symbols}" "${names}")
+    # A shifted link's padding before .text's code: the first section lld places there (absent elsewhere, which
+    # --no-warn-symbol-ordering lets pass).
+    buster_start_order_write("${symbols}" "buster_shift_padding_text\n${names}")
+    # Whether SHIFT_SOURCE's padding goes before its functions here, so that a shifted link needs the second padding
+    # to move .text (a source with no start-ordered function has its padding right before its objects in .text).
+    set(buster_start_order_shift_padded ${padded} PARENT_SCOPE)
+endfunction()
+
+# The start's order inside unit UNIT's named sections (#1444): LIST's names of UNIT's own functions (`UNIT.c NAME`) and
+# of the global ones (`- NAME`, which any unit may define), in LIST's order, one a line, written to PATH for the
+# parallel split's --first, which puts those that the unit defines in .text.buster_checker first in that section.
+# `count` is the number of UNIT's own lines; with none, PATH is removed and the split takes no list.
+function(buster_start_order_unit list unit path count)
+    file(STRINGS "${list}" lines)
+    set(names "")
+    set(own 0)
+    foreach(line IN LISTS lines)
+        if(line MATCHES "^${unit}\\.c ([A-Za-z_][A-Za-z0-9_.]*)$")
+            string(APPEND names "${CMAKE_MATCH_1}\n")
+            math(EXPR own "${own} + 1")
+        elseif(line MATCHES "^- ([A-Za-z_.][A-Za-z0-9_.@]*)$")
+            string(APPEND names "${CMAKE_MATCH_1}\n")
+        endif()
+    endforeach()
+    if(own EQUAL 0)
+        file(REMOVE "${path}")
+    else()
+        buster_start_order_write("${path}" "${names}")
+    endif()
+    set(${count} ${own} PARENT_SCOPE)
 endfunction()

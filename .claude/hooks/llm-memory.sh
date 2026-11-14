@@ -4,8 +4,8 @@
 #
 #   llm-memory.sh start   SessionStart: put the clone at ~/llm-memory; in Claude Code, link this checkout's memory
 #                         folder into it
-#   llm-memory.sh stop    Stop: run `llm-memory sync` in the background, so each turn's memories reach GitHub (in Claude
-#                         Code, this session's branch and its one pull request)
+#   llm-memory.sh stop    Stop: run `llm-memory sync` in the background, so each turn's memories reach GitHub's main
+#                         (no pull request)
 #
 # On the owner's own computers the clone, the link and the sync timer already exist, so the hook acts only in a
 # cloud session: Claude Code's (CLAUDE_CODE_REMOTE=true), or Codex's, whose environment already sets
@@ -54,10 +54,9 @@ is_clone()
     git -C "$1" rev-parse -q --verify HEAD > /dev/null 2>&1 && [ -x "$1/bin/llm-memory" ]
 }
 
-# A Claude Code cloud session may push only to its own branch, the one this checkout is on. Put the clone on that branch
-# (GitHub's copy of it if a container before this one pushed it, else main) and set llm-memory.branch, so that sync
-# commits there, rebases it on GitHub's main, pushes it and keeps one pull request open for it. Nothing commits to local
-# main, so it can't diverge from GitHub's. A shallow clone is deepened, since the index orders notes by when Git first
+# Put the clone on this checkout's session branch (GitHub's copy of it if an older sync pushed one, else main) and set
+# llm-memory.branch, so that sync commits there, rebases it on GitHub's main and pushes it straight to main, with no pull
+# request. Nothing commits to local main, so it can't diverge from GitHub's. A shallow clone is deepened, since the index orders notes by when Git first
 # saw them.
 on_session_branch()
 {
@@ -69,7 +68,7 @@ on_session_branch()
     claude/*)
         ;;
     *)
-        echo "Agent memory: this checkout is on ${branch:-a detached HEAD}, not a claude/ session branch, so sync can't push memories; save them and open a pull request in davidgmbb/llm-memory by hand."
+        echo "Agent memory: this checkout is on ${branch:-a detached HEAD}, not a claude/ session branch, so sync won't run; save memories, then commit and push them to main in ~/llm-memory by hand."
         return
         ;;
     esac
@@ -127,7 +126,7 @@ start()
             if [ "$(cd "$project" && pwd -P)" = "$(cd "$checkout/.." && pwd -P)" ]; then
                 HOME=$home "$memory/bin/llm-memory" link "$project" "$name" > /dev/null
             fi
-            echo "Agent memory: ~/llm-memory/projects/$name is this project's memory folder; the Stop hook syncs it to GitHub, on this session's branch and pull request. MEMORY.md is generated from the notes: save each memory as a note with name/description frontmatter."
+            echo "Agent memory: ~/llm-memory/projects/$name is this project's memory folder; the Stop hook syncs it straight to main on GitHub, with no pull request. MEMORY.md is generated from the notes: save each memory as a note with name/description frontmatter."
             if [ "${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-}" != 0 ]; then
                 echo "Auto memory is off in this cloud session (the environment doesn't set CLAUDE_CODE_DISABLE_AUTO_MEMORY=0): read ~/llm-memory/projects/$name/MEMORY.md and save there by hand, as AGENTS.md says for other agents."
             fi

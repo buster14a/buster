@@ -53,8 +53,8 @@ static void check_test_run_mode_reply(int socket, CheckRunModeReply reply, int32
     {
         const uint32_t length = (uint32_t)strlen(text) + (reply == CHECK_RUN_MODE_PARTIAL ? 1u : 0u);
         const uint32_t sent = reply == CHECK_RUN_MODE_PARTIAL ? (length - 1) / 2 : length;
-        read = oracle_server_send(socket, &status, sizeof(status)) && oracle_server_send(socket, &length, sizeof(length)) &&
-               oracle_server_send(socket, text, sent);
+        read = oracle_server_send(socket, &status, sizeof(status), deadline) && oracle_server_send(socket, &length, sizeof(length), deadline) &&
+               oracle_server_send(socket, text, sent, deadline);
     }
     close(socket);
     _exit(read ? 0 : 1);

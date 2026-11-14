@@ -165,7 +165,8 @@ static InterpreterStatus ir_interpreter_simd_operation(const IrInterpreterFrame*
     }
     else
     {
-        // A ternary intrinsic's third operand (#1840) is in the extra array, its `c` its kind and that place.
+        // A ternary intrinsic's third operand (#1840) is in the extra array, its `c` its kind and that place (a scatter's
+        // values there are no lane operation's: the interpreter's memory case runs it).
         const bool ternary = ir_ternary_instruction(function, i);
         const uint32_t ids[3] = { function->a[i], function->b[i], ternary ? ir_intrinsic_third(function, i) : function->c[i] };
         const uint32_t mask = ir_value_mask(function, i) | (ternary ? 4u : 0u);

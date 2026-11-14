@@ -1,0 +1,9 @@
+restrict _Atomic __auto_type first = 1;
+restrict __auto_type _Atomic second = 2;
+_Atomic restrict __auto_type third = 3;
+_Atomic __auto_type restrict fourth = 4;
+__auto_type restrict _Atomic fifth = 5;
+__auto_type _Atomic restrict sixth = 6;
+const volatile restrict _Atomic __auto_type qualified = 7;
+__restrict _Atomic __auto_type gnu_restrict = 8;
+_Atomic __auto_type __restrict__ gnu_restrict2 = 9;

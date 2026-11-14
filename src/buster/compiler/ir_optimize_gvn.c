@@ -889,9 +889,9 @@ static IrError ir_gvn_alias_view(IrGvnWork* work, Arena* scratch, IrFunction* re
             extras += f->calls[f->b[i]].argument_count;
             calls += 1;
         }
-        else if (ir_ternary_instruction(f, i))
+        else if (ir_extra_value_count(f, i) != 0)
         {
-            extras += 1;
+            extras += ir_extra_value_count(f, i);
         }
     }
     IrError error = extras <= UINT32_MAX && calls <= UINT32_MAX ? IR_OK : IR_ERROR_LIMIT;
@@ -974,10 +974,13 @@ static IrError ir_gvn_alias_view(IrGvnWork* work, Arena* scratch, IrFunction* re
             }
             call += 1;
         }
-        else if (ir_ternary_instruction(f, i))
+        else if (ir_extra_value_count(f, i) != 0)
         {
             view.c[i] = ir_intrinsic_ternary_c(f->c[i], extra);
-            view.extra[extra++] = ir_gvn_resolve(work->alias, ir_intrinsic_third(f, i));
+            for (uint32_t k = 0, extra_values = ir_extra_value_count(f, i); k < extra_values; k += 1)
+            {
+                view.extra[extra++] = ir_gvn_resolve(work->alias, ir_extra_value(f, i, k));
+            }
         }
     }
     if (error == IR_OK)

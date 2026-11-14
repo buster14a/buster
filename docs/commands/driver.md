@@ -21,7 +21,13 @@ requirements. [Command index](README.md).
   action run too with `--verify`), `--lower-all`
   lowering every definition, referenced or not (#129's test option; `-c` and
   the direct path lower only what the unit's roots reach,
-  `check_program_select`), `--tier1` compiling each function Tier 1's pipeline
+  `check_program_select`), `--selection-census` reporting on stderr, beside
+  the unit's exact references, the candidates a selection before #2536's
+  windows could take, by a walk from every root, a scan of the value nodes and
+  the scan pruned of what no control evaluates, by the writer's dead arms and
+  by the pass's own before the bodies' controls (step 2.2a), with their
+  selections against the exact one and their cost (step 2.1's test option, no change to the
+  object: [the design](../all-core-path.md#step-2-the-selection-after-the-windows)), `--tier1` compiling each function Tier 1's pipeline
   takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, both tiers'
   code the emission's `EmittedCode`, #1056, their unwind tables alike; with `-g`
   Tier 1's rows at the function's granularity, the Tier 1 guide's "Debug
@@ -33,8 +39,10 @@ requirements. [Command index](README.md).
   `code_certified`, or left for a shape it doesn't decode, `code_uncertified`),
   and `--tier1-no-rematerialize` compiles them without rematerialization,
   `--tier1-no-lifetimes` without their objects' lifetimes and
-  `--tier1-no-inline` without expanding the unit's always_inline functions'
-  calls, which the report's `inlined` counts (#1282): [the Tier 1
+  `--tier1-no-inline` without expanding the unit's candidates' calls, which
+  the report's `inlined` counts, or leaving functions without code, its
+  `dead` (#1282, #2541), and `--tier1-no-hold` with every candidate's code
+  made on its lane, none held for the last pass (the same objects): [the Tier 1
   guide](../../docs/tier1.md)'s "The C driver's `--tier1`" and "Inlining", and [Tier 1 failure
   outcomes](../../docs/tier1-outcomes.md)); `-O` flags set only preprocessor
   optimization macros, not the tier; Tier 0 is the default, and inlines the same calls: `--tier0-no-inline` keeps them, #1398's control, [the Tier 0 guide](tier0.md#inlining-always_inline-functions-1398)), `--emit-window=N` taking one lane's emission in windows of about N tokens, each window's lowering and code before the next one's, in memory the next one reuses (#2536's step 1; 2,048 by default, 0 one window as long as the unit: [function lanes](function-lanes.md#windows-2536)), `--id-order N` handing the unit's identifiers their
@@ -114,8 +122,8 @@ requirements. [Command index](README.md).
   `check_units_merge_lanes`, #778) into one executable, with `-g` of their DWARF
   units, one each (#779). A lane's units skip the file-scope declarations its
   earlier units read silently and purely and that their own code doesn't reach
-  (#2531, `--attested=on|verify|off`, on by default but with `-g` or
-  `--scalar`: the [translation units guide](translation-units.md#attested-declarations---attested-2531)).
+  (#2531, `--attested=on|verify|off`, on by default but with `--scalar`, `-g`
+  too: the [translation units guide](translation-units.md#attested-declarations---attested-2531)).
   `--attested-memo=DIRECTORY` keeps their memo across processes, in a file
   of that directory for the compiler's build and the command's options, so
   that a command of one source file skips what earlier commands learned too

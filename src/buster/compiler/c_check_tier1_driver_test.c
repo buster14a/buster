@@ -1146,8 +1146,10 @@ static uint32_t check_test_tier1_function(const char* path, const char* name, X8
         function = named ? symbol : NULL;
     }
     const Elf64_Shdr* text = function != NULL ? &elf.sections[function->st_shndx] : NULL;
+    // The decoder's tables are this helper's to set up: which tests ran before it in this process (a part's deal) is
+    // no precondition.
     valid = valid && text != NULL && function->st_size != 0 && function->st_value <= text->sh_size && function->st_size <= text->sh_size - function->st_value &&
-            check_test_elf_range(elf.file, text->sh_offset, text->sh_size);
+            check_test_elf_range(elf.file, text->sh_offset, text->sh_size) && x86_disassembler_initialize();
     const X86DecodeResult decoded = valid ? x86_disassemble_scalar((const uint8_t*)bytes + text->sh_offset + function->st_value, function->st_size, records, capacity)
                                           : (X86DecodeResult){ .status = X86_DECODE_BAD_ARGUMENT };
     valid = valid && decoded.status == X86_DECODE_OK && decoded.consumed == function->st_size;
@@ -1877,13 +1879,15 @@ static void check_test_driver_tier1_gvn(CheckTest* test, const char* clang, cons
 // The --tier1-passes= fixture (#139): tier1_passes gives each pass of Tier 1's pipeline something to do: a constant
 // compare (SCCP), an unused product (dead-code removal), a branch whose arms only call, leaving an empty block that jumps
 // to a join without phis (CFG cleanup), a loop-invariant sum (LICM), a struct local (SROA), a repeated sum (#866's
-// solver) and two small static callees (the inlining).
+// solver) and two small static callees (the inlining). It is noinline itself: expanded into main twice (#2541 step 2
+// expands external definitions), its blocks are the merge's whether or not CFG cleanup runs, and the counts no longer
+// tell the passes apart.
 static const char check_test_tier1_passes_source[] =
     "#include <stdio.h>\n"
     "struct tier1_passes_pair { long low; long high; };\n"
     "static long tier1_passes_twice(long x) { return x * 2 + 1; }\n"
     "static struct tier1_passes_pair tier1_passes_make(long a) { struct tier1_passes_pair p = { a, a * 2 }; return p; }\n"
-    "long tier1_passes(const long* values, long n, long k)\n"
+    "__attribute__((noinline)) long tier1_passes(const long* values, long n, long k)\n"
     "{\n"
     "    struct tier1_passes_pair pair = tier1_passes_make(k + 4);\n"
     "    const long scale = 3;\n"
@@ -3453,7 +3457,10 @@ static void check_test_driver_tier1_asm(CheckTest* test, const char* clang, cons
             unlink(program);
         }
     }
-    for (uint32_t path = 0; written && path < 2; path += 1)
+    // A driver part may run this suite before any other decoder user (#2737).
+    const bool decoder_ready = x86_disassembler_initialize();
+    check_test_expect(test, decoder_ready, "asm bodies' object decoder initializes");
+    for (uint32_t path = 0; written && decoder_ready && path < 2; path += 1)
     {
         CheckTestTier1Build build;
         const bool compiled = check_test_tier1_build(executable, unit, "", object, true, path != 0, true, false, NULL, &build);
@@ -5705,6 +5712,121 @@ static void check_test_driver_tier1_half(CheckTest* test, const char* clang, con
     unlink(unit);
 }
 
+// #2750's copies: below AVX-512 too, an inlined wrapper's by-value vectors are copied by the target's own vector moves
+// (16 bytes at every target, 32 with AVX), so SROA and promotion take their slots as at x86-64-v4. Copied by 8-byte
+// integers, each stayed memory that the wrapper's 16-byte load could not be forwarded from. By each path the build at
+// x86-64 and at x86-64-v3 leaves no more frame than x86-64-v4's of the same source, and runs as clang -O0's does.
+static const char check_test_tier1_vector_copies_source[] =
+    "#include <immintrin.h>\n"
+    "#include <stdio.h>\n"
+    "__attribute__((noinline)) void add(int* d, const int* a, const int* b, int n)\n"
+    "{\n"
+    "    for (int i = 0; i + 4 <= n; i += 4) _mm_storeu_si128((__m128i*)(d + i), _mm_add_epi32(_mm_loadu_si128((const __m128i*)(a + i)), _mm_loadu_si128((const __m128i*)(b + i))));\n"
+    "}\n"
+    "__attribute__((noinline)) void scale(float* d, const float* a, float k, int n)\n"
+    "{\n"
+    "    __m128 kk = _mm_set1_ps(k);\n"
+    "    for (int i = 0; i + 4 <= n; i += 4) _mm_storeu_ps(d + i, _mm_mul_ps(_mm_loadu_ps(a + i), kk));\n"
+    "}\n"
+    "#ifdef WIDE\n"
+    "__attribute__((noinline)) void sub256(int* d, const int* a, const int* b, int n)\n"
+    "{\n"
+    "    for (int i = 0; i + 8 <= n; i += 8) _mm256_storeu_si256((__m256i*)(d + i), _mm256_sub_epi32(_mm256_loadu_si256((const __m256i*)(a + i)), _mm256_loadu_si256((const __m256i*)(b + i))));\n"
+    "}\n"
+    "#endif\n"
+    "static int a[16], b[16], d[16];\n"
+    "static float fa[16], fd[16];\n"
+    "int main(void)\n"
+    "{\n"
+    "    for (int i = 0; i < 16; i += 1) { a[i] = i * 7 + 1; b[i] = 100 - i * 3; fa[i] = (float)i * 0.5f; }\n"
+    "    add(d, a, b, 16);\n"
+    "    scale(fd, fa, 3.0f, 16);\n"
+    "    long s = 0;\n"
+    "    for (int i = 0; i < 16; i += 1) s = s * 31 + d[i] + (long)fd[i];\n"
+    "#ifdef WIDE\n"
+    "    sub256(d, a, b, 16);\n"
+    "    for (int i = 0; i < 16; i += 1) s = s * 31 + d[i];\n"
+    "#endif\n"
+    "    printf(\"%ld\\n\", s);\n"
+    "    return 0;\n"
+    "}\n";
+
+static void check_test_driver_tier1_vector_copies(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const targets[2] = { "x86-64", "x86-64-v3" };
+    char unit[512];
+    snprintf(unit, sizeof(unit), "%s/tier1-vector-copies.c", directory);
+    const bool written = parse_test_write(unit, check_test_tier1_vector_copies_source, strlen(check_test_tier1_vector_copies_source));
+    check_test_expect(test, written, "the vector copies' fixture is written");
+    for (uint32_t t = 0; written && t < 2; t += 1)
+    {
+        // The 32-byte loop is the AVX target's alone: x86-64 has no ymm register.
+        const bool wide = t != 0;
+        X86Target target = { 0 };
+        const bool parsed = x86_target_parse(targets[t], strlen(targets[t]), &target);
+        const bool host = parsed && (x86_target_native().features & target.features) == target.features;
+        char march[64];
+        char reference[512];
+        snprintf(march, sizeof(march), "-march=%s", targets[t]);
+        snprintf(reference, sizeof(reference), "%s/tier1-vector-copies-clang-%u", directory, t);
+        char* reference_arguments[8] = { (char*)clang, "-O0", march, "-o", reference, unit, wide ? "-DWIDE" : NULL, NULL };
+        char* text = NULL;
+        const bool referenced = check_test_driver_spawn(reference_arguments, &text) == 0;
+        free(text);
+        char expected[256] = { 0 };
+        const bool ran = referenced && (!host || (check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0));
+        char message[256];
+        snprintf(message, sizeof(message), "clang's build of the vector copies' fixture runs (%s)", targets[t]);
+        check_test_expect(test, ran, message);
+        for (uint32_t path = 0; ran && path < 2; path += 1)
+        {
+            // Build 0 is the target's; build 1 is x86-64-v4's, whose copies were vectors before #2750: its frame bounds the
+            // target's.
+            uint64_t frames[2] = { UINT64_MAX, 0 };
+            bool clean = true;
+            char program[512];
+            snprintf(program, sizeof(program), "%s/tier1-vector-copies-%u-%u", directory, t, path);
+            for (uint32_t build = 0; build < 2; build += 1)
+            {
+                char* arguments[12] = { (char*)executable, "--tier1", "--tier1-report", "--verify", build == 0 ? march : "-march=x86-64-v4" };
+                uint32_t count = 5;
+                if (wide)
+                {
+                    arguments[count++] = "-DWIDE";
+                }
+                if (path != 0)
+                {
+                    arguments[count++] = "--scalar";
+                }
+                if (build != 0)
+                {
+                    arguments[count++] = "-c";
+                }
+                arguments[count++] = "-o";
+                arguments[count++] = build == 0 ? program : "/dev/null";
+                arguments[count++] = unit;
+                arguments[count] = NULL;
+                text = NULL;
+                const bool built = check_test_driver_spawn(arguments, &text) == 0;
+                uint64_t internal = UINT64_MAX;
+                uint64_t fallbacks = UINT64_MAX;
+                clean = built && check_test_tier1_field(text, "frame_bytes", &frames[build]) && check_test_tier1_field(text, "internal_failures", &internal) && internal == 0 &&
+                        check_test_tier1_field(text, "fallbacks", &fallbacks) && fallbacks == 0 && clean;
+                free(text);
+            }
+            snprintf(message, sizeof(message), "the wrappers' vectors leave no more frame at %s than at x86-64-v4: %llu bytes against %llu (%s path)", targets[t], (unsigned long long)frames[0],
+                     (unsigned long long)frames[1], path != 0 ? "scalar" : "vector");
+            check_test_expect(test, clean && frames[0] <= frames[1], message);
+            char actual[256] = { 0 };
+            snprintf(message, sizeof(message), "the vector copies' fixture by --tier1 runs as clang -O0's build does (%s, %s path)", targets[t], path != 0 ? "scalar" : "vector");
+            check_test_expect(test, clean && (!host || (check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0)), message);
+            unlink(program);
+        }
+        unlink(reference);
+    }
+    unlink(unit);
+}
+
 // #1282's inlining: the unit's always_inline functions of internal linkage expanded into their callers by --tier1, the
 // x86 intrinsics' wrappers above all, whose vectors pass and return by value: their byte-wise copies into fresh slots,
 // split by SROA and promoted. A static always_inline helper of a struct by value (copies by integers), and a static
@@ -5865,6 +5987,174 @@ static void check_test_driver_tier1_inline(CheckTest* test, const char* clang, c
         check_test_expect(test, compiled && check_test_driver_same_files(objects[0], objects[1]), message);
         unlink(objects[0]);
         unlink(objects[1]);
+    }
+    unlink(reference);
+    unlink(unit);
+    check_test_driver_tier1_vector_copies(test, clang, executable, directory);
+}
+
+// #2541 step 2's classes and dead functions: an external definition (expanded at its calls, its code kept), a weak one
+// (another unit's may replace it: its calls stay), a static function with one call past the small class's cost (the
+// single-site class: expanded and dead), a static chain whose only calls are in an expanded function (dead), static
+// functions expanded where called but kept by their address taken in code, by a static table and by a used attribute,
+// one whose only caller Tier 1 leaves to Tier 0 (it calls setjmp), whose call stays and whose code the emission's last
+// pass makes from its summary, and one that calls a runtime function (__divti3), whose expansion's call of it takes the
+// runtime's symbol whichever lane lowered the callee (by eight lanes, the parts are apart). By each path, with and without inlining, the build runs as clang -O0's does; its
+// object defines the kept functions and leaves out the dead ones (all of them without inlining); and its object by one
+// lane is its object by eight, and its object without holding the candidates' code for the last pass (--tier1-no-hold).
+// An executable keeps every function: its binding resolves every program symbol.
+static const char check_test_tier1_unit_inline_source[] =
+    "#include <setjmp.h>\n"
+    "#include <stdio.h>\n"
+    "int scale(int x) { return x * 3 + 1; }\n"
+    "__attribute__((weak)) int hook(int x) { return x + 11; }\n"
+    "static long crunch(const int* p, int n)\n"
+    "{\n"
+    "    long s = 0;\n"
+    "    for (int i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        int v = p[i];\n"
+    "        if (v & 1) s += v * 3; else s -= v / 2;\n"
+    "        switch (v & 3) { case 0: s ^= 5; break; case 1: s += 7; break; case 2: s *= 3; break; default: s -= 1; }\n"
+    "        s += scale(v) + (v << 2) - (v >> 1) + (s >> 3) * (v | 1) - (s % 7) + ((v & 8) != 0 ? s / 3 : s * 2);\n"
+    "        s ^= (s << 7) + (long)(v * 1103515245u) + (s >> 11) - (long)(i * 12345);\n"
+    "    }\n"
+    "    return s;\n"
+    "}\n"
+    "static long quotient(__int128 a, long b) { return (long)(a / b); }\n"
+    "static int lead(int x) { return x ^ 0x55; }\n"
+    "static int hop(int x) { return lead(x) + lead(x + 1); }\n"
+    "static int add1(int x) { return x + 1; }\n"
+    "static int sub1(int x) { return x - 1; }\n"
+    "static int (*const table[])(int) = { sub1 };\n"
+    "static __attribute__((used)) int pinned(int x) { return x * 5; }\n"
+    "static int saved(int x) { return x * 9 - 4; }\n"
+    "static jmp_buf place;\n"
+    "__attribute__((noinline)) int jumpy(int x) { if (setjmp(place) != 0) return -1; return saved(x); }\n"
+    "__attribute__((noinline)) long run(int n, int (*f)(int))\n"
+    "{\n"
+    "    int d[7] = { 3, 8, 1, 6, 4, 11, 2 };\n"
+    "    long r = crunch(d, 7);\n"
+    "    for (int i = 0; i < n; i += 1) r += scale(i) + hook(i) + hop(i) + add1(i) + sub1(i) + pinned(i) + f(i) + table[0](i);\n"
+    "    return r + jumpy(n);\n"
+    "}\n"
+    "__attribute__((noinline)) long wide(int n) { return quotient((__int128)n << 70, 12345) + quotient(-(__int128)n << 66, 777); }\n"
+    "int main(void) { printf(\"%ld %d\\n\", run(9, add1) + wide(5), scale(4)); return 0; }\n";
+
+static void check_test_driver_tier1_unit_inline(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char unit[512];
+    char reference[512];
+    snprintf(unit, sizeof(unit), "%s/tier1-unit-inline.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-unit-inline-clang", directory);
+    const bool written = parse_test_write(unit, check_test_tier1_unit_inline_source, strlen(check_test_tier1_unit_inline_source));
+    char* reference_arguments[] = { (char*)clang, "-O0", "-o", reference, unit, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    char expected[256] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the unit inlining fixture runs");
+    static const char* const kept[] = { "scale", "hook", "add1", "sub1", "pinned", "saved", "jumpy", "run", "wide", "main" };
+    static const char* const dead[] = { "crunch", "hop", "lead", "quotient" };
+    for (uint32_t build = 0; ran && build < 4; build += 1)
+    {
+        // Builds 0 and 1 inline, by the vector path and the scalar twin; 2 and 3 keep every call (--tier1-no-inline).
+        const bool scalar = build % 2 != 0;
+        const bool inlining = build < 2;
+        char program[512];
+        char object[512];
+        char message[256];
+        snprintf(program, sizeof(program), "%s/tier1-unit-inline-%u", directory, build);
+        snprintf(object, sizeof(object), "%s/tier1-unit-inline-%u.o", directory, build);
+        bool built = true;
+        uint64_t inlined = UINT64_MAX;
+        uint64_t dropped = UINT64_MAX;
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            // An executable, then -c's object.
+            char* arguments[12] = { (char*)executable, "--tier1", "--tier1-report", "--verify" };
+            uint32_t count = 4;
+            if (scalar)
+            {
+                arguments[count++] = "--scalar";
+            }
+            if (!inlining)
+            {
+                arguments[count++] = "--tier1-no-inline";
+            }
+            if (k != 0)
+            {
+                arguments[count++] = "-c";
+            }
+            arguments[count++] = "-o";
+            arguments[count++] = k == 0 ? program : object;
+            arguments[count++] = unit;
+            arguments[count] = NULL;
+            text = NULL;
+            built = check_test_driver_spawn(arguments, &text) == 0 && built;
+            // The executable's report: its calls expanded; the object's: its dead functions, which -c's object alone leaves
+            // out (an executable's binding resolves every program symbol).
+            built = built && check_test_tier1_field(text, k == 0 ? "inlined" : "dead", k == 0 ? &inlined : &dropped);
+            free(text);
+        }
+        snprintf(message, sizeof(message), "--tier1 %s the unit's calls and leaves %s function without code (build %u)", inlining ? "expands" : "keeps",
+                 inlining ? "each dead" : "no", build);
+        check_test_expect(test, built && (inlining ? inlined >= 12 && dropped == 4 : inlined == 0 && dropped == 0), message);
+        char actual[256] = { 0 };
+        snprintf(message, sizeof(message), "the unit inlining fixture by --tier1 runs as clang -O0's build does (build %u)", build);
+        check_test_expect(test, built && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0, message);
+        Arena arena = arena_reserve(UINT64_C(1) << 26);
+        CheckTestElf elf = { 0 };
+        const bool read = built && arena.base != 0 && check_test_elf_open(&elf, object_test_read_file(&arena, object));
+        bool defined = read;
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(kept); k += 1)
+        {
+            defined = defined && check_test_elf_defined(&elf, kept[k]) != 0;
+        }
+        bool absent = read;
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(dead); k += 1)
+        {
+            absent = absent && (check_test_elf_defined(&elf, dead[k]) == 0) == inlining;
+        }
+        snprintf(message, sizeof(message), "the unit inlining fixture's object defines the kept functions and %s the dead ones (build %u)", inlining ? "leaves out" : "keeps",
+                 build);
+        check_test_expect(test, defined && absent, message);
+        arena_release(&arena);
+        unlink(program);
+        unlink(object);
+    }
+    for (uint32_t path = 0; ran && path < 2; path += 1)
+    {
+        // The summaries and the last pass are by whichever lane: the object is the same by any count, and with every
+        // candidate's code made on its lane (--tier1-no-hold).
+        char objects[3][512];
+        bool compiled = true;
+        for (uint32_t k = 0; k < 3; k += 1)
+        {
+            snprintf(objects[k], sizeof(objects[k]), "%s/tier1-unit-inline-lanes-%u.o", directory, k);
+            char* arguments[12] = { (char*)executable, "--tier1", "--lanes", k == 0 ? "1" : "8", "-c", "-o", objects[k], unit };
+            uint32_t count = 8;
+            if (path != 0)
+            {
+                arguments[count++] = "--scalar";
+            }
+            if (k == 2)
+            {
+                arguments[count++] = "--tier1-no-hold";
+            }
+            arguments[count] = NULL;
+            text = NULL;
+            compiled = check_test_driver_spawn(arguments, &text) == 0 && compiled;
+            free(text);
+        }
+        char message[256];
+        snprintf(message, sizeof(message), "the unit inlining fixture's --tier1 object by one lane is its object by eight, and without holding (%s path)",
+                 path != 0 ? "scalar" : "vector");
+        check_test_expect(test, compiled && check_test_driver_same_files(objects[0], objects[1]) && check_test_driver_same_files(objects[0], objects[2]), message);
+        unlink(objects[0]);
+        unlink(objects[1]);
+        unlink(objects[2]);
     }
     unlink(reference);
     unlink(unit);

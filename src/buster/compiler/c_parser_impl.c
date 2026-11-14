@@ -676,6 +676,22 @@ BUSTER_INLINE bool parse_scalar_gnu_attribute_group(const ParseScalar* parser, c
     return list || arguments;
 }
 
+static uint32_t parse_scalar_first_gnu_attribute(const ParseScalar* parser, uint32_t i);
+
+// GNU attributes immediately before an implicit int's grouped or pointer declarator (#2332). The missing-type
+// diagnostic is at its name; only its declaration's own prefix may enable the checker's recovery.
+static uint32_t parse_scalar_typeless_attributes(const ParseScalar* parser, uint32_t name)
+{
+    uint32_t start = name;
+    while (start > 0 && (parser->kinds[start - 1] == PARSE_KIND_L_PAREN || parser->kinds[start - 1] == PARSE_KIND_STAR ||
+                         parser->kinds[start - 1] == PARSE_KIND_QUALIFIER))
+    {
+        start -= 1;
+    }
+    const uint32_t first = start < name ? parse_scalar_first_gnu_attribute(parser, start) : name;
+    return first < start ? first : name;
+}
+
 // The missing type of the declarator in declaration frame `frame`, if it has one, which clang's Sema reports as it takes
 // the declarator, so before any error at what follows it (#1127).
 static void parse_scalar_typeless_note(ParseScalar* parser, ParseFrame* frame)
@@ -688,6 +704,13 @@ static void parse_scalar_typeless_note(ParseScalar* parser, ParseFrame* frame)
         if (parser->diagnostic_count > before && frame->role == PARSE_ROLE_OPEN_FUNCTION)
         {
             parser->diagnostics[before].parameter_type = true;
+        }
+        else if (parser->diagnostic_count > before && parse_frame_is_block(frame) && parser->language.standard < 2023)
+        {
+            const uint32_t name = frame->typeless_name - 1;
+            const uint32_t first = parse_scalar_typeless_attributes(parser, name);
+            parser->diagnostics[before].declaration_type = first < name;
+            parser->diagnostics[before].argument = first < name ? first : BUSTER_PARSE_NONE;
         }
         frame->typeless_name = 0;
     }
@@ -3160,6 +3183,9 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         // before the parser looks for the `,`, `;` or `)` due, but after it asks for a function's body, at the end of
         // the file too (ParseDeclGroup), and after a keyword it takes for a parameter's name (#1127). In the
         // declarator's own parentheses it hasn't ended: their `)` is due, and clang's parser says so first.
+        const bool implicit_attribute = parser->language.standard >= 1999 && parser->language.standard < 2023 &&
+                                        parse_frame_is_block(declaration) && (declaration->flags & BUSTER_PARSE_FRAME_TYPE_SEEN) == 0 &&
+                                        declaration->name < parser->count && parse_scalar_typeless_attributes(parser, declaration->name) < declaration->name;
         if (group != PARSE_ROLE_OPEN_GROUP && !parse_scalar_fn_body_due(parser, i, frame) && !parse_scalar_keyword_parameter(parser, i, frame))
         {
             parse_scalar_typeless_note(parser, declaration);
@@ -3171,6 +3197,37 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         else
         {
             parse_scalar_unexpected(parser, i, frame);
+            // After an attributed implicit declarator, Clang keeps the declaration and skips the malformed suffix
+            // through its semicolon. Reparse only a proven balanced tail; the original error remains final.
+            uint32_t tail = i;
+            uint32_t depth = 0;
+            bool balanced = implicit_attribute && parser->error_token == i &&
+                            parser->error_message == PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION;
+            while (balanced && tail < parser->count && (depth != 0 || parser->kinds[tail] != PARSE_KIND_SEMI))
+            {
+                const uint8_t next = parser->kinds[tail];
+                if (next == PARSE_KIND_L_PAREN || next == PARSE_KIND_L_SQUARE)
+                {
+                    parser->brackets[depth++] = next;
+                }
+                else if (next == PARSE_KIND_R_PAREN || next == PARSE_KIND_R_SQUARE)
+                {
+                    const uint8_t expected = next == PARSE_KIND_R_PAREN ? PARSE_KIND_L_PAREN : PARSE_KIND_L_SQUARE;
+                    balanced = depth != 0 && parser->brackets[depth - 1] == expected;
+                    depth -= balanced;
+                }
+                else
+                {
+                    // No brace belongs to this bounded suffix repair, including inside a parenthesized tail.
+                    balanced = next != PARSE_KIND_R_BRACE && next != PARSE_KIND_L_BRACE;
+                }
+                tail += balanced;
+            }
+            if (balanced && depth == 0 && tail < parser->count)
+            {
+                parser->error_resumed = true;
+                parser->error_resume_end = tail + 1;
+            }
         }
     }
 }
@@ -11229,7 +11286,15 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
             const uint32_t source = parser->tokens.sources[diagnostic->token];
             // Published where the parser knew it (ParseDiagnostic.publication), after an earlier error of its token's.
             const uint32_t known = diagnostic->publication != 0 && diagnostic->publication < parser->tokens.count ? parser->tokens.sources[diagnostic->publication] : source;
-            pp_diagnose_output_notes_at(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, source, known, &note, opener_kind != PARSE_KIND_END ? 1u : 0u, "%s", text);
+            if (diagnostic->declaration_type)
+            {
+                // The missing type is known before this declarator's attributes and redeclaration are checked.
+                pp_diagnose_output_phase(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, source, known, PP_DIAGNOSTIC_TYPE, "%s", text);
+            }
+            else
+            {
+                pp_diagnose_output_notes_at(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, source, known, &note, opener_kind != PARSE_KIND_END ? 1u : 0u, "%s", text);
+            }
         }
         else
         {

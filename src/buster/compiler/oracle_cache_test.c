@@ -4087,6 +4087,8 @@ static void oracle_test_served_children(OracleTest* test, const char* server, co
     free(lying);
 }
 
+#include "oracle_server_test.c"
+
 // Served runs (oracle_serve, oracle_cache.c's --- Served runs ---), with a server of the test's own (oracle_test_server)
 // standing for the test's program, whose `cat` of a run's input is the run: served with the cache off; in use mode an
 // entry taken where one fits and otherwise served, no entry written; in check mode a served run that differs from the
@@ -4125,6 +4127,7 @@ static void oracle_test_served(OracleTest* test)
     const bool ready = built && lying != 0 && crashing != 0 && stalling != 0 && overriding != 0 && oracle_test_write(input, "served bytes\n", 13) &&
                        oracle_test_write(other, "other bytes\n", 12);
     oracle_test_expect(test, ready, "served: the test's server built");
+    oracle_test_server_transport(test, server, input, ready);
     char* cat[] = { test->helper, "cat", 0 };
     OracleRun run;
     uint32_t files = 0;

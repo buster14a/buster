@@ -120,13 +120,48 @@ date. Release is for the product and every timing, Develop for edits and tests
 
 The flags differ from a direct clang command only in the build's mechanics:
 CMake's depfile options, `CMAKE_INTDIR`, a definition no source reads, the
-include directory and the source as absolute paths, and
+include directory and the source as absolute paths,
 `-fmacro-prefix-map=SOURCE_DIR/=`, which keeps `__FILE__` (assert's messages)
-relative to the source directory, as it is when clang runs from there. With
+relative to the source directory, as it is when clang runs from there, and,
+where the debug information is line tables alone (Develop, and a sanitizer
+build's Release), [the code generator's variable-location
+option](#line-tables-variable-locations). With
 `BUSTER_DEBUG_INFO=0` the Release executable is the old `build.sh`'s byte for
 byte (the CI configuration, checked at `x86-64`); with `-g`, its allocated
 sections are, and only `.debug_str` and `.debug_line_str` (source paths) and
 the build ID, a hash over the whole file, differ.
+
+### Line tables' variable locations
+
+A compile whose debug information is line tables alone has no variables to
+locate, yet LLVM's default variable-location pass, the instruction-referencing
+LiveDebugValues, still analyzes every function's machine values: in a clean
+x86-64 MSan build, its "Live DEBUG_VALUE analysis" took 188 s of the units'
+and parts' 1,815 s of compiles (`-ftime-trace` on each compile, #2739), 17% of
+a part of the checker's unit, whose instrumented functions are long. So
+Develop and a sanitizer build's Release compile with `-mllvm
+-experimental-debug-variable-locations=false` (`BUSTER_LINE_TABLES_CODEGEN` in
+`cmake/BusterSettings.cmake`), units and parts' jobs alike: the older pass,
+which has nothing to track either, takes none of that time, and the objects
+are the same, byte for byte. A `-g` compile keeps LLVM's default, since the
+two passes locate variables differently. It is a build option rather than a
+flag of the code, as `-fmacro-prefix-map` is, so `print-compile-flags` leaves
+it out (the correctness inventory hands those flags to the compiler's own
+driver).
+
+**Measured** in a 4-CPU container (Intel Xeon, 2.1 GHz) with CI's toolchain,
+clean builds at `c471f32f`, before and after
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/build-trace-2739-2026-11-14)):
+
+| Build | Before | After | CPU time (Ninja's steps) |
+| --- | ---: | ---: | ---: |
+| x86-64 MSan Release, 4 jobs (a hosted row's product) | 450.3 s | 399.9 s | 1,737 → 1,582 s |
+| native Develop, 4 jobs (`./build.sh`'s default) | 124.7 s | 125.8 s | 484 → 489 s |
+
+Both executables' allocated sections are the same before and after, byte for
+byte (the debug strings differ by the checkouts' directory names). The pass
+costs what the instrumented code's long functions make it cost: an
+uninstrumented Develop build gains nothing measurable.
 
 ## The toolchain
 
@@ -711,8 +746,11 @@ command the link uses wait for every unit's object (the backend's parts waited
 for the checker's bitcode, 14.5 s, then competed with its parts).
 
 The executable's code is the single object's: every function at the same
-address with the same instructions. The split keeps what the code generator
-saw. A function another part refers to stays local where it is defined, so its
+address with the same instructions, but where the start's order puts the
+functions small compiles run first in `.text.buster_checker` ([The start's
+code order](#the-starts-code-order)), which moves them and what follows them
+in that section, each with the same instructions. The split keeps what the
+code generator saw. A function another part refers to stays local where it is defined, so its
 jumps relax as before (a near tail call's two-byte `jmp`); a hidden alias,
 `NAME.buster_split`, names it for the other parts. A code part reads strong
 constants' initializers `available_externally`, so a string's bytes still fold
@@ -1041,13 +1079,19 @@ where lld links the static executable, the functions that small compiles run
 go first, together, in a section of their own before `.text`
 (`.text.buster_start`), and the C library's ones right after it, first in
 `.text`. The checker's own code stays in its section, `.text.buster_checker`
-(one section of each unit, `main.c`'s pragmas, #502), which holds 18 of the
-empty file's windows and 60 of `hello.c`'s.
+(one section of each unit, which starts on a page, `main.c`'s pragmas, #502),
+which held 18 of the empty file's windows and 60 of `hello.c`'s; the script
+puts every unit's together, between `.text.buster_start` and `.text`, and
+can't reorder the functions inside one: Release's parallel split puts the
+list's functions of that section first in it.
 
-- **The list:** `cmake/BusterStartOrder.txt`, the functions in the order the
-  profiled build had them, `UNIT NAME` for a local function of one of
-  `main.c`'s units and `- NAME` for any other: a global one, whose name is the
-  link's alone, or the C library's.
+- **The list:** `cmake/BusterStartOrder.txt`, `UNIT NAME` for a local
+  function of one of `main.c`'s units and `- NAME` for any other: a global
+  one, whose name is the link's alone, or the C library's. The functions go by
+  the smallest command that ran each, an empty file's `-fsyntax-only` first,
+  then what `-E -P`, `tiny.c`'s `-c` and `hello.c`'s `-c` add, each command's
+  in the order the profiled build had them: the smallest compile's code is
+  together, and each larger one's follows it.
 - **Each unit's copy apart:** every unit compiles a copy of the static helpers
   it uses, and a symbol ordering file, which names symbols, moves every copy:
   one built so faulted more (75 times against 69 in `.text`, #1444's opening
@@ -1059,14 +1103,41 @@ empty file's windows and 60 of `hello.c`'s.
   others go by name in a symbol ordering file (`start-order.symbols`), which
   puts their sections first in `.text`, right after; `start-order` leaves out
   any whose name a unit's static shares, which the name would move too.
+- **Inside the checker's section:** in every static build, whatever its
+  linker, so that switching `BUSTER_LINKER` relinks alone,
+  `BusterStartOrder.cmake` writes at configuration each Release split unit's
+  names, its own lines' and the `- NAME` ones in the list's order, to
+  `start-order/UNIT.txt` in the tree. The split (`tools/codegen/split.c
+  --first`) puts each function they name that the unit defines in a named
+  section, `.text.buster_checker`, before that section's first unlisted
+  function, in the list's order, before it plans the parts; every other
+  function keeps its order, and every function its instructions. A list that
+  moves nothing fails the split, as a stale one would. The checker's unit
+  puts 269 functions, 1.95 MB of its 5.4 MB, there. Develop's parts
+  (`presplit`, dealt by file) and Release's single compiles
+  (`BUSTER_BUILD_DEFINES`, `BUSTER_PGO`, so `BUSTER_CHECKER_OFFSET`'s builds
+  too) keep the section in source order.
 - **Shifts:** a shifted link's padding (`.text.buster_shift_padding`, above)
   goes in `.text.buster_start` right before the shift source's first
-  function, so that the shift moves that unit's code there too.
+  function when it has one there (`main.c` and the checker's and the front
+  end's units), so that the shift moves that unit's code there too, and a
+  second one (`.text.buster_shift_padding_text`, first in the symbol ordering
+  file) goes first in `.text`, so that every unit's code there moves by the
+  shift (its multiple of 64 bytes: the C library's string functions, first
+  in `.text`, and some of the units' functions are aligned to 64); another
+  source's padding stays right before its objects in `.text`. While the checker's sections were in `.text`, each unit's,
+  page-aligned and empty where the unit has none of the checker's code,
+  started its functions on a page, and `.text` itself started on one after
+  the first padding: no shift short of a page moved `.text`'s code (#2728).
+  A shifted link's post-link step checks that `main_unit_backend` moved by
+  the shift's multiple of 64, give or take whole pages (the start's padding
+  can push the page-aligned checker's sections by one).
 - **Where:** a static link by lld (`start order: TRUE` in the configure
   step's status line). Every static build compiles with
-  `-ffunction-sections`, whatever its linker, so that switching
-  `BUSTER_LINKER` relinks alone; a static link by mold or GNU ld lays the
-  sections out without the script. The sanitizers', fuzzing and
+  `-ffunction-sections`, and its split units' parts take the list, whatever
+  its linker, so that switching `BUSTER_LINKER` relinks alone; a static link
+  by mold or GNU ld lays the sections out without the script, and keeps the
+  checker's section in the list's order. The sanitizers', fuzzing and
   `BUSTER_HOST_RUNTIME`'s dynamic links compile without it.
   `-ffunction-sections` alone made `.text` 6 KB longer (0.02%): a jump to
   another function's section can't take the assembler's short form.
@@ -1082,13 +1153,29 @@ ran 4.1% to 5.8% faster from a cold start, a file-first `-c` 8.7%, while
 `main.c`'s `-fsyntax-only` and `sqlite3.c`'s `-c` stayed within their floors
 ([the record](https://github.com/buster14a/buster-performance/tree/0880281cac17cceb9749d19b1554873e51028928/docs/measurements/start-order-1444-2026-11-13)).
 
+The checker's section then held 31 of the empty file's 57 code faults and
+64 of `hello.c`'s 94. With its functions in the list's order and the list
+sampled with a period per process (below), the empty file's `-fsyntax-only`
+took 35 code faults (14 in the checker's section), `tiny.c`'s `-c` 50 against
+85 and `hello.c`'s 61 against 94, with 8% to 13% fewer iTLB misses. From a
+cold start they ran 8.3%, 9.4% and 4.1% faster against floors of 2.5%, 3.2%
+and 1.5%; `-E -P`, `main.c`'s `-fsyntax-only` and `sqlite3.c`'s `-c` stayed
+within theirs ([the
+record](https://github.com/buster14a/buster-performance/tree/256c516de9f30d80da1a750b80a98909c005c138/docs/measurements/checker-start-order-1444-2026-11-14)).
+
 Refresh the list when small compiles' code has moved, from a Release build of
 the tree as the benchmark builds are, on the 9700X under its lock: sample each
-control (`perf record -b -e instructions:u -c 4999`, a few hundred processes
-of each of an empty file's `-fsyntax-only` and `-E -P`, `tiny.c`'s `-c` and
-`hello.c`'s `-c`, `perf script -F ip,brstack` of each), take the executable's
-symbols (`readelf -sW`), then write the list with `start-order` below the
-header, which names the revision, the host and the commands:
+control, a few hundred processes of each of an empty file's `-fsyntax-only`
+and `-E -P`, `tiny.c`'s `-c` and `hello.c`'s `-c`, each process under a `perf
+record -b -e instructions:u -c PERIOD` of its own with a different period
+(4999 + 2i for the i-th), and `perf script -F ip,brstack` of them all. A
+compile is deterministic: under one period every process is sampled at about
+the same instructions, and the short functions those samples miss stay out
+of the list in every run; the 2026-11-13 list, sampled so, left out functions
+that an empty file's compile runs. Take the executable's symbols (`readelf
+-sW`), then write the list with `start-order` below the header, which names
+the revision, the host and the commands, giving the samples smallest command
+first, the order it groups them by:
 
 ```sh
 ./build/compiler start-order symbols.txt syntax.txt preprocess.txt tiny.txt hello.txt > body.txt
@@ -1114,8 +1201,17 @@ their code's placements (#509, "Comparing two versions" in
 9700X. The padding is a section of its own, `.text.buster_shift_padding`,
 with the source's `.text`'s alignment and `SHF_GNU_RETAIN`, which the linkers
 place right before the source's objects; the step fails when the linker dropped
-it. The padding moves units' `.text`, never the page-aligned `.text.buster_checker`
-that holds the checker's own code. To place that code, build with
+it. Where lld links with the start's code order ([below](#the-starts-code-order)),
+a source with start-ordered functions (`main.c`, the 9700X job's) has its
+padding before them and again first in `.text`, and the step also fails when
+`main_unit_backend` didn't move by the shift's multiple of 64 bytes (and whole
+pages). Such a
+shift moves code to other pages and 4 KB offsets but not within its 64-byte
+lines, where a function's place can change a small benchmark's time by more:
+the same main moved `run_c_environment_benchmark` by 16 to 48 bytes and ran
+`benchmark-environments` up to 1.5% slower, and `benchmark-unwind` up to 4.8%
+(#2728). The padding moves units' code, never the page-aligned
+`.text.buster_checker` that holds the checker's own code. To place that code, build with
 `BUSTER_BUILD_DEFINES=-DBUSTER_CHECKER_OFFSET=N` (`main.c`, a multiple of 16 below
 4,096), one full build per offset (#1233).
 

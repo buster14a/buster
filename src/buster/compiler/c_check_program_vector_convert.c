@@ -630,3 +630,89 @@ static const char* check_vector_convert_row(const TypeTable* types, const X86Tar
     }
     return reason;
 }
+
+// The row of __builtin_elementwise_sqrt or _fma of float or double scalars (`class`, F32 or F64), of `arguments`
+// operands of the class: VSQRTSS/SD of the operand, or VFMADD213SS/SD of b, a and c (b = a * b + c, b's register the
+// destination as clang's code has it; of two NaNs a's is the result, as x86's FMA3 forms take one in the formula's order:
+// IR_FMA, #1840), moved into the first operand's register, at the current rounding, as llvm.sqrt and llvm.fma compute
+// them. Their EVEX forms are AVX-512F's, which a target may lack though the operands are no vectors. These rows and the
+// contraction's (check_vector_contract_row) are here, in the backend unit too, so that the IR decoder's tests check
+// ir_simd_typed_fma against them (#1840).
+static const char* check_vector_scalar_row(const X86Target* target, CBuiltinId builtin, uint8_t class, uint32_t arguments, Tier0Operation* row)
+{
+    const bool root = builtin == CBUILTIN_ELEMENTWISE_SQRT && arguments == 1;
+    const bool product = builtin == CBUILTIN_ELEMENTWISE_FMA && arguments == 3;
+    const char* reason = NULL;
+    memset(row, 0, sizeof(*row));
+    if (!root && !product)
+    {
+        reason = "elementwise builtins of scalars";
+    }
+    else if ((target->features & BUSTER_X86_FEATURE(AVX512F)) == 0)
+    {
+        // Without AVX-512F, SQRTSS's or SQRTSD's (VSQRTSS's with AVX: #775), and FMA's VFMADD213SS or SD.
+        const bool d = class == BUSTER_TYPED_CLASS_F64;
+        const bool avx = (target->features & BUSTER_X86_FEATURE(AVX)) != 0;
+        const uint8_t f0 = BUSTER_TIER0_ROLE_FLOATING(0);
+        const uint8_t result = BUSTER_TIER0_ROLE_FLOATING_RESULT;
+        if (root)
+        {
+            row->records[0] = avx ? check_vector_lower_record(d ? X86_FORM_VSQRTSD_X_X_XM64 : X86_FORM_VSQRTSS_X_X_XM32, result, f0, f0) :
+                                    check_vector_lower_record(d ? X86_FORM_SQRTSD_X_XM64 : X86_FORM_SQRTSS_X_XM32, result, 0, f0);
+        }
+        else
+        {
+            // b's register is the product's destination, as clang's code has it.
+            row->records[0] = check_vector_lower_record(d ? X86_FORM_VFMADD213SD_X_X_XM64 : X86_FORM_VFMADD213SS_X_X_XM32, BUSTER_TIER0_ROLE_FLOATING(1),
+                                                        BUSTER_TIER0_ROLE_FLOATING(0), BUSTER_TIER0_ROLE_FLOATING(2));
+            row->records[1] = check_vector_lower_record(X86_FORM_VMOVAPS_X_XM128, result, 0, BUSTER_TIER0_ROLE_FLOATING(1));
+            reason = (target->features & BUSTER_X86_FEATURE(FMA)) == 0 ? "fused multiply-adds of scalars without FMA or AVX-512F" : NULL;
+        }
+        row->record_count = root ? 1 : 2;
+        row->operand_count = (uint8_t)arguments;
+        for (uint32_t j = 0; j < arguments; j += 1)
+        {
+            row->operand_classes[j] = class;
+        }
+        row->result_class = class;
+    }
+    else
+    {
+        const bool d = class == BUSTER_TYPED_CLASS_F64;
+        const uint8_t f0 = BUSTER_TIER0_ROLE_FLOATING(0);
+        row->records[0] = root ? check_vector_lower_record(d ? X86_FORM_VSQRTSD_X_X_XM64_EVEX : X86_FORM_VSQRTSS_X_X_XM32_EVEX, BUSTER_TIER0_ROLE_FLOATING_RESULT,
+                                                           f0, f0) :
+                                 check_vector_lower_record(d ? X86_FORM_VFMADD213SD_X_X_XM64_EVEX : X86_FORM_VFMADD213SS_X_X_XM32_EVEX,
+                                                           BUSTER_TIER0_ROLE_FLOATING(1), f0, BUSTER_TIER0_ROLE_FLOATING(2));
+        row->records[1] = check_vector_lower_record(X86_FORM_VMOVAPS_X_XM128_EVEX, BUSTER_TIER0_ROLE_FLOATING_RESULT, 0, BUSTER_TIER0_ROLE_FLOATING(1));
+        row->record_count = root ? 1 : 2;
+        row->operand_count = (uint8_t)arguments;
+        for (uint32_t j = 0; j < arguments; j += 1)
+        {
+            row->operand_classes[j] = class;
+        }
+        row->result_class = class;
+    }
+    return reason;
+}
+
+// A source expression's contracted product (#1239), keeping its operands in evaluation order: a, b, c for a * b + c,
+// or c, a, b for c + a * b. The product's second operand stays the destructive destination in either order, as
+// clang -O0's fmuladd does (and therefore keeps the same NaN priority). Negations are explicit typed operands; using
+// fmsub or fnmadd instead would change the sign of a NaN. The result still replaces the first stack operand.
+static const char* check_vector_contract_row(const X86Target* target, uint8_t class, bool product_right, Tier0Operation* row)
+{
+    const char* reason = check_vector_scalar_row(target, CBUILTIN_ELEMENTWISE_FMA, class, 3, row);
+    if (reason == NULL && (target->features & BUSTER_X86_FEATURE(AVX512VL)) == 0)
+    {
+        // Scalar EVEX FMA needs AVX512F alone, but the 128-bit copy needs VL. Its VEX twin keeps this row legal when
+        // the function's target removes VL; the mixed row's floating roles are placed below xmm16 by both tiers.
+        row->records[1].form = X86_FORM_VMOVAPS_X_XM128;
+    }
+    if (reason == NULL && product_right)
+    {
+        row->records[0] = check_vector_lower_record(row->records[0].form, BUSTER_TIER0_ROLE_FLOATING(2), BUSTER_TIER0_ROLE_FLOATING(1), BUSTER_TIER0_ROLE_FLOATING(0));
+        row->records[1] = check_vector_lower_record(row->records[1].form, BUSTER_TIER0_ROLE_FLOATING_RESULT, 0, BUSTER_TIER0_ROLE_FLOATING(2));
+    }
+    return reason;
+}

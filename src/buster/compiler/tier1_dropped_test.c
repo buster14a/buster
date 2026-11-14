@@ -250,6 +250,128 @@ static void tier1_bare_compile(Tier1EmitTest* test, bool vector, uint32_t regist
     arena_pop_to(&test->input, 0);
 }
 
+// #2618: a definition whose block's edges read nothing of it. r(p0, p1): b0 defines k, a constant no immediate holds, and
+// jumps to b2, the loop's header, laid out after its body b1 as hexFunc's is; b1 computes s' = (((p1 + i) ^ s) * p1) + k
+// and i' = i + 1 and goes back to b2, whose phis take i and s and which leaves for b3, the return of s, after four turns.
+// With four registers, i, s, p1 and k fill them where b1 starts, and p1 + i, a lea, takes k's before its read: k's range
+// there is recomputed from its start, b2's, which reads nothing, rests in the body's convention, and b0's definition,
+// whose register no edge reads, is left out (tier1_emit_cfg_dead_definition). The loop's edges then move nothing for k.
+static bool tier1_rest_function(Arena* input, IrFunction* function)
+{
+    const IrSizes sizes = {
+        .instruction_count = 24,
+        .block_count = 4,
+        .extra_count = 8,
+        .constant_count = 4,
+        .parameter_count = 2,
+    };
+    const bool created = ir_create(input, &sizes, function) == IR_OK;
+    if (created)
+    {
+        function->result_type = IR_I64;
+        function->parameter_types[0] = IR_I64;
+        function->parameter_types[1] = IR_I64;
+        function->incoming = (AbiCall){ .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .integer_registers = 2 };
+        function->constants[0].low = UINT64_C(0x123456789abcdef1);
+        function->constants[1].low = 0;
+        function->constants[2].low = 1;
+        function->constants[3].low = 4;
+        uint32_t next = 0;
+        const uint32_t p0 = tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t p1 = tier1_select_test_append(function, &next, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t k = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t zero = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_append(function, &next, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function->block_offsets[1] = next;
+        // The body's values refer to the header's phis, which follow them: i at `phis`, s at `phis + 1`.
+        const uint32_t phis = next + 7;
+        const uint32_t offset = tier1_select_test_append(function, &next, IR_ADD, IR_I64, p1, phis, BUSTER_IR_NONE);
+        const uint32_t mixed = tier1_select_test_append(function, &next, IR_XOR, IR_I64, offset, phis + 1, BUSTER_IR_NONE);
+        const uint32_t product = tier1_select_test_append(function, &next, IR_MUL, IR_I64, mixed, p1, BUSTER_IR_NONE);
+        const uint32_t sum = tier1_select_test_append(function, &next, IR_ADD, IR_I64, product, k, BUSTER_IR_NONE);
+        const uint32_t one = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t step = tier1_select_test_append(function, &next, IR_ADD, IR_I64, phis, one, BUSTER_IR_NONE);
+        tier1_select_test_append(function, &next, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function->block_offsets[2] = next;
+        const uint32_t i = tier1_select_test_append(function, &next, IR_PHI, IR_I64, 0, 2, BUSTER_IR_NONE);
+        const uint32_t s = tier1_select_test_append(function, &next, IR_PHI, IR_I64, 4, 2, BUSTER_IR_NONE);
+        const uint32_t four = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function->extra[0] = 0;
+        function->extra[1] = zero;
+        function->extra[2] = 1;
+        function->extra[3] = step;
+        function->extra[4] = 0;
+        function->extra[5] = p0;
+        function->extra[6] = 1;
+        function->extra[7] = sum;
+        const uint32_t below = tier1_select_test_append(function, &next, IR_ICMP, IR_I1, i, four, IR_ULT);
+        tier1_select_test_append(function, &next, IR_CBR, IR_VOID, below, 1, 3);
+        function->block_offsets[3] = next;
+        tier1_select_test_append(function, &next, IR_RET, IR_VOID, s, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function->instruction_count = next;
+        function->block_offsets[4] = next;
+    }
+    return created;
+}
+
+static uint64_t tier1_rest_oracle(uint64_t p0, uint64_t p1)
+{
+    uint64_t s = p0;
+    for (uint32_t i = 0; i < 4; i += 1)
+    {
+        s = (((p1 + i) ^ s) * p1) + UINT64_C(0x123456789abcdef1);
+    }
+    return s;
+}
+
+static void tier1_rest_compile(Tier1EmitTest* test, bool vector, uint32_t register_mask, uint32_t* dropped)
+{
+    IrFunction function;
+    const bool created = tier1_rest_function(&test->input, &function);
+    const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+    tier1_emit_test_expect(test, valid, "the resting loop's fixture is valid IR");
+    IrDominance dominance;
+    const bool dominated = valid && tier1_terminal_dominance(test, &function, vector, &dominance);
+    Tier1SelectPlan plan;
+    uint32_t node = BUSTER_IR_NONE;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    tier1_emit_test_expect(test, planned, "the resting loop's fixture selects");
+    const Tier1EmitOptions options = { .register_mask = register_mask, .vector = vector, .rematerialize = true, .certify = true };
+    Tier1EmitResult emitted;
+    const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+    tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "the resting loop's fixture emits through the CFG consumer");
+    if (error == TIER1_EMIT_OK)
+    {
+        // k is node 2.
+        *dropped += emitted.dropped != 0 && emitted.dropped[2] != 0;
+        void* executable = MAP_FAILED;
+        uint64_t bytes = 0;
+        if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
+        {
+            uint64_t random = UINT64_C(0x1f83d9abfb41bd6b) ^ register_mask ^ (vector ? 1 : 0);
+            for (uint32_t sample = 0; sample < 32; sample += 1)
+            {
+                const uint64_t p0 = tier1_emit_test_random(&random);
+                const uint64_t p1 = tier1_emit_test_random(&random);
+                const uint64_t actual = tier1_dropped_call(executable, p0, p1);
+                const uint64_t expected = tier1_rest_oracle(p0, p1);
+                if (actual != expected && test->failures < 20)
+                {
+                    fprintf(stderr, "  rest vector=%u mask=%x p0=%016" PRIx64 " p1=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", vector, register_mask, p0, p1, actual, expected);
+                }
+                tier1_emit_test_expect(test, actual == expected, "a loop whose recipe rests at its header computes its value");
+            }
+        }
+        if (executable != MAP_FAILED)
+        {
+            munmap(executable, bytes);
+        }
+    }
+    arena_pop_to(&test->output, 0);
+    arena_pop_to(&test->scratch, 0);
+    arena_pop_to(&test->input, 0);
+}
+
 static void tier1_dropped_tests(Tier1EmitTest* test)
 {
     const uint32_t few = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI);
@@ -264,5 +386,11 @@ static void tier1_dropped_tests(Tier1EmitTest* test)
         tier1_bare_compile(test, variant != 0, few, &bare);
     }
     tier1_emit_test_expect(test, bare >= 2, "a recomputed definition with no free register is left out on both paths");
-    printf("tier1 dropped definitions: %u left out over the fixture's compiles, %u with no register\n", dropped, bare);
+    uint32_t rested = 0;
+    for (uint32_t variant = 0; variant < 2; variant += 1)
+    {
+        tier1_rest_compile(test, variant != 0, few | (1u << X86_REGISTER_RCX), &rested);
+    }
+    tier1_emit_test_expect(test, rested == 2, "a definition whose successors' ranges rest is left out on both paths");
+    printf("tier1 dropped definitions: %u left out over the fixture's compiles, %u with no register, %u before a resting loop\n", dropped, bare, rested);
 }
