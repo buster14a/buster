@@ -27,7 +27,9 @@ register to a value its hint names (#2618) and one that waits for its read
 `tier1_allocate_hints_test.c`, as does a range's alternate (#2734:
 `alternate_intervals`, taken where its interval's value still holds the
 register and it is free), which the random inputs and their reference model
-too; `test-tier1-emit` checks
+too; avoided registers (#2767: `avoided_registers`, a range live across a fixed
+register's sequence) have their traces on the scan and the common path and their
+random properties in `tier1_allocate_avoided_test.c`; `test-tier1-emit` checks
   which values the CFG consumer finds read on every iteration of their loops
   (`tier1_hot_recipes_test.c`). Use the shared 9700X lock per build/test/measurement and
   CPU 2 for timing.

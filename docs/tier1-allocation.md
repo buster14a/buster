@@ -32,6 +32,7 @@ Allocating the unfused uses and then folding is unsound.
 | `use_positions` | optional u32 | Nondecreasing positions inside each range |
 | `use_required` | optional u8 | 1 requires a register at that use; 0 permits memory |
 | `clobbers` | optional u32 | Nondecreasing positions where `clobber_registers[class]` lose their values (#2574) |
+| `avoided_registers` | optional u32 | Registers each interval takes only where no other it may take is free (#2767) |
 
 `registers[3]` contains the allocatable physical masks. GPR bits are 0–15;
 vector bits are 0–31; opmask bits are 1–7, k1 to k7 (#179,
@@ -774,8 +775,10 @@ Before allocation the frame's reservations count a column for every
 caller-saved register of a function that calls (`call_save_columns`). After it,
 each consumer keeps the rows of those registers whose fragments cover a call's
 or such a sequence's definition phase, other than their own value's definition
+and a shift's count, which its shift reads in `cl` and leaves there
 (`tier1_emit_fragment_saved`: `tier1_emit_saves` and `tier1_emit_cfg_saves`, the
-latter beside the opmask and xmm registers' rows). Every caller-saved register
+latter beside the opmask and xmm registers' rows). Values live across a sequence
+avoid its registers ("Values live across fixed sequences" below), so few take one. Every caller-saved register
 used to have a row in every function that called, used or not: in `sqlite3GetInt32`,
 64 of its 104 bytes. The tests check that the rows are exactly the registers the
 records store to (`tier1_emit_test_general_rows_used`). On the 9700X, Tier 1's
@@ -1490,6 +1493,7 @@ swaps:
   division, so the records save and restore it besides moving it.
   Only the allocation avoiding `rax` and `rdx` for a divisor would
   remove them, as fixed ranges keep values out of a call's clobbers.
+  #2767 does ("Values live across fixed sequences" below).
 - **1.48 M: `OP_GETTABUP`'s fetch.** It swaps `pc` and `i` (as main
   does): the handler spills `pc` around its call, and reloads it into
   another register than the dispatch's.
@@ -1530,6 +1534,150 @@ Tests:
 - `test-tier1-select` runs every value, count and destination
   register's shift, and every dividend, divisor and destination
   register's division and remainder, natively against C.
+
+### Values live across fixed sequences (#2767)
+
+The CFG consumer's fixed sequences (`tier1_select_fixed`) write registers of
+their own: a division by a register, a division by a constant's reciprocal and a
+high multiplication write `rax` and `rdx`, and a shift by `cl` writes `rcx`.
+Their consumer saves every other value live past one in those registers around
+its records, in the register's call-save row (`tier1_emit_cfg_fixed`). Nothing
+kept values out of them, and the scan takes the lowest free register, `rax`
+first. Lua's integer `//` (`luaV_idiv`, which #2541 inlined into
+`luaV_execute`) kept its divisor in `rax`, live past the division:
+
+```
+mov %rax,(%rsp); mov %rax,%r11; mov %r13,%rax; cqto; idiv %r11
+mov %rax,%rcx; mov (%rsp),%rax
+```
+
+`luaH_getshortstr` kept a string's hash in `rcx` across `1 << lsizenode`. Such
+saves ran 7.32 M times on Lua's scripts and 5.83 M on speedtest1, each a store
+and a load. A divisor in `rax` or `rdx` that ends at its division, and a shift's
+destination in `rcx`, also went through the scratch register.
+
+**Sequences** (`Tier1CfgInput.sequences`). The consumer names each sequence by
+its definition phase, the registers it writes that values may take, and three
+values:
+
+- its reader (`tier1_select_fixed_reader`): a shift's count, which the shift
+  reads in `cl` and leaves there;
+- its operand (`tier1_select_fixed_operand`): a division's divisor, and a
+  shift's other operand, which its destination takes where it dies;
+- its result (`tier1_select_fixed_result`): a shift's destination, which shifts
+  in the scratch register where it is `rcx`.
+
+**The registers a range avoids** (`tier1_cfg_crossed`).
+
+- A general range lives across a sequence where the sequence is after its start
+  and before its end. The sequence's own value starts there and its dying
+  operands end there, so neither avoids its registers by living across it: a
+  quotient may still take `rax`, a dividend end in it.
+- A range of a sequence's reader doesn't avoid that sequence's registers.
+- A sequence's operand and result avoid its registers.
+- A whole phi web avoids the union, in all its ranges.
+- Each position's count of the sequences before it and a prefix count per
+  register over the sequences find a range's in two loads, so a range over a
+  long run of sequences costs no more.
+
+**Avoided, not refused** (`Tier1AllocationInput.avoided_registers`). The scan
+takes a register an interval avoids only where no other register it may take is
+free. It doesn't do so for the interval's hint, and it evicts no value to keep
+out of one. The common path's hinted copy, which the CFG's problems take, does
+the same with its own swap: a start whose level's register it avoids takes,
+among the free registers it doesn't avoid, its hint, else the lowest, from a
+free level above or the never-taken registers, as it takes a hint. Without
+hints, a class with an interval that avoids a register it may take goes to the
+scan. A function whose ranges cross a sequence so keeps the allocation it had
+but for those swaps. Sending every such class to the scan instead gave Lua the
+same objects and speedtest1 61 more instructions, and compiled `sqlite3.c` in
+the same time on the 9700X.
+
+**Readers.** A shift whose count is in `rcx` writes nothing of `rcx` but its
+destination. Its consumer no longer saves the count around it, and the frame
+gives it no row (`tier1_emit_save_positions`' readers). `memsys5Free`'s loop had
+saved `iLogsize` around its `sar %cl` on every iteration.
+
+Lua's division now reads:
+
+```
+mov (%r14,%rcx,1),%rcx   # the divisor, loaded where it divides from
+...
+mov %r13,%rax; cqto; idiv %rcx
+```
+
+and `luaH_getshortstr`'s mask is `mov $0x1,%r8d; movzbl 0xb(%rdi),%ecx; mov
+%r8,%rdi; shl %cl,%edi`.
+
+**Measured.** By callgrind (#1189's `gap.c`, #1217's inputs, Lua's hash seed
+fixed), #2766's head `3652581` against this rule:
+
+| | base | this |
+| --- | ---: | ---: |
+| Lua's five scripts, whole processes | 4,774.6 M | 4,752.8 M (−0.46%) |
+| `luaV_execute` | 2,225.5 M | 2,215.0 M |
+| its moves through `r11` | 5.0 M | 1.5 M |
+| saves around Lua's sequences | 7.32 M | 0 |
+| speedtest1, whole process | 2,626.71 M | 2,613.07 M (−0.52%) |
+| saves around speedtest1's sequences | 5.83 M | 0.44 M |
+| divisors moved through `r11` in speedtest1 | 1.79 M | 0 |
+
+- **By function.** On Lua, `luaV_execute` −10.47 M, `luaH_getshortstr`
+  −5.78 M, `mainpositionTV` −2.42 M, `luaH_free` −1.20 M, `luaH_resize`
+  −0.80 M, `luaH_newkey` −0.80 M; none runs more. On speedtest1,
+  `sqlite3BtreeIndexMoveto` runs +0.97 M: its hot loop has every register busy,
+  and a division that speedtest1 never runs moved its `pRes` out of `rdx`, which
+  reshuffled the loop's registers.
+- **What's left.** speedtest1's saves are of parameters whose first range is
+  bound to its incoming register (`pcache1Fetch`'s `createFlag` in `rdx`).
+  `luaV_execute`'s moves through `r11` are #2768's `OP_GETTABUP` fetch.
+
+**What lost** (against the base, before the operand and result rule):
+
+| Form | speedtest1 | Lua's scripts |
+| --- | ---: | ---: |
+| ranges refused the registers (allowed sets), no readers | −2.85 M | −6.9 M |
+| the same, with readers | −5.65 M | −6.9 M |
+| ranges avoid the registers, each on its own | −4.89 M | −6.9 M |
+| ranges avoid them, but a hint to one wins | −3.38 M | 0.0 M |
+| each value's ranges avoid them together | −10.71 M | −10.4 M |
+| each phi web's ranges avoid them together | −11.13 M | −11.2 M |
+| the same, with the operand and result (this rule) | −13.64 M | −21.8 M |
+
+- **Refusing the registers** spilled `sqlite3BtreeIndexMoveto`'s `pRes`. Its
+  range in the block of that never-run division found every other register
+  held, and the slot then followed it into its hot loop: +3.84 M.
+- **Each range on its own** moved Lua's divisor out of `rax` on the edge into
+  its division's block. A range in a cold block also took a free register that
+  its value's later ranges then followed by their hints, which the loop's
+  values were already using.
+- **A hint first** kept Lua's divisor in `rax`: its range enters the division's
+  block hinted there.
+- **Without readers** (the first row), `memsys5Free` ran +1.13 M: `iLogsize`
+  moved out of `rcx` in its loop, where it is the shift's count, and back on its
+  edges.
+- **Without the result,** Lua ran 6.3 M more: `luaH_getshortstr`'s count dies at
+  the shift, and its destination took the `rcx` it left.
+
+**Compile cost.** On the 9700X (`measure-compile`, CPU 2, `--tier1 --lanes 1 -c
+sqlite3.c`, 21 runs a revision in a Williams order against base), the first form
+of the change took +0.80% wall time and +0.70% instructions: two halvings per
+range, two passes over every node, and the scan. Finding the sequences by a
+count per position and filling them in one pass over the functions that have
+any took that to +0.39% and +0.45%. The rule as it stands, with the operands
+and results, takes +0.44% wall time (618.7 against 616.0 ms) and +0.43%
+instructions; Lua's `lvm.c` compiles in the same time. In callgrind's count of
+the scalar host build, the same compile runs +0.25% (`tier1_cfg_prepare`'s
+sequences, the consumer's pass and the allocator's avoidance).
+
+**Run time on the 9700X** (#2553's method: Lua's objects in 33 link orders,
+speedtest1 after 8 pads, 5 and 7 rounds, each a hold of the lock, `perf stat` on
+CPU 2; 1,762 runs, none failed). Lua's five scripts run −0.44% instructions and
+−0.36% cycles, an interval of −0.79% to +0.08%; `arithmetic`, whose loops run
+`//` and `%`, takes −1.51% cycles (−1.94% to −1.08%) and is faster at 30 of the
+33 orders. speedtest1 runs −0.53% instructions in the same time: +0.09% cycles,
+−0.66% to +0.83%. Statically, speedtest1's edge moves go from 35,590 to 36,035,
+where values move out of the registers their webs avoid; Lua's don't change.
 
 ## Rematerialization
 
