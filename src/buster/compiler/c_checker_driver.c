@@ -200,6 +200,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_AUTO_TYPE_BIT_FIELD: result = "cannot pass bit-field as __auto_type initializer in C"; break;
         case CHECK_INPUT_AUTO_TYPE_ATOMIC_INITIALIZER: result = "incompatible atomic auto type initializer"; break;
         case CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS: result = "ambiguous weak alias reference"; break;
+        case CHECK_INPUT_WEAK_ALIAS_OBJECT_AMBIGUOUS: result = "ambiguous weak alias object reference"; break;
         case CHECK_INPUT_WEAK_ALIAS_REDEFINITION: result = "weak alias redefinition"; break;
         case CHECK_INPUT_AUTO_DEDUCED_INITIALIZER: result = "declaration with deduced type 'auto' requires an initializer"; break;
         case CHECK_INPUT_AUTO_DEDUCED_SELF: result = "variable declared with deduced type 'auto' cannot appear in its own initializer"; break;
@@ -6471,19 +6472,24 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                             scoped ? "::" : "", (int)attribute.length, attribute.pointer);
                             }
                         }
-                        else if (phase == 0 && (kind == CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS || kind == CHECK_INPUT_WEAK_ALIAS_REDEFINITION) && token < count)
+                        else if (phase == 0 && (kind == CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS || kind == CHECK_INPUT_WEAK_ALIAS_OBJECT_AMBIGUOUS ||
+                                                kind == CHECK_INPUT_WEAK_ALIAS_REDEFINITION) && token < count)
                         {
                             const CheckInputReport* report = input->reports + index;
                             const uint32_t name = parser->tokens.names[token];
                             const uint32_t previous = report->note_token;
+                            const bool object = kind == CHECK_INPUT_WEAK_ALIAS_OBJECT_AMBIGUOUS;
+                            const char* candidate = object ? check_warning_text(scratch, "candidate found by name lookup is '%.*s'", (int)intern_length(pp->table, name),
+                                                                                intern_bytes(pp->table, name)) : "candidate function";
+                            const uint32_t second = object && report->value < count ? parser->tokens.sources[report->value] : (uint32_t)report->value;
                             const PPOutputDiagnosticNote notes[2] = {
-                                { .token = previous < count ? parser->tokens.sources[previous] : 0, .message = kind == CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS ? "candidate function" : "previous definition is here" },
-                                { .token = (uint32_t)report->value, .message = "candidate function" },
+                                { .token = previous < count ? parser->tokens.sources[previous] : 0, .message = kind != CHECK_INPUT_WEAK_ALIAS_REDEFINITION ? candidate : "previous definition is here" },
+                                { .token = second, .message = candidate },
                             };
                             const bool call = token + 1 < count && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN;
-                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, notes, kind == CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS ? 2u : 1u,
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, notes, kind != CHECK_INPUT_WEAK_ALIAS_REDEFINITION ? 2u : 1u,
                                                         kind == CHECK_INPUT_WEAK_ALIAS_REDEFINITION ? "redefinition of '%.*s' as different kind of symbol" :
-                                                        call ? "call to '%.*s' is ambiguous" : "reference to '%.*s' is ambiguous",
+                                                        call && !object ? "call to '%.*s' is ambiguous" : "reference to '%.*s' is ambiguous",
                                                         (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
                         else if (phase == 0 && input->reports[index].message == CHECK_INPUT_AUTO_TYPE_ATOMIC_INITIALIZER && token < count)

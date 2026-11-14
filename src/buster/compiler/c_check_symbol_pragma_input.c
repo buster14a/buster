@@ -393,7 +393,7 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
         // the clone. Keep these diagnostics recoverable so subsequent declarations remain visible.
         bool diagnosed = false;
         const uint32_t clone = selected > record->token ? selected : record->token;
-        if (!mismatched && defined && alias.previous != BUSTER_CHECK_NONE && kind == C_BINDING_FUNCTION)
+        if (!mismatched && defined && alias.previous != BUSTER_CHECK_NONE && (kind == C_BINDING_FUNCTION || (!no_op && kind == C_BINDING_OBJECT)))
         {
             for (uint32_t event = 0; event < bindings->count; event += 1)
             {
@@ -403,25 +403,35 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
                     bindings->point[event] > clone && resolved < input->token_count && input->objects[resolved] == input->objects[alias.previous])
                 {
                     const uint32_t before = input->report_count;
-                    check_input_report(reader, token, CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS);
+                    check_input_report(reader, token, kind == C_BINDING_FUNCTION ? CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS : CHECK_INPUT_WEAK_ALIAS_OBJECT_AMBIGUOUS);
                     if (input->report_count > before)
                     {
-                        input->reports[before].note_token = alias.previous;
-                        input->reports[before].value = record->source + 3;
+                        input->reports[before].note_token = kind == C_BINDING_FUNCTION ? alias.previous : selected;
+                        input->reports[before].value = kind == C_BINDING_FUNCTION ? record->source + 3 : alias.previous;
                         diagnosed = check_input_recover_reports(reader, before) || diagnosed;
                     }
                 }
             }
         }
-        if (!no_op && !mismatched && defined && alias.previous != BUSTER_CHECK_NONE && kind == C_BINDING_OBJECT &&
-            alias.next != BUSTER_CHECK_NONE && alias.next > clone && alias.defined_after)
+        if (!no_op && !mismatched && defined && alias.previous != BUSTER_CHECK_NONE && kind == C_BINDING_OBJECT)
         {
-            const uint32_t before = input->report_count;
-            check_input_report(reader, alias.next, CHECK_INPUT_WEAK_ALIAS_REDEFINITION);
-            if (input->report_count > before)
+            uint32_t conflicts = 0;
+            for (uint32_t at = check_input_symbol_lower(ordered, count, record->name);
+                 at < count && (uint32_t)(ordered[at] >> 32) == record->name; at += 1)
             {
-                input->reports[before].note_token = selected;
-                diagnosed = check_input_recover_reports(reader, before);
+                const uint32_t event = (uint32_t)ordered[at];
+                const uint32_t token = bindings->declaration[event];
+                if (bindings->point[event] > clone)
+                {
+                    const uint32_t before = input->report_count;
+                    check_input_report(reader, token, CHECK_INPUT_WEAK_ALIAS_REDEFINITION);
+                    if (input->report_count > before)
+                    {
+                        input->reports[before].note_token = conflicts == 0 ? selected : alias.previous;
+                        diagnosed |= check_input_recover_reports(reader, before);
+                        conflicts += 1;
+                    }
+                }
             }
         }
         // An A the unit never declares, or declares only before the pragma, of external linkage, never defines and never

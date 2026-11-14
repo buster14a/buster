@@ -98,6 +98,7 @@ typedef enum CheckInputMessage
     CHECK_INPUT_AUTO_TYPE_BIT_FIELD,
     CHECK_INPUT_AUTO_TYPE_ATOMIC_INITIALIZER,
     CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS,
+    CHECK_INPUT_WEAK_ALIAS_OBJECT_AMBIGUOUS,
     CHECK_INPUT_WEAK_ALIAS_REDEFINITION,
     // C23's `auto` type specifier (#793): the same errors as __auto_type's, naming `auto` where clang does, and two
     // declarators of one declaration whose deductions differ.
@@ -485,6 +486,7 @@ static const char* const check_input_messages[] =
     "cannot pass bit-field as __auto_type initializer in C",
     "incompatible atomic auto type initializer",
     "ambiguous weak alias reference",
+    "ambiguous weak alias object reference",
     "weak alias redefinition",
     "declaration with deduced type 'auto' requires an initializer",
     "variable declared with deduced type 'auto' cannot appear in its own initializer",

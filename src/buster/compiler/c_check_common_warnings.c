@@ -12341,8 +12341,10 @@ static void check_common_rejected_initializer_commas(const Parser* parser, Prepr
     CheckCommonFacts facts = { 0 };
     CheckWarningSpelling spell = { 0 };
     CheckCommonIgnored ignored = { 0 };
+    CheckCommonCandidates candidates = { .count = graph->count };
+    const bool indexed = BUSTER_SCALAR_PATH(parser->options.scalar) || check_common_candidates_build(graph, scratch, false, &candidates);
     uint8_t* marked = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
-    bool ready = marked != NULL && check_common_facts(input, stream, types, parser, NULL, &enabled, NULL, scratch, &facts) &&
+    bool ready = indexed && marked != NULL && check_common_facts(input, stream, types, parser, NULL, &enabled, NULL, &candidates, scratch, &facts) &&
                  check_common_ignored_prepare(&ignored, parser, pp, input, types, scratch);
     if (ready)
     {
