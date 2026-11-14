@@ -20,8 +20,10 @@
 // its size is a vector's that the transport has (an intrinsic's __m256i), else a COPY of its bytes through one U64
 // temporary of the caller's (`t`). A COPY moves 16 bytes at a time, and a vector's next read of the object takes them
 // whole: on Zen 5 a load that two stores wrote isn't forwarded, which made #1398's kernels 8 times slower than their
-// calls. The callee's entries follow, but its last, its only RETURN, whose operand the call's result then is; an
-// aggregate result in registers goes into the call's result object the same way.
+// calls. The callee's entries follow, but its last, a RETURN, whose operand the call's result then is; an aggregate
+// result in registers goes into the call's result object the same way. With --tier0-inline-shapes (step 5, off by
+// default), a RETURN before it is a JUMP, or with a value a JUMP_VALUE, to the copy's end, which finds the value where
+// the last RETURN's operand falls through, and a result in memory is written through the call's object's address.
 //
 // A callee's locals are appended once per caller and level: a site inside another site's arguments, of the same
 // callee, after that one's first binding, takes the next level's copy, since both sites' locals are live at once.
@@ -140,14 +142,18 @@ static bool tier0_inline_branch(uint32_t kind)
 
 // Whether `function`'s stream can be a callee's (docs/tier0-inlining.md, "Eligibility"): nothing about its own frame or
 // code addresses (variadic, setjmp or a call of its kin, eh_return, unwind_init, an interrupt or preserving convention,
-// a realigned stack, labels (an asm body's too), ALLOCA and the stack's kinds, FRAME_ADDRESS, tail calls, JUMP_INDIRECT),
-// no result through memory, and at most one RETURN, its last entry. Its entries are its body, but that RETURN (`*body`).
-static bool tier0_inline_callee_valid(const Tier0Function* function, uint32_t* body)
+// a realigned stack, labels (an asm body's too), ALLOCA and the stack's kinds, FRAME_ADDRESS, tail calls, JUMP_INDIRECT).
+// Its entries are its body, but its last entry where that is a RETURN (`*body`). Without `shapes` it has no result
+// through memory and at most one RETURN, its last entry; with them (step 5, --tier0-inline-shapes) a RETURN before it
+// goes to the copy's end (tier0_inline_body_scalar), and a result through memory is the site's to bind
+// (tier0_inline_site_valid). They are off by default: on the 9700X the vector lexer's spliced loops lost their locals'
+// registers to their large caller's (docs/tier0-inlining.md, "Several returns and results in memory").
+static bool tier0_inline_callee_valid(const Tier0Function* function, bool shapes, uint32_t* body)
 {
     const uint32_t count = function->count;
     bool valid = function->incoming_variadic == 0 && !function->returns_twice && !function->calls_returns_twice && !function->eh_return && !function->unwind_init && function->interrupt == 0 &&
                  function->preserve_general == 0 && function->preserve_vectors == 0 && function->preserve_mask_bytes == 0 && !function->realign_stack &&
-                 function->label_count == 0 && function->table_count == 0 && function->result.kind != BUSTER_ABI_RESULT_MEMORY;
+                 function->label_count == 0 && function->table_count == 0 && (shapes || function->result.kind != BUSTER_ABI_RESULT_MEMORY);
     const bool returns = count != 0 && function->kinds[count - 1] == BUSTER_TYPED_RETURN;
     // An asm body's labels (#1839, Tier0AsmBody.labels) are defined once, where its own code has them.
     for (uint32_t b = 0; valid && b < function->asm_body_count; b += 1)
@@ -158,7 +164,7 @@ static bool tier0_inline_callee_valid(const Tier0Function* function, uint32_t* b
     {
         const uint32_t kind = function->kinds[e];
         valid = kind != BUSTER_TYPED_ALLOCA && kind != BUSTER_TYPED_STACK_SAVE && kind != BUSTER_TYPED_STACK_RESTORE && kind != BUSTER_TYPED_FRAME_ADDRESS &&
-                kind != BUSTER_TYPED_TAIL_CALL && kind != BUSTER_TYPED_JUMP_INDIRECT && (kind != BUSTER_TYPED_RETURN || e + 1 == count);
+                kind != BUSTER_TYPED_TAIL_CALL && kind != BUSTER_TYPED_JUMP_INDIRECT && (shapes || kind != BUSTER_TYPED_RETURN || e + 1 == count);
     }
     *body = returns ? count - 1 : count;
     return valid;
@@ -240,8 +246,9 @@ static bool tier0_inline_starts(const Tier0Function* function, uint32_t end, uin
 }
 
 // The splice's input: the caller and, per call row of it, 0 for a call it keeps or 1 + the index in `callees` of the
-// stream that the call inlines, each of which tier0_inline_callee_valid accepts; and the vector transport for a caller
-// without vectors whose callees have them (the caller's target's, Tier0Function.vector_bytes).
+// stream that the call inlines, each of which tier0_inline_callee_valid accepts with `shapes` (step 5's, several returns
+// and results in memory: --tier0-inline-shapes); and the vector transport for a caller without vectors whose callees
+// have them (the caller's target's, Tier0Function.vector_bytes).
 typedef struct Tier0InlineInput Tier0InlineInput;
 struct Tier0InlineInput
 {
@@ -250,6 +257,7 @@ struct Tier0InlineInput
     const Tier0Function* const* callees;
     uint32_t callee_count;
     uint8_t vector_bytes;
+    bool shapes;
 };
 
 // A site: its CALL entry and row, its distinct callee (Tier0InlinePlan.distinct), its level, the entry before which its
@@ -272,6 +280,9 @@ struct Tier0InlineSite
     // `parameters`, are left out, and its arguments stay on the stacks as the CALL took them.
     bool forward;
     uint32_t parameters;
+    // 1 where its callee's result goes through a hidden pointer, parameter 0 (step 5), which takes the address of the
+    // call's result object, so that argument k binds parameter k + 1; else 0.
+    uint32_t hidden;
 };
 
 // A distinct callee of the caller's sites: its index in the input's callees, its body (its entries but its RETURN), its
@@ -374,7 +385,8 @@ static uint32_t tier0_inline_binding_entries(const Tier0Function* caller, const 
 static bool tier0_inline_forwards(const Tier0Function* callee, uint32_t body)
 {
     const uint32_t n = callee->parameter_count;
-    bool valid = n <= body;
+    // A result through a hidden pointer reads parameter 0 where it writes the result, not first.
+    bool valid = n <= body && callee->result.kind != BUSTER_ABI_RESULT_MEMORY;
     for (uint32_t k = 0; valid && k < n; k += 1)
     {
         valid = callee->kinds[k] == BUSTER_TYPED_LOCAL && callee->values[k] == k;
@@ -413,13 +425,23 @@ static bool tier0_inline_site_forwards(const Tier0Function* caller, const Tier0F
     return valid;
 }
 
-// How site `site`'s result binds: none, or an aggregate's into the call's object (a vector only into an object of its
-// size, all of whose bytes a SET_LOCAL writes).
+// How site `site`'s result binds: none, an aggregate's into the call's object (a vector only into an object of its
+// size, all of whose bytes a SET_LOCAL writes), or through a hidden pointer, already in the object, the pointer the
+// callee returns discarded (a DISCARD, one entry as a value's binding).
 static uint32_t tier0_inline_result_entries(const Tier0Function* caller, const Tier0Function* callee, const Tier0InlinePlan* plan, const Tier0InlineSite* site)
 {
     const uint32_t object = caller->call_result_objects != 0 ? caller->call_result_objects[site->row] : 0;
-    const uint32_t how = object != 0 ? tier0_inline_aggregate(plan, callee->result_size) : BUSTER_TIER0_INLINE_BIND_NONE;
-    return how == BUSTER_TIER0_INLINE_BIND_VECTOR && caller->local_sizes[object - 1] != callee->result_size ? BUSTER_TIER0_INLINE_BIND_COPY : how;
+    const uint32_t how = site->hidden != 0 ? BUSTER_TIER0_INLINE_BIND_VALUE :
+                         object != 0       ? tier0_inline_aggregate(plan, callee->result_size) :
+                                             BUSTER_TIER0_INLINE_BIND_NONE;
+    return site->hidden == 0 && how == BUSTER_TIER0_INLINE_BIND_VECTOR && caller->local_sizes[object - 1] != callee->result_size ? BUSTER_TIER0_INLINE_BIND_COPY : how;
+}
+
+// The entries of site `site`'s hidden pointer's binding, after its last argument's (step 5): LOCAL_ADDRESS of the call's
+// object, SET_LOCAL of the callee's parameter 0; none without one.
+static uint32_t tier0_inline_hidden_entries(const Tier0InlineSite* site)
+{
+    return 2 * site->hidden;
 }
 
 // Whether site `site` (its entry, row and callee `callee`, body `body` set) is one: the arguments the parameters take,
@@ -432,9 +454,19 @@ static bool tier0_inline_site_valid(const Tier0Function* caller, const Tier0Func
     const bool returns = body != callee->count;
     const uint32_t returned = returns ? callee->classes[callee->count - 1] : BUSTER_TYPED_CLASS_VOID;
     const uint32_t object = caller->call_result_objects != 0 ? caller->call_result_objects[row] : 0;
-    bool valid = n == callee->parameter_count && caller->call_variadic[row] == 0 && caller->call_targets[row] != 0 &&
+    const uint32_t hidden = callee->result.kind == BUSTER_ABI_RESULT_MEMORY ? 1u : 0u;
+    site->hidden = hidden;
+    bool valid = n + hidden == callee->parameter_count && caller->call_variadic[row] == 0 && caller->call_targets[row] != 0 &&
                  (caller->call_tails == 0 || caller->call_tails[row] == 0);
-    if (valid && object != 0)
+    if (valid && hidden != 0)
+    {
+        // A result through a hidden pointer (step 5): parameter 0, a U64, takes the address of the call's object, whose
+        // address the call needs taken, where the callee writes its result; its RETURN gives the pointer back.
+        const uint32_t local = object - 1;
+        valid = object != 0 && class == BUSTER_TYPED_CLASS_VOID && returned == BUSTER_TYPED_CLASS_U64 && local < caller->local_count && caller->local_flags != 0 &&
+                (caller->local_flags[local] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0 && callee->local_count != 0 && callee->local_classes[0] == BUSTER_TYPED_CLASS_U64;
+    }
+    else if (valid && object != 0)
     {
         // An aggregate result in registers, into the call's object: the callee's RETURN gives its bytes' address.
         const uint32_t local = object - 1;
@@ -450,8 +482,8 @@ static bool tier0_inline_site_valid(const Tier0Function* caller, const Tier0Func
     {
         const uint32_t a = caller->call_first[row] + k;
         const uint32_t size = caller->argument_sizes != 0 ? caller->argument_sizes[a] : 0;
-        const uint32_t own = callee->local_sizes != 0 ? callee->local_sizes[k] : 0;
-        valid = size == 0 ? own == 0 || (callee->local_flags[k] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) == 0 :
+        const uint32_t own = callee->local_sizes != 0 ? callee->local_sizes[k + hidden] : 0;
+        valid = size == 0 ? own == 0 || (callee->local_flags[k + hidden] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) == 0 :
                             size <= BUSTER_TIER0_INLINE_COPY_BYTES && own == size && caller->argument_classes[a] == BUSTER_TYPED_CLASS_U64;
     }
     valid = valid && tier0_inline_starts(caller, site->entry, n, arguments);
@@ -527,7 +559,7 @@ static bool tier0_inline_plan(const Tier0InlineInput* input, bool vector, Arena*
         const Tier0Function* callee = index < input->callee_count ? input->callees[index] : 0;
         uint32_t body = 0;
         Tier0InlineSite site = { .entry = entry, .row = row, .argument = argument };
-        bool taken = callee != 0 && tier0_inline_callee_valid(callee, &body) && tier0_inline_site_valid(caller, callee, &site, body, plan->arguments + argument);
+        bool taken = callee != 0 && tier0_inline_callee_valid(callee, input->shapes, &body) && tier0_inline_site_valid(caller, callee, &site, body, plan->arguments + argument);
         // A callee's vectors on the caller's transport: the EVEX path takes every one's, another only its own.
         const uint8_t transport = caller->vectors ? caller->vector_bytes : input->vector_bytes;
         taken = taken && (!callee->vectors || transport == 0 || transport == callee->vector_bytes) && (!callee->masks || transport == 0);
@@ -674,7 +706,8 @@ static bool tier0_inline_plan(const Tier0InlineInput* input, bool vector, Arena*
         plan->call_count += callee->call_count;
         plan->argument_count += callee->argument_count;
         const uint32_t skipped = site->forward ? n : 0;
-        const uint32_t size = (n != 0 ? tier0_inline_binding_entries(caller, plan, site, n - 1) : 0) + distinct->body - skipped + tier0_inline_result_entries(caller, callee, plan, site);
+        const uint32_t size = (n != 0 ? tier0_inline_binding_entries(caller, plan, site, n - 1) : 0) + tier0_inline_hidden_entries(site) + distinct->body - skipped +
+                              tier0_inline_result_entries(caller, callee, plan, site);
         plan->insertions[plan->insertion_count] = (Tier0InlineInsertion){ .site = s, .argument = BUSTER_TIER0_INLINE_CALL_INSERTION, .next = plan->heads[site->entry] };
         plan->insertion_count += 1;
         plan->heads[site->entry] = plan->insertion_count;
@@ -740,7 +773,8 @@ static bool tier0_inline_plan(const Tier0InlineInput* input, bool vector, Arena*
     plan->count &= UINT32_MAX;
     valid = valid && plan->count <= BUSTER_TIER0_MAX_ENTRIES && plan->local_count <= BUSTER_TIER0_MAX_LOCALS && plan->call_count <= UINT32_MAX &&
             plan->argument_count <= UINT32_MAX && plan->operation_count <= UINT32_MAX && plan->x87_count <= UINT32_MAX && plan->vector_count <= UINT32_MAX;
-    // Each site's body's first entry in G: after its call's first insertion's start, its last argument's binding.
+    // Each site's body's first entry in G: after its call's first insertion's start, its last argument's binding and its
+    // hidden pointer's.
     for (uint32_t s = 0; valid && s < plan->site_count; s += 1)
     {
         Tier0InlineSite* site = plan->sites + s;
@@ -751,7 +785,7 @@ static bool tier0_inline_plan(const Tier0InlineInput* input, bool vector, Arena*
             const Tier0InlineInsertion* insertion = plan->insertions + i - 1;
             at += insertion->argument != BUSTER_TIER0_INLINE_CALL_INSERTION ? tier0_inline_binding_entries(caller, plan, plan->sites + insertion->site, insertion->argument) : 0;
         }
-        site->body_base = at + (n != 0 ? tier0_inline_binding_entries(caller, plan, site, n - 1) : 0);
+        site->body_base = at + (n != 0 ? tier0_inline_binding_entries(caller, plan, site, n - 1) : 0) + tier0_inline_hidden_entries(site);
     }
     return valid;
 }
@@ -797,7 +831,7 @@ static uint32_t tier0_inline_bind(const Tier0Function* caller, const Tier0Inline
 {
     const uint32_t a = caller->call_first[site->row] + k;
     const uint32_t size = caller->argument_sizes != 0 ? caller->argument_sizes[a] : 0;
-    const uint32_t local = site->local_base + k;
+    const uint32_t local = site->local_base + site->hidden + k;
     if (site->forward)
     {
         // A forwarded vector's bytes are loaded where its address was, and a value stays.
@@ -840,13 +874,18 @@ static void tier0_inline_bases(const Tier0InlinePlan* plan, const Tier0InlineSit
     bases[BUSTER_TIER0_INLINE_CAS] = (uint64_t)site->local_base << BUSTER_TYPED_CAS_LOCAL_SHIFT;
 }
 
-// The result's binding of site `site` at G's entry `at` (none, or an aggregate's copy into its object); returns the
-// entry after it.
+// The result's binding of site `site` at G's entry `at` (none, an aggregate's copy into its object, or a DISCARD of the
+// hidden pointer the callee returns); returns the entry after it.
 static uint32_t tier0_inline_result(const Tier0Function* caller, const Tier0Function* callee, const Tier0InlinePlan* plan, const Tier0InlineSite* site,
                                     Tier0InlineColumns* g, uint32_t at)
 {
     const uint32_t object = caller->call_result_objects != 0 ? caller->call_result_objects[site->row] : 0;
-    if (object != 0)
+    if (site->hidden != 0)
+    {
+        tier0_inline_put(g, at, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
+        at += 1;
+    }
+    else if (object != 0)
     {
         at = tier0_inline_bind_aggregate(plan, tier0_inline_result_entries(caller, callee, plan, site), callee->result_size, object - 1, g, at);
     }
@@ -1153,7 +1192,9 @@ static uint32_t tier0_inline_segment_scalar(const Tier0Function* caller, const T
     return at;
 }
 
-// Site `site`'s copy of its callee's body at G's `at`, rebased (the scalar path); returns G's entry after it.
+// Site `site`'s copy of its callee's body at G's `at`, rebased (the scalar path); returns G's entry after it. A RETURN
+// in the body, before its last entry, goes to the copy's end (step 5): a JUMP, or with a value a JUMP_VALUE, whose value
+// the end finds on the stack where the last RETURN's operand falls through to it, as an arm of ?: leaves its own.
 static uint32_t tier0_inline_body_scalar(const Tier0Function* callee, const Tier0InlinePlan* plan, const Tier0InlineSite* site, Tier0InlineColumns* g, uint32_t at)
 {
     const uint32_t body = plan->distinct[site->callee].body;
@@ -1161,10 +1202,11 @@ static uint32_t tier0_inline_body_scalar(const Tier0Function* callee, const Tier
     tier0_inline_bases(plan, site, bases);
     for (uint32_t e = tier0_inline_skipped(site); e < body; e += 1)
     {
-        const uint32_t kind = callee->kinds[e];
+        const bool returns = callee->kinds[e] == BUSTER_TYPED_RETURN;
         const uint32_t class = callee->classes[e];
+        const uint32_t kind = !returns ? callee->kinds[e] : class == BUSTER_TYPED_CLASS_VOID ? BUSTER_TYPED_JUMP : BUSTER_TYPED_JUMP_VALUE;
         const uint32_t meaning = tier0_inline_meaning(kind, class);
-        uint64_t value = callee->values[e];
+        uint64_t value = returns ? body : callee->values[e];
         value = meaning == BUSTER_TIER0_INLINE_ENTRY && value > body ? body : value;
         tier0_inline_put(g, at, kind, class, value + bases[meaning]);
         at += 1;
@@ -1206,9 +1248,10 @@ static uint32_t tier0_inline_segment_vector(const Tier0Function* caller, const T
     return at;
 }
 
-// Site `site`'s copy of its callee's body at G's `at`, rebased (the vector path): each lane's meaning a vpermb of its kind
-// (a CONST's by a compare of its class), its base a vpermq of the bases by meaning, a target past the body clamped to
-// it, and an add; returns G's entry after it.
+// Site `site`'s copy of its callee's body at G's `at`, rebased (the vector path): a RETURN's lanes made a JUMP or a
+// JUMP_VALUE to the end by masked moves of their kinds and values (step 5), each lane's meaning a vpermb of its kind (a
+// CONST's by a compare of its class), its base a vpermq of the bases by meaning, a target past the body clamped to it,
+// and an add; returns G's entry after it.
 static uint32_t tier0_inline_body_vector(const Tier0Function* callee, const Tier0InlinePlan* plan, const Tier0InlineSite* site, Tier0InlineColumns* g, uint32_t at)
 {
     const uint32_t body = plan->distinct[site->callee].body;
@@ -1225,8 +1268,12 @@ static uint32_t tier0_inline_body_vector(const Tier0Function* callee, const Tier
     {
         const uint32_t take = body - e < 64 ? body - e : 64;
         const __mmask64 lanes = _bzhi_u64(UINT64_MAX, take);
-        const __m512i kinds = _mm512_maskz_loadu_epi8(lanes, callee->kinds + e);
+        __m512i kinds = _mm512_maskz_loadu_epi8(lanes, callee->kinds + e);
         const __m512i classes = _mm512_maskz_loadu_epi8(lanes, callee->classes + e);
+        const __mmask64 returns = _mm512_mask_cmpeq_epi8_mask(lanes, kinds, _mm512_set1_epi8(BUSTER_TYPED_RETURN));
+        const __mmask64 voids = _mm512_cmpeq_epi8_mask(classes, _mm512_set1_epi8(BUSTER_TYPED_CLASS_VOID));
+        kinds = _mm512_mask_mov_epi8(kinds, returns & voids, _mm512_set1_epi8(BUSTER_TYPED_JUMP));
+        kinds = _mm512_mask_mov_epi8(kinds, returns & ~voids, _mm512_set1_epi8(BUSTER_TYPED_JUMP_VALUE));
         _mm512_mask_storeu_epi8(g->kinds + at, lanes, kinds);
         _mm512_mask_storeu_epi8(g->classes + at, lanes, classes);
         const __mmask64 constants = _mm512_cmpeq_epi8_mask(kinds, constant);
@@ -1240,6 +1287,7 @@ static uint32_t tier0_inline_body_vector(const Tier0Function* callee, const Tier
             const __mmask8 valid = (__mmask8)_bzhi_u32(0xffu, take - q);
             const __m512i meaning = _mm512_cvtepu8_epi64(_mm_loadl_epi64((const __m128i*)(meaning_bytes + q)));
             __m512i values = _mm512_maskz_loadu_epi64(valid, callee->values + e + q);
+            values = _mm512_mask_mov_epi64(values, (__mmask8)(returns >> q), end);
             values = _mm512_mask_min_epu64(values, _mm512_cmpeq_epi64_mask(meaning, entry), values, end);
             values = _mm512_add_epi64(values, _mm512_permutexvar_epi64(meaning, bases));
             _mm512_mask_storeu_epi64(g->values + at + q, valid, values);
@@ -1279,6 +1327,12 @@ static uint32_t tier0_inline_entries(const Tier0InlineInput* input, const Tier0I
                 const Tier0Function* callee = input->callees[plan->distinct[site->callee].index];
                 const uint32_t n = caller->call_argument_counts[site->row];
                 at = n != 0 ? tier0_inline_bind(caller, plan, site, n - 1, g, at) : at;
+                if (site->hidden != 0)
+                {
+                    tier0_inline_put(g, at, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, caller->call_result_objects[site->row] - 1u);
+                    tier0_inline_put(g, at + 1, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, site->local_base);
+                    at += 2;
+                }
 #if BUSTER_HOST_VECTOR
                 at = vector ? tier0_inline_body_vector(callee, plan, site, g, at) : tier0_inline_body_scalar(callee, plan, site, g, at);
 #else

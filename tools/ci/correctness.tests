@@ -299,8 +299,10 @@ test "${#host_flags[@]}" -gt 0
 "$BUSTER_COMPILER" test-tier0 --cross-check
 == Test Tier 0's inlining of always_inline functions
 # #1398: the driver fixture's bodies and the compiler's own main.c spliced by the vector path and its scalar twin,
-# which must give the same streams, each accepted by tier0_validate and compiled.
+# which must give the same streams, each accepted by tier0_validate and compiled; the fixture's too with step 5's
+# opt-in shapes (several returns, results in memory).
 "$BUSTER_COMPILER" test-tier0-inline
+"$BUSTER_COMPILER" test-tier0-inline --tier0-inline-shapes
 mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
 test "${#host_flags[@]}" -gt 0
 "$BUSTER_COMPILER" test-tier0-inline "${host_flags[@]}" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c

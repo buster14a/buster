@@ -127,6 +127,7 @@ static bool check_tier0_inline_splice(const CheckEmitRun* run, CheckTier0InlineL
             .callees = callees,
             .callee_count = count,
             .vector_bytes = check_tier0_inline_transport(check_tier1_inline_target(table->program, b)),
+            .shapes = run->tier0_inline_shapes,
         };
         valid = run->scalar ? tier0_inline_scalar(&input, arena, result) : tier0_inline(&input, arena, result);
     }
@@ -146,7 +147,7 @@ static bool check_tier0_inline_splice(const CheckEmitRun* run, CheckTier0InlineL
 static void check_tier0_inline_visit(const CheckEmitRun* run, CheckTier0InlineLane* lane, uint32_t v, uint32_t* components, uint32_t* depth)
 {
     uint32_t body = 0;
-    if (tier0_inline_callee_valid(&run->lowered->functions[v], &body))
+    if (tier0_inline_callee_valid(&run->lowered->functions[v], run->tier0_inline_shapes, &body))
     {
         lane->visits += 1;
         lane->indices[v] = lane->visits;
@@ -292,7 +293,7 @@ static bool check_tier0_inline_held(const CheckEmitRun* run, uint32_t b)
     const CheckTier1Inline* table = run->tier0_inline;
     uint32_t body = 0;
     const bool held = table != NULL && table->holding && table->stage == 0 && b < table->body_count && table->held[b] == BUSTER_CHECK_TIER1_INLINE_HELD &&
-                      table->released[b] == 0 && tier0_inline_callee_valid(&run->lowered->functions[b], &body);
+                      table->released[b] == 0 && tier0_inline_callee_valid(&run->lowered->functions[b], run->tier0_inline_shapes, &body);
     if (held)
     {
         table->held[b] = BUSTER_CHECK_TIER1_INLINE_WAITING;
