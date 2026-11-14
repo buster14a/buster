@@ -259,6 +259,8 @@ static CheckRepairStatus check_repair_make(CheckRepair* repair, const Parser* or
             .preprocessor = repair->preprocessor,
             .typo_sources = original->typo_sources,
             .typo_count = original->typo_count,
+            .invalid_call_sources = original->invalid_call_sources,
+            .invalid_call_count = original->invalid_call_count,
         };
         memcpy(view->predeclared, original->predeclared, sizeof(view->predeclared));
         view->tokens.count = total;
