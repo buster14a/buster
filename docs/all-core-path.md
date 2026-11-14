@@ -664,7 +664,9 @@ and measured on the 9700X at main `ca1ede6a` with step
   musl's 1,336 units. musl's command on one lane is unchanged.
 - **The default.** This table's rule keeps a step whose gate misses behind
   its option; the owner made W = 2,048 the driver's default all the same
-  (2026-11-14), for its 1.3% at eight workers and nothing lost at one.
+  (2026-11-14), for its 1.3% at eight workers and nothing lost at one
+  ([its check](https://github.com/buster14a/buster-performance/tree/8643d3b382134849cca850a6a78803ff1b1f3dc5/docs/measurements/all-core-step1-default-2536-2026-11-14):
+  one worker's user cycles the same by an interleaved comparison).
   `--emit-window=0` is the twin. The step was expected to give 298 MB/s (1.03
   times); it gives 292.9 (1.013 times `W = ∞` on the same executable).
 
