@@ -3828,19 +3828,23 @@ static bool check_attested_open(CheckAttested* census)
         census->runtime_lengths[r] = check_lower_runtime_names[r] != NULL ? (uint32_t)strlen(check_lower_runtime_names[r]) : UINT32_MAX;
     }
     census->unit_arena = check_attested_reserve(census, UINT64_C(1) << 36);
-    // The lists' cache: room for every size its table takes, each after the last, and its pool.
-    census->list_arena = check_attested_reserve(census, 2 * (uint64_t)BUSTER_ATTESTED_LIST_SLOTS * sizeof(CheckAttestedListSlot) + 4096);
-    census->list_slots = arena_push_array(&census->list_arena, BUSTER_ATTESTED_LIST_FIRST_SLOTS, sizeof(CheckAttestedListSlot), 64);
-    census->list_mask = BUSTER_ATTESTED_LIST_FIRST_SLOTS - 1;
-    census->list_pool_arena = check_attested_reserve(census, (uint64_t)BUSTER_ATTESTED_LIST_POOL * sizeof(uint32_t) + 4096);
-    census->list_pool = arena_push_array(&census->list_pool_arena, BUSTER_ATTESTED_LIST_POOL, sizeof(uint32_t), 64);
-    census->tree_pool_arena = check_attested_reserve(census, (uint64_t)BUSTER_ATTESTED_TREE_POOL * sizeof(uint16_t) + 4096);
-    census->tree_pool = arena_push_array(&census->tree_pool_arena, BUSTER_ATTESTED_TREE_POOL, sizeof(uint16_t), 64);
+    // The lists' cache: room for every size its table takes, each after the last, and its pool. A command of one source
+    // file's state keeps none (CheckAttested.alone), so it maps none: three mappings fewer to make, commit and unmap.
+    if (!census->alone)
+    {
+        census->list_arena = check_attested_reserve(census, 2 * (uint64_t)BUSTER_ATTESTED_LIST_SLOTS * sizeof(CheckAttestedListSlot) + 4096);
+        census->list_slots = arena_push_array(&census->list_arena, BUSTER_ATTESTED_LIST_FIRST_SLOTS, sizeof(CheckAttestedListSlot), 64);
+        census->list_mask = BUSTER_ATTESTED_LIST_FIRST_SLOTS - 1;
+        census->list_pool_arena = check_attested_reserve(census, (uint64_t)BUSTER_ATTESTED_LIST_POOL * sizeof(uint32_t) + 4096);
+        census->list_pool = arena_push_array(&census->list_pool_arena, BUSTER_ATTESTED_LIST_POOL, sizeof(uint32_t), 64);
+        census->tree_pool_arena = check_attested_reserve(census, (uint64_t)BUSTER_ATTESTED_TREE_POOL * sizeof(uint16_t) + 4096);
+        census->tree_pool = arena_push_array(&census->tree_pool_arena, BUSTER_ATTESTED_TREE_POOL, sizeof(uint16_t), 64);
+    }
     check_attested_actions(census->kind_actions, census->role_actions);
     return census->memo != NULL && census->keys != NULL && census->list_marks != NULL && census->body_marks != NULL && census->runtime_lengths != NULL &&
            census->id_words != NULL &&
            census->unit_arena.base != NULL &&
-           census->list_slots != NULL && census->list_pool != NULL && census->tree_pool != NULL;
+           (census->alone || (census->list_slots != NULL && census->list_pool != NULL && census->tree_pool != NULL));
 }
 
 static void check_attested_close(CheckAttested* census)

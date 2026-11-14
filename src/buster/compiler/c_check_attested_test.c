@@ -565,7 +565,7 @@ static __attribute__((noinline)) void check_test_attested_memo(CheckTest* test, 
     const char* kept[] = { "-nostdinc", "-std=gnu17", memo_option, "-c" };
     const char* warned[] = { "-nostdinc", "-std=gnu17", "-Wall", memo_option, "-c" };
     char path[700];
-    const char* const names[] = { "off", "cold", "warm", "on" };
+    const char* const names[] = { "off", "cold", "warm", "on", "failed-off", "failed" };
     for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(names); n += 1)
     {
         snprintf(path, sizeof(path), "%s/%s/diagnostics.err", directory, names[n]);
@@ -597,6 +597,19 @@ static __attribute__((noinline)) void check_test_attested_memo(CheckTest* test, 
     check_test_expect(test, files == 1 && bytes > BUSTER_ATTESTED_MEMO_HEADER && (bytes - BUSTER_ATTESTED_MEMO_HEADER) % sizeof(CheckAttestedHash) == 0 &&
                                 skipped_cold != 0 && skipped_warm > skipped_cold && views == units,
                       "--attested-memo: one file, whole records; a command of one source file skips what earlier commands learned, every one of them warm");
+    // The two units with errors, each by a command of its own with the memo warm: each skips, fails, and is read again
+    // whole, its diagnostics the second reading's alone, --attested=off's (a stream of the command's own, into which the
+    // preprocessor's and the checker's print too).
+    bool failed = written;
+    uint64_t failed_again = 0;
+    for (uint32_t u = units; u < units + 2; u += 1)
+    {
+        failed = failed && check_attested_test_unit_range(directory, "failed-off", "off", plain, BUSTER_ARRAY_LENGTH(plain), u, 1, 1);
+        failed = failed && check_attested_test_unit_range(directory, "failed", "on", kept, BUSTER_ARRAY_LENGTH(kept), u, 1, 1);
+        failed_again += check_units_attested_last[CHECK_ATTESTED_SUMMARY_AGAIN];
+    }
+    check_test_expect(test, failed && failed_again == 2 && check_attested_test_compiled_same(directory, "failed", "failed-off", 0, false),
+                      "--attested-memo: a command of one source file that skipped and failed is read again, its diagnostics --attested=off's");
     // The units as one command: its first unit skips too.
     const bool on = written && check_attested_test_compile(directory, "on", "on", kept, BUSTER_ARRAY_LENGTH(kept), units, 0);
     check_test_expect(test, on && check_attested_test_compiled_same(directory, "on", "off", units, true) &&
@@ -618,7 +631,7 @@ static __attribute__((noinline)) void check_test_attested_memo(CheckTest* test, 
         check_attested_test_compiled_remove(directory, names[n], units);
     }
     check_attested_test_memos_remove(memo);
-    for (uint32_t u = 0; u < units; u += 1)
+    for (uint32_t u = 0; u < units + 2; u += 1)
     {
         snprintf(path, sizeof(path), "%s/unit%u.c", directory, u + 1);
         unlink(path);
