@@ -1806,7 +1806,21 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         uint32_t* entry_stamps = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
         uint32_t* exit_pieces = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
         uint32_t* exit_stamps = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-        ready = ready && firsts != 0 && siblings != 0 && entry_pieces != 0 && entry_stamps != 0 && exit_pieces != 0 && exit_stamps != 0;
+        // Per block, the join_starts byte of a range entering it from another block (#2618): its predecessor count where
+        // that is BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM or more, saturating, and whether one is laid out at or after it.
+        uint8_t* join_bytes = ready ? arena_push(scratch, (uint64_t)blocks + 1, 1) : 0;
+        ready = ready && firsts != 0 && siblings != 0 && entry_pieces != 0 && entry_stamps != 0 && exit_pieces != 0 && exit_stamps != 0 && join_bytes != 0;
+        for (uint32_t b = 0; ready && b < blocks; b += 1)
+        {
+            const uint32_t incoming = input->predecessor_offsets[b + 1] - input->predecessor_offsets[b];
+            uint32_t later = 0;
+            for (uint32_t q = input->predecessor_offsets[b]; incoming >= BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM && q < input->predecessor_offsets[b + 1]; q += 1)
+            {
+                later |= input->predecessors[q] >= b;
+            }
+            const uint32_t count = incoming < BUSTER_TIER1_ALLOCATE_JOIN_COUNT ? incoming : BUSTER_TIER1_ALLOCATE_JOIN_COUNT;
+            join_bytes[b] = incoming >= BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM ? (uint8_t)(count | (later != 0 ? BUSTER_TIER1_ALLOCATE_JOIN_LATER : 0)) : 0;
+        }
         for (uint32_t b = 0; ready && b < blocks; b += 1)
         {
             uint32_t first = BUSTER_TIER1_CFG_NONE;
@@ -2051,18 +2065,11 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                                     const bool anchored = !modeled && anchor != BUSTER_TIER1_CFG_NONE && exit_stamps[anchor] == v + 1;
                                     const uint32_t earlier = modeled ? entry_pieces[model] : anchored ? exit_pieces[anchor] | BUSTER_TIER1_ALLOCATE_HINT_EXIT : BUSTER_TIER1_CFG_NONE;
                                     tier1_cfg_piece(&pieces, input, v, from, to, piece == 0 && defined_here ? phi_hints[v] : v, earlier, piece != 0);
-                                    // A range entering a join (#2618): its predecessor count, and whether one is laid
-                                    // out at or after it, for an unused recipe to rest there (Tier1AllocationInput.join_starts).
-                                    const uint32_t incoming = entry && !defined_here ? input->predecessor_offsets[b + 1] - input->predecessor_offsets[b] : 0;
-                                    uint32_t later = 0;
-                                    for (uint32_t q = input->predecessor_offsets[b]; pieces.fill && incoming >= BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM && q < input->predecessor_offsets[b + 1]; q += 1)
+                                    // A range entering a join (#2618), for an unused recipe to rest there
+                                    // (Tier1AllocationInput.join_starts).
+                                    if (pieces.fill && entry && !defined_here)
                                     {
-                                        later += input->predecessors[q] >= b;
-                                    }
-                                    if (pieces.fill && incoming >= BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM)
-                                    {
-                                        const uint32_t count = incoming < BUSTER_TIER1_ALLOCATE_JOIN_COUNT ? incoming : BUSTER_TIER1_ALLOCATE_JOIN_COUNT;
-                                        pieces.joins[pieces.count - 1] = (uint8_t)(count | (later != 0 ? BUSTER_TIER1_ALLOCATE_JOIN_LATER : 0));
+                                        pieces.joins[pieces.count - 1] = join_bytes[b];
                                     }
                                 }
                                 if (entry)
