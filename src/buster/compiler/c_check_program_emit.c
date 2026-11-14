@@ -492,15 +492,17 @@ struct CheckEmitGrowth
 #define BUSTER_CHECK_TIER1_SCHEDULE_POST 1
 #define BUSTER_CHECK_TIER1_SCHEDULE_PRE 2
 // --tier1-passes= (#139): the passes of Tier 1's pipeline whose default the option turns over, a bit each, so that 0 is
-// the default pipeline, which runs SCCP, dead-code removal and CFG cleanup and neither LICM nor SROA on every function.
-// The first three bits are ir_optimize.c's BUSTER_IR_OPTIMIZE_SCCP, DCE and CFG. #866's solver and the inlining keep
-// their own options (--tier1-gvn, --tier1-no-inline), which the option's list sets too.
+// the default pipeline, which runs SCCP, dead-code removal, CFG cleanup and its merges, and neither LICM nor SROA on every
+// function. SCCP's, dead-code removal's, CFG cleanup's and the merges' bits are ir_optimize.c's BUSTER_IR_OPTIMIZE_SCCP,
+// DCE, CFG and MERGE. #866's solver and the inlining keep their own options (--tier1-gvn, --tier1-no-inline), which the
+// option's list sets too.
 #define BUSTER_CHECK_TIER1_PASS_SCCP 1u
 #define BUSTER_CHECK_TIER1_PASS_DCE 2u
 #define BUSTER_CHECK_TIER1_PASS_CFG 4u
 #define BUSTER_CHECK_TIER1_PASS_LICM 8u
 #define BUSTER_CHECK_TIER1_PASS_SROA 16u
-#define BUSTER_CHECK_TIER1_PASSES_DEFAULT (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG)
+#define BUSTER_CHECK_TIER1_PASS_MERGE 32u
+#define BUSTER_CHECK_TIER1_PASSES_DEFAULT (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE)
 #define BUSTER_CHECK_TIER1_PASSES_ALL (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA)
 
 typedef struct CheckTier1Lane CheckTier1Lane;
@@ -590,12 +592,13 @@ struct CheckTier1Counts
     // With --tier1-schedule (#172), the blocks scheduled and the records or IR instructions that changed places.
     uint32_t schedule_blocks;
     uint32_t schedule_moved;
-    // What #139's passes did to it (--tier1-passes=): the optimizer's folded constants and the instructions and blocks its
-    // output has fewer than its input (SCCP, dead-code removal and CFG cleanup together), LICM's moved values, SROA's split
-    // slots and #866's solver's removed instructions.
+    // What #139's passes did to it (--tier1-passes=): the optimizer's folded constants, the instructions and blocks its
+    // output has fewer than its input (SCCP, dead-code removal, CFG cleanup and its merges together) and the blocks merged
+    // into their predecessors, LICM's moved values, SROA's split slots and #866's solver's removed instructions.
     uint32_t folded;
     uint32_t removed_instructions;
     uint32_t removed_blocks;
+    uint32_t merged_blocks;
     uint32_t licm_moved;
     uint32_t sroa_split;
     uint32_t gvn_removed;
@@ -639,6 +642,7 @@ struct CheckTier1Report
     uint64_t folded;
     uint64_t removed_instructions;
     uint64_t removed_blocks;
+    uint64_t merged_blocks;
     uint64_t licm_moved;
     uint64_t sroa_split;
     uint64_t gvn_removed;
@@ -4890,6 +4894,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->tier1_report.folded += compiled ? counts->folded : 0;
         lanes->tier1_report.removed_instructions += compiled ? counts->removed_instructions : 0;
         lanes->tier1_report.removed_blocks += compiled ? counts->removed_blocks : 0;
+        lanes->tier1_report.merged_blocks += compiled ? counts->merged_blocks : 0;
         lanes->tier1_report.licm_moved += compiled ? counts->licm_moved : 0;
         lanes->tier1_report.sroa_split += compiled ? counts->sroa_split : 0;
         lanes->tier1_report.gvn_removed += compiled ? counts->gvn_removed : 0;

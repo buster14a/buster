@@ -1926,6 +1926,7 @@ struct CheckTestTier1Passes
     uint64_t folded;
     uint64_t removed_instructions;
     uint64_t removed_blocks;
+    uint64_t merged_blocks;
     uint64_t licm_moved;
     uint64_t sroa_split;
     uint64_t gvn_removed;
@@ -1956,7 +1957,8 @@ static bool check_test_tier1_passes_build(const char* executable, const char* so
     const char* every = "";
     const bool reported = check_test_tier1_field(text, "inlined", &counters->inlined) && check_test_tier1_field(text, "folded", &counters->folded) &&
                           check_test_tier1_field(text, "removed_instructions", &counters->removed_instructions) &&
-                          check_test_tier1_field(text, "removed_blocks", &counters->removed_blocks) && check_test_tier1_field(text, "licm_moved", &counters->licm_moved) &&
+                          check_test_tier1_field(text, "removed_blocks", &counters->removed_blocks) && check_test_tier1_field(text, "merged_blocks", &counters->merged_blocks) &&
+                          check_test_tier1_field(text, "licm_moved", &counters->licm_moved) &&
                           check_test_tier1_field(text, "sroa_split", &counters->sroa_split) && check_test_tier1_field(text, "gvn_removed", &counters->gvn_removed);
     const bool taken = check_test_tier1_taken(text, &every, 1);
     if (status != 0 && text != NULL)
@@ -1988,7 +1990,7 @@ static void check_test_driver_tier1_passes(CheckTest* test, const char* clang, c
     check_test_expect(test, ran, "clang's build of the passes fixture runs");
     static const char* const variants[] = {
         "--tier1-passes=-sccp", "--tier1-passes=-dce", "--tier1-passes=-cfg", "--tier1-passes=+licm", "--tier1-passes=+sroa",
-        "--tier1-passes=+gvn", "--tier1-passes=-inline", "--tier1-passes=+all", "--tier1-passes=-all",
+        "--tier1-passes=+gvn", "--tier1-passes=-inline", "--tier1-passes=+all", "--tier1-passes=-all", "--tier1-passes=-merge",
     };
     for (uint32_t path = 0; ran && path < 2; path += 1)
     {
@@ -2001,10 +2003,10 @@ static void check_test_driver_tier1_passes(CheckTest* test, const char* clang, c
                           "the passes fixture's default --tier1 build prints clang's build's output, every function Tier 1's");
         // By default every pass of the pipeline but LICM, SROA and the solver does something.
         check_test_expect(test, plain_built && plain.inlined != 0 && plain.folded != 0 && plain.removed_instructions != 0 && plain.removed_blocks != 0 &&
-                                    plain.licm_moved == 0 && plain.sroa_split == 0 && plain.gvn_removed == 0,
-                          "the default pipeline inlines, folds and removes, and runs neither LICM, SROA nor the solver");
-        printf("  Tier 1's passes, %s path: inlined %" PRIu64 ", folded %" PRIu64 ", removed %" PRIu64 " instructions and %" PRIu64 " blocks by default\n",
-               path == 0 ? "vector" : "scalar", plain.inlined, plain.folded, plain.removed_instructions, plain.removed_blocks);
+                                    plain.merged_blocks != 0 && plain.licm_moved == 0 && plain.sroa_split == 0 && plain.gvn_removed == 0,
+                          "the default pipeline inlines, folds, removes and merges, and runs neither LICM, SROA nor the solver");
+        printf("  Tier 1's passes, %s path: inlined %" PRIu64 ", folded %" PRIu64 ", removed %" PRIu64 " instructions and %" PRIu64 " blocks (%" PRIu64 " merged) by default\n",
+               path == 0 ? "vector" : "scalar", plain.inlined, plain.folded, plain.removed_instructions, plain.removed_blocks, plain.merged_blocks);
         for (uint32_t v = 0; plain_built && v < BUSTER_ARRAY_LENGTH(variants); v += 1)
         {
             CheckTestTier1Passes with;
@@ -2018,16 +2020,18 @@ static void check_test_driver_tier1_passes(CheckTest* test, const char* clang, c
                                  v == 4   ? with.sroa_split != 0 :
                                  v == 5   ? with.gvn_removed != 0 :
                                  v == 6   ? with.inlined == 0 :
-                                 v == 7   ? with.inlined != 0 && with.folded != 0 && with.licm_moved != 0 && with.sroa_split != 0 && with.gvn_removed != 0 :
-                                            with.inlined == 0 && with.folded == 0 && with.removed_instructions < plain.removed_instructions && with.licm_moved == 0 &&
-                                            with.sroa_split == 0 && with.gvn_removed == 0;
+                                 v == 7   ? with.inlined != 0 && with.folded != 0 && with.merged_blocks != 0 && with.licm_moved != 0 && with.sroa_split != 0 &&
+                                            with.gvn_removed != 0 :
+                                 v == 8   ? with.inlined == 0 && with.folded == 0 && with.removed_instructions < plain.removed_instructions && with.merged_blocks == 0 &&
+                                            with.licm_moved == 0 && with.sroa_split == 0 && with.gvn_removed == 0 :
+                                            with.merged_blocks == 0 && with.removed_blocks < plain.removed_blocks;
             check_test_expect(test, same, variants[v]);
             check_test_expect(test, built && reached, variants[v]);
             if (!(built && reached))
             {
-                printf("  %s, %s path: inlined %" PRIu64 " folded %" PRIu64 " removed %" PRIu64 "/%" PRIu64 " licm %" PRIu64 " sroa %" PRIu64 " gvn %" PRIu64 "\n",
-                       variants[v], path == 0 ? "vector" : "scalar", with.inlined, with.folded, with.removed_instructions, with.removed_blocks, with.licm_moved,
-                       with.sroa_split, with.gvn_removed);
+                printf("  %s, %s path: inlined %" PRIu64 " folded %" PRIu64 " removed %" PRIu64 "/%" PRIu64 " merged %" PRIu64 " licm %" PRIu64 " sroa %" PRIu64 " gvn %" PRIu64 "\n",
+                       variants[v], path == 0 ? "vector" : "scalar", with.inlined, with.folded, with.removed_instructions, with.removed_blocks, with.merged_blocks,
+                       with.licm_moved, with.sroa_split, with.gvn_removed);
             }
         }
         unlink(output);

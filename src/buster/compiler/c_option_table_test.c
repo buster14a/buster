@@ -127,7 +127,7 @@ struct OptionTestCase
 
 #define BUSTER_OPTION_TEST_USAGE_E "usage: compiler -E/-M/-MM "
 #define BUSTER_OPTION_TEST_USAGE_CHECK "usage: compiler [check] "
-#define BUSTER_OPTION_TEST_TIER1_PASSES "error: --tier1-passes= takes a comma-separated list of +NAME and -NAME, NAME being sccp, dce, cfg, licm, sroa, gvn, inline or all\n"
+#define BUSTER_OPTION_TEST_TIER1_PASSES "error: --tier1-passes= takes a comma-separated list of +NAME and -NAME, NAME being sccp, dce, cfg, merge, licm, sroa, gvn, inline or all\n"
 
 static const OptionTestCase option_test_cases[] = {
     // Joined and separate values, each family's order.
@@ -241,7 +241,7 @@ static const OptionTestCase option_test_cases[] = {
     { { "-fsyntax-only", "empty.c", "--units-memory=0" }, 1, NULL, NULL, BUSTER_OPTION_TEST_USAGE_CHECK, NULL, NULL },
     { { "-fsyntax-only", "empty.c", "--tier1-schedule=bogus" }, 1, NULL, NULL, "error: --tier1-schedule= takes none, post or pre\n" BUSTER_OPTION_TEST_USAGE_CHECK, NULL, NULL },
     // #139's --tier1-passes=: signed names in turn; an unsigned, unknown or empty item and a trailing comma are refused.
-    { { "-fsyntax-only", "empty.c", "--tier1", "--tier1-passes=-sccp,-dce,-cfg,+licm,+sroa,+gvn,-inline" }, 0, NULL, NULL, "", NULL, NULL },
+    { { "-fsyntax-only", "empty.c", "--tier1", "--tier1-passes=-sccp,-dce,-cfg,-merge,+licm,+sroa,+gvn,-inline" }, 0, NULL, NULL, "", NULL, NULL },
     { { "-fsyntax-only", "empty.c", "--tier1", "--tier1-passes=+all,-all,+sccp" }, 0, NULL, NULL, "", NULL, NULL },
     { { "-fsyntax-only", "empty.c", "--tier1", "--tier1-passes=sccp" }, 1, NULL, NULL, BUSTER_OPTION_TEST_TIER1_PASSES BUSTER_OPTION_TEST_USAGE_CHECK, NULL, NULL },
     { { "-fsyntax-only", "empty.c", "--tier1", "--tier1-passes=+bogus" }, 1, NULL, NULL, BUSTER_OPTION_TEST_TIER1_PASSES BUSTER_OPTION_TEST_USAGE_CHECK, NULL, NULL },

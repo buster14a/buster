@@ -15,8 +15,9 @@
 //   give the same function, and against the scalar available-expression twin, which must accept the function and remove
 //   no more instructions than the partition (it doesn't see cyclic congruences): the semantic comparison, as the solver's
 //   guide has it. The numbering's result must promote.
-// - The optimizer on P with SCCP alone, dead-code removal alone, CFG cleanup alone, the three, and the three with Tier 1's
-//   layout and identities (c_check_tier1.c's set), forced vector and forced scalar: the same function.
+// - The optimizer on P with SCCP alone, dead-code removal alone, CFG cleanup alone and with its merges, the three, and
+//   the three with the merges and Tier 1's layout and identities (c_check_tier1.c's set), forced vector and forced
+//   scalar: the same function.
 // - LICM on P, vector and scalar: the same function, or the same refusal.
 // For each caller among them, the inliner on a unit of it and its direct callees among the file's functions, as the C
 // driver's expansion takes one (every function of internal linkage and #2541's general splice on, so that every such call is
@@ -35,6 +36,7 @@ typedef enum IrSourcePass
     IR_SOURCE_PASS_SCCP,
     IR_SOURCE_PASS_DCE,
     IR_SOURCE_PASS_CFG,
+    IR_SOURCE_PASS_MERGE,
     IR_SOURCE_PASS_OPTIMIZER,
     IR_SOURCE_PASS_TIER1,
     IR_SOURCE_PASS_LICM,
@@ -48,6 +50,7 @@ static const char* const ir_source_pass_names[IR_SOURCE_PASS_COUNT] = {
     "sccp",
     "dce",
     "cfg",
+    "merge",
     "optimizer",
     "tier1",
     "licm",
@@ -59,8 +62,9 @@ static const uint32_t ir_source_pass_optimizer[] = {
     BUSTER_IR_OPTIMIZE_SCCP,
     BUSTER_IR_OPTIMIZE_DCE,
     BUSTER_IR_OPTIMIZE_CFG,
+    BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_MERGE,
     BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG,
-    BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_LAYOUT | BUSTER_IR_OPTIMIZE_IDENTITY,
+    BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_MERGE | BUSTER_IR_OPTIMIZE_LAYOUT | BUSTER_IR_OPTIMIZE_IDENTITY,
 };
 _Static_assert(BUSTER_ARRAY_LENGTH(ir_source_pass_optimizer) == IR_SOURCE_PASS_TIER1 - IR_SOURCE_PASS_SCCP + 1, "a mask for each optimizer row");
 
@@ -184,9 +188,11 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
         const IrCheck scalar_check = ir_optimize(promoted, twin, scratch, options, &scalar);
         const bool same = vector_check.error == IR_OK && scalar_check.error == IR_OK && vector.folded == scalar.folded &&
                           vector.removed_instructions == scalar.removed_instructions && vector.removed_blocks == scalar.removed_blocks &&
-                          ir_source_passes_equal(&vector.function, &scalar.function);
+                          vector.merged_blocks == scalar.merged_blocks && ir_source_passes_equal(&vector.function, &scalar.function);
         const bool changed = vector.folded != 0 || vector.removed_instructions != 0 || vector.removed_blocks != 0;
-        ir_source_passes_record(totals, (IrSourcePass)(IR_SOURCE_PASS_SCCP + row), file, name, vector_check, scalar_check, same, true, changed, vector.removed_instructions);
+        // The merges' row counts its merged blocks; the others their removed instructions.
+        const uint64_t effect = IR_SOURCE_PASS_SCCP + row == IR_SOURCE_PASS_MERGE ? vector.merged_blocks : vector.removed_instructions;
+        ir_source_passes_record(totals, (IrSourcePass)(IR_SOURCE_PASS_SCCP + row), file, name, vector_check, scalar_check, same, true, changed, effect);
         arena_pop_to(output, output_mark);
         arena_pop_to(twin, twin_mark);
     }
@@ -464,7 +470,7 @@ static int run_ir_source_passes_tests(int count, char** arguments)
     return passed ? 0 : 1;
 }
 
-// #139's compile time per pass for both versions (benchmark-ir-source-passes): the files' functions prepared as
+// #139's compile time per pass for both versions (benchmark-ir-source --passes): the files' functions prepared as
 // test-ir-source --passes prepares them, each lowered (L) and promoted (P) once outside the time, and each caller's
 // inlining unit built once; then each pass by its vector and its scalar version over the whole corpus, in
 // BUSTER_TIER0_BENCHMARK_PASSES passes that alternate which of the pair runs first, after a warm-up of each. The passes
@@ -476,7 +482,7 @@ static int run_ir_source_passes_tests(int count, char** arguments)
 // corpus. Any function a pass refuses where it ran outside the time, or a run with a refusal, fails it. Run it under the
 // 9700X's lock pinned to one CPU.
 //
-//   build/compiler benchmark-ir-source-passes [--only PASS] [preprocessor options] file...
+//   build/compiler benchmark-ir-source --passes [--only PASS] [preprocessor options] file...
 
 typedef struct IrSourcePassUnit IrSourcePassUnit;
 struct IrSourcePassUnit
@@ -726,7 +732,7 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
             ir_source_passes_corpus_units(&corpus, &file, first, &tables, &output, &scratch);
         }
         corpus.failures += !prepared;
-        printf("benchmark-ir-source-passes: file=%s functions=%u %s\n", files[i], file.count, prepared ? "prepared" : file.reason);
+        printf("benchmark-ir-source --passes: file=%s functions=%u %s\n", files[i], file.count, prepared ? "prepared" : file.reason);
         fflush(stdout);
         // The typed streams aren't needed past the lowering: the kept IR owns its columns.
         arena_pop_to(&lowered_arena, 0);
@@ -740,7 +746,7 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
             .instructions = tier0_benchmark_counter(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS),
             .throttle = tier0_benchmark_counter(PERF_TYPE_RAW, BUSTER_TIER0_BENCHMARK_THROTTLE_EVENT),
         };
-        printf("benchmark-ir-source-passes: functions=%u lowered_instructions=%" PRIu64 " promoted_instructions=%" PRIu64 " inline_units=%u\n", corpus.count, corpus.instructions,
+        printf("benchmark-ir-source --passes: functions=%u lowered_instructions=%" PRIu64 " promoted_instructions=%" PRIu64 " inline_units=%u\n", corpus.count, corpus.instructions,
                corpus.promoted_instructions, corpus.unit_count);
         printf("%-12s %-7s %12s %12s %12s %12s %8s\n", "pass", "version", "total ms", "ns/instr", "cyc/instr", "ins/instr", "IPC");
         uint32_t failed = 0;
@@ -781,7 +787,7 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
         reported = failed == 0;
         if (!reported)
         {
-            printf("benchmark-ir-source-passes: %u function runs failed: no report\n", failed);
+            printf("benchmark-ir-source --passes: %u function runs failed: no report\n", failed);
         }
         const int descriptors[] = { counters.cycles, counters.instructions, counters.throttle };
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(descriptors); i += 1)
@@ -794,11 +800,11 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
     }
     else if (valid)
     {
-        printf("benchmark-ir-source-passes: %" PRIu64 " files or functions failed: no report\n", corpus.failures);
+        printf("benchmark-ir-source --passes: %" PRIu64 " files or functions failed: no report\n", corpus.failures);
     }
     else
     {
-        fprintf(stderr, "usage: compiler benchmark-ir-source-passes [--only sroa|gvn|sccp|dce|cfg|optimizer|tier1|licm|inline] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler benchmark-ir-source --passes [--only sroa|gvn|sccp|dce|cfg|merge|optimizer|tier1|licm|inline] [preprocessor options] file...\n");
     }
     arena_release(&scratch);
     arena_release(&output);
