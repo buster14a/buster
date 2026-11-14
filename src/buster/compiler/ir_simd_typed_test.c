@@ -2890,6 +2890,82 @@ static void ir_simd_typed_test_lane_unaries(IrTestTally* tally)
     printf("  IR SIMD rows: %u population counts, leading zero counts, conflicts and absolute values decode to the IR's lane_unary\n", decoded_rows);
 }
 
+// The blends by a vector's signs (#2780): the pblendvb, blendvps and blendvpd builtins' rows at 16 and 32 bytes, by the
+// real producer (tier1_masks_test_blendv_rule), decode as the IR's select under a comparison less than zero at their
+// lanes, at exactly AVX512F's, VL's, BW's for bytes or DQ's for the others, and the form's; refused without each and
+// under 6 changes.
+static void ir_simd_typed_test_blendvs(IrTestTally* tally)
+{
+    static const IrSimdLane lanes[3] = { IR_SIMD_LANE_I8, IR_SIMD_LANE_I32, IR_SIMD_LANE_I64 };
+    const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
+    const uint64_t all = UINT64_MAX;
+    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512DQ),
+                                         BUSTER_X86_FEATURE(AVX2) };
+    uint32_t decoded_rows = 0;
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    for (uint32_t i = 0; tables && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        uint32_t size = 0;
+        if (!tier1_masks_test_blendv_rule(rule->name, &size))
+        {
+            continue;
+        }
+        Tier0Operation row;
+        char description[192];
+        const bool made = check_x86_lower_row_of(&every, rule, 0, 4, 0, false, &row) == NULL;
+        snprintf(description, sizeof(description), "%s: its row is the front end's", rule->name);
+        ir_test_expect(tally, made, description);
+        if (!made)
+        {
+            continue;
+        }
+        const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | (size == 0 ? BUSTER_X86_FEATURE(AVX512BW) : BUSTER_X86_FEATURE(AVX512DQ)) |
+                                  (x86_target_requirement(row.records[0].form) & ~BUSTER_X86_TARGET_KNOWN);
+        IrSimdTypedOperation decoded;
+        memset(&decoded, 0xa5, sizeof(decoded));
+        const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+        snprintf(description, sizeof(description), "%s: the IR's select under a comparison at exactly its features", rule->name);
+        const bool ok = status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.blendv && decoded.lane == lanes[size] &&
+                        (decoded.required_features & ~BUSTER_X86_FEATURE(AVX)) == (expected & ~BUSTER_X86_FEATURE(AVX));
+        ir_test_expect(tally, ok, description);
+        decoded_rows += ok;
+        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
+        {
+            IrSimdTypedOperation without;
+            memset(&without, 0x5a, sizeof(without));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
+            const bool required = ((expected | ir_typed_vector_moves(row.result_bytes, all & ~features[f])) & features[f]) != 0;
+            ir_test_expect(tally, required ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && without.blendv,
+                           "a blend without a feature it needs stays the machine row, and needs no other");
+        }
+        for (uint32_t m = 0; m < 6; m += 1)
+        {
+            Tier0Operation changed = row;
+            X86Instruction* first = &changed.records[0];
+            switch (m)
+            {
+            case 0: first->decorations = BUSTER_TIER0_DECORATION_MASK(0); break;
+            case 1: first->mode = BUSTER_X86_MEMORY_BASE; break;
+            case 2: first->immediate = 3 << 4; break;
+            case 3: changed.operand_bytes[2] = (uint8_t)(rule->bytes == 16 ? 32 : 16); break;
+            case 4: first->vvvv = BUSTER_TIER0_ROLE_VECTOR(1); break;
+            case 5:
+                changed.records[1] = changed.records[0];
+                changed.record_count = 2;
+                break;
+            }
+            memset(&decoded, 0xa5, sizeof(decoded));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
+            snprintf(description, sizeof(description), "%s (change %u): not the IR's blend", rule->name, m);
+            ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded) || (refused == IR_SIMD_TYPED_OK && !decoded.blendv && !decoded.machine), description);
+        }
+    }
+    ir_test_expect(tally, decoded_rows == 6, "every blend by a vector's signs decodes");
+    printf("  IR SIMD rows: %u blends by a vector's signs decode to the IR's vselect under a comparison less than zero\n", decoded_rows);
+}
+
 // The pairwise operations and the dot products (#2780): the pmaddwd, pmaddubsw, pack, vpdpbusd, vpdpbusds, vpdpwssd and
 // vpdpwssds builtins' rows at each width, by the real producer (tier1_masks_test_pairwise_rule), decode as the IR's
 // pairwise or dot of their operation at exactly AVX512F's, VL's below 64 bytes and BW's (VNNI's for the dot products);
@@ -3453,6 +3529,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_simd_typed_test_bitshuffles(tally);
     ir_simd_typed_test_quadword_ops(tally);
     ir_simd_typed_test_pairwise_dots(tally);
+    ir_simd_typed_test_blendvs(tally);
     ir_simd_typed_test_funnels(tally);
     ir_simd_typed_test_shuffle_matches(tally);
     ir_simd_typed_test_shifts(tally);

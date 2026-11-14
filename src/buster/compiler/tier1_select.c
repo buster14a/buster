@@ -383,6 +383,10 @@ typedef enum Tier1SelectRule
 // A dot product (#2780, tier1_select_dot): `immediate` the IR's flags, its operation; values[0] the accumulator, which
 // the destination takes first unless it holds it, values[1] in vvvv and values[2] in rm.
 #define BUSTER_TIER1_VECTOR_DOT 35
+// A blend by a vector's signs (#2780): `vselect (vcmp lt s, 0), b, a` of bytes, doublewords or quadwords at 16 or 32
+// bytes, whose comparison the select alone reads, as vpblendvb, vblendvps or vblendvpd; `source_width` the lanes
+// (IrSimdLane), values[0] a (vvvv), values[1] b (rm), values[2] s (the immediate's bits 7 to 4).
+#define BUSTER_TIER1_VECTOR_BLENDV 36
 // A floating operation at its own rounding of values[0] and values[1] (#1840): `immediate` the IR's flags, one record of
 // ir_simd_fround_forms' with the rounding in its decorations.
 #define BUSTER_TIER1_VECTOR_FROUND 26
@@ -2669,6 +2673,20 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
                 .reg = extend ? x : left,
                 .rm = extend ? left : x,
                 .mode = BUSTER_X86_REGISTER_DIRECT,
+            };
+            tier1_select_append(&result, record);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_BLENDV)
+        {
+            // AVX's and AVX2's VEX forms, their sign vector's register in the immediate's bits 7 to 4.
+            const uint32_t lanes = holes->source_width == IR_SIMD_LANE_I8 ? 0 : holes->source_width == IR_SIMD_LANE_I32 ? 1 : 2;
+            const X86Instruction record = {
+                .form = ir_simd_blendv_forms[lanes][width == 16 ? 0 : 1],
+                .reg = x,
+                .vvvv = left,
+                .rm = right,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .immediate = (int32_t)((holes->third & 15) << 4),
             };
             tier1_select_append(&result, record);
         }
@@ -5828,6 +5846,25 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 expand.values[0] = a;
                 expand.intrinsic_cost = 1;
                 tier1_select_add_candidate(forest, node, &candidates, expand);
+            }
+            // A select under a comparison of a vector's lanes less than zero whose only use it is (#2780): vpblendvb,
+            // vblendvps or vblendvpd at 16 or 32 bytes, of bytes, doublewords or quadwords, the comparison folded.
+            const uint32_t selected = function->flags[node];
+            if ((vector_width == 16 || vector_width == 32) && (selected == IR_SIMD_LANE_I8 || selected == IR_SIMD_LANE_I32 || selected == IR_SIMD_LANE_I64) &&
+                tier1_select_tree_child(forest, node, a) && function->op[a] == IR_VCMP && function->c[a] == IR_LT && function->flags[a] == selected &&
+                function->b[a] < function->instruction_count && tier1_select_vector_fill(function, function->b[a], vector_width) == 0)
+            {
+                Tier1SelectPattern blend = base;
+                blend.rule = TIER1_RULE_VECTOR;
+                blend.width = (uint8_t)vector_width;
+                blend.scale = BUSTER_TIER1_VECTOR_BLENDV;
+                blend.source_width = (uint8_t)selected;
+                blend.values[0] = c;
+                blend.values[1] = b;
+                blend.values[2] = function->a[a];
+                blend.intrinsic_cost = 1;
+                tier1_select_fold(forest, node, a, &blend);
+                tier1_select_add_candidate(forest, node, &candidates, blend);
             }
             // A select of a gather whose only use it is, under the gather's own mask at its lanes (#1840): the gather merged
             // into w, or into zeros where w is a zero vector.

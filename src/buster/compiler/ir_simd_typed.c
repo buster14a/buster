@@ -170,6 +170,9 @@ struct IrSimdTypedOperation
     // `immediate`.
     bool pairwise;
     bool dot;
+    // A blend by a vector's signs (#2780, ir_simd_typed_blendv): whether the row is one, its lanes in `lane`: the IR's
+    // vselect of b where the third operand's lanes compare less than zero, else a.
+    bool blendv;
 };
 
 // The conversions' and the scalar shifts' forms (#1840), shared with Tier 1's selection.
@@ -2569,6 +2572,51 @@ static IrSimdTypedStatus ir_simd_typed_quadword_op(const Tier0Operation* source,
     return status;
 }
 
+// The blends by a vector's signs (#2780): a row of three vectors of 16 or 32 bytes and one record of an
+// ir_simd_blendv_forms form at that width, VECTOR(0) in reg and vvvv, VECTOR(1) in rm and VECTOR(2) in the immediate's
+// bits 7 to 4, register-direct and undecorated (c_check_program_x86.c's CHECK_X86_LOWER_BLENDV): the builtins'
+// __builtin_ia32_pblendvb128 and 256, blendvps and blendvpd at both widths. It is the IR's vselect of b's lanes where
+// the third operand's signed lanes compare less than zero, a's elsewhere, at the form's lanes. Its features are the
+// select's and the comparison's by masks (AVX512F, VL, and BW for bytes, DQ for the others), the form's, which Tier 1
+// selects back where the comparison is the select's alone, and the vectors' moves; otherwise it stays a machine row.
+static IrSimdTypedStatus ir_simd_typed_blendv(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    static const IrSimdLane lanes[3] = { IR_SIMD_LANE_I8, IR_SIMD_LANE_I32, IR_SIMD_LANE_I64 };
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint32_t bytes = source->result_bytes;
+    const uint32_t width = bytes == 16 ? 0 : 1;
+    bool admitted = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 16 || bytes == 32) && source->record_count == 1 && source->operand_count == 3;
+    for (uint32_t j = 0; admitted && j < 3; j += 1)
+    {
+        admitted = source->operand_classes[j] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[j] == bytes;
+    }
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    uint64_t required = 0;
+    for (uint32_t size = 0; admitted && size < 3; size += 1)
+    {
+        const X86Instruction expected = { .form = ir_simd_blendv_forms[size][width], .reg = v0, .vvvv = v0, .rm = v1, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = 2 << 4 };
+        if (memcmp(&source->records[0], &expected, sizeof(expected)) == 0)
+        {
+            candidate.blendv = true;
+            candidate.lane = lanes[size];
+            required = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | (size == 0 ? BUSTER_X86_FEATURE(AVX512BW) : BUSTER_X86_FEATURE(AVX512DQ)) |
+                       (x86_target_requirement(expected.form) & ~BUSTER_X86_TARGET_KNOWN);
+        }
+    }
+    candidate.required_features = candidate.blendv ? ir_typed_vector_moves(bytes, target_features) | required : 0;
+    const IrSimdTypedStatus status = candidate.blendv && (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_UNSUPPORTED;
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        candidate.operand_count = 3;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+    }
+    return status;
+}
+
 // The pairwise operations and the dot products (#2780): a row of two vectors of the result's width (16, 32 or 64 bytes)
 // and one record of an ir_simd_pairwise_forms form at that width, of VECTOR(0) (vvvv) and VECTOR(1) (rm) into VECTOR(0)
 // (reg), register-direct and undecorated: the builtins' __builtin_ia32_pmaddwd128 to 512, pmaddubsw128 to 512 and the
@@ -2797,6 +2845,10 @@ static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_
     if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
     {
         status = ir_simd_typed_pairwise(source, target_features, result);
+    }
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
+    {
+        status = ir_simd_typed_blendv(source, target_features, result);
     }
     if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
     {

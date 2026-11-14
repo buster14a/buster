@@ -1067,6 +1067,16 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_QUADWORD_OP, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
     }
+    else if (operation->blendv)
+    {
+        // A blend by a vector's signs (#2780): b's lanes where the third operand's compare less than zero, else a's.
+        const uint64_t zero[8] = {0};
+        const uint32_t zeros = ir_typed_vector_constant(sink, type, zero);
+        const uint32_t mask = ir_typed_emit(sink, IR_VCMP, (IrType)ir_lane_mask(type, operation->lane), operands[2], zeros, IR_LT, 0);
+        ir_typed_lanes(sink, mask, operation->lane);
+        value = ir_typed_emit(sink, IR_VSELECT, type, mask, operands[1], operands[0], 0);
+        ir_typed_lanes(sink, value, operation->lane);
+    }
     else if (operation->pairwise)
     {
         // A pairwise operation (#2780), its operation in its flags.

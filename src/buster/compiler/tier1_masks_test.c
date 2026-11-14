@@ -211,6 +211,10 @@ struct Tier1MasksTest
     // every stage as the IR's pairwise or dot.
     uint32_t pairwise_attempts;
     uint32_t pairwise_rows;
+    // The blends by a vector's signs (#2780, tier1_masks_test_blendvs): those tried, and those through every stage as the
+    // IR's select, Tier 1's one blend.
+    uint32_t blendv_attempts;
+    uint32_t blendv_rows;
     // The funnel shifts (#1840, tier1_masks_test_funnels): those tried, and those through every stage as the IR's funnel.
     uint32_t funnel_attempts;
     uint32_t funnel_rows;
@@ -8466,6 +8470,127 @@ static void tier1_masks_test_pairwise_dots(Tier1MasksTest* test)
     free(program);
 }
 
+// A blend by a vector's signs' x86 builtin (#2780): whether `name` is __builtin_ia32_pblendvb128 or 256, blendvps or
+// blendvpd at 16 or 32 bytes, and its lanes' size index (0 bytes, 1 doublewords, 2 quadwords).
+static bool tier1_masks_test_blendv_rule(const char* name, uint32_t* size)
+{
+    static const char* const names[6] = { "__builtin_ia32_pblendvb128", "__builtin_ia32_pblendvb256", "__builtin_ia32_blendvps", "__builtin_ia32_blendvps256",
+                                           "__builtin_ia32_blendvpd", "__builtin_ia32_blendvpd256" };
+    bool found = false;
+    for (uint32_t i = 0; i < 6; i += 1)
+    {
+        if (strcmp(name, names[i]) == 0)
+        {
+            found = true;
+            *size = i / 2;
+        }
+    }
+    return found;
+}
+
+// The blends by a vector's signs through the IR to Tier 1 (#2780): each pblendvb, blendvps and blendvpd builtin's row at
+// 16 and 32 bytes, by the real producer, as the program's only row in 4 statements of the input buffer's vectors k,
+// k + 1 and k + 2 (a, b and the signs) into the output's vector k. tier1_masks_test_typed_pipeline takes each through
+// the IR as its vselect under a comparison less than zero, which the interpreter runs at every stage, and Tier 1
+// natively, against each lane written out: b's where the sign vector's lane is negative, a's elsewhere. Tier 1's code
+// by both paths is the blend's one record per statement, the comparison folded: no vpmovb2m to vpmovq2m.
+static void tier1_masks_test_blendvs(Tier1MasksTest* test)
+{
+    static const uint16_t signs[3][2] = {
+        { X86_FORM_VPMOVB2M_K_X, X86_FORM_VPMOVB2M_K_Y },
+        { X86_FORM_VPMOVD2M_K_X, X86_FORM_VPMOVD2M_K_Y },
+        { X86_FORM_VPMOVQ2M_K_X, X86_FORM_VPMOVQ2M_K_Y },
+    };
+    X86Target target = { 0 };
+    x86_target_parse("x86-64-v4", 9, &target);
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
+    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
+    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
+    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0,
+                                         "the blends' memory");
+    uint64_t state = test->random ^ UINT64_C(0xa4093822299f31d0);
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        uint32_t size = 0;
+        if (!tier1_masks_test_blendv_rule(rule->name, &size))
+        {
+            continue;
+        }
+        const uint64_t output_mark = test->output.length;
+        test->blendv_attempts += 1;
+        Tier0Operation row;
+        const bool made = check_x86_lower_row_of(&target, rule, 0, 4, 0, false, &row) == NULL;
+        const uint32_t bytes = rule->bytes;
+        const uint32_t element = size == 0 ? 1 : size == 1 ? 4 : 8;
+        bool ok = tier1_masks_test_expect(test, made && row.operand_count == 3 && row.record_count == 1 && row.result_class == BUSTER_TYPED_CLASS_VECTOR, "the front end's blend's row");
+        program->count = 0;
+        program->overflow = false;
+        program->rows = true;
+        program->objects = false;
+        for (uint32_t k = 0; ok && k < 4; k += 1)
+        {
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, k * bytes / 8);
+            for (uint32_t j = 0; j < 3; j += 1)
+            {
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, (k + j) * bytes / 8 % 32);
+                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+            }
+            tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
+            tier0_test_mask_emit(program, BUSTER_TYPED_SET, row.result_class, bytes);
+        }
+        tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+        ok = ok && tier1_masks_test_expect(test, !program->overflow, "the blend's program fits");
+        Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
+        functions[0].operations = &row;
+        functions[0].operation_count = 1;
+        for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+        {
+            uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
+            uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
+            tier0_test_mask_inputs(in, &state);
+            memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
+            const uint8_t* raw = (const uint8_t*)in;
+            for (uint32_t k = 0; k < 4; k += 1)
+            {
+                const uint8_t* a = raw + k * bytes % 256;
+                const uint8_t* b = raw + (k + 1) * bytes % 256;
+                const uint8_t* s = raw + (k + 2) * bytes % 256;
+                for (uint32_t lane = 0; lane < bytes / element; lane += 1)
+                {
+                    const bool negative = (s[lane * element + element - 1] & 0x80) != 0;
+                    memcpy(wanted + k * bytes + lane * element, (negative ? b : a) + lane * element, element);
+                }
+            }
+        }
+        test->watched_forms[0] = ok ? row.records[0].form : X86_FORM_NONE;
+        test->watched_forms[1] = signs[size][bytes == 16 ? 0 : 1];
+        test->watched_records[0] = 0;
+        test->watched_records[1] = 0;
+        bool machine = false;
+        ok = ok && tier1_masks_test_typed_pipeline(test, rule->name, functions, true, inputs, expected, arenas, &machine);
+        ok = ok && tier1_masks_test_expect(test, !machine && test->watched_records[0] == 2 * 4 && test->watched_records[1] == 0,
+                                           "a blend is the IR's select under a comparison, and Tier 1's one blend by both paths");
+        test->watched_forms[0] = X86_FORM_NONE;
+        test->watched_forms[1] = X86_FORM_NONE;
+        test->blendv_rows += ok;
+        tier1_masks_test_expect(test, test->scratch.length == 0, "the blends return the scratch arena");
+        arena_pop_to(&test->output, output_mark);
+        for (uint32_t k = 0; k < 3; k += 1)
+        {
+            arena_pop_to(&arenas[k], 0);
+        }
+    }
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        arena_release(&arenas[k]);
+    }
+    free(expected);
+    free(inputs);
+    free(program);
+}
+
 // The bit shuffles into a mask through the IR to Tier 1 (#1840): each vpshufbitqmb builtin's row (16, 32 and 64 bytes, its
 // masks in the mask class by check_x86_lower_masks), as the program's only row in 8 statements: the input's vectors at
 // 16k and 16k + 64 under the input word k in the odd statements and every lane in the even ones, its mask stored into
@@ -8987,6 +9112,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_bitshuffles(&test);
             tier1_masks_test_quadword_ops(&test);
             tier1_masks_test_pairwise_dots(&test);
+            tier1_masks_test_blendvs(&test);
             tier1_masks_test_funnels(&test);
             tier1_masks_test_shifts(&test);
             tier1_masks_test_mask_vectors(&test);
@@ -9024,7 +9150,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.select_rows + test.width_rows + test.permute_rows + test.convert_rows +
                                                                                test.shift_rows + test.mask_vector_rows + test.lane_op_rows + test.permute2_rows + test.ternlog_rows + test.compress_rows +
                                                                                test.masked_rows + test.gather_rows + test.scatter_rows + test.compress_store_rows + test.truncating_store_rows + test.fma_rows + test.lane_rows + test.reduce_rows + test.unary_rows + test.fround_rows + test.cvtt_rows +
-                                                                               test.shuffle_rows + test.carrier_rows + test.bitshuffle_rows + test.quadword_rows + test.pairwise_rows +
+                                                                               test.shuffle_rows + test.carrier_rows + test.bitshuffle_rows + test.quadword_rows + test.pairwise_rows + test.blendv_rows +
                                                                                test.funnel_rows),
                                     "every typed program and front-end row runs natively by both of Tier 1's paths");
             // The comparisons: 24 integer rules (bytes to quadwords, signed and unsigned, at 3 widths) at 8 immediates, 6
@@ -9056,6 +9182,9 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_expect(&test, test.pairwise_attempts == 18u + (!test.native || (x86_target_native().features & BUSTER_X86_FEATURE(AVX512VNNI)) != 0 ? 12u : 0u) &&
                                                test.pairwise_rows == test.pairwise_attempts,
                                     "every pairwise operation and dot product goes through the IR and Tier 1 as the IR's pairwise or dot");
+            // The blends by a vector's signs (#2780): pblendvb, blendvps and blendvpd at 16 and 32 bytes.
+            tier1_masks_test_expect(&test, test.blendv_attempts == 6 && test.blendv_rows == test.blendv_attempts,
+                                    "every blend by a vector's signs goes through the IR as its select and Tier 1 as one blend");
             // The bit shuffles into a mask (#1840): vpshufbitqmb at 3 widths, on a host that runs them.
             tier1_masks_test_expect(&test, test.bitshuffle_attempts == (!test.native || (x86_target_native().features & BUSTER_X86_FEATURE(AVX512BITALG)) != 0 ? 3u : 0u) &&
                                                test.bitshuffle_rows == test.bitshuffle_attempts,
@@ -9147,6 +9276,9 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
                test.funnel_rows);
         printf("test-tier1-masks: the quadword operations: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its quadword_op\n",
                test.quadword_rows);
+        printf("test-tier1-masks: the blends by a vector's signs: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its vselect, one "
+               "blend each\n",
+               test.blendv_rows);
         printf("test-tier1-masks: the pairwise operations and dot products: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its pairwise "
                "and dot\n",
                test.pairwise_rows);

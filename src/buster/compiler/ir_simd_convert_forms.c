@@ -324,6 +324,15 @@ static const uint16_t ir_simd_quadword_op_forms[4][3] = {
     { X86_FORM_VPMULDQ_X_X_XM128_EVEX, X86_FORM_VPMULDQ_Y_Y_YM256_EVEX, X86_FORM_VPMULDQ_Z_Z_ZM512 },
 };
 
+// The blends by a vector's signs (#2780), by the lanes (bytes, doublewords, quadwords) and the width (16, 32 bytes): AVX's
+// and AVX2's vpblendvb, vblendvps and vblendvpd, b's lane where the sign vector's (imm8[7:4]) is negative, else a's;
+// the destination in reg, a in vvvv, b in rm.
+static const uint16_t ir_simd_blendv_forms[3][2] = {
+    { X86_FORM_VPBLENDVB_X_X_XM128_X, X86_FORM_VPBLENDVB_Y_Y_YM256_Y },
+    { X86_FORM_VBLENDVPS_X_X_XM128_X, X86_FORM_VBLENDVPS_Y_Y_YM256_Y },
+    { X86_FORM_VBLENDVPD_X_X_XM128_X, X86_FORM_VBLENDVPD_Y_Y_YM256_Y },
+};
+
 // The pairwise operations (#2780, BUSTER_IR_INTRINSIC_PAIRWISE), by the operation (BUSTER_IR_PAIRWISE_*) and the width,
 // a's register in vvvv, b's in rm and the destination in reg: BW's EVEX vpmaddwd, vpmaddubsw, vpacksswb, vpackuswb,
 // vpackssdw and vpackusdw.
