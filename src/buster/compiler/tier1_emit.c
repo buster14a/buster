@@ -505,6 +505,7 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
         // (#2685, tier1_select_ties), which leaves out the copy into the destination: the hinted allocator's value hints.
         // A returned value takes none (tier1_select_returned).
         tier1_select_returned(plan, returned);
+        bool tied = false;
         for (uint32_t interval = 0; interval < source->count; interval += 1)
         {
             const uint32_t value = source->values[interval];
@@ -520,6 +521,7 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
                 const bool ends = tied != BUSTER_IR_NONE && source->ends[tied] == source->starts[interval];
                 hints[interval] = hints[interval] == BUSTER_IR_NONE && ends ? ties[k] : hints[interval];
             }
+            tied |= hints[interval] != BUSTER_IR_NONE;
         }
         // The prospective spill set contains every selected definition. Its alignment determines frame-base
         // reservations before allocation; reducing it to actual spills later cannot add a reservation.
@@ -556,7 +558,8 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
             prepared.allocation.use_required = required;
             prepared.allocation.use_count = use;
             prepared.allocation.rematerializable = interval_remat;
-            prepared.allocation.hint_values = hints;
+            // Without a tie, no hints: the allocator's copy without them is the cheaper.
+            prepared.allocation.hint_values = tied ? hints : 0;
         }
     }
     if (error == TIER1_EMIT_OK)

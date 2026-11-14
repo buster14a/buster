@@ -512,6 +512,14 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     bool ok = error == TIER1_EMIT_OK;
     uint32_t* node_values = ok ? ir_allocate(output, count, 4, &ok) : 0;
     uint32_t* value_nodes = ok ? ir_allocate(output, (uint64_t)count + 1, 4, &ok) : 0;
+    // Two per value: the operands whose registers its definition may take (#2685, Tier1CfgInput.ties), first as nodes;
+    // and each node a return reads.
+    uint32_t* ties = ok ? ir_allocate(output, 2 * (uint64_t)count + 2, 4, &ok) : 0;
+    uint8_t* returned = ok ? ir_allocate(scratch, (uint64_t)count + 1, 1, &ok) : 0;
+    if (ok)
+    {
+        memset(returned, 0, (uint64_t)count + 1);
+    }
     uint32_t value_count = 0;
     uint32_t phi_count = 0;
     uint32_t operand_count = 0;
@@ -548,6 +556,18 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         floats += floating && value;
         node_values[node] = value ? value_count : BUSTER_TIER1_CFG_NONE;
         value_nodes[value_count] = node;
+        // The operands whose registers a two-address result may take (#2685, tier1_select_ties), as nodes, and the node a
+        // return reads (tier1_select_returned's rule), from the pattern this pass reads anyway: the values' pass maps them.
+        uint32_t first = BUSTER_IR_NONE;
+        uint32_t second = BUSTER_IR_NONE;
+        if (value)
+        {
+            tier1_select_ties(plan, node, &first, &second);
+        }
+        ties[2 * (uint64_t)value_count] = first;
+        ties[2 * (uint64_t)value_count + 1] = second;
+        const uint32_t read = plan->covered[node] == 0 && plan->patterns[node].rule == TIER1_RULE_RETURN ? plan->patterns[node].values[0] : BUSTER_IR_NONE;
+        returned[read < count ? read : count] = read < count;
         value_count += value;
         phi_count += function->op[node] == IR_PHI && !x87;
         operand_count += function->op[node] == IR_PHI && !x87 ? function->b[node] : 0;
@@ -759,8 +779,6 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     uint32_t* phi_values = ok ? ir_allocate(output, (uint64_t)phi_count + 1, 4, &ok) : 0;
     uint32_t* phi_operand_offsets = ok ? ir_allocate(output, (uint64_t)phi_count + 1, 4, &ok) : 0;
     uint32_t* phi_operands = ok ? ir_allocate(output, (uint64_t)operand_count + 1, 4, &ok) : 0;
-    uint32_t* ties = ok ? ir_allocate(output, 2 * (uint64_t)value_count + 2, 4, &ok) : 0;
-    uint8_t* returned = ok ? ir_allocate(scratch, (uint64_t)count + 1, 1, &ok) : 0;
     error = ok || error != TIER1_EMIT_OK ? error : TIER1_EMIT_MEMORY;
     if (error == TIER1_EMIT_OK)
     {
@@ -803,7 +821,6 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             }
         }
         predecessor_offsets[blocks] = edge;
-        tier1_select_returned(plan, returned);
         // Values: a parameter in its incoming register from position 0 (its definition's interval alone: elsewhere it may
         // be in any register), a phi at its block's start, any other at its node's definition phase.
         use_offsets[0] = 0;
@@ -826,18 +843,13 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             // reads this column).
             rematerializable[v] = classes[v] != BUSTER_TIER1_ALLOCATE_GPR ? 0 : marks[node];
             use_offsets[v + 1] = op != IR_PHI;
-            // The operands whose registers a two-address result may take (#2685, tier1_select_ties): values of its class.
-            // A returned value takes none (tier1_select_returned).
-            uint32_t first = BUSTER_IR_NONE;
-            uint32_t second = BUSTER_IR_NONE;
-            if (op != IR_PHI && !parameter && returned[node] == 0)
+            // The ties as values of v's class; a returned value takes none (tier1_select_returned).
+            for (uint32_t k = 0; k < 2; k += 1)
             {
-                tier1_select_ties(plan, node, &first, &second);
+                const uint32_t tied = ties[2 * (uint64_t)v + k];
+                const uint32_t tied_value = tied < count && returned[node] == 0 ? node_values[tied] : BUSTER_TIER1_CFG_NONE;
+                ties[2 * (uint64_t)v + k] = tied_value != BUSTER_TIER1_CFG_NONE && node_classes[tied] == classes[v] ? tied_value : BUSTER_TIER1_CFG_NONE;
             }
-            const uint32_t first_value = first < count ? node_values[first] : BUSTER_TIER1_CFG_NONE;
-            const uint32_t second_value = second < count ? node_values[second] : BUSTER_TIER1_CFG_NONE;
-            ties[2 * (uint64_t)v] = first_value != BUSTER_TIER1_CFG_NONE && node_classes[value_nodes[first_value]] == classes[v] ? first_value : BUSTER_TIER1_CFG_NONE;
-            ties[2 * (uint64_t)v + 1] = second_value != BUSTER_TIER1_CFG_NONE && node_classes[value_nodes[second_value]] == classes[v] ? second_value : BUSTER_TIER1_CFG_NONE;
         }
         // Uses by value, counted then filled in node order, which is position order: a node's effective uses, then its
         // definition's own use. A parameter's, at position 0, precedes every other use of it.

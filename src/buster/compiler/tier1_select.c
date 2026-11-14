@@ -7451,7 +7451,7 @@ static X86Instruction tier1_select_memory_holes(const Tier1SelectPattern* patter
 // first place; a select's value where its condition holds not, which its cmov keeps, and the other one, which it inverts
 // to keep. BUSTER_IR_NONE where it has none. The allocator takes such a register only where the operand's interval ends
 // there: an operand live past the node holds it.
-static void tier1_select_ties(const Tier1SelectPlan* plan, uint32_t node, uint32_t* first, uint32_t* second)
+static inline __attribute__((always_inline)) void tier1_select_ties(const Tier1SelectPlan* plan, uint32_t node, uint32_t* first, uint32_t* second)
 {
     const Tier1SelectPattern* pattern = &plan->patterns[node];
     const uint8_t rule = plan->covered[node] ? TIER1_RULE_NONE : pattern->rule;
