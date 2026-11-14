@@ -236,6 +236,13 @@ unused-warning fixtures also check exact scope-completion tokens.
   `c_check_interrupt_driver_test.c` (#147) compares x86's `interrupt` attribute's handler errors (with those clang
   places nowhere), its direct calls and `-Wexcessive-regsave` with pinned Clang through the vector, scalar and
   two-lane deferred paths, and checks that `-c` of a definition is refused by name (`docs/c-checker.md`).
+  The executable interrupt-handler control in `c_check_convention_driver_test.c`
+  retains the first failed compile, link or run stage, its status and captured
+  diagnostics, with the actual and pinned Clang versions (#2226). A version
+  mismatch never turns a failed control into a pass or skip. The original
+  `tests/driver/interrupt_probe_control.c` fixture checks all three failure
+  stages, empty and wrong output, successful output, and that no later stage
+  runs after a failure.
   Bitwise/comparison `-Wparentheses` diagnostics distinguish a single bare comparison from eager logical
   comparison pairs and unparenthesized bitwise chains (#1390). Parenthesized operands retain their explicit
   grouping. Original default-warning fixtures compare complete diagnostics and independent counts against
@@ -552,7 +559,7 @@ Clang's hidden-parameter ABI ([fortify compatibility](../c-builtins-fortify.md#c
 
 ## Runtime fixtures
 
-`test-checker`'s shared source fixtures (`check_test_sources`, 418 cases) are
+`test-checker`'s shared source fixtures (`check_test_sources`, 420 cases) are
 runtime data (#2053): `tests/checker/sources/` holds `catalog.tsv` and one file
 a case, which the test reads when it runs, so that editing a case's source or
 flags, or adding a case, compiles, links and bakes nothing. The catalog's first

@@ -2198,6 +2198,20 @@ static __attribute__((noinline)) void check_test_program_x86(CheckTest* test, co
             check_test_program_source_native_limits(test, "int tested(int n){return (int)__builtin_ia32_pdep_si((unsigned)n,0x55555555u);}",
                                                     "integer-only-BMI2-without-avx512", clang, false, -1, 0, &bmi2,
                                                     (native.features & bmi2.features) == bmi2.features);
+            // #2717: the ordinary source suite checks the inferred types and the refused immediate; this same
+            // accepted fixture must also compile, link and execute like clang with only the v3 target's features.
+            CheckTestFixtures fixture = { .storage = arena_reserve(UINT64_C(1) << 20) };
+            char path[PATH_MAX + 128];
+            snprintf(path, sizeof(path), "%s/checker/sources/auto-type-x86-statement.c", check_test_fixture_root);
+            uint64_t length = 0;
+            const char* source = check_test_fixture_read(&fixture, path, &length);
+            check_test_expect(test, source != NULL && length != 0, "the __auto_type x86 statement-expression fixture is read");
+            if (source != NULL && length != 0)
+            {
+                check_test_program_source_native_limits(test, source, "auto-type-x86-statement", clang, false, -1, 0, &bmi2,
+                                                        (native.features & bmi2.features) == bmi2.features);
+            }
+            arena_release(&fixture.storage);
             check_test_program_build_release();
             check_test_program_march = "-march=x86-64";
         }
