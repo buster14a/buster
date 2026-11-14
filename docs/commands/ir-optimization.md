@@ -54,6 +54,47 @@ entry points both verify the resulting SSA and remapped CFG. See the
 [Tier 1 command guide](tier1.md#block-placement-and-critical-edge-fall-through-1218)
 for its ordering policy, regression coverage and measurement boundaries.
 
+## Vectors assembled in memory (#1344)
+
+clang's headers write `_mm512_set1_epi8`, `_mm512_setzero_si512`,
+`_mm512_set_epi64` and their kin as vector compound literals, and the typed
+stream initializes such a literal as an object: each element's store, then one
+load of the whole vector. With the `simd` and `flagged` options, SROA's
+`ir_sroa_assemble` turns that load back into a value before the fields are
+made. It walks each reachable block's loads and stores of the slots that are
+not refused and hold at most 64 bytes, and keeps for each slot the bytes the
+block's stores wrote, which of them are constants', and whether every store
+wrote the same scalar. A vector load whose every byte they wrote becomes, in
+place:
+
+- an `IR_VCONST` of the bytes, where each is a constant's (read through the
+  truncations, extensions and copies the typed stream leaves between a literal
+  and its store), appended after the function's own vector constants; or
+- a splat of the scalar, where every store wrote the same one at offsets that
+  are multiples of its size. A slot's repeated loads with no store between
+  count as one scalar, since the typed stream reads a parameter again for each
+  element.
+
+The element stores then reach no load and go with their fields. The walk
+assumes nothing across blocks: a slot that isn't refused has no access but its
+loads and stores, and a dead store's bytes are read by no load, so within a
+block it sees every write of the bytes it decides. A literal whose elements are
+distinct scalars stays in memory. `IrSroaResult.assembled` counts the loads,
+and the C driver's Tier 1 path takes SROA's result when it is nonzero, as when
+a slot was split. `test-ir-inline` runs four fixtures in the typed stream's
+shape through SROA and promotion on both twins and on the interpreter: a splat
+of 64 bytes read from the parameter's object with a second 16-byte load, a
+zeroed object's quadword constants, and two that must stay memory (the
+scalar's object written between its loads, and one lane another scalar's).
+
+On the compiler's own lexer by `--tier1`, `c_tokenize` went from 30.20 to
+14.62 instructions per byte on a 9,076-byte file (clang -O2: 3.06), every
+instruction counted; the record is
+[buster-performance's](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-vector-lexer-breakdown-1344-2026-11-14).
+What it leaves are true constants that Tier 1's constant rule still builds
+below `rsp` (#2744), but for those whose quadwords are one value, which are a
+`mov` and a `vpbroadcastq` at EVEX targets (13.46 instructions per byte).
+
 ## Verification work and retained analyses (#1379)
 
 Every first validity boundary remains enabled. `ir_verify_cfg` checks shape,
