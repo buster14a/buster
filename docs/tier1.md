@@ -171,16 +171,21 @@ measurements of what each one gains. LIST is a comma-separated list of items
 applied in turn, each `+` or `-` and then a pass's name: `sccp`, `dce`, `cfg`
 (the jump threading), `merge` (CFG cleanup's merges, below), `licm`, `sroa`
 (on every function, with #1282's options, before the solver and promotion),
+`vectorize` (#2743's loop vectorizer, [its guide](tier1-loop-vectorization.md)),
 `gvn` (as `--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or
 `all`. The default is SCCP, dead-code removal, CFG cleanup, its merges and
 the inlining. LICM runs after if-conversion, before the optimizer, which
-cleans up after it. A function that LICM or SROA refuses goes on as it was.
+cleans up after it, and the loop vectorizer after LICM. A function that LICM,
+SROA or the loop vectorizer refuses goes on as it was.
 The summaries the unit's inlining builds run the same passes, and with SROA,
 as with the solver, a candidate compiles from its own pipeline.
 `--tier1-report` gives each pass's counts: `folded` constants,
 `removed_instructions` and `removed_blocks` (the optimizer's output against
 its input, merges included), `merged_blocks`, `licm_moved`, `sroa_split`
-(slots) and `gvn_removed`.
+(slots) and `gvn_removed`; with `vectorize`, a `tier1-vectorize` line gives the
+innermost loops examined, those vectorized by their widest vector (`bytes16`,
+`bytes32`, `bytes64`), their reductions and run-time overlap tests (`guards`),
+and the refused loops by reason (`refused.shape` to `refused.width`).
 
 CFG cleanup's merges join a block to its predecessor when that predecessor is
 its only one and it is the predecessor's only executable successor. The block

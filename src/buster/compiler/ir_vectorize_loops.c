@@ -580,13 +580,16 @@ static bool ir_vectorize_shape(IrVectorizeWork* work, uint32_t loop, IrVectorize
     {
         const uint32_t block = next;
         const uint32_t end = f->block_offsets[(uint64_t)block + 1] - 1;
+        // Its one reachable predecessor is the previous block (an unreachable stub may branch to it too).
         uint32_t predecessors = 0;
+        uint32_t reached = BUSTER_IR_NONE;
         for (uint32_t edge = cfg->predecessor_offsets[block]; edge < cfg->predecessor_offsets[(uint64_t)block + 1]; edge += 1)
         {
-            predecessors += work->loops.rpo_index[cfg->predecessors[edge]] != BUSTER_DOMINATOR_NONE ? 1 : 0;
+            const bool reachable = work->loops.rpo_index[cfg->predecessors[edge]] != BUSTER_DOMINATOR_NONE;
+            predecessors += reachable ? 1 : 0;
+            reached = reachable ? cfg->predecessors[edge] : reached;
         }
-        valid = dominators_loop_contains(&work->loops, loop, block) && predecessors == 1 && cfg->predecessors[cfg->predecessor_offsets[block]] == previous && f->op[end] == IR_BR &&
-                visited < work->loops.loop_size[loop];
+        valid = dominators_loop_contains(&work->loops, loop, block) && predecessors == 1 && reached == previous && f->op[end] == IR_BR && visited < work->loops.loop_size[loop];
         for (uint32_t i = f->block_offsets[block]; valid && i < end; i += 1)
         {
             // A chain block's phi has its predecessor's value alone: a copy.
@@ -601,6 +604,22 @@ static bool ir_vectorize_shape(IrVectorizeWork* work, uint32_t loop, IrVectorize
     valid = valid && visited == work->loops.loop_size[loop] && previous == plan->latch;
     plan->row_count = valid ? count : 0;
     return valid;
+}
+
+// A branch's condition past the lowering's truth chains, `icmp ne (zext c), 0`, which truth simplification removes in
+// Tier 1's pipeline but other clients may leave: c.
+static uint32_t ir_vectorize_truth(const IrFunction* f, uint32_t value)
+{
+    uint32_t at = value;
+    uint64_t zero = 1;
+    uint32_t depth = 0;
+    while (depth < BUSTER_IR_VECTORIZE_DEPTH && at < f->instruction_count && f->op[at] == IR_ICMP && f->c[at] == IR_NE && f->a[at] < f->instruction_count && f->op[f->a[at]] == IR_ZEXT &&
+           f->type[f->a[f->a[at]]] == IR_I1 && ir_vectorize_constant(f, f->b[at], &zero) && zero == 0)
+    {
+        at = f->a[f->a[at]];
+        depth += 1;
+    }
+    return at;
 }
 
 // Whether `value` is a header phi, or a header row adding a constant to one (the exit test's `i + 1 < n`): its phi.
@@ -632,7 +651,7 @@ static bool ir_vectorize_induction(IrVectorizeWork* work, uint32_t loop, IrVecto
 {
     const IrFunction* f = work->function;
     const uint32_t terminator = f->block_offsets[(uint64_t)plan->header + 1] - 1;
-    const uint32_t compare = f->a[terminator];
+    const uint32_t compare = ir_vectorize_truth(f, f->a[terminator]);
     bool valid = compare < f->instruction_count && f->op[compare] == IR_ICMP && work->cfg.instruction_blocks[compare] == plan->header;
     const bool into = valid && dominators_loop_contains(&work->loops, loop, f->b[terminator]);
     uint32_t predicate = valid ? f->c[compare] : IR_PREDICATE_COUNT;
