@@ -463,8 +463,38 @@ does, each rule checked against clang's answers on probes of it:
   The ordinary control walk is specialized without the prefix checks.
   Tier 0 has no loop transformation for the hints to steer.
 - **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
-  or a compound statement's start. Its state changes nothing, since nothing
-  here contracts `a * b + c` into a fused operation.
+  or a compound statement's start. `ON` permits contraction within a source
+  expression, `OFF` forbids it, and `DEFAULT` restores the command-line
+  contraction mode. The command-line default is `-ffp-contract=on`;
+  `off`, `on`, `fast` and `fast-honor-pragmas` are validated, ordered options.
+  Clang 23's `fast-honor-pragmas` is an alias of `fast`, and both allow lexical
+  pragma overrides. Fast mode grants a broader optimization permission;
+  Clang's `-O0` retains separate multiply/add operations in that mode.
+  The optional `CheckGraph.fp_environments` byte carries contraction in bits
+  `BUSTER_CHECK_FP_CONTRACT_ON` and `BUSTER_CHECK_FP_CONTRACT_FAST`, independently
+  of evaluation methods and environment access. Its zero policy is off.
+  Sources without floating pragmas allocate no new column: their immutable
+  `fp_contract_default` carries the argv policy. Handwritten graphs default
+  to off. Scalar and SIMD input publication preserve the same bits, and
+  deferred expression slices retain the source graph's default and column.
+  Shared native lowering (`c_check_program_contract.c`) contracts scalar float
+  and double multiply/add/subtract expressions when both operations permit
+  `on` and the function's effective target has FMA or AVX512F. Parentheses,
+  same-format casts and selected wrappers retain the opportunity; stored
+  products, statement-expression results, dynamic conditional joins and
+  conversions to another floating format are boundaries. Compound `+=` and
+  `-=` keep the ordinary address evaluation and single store. The existing
+  exact x86 operation row carries the fused operation through both tiers;
+  operand order and explicit negations preserve the pinned oracle's NaN bits.
+  Targets without FMA retain separate arithmetic, and `fast` retains the
+  pinned `-O0` behavior rather than adding a cross-statement optimization pass.
+  Constant products retain their prior rounding. A GNU statement expression
+  that supplies a constant floating operand is materialized at runtime in
+  every contraction mode, as Clang does: its source proof remains available,
+  while the inherited source/runtime flag prevents an enclosing expression
+  from folding an unfused answer over a fused result. This correction can
+  change instruction bytes for those previously folded statement expressions
+  even on a non-FMA target; default and explicit `off` still agree there.
 - **The clang and Microsoft floating-point spellings** (`c_check_fp_input.c`):
   `#pragma clang fp` accepts any sequence of `contract(on|off|fast)`,
   `reassociate(on|off)`, `reciprocal(on|off)`, `eval_method(source|double|extended)` and
@@ -475,8 +505,8 @@ does, each rule checked against clang's answers on probes of it:
   Clang's `-Wignored-pragmas` warning with ordinary command-line, source and
   system-header policy. Illegal precision/exception combinations and stack
   operations inside a compound have Clang's diagnostic text and location.
-  Permission to contract, reassociate, use reciprocals or relax precision does
-  not require those transformations; generated evaluation remains precise.
+  Reassociation, reciprocal evaluation and precision relaxation remain
+  independent permissions; they are not implied by contraction.
   `strict` and `maytrap` preserve runtime operations and conversions through the
   existing floating-environment path, including discarded results and constant
   operands. The exception state is separate from STDC `FENV_ACCESS`, so changing
@@ -2937,10 +2967,13 @@ What the lowering covers past scalars (#145's programs):
   name as a swizzle only in a unit whose type table has an extended vector
   (`TypeTable.ext_vectors`), growing its list past the `.` members it counted;
   a struct's `->` member is unaffected. Swizzles aren't lowered: `-c` refuses
-  both spellings as a member access. The checker's swizzle diagnostics are its
-  own words, not clang's ("illegal vector component name", "vector is not
-  assignable (contains duplicate components)", "address of vector element
-  requested", a `vector_size` vector's "is not a structure or union"): #2096.
+  both spellings as a member access. The cold diagnostic renderer gives clang's
+  vector member errors (#2096): the first illegal component character at its
+  operator-relative byte, an out-of-range component at the operator, duplicate
+  components on assignment, and an element's forbidden address. GNU vectors
+  keep the non-record-base error and their typedef spelling. A duplicate or
+  temporary swizzle's address gets the rvalue error, while ordinary records and
+  valid swizzles keep their existing semantics.
   Extended vectors' `!`, `&&` and `||` compare each lane with zero and return
   all-one or all-zero signed lanes. Both operands are evaluated; these vector
   operators do not short-circuit. Half-precision truth uses scalar conversions
@@ -3595,16 +3628,28 @@ What the lowering covers past scalars (#145's programs):
     `isUsed`) is read from the binding events: an evaluated use that reached
     its declarations, outside its own body. A unit with a multiversioned
     function is read in source order for it (`CheckInput.target_multiversion`,
-    `check_deferred_bodies`).
+    `check_deferred_bodies`). Each use of a visible `target` overload set
+    retains its latest default declaration in `CheckInput.target_candidates`
+    (#2424), respecting scope and declaration order. Calls use an isolated
+    default candidate through the existing overload checker: wrong arity or
+    a nonviable argument gives "no matching function" and the default's
+    candidate note. The candidate's `BUSTER_CHECK_OVERLOAD_TARGET` bit rejects
+    incompatible function-pointer signatures, as do ordinary overload sets
+    with multiple distinct functions. An ordinary singleton keeps its
+    configurable conversion. C's viable object-pointer
+    conversions keep their warning policy and note the default's parameter.
+    A mismatched function-pointer
+    initialization or assignment spells the source as '<overloaded function
+    type>'; initialization also notes the default's signature. Passing or returning it uses
+    the same source spelling, with the callee's parameter note when passing.
+    A lone target version and `target_clones` keep ordinary-call diagnostics.
   - *Tests.* `test-checker-driver --target-versions-only` compares each unit's
     whole output with clang's by the vector path, the scalar one and with the
     bodies deferred.
-  - *Differences from clang.* Where several versions are visible, clang
-    resolves a reference as an overload set. A call of the wrong arity or
-    argument types gets this checker's call errors, not "no matching function"
-    with its candidate notes. A reference other than a call, which clang
-    resolves only against a function pointer type and a default version,
-    is accepted. A different calling convention isn't compared.
+  - *Differences from clang.* A reference other than a call without a default
+    version or without a function-pointer target is still accepted in cases
+    where clang cannot resolve its overload set. A different calling
+    convention isn't compared.
   - *Code* (`c_check_program_target_versions.c`, as clang's
     `emitMultiVersionFunctions` and `EmitX86MultiVersionResolver` make it). A
     name's versions form a group (`CheckProgram.target_groups`). A `target`
@@ -4179,7 +4224,7 @@ What the lowering covers past scalars (#145's programs):
   function's end, and a statement expression's end, after its value is kept
   (`CheckProgramRegion.cleanups`). Each variable's call is written once
   (#1370), as clang's is: `CHECK_CONTROL_CLEANUP` (whose target is the record)
-  at its scope's end. An exit of the function's statements is one
+  at its scope's end. An exit of the function's or a statement expression's statements is one
   `CHECK_CONTROL_EXIT` instead of a run of calls, which names its first and
   last record (`CheckProgramExit`); its tail (its restore, lifetime ends and
   jump, or its return) follows it, so every walk of the controls sees the
@@ -4187,26 +4232,39 @@ What the lowering covers past scalars (#145's programs):
   body's chains in linear passes (`CheckProgramChain`): the lowering jumps
   from the exit to its first record's call, and after each call a dispatch
   goes on to the destinations that stop there (exits with the same last
-  record and the same tail share one, whose tail the first of them keeps in
+  record and the same tail share one, whose tail the first emitted exit keeps in
   place; a lone jump's is its target), to the parent's call for exits that go
   on, and to the next control. Only a dispatch of two continuations or more
   tests an I32 destination slot, which every exit and fall that crosses one
   stores first (a fall 0, at its run's head, past which exits enter): the
   issue's function of early returns stores none, and its calls are its
-  variables' count. An exit from a statement expression's statements takes
-  the chain through the records within its block, whose calls its region
-  lowers with its statements, from the empty evaluation stack the region
-  starts with: the dispatch's jumps and the exit's agree on the stack, out of
-  the region as within it. An exit that leaves the block's own records (their
-  calls run after its END, once its value is kept) or records outside it, one
-  through a record whose scope's end a constant switch's kept statements leave
-  out, and one whose jump no path reaches keep their runs in place. Code and call rows grow
+  variables' count. Statement expressions share the chain through their own
+  block's records and enclosing records too. Their own calls run after their
+  `END`, once the value has been kept (and an aggregate copied), before any
+  saved outer expression operands are restored. Both a normal completion and
+  an exit therefore reach the calls with an empty evaluation stack. The
+  post-value run has a natural fall, which stores zero when its dispatch
+  needs it; a nested region's earlier exit cannot leave a stale destination.
+  Destinations become active when their exits are lowered
+  (`CheckLowerWriter.chain_destinations`), and a dispatch only names active
+  destinations. This matters when a constant expression skips a region:
+  its return tail is never emitted, and an enclosing cleanup must neither
+  branch to that absent tail nor make an emitted exit share it.
+  An exit through a record whose scope's end a constant switch's kept
+  statements leave out, and one whose jump no path reaches, keeps its run
+  in place. Code and call rows grow
   linearly in exits plus cleanups, where they grew as their product (85
   cleanups with an early return each made 3,825 calls, and 86 exhausted the
   call rows). An exit keeps only the innermost record whose scope holds its
   target; the planner finds its last record in one preorder sweep, and a
   scope's end and `check_control_cleanup_at` skip closed scopes whole, so the
-  planning is linear too. On the 9700X, 10,000 cleanups with an early return
+  planning is linear too. Control room reserves at most one `RESULT` and
+  `EXIT` per jump and one `CLEANUP` per variable, including regions; inline
+  fallbacks expand during lowering and need no repeated control entries.
+  `c_check_cleanup_driver_test.c` checks region-own and enclosing-chain
+  growth, cleanup traces against Clang in both tiers and both reader paths,
+  retained scalar and aggregate values, nested regions, skipped return
+  destinations and VLA cleanup before release. On the 9700X, 10,000 cleanups with an early return
   each compile in 36 ms by Tier 0 (`-c`), and sqlite3.c's compile is
   unchanged ([the measurements](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/cleanup-chains-1370-2026-11-09)).
   The planner stays scalar. It runs only for a body with an exit through a
@@ -5017,9 +5075,8 @@ on past it. A declaration of another version is another entity's, checked
 as any, and one of the invalid version's that follows it is a redefinition of
 it again, noted there, as clang's `CheckMultiVersionAdditionalDecl` finds it.
 A call of a `target` multiversioned name keeps its other versions, as clang's
-overload resolution does. Its argument errors are still the plain call's
-wording, not clang's "no matching function", as with every multiversioned
-call.
+overload resolution does. Its visible default is the overload checker's
+candidate (#2424), so invalid arguments name that candidate in their notes.
 
 `check_driver_rejected_warnings` follows clang's `ActOnPopScope`: a scope in
 which an error occurred gives no unused-variable warning, nested scopes'
@@ -5481,7 +5538,12 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   each, an implicitly declared function's among them in its block. A library
   function's implicit declaration stays one after its block, as clang
   declares the builtin at file scope (`printf` called in one function is
-  `printff`'s correction in the next). A name whose length differs
+  `printff`'s correction in the next). Predefined typedefs are candidates from
+  the start, with declaration notes that have no source location (#2250).
+  A builtin function's name becomes a candidate at its first use, before its
+  arguments, and stays one after the block; its note points to that first use.
+  A feature query alone introduces no builtin declaration. Visible declarations
+  shadow both kinds of candidate. A name whose length differs
   from the typo's by more than a third of it is skipped
   (`TypoCorrectionConsumer::addName`), and so is one further than
   (length + 2) / 3 by Levenshtein's distance. The nearest is taken if no other
@@ -5631,12 +5693,23 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   calls', and clang's search at each call of a prototyped function with too
   few or too many arguments (`TryTypoCorrectionForCall`, which suggests
   nothing in C). The calls' suggestions past the limit are dropped once the
-  values' are known (`check_typo_finish`).
+  values' are known (`check_typo_finish`). Recovery views retain the source
+  positions of already corrected names, so rereading a builtin or type typo
+  does not renew that budget (`Parser.typo_sources`, #2250).
+
+A builtin suggestion is read again through the driver's existing name-edit
+view, preserving the original typo error and its first-use note before the
+corrected expression's diagnostics. Its normal argument checks, warnings
+and direct-call constraint still run. Predefined-type corrections
+at statements and parameters use the same view with the predefined name,
+and retain their locationless declaration notes.
 
 The search runs only after an undeclared name, so a valid unit pays nothing.
 It replays the binding stream's scope stack once per unit (`CheckTypoScope`,
-one for the walk's calls and one for the answers' values), then prefilters
-the visible names by length (`3 * |difference| <= length`) in AVX-512. Each
+one for the walk's calls and one for the answers' values), alongside the
+effective parse's builtin operands. Both operand discovery and the candidate
+length prefilter (`3 * |difference| <= length`) have AVX-512 and scalar paths.
+Predefined types and used builtins share the existing candidate filter. Each
 distance comes from Myers's bit-parallel algorithm, with the candidate's
 equality masks from byte compares; names over 64 bytes, and the scalar path,
 use the dynamic-programming table, the twin that `test-checker` checks against
@@ -5645,11 +5718,6 @@ use the dynamic-programming table, the twin that `test-checker` checks against
 with an undeclared name fails them and is read again in source order.
 
 Left as they were:
-
-- No search offers a builtin's name or a predefined type's (clang's
-  `use of undeclared identifier '__builtin_absx'; did you mean
-  '__builtin_abs'?`, or `'__builtin_ms_va_list'` for
-  `__builtin_c23_va_start` named outside a call before C23).
 
 - A parameter's correction to a storage class (`statc v` to `static`) reads
   the parameter with it, but buster lacks clang's "invalid storage class
@@ -6881,6 +6949,39 @@ probe's climb stopping at a token shallower than the operand
 token's start. `test-checker-driver` checks the parents by both paths and the
 starts against their definitions on random graphs and trees whose columns end
 at `PROT_NONE` pages (`c_check_common_tree_test.c`).
+
+The vector warning driver classifies its immutable operator column once
+(`c_check_common_candidates.c`, #1340). Eight classes cover reach, comparisons,
+returned addresses, calls, static selections, evaluation masks, discarded
+values and shifts. Each class has one 16-bit mask per 16 nodes, with the
+classes in separate contiguous columns: one byte per node, rounded to 16
+nodes. Full batches classify 64 operators with one byte-table lookup; the
+last loads are masked to the logical count. The reach, format, return-stack,
+static-selection, operand-mask, discarded-value and detached-shift passes
+consume these masks in ascending node order and retain their semantic tests.
+The comparison masks also supply the existing 16-comparison batches.
+
+The parent pass retains immutable parentless membership while counting its
+distinct children, at one bit per node, rounded to 64 nodes. The tree path
+expands it into the initial evaluated and used bytes, and the evaluation and
+emission scans reuse it instead of reloading four bytes of parent per node.
+Control flow and selections still change their separate evaluated marks.
+Displaced roots, statement expressions and initializer publication still use
+the existing root-order machinery. A graph that fails the tree check keeps
+the original fallback; the scalar driver allocates neither index and still
+visits every node as its independent oracle. Empty graphs allocate nothing,
+and allocation failure reports the existing common-warning capacity error.
+Both indexes belong to the warning driver's scratch region and expire before
+backend processing. Their combined payload is about 1.125 bytes per node;
+this is a storage and scan-work description, not a measured timing result.
+
+`c_check_common_candidates_test.c` compares the lookup and scalar classifier
+with independent operator predicates, every operator across lane boundaries,
+invalid operator IDs, protected input and exact-capacity output tails,
+independent readers, and allocation failure. The tree tests also compare the
+root bitmap with an independent edge walk on valid and rejected trees and
+verify cached, uncached and scalar root enumeration.
+
 The expression walk starts only at a root that reaches something or whose
 discarded expression may get the statement's unused-value warning, and enters
 only the subtrees that hold its walk's bit; every warning keeps its order. The default-ignored warnings' work runs only

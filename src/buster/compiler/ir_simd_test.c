@@ -934,6 +934,106 @@ static void ir_test_scalar_shifts(IrTestTally* test, Arena* output, Arena* scrat
     ir_test_expect(test, admitted_count == 3 * 3 * 3, "every scalar shift of the IR's vector widths is admitted, and no other");
 }
 
+// A ternary intrinsic's third value lives in extra, outside the three instruction columns. It obeys the same
+// definition-before-use and block-dominance rules as a and b. Keep those two inputs valid while varying only the
+// third, with the intrinsic in every position of a verifier batch, so a fast-path omission cannot hide behind them.
+static void ir_test_ternary_dominance(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    static const uint32_t kinds[] = {
+        BUSTER_IR_INTRINSIC_PERMUTE2,
+        BUSTER_IR_INTRINSIC_TERNLOG,
+        BUSTER_IR_INTRINSIC_COMPRESS,
+        BUSTER_IR_INTRINSIC_EXPAND,
+    };
+    for (uint32_t kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+    {
+        for (uint32_t width = 0; width < 3; width += 1)
+        {
+            for (uint32_t padding = 0; padding < BUSTER_IR_VECTOR_COUNT; padding += 1)
+            {
+                const uint64_t mark = output->length;
+                const uint32_t use = 7 + padding;
+                const IrSizes sizes = {
+                    .instruction_count = use + 3,
+                    .block_count = 3,
+                    .extra_count = 1,
+                };
+                IrFunction function = { 0 };
+                const bool ready = ir_create(output, &sizes, &function) == IR_OK;
+                ir_test_expect(test, ready, "ternary dominance fixture allocates");
+                if (ready)
+                {
+                    const IrType type = (IrType)(IR_V4I32 + width);
+                    const IrType second = kind >= 2 ? (width == 2 ? IR_M16 : IR_M8) : type;
+                    function.result_type = IR_VOID;
+                    function.block_offsets[1] = 5;
+                    function.block_offsets[2] = 7;
+                    function.block_offsets[3] = use + 3;
+                    ir_test_instruction(&function, 0, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, 1, IR_UNDEF, second, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, 2, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, 3, IR_UNDEF, IR_I1, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, 4, IR_CBR, IR_VOID, 3, 1, 2);
+                    ir_test_instruction(&function, 5, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, 6, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    for (uint32_t i = 7; i < use; i += 1)
+                    {
+                        ir_test_instruction(&function, i, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    }
+                    ir_test_instruction(&function, use, IR_INTRINSIC, type, 0, 1, ir_intrinsic_ternary_c(kinds[kind], 0));
+                    function.flags[use] = kind == 1 ? 0xa6 : 2;
+                    ir_test_instruction(&function, use + 1, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_test_instruction(&function, use + 2, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    // Entry dominates both return arms; neither arm dominates the other.
+                    const uint32_t enter[] = {
+                        0,
+                        1,
+                        2,
+                    };
+                    const uint32_t leave[] = {
+                        3,
+                        2,
+                        3,
+                    };
+                    const IrDominance dominance = {
+                        .enter = enter,
+                        .leave = leave,
+                        .block_count = 3,
+                    };
+                    const uint32_t values[] = {
+                        2,
+                        use,
+                        use + 1,
+                        5,
+                    };
+                    for (uint32_t variant = 0; variant < BUSTER_ARRAY_LENGTH(values); variant += 1)
+                    {
+                        function.extra[0] = values[variant];
+                        for (uint32_t supplied = 0; supplied < 2; supplied += 1)
+                        {
+                            const IrDominance* view = supplied != 0 ? &dominance : NULL;
+                            const bool invalid = variant == 1 || variant == 2 || (variant == 3 && supplied != 0);
+                            const IrError error = invalid ? IR_ERROR_DOMINANCE : IR_OK;
+                            const uint32_t instruction = invalid ? use : BUSTER_IR_NONE;
+                            const uint32_t detail = invalid ? 3 : 0;
+                            const uint64_t scratch_mark = scratch->length;
+                            const IrCheck vector = ir_verify(&function, scratch, view);
+                            ir_test_expect(test, vector.error == error && vector.instruction == instruction && vector.detail == detail &&
+                                           vector.dominance_checked == (!invalid && supplied != 0) && scratch->length == scratch_mark,
+                                           "vector verifier checks a ternary intrinsic's third operand dominance and exact diagnostic");
+                            const IrCheck scalar = ir_verify_scalar(&function, scratch, view);
+                            ir_test_expect(test, scalar.error == error && scalar.instruction == instruction && scalar.detail == detail &&
+                                           scalar.dominance_checked == (!invalid && supplied != 0) && scratch->length == scratch_mark,
+                                           "scalar verifier checks a ternary intrinsic's third operand dominance and exact diagnostic");
+                        }
+                    }
+                }
+                arena_pop_to(output, mark);
+            }
+        }
+    }
+}
+
 // The permutes of two tables (#1840), whose third operand the extra array holds: both verifiers admit permute2 exactly
 // where its lanes (flags 0 to 3) and its three operands' types agree, its third operand in a slot of the extra array,
 // and refuse a missing slot, a slot naming no value and a binary kind whose `c` has a slot; the model is checked
@@ -2131,6 +2231,7 @@ static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
 {
     ir_test_scalar_shifts(test, output, scratch);
     ir_test_lane_ops(test, output, scratch);
+    ir_test_ternary_dominance(test, output, scratch);
     ir_test_permute2s(test, output, scratch);
     ir_test_ternlogs(test, output, scratch);
     ir_test_compresses(test, output, scratch);
