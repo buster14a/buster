@@ -1364,6 +1364,17 @@ edge copied slot to slot through `r11` (+11.7 M). By callgrind (#1189's
   rise from 19,436 stores and 24,766 loads to 19,545 and 24,902. `lvm.c` has
   9,840 records instead of 9,994 and 992 edge moves instead of 1,196.
 
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/e1a21c966bf6728ef5f50326d60dd7419c932cc1/docs/measurements/tier1-waiting-ranges-2768-2026-11-14),
+#2592's method), main `5f3c7d48` against the change: speedtest1 runs 0.39% fewer
+user cycles over 8 layouts (95% interval −0.77% to −0.01%, slower at 2 of
+them) for 0.93% fewer instructions, and Lua's five scripts −0.04% (−0.52% to
++0.44%) over 33 link orders for 0.56% fewer instructions at each: Zen 5
+eliminates register moves at rename, and `arithmetic` and `closures` move with
+the link order by up to 10% either way. `sqlite3.c`'s `--tier1 -c` takes 0.21%
+more cycles for 0.29% more instructions, and `lvm.c`'s the same cycles: the
+scan's checks and its reloads at uses cost about what the fewer records and
+edge moves save later.
+
 Every Lua build printed clang -O0's output and every speedtest1 gave its
 verification hash. `tier1_allocate_hints_test.c`'s traces check a range that
 waits and reloads into its value's first register, one that takes that
