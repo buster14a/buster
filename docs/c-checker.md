@@ -6976,23 +6976,34 @@ a literal conversion, in unreachable code and short-circuited operands too, and
 a brace initializer's in its reverse order; the walks' candidates test the
 operand's operator before any type.
 
-A failed static assertion's root is excluded from the rejected unit's warning
-walk. `check_driver_reports_from` therefore checks that root's
-integer-to-boolean conversion when publishing `CHECK_MESSAGE_STATIC_ASSERT`,
-at the error's expression boundary
-and in the preceding diagnostic phase. This keeps the warning before the
+A failed static assertion's tree is excluded from the rejected unit's warning
+walk. `check_driver_reports_from` therefore calls
+`check_common_failed_assertion` when publishing `CHECK_MESSAGE_STATIC_ASSERT`.
+Its bounded worklist visits the retained condition tree, using the existing
+integer and floating literal conversion emitters at the error's expression
+boundary and in the preceding diagnostic phase. Conditional conditions are
+checked first in source postorder, as Clang constructs them; the assertion's
+own conversion and nested logical operands then follow the completed
+expression's order. Static selections retain only their selected result,
+explicit casts do not create implicit conversions, and a conditional's arms
+do not inherit its outer boolean context. GNU omitted-middle conditionals
+visit their shared condition once and do not diagnose that saved value as a
+new conversion of the written expression. This keeps the warnings before the
 unchanged assertion error, with the normal command-line and pragma policy,
 including promotion, suppression and fatal/error-limit handling. The original
 runtime sources `tests/driver/assert_bool_*.c`, through
 `c_check_assert_bool_driver_test.c`, compare complete Clang diagnostics for
-file, member and block scopes, repeated failures, successful and non-warning
-controls, unrelated errors, macro expansion notes, C17/C23 and both
-scalar/vector readers and lane requests. Clang is the external behavioral
-oracle; the fixtures and
-implementation are original. Nested boolean conversions inside a failed
-condition, such as `_Static_assert(!(1 << 3), "nested")`, still need the failed
-subtree's conversion traversal; the error path currently checks only the
-assertion condition's own conversion.
+file, member and block scopes, nested and short-circuited logical operands,
+conditional warning order, floating literals, selections, explicit casts,
+unevaluated controls, worklist growth, builtin arguments, repeated failures,
+successful and non-warning controls, unrelated errors, macro expansion notes,
+C17/C23 and both reader choices and lane requests. The focused driver selector
+is `--assert-bool-only`. Clang is the external behavioral oracle; the fixtures
+and implementation are original. The cold path does not reconstruct source
+operands erased by static selections or queries, or restore other warning
+families such as `-Wconstant-logical-operand`; those remain separate recovery
+work. Successful-assertion conditional warning ordering also continues to use
+the ordinary warning walk.
 
 The graph's passes share their facts, `check_common_facts`, which give each
 node its parent, whether another node uses its value, whether it is evaluated,

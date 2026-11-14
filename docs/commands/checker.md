@@ -83,7 +83,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --operand-diagnostics-only | --label-attributes-only |
-  --attribute-recovery-only] [--in-process] [--clang-server PATH]
+  --attribute-recovery-only | --assert-bool-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; with
@@ -130,6 +130,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   typedef and qualifier spelling, and valid scalar/record/atomic-lvalue controls. The
   atomic conditional controls also compile, link and execute selections of integer,
   floating, pointer and aligned values through Clang and all three Buster routes.
+  `--assert-bool-only` runs `c_check_assert_bool_driver_test.c` alone, including
+  the original `tests/driver/assert_bool_*.c` sources for root and nested
+  boolean-conversion warnings in failed static assertions (#2409). It compares
+  complete diagnostics and exit status under warning promotion/suppression,
+  error limits, source policy, C17/C23, both reader choices and lane requests,
+  and verifies existing object-output preservation for rejected input.
   `--semantic-recovery-only` runs
   `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,
   `c_check_attribute_call_recovery_driver_test.c`,
