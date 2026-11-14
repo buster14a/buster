@@ -174,8 +174,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes; and
   #1376's clears (`c_check_program_clear_test.c`): each path's shape (memset past 128 bytes, no loop, no clear before
   a whole object's copy, compound literals in place, a volatile object's stores) and native runs on a dirtied stack.
-  The same group covers #1549's hidden-result call initializers: copy and temporary elimination, nested and indirect
-  calls, alignment, volatile and self-reference fallbacks, assignments and reentry; and #1375's named results
+  The same group covers #1549's hidden-result call initializers: copy, temporary and discarded-address elimination,
+  nested and indirect calls, only members and elements, alignment, volatile and self-reference fallbacks, assignments,
+  reentry, and which labels keep the copy, at both scan paths' lengths; and #1375's named results
   (`c_check_program_named_result_test.c`): no copy or frame bytes on either side of the inline copy's limit, unions,
   compound literals, escaping addresses, statement expressions and cleanups, every excluded shape's copy, and a native
   run of each against clang -O0's code on a dirtied stack. `tests/interpreter/source.c`

@@ -7003,7 +7003,9 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
             writer->aggregates |= aggregate || wide || vector != 0;
             writer->argument_classes[writer->argument_count++] = class;
         }
-        if (aggregate_result && object_result)
+        // The result's address is the call's value, except for a call that writes an initializer's destination
+        // (check_lower_init_call), whose value nothing reads: such a call leaves none.
+        if (aggregate_result && object_result && destination == BUSTER_CHECK_NONE)
         {
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
         }
@@ -15337,6 +15339,51 @@ static bool check_lower_init_names_destination(const CheckLowerWriter* writer, u
     return named;
 }
 
+// Whether a source label can reach the declaration again while its object lives, so that its address may have escaped
+// on an earlier visit. The object lives from its block's entry (C11 6.2.4p6), so only a label between that block's
+// opener and the initializer's end can: a goto back over the declaration within its block, or into an earlier
+// nested block of it. A label past the initializer, such as a `goto out;` cleanup's, never runs the declaration
+// again, and reentering the block from a label outside it (a loop's next iteration among them) begins a new
+// lifetime, in which no earlier address is valid. Case labels are reached only from their switch's head, outside
+// the switch's body. The initializer's first token has the depth of the declaration's innermost group: its block,
+// a statement expression's or a for statement's header. The nearest earlier token below that depth is the group's
+// opener. Full vectors read 16 tokens' depths and roles backward from the initializer's end; the scalar twin and
+// tail ask each token the same, nearest first, so both stop at the same token.
+static bool check_lower_init_relabelled(const CheckLowerWriter* writer, uint32_t declaration)
+{
+    const CheckProgram* program = writer->program;
+    const CheckInput* input = program->input;
+    const uint32_t* depths = program->parser->tree.depths;
+    const uint8_t* roles = program->parser->tree.roles;
+    const uint32_t opening = writer->body->opening;
+    const uint32_t begin = check_sparse_get(input->initializer_begins, declaration);
+    const uint32_t end = check_sparse_get(input->initializer_ends, declaration);
+    const bool labels = writer->body->label_count != 0;
+    const bool known = depths != NULL && roles != NULL && opening < begin && begin < end && end <= input->token_count;
+    const uint32_t depth = labels && known ? depths[begin] : 0;
+    const bool scalar = BUSTER_SCALAR_PATH(writer->scalar);
+    bool labelled = false;
+    bool opened = !labels;
+    uint32_t token = labels && known ? end : opening;
+    for (; !labelled && !opened && !scalar && token - opening >= BUSTER_CHECK_PROGRAM_LANES; token -= BUSTER_CHECK_PROGRAM_LANES)
+    {
+        const uint32_t block = token - BUSTER_CHECK_PROGRAM_LANES;
+        const uint32_t below = _mm512_cmplt_epu32_mask(_mm512_loadu_si512(depths + block), _mm512_set1_epi32((int)depth));
+        const uint32_t marked = _mm_cmpeq_epi8_mask(_mm_loadu_si128((const __m128i*)(roles + block)), _mm_set1_epi8((char)PARSE_ROLE_LABEL));
+        const uint32_t nearest = (below | marked) != 0 ? 31u - (uint32_t)__builtin_clz(below | marked) : 0;
+        labelled = ((marked >> nearest) & 1u) != 0;
+        opened = !labelled && ((below >> nearest) & 1u) != 0;
+    }
+    for (; !labelled && !opened && token > opening;)
+    {
+        token -= 1;
+        labelled = roles[token] == PARSE_ROLE_LABEL;
+        opened = !labelled && depths[token] < depth;
+    }
+    // A body with labels whose group was not found keeps the conservative answer.
+    return labelled || !opened;
+}
+
 // A bound function with returns_twice, or a builtin whose catalogue says it returns twice ('j'): setjmp's standard
 // library names need the catalogue even when their source declarations do not spell the attribute. A mere reference
 // suffices; taking such a function's address keeps the conservative result too.
@@ -15543,33 +15590,38 @@ static void check_lower_named_rewrite(CheckLowerWriter* writer)
 
 // A whole automatic object initialized by one call can be that call's hidden result object (#1549). The destination
 // is passed to this call's expansion only: its argument tasks, including nested calls, keep their own result objects.
-// Keep a copy for volatile objects, a different result type, register returns, insufficient canonical ABI alignment,
-// and self references. A body with source labels can reenter an initializer after its destination has escaped, so it
-// keeps the ordinary path too, as does a body that names a returns-twice function. No assignment reaches this helper.
-// Nor does the function's named result (#1375): its address is the hidden pointer's value, which a call's result object
-// (Tier0Function.call_result_objects, a frame object) can't be, so its call returns into an object of its own.
+// The call writes the part the plan's one part names, at offset 0 and of the object's size: the object itself, or its
+// only member or element (`struct Outer o = { make(n) };`, `struct S a[1] = { make(n) };`), so the part's type, not
+// the object's, is the result's. Keep a copy for volatile or atomic objects, a different result type, register
+// returns, insufficient canonical ABI alignment, and self references, and where a label can reenter the initializer
+// after its destination has escaped (check_lower_init_relabelled) or the body names a returns-twice function. No
+// assignment reaches this helper. Nor does the function's named result (#1375): its address is the hidden pointer's
+// value, which a call's result object (Tier0Function.call_result_objects, a frame object) can't be, so its call returns
+// into an object of its own. The call leaves no value (check_lower_call_body), so nothing is discarded.
 static bool check_lower_init_call(CheckLowerWriter* writer, const CheckInitializer* plan, uint32_t declaration, uint32_t local, TypeId destination)
 {
     const CheckProgram* program = writer->program;
     const TypeTable* types = program->types;
     const CheckInitPart* part = plan->count == 1 ? plan->parts : NULL;
-    const uint8_t kind = check_action_kind(types, destination);
+    const TypeId written = part != NULL ? type_strip_aligned(types, part->type) : 0;
+    const uint8_t kind = part != NULL ? type_kind(types, written) : 0;
+    const bool atomic = check_action_kind(types, destination) == BUSTER_TYPE_KIND_ATOMIC || check_action_kind(types, plan->type) == BUSTER_TYPE_KIND_ATOMIC;
     const bool single = part != NULL && part->kind == CHECK_INIT_VALUE && part->bit_offset == 0 && part->bit_width == 0 && part->overload_candidate == 0 &&
-                        (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && part->node < program->stream->count &&
-                        program->input->graph.ops[part->node] == CHECK_OP_CALL && writer->body->label_count == 0 &&
+                        (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && (type_qualifiers(written) & BUSTER_TYPE_VOLATILE) == 0 && !atomic &&
+                        part->node < program->stream->count && program->input->graph.ops[part->node] == CHECK_OP_CALL &&
                         !check_lower_init_volatile_object(writer, plan, destination);
     const TypeId result = single ? check_stream_type(program->stream, part->node) : 0;
     const TypeId canonical = single ? type_strip_aligned(types, result) : 0;
-    const bool inplace = single && type_unqualified(canonical) == type_unqualified(type_strip_aligned(types, destination)) &&
+    const bool inplace = single && type_unqualified(canonical) == type_unqualified(written) &&
                          writer->abi_table->results[type_index(result)].kind == BUSTER_ABI_RESULT_MEMORY &&
                          type_size(types, result) == writer->local_sizes[local] && plan->object_size == writer->local_sizes[local] &&
                          writer->local_alignments[local] >= type_alignment_log2(types, canonical) && local != writer->named_result &&
-                         !check_lower_init_names_destination(writer, declaration) && !check_lower_init_reentry(writer);
+                         !check_lower_init_names_destination(writer, declaration) && !check_lower_init_relabelled(writer, declaration) &&
+                         !check_lower_init_reentry(writer);
     if (inplace)
     {
         writer->token = part->token;
         check_lower_source(writer, part->token);
-        check_lower_instruction(writer, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
         check_lower_call_result(writer, part->node, CHECK_LOWER_RUNTIMES, 0, 0, local);
     }
     return inplace;
