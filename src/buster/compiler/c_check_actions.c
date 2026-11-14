@@ -2519,7 +2519,19 @@ static inline __attribute__((always_inline)) void check_action_member(TypeTable*
             record = type_strip_aligned(table, type_element(table, record));
         }
     }
-    const uint8_t kind = type_kind(table, record);
+    uint8_t kind = type_kind(table, record);
+    if (__builtin_expect(kind == BUSTER_TYPE_KIND_ATOMIC, 0))
+    {
+        // The access still has its member's type. Its runtime-behavior diagnostic is deferred independently
+        // (-Watomic-access), so unevaluated/suppressed accesses and recovery use the same member lookup.
+        const TypeId element = type_strip_aligned(table, type_element(table, record));
+        const uint8_t element_kind = type_kind(table, element);
+        if (element_kind == BUSTER_TYPE_KIND_STRUCT || element_kind == BUSTER_TYPE_KIND_UNION)
+        {
+            record = element;
+            kind = element_kind;
+        }
+    }
     if (result->diagnostic == CHECK_DIAG_NONE && kind != BUSTER_TYPE_KIND_STRUCT && kind != BUSTER_TYPE_KIND_UNION)
     {
         check_action_diagnose(result, CHECK_DIAG_MEMBER, 0);

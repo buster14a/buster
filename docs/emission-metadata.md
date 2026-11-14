@@ -207,9 +207,9 @@ fixed descriptor where they spell its simple shape (pushes, one allocation, its
 release and pops), which the vector writer takes, and otherwise to a row
 program (`UnwindFunction.open == BUSTER_UNWIND_ROWS`), which the exact writer
 writes (`unwind_rows_scalar`). For every fixed shape's rows a row program is the
-fixed writer's bytes exactly: advances are always `DW_CFA_advance_loc4`, a
-state's remembering takes no advance (the rules in force there are those in
-force since the last row), and a CFA's register or offset alone changes by
+fixed writer's bytes exactly: advances use the shortest encoding of each PC
+delta (#1377), a state's remembering takes no advance (the rules in force
+there are those in force since the last row), and a CFA's register or offset alone changes by
 `DW_CFA_def_cfa_register` or `DW_CFA_def_cfa_offset`. With `--verify`, the
 events are proved (`emitted_verify_frames`), and where Tier 0's fixed-frame
 analyzer (`unwind_tier0`, which reads the records alone) takes the function,

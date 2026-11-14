@@ -1518,6 +1518,7 @@ static void parse_scalar_terminator(ParseScalar* parser, uint32_t i, ParseFrame*
 // (type names).
 BUSTER_INLINE void parse_scalar_begin_declaration(ParseFrame* frame, uint32_t names, ParseStep* step)
 {
+    frame->invalid_declarators = 0;
     frame->mode = PARSE_MODE_SPECIFIERS;
     frame->flags = (frame->flags & ~BUSTER_PARSE_FRAME_ITEM_STATE) | BUSTER_PARSE_FRAME_DECLARATION | names;
     step->again = true;
@@ -2511,7 +2512,7 @@ static void parse_scalar_specifiers(ParseScalar* parser, uint32_t i, ParseFrame*
                 parser->diagnostics[before].parameter_type = true;
             }
             step->role = PARSE_ROLE_SPECIFIER;
-            frame->flags |= BUSTER_PARSE_FRAME_TYPE_SEEN | BUSTER_PARSE_FRAME_SPECIFIED;
+            frame->flags |= BUSTER_PARSE_FRAME_TYPE_SEEN | BUSTER_PARSE_FRAME_SPECIFIED | BUSTER_PARSE_FRAME_UNKNOWN_TYPE;
         }
         else if (frame->role == PARSE_ROLE_OPEN_STRUCT && (frame->flags & BUSTER_PARSE_FRAME_SPECIFIED) == 0)
         {
@@ -3021,6 +3022,37 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         // A declarator's group holds no initializer: clang closes the group at the `=` (#1127).
         parse_scalar_close_expected(parser, i, PARSE_KIND_L_PAREN, true);
     }
+    else if (kind == PARSE_KIND_EQUAL && definition_scope &&
+             (frame->flags & (BUSTER_PARSE_FRAME_UNKNOWN_TYPE | BUSTER_PARSE_FRAME_LATER_DECLARATOR)) ==
+                 (BUSTER_PARSE_FRAME_UNKNOWN_TYPE | BUSTER_PARSE_FRAME_LATER_DECLARATOR))
+    {
+        // Clang's first invalid declarator still reads its initializer. A later one only reads its declarator, so
+        // this '=' is where the declaration's ';' is due; a comma without a later initializer is still valid syntax.
+        // For-init declarations leave their ';' to the for parser, whose recovery is different.
+        parse_scalar_unexpected(parser, i, frame);
+        uint32_t tail = i;
+        bool balanced = true;
+        while (balanced && tail < parser->count && parser->kinds[tail] != PARSE_KIND_SEMI)
+        {
+            const uint8_t next = parser->kinds[tail];
+            if (next == PARSE_KIND_L_PAREN || next == PARSE_KIND_L_SQUARE || next == PARSE_KIND_L_BRACE)
+            {
+                tail = parse_scalar_skip_group(parser, tail, &balanced);
+            }
+            else
+            {
+                balanced = !parse_kind_is_closer(next);
+                tail += 1;
+            }
+        }
+        if (balanced && tail < parser->count && frame->invalid_declarators != 0)
+        {
+            parser->error_resumed = true;
+            parser->error_resume_delete = true;
+            parser->error_resume_begin = frame->invalid_declarators - 1;
+            parser->error_resume_end = tail;
+        }
+    }
     else if (kind == PARSE_KIND_EQUAL && !abstract)
     {
         // The name is in scope in its initializer.
@@ -3040,11 +3072,16 @@ static void parse_scalar_after_declarator(ParseScalar* parser, uint32_t i, Parse
         parse_scalar_complete_declarator(parser, declaration, false);
         step->role = parse_frame_comma_role(parser);
         frame->mode = step->role == PARSE_ROLE_COMMA ? PARSE_MODE_DECLARATOR : PARSE_MODE_ITEM;
+        if (step->role == PARSE_ROLE_COMMA && (frame->flags & BUSTER_PARSE_FRAME_UNKNOWN_TYPE) != 0 && frame->invalid_declarators == 0)
+        {
+            frame->invalid_declarators = i + 1;
+        }
         frame->flags &= ~(BUSTER_PARSE_FRAME_POINTER | BUSTER_PARSE_FRAME_AFTER_STAR | BUSTER_PARSE_FRAME_KR);
         frame->flags |= step->role == PARSE_ROLE_COMMA ? BUSTER_PARSE_FRAME_LATER_DECLARATOR : 0;
         if (step->role == PARSE_ROLE_SEPARATOR)
         {
-            frame->flags &= ~(BUSTER_PARSE_FRAME_TYPE_SEEN | BUSTER_PARSE_FRAME_TYPEDEF | BUSTER_PARSE_FRAME_SPECIFIED | BUSTER_PARSE_FRAME_AUTO);
+            frame->flags &= ~(BUSTER_PARSE_FRAME_TYPE_SEEN | BUSTER_PARSE_FRAME_TYPEDEF | BUSTER_PARSE_FRAME_SPECIFIED | BUSTER_PARSE_FRAME_AUTO |
+                              BUSTER_PARSE_FRAME_UNKNOWN_TYPE);
             frame->argument += 1;
         }
         if (group == PARSE_ROLE_OPEN_KEYWORD && frame->keyword == PARSE_KIND_GENERIC)
@@ -3942,11 +3979,16 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
             // The end of an initializer: the next declarator, or the next parameter.
             frame->statement = frame->statement == PARSE_ITEM_DIRECT_INITIALIZER ? PARSE_ITEM_EXPRESSION : frame->statement;
             frame->mode = step->role == PARSE_ROLE_COMMA ? PARSE_MODE_DECLARATOR : PARSE_MODE_ITEM;
+            if (step->role == PARSE_ROLE_COMMA && (flags & BUSTER_PARSE_FRAME_UNKNOWN_TYPE) != 0 && frame->invalid_declarators == 0)
+            {
+                frame->invalid_declarators = i + 1;
+            }
             frame->flags &= ~(BUSTER_PARSE_FRAME_POINTER | BUSTER_PARSE_FRAME_AFTER_STAR | BUSTER_PARSE_FRAME_CONDITIONAL | BUSTER_PARSE_FRAME_KR | BUSTER_PARSE_FRAME_AFTER_WIDTH);
             frame->flags |= step->role == PARSE_ROLE_COMMA ? BUSTER_PARSE_FRAME_LATER_DECLARATOR : 0;
             if (step->role == PARSE_ROLE_SEPARATOR)
             {
-                frame->flags &= ~(BUSTER_PARSE_FRAME_TYPE_SEEN | BUSTER_PARSE_FRAME_TYPEDEF | BUSTER_PARSE_FRAME_SPECIFIED | BUSTER_PARSE_FRAME_AUTO);
+                frame->flags &= ~(BUSTER_PARSE_FRAME_TYPE_SEEN | BUSTER_PARSE_FRAME_TYPEDEF | BUSTER_PARSE_FRAME_SPECIFIED | BUSTER_PARSE_FRAME_AUTO |
+                                  BUSTER_PARSE_FRAME_UNKNOWN_TYPE);
                 frame->argument += 1;
             }
         }
@@ -4790,6 +4832,7 @@ static void parse_scalar_reset(ParseScalar* parser)
     parser->error_resumed = false;
     parser->error_resume_delete = false;
     parser->error_resume_end = 0;
+    parser->error_resume_begin = 0;
     parser->error_resume_colon = false;
     parser->error_probe = false;
 }
@@ -4815,6 +4858,7 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
             .resumed = parser->error_resumed,
             .resume_delete = parser->error_resume_delete,
             .resume_end = parser->error_resume_end,
+            .resume_begin = parser->error_resume_begin,
             .resume_colon = parser->error_resume_colon,
             .probe = parser->error_probe,
         };
@@ -7686,17 +7730,25 @@ static bool parse_brackets_avx512(const uint8_t* codes, const int8_t* deltas, ui
                 _mm512_storeu_si512(depths + block + 16 * q, _mm512_add_epi32(base_vector, relative));
             }
             (void)none;
-            // The openers still open at the block's end, onto open_stack.
-            if (open != 0)
+            // The openers still open at the block's end, onto open_stack, each at its depth before it (#892). A delta is
+            // -1, 0 or 1, so those depths are consecutive from the first's: a later open opener's is at least the depth after
+            // an earlier one, which it never goes below, and the last opener at a depth between them is open too. So the
+            // block's positions of `open`, compressed, are open_stack's entries from the first's depth, a quarter of the
+            // block at a time, each store masked to its quarter's openers. The loop over them a lane at a time ran its
+            // number of openers, mispredicted at most blocks on the 9700X.
+            int8_t before_bytes[64];
+            _mm512_storeu_si512(before_bytes, before);
+            uint32_t* pushed = open_stack + base + before_bytes[open != 0 ? (uint32_t)__builtin_ctzll(open) : 0];
+            for (uint32_t q = 0; q < 4; q += 1)
             {
-                int8_t before_bytes[64];
-                _mm512_storeu_si512(before_bytes, before);
-                while (open != 0)
-                {
-                    const uint32_t lane = (uint32_t)__builtin_ctzll(open);
-                    open &= open - 1;
-                    open_stack[base + before_bytes[lane]] = block + lane;
-                }
+                const __mmask16 quarter = (__mmask16)(open >> (16 * q));
+                const uint32_t opened = (uint32_t)__builtin_popcount(quarter);
+                const __m512i positions = _mm512_add_epi32(block_vector, _mm512_setr_epi32((int)(16 * q), (int)(16 * q + 1), (int)(16 * q + 2), (int)(16 * q + 3),
+                                                                                            (int)(16 * q + 4), (int)(16 * q + 5), (int)(16 * q + 6), (int)(16 * q + 7),
+                                                                                            (int)(16 * q + 8), (int)(16 * q + 9), (int)(16 * q + 10), (int)(16 * q + 11),
+                                                                                            (int)(16 * q + 12), (int)(16 * q + 13), (int)(16 * q + 14), (int)(16 * q + 15)));
+                _mm512_mask_storeu_epi32(pushed, (__mmask16)_bzhi_u32(0xffffu, opened), _mm512_maskz_compress_epi32(quarter, positions));
+                pushed += opened;
             }
             int8_t after_bytes[64];
             _mm512_storeu_si512(after_bytes, after);

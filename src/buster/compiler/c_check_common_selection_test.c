@@ -200,6 +200,433 @@ static void check_test_selection_generate(CheckTestSelections* input, uint64_t* 
     }
 }
 
+// Discover this input's allocation count, then fail every allocation on both paths. A new scratch index must join the
+// failure contract too: false, unchanged marks, and the scratch arena at its original length.
+static bool check_test_selection_exhaustion(const CheckTestSelections* input, Arena* scratch)
+{
+    CheckTestSelectionColumn columns[2] = { 0 };
+    uint8_t* expected = check_test_selection_column(&columns[0], input->node_count);
+    uint8_t* actual = check_test_selection_column(&columns[1], input->node_count);
+    bool same = expected != NULL && actual != NULL;
+    const CheckGraph graph = {
+        .ops = input->ops,
+        .tokens = input->tokens,
+        .operand0 = input->operands,
+        .count = input->node_count,
+    };
+    const CheckCommonResources saved = check_common_resources;
+    const uint64_t length = scratch->length;
+    for (uint32_t scalar = 0; same && scalar < 2; scalar += 1)
+    {
+        Parser parser = { 0 };
+        parser.options.scalar = scalar != 0;
+        parser.tokens.kinds = input->kinds;
+        parser.tokens.count = input->token_count;
+        parser.tree.parents = input->parents;
+        parser.tree.depths = input->depths;
+        memset(expected, 0x33, input->node_count);
+        check_common_resources = (CheckCommonResources){ .fail_at = UINT32_MAX };
+        same = check_common_unselected_roots(&graph, &parser, input->roots, expected, 1, scratch) && scratch->length == length;
+        const uint32_t allocations = check_common_resources.pushes;
+        same &= allocations != 0;
+        for (uint32_t fail = 0; same && fail <= allocations; fail += 1)
+        {
+            memset(actual, 0x33, input->node_count);
+            check_common_resources = (CheckCommonResources){ .fail_at = fail };
+            const bool returned = check_common_unselected_roots(&graph, &parser, input->roots, actual, 1, scratch);
+            check_common_resources.fail_at = UINT32_MAX;
+            same = returned == (fail == allocations) && scratch->length == length;
+            for (uint32_t node = 0; node < input->node_count; node += 1)
+            {
+                same &= actual[node] == (fail == allocations ? expected[node] : 0x33);
+            }
+        }
+    }
+    check_common_resources = saved;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(columns); i += 1)
+    {
+        check_test_selection_unmap(&columns[i]);
+    }
+    return same;
+}
+
+// Nested selections put a complete inner selection in either the chosen or the unchosen arm. Each arm also has an
+// independent statement-expression root at its value's token. The expected marks come from those choices alone:
+// controls and unchosen arms are marked; an outer unchosen arm overrides every inner choice (#2023, #1341).
+static void check_test_selection_nested(CheckTest* test, Arena* scratch)
+{
+    enum
+    {
+        NESTED_LIMIT = 257,
+        NESTED_TOKENS = NESTED_LIMIT * 11 + 1,
+        NESTED_NODES = NESTED_LIMIT * 7 + 2,
+    };
+    uint8_t kinds[NESTED_TOKENS];
+    uint32_t parents[NESTED_TOKENS];
+    uint32_t depths[NESTED_TOKENS];
+    CheckOp ops[NESTED_NODES];
+    uint32_t tokens[NESTED_NODES];
+    uint32_t operands[NESTED_NODES];
+    uint8_t roots[NESTED_NODES];
+    uint8_t expected[NESTED_NODES];
+    uint8_t actual[NESTED_NODES];
+    CheckCommonSelection records[NESTED_LIMIT];
+    static const uint32_t sizes[] = {
+        1,
+        65,
+        NESTED_LIMIT,
+    };
+    uint32_t changed = 0;
+    for (uint32_t size = 0; size < BUSTER_ARRAY_LENGTH(sizes); size += 1)
+    {
+        const uint32_t selections = sizes[size];
+        const uint32_t token_count = (selections + 1) / 2 * 11 + selections / 2 * 7 + 1;
+        const uint32_t node_count = selections * 7 + 2;
+        CheckTestSelections input = {
+            .kinds = kinds,
+            .parents = parents,
+            .depths = depths,
+            .token_count = token_count,
+            .ops = ops,
+            .tokens = tokens,
+            .operands = operands,
+            .roots = roots,
+            .node_count = node_count,
+        };
+        for (uint32_t shape = 0; shape < 3; shape += 1)
+        {
+            for (uint32_t at = 0; at < token_count; at += 1)
+            {
+                kinds[at] = PARSE_KIND_IDENTIFIER;
+                parents[at] = BUSTER_CHECK_NONE;
+                depths[at] = 0;
+            }
+            for (uint32_t node = 0; node < node_count; node += 1)
+            {
+                ops[node] = CHECK_OP_VALUE;
+                tokens[node] = BUSTER_CHECK_NONE;
+                operands[node] = BUSTER_CHECK_NONE;
+                roots[node] = 0;
+                expected[node] = 0;
+            }
+            uint32_t first = 0;
+            uint32_t end = token_count;
+            uint32_t outer_close = BUSTER_CHECK_NONE;
+            bool outer_chosen = true;
+            bool unselected = false;
+            for (uint32_t level = 0; level < selections; level += 1)
+            {
+                const bool generic = (level & 1) == 0;
+                const bool chosen = shape == 0 || (shape == 2 && (level & 1) == 0);
+                const uint32_t prefix = generic ? (chosen ? 6 : 10) : (chosen ? 4 : 6);
+                const uint32_t suffix = chosen ? (generic ? 5 : 3) : 1;
+                const uint32_t close = end - 1;
+                const uint32_t simple = chosen ? close - 1 : first + (generic ? 6 : 4);
+                for (uint32_t at = first; at < first + prefix; at += 1)
+                {
+                    parents[at] = close;
+                    depths[at] = level + 1;
+                }
+                for (uint32_t at = end - suffix; at < end; at += 1)
+                {
+                    parents[at] = close;
+                    depths[at] = level + 1;
+                }
+                kinds[first] = generic ? PARSE_KIND_GENERIC : PARSE_KIND_TYPE_ARGUMENT;
+                kinds[first + 1] = PARSE_KIND_L_PAREN;
+                kinds[first + 3] = PARSE_KIND_COMMA;
+                kinds[close] = PARSE_KIND_R_PAREN;
+                depths[first] = level;
+                depths[first + 1] = level;
+                depths[close] = level;
+                parents[close] = outer_close;
+                if (generic)
+                {
+                    kinds[first + 5] = PARSE_KIND_COLON;
+                    const uint32_t comma = chosen ? close - 4 : first + 7;
+                    kinds[comma] = PARSE_KIND_COMMA;
+                    kinds[comma + 1] = PARSE_KIND_DEFAULT;
+                    kinds[comma + 2] = PARSE_KIND_COLON;
+                }
+                else
+                {
+                    kinds[chosen ? close - 2 : first + 5] = PARSE_KIND_COMMA;
+                }
+                // Postorder: the innermost value is node 0 and its statement-expression probe node 1; every level
+                // adds its control, simple arm, both probes, two conversions at its `)`, and the selection itself.
+                const uint32_t node = 2 + (selections - 1 - level) * 7;
+                const uint32_t child = level + 1 < selections ? node - 1 : 0;
+                tokens[node] = first + 2;
+                roots[node] = 1;
+                expected[node] = 1;
+                tokens[node + 1] = simple;
+                roots[node + 1] = chosen;
+                expected[node + 1] = chosen;
+                tokens[node + 2] = simple;
+                roots[node + 2] = 1;
+                expected[node + 2] = chosen || unselected;
+                tokens[node + 3] = end - suffix - 1;
+                roots[node + 3] = 1;
+                expected[node + 3] = !chosen || unselected;
+                for (uint32_t convert = 4; convert < 6; convert += 1)
+                {
+                    ops[node + convert] = CHECK_OP_CONVERT;
+                    tokens[node + convert] = close;
+                    operands[node + convert] = convert == 4 ? (chosen ? child : node + 1) : node + 4;
+                }
+                ops[node + 6] = CHECK_OP_SELECT;
+                tokens[node + 6] = close;
+                operands[node + 6] = node + 5;
+                roots[node + 6] = level == 0 || !outer_chosen;
+                expected[node + 6] = roots[node + 6] != 0 && unselected;
+                first += prefix;
+                end -= suffix;
+                outer_close = close;
+                outer_chosen = chosen;
+                unselected |= !chosen;
+            }
+            parents[first] = outer_close;
+            depths[first] = selections;
+            tokens[0] = first;
+            tokens[1] = first;
+            roots[0] = !outer_chosen;
+            roots[1] = 1;
+            expected[0] = roots[0] != 0 && unselected;
+            expected[1] = unselected;
+            for (uint32_t reverse = 0; reverse < 2; reverse += 1)
+            {
+                const CheckGraph graph = {
+                    .ops = ops,
+                    .tokens = tokens,
+                    .operand0 = operands,
+                    .count = node_count,
+                };
+                bool same = first + 1 == end;
+                for (uint32_t scalar = 0; same && scalar < 2; scalar += 1)
+                {
+                    Parser parser = { 0 };
+                    parser.options.scalar = scalar != 0;
+                    parser.tokens.kinds = kinds;
+                    parser.tokens.count = token_count;
+                    parser.tree.parents = parents;
+                    parser.tree.depths = depths;
+                    memset(actual, 0, node_count);
+                    const uint64_t length = scratch->length;
+                    same = check_common_unselected_roots(&graph, &parser, roots, actual, 1, scratch) && scratch->length == length &&
+                           memcmp(actual, expected, node_count) == 0;
+                    uint32_t record_count = 0;
+                    for (uint32_t node = 0; node < node_count; node += 1)
+                    {
+                        if (ops[node] == CHECK_OP_SELECT)
+                        {
+                            records[record_count++] = (CheckCommonSelection){
+                                .close = tokens[node],
+                                .node = node,
+                            };
+                        }
+                    }
+                    // Count actual token work, not elapsed time. Reversing the graph also reverses these queries; the
+                    // indexed continuation must stay bounded and return the walk's spans in either order.
+                    CheckCommonSelectionWork work = { 0 };
+                    const bool vector = !BUSTER_SCALAR_PATH(parser.options.scalar);
+                    same &= check_common_chosen_spans(&graph, &parser, records, record_count, vector, scratch, &work) && scratch->length == length;
+                    same &= record_count == selections && work.walked <= (uint64_t)token_count * 2 && work.indexed <= (uint64_t)token_count * 6 + 2 &&
+                            work.queries <= selections && (shape != 0 || selections == 1 || work.queries != 0);
+                    for (uint32_t record = 0; record < record_count; record += 1)
+                    {
+                        const CheckCommonRange span = check_common_chosen_span(&graph, &parser, records[record].node);
+                        same &= records[record].chosen.first == span.first && records[record].chosen.end == span.end;
+                    }
+                }
+                same &= check_test_selection_case(&input, scratch, &changed);
+                char label[128];
+                snprintf(label, sizeof(label), "unselected roots: %u nested selections, shape %u, reversed %u", selections, shape, reverse);
+                check_test_expect(test, same, label);
+                if (reverse == 0)
+                {
+                    for (uint32_t node = 0; node < node_count / 2; node += 1)
+                    {
+                        const uint32_t other = node_count - 1 - node;
+                        const CheckOp op = ops[node];
+                        ops[node] = ops[other];
+                        ops[other] = op;
+                        const uint32_t token = tokens[node];
+                        tokens[node] = tokens[other];
+                        tokens[other] = token;
+                        const uint32_t operand = operands[node];
+                        operands[node] = operands[other];
+                        operands[other] = operand;
+                        const uint8_t root = roots[node];
+                        roots[node] = roots[other];
+                        roots[other] = root;
+                        const uint8_t mark = expected[node];
+                        expected[node] = expected[other];
+                        expected[other] = mark;
+                    }
+                    for (uint32_t node = 0; node < node_count; node += 1)
+                    {
+                        const uint32_t operand = operands[node];
+                        operands[node] = operand < node_count ? node_count - 1 - operand : operand;
+                    }
+                }
+            }
+            if (selections == NESTED_LIMIT && shape == 0)
+            {
+                check_test_expect(test, check_test_selection_exhaustion(&input, scratch), "unselected roots: nested selection scratch exhaustion");
+                // A parser-shaped chain becomes an arbitrary depth column: jumps, a very large depth, and a closing
+                // token whose +1 depth wraps. The independent walk defines these synthetic graphs too.
+                for (uint32_t at = 0; at < token_count; at += 1)
+                {
+                    depths[at] *= 3;
+                }
+                depths[0] = UINT32_MAX - 1;
+                depths[token_count - 1] = UINT32_MAX;
+                check_test_expect(test, check_test_selection_case(&input, scratch, &changed), "unselected roots: nested selections with arbitrary depth jumps");
+            }
+        }
+    }
+}
+
+// Two selections at one closing token, which only a synthetic graph has. A root is unselected if either selection
+// excludes its arm: equal choices preserve that arm, different choices preserve neither. Conversions at the same
+// closer may hide the choice, or form a cycle whose bounded walk has no chosen span.
+static void check_test_selection_shared_close(CheckTest* test, Arena* scratch)
+{
+    enum
+    {
+        N_CONTROL,
+        N_A,
+        N_B,
+        N_A_CONVERT,
+        N_B_CONVERT,
+        N_A_SELECT,
+        N_B_SELECT,
+        N_A_ROOT,
+        N_B_ROOT,
+        NODES,
+    };
+    // __builtin_choose_expr(c, a, b).
+    uint8_t kinds[] = {
+        PARSE_KIND_TYPE_ARGUMENT,
+        PARSE_KIND_L_PAREN,
+        PARSE_KIND_IDENTIFIER,
+        PARSE_KIND_COMMA,
+        PARSE_KIND_IDENTIFIER,
+        PARSE_KIND_COMMA,
+        PARSE_KIND_IDENTIFIER,
+        PARSE_KIND_R_PAREN,
+    };
+    uint32_t parents[BUSTER_ARRAY_LENGTH(kinds)];
+    uint32_t depths[BUSTER_ARRAY_LENGTH(kinds)];
+    for (uint32_t at = 0; at < BUSTER_ARRAY_LENGTH(kinds); at += 1)
+    {
+        parents[at] = at < 7 ? 7 : BUSTER_CHECK_NONE;
+        depths[at] = at > 1 && at < 7 ? 1 : 0;
+    }
+    CheckOp ops[NODES];
+    uint32_t tokens[NODES];
+    uint32_t operands[NODES];
+    uint8_t roots[NODES];
+    for (uint32_t node = 0; node < NODES; node += 1)
+    {
+        ops[node] = node == N_A_CONVERT || node == N_B_CONVERT ? CHECK_OP_CONVERT :
+                    node == N_A_SELECT || node == N_B_SELECT ? CHECK_OP_SELECT : CHECK_OP_VALUE;
+        tokens[node] = node == N_CONTROL ? 2 : node == N_A || node == N_A_ROOT ? 4 : node == N_B || node == N_B_ROOT ? 6 : 7;
+        operands[node] = BUSTER_CHECK_NONE;
+        roots[node] = node == N_CONTROL || node == N_A_SELECT || node == N_B_SELECT || node == N_A_ROOT || node == N_B_ROOT;
+    }
+    operands[N_A_SELECT] = N_A_CONVERT;
+    operands[N_B_SELECT] = N_B_CONVERT;
+    CheckTestSelections input = {
+        .kinds = kinds,
+        .parents = parents,
+        .depths = depths,
+        .token_count = BUSTER_ARRAY_LENGTH(kinds),
+        .ops = ops,
+        .tokens = tokens,
+        .operands = operands,
+        .roots = roots,
+        .node_count = NODES,
+    };
+    const CheckGraph graph = {
+        .ops = ops,
+        .tokens = tokens,
+        .operand0 = operands,
+        .count = NODES,
+    };
+    uint32_t changed = 0;
+    for (uint32_t shape = 0; shape < 4; shape += 1)
+    {
+        operands[N_A_CONVERT] = shape == 3 ? N_B_CONVERT : N_A;
+        operands[N_B_CONVERT] = shape == 3 ? N_A_CONVERT : shape == 0 ? N_A : N_B;
+        tokens[N_B] = shape == 2 ? 7 : 6;
+        bool same = true;
+        for (uint32_t scalar = 0; same && scalar < 2; scalar += 1)
+        {
+            Parser parser = { 0 };
+            parser.options.scalar = scalar != 0;
+            parser.tokens.kinds = kinds;
+            parser.tokens.count = BUSTER_ARRAY_LENGTH(kinds);
+            parser.tree.parents = parents;
+            parser.tree.depths = depths;
+            uint8_t marks[NODES] = { 0 };
+            const uint64_t length = scratch->length;
+            same = check_common_unselected_roots(&graph, &parser, roots, marks, 1, scratch) && scratch->length == length;
+            for (uint32_t node = 0; node < NODES; node += 1)
+            {
+                const bool expected = node == N_CONTROL || node == N_B_ROOT || (shape != 0 && node == N_A_ROOT);
+                same &= marks[node] == expected;
+            }
+        }
+        same &= check_test_selection_case(&input, scratch, &changed);
+        check_test_expect(test, same, "unselected roots: shared closing token, converted, folded or cyclic choices");
+    }
+}
+
+// Nested intervals, separated clusters, and short ranges across word boundaries. The oracle tests each token against
+// every interval; the production pass may touch each covered word only once plus one boundary word per interval.
+static void check_test_selection_ranges(CheckTest* test)
+{
+    enum
+    {
+        RANGES = 257,
+        TOKENS = 4099,
+        WORDS = (TOKENS + 63) / 64,
+    };
+    uint64_t ranges[RANGES];
+    CheckTestSelectionColumn column = { 0 };
+    uint64_t* bits = check_test_selection_column(&column, WORDS * sizeof(uint64_t));
+    bool same = bits != NULL;
+    for (uint32_t shape = 0; same && shape < 4; shape += 1)
+    {
+        const uint32_t count = shape == 0 ? 0 : RANGES;
+        uint32_t end = 0;
+        memset(bits, 0, WORDS * sizeof(uint64_t));
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t first = shape == 1 ? i : shape == 2 ? i / 65 * 1024 + i % 65 : i + 1 == count ? TOKENS - 2 : i * 15;
+            const uint32_t last = shape == 1 ? TOKENS - i : shape == 2 ? i / 65 * 1024 + 257 - i % 65 :
+                                  i + 1 == count ? TOKENS : first + 1 + (i & 3);
+            ranges[i] = (uint64_t)first << 32 | last;
+            end = last > end ? last : end;
+        }
+        uint32_t covered = 0;
+        const uint64_t touched = check_common_merge_ranges(bits, count != 0 ? ranges : NULL, count, &covered);
+        same &= covered == end && touched <= ((uint64_t)end + 63) / 64 + count;
+        for (uint32_t at = 0; at < WORDS * 64; at += 1)
+        {
+            bool expected = false;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                expected |= at >= (uint32_t)(ranges[i] >> 32) && at < (uint32_t)ranges[i];
+            }
+            same &= ((bits[at >> 6] >> (at & 63)) & 1) == expected;
+        }
+    }
+    check_test_expect(test, same, "unselected roots: merged interval bits and bounded word writes, including gaps and tails");
+    check_test_selection_unmap(&column);
+}
+
 static void check_test_driver_unselected_roots(CheckTest* test)
 {
     Arena scratch = arena_reserve(UINT64_C(1) << 26);
@@ -404,30 +831,10 @@ static void check_test_driver_unselected_roots(CheckTest* test)
     roots[N_F] = 1;
     check_test_expect(test, check_test_selection_case(&fixture, &scratch, &changed), "unselected roots: a selected root takes the walk");
     roots[N_F] = 0;
-    // Each scratch allocation failed in turn: the bits, the selections' keys and their sort's temporary, then the ranges.
-    // The fifth count succeeds.
-    bool exhausted = true;
-    for (uint32_t fail = 0; fail < 5; fail += 1)
-    {
-        Parser parser = { 0 };
-        parser.tokens.kinds = kinds;
-        parser.tokens.count = FIXTURE_TOKENS;
-        parser.tree.parents = parents;
-        parser.tree.depths = depths;
-        uint8_t marks[FIXTURE_NODES];
-        memset(marks, 0x33, sizeof(marks));
-        check_common_resources.fail_at = fail;
-        check_common_resources.pushes = 0;
-        const bool returned = check_common_unselected_roots(&graph, &parser, roots, marks, 1, &scratch);
-        check_common_resources.fail_at = UINT32_MAX;
-        bool kept = true;
-        for (uint32_t node = 0; node < FIXTURE_NODES; node += 1)
-        {
-            kept &= marks[node] == 0x33 || (fail == 4 && marks[node] == 1);
-        }
-        exhausted &= kept && returned == (fail == 4);
-    }
-    check_test_expect(test, exhausted, "unselected roots: each failed scratch allocation returns false and leaves the marks");
+    check_test_expect(test, check_test_selection_exhaustion(&fixture, &scratch), "unselected roots: each failed scratch allocation returns false and leaves the marks");
+    check_test_selection_ranges(test);
+    check_test_selection_nested(test, &scratch);
+    check_test_selection_shared_close(test, &scratch);
     // Random trees and graphs, each size across the 64-token and 16-node blocks, with and without selected roots.
     uint64_t state = 1341;
     bool same = true;

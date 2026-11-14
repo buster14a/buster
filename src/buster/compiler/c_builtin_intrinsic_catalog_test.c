@@ -323,6 +323,70 @@ static void builtin_intrinsic_catalog_test_names(BuiltinIntrinsicCatalogTest* te
         builtin_intrinsic_lookup_batch(NULL, NULL, 0, scalar != 0);
     }
     builtin_intrinsic_catalog_test_expect(test, true, "both empty batch paths permit null slices");
+    bool table = builtin_intrinsic_table_ready || builtin_intrinsic_table_initialize();
+    for (uint32_t i = 0; table && i < BUSTER_ARRAY_LENGTH(names); i += 1)
+    {
+        const bool bounded = names[i].name != NULL || names[i].length == 0;
+        table = !bounded || builtin_intrinsic_table_lookup(names[i].name, names[i].length) == builtin_intrinsic_lookup(names[i].name, names[i].length);
+    }
+    builtin_intrinsic_catalog_test_expect(test, table, "the exact table answers the bounded slices, embedded NUL and unsigned bytes as the binary search does");
+}
+
+// The exact table (#2654) against the binary search: every row's name, each one's near misses (one byte longer, one
+// shorter, its last byte changed, its first byte changed), names of no row and the bounded slices of
+// builtin_intrinsic_catalog_test_names; a second build gives the same slots, and no probe is long.
+static void builtin_intrinsic_catalog_test_table(BuiltinIntrinsicCatalogTest* test)
+{
+    const bool ready = builtin_intrinsic_table_ready || builtin_intrinsic_table_initialize();
+    builtin_intrinsic_catalog_test_expect(test, ready, "the exact table is made");
+    bool rows = ready;
+    bool misses = ready;
+    for (uint32_t i = 0; ready && i < BUSTER_BUILTIN_INTRINSIC_COUNT; i += 1)
+    {
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_at(i);
+        char near[128];
+        const uint32_t length = info->name_length < sizeof(near) - 1 ? info->name_length : (uint32_t)sizeof(near) - 1;
+        memcpy(near, info->name, length);
+        rows &= builtin_intrinsic_table_lookup(info->name, info->name_length) == info;
+        near[length] = 'x';
+        misses &= builtin_intrinsic_table_lookup(near, length + 1) == builtin_intrinsic_lookup(near, length + 1);
+        misses &= builtin_intrinsic_table_lookup(near, length - 1) == builtin_intrinsic_lookup(near, length - 1);
+        near[length - 1] ^= 0x20;
+        misses &= builtin_intrinsic_table_lookup(near, length) == builtin_intrinsic_lookup(near, length);
+        near[length - 1] ^= 0x20;
+        near[0] ^= 0x01;
+        misses &= builtin_intrinsic_table_lookup(near, length) == builtin_intrinsic_lookup(near, length);
+    }
+    builtin_intrinsic_catalog_test_expect(test, rows, "the exact table finds every catalogue row by its name");
+    builtin_intrinsic_catalog_test_expect(test, misses, "the exact table answers each row's near misses as the binary search does");
+    const char* others[] = { "memcpy", "printf", "x", "ab", "abc", "abcd", "__builtin", "__builtin_", "__builtin_ia32_", "sqlite3_free", "" };
+    bool equal = ready;
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(others); i += 1)
+    {
+        const uint32_t length = (uint32_t)strlen(others[i]);
+        equal &= builtin_intrinsic_table_lookup(others[i], length) == builtin_intrinsic_lookup(others[i], length);
+    }
+    equal &= builtin_intrinsic_table_lookup(NULL, 0) == NULL && builtin_intrinsic_table_lookup(NULL, UINT32_MAX) == NULL && builtin_intrinsic_table_lookup("memcpy", 0) == NULL;
+    builtin_intrinsic_catalog_test_expect(test, equal, "the exact table answers library names, short names and empty slices as the binary search does");
+    uint32_t longest = 0;
+    uint32_t run = 0;
+    for (uint32_t slot = 0; ready && slot < 2 * BUSTER_BUILTIN_INTRINSIC_TABLE_SLOTS; slot += 1)
+    {
+        run = builtin_intrinsic_table[slot % BUSTER_BUILTIN_INTRINSIC_TABLE_SLOTS] != 0 ? run + 1 : 0;
+        longest = run > longest ? run : longest;
+    }
+    builtin_intrinsic_catalog_test_expect(test, longest < 64, "no run of full slots in the exact table is 64 long");
+    uint32_t* first = ready ? malloc(sizeof(builtin_intrinsic_table)) : NULL;
+    if (first != NULL)
+    {
+        memcpy(first, builtin_intrinsic_table, sizeof(builtin_intrinsic_table));
+        memset(builtin_intrinsic_table, 0, sizeof(builtin_intrinsic_table));
+        builtin_intrinsic_table_ready = false;
+        const bool again = builtin_intrinsic_table_initialize();
+        builtin_intrinsic_catalog_test_expect(test, again && memcmp(first, builtin_intrinsic_table, sizeof(builtin_intrinsic_table)) == 0,
+                                              "a second build of the exact table gives the same slots");
+    }
+    free(first);
 }
 
 static void builtin_intrinsic_catalog_test_batches(BuiltinIntrinsicCatalogTest* test)
@@ -429,6 +493,9 @@ static void builtin_intrinsic_catalog_test_pages(BuiltinIntrinsicCatalogTest* te
                 builtin_intrinsic_lookup_batch(&input, &output, 1, false);
                 builtin_intrinsic_catalog_test_expect(test, output == info && builtin_intrinsic_lookup(name, info->name_length) == info,
                     "every unterminated table name ends exactly at a guard page for scalar and SIMD search");
+                builtin_intrinsic_catalog_test_expect(test, (builtin_intrinsic_table_ready || builtin_intrinsic_table_initialize()) &&
+                    builtin_intrinsic_table_lookup(name, info->name_length) == info,
+                    "every unterminated table name ends exactly at a guard page for the exact table");
             }
         }
         for (uint32_t i = 0; i < BUSTER_BUILTIN_INTRINSIC_OWN_MAIN_COUNT; i += 1)
@@ -543,6 +610,7 @@ static int test_builtin_intrinsic_catalog(int argc, char** argv)
         builtin_intrinsic_catalog_test_inventory(&test);
         builtin_intrinsic_catalog_test_own_main(&test);
         builtin_intrinsic_catalog_test_names(&test);
+        builtin_intrinsic_catalog_test_table(&test);
         builtin_intrinsic_catalog_test_batches(&test);
         builtin_intrinsic_catalog_test_pages(&test);
     }

@@ -145,6 +145,9 @@ struct IrSimdTypedOperation
     // `immediate`; and a truncating conversion of lane 0 (ir_simd_typed_cvtt), the same.
     bool fround;
     bool cvtt;
+    // A byte shuffle by an immediate (#1840, ir_simd_typed_shuffle_immediate): its kind (BUSTER_IR_SHUFFLE_IMMEDIATE_*)
+    // plus one, 0 for any other row, its immediate in `immediate`: the IR's shuffle of the vector by that kind's indices.
+    uint8_t shuffle_immediate;
 };
 
 // The conversions' and the scalar shifts' forms (#1840), shared with Tier 1's selection.
@@ -1170,6 +1173,61 @@ static IrSimdTypedStatus ir_simd_typed_permute(const Tier0Operation* source, uin
     return status;
 }
 
+// The byte shuffles by an immediate (#1840): a row of one vector of 16, 32 or 64 bytes into a vector of its width, one
+// record of an ir_simd_shuffle_immediate_forms form at that width (or the front end's 32-byte vpshufd, AVX2's VEX form),
+// register-direct and undecorated, of VECTOR(0) (rm) into VECTOR(0)'s register (reg, or vvvv for vpslldq and vpsrldq):
+// the builtins' __builtin_ia32_pshufd, pshufd256 and pshufd512, pshuflw and pshufhw, and pslldqi and psrldqi's byte
+// shifts. An imm8 is its low 8 bits. It is the IR's shuffle of the vector by the kind's indices at that immediate in each
+// 16-byte lane, a constant; Tier 1 matches it back to the EVEX form (tier1_select_shuffle_immediate). Its features are
+// that form's (BW for the words' shuffles and the byte shifts), AVX512F's, VL's below 64 bytes and the vectors' moves;
+// otherwise, and for any other form or field, it stays a machine row.
+static IrSimdTypedStatus ir_simd_typed_shuffle_immediate(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint32_t bytes = source->result_bytes;
+    const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+    const X86Instruction* record = &source->records[0];
+    const bool admitted = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 16 || bytes == 32 || bytes == 64) && source->record_count == 1 &&
+                          source->operand_count == 1 && source->operand_classes[0] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[0] == bytes &&
+                          record->immediate >= -128 && record->immediate <= 255;
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    for (uint32_t kind = 0; admitted && kind < BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS; kind += 1)
+    {
+        const uint16_t form = ir_simd_shuffle_immediate_forms[kind][width];
+        const bool shift = kind == BUSTER_IR_SHUFFLE_IMMEDIATE_LEFT_BYTES || kind == BUSTER_IR_SHUFFLE_IMMEDIATE_RIGHT_BYTES;
+        const X86Instruction expected = {
+            .form = form,
+            .reg = shift ? 0 : v0,
+            .vvvv = shift ? v0 : 0,
+            .rm = v0,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .immediate = record->immediate,
+        };
+        X86Instruction vex = expected;
+        vex.form = X86_FORM_VPSHUFD_Y_YM256_IMM8;
+        const bool matched = memcmp(record, &expected, sizeof(expected)) == 0 ||
+                             (kind == BUSTER_IR_SHUFFLE_IMMEDIATE_DWORDS && width == 1 && memcmp(record, &vex, sizeof(vex)) == 0);
+        if (matched)
+        {
+            candidate.shuffle_immediate = (uint8_t)(kind + 1);
+            candidate.immediate = (uint8_t)((uint32_t)record->immediate & 0xff);
+            candidate.required_features = ir_typed_vector_moves(bytes, target_features) | BUSTER_X86_FEATURE(AVX512F) | (width < 2 ? BUSTER_X86_FEATURE(AVX512VL) : 0) |
+                                          (x86_target_requirement(form) & ~BUSTER_X86_TARGET_KNOWN);
+        }
+    }
+    const IrSimdTypedStatus status = candidate.shuffle_immediate != 0 && (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK :
+                                                                                                                                                         IR_SIMD_TYPED_UNSUPPORTED;
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        candidate.operand_count = 1;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+    }
+    return status;
+}
+
 // The permutes of two tables (#1840): a row of one record of a vpermt2b to vpermt2q form at the result's width (16, 32 or
 // 64 bytes, ir_simd_permute2_forms), register-direct and undecorated, whose destination is VECTOR(0)'s register, the
 // first table (reg), its indices a vector of the result's width (vvvv) and its second table another vector (rm): the
@@ -2104,12 +2162,13 @@ static IrSimdTypedStatus ir_simd_typed_cvtt(const Tier0Operation* source, uint64
 }
 
 // A row's decoding: the bit builtins', the signed overflow builtins', masks, scalar intrinsics, lane operations,
-// comparisons into a mask alone, masked moves' selects, undefined vectors, width changes, permutes, conversions and
-// shifts by a scalar count, lane operations, masks to vectors and back, masked loads and stores, one lane's moves,
-// reductions, the lanes' unary operations, floating operations at their own rounding and truncating conversions of
-// lane 0 (#1840), then exact scalar splats; other admitted forms stay machine rows. A semantic match
-// whose target lacks a required feature stays refused, but a comparison into a mask alone, a select, an undefined
-// vector, a width change, a permute, a conversion or a shift, whose machine row a target may still run, stays one.
+// comparisons into a mask alone, masked moves' selects, undefined vectors, width changes, permutes, byte shuffles by an
+// immediate, conversions and shifts by a scalar count, lane operations, masks to vectors and back, masked loads and
+// stores, one lane's moves, reductions, the lanes' unary operations, floating operations at their own rounding and
+// truncating conversions of lane 0 (#1840), then exact scalar splats; other admitted forms stay machine rows. A semantic
+// match whose target lacks a required feature stays refused, but a comparison into a mask alone, a select, an undefined
+// vector, a width change, a permute, a byte shuffle by an immediate, a conversion or a shift, whose machine row a target
+// may still run, stays one.
 static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
 {
     const bool masks = source != NULL && source->operand_count != 0 && source->operand_classes[0] == BUSTER_TYPED_CLASS_MASK && tier0_class_integer(source->result_class);
@@ -2149,6 +2208,10 @@ static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_
     if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
     {
         status = ir_simd_typed_permute(source, target_features, result);
+    }
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
+    {
+        status = ir_simd_typed_shuffle_immediate(source, target_features, result);
     }
     if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
     {

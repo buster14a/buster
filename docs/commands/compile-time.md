@@ -26,3 +26,13 @@ requirements. [Command index](README.md).
   lowering's coverage; the 9700X job runs it on
   `sqlite3.c` against tcc, clang -O0 and gcc -O0 (those two unpinned, their versions printed), with perf's counters and profile, where `changes`' `compile_time` says. [The compile-time
   guide](../../docs/compile-time.md) has the attribution. `test-checker-driver --executable` checks both.
+
+With `-flazy-system-headers --time-stages`, each planned translation unit also
+prints `time-lazy planner=eager|tree|bindings tokens=N scalar-replay-tokens=N
+bodies=N selected=N deferred=N references=N retained-bytes=N` (#1364).
+`eager` proves the existing opaque-reference policy requires every body and
+allocates no plan. `tree` certifies the completed syntax tree without a second grammar traversal;
+`bindings` is the exact fallback for inputs the tree certificate cannot prove.
+The planner's time remains part of `check-input`. Compare lazy and eager whole
+processes on the approved 9700X, retaining these coverage counters alongside
+the timings; do not infer a speedup solely from a zero replay-token count.

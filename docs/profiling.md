@@ -8,6 +8,10 @@ method, so that the next stage can be tuned the same way. The commands are `buil
 
 ## The rules
 
+- **Measure Release.** `./build.sh` builds Develop, the edit loop's configuration, whose code runs 1% to 2% slower and
+  which leaves the benchmark units out ([the build guide](commands/build.md#configurations)); every timing, benchmark
+  and `perf` run is of `./build.sh --config Release`'s executable, in each tree an `ab` or `time-runs` compares.
+  `lexer-variant` and `shifts` build Release unless told otherwise.
 - **Decide on the 9700X.** Zen 5 runs 512-bit operations on four full-width pipes, so Zen 4's numbers mislead (merge-masked
   loads and `vpcompressb` to memory, for two, cost very differently), and models of the CPU from instruction tables,
   llvm-mca among them, are well off (x86-64-encoder.md, "Zen 5's costs, measured"). A laptop is for building,
@@ -168,7 +172,7 @@ The noise sets which comparison to use.
   ```sh
   mkdir -p ../offsets/mine
   for n in 0 16 32 48 1040 2080 3120 4032; do
-      BUSTER_BUILD_DEFINES="-DBUSTER_CHECKER_OFFSET=$n" ./build.sh && cp build/compiler "../offsets/mine/compiler-$n"
+      BUSTER_BUILD_DEFINES="-DBUSTER_CHECKER_OFFSET=$n" ./build.sh --config Release && cp build/compiler "../offsets/mine/compiler-$n"
   done
   ```
 

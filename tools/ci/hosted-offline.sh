@@ -4,7 +4,8 @@
 #
 # The hosted jobs' external inputs besides the release inputs (#2275; docs/hosted-toolchain.md, "Offline inputs"): the
 # apt packages setup-hosted.sh installs, the baseline runtime's .debs (setup-baseline-runtime.sh), the frozen corpus
-# (fetch-corpus.sh), and c-testsuite's and SQLite's pinned commits (fetch-c-testsuite.sh, fetch-sqlite.sh). The
+# (fetch-corpus.sh), c-testsuite's and SQLite's pinned commits (fetch-c-testsuite.sh, fetch-sqlite.sh), and Lua's release
+# archive (this script's lua command). The
 # preparation job acquires them once per run into a bundle, ROOT, which every hosted job then reads with no network:
 #
 #   ROOT/apt/MANIFEST, ROOT/apt/*.deb  The .debs that apt-get --download-only fetched for the package list on this
@@ -27,6 +28,8 @@
 #   hosted-offline.sh apt-install ROOT setup-hosted.sh's install: the manifest's .debs by apt-get --no-download, resolved
 #                                      against the installed packages alone (no package lists), then every recorded
 #                                      version compared with dpkg's. The step summary lists them.
+#   hosted-offline.sh lua DIRECTORY    Reads the pinned Lua archive through cached-download.sh and extracts its source
+#                                      tree into DIRECTORY; hosted consumers require its verified offline copy.
 #
 # A consumer never reaches the network for these inputs: a missing file or a hash that doesn't match fails, and nothing
 # is fetched again (BUSTER_CI_OFFLINE=1 makes the scripts that read ROOT/ci refuse to). Only `prepare` acquires.
@@ -39,8 +42,8 @@ format='buster-hosted-apt 1'
 # image's: its cache key names the image.
 packages=(gcc g++ binutils libc6-dev gdb tcc zstd linux-perf qemu-user valgrind libzstd-dev libxml2-dev zlib1g-dev tcl8.6-dev)
 # The inputs under ROOT/ci, each acquired and checked by its own script, and the scripts whose contents pin them.
-ci_inputs=(baseline corpus c-testsuite sqlite)
-ci_scripts=(setup-baseline-runtime.sh fetch-corpus.sh fetch-c-testsuite.sh fetch-sqlite.sh cached-download.sh)
+ci_inputs=(baseline corpus c-testsuite sqlite lua)
+ci_scripts=(setup-baseline-runtime.sh fetch-corpus.sh fetch-c-testsuite.sh fetch-sqlite.sh cached-download.sh hosted-offline.sh)
 # The pause before a failed acquisition's next attempt, times the attempt's number: 20 and 40 s. The fixtures set it
 # to 0.
 retry_seconds=${BUSTER_HOSTED_RETRY_SECONDS:-20}
@@ -164,7 +167,7 @@ check_apt()
 # attempts, each apt host that doesn't resolve here is pinned in /etc/hosts to an address a DNS-over-HTTPS resolver
 # gives it (Cloudflare's, else Google's), as setup-hosted.sh did before it stopped using the network. This brings in
 # nothing unverified: apt checks the archive's signed Release files and every package's hash, and the downloads here
-# keep their SHA-256 pins (setup-baseline-runtime.sh's come from archive.ubuntu.com too).
+# keep their SHA-256 pins (setup-baseline-runtime.sh's come from snapshot.ubuntu.com, the archive's snapshots).
 apt_hosts()
 {
     local file
@@ -173,7 +176,7 @@ apt_hosts()
             { grep -vE '^[[:space:]]*#' "$file" || true; } | { grep -oE 'https?://[^/[:space:]]+' || true; }
         fi
     done | sed -E 's#^https?://##'
-    printf '%s\n' archive.ubuntu.com security.ubuntu.com azure.archive.ubuntu.com
+    printf '%s\n' archive.ubuntu.com security.ubuntu.com azure.archive.ubuntu.com snapshot.ubuntu.com
 }
 
 resolve_over_https()
@@ -303,6 +306,19 @@ prepare_apt()
     apt_detail="$count .debs, $bytes bytes, runner image $(sed -n 's/^runner //p' "$directory/MANIFEST")"
 }
 
+# Lua 5.4.8, as the existing Tier 1 runtime measurement pins it. Verification precedes extraction, including on an
+# offline consumer; the archive stays in the shared input cache, while each caller gets its own extracted tree.
+fetch_lua()
+{
+    local root=$1
+    temporary=$(mktemp -d)
+    bash "$here/cached-download.sh" https://www.lua.org/ftp/lua-5.4.8.tar.gz \
+        4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae "$temporary/lua.tar.gz"
+    mkdir -p -- "$root"
+    tar --extract --gzip --file "$temporary/lua.tar.gz" --directory "$root" --strip-components=1 --no-same-owner
+    [ -f "$root/src/lua.c" ] && [ -f "$root/src/luac.c" ] || die 'the Lua archive lacks the interpreter or compiler source'
+}
+
 # Runs input NAME's own script with BUSTER_CI_CACHE=CACHE into SCRATCH: offline (1) or allowed to fetch (0).
 run_ci_input()
 {
@@ -316,6 +332,8 @@ run_ci_input()
             BUSTER_CI_CACHE=$cache BUSTER_CI_OFFLINE=$offline bash "$here/fetch-c-testsuite.sh" "$scratch/c-testsuite" ;;
         sqlite)
             BUSTER_CI_CACHE=$cache BUSTER_CI_OFFLINE=$offline bash "$here/fetch-sqlite.sh" "$scratch/sqlite" ;;
+        lua)
+            BUSTER_CI_CACHE=$cache BUSTER_CI_OFFLINE=$offline bash "$here/hosted-offline.sh" lua "$scratch/lua" ;;
     esac > "$scratch.log" 2>&1
 }
 
@@ -432,6 +450,10 @@ apt_install()
 
 command=${1:-}
 case "$command" in
+    lua)
+        [ $# -eq 2 ] && [ -n "$2" ] && [ "$2" != / ] || die 'usage: hosted-offline.sh lua DIRECTORY'
+        fetch_lua "$2"
+        ;;
     keys)
         [ $# -eq 1 ] || die 'usage: hosted-offline.sh keys'
         runner_image > /dev/null
@@ -447,6 +469,6 @@ case "$command" in
         esac
         ;;
     *)
-        die 'usage: hosted-offline.sh keys | prepare ROOT | verify ROOT | apt-install ROOT'
+        die 'usage: hosted-offline.sh keys | prepare ROOT | verify ROOT | apt-install ROOT | lua DIRECTORY'
         ;;
 esac

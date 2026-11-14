@@ -19,7 +19,6 @@
 #include "ir_if_convert.c"
 #include "ir_thread.c"
 #include "tier1_schedule_ir.c"
-#include "c_check_tier1_inline.c"
 #include "c_check_tier1_schedule.c"
 
 _Static_assert(BUSTER_TIER1_ACCESS_DIRECT == BUSTER_TIER0_ACCESS_DIRECT && BUSTER_TIER1_ACCESS_GOT == BUSTER_TIER0_ACCESS_GOT && BUSTER_TIER1_ACCESS_LOCAL_EXEC == BUSTER_TIER0_ACCESS_LOCAL_EXEC &&
@@ -177,7 +176,6 @@ static void check_tier1_lane_release(CheckTier1Lane* lane)
     }
     arena_release(&lane->scratch);
     arena_release(&lane->forms);
-    arena_release(&lane->inline_cache);
     *lane = (CheckTier1Lane){ 0 };
 }
 
@@ -274,76 +272,58 @@ static bool check_tier1_frame(const Tier1EmitResult* emitted, uint32_t count, ui
 
 #include "c_check_tier1_debug.c"
 
-static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
-                                             bool rematerialize, bool gvn, bool certify, bool sources, Arena* output, EmittedCode* code,
-                                             CheckTier1Counts* counts, const CheckTier1Fault* fault)
+// A function's IR as Tier 1's passes take it, after its lowering, its calls' expansion (#2541) and #866's solver: its
+// verified-ness, which promotion then doesn't check again, and the unexpanded lowering, which promotion takes where it
+// refuses the expansion or finds it past its limits (null where nothing was expanded).
+typedef struct CheckTier1PassesInput CheckTier1PassesInput;
+struct CheckTier1PassesInput
 {
-    *code = (EmittedCode){ 0 };
-    *counts = (CheckTier1Counts){ 0 };
-    CheckTier1Outcome outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA,
-                                                check_tier1_lane_prepare(lane, target, gvn) ? 0 : BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, fault);
-    CheckTier1Stage stage = outcome.stage;
+    const IrFunction* function;
+    bool verified;
+    const IrFunction* unexpanded;
+};
+
+// What Tier 1's passes made of a function (check_tier1_passes): the optimized function and its verified analysis,
+// --tier1-schedule=pre's counts, and whether promotion took the unexpanded lowering instead of the expansion.
+typedef struct CheckTier1Passes CheckTier1Passes;
+struct CheckTier1Passes
+{
+    IrOptimizeResult optimized;
+    IrVerifiedAnalysis analysis;
+    uint32_t pre_blocks;
+    uint32_t pre_moved;
+    bool unexpanded;
+};
+
+// Tier 1's passes from SSA promotion to the optimizer's verified result, which selection reads: promotion in `promotion`,
+// the 128-bit integers' halves, the wide vectors' pieces, truth simplification, threading and if-conversion in steps[6],
+// --tier1-schedule=pre's order, and the optimizer, whose function goes to `output` and its analysis to `analyses` under
+// `revision`. A function's own pipeline runs them (check_tier1_compile) and so does a candidate's summary, once for the
+// unit (c_check_tier1_inline.c's check_tier1_inline_build), whose callers copy its result and whose own code goes on
+// from it. The outcome is the first failing pass's, as check_tier1_step classifies it.
+static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTier1PassesInput* input, const X86Target* target, bool scalar, bool certify, const CheckTier1Fault* fault,
+                                            Arena* promotion, Arena* output, Arena* analyses, IrVerifiedRevision* revision, CheckTier1Passes* passes)
+{
+    *passes = (CheckTier1Passes){ 0 };
     Arena* scratch = &lane->scratch;
-    const IrType result_type = result_class == UINT8_MAX ? IR_VOID : (IrType)ir_typed_types[result_class];
-    IrFunction lowered = { 0 };
-    // A caller of a function that returns twice (#1847, Tier0Function.calls_returns_twice) is Tier 0's: Tier 1 shares
-    // call-save rows and spill slots among values whose ranges don't meet on the CFG, which has no edge from a longjmp
-    // back to the call, so a second return would read another value's bytes. Its IR lowers as any other's.
-    if (stage == CHECK_TIER1_COMPILED && function->calls_returns_twice)
-    {
-        outcome = check_tier1_failure(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_RETURNS_TWICE, UINT32_MAX, 0);
-        stage = outcome.stage;
-    }
-    if (stage == CHECK_TIER1_COMPILED)
-    {
-        // A vector wider than the target moves whole is taken, and split below (#1624).
-        const IrCheck check = sources ? ir_lower_typed_target_pieces_sources(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered, scalar) :
-                                       ir_lower_typed_target_pieces(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered, scalar);
-        outcome = check_tier1_step(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
-        outcome.dominance_checked = check.dominance_checked;
-        stage = outcome.stage;
-    }
-    // The calls of the unit's always_inline functions expanded, and the aggregates' slots split (#1282,
-    // c_check_tier1_inline.c), in steps[4] and steps[5]: what the solver and promotion take in place of the lowering.
-    IrFunction expanded = { 0 };
-    uint32_t inlined_calls = 0;
-    const CheckTier1Inline* inlining = lane->inlining;
-    const uint64_t body = inlining != NULL ? (uint64_t)(function - inlining->lowered->functions) : UINT64_MAX;
-    // Whether `lowered` is still the lowering's verified result: inlining's expansion isn't verified until promotion.
-    bool lowered_verified = true;
-    if (stage == CHECK_TIER1_COMPILED && inlining != NULL && function >= inlining->lowered->functions && body < inlining->program->body_count &&
-        check_tier1_inline(lane, (uint32_t)body, &lowered, target, scalar, &expanded, &inlined_calls))
-    {
-        lowered = expanded;
-        lowered_verified = false;
-    }
+    CheckTier1Outcome outcome = check_tier1_step(CHECK_TIER1_COMPILED, CHECK_TIER1_CAUSE_IR, 0, BUSTER_IR_NONE, 0, NULL);
+    CheckTier1Stage stage = outcome.stage;
     IrFunction promoted = { 0 };
-    // #866's congruence solver, before promotion, so that promotion's phi placement decides what its merged values
-    // need: on promoted SSA its class representatives lengthen live ranges across blocks, which Tier 1's allocation then
-    // pays for in moves and spills. Its rewritten function is verified. Like the other stages, only an explicit
-    // capability refusal permits Tier 0 fallback; resource or invariant failures retain their original IrCheck.
-    IrGvnResult gvn_result = { 0 };
-    bool gvn_applied = false;
-    if (stage == CHECK_TIER1_COMPILED && gvn)
     {
-        IrGvnOptions options = ir_gvn_options();
-        options.scalar = scalar;
-        const IrCheck check = ir_optimize_gvn(&lowered, &lane->steps[7], scratch, options, &gvn_result);
-        outcome = check_tier1_step(CHECK_TIER1_VALUE_NUMBERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
-        outcome.dominance_checked = check.dominance_checked;
-        outcome.operation = check.instruction < lowered.instruction_count ? lowered.op[check.instruction] : IR_OP_COUNT;
-        stage = outcome.stage;
-        gvn_applied = stage == CHECK_TIER1_COMPILED;
-    }
-    const IrFunction* unssa = gvn_applied ? &gvn_result.function : &lowered;
-    if (stage == CHECK_TIER1_COMPILED)
-    {
-        // GVN's result and the lowering's are each verified whole as they're made, so promotion doesn't verify them again
-        // (#1379); an inlined expansion it does.
-        const bool verified = gvn_applied || lowered_verified;
-        const IrCheck check = verified ? ssa_ir_promote_verified_input(unssa, !scalar, &lane->steps[1], scratch, &promoted) :
-                              scalar   ? ssa_ir_promote_scalar(unssa, &lane->steps[1], scratch, &promoted) :
-                                         ssa_ir_promote(unssa, &lane->steps[1], scratch, &promoted);
+        const IrFunction* unssa = input->function;
+        const uint64_t mark = promotion->length;
+        IrCheck check = input->verified ? ssa_ir_promote_verified_input(unssa, !scalar, promotion, scratch, &promoted) :
+                        scalar          ? ssa_ir_promote_scalar(unssa, promotion, scratch, &promoted) :
+                                          ssa_ir_promote(unssa, promotion, scratch, &promoted);
+        // An expansion promotion refuses or finds past its limits keeps the function's calls: the lowering is promoted
+        // instead, so that inlining is never a refusal. Any other error is the expansion's.
+        passes->unexpanded = input->unexpanded != NULL && (check.error == IR_ERROR_UNSUPPORTED || check.error == IR_ERROR_LIMIT);
+        if (passes->unexpanded)
+        {
+            arena_pop_to(promotion, mark);
+            unssa = input->unexpanded;
+            check = ssa_ir_promote_verified_input(unssa, !scalar, promotion, scratch, &promoted);
+        }
         outcome = check_tier1_step(CHECK_TIER1_PROMOTION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
         outcome.operation = check.instruction < unssa->instruction_count ? unssa->op[check.instruction] : IR_OP_COUNT;
@@ -352,8 +332,6 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     // The 128-bit integers' halves (#141, ir_wide.c), which the optimizer then takes: a function without any is the
     // promoted one itself, borrowed.
     IrWideResult wide = { 0 };
-    uint32_t pre_blocks = 0;
-    uint32_t pre_moved = 0;
     if (stage == CHECK_TIER1_COMPILED)
     {
         const IrCheck check = scalar ? ir_wide_split_scalar(&promoted, &lane->steps[6], scratch, &wide) : ir_wide_split(&promoted, &lane->steps[6], scratch, &wide);
@@ -424,25 +402,124 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         arena_pop_to(scratch, mark);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, error, BUSTER_IR_NONE, 0, NULL);
         stage = outcome.stage;
-        pre_blocks = schedule_stats.segments;
-        pre_moved = schedule_stats.moved;
+        passes->pre_blocks = schedule_stats.segments;
+        passes->pre_moved = schedule_stats.moved;
     }
-    IrOptimizeResult optimized = { 0 };
-    IrVerifiedRevision revision = { 0 };
-    IrVerifiedAnalysis analysis = { 0 };
     if (stage == CHECK_TIER1_COMPILED)
     {
         IrOptimizeOptions options = ir_optimize_options();
         options.passes |= BUSTER_IR_OPTIMIZE_LAYOUT | BUSTER_IR_OPTIMIZE_IDENTITY;
         options.scalar = scalar;
-        const IrCheck check = ir_optimize_verified(&wide.function, &lane->steps[2], &lane->steps[3], scratch, options, &revision, &optimized, &analysis);
+        const IrCheck check = ir_optimize_verified(&wide.function, output, analyses, scratch, options, revision, &passes->optimized, &passes->analysis);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
         outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
     }
+    return outcome;
+}
+
+#include "c_check_tier1_inline.c"
+
+static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
+                                             bool rematerialize, bool gvn, bool certify, bool sources, Arena* output, EmittedCode* code,
+                                             CheckTier1Counts* counts, const CheckTier1Fault* fault)
+{
+    *code = (EmittedCode){ 0 };
+    *counts = (CheckTier1Counts){ 0 };
+    CheckTier1Outcome outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA,
+                                                check_tier1_lane_prepare(lane, target, gvn) ? 0 : BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, fault);
+    CheckTier1Stage stage = outcome.stage;
+    Arena* scratch = &lane->scratch;
+    const IrType result_type = result_class == UINT8_MAX ? IR_VOID : (IrType)ir_typed_types[result_class];
+    IrFunction lowered = { 0 };
+    // A caller of a function that returns twice (#1847, Tier0Function.calls_returns_twice) is Tier 0's: Tier 1 shares
+    // call-save rows and spill slots among values whose ranges don't meet on the CFG, which has no edge from a longjmp
+    // back to the call, so a second return would read another value's bytes. Its IR lowers as any other's.
+    if (stage == CHECK_TIER1_COMPILED && function->calls_returns_twice)
+    {
+        outcome = check_tier1_failure(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_RETURNS_TWICE, UINT32_MAX, 0);
+        stage = outcome.stage;
+    }
+    // A candidate whose summary is ready (#2541, c_check_tier1_inline.c's check_tier1_inline_own) goes on from it to
+    // selection: the summary was its lowering, its calls' expansion and Tier 1's passes (check_tier1_passes), done once
+    // for the unit. Not with source rows, which the summary has none of, the solver, which runs before promotion, or a
+    // fault, which may be any pass's.
+    const CheckTier1Inline* inlining = lane->inlining;
+    const uint64_t body = inlining != NULL ? (uint64_t)(function - inlining->lowered->functions) : UINT64_MAX;
+    const bool member = inlining != NULL && function >= inlining->lowered->functions && body < inlining->program->body_count;
+    CheckTier1Passes passes = { 0 };
+    uint32_t inlined_calls = 0;
+    const bool own = stage == CHECK_TIER1_COMPILED && member && !function->calls_returns_twice && !sources && !gvn && fault == NULL &&
+                     check_tier1_inline_own(lane, (uint32_t)body, scalar, certify, &passes, &inlined_calls);
+    if (stage == CHECK_TIER1_COMPILED && !own)
+    {
+        // A vector wider than the target moves whole is taken, and split below (#1624).
+        const IrCheck check = sources ? ir_lower_typed_target_pieces_sources(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered, scalar) :
+                                       ir_lower_typed_target_pieces(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered, scalar);
+        outcome = check_tier1_step(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+        outcome.dominance_checked = check.dominance_checked;
+        stage = outcome.stage;
+    }
+    // The calls of the unit's candidates expanded from their offers, and the aggregates' slots split (#1282, #2541,
+    // c_check_tier1_inline.c), in steps[4] and steps[5]: what the solver and promotion take in place of the lowering.
+    IrFunction expanded = { 0 };
+    // Whether `lowered` is verified: the lowering is as it is made, and an expansion SROA took is by SROA; another
+    // expansion isn't until promotion.
+    bool lowered_verified = true;
+    const IrFunction original = lowered;
+    bool expanded_verified = true;
+    if (stage == CHECK_TIER1_COMPILED && !own && member && check_tier1_inline(lane, (uint32_t)body, &lowered, target, scalar, certify, &expanded, &inlined_calls, &expanded_verified))
+    {
+        lowered = expanded;
+        lowered_verified = expanded_verified;
+    }
+    // #866's congruence solver, before promotion, so that promotion's phi placement decides what its merged values
+    // need: on promoted SSA its class representatives lengthen live ranges across blocks, which Tier 1's allocation then
+    // pays for in moves and spills. Its rewritten function is verified. Like the other stages, only an explicit
+    // capability refusal permits Tier 0 fallback; resource or invariant failures retain their original IrCheck.
+    IrGvnResult gvn_result = { 0 };
+    bool gvn_applied = false;
+    if (stage == CHECK_TIER1_COMPILED && gvn)
+    {
+        IrGvnOptions options = ir_gvn_options();
+        options.scalar = scalar;
+        const IrCheck check = ir_optimize_gvn(&lowered, &lane->steps[7], scratch, options, &gvn_result);
+        outcome = check_tier1_step(CHECK_TIER1_VALUE_NUMBERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+        outcome.dominance_checked = check.dominance_checked;
+        outcome.operation = check.instruction < lowered.instruction_count ? lowered.op[check.instruction] : IR_OP_COUNT;
+        stage = outcome.stage;
+        gvn_applied = stage == CHECK_TIER1_COMPILED;
+    }
+    const IrFunction* unssa = gvn_applied ? &gvn_result.function : &lowered;
+    // The passes from promotion to the optimizer (check_tier1_passes), or a candidate's own summary's, which ran them.
+    IrVerifiedRevision revision = { 0 };
+    if (stage == CHECK_TIER1_COMPILED && !own)
+    {
+        // GVN's result and the lowering's are each verified whole as they're made, so promotion doesn't verify them again
+        // (#1379); an inlined expansion it does, but where SROA took and verified it.
+        const CheckTier1PassesInput input = {
+            .function = unssa,
+            .verified = gvn_applied || lowered_verified,
+            .unexpanded = !gvn_applied && inlined_calls != 0 ? &original : NULL,
+        };
+        outcome = check_tier1_passes(lane, &input, target, scalar, certify, fault, &lane->steps[1], &lane->steps[2], &lane->steps[3], &revision, &passes);
+        stage = outcome.stage;
+        inlined_calls = passes.unexpanded ? 0 : inlined_calls;
+    }
+    else if (stage == CHECK_TIER1_COMPILED)
+    {
+        // The summary's function and analysis, which nothing writes: this revision is theirs.
+        revision.function = &passes.optimized.function;
+        revision.number = 1;
+        passes.analysis.owner = &revision;
+        passes.analysis.revision = revision.number;
+    }
+    const IrVerifiedAnalysis analysis = passes.analysis;
+    const uint32_t pre_blocks = passes.pre_blocks;
+    const uint32_t pre_moved = passes.pre_moved;
     // #866's congruence solver's result, if it ran, is `unssa`; `ir` is what the plan below reads.
-    const IrFunction* ir = &optimized.function;
+    const IrFunction* ir = &passes.optimized.function;
     if (stage == CHECK_TIER1_COMPILED)
     {
         const bool current = ir_verified_current(&analysis, &revision, ir);

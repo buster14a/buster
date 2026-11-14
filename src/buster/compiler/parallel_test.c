@@ -1340,7 +1340,7 @@ static void parallel_test_command_line(ParallelTest* test)
     parallel_test_check(test, "the command, a list that can't be read", status == 1, parallel_test_read(&test->arena, errors), "parallel: can't read /nonexistent/list\n");
     test->arena.length = 0;
 
-    static const char usage[] = "usage: parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [LIST]\n";
+    static const char usage[] = "usage: parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [--memory MIB] [LIST]\n";
     char* const option_cases[][5] = {
         { "compiler", "parallel", "--jobs", "0", 0 },
         { "compiler", "parallel", "--jobs", "x", 0 },
@@ -1501,7 +1501,7 @@ static void parallel_test_shards(ParallelTest* test)
     }
 
     // The options' errors print the usage; the costs' print the file, the line and the problem.
-    static const char usage[] = "usage: parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [LIST]\n";
+    static const char usage[] = "usage: parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [--memory MIB] [LIST]\n";
     char* const option_cases[][7] = {
         { "compiler", "parallel", "--shard", "0/2", list, 0 },
         { "compiler", "parallel", "--shard", "3/2", list, 0 },
@@ -1564,7 +1564,7 @@ static void parallel_test_shards(ParallelTest* test)
     // hold all of a 4-CPU runner for 10 s each, and one of 60 s on one CPU. By costs alone (60, 40, 40, 40), long goes
     // to shard 1, w1 and w2 to shard 2 and w3 to shard 1 again, where long starts after it, at 10 s. By schedule, long
     // keeps shard 1 to itself, ending at 60 s, and the three wide ones end at 30 s on shard 2.
-    const bool scheduled_ready = parallel_test_write(list, parallel_test_string("== w1 [8 CPUs]\necho w1\n== w2 [8 CPUs]\necho w2\n== w3 [8 CPUs]\necho w3\n== long\necho long\n"));
+    bool scheduled_ready = parallel_test_write(list, parallel_test_string("== w1 [8 CPUs]\necho w1\n== w2 [8 CPUs]\necho w2\n== w3 [8 CPUs]\necho w3\n== long\necho long\n"));
     static const ParallelTestShard scheduled_cases[] = {
         {
             "1/2",
@@ -1635,6 +1635,88 @@ static void parallel_test_shards(ParallelTest* test)
         parallel_test_check(test, name, status == 0, parallel_test_normalize(&test->arena, parallel_test_read(&test->arena, output)), first_cases[i].expected);
         test->arena.length = 0;
     }
+    // Peaks (#2031): with the runner's memory, a command waits for the running commands' peaks to leave room for its own
+    // in 90% of it (test_deal_memory_fits), and the deal simulates the same. big (50 s) goes to shard 1; a (30 s, 600 MiB)
+    // to shard 2. By time alone b (30 s, 600 MiB) joins a, both ending at 30 s; but of a runner of 1,000 MiB they may
+    // hold 900 at once, so beside a it would wait to 60 s, and it goes beside big on shard 1 instead, ending at 50 s.
+    const bool memory_ready = parallel_test_write(list, parallel_test_string("== big\necho big\n== a\necho a\n== b\necho b\n"));
+    static const ParallelTestShard memory_cases[] = {
+        {
+            "1/2",
+            true,
+            "parallel: shard 1 of 2, 2 of 3 commands, at most 4 CPUs at once\n"
+            "== big: passed in * s, * s of CPU, * MiB peak\nbig\n"
+            "== b: passed in * s, * s of CPU, * MiB peak\nb\n"
+            "parallel: 2 commands in * s, * s of CPU, at most 4 CPUs at once: 2 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+        {
+            "2/2",
+            true,
+            "parallel: shard 2 of 2, 1 of 3 commands, at most 4 CPUs at once\n"
+            "== a: passed in * s, * s of CPU, * MiB peak\na\n"
+            "parallel: 1 commands in * s, * s of CPU, at most 4 CPUs at once: 1 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+        {
+            "2/2",
+            false,
+            "parallel: shard 2 of 2, 2 of 3 commands, at most 4 CPUs at once\n"
+            "== a: passed in * s, * s of CPU, * MiB peak\na\n"
+            "== b: passed in * s, * s of CPU, * MiB peak\nb\n"
+            "parallel: 2 commands in * s, * s of CPU, at most 4 CPUs at once: 2 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+    };
+    for (uint64_t i = 0; i < sizeof(memory_cases) / sizeof(memory_cases[0]); i += 1)
+    {
+        // The same costs and peaks, with and without the runner's memory.
+        const char* text = memory_cases[i].costs ? "#: runner-cpus 4\n#: runner-memory 1000\n#: peak 600 a\n#: peak 600 b\n50 big\n30 a\n30 b\n"
+                                                 : "#: runner-cpus 4\n#: peak 600 a\n#: peak 600 b\n50 big\n30 a\n30 b\n";
+        const bool written = memory_ready && parallel_test_write(costs, parallel_test_string(text));
+        char* arguments[] = { "compiler", "parallel", "--jobs", "4", "--memory", "100000", "--shard", (char*)memory_cases[i].shard, "--costs", costs, list, 0 };
+        const int status = written ? parallel_test_command(test, arguments, "/dev/null", -1) : -1;
+        char name[128];
+        snprintf(name, sizeof(name), "shards, %s by schedule, %s the runner's memory", memory_cases[i].shard, memory_cases[i].costs ? "with" : "without");
+        parallel_test_check(test, name, status == 0, parallel_test_normalize(&test->arena, parallel_test_read(&test->arena, output)), memory_cases[i].expected);
+        test->arena.length = 0;
+    }
+    // The run itself (#2031): x and y hold 600 MiB each at their peaks. Of --memory 1000 the commands at once may hold
+    // 900, so y starts once x has ended and finds x's marker gone; with --memory 100000 it starts beside x, finds the
+    // marker half a second in, and says so. z, of 2,000 MiB, is past the budget: it runs alone, after y, and the summary
+    // names it. y's half second is x's room to make its marker.
+    char marker[600];
+    parallel_test_path(test, marker, sizeof(marker), "x-running");
+    char script[2048];
+    snprintf(script, sizeof(script),
+             "== x\ntouch '%s'\nsleep 1\nrm '%s'\n"
+             "== y\nsleep 0.5\nif test -e '%s'; then echo beside x; else echo alone; fi\n"
+             "== z\necho z\n",
+             marker, marker, marker);
+    const bool run_ready = parallel_test_write(list, parallel_test_string(script)) && parallel_test_write(costs, parallel_test_string("#: peak 600 x\n#: peak 600 y\n#: peak 2000 z\n10 x\n10 y\n10 z\n"));
+    static const char* const memories[] = { "1000", "100000" };
+    static const char* const run_expected[] = {
+        "parallel: shard 1 of 1, 3 of 3 commands, at most 4 CPUs at once\n"
+        "== x: passed in * s, * s of CPU, * MiB peak\n"
+        "== y: passed in * s, * s of CPU, * MiB peak\nalone\n"
+        "== z: passed in * s, * s of CPU, * MiB peak\nz\n"
+        "parallel: 3 commands in * s, * s of CPU, at most 4 CPUs at once: 3 passed, 0 failed, 0 skipped, 0 not started\n"
+        "parallel: z needs 2000 MiB at its peak, past the 900 MiB the commands at once may hold, so it ran alone\n",
+        "parallel: shard 1 of 1, 3 of 3 commands, at most 4 CPUs at once\n"
+        "== x: passed in * s, * s of CPU, * MiB peak\n"
+        "== y: passed in * s, * s of CPU, * MiB peak\nbeside x\n"
+        "== z: passed in * s, * s of CPU, * MiB peak\nz\n"
+        "parallel: 3 commands in * s, * s of CPU, at most 4 CPUs at once: 3 passed, 0 failed, 0 skipped, 0 not started\n",
+    };
+    for (uint64_t i = 0; i < sizeof(memories) / sizeof(memories[0]); i += 1)
+    {
+        char* arguments[] = { "compiler", "parallel", "--jobs", "4", "--memory", (char*)memories[i], "--shard", "1/1", "--costs", costs, list, 0 };
+        const int status = run_ready ? parallel_test_command(test, arguments, "/dev/null", -1) : -1;
+        char name[128];
+        snprintf(name, sizeof(name), "memory: the run's peaks within --memory %s", memories[i]);
+        parallel_test_check(test, name, status == 0, parallel_test_normalize(&test->arena, parallel_test_read(&test->arena, output)), run_expected[i]);
+        test->arena.length = 0;
+    }
+    unlink(marker);
+    // Rewritten: the invalid costs below are read against the wide commands' list.
+    scheduled_ready = parallel_test_write(list, parallel_test_string("== w1 [8 CPUs]\necho w1\n== w2 [8 CPUs]\necho w2\n== w3 [8 CPUs]\necho w3\n== long\necho long\n"));
 #define BUSTER_PARALLEL_TEST_COST(literal, message) \
     {                                            \
         .text = literal,                         \
@@ -1653,6 +1735,14 @@ static void parallel_test_shards(ParallelTest* test)
         BUSTER_PARALLEL_TEST_COST("#: first-shard -1\n", "1: a first shard's time that isn't SECONDS"),
         BUSTER_PARALLEL_TEST_COST("#: first-shard 99999999999999999999\n", "1: a first shard's time that isn't SECONDS"),
         BUSTER_PARALLEL_TEST_COST("#: first-shard 1\n#: first-shard 1\n", "2: a first shard's time that an earlier line gives"),
+        BUSTER_PARALLEL_TEST_COST("#: runner-memory 0\n", "1: a runner's memory that isn't MIB"),
+        BUSTER_PARALLEL_TEST_COST("#: runner-memory 16 GiB\n", "1: a runner's memory that isn't MIB"),
+        BUSTER_PARALLEL_TEST_COST("#: runner-memory 99999999999999999999\n", "1: a runner's memory that isn't MIB"),
+        BUSTER_PARALLEL_TEST_COST("#: runner-memory 1000\n#: runner-memory 1000\n", "2: a runner's memory that an earlier line gives"),
+        BUSTER_PARALLEL_TEST_COST("#: peak long\n", "1: a peak that isn't MIB TITLE"),
+        BUSTER_PARALLEL_TEST_COST("#: peak 600\n", "1: a peak that isn't MIB TITLE"),
+        BUSTER_PARALLEL_TEST_COST("#: peak 600long\n", "1: a peak that isn't MIB TITLE"),
+        BUSTER_PARALLEL_TEST_COST("#: peak 600 long\n#: peak 700 long\n", "2: a title that an earlier peak has"),
     };
 #undef BUSTER_PARALLEL_TEST_COST
     for (uint64_t i = 0; i < sizeof(runner_cases) / sizeof(runner_cases[0]); i += 1)

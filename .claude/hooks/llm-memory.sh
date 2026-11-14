@@ -4,7 +4,8 @@
 #
 #   llm-memory.sh start   SessionStart: put the clone at ~/llm-memory; in Claude Code, link this checkout's memory
 #                         folder into it
-#   llm-memory.sh stop    Stop: run `llm-memory sync` in the background, so each turn's memories reach GitHub
+#   llm-memory.sh stop    Stop: run `llm-memory sync` in the background, so each turn's memories reach GitHub (in Claude
+#                         Code, this session's branch and its one pull request)
 #
 # On the owner's own computers the clone, the link and the sync timer already exist, so the hook acts only in a
 # cloud session: Claude Code's (CLAUDE_CODE_REMOTE=true), or Codex's, whose environment already sets
@@ -53,25 +54,49 @@ is_clone()
     git -C "$1" rev-parse -q --verify HEAD > /dev/null 2>&1 && [ -x "$1/bin/llm-memory" ]
 }
 
-# add_repo checks the clone out on the session's branch, and sync pushes to the branch it is on, so memories would land
-# on that branch and never reach main. Move a clone whose branch holds nothing main lacks onto main; one that does is
-# left alone, and the hook says so.
-on_main()
+# A Claude Code cloud session may push only to its own branch, the one this checkout is on. Put the clone on that branch
+# (GitHub's copy of it if a container before this one pushed it, else main) and set llm-memory.branch, so that sync
+# commits there, rebases it on GitHub's main, pushes it and keeps one pull request open for it. Nothing commits to local
+# main, so it can't diverge from GitHub's. A shallow clone is deepened, since the index orders notes by when Git first
+# saw them.
+on_session_branch()
 {
     local branch
-    branch=$(git -C "$memory" symbolic-ref -q --short HEAD) || branch=
-    if [ "$branch" != main ]; then
-        GIT_TERMINAL_PROMPT=0 timeout 60 git -C "$memory" fetch -q origin +refs/heads/main:refs/remotes/origin/main > /dev/null 2>&1 || true
-        if git -C "$memory" merge-base --is-ancestor HEAD refs/remotes/origin/main 2> /dev/null; then
-            if git -C "$memory" rev-parse -q --verify refs/heads/main > /dev/null; then
-                git -C "$memory" checkout -q main > /dev/null 2>&1 || true
+    local current
+    local fetch=()
+    branch=$(git -C "$checkout" symbolic-ref -q --short HEAD) || branch=
+    case $branch in
+    claude/*)
+        ;;
+    *)
+        echo "Agent memory: this checkout is on ${branch:-a detached HEAD}, not a claude/ session branch, so sync can't push memories; save them and open a pull request in davidgmbb/llm-memory by hand."
+        return
+        ;;
+    esac
+    if [ "$(git -C "$memory" rev-parse --is-shallow-repository 2> /dev/null)" = true ]; then
+        fetch=(--depth=1000)
+    fi
+    GIT_TERMINAL_PROMPT=0 timeout 120 git -C "$memory" fetch -q "${fetch[@]}" origin +refs/heads/main:refs/remotes/origin/main > /dev/null 2>&1 || true
+    GIT_TERMINAL_PROMPT=0 timeout 60 git -C "$memory" fetch -q origin "+refs/heads/$branch:refs/remotes/origin/$branch" > /dev/null 2>&1 || true
+    current=$(git -C "$memory" symbolic-ref -q --short HEAD) || current=
+    if [ "$current" != "$branch" ]; then
+        if git -C "$memory" rev-parse -q --verify "refs/heads/$branch" > /dev/null; then
+            git -C "$memory" checkout -q "$branch" > /dev/null 2>&1 || true
+        elif git -C "$memory" merge-base --is-ancestor HEAD refs/remotes/origin/main 2> /dev/null; then
+            if git -C "$memory" rev-parse -q --verify "refs/remotes/origin/$branch" > /dev/null; then
+                git -C "$memory" checkout -q --no-track -b "$branch" "refs/remotes/origin/$branch" > /dev/null 2>&1 || true
             else
-                git -C "$memory" checkout -q -b main --track origin/main > /dev/null 2>&1 || true
+                git -C "$memory" checkout -q --no-track -b "$branch" refs/remotes/origin/main > /dev/null 2>&1 || true
             fi
+        else
+            # HEAD holds memories main lacks: they go on the session branch, and sync rebases them onto main.
+            git -C "$memory" checkout -q -b "$branch" > /dev/null 2>&1 || true
         fi
-        if [ "$(git -C "$memory" symbolic-ref -q --short HEAD)" != main ]; then
-            echo "Agent memory: ~/llm-memory is on ${branch:-a detached HEAD}, not main, and couldn't move; sync would push memories there. Put its commits on main by hand."
-        fi
+    fi
+    if [ "$(git -C "$memory" symbolic-ref -q --short HEAD)" = "$branch" ]; then
+        git -C "$memory" config llm-memory.branch "$branch"
+    else
+        echo "Agent memory: ~/llm-memory is on ${current:-a detached HEAD} and couldn't move to $branch; sync would push nowhere. Check it out by hand, then run: git -C ~/llm-memory config llm-memory.branch $branch"
     fi
 }
 
@@ -94,7 +119,7 @@ start()
         git -C "$memory" config user.name > /dev/null || git -C "$memory" config user.name Codex
     fi
     if is_clone "$memory" && claude; then
-        on_main
+        on_session_branch
     fi
     if is_clone "$memory"; then
         if claude; then
@@ -102,7 +127,7 @@ start()
             if [ "$(cd "$project" && pwd -P)" = "$(cd "$checkout/.." && pwd -P)" ]; then
                 HOME=$home "$memory/bin/llm-memory" link "$project" "$name" > /dev/null
             fi
-            echo "Agent memory: ~/llm-memory/projects/$name is this project's memory folder; the Stop hook syncs it to GitHub."
+            echo "Agent memory: ~/llm-memory/projects/$name is this project's memory folder; the Stop hook syncs it to GitHub, on this session's branch and pull request. MEMORY.md is generated from the notes: save each memory as a note with name/description frontmatter."
             if [ "${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-}" != 0 ]; then
                 echo "Auto memory is off in this cloud session (the environment doesn't set CLAUDE_CODE_DISABLE_AUTO_MEMORY=0): read ~/llm-memory/projects/$name/MEMORY.md and save there by hand, as AGENTS.md says for other agents."
             fi

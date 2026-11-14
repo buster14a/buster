@@ -465,6 +465,16 @@ struct InternTable
     uint32_t count;
     // Immutable admission ceiling shared by every consumer of these ids; zero is the original hard ceiling.
     uint32_t id_limit;
+    // Each id's answer from the intrinsic catalogue: a 16-bit code per id from id 0, which c_check_intrinsic_input.c
+    // gives its meaning (#893), zero for an id it hasn't looked up. The answer is the spelling's alone, so the units of a
+    // command that share the table look each spelling up once. Its own reservation of room for `intrinsic_capacity` ids,
+    // fresh (so zero), made at its first use and made again twice as large, copied, when the table has
+    // outgrown it (intern_intrinsic_rows); intern_reset and intern_release drop it.
+    uint16_t* intrinsic_rows;
+    uint32_t intrinsic_capacity;
+    // The ids below this have their codes (c_check_intrinsic_input.c fills a table's new ids in id order, #2654).
+    uint32_t intrinsic_known;
+    Arena intrinsic_arena;
 };
 
 static uint32_t intern_id_limit(const InternTable* table)
@@ -1029,12 +1039,58 @@ static __attribute__((unused)) void intern_release(InternTable* table)
 {
     arena_release(&table->arena);
     arena_release(&table->record_arena);
+    arena_release(&table->intrinsic_arena);
     *table = (InternTable){ 0 };
 }
 
-// Back to the predefined names only, keeping the memory (for benchmark passes and tests).
+// The codes' first reservation: 8 KB, which a small unit's ids fit. Each growth doubles it, so that a table of up to
+// 32,768 ids (sqlite3.c and its headers intern 22,800) keeps its codes in the arena's base pages (BUSTER_ARENA_SMALL_BYTES,
+// 64 KB), where a reservation takes no huge-page advice and splits no mapping.
+#define BUSTER_INTERN_INTRINSIC_FIRST 4096u
+
+// The table's intrinsic codes (InternTable.intrinsic_rows), with room for every id it has: at the first call, and again
+// when the table has grown past them, a fresh reservation of the first size, doubled until the ids fit, with the codes it
+// had.
+// Null, the codes left as they were, if the memory can't be reserved.
+static __attribute__((unused)) uint16_t* intern_intrinsic_rows(InternTable* table)
+{
+    if (table->intrinsic_rows == NULL || table->count > table->intrinsic_capacity)
+    {
+        uint64_t total = table->intrinsic_rows != NULL ? (uint64_t)table->intrinsic_capacity : BUSTER_INTERN_INTRINSIC_FIRST;
+        while (total < table->count)
+        {
+            total *= 2;
+        }
+        const uint64_t bytes = total * sizeof(uint16_t);
+        Arena arena = arena_reserve(bytes);
+        uint16_t* rows = arena.base != NULL ? arena_push(&arena, bytes, 64) : NULL;
+        if (rows != NULL)
+        {
+            if (table->intrinsic_rows != NULL)
+            {
+                memcpy(rows, table->intrinsic_rows, (uint64_t)table->intrinsic_capacity * sizeof(uint16_t));
+            }
+            arena_release(&table->intrinsic_arena);
+            table->intrinsic_arena = arena;
+            table->intrinsic_rows = rows;
+            table->intrinsic_capacity = (uint32_t)total;
+        }
+        else
+        {
+            arena_release(&arena);
+        }
+    }
+    return table->intrinsic_rows != NULL && table->count <= table->intrinsic_capacity ? table->intrinsic_rows : NULL;
+}
+
+// Back to the predefined names only, keeping the memory (for benchmark passes and tests). The ids' intrinsic codes go,
+// since the ids name other spellings after it.
 static __attribute__((unused)) bool intern_reset(InternTable* table)
 {
+    arena_release(&table->intrinsic_arena);
+    table->intrinsic_rows = NULL;
+    table->intrinsic_capacity = 0;
+    table->intrinsic_known = 0;
     memset(table->buckets, 0, (table->bucket_mask + 1) * BUSTER_INTERN_BUCKET_BYTES);
     table->record_arena.length = (uint64_t)(table->records - table->record_arena.base) + 1;
     table->count = 1;

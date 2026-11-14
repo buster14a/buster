@@ -8,7 +8,7 @@
 #
 # Every HOST resolves to the loopback address alone (/etc/hosts, whose earlier entries for it, such as a preparation's
 # DNS-over-HTTPS pins, are removed first: glibc returns every matching line), so that each request to it is refused.
-# --apt adds every host that apt's sources and mirror lists name, Ubuntu's archive and security hosts, and a firewall
+# --apt adds every host that apt's sources and mirror lists name, Ubuntu's archive, security and snapshot hosts, and a firewall
 # rule that refuses plain HTTP, which Ubuntu's mirrors serve, to every address but the platform's link-local ones. Each
 # host must then be unreachable by HTTPS and HTTP, or this fails. BUSTER_HOSTS_FILE, for a check of the table alone,
 # edits that file instead, and stops there.
@@ -27,7 +27,7 @@ if [ "$apt" = true ]; then
             fi
         done | sed -E 's|^https?://||; s|^.*@||; s|:[0-9]+$||'
     )
-    hosts+=(archive.ubuntu.com security.ubuntu.com azure.archive.ubuntu.com ports.ubuntu.com)
+    hosts+=(archive.ubuntu.com security.ubuntu.com azure.archive.ubuntu.com ports.ubuntu.com snapshot.ubuntu.com)
 fi
 mapfile -t hosts < <(printf '%s\n' "${hosts[@]}" | LC_ALL=C sort -u)
 [ "${#hosts[@]}" -gt 0 ] || { echo 'hosts-down.sh: no host to take down' >&2; exit 2; }

@@ -269,6 +269,32 @@ static bool ssa_source_native_one(const char* source, char** options, uint32_t o
     return ready;
 }
 
+// Whether the two paths' executables, each `program` in its directory, are the same bytes (#1395, #2606): the same
+// source and options give the same Tier 1 program on any compiler host. A difference prints its first offset.
+static bool ssa_source_native_identical(const char* source, const char* vector_directory, const char* scalar_directory)
+{
+    char paths[2][PATH_MAX];
+    const int vector_length = snprintf(paths[0], sizeof(paths[0]), "%s/program", vector_directory);
+    const int scalar_length = snprintf(paths[1], sizeof(paths[1]), "%s/program", scalar_directory);
+    const bool named = vector_length >= 0 && (size_t)vector_length < sizeof(paths[0]) && scalar_length >= 0 && (size_t)scalar_length < sizeof(paths[1]);
+    uint64_t lengths[2] = { 0, 0 };
+    char* bytes[2] = { named ? c_testsuite_read(paths[0], &lengths[0]) : NULL, named ? c_testsuite_read(paths[1], &lengths[1]) : NULL };
+    uint64_t at = 0;
+    while (bytes[0] != NULL && bytes[1] != NULL && at < lengths[0] && at < lengths[1] && bytes[0][at] == bytes[1][at])
+    {
+        at += 1;
+    }
+    const bool same = bytes[0] != NULL && bytes[1] != NULL && lengths[0] == lengths[1] && at == lengths[0];
+    if (!same)
+    {
+        printf("test-ssa-source: file=%s native executables differ at byte %" PRIu64 " (sizes %" PRIu64 "/%" PRIu64 ", vector %s, scalar %s)\n", source, at, lengths[0], lengths[1],
+               bytes[0] != NULL ? "read" : "unreadable", bytes[1] != NULL ? "read" : "unreadable");
+    }
+    free(bytes[0]);
+    free(bytes[1]);
+    return same;
+}
+
 static bool ssa_source_native_write(const char* path, const char* text)
 {
     FILE* file = fopen(path, "w");

@@ -246,6 +246,15 @@ static uint64_t check_lanes_test_generate(CheckLanesTestTally* tally, char* text
                             "static struct pair swap_pair(struct pair p)\n{\n    struct pair q = { p.y, p.x };\n    return q;\n}\n"
                             "static long sum_values(int count, ...)\n{\n    va_list list;\n    va_start(list, count);\n    long total = 0;\n"
                             "    for (int i = 0; i < count; i += 1)\n    {\n        total += va_arg(list, long);\n    }\n    va_end(list);\n    return total;\n}\n");
+    if (functions >= 50)
+    {
+        // Copies share object, switch, VLA and cleanup records. Their lowering must not race across parts.
+        check_lanes_test_append(text, capacity, &used,
+                                "static void clone_cleanup(long *p) { *p += 1; }\n"
+                                "__attribute__((target_clones(\"default\", \"sse4.2\", \"avx2\")))\n"
+                                "static long clone_lanes(long n) { long x __attribute__((cleanup(clone_cleanup))) = n;\n"
+                                "long a[(n & 3) + 1]; a[0] = n; switch (n & 3) { case 0: x += a[0]; break; case 1: x -= 2; break; default: x += 3; } return x; }\n");
+    }
     for (uint32_t f = 0; f < functions; f += 1)
     {
         const uint32_t kind = (uint32_t)(check_lanes_test_random(tally) % BUSTER_CHECK_LANES_TEST_KINDS);
@@ -253,6 +262,10 @@ static uint64_t check_lanes_test_generate(CheckLanesTestTally* tally, char* text
         check_lanes_test_function(text, capacity, &used, f, kind, callee);
     }
     check_lanes_test_append(text, capacity, &used, "int main(void)\n{\n    long total = 0;\n    for (long i = 0; i < 3; i += 1)\n    {\n");
+    if (functions >= 50)
+    {
+        check_lanes_test_append(text, capacity, &used, "        total += clone_lanes(i);\n");
+    }
     for (uint32_t f = 0; f < functions; f += 1)
     {
         check_lanes_test_append(text, capacity, &used, "        total = total * 31 + f%u(i, total & 255);\n", f);

@@ -501,6 +501,10 @@ struct CheckProgram
     // Whether any declaration of a function has returns_twice. Whole-object call initializers (#1549) use this to
     // retain their separate result object in bodies that may reenter them. Null where no declaration has it.
     uint8_t* object_returns_twice;
+    // Per object, whether a declaration of it has an asm label, not ignored: clang's code calls a library builtin's
+    // declaration of one by its label rather than compute it (#1373, check_program_call_computed). Made before the
+    // references' pass (check_program_labelled_objects); null where no declaration has one.
+    uint8_t* object_labelled;
     // GNU's alias, ifunc and weakref attributes (#147, check_program_aliases): an entry per object a file-scope declaration
     // gives one, in object order; null in a unit without one, the usual one. A selection shares them, but for their states
     // (BUSTER_CHECK_PROGRAM_ALIAS_*, a byte each), which are each program's: its own references and selection decide them.
@@ -3350,12 +3354,15 @@ static uint32_t check_program_reference_roots(CheckProgram* program, const Check
     const CheckGraph* graph = &program->input->graph;
     for (uint32_t i = 0; i < count; i += 1)
     {
+        // Each entry's node pushed without a branch (#892): an entry without one marks the marks' last slot, which names no
+        // node, and a node marked already is stored past the stack's top, which has room for one more. Tested an entry at a
+        // time, the push was missed at most of the entries it took on the 9700X.
         const uint32_t node = controls[i].node;
-        if (node != BUSTER_CHECK_NONE && nodes[node] != epoch)
-        {
-            nodes[node] = epoch;
-            stack[(*depth)++] = node;
-        }
+        const uint32_t mark = node != BUSTER_CHECK_NONE ? node : graph->count;
+        const bool fresh = (node != BUSTER_CHECK_NONE) & (nodes[mark] != epoch);
+        nodes[mark] = epoch;
+        stack[*depth] = node;
+        *depth += fresh;
         if (controls[i].kind == CHECK_CONTROL_ASM)
         {
             const CheckInputAsm* assembly = program->input->asm_statements + controls[i].target;
@@ -3462,31 +3469,107 @@ static bool check_program_labeled(CheckProgram* program, uint32_t root, uint32_t
     return labeled;
 }
 
-// The library builtin a call computes inline as clang -O0's code does (#967), or CBUILTIN_LIBRARY_COUNT: a call of the
-// unit's declaration of fmax, fmin or their _num kin of float or double that clang makes the builtin (the reader's mark,
-// BUSTER_CHECK_LIBRARY_CALL), but of one with an asm label on a declaration, which clang's code calls by its label
-// (EmitBuiltinExpr's BuiltinIDIfNoAsmLabel is 0 for it). The label's search reads the callee's declarations, in a unit
-// with an asm keyword alone, for the few calls the reader marked.
-static CBuiltinLibraryId check_program_call_extreme(const CheckProgram* program, uint32_t node)
+// A builtin's size or value argument whose value the code may take as a constant, as ordinary constant emission's proof
+// takes it: a retained folded integer is no runtime value where a floating environment or evaluation effect still
+// matters, and then its evaluation runs no code. Its value's low 64 bits in *value.
+static bool check_program_constant_operand(const CheckGraph* graph, const CheckStream* stream, uint32_t node, uint64_t* value)
+{
+    const CheckOp op = graph->ops[node];
+    const CheckValue checked = check_stream_value(stream, node);
+    const bool constant = op != CHECK_OP_BUILTIN_QUERY && op != CHECK_OP_STATEMENT_VALUE && op != CHECK_OP_INITIALIZE && checked.category == CHECK_RVALUE &&
+                          checked.constant_kind == CHECK_CONSTANT_INTEGER && checked.fault == CHECK_FAULT_NONE &&
+                          (checked.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
+    *value = constant ? (uint64_t)checked.integer : 0;
+    return constant;
+}
+
+// CheckProgram.object_labelled: the objects of the declarations with an asm label not ignored (check_input_attribute_of's),
+// by one scan of the tokens
+// with attributes (CheckInput.attributes), in a unit with an asm keyword alone; false where the column has no room.
+static bool check_program_labelled_objects(CheckProgram* program, Arena* output, bool scalar)
 {
     const CheckInput* input = program->input;
-    const CheckGraph* graph = &input->graph;
-    const uint32_t member = graph->members[node];
-    const uint32_t index = member & ~BUSTER_CHECK_LIBRARY_CALL;
-    const bool marked = (member & BUSTER_CHECK_LIBRARY_CALL) != 0 && index < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS && graph->argument_counts[node] == 2 &&
-                        cbuiltin_library_plain_folds[index].library != CBUILTIN_LIBRARY_COUNT;
-    const uint32_t callee = marked ? graph->operand0[node] : BUSTER_CHECK_NONE;
-    const uint32_t object = callee < graph->count ? check_stream_value(program->stream, callee).object : 0;
-    bool labelled = false;
-    for (uint32_t token = 0; marked && object != 0 && input->asm_capacity != 0 && !labelled && token < input->token_count; token += 1)
+    const uint32_t count = input->token_count;
+    bool room = true;
+    for (uint32_t first = input->asm_capacity != 0 ? check_input_attributed_next(input->attributes, 0, count, scalar) : count; room && first < count;
+         first = check_input_attributed_next(input->attributes, first + 16, count, scalar))
     {
-        const CheckInputAttributes* attributes = input->objects[token] == object && input->declarations[token] == token ? check_input_attributes_at(input, token) : NULL;
-        for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+        const uint32_t lanes = check_input_attributed_group(input->attributes, first, count, scalar);
+        for (uint32_t selected = lanes; room && selected != 0; selected &= selected - 1)
         {
-            labelled |= attributes->records[i].kind == CHECK_ATTRIBUTE_ASM_LABEL && !attributes->records[i].ignored;
+            const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
+            const uint32_t object = input->objects[token];
+            const CheckInputAttribute* label = object != 0 && object <= count && input->declarations[token] == token ?
+                                               check_input_attribute_of(check_input_attributes_at(input, token), CHECK_ATTRIBUTE_ASM_LABEL) : NULL;
+            if (label != NULL && program->object_labelled == NULL)
+            {
+                program->object_labelled = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, (uint64_t)count + 1);
+                room = program->object_labelled != NULL;
+                if (room)
+                {
+                    memset(program->object_labelled, 0, (uint64_t)count + 1);
+                }
+            }
+            if (label != NULL && room)
+            {
+                program->object_labelled[object] = 1;
+            }
         }
     }
-    return marked && !labelled ? cbuiltin_library_plain_folds[index].library : CBUILTIN_LIBRARY_COUNT;
+    return room;
+}
+
+// The plain library builtin a call computes inline as clang -O0's code computes its intrinsic (#967, #1373), its row of
+// cbuiltin_library_plain_folds, or BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS: a call of the unit's declaration of one that clang
+// makes the builtin (the reader's mark, BUSTER_CHECK_LIBRARY_CALL) whose row computes it (CBuiltinLibraryComputed), with
+// its prototype's arguments, memcpy, memmove and memset with a constant size of at most
+// BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES; but of one with an asm label on a declaration, which clang's code calls by its
+// label (EmitBuiltinExpr's BuiltinIDIfNoAsmLabel is 0 for it): CheckProgram.object_labelled. The references' pass and
+// the lowering ask for every call, so it reads no token: a search of the unit's declarations for each computed memcpy
+// took sqlite3.c's -c from 126 to 187 ms on the 9700X.
+static __attribute__((noinline)) uint32_t check_program_call_marked(const CheckProgram* program, uint32_t node)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const uint32_t member = graph->members[node];
+    const uint32_t index = member & ~BUSTER_CHECK_LIBRARY_CALL;
+    const bool library = (member & BUSTER_CHECK_LIBRARY_CALL) != 0 && index < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
+    const CBuiltinLibraryComputed computed = library ? cbuiltin_library_plain_folds[index].computed : CBUILTIN_LIBRARY_COMPUTED_NONE;
+    const bool memory = computed == CBUILTIN_LIBRARY_COMPUTED_COPY || computed == CBUILTIN_LIBRARY_COMPUTED_MOVE || computed == CBUILTIN_LIBRARY_COMPUTED_SET;
+    const bool unary = computed == CBUILTIN_LIBRARY_COMPUTED_ABSOLUTE || computed == CBUILTIN_LIBRARY_COMPUTED_FLOAT_ABSOLUTE;
+    const uint32_t arity = memory ? 3 : unary ? 1 : 2;
+    bool marked = computed != CBUILTIN_LIBRARY_COMPUTED_NONE && graph->argument_counts[node] == arity;
+    uint64_t size = 0;
+    if (marked && memory)
+    {
+        const uint32_t size_node = graph->argument_nodes[graph->argument_offsets[node] + 2];
+        marked = check_program_constant_operand(graph, program->stream, size_node, &size) && size <= BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES;
+    }
+    const uint32_t callee = marked && program->object_labelled != NULL ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    const uint32_t object = callee < graph->count ? check_stream_value(program->stream, callee).object : 0;
+    const bool labelled = object != 0 && object < program->object_count && program->object_labelled[object] != 0;
+    return marked && !labelled ? index : BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
+}
+
+// check_program_call_marked's answer for a call the reader marked, BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS for any other: the
+// references' pass and the lowering ask of every call, and most are unmarked.
+static inline __attribute__((always_inline)) uint32_t check_program_call_computed(const CheckProgram* program, uint32_t node)
+{
+    const bool marked = (program->input->graph.members[node] & BUSTER_CHECK_LIBRARY_CALL) != 0;
+    return marked ? check_program_call_marked(program, node) : BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
+}
+
+// Whether a call has a plain library builtin's semantics of its own, which the node machine and its census leave to the
+// pipeline: the reader marked it (BUSTER_CHECK_LIBRARY_CALL), and its row folds (where its arguments are constants) or
+// the code computes it (check_program_call_computed). Any other marked call, a memcpy of a size that is no small constant,
+// is an ordinary call of its declaration. The checker unit's alone call it (c_check_node_machine_type.c,
+// c_check_node_census.c).
+static __attribute__((unused)) bool check_program_call_library(const CheckProgram* program, uint32_t node)
+{
+    const uint32_t member = program->input->graph.members[node];
+    const uint32_t index = member & ~BUSTER_CHECK_LIBRARY_CALL;
+    const bool marked = (member & BUSTER_CHECK_LIBRARY_CALL) != 0 && index < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
+    return marked && (cbuiltin_library_plain_folds[index].fold != CBUILTIN_LIBRARY_FOLD_NONE ||
+                      check_program_call_computed(program, node) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS);
 }
 
 static uint32_t check_program_references(CheckProgram* program, const CheckControl* controls, uint32_t count, uint32_t epoch,
@@ -3587,9 +3670,9 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                     // This edge names the source overload set; the checked selection above is the callee.
                     operands[0] = BUSTER_CHECK_NONE;
                 }
-                // A plain fmax or its kin that the code computes inline (#967, check_lower_call_extreme) references no
-                // function, as clang's code doesn't.
-                if (check_program_call_extreme(program, node) != CBUILTIN_LIBRARY_COUNT)
+                // A plain fmax, memcpy or their kin that the code computes inline (#967, #1373, check_program_call_computed)
+                // references no function, as clang's code doesn't.
+                if (check_program_call_computed(program, node) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS)
                 {
                     operands[0] = BUSTER_CHECK_NONE;
                 }
@@ -4848,6 +4931,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     const uint8_t* return_facts = valid && program->status == CHECK_PROGRAM_OK && options.return_warnings && node_count != 0 ?
                                     check_program_return_facts(program, scratch, options.return_flow_work, BUSTER_SCALAR_PATH(options.scalar)) : NULL;
     valid = valid && (!options.return_warnings || node_count == 0 || return_facts != NULL) && program->status == CHECK_PROGRAM_OK;
+    // The labelled library declarations, which a computed call's test reads in the references' pass below.
+    valid = valid && check_program_labelled_objects(program, output, BUSTER_SCALAR_PATH(options.scalar));
     uint32_t reference_count = 0;
     for (uint32_t b = 0; valid && b < body_count && program->status == CHECK_PROGRAM_OK; b += 1)
     {
