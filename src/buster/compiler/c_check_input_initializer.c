@@ -263,6 +263,41 @@ static uint32_t check_input_auto_initializer_spelling(const CheckInputReader* re
     return check_input_token_type_spelling(reader->output, parser, root, true);
 }
 
+// A bit-field initializer, through only the syntax that preserves its designation. The value's bit-field flag also
+// survives some rvalue conversions for promotion, so it alone does not distinguish a comma or assignment's result.
+// A member of an rvalue record is still a bit-field initializer, unlike those converted values (#1844).
+static bool check_input_auto_initializer_bit_field(const CheckInputReader* reader, uint32_t begin, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    uint32_t root = check_input_range_root(reader, begin, end);
+    bool field = false;
+    for (uint32_t steps = 0; root >= begin && root < end && steps < end - begin; steps += 1)
+    {
+        const uint32_t chosen = reader->selected_tokens[root];
+        const uint32_t selected = chosen & ~CHECK_INPUT_SOURCE_SELECTION;
+        if (chosen != BUSTER_CHECK_NONE && selected >= begin && selected < end && selected != root)
+        {
+            root = selected;
+        }
+        else if (parser->tree.roles[root] == PARSE_ROLE_CLOSE_GROUP ||
+                 (parser->tree.roles[root] == PARSE_ROLE_PREFIX && parser->tokens.kinds[root] == PARSE_KIND_EXTENSION))
+        {
+            uint32_t value = BUSTER_CHECK_NONE;
+            for (uint32_t child = reader->first_child[root]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+            {
+                value = child >= begin && child < end ? child : value;
+            }
+            root = value != root ? value : BUSTER_CHECK_NONE;
+        }
+        else
+        {
+            field = parser->tokens.kinds[root] == PARSE_KIND_PERIOD || parser->tokens.kinds[root] == PARSE_KIND_ARROW;
+            break;
+        }
+    }
+    return field;
+}
+
 // An __auto_type declaration's type, once the walk has read its initializer (whose uses' declarations it captured:
 // inference_end), as clang deduces it: the initializer's, converted as an lvalue's (its qualifiers dropped, but not
 // _Atomic) and decayed, with the specifiers' const and volatile. A use of the variable in its initializer is an error
@@ -312,6 +347,7 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
     const bool object_pointer = adjusted_kind == BUSTER_TYPE_KIND_POINTER && type_kind(types, types->types.base[type_index(adjusted)]) != BUSTER_TYPE_KIND_FUNCTION;
     const bool refused = (atomic || restricted) && evaluated &&
                          (declarator || (atomic && adjusted_kind == BUSTER_TYPE_KIND_ATOMIC) || (restricted && !object_pointer));
+    const bool atomic_pointer = gnu && atomic && declarator && pointers;
     const CheckNoderefType* noderef = evaluated ? check_input_noderef_value(reader, value.type, reader->constant_noderef) : NULL;
     TypeId result = 0;
     *rejected = false;
@@ -335,14 +371,28 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
             check_input_report(reader, failed < parser->tokens.count ? failed : begin, undeclared ? CHECK_INPUT_UNDECLARED : CHECK_INPUT_DECLARATION);
         }
     }
-    else if (gnu && atomic && declarator && pointers)
+    else if (atomic_pointer)
     {
         // The initializer's original type is what clang prints, including lvalue qualifiers, arrays and functions.
         // No deduction or initializer conversion takes place for this invalid declaration. It stays bound with quiet
         // uses, while later declarators and independent errors are still checked in source order.
         const uint32_t before = reader->output->report_count;
-        check_input_report_typed(reader, declaration, CHECK_INPUT_AUTO_ATOMIC_POINTER, placeholder, declaration,
-                                 (uint64_t)value.type | (uint64_t)check_input_auto_initializer_spelling(reader, begin, end) << 32);
+        if ((value.flags & BUSTER_CHECK_BIT_FIELD) != 0 && check_input_auto_initializer_bit_field(reader, begin, end))
+        {
+            // This earlier constraint leaves the same quiet invalid declaration as an incompatible initializer.
+            uint32_t root = reader->first_child[assignment];
+            while (root != BUSTER_CHECK_NONE && root < assignment)
+            {
+                root = reader->next_child[root];
+            }
+            const bool member = root < end && (parser->tokens.kinds[root] == PARSE_KIND_PERIOD || parser->tokens.kinds[root] == PARSE_KIND_ARROW);
+            check_input_report(reader, member ? reader->ends[root] : begin, CHECK_INPUT_AUTO_TYPE_BIT_FIELD);
+        }
+        else
+        {
+            check_input_report_typed(reader, declaration, CHECK_INPUT_AUTO_ATOMIC_POINTER, placeholder, declaration,
+                                     (uint64_t)value.type | (uint64_t)check_input_auto_initializer_spelling(reader, begin, end) << 32);
+        }
         if (reader->output->report_count == before + 1)
         {
             reader->output->reports[before].completion = end;

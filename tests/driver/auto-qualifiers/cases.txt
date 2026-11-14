@@ -6,6 +6,7 @@ atomic-restrict-recovery 0 4 0 0
 atomic-restrict-uninitialized 0 3 0 0
 atomic-pointer-qualifiers 0 10 0 0
 atomic-pointer-types 0 10 0 0
+atomic-pointer-bitfields 1 18 0 0
 atomic-pointer-group 0 4 0 0
 atomic-pointer-recovery 0 3 0 0
 atomic-pointer-macro 0 3 2 0
