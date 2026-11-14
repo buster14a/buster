@@ -21,19 +21,22 @@
 //   - each baseline CRT startup object relinks and post-links every affected executable, with no work when unchanged;
 //   - filtered compile commands are configuration-specific, reused until an input changes and rebuilt if missing;
 //   - driver helpers preserve version thresholds, description failures and publication without redundant copies;
+//   - BUSTER_TOOLCHAIN refuses unknown values, takes PATH's release clang as it is and otherwise a staged toolchain only
+//     once its marker is written, and never downloads in the check;
 //   - the parallel native generation's splitter links llvm-config's system libraries at paths the host lacks by name;
 //   - fresh build.sh, direct CMake and preset trees ignore hostile CFLAGS/LDFLAGS before probing C, including cached
 //     global/configuration flags, in generated compile/link commands and real unit compiles;
 //   - a clean --all during a build waits for it, and then removes every tree and the published files;
-//   - a fresh ./build.sh builds and publishes the Release executable and its configuration's compile commands, and
-//     leaves no temporary file behind;
+//   - a fresh ./build.sh --config Release builds and publishes the Release executable and its configuration's compile
+//     commands, and leaves no temporary file behind;
 //   - an unchanged build configures, compiles, links, bakes and publishes nothing;
 //   - an edited unit, an included .c and a header rebuild their dependents alone (Ninja's plan against its depfiles),
 //     and an edited unit is compiled, linked, baked and published alone;
 //   - Debug and Release share the tree, and switching back builds nothing and publishes that configuration's file;
 //   - the Develop configuration builds its units in parts beside them without changing Release's executable, leaves the
 //     benchmark units out with stand-ins that name Release, rebuilds an appended function's one part, writes the
-//     objects Release's executable writes, and after a series of edits is the same file a clean build makes;
+//     objects Release's executable writes, is what ./build.sh builds without --config, and after a series of edits is
+//     the same file a clean build makes;
 //   - BUSTER_BAKE reruns the post-link step alone, both ways, and BUSTER_LINKER the link;
 //   - a failed post-link step, a failed compile, an interrupt of the build's process group and a termination of
 //     build.sh alone publish nothing and leave nothing running, a clean of the tree during its build waits for the
@@ -1912,7 +1915,7 @@ static void check_incremental(void)
     char tmpdir[PATH_MAX + 8];
     snprintf(tmpdir, sizeof(tmpdir), "TMPDIR=%s", temporary);
     const char* const scratch[] = { tmpdir, "CFLAGS=-f" BUSTER_REGRESSION_INVALID_FLAG "-cflags", "LDFLAGS=-Wl,--" BUSTER_REGRESSION_INVALID_FLAG "-ldflags", 0 };
-    BUILD_ENV(scratch, "build", "--verbose");
+    BUILD_ENV(scratch, "build", "--config", "Release", "--verbose");
     check_ignored_flag_text(build_log);
     if (access(release, X_OK) != 0 || !same_file("build/compiler", release))
     {
@@ -1933,7 +1936,7 @@ static void check_incremental(void)
     {
         fail("build.sh left %s behind", left.data);
     }
-    pass("a fresh build publishes the Release executable and compile commands, and leaves no temporary file");
+    pass("a fresh Release build publishes its executable and compile commands, and leaves no temporary file");
 
     static Snapshot before;
     snapshot(&before);
@@ -1942,7 +1945,7 @@ static void check_incremental(void)
     snprintf(cache_path, sizeof(cache_path), "%s/CMakeCache.txt", tree);
     const struct stat cache = status_of(cache_path);
     const struct stat commands = status_of("build/compile_commands.json");
-    BUILD("build");
+    BUILD("build", "--config", "Release");
     ran_since(&before, names, sizeof(names));
     if (!contains_line(build_log, "ninja: no work to do.") || names[0] != 0)
     {
@@ -1963,7 +1966,7 @@ static void check_incremental(void)
     {
         fail("can't remove the cached Release compile commands");
     }
-    BUILD("build");
+    BUILD("build", "--config", "Release");
     ran_since(&before, names, sizeof(names));
     if (strcmp(names, "compile_commands.json ") != 0 || !compile_commands_of("Release") ||
         status_of("build/compiler").st_ino != compiler.st_ino ||
@@ -1976,7 +1979,7 @@ static void check_incremental(void)
     {
         fail("can't remove the published compile commands");
     }
-    BUILD("build");
+    BUILD("build", "--config", "Release");
     ran_since(&before, names, sizeof(names));
     if (names[0] != 0 || !compile_commands_of("Release") || status_of("build/compiler").st_ino != compiler.st_ino)
     {
@@ -2184,7 +2187,7 @@ static void check_incremental(void)
     snapshot(&before);
     const struct stat selected_before = status_of(selected);
     utimensat(AT_FDCWD, "src/buster/compiler/tier1_model_measure.c", 0, 0);
-    BUILD("build");
+    BUILD("build", "--config", "Release");
     ran_since(&before, names, sizeof(names));
     if (strcmp(names, "compiler compiler.link tier1_model_measure.c.o ") != 0 || !same_file("build/compiler", release) ||
         !same_time(status_of(selected), selected_before))
@@ -2209,7 +2212,7 @@ static void check_configurations(void)
     static Snapshot before;
     char names[8192];
     snapshot(&before);
-    BUILD("build");
+    BUILD("build", "--config", "Release");
     ran_since(&before, names, sizeof(names));
     if (names[0] != 0 || !same_file("build/compiler", release) || !compile_commands_of("Release"))
     {
@@ -2221,14 +2224,14 @@ static void check_configurations(void)
     {
         fail("switching back to Debug ran %s or didn't publish it", names);
     }
-    BUILD("build");
+    BUILD("build", "--config", "Release");
     pass("Debug and Release share the tree and switch without building");
 
     static const char* const bakes[][2] = { { "BUSTER_BAKE=0", 0 }, { "BUSTER_BAKE=1", 0 } };
     for (uint32_t i = 0; i < 2; i += 1)
     {
         snapshot(&before);
-        BUILD_ENV(bakes[i], "build");
+        BUILD_ENV(bakes[i], "build", "--config", "Release");
         ran_since(&before, names, sizeof(names));
         if (strcmp(compiler_outputs(names), "compiler ") != 0)
         {
@@ -2251,7 +2254,7 @@ static void check_configurations(void)
         free(graph_before.data);
         const char* const linker[] = { "BUSTER_LINKER=bfd", 0 };
         snapshot(&before);
-        BUILD_ENV(linker, "build");
+        BUILD_ENV(linker, "build", "--config", "Release");
         ran_since(&before, names, sizeof(names));
         Text graph_after = read_file(graph);
         const bool rejoined = joined && merged_before != (strstr(graph_after.data, "-DMERGES=1") != 0);
@@ -2260,7 +2263,7 @@ static void check_configurations(void)
         {
             fail("BUSTER_LINKER=bfd ran %s", names);
         }
-        BUILD("build");
+        BUILD("build", "--config", "Release");
         pass("BUSTER_LINKER relinks alone, and joins the parts again where it changes whether the link merges constants");
     }
     // A static link never by wild (#652): wild 0.10.0's static executables fault at their first TLS access, so wild by
@@ -2453,19 +2456,20 @@ static void check_develop(void)
     static Snapshot before;
     char names[8192];
     snapshot(&before);
-    BUILD("build");
+    BUILD("build", "--config", "Release");
     ran_since(&before, names, sizeof(names));
     if (names[0] != 0 || !same_file("build/compiler", release) || !compile_commands_of("Release"))
     {
         fail("switching to Release ran %s or didn't publish it", names);
     }
-    BUILD("--config", "Develop");
+    // The default configuration (#2559): a build without --config is Develop's.
+    BUILD("build");
     ran_since(&before, names, sizeof(names));
     if (names[0] != 0 || !same_file("build/compiler", develop) || !compile_commands_of("Develop"))
     {
-        fail("switching back to Develop ran %s or didn't publish it", names);
+        fail("a build without --config ran %s or didn't publish Develop", names);
     }
-    pass("Release and Develop share the tree and switch without building");
+    pass("Release and Develop share the tree and switch without building, and a build without --config is Develop's");
 
     // The executables differ in code, not in what they write: the same object from the same C, at both tiers.
     static const char* const tiers[] = { 0, "--tier1" };
@@ -2566,12 +2570,225 @@ static void check_develop(void)
     }
     BUILD("clean", "--config", "Develop");
     snapshot(&before);
-    BUILD("build");
+    BUILD("build", "--config", "Release");
     ran_since(&before, names, sizeof(names));
     if (strstr(names, ".c.o") != 0 || !same_time(status_of(release), release_status))
     {
         fail("restoring the sources Develop's checks edited rebuilt Release's %s", names);
     }
+}
+
+// The last line `argv` prints, without its newline: a command's result after what it says on stderr.
+static void capture_last_line(char* const* argv, char* line, size_t size)
+{
+    Text text = capture(argv);
+    while (text.length > 0 && text.data[text.length - 1] == '\n')
+    {
+        text.length -= 1;
+        text.data[text.length] = 0;
+    }
+    const char* last = strrchr(text.data, '\n');
+    snprintf(line, size, "%s", last != 0 ? last + 1 : text.data);
+    free(text.data);
+}
+
+// CI's toolchain, which build.sh builds with unless BUSTER_TOOLCHAIN=path (docs/commands/build.md, "The toolchain"),
+// first on this program's PATH too, so that the trees it configures itself (the flags' fresh trees, the presets) use
+// the clang build.sh's do: a preset configured with another would start build.sh's tree afresh.
+static void align_toolchain(void)
+{
+    const char* setting = getenv("BUSTER_TOOLCHAIN");
+    if (setting == 0 || setting[0] == 0 || strcmp(setting, "ci") == 0)
+    {
+        char* identity_argv[] = { "bash", "tools/ci/session-toolchain.sh", "identity", 0 };
+        char* version_argv[] = { "sh", "-c", "clang --version 2> /dev/null | head -n 1", 0 };
+        char identity[512];
+        char version[512];
+        capture_line(identity_argv, identity, sizeof(identity));
+        capture_line(version_argv, version, sizeof(version));
+        if (strcmp(identity, version) != 0)
+        {
+            char* stage_argv[] = { "bash", "tools/ci/session-toolchain.sh", "stage", 0 };
+            char directories[4 * PATH_MAX];
+            capture_last_line(stage_argv, directories, sizeof(directories));
+            const char* path = getenv("PATH");
+            const size_t length = strlen(directories) + strlen(path != 0 ? path : "") + 2;
+            char* joined = malloc(length);
+            if (joined == 0)
+            {
+                fail("out of memory joining PATH");
+            }
+            snprintf(joined, length, "%s:%s", directories, path != 0 ? path : "");
+            if (setenv("PATH", joined, 1) != 0)
+            {
+                fail("can't put CI's toolchain first on PATH");
+            }
+            free(joined);
+            capture_line(version_argv, version, sizeof(version));
+            if (strcmp(identity, version) != 0)
+            {
+                fail("CI's staged toolchain's clang is %s, not %s", version, identity);
+            }
+        }
+    }
+}
+
+// The toolchain setting (#2628): an unknown value is refused; a PATH whose clang is the release's is used as it is,
+// staging nothing; and any other PATH's clang gives way to the hosted layout staged in the cache, its marker the
+// staging's last step. A stand-in plays the release there: a clang that reports the release's identity and runs the
+// real one, beside the real CMake and Ninja, in a cache of its own. Each run has a curl that fails, so that a wrong
+// decision to stage fails at once rather than downloading the release.
+static void check_toolchain(void)
+{
+    char log[PATH_MAX];
+    snprintf(log, sizeof(log), "%s/toolchain.log", work);
+    const char* const bogus[] = { "BUSTER_TOOLCHAIN=bogus", 0 };
+    char* output[] = { "./build.sh", "print-output", 0 };
+    if (run(log, bogus, output) != 1 || occurrences(log, "BUSTER_TOOLCHAIN must be ci or path") != 1)
+    {
+        fputs(read_file(log).data, stderr);
+        fail("BUSTER_TOOLCHAIN=bogus wasn't refused");
+    }
+
+    char identity[512];
+    char* identity_argv[] = { "bash", "tools/ci/session-toolchain.sh", "identity", 0 };
+    capture_line(identity_argv, identity, sizeof(identity));
+    char real_clang[PATH_MAX];
+    char real_cmake[PATH_MAX];
+    char real_ninja[PATH_MAX];
+    char* which_clang[] = { "sh", "-c", "command -v clang", 0 };
+    char* which_cmake[] = { "sh", "-c", "command -v cmake", 0 };
+    char* which_ninja[] = { "sh", "-c", "command -v ninja", 0 };
+    capture_line(which_clang, real_clang, sizeof(real_clang));
+    capture_line(which_cmake, real_cmake, sizeof(real_cmake));
+    capture_line(which_ninja, real_ninja, sizeof(real_ninja));
+
+    // Two caches, each with nothing staged, and the stand-ins' directory: a clang that isn't the release's and a curl
+    // that fails.
+    char staged_cache[PATH_MAX];
+    char empty_cache[PATH_MAX];
+    char stand_ins[PATH_MAX];
+    char used[PATH_MAX];
+    snprintf(staged_cache, sizeof(staged_cache), "%s/toolchain-staged", work);
+    snprintf(empty_cache, sizeof(empty_cache), "%s/toolchain-empty", work);
+    snprintf(stand_ins, sizeof(stand_ins), "%s/toolchain-stand-ins", work);
+    snprintf(used, sizeof(used), "%s/toolchain-used", work);
+    if (mkdir(staged_cache, 0755) != 0 || mkdir(empty_cache, 0755) != 0 || mkdir(stand_ins, 0755) != 0)
+    {
+        fail("can't make the toolchain fixture's directories");
+    }
+    char path[PATH_MAX + 32];
+    snprintf(path, sizeof(path), "%s/clang", stand_ins);
+    write_file(path, "#!/bin/sh\necho 'clang version 0 (not the release)'\nexit 1\n", 0755);
+    snprintf(path, sizeof(path), "%s/curl", stand_ins);
+    write_file(path, "#!/bin/sh\necho 'curl: the toolchain check downloads nothing' >&2\nexit 6\n", 0755);
+
+    // The staged cache's hosted layout: its root, its marker's line and its PATH directories (build tools, LLVM's, the
+    // linkers').
+    char staged_home[PATH_MAX + 32];
+    snprintf(staged_home, sizeof(staged_home), "XDG_CACHE_HOME=%s", staged_cache);
+    const char* const staged_environment[] = { staged_home, 0 };
+    char* layout_argv[] = { "bash", "tools/ci/session-toolchain.sh", "layout", 0 };
+    if (run(log, staged_environment, layout_argv) != 0)
+    {
+        fputs(read_file(log).data, stderr);
+        fail("session-toolchain.sh layout failed");
+    }
+    Text layout = read_file(log);
+    char* root = layout.data;
+    char* key = strchr(root, '\n');
+    char* directories = key != 0 ? strchr(key + 1, '\n') : 0;
+    char* end = directories != 0 ? strchr(directories + 1, '\n') : 0;
+    if (end == 0)
+    {
+        fail("session-toolchain.sh layout didn't print a root, a key and directories: %s", layout.data);
+    }
+    *key++ = 0;
+    *directories++ = 0;
+    *end = 0;
+    char* tools = directories;
+    char* llvm = tools != 0 ? strchr(tools, ':') : 0;
+    char* linkers = llvm != 0 ? strchr(llvm + 1, ':') : 0;
+    if (linkers == 0)
+    {
+        fail("session-toolchain.sh layout's directories aren't three: %s", directories);
+    }
+    *llvm++ = 0;
+    *linkers++ = 0;
+    char* make[] = { "mkdir", "-p", tools, llvm, linkers, 0 };
+    if (run(0, 0, make) != 0)
+    {
+        fail("can't make the staged layout's directories");
+    }
+    const size_t script_size = 3 * PATH_MAX + 1024;
+    char* script = malloc(script_size);
+    if (script == 0)
+    {
+        fail("out of memory writing the stand-in clang");
+    }
+    snprintf(script, script_size,
+             "#!/bin/sh\nif [ \"$1\" = --version ]; then\n    echo '%s'\n    exit 0\nfi\necho used >> '%s'\nexec '%s' \"$@\"\n", identity,
+             used, real_clang);
+    snprintf(path, sizeof(path), "%s/clang", llvm);
+    write_file(path, script, 0755);
+    free(script);
+    char cmake_link[PATH_MAX + 32];
+    char ninja_link[PATH_MAX + 32];
+    snprintf(cmake_link, sizeof(cmake_link), "%s/cmake", tools);
+    snprintf(ninja_link, sizeof(ninja_link), "%s/ninja", tools);
+    if (symlink(real_cmake, cmake_link) != 0 || symlink(real_ninja, ninja_link) != 0)
+    {
+        fail("can't link the real CMake and Ninja into the staged layout");
+    }
+
+    char stand_in_path[2 * PATH_MAX + 4096];
+    snprintf(stand_in_path, sizeof(stand_in_path), "PATH=%s:%s", stand_ins, getenv("PATH"));
+    char* flags[] = { "./build.sh", "print-compile-flags", 0 };
+
+    // The release first on PATH is used as it is, with nothing staged in the cache.
+    char empty_home[PATH_MAX + 32];
+    char release_path[3 * PATH_MAX + 4096];
+    snprintf(empty_home, sizeof(empty_home), "XDG_CACHE_HOME=%s", empty_cache);
+    snprintf(release_path, sizeof(release_path), "PATH=%s:%s:%s", llvm, stand_ins, getenv("PATH"));
+    const char* const release_first[] = { empty_home, release_path, 0 };
+    if (run(log, release_first, flags) != 0 || access(used, F_OK) != 0)
+    {
+        fputs(read_file(log).data, stderr);
+        fail("build.sh didn't take PATH's release clang as it was");
+    }
+    char* staged_anything[] = { "find", empty_cache, "-mindepth", "1", "-print", "-quit", 0 };
+    Text left = capture(staged_anything);
+    if (left.length != 0)
+    {
+        fail("build.sh staged %s with the release first on PATH", left.data);
+    }
+    free(left.data);
+    unlink(used);
+
+    // Marked, the staged layout goes first on PATH: the stand-in's clang answers the description's queries.
+    const char* const staged[] = { staged_home, stand_in_path, 0 };
+    char marker[PATH_MAX + 32];
+    char marker_line[64];
+    snprintf(marker, sizeof(marker), "%s/.complete", root);
+    snprintf(marker_line, sizeof(marker_line), "%s\n", key);
+    write_file(marker, marker_line, 0644);
+    if (run(log, staged, flags) != 0 || access(used, F_OK) != 0)
+    {
+        fputs(read_file(log).data, stderr);
+        fail("build.sh didn't build with the marked staged toolchain");
+    }
+    unlink(used);
+
+    // Unmarked, the layout is a partial staging, which build.sh stages afresh (taking it away first), and the failing
+    // curl stops: it fails, naming BUSTER_TOOLCHAIN=path, and runs no clang.
+    unlink(marker);
+    if (run(log, staged, flags) == 0 || occurrences(log, "BUSTER_TOOLCHAIN=path builds with PATH's") != 1 || access(used, F_OK) == 0)
+    {
+        fputs(read_file(log).data, stderr);
+        fail("build.sh used an unmarked staged toolchain, or didn't fail naming BUSTER_TOOLCHAIN=path");
+    }
+    free(layout.data);
+    pass("BUSTER_TOOLCHAIN refuses unknown values; CI's toolchain is PATH's release as it is, or else the staged one once marked");
 }
 
 static void check_failures(void)
@@ -2588,7 +2805,7 @@ static void check_failures(void)
     char path[PATH_MAX * 2];
     snprintf(path, sizeof(path), "PATH=%s:%s", directory, getenv("PATH"));
     const char* const fake[] = { path, 0 };
-    if (build_with(fake, true, "build", (char*)0) == 0)
+    if (build_with(fake, true, "build", "--config", "Release", (char*)0) == 0)
     {
         fail("a failed post-link step succeeded");
     }
@@ -2597,7 +2814,7 @@ static void check_failures(void)
     {
         fail("a failed post-link step published build/compiler or left %s", release);
     }
-    BUILD("build");
+    BUILD("build", "--config", "Release");
     if (!same_file("build/compiler", release))
     {
         fail("the build after a failed post-link step didn't publish");
@@ -2614,7 +2831,7 @@ static void check_failures(void)
     {
         fail("can't edit %s", edited_unit);
     }
-    const int status = build_with(0, true, "build", (char*)0);
+    const int status = build_with(0, true, "build", "--config", "Release", (char*)0);
     write_file(edited_unit, unit.data, 0644);
     edited = false;
     free(unit.data);
@@ -2627,7 +2844,7 @@ static void check_failures(void)
     // timeout(1)'s: main_unit_types.c takes 20 s on the 9700X and longer elsewhere, so each comes while it compiles.
     char log[PATH_MAX];
     snprintf(log, sizeof(log), "%s/interrupted.log", work);
-    char* argv[] = { "./build.sh", 0 };
+    char* argv[] = { "./build.sh", "--config", "Release", 0 };
     for (uint32_t i = 0; i < 2; i += 1)
     {
         utimensat(AT_FDCWD, "src/buster/compiler/main_unit_types.c", 0, 0);
@@ -2683,7 +2900,7 @@ static void check_failures(void)
 
     // A configuration's clean, which takes its outputs alone, after which check-call-graph fails before capturing.
     BUILD("--config", "Debug");
-    BUILD("build");
+    BUILD("build", "--config", "Release");
     BUILD("clean", "--config", "Debug");
     if (access(debug, F_OK) == 0 || access(release, X_OK) != 0 || !same_file("build/compiler", release))
     {
@@ -2778,7 +2995,7 @@ static void check_experiments(void)
     {
         fail("compiler-64 is build/compiler, or doesn't run");
     }
-    BUILD("build");
+    BUILD("build", "--config", "Release");
     pass("shifts link padded executables, each shift once");
 
     // A lexer variant, in a tree of its own, published as build/compiler, and the published executable back. The
@@ -2806,7 +3023,7 @@ static void check_experiments(void)
     {
         fail("the lexer variant isn't in build/compiler");
     }
-    BUILD("build");
+    BUILD("build", "--config", "Release");
     if (!same_file("build/compiler", release))
     {
         fail("the build after lexer-variant didn't publish");
@@ -3304,18 +3521,34 @@ static void check_codegen_system_libraries(void)
 {
     char present[PATH_MAX];
     char script[PATH_MAX];
-    char text[4 * PATH_MAX];
-    char expected[2 * PATH_MAX];
+    char text[6 * PATH_MAX];
+    char expected[3 * PATH_MAX];
     snprintf(present, sizeof(present), "%s/libpresent.a", work);
     snprintf(script, sizeof(script), "%s/system-libraries.cmake", work);
     write_file(present, "!<arch>\n", 0644);
+    // The host's library directories: one with a development link (libdevelopment.so) and its runtime file, one with
+    // a runtime file alone (libruntime.so.2), its longer name's too.
+    char directories[PATH_MAX];
+    char file[PATH_MAX + 64];
+    snprintf(directories, sizeof(directories), "%s/system-libraries", work);
+    mkdir(directories, 0755);
+    snprintf(file, sizeof(file), "%s/libdevelopment.so", directories);
+    write_file(file, "", 0644);
+    snprintf(file, sizeof(file), "%s/libdevelopment.so.1", directories);
+    write_file(file, "", 0644);
+    snprintf(file, sizeof(file), "%s/libruntime.so.2.5", directories);
+    write_file(file, "", 0644);
+    snprintf(file, sizeof(file), "%s/libruntime.so.2", directories);
+    write_file(file, "", 0644);
     snprintf(text, sizeof(text),
+        "set(BUSTER_CODEGEN_LIBRARY_DIRECTORIES \"%s/absent\" \"%s\")\n"
         "include(\"%s/cmake/BusterCodegen.cmake\")\n"
-        "buster_codegen_system_libraries(libraries -lrt /buster-absent/x86_64-linux-gnu/libzstd.a \"%s\" /buster-absent/libxml2.so.2 -lm)\n"
+        "buster_codegen_system_libraries(libraries -lrt /buster-absent/x86_64-linux-gnu/libzstd.a \"%s\" /buster-absent/libxml2.so.2 "
+        "/buster-absent/libdevelopment.a /buster-absent/libruntime.a -lm)\n"
         "message(\"libraries: ${libraries}\")\n",
-        root, present);
+        directories, directories, root, present);
     write_file(script, text, 0644);
-    snprintf(expected, sizeof(expected), "libraries: -lrt;-lzstd;%s;-lxml2;-lm\n", present);
+    snprintf(expected, sizeof(expected), "libraries: -lrt;-lzstd;%s;-lxml2;-ldevelopment;%s/libruntime.so.2;-lm\n", present, directories);
     char* argv[] = { "cmake", "-P", script, 0 };
     Text log = capture(argv);
     if (strcmp(log.data, expected) != 0)
@@ -3323,7 +3556,7 @@ static void check_codegen_system_libraries(void)
         fail("BusterCodegen.cmake's system libraries: expected \"%s\", got \"%s\"", expected, log.data);
     }
     free(log.data);
-    pass("llvm-config's system libraries at paths the host lacks link by name, the others as given");
+    pass("llvm-config's system libraries at paths the host lacks link by name, or by their runtime file's path where the host has no development file, the others as given");
 }
 
 // Exercise the real CMake split/merge helpers on two independent translation units with colliding private names.
@@ -3686,9 +3919,9 @@ static void check_parallel_codegen_compiler(void)
         "BUSTER_PARALLEL_CODEGEN=1", "BUSTER_DEBUG_INFO=0", "BUSTER_SANITIZER=none", "BUSTER_FUZZ_AVAILABLE=0",
         "BUSTER_FUZZ_ENTRY=", "BUSTER_PGO=0", "BUSTER_PGO_TRAIN=", "BUSTER_HOST_RUNTIME=", "BUSTER_BUILD_DEFINES=", 0,
     };
-    BUILD_ENV(settings, "build");
+    BUILD_ENV(settings, "build", "--config", "Release");
     char path[PATH_MAX];
-    char* print[] = { "./build.sh", "print-output", 0 };
+    char* print[] = { "./build.sh", "print-output", "--config", "Release", 0 };
     char log[PATH_MAX];
     snprintf(log, sizeof(log), "%s/parallel-codegen-output.log", work);
     if (run(log, settings, print) != 0)
@@ -3707,7 +3940,7 @@ static void check_parallel_codegen_compiler(void)
     output = capture(baked);
     free(output.data);
     const struct stat compiler = status_of(path);
-    BUILD_ENV(settings, "build");
+    BUILD_ENV(settings, "build", "--config", "Release");
     if (!same_time(status_of(path), compiler) || !same_file("build/compiler", path))
     {
         fail("an unchanged opt-in compiler build regenerated or failed to publish its executable");
@@ -3740,6 +3973,7 @@ int main(int argc, char** argv)
     }
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
+    align_toolchain();
     if (argc == 1 || ownership_only)
     {
         check_standalone_preprocessing();
@@ -3749,6 +3983,7 @@ int main(int argc, char** argv)
     if (argc == 1 || driver_only)
     {
         check_driver();
+        check_toolchain();
     }
     if (ownership_only)
     {
@@ -3770,7 +4005,7 @@ int main(int argc, char** argv)
     }
     if (!ownership_only && !driver_only && !crt_only && !commands_only && !codegen_only)
     {
-        char* output[] = { "./build.sh", "print-output", 0 };
+        char* output[] = { "./build.sh", "print-output", "--config", "Release", 0 };
         char* output_debug[] = { "./build.sh", "print-output", "--config", "Debug", 0 };
         char* output_develop[] = { "./build.sh", "print-output", "--config", "Develop", 0 };
         capture_line(output, release, sizeof(release));
@@ -3783,7 +4018,7 @@ int main(int argc, char** argv)
     }
     if (develop_only)
     {
-        BUILD("build");
+        BUILD("build", "--config", "Release");
         check_develop();
     }
     if (!ownership_only && !driver_only && !crt_only && !commands_only && !codegen_only && !develop_only)

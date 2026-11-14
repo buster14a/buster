@@ -2173,8 +2173,9 @@ instructions and instructions per cycle medians of 3 rounds under `perf stat`:
 - **Code size:**
   - `.text` is 1.29 times clang's, in `sqlite3.o` and in the executable; the tables took 11,808 bytes out of
     `sqlite3.o`'s and added 11,232 to its `.rodata`, 2,808 entries;
-  - `sqlite3.o`'s `.eh_frame` is 2.46 times clang's: `unwind.c` advances with `DW_CFA_advance_loc4` throughout, for FDE
-    sizes known before writing.
+  - In this measurement, `sqlite3.o`'s `.eh_frame` was 2.46 times clang's: `unwind.c` used `DW_CFA_advance_loc4`
+    throughout. #1377 replaces those advances with their shortest encodings while still sizing FDEs before writing;
+    the historical corpus size above has not been remeasured for that change.
 - **`switch`** dispatches through a jump table where clang -O0's does (`docs/c-checker.md`, "Switches"):
   - `sqlite3VdbeExec`'s dispatch on the opcode is a bounds check and a table, as clang's is, where before the tables it
     was 184 compare-and-branch pairs;

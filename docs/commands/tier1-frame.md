@@ -23,7 +23,8 @@ requirements. [Command index](README.md).
   "Slot sharing between objects"); `test-tier1-emit` checks shared and separate
   rows natively, and `test-checker-driver`'s lifetime fixture smaller frames
   than `--tier1-no-lifetimes`' against clang.
-  `test-tier1-frame` checks independent pressure/layout/prologue oracles;
+  `test-tier1-frame` checks independent pressure/layout/prologue oracles, and
+  that both colorers give identical slots and offsets (#2606);
   `benchmark-tier1-frame` measures preparation, coloring, layout and total cost.
   `test-tier1-frame-execution` runs native prologues/epilogues, ABI preservation,
   variadic saves and guarded page probes. [The frame guide](../../docs/tier1-frame.md)

@@ -282,11 +282,14 @@ static inline __attribute__((always_inline)) bool check_lower_batch_expression(C
                     (root_info & ((BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_ADDRESS | BUSTER_CHECK_LOWER_TYPE_ATOMIC) << 8)) == 0 &&
                     check_lower_value_payload(writer, a, a_info, false, &a_kind, &a_bits) &&
                     (!binary || check_lower_value_payload(writer, b, b_info, false, &b_kind, &b_bits));
+            // A signed power of two's sequence (check_lower_signed_power_entries) is past the fragment's three entries:
+            // the task loop writes it.
+            const uint8_t power = valid && binary ? check_lower_power(writer, node, class, &kind, &b_bits) : BUSTER_CHECK_LOWER_POWER_NONE;
+            valid = valid && power != BUSTER_CHECK_LOWER_POWER_SIGNED;
             if (valid)
             {
-                const bool power = binary && check_lower_unsigned_power(writer, node, class, &kind, &b_bits);
                 const uint32_t kinds = a_kind | (uint32_t)b_kind << 8 | (uint32_t)(kind == BUSTER_CHECK_LOWER_BATCH_WRAPPER ? 0 : kind) << 16;
-                const uint32_t classes = (uint8_t)a_info | (binary ? (uint32_t)(power ? class : (uint8_t)b_info) << 8 : 0) | (uint32_t)class << 16;
+                const uint32_t classes = (uint8_t)a_info | (binary ? (uint32_t)(power == BUSTER_CHECK_LOWER_POWER_MASK ? class : (uint8_t)b_info) << 8 : 0) | (uint32_t)class << 16;
                 const uint8_t occupied = 1 | (binary ? 2 : 0) | (kind != BUSTER_CHECK_LOWER_BATCH_WRAPPER ? 4 : 0);
                 check_lower_batch_write(writer, kinds, classes, a_bits, b_bits, occupied);
                 writer->token = graph->tokens[binary ? b : a];

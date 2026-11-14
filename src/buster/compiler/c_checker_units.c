@@ -2255,6 +2255,7 @@ static void check_units_lane_functions(const CheckUnitsRun* run, CheckUnitsLane*
         .tier0_no_inline = command->tier0_no_inline,
         .tier1_schedule = command->tier1_schedule,
         .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,
+        .tier1_function_sizes = command->tier1_function_sizes != NULL ? errors : NULL,
         .helper_reporting = command->helper_report != NULL,
         .units_lane = lane,
         .helper_forms = command->helper_forms,
@@ -2658,6 +2659,11 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         if (ready && emitting && !check_asm_index_ready)
         {
             ready = check_asm_index_initialize();
+        }
+        // And the intrinsic catalogue's exact table (#2654), which every unit's intrinsic set-up reads, whatever it emits.
+        if (ready && !builtin_intrinsic_table_ready)
+        {
+            ready = builtin_intrinsic_table_initialize();
         }
         // A baked executable starts with the semantics tables built (baked.h, #590), and x86_semantics_initialize rebuilds
         // them unconditionally, writing the baked pages: only an executable that isn't baked runs it (#1571).

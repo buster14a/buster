@@ -7,8 +7,10 @@
 // instructions, inserts the returned phis at block entry, and discards unreachable blocks. The caller's full IR
 // verifier remains responsible for VALUE's hidden operands, terminators and the semantics of memory operations.
 //
-// ssa_build places pruned phis with liveness and dominance-frontier bitsets, then renames through nearest dominating
-// definitions. ssa_build_scalar reads variables through predecessors with an explicit stack (Braun et al., CC 2013).
+// Small inputs place pruned phis with liveness and dominance-frontier bitsets, then rename through nearest dominating
+// definitions. The dense workspace has a checked byte budget. Larger inputs reuse one local's predecessor-reading
+// workspace, retaining only its compact phi graph (ssa_bounded.c). The scalar twin reads variables through
+// predecessors with an explicit stack (Braun et al., CC 2013); ssa_verify.c checks independent bounded equations.
 // Both remove trivial phis and redundant phi cycles without recursion. No implementation from the papers is copied.
 // Include after lane.c, dataflow.c and dominators.c. All temporary/output memory belongs to the caller's arenas.
 
@@ -154,6 +156,7 @@ struct SsaWork
     uint32_t* phi_operands;
     // Original values, one undef per local, then provisional phis. Redirects are acyclic; phi operand edges may cycle.
     uint32_t* aliases;
+    SsaError construction_error;
 };
 
 static uint32_t ssa_resolve(SsaWork* work, uint32_t value)
@@ -177,20 +180,34 @@ static uint32_t ssa_undefined(const SsaWork* work, uint32_t local)
     return work->input->instruction_count + local;
 }
 
-// The value a WRITE's operand stands for in `result`: an instruction's replacement, or its local's undef as it is.
-static uint32_t ssa_written(const SsaWork* work, const SsaResult* result, uint32_t operand)
-{
-    return operand < work->input->instruction_count ? result->replacements[operand] : operand;
-}
-
 // This is a memory budget, not a measured scalar/vector crossover. The shared analyzer's retained frontier
 // reservation and temporary dominator matrix occupy distinct regions, so their combined payload is bounded here.
 #define BUSTER_SSA_DOMINANCE_BYTES (16ull << 20)
+#define BUSTER_SSA_DENSE_BYTES (16ull << 20)
 
 static bool ssa_vector_fits(uint32_t blocks)
 {
     const uint64_t row_bytes = ((uint64_t)blocks + BUSTER_DOMINATOR_VECTOR_BITS - 1) / BUSTER_DOMINATOR_VECTOR_BITS * BUSTER_DOMINATOR_VECTOR_BYTES;
     return ((uint64_t)blocks * 2 + 1) * row_bytes <= BUSTER_SSA_DOMINANCE_BYTES;
+}
+
+// Bound every Cartesian workspace, including provisional SCC cleanup, emission, four padded liveness matrices,
+// and the vector renamer's offsets/cursors. The topology and instruction terms deliberately overestimate their
+// aligned columns. Dominance/frontier storage has its own separate cap above. This is a storage bound, not a new
+// measured scalar/vector crossover; eligibility can only reduce these conservative input-local extents.
+static bool ssa_dense_fits(const SsaInput* input)
+{
+    const uint64_t cells = (uint64_t)input->block_count * input->local_count;
+    const uint64_t operands = (uint64_t)input->edge_count * input->local_count;
+    bool fits = cells <= BUSTER_SSA_DENSE_BYTES / 128 && operands <= BUSTER_SSA_DENSE_BYTES / 16;
+    if (fits)
+    {
+        const uint64_t rows = ((uint64_t)input->local_count + BUSTER_DATAFLOW_VECTOR_BITS - 1) / BUSTER_DATAFLOW_VECTOR_BITS;
+        const uint64_t flow = (uint64_t)input->block_count * rows * BUSTER_DATAFLOW_VECTOR_BYTES * 4;
+        const uint64_t linear = ((uint64_t)input->instruction_count + input->local_count) * 32 + (uint64_t)input->block_count * 256 + (uint64_t)input->edge_count * 32 + 8192;
+        fits = flow <= BUSTER_SSA_DENSE_BYTES && linear <= BUSTER_SSA_DENSE_BYTES && cells * 128 + operands * 16 + flow + linear <= BUSTER_SSA_DENSE_BYTES;
+    }
+    return fits;
 }
 
 static void* ssa_allocate(Arena* arena, uint64_t count, uint64_t bytes)
@@ -403,7 +420,7 @@ static bool ssa_dominates(const SsaWork* work, uint32_t definition, uint32_t use
     return dominators_dominates(&work->dominators, definition, use);
 }
 
-static SsaError ssa_prepare(SsaWork* work, const SsaInput* input, Arena* scratch, bool vector)
+static SsaError ssa_prepare_path(SsaWork* work, const SsaInput* input, Arena* scratch, bool vector, bool dense_flow)
 {
     (void)vector;
 
@@ -433,7 +450,9 @@ static SsaError ssa_prepare(SsaWork* work, const SsaInput* input, Arena* scratch
     {
         ssa_promote(work, BUSTER_VECTOR_PATH(vector));
         cursor = ssa_allocate(scratch, input->block_count, sizeof(uint32_t));
-        if (cursor == 0 || !dataflow_create(scratch, input->block_count, work->promoted_count, input->edge_count, &work->flow))
+        // Only the budgeted dense constructor needs liveness matrices. Preserve its existing Dataflow layout;
+        // the bounded predecessor reader and independent verifier borrow topology without any local bit rows.
+        if (cursor == 0 || !dataflow_create(scratch, input->block_count, dense_flow ? work->promoted_count : 0, input->edge_count, &work->flow))
         {
             error = SSA_ERROR_MEMORY;
         }
@@ -525,6 +544,11 @@ static SsaError ssa_prepare(SsaWork* work, const SsaInput* input, Arena* scratch
     return error;
 }
 
+static SsaError ssa_prepare(SsaWork* work, const SsaInput* input, Arena* scratch, bool vector)
+{
+    return ssa_prepare_path(work, input, scratch, vector, false);
+}
+
 static SsaError ssa_definitions(SsaWork* work)
 {
     const SsaInput* input = work->input;
@@ -600,17 +624,27 @@ static SsaError ssa_definitions(SsaWork* work)
 
 static uint32_t ssa_add_phi(SsaWork* work, uint32_t block, uint32_t local)
 {
-    const uint32_t phi = work->phi_count++;
-    work->phi_blocks[phi] = block;
-    work->phi_locals[phi] = local;
-    work->phi_offsets[phi] = work->operand_count;
     const uint32_t count = work->result.predecessor_offsets[block + 1] - work->result.predecessor_offsets[block];
-    for (uint32_t i = 0; i < count; i += 1)
+    uint32_t value = BUSTER_SSA_NONE;
+    if (work->phi_count >= work->phi_capacity || (uint64_t)work->result.phi_base + work->phi_count >= BUSTER_SSA_NONE || count > work->operand_capacity - work->operand_count)
     {
-        work->phi_operands[work->operand_count++] = BUSTER_SSA_NONE;
+        work->construction_error = SSA_ERROR_LIMIT;
     }
-    work->phi_offsets[phi + 1] = work->operand_count;
-    return work->result.phi_base + phi;
+    else
+    {
+        const uint32_t phi = work->phi_count++;
+        value = work->result.phi_base + phi;
+        work->aliases[value] = value;
+        work->phi_blocks[phi] = block;
+        work->phi_locals[phi] = local;
+        work->phi_offsets[phi] = work->operand_count;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            work->phi_operands[work->operand_count++] = BUSTER_SSA_NONE;
+        }
+        work->phi_offsets[phi + 1] = work->operand_count;
+    }
+    return value;
 }
 
 typedef struct SsaReadFrame SsaReadFrame;
@@ -628,7 +662,7 @@ static uint32_t ssa_read_entry(SsaWork* work, uint32_t block, uint32_t dense, Ss
     if (work->entry[root] == BUSTER_SSA_NONE)
     {
         work->entry[root] = block == 0 ? ssa_undefined(work, local) : ssa_add_phi(work, block, local);
-        if (block != 0)
+        if (block != 0 && work->construction_error == SSA_OK)
         {
             stack[depth++] = (SsaReadFrame){
                 .block = block,
@@ -636,7 +670,7 @@ static uint32_t ssa_read_entry(SsaWork* work, uint32_t block, uint32_t dense, Ss
             };
         }
     }
-    while (depth != 0)
+    while (depth != 0 && work->construction_error == SSA_OK)
     {
         SsaReadFrame* frame = &stack[depth - 1];
         const uint32_t begin = work->result.predecessor_offsets[frame->block];
@@ -660,15 +694,18 @@ static uint32_t ssa_read_entry(SsaWork* work, uint32_t block, uint32_t dense, Ss
                 }
                 value = work->entry[cell];
             }
-            const uint32_t phi = work->entry[(uint64_t)frame->block * work->promoted_count + dense] - work->result.phi_base;
-            work->phi_operands[work->phi_offsets[phi] + frame->edge - begin] = value;
-            frame->edge += 1;
-            if (descend)
+            if (work->construction_error == SSA_OK)
             {
-                stack[depth++] = (SsaReadFrame){
-                    .block = predecessor,
-                    .edge = work->result.predecessor_offsets[predecessor],
-                };
+                const uint32_t phi = work->entry[(uint64_t)frame->block * work->promoted_count + dense] - work->result.phi_base;
+                work->phi_operands[work->phi_offsets[phi] + frame->edge - begin] = value;
+                frame->edge += 1;
+                if (descend)
+                {
+                    stack[depth++] = (SsaReadFrame){
+                        .block = predecessor,
+                        .edge = work->result.predecessor_offsets[predecessor],
+                    };
+                }
             }
         }
     }
@@ -711,7 +748,7 @@ static SsaError ssa_construct_scalar(SsaWork* work)
             }
         }
     }
-    return error;
+    return error == SSA_OK ? work->construction_error : error;
 }
 
 static SsaError ssa_place_phis(SsaWork* work)
@@ -790,7 +827,7 @@ static SsaError ssa_place_phis(SsaWork* work)
             }
         }
     }
-    return error;
+    return error == SSA_OK ? work->construction_error : error;
 }
 
 static void ssa_jump_definitions(uint32_t* up, uint32_t* next, uint32_t blocks)
@@ -1364,7 +1401,9 @@ static SsaError ssa_simplify(SsaWork* work)
     return error;
 }
 
-static SsaError ssa_build_path(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result, bool vector)
+#include "ssa_bounded.c"
+
+static SsaError ssa_build_selected_path(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result, bool vector, bool bounded)
 {
     (void)vector;
 
@@ -1374,16 +1413,23 @@ static SsaError ssa_build_path(const SsaInput* input, Arena* output, Arena* scra
     SsaWork work = { 0 };
     if (error == SSA_OK)
     {
-        vector = BUSTER_VECTOR_PATH(vector) && ssa_vector_fits(input->block_count);
-        error = ssa_prepare(&work, input, scratch, BUSTER_VECTOR_PATH(vector));
+        bounded |= !ssa_dense_fits(input);
+        error = ssa_prepare_path(&work, input, scratch, !bounded && BUSTER_VECTOR_PATH(vector) && ssa_vector_fits(input->block_count), !bounded);
     }
-    if (error == SSA_OK)
+    if (error == SSA_OK && !bounded)
     {
         error = ssa_definitions(&work);
     }
     if (error == SSA_OK)
     {
-        error = BUSTER_VECTOR_PATH(vector) ? ssa_construct_vector(&work) : ssa_construct_scalar(&work);
+        if (bounded)
+        {
+            error = ssa_construct_bounded(&work, BUSTER_VECTOR_PATH(vector));
+        }
+        else
+        {
+            error = BUSTER_VECTOR_PATH(vector) && ssa_vector_fits(input->block_count) ? ssa_construct_vector(&work) : ssa_construct_scalar(&work);
+        }
     }
     if (error == SSA_OK)
     {
@@ -1404,6 +1450,17 @@ static SsaError ssa_build_path(const SsaInput* input, Arena* output, Arena* scra
     return error;
 }
 
+static SsaError ssa_build_path(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result, bool vector)
+{
+    return ssa_build_selected_path(input, output, scratch, result, vector, false);
+}
+
+// The tests force both bounded kernels on tiny fixtures as well as the memory-limit cases.
+static __attribute__((unused)) SsaError ssa_build_bounded_path(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result, bool vector)
+{
+    return ssa_build_selected_path(input, output, scratch, result, vector, true);
+}
+
 static SsaError ssa_build_scalar(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result);
 
 static SsaError ssa_build(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result)
@@ -1420,289 +1477,4 @@ static SsaError ssa_build_scalar(const SsaInput* input, Arena* output, Arena* sc
     return ssa_build_path(input, output, scratch, result, false);
 }
 
-static bool ssa_value_valid(const SsaWork* work, const SsaResult* result, uint32_t value, uint32_t block, uint32_t position, uint8_t type)
-{
-    const SsaInput* input = work->input;
-    bool valid = value < (uint64_t)result->phi_base + result->phi_count;
-    if (valid && value < input->instruction_count)
-    {
-        const uint8_t kind = input->kinds[value];
-        const uint32_t origin = work->instruction_blocks[value];
-        valid = kind != BUSTER_SSA_WRITE && input->types[value] == type;
-        valid = valid && !(kind == BUSTER_SSA_READ && result->promoted[input->locals[value]] != 0);
-        valid = valid && ssa_dominates(work, origin, block) && (origin != block || value < position);
-    }
-    else if (valid && value < result->phi_base)
-    {
-        valid = input->local_types[value - input->instruction_count] == type;
-    }
-    else if (valid)
-    {
-        const uint32_t phi = value - result->phi_base;
-        valid = result->phi_locals[phi] < input->local_count && result->phi_blocks[phi] < input->block_count;
-        valid = valid && input->local_types[result->phi_locals[phi]] == type && ssa_dominates(work, result->phi_blocks[phi], block);
-    }
-    return valid;
-}
-
-static void ssa_check_fail(SsaCheck* check, uint32_t instruction, const char* rule)
-{
-    if (check->error == SSA_OK)
-    {
-        *check = (SsaCheck){
-            .error = SSA_ERROR_INVALID,
-            .instruction = instruction,
-            .rule = rule,
-        };
-    }
-}
-
-// The verifier solves symbolic reaching-definition equations from the result's phis, rather than rerunning either
-// construction algorithm. Unknown predecessors can be visited later, but every known incoming value must agree at
-// a live entry without a phi. At a phi, each operand must equal its predecessor's final local value. This catches
-// incorrect yet dominating substitutions, which structural dominance checks alone would accept.
-static SsaCheck ssa_verify_equations(SsaWork* work, const SsaResult* result)
-{
-    const SsaInput* input = work->input;
-    const uint64_t cells = (uint64_t)input->block_count * work->promoted_count;
-    uint32_t* incoming = ssa_allocate(work->scratch, cells, sizeof(uint32_t));
-    uint32_t* outgoing = ssa_allocate(work->scratch, cells, sizeof(uint32_t));
-    uint32_t* current = ssa_allocate(work->scratch, work->promoted_count, sizeof(uint32_t));
-    SsaCheck check = {
-        .error = incoming != 0 && outgoing != 0 && current != 0 ? SSA_OK : SSA_ERROR_MEMORY,
-        .instruction = BUSTER_SSA_NONE,
-        .rule = "reaching-definition scratch",
-    };
-    if (check.error == SSA_OK)
-    {
-        memset(incoming, 0xff, cells * sizeof(uint32_t));
-        memset(outgoing, 0xff, cells * sizeof(uint32_t));
-        dataflow_liveness_scalar(&work->flow);
-    }
-    bool changed = check.error == SSA_OK;
-    while (changed && check.error == SSA_OK)
-    {
-        changed = false;
-        for (uint32_t order = input->block_count; order != 0; order -= 1)
-        {
-            const uint32_t block = work->flow.postorder[order - 1];
-            if (work->result.reachable[block] != 0)
-            {
-                for (uint32_t dense = 0; dense < work->promoted_count; dense += 1)
-                {
-                    const uint64_t cell = (uint64_t)block * work->promoted_count + dense;
-                    uint32_t value = work->entry[cell];
-                    const bool live = (work->flow.in[(uint64_t)block * work->flow.row_words + dense / 64] & (1ull << (dense % 64))) != 0;
-                    if (value == BUSTER_SSA_NONE)
-                    {
-                        if (block == 0 || !live)
-                        {
-                            value = ssa_undefined(work, work->local_ids[dense]);
-                        }
-                        else
-                        {
-                            for (uint32_t edge = result->predecessor_offsets[block]; edge < result->predecessor_offsets[block + 1]; edge += 1)
-                            {
-                                const uint32_t predecessor = result->predecessors[edge];
-                                const uint32_t other = outgoing[(uint64_t)predecessor * work->promoted_count + dense];
-                                if (other != BUSTER_SSA_NONE)
-                                {
-                                    if (value != BUSTER_SSA_NONE && value != other)
-                                    {
-                                        ssa_check_fail(&check, input->block_offsets[block], "different reaching values without a phi");
-                                    }
-                                    value = other;
-                                }
-                            }
-                        }
-                    }
-                    if (value != BUSTER_SSA_NONE && incoming[cell] == BUSTER_SSA_NONE)
-                    {
-                        incoming[cell] = value;
-                        changed = true;
-                    }
-                    else if (value != BUSTER_SSA_NONE && incoming[cell] != value)
-                    {
-                        ssa_check_fail(&check, input->block_offsets[block], "entry value changed");
-                    }
-                    const uint32_t last = work->last[cell];
-                    const uint32_t exit = last == BUSTER_SSA_NONE ? value : ssa_written(work, result, last);
-                    if (exit != BUSTER_SSA_NONE && outgoing[cell] == BUSTER_SSA_NONE)
-                    {
-                        outgoing[cell] = exit;
-                        changed = true;
-                    }
-                    else if (exit != BUSTER_SSA_NONE && outgoing[cell] != exit)
-                    {
-                        ssa_check_fail(&check, input->block_offsets[block], "exit value changed");
-                    }
-                }
-            }
-        }
-    }
-    for (uint32_t phi = 0; check.error == SSA_OK && phi < result->phi_count; phi += 1)
-    {
-        const uint32_t block = result->phi_blocks[phi];
-        const uint32_t dense = work->dense[result->phi_locals[phi]];
-        const uint32_t begin = result->predecessor_offsets[block];
-        for (uint32_t edge = begin; edge < result->predecessor_offsets[block + 1]; edge += 1)
-        {
-            const uint32_t predecessor = result->predecessors[edge];
-            const uint32_t expected = outgoing[(uint64_t)predecessor * work->promoted_count + dense];
-            if (expected == BUSTER_SSA_NONE || expected != result->phi_operands[result->phi_offsets[phi] + edge - begin])
-            {
-                ssa_check_fail(&check, input->block_offsets[block], "phi operand is not the predecessor's local value");
-            }
-        }
-    }
-    for (uint32_t block = 0; check.error == SSA_OK && block < input->block_count; block += 1)
-    {
-        if (work->result.reachable[block] != 0)
-        {
-            memcpy(current, incoming + (uint64_t)block * work->promoted_count, (uint64_t)work->promoted_count * sizeof(uint32_t));
-            for (uint32_t i = input->block_offsets[block]; i < input->block_offsets[block + 1]; i += 1)
-            {
-                const uint8_t kind = input->kinds[i];
-                if (kind == BUSTER_SSA_READ || kind == BUSTER_SSA_WRITE)
-                {
-                    const uint32_t dense = work->dense[input->locals[i]];
-                    if (dense != BUSTER_SSA_NONE)
-                    {
-                        if (kind == BUSTER_SSA_WRITE)
-                        {
-                            current[dense] = ssa_written(work, result, input->operands[i]);
-                        }
-                        else if (current[dense] == BUSTER_SSA_NONE || result->replacements[i] != current[dense])
-                        {
-                            ssa_check_fail(&check, i, "read is not the current local value");
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if (check.error == SSA_OK)
-    {
-        check.rule = 0;
-    }
-    return check;
-}
-
-static SsaCheck ssa_verify(const SsaInput* input, const SsaResult* result, Arena* scratch)
-{
-    SsaCheck check = {
-        .error = result != 0 && scratch != 0 ? ssa_check_input(input) : SSA_ERROR_INVALID,
-        .instruction = BUSTER_SSA_NONE,
-        .rule = "input",
-    };
-    const uint64_t saved = scratch == 0 ? 0 : scratch->length;
-    SsaWork work = { 0 };
-    if (check.error == SSA_OK)
-    {
-        check.error = ssa_prepare(&work, input, scratch, false);
-    }
-    if (check.error == SSA_OK)
-    {
-        const uint64_t maximum_phis = (uint64_t)input->block_count * work.promoted_count;
-        const uint64_t maximum_operands = (uint64_t)work.result.reachable_edge_count * work.promoted_count;
-        const bool pointers = result->predecessor_offsets != 0 && result->phi_offsets != 0 && (input->local_count == 0 || result->promoted != 0) && (input->block_count == 0 || result->reachable != 0) && (input->instruction_count == 0 || result->replacements != 0) && (result->phi_count == 0 || (result->phi_blocks != 0 && result->phi_locals != 0)) && (result->operand_count == 0 || result->phi_operands != 0) && (result->reachable_edge_count == 0 || (result->predecessors != 0 && result->predecessor_edges != 0));
-        if (!pointers || result->phi_base != work.result.phi_base || result->phi_count > maximum_phis || result->operand_count > maximum_operands || (uint64_t)result->phi_base + result->phi_count >= BUSTER_SSA_NONE || result->reachable_edge_count != work.result.reachable_edge_count)
-        {
-            ssa_check_fail(&check, BUSTER_SSA_NONE, "output columns or counts");
-        }
-    }
-    if (check.error == SSA_OK)
-    {
-        const bool locals = input->local_count == 0 || memcmp(result->promoted, work.result.promoted, input->local_count) == 0;
-        const bool blocks = input->block_count == 0 || memcmp(result->reachable, work.result.reachable, input->block_count) == 0;
-        const bool offsets = memcmp(result->predecessor_offsets, work.result.predecessor_offsets, ((uint64_t)input->block_count + 1) * sizeof(uint32_t)) == 0;
-        const uint64_t bytes = (uint64_t)result->reachable_edge_count * sizeof(uint32_t);
-        const bool predecessors = bytes == 0 || (memcmp(result->predecessors, work.result.predecessors, bytes) == 0 && memcmp(result->predecessor_edges, work.result.predecessor_edges, bytes) == 0);
-        if (!locals || !blocks || !offsets || !predecessors || result->phi_offsets[0] != 0 || result->phi_offsets[result->phi_count] != result->operand_count)
-        {
-            ssa_check_fail(&check, BUSTER_SSA_NONE, "promotion, reachability or predecessors");
-        }
-    }
-    if (check.error == SSA_OK)
-    {
-        check.error = ssa_definitions(&work);
-    }
-    for (uint32_t phi = 0; check.error == SSA_OK && phi < result->phi_count; phi += 1)
-    {
-        const uint32_t block = result->phi_blocks[phi];
-        const uint32_t local = result->phi_locals[phi];
-        if (block == 0 || block >= input->block_count || local >= input->local_count || result->reachable[block] == 0 || result->promoted[local] == 0 || result->phi_offsets[phi] > result->phi_offsets[phi + 1] || result->phi_offsets[phi + 1] > result->operand_count)
-        {
-            ssa_check_fail(&check, BUSTER_SSA_NONE, "phi block, local or operand range");
-        }
-        else
-        {
-            const uint64_t cell = (uint64_t)block * work.promoted_count + work.dense[local];
-            if (work.entry[cell] != BUSTER_SSA_NONE || result->phi_offsets[phi + 1] - result->phi_offsets[phi] != result->predecessor_offsets[block + 1] - result->predecessor_offsets[block])
-            {
-                ssa_check_fail(&check, input->block_offsets[block], "duplicate phi or predecessor multiplicity");
-            }
-            work.entry[cell] = result->phi_base + phi;
-        }
-    }
-    for (uint32_t i = 0; check.error == SSA_OK && i < input->instruction_count; i += 1)
-    {
-        const uint8_t kind = input->kinds[i];
-        if (kind == BUSTER_SSA_WRITE)
-        {
-            if (result->replacements[i] != BUSTER_SSA_NONE)
-            {
-                ssa_check_fail(&check, i, "write must not define a value");
-            }
-        }
-        else if (kind == BUSTER_SSA_READ && result->promoted[input->locals[i]] != 0)
-        {
-            const uint32_t block = work.instruction_blocks[i];
-            const uint32_t value = result->replacements[i];
-            const bool valid = result->reachable[block] != 0 ? ssa_value_valid(&work, result, value, block, i, input->types[i]) : value == input->instruction_count + input->locals[i];
-            if (!valid)
-            {
-                ssa_check_fail(&check, i, "read replacement type, dominance or canonical value");
-            }
-        }
-        else if (result->replacements[i] != i)
-        {
-            ssa_check_fail(&check, i, "unpromoted instruction changed");
-        }
-    }
-    for (uint32_t phi = 0; check.error == SSA_OK && phi < result->phi_count; phi += 1)
-    {
-        const uint32_t block = result->phi_blocks[phi];
-        const uint8_t type = input->local_types[result->phi_locals[phi]];
-        uint32_t same = BUSTER_SSA_NONE;
-        bool distinct = false;
-        for (uint32_t operand = result->phi_offsets[phi]; operand < result->phi_offsets[phi + 1]; operand += 1)
-        {
-            const uint32_t edge = result->predecessor_offsets[block] + operand - result->phi_offsets[phi];
-            const uint32_t predecessor = result->predecessors[edge];
-            const uint32_t value = result->phi_operands[operand];
-            if (!ssa_value_valid(&work, result, value, predecessor, input->block_offsets[predecessor + 1], type))
-            {
-                ssa_check_fail(&check, input->block_offsets[block], "phi operand type or edge dominance");
-            }
-            if (value != result->phi_base + phi)
-            {
-                distinct |= same != BUSTER_SSA_NONE && same != value;
-                same = value;
-            }
-        }
-        if (!distinct)
-        {
-            ssa_check_fail(&check, input->block_offsets[block], "trivial phi");
-        }
-    }
-    if (check.error == SSA_OK)
-    {
-        check = ssa_verify_equations(&work, result);
-    }
-    if (scratch != 0)
-    {
-        arena_pop_to(scratch, saved);
-    }
-    return check;
-}
+#include "ssa_verify.c"

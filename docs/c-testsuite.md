@@ -13,7 +13,7 @@ harness.
 ## The command
 
 ```sh
-./build/compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--clang PATH] [--id-order N] [--tier1] [--cross-check] [--keep] DIR
+./build/compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--clang PATH] [--id-order N] [--tier1] [--cross-check] [--code-size] [--check-code-size] [--keep] DIR
 ./build/compiler test-c-testsuite --self-test
 ```
 
@@ -54,6 +54,51 @@ line adds how many of the compiled tests' functions Tier 1 compiled. On the
 subset at its introduction: 220 passed, Tier 1 compiling 350 of the 430
 functions.
 
+With `--tier1 --code-size`, the harness also reports
+[#1116](https://github.com/buster14a/buster/issues/1116)'s code-size comparison.
+`--code-size` requires `--tier1`, implies `--cross-check`, and cannot be
+combined with `--self-test`. `--check-code-size` enables the same measurement
+and also enforces its size bound. The object compile additionally requests
+`--tier1-function-sizes`; its `object-compile.txt` remains separate from the
+cross-check's `readelf` and linker logs. Both modes validate that report
+against the emitted object and the cross-check's existing Clang `-O0` object,
+so both comparisons inspect the same objects.
+
+The final `tier1-code-size` row for `corpus=c-testsuite` reports each count and
+byte sum. The gate compares the **sum of the sizes of all emitted Tier 1
+functions** with the sum of their matching Clang functions' sizes: equality
+passes. It does not require every individual function or test to be smaller.
+A Tier 1 body without a Clang counterpart stays in `tier1_bytes` and
+contributes no `clang_bytes`, so a missing counterpart can only make the bound
+harder to meet. `unmatched` and `unmatched_bytes` expose that portion of the
+Tier 1 total. Every compiled body must be counted exactly once as matched or
+unmatched. The independent symbol cross-check still applies.
+
+Tier 0 fallback functions are counted and reported separately. The objects'
+whole executable-section byte totals also remain separate, because they
+contain padding and other code. At least one validated match and nonzero
+reference bytes must be compared; absent or invalid evidence and an empty
+comparison fail in either mode, even if the programs ran correctly.
+All parsed unit results are reduced after the workers finish, so worker
+ordering cannot change the aggregate. The row always reports `gate=pass` or
+`gate=fail`. With `--code-size`, it records `enforced=0`, and a well-formed
+result above the bound does not fail the command. With `--check-code-size`,
+it records `enforced=1`, and that result makes the command exit 1. Missing or
+invalid evidence fails both modes. Every failure retains its files.
+
+Hosted and native correctness use `--code-size` for c-testsuite. Its observed
+aggregate exceeds the bound and remains visible as `gate=fail` with
+`enforced=0`; CI does not claim it passed that bound. #1116's enforced corpus
+is the original Lua corpus, all 34 source files including `luac.c`, through
+`measure-tier1-programs --check-code-size=lua`. The strict c-testsuite flag
+remains available for checking its own bound explicitly.
+
+Failed hosted shards upload the retained Buster and Clang objects, body-size
+reports and oracle logs in
+`tier1-code-size-ARCH-SANITIZER-OOPT-shardK-ATTEMPT`, kept for 14 days. The
+same artifact includes the SQLite and Lua size campaign's objects and reports
+when that campaign failed on the shard.
+
 A test passes when everything it was put through gave the expected status and
 output. A refusal that names a feature (`error: unsupported: FEATURE`) makes it
 unsupported, with that feature, when both paths exit as the compiler does for a
@@ -66,13 +111,15 @@ The tests run `--jobs` at a time (one per core by default), in worker
 processes that write into a shared mapping; the report lists every test in name
 order with its outcome and detail, then the counts. `--subset FILE` lists the
 tests that must pass (a name a line; `#` starts a comment). The exit status is
-1 if a test fails, if one of the subset's doesn't pass or isn't in DIR, or if
-the harness can't run. `--compiler PATH` tests another compiler executable with
-the same options, and `--keep` keeps the work directory (under `$TMPDIR` or
+1 if a test fails, if one of the subset's doesn't pass or isn't in DIR, if the
+requested code-size evidence is invalid, an enforced size bound fails, or if
+the harness can't run. `--compiler PATH` tests another compiler executable
+with the same options, and `--keep` keeps
+the work directory (under `$TMPDIR` or
 `/tmp`), which a failure keeps anyway.
 
 `--self-test` (about 10 s) runs the harness on three tests of its own with a
-stand-in compiler, a shell script, in six scenarios at once, each in a process
+stand-in compiler, a shell script, in seven scenarios at once, each in a process
 of its own with its own results' mapping (a scenario whose process doesn't
 start or end fails): from a DIR and a `$TMPDIR`
 relative to the current directory (the processes run elsewhere, so the harness
@@ -83,9 +130,21 @@ a signal in the scalar path alone and in both, and for their time in both),
 each of which must fail; with `--cross-check` where `-c`'s refusals are
 then killed, which must fail whether or not the direct path compiled the test;
 and with `--cross-check` where `-c` writes a real object (`cc`'s) that defines a
-function more than `clang -O0 -c`'s, which must fail though its program passes.
+function more than `clang -O0 -c`'s, which must fail though its program passes;
+and with `--code-size` where the object compiles, links, runs and has the
+oracle's symbols but omits the requested report, which must fail even in
+report-only mode.
 The stand-in's third program, which sleeps 30 s, must be killed at a five-second
 timeout, and so must its compiles where they sleep.
+
+The self-test also exercises the shared size reader and corpus reduction:
+one larger function offset by a smaller one passes at exact equality, one
+extra byte fails with enforcement and reports `gate=fail` with `enforced=0`
+without failing in report-only mode, and unpaired bodies stay charged against
+the matching reference total. Inconsistent matched/unmatched counts, invalid
+evidence and empty comparisons fail; disabling size measurement preserves the
+legacy behavior. Its command-level controls reject either size flag without
+`--tier1` and with `--self-test` before attempting to run the corpus.
 
 The harness is test tooling outside the compile path and has no vector path.
 
@@ -99,7 +158,11 @@ git init -q --template= build/c-testsuite
 git -C build/c-testsuite fetch -q --depth 1 https://github.com/c-testsuite/c-testsuite 5c7275656d751de0e68b2d340a95b5681858ed07
 git -C build/c-testsuite checkout -q FETCH_HEAD
 ./build/compiler test-c-testsuite --cross-check --subset tests/c-testsuite/subset.txt build/c-testsuite
+./build/compiler test-c-testsuite --tier1 --code-size --clang clang --subset tests/c-testsuite/subset.txt build/c-testsuite
 ```
+
+Replace `--code-size` with `--check-code-size` to enforce c-testsuite's size
+bound as well as validating its evidence.
 
 `tests/c-testsuite/subset.txt` declares all 220: every test must pass.
 
@@ -130,6 +193,8 @@ executable for every test that compiles, and `--cross-check` agreed. With the
 symbols' stage (on a Zen 4 laptop, clang 23.1.3), every object of the 219
 defines `clang -O0 -c`'s functions and objects.
 
-This establishes correct programs, not their speed or size: Tier 0's code
-against `clang -O0`'s and the whole compile against tcc's are #136's and
-#138's measurements.
+These historical results establish correct programs. The explicit size
+report compares all emitted Tier 1 functions' aggregate size, with enforcement
+available through `--check-code-size`; it makes no execution-time claim.
+Tier 0's code against `clang -O0`'s and the whole compile against tcc's remain
+#136's and #138's measurements.

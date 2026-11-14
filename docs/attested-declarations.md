@@ -4,9 +4,10 @@ Status: step 0, the census, is built and measured
 ([below](#step-0-the-census)), and so are steps 1 and 2, the shadow and the
 skip in the compile ([below](#steps-1-and-2-the-skip-in-the-compile)): a
 command of several source files skips by default (`--attested=on`). Step 3's
-first part is built and measured, and its gate isn't held
-([below](#step-3-its-first-part-what-a-skipped-unit-still-clears-and-scans));
-the rest of step 3, and step 4, are design. It is
+two parts are built and measured, and its gate isn't held
+([below](#step-3-its-first-part-what-a-skipped-unit-still-clears-and-scans),
+[and below](#step-3-its-second-part-the-passes-and-the-readers-tree-from-a-lanes-cache));
+step 4 is design. It is
 [#672](https://github.com/buster14a/buster/issues/672)'s one-core target's
 design for what [the node machine](node-machine.md)
 ([#2524](https://github.com/buster14a/buster/issues/2524)) doesn't cover:
@@ -742,6 +743,127 @@ between two batches of rounds that day (1,014.0 and 1,060.6 ms on musl, the
 same instructions), which moves the cumulative figure but not the comparison
 with main, whose rounds alternate with the first part's.
 
+## Step 3, its second part: the passes, and the reader's tree from a lane's cache
+
+After the first part, a probe of the 9700X (the TSC ticks of each pass and
+of each phase of `check_input_run`, each a token of the units; [the
+record](https://github.com/buster14a/buster-performance/tree/30ae9dfc5ef642e3c51479bbee109a98eebac522/docs/measurements/attested-step3b-2531-2026-11-13)'s
+`dev/probe/`) gave the passes before the reader 27.8 ticks a token on musl's
+command and 24.3 on the glibc units', a sixth and a third of what the reader
+then took:
+the lists 7.9 and 9.1, the chain 5.3 and 5.1, the reach 4.3 and 1.9, the
+literals 3.9 and 2.7, the own hashes 3.6 and 3.5, the tokens' levels 2.0 and
+1.8. In the reader, `parse_tree_columns` was 7.8 and 7.4 ticks a token over
+every token of the unit, skipped or not. Seven changes, each exact:
+
+- **A function definition's semantic hash is its own in the lane**, made from
+  the unit's stamp and its place. It is never attested, so its hash is only
+  what the names it declares take; a later declaration that lists one of them
+  then misses and is read. That is the conservative side of every rule, and
+  musl's command skips the same 259,860 declarations and learns the same 2,995
+  hashes. The own hashes and the literals then pass a body by, and the chain
+  its names: a third of musl's tokens.
+- **The lists come from a lane's cache** (`CheckAttestedListSlot`,
+  `check_attested_lists_cached`). A declaration's list is made from its tokens'
+  kinds, roles and names alone, which its own hash covers at their places, so
+  the vector path takes the declarations' bounds (64 tokens at a time), then
+  their own hashes, then each one's list from the cache by its own hash and
+  length, or makes it a token at a time and keeps it. musl's command takes
+  92.7% of its declarations' lists from the cache (all but 3,036 misses and the
+  18,584 definitions), the glibc units 98.3%. The walk over the whole unit is
+  the scalar path, the twin: `measure-attested --twins` finds no difference.
+- **A cached declaration's tree columns are kept beside its list**
+  (`check_attested_tree_columns`). In a valid parse each file-scope
+  declaration is one tree whose root is its last token and has no sibling, so
+  its columns are its parents' alone, offset by its first token, and its
+  postorder positions are its own run (every earlier token's subtree ends
+  before it). A hit whose parents are the same takes its columns from the
+  cache, 16 tokens at a time; any other has them made over its own run, as
+  `parse_tree_columns` makes the unit's. A kept tree is a halfword a token and
+  column, with its parents. With `--attested=verify` and `--twins` the unit's
+  columns are made whole too and compared, a difference a contradiction: none
+  over musl's 1,336 units and the glibc units' 512.
+- **The reader's system tokens take the levels the passes mapped**
+  (`check_attested_token_levels`), 64 tokens at a time, instead of mapping the
+  preprocessor's levels again; the passes' map goes 16 tokens at a time.
+- **A body's list holds each name and class once**, so that the reach and the
+  events' test take a name once however often the body spells it (the first
+  entry, on both paths).
+- **The chain fetches a name's state eight entries ahead**, and the lists'
+  cache a slot four declarations ahead.
+- **The expressions' walk gives a skipped declaration's tokens no class**
+  (`check_input_expression_classes`): an ignored token with children took one,
+  and the coded walk passed its children's empty lists on.
+
+The probe after them (the record's `final/probe-*`): the passes 20.6 ticks a
+token on musl and 17.6 on the glibc units, the tree columns 6.2 and 3.3, the
+system tokens' phase 1.4 and 1.3, the expressions' walk 28.6 to 24.5 and 11.9
+to 7.0.
+
+On the 9700X (CPU 2, `setarch -R`, the median of 7 rounds), against main at
+the branch's base `b7a95eed` and, as main has it now, with #2638's
+preprocessor change:
+
+| `-c` of the command, one lane | musl, 1,336 units | 512 units over glibc's headers |
+| --- | ---: | ---: |
+| main with `--attested=off`, main, the head: ms | 1,003.5; 833.2; 817.3 | 835.8; 545.9; 521.6 |
+| … with #2638: ms | 943.0; 764.6; 749.6 | 796.6; 498.9; 476.8 |
+| the head against main | **1.019**; with #2638 **1.020** | **1.047**; with #2638 **1.046** |
+| against `--attested=off` (step 3's gate) | 1.228; with #2638 **1.258** (1.26) | 1.602; with #2638 **1.671** (1.7) |
+| user instructions, main to the head | 8,973.8 to 8,603.7 M | 6,637.6 to 6,075.6 M |
+
+- **Every object and diagnostic** is `--attested=off`'s and `--scalar`'s, by
+  one lane and by eight, with `-Wall -Wextra` and by `--attested=verify` (with
+  `-g`, its trees compared whole); `-c sqlite3.c` (123.9 against 123.3 ms) and a
+  small unit's process (1.3 ms each) are main's.
+- **By eight lanes** the CPU time is main's within 0.3% (1,453.1 against
+  1,455.6 ms on musl, 971.1 against 974.1 on the glibc units) and the wall time
+  main's or less (209.2 against 205.7 ms, 136.2 each); the head's kernel cycles
+  are 40 to 60 M more in every round, with 2,500 to 3,200 more page faults:
+  each lane fills its own caches, whose arenas take huge pages past their
+  first base pages.
+
+**What a skipped token still costs** (the record's `final/gone/`): the
+preprocessed units of [the design's
+record](https://github.com/buster14a/buster-performance/tree/c679fea7246dbea68cb312d132a60af79cf9deb2/docs/measurements/file-scope-design-672-2026-11-12)
+as they are, with the compile's skip, less the same units with the emulation's
+skipped tokens gone, in TSC ticks a skipped token (1.46 cycles a tick):
+
+| | musl, main | musl, head | glibc units, main | glibc units, head |
+| --- | ---: | ---: | ---: | ---: |
+| the reader | 47.0 | 34.0 | 33.1 | 21.9 |
+| … its walk; its expressions' walk | 12.0; 11.4 | 10.4; 4.3 | 5.9; 8.8 | 6.1; 3.1 |
+| … its tree columns; the events' test | 7.8; 4.4 | 4.9; 4.3 | 7.3; 1.5 | 2.5; 1.5 |
+| the passes | 42.9 | 32.7 | 26.3 | 18.7 |
+
+The compile reads 58,815 of musl's tokens that the gone units lack (the two
+skips' rules differ), about 4.5 of the walk's 10.4 ticks; the glibc units'
+sets differ by 6,894 tokens. In cycles the reader's residual is about 50 on
+musl (43 without the difference) and 32 on the glibc units, where main's was
+69 and 48.
+
+**The gate isn't held.** A skipped token costs `check-input` about 43 and 32
+cycles (20), and the cumulative factor with main as it is now is 1.258 on musl
+(its rounds 1.210 to 1.262) and 1.671 on the glibc units (1.26 and 1.7).
+
+What the gate still needs:
+
+- **The walk's spread.** It visits no skipped token, but its read tokens'
+  columns are spread among the skipped ones': on the glibc units a read token
+  costs the walk 300 ticks among them and 257 with them gone (musl's 185 and
+  176). Compacting the read tokens before the walk would take that, and needs
+  the column audit the first part named.
+- **The tree columns of a skipped declaration** are copied from the cache (2.5
+  to 4.9 ticks a skipped token); leaving them unwritten needs the same audit of
+  the passes that read the tree whole (the commas', the packs', the limits').
+- **The passes** (19 and 33 ticks a skipped token): the chain and the reach
+  read each name's lane state out of the first two caches, the lists' hits copy
+  from a pool there, and a definition's body still takes the lists' walk.
+- **The names' arrays' clears**, 2.3 ticks a token of musl's units (0.6 of the
+  glibc units'): a lane's intern table holds every unit's names.
+- **The glibc units' preprocessing**, beyond the reader, which the first part
+  found 46% of their command with the skip (before #2638).
+
 ## Expected gains
 
 From the skip measured in the reader, the prototype's passes and what a
@@ -886,7 +1008,8 @@ stage counters of the command with the skip:
   every unit looks its operands' names up among the intrinsics' again
   ([#893](https://github.com/buster14a/buster/issues/893) has the lookup's
   cost in one unit), and the answer is a name's, which the lane's intern
-  table could keep (step 3 takes the skipped tokens' share of it).
+  table could keep (step 3 takes the skipped tokens' share of it). The table
+  keeps it now (#893's memo, `docs/builtin-intrinsic-filter.md`).
 - **The parser (6%) and the emission (4%; 8% of `sqlite3.c`)**, which no
   measurement here puts above the others.
 

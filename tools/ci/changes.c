@@ -411,7 +411,7 @@ static const ChangesModule changes_modules[] = {
     // main, Tier 0's column among them.
     {
         .name = "tier1_programs",
-        .sources = "tier1_programs_measure|profile|compile_measure|c_check_program_lower[a-z0-9_]*|c_check_program_emit|c_check_tier1[a-z0-9_]*|ir|"
+        .sources = "tier1_programs_measure|profile|compile_measure|c_checker_driver|c_checker_units|c_option_table|c_check_program_lower[a-z0-9_]*|c_check_program_emit|c_check_tier1[a-z0-9_]*|ir|"
                    "ir_validate|ir_lower[a-z0-9_]*|ssa|ssa_ir|dominators|ir_optimize[a-z0-9_]*|ir_thread|tier1_[a-z0-9_]*",
     },
     // #1059's paired measurements (measure-helpers): the primitives' kernels and speedtest1 by both tiers, each as the
@@ -1811,6 +1811,17 @@ static const ChangesFixture changes_fixtures[] = {
         .unmeasured = "checker lexer",
     },
     {
+        // #2053: runtime fixtures and their catalogs are under tests/, never Markdown, which counts as documentation.
+        .name = "the checker's runtime fixtures and catalog are code",
+        .files = "tests/checker/sources/catalog.tsv tests/checker/sources/0001.c",
+        .outputs_true = "code",
+    },
+    {
+        .name = "a Markdown file under tests/ is documentation, so no fixture or catalog is one",
+        .files = "tests/checker/sources/README.md",
+        .outputs_false = "code",
+    },
+    {
         .name = "docs/performance alone counts as code, for the qualification",
         .files = "docs/performance/buster-manifest-v1.schema.json",
         .outputs_true = "code performance",
@@ -1860,6 +1871,26 @@ static const ChangesFixture changes_fixtures[] = {
         .name = "the timing alone runs Tier 1's program measurement",
         .files = "src/buster/compiler/profile.c",
         .outputs_true = "tier1_programs",
+    },
+    {
+        .name = "the Tier 1 function-size reader alone runs the corpus qualification",
+        .files = "src/buster/compiler/tier1_code_size.c",
+        .outputs_true = "code tier1_programs",
+    },
+    {
+        .name = "the driver's manifest publication feeds the corpus qualification",
+        .files = "src/buster/compiler/c_checker_driver.c",
+        .outputs_true = "code tier1_programs",
+    },
+    {
+        .name = "per-unit manifest publication feeds the corpus qualification",
+        .files = "src/buster/compiler/c_checker_units.c",
+        .outputs_true = "code tier1_programs",
+    },
+    {
+        .name = "the manifest option feeds the corpus qualification",
+        .files = "src/buster/compiler/c_option_table.c",
+        .outputs_true = "code tier1_programs",
     },
     {
         .name = "the checker's lowering alone feeds Tier 1's programs",

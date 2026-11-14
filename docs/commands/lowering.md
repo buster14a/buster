@@ -83,6 +83,49 @@ pressure; the small loop's three-record check does not establish the same shape
 in SQLite or Lua. Whole-corpus instruction counts and runtime acceptance still
 require the 9700X measurements. General LICM remains disabled.
 
+## Sparse-switch search trees (#1371)
+
+Tier 1's emission asks `check_lower_prepare` to retain a balanced dispatch plan
+for a sparse switch with at least 128 nonempty case intervals. Dense jump tables
+keep their existing admission rule and take priority. Smaller sparse switches,
+Tier 0, and selectors outside the exact signed/unsigned 32- and 64-bit classes
+keep the existing comparisons. The threshold preserves the issue's competitive
+100-case chain; it is a conservative policy boundary, not a measured crossover
+for every workload. Current-revision runtime and compile-time qualification on
+the 9700X is still required before making a speedup claim.
+
+The checked controls already retain the selector, converted case bounds and
+original labels. Table preparation sorts those intervals once and, when a tree
+is selected, retains an immutable slice in shared scratch for the lowering
+lanes. Its records retain the original case index separately from the signed
+ordering key. GNU ranges stay intervals, empty ranges are omitted, and wider or
+nonstandard-width `_BitInt` selectors retain their existing lowering.
+
+`c_check_program_sparse_switch.c` emits the tree at the first case, after the
+selector has been evaluated once into its local. Each split compares against
+the median interval's lower bound; leaves check at most four intervals using
+the ordinary case rules, then branch to the original default or switch exit.
+An explicit stack of 32 frames bounds traversal for a `uint32_t` interval count.
+Planning remains O(K log K) for K intervals, with O(K) storage and emitted code;
+each dispatch has O(log K) comparisons. The new ordinary branches enter IR and
+SSA through their existing construction, without a new opcode or indirect
+target metadata. Case bodies, fallthrough, cleanup exits and source labels
+retain their order and identity.
+
+The consumed dispatch controls are numbered without placing new reachable
+labels. This preserves a statement expression's pending stack values after
+the tree's terminating edges. Looking up the plan by its original control
+boundary also survives a nested switch inside the selector expression.
+
+`test-checker` checks plan selection and dispatch against an independent linear
+interval oracle. The standalone `tests/driver/tier1_sparse_switch.c` fixture,
+run in the existing Tier 1 pattern correctness group, compiles both host paths
+with `--tier1-strict --verify`, checks identical objects, and executes them
+against a Clang-built oracle. It covers signed/unsigned boundaries, exhaustive
+16-bit inputs, shuffled cases, ranges and holes, volatile selector side effects,
+nested statement expressions, fallthrough, goto and cleanup. A native CFG walk
+requires a bounded comparison path, so a correct linear chain fails the test.
+
 ## Node templates (#1048)
 
 `./build/compiler measure-lowering-templates [--top N] [--keys N] [--abstracts N]
@@ -121,11 +164,26 @@ takes changes the templates too: run the command on `sqlite3.c`, Lua and
 c-testsuite. [The lowering guide](../../docs/c-lowering.md)'s "Node templates
 over a body: the first path (#1048)" has the coverage and the measurements.
 
-Unsigned power-of-two division and remainder normalize proven integer constants
-from their source type before testing the arithmetic-width value. The regression
-includes negative signed char/short/int constants widened to U32/U64, their
-compound assignments, and positive narrow constants that still select shifts or
-masks. Source `_BitInt` values retain ordinary lowering in this optimization.
+Division and remainder by a proven constant power of two (#1386,
+`check_lower_power`) normalize the constant from its source type before testing
+the arithmetic-width value. Unsigned U32/U64 by 2^k, and signed by 1, become a
+shift or a mask. Signed I32/I64 by a positive 2^k become the bias sequence
+`(x + ((x >> (W - 1)) & (2^k - 1))) >> k`, or `x - (that sum & -2^k)` for the
+remainder, whose DUPs keep the dividend (`check_lower_signed_power_entries`). A
+pointer difference by a power-of-two element size is an arithmetic shift, exact
+since the difference is a multiple of the size, and by a size of 1 nothing. The
+batch fragments, the node templates and the node machine's expressions leave a
+rewritten root to the tasks; the node machine's updates write a shift or a mask
+as the tasks do and leave a signed sequence, past their row's 8 entries, to
+them. The regressions (`c_check_power_divmod_test.c`) cover negative signed
+char/short/int constants widened to U32/U64, their compound assignments,
+positive narrow constants that still select shifts or masks, and signed
+quotients and remainders at both ends of I32 and I64 against independent
+expectations. They also cover promoted narrow operands, pointer differences of
+1- to 32-byte elements, and controls that keep their division: negative
+divisors, the sign bit's, a `_BitInt`'s, divisors with effects or that aren't
+constants, and element sizes of 3, 12 and a variable-length array's. Source
+`_BitInt` values retain ordinary lowering in this optimization.
 
 ## Node machine census (#2524)
 

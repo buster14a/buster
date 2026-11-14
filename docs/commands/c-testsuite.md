@@ -8,21 +8,44 @@ requirements. [Command index](README.md).
 
 - `src/buster/compiler/c_testsuite.c` is #145's harness: `test-c-testsuite
   [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH]
-  [--clang PATH] [--id-order N] [--cross-check] [--keep] DIR` compiles each of
+  [--clang PATH] [--id-order N] [--tier1] [--cross-check] [--code-size]
+  [--check-code-size] [--keep] DIR` compiles each of
   c-testsuite's single-exec programs by the direct path, by both paths, the
   scalar one with its identifiers' ids in another order (#153's `--id-order`),
   into the same bytes, and runs it against its expected output;
   `--cross-check` also links its `-c` object with `cc`, and compares the
   functions and objects it defines with `clang -O0 -c`'s (#129,
-  `c_lowering_symbols.c`). `--self-test` checks the harness with a stand-in
-  compiler, in six scenarios that run at once, each in a process of its own
+  `c_lowering_symbols.c`). `--code-size` requires `--tier1`, implies
+  `--cross-check`, and compares the corpus's sum of all emitted Tier 1 function
+  bytes with the matching Clang `-O0` functions' sum. `--check-code-size`
+  enables that measurement and requires the first sum not to exceed the
+  second. A Tier 1 body without a Clang counterpart stays in the first sum
+  and contributes no reference bytes, making the bound stricter. It reads the object
+  compile's explicit `--tier1-function-sizes` report and the same two objects
+  used by the symbol comparison. Unpaired counts and bytes show the portion
+  already included in the Tier 1 total; fallback and whole executable-section
+  bytes are separate. Both modes reject empty comparisons, missing or invalid
+  evidence, and inconsistent matched/unmatched counts. `--code-size` reports
+  the bound's `gate=pass|fail` with `enforced=0`, so an otherwise valid size
+  excess does not fail the command. `--check-code-size` records `enforced=1`
+  and makes that excess fail. The independent symbol cross-check still applies.
+  `--self-test` checks the harness with a stand-in
+  compiler, in seven scenarios that run at once, each in a process of its own
   (each changes the directory and environment, and its results' shared mapping
-  is its own): each waits out one-second timeouts, so in turn they took about 7 s
-  and at once take about 2.
+  is its own), including a working object whose requested size report is
+  absent, which fails even in report-only mode. It also checks the size reader,
+  the enforced and report-only aggregate thresholds, conservative unpaired-body
+  accounting, invalid and empty evidence, disabled measurement, and the
+  command's invalid size-option combinations.
   `tests/c-testsuite/subset.txt` declares the programs of c-testsuite's commit
   `5c72756` that must pass, all 220 of them; the 9700X job fetches that commit
   and runs both, and the subset again with `--tier1`, which compiles them by the
-  driver's `--tier1` and runs both paths' programs. [The c-testsuite guide](../../docs/c-testsuite.md) has the details.
+  driver's `--tier1` and runs both paths' programs. Hosted and native
+  correctness use `--code-size` on that Tier 1 run: its current size excess
+  remains visible as `gate=fail` with `enforced=0`. #1116's enforced corpus is
+  the original 34-file Lua corpus (`measure-tier1-programs
+  --check-code-size=lua`); the strict c-testsuite flag remains available.
+  [The c-testsuite guide](../../docs/c-testsuite.md) has the details.
 
 ## SQLite's tests (#146)
 

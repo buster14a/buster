@@ -13695,14 +13695,23 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
             {
                 const uint32_t call = (uint32_t)function->values[i];
                 const uint32_t call_first = function->call_first[call];
-                uint32_t integer_arguments = 0;
+                const uint32_t argument_count = function->call_argument_counts[call];
+                // Its floating arguments (tier0_class_floating's F32 and F64) counted 64 classes at a time, the first 64
+                // whatever the call's number (#892): a class at a time, the loop's end was missed at a quarter of the calls on
+                // the 9700X.
                 uint32_t floating_arguments = 0;
-                for (uint32_t a = 0; a < function->call_argument_counts[call]; a += 1)
+                uint32_t a = 0;
+                do
                 {
-                    const bool is_floating = tier0_class_floating(function->argument_classes[call_first + a]);
-                    integer_arguments += is_floating ? 0 : 1;
-                    floating_arguments += is_floating ? 1 : 0;
-                }
+                    const uint32_t left = argument_count - a < 64 ? argument_count - a : 64;
+                    const __mmask64 live = (__mmask64)_bzhi_u64(~(uint64_t)0, left);
+                    const __m512i classes = _mm512_maskz_loadu_epi8(live, function->argument_classes + call_first + a);
+                    const uint64_t floating = _mm512_mask_cmpeq_epi8_mask(live, classes, _mm512_set1_epi8((char)BUSTER_TYPED_CLASS_F32)) |
+                                              _mm512_mask_cmpeq_epi8_mask(live, classes, _mm512_set1_epi8((char)BUSTER_TYPED_CLASS_F64));
+                    floating_arguments += (uint32_t)__builtin_popcountll(floating);
+                    a += 64;
+                } while (a < argument_count);
+                const uint32_t integer_arguments = argument_count - floating_arguments;
                 const int32_t below = entry_depth - (int32_t)integer_arguments - (function->call_targets[call] == 0 ? 1 : 0);
                 const int32_t floating_below = entry_floating - (int32_t)floating_arguments;
                 const uint32_t saved = tier0_call_saved(function, call, (uint32_t)below);

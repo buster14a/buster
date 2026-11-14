@@ -148,6 +148,15 @@ static const char node_census_test_quiet[] =
     "    return x + e; // take\n"
     "}\n";
 
+static const char node_census_test_atomic[] =
+    "struct A { int x; };\n"
+    "_Atomic(struct A) a;\n"
+    "_Atomic(struct A)* p;\n"
+    "#pragma clang diagnostic ignored \"-Watomic-access\"\n"
+    "int direct(void) { return a.x; } // refuse: complex-bitint-atomic-vector-half\n"
+    "int indirect(void) { return p->x; } // refuse: complex-bitint-atomic-vector-half\n"
+    "int ordinary(struct A* q) { return q->x + 1; } // take\n";
+
 // The shadow's fixture (#2524's step 1): each line that ends with `// machine: taken` has expressions the census takes and
 // the machine takes them all, each that ends with `// machine: REFUSAL` one the machine refuses for that reason
 // (node_machine_refusal_names). Its taken expressions' records and entries must be the pipeline's, by T's rows and by
@@ -446,6 +455,8 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-census refuses what the machine's set has no code for, by its test");
     check_test_expect(test, ready && node_census_test_fixture(directory, "quiet.c", node_census_test_quiet, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
                       "node-census refuses nothing for warnings that are off by default");
+    check_test_expect(test, ready && node_census_test_fixture(directory, "atomic.c", node_census_test_atomic, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
+                      "node-census refuses atomic record accesses by type without refusing ordinary members or the whole unit");
     char headers[512];
     char header[640];
     snprintf(headers, sizeof(headers), "%s/system", directory);

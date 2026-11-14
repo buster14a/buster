@@ -29,8 +29,9 @@
 // every local in memory, whose markers read and write nothing, must agree with on every program C defines.
 //
 // --tier1 additionally builds each program with --tier1 --tier1-strict --verify, with and without --scalar. Every
-// selected function must be compiled by Tier 1, and both native programs must finish with the interpreted output and
-// status. These runs follow the interpreter children sequentially. The interpreter children and native programs see
+// selected function must be compiled by Tier 1, both native programs must finish with the interpreted output and
+// status, and the two executables must be the same bytes (#1395, #2606). These runs follow the interpreter children
+// sequentially. The interpreter children and native programs see
 // an empty environment in this mode, including libc's getenv, as well as main's explicit envp.
 //
 // The work directory is under $TMPDIR (or /tmp); --keep keeps it, as a failure does. The report has a line per file,
@@ -659,6 +660,7 @@ static bool ssa_source_execute(const IrSourceFile* file, IrFunction* const* form
             totals->native_functions[path] += matched ? result.functions : 0;
             passed = matched && passed;
         }
+        passed = passed && ssa_source_native_identical(name, native_directories[0], native_directories[1]);
         totals->native_passed += passed;
     }
     for (uint32_t form = 0; form < form_count; form += 1)

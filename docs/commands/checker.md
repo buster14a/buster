@@ -87,7 +87,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; with
   `--lazy-system-headers`, only the checks that pass the driver
-  `-flazy-system-headers`, since the others run the same either way, and
+  `-flazy-system-headers`, including the real system-header lazy-policy
+  fixtures and eager/lazy object comparisons, since the others run the same either way, and
   `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
   `CheckDriverPart`; #2071's run modes, for every run of buster and of the
   oracle clang that goes through the shared helpers
@@ -153,7 +154,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   regions") and of the transitions ("Memoized transitions"), opt-in (the driver's `--check-transitions`) while they
   don't save a large fraction of `check-expressions`. With them, `--time-stages` reports their hits, misses, folds and entries as `time-check
   transition-*` lines, and the driver's `--verify` runs every hit's action too and fails on a difference.
-  `test-checker [--seed N] [--clang PATH] [--part K/N] [--program-initializers|--program-vectors|--program-library|--embed-initializers|--requests|--attested|--transitions]` compares fresh scalar/vector tables,
+  `test-checker [--seed N] [--clang PATH] [--fixtures DIR] [--part K/N] [--program-initializers|--program-vectors|--program-library|--embed-initializers|--requests|--attested|--transitions]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue
   (`c_check_constraints_test.c`): for every Constraints paragraph of C17's 6.4 to 6.10 a violation of each rule and
   a valid twin, and the conversions, constant expressions and initializers, each checked as the corpus check checks a
@@ -291,6 +292,16 @@ unused-warning fixtures also check exact scope-completion tokens.
   leaves out and the scan reads.
   `c_check_unevaluated_driver_test.c` compares it with complete pinned-Clang output at each policy, both paths and one
   or three lanes.
+  Member lookup on an atomic struct or union still finds the underlying record's member and keeps its declared type
+  (#2444), including arrays and bit-fields; qualifiers on the atomic wrapper do not qualify the member.
+  `-Watomic-access` defaults to an error at `.` or `->`, can be demoted or suppressed independently, and joins the
+  existing runtime-warning walk: none in unevaluated operands or array bounds, reachable accesses at the function's
+  end, and file-scope accesses after the initializer's own diagnostics. Structural errors retain the usual queued
+  warnings during recovery, and an atomic error at one body's end flushes subsequent bodies' queues. Under `-w`, a
+  valid body skips that queue; erroneous bodies and file-scope initializers retain default-error accesses.
+  A monotonic type-table flag adds member candidates to that walk only in units with atomic
+  records; ordinary units gain no new graph scan or formatting work. The default-warning driver fixtures compare
+  complete Clang output and source/command-line policies through scalar/vector and one/three-lane readers.
   `-Wunsequenced` (#1953, clang's SequenceChecker, `c_check_unsequenced.c`) is on by default, under
   `-Wsequence-point`: two modifications of a variable, or a modification and a read of it, that no sequence point
   orders warn once per variable and full expression, "multiple unsequenced modifications to 'x'" or "unsequenced
@@ -529,6 +540,33 @@ suite also checks current glibc's Clang fortify wrappers at `_FORTIFY_SOURCE=2/3
 including ordinary function addresses and scalar/vector, eager/lazy headers.
 The object-size attributes currently use conservative unknown bounds, without
 Clang's hidden-parameter ABI ([fortify compatibility](../c-builtins-fortify.md#current-glibcs-clang-wrappers-1361)).
+
+## Runtime fixtures
+
+`test-checker`'s shared source fixtures (`check_test_sources`, 418 cases) are
+runtime data (#2053): `tests/checker/sources/` holds `catalog.tsv` and one file
+a case, which the test reads when it runs, so that editing a case's source or
+flags, or adding a case, compiles, links and bakes nothing. The catalog's first
+line is `buster-fixtures v1 checker-sources`; each later line not starting with
+`#` is a case, four tab-separated fields:
+
+- **ID**, unique, of letters, digits, `.`, `_` and `-` (the extraction numbered
+  them `0001` to `0418` in the table's order);
+- **FILE**, in the same directory, unique, ending in `.c`: the source's bytes as
+  they are (no NUL; the runner writes a source to its first NUL, as it did);
+- **FLAGS**, comma-separated, or `-`: `rejected`, `unsupported`, `extension`,
+  `gnu23`, `unsigned-char`, `undecided`, `overload-tables`, `overload-none`,
+  and `capacity=NAME` for a type table `check_test_fixture_capacity` names;
+- **NAME**, what the case checks, which a failure prints.
+
+The cases run in the catalog's order, then the 64 generated ones. A missing or
+malformed catalog, a missing or unreadable file, a repeated ID or file, a file
+in the directory that no line names, or an empty catalog fails the run; no case
+is skipped. The fixture root is `tests/` under the working directory, or
+`test-checker --fixtures DIR`. A new ordinary case goes there: its file and its
+line. The cases' bytes are the table's literals as clang compiled them, compared
+byte for byte when they moved (buster-performance's
+`fixtures-runtime-2053-2026-11-13`).
 
 ## System-header token bitmap and MSan (#1610)
 

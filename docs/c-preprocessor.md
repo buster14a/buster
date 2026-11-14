@@ -325,7 +325,7 @@ To reproduce, use a separate checkout of `d8109dd` on the 9700X, build through
 the shared lock, and run from that checkout (Bash):
 
 ```sh
-EXCLUSIVE_OWNER=cache-110-repro ~/buster-fast-bench/exclusive.sh ./build.sh
+EXCLUSIVE_OWNER=cache-110-repro ~/buster-fast-bench/exclusive.sh ./build.sh --config Release
 EXCLUSIVE_OWNER=cache-110-repro ~/buster-fast-bench/exclusive.sh ./build/compiler test-preprocessor --clang
 corpus="$HOME/buster-fast-bench/preprocessor-corpora-astra-01a158dd"
 EXCLUSIVE_OWNER=cache-110-repro ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler benchmark-preprocessor \
@@ -1126,8 +1126,11 @@ system-level boundary requests the existing replay, which supplies its canonical
 visibility and count, including for quiet clients. The system-warning tests cover
 both kernels, immediate/deferred history, quiet counting, both option states,
 macro uses in both directions, nested headers, predefined-macro whitespace and
-invocations spanning header exits. Destringized `_Pragma` messages retain their
-scratch-spelling step and column as a generated diagnostic source.
+invocations spanning header exits. Destringized `_Pragma` tokens retain their
+scratch-spelling step and column as a shared generated source, including when
+the checker later diagnoses a retained pragma. Messages reuse that source;
+its parent is the operator's enclosing expansion, without a duplicate builtin
+note. Leading whitespace in the string remains part of the relative column.
 
 Then the headers among others (#255's review), in each mode, hosted and
 freestanding: two units include buster's 11, the C library's headers that
@@ -1929,10 +1932,11 @@ The append-only tables belong to the translation unit:
 - `PPSubstitution` (12 bytes) retains the expansion, parameter occurrence and
   source origin for each argument run. Reusing an expanded argument retains
   its original expansion and creates distinct substitution occurrences.
-- `PPGenerated` (24 bytes) distinguishes pastes and stringifications.
+- `PPGenerated` (24 bytes) distinguishes pastes, stringifications and
+  destringized pragma spellings.
   A paste retains both operand locations and origins; a stringification keeps
   its raw argument's token locations and origins in `PPSource` records (eight
-  bytes each). These survive reuse of the temporary argument buffers. Builtins
+  bytes each). These survive reuse of the temporary argument buffers. Other builtins
   retain their identity through the expansion record, even when `0` and `1`
   reuse the same scratch spelling; they need no duplicate generated record.
 
@@ -3496,7 +3500,10 @@ spellings alone would miss this change (#272).
   extension, `-pedantic-errors`, unless `-Wno-error=` demotes it; and the
   source's `#pragma clang diagnostic` for the group over all of that, which
   the preprocessor follows through push and pop at any depth
-  (`Preprocessor.warning_mappings`). Every other preprocessor warning does the
+  (`Preprocessor.warning_mappings`). The command line's part is read once a
+  unit, at the warning's first use (`pp_warning_command_read`,
+  `Preprocessor.warning_commands`, #2547), and a warning's text is formatted
+  only after its severity says it is given (`pp_diagnose_group`). Every other preprocessor warning does the
   same (#1790, #1970): each is a kind of `PPWarning` (`pp_warnings`) with its
   group's flag, the groups that hold it (`-Wunknown-pragmas` under `-Wpragmas`
   and `-Wall`, `-Wmultichar` under `-Wmost` and `-Wall`), whether it is an
@@ -3521,8 +3528,13 @@ spellings alone would miss this change (#272).
   #2222, `pp_reserved_macro_name`, `CheckMacroName`'s) at the name, before the
   directive's other warnings, but for a `#define` of a feature-test macro
   clang's `isFeatureTestMacro` lists (`_GNU_SOURCE`, `_POSIX_C_SOURCE`,
-  `__STDC_FORMAT_MACROS`, …) and for the predefines' and the command line's
-  definitions. Not given yet (#2222): `-Wgnu-line-marker`, whose place clang
+  `__STDC_FORMAT_MACROS`, …, `pp_feature_macros`) and for the predefines' and
+  the command line's definitions. Off by default, it costs a compile without it
+  one bit's test a directive (#2547, `Preprocessor.warnings_possible`): the
+  unit's first `#define` or `#undef` learns that no location can give it and
+  clears the bit, which each `#pragma clang diagnostic` push, pop or mapping
+  sets again, so the name, the table and the options are read only where it may
+  be given (`c_preprocessor_warning_possible_test.c`). Not given yet (#2222): `-Wgnu-line-marker`, whose place clang
   reads under the numbering before the marker, and `-Wunused-macros`. Not clang's yet, for `\N` as for `\u`: the error of a basic
   or control character's UCN in a skipped group, which clang gives; a UCN of a
   character no identifier may have within one ("character <U+2603> not allowed
@@ -3577,7 +3589,7 @@ spellings alone would miss this change (#272).
 ## Reproduction
 
 ```sh
-./build.sh
+./build.sh --config Release
 ./build/compiler test-preprocessor --clang
 ./build/compiler test-preprocessor --clang path/to/sqlite3.c
 taskset -c 2 ./build/compiler benchmark-preprocessor --clang path/to/sqlite3.c
