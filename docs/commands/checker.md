@@ -840,6 +840,16 @@ harness: their declarations, spellings and errors, the conversions' errors and
 notes, the conditionals' types (by `_Generic`), and the segments' accesses that
 the lowering refuses (`-fsyntax-only` alone). Each one's whole output equals
 Clang's on both kernels, at each policy and lane count.
+Its `tests/driver/auto-address/` runtime sources cover `__auto_type` with
+numeric and OpenCL address spaces (#1844), including the numeric bounds,
+duplicate and conflicting attributes, pointer and object levels, cv/atomic
+qualifiers, specifier restrict, automatic versus static storage, and compatible
+or incompatible redeclarations. The same source runs in GNU17 and C23 modes
+with `_Generic` assertions for the deduced types. Both kernels, one/three
+requested lanes, syntax checks, object emission or preservation, and
+default/`-Werror`/`-w` policies compare complete diagnostics with Clang.
+These lane options exercise the existing scheduling requests; they do not by
+themselves establish that a particular body is admitted to deferred checking.
 
 `c_check_format_bitint_driver_test.c` adds 25 original fixtures to
 `test-checker-driver` through the shared default-warning harness. Independent

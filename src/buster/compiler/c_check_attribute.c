@@ -5315,17 +5315,17 @@ static bool check_input_neon_vector(CheckInputReader* reader, CheckInputAttribut
     return valid && !refused;
 }
 
-static bool check_input_auto_type(TypeId type);
+static bool check_input_auto_type(const TypeTable* types, TypeId type);
 
 // Whether `type` is an __auto_type placeholder's, through pointer levels (#1844): `__auto_type`, `const __auto_type *`.
 static bool check_input_auto_type_level(const TypeTable* types, TypeId type)
 {
     TypeId level = type != 0 ? type_strip_aligned(types, type) : 0;
-    for (uint32_t steps = 0; level != 0 && !check_input_auto_type(level) && steps < 64; steps += 1)
+    for (uint32_t steps = 0; level != 0 && !check_input_auto_type(types, level) && steps < 64; steps += 1)
     {
         level = type_kind(types, level) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, level)) : 0;
     }
-    return level != 0 && check_input_auto_type(level);
+    return level != 0 && check_input_auto_type(types, level);
 }
 
 // A vector's or a mode's attribute of an __auto_type placeholder's type `type` (#1844), as clang's handlers meet the

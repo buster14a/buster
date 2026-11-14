@@ -8466,6 +8466,19 @@ constant evaluation of its own initializer (`(typeof(x)){0}`,
 any use does, recording its declaration, so that the finish's scan of the
 initializer reports it at the use, with clang's message.
 
+Address-space attributes also wrap the placeholder (#1844). Deduction preserves
+each written space at its own level: a specifier's space qualifies the deduced
+object, or the pointee under a pointer declarator; a pointer's own attribute
+qualifies that pointer. GNU numeric and OpenCL spaces use the existing type
+qualifier representation, including target space zero. The ordinary rules still
+reject an automatic object in an address space, allow a pointer to such an
+object and allow file-scope or static objects. Lvalue conversion drops the
+initializer object's space; it keeps a pointer's pointee space. Specifier
+`const`, `volatile` and `_Atomic` survive deduction. A specifier's `restrict`
+with an address-space attribute is invalid before deduction, as clang checks
+the wrapped placeholder; a pointer declarator's `restrict`, or a space after
+the name of a restrict-deduced pointer, remains valid.
+
 Clang's errors, at its places: `__auto_type` anywhere but a declaration's own
 specifiers (a parameter's, a member's, a type name's) at the keyword
 (`CheckInputReader.specifier_auto_type`); a typedef's and a function's at the
@@ -8497,13 +8510,17 @@ deduced one, as clang's C `mergeTypes` takes the placeholder before deducing
 `check_input_auto_type_merged`), through pointer declarators, and a `restrict`
 placeholder's over a restrict pointer. Where clang's `mergeTypes` refuses the
 merge (#1844, `check_input_auto_type_refused`), clang's error is given: the
-qualifiers of a level differ (const, volatile and restrict alike), a pointer
-declarator meets no pointer, or an `_Atomic` placeholder meets no atomic type.
+qualifiers of a level differ (const, volatile, restrict and address space), a
+pointer declarator meets no pointer, or an `_Atomic` placeholder meets no atomic type.
 It reads "redefinition of 'p' with a different type: 'const __auto_type' vs
 'int'", or "redeclaration" with `extern`, at the name. The placeholder is
 printed through its declarator (`'volatile __auto_type *const'`,
-`'_Atomic(__auto_type)'`, `'restrict __auto_type'`;
-`check_semantic_auto_type_spelling`). The note is at the entity's latest
+`'_Atomic(__auto_type)'`, `'restrict __auto_type'`), keeping each level's address
+space and its source macro spelling through the shared type printer
+(`type_print` with aliases for the private placeholder markers;
+`check_semantic_auto_type_spelling`). A local whole-placeholder alias preserves
+the qualifier order of a prefix or suffix macro and the raw address-space
+spelling when an `_Atomic` specifier rebuilds the type. The note is at the entity's latest
 earlier declaration, "previous definition is here" for a definition or a
 tentative one (`CHECK_REDECLARATION_AUTO_TYPE`). The reader stops there, as at
 other initialized invalid declarations, so clang's later errors aren't given.
@@ -8512,8 +8529,11 @@ Refused by name: `_Atomic` and `restrict` through a declarator
 together (clang's restrict error names `_Atomic(__auto_type)`), `_Atomic` of an
 atomic value (clang's error names the placeholder's type), `restrict` of a value
 that is no pointer to an object (clang's `restrict int`, which the placeholder
-can't be told from), and type attributes with `__auto_type` but a vector's and a
-mode's. A redeclaration of an atomic entity takes its type, as clang's
+can't be told from), and other type-changing attributes besides the handled
+vector, mode and address-space attributes. An incompatible address-space
+pointee initializer is rejected by the assignment check, whose message names
+the deduced type rather than clang's undeduced placeholder. A redeclaration of
+an atomic entity takes its type, as clang's
 `mergeTypes` merges it (#1844): a plain placeholder any atomic type
 (`_Atomic int r; __auto_type r = 1;` is an `_Atomic int`, and so is
 `__auto_type *p` after `_Atomic int *p`), and an `_Atomic` one an atomic type
@@ -8532,6 +8552,15 @@ first error's line, on both paths, and its programs (`local-labels`,
 `auto-type`) run natively against clang -O0's code. `test-checker-driver`
 compares each error's line and column, and its text where the driver's message
 is clang's (`c_checker_driver_gnu_test.c`).
+
+The original runtime sources in `tests/driver/auto-address/` run through the
+address-space driver's existing diagnostic harness in GNU17 and C23 modes.
+Their `_Generic` assertions check the deduced qualifier levels, compatible
+redeclarations and lvalue conversion. The error cases check automatic storage,
+incompatible redeclarations, specifier restrict, invalid numeric spaces and
+conflicting attributes; the duplicate-space case checks its warning and
+preserved type. Complete Clang diagnostics, object emission or preservation,
+default/`-Werror`/`-w`, both kernels and one/three requested lanes are covered.
 
 **C23 `auto` and `constexpr` (#793).** In C23 a declaration's `auto`, when no
 other type specifier is beside it, is a type specifier rather than the storage
