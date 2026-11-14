@@ -85,6 +85,10 @@ struct Tier1AllocationInput
     // and it is free there (UINT32_MAX for none): a phi whose block passes it to a phi of its one successor takes the
     // place that phi's first interval took, where it is settled, rather than its operand's (#2734).
     const uint32_t* alternate_intervals;
+    // Optional (#2767): per interval, registers of its allowed ones that it takes only where none of its others is free, and
+    // never evicts another value for: a range live across a fixed register's sequence, which writes them, so that its
+    // consumer would save the range's value around it. A class with any is the scan's.
+    const uint32_t* avoided_registers;
     const uint8_t* rematerializable;
     // Both use columns may be absent (next use then conservatively means interval end). Otherwise each slice is
     // sorted, contains positions inside its interval, and may be empty. Duplicate positions are legal.
@@ -288,6 +292,13 @@ static uint8_t tier1_allocation_value_hint(const Tier1AllocationInput* columns, 
     return opening != UINT8_MAX ? opening : own != UINT8_MAX ? own : value != UINT32_MAX ? last[value] : UINT8_MAX;
 }
 
+// The registers an interval takes from `pool`, of the free ones it may take: those it doesn't avoid, where any is left (#2767).
+static uint32_t tier1_allocation_preferred(const Tier1AllocationInput* columns, uint32_t interval, uint32_t pool)
+{
+    const uint32_t kept = columns->avoided_registers != 0 ? pool & ~columns->avoided_registers[interval] : pool;
+    return kept != 0 ? kept : pool;
+}
+
 // An interval's hinted register at its start: the register its alternate interval opened with, where its value holds
 // that one still, a settled place, and it is among `free`'s; else tier1_allocation_value_hint's.
 static uint8_t tier1_allocation_start_hint(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval, uint32_t free)
@@ -353,16 +364,18 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan(const Tier
             {
                 const uint32_t position = columns.starts[interval];
                 const uint32_t free = ~occupied & allowed[interval];
-                const uint8_t follow = tier1_allocation_start_hint(&columns, last, interval, free);
+                // The registers it doesn't avoid first (#2767), its hints among them.
+                const uint32_t pool = tier1_allocation_preferred(&columns, interval, free);
+                const uint8_t follow = tier1_allocation_start_hint(&columns, last, interval, pool);
                 uint32_t chosen = UINT32_MAX;
                 if (free != 0)
                 {
-                    chosen = (uint32_t)__builtin_ctz(free);
+                    chosen = (uint32_t)__builtin_ctz(pool);
                     if (columns.hints != 0 && columns.hints[interval] != UINT8_MAX && ((free >> columns.hints[interval]) & 1) != 0)
                     {
                         chosen = columns.hints[interval];
                     }
-                    else if (follow < 32 && ((free >> follow) & 1) != 0)
+                    else if (follow < 32 && ((pool >> follow) & 1) != 0)
                     {
                         chosen = follow;
                     }
@@ -583,10 +596,12 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             for (uint32_t k = e; k < event_count && (events[k] & (BUSTER_TIER1_ALLOCATE_USE_EVENT | 1)) == 1 && columns.starts[events[k] >> 1] == claims_at; k += 1)
             {
                 const uint32_t other = events[k] >> 1;
-                const uint8_t want = columns.classes[other] == class ? tier1_allocation_start_hint(&columns, last, other, ~occupied & allowed[other] & ~claimed) : UINT8_MAX;
+                // A register it avoids (#2767) is no claim where it may take another.
+                const uint32_t claimable = columns.classes[other] == class ? tier1_allocation_preferred(&columns, other, ~occupied & allowed[other] & ~claimed) : 0;
+                const uint8_t want = columns.classes[other] == class ? tier1_allocation_start_hint(&columns, last, other, claimable) : UINT8_MAX;
                 const bool unused = columns.use_offsets[other] == columns.use_offsets[other + 1] && !tier1_allocation_required_at(&columns, other, claims_at);
                 const bool resting = unused && (tier1_allocation_spill_kind(&columns, other) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE || want == BUSTER_TIER1_ALLOCATE_MEMORY_HINT);
-                if (!resting && want < 32 && (((~occupied & allowed[other] & ~claimed) >> want) & 1) != 0)
+                if (!resting && want < 32 && ((claimable >> want) & 1) != 0)
                 {
                     claimed |= 1u << want;
                     claimers[want] = other;
@@ -616,7 +631,9 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
                 const uint32_t r = (uint32_t)__builtin_ctz(left);
                 others |= claimers[r] != interval ? 1u << r : 0;
             }
-            const uint8_t follow = use_event ? tier1_allocation_value_hint(&columns, last, interval) : tier1_allocation_start_hint(&columns, last, interval, ~occupied & allowed[interval] & ~others);
+            const uint8_t follow = use_event ? tier1_allocation_value_hint(&columns, last, interval) : tier1_allocation_start_hint(&columns, last, interval, tier1_allocation_preferred(&columns, interval, ~occupied & allowed[interval] & ~others));
+            // A register the interval avoids (#2767) is taken only as the last free one, never from a recipe.
+            const uint32_t avoided = columns.avoided_registers != 0 ? columns.avoided_registers[interval] : 0;
             const bool recomputed = tier1_allocation_spill_kind(&columns, interval) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
             // An unused recipe may keep an unclaimed free register, preserving a hoisted definition without taking
             // a continuing value's register. It never evicts one; an unused value last in memory stays there, and so
@@ -627,7 +644,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             // an eviction does, recomputed at its next required use. Where a recipe holds the register an edge or a block's entry would keep a loop's value in, the value took
             // another one, and the edges moved it back (luaV_execute's frame objects' addresses and Tier 1's constants).
             const bool hinted = columns.hints == 0 || columns.hints[interval] == UINT8_MAX;
-            if (hinted && !idle && !recomputed && follow < 32 && ((allowed[interval] >> follow) & 1) != 0 && !(starting && ((claimed >> follow) & 1) != 0 && claimers[follow] != interval) &&
+            if (hinted && !idle && !recomputed && follow < 32 && ((allowed[interval] >> follow) & 1) != 0 && ((avoided >> follow) & 1) == 0 && !(starting && ((claimed >> follow) & 1) != 0 && claimers[follow] != interval) &&
                 tier1_allocation_yields(&columns, active, occupied, follow, position))
             {
                 const uint32_t victim = active[follow];
@@ -651,7 +668,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             }
             else if (open != 0 || (free != 0 && required))
             {
-                const uint32_t pool = open != 0 ? open : free;
+                const uint32_t pool = tier1_allocation_preferred(&columns, interval, open != 0 ? open : free);
                 const uint32_t hint_pool = idle ? pool : free;
                 chosen = (uint32_t)__builtin_ctz(pool);
                 if (columns.hints != 0 && columns.hints[interval] != UINT8_MAX && ((hint_pool >> columns.hints[interval]) & 1) != 0)
@@ -1236,7 +1253,8 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
                 if (columns.classes[i] == class)
                 {
                     class_count += 1;
-                    regular &= allowed[i] == columns.registers[class];
+                    // An interval that avoids registers (#2767) is the scan's: the rule takes each level's register.
+                    regular &= allowed[i] == columns.registers[class] && (columns.avoided_registers == 0 || (columns.avoided_registers[i] & allowed[i]) == 0);
                     // A recomputable interval a clobber reaches (#2574) leaves its register there, which only the scan does.
                     if (regular && columns.clobber_registers[class] != 0 && tier1_allocation_spill_kind(&columns, i) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE)
                     {
