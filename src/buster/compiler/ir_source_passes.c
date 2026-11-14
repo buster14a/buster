@@ -463,3 +463,351 @@ static int run_ir_source_passes_tests(int count, char** arguments)
     free(options);
     return passed ? 0 : 1;
 }
+
+// #139's compile time per pass for both versions (benchmark-ir-source-passes): the files' functions prepared as
+// test-ir-source --passes prepares them, each lowered (L) and promoted (P) once outside the time, and each caller's
+// inlining unit built once; then each pass by its vector and its scalar version over the whole corpus, in
+// BUSTER_TIER0_BENCHMARK_PASSES passes that alternate which of the pair runs first, after a warm-up of each. The passes
+// take the inputs --tier1's pipeline gives them: SROA (Tier 1's options), #866's solver and the inliner the lowered form,
+// the optimizer's rows and LICM the promoted one (the driver's optimizer and LICM take it after the wide integers' halves,
+// truth simplification, threading and if-conversion, which leave most functions as they are). Each run includes what
+// its public call does: input checks, analyses, allocation, the rewrite and, where the pass verifies, verification. It
+// prints each variant's median nanoseconds, cycles and instructions per lowered IR instruction and its total for the
+// corpus. Any function a pass refuses where it ran outside the time, or a run with a refusal, fails it. Run it under the
+// 9700X's lock pinned to one CPU.
+//
+//   build/compiler benchmark-ir-source-passes [--only PASS] [preprocessor options] file...
+
+typedef struct IrSourcePassUnit IrSourcePassUnit;
+struct IrSourcePassUnit
+{
+    IrInlineUnit unit;
+};
+
+typedef struct IrSourcePassCorpus IrSourcePassCorpus;
+struct IrSourcePassCorpus
+{
+    IrFunction* lowered;
+    IrFunction* promoted;
+    uint32_t count;
+    uint32_t capacity;
+    IrSourcePassUnit* units;
+    uint32_t unit_count;
+    uint32_t unit_capacity;
+    uint64_t instructions;
+    uint64_t promoted_instructions;
+    uint64_t failures;
+};
+
+// One run of `pass` by one version over the corpus; the output put back after each function. Returns its reading, with
+// the functions it refused (an inliner unit both versions refuse alike is the run's input, not a failure: the
+// preparation keeps only the units that both versions take).
+static Tier0BenchmarkReading ir_source_passes_run(IrSourcePass pass, bool scalar, const IrSourcePassCorpus* corpus, Arena* output, Arena* scratch, Tier0BenchmarkCounters counters)
+{
+    uint32_t failures = 0;
+    const uint64_t mark = output->length;
+    const Tier0BenchmarkReading begin = tier0_benchmark_read(counters);
+    const uint32_t count = pass == IR_SOURCE_PASS_INLINE ? corpus->unit_count : corpus->count;
+    for (uint32_t f = 0; f < count; f += 1)
+    {
+        IrCheck check = { .error = IR_OK };
+        if (pass == IR_SOURCE_PASS_SROA)
+        {
+            IrSroaOptions options = ir_sroa_options();
+            options.simd = true;
+            options.flagged = true;
+            options.scalar = scalar;
+            IrSroaResult result = { 0 };
+            check = ir_optimize_sroa(&corpus->lowered[f], output, scratch, options, &result);
+        }
+        else if (pass == IR_SOURCE_PASS_GVN)
+        {
+            IrGvnOptions options = ir_gvn_options();
+            options.scalar = scalar;
+            IrGvnResult result = { 0 };
+            check = ir_optimize_gvn(&corpus->lowered[f], output, scratch, options, &result);
+        }
+        else if (pass == IR_SOURCE_PASS_LICM)
+        {
+            IrLicmOptions options = ir_licm_options();
+            options.scalar = scalar;
+            IrLicmResult result = { 0 };
+            check = ir_optimize_licm(&corpus->promoted[f], output, scratch, options, &result);
+        }
+        else if (pass == IR_SOURCE_PASS_INLINE)
+        {
+            IrInlineOptions options = ir_inline_options();
+            options.control_flow = true;
+            options.scalar = scalar;
+            IrInlineResult result = { 0 };
+            uint32_t failed = BUSTER_IR_NONE;
+            check = ir_optimize_inline(&corpus->units[f].unit, output, scratch, options, &result, &failed);
+        }
+        else
+        {
+            IrOptimizeOptions options = ir_optimize_options();
+            options.passes = ir_source_pass_optimizer[pass - IR_SOURCE_PASS_SCCP];
+            options.path = scalar ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
+            IrOptimizeResult result = { 0 };
+            check = ir_optimize(&corpus->promoted[f], output, scratch, options, &result);
+        }
+        failures += check.error != IR_OK && check.error != IR_ERROR_UNSUPPORTED;
+        arena_pop_to(output, mark);
+    }
+    const Tier0BenchmarkReading end = tier0_benchmark_read(counters);
+    const Tier0BenchmarkReading taken = {
+        .nanoseconds = end.nanoseconds - begin.nanoseconds,
+        .cycles = end.cycles - begin.cycles,
+        .instructions = end.instructions - begin.instructions,
+        .throttle = end.throttle - begin.throttle,
+        .failures = failures,
+    };
+    return taken;
+}
+
+// Adds each caller of `source`'s functions (lowered in `functions`, from the corpus's `first`) whose unit both inliner
+// versions take, as ir_source_passes_unit builds it, the unit's tables in `tables`.
+static void ir_source_passes_corpus_units(IrSourcePassCorpus* corpus, const IrSourceFile* source, uint32_t first, Arena* tables, Arena* output, Arena* scratch)
+{
+    const IrFunction* functions = corpus->lowered + first;
+    IrSourcePassMember* members = BUSTER_ARENA_PUSH_ARRAY(scratch, IrSourcePassMember, (uint64_t)source->count + 1);
+    for (uint32_t f = 0; members != 0 && f < source->count; f += 1)
+    {
+        members[f] = (IrSourcePassMember){ .symbol = source->functions[f].symbol, .index = f };
+    }
+    if (members != 0)
+    {
+        qsort(members, source->count, sizeof(IrSourcePassMember), ir_source_passes_member_order);
+    }
+    IrSourcePassMember unit_members[BUSTER_IR_SOURCE_PASSES_CALLEES + 1];
+    for (uint32_t caller = 0; members != 0 && caller < source->count && corpus->unit_count < corpus->unit_capacity; caller += 1)
+    {
+        const IrFunction* body = &functions[caller];
+        uint32_t size = 1;
+        bool fits = true;
+        unit_members[0] = (IrSourcePassMember){ .symbol = source->functions[caller].symbol, .index = caller };
+        for (uint32_t node = 0; fits && node < body->instruction_count; node += 1)
+        {
+            const bool site = body->op[node] == IR_CALL && body->calls[body->b[node]].row == 0 && body->calls[body->b[node]].body == 0;
+            const uint32_t symbol = site ? body->a[node] : UINT32_MAX;
+            uint32_t low = 0;
+            uint32_t high = source->count;
+            while (low < high)
+            {
+                const uint32_t middle = low + (high - low) / 2;
+                low = members[middle].symbol < symbol ? middle + 1 : low;
+                high = members[middle].symbol < symbol ? high : middle;
+            }
+            const bool found = symbol != UINT32_MAX && low < source->count && members[low].symbol == symbol;
+            const bool single = found && (low + 1 == source->count || members[low + 1].symbol != symbol);
+            bool known = false;
+            for (uint32_t k = 0; found && k < size; k += 1)
+            {
+                known = known || unit_members[k].symbol == symbol;
+            }
+            fits = !found || known || (single && size <= BUSTER_IR_SOURCE_PASSES_CALLEES);
+            if (fits && found && !known)
+            {
+                unit_members[size] = members[low];
+                size += 1;
+            }
+        }
+        IrFunction* unit_functions = fits && size > 1 ? BUSTER_ARENA_PUSH_ARRAY(tables, IrFunction, size) : 0;
+        uint32_t* symbols = unit_functions != 0 ? BUSTER_ARENA_PUSH_ARRAY(tables, uint32_t, size) : 0;
+        uint8_t* flags = symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(tables, uint8_t, size) : 0;
+        if (flags != 0)
+        {
+            qsort(unit_members, size, sizeof(IrSourcePassMember), ir_source_passes_member_order);
+            uint32_t position = 0;
+            uint32_t symbol_count = 0;
+            for (uint32_t k = 0; k < size; k += 1)
+            {
+                const uint32_t index = unit_members[k].index;
+                position = index == caller ? k : position;
+                unit_functions[k] = functions[index];
+                symbols[k] = unit_members[k].symbol;
+                flags[k] = BUSTER_IR_INLINE_INTERNAL | (functions[index].variadic ? BUSTER_IR_INLINE_VARIADIC : 0);
+                symbol_count = source->functions[index].symbol_count > symbol_count ? source->functions[index].symbol_count : symbol_count;
+            }
+            IrSourcePassUnit* unit = &corpus->units[corpus->unit_count];
+            unit->unit = (IrInlineUnit){
+                .functions = unit_functions,
+                .symbols = symbols,
+                .flags = flags,
+                .count = size,
+                .symbol_count = symbol_count,
+                .only = position + 1,
+            };
+            // Kept where both versions take it: a refusal alike (an unprototyped call) is no unit's time.
+            const uint64_t mark = output->length;
+            IrInlineOptions options = ir_inline_options();
+            options.control_flow = true;
+            IrInlineResult result = { 0 };
+            uint32_t failed = BUSTER_IR_NONE;
+            const bool vector = ir_optimize_inline(&unit->unit, output, scratch, options, &result, &failed).error == IR_OK;
+            arena_pop_to(output, mark);
+            options.scalar = true;
+            const bool twin = ir_optimize_inline(&unit->unit, output, scratch, options, &result, &failed).error == IR_OK;
+            arena_pop_to(output, mark);
+            corpus->unit_count += vector && twin;
+        }
+    }
+}
+
+static int run_ir_source_passes_benchmark(int count, char** arguments)
+{
+    uint32_t only = IR_SOURCE_PASS_COUNT;
+    char** options = calloc((size_t)count + 1, sizeof(char*));
+    char** files = calloc((size_t)count + 1, sizeof(char*));
+    uint32_t option_count = 0;
+    uint32_t file_count = 0;
+    bool valid = options != 0 && files != 0;
+    for (int i = 0; valid && i < count; i += 1)
+    {
+        if (strcmp(arguments[i], "--only") == 0)
+        {
+            valid = i + 1 < count;
+            uint32_t named = IR_SOURCE_PASS_COUNT;
+            for (uint32_t pass = 0; valid && pass < IR_SOURCE_PASS_COUNT; pass += 1)
+            {
+                named = strcmp(arguments[i + 1], ir_source_pass_names[pass]) == 0 ? pass : named;
+            }
+            only = named;
+            valid = valid && only != IR_SOURCE_PASS_COUNT;
+            i += 1;
+        }
+        else if (arguments[i][0] != '-')
+        {
+            files[file_count++] = arguments[i];
+        }
+        else if (strcmp(arguments[i], "--no-default-config") != 0)
+        {
+            options[option_count++] = arguments[i];
+            if (pp_option_takes_value(arguments[i]))
+            {
+                valid = i + 1 < count;
+                options[option_count++] = valid ? arguments[++i] : 0;
+            }
+        }
+    }
+    valid = valid && file_count != 0;
+    Arena lowered_arena = arena_reserve(UINT64_C(1) << 36);
+    Arena arena = arena_reserve(UINT64_C(1) << 32);
+    Arena kept = arena_reserve(UINT64_C(1) << 36);
+    // Promotion mustn't write into the arena that holds its input (ssa_ir.c).
+    Arena kept_promoted = arena_reserve(UINT64_C(1) << 36);
+    Arena tables = arena_reserve(UINT64_C(1) << 34);
+    Arena output = arena_reserve(UINT64_C(1) << 34);
+    Arena scratch = arena_reserve(UINT64_C(1) << 35);
+    IrSourcePassCorpus corpus = { .capacity = BUSTER_TIER0_BENCHMARK_MAX_FUNCTIONS, .unit_capacity = BUSTER_TIER0_BENCHMARK_MAX_FUNCTIONS };
+    corpus.lowered = valid && tables.base != 0 ? BUSTER_ARENA_PUSH_ARRAY(&tables, IrFunction, corpus.capacity) : 0;
+    corpus.promoted = corpus.lowered != 0 ? BUSTER_ARENA_PUSH_ARRAY(&tables, IrFunction, corpus.capacity) : 0;
+    corpus.units = corpus.promoted != 0 ? BUSTER_ARENA_PUSH_ARRAY(&tables, IrSourcePassUnit, corpus.unit_capacity) : 0;
+    valid = valid && lowered_arena.base != 0 && arena.base != 0 && kept.base != 0 && kept_promoted.base != 0 && output.base != 0 && scratch.base != 0 && corpus.units != 0;
+    for (uint32_t i = 0; valid && i < file_count; i += 1)
+    {
+        IrSourceFile file;
+        ir_source_prepare(&file, files[i], options, option_count, &lowered_arena, &arena, false, false);
+        const bool prepared = file.status == IR_SOURCE_PREPARED && corpus.count + file.count <= corpus.capacity;
+        const uint32_t first = corpus.count;
+        for (uint32_t f = 0; prepared && f < file.count; f += 1)
+        {
+            const IrSourceFunction* source = &file.functions[f];
+            IrFunction* lowered = &corpus.lowered[corpus.count];
+            const bool lowers = ir_lower_typed_target(source->function, source->result_type, source->symbol_count, source->target_features, &kept, &scratch, lowered).error == IR_OK;
+            const bool promotes = lowers && ssa_ir_promote(lowered, &kept_promoted, &scratch, &corpus.promoted[corpus.count]).error == IR_OK;
+            corpus.failures += !promotes;
+            corpus.instructions += lowers ? lowered->instruction_count : 0;
+            corpus.promoted_instructions += promotes ? corpus.promoted[corpus.count].instruction_count : 0;
+            corpus.count += 1;
+        }
+        if (prepared)
+        {
+            ir_source_passes_corpus_units(&corpus, &file, first, &tables, &output, &scratch);
+        }
+        corpus.failures += !prepared;
+        printf("benchmark-ir-source-passes: file=%s functions=%u %s\n", files[i], file.count, prepared ? "prepared" : file.reason);
+        fflush(stdout);
+        // The typed streams aren't needed past the lowering: the kept IR owns its columns.
+        arena_pop_to(&lowered_arena, 0);
+        arena_pop_to(&arena, 0);
+    }
+    bool reported = false;
+    if (valid && corpus.failures == 0 && corpus.count != 0)
+    {
+        const Tier0BenchmarkCounters counters = {
+            .cycles = tier0_benchmark_counter(PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES),
+            .instructions = tier0_benchmark_counter(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS),
+            .throttle = tier0_benchmark_counter(PERF_TYPE_RAW, BUSTER_TIER0_BENCHMARK_THROTTLE_EVENT),
+        };
+        printf("benchmark-ir-source-passes: functions=%u lowered_instructions=%" PRIu64 " promoted_instructions=%" PRIu64 " inline_units=%u\n", corpus.count, corpus.instructions,
+               corpus.promoted_instructions, corpus.unit_count);
+        printf("%-12s %-7s %12s %12s %12s %12s %8s\n", "pass", "version", "total ms", "ns/instr", "cyc/instr", "ins/instr", "IPC");
+        uint32_t failed = 0;
+        for (uint32_t pass = 0; pass < IR_SOURCE_PASS_COUNT; pass += 1)
+        {
+            if (only != IR_SOURCE_PASS_COUNT && pass != only)
+            {
+                continue;
+            }
+            double values[2][3][BUSTER_TIER0_BENCHMARK_PASSES];
+            memset(values, 0, sizeof(values));
+            for (uint32_t version = 0; version < 2; version += 1)
+            {
+                failed += ir_source_passes_run((IrSourcePass)pass, version != 0, &corpus, &output, &scratch, counters).failures;
+            }
+            for (uint32_t round = 0; round < BUSTER_TIER0_BENCHMARK_PASSES && failed == 0; round += 1)
+            {
+                for (uint32_t turn = 0; turn < 2; turn += 1)
+                {
+                    const uint32_t version = (round & 1) != 0 ? 1 - turn : turn;
+                    const Tier0BenchmarkReading taken = ir_source_passes_run((IrSourcePass)pass, version != 0, &corpus, &output, &scratch, counters);
+                    failed += taken.failures;
+                    values[version][0][round] = (double)taken.nanoseconds;
+                    values[version][1][round] = (double)taken.cycles;
+                    values[version][2][round] = (double)taken.instructions;
+                }
+            }
+            for (uint32_t version = 0; version < 2 && failed == 0; version += 1)
+            {
+                const double ns = tier0_benchmark_median(values[version][0]);
+                const double cycles = tier0_benchmark_median(values[version][1]);
+                const double instructions = tier0_benchmark_median(values[version][2]);
+                const double r = (double)corpus.instructions;
+                printf("%-12s %-7s %12.3f %12.3f %12.3f %12.3f %8.2f\n", ir_source_pass_names[pass], version == 0 ? "vector" : "scalar", ns / 1e6, ns / r, cycles / r, instructions / r,
+                       cycles != 0 ? instructions / cycles : 0.0);
+            }
+        }
+        reported = failed == 0;
+        if (!reported)
+        {
+            printf("benchmark-ir-source-passes: %u function runs failed: no report\n", failed);
+        }
+        const int descriptors[] = { counters.cycles, counters.instructions, counters.throttle };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(descriptors); i += 1)
+        {
+            if (descriptors[i] >= 0)
+            {
+                close(descriptors[i]);
+            }
+        }
+    }
+    else if (valid)
+    {
+        printf("benchmark-ir-source-passes: %" PRIu64 " files or functions failed: no report\n", corpus.failures);
+    }
+    else
+    {
+        fprintf(stderr, "usage: compiler benchmark-ir-source-passes [--only sroa|gvn|sccp|dce|cfg|optimizer|tier1|licm|inline] [preprocessor options] file...\n");
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&tables);
+    arena_release(&kept_promoted);
+    arena_release(&kept);
+    arena_release(&arena);
+    arena_release(&lowered_arena);
+    free(files);
+    free(options);
+    return reported ? 0 : 1;
+}
