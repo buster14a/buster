@@ -850,8 +850,8 @@ struct CheckProgramLanes
     bool tier0_no_inline;
     // --emit-window=N (#2536's step 1, docs/all-core-path.md): one lane's emission takes its bodies in windows of about
     // N tokens, each window's lowering and code before the next window's, in memory the next window reuses
-    // (check_program_emit_windows). 0, the default, is one window as long as the unit (W = ∞): today's order, and the
-    // windows' twin.
+    // (check_program_emit_windows); the driver's default is BUSTER_CHECK_EMIT_WINDOW_TOKENS. 0, a caller's without the
+    // driver, is one window as long as the unit (W = ∞): the order before windows, and their twin.
     uint32_t window_tokens;
     // --poison-arenas (a test option): each window's bytes are overwritten as it is popped, so that a part that read what
     // another part left would show (BUSTER_CHECK_EMIT_WINDOW_POISON).
@@ -964,6 +964,10 @@ static _Thread_local Arena check_program_thread_columns;
 // as its columns are, so that an emission without lanes inlines what one with them does and makes the same object.
 // Its pages are popped by the next emission's first use; never released.
 static _Thread_local CheckTier0InlineLane check_program_thread_inline;
+// The driver's windows by default (CheckProgramLanes.window_tokens, #2536's step 1): on the 9700X, sqlite3.c at eight
+// workers takes 1.6% fewer user cycles by them than by one window as long as the unit, and one worker as many, from 2,048
+// tokens on; below that a window's own cost shows at one worker (docs/all-core-path.md's "Step 1's result").
+#define BUSTER_CHECK_EMIT_WINDOW_TOKENS 2048
 // The byte --poison-arenas writes over a popped window (CheckProgramLanes.poison_windows).
 #define BUSTER_CHECK_EMIT_WINDOW_POISON 0xa5
 // The calling thread's window (#2536's step 1, check_program_emit_windows): a window's typed streams and Tier 0 code,
