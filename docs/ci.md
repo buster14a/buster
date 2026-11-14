@@ -2,8 +2,10 @@
 
 Every change reaches `main` through the merge queue (#1430). The queue's
 candidate for it runs the complete hosted contract on its exact commit before
-it merges: both host architectures with all four O3 build modes (plain and
-three sanitizer configurations) across each row's shards, the vector pool, the
+it merges: the portable `x86-64` architecture with all four O3 build modes
+(plain and three sanitizer configurations) and the `native` plain row, across
+each row's shards, the vector pool (whose sanitizer configurations replaced the
+`native` sanitizer rows, #2032), the
 three fuzz campaigns, and each auxiliary workflow its change touches (see "The
 merge queue"). Documentation-only changes run it too. Main's ruleset requires
 the queue, with no bypass, and main is fast-forwarded to the commit the queue
@@ -70,15 +72,21 @@ tools/ci/costs/ROW.costs`: the runner deals the commands to the shards by the
 row's own costs on a hosted runner, the costliest first, each to the shard that
 would end the earliest with it, the same deal on every shard's runner, so that
 a row's shards run every command once (docs/commands/parallel.md). The plain
-rows run as 4 shards, the `x86-64` TSan and MSan rows as 6, the `native` MSan
-row as 5 and the others as 4 (#2031; [Shard costs](commands/ci.md#shard-costs)
+rows run as 4 shards, the `x86-64` TSan and MSan rows as 6 and its ASan row as
+4 (#2031; [Shard costs](commands/ci.md#shard-costs)
 has the tables and the plans). Unsharded, a plain row's test step took 14.6
 minutes of its 18-minute job on one 4-CPU runner, and the MSan rows took up to
 98 minutes. A portable `x86-64` row builds its compiler once, in a job of its
 own, and its shards run that verified product (see "Shared row products"
-below). A `native` row's shards each build the compiler themselves, since a
-native build must run on the CPU model it was built for, which hosted runners
-don't share. A row's once-only steps (the baseline fallback checks, the QEMU
+below). The `native` plain row's shards each build the compiler themselves,
+since a native build must run on the CPU model it was built for, which hosted
+runners don't share. That was why the `native` sanitizer rows went (#2032, the
+owner's go-ahead on 2026-11-14): their 13 shards each built an instrumented
+compiler, 5 to 11 minutes, and on 160 merge-queue candidates the `native`
+shards took 316 of a merged candidate's 912 runner-minutes, its MSan or TSan
+row finishing last in 18 of 43 (#2703). The vector row's sanitizer
+configurations test the vector path under each detector, and the `x86-64`
+rows the scalar one. A row's once-only steps (the baseline fallback checks, the QEMU
 smoke test, the constrained arenas, the parser smoke test, the performance
 readers and the TSan/MSan `main.c` compiles) run in its shard 1, which the deal
 gives that much less of the inventory (its table's `#: first-shard`), and each
@@ -102,7 +110,8 @@ transparent huge pages off (#1109, `arena_page_policy` in `lane.c`), and the
 9700X with them as its system has them.
 Baseline memory boundary tests also run with undefined-behavior checks.
 The hosted matrix additionally builds the entire compiler with each of
-`BUSTER_SANITIZER=address|thread|memory`, for both host architectures.
+`BUSTER_SANITIZER=address|thread|memory`, for the `x86-64` architecture and the
+vector row's configurations (the `native` sanitizer rows went in #2032).
 Every variant runs `tools/ci/correctness.tests`, including the same corpus,
 seeds, lane counts, generated-code execution and external cross-checks. These
 are full suites, a row's shards together; the TSan and MSan rows are not
@@ -451,7 +460,8 @@ its shards, which one pool of draws holds:
 - The runs that run the sanitizer rows (merge-queue candidates, full
   dispatches, the nightly snapshot's deferred run; before the queue, pushes
   before the nightly mode): the plain and the three sanitizer configurations
-  (`none address thread memory`, 16 items), beside the `native` rows.
+  (`none address thread memory`, 16 items), beside the `native` plain row,
+  which alone of the `native` rows stays (#2032).
 - Elsewhere (nightly backlog runs and admitted snapshot runs, the `plain`
   scope; before the queue, pushes in the nightly mode): no vector row. Their `native` rows stay,
   and `tools/ci/nightly.c` counts the plain rows' shards by their names, which
@@ -804,8 +814,8 @@ A candidate's run is the only per-merge correctness run (the owner's decision
 on 2026-11-10). It works like this:
 
 - **Scope.** The full hosted contract runs on the candidate's exact commit:
-  - both host architectures, each with its plain, ASan, TSan and MSan O3
-    builds and every row's shards;
+  - `x86-64` with its plain, ASan, TSan and MSan O3 builds, and the `native`
+    plain row (#2032), every row's shards;
   - the vector pool's 16 items;
   - the three fuzz campaigns.
 
@@ -859,9 +869,10 @@ on 2026-11-10). It works like this:
   - The coverage step (`nightly.sh coverage`, `nightly coverage`) reads the
     run's own jobs, because a test job's result alone stays green when a shard
     or a row is skipped.
-  - It requires every shard 1..N of every row and sanitizer (one N per row),
-    the vector pool's verdict and each fuzz campaign to have completed
-    successfully.
+  - It requires every shard 1..N of every row of the contract (one N per
+    row): `x86-64`'s four and `native`'s plain one. A `native` sanitizer row
+    counts for nothing either way (#2032). It also requires the vector pool's
+    verdict and each fuzz campaign to have completed successfully.
   - Each auxiliary workflow the selector named must have run at least one job,
     and every job it ran must have succeeded. One the selector didn't name must
     have run none. A missing list (no selector) fails.
@@ -1308,7 +1319,7 @@ a 16 GiB hosted runner with any other command. The `-c` commands peak at
 10 GiB under TSan and 6.6 GiB under MSan (`-O3`, `--lanes 1`), so those rows
 run them in the workflow's separate "Compile main.c alone under TSan or MSan"
 step after the suite, where the runner is otherwise idle; the plain and ASan
-rows of both host architectures, plus the 9700X, run them in the suite. The
+rows, plus the 9700X, run them in the suite. The
 plain and ASan rows and the 9700X also run the checking comparison, so
 the self-check remains required wherever the runner has the memory. Every other
 command runs in every row.
