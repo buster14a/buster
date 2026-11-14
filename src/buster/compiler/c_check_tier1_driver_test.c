@@ -1255,6 +1255,8 @@ struct CheckTestTier1Build
     // The functions whose code --verify's certificate proved, and those it left uncertified (#939).
     uint64_t code_certified;
     uint64_t code_uncertified;
+    // The IR instructions #866's congruence solver removed (--tier1-gvn's), 0 without it.
+    uint64_t gvn_removed;
     bool reported;
 };
 
@@ -1314,7 +1316,8 @@ static bool check_test_tier1_build_names(const char* executable, const char* sou
                       check_test_tier1_field(text, "spill_slots", &build->slots) && check_test_tier1_field(text, "frame_bytes", &build->frame) &&
                       check_test_tier1_field(text, "call_stores", &build->call_stores) && check_test_tier1_field(text, "machine_rows", &build->machine_rows) &&
                       check_test_tier1_field(text, "row_moves", &build->row_moves) && check_test_tier1_field(text, "code_certified", &build->code_certified) &&
-                      check_test_tier1_field(text, "code_uncertified", &build->code_uncertified);
+                      check_test_tier1_field(text, "code_uncertified", &build->code_uncertified) &&
+                      check_test_tier1_field(text, "gvn_removed", &build->gvn_removed);
     const bool taken = check_test_tier1_taken(text, names, name_count);
     if (status != 0 && text != NULL)
     {
@@ -1771,9 +1774,11 @@ static void check_test_driver_tier1_schedule(CheckTest* test, const char* clang,
 // --tier1-gvn (#866): the rematerialization fixture compiled with #866's congruence solver before promotion, by each
 // path, against the same fixture compiled without it. Its function is still Tier 1's and its executable still prints
 // clang's build's output, so the solver's merged values reach Tier 1's code without changing what the program does; and
-// its record count must differ from the build without the option, which is what a dropped `tier1_gvn` would show. The
-// option is a measurement one (docs/tier1.md's "The C driver's --tier1" has what it costs), so no direction of that
-// difference is asserted here.
+// the report's count of what the solver removed (gvn_removed) is 0 without the option and not with it, which a dropped
+// `tier1_gvn` would show. The record count was the proxy until #2678 folded the constants' conversions in the lowering:
+// the solver's merges were mostly duplicated conversions of constants, and those left change no record of this fixture
+// (156 records either way, 122 IR instructions removed). The option is a measurement one (docs/tier1.md's "The C
+// driver's --tier1" has what it costs), so no direction of a record difference is asserted here.
 static void check_test_driver_tier1_gvn(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     char source[512];
@@ -1799,11 +1804,12 @@ static void check_test_driver_tier1_gvn(CheckTest* test, const char* clang, cons
         const bool plain_built = check_test_tier1_build(executable, source, "tier1_remat", plain_output, true, path != 0, false, false, NULL, &plain);
         const bool gvn_built = check_test_tier1_build(executable, source, "tier1_remat", gvn_output, true, path != 0, false, true, NULL, &with);
         check_test_expect(test, gvn_built, "--tier1-gvn compiles the fixture, its function Tier 1's");
-        check_test_expect(test, plain_built && gvn_built && plain.records != with.records, "--tier1-gvn changes the fixture's code, so the option reached Tier 1");
+        check_test_expect(test, plain_built && gvn_built && plain.gvn_removed == 0 && with.gvn_removed != 0, "--tier1-gvn runs the solver on the fixture, so the option reached Tier 1");
         char actual[256] = { 0 };
         check_test_expect(test, gvn_built && check_test_driver_capture(gvn_output, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
                           "--tier1-gvn's executable prints clang's build's output");
-        printf("  Tier 1's GVN, %s path: %" PRIu64 " records (%" PRIu64 " without the option)\n", path == 0 ? "vector" : "scalar", with.records, plain.records);
+        printf("  Tier 1's GVN, %s path: %" PRIu64 " records, %" PRIu64 " IR instructions removed (%" PRIu64 " records without the option)\n", path == 0 ? "vector" : "scalar",
+               with.records, with.gvn_removed, plain.records);
         unlink(plain_output);
         unlink(gvn_output);
     }
@@ -1820,6 +1826,7 @@ static void check_test_driver_tier1_gvn(CheckTest* test, const char* clang, cons
                      parse_test_write(second, other, sizeof(other) - 1);
     check_test_expect(test, two, "the gvn two-file fixture writes");
     uint64_t two_records[2] = { 0, 0 };
+    uint64_t two_removed[2] = { 0, 0 };
     for (uint32_t gvn = 0; two && gvn < 2; gvn += 1)
     {
         // The command runs inside `directory`, so a relative --executable must be resolved first.
@@ -1842,8 +1849,9 @@ static void check_test_driver_tier1_gvn(CheckTest* test, const char* clang, cons
         char* arguments[] = { "sh", "-c", script, NULL };
         char* text = NULL;
         const int status = check_test_driver_spawn(arguments, &text);
-        // The report's tier1 lines: one per unit or one summed over them, so every line's records are added.
+        // The report's tier1 lines: one per unit or one summed over them, so every line's records and solver removals are added.
         uint64_t records = 0;
+        uint64_t removed = 0;
         for (const char* line = text; line != NULL && *line != 0;)
         {
             const char* end = strchr(line, '\n');
@@ -1856,14 +1864,17 @@ static void check_test_driver_tier1_gvn(CheckTest* test, const char* clang, cons
                 const size_t kept = length < sizeof(field) - 1 ? length : sizeof(field) - 1;
                 snprintf(field, sizeof(field), "%.*s", (int)kept, line);
                 records += check_test_tier1_field(field, "records", &value) ? value : 0;
+                removed += check_test_tier1_field(field, "gvn_removed", &value) ? value : 0;
             }
             line = end != NULL ? end + 1 : NULL;
         }
         two_records[gvn] = records;
+        two_removed[gvn] = removed;
         check_test_expect(test, status == 0 && records != 0, "--tier1 -c compiles two files in one command");
         free(text);
     }
-    check_test_expect(test, two && two_records[0] != 0 && two_records[0] != two_records[1], "--tier1-gvn reaches the lanes of a command of several files");
+    check_test_expect(test, two && two_records[0] != 0 && two_records[1] != 0 && two_removed[0] == 0 && two_removed[1] != 0,
+                      "--tier1-gvn reaches the lanes of a command of several files");
     char object_a[512];
     char object_b[512];
     snprintf(object_a, sizeof(object_a), "%s/tier1-gvn-two-a.o", directory);
@@ -1877,7 +1888,9 @@ static void check_test_driver_tier1_gvn(CheckTest* test, const char* clang, cons
 }
 
 // The --tier1-passes= fixture (#139): tier1_passes gives each pass of Tier 1's pipeline something to do: a constant
-// compare (SCCP), an unused product (dead-code removal), a branch whose arms only call, leaving an empty block that jumps
+// compare and a product of constants (SCCP: the compare decides its branch and dies with it, so the product is what the
+// report's folded counts, as the constants' conversions were until #2678 folded them in the lowering), an unused product
+// (dead-code removal), a branch whose arms only call, leaving an empty block that jumps
 // to a join without phis (CFG cleanup), a loop-invariant sum (LICM), a struct local (SROA), a repeated sum (#866's
 // solver) and two small static callees (the inlining). It is noinline itself: expanded into main twice (#2541 step 2
 // expands external definitions), its blocks are the merge's whether or not CFG cleanup runs, and the counts no longer
@@ -1913,7 +1926,7 @@ static const char check_test_tier1_passes_source[] =
     "        printf(\"negative\\n\");\n"
     "    }\n"
     "    long repeated = (k + n) * (k + n);\n"
-    "    return total + pair.low + pair.high + repeated;\n"
+    "    return total + pair.low + pair.high + repeated + scale * scale;\n"
     "}\n"
     "int main(int argc, char** argv)\n"
     "{\n"
