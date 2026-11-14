@@ -7,7 +7,7 @@
 // bitcode an edit changed.
 //
 //   presplit INPUT.bc PARTS DIRECTORY [--import LIMIT] [--anchor M] [--cohere CAP] [--spread S] [--tests-optnone]
-//            [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--constant-arguments] [--promote-arguments] [--first LIST] [--verify]
+//            [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--constant-arguments] [--promote-arguments] [--copy-limit SIZE] [--first LIST] [--verify]
 //            [--report]
 //
 // writes DIRECTORY/part0.bc to DIRECTORY/partPARTS.bc and DIRECTORY/locals.txt. Parts 0 to PARTS - 1 hold function
@@ -216,6 +216,8 @@ struct PresplitPlan
     uint32_t parts;
     uint64_t anchor;
     uint64_t import_limit;
+    // The size up to which a function goes to two parts or more as copies (--copy-limit); all by default.
+    uint64_t copy_limit;
     // 0 is off.
     uint64_t cohere;
     uint64_t spread;
@@ -1337,8 +1339,15 @@ static void presplit_plan(PresplitPlan* plan)
         {
             const uint64_t references = presplit_references(plan, entry->function);
             // A copy serves only the parts that read the function; another part's reference (an optnone caller's,
-            // whose callees no part reads) needs the alias.
-            entry->copied = entry->copied && (references & ~presplit_where(entry)) == 0;
+            // whose callees no part reads) needs the alias. And copies in two parts or more (--copy-limit, Release's
+            // 40) only of a function the whole module calls once, or one that small: each part's inliner leaves its
+            // own copy outlined where it doesn't inline it, so the parts held the same function many times
+            // (arena_commit 46 times, arena_reserve_policy 33), 1.2 MB more code in the checker's unit, and its
+            // sources ran 15% to 27% more instruction cache misses than the whole build's. A larger function goes
+            // available_externally, through its alias: the whole unit's inlining keeps all but 12 of its pairs.
+            const bool one = (references & (references - 1)) == 0;
+            const bool limited = entry->uses == 1 || entry->import_size <= plan->copy_limit;
+            entry->copied = entry->copied && (one || limited) && (references & ~presplit_where(entry)) == 0;
             entry->aliased = !entry->copied && (entry->used || (references & ~(UINT64_C(1) << entry->part)) != 0);
         }
     }
@@ -2223,7 +2232,7 @@ static bool presplit_options(PresplitPlan* plan, int argc, char** argv)
             plan->first = argv[i + 1];
             i += 1;
         }
-        else if ((strcmp(argv[i], "--anchor") == 0 || strcmp(argv[i], "--import") == 0 || strcmp(argv[i], "--cohere") == 0 || strcmp(argv[i], "--spread") == 0) && i + 1 < argc)
+        else if ((strcmp(argv[i], "--anchor") == 0 || strcmp(argv[i], "--import") == 0 || strcmp(argv[i], "--cohere") == 0 || strcmp(argv[i], "--spread") == 0 || strcmp(argv[i], "--copy-limit") == 0) && i + 1 < argc)
         {
             char* end = 0;
             const unsigned long long value = strtoull(argv[i + 1], &end, 10);
@@ -2236,6 +2245,10 @@ static bool presplit_options(PresplitPlan* plan, int argc, char** argv)
             else if (strcmp(argv[i], "--cohere") == 0)
             {
                 plan->cohere = value;
+            }
+            else if (strcmp(argv[i], "--copy-limit") == 0)
+            {
+                plan->copy_limit = value;
             }
             else if (strcmp(argv[i], "--spread") == 0)
             {
@@ -2264,6 +2277,7 @@ int main(int argc, char** argv)
     PresplitPlan plan = {
         .anchor = PRESPLIT_DEFAULT_ANCHOR,
         .import_limit = PRESPLIT_DEFAULT_IMPORT,
+        .copy_limit = UINT64_MAX,
         .cohere = PRESPLIT_DEFAULT_COHERE,
         .spread = PRESPLIT_DEFAULT_SPREAD,
     };
@@ -2272,7 +2286,7 @@ int main(int argc, char** argv)
     const unsigned long parts = argc >= 4 ? strtoul(argv[2], &end, 10) : 0;
     if (!valid || end == argv[2] || *end != 0 || parts == 0 || parts > PRESPLIT_MAXIMUM_PARTS)
     {
-        fprintf(stderr, "usage: presplit INPUT.bc PARTS DIRECTORY [--import LIMIT] [--anchor M] [--cohere CAP] [--spread S] [--tests-optnone] [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--constant-arguments] [--promote-arguments] [--first LIST] [--verify] [--report]  (PARTS from 1 to %u)\n",
+        fprintf(stderr, "usage: presplit INPUT.bc PARTS DIRECTORY [--import LIMIT] [--anchor M] [--cohere CAP] [--spread S] [--tests-optnone] [--strip-debug] [--keep-statics] [--benchmark-bodies] [--simplified-size] [--constant-arguments] [--promote-arguments] [--copy-limit SIZE] [--first LIST] [--verify] [--report]  (PARTS from 1 to %u)\n",
                 PRESPLIT_MAXIMUM_PARTS);
     }
     else

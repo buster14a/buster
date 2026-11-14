@@ -828,6 +828,15 @@ below). Its options (`BUSTER_RELEASE_SPLIT_OPTIONS`) add:
   inliner, so that the part doesn't inline it as the last call where the whole
   unit doesn't (`arena_reserve_small` into `scratch_begin` made that too big to
   inline into the assembler's layout and emission).
+- **Copies in two parts or more only where they pay** (`--copy-limit 40`):
+  a function the whole module calls once, or one of up to 40 instructions as
+  SROA leaves it; a larger one goes `available_externally`, through its
+  alias. Each part's inliner leaves its own copy outlined where it doesn't
+  inline it: the checker's unit held `arena_commit` 46 times and
+  `arena_reserve_policy` 33, 1.2 MB more code than the whole unit, and its
+  sources ran 15% to 27% more instruction cache misses than the whole
+  build's. With the limit the duplicates are 0.31 MB, and the whole unit's
+  inlining loses 12 pairs.
 - **A benchmark's own file reads the bodies it calls**, whatever their size
   (`--benchmark-bodies`): a benchmark measures its kernel inlined into its
   loop, as the whole unit compiles it.
