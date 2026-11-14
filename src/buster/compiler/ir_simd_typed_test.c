@@ -3157,6 +3157,125 @@ static void ir_simd_typed_test_selects(IrTestTally* tally)
     printf("  IR SIMD rows: %u of the front end's select rows decode to the IR's vselect and %u undefined vectors to its zero vector\n", selects, zeros);
 }
 
+// The scalar fused multiply-adds' rows (#1840): __builtin_elementwise_fma's (check_vector_scalar_row) and a contracted
+// a * b + c's either way round (check_vector_contract_row), of floats and doubles, at x86-64-v3 (VEX), znver5 (EVEX),
+// AVX512F without VL (an EVEX product, a VEX copy) and AVX512F without FMA. Each decodes to IR_FMA of vvvv's, reg's and
+// rm's operands where the target has FMA, its features FMA's, and stays the IR's machine row without it. Then each row
+// changed one way: an immediate, a decoration, memory, a role used twice, the copy of another role or by another form, an
+// operand of another class, a result's bytes, a third record: none IR_FMA's. And ir_fma_bits, IR_FMA's semantics, against
+// vfmadd213sd and ss on the host where it has FMA, over every triple of 16 values each: NaNs of both signs and payloads, a
+// signaling one, infinities, zeros, subnormals and the values whose product rounds.
+static void ir_simd_typed_test_fma(IrTestTally* tally)
+{
+    static const char* const names[4] = { "x86-64-v3", "znver5", "AVX512F without VL", "AVX512F without FMA" };
+    X86Target targets[4] = { 0 };
+    bool parsed = x86_target_parse("x86-64-v3", 9, &targets[0]) && x86_target_parse("znver5", 6, &targets[1]);
+    targets[2] = targets[1];
+    targets[2].features &= ~BUSTER_X86_FEATURE(AVX512VL);
+    targets[3] = targets[1];
+    targets[3].features &= ~BUSTER_X86_FEATURE(FMA);
+    ir_test_expect(tally, parsed, "the FMA rows' targets");
+    uint32_t decodes = 0;
+    for (uint32_t t = 0; parsed && t < 4; t += 1)
+    {
+        const bool fused = (targets[t].features & BUSTER_X86_FEATURE(FMA)) != 0;
+        for (uint32_t d = 0; d < 2; d += 1)
+        {
+            const uint8_t class = d == 0 ? BUSTER_TYPED_CLASS_F32 : BUSTER_TYPED_CLASS_F64;
+            for (uint32_t shape = 0; shape < 3; shape += 1)
+            {
+                Tier0Operation row;
+                const char* reason = shape == 0 ? check_vector_scalar_row(&targets[t], CBUILTIN_ELEMENTWISE_FMA, class, 3, &row) :
+                                                  check_vector_contract_row(&targets[t], class, shape == 2, &row);
+                char description[192];
+                snprintf(description, sizeof(description), "%s: the %s %s row is the front end's", names[t], d == 0 ? "float" : "double",
+                         shape == 0 ? "fma builtin's" : shape == 1 ? "contraction's" : "right-hand contraction's");
+                ir_test_expect(tally, reason == NULL, description);
+                if (reason != NULL)
+                {
+                    continue;
+                }
+                // A contraction of c + a * b keeps a * b's operands second and third: IR_FMA of its operands 1, 2 and 0.
+                const uint8_t order[3] = { shape == 2 ? 1 : 0, shape == 2 ? 2 : 1, shape == 2 ? 0 : 2 };
+                IrSimdTypedOperation decoded;
+                memset(&decoded, 0xa5, sizeof(decoded));
+                const IrSimdTypedStatus status = ir_simd_typed_row(&row, targets[t].features, &decoded);
+                snprintf(description, sizeof(description), "%s: the %s %s row is %s", names[t], d == 0 ? "float" : "double", shape == 0 ? "builtin" : "contraction",
+                         fused ? "IR_FMA of its product's operands then its addend, its features FMA's" : "the IR's machine row without FMA");
+                const bool decoded_fma = status == IR_SIMD_TYPED_OK && decoded.fma;
+                const bool exact = decoded_fma && decoded.fma_operands[0] == order[0] && decoded.fma_operands[1] == order[1] && decoded.fma_operands[2] == order[2] &&
+                                   decoded.required_features == BUSTER_X86_FEATURE(FMA) && decoded.operand_count == 3;
+                ir_test_expect(tally, fused ? exact : (!decoded_fma && ir_simd_typed_test_undecoded(status, &decoded)), description);
+                decodes += exact ? 1 : 0;
+                for (uint32_t m = 0; m < 9; m += 1)
+                {
+                    Tier0Operation changed = row;
+                    switch (m)
+                    {
+                    case 0: changed.records[0].immediate = 1; break;
+                    case 1: changed.records[0].decorations = 1; break;
+                    case 2: changed.records[0].mode = BUSTER_X86_MEMORY_BASE; break;
+                    case 3: changed.records[0].vvvv = changed.records[0].rm; break;
+                    case 4: changed.records[1].rm = changed.records[0].vvvv; break;
+                    case 5: changed.records[1].form = X86_FORM_VMOVAPD_X_XM128; break;
+                    case 6: changed.operand_classes[1] = d == 0 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_F32; break;
+                    case 7: changed.result_bytes = 16; break;
+                    default:
+                        changed.records[2] = changed.records[1];
+                        changed.record_count = 3;
+                        break;
+                    }
+                    IrSimdTypedOperation mutated;
+                    memset(&mutated, 0x3c, sizeof(mutated));
+                    const IrSimdTypedStatus result = ir_simd_typed_row(&changed, UINT64_MAX, &mutated);
+                    snprintf(description, sizeof(description), "%s: the %s row changed one way (%u) isn't IR_FMA", names[t], d == 0 ? "float" : "double", m);
+                    ir_test_expect(tally, !(result == IR_SIMD_TYPED_OK && mutated.fma), description);
+                }
+            }
+        }
+    }
+    ir_test_expect(tally, decodes == 3 * 2 * 3, "every FMA row decodes at every target with FMA");
+    // IR_FMA's semantics against the hardware's.
+    static const uint64_t doubles[16] = { 0x7ff8000000000001, 0xfff8000000000002, 0x7ff0000000000003, 0x7ff0000000000000, 0xfff0000000000000, 0, 0x8000000000000000,
+                                          0x3ff0000000000000, 0x4000000000000000, 0xbff8000000000000, 0x0000000000000001, 0x7fefffffffffffff, 0x3ff0000000000001,
+                                          0xbcb0000000000000, 0x0010000000000000, 0x3fefffffffffffff };
+    static const uint32_t floats[16] = { 0x7fc00001, 0xffc00002, 0x7f800003, 0x7f800000, 0xff800000, 0, 0x80000000, 0x3f800000, 0x40000000, 0xbfc00000, 1,
+                                         0x7f7fffff, 0x3f800001, 0xb3800000, 0x00800000, 0x3f7fffff };
+    const X86Target host = x86_target_native();
+    uint32_t compared = 0;
+    uint32_t differ = 0;
+    for (uint32_t i = 0; (host.features & BUSTER_X86_FEATURE(FMA)) != 0 && i < 16 * 16 * 16; i += 1)
+    {
+        const uint32_t x = i / 256;
+        const uint32_t y = (i / 16) % 16;
+        const uint32_t z = i % 16;
+        double a = 0;
+        double b = 0;
+        double c = 0;
+        memcpy(&a, &doubles[x], 8);
+        memcpy(&b, &doubles[y], 8);
+        memcpy(&c, &doubles[z], 8);
+        __asm__("vfmadd213sd %2, %1, %0" : "+x"(b) : "x"(a), "x"(c));
+        uint64_t hardware = 0;
+        memcpy(&hardware, &b, 8);
+        float p = 0;
+        float q = 0;
+        float r = 0;
+        memcpy(&p, &floats[x], 4);
+        memcpy(&q, &floats[y], 4);
+        memcpy(&r, &floats[z], 4);
+        __asm__("vfmadd213ss %2, %1, %0" : "+x"(q) : "x"(p), "x"(r));
+        uint32_t single = 0;
+        memcpy(&single, &q, 4);
+        differ += ir_fma_bits(IR_F64, doubles[x], doubles[y], doubles[z]) != hardware;
+        differ += ir_fma_bits(IR_F32, floats[x], floats[y], floats[z]) != single;
+        compared += 2;
+    }
+    ir_test_expect(tally, differ == 0, "IR_FMA's bits are vfmadd213's of every triple, NaNs in the formula's order");
+    printf("  IR SIMD rows: %u scalar fused multiply-add rows decode to IR_FMA; its semantics match the host's FMA on %u of %u triples\n", decodes,
+           compared - differ, compared);
+}
+
 static void ir_simd_typed_test(IrTestTally* tally)
 {
     ir_simd_typed_test_selects(tally);
@@ -3426,6 +3545,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
                    "missing typed operation input is rejected before indexing a record");
     ir_simd_typed_test_masks(tally);
     ir_simd_typed_test_intrinsics(tally);
+    ir_simd_typed_test_fma(tally);
     ir_simd_typed_test_bits(tally);
     ir_simd_typed_test_overflows(tally);
     ir_simd_typed_test_compare_masks(tally);

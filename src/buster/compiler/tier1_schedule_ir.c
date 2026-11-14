@@ -93,6 +93,7 @@ static uint32_t tier1_schedule_ir_weight(uint32_t op)
             weight = 0;
             break;
         case IR_LOAD:
+        case IR_FMA:
             weight = 4;
             break;
         case IR_MUL:

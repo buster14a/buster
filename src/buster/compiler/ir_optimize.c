@@ -1248,6 +1248,7 @@ static const uint8_t ir_optimize_roots[BUSTER_IR_OP_TABLE] = {
         [IR_FSUB] = 2,
         [IR_FMUL] = 2,
         [IR_FDIV] = 2,
+        [IR_FMA] = 2,
         [IR_FCMP] = 2,
         [IR_FTRUNC] = 2,
         [IR_FEXT] = 2,

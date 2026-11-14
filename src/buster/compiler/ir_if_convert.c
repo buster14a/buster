@@ -180,7 +180,7 @@ struct IrIfConvertWork
     bool scalar;
 };
 
-_Static_assert(IR_OP_COUNT == 68, "a new operation needs its class in ir_if_convert_barriers");
+_Static_assert(IR_OP_COUNT == 69, "a new operation needs its class in ir_if_convert_barriers");
 // Everything not listed is neither: pure operations, constants, loads (plain, masked and gathered; an observable plain
 // one is a write, below), phis, allocation and the stack save. A call may free or unmap memory; a stack restore and a lifetime's end release a
 // frame's; IR_INVALID never verifies but stays conservative.

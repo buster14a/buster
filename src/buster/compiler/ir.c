@@ -207,6 +207,12 @@ typedef enum IrOp
     // can't fault, as a masked load's (vpgatherdd to vpgatherqq zmm{k}, [a + zmm * scale], into a zeroed register). A
     // load's effect, of any memory.
     IR_GATHER,
+    // A fused multiply-add (#1840) of floats or doubles: a * b + c, rounded once at the current rounding. Where a, b or c
+    // is a NaN, the first of them in that order, quieted; where the product or the sum is invalid (an infinity times zero,
+    // or infinities of opposite signs) of no NaN, the default NaN, a negative quiet NaN of no payload. x86's FMA3 forms
+    // compute this in each of their orders, 132, 213 and 231 (vfmadd213sd b, a, c's a * b + c), on Intel's and AMD's
+    // (#1840's check over 3,375 operand triples): the product's operands in the formula's order, then the addend's.
+    IR_FMA,
     IR_OP_COUNT,
 } IrOp;
 
@@ -863,6 +869,7 @@ static const char* const ir_op_names[IR_OP_COUNT] = {
     "masked_store",
     "compress_store",
     "gather",
+    "fma",
 };
 
 // The text form's names of a machine row's classes (#141, IrFunction.rows): the typed stream's, a vector's and a mask's
@@ -1258,6 +1265,7 @@ typedef enum IrRule
     IR_RULE_MASKED_LOAD,
     IR_RULE_MASKED_STORE,
     IR_RULE_GATHER,
+    IR_RULE_FMA,
 } IrRule;
 
 #define BUSTER_IR_INTS (((1u << (IR_I128 + 1)) - 1) & ~1u)
@@ -1334,7 +1342,8 @@ typedef enum IrRule
     X(IR_MASKED_LOAD,   7, 7, BUSTER_IR_VECTORS, IR_RULE_MASKED_LOAD, 0) \
     X(IR_MASKED_STORE,  7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0) \
     X(IR_COMPRESS_STORE, 7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0) \
-    X(IR_GATHER,        7, 7, BUSTER_IR_VECTORS, IR_RULE_GATHER, 0)
+    X(IR_GATHER,        7, 7, BUSTER_IR_VECTORS, IR_RULE_GATHER, 0) \
+    X(IR_FMA,           7, 7, (1u << IR_F32) | (1u << IR_F64), IR_RULE_FMA, 0)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
 static const uint8_t ir_operand_table[BUSTER_IR_OP_TABLE] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_ROW) };
@@ -1592,6 +1601,62 @@ static bool ir_gather_index_valid(uint32_t type, uint32_t lane, uint32_t index)
     const uint32_t count = ir_lane_count(type, lane);
     const uint32_t bits = count != 0 && ir_vector_type(index) ? ir_type_bits[index] / count : 0;
     return (lane == IR_SIMD_LANE_I32 || lane == IR_SIMD_LANE_I64) && (bits == 32 || bits == 64);
+}
+
+// The bits of IR_FMA's a * b + c (#1840) of type IR_F32 (each operand's low 32 bits) or IR_F64: the first NaN of a, b and
+// c quieted, otherwise the product and sum rounded once (the host's fma at its current rounding), and where that is a NaN
+// (an invalid operation of numbers), the default NaN.
+static uint64_t ir_fma_bits(uint32_t type, uint64_t a, uint64_t b, uint64_t c)
+{
+    const bool d = type == IR_F64;
+    const uint64_t exponent = d ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000);
+    const uint64_t mantissa = d ? UINT64_C(0x000fffffffffffff) : UINT64_C(0x007fffff);
+    const uint64_t quiet = d ? UINT64_C(0x0008000000000000) : UINT64_C(0x00400000);
+    const uint64_t operands[3] = {
+        a,
+        b,
+        c,
+    };
+    uint64_t result = 0;
+    bool found = false;
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        const bool nan = (operands[k] & exponent) == exponent && (operands[k] & mantissa) != 0;
+        result = !found && nan ? (operands[k] & (exponent | mantissa | (d ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000)))) | quiet : result;
+        found = found || nan;
+    }
+    if (!found && d)
+    {
+        double x = 0;
+        double y = 0;
+        double z = 0;
+        memcpy(&x, &a, sizeof(x));
+        memcpy(&y, &b, sizeof(y));
+        memcpy(&z, &c, sizeof(z));
+        const double r = __builtin_fma(x, y, z);
+        memcpy(&result, &r, sizeof(r));
+    }
+    else if (!found)
+    {
+        const uint32_t bits[3] = {
+            (uint32_t)a,
+            (uint32_t)b,
+            (uint32_t)c,
+        };
+        float x = 0;
+        float y = 0;
+        float z = 0;
+        memcpy(&x, &bits[0], sizeof(x));
+        memcpy(&y, &bits[1], sizeof(y));
+        memcpy(&z, &bits[2], sizeof(z));
+        const float r = __builtin_fmaf(x, y, z);
+        uint32_t word = 0;
+        memcpy(&word, &r, sizeof(word));
+        result = word;
+    }
+    const bool invalid = !found && (result & exponent) == exponent && (result & mantissa) != 0;
+    result = invalid ? (d ? UINT64_C(0xfff8000000000000) : UINT64_C(0xffc00000)) : result;
+    return result;
 }
 
 #endif
@@ -2313,6 +2378,8 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_MASKED_STORE: valid = ta == IR_PTR && ir_vector_type(tb) && operand_types[2] == ir_lane_mask(tb, f->flags[i]); break;
             // A gather's index of an element per lane, of 32 or 64 bits, and its mask at its lanes (#1840).
             case IR_RULE_GATHER: valid = ta == IR_PTR && ir_vector_type(type) && ir_gather_index_valid(type, f->flags[i], tb) && operand_types[2] == ir_lane_mask(type, f->flags[i]); break;
+            // A fused multiply-add's three operands are its result's type (#1840).
+            case IR_RULE_FMA: valid = ta == type && tb == type && operand_types[2] == type; break;
             case IR_RULE_SYMBOL: valid = a != 0 && a < f->symbol_count; break;
             case IR_RULE_ADDRESS:
             {

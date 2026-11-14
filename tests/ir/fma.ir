@@ -1,0 +1,15 @@
+function (f64, f64, f64, f32, f32, f32) -> f64 {
+b0:
+  %0 = param.f64 0
+  %1 = param.f64 1
+  %2 = param.f64 2
+  %3 = param.f32 3
+  %4 = param.f32 4
+  %5 = param.f32 5
+  %6 = fma.f64 %0, %1, %2
+  %7 = fma.f64 %6, %6, %0
+  %8 = fma.f32 %3, %4, %5
+  %9 = fext.f64 %8
+  %10 = fma.f64 %7, %9, %2
+  %11 = ret.void %10
+}

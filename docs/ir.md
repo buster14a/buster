@@ -136,6 +136,7 @@ column comparisons deterministic.
 | `masked_store` | `a:ptr`, `b` the stored vector, `c` the mask of the lanes in flags; result is `void`. A lane whose bit is clear is never written |
 | `compress_store` | as `masked_store`; the set lanes are written one after another from the address, and no other byte ([gathers and compressing stores](ir-simd.md#gathers-compressing-stores-and-truncating-stores-1840)) |
 | `gather` | `a:ptr` the base, `b` the index vector of a dword or a qword per lane, `c` the mask of the lanes in flags (i32 or i64), `alignment_log2` the scale's log2; lane i is the lane's bytes at `a + sext(b[i]) * scale` where the bit is set, 0 elsewhere, and a clear lane is never read |
+| `fma` | `a,b,c` of the result's type, `f32` or `f64`; `a * b + c` rounded once, the first NaN of `a`, `b` and `c` quieted, or the default NaN for an invalid product or sum of numbers ([scalar fused multiply-adds](ir-simd.md#scalar-fused-multiply-adds-1840)) |
 | `call`, `call_indirect` | `a` is a symbol or a pointer value; `b` indexes `calls`; `c` an aggregate result's destination (a `ptr`), or absent |
 | `phi` | `a` is an extra-word offset, `b` the incoming count; pairs are `(predecessor, value)` |
 | `br` | `a` is a block ID |

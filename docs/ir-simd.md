@@ -1582,6 +1582,64 @@ The tests:
   `test-tier1-pipeline`, `test-ssa-ir`, `test-ir-parse`, `test-tier1-cfg` and
   `test-dataflow`, and the same object for `--tier1 -c main_unit_backend.c`.
 
+## Scalar fused multiply-adds (#1840)
+
+`fma` (`IR_FMA`) is a float's or a double's multiply-add, rounded once:
+
+```text
+%6 = fma.f64 %0, %1, %2
+```
+
+- **Operands:** a, b and c are of the result's type, `f32` or `f64`. No
+  flags; the rounding is MXCSR's, as `fadd`'s.
+- **Semantics:** `a * b + c` rounded once. Where a, b or c is a NaN, the first
+  of them in that order, quieted. Where the product or the sum of numbers is
+  invalid (an infinity times zero, or infinities of opposite signs), the
+  default NaN, `0xfff8000000000000` (`0xffc00000` for a float).
+- **Why that NaN order.** x86's FMA3 forms take the formula's operands in order
+  whatever their encoding: `vfmadd213sd b, a, c` (b's register the
+  destination), `vfmadd231sd c, a, b` and `vfmadd132sd a, c, b` all give a's
+  NaN over b's. Measured over the 3,375 triples of 15 doubles each (NaNs of
+  both signs and payloads, a signaling one, infinities, zeros, subnormals, and
+  products that round) on an Intel Xeon and on the Ryzen 7 9700X: no triple
+  differs between the forms or from the model. `test-ir-simd` checks the model
+  against the host's `vfmadd213sd` and `ss` on 4,096 triples each.
+- **Model:** `ir_fma_bits`, the NaN order above and otherwise the host's
+  `__builtin_fma` (one rounding), which the interpreter runs and nothing folds.
+- **Passes:** as `fadd`'s: an optimizer root unless it folds (it doesn't), and
+  neither GVN's nor LICM's (it reads MXCSR and can raise exceptions).
+
+**Decoder** (`ir_simd_typed_fma`): `__builtin_elementwise_fma` of a float or a
+double (`check_vector_scalar_row`) and a contracted `a * b + c` or `c + a * b`
+(#1239, `check_vector_contract_row`) are two records: `vfmadd213ss` or `sd`
+(VEX's, or EVEX's at AVX512F) of three FLOATING roles, then the reg field's
+register's copy into the result (`vmovaps`, either encoding). The row is
+`IR_FMA` of its vvvv, reg and rm operands in that order, at a target with FMA.
+Tier 1 emits FMA's VEX forms, so at a target of AVX512F's EVEX forms alone
+the row stays a machine row. Both row builders live in
+`c_check_program_vector_convert.c`, which the backend unit compiles, so that
+`test-ir-simd` decodes the front end's own rows: 18 at x86-64-v3, znver5 and
+AVX512F without VL, none decoded without FMA. Nine changed rows each (an
+immediate, a decoration, memory, a role twice, another copy, another class, a
+result's bytes, a third record) aren't `IR_FMA`.
+
+**Tier 1** (`TIER1_RULE_FLOAT_FMA`): the FMA3 form whose destination holds an
+operand already, the other two in the formula's order: `vfmadd213` where it is
+b's, `231` where it is c's, `132` where it is a's; otherwise b's copy into the
+destination, then `213`. Each form computes the same bits (above).
+`x86_semantics.c` has the `132` forms' effects beside the `213` and `231` ones'
+(the code certificate refuses a record of a form it can't read).
+
+**Tests:** `test-tier1-select` expands each case at both widths;
+`test-tier1-masks` takes 8 programs (the builtin's, the two contractions' and a
+row whose roles make Tier 1 choose `132`, of floats and doubles) through the
+IR's interpreter at every stage and Tier 1 natively against the host's
+`vfmadd213`, each with an operand used twice and a result fed back into the
+next statement.
+
+`main_unit_backend.c`'s 20 rows of #2644's contractions are `fma` now: at
+`--tier1 -march=znver5` its machine rows fall from 21 to 1, the scatter.
+
 ## One lane's moves and movemasks (#1840)
 
 Three more `intrinsic` kinds move one lane between a vector and a general

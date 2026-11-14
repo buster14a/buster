@@ -14,7 +14,7 @@
 // the unary kinds' is none. IR_ATOMIC_RMW (#1059) uses its address and its operand, as a store does, and a
 // compare-exchange's desired value too. IR_MASKED_LOAD and IR_MASKED_STORE (#1840) use a, b and c, as a select does,
 // and so do IR_COMPRESS_STORE and IR_GATHER (#1840), the last added.
-_Static_assert(IR_OP_COUNT == 68, "audit the independent dataflow operand oracle for a new IR operation");
+_Static_assert(IR_OP_COUNT == 69, "audit the independent dataflow operand oracle for a new IR operation");
 
 typedef struct IrDataflowTests IrDataflowTests;
 struct IrDataflowTests
@@ -76,7 +76,7 @@ static uint32_t ir_dataflow_test_direct(const IrFunction* f, uint32_t node, uint
                 values[count++] = f->c[node];
             }
         } break;
-        case IR_SELECT: case IR_VSELECT: case IR_MASKED_LOAD: case IR_MASKED_STORE: case IR_COMPRESS_STORE: case IR_GATHER:
+        case IR_SELECT: case IR_VSELECT: case IR_MASKED_LOAD: case IR_MASKED_STORE: case IR_COMPRESS_STORE: case IR_GATHER: case IR_FMA:
         {
             values[count++] = f->a[node];
             values[count++] = f->b[node];

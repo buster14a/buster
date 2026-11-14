@@ -1068,6 +1068,13 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     defined = frame->defined[selected] != 0;
                     break;
                 }
+                case IR_FMA:
+                {
+                    // A fused multiply-add (#1840): one rounding, the first NaN of a, b and c (ir_fma_bits).
+                    const uint64_t third = c < function->instruction_count ? frame->values[c].low : 0;
+                    value.low = ir_fma_bits(type, av.low, bv.low, third);
+                    break;
+                }
                 case IR_STACK_ADDR:
                     value.low = frame->slots[a];
                     break;

@@ -1142,6 +1142,12 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_intrinsic(IrTyped
     return value;
 }
 
+// A scalar fused multiply-add's row (#1840, ir_simd_typed_fma) as IR_FMA of the operands its record places.
+static __attribute__((always_inline)) inline uint32_t ir_typed_fma(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands)
+{
+    return ir_typed_emit(sink, IR_FMA, type, operands[operation->fma_operands[0]], operands[operation->fma_operands[1]], operands[operation->fma_operands[2]], 0);
+}
+
 static __attribute__((always_inline)) inline uint32_t ir_typed_splat(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, uint32_t scalar)
 {
     const IrType source = (IrType)ir_typed_types[operation->operand_classes[0]];

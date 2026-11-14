@@ -158,6 +158,10 @@ typedef enum Tier1SelectRule
     TIER1_RULE_FLOAT_BINARY,
     TIER1_RULE_FLOAT_LOAD_OPERAND,
     TIER1_RULE_FLOAT_NEGATE,
+    // A fused multiply-add (#1840, IR_FMA): values[0] times values[1] plus values[2], rounded once, by FMA3's VEX form whose
+    // destination holds an operand already (TIER1_RULE_FLOAT_FMA's expansion); the decoder admits IR_FMA where the target
+    // has FMA alone.
+    TIER1_RULE_FLOAT_FMA,
     TIER1_RULE_FLOAT_LOAD,
     TIER1_RULE_FLOAT_LOAD_ADDRESS,
     TIER1_RULE_FLOAT_STORE,
@@ -2782,6 +2786,36 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         memory.reg = x;
         memory.form = tier1_select_float_forms(width)->arithmetic[(uint32_t)holes->operation & 3];
         tier1_select_append(&result, memory);
+        break;
+    }
+    case TIER1_RULE_FLOAT_FMA:
+    {
+        // a * b + c: x86's FMA3 forms take a NaN in the formula's order whatever their form (IR_FMA), so the form is the
+        // one whose destination holds an operand already: 213 where it is b's (x = a * x + c), 231 where it
+        // is c's (x = a * b + x) and 132 where it is a's (x = x * b + c); otherwise b's copy into the destination, then
+        // 213. vvvv and rm are the other two, in the formula's order.
+        static const uint16_t forms[2][3] = {
+            { X86_FORM_VFMADD213SS_X_X_XM32, X86_FORM_VFMADD231SS_X_X_XM32, X86_FORM_VFMADD132SS_X_X_XM32 },
+            { X86_FORM_VFMADD213SD_X_X_XM64, X86_FORM_VFMADD231SD_X_X_XM64, X86_FORM_VFMADD132SD_X_X_XM64 },
+        };
+        const uint8_t x = destination & 15;
+        const uint8_t a = holes->left & 15;
+        const uint8_t b = holes->right & 15;
+        const uint8_t c = holes->third & 15;
+        const uint32_t d = width == 8 ? 1 : 0;
+        const uint32_t kind = x == b ? 0 : x == c ? 1 : x == a ? 2 : 0;
+        if (x != b && x != c && x != a)
+        {
+            tier1_select_append(&result, tier1_select_float_move(x, b));
+        }
+        const X86Instruction record = {
+            .form = forms[d][kind],
+            .reg = x,
+            .vvvv = kind == 2 ? c : a,
+            .rm = kind == 0 ? c : b,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+        };
+        tier1_select_append(&result, record);
         break;
     }
     case TIER1_RULE_FLOAT_NEGATE:
@@ -5872,6 +5906,16 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             tier1_select_memory(forest, node, function->a[load], &folded, 1);
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
+    }
+    else if (float_width != 0 && op == IR_FMA)
+    {
+        base.rule = TIER1_RULE_FLOAT_FMA;
+        base.width = (uint8_t)float_width;
+        base.values[0] = a;
+        base.values[1] = b;
+        base.values[2] = c;
+        base.intrinsic_cost = 4;
+        tier1_select_add_candidate(forest, node, &candidates, base);
     }
     else if (float_width != 0 && op == IR_FNEG)
     {

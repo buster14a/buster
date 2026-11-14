@@ -82,6 +82,9 @@ struct IrSimdTypedOperation
     // (BUSTER_IR_INTRINSIC_* + 1, 0 for any other row), and the operands its a and b are, the source and the other.
     uint8_t intrinsic;
     uint8_t intrinsic_operands[2];
+    // A scalar fused multiply-add's row (#1840, ir_simd_typed_fma): the operands IR_FMA's a, b and c are, a * b + c.
+    bool fma;
+    uint8_t fma_operands[3];
     // A scalar's bit splat (#1450): the bytes repeated by the exact broadcast form, zero for every other row.
     // Integer rows may use a wider scalar register; lowering truncates it to these bytes before the splat.
     uint8_t splat_bytes;
@@ -727,6 +730,60 @@ static IrSimdTypedStatus ir_simd_typed_intrinsic(const Tier0Operation* source, u
         memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
         memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
         *result = candidate;
+    }
+    return status;
+}
+
+// A scalar fused multiply-add's row (#1840): __builtin_elementwise_fma of a float or a double, or a contracted
+// a * b + c (#1239, check_vector_contract_row), of three operands of the result's class: vfmadd213ss or sd, VEX's or
+// EVEX's, of FLOATING roles into the role in its reg field, then that register's copy into the result (movaps, either
+// encoding). vfmadd213's reg * vvvv + rm is IR_FMA(vvvv, reg, rm): its product's operands vvvv's then reg's, as x86's
+// forms take a NaN (ir_fma_bits). It needs FMA, whose VEX forms Tier 1 emits; at a target of AVX512F's EVEX forms alone it
+// stays a machine row.
+static IrSimdTypedStatus ir_simd_typed_fma(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    IrSimdTypedStatus status = IR_SIMD_TYPED_UNSUPPORTED;
+    const uint8_t class = source->result_class;
+    const bool d = class == BUSTER_TYPED_CLASS_F64;
+    const bool shaped = (class == BUSTER_TYPED_CLASS_F32 || d) && source->result_bytes == 0 && source->record_count == 2 && source->operand_count == 3 &&
+                        source->operand_classes[0] == class && source->operand_classes[1] == class && source->operand_classes[2] == class &&
+                        source->operand_bytes[0] == 0 && source->operand_bytes[1] == 0 && source->operand_bytes[2] == 0;
+    const X86Instruction* product = &source->records[0];
+    const X86Instruction* copy = &source->records[1];
+    const uint16_t vex = d ? X86_FORM_VFMADD213SD_X_X_XM64 : X86_FORM_VFMADD213SS_X_X_XM32;
+    const uint16_t evex = d ? X86_FORM_VFMADD213SD_X_X_XM64_EVEX : X86_FORM_VFMADD213SS_X_X_XM32_EVEX;
+    const uint8_t reg = (uint8_t)(product->reg - BUSTER_TIER0_ROLE_FLOATING(0));
+    const uint8_t vvvv = (uint8_t)(product->vvvv - BUSTER_TIER0_ROLE_FLOATING(0));
+    const uint8_t rm = (uint8_t)(product->rm - BUSTER_TIER0_ROLE_FLOATING(0));
+    const X86Instruction expected = {
+        .form = product->form,
+        .reg = product->reg,
+        .vvvv = product->vvvv,
+        .rm = product->rm,
+        .mode = BUSTER_X86_REGISTER_DIRECT,
+    };
+    const X86Instruction moved = {
+        .form = copy->form,
+        .reg = BUSTER_TIER0_ROLE_FLOATING_RESULT,
+        .rm = product->reg,
+        .mode = BUSTER_X86_REGISTER_DIRECT,
+    };
+    // The three FLOATING roles, each once.
+    const bool roles = reg < 3 && vvvv < 3 && rm < 3 && reg != vvvv && reg != rm && vvvv != rm;
+    if (shaped && roles && (product->form == vex || product->form == evex) && (copy->form == X86_FORM_VMOVAPS_X_XM128 || copy->form == X86_FORM_VMOVAPS_X_XM128_EVEX) &&
+        memcmp(product, &expected, sizeof(expected)) == 0 && memcmp(copy, &moved, sizeof(moved)) == 0 && (target_features & BUSTER_X86_FEATURE(FMA)) != 0)
+    {
+        IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+        candidate.fma = true;
+        candidate.fma_operands[0] = vvvv;
+        candidate.fma_operands[1] = reg;
+        candidate.fma_operands[2] = rm;
+        candidate.required_features = BUSTER_X86_FEATURE(FMA);
+        candidate.operand_count = source->operand_count;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+        status = IR_SIMD_TYPED_OK;
     }
     return status;
 }
@@ -2513,6 +2570,10 @@ static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_
     if (status == IR_SIMD_TYPED_UNSUPPORTED)
     {
         status = ir_simd_typed_overflow(source, result);
+    }
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && source != NULL && (source->result_class == BUSTER_TYPED_CLASS_F32 || source->result_class == BUSTER_TYPED_CLASS_F64))
+    {
+        status = ir_simd_typed_fma(source, target_features, result);
     }
     if (status == IR_SIMD_TYPED_UNSUPPORTED)
     {
