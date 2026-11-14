@@ -36,7 +36,7 @@ A memory is one note file with `name`/`description`/`metadata.type`
 frontmatter. `MEMORY.md`, the index Claude Code loads, is generated from the
 notes by `llm-memory index` (run by `sync` and `link`) and isn't tracked in
 Git, so two sessions that each save a memory touch different files and their
-pull requests never conflict. A line an agent adds or changes in `MEMORY.md`
+pushes never conflict. A line an agent adds or changes in `MEMORY.md`
 moves into the frontmatter of the note it links first (`metadata.index`) at the
 next sync. The index lists standing rules (`feedback`, `user`) first, then the
 newest notes. Claude Code loads only its first 200 lines or 25 KB, so a cut
@@ -49,16 +49,16 @@ With `llm-memory.branch` set, sync never commits to local `main`, so it can't
 diverge from GitHub's. Each run:
 
 1. commits the session's changes on its branch;
-2. keeps the commits GitHub's copy of the branch holds;
+2. keeps the commits GitHub's copy of the branch holds, if an older sync
+   pushed one;
 3. rebases onto GitHub's `main`;
-4. force-pushes the branch with a lease;
-5. opens a pull request into `main`, unless one is already open, through the
-   proxy's credentials for `api.github.com`.
+4. pushes straight to `main`, fetching, rebasing and retrying if another
+   computer pushed first.
 
-Later turns update the same pull request. Once it merges, the next sync starts
-the branch again from `main`. Don't hand-copy notes into a pull request of
-your own; save, then sync. If the hook says it couldn't move the clone, check
-out the session branch in `~/llm-memory` and set the config it names.
+The owner wants memories on `main` without merging anything by hand, so sync
+opens no pull request, and neither should you; save, then sync. If the hook
+says it couldn't move the clone, check out the session branch in
+`~/llm-memory` and set the config it names.
 
 ## Sessions that start beside the checkout
 

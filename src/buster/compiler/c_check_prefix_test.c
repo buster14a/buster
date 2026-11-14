@@ -38,6 +38,14 @@ static void check_test_prefix_faults(CheckTest* test, Parser* parser)
         const uint64_t used = output.length;
         if (ready)
         {
+            bool meanings = prefix.parser.meanings.capacity == parser->meanings.capacity && parser->meanings.capacity != 0 &&
+                            prefix.parser.meanings.table == parser->meanings.table && prefix.parser.meanings.meanings == parser->meanings.meanings &&
+                            memcmp(prefix.parser.meanings.custom_attributes, parser->meanings.custom_attributes, sizeof(parser->meanings.custom_attributes)) == 0;
+            for (uint32_t i = 0; meanings && i < BUSTER_PARSE_PREDECLARED_TYPEDEFS; i += 1)
+            {
+                meanings = prefix.parser.predeclared[i] == parser->predeclared[i] && prefix.parser.predeclared[i] < prefix.parser.meanings.capacity;
+            }
+            check_test_expect(test, meanings, "a diagnostic prefix preserves the meaning table bounds needed by later reparses");
             const uint32_t end = prefix.end;
             const uint64_t capacity = output.capacity;
             for (uint64_t limit = 33; limit < used; limit += 64)

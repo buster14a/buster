@@ -15,7 +15,9 @@ requirements. [Command index](README.md).
   into the same bytes, and runs it against its expected output;
   `--cross-check` also links its `-c` object with `cc`, and compares the
   functions and objects it defines with `clang -O0 -c`'s (#129,
-  `c_lowering_symbols.c`). `--code-size` requires `--tier1`, implies
+  `c_lowering_symbols.c`); with `--tier1`, clang's may also have local
+  functions that inlining left without code (#2541 step 2), as many as the
+  compile's `--tier1-report` counts `dead` at most. `--code-size` requires `--tier1`, implies
   `--cross-check`, and compares the corpus's sum of all emitted Tier 1 function
   bytes with the matching Clang `-O0` functions' sum. `--check-code-size`
   enables that measurement and requires the first sum not to exceed the

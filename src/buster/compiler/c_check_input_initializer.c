@@ -147,7 +147,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
     // An array whose initializer is parenthesized may be a compound literal's (GNU's, check_input_initializer_finish).
     const bool parenthesized = parser->tokens.kinds[begin] == PARSE_KIND_L_PAREN && type_kind_is_array(type_kind(reader->types, type_strip_aligned(reader->types, type)));
     // (A variable whose type tags register its initializer's value, #1447, c_check_type_safety_input.c, finishes too.)
-    if (valid && (incomplete || parenthesized || check_const_eligible(reader->types, type) || check_input_auto_type(type) ||
+    if (valid && (incomplete || parenthesized || check_const_eligible(reader->types, type) || check_input_auto_type(reader->types, type) ||
                   (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0 ||
                   (reader->type_tag_attributes && check_type_tags_pending(reader->output, declaration) != NULL)))
     {
@@ -257,14 +257,14 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
     // names the placeholder's type), and a restrict of a value that is no pointer to an object, whose `restrict int` the
     // placeholder can't be told from.
     // The placeholder itself, or under a declarator's pointers and arrays.
-    TypeId marker = placeholder;
-    for (uint32_t steps = 0; marker != 0 && !check_input_auto_type(marker) && steps < 64; steps += 1)
+    TypeId marker = type_strip_aligned(types, placeholder);
+    for (uint32_t steps = 0; marker != 0 && !check_input_auto_type(types, marker) && steps < 64; steps += 1)
     {
         const TypeId level = type_strip_aligned(types, marker);
         const uint8_t kind = type_kind(types, level);
-        marker = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? types->types.base[type_index(level)] : 0;
+        marker = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? type_strip_aligned(types, types->types.base[type_index(level)]) : 0;
     }
-    const bool declarator = marker != placeholder;
+    const bool declarator = marker != type_strip_aligned(types, placeholder);
     bool atomic = false;
     const uint32_t qualifiers = check_input_auto_type_qualifiers(marker, &atomic);
     const bool restricted = (qualifiers & BUSTER_TYPE_RESTRICT) != 0;
@@ -655,7 +655,7 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
     bool valid = !mismatched && begin < end && end <= parser->tokens.count;
     // An array of unknown size whose initializer is no list, recovered (below): it keeps its type and no initializer.
     bool listless = false;
-    if (valid && (check_input_auto_type(type) || (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0))
+    if (valid && (check_input_auto_type(reader->types, type) || (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0))
     {
         type = check_input_auto_type_finish(reader, declaration, begin, end, type);
         valid = type != 0 && check_input_cleanup_deduced(reader, declaration, type);

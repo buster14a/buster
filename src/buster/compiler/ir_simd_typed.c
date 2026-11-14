@@ -199,6 +199,21 @@ static uint32_t ir_typed_vector_piece(uint64_t target_features)
     return (target_features & BUSTER_X86_FEATURE(AVX512F)) != 0 ? 64 : (target_features & BUSTER_X86_FEATURE(AVX)) != 0 ? 32 : 16;
 }
 
+// The widths at which a by-value vector aggregate is copied by one vector load and store (IrTypedPlan.vector_copies,
+// IrInlineOptions.vector_copies: bit 0 16 bytes, bit 1 32, bit 2 64): those whose moves the target has
+// (ir_typed_vector_moves), so x86-64's 16 bytes everywhere and 32 with AVX. A copy by 8-byte integers that a 16-byte load
+// then reads cannot be forwarded from the store buffer, and keeps the vector in memory.
+static uint8_t ir_typed_vector_copies(uint64_t target_features)
+{
+    uint8_t copies = 0;
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        const uint64_t required = ir_typed_vector_moves(16u << width, target_features);
+        copies |= (uint8_t)(((target_features & required) == required) << width);
+    }
+    return copies;
+}
+
 // A comparison's opmask forms (#717's C comparisons, #1623's comparisons into a mask), by its lanes: signed and unsigned
 // integers' vpcmp and vpcmpu of each width, floats' and doubles' vcmpps and vcmppd (unsigned_lanes 0).
 static const uint16_t ir_simd_typed_comparisons[IR_SIMD_LANE_COUNT][2][3] = {

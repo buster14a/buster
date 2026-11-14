@@ -5010,6 +5010,31 @@ The fixtures cover each pass above, shared records, two errors in one list,
 missing names and a control error after a recovered error, block declarations,
 exclusions, `_Alignas`, a dropped `format`, and enumerators.
 
+GNU-attribute-led calls before C23 have a bounded diagnostic recovery (#2406).
+For `__attribute__((unused)) missing(1);`, Clang classifies `missing` before
+reporting "expected identifier or '('", but never reads the arguments. A
+private parser view retains the callee and its parentheses, erases the leading
+attributes and unread arguments, and keeps the original parse error after the
+callee's lookup diagnostic. The ordinary binding and implicit declaration
+survive for later statements. A silent invalid-use report then cuts the
+synthetic call before expression checking, so it cannot invent an arity,
+noncallable or deprecation diagnostic. The view retains preprocessor source
+indices across recovery rounds and repeated macro expansions. It applies only
+to a balanced call followed by a semicolon; catalog-recognized builtin spellings
+(including library names) and a semicolon within the outer argument list keep
+the existing recovery.
+
+`c_check_attribute_call_recovery_driver_test.c` reads the original runtime
+fixtures in `tests/checker/parse-recovery/attributed-call*.c`. It compares the
+whole diagnostic stream and status with Clang in GNU89 and GNU17, through both
+readers, syntax-only and object output, and one/three requested lanes with
+deferred bodies. The cases cover ordinary prototypes, noncallable and annotated
+callees, preserved implicit declarations, repeated macros, prior recovery
+rounds, deeply nested unread arguments, and builtin exclusion. Warning
+promotion/suppression and the error limit are checked; rejected compilations
+preserve an existing output, while accepted controls replace it with an ELF
+object. A separate control keeps C23's declaration grammar.
+
 Phase 2 covers redeclarations that conflict with a declaration of the same
 name: the visible one in `check_input_bind`'s first test, or its entity's
 linked one in the second (`int k = 1; int k = 2;`). Clang marks such a
@@ -5626,6 +5651,11 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   quiets its invalid uses, with that status carried across comma declarators.
   An actual structural error
   still cuts the view, and the original error always rejects the unit.
+  A prefix retains the complete borrowed `ParseMeanings` metadata (#2748):
+  capacity, spelling table, custom attribute names and the original meanings
+  array. A later rejected-warning view copies that metadata and allocates its
+  own mutable meanings array before reparsing, preserving the original bindings
+  and source-origin maps.
 - **A statement's start** (`StatementFilterCCC`): a keyword is offered by the
   next token as within an expression, and a type keyword or a typedef name
   before a name, `(`, `[`, `*` or `&`; an object alone before `=`. Clang's
@@ -5751,9 +5781,10 @@ Left as they were:
   missing `;` after `return 0`): its name's error is the parser's.
 - After a block item's GNU attributes, a builtin's name without a call
   (`__builtin_abs;`, clang's "expected identifier or '('") is still an
-  implicit int's declarator, and before C23 an undeclared function's call
-  there lacks clang's "call to undeclared function" error before its "expected
-  identifier or '('", whose parse error ends the body's checking.
+  implicit int's declarator. A catalog-recognized builtin spelling's call there still keeps
+  the existing parse error and may end the body's checking. The bounded
+  pre-C23 recovery for ordinary calls is described under semantic error
+  recovery above (#2406).
 - A declaration's type name outside a statement's start is clang's parser's
   to correct (`DiagnoseUnknownTypeName`): a parameter's `myin v` keeps
   buster's "unknown type name" with no suggestion, and its prefix view
@@ -6929,8 +6960,7 @@ Clang's `DiagnoseIntInBoolContext` follows every conversion to `_Bool` (#1447,
 `check_common_int_in_bool`): the operands of `!`, `&&` and `||` and the
 conditions of statements and conditionals (`CheckBoolLikeConversion`, the
 operand itself and never a conditional's arms), a static assertion's condition
-(#2409, `check_common_assertion_reach`; left: a failed assertion's, whose
-root its error leaves unwalked, gives none, where clang's precedes the error), and an initializer's,
+(#2409, `check_common_assertion_reach`), and an initializer's,
 assignment's, return's or argument's conversion, whose conditional arms and
 comma result carry it. Its implicit conversions passed, a `<<` of a literal 0,
 or of two literals, always evaluates to one truth, which clang's evaluation
@@ -6945,6 +6975,35 @@ at most a unary minus, with no parentheses. The always-forms are
 a literal conversion, in unreachable code and short-circuited operands too, and
 a brace initializer's in its reverse order; the walks' candidates test the
 operand's operator before any type.
+
+A failed static assertion's tree is excluded from the rejected unit's warning
+walk. `check_driver_reports_from` therefore calls
+`check_common_failed_assertion` when publishing `CHECK_MESSAGE_STATIC_ASSERT`.
+Its bounded worklist visits the retained condition tree, using the existing
+integer and floating literal conversion emitters at the error's expression
+boundary and in the preceding diagnostic phase. Conditional conditions are
+checked first in source postorder, as Clang constructs them; the assertion's
+own conversion and nested logical operands then follow the completed
+expression's order. Static selections retain only their selected result,
+explicit casts do not create implicit conversions, and a conditional's arms
+do not inherit its outer boolean context. GNU omitted-middle conditionals
+visit their shared condition once and do not diagnose that saved value as a
+new conversion of the written expression. This keeps the warnings before the
+unchanged assertion error, with the normal command-line and pragma policy,
+including promotion, suppression and fatal/error-limit handling. The original
+runtime sources `tests/driver/assert_bool_*.c`, through
+`c_check_assert_bool_driver_test.c`, compare complete Clang diagnostics for
+file, member and block scopes, nested and short-circuited logical operands,
+conditional warning order, floating literals, selections, explicit casts,
+unevaluated controls, worklist growth, builtin arguments, repeated failures,
+successful and non-warning controls, unrelated errors, macro expansion notes,
+C17/C23 and both reader choices and lane requests. The focused driver selector
+is `--assert-bool-only`. Clang is the external behavioral oracle; the fixtures
+and implementation are original. The cold path does not reconstruct source
+operands erased by static selections or queries, or restore other warning
+families such as `-Wconstant-logical-operand`; those remain separate recovery
+work. Successful-assertion conditional warning ordering also continues to use
+the ordinary warning walk.
 
 The graph's passes share their facts, `check_common_facts`, which give each
 node its parent, whether another node uses its value, whether it is evaluated,
@@ -8477,6 +8536,19 @@ constant evaluation of its own initializer (`(typeof(x)){0}`,
 any use does, recording its declaration, so that the finish's scan of the
 initializer reports it at the use, with clang's message.
 
+Address-space attributes also wrap the placeholder (#1844). Deduction preserves
+each written space at its own level: a specifier's space qualifies the deduced
+object, or the pointee under a pointer declarator; a pointer's own attribute
+qualifies that pointer. GNU numeric and OpenCL spaces use the existing type
+qualifier representation, including target space zero. The ordinary rules still
+reject an automatic object in an address space, allow a pointer to such an
+object and allow file-scope or static objects. Lvalue conversion drops the
+initializer object's space; it keeps a pointer's pointee space. Specifier
+`const`, `volatile` and `_Atomic` survive deduction. A specifier's `restrict`
+with an address-space attribute is invalid before deduction, as clang checks
+the wrapped placeholder; a pointer declarator's `restrict`, or a space after
+the name of a restrict-deduced pointer, remains valid.
+
 Within a statement expression, cached deduction keeps a prepared x86 builtin's
 callee as an expression operand (#2717). The ordered reader's `ignored` mark
 means the retained graph uses the intrinsic call record, not that the callee is
@@ -8518,23 +8590,38 @@ deduced one, as clang's C `mergeTypes` takes the placeholder before deducing
 `check_input_auto_type_merged`), through pointer declarators, and a `restrict`
 placeholder's over a restrict pointer. Where clang's `mergeTypes` refuses the
 merge (#1844, `check_input_auto_type_refused`), clang's error is given: the
-qualifiers of a level differ (const, volatile and restrict alike), a pointer
-declarator meets no pointer, or an `_Atomic` placeholder meets no atomic type.
+qualifiers of a level differ (const, volatile, restrict and address space), a
+pointer declarator meets no pointer, or an `_Atomic` placeholder meets no atomic type.
 It reads "redefinition of 'p' with a different type: 'const __auto_type' vs
 'int'", or "redeclaration" with `extern`, at the name. The placeholder is
 printed through its declarator (`'volatile __auto_type *const'`,
-`'_Atomic(__auto_type)'`, `'restrict __auto_type'`;
-`check_semantic_auto_type_spelling`). The note is at the entity's latest
+`'_Atomic(__auto_type)'`, `'restrict __auto_type'`), keeping each level's address
+space and its source macro spelling through the shared type printer
+(`type_print` with aliases for the private placeholder markers;
+`check_semantic_auto_type_spelling`). A local whole-placeholder alias preserves
+the qualifier order of a prefix or suffix macro and the raw address-space
+spelling when an `_Atomic` specifier rebuilds the type. The note is at the entity's latest
 earlier declaration, "previous definition is here" for a definition or a
 tentative one (`CHECK_REDECLARATION_AUTO_TYPE`). The reader stops there, as at
 other initialized invalid declarations, so clang's later errors aren't given.
+The combination of `_Atomic` and `restrict` among an `__auto_type` declaration's
+specifiers reports "restrict requires a pointer or reference
+('_Atomic(__auto_type)' is invalid)" at each declarator's name, including later
+comma declarators. The rejected restrict is dropped, so the existing atomic
+deduction and later independent diagnostics still run. The report uses the
+unqualified placeholder even with const or volatile, as Clang does, and keeps
+the name's macro expansion notes. A missing initializer reports its qualified
+placeholder type after the restrict error, even at the same name. This recovery
+does not permit object emission.
 Refused by name: `_Atomic` and `restrict` through a declarator
-(`_Atomic __auto_type *p`, whose initializer clang finds incompatible) or
-together (clang's restrict error names `_Atomic(__auto_type)`), `_Atomic` of an
+(`_Atomic __auto_type *p`, whose initializer clang finds incompatible), `_Atomic` of an
 atomic value (clang's error names the placeholder's type), `restrict` of a value
 that is no pointer to an object (clang's `restrict int`, which the placeholder
-can't be told from), and type attributes with `__auto_type` but a vector's and a
-mode's. A redeclaration of an atomic entity takes its type, as clang's
+can't be told from), and other type-changing attributes besides the handled
+vector, mode and address-space attributes. An incompatible address-space
+pointee initializer is rejected by the assignment check, whose message names
+the deduced type rather than clang's undeduced placeholder. A redeclaration of
+an atomic entity takes its type, as clang's
 `mergeTypes` merges it (#1844): a plain placeholder any atomic type
 (`_Atomic int r; __auto_type r = 1;` is an `_Atomic int`, and so is
 `__auto_type *p` after `_Atomic int *p`), and an `_Atomic` one an atomic type
@@ -8553,6 +8640,25 @@ first error's line, on both paths, and its programs (`local-labels`,
 `auto-type`) run natively against clang -O0's code. `test-checker-driver`
 compares each error's line and column, and its text where the driver's message
 is clang's (`c_checker_driver_gnu_test.c`).
+
+The original `tests/driver/auto-qualifiers/` runtime sources compare complete
+Clang diagnostics for the combined atomic/restrict specifiers in every order,
+GNU restrict spellings, macros, comma groups and later independent errors.
+Missing initializers retain both errors, and `typeof` assertions check the
+recovered atomic types. Accepted neighboring atomic and restricted-pointer
+declarations check that deduction and emission remain valid; C23 constexpr
+and inferred-auto comma groups guard the continuation flags. The shared driver
+harness covers GNU17 and C23, both kernels, one/three requested lanes, syntax
+and object routes, and default, `-Werror` and `-w` policies.
+
+The original runtime sources in `tests/driver/auto-address/` run through the
+address-space driver's existing diagnostic harness in GNU17 and C23 modes.
+Their `_Generic` assertions check the deduced qualifier levels, compatible
+redeclarations and lvalue conversion. The error cases check automatic storage,
+incompatible redeclarations, specifier restrict, invalid numeric spaces and
+conflicting attributes; the duplicate-space case checks its warning and
+preserved type. Complete Clang diagnostics, object emission or preservation,
+default/`-Werror`/`-w`, both kernels and one/three requested lanes are covered.
 
 **C23 `auto` and `constexpr` (#793).** In C23 a declaration's `auto`, when no
 other type specifier is beside it, is a type specifier rather than the storage
@@ -8713,11 +8819,13 @@ change, it refused such a declaration by name.
   (`[[x]] l:`), read as GNU ones after its colon are
   (`check_input_label_attributes`); their closer is the name's parent in the
   tree, so a label's name is the token before its colon there
-  (`check_input_label_name`). A name clang refuses on a label is its error
-  before the attributes are read, but a `suppress` whose argument is no string
-  literal (`check_input_label_suppress_literal`, #2332): clang's parser drops
-  it with its string error first, which the reading gives. A refused attribute
-  before it in the list still gives its subject error instead. The parser reports clang's errors for C23
+  (`check_input_label_name`). The ordinary attribute reader first checks every
+  list's arguments, then the label's subject checks complete after the lists
+  (#2332). Thus a malformed `suppress` gives its parser errors before a
+  `minsize` subject error in either textual order, including separate lists,
+  GNU and C23 spellings, and macro expansions. A dropped attribute has no
+  subject error, and a recovered subject error is not given again by the
+  label-only refusal checks. The parser reports clang's errors for C23
   attributes after GNU ones and before a block's `}`. Specifiers of
   attributes alone have no type: an implicit int's error at an unbound
   declarator's name. In a block, an already-declared ordinary name after GNU
@@ -8784,10 +8892,17 @@ change, it refused such a declaration by name.
   declaration. The original `tests/driver/attribute_recovery.c` fixtures compare
   both language modes, readers, warning policy, deferred checking and output
   preservation. Mixed statement/nonstatement attributes, string subscripts and
-  unmatched outer lists still have recovery gaps. So does an implicit int's
-  declaration after a statement's attributes (`__attribute__((unused))
-  (x)++;`), whose redeclaration errors and `-Wignored-attributes` warning
-  clang's Sema gives after the parser's errors, which stop buster (#2332). The calls
+  unmatched outer lists still have recovery gaps. In C99 through C17, an
+  attributed grouped or pointer declarator with no type
+  (`__attribute__((unused)) (x)++;`, or `*p = 1;`) now retains its missing-type
+  error while a private view checks the declaration (#2332). A suffix is removed
+  only through a semicolon with matching parentheses and brackets and no brace.
+  The missing type, late-attribute warning and previous-definition note,
+  redefinition, and suffix error keep Clang's order. An invalid redeclaration
+  retains the earlier binding and checks its initializer expression without
+  converting it to the invalid declaration's type. Later independent errors and
+  deferred warnings remain visible. GNU89 and C23 keep their existing behavior;
+  C23's invalid declarations do not have pre-C23 implicit-int recovery. The calls
   are clang's `CallExprFinder`'s (`check_input_statement_call`): a call's
   `(` (not a declarator's parameters') or an asm statement's, outside
   `sizeof`'s, `_Alignof`'s and `typeof`'s operands and GNU attributes'

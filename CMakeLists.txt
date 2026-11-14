@@ -68,22 +68,25 @@ include(cmake/BusterSettings.cmake)
 buster_settings_normalize()
 buster_settings_tools("${CMAKE_C_COMPILER}")
 buster_settings_linker()
-# The start's code order (#1444, cmake/BusterStartOrder.cmake): in a static link, every unit's functions in sections of
-# their own, whatever the linker, so that switching it relinks alone; and with lld, the ones small compiles run
-# (cmake/BusterStartOrder.txt) placed together before .text.
+# The start's code order (#1444, cmake/BusterStartOrder.cmake): in a static link, whatever the linker, so that switching
+# it relinks alone, every unit's functions in sections of their own, and the parallel split's units with the functions
+# small compiles run (cmake/BusterStartOrder.txt) first in .text.buster_checker, which is the object's own order; and
+# with lld, those functions placed together before .text.
 set(buster_start_order FALSE)
+set(buster_split_order FALSE)
 if(buster_static)
     list(APPEND buster_host_flags -ffunction-sections)
     list(APPEND buster_flags -ffunction-sections)
+    set(buster_split_order TRUE)
+    include(cmake/BusterStartOrder.cmake)
+    set(start_order_list "${CMAKE_SOURCE_DIR}/cmake/BusterStartOrder.txt")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${start_order_list}" "${CMAKE_SOURCE_DIR}/cmake/BusterStartOrder.cmake")
 endif()
 if(buster_static AND buster_lld)
     set(buster_start_order TRUE)
-    include(cmake/BusterStartOrder.cmake)
-    set(start_order_list "${CMAKE_SOURCE_DIR}/cmake/BusterStartOrder.txt")
     set(start_order_script "${CMAKE_BINARY_DIR}/start-order.ld")
     set(start_order_symbols "${CMAKE_BINARY_DIR}/start-order.symbols")
     buster_start_order_files("${start_order_list}" "${start_order_script}" "${start_order_symbols}" "${BUSTER_SHIFT_SOURCE}")
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${start_order_list}" "${CMAKE_SOURCE_DIR}/cmake/BusterStartOrder.cmake")
     list(APPEND buster_linker_flags "-Wl,-T,${start_order_script}" "-Wl,--symbol-ordering-file=${start_order_symbols}" -Wl,--no-warn-symbol-ordering)
 endif()
 message(STATUS "buster: variant ${buster_variant}, stage 1 linker: ${buster_linker}, static: ${buster_static}, start order: ${buster_start_order}")
@@ -175,10 +178,18 @@ set(profile_use "")
 if(buster_pgo)
     set(profile_use "-fprofile-instr-use=${pgo}/compiler.profdata")
 endif()
-buster_shell_group(develop_debug_group ${BUSTER_DEVELOP_CONFIGURATION_DEBUG})
+buster_shell_group(develop_debug_group ${BUSTER_DEVELOP_CONFIGURATION_DEBUG} ${BUSTER_LINE_TABLES_CODEGEN})
+# The configurations whose debug information is line tables alone take BUSTER_LINE_TABLES_CODEGEN
+# (BusterSettings.cmake): Develop always, and Release in a sanitizer build; buster_release_line_tables is Release's,
+# for its parts' jobs too.
+set(buster_release_line_tables "")
+if(buster_debug STREQUAL "-gline-tables-only")
+    set(buster_release_line_tables ${BUSTER_LINE_TABLES_CODEGEN})
+endif()
+buster_shell_group(release_debug_group ${buster_debug} ${buster_release_line_tables})
 function(buster_unit_options target definitions)
     target_compile_options(${target} PRIVATE
-        "$<$<CONFIG:Release>:${buster_debug}>"
+        "$<$<CONFIG:Release>:${release_debug_group}>"
         "$<$<CONFIG:Debug>:${BUSTER_DEBUG_CONFIGURATION_DEBUG}>"
         "$<$<CONFIG:Develop>:${develop_debug_group}>"
         "${flags_group}"
@@ -519,9 +530,15 @@ if(NOT BUSTER_SHIFTS STREQUAL "")
         endif()
         set(directory "${CMAKE_BINARY_DIR}/$<CONFIG>/shifts")
         set(padding "${directory}/padding-${bytes}.o")
+        # Where the start's code order puts the padding before the source's start-ordered functions, the padding also
+        # goes first in .text, which every unit's other code sits in (#2728).
+        set(text_padding 0)
+        if(buster_start_order AND buster_start_order_shift_padded)
+            set(text_padding 1)
+        endif()
         add_custom_command(OUTPUT "${padding}"
             COMMAND "${CMAKE_COMMAND}" "-DOBJECT=${shift_object}" "-DSOURCE=${BUSTER_SHIFT_SOURCE}" "-DSHIFT=${bytes}"
-                "-DOUTPUT=${padding}" "-DCLANG=${CMAKE_C_COMPILER}" "-DREADELF=${BUSTER_READELF}"
+                "-DOUTPUT=${padding}" "-DCLANG=${CMAKE_C_COMPILER}" "-DREADELF=${BUSTER_READELF}" "-DTEXT=${text_padding}"
                 -P "${CMAKE_SOURCE_DIR}/cmake/BusterShiftPadding.cmake"
             DEPENDS "${shift_object}" "${CMAKE_SOURCE_DIR}/cmake/BusterShiftPadding.cmake"
             VERBATIM)
@@ -536,7 +553,7 @@ if(NOT BUSTER_SHIFTS STREQUAL "")
             buster_post_link(compiler_shift_${bytes} "${output}" ARGUMENTS -DPADDING=1 OBJECTS ${shift_objects})
         else()
             buster_post_link(compiler_shift_${bytes} "${output}" ARGUMENTS -DPADDING=1 "-DUNSHIFTED=${compiler}"
-                DEPENDS "${compiler}" OBJECTS ${shift_objects})
+                "-DMOVED=${text_padding}" "-DSHIFT=${bytes}" DEPENDS "${compiler}" OBJECTS ${shift_objects})
         endif()
         list(APPEND shifted "${output}")
     endforeach()
