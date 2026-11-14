@@ -6976,23 +6976,34 @@ a literal conversion, in unreachable code and short-circuited operands too, and
 a brace initializer's in its reverse order; the walks' candidates test the
 operand's operator before any type.
 
-A failed static assertion's root is excluded from the rejected unit's warning
-walk. `check_driver_reports_from` therefore checks that root's
-integer-to-boolean conversion when publishing `CHECK_MESSAGE_STATIC_ASSERT`,
-at the error's expression boundary
-and in the preceding diagnostic phase. This keeps the warning before the
+A failed static assertion's tree is excluded from the rejected unit's warning
+walk. `check_driver_reports_from` therefore calls
+`check_common_failed_assertion` when publishing `CHECK_MESSAGE_STATIC_ASSERT`.
+Its bounded worklist visits the retained condition tree, using the existing
+integer and floating literal conversion emitters at the error's expression
+boundary and in the preceding diagnostic phase. Conditional conditions are
+checked first in source postorder, as Clang constructs them; the assertion's
+own conversion and nested logical operands then follow the completed
+expression's order. Static selections retain only their selected result,
+explicit casts do not create implicit conversions, and a conditional's arms
+do not inherit its outer boolean context. GNU omitted-middle conditionals
+visit their shared condition once and do not diagnose that saved value as a
+new conversion of the written expression. This keeps the warnings before the
 unchanged assertion error, with the normal command-line and pragma policy,
 including promotion, suppression and fatal/error-limit handling. The original
 runtime sources `tests/driver/assert_bool_*.c`, through
 `c_check_assert_bool_driver_test.c`, compare complete Clang diagnostics for
-file, member and block scopes, repeated failures, successful and non-warning
-controls, unrelated errors, macro expansion notes, C17/C23 and both
-scalar/vector readers and lane requests. Clang is the external behavioral
-oracle; the fixtures and
-implementation are original. Nested boolean conversions inside a failed
-condition, such as `_Static_assert(!(1 << 3), "nested")`, still need the failed
-subtree's conversion traversal; the error path currently checks only the
-assertion condition's own conversion.
+file, member and block scopes, nested and short-circuited logical operands,
+conditional warning order, floating literals, selections, explicit casts,
+unevaluated controls, worklist growth, builtin arguments, repeated failures,
+successful and non-warning controls, unrelated errors, macro expansion notes,
+C17/C23 and both reader choices and lane requests. The focused driver selector
+is `--assert-bool-only`. Clang is the external behavioral oracle; the fixtures
+and implementation are original. The cold path does not reconstruct source
+operands erased by static selections or queries, or restore other warning
+families such as `-Wconstant-logical-operand`; those remain separate recovery
+work. Successful-assertion conditional warning ordering also continues to use
+the ordinary warning walk.
 
 The graph's passes share their facts, `check_common_facts`, which give each
 node its parent, whether another node uses its value, whether it is evaluated,
@@ -8593,9 +8604,17 @@ spelling when an `_Atomic` specifier rebuilds the type. The note is at the entit
 earlier declaration, "previous definition is here" for a definition or a
 tentative one (`CHECK_REDECLARATION_AUTO_TYPE`). The reader stops there, as at
 other initialized invalid declarations, so clang's later errors aren't given.
+The combination of `_Atomic` and `restrict` among an `__auto_type` declaration's
+specifiers reports "restrict requires a pointer or reference
+('_Atomic(__auto_type)' is invalid)" at each declarator's name, including later
+comma declarators. The rejected restrict is dropped, so the existing atomic
+deduction and later independent diagnostics still run. The report uses the
+unqualified placeholder even with const or volatile, as Clang does, and keeps
+the name's macro expansion notes. A missing initializer reports its qualified
+placeholder type after the restrict error, even at the same name. This recovery
+does not permit object emission.
 Refused by name: `_Atomic` and `restrict` through a declarator
-(`_Atomic __auto_type *p`, whose initializer clang finds incompatible) or
-together (clang's restrict error names `_Atomic(__auto_type)`), `_Atomic` of an
+(`_Atomic __auto_type *p`, whose initializer clang finds incompatible), `_Atomic` of an
 atomic value (clang's error names the placeholder's type), `restrict` of a value
 that is no pointer to an object (clang's `restrict int`, which the placeholder
 can't be told from), and other type-changing attributes besides the handled
@@ -8621,6 +8640,16 @@ first error's line, on both paths, and its programs (`local-labels`,
 `auto-type`) run natively against clang -O0's code. `test-checker-driver`
 compares each error's line and column, and its text where the driver's message
 is clang's (`c_checker_driver_gnu_test.c`).
+
+The original `tests/driver/auto-qualifiers/` runtime sources compare complete
+Clang diagnostics for the combined atomic/restrict specifiers in every order,
+GNU restrict spellings, macros, comma groups and later independent errors.
+Missing initializers retain both errors, and `typeof` assertions check the
+recovered atomic types. Accepted neighboring atomic and restricted-pointer
+declarations check that deduction and emission remain valid; C23 constexpr
+and inferred-auto comma groups guard the continuation flags. The shared driver
+harness covers GNU17 and C23, both kernels, one/three requested lanes, syntax
+and object routes, and default, `-Werror` and `-w` policies.
 
 The original runtime sources in `tests/driver/auto-address/` run through the
 address-space driver's existing diagnostic harness in GNU17 and C23 modes.
