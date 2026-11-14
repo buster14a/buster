@@ -188,11 +188,22 @@ the census below measures, run in the compile). `--attested=MODE` picks:
   declarations' operands out too (`CheckInputReader.skips`), and its bindings'
   heads sit uncleared in its own fresh arena (`c_bindings_initialize_zeroed`,
   `arena_untouched`), where a unit of a lane, whose intern table holds every
-  unit's names, cleared them all.
+  unit's names, cleared them all. The lane keeps a cache of its declarations'
+  lists by their own hashes (`CheckAttestedListSlot`, the passes' vector path,
+  `check_attested_lists_cached`), and of a cached declaration's tree columns
+  beside it (`check_attested_tree_columns`): the reader takes a hit's columns
+  from it, its parents compared, where `parse_tree_columns` made the unit's,
+  and the system tokens from the levels the passes mapped
+  (`check_attested_token_levels`). A function definition's semantic hash is
+  its own in the lane (it is never attested), so that the passes don't hash its
+  body. The expressions' walk gives a skipped declaration's tokens no class
+  (`check_input_expression_classes`): a whole file-scope tree of ignored
+  tokens, none of whose values reaches a token read.
 - **`verify`:** the same passes, and nothing skipped: a hit whose reading here
   isn't silent, pure and listed (a contradiction: an input of a reading that
   the semantic hash doesn't cover) fails the unit with a fatal error naming
-  its file and line. Step 1's shadow.
+  its file and line. Step 1's shadow. The unit's tree columns from the cache are
+  also made whole and compared, a difference a contradiction.
 - **`off`:** no passes and no state. `--scalar` is `off` (its reader is the
   skip's oracle), and so is `on` with `-g`, whose DWARF describes every type
   the unit's table holds (`c_check_debug_values.c`), a skipped declaration's
@@ -250,11 +261,16 @@ sets, at two places: its reader's call and its unit's end.
   declaration's tokens of its kind, role, system level and name or literal at
   its place), the chain (each declaration's semantic hash from its own, the
   pragmas before it and the current hash of every name it lists; the memo's
-  probe; its declared names' new hashes), the reach and the marks. The lists
-  go 64 tokens at a time and the own hashes eight a register on the vector
-  path, and `--scalar` runs their twins; `--twins` makes each unit's lists,
-  own hashes and literals again by the other path and counts the units whose
-  results differ. Each pass is timed by the thread's user-mode cycles, branch
+  probe; its declared names' new hashes), the reach and the marks. On the
+  vector path the declarations' bounds go 64 tokens at a time, then the own
+  hashes eight a register (a function definition's is zero, its body unread),
+  then each declaration's list from the lane's cache by its own hash, or made
+  a token at a time and kept; `--scalar` runs the lists' walk over the unit,
+  their twin, and the own hashes' scalar loop after it. A body's list holds
+  each key and class once. `--twins` makes each unit's lists, own hashes and
+  literals again by the other path and counts the units whose results differ,
+  and makes the reader's tree columns whole too and counts each unit whose
+  cached columns differ as a contradiction. Each pass is timed by the thread's user-mode cycles, branch
   misses and L1D read misses (`rdpmc`) and TSC ticks: the first run's, the
   one inside the compile, and with `--passes N` the least of N runs. The
   report gives them a token of the units' tokens.
@@ -284,7 +300,10 @@ sets, at two places: its reader's call and its unit's end.
   impure reason's; an error's unit's), the share of the tokens outside
   function definitions that would be skipped, the binding events against the
   lists (`unlisted`, the gate's zero), the contradictions, the diagnostics and
-  the literals, the twins' differences and each pass's counts. `--list N` prints the first N
+  the literals, the lists' cache (`lists cached`, `made`, `kept`) and the
+  trees' (`trees cached`, `made`, `kept`, `mismatches`, the gate's zero), the
+  twins' differences and each pass's counts (on the vector path the lists'
+  time holds the own hashes'). `--list N` prints the first N
   declarations of each outcome but `skipped`, and every unlisted name and
   contradiction, by unit, file and line.
 

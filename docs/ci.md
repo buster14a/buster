@@ -190,6 +190,22 @@ on every use, published atomically, and replaced when stale or corrupt:
   protocol, which checks every object's hash.
 - **SQLite's tree (#146):** a bare mirror holding SQLite 3.53.2's commit, in
   the same way (`tools/ci/fetch-sqlite.sh`), for `test-sqlite`'s CLI tests.
+- **Tier 1's and the helpers' programs:** `speedtest1.c` and Lua 5.4.8's
+  release, under their SHA-256 (`cached-download.sh`), for
+  `measure-tier1-programs` and `measure-helpers` alike (#2629).
+- **buster-performance's pinned records (#2629):** a bare mirror holding each
+  pinned commit the job reads, shallow (`tools/ci/fetch-performance.sh`): the
+  branch-sizing qualification's harness (`a00d16e4`) and Tier 1's Lua scripts
+  (`818cfbbc`). A step checks out its directory alone from the mirror, through
+  Git's pack protocol (a partial clone, sparse), where `actions/checkout`
+  fetched it from GitHub on every run.
+
+Everything else the job uses is on the host: the official Clang release above,
+CMake and Ninja (`setup-build-tools.sh`, in the same cache), the frozen corpora
+under `/var/lib/buster-9700x/corpora`, and the host's packages (`tcc`, `gcc`,
+its clang, `perf`). Beyond the commits it measures, the run's and its pull
+request's base (`build-benchmarks.sh` and the branch-sizing comparison fetch
+the base, shallow), the job downloads nothing a run before it already did.
 
 The pragma oracle is not cached. Its 2.3 s build finishes while the compiler
 build's longest unit (35 s) still runs, so a cached oracle would save no time.
@@ -262,6 +278,11 @@ event, draft state, selection, dispatch purpose, the `evidence` job's hardware
 decision, and seven job results.
 The hosted selector job runs that test before any hardware admission, and the
 selector's own policy mutants pin the draft guard and ready/draft triggers.
+The evidence result it reads is the `evidence` job's where the CI glue's
+fixtures (the `glue` job, `CI glue fixtures`) did what the event requires:
+passed on a pull request and a merge-queue candidate, which alone run them,
+and skipped elsewhere (`qualification_evidence`, which the self-test checks
+for every event and both results).
 
 A pull request's run stops at its first failure. Its two test rows' shards fail
 fast, and its tests wait for the policy job (`Measurement storage policy`: the
@@ -273,6 +294,13 @@ to main, the daily run and dispatched runs keep `fail-fast: false` and test
 whatever those checks report: their sanitizer rows and fuzz campaigns are main's
 coverage, and one detector's failure must not hide what the others find. The
 Tier 1 machine-problem workflow's two architectures follow the same rule.
+The CI glue's fixtures are the exception (#2658): the scripts the evidence,
+record and 9700X jobs run, the vector row's draws and the setup re-run's
+decisions, against fixtures, in a job of their own beside the rows, which the
+required aggregate waits for. In the evidence job they held every row back by
+about 4 minutes (merge-queue run 43481767714: 236 s of its 246 s, the rows
+starting at 298 s), when neither a pull request nor a candidate uses the
+9700X; a candidate's pull request has passed the same fixtures.
 GitHub has no fail-fast across jobs. A job that cancels the run through the API
 was considered (#1195) and dropped: it needs a token with `actions: write`,
 which fork pull requests don't get; on a pull request, once the policy checks
@@ -852,7 +880,8 @@ on 2026-11-10). It works like this:
   - `blocked-hosted` when a hosted job failed;
   - `interrupted` otherwise.
 - **Accounting.** `ci-timings.yml`'s daily report (`timings.sh`,
-  `timings --queue`) covers the latest 100 completed candidate runs. It
+  `timings --queue`) covers the latest 100 completed candidate runs of
+  main's queue (another branch's, such as the drill's, never lands on main). It
   splits each one by what became of its candidate: merged (its commit is on
   main), passed but invalidated, failed, or cancelled. For each it gives the
   candidates and the runner-minutes (the sum of the jobs' own times), the

@@ -159,10 +159,12 @@ static bool unwind_test_instructions(UnwindTestReader* reader, UnwindTestRow* ro
         {
             // Padding does not change the row.
         }
-        else if (op == 4)
+        else if ((op & 0xc0) == 0x40 || op == 2 || op == 3 || op == 4)
         {
-            const uint64_t delta = unwind_test_integer(reader, 4);
-            reader->valid &= function != 0 && delta != 0 && delta <= UINT32_MAX - pc;
+            const uint64_t delta = (op & 0xc0) == 0x40 ? op & 63 : unwind_test_integer(reader, 1u << (op - 2));
+            // Decode independently of the writer and require the shortest encoding, not merely an equivalent PC.
+            const bool shortest = op == 2 ? delta >= 64 : op == 3 ? delta >= 256 : op == 4 ? delta >= 65536 : true;
+            reader->valid &= function != 0 && delta != 0 && delta <= UINT32_MAX - pc && shortest;
             if (reader->valid)
             {
                 reader->valid &= unwind_test_row(function, pc, row);
@@ -298,6 +300,22 @@ static bool unwind_test_decode(const UnwindFunction* functions, uint32_t count, 
     return reader.valid && reader.at == output->size;
 }
 
+// Every advance-width boundary, rotated across shapes so different holes in a template require different widths.
+static uint32_t unwind_test_delta(uint32_t index)
+{
+    const uint32_t deltas[] = {
+        1,
+        63,
+        64,
+        255,
+        256,
+        65535,
+        65536,
+        65537,
+    };
+    return deltas[index % BUSTER_ARRAY_LENGTH(deltas)];
+}
+
 static UnwindFunction unwind_test_description(uint32_t saved, uint32_t frame)
 {
     UnwindFunction function = {
@@ -308,7 +326,7 @@ static UnwindFunction unwind_test_description(uint32_t saved, uint32_t frame)
     uint32_t offset = 0;
     for (uint32_t event = 0; event < function.event_count; event += 1)
     {
-        offset += event % 3 == 0 ? 65537 : event + 1;
+        offset += unwind_test_delta(event + saved + (frame != 0));
         function.offsets[event] = offset;
     }
     function.size = offset + 1;
@@ -326,7 +344,7 @@ static UnwindFunction unwind_test_pointer_description(uint32_t saved)
     uint32_t offset = 0;
     for (uint32_t event = 0; event < function.event_count; event += 1)
     {
-        offset += event % 3 == 0 ? 65537 : event + 1;
+        offset += unwind_test_delta(event + saved);
         function.offsets[event] = offset;
     }
     function.size = offset + 1;
@@ -346,7 +364,7 @@ static UnwindFunction unwind_test_tail_description(uint32_t saved, uint32_t fram
     uint32_t offset = 0;
     for (uint32_t step = 0; step < function.event_count + tail_events; step += 1)
     {
-        offset += step % 3 == 0 ? 65537 : step + 1;
+        offset += unwind_test_delta(step + saved + (frame != 0));
         if (step < prologue)
         {
             function.offsets[step] = offset;
@@ -473,6 +491,150 @@ static bool unwind_test_emitters(void)
     printf("unwind emitters: %u save/frame combinations, frame pointers and %u with tail calls or open among them, as pairs and with one CIE, independent CFI "
            "rows and atomic capacity refusal: %s\n",
            count, tailed, valid ? "pass" : "FAIL");
+    return valid;
+}
+
+// Compact records must use their exact aligned size, including when a full vector batch has a partial batch after
+// it. Six saves and a 64-byte frame need 17 header + 14 advance + 46 rule bytes, aligned to an 80-byte FDE.
+static bool unwind_test_compact(void)
+{
+    UnwindFunction functions[BUSTER_UNWIND_BATCH + 1];
+    const uint32_t count = BUSTER_ARRAY_LENGTH(functions);
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        functions[i] = unwind_test_description(63, 64);
+        for (uint32_t event = 0; event < functions[i].event_count; event += 1)
+        {
+            functions[i].offsets[event] = event + 1;
+        }
+        functions[i].size = functions[i].event_count + 1;
+    }
+    uint8_t bytes[2][(BUSTER_UNWIND_BATCH + 1) * 120] = { 0 };
+    uint32_t locations[2][BUSTER_UNWIND_BATCH + 1] = { 0 };
+    bool valid = unwind_check(functions, count) == UNWIND_OK;
+    for (uint32_t shared = 0; shared < 2; shared += 1)
+    {
+        const uint64_t expected = shared != 0 ? 40 + (uint64_t)count * 80 : (uint64_t)count * 120;
+        for (uint32_t way = 0; way < 2; way += 1)
+        {
+            UnwindOutput output = {
+                .bytes = bytes[way],
+                .capacity = expected,
+                .locations = locations[way],
+                .location_capacity = count,
+                .shared = shared != 0,
+            };
+            valid &= unwind_write(functions, count, &output, way == 0) == UNWIND_OK && output.size == expected && unwind_test_decode(functions, count, &output);
+        }
+        valid &= memcmp(bytes[0], bytes[1], expected) == 0 && memcmp(locations[0], locations[1], sizeof(locations[0])) == 0;
+    }
+
+    // A general row program starts at PC 0 and changes two rules at one PC. Neither case emits a zero advance;
+    // positive deltas exercise both sides of all three width boundaries with literal expected bytes.
+    const EmissionFrameRow rows[] = {
+        {
+            .offset = 0,
+            .kind = EMISSION_FRAME_CFA_OFFSET,
+            .value = 16,
+        },
+        {
+            .offset = 0,
+            .reg = 3,
+            .kind = EMISSION_FRAME_OFFSET,
+            .value = -16,
+        },
+        {
+            .offset = 63,
+            .kind = EMISSION_FRAME_CFA_OFFSET,
+            .value = 24,
+        },
+        {
+            .offset = 127,
+            .kind = EMISSION_FRAME_CFA_OFFSET,
+            .value = 32,
+        },
+        {
+            .offset = 382,
+            .kind = EMISSION_FRAME_CFA_OFFSET,
+            .value = 40,
+        },
+        {
+            .offset = 638,
+            .kind = EMISSION_FRAME_CFA_OFFSET,
+            .value = 48,
+        },
+        {
+            .offset = 66173,
+            .kind = EMISSION_FRAME_CFA_OFFSET,
+            .value = 56,
+        },
+        {
+            .offset = 131709,
+            .kind = EMISSION_FRAME_CFA_OFFSET,
+            .value = 64,
+        },
+        {
+            .offset = 131709,
+            .reg = 3,
+            .kind = EMISSION_FRAME_RESTORE,
+        },
+        {
+            .offset = 131709,
+            .kind = EMISSION_FRAME_CFA_OFFSET,
+            .value = 8,
+        },
+    };
+    const uint8_t instructions[] =
+        "\x0e\x10\x83\x02"
+        "\x7f\x0e\x18"
+        "\x02\x40\x0e\x20"
+        "\x02\xff\x0e\x28"
+        "\x03\x00\x01\x0e\x30"
+        "\x03\xff\xff\x0e\x38"
+        "\x04\x00\x00\x01\x00\x0e\x40"
+        "\xc3\x0e\x08";
+    const UnwindFunction program = {
+        .size = 131710,
+        .open = BUSTER_UNWIND_ROWS,
+        .rows = rows,
+        .row_count = BUSTER_ARRAY_LENGTH(rows),
+    };
+    valid &= unwind_check(&program, 1) == UNWIND_OK;
+    for (uint32_t way = 0; way < 4; way += 1)
+    {
+        UnwindOutput output = {
+            .bytes = bytes[0],
+            .capacity = 96,
+            .locations = locations[0],
+            .location_capacity = 1,
+            .shared = way >= 2,
+        };
+        const bool written = unwind_write(&program, 1, &output, way % 2 == 0) == UNWIND_OK && output.size == 96;
+        valid &= written;
+        if (written)
+        {
+            UnwindTestReader reader = {
+                .bytes = output.bytes,
+                .end = output.size,
+                .valid = true,
+            };
+            UnwindTestRow initial;
+            unwind_test_cie(&reader, &initial, output.size);
+            reader.valid &= unwind_test_integer(&reader, 4) == 52 && unwind_test_integer(&reader, 4) == 44;
+            reader.valid &= reader.at == output.locations[0] && unwind_test_integer(&reader, 4) == 0;
+            reader.valid &= unwind_test_integer(&reader, 4) == program.size && unwind_test_uleb(&reader) == 0;
+            for (uint32_t i = 0; i < sizeof(instructions) - 1; i += 1)
+            {
+                reader.valid &= unwind_test_integer(&reader, 1) == instructions[i];
+            }
+            while (reader.valid && reader.at < reader.end)
+            {
+                reader.valid &= unwind_test_integer(&reader, 1) == 0;
+            }
+            valid &= reader.valid && reader.at == output.size;
+        }
+    }
+    printf("unwind compact advances: exact compact capacities, width boundaries and rows at unchanged PCs: %s\n", valid ? "pass" : "FAIL");
     return valid;
 }
 
@@ -661,6 +823,7 @@ static int run_unwind_tests(int argc, char** argv)
     if (valid)
     {
         valid &= unwind_test_emitters();
+        valid &= unwind_test_compact();
         valid &= unwind_test_diagnostics();
         valid &= unwind_test_guards();
         valid &= unwind_tier0_test();

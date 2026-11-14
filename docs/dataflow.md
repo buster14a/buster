@@ -154,7 +154,7 @@ order alternating from pair to pair. Each command acquired and released the
 shared host lock separately, including each benchmark process:
 
 ```sh
-EXCLUSIVE_OWNER=claude-rows ~/buster-fast-bench/exclusive.sh ./build.sh
+EXCLUSIVE_OWNER=claude-rows ~/buster-fast-bench/exclusive.sh ./build.sh --config Release
 EXCLUSIVE_OWNER=claude-rows ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler benchmark-dataflow
 ```
 

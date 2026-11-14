@@ -2205,8 +2205,9 @@ instructions and instructions per cycle medians of 3 rounds under `perf stat`:
 - **Code size:**
   - `.text` is 1.29 times clang's, in `sqlite3.o` and in the executable; the tables took 11,808 bytes out of
     `sqlite3.o`'s and added 11,232 to its `.rodata`, 2,808 entries;
-  - `sqlite3.o`'s `.eh_frame` is 2.46 times clang's: `unwind.c` advances with `DW_CFA_advance_loc4` throughout, for FDE
-    sizes known before writing.
+  - In this measurement, `sqlite3.o`'s `.eh_frame` was 2.46 times clang's: `unwind.c` used `DW_CFA_advance_loc4`
+    throughout. #1377 replaces those advances with their shortest encodings while still sizing FDEs before writing;
+    the historical corpus size above has not been remeasured for that change.
 - **`switch`** dispatches through a jump table where clang -O0's does (`docs/c-checker.md`, "Switches"):
   - `sqlite3VdbeExec`'s dispatch on the opcode is a bounds check and a table, as clang's is, where before the tables it
     was 184 compare-and-branch pairs;
@@ -2220,9 +2221,9 @@ instructions and instructions per cycle medians of 3 rounds under `perf stat`:
   storing and loading the one register the entry needs would do. A deep entry of the memory classes or vectors also
   loads the deep slots of its operands in their own slots, which it doesn't read.
 - **Uncovered entries:** these are refused (`TIER0_ERROR_UNSUPPORTED`) or not yet in the stream:
-  - bit-fields need no entry of their own: the checker's lowering reads and writes the bytes that hold a field's bits
-    as pieces of 8, 4, 2 and 1 bytes, with shifts and masks (`docs/c-checker.md`, "Bit-fields"). It refuses a field
-    whose bits are spread over more than 8 bytes (a packed one), with `CHECK_PROGRAM_UNSUPPORTED`;
+  - bit-fields need no entry of their own: the checker's lowering reads and writes a field's access unit, clang's
+    (#1372), as pieces of 8, 4, 2 and 1 bytes, with shifts and masks (`docs/c-checker.md`, "Bit-fields"). It refuses a
+    field whose bits are spread over more than 8 bytes (a packed one), with `CHECK_PROGRAM_UNSUPPORTED`;
   - complex values need no entry of their own: the checker's lowering takes them as aggregates of their two parts and
     computes each part, libgcc's functions their products and quotients (`docs/c-checker.md`, "Complex values");
   - inline assembly, `setjmp` and atomics;

@@ -1416,7 +1416,7 @@ volatile is the same access as one of the element's bytes (an element of a
 volatile vector stays refused by name). A bit-field's
 read and store take it on each piece of its unit (`check_lower_bit_unit`,
 `check_lower_bit_store`): its place (`CheckLowerBitField.segment`, packed in its
-task's bits 14 and 15) has its record's override, from the member's type
+task's bits 17 and 18) has its record's override, from the member's type
 (`check_lower_bit_member`). An atomic builtin's
 object in `%fs` or `%gs` takes it where a direct plan (#1059) takes the builtin:
 its LOAD or SET (a seq_cst store's `xchg`), `ATOMIC_RMW` (`lock xadd`, `xchg`),

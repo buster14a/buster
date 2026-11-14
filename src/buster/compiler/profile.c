@@ -11,6 +11,7 @@
 //   build/compiler label-spills FUNCTION TAG INPUT.s OUTPUT.s
 //   build/compiler spill-report FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]
 //   build/compiler branch-misses BRSTACK [--bias ADDRESS] [--disassembly FILE] [--branches N]
+//   build/compiler start-order SYMBOLS SAMPLES...
 //   build/compiler time-runs [--runs N] [--warmups N] [--after-scalar MS] [--copies N] [--directory PATH]
 //                            [--executable PATH | --build NAME PATH]... --list ARGUMENT... [--list ARGUMENT...]...
 //
@@ -35,6 +36,10 @@
 // - branch-misses reads `perf script -F brstack` of last-branch records (`perf record -j any,u`) and ranks the branches
 //   by their mispredictions, at addresses less the load bias (where a PIE was mapped, from --show-mmap-events), so
 //   that `addr2line` and objdump of the file take them; with the file's disassembly, each with its instruction.
+// - start-order reads `readelf -sW` of the executable and `perf script -F ip,brstack` of its samples (one file per command
+//   profiled) and writes the functions they ran in address order: a local function of one of main.c's units as its unit
+//   and name, and any other (a global one, the C library's) as `-` and its name: cmake/BusterStartOrder.txt, which the
+//   link places before .text (build.md, "The start's code order", #1444).
 // - time-runs times whole processes of this executable (or of each --executable, and of each --build's placements),
 //   one per argument list, executable and copy in each run, in each run's order of a Williams design (profile_ab_tree:
 //   each slot follows each other equally often), after warm-up runs in slot order: each one's wall time from its exec's release to wait4's return, its user and system time, peak
@@ -50,12 +55,13 @@
 //   with each one's spread over its placements and copies and each difference's range over them (profile_time_compare).
 //
 // Each tool's work is a function of its input texts that writes its report into a ProfileReport (profile_hot_loops,
-// profile_label_spills, profile_spill_report, profile_branch_misses, and time-runs' profile_time_compare), which
+// profile_label_spills, profile_spill_report, profile_branch_misses, profile_start_order, and time-runs'
+// profile_time_compare), which
 // profile_test.c checks, and ab's order is profile_ab_tree. main.c includes this file after lane.c, for its arenas, and profile_test.c after it.
 //
 // Layout, in this order: the report (ProfileReport, profile_print), reading text (profile_line and the others), the
 // disassembly (ProfileDisassembly, profile_disassembly_read, profile_jump_target), hot-loops, label-spills,
-// spill-report, branch-misses, ab (profile_ab_tree, profile_ab_run), time-runs (profile_time_slot, profile_time_one,
+// spill-report, branch-misses, start-order (profile_start_order), ab (profile_ab_tree, profile_ab_run), time-runs (profile_time_slot, profile_time_one,
 // profile_time_compare, profile_time_make_copies, profile_time_runs), and the commands (run_profile_command).
 
 #include "buster/compiler/test_paths.h"
@@ -1522,8 +1528,250 @@ static bool profile_branch_misses(Arena* arena, ProfileReport* report, String8 b
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// ab
+// start-order
 
+// A function's copy in the executable, from readelf -sW's FUNC symbols: its address, size and name, and for a local one
+// of main.c's units the FILE symbol before it, its unit's source.
+typedef struct ProfileFunction ProfileFunction;
+struct ProfileFunction
+{
+    uint64_t address;
+    uint64_t size;
+    String8 name;
+    String8 unit;
+    bool hit;
+};
+
+// start-order's sample files, one per command profiled.
+#define BUSTER_PROFILE_START_SAMPLES 64
+
+static int profile_function_compare(const void* a, const void* b)
+{
+    const ProfileFunction* x = a;
+    const ProfileFunction* y = b;
+    return (x->address > y->address) - (x->address < y->address);
+}
+
+// Whether `file` is one of main.c's units, whose objects the link names by their source (build.md, "The start's code
+// order"): main.c and main_unit_*.c.
+static bool profile_start_unit(String8 file)
+{
+    const String8 suffix = profile_string(".c");
+    const bool source = file.length > suffix.length && memcmp(file.pointer + file.length - suffix.length, suffix.pointer, suffix.length) == 0;
+    return source && (profile_equal(file, profile_string("main.c")) || profile_starts_with(file, profile_string("main_unit_")));
+}
+
+// The field of `line` at *position, the blanks before it skipped, and *position past it.
+static String8 profile_field(String8 line, uint64_t* position)
+{
+    uint64_t start = *position;
+    while (start < line.length && profile_is_blank(line.pointer[start]))
+    {
+        start += 1;
+    }
+    uint64_t end = start;
+    while (end < line.length && !profile_is_blank(line.pointer[end]))
+    {
+        end += 1;
+    }
+    *position = end;
+    return profile_slice(line, start, end);
+}
+
+// readelf's Size column: decimal, or hexadecimal with 0x for a large one.
+static bool profile_symbol_size(String8 text, uint64_t* size)
+{
+    uint64_t position = 0;
+    const bool hexadecimal = profile_starts_with(text, profile_string("0x"));
+    return hexadecimal ? profile_hex(text, &position, size) && position == text.length : profile_decimal(text, size);
+}
+
+// The functions of `symbols` (readelf -sW of the executable), sorted by address, each local one of main.c's units with
+// its unit: an alias the parallel parts' split names (NAME.buster_split) is left out, as its function is there under its
+// own name. Null if the arena is full.
+static ProfileFunction* profile_functions_read(Arena* arena, String8 symbols, uint64_t* count)
+{
+    uint64_t lines = 1;
+    for (uint64_t i = 0; i < symbols.length; i += 1)
+    {
+        lines += symbols.pointer[i] == '\n';
+    }
+    ProfileFunction* functions = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileFunction, lines);
+    uint64_t found = 0;
+    String8 file = { 0 };
+    uint64_t position = 0;
+    const String8 alias = profile_string(".buster_split");
+    while (functions != 0 && position < symbols.length)
+    {
+        const String8 line = profile_line(symbols, &position);
+        uint64_t at = 0;
+        const String8 number = profile_field(line, &at);
+        const String8 value = profile_field(line, &at);
+        const String8 size_text = profile_field(line, &at);
+        const String8 type = profile_field(line, &at);
+        const String8 bind = profile_field(line, &at);
+        profile_field(line, &at);
+        const String8 index = profile_field(line, &at);
+        const String8 name = profile_field(line, &at);
+        uint64_t address = 0;
+        uint64_t size = 0;
+        uint64_t value_at = 0;
+        const bool symbol = number.length > 1 && number.pointer[number.length - 1] == ':' && name.length != 0 && profile_hex(value, &value_at, &address) &&
+                            value_at == value.length && profile_symbol_size(size_text, &size);
+        const bool aliased = name.length > alias.length && memcmp(name.pointer + name.length - alias.length, alias.pointer, alias.length) == 0;
+        if (symbol && profile_equal(type, profile_string("FILE")))
+        {
+            file = name;
+        }
+        else if (symbol && profile_equal(type, profile_string("FUNC")) && !profile_equal(index, profile_string("UND")) && size != 0 && !aliased)
+        {
+            const bool unit = profile_equal(bind, profile_string("LOCAL")) && profile_start_unit(file);
+            functions[found] = (ProfileFunction){
+                .address = address,
+                .size = size,
+                .name = name,
+                .unit = unit ? file : (String8){ 0 },
+            };
+            found += 1;
+        }
+    }
+    if (functions != 0)
+    {
+        qsort(functions, found, sizeof(ProfileFunction), profile_function_compare);
+    }
+    *count = found;
+    return functions;
+}
+
+// The function whose copy holds `address`, or count.
+static uint64_t profile_function_at(const ProfileFunction* functions, uint64_t count, uint64_t address)
+{
+    uint64_t low = 0;
+    uint64_t high = count;
+    while (low < high)
+    {
+        const uint64_t middle = low + (high - low) / 2;
+        if (functions[middle].address <= address)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    const bool inside = low != 0 && address - functions[low - 1].address < functions[low - 1].size;
+    return inside ? low - 1 : count;
+}
+
+// Marks the function that holds `address` as run; counts it, and in *outside if none holds it.
+static void profile_start_hit(ProfileFunction* functions, uint64_t count, uint64_t address, uint64_t* addresses, uint64_t* outside)
+{
+    const uint64_t index = profile_function_at(functions, count, address);
+    *addresses += 1;
+    *outside += index == count;
+    if (index != count)
+    {
+        functions[index].hit = true;
+    }
+}
+
+// Marks the function that holds each address of `samples` (perf script -F ip,brstack: each line's ip, then its records,
+// 0xFROM/0xTO/...) as run. Returns the addresses read, and in *outside those no function holds.
+static uint64_t profile_start_hits(ProfileFunction* functions, uint64_t count, String8 samples, uint64_t* outside)
+{
+    uint64_t addresses = 0;
+    uint64_t position = 0;
+    while (position < samples.length)
+    {
+        const String8 line = profile_line(samples, &position);
+        uint64_t at = 0;
+        while (at < line.length)
+        {
+            const String8 field = profile_field(line, &at);
+            uint64_t i = 0;
+            uint64_t address = 0;
+            if (field.length != 0 && profile_hex(field, &i, &address))
+            {
+                profile_start_hit(functions, count, address, &addresses, outside);
+                // A record's branch target, after the '/' that ends its source.
+                i += i < field.length && field.pointer[i] == '/';
+                if (i < field.length && field.pointer[i - 1] == '/' && profile_hex(field, &i, &address))
+                {
+                    profile_start_hit(functions, count, address, &addresses, outside);
+                }
+            }
+        }
+    }
+    return addresses;
+}
+
+// start-order: the functions that `samples` ran (perf script -F ip,brstack of user instructions, one text per command
+// profiled), by their copies in `symbols` (readelf -sW of the same executable), in address order, one a line: `UNIT
+// NAME` for a local function of one of main.c's units, which the link script places by its unit's object and its
+// section (-ffunction-sections' .text.NAME), so that one unit's copy of a static helper moves and the others' don't;
+// and `- NAME` for any other, a global function (whose name is the link's alone) or the C library's, which the symbol
+// ordering file places by name. One whose name a unit's local function has too, which the name would move as well, is
+// left out.
+static bool profile_start_order(Arena* arena, ProfileReport* report, String8 symbols, const String8* samples, uint32_t sample_count)
+{
+    uint64_t count = 0;
+    ProfileFunction* functions = profile_functions_read(arena, symbols, &count);
+    const bool valid = functions != 0 && count != 0;
+    uint64_t addresses = 0;
+    uint64_t outside = 0;
+    for (uint32_t s = 0; valid && s < sample_count; s += 1)
+    {
+        addresses += profile_start_hits(functions, count, samples[s], &outside);
+    }
+    // A function placed by name whose name a unit's local function has too is left out, as its name would move both:
+    // each run one is looked for among all the functions, which a refresh does once.
+    uint64_t unit_functions = 0;
+    uint64_t other_functions = 0;
+    uint64_t unit_bytes = 0;
+    uint64_t other_bytes = 0;
+    uint64_t shared = 0;
+    for (uint64_t f = 0; valid && f < count; f += 1)
+    {
+        const ProfileFunction* function = &functions[f];
+        bool named = false;
+        for (uint64_t g = 0; function->hit && function->unit.length == 0 && !named && g < count; g += 1)
+        {
+            named = functions[g].unit.length != 0 && profile_equal(functions[g].name, function->name);
+        }
+        unit_functions += function->hit && function->unit.length != 0;
+        unit_bytes += function->hit && function->unit.length != 0 ? function->size : 0;
+        other_functions += function->hit && function->unit.length == 0 && !named;
+        other_bytes += function->hit && function->unit.length == 0 && !named ? function->size : 0;
+        shared += function->hit && named;
+        functions[f].hit = function->hit && !named;
+    }
+    if (valid)
+    {
+        profile_print(report, "# start-order: %llu addresses, %llu of them in no function; %llu local functions of main.c's units (%llu KB) and %llu by name (%llu KB)",
+                      (unsigned long long)addresses, (unsigned long long)outside, (unsigned long long)unit_functions, (unsigned long long)(unit_bytes >> 10),
+                      (unsigned long long)other_functions, (unsigned long long)(other_bytes >> 10));
+        if (shared != 0)
+        {
+            profile_print(report, ", %llu left out that share a unit's function's name", (unsigned long long)shared);
+        }
+        profile_print(report, "\n");
+        for (uint64_t f = 0; f < count; f += 1)
+        {
+            const ProfileFunction* function = &functions[f];
+            if (function->hit)
+            {
+                const String8 unit = function->unit.length != 0 ? function->unit : profile_string("-");
+                profile_print(report, "%.*s %.*s\n", (int)unit.length, unit.pointer, (int)function->name.length, function->name.pointer);
+            }
+        }
+    }
+    else
+    {
+        profile_print(report, "start-order: %s\n", functions == 0 ? "out of memory" : "no functions in the symbols");
+    }
+    return valid && !report->full;
+}
 // The tree that run `position` of a round runs (#1311): round r takes row r of a Williams design, a Latin square
 // whose rows each run every tree once, and over its period every tree runs at every place and directly after every
 // other tree equally often. A rotation ran the trees in one cyclic order from different starts, so each tree followed
@@ -2577,7 +2825,7 @@ static bool profile_option(int argc, char** argv, int* i, const char* name, uint
     return result;
 }
 
-// The commands but ab, which reads no text: hot-loops, label-spills, spill-report and branch-misses.
+// The commands but ab, which reads no text: hot-loops, label-spills, spill-report, start-order and branch-misses.
 static int run_profile_text_command(Arena* arena, ProfileReport* report, int argc, char** argv)
 {
     bool valid = true;
@@ -2647,6 +2895,26 @@ static int run_profile_text_command(Arena* arena, ProfileReport* report, int arg
             fprintf(stderr, "usage: spill-report FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]\n");
         }
     }
+    else if (strcmp(argv[0], "start-order") == 0)
+    {
+        valid = argc >= 3 && argc - 2 <= BUSTER_PROFILE_START_SAMPLES;
+        String8 samples[BUSTER_PROFILE_START_SAMPLES];
+        const String8 symbols = valid ? profile_read_file(arena, argv[1]) : (String8){ 0 };
+        bool read = symbols.pointer != 0;
+        for (int i = 2; read && i < argc; i += 1)
+        {
+            samples[i - 2] = profile_read_file(arena, argv[i]);
+            read = samples[i - 2].pointer != 0;
+        }
+        if (read)
+        {
+            succeeded = profile_start_order(arena, report, symbols, samples, (uint32_t)(argc - 2));
+        }
+        if (!valid)
+        {
+            fprintf(stderr, "usage: start-order SYMBOLS SAMPLES... (at most %u sample files)\n", BUSTER_PROFILE_START_SAMPLES);
+        }
+    }
     else
     {
         count = BUSTER_PROFILE_DEFAULT_BRANCHES;
@@ -2697,7 +2965,7 @@ static int run_profile_text_command(Arena* arena, ProfileReport* report, int arg
     return succeeded ? 0 : 1;
 }
 
-// argv[0] is the command's name: ab, hot-loops, label-spills, spill-report or branch-misses.
+// argv[0] is the command's name: ab, hot-loops, label-spills, spill-report, start-order or branch-misses.
 static int run_profile_command(int argc, char** argv)
 {
     int result = 1;

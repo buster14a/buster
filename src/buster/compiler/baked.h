@@ -3,8 +3,9 @@
 //
 // BUSTER_BAKED puts a variable in the executable's buster_baked section (#590): the state the backend's initializers
 // write (x86_encoder_initialize's table for x86_encode, x86_semantics_initialize's, tier0_initialize's,
-// unwind_initialize's, tier1_select_initialize's, check_lower_runtime_names_initialize's and the asm matcher's index,
-// check_asm_index_initialize's), which build.sh has the
+// unwind_initialize's, tier1_select_initialize's, check_lower_runtime_names_initialize's, the asm matcher's index,
+// check_asm_index_initialize's, and the intrinsic catalogue's exact table, builtin_intrinsic_table_initialize's), which
+// build.sh has the
 // linked executable write into its own file (bake-tables, baked.c), so that a compile starts with it built rather than
 // building it. The section is writable data with file bytes: a process
 // reads its pages from the page cache, shared with every other process, as they are touched, and an executable that

@@ -252,6 +252,10 @@ enum
     CHECK_WARNING_ID_INCOMPATIBLE_POINTER_TYPES = 159,
     CHECK_WARNING_ID_INCOMPATIBLE_FUNCTION_POINTER_TYPES = 160,
     CHECK_WARNING_ID_RETURN_MISMATCH = 161,
+    // Clang strips an atomic enum base before checking its integer type (#2492), an error by default.
+    CHECK_WARNING_ID_UNDERLYING_ATOMIC_QUALIFIER = 162,
+    // Member access on an atomic struct/union (#2444): a deferred runtime warning that defaults to an error.
+    CHECK_WARNING_ID_ATOMIC_ACCESS = 163,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -604,6 +608,7 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_NONSCALAR_SAME_CAST,
     // An enum's fixed underlying type in a declaration with a declarator (#2213), at its `:`: its description's words.
     CHECK_WARNING_EVENT_ELABORATED_ENUM_BASE,
+    CHECK_WARNING_EVENT_UNDERLYING_ATOMIC_QUALIFIER,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

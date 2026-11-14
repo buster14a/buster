@@ -197,6 +197,22 @@ because `DW_CFA_restore` restores that rule, not necessarily a register's prior
 stack location. CFA offsets, advances and register rules follow
 [DWARF 5, section 6.4](https://dwarfstd.org/doc/DWARF5.pdf).
 
+Each PC advance uses the shortest encoding of its delta (#1377). With the
+CIE's code alignment of 1, the delta is the number of bytes between successive
+transition PCs:
+
+| Delta | Instruction | Total bytes |
+|---|---|---:|
+| Below 64 | `DW_CFA_advance_loc`, delta in the opcode | 1 |
+| 64–255 | `DW_CFA_advance_loc1` | 2 |
+| 256–65,535 | `DW_CFA_advance_loc2` | 3 |
+| 65,536 and above | `DW_CFA_advance_loc4` | 5 |
+
+Fixed descriptions, frame pointers, open frames, tail teardowns and row
+programs use the same encoding rule. A row at the current PC adds no advance;
+remembering a state still takes none. Only the representation changes: each
+rule takes effect at the same instruction boundary as before.
+
 `unwind_write(functions, count, output, exact)` fills caller-owned byte and
 location slices. A capacity result reports the required byte size while
 preserving both slices. Other errors preserve the output descriptor too. Inputs
@@ -225,14 +241,25 @@ the first.
 
 The scalar writer appends the CIE and instructions independently. The vector
 writer classifies eight descriptors, forms CFA LEB bytes and expands original
-templates of FDEs with byte permutations and bounded stores, the CIE copied
-before each (or once). Its 384 shapes cover 64 save masks and no allocation or
-one of five CFA LEB widths; the CIE pointer is a hole, as the range and the CFA
-bytes are. A frame pointer's function, the rare shape, it leaves to the exact
-writer, lane by lane, having sized its FDE in its lane (42 + 13n bytes to a
-multiple of 8). Each FDE occupies 24–144 bytes, and each pair 40 more.
-Initialization tables are shared and immutable afterward; frame analysis needs
-only bounded stack scratch and a 68-byte descriptor per function.
+templates of FDEs with byte permutations. Its 384 shapes cover 64 save masks
+and no allocation or one of five CFA LEB widths. The advance opcodes, deltas,
+FDE length, CIE pointer, function range and CFA bytes fill the templates' holes.
+Register compaction removes unused delta operand bytes from each expanded
+chunk before a bounded store; only the compact record receives its final
+eight-byte alignment padding. The CIE is copied before each FDE, or once for
+a shared batch.
+
+The capacity pass computes each FDE's compact size from its transition deltas
+before any output store. The emission pass recomputes those bounded batch
+sizes and places consecutive FDEs from them, so every published relocation and
+backward CIE pointer uses the compact layout. Frame pointers, open frames,
+tail calls and general row programs retain the exact writer in their lanes;
+their size calculations follow the same transition order as their emission.
+A closed fixed-shape FDE occupies 24–144 bytes, and a pair 40 more, with the
+actual size determined by its PC deltas and CFA operand width. Initialization
+tables are shared and immutable afterward. Compaction needs no input or output
+padding and adds no persistent per-function metadata; its scratch is bounded
+by a batch.
 
 ## The C driver's unwind tables
 
@@ -317,7 +344,13 @@ pointer's descriptor must keep, and protected descriptor/byte/location tails
 from zero through 65 functions, a frame pointer's every third, a tail call's
 every fifth and an open function's every seventh; and open descriptions of every
 save mask, with and without a frame pointer, with no returns to three, and their
-descriptors' rules (#177). The interpreter
+descriptors' rules (#177). The generated transition deltas cover both sides of
+the 63/64, 255/256 and 65,535/65,536 encoding boundaries in mixed-width
+templates. The independent interpreter rejects unnecessarily wide advances.
+A short-advance fixture checks an 80-byte FDE at exact output capacity across
+a full batch and a partial batch, as pairs and with one CIE. A literal row
+program checks each width, rows at PC zero and repeated PCs, record lengths
+and final padding. The interpreter
 checks every row transition, including stack release and pops, and the
 constant state between transitions; a frame pointer's rows by the CFA's register
 too. Corrupted return rules and ranges are negative controls for the

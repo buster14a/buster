@@ -294,9 +294,9 @@ static __attribute__((noinline)) bool node_machine_update_first(NodeMachine* mac
     return takes;
 }
 
-// An update's own row, after operand 1's entries (none for an increment or an unsigned power of two): the operation, the
-// result converted back to the destination's type, and the store, by name or through the kept address. The conversion
-// takes, as the plan's classes are I8 to F64 and neither complex nor an aggregate.
+// An update's own row, after operand 1's entries (none for an increment or a power of two's shift or mask): the
+// operation, the result converted back to the destination's type, and the store, by name or through the kept address.
+// The conversion takes, as the plan's classes are I8 to F64 and neither complex nor an aggregate.
 static __attribute__((noinline)) void node_machine_update_last(NodeMachine* machine, const NodeMachineUpdate* update)
 {
     const uint8_t class = update->stored_class;

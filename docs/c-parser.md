@@ -231,6 +231,19 @@ vector path's checks take the comma there as an error by the group's mode
 Without a `]` before the `;` nothing is resumed, where clang reads on. A GNU
 attribute list's item that isn't a name is resumed the same way: clang's
 ParseGNUAttributes skips to the list's `)` (`parse_scalar_resume_at_closer`).
+An unknown type's declaration reads the first initializer, as clang's
+`ParseDeclGroup` does, but a later declarator stops before its initializer
+(#2640). Its `=` therefore diagnoses the missing `;` immediately after that
+declarator. A comma without a later initializer does not cause this error.
+For a balanced tail ending at a `;`, `ParseDiagnostic.resume_begin` records
+the first comma: the diagnostic view discards every later declarator through
+that tail, preserving clang's lack of bindings for those names. It reparses
+the remaining first declarator and following declarations while retaining
+the unknown-type error and invalid-type provenance. This repair applies to
+file and block declarations; for-init declarations have different recovery.
+Diagnostics already read inside the discarded declarators, including their
+parameters' unknown or missing types, are retained once at their original
+source positions across successive recovery rounds.
 `test-parser` checks every diagnostic's place and mark on both paths
 (`parse_test_check_resumed`). It reports one syntax error per
 top-level declaration, the first, after the errors clang gives without

@@ -35,10 +35,14 @@ patterns are:
   and 52.3 M of Lua's scripts' 311.5 M were these. The instruction count is the
   same; the address cause shrinks and the arithmetic grows by as much.
   A signed power-of-two division adds its bias in place the same way
-  (`TIER1_RULE_DIVIDE_POWER`, a pointer difference's division by its element's
-  size). Flags are dead between IR nodes. Folded frame operands have their
-  final base and object offset before this decision; any other displacement
-  form or an `rsp` base keeps `lea`.
+  (`TIER1_RULE_DIVIDE_POWER`). A C source's pointer difference no longer reaches
+  it: since #1386 the lowering writes its division by a power-of-two element size
+  as an arithmetic shift, which the difference's exactness allows, and a signed
+  `/` or `%` by a positive power of two as the bias sequence itself: a quotient
+  takes as many records as this rule's, a remainder returned at once up to two
+  more moves, and #1386's 9700X loops ran as fast. Flags are dead between IR
+  nodes. Folded frame operands have their final base and object offset before
+  this decision; any other displacement form or an `rsp` base keeps `lea`.
 - Explicit `IR_ADDRESS` base + index × scale + signed disp32, loads and stores,
   and folding those addresses into memory operands. Byte/word loads zero-extend
   into registers, while stores write exactly one/two bytes. An address whose

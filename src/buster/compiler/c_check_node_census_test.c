@@ -69,13 +69,14 @@ static const char node_census_test_clean[] =
     "int h(int* p, size_t l, unsigned char* z, struct S* sp, int i)\n"
     "{\n"
     "    int x = 0; // take\n"
-    "    int arr[4];\n"
+    "    int arr[16];\n"
     "    unsigned char uc = 255; // take\n"
     "    unsigned char ud = -1; // take\n"
     "    int big = 0x80000000u; // take\n"
-    "    int* e = &arr[4]; // take\n"
+    "    int* e = &arr[16]; // take\n"
     "    double d = 86400000; // take\n"
     "    memset(arr, 0, sizeof(arr)); // take\n"
+    "    memset(arr, 0, l); // take\n"
     "    (void)i; // take\n"
     "    x = x + 1; // take\n"
     "    sp->a = sp->b = 0; // take\n"
@@ -94,6 +95,8 @@ static const char node_census_test_set[] =
     "struct S { int a; int b; };\n"
     "int printf(const char*, ...);\n"
     "unsigned long strlen(const char*);\n"
+    "void* memset(void*, int, unsigned long);\n"
+    "int abs(int);\n"
     "int k(struct B* b, struct S* s, struct S* t, int i, ...)\n"
     "{\n"
     "    register int r = i;\n"
@@ -107,6 +110,8 @@ static const char node_census_test_set[] =
     "    x = ((struct S){ 1, 2 }).a; // refuse: compound-literal\n"
     "    printf(\"%d\", x); // refuse: callee\n"
     "    x = (int)strlen(\"ab\"); // refuse: callee\n"
+    "    memset(s, 0, sizeof(*s)); // refuse: callee\n"
+    "    x = abs(i); // refuse: callee\n"
     "    __builtin_va_start(ap, i); // refuse: operator\n"
     "    __builtin_va_end(ap); // refuse: operator\n"
     "    z = z * 2; // refuse: complex-bitint-atomic-vector-half\n"
@@ -147,6 +152,15 @@ static const char node_census_test_quiet[] =
     "    e = 5; // take\n"
     "    return x + e; // take\n"
     "}\n";
+
+static const char node_census_test_atomic[] =
+    "struct A { int x; };\n"
+    "_Atomic(struct A) a;\n"
+    "_Atomic(struct A)* p;\n"
+    "#pragma clang diagnostic ignored \"-Watomic-access\"\n"
+    "int direct(void) { return a.x; } // refuse: complex-bitint-atomic-vector-half\n"
+    "int indirect(void) { return p->x; } // refuse: complex-bitint-atomic-vector-half\n"
+    "int ordinary(struct A* q) { return q->x + 1; } // take\n";
 
 // The shadow's fixture (#2524's step 1): each line that ends with `// machine: taken` has expressions the census takes and
 // the machine takes them all, each that ends with `// machine: REFUSAL` one the machine refuses for that reason
@@ -446,6 +460,8 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-census refuses what the machine's set has no code for, by its test");
     check_test_expect(test, ready && node_census_test_fixture(directory, "quiet.c", node_census_test_quiet, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
                       "node-census refuses nothing for warnings that are off by default");
+    check_test_expect(test, ready && node_census_test_fixture(directory, "atomic.c", node_census_test_atomic, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
+                      "node-census refuses atomic record accesses by type without refusing ordinary members or the whole unit");
     char headers[512];
     char header[640];
     snprintf(headers, sizeof(headers), "%s/system", directory);
