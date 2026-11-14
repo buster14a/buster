@@ -4,6 +4,7 @@ function-existing	function-existing.c	rejected	weak alias call with an existing 
 variable-later	variable-later.c	rejected	weak alias variable redeclaration after a later target
 variable-existing	variable-existing.c	rejected	weak alias variable redeclaration with an existing target
 variable-reference	variable-reference.c	rejected	weak alias variable reference is ambiguous
+defined-variable-reference	defined-variable-reference.c	rejected	reference remains ambiguous when the alias is already defined
 variable-repeated	variable-repeated.c	rejected	repeated declarations after a weak alias retain both errors
 combined	combined.c	rejected	weak alias errors preserve the rest of the translation unit
 before-target	before-target.c	-	a weak alias clone is not visible before its target declaration

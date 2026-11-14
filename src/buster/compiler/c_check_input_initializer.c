@@ -305,6 +305,7 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
             CheckInputReport* report = reader->output->reports + before;
             report->type = placeholder;
             report->value = value.type;
+            report->completion = end;
             if (begin + 1 == end && parser->tokens.kinds[begin] == PARSE_KIND_IDENTIFIER)
             {
                 report->type_spelling = check_input_token_type_spelling(reader->output, parser, begin, false);
@@ -318,6 +319,26 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
                         type_same_canonical(types, reader->declared_types[spelling], value.type) == TYPE_ANSWER_YES)
                     {
                         report->type_spelling = spelling;
+                    }
+                }
+            }
+            // Keep a usable declaration after diagnosing the invalid double-atomic deduction. This lets the ordinary
+            // expression and warning walks retain the initializer and later statements without accepting the unit.
+            if (!reader->lane && check_input_recover_reports(reader, before))
+            {
+                result = check_input_type_result(reader, type_qualify(types, adjusted, qualifiers));
+                reader->declared_types[declaration] = result;
+                reader->query_types[assignment] = result;
+                check_input_noderef_set(reader->output, declaration, noderef);
+                check_input_noderef_set(reader->output, assignment, noderef);
+                reader->initializers[assignment] = check_init_aggregate(types, result) ? 2 : 1;
+                if (check_input_linkage(reader->declaration_bits, declaration) != 0)
+                {
+                    const uint32_t name = parser->tokens.names[declaration];
+                    reader->linked_types[name] = result;
+                    if (reader->deferred != 0)
+                    {
+                        check_deferred_linked(reader, name, declaration);
                     }
                 }
             }

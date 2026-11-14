@@ -393,7 +393,7 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
         // the clone. Keep these diagnostics recoverable so subsequent declarations remain visible.
         bool diagnosed = false;
         const uint32_t clone = selected > record->token ? selected : record->token;
-        if (!mismatched && defined && alias.previous != BUSTER_CHECK_NONE && (kind == C_BINDING_FUNCTION || (!no_op && kind == C_BINDING_OBJECT)))
+        if (!mismatched && defined && alias.previous != BUSTER_CHECK_NONE && (kind == C_BINDING_FUNCTION || kind == C_BINDING_OBJECT))
         {
             for (uint32_t event = 0; event < bindings->count; event += 1)
             {
