@@ -149,6 +149,12 @@ struct PresplitFunction
     bool inert;
     // No caller inlines it (noinline, optnone or naked).
     bool opaque;
+    // always_inline: every part that reads it inlines it at each call.
+    bool always;
+    // Its size with the always_inline bodies it calls, which its part's mandatory inliner gives it before the inliner
+    // weighs it (presplit_expanded), once known.
+    uint64_t expanded;
+    bool expanded_known;
     // Holds inline assembly with text: kept in part 0 and never read by another part (presplit_scan).
     bool pinned;
     // A part that reads it holds a local copy of its own, and its own part no alias (--keep-statics).
@@ -1200,6 +1206,26 @@ static void presplit_imports(PresplitPlan* plan)
     }
 }
 
+// A function's import size with its always_inline callees' (and theirs), each call once: what --copy-limit weighs, as
+// the body the inliner sees has them inlined. tier1_allocate_impl, a call to the always_inline tier1_allocate_body
+// (30 KB of code), measured 7 and was copied, outlined, into 3 parts. A cycle counts each function once.
+static uint64_t presplit_expanded(PresplitPlan* plan, uint32_t index)
+{
+    PresplitFunction* entry = &plan->functions[index];
+    if (!entry->expanded_known)
+    {
+        entry->expanded_known = true;
+        uint64_t size = entry->import_size;
+        for (uint32_t c = 0; c < entry->callee_count; c += 1)
+        {
+            const PresplitFunction* callee = &plan->functions[entry->callees[c]];
+            size += callee->defined && callee->always && !callee->opaque ? presplit_expanded(plan, entry->callees[c]) : 0;
+        }
+        entry->expanded = size;
+    }
+    return entry->expanded;
+}
+
 // The plan every part shares, made before the parts fork.
 static void presplit_plan(PresplitPlan* plan)
 {
@@ -1299,6 +1325,7 @@ static void presplit_plan(PresplitPlan* plan)
         if (entry->defined)
         {
             const bool always = presplit_has_attribute(entry->function, "alwaysinline");
+            entry->always = always;
             entry->inert = presplit_has_attribute(entry->function, "optnone");
             entry->opaque = presplit_has_attribute(entry->function, "noinline") || entry->inert || presplit_has_attribute(entry->function, "naked");
             const bool small = plan->simplified_size ? entry->import_size <= plan->import_limit : entry->cost <= plan->import_limit + PRESPLIT_FUNCTION_COST;
@@ -1344,9 +1371,13 @@ static void presplit_plan(PresplitPlan* plan)
             // own copy outlined where it doesn't inline it, so the parts held the same function many times
             // (arena_commit 46 times, arena_reserve_policy 33), 1.2 MB more code in the checker's unit, and its
             // sources ran 15% to 27% more instruction cache misses than the whole build's. A larger function goes
-            // available_externally, through its alias: the whole unit's inlining keeps all but 12 of its pairs.
+            // available_externally, through its alias: the whole unit's inlining keeps all but 12 of its pairs. An
+            // always_inline function is copied whatever its size: each copy inlines at every call and then goes, as
+            // the whole unit's body does, where its alias kept the owner's body, dead, in the executable
+            // (tier1_select_candidates, 57 KB, tier1_allocate_body, 30 KB: 99 bodies, 342 KB of the checker's unit).
+            // Another is weighed with the always_inline bodies it calls (presplit_expanded).
             const bool one = (references & (references - 1)) == 0;
-            const bool limited = entry->uses == 1 || entry->import_size <= plan->copy_limit;
+            const bool limited = entry->always || entry->uses == 1 || presplit_expanded(plan, i) <= plan->copy_limit;
             entry->copied = entry->copied && (one || limited) && (references & ~presplit_where(entry)) == 0;
             entry->aliased = !entry->copied && (entry->used || (references & ~(UINT64_C(1) << entry->part)) != 0);
         }
