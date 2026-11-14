@@ -2027,6 +2027,45 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: bash tools/ci/nightly.sh stale "$RUNNER_TEMP/stale"
 
+  # A merge-queue candidate stops at its first failure (#1430, the owner's choice on 2026-11-12), but GitHub's fail-fast
+  # works within one matrix alone: after a row failed, the aggregate still waited for the fuzz campaigns (about 21
+  # minutes), the glue fixtures and the auxiliary workflows, so a failure that took seconds to show held the candidate,
+  # its runners and the queue's entries behind it until then (#2703: 22.5 minutes on average). Once the test rows or the
+  # fuzz campaigns have failed, these cancel the candidate's run. Its `Integration qualification` still runs (always())
+  # and fails at once, as it does in the runs `stale` cancels, and GitHub rebuilds the entries behind. A candidate's
+  # run alone: a pull request's tests are its last jobs, and the other runs report every row (#1195's reasons).
+  stop-tests:
+    name: Stop a failing merge-queue candidate (tests)
+    needs: [test]
+    if: ${{ failure() && github.event_name == 'merge_group' && github.repository_id == '1421805693' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel this candidate's run
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/cancel"
+
+  stop-fuzz:
+    name: Stop a failing merge-queue candidate (fuzz)
+    needs: [fuzz]
+    if: ${{ failure() && github.event_name == 'merge_group' && github.repository_id == '1421805693' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel this candidate's run
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/cancel"
+
   # A merge-queue candidate's auxiliary workflows (#1430), each called whole where the candidate's own change (its merge
   # against its base) touches a path the workflow's pull_request trigger lists: tools/ci/changes.c reads those lists
   # from the workflows themselves (changes_auxiliary_decide), so the rule is written once. A pull request runs them on

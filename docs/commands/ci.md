@@ -39,7 +39,13 @@ nothing, since the queue tested it before it landed.
   stops at its first failure (the owner's choice on 2026-11-12):
   - its tests and fuzz campaigns wait for the policy job;
   - its rows, shards, vector draws and fuzz campaigns fail fast, each within
-    its own matrix.
+    its own matrix;
+  - each shard stops at its first failing command (`parallel --fail-fast`,
+    #2703), as a pull request's does;
+  - once its test rows or fuzz campaigns have failed, `stop-tests` or
+    `stop-fuzz` cancels its run (#2703), so its aggregate fails at once
+    rather than after the other matrix (the fuzz campaigns take about 21
+    minutes).
   It never uses the 9700X (`hardware=skip`, reason `merge-group`), and
   SQLite's full Tcl suite stays nightly.
 - **Selector.** `changes --event merge_group --files LIST --workflow
@@ -159,9 +165,10 @@ request on its hosted rows and says so. All correctness builds run
 the same suite inventory, `tools/ci/correctness.tests`. Failed, cancelled or
 skipped hosted tests cannot queue the hardware job; failed native tests cannot
 start benchmarks. A pull request's run stops at its first failure: its test rows
-fail fast, and its tests don't start when the guide-size or DCO hook check
-fails. A merge-queue candidate's run does too, and its fuzz campaigns fail fast
-as well. Pushes to main, the daily and dispatched runs report every row. The
+fail fast, each shard stops at its first failing command (`parallel
+--fail-fast`, #2703), and its tests don't start when the guide-size or DCO hook
+check fails. A merge-queue candidate's run does too, its fuzz campaigns fail
+fast as well, and its first failed test or fuzz matrix cancels the run. Pushes to main, the daily and dispatched runs report every row. The
 existing required check name is retained by a hosted aggregation job that fails
 when either stage fails.
 Draft and ready PRs alike get hosted feedback and never queue hardware.
