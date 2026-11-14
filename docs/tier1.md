@@ -122,8 +122,8 @@ changing the mapping requires updating that test and re-evaluating these gates.
 compiles each function the pipeline takes by Tier 1 and every other function by
 Tier 0, as without the option, into one System V program
 (`c_check_tier1.c`, #138's piece for #140). Each function's typed stream is
-lowered to the shared IR, promoted to SSA, optimized (SCCP, dead code and CFG
-cleanup), whose final verification retains the CFG and dominators for selection
+lowered to the shared IR, promoted to SSA, optimized (SCCP, dead code, CFG
+cleanup and its merges), whose final verification retains the CFG and dominators for selection
 (#1055), selected and emitted, the CFG consumer allocating it over its CFG
 (`tier1_cfg.c`); with `--scalar`, every step
 by its scalar twin. Its records, branch columns and references take Tier 0's
@@ -164,6 +164,39 @@ promotion, so that promotion's phi placement decides what its merged values
 need. It is a measurement option, off by default, and the measurement says to
 keep it off: its class representatives lengthen live ranges that Tier 1's
 allocation pays for in moves and spills.
+
+`--tier1-passes=LIST` (#139) turns each of the pipeline's optimization passes
+on or off, for the differential campaigns with each pass off and the
+measurements of what each one gains. LIST is a comma-separated list of items
+applied in turn, each `+` or `-` and then a pass's name: `sccp`, `dce`, `cfg`
+(the jump threading), `merge` (CFG cleanup's merges, below), `licm`, `sroa`
+(on every function, with #1282's options, before the solver and promotion),
+`gvn` (as `--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or
+`all`. The default is SCCP, dead-code removal, CFG cleanup, its merges and
+the inlining. LICM runs after if-conversion, before the optimizer, which
+cleans up after it. A function that LICM or SROA refuses goes on as it was.
+The summaries the unit's inlining builds run the same passes, and with SROA,
+as with the solver, a candidate compiles from its own pipeline.
+`--tier1-report` gives each pass's counts: `folded` constants,
+`removed_instructions` and `removed_blocks` (the optimizer's output against
+its input, merges included), `merged_blocks`, `licm_moved`, `sroa_split`
+(slots) and `gvn_removed`.
+
+CFG cleanup's merges join a block to its predecessor when that predecessor is
+its only one and it is the predecessor's only executable successor. The block
+must not be the entry, must carry no label, and must be reached through a
+`br`, or a `cbr` or `switch` that SCCP left one way. A chain of such blocks
+becomes one block. Each block's chain head comes from pointer jumping, the
+threading's kernel with its vector and scalar twins (`ir_optimize_merges`).
+A merged block's phis each have one executable incoming value, which their
+users read in their place, as an identity's do. Its source regions are
+dropped and its head's kept, the rule the debug-region consumer sets for a
+merger. Only Tier 1 asks for the merges (`BUSTER_IR_OPTIMIZE_MERGE`); the
+shared optimizer's default keeps every block. On the frozen `sqlite3.c`,
+9,125 of the 52,642 blocks Tier 1's optimizer kept had such a predecessor.
+Most came from the inlining's splice, which ends a call's block in a jump to
+the callee's entry and each return in a jump to a continuation block.
+Without the inlining there are 3,072 of 37,887.
 
 `--tier1-schedule=post` and `--tier1-schedule=pre` schedule Tier 1's code block
 by block, after allocation on its machine records or before selection on its IR
@@ -451,15 +484,21 @@ into the tied half's register.
 ### Inlining (#1282, #2541)
 
 Between the lowering and SSA promotion, `--tier1` expands a body's calls of the
-unit's candidates (`c_check_tier1_inline.c`): its functions of internal linkage,
-but naked ones and those that call a function that returns twice. An
-always_inline one is expanded whatever its size and control flow, as clang
-expands it, the x86 intrinsics' wrappers above all; one without an inline
-attribute is the small class (#2541 step 1, [the unit inlining
-design](tier1-unit-inlining.md)): a summary of at most 256 instructions, each
-call expanded at an inliner cost of at most 64. The checker records each
-function's always_inline and noinline attributes (`CheckProgram.object_inline`);
-a function with noinline, or with both, is no candidate. The emission lowers
+unit's candidates (`c_check_tier1_inline.c`): its function definitions, but
+naked ones, those that call a function that returns twice, and external ones
+that another unit's definition may replace at link time (a weak or selectany
+declaration, or a late `#pragma weak`), whose calls LLVM's inliner keeps too.
+An external candidate keeps its own code (#2541 step 2). An always_inline one
+is expanded whatever its size and control flow, as clang expands it, the x86
+intrinsics' wrappers above all; one without an inline attribute is the small
+class ([the unit inlining design](tier1-unit-inlining.md)): a summary of at
+most 1,024 instructions, each call expanded at an inliner cost of at most 256
+(step 2's sweep: step 1 had 256 and 64); and an internal one with one direct
+call in the unit and nothing else that keeps it (below) is the single-site
+class, at most 2,048 instructions and a cost of 8,192, since its expansion
+leaves it dead. The checker records each function's always_inline and noinline
+attributes (`CheckProgram.object_inline`); a function with noinline, or with
+both, is no candidate. The emission lowers
 every part before any part's code (`CheckEmitRun.tier1_inline`: the lanes meet
 between the halves, a growing team's code waits for every lowering, a board's
 share runs two epochs), so that a body's lane reads any callee's typed stream.
@@ -480,15 +519,20 @@ summary at selection: its lowering, passes and optimization are moved, not
 repeated. A summary is a function of its body and its callees' summaries, so
 the objects are the same by any lane count.
 
-A caller copies its direct callees' summaries: the unit of the caller and those
-callees (up to 64) goes through `ir_optimize_inline` with `control_flow`
+A caller copies its direct callees' summaries: the unit of the caller and all
+of those callees, each once, by symbol (step 1 took the first 64, which a
+dispatch loop such as `sqlite3VdbeExec` passes; #2541 step 2), goes through
+`ir_optimize_inline` with `control_flow`
 (#2541), each callee's class's cost limit (`IrInlineUnit.limits`), the caller
 alone rewritten (`IrInlineUnit.only`) and its inputs, verified as they were
 made, not verified again (`IrInlineOptions.trusted`). A helper's blocks are
 spliced at the call, its returns joined in a phi ([the inlining
 guide](ir-inlining.md)'s "Callees with control flow"), and copies of 64-, 32-
 and 16-byte vectors take the target's widths ([the inlining guide](ir-inlining.md)'s
-"SIMD callees and by-value vectors"). A callee whose target has a feature its
+"SIMD callees and by-value vectors"). A callee one of whose calls doesn't
+match its signature stays a call at all of them: the inliner checks each call
+and would refuse the whole unit (`ir_inline_signature`), which once left
+`sqlite3VdbeExec` without any expansion. A callee whose target has a feature its
 caller's lacks stays a call. SROA, with its `simd` and `flagged` options ([the
 field splitting guide](ir-scalar-replacement.md)'s "#1282's options"), then
 splits the slots of a body with vectors, as without inlining, or of an
@@ -514,7 +558,37 @@ Any failure of the inlining or of SROA keeps the body as it was lowered, and an
 expansion that promotion refuses or finds past its limits is promoted from the
 unexpanded lowering instead: inlining is an optimization, never a refusal.
 `--tier1-report`'s `inlined` sums the calls expanded into the bodies Tier 1
-compiled; `--tier1-no-inline` keeps every call, for comparison. `test-ir-inline`
+compiled, and `dead` counts the functions left without code (below);
+`--tier1-no-inline` keeps every call, for comparison.
+
+**Dead functions (#2541 step 2).** An internal candidate that no emitted code
+refers to once its callers have expanded its calls gets no code, symbol, frame
+or jump table (`check_tier1_inline_dead`), as LLVM's GlobalDCE drops it. A
+candidate is *rooted*, and keeps its code whatever its callers do, where an
+attribute keeps it (used, constructor, destructor, interrupt, target, an
+alias's, ifunc's or weakref's, section, retain, patchable_function_entry,
+weak, selectany), a section placement, static data's initializers
+(`CheckProgram.initializer_references`) or an alias names it, or where it has
+several versions. The others are alive where a kept body's code refers to them
+(a call no caller expanded, a Tier 0 fallback's, an address taken), followed
+from each body reached. So that a dead function costs no selection,
+allocation or emission, the unit stage marks the candidates that may die (not
+rooted, in no cycle, whose address no code takes: a `GLOBAL_ADDRESS` entry of a
+typed stream, found 64 kinds a vector with a scalar twin), and such a body
+whose summary its callers should expand (offered at its target, at an inliner
+cost within its class's limit) makes no code on its lane
+(`check_tier1_inline_held`). Once the lanes are done, the emission's last pass
+(`check_program_emit_last`, on the calling thread with lane 0's state) makes
+the code of each held body that the emitted code still refers to, from its
+summary, until none is left; the merge leaves the rest out. The objects are the
+same with and without holding (`--tier1-no-hold` makes every candidate's code
+on its lane, the comparison's control), and by any lane count. In `-c`'s object alone,
+whose symbols that nothing refers to are left out (a direct executable's
+binding resolves every program symbol, and keeps every function), not under `-g`, whose
+entries have no form for a function without code yet (#2541 step 3), with
+`-fpatchable-function-entry`, or in a unit with asm, whose templates refer to
+names. A dead function is no function of the object's for
+`--tier1-report`'s counts and `--tier1-function-sizes`' manifest. `test-ir-inline`
 runs the inliner's SIMD and by-value fixtures, the latter on the IR's
 interpreter before and after inlining, SROA and promotion, #2541's generated
 units of callees with control flow, and the per-callee limits and caller-only
@@ -788,7 +862,11 @@ PR #1159 removed the redundant call moves and repeated call saves described
 by #1116. Its remaining Lua size criterion is now an explicit corpus gate:
 `measure-tier1-programs --check-code-size=lua` requires the sum of all emitted
 Tier 1 function bytes across Lua's 34 sources, including `luac.c`, to be no
-greater than the matching Clang `-O0` sum. The command also reports SQLite's
+greater than the matching Clang `-O0` sum. Its Tier 1 objects are built with
+`--tier1-no-inline` (#2541 step 2): the bound is per function against clang
+-O0's same function, which a body with other functions' bodies expanded into
+it has no counterpart of; inlining's growth is the [unit inlining
+design](tier1-unit-inlining.md)'s own measurement. The command also reports SQLite's
 `sqlite3.c`; `test-c-testsuite --tier1 --code-size` reports the same quantities
 for c-testsuite. Their above-bound results stay visible as `gate=fail` with
 `enforced=0`. Strict optional gates remain available with the bare

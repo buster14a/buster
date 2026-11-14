@@ -138,8 +138,10 @@ measurements.
 all-core path](../all-core-path.md): one lane's emission
 (`check_program_emit_alone`) cuts its bodies into parts of about N of their
 tokens, as the lanes cut theirs, and takes each part's lowering and its code
-before the next part's (`check_program_emit_windows`). 0, the default, is one
-part, today's order and the windows' twin. A part's typed streams and Tier 0
+before the next part's (`check_program_emit_windows`). The driver's default is
+2,048 tokens (`BUSTER_CHECK_EMIT_WINDOW_TOKENS`, the owner's choice once step 1
+was measured); 0 is one part, the order before windows and their twin, and a
+caller without the driver (`CheckProgramLanes` zeroed) gets it. A part's typed streams and Tier 0
 code go in the thread's window (`check_program_thread_window`: base pages,
 reserved once and never given back), which the part pops when its code is
 done, so the next part's pushes find the same pages in the cache. Before the

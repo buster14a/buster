@@ -947,6 +947,85 @@ fixtures that measure a frame across a call (a backtrace's depth, a value kept
 in a callee-saved register across one) mark their callees `noinline`, since a
 small static helper is now expanded.
 
+### Step 2, measured
+
+Step 2 landed in #2713 ([the Tier 1 guide](tier1.md)'s "Inlining" and "Dead
+functions"). Where it departs from the design above:
+
+- **External definitions** are candidates of the always_inline and small
+  classes, but where another unit's definition may replace them (a weak or
+  selectany declaration, a late `#pragma weak`), and keep their own code.
+- **The classes.** Small: a summary of at most 1,024 instructions at an inliner
+  cost of at most 256, by the sweep below. Single-site: an internal function
+  with one direct call in the unit and nothing else keeping it, at most 2,048
+  instructions at a cost of 8,192. The shrinking class is inside the small one,
+  and no growth budget per caller is set: the sweep's larger limits cost
+  speedtest1 cycles past 256 before any caller's growth did.
+- **Dead functions, held code and the last pass.** A candidate's code is held
+  where its summary is a form its callers copy and nothing else keeps it (an
+  attribute, a section, static data, an alias, an address taken in code, a
+  cycle); the emission's last pass makes the held code that emitted code still
+  refers to, and the merge leaves the rest out. The objects are the same with
+  and without holding (`--tier1-no-hold`) and by any lane count. Only in `-c`'s
+  objects: an executable's binding, direct or of a link of several units,
+  resolves every program symbol; not under `-g` (step 3) or in a unit with asm.
+- **Every callee, every call.** A caller copies all its callees' summaries (step
+  1 stopped at 64), and leaves out a callee one of whose calls doesn't match its
+  signature: the inliner checks each call and refused `sqlite3VdbeExec`'s
+  whole unit over one, which kept every call of the program's hottest caller.
+  That fix alone removed 5.6 M of speedtest1's 26.2 M calls at `--size 2` and
+  2.4% of its instructions.
+- **The two forms** were measured and not adopted: copying a wrapper's plain
+  form keeps its deeper callee alive and called from every copy, and on
+  speedtest1 cost 1.5% more instructions and 17.7% more `.text`, with 260 fewer
+  dead functions (the record's `local/two-forms.txt`).
+- **Fixes on the way.** The inliner sized a straight-line callee's tables by
+  their length rather than by the rows its nodes name, which an optimized
+  summary may hold stale rows past (the self-hosted build's internal error);
+  and with several lanes a body that expanded a callee's call of a runtime
+  function kept its provisional symbol (the campaign's failures).
+- **#1116's size bound** is measured with `--tier1-no-inline`: it compares each
+  function with clang -O0's same function, of which an expanded body has none.
+
+The gate, on the 9700X, by the PR's head merged with main (`583e2499`, against
+main `3482ab88`; the record is buster-performance's
+`tier1-unit-inlining-step2-2541-2026-11-14`; 6 rounds; user cycles as 100 ln(head / control), speedtest1
+over eight placements and Lua over four link orders, with each one's 95%
+interval):
+
+| Gate | Result |
+| --- | --- |
+| speedtest1 at least 12% fewer cycles | **met**: -14.61 (-15.06 to -14.16) against `--tier1-no-inline`, faster at 8 of 8; -8.42 against main |
+| Lua at least 7.5% fewer cycles | **met**: -8.81 (-10.79 to -6.82), faster at 4 of 4; -7.17 against main |
+| no more `.text` than the prototype's (+64.6%, +66.3%) | **met**: +59.8% and +47.0%; the target, the gain at half that growth, is not reached |
+| the compiler built by `--tier1` at most 60 M returns | **at the edge**: 60.8 M and 60.1 M by two builds of the head (59.8 M by `71e9ee75`), from 481.7 M without inlining and 139.4 M by main's |
+| and at least 8% fewer cycles | **met**: -10.9% against `--tier1-no-inline`'s build (7,534 M against 8,458 M; -2.2% against main's) |
+| a Csmith and YARPGen campaign of at least 1,000 programs | **met**: of 1,400 generated, 1,157 run by `--tier1`, `--tier1 --tier1-no-inline` and clang alike, none differing; the 243 others clang -O0's own failures (YARPGen's arrays past the small code model at its link, timeouts, output past the harness's limit) |
+
+The compile (`--tier1 -c sqlite3.c`, one lane): 3,474 M cycles against
+2,163 M without inlining (+60.6%) for `.text` 988,824 to 1,584,072 bytes
+(+60.2%): the compile's growth is the code's, as the design claimed. Holding
+takes 8.8% of it (3,808 M with `--tier1-no-hold`). Against main's 2,545 M,
++36.5%. Objects are the same bytes by one lane and eight, with and without
+holding, by both twins (72 of 72 pairs). Lua's `calls.lua` alone is slower than
+main's (+5.4%, with 1.2% fewer instructions, fewer branches and as many misses):
+an IPC loss of `luaV_execute`'s that its other four scripts' gains outweigh.
+
+The sweep before (5 rounds, against `--tier1-no-inline`):
+
+| Limit (cost, size) | speedtest1 | Lua | speedtest1 `.text` | Lua `.text` | `-c sqlite3.c` cycles |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| main (step 1) | -5.33 | -2.26 | +12.4% | +15.7% | +17.2% |
+| 128, 512 | -13.67 | -6.16 | +43.0% | +20.8% | |
+| 192, 768 | -13.93 | -7.66 | +48.9% | +36.0% | +52.3% |
+| 256, 1,024 | -14.46 | -7.99 | +60.0% | +47.0% | +61.2% |
+
+The calls left in the self-built compiler (`perf record -j any_call`) are
+larger hashing and interning functions with several callers
+(`intern_hash_bytes_scalar`, `refine_intern_identifier`,
+`intern_find_or_add_hashed`, `refine_gap_is_splices`) and the C library's
+(`memcmp`, `memcpy`): the limits, not the reach, leave them.
+
 ### Expected gains
 
 As changes of `--tier1`'s user cycles, with the measurements each rests on:

@@ -88,6 +88,8 @@
 #define BUSTER_ATTESTED_MAX_IDS (1u << 24)
 #define BUSTER_ATTESTED_MEMO_FIRST_SLOTS (1u << 12)
 #define BUSTER_ATTESTED_MEMO_SLOTS (1u << 22)
+// The most hashes a command of one source file's memo holds (CheckAttested.alone): a full file's, and as many learned.
+#define BUSTER_ATTESTED_ALONE_HASHES (1u << 21)
 #define BUSTER_ATTESTED_NONE UINT32_MAX
 
 // The passes, as they are timed.
@@ -290,6 +292,10 @@ struct CheckAttested
     Parser view;
     uint32_t* view_begins;
     uint32_t* view_ends;
+    // The declarations a view reads, in order (`view_read_count` of them), which the reader's tree columns take one after
+    // another without a skipped one's state (check_attested_tree_columns).
+    uint32_t* view_reads;
+    uint32_t view_read_count;
     uint8_t* view_levels;
     uint32_t* view_pragmas;
     // Step 4 (--attested-memo, check_attested_memo_load and check_attested_memo_save): the memo kept across processes, in
@@ -312,6 +318,11 @@ struct CheckAttested
     Arena fresh_arena;
     CheckAttestedHash* fresh;
     uint64_t fresh_count;
+    // A command of one source file's memo is its hashes in the order loaded and learned (`memo`, `memo_count` of them; the
+    // fresh ones those past `memo_loaded`) and a table of their indexes plus one (`memo_index`, `memo_mask + 1` slots, zero
+    // empty) at most half full: about 24 bytes a hash for a process to fault in, where a table of the hashes themselves
+    // takes 32 to 64 (check_attested_memo_has_alone).
+    uint32_t* memo_index;
     // The lane's units that skipped, those read as their view, and those read again.
     uint64_t units_skipping;
     uint64_t units_viewing;
@@ -537,21 +548,88 @@ static bool check_attested_equal(CheckAttestedHash a, CheckAttestedHash b)
     return a.low == b.low && a.high == b.high;
 }
 
-// Whether the memo holds `hash`.
-static bool check_attested_memo_has(const CheckAttested* census, CheckAttestedHash hash)
+// Whether a command of one source file's memo holds `hash` (CheckAttested.memo_index): its probe of the index table.
+static bool check_attested_memo_has_alone(const CheckAttested* census, CheckAttestedHash hash)
 {
     const uint64_t mask = census->memo_mask;
     uint64_t slot = hash.low & mask;
+    uint32_t index = census->memo_index[slot];
     bool found = false;
-    bool probing = true;
-    while (probing)
+    while (!found && index != 0)
     {
-        const CheckAttestedHash entry = census->memo[slot];
-        found = check_attested_equal(entry, hash);
-        probing = !found && entry.low != 0;
+        found = check_attested_equal(census->memo[index - 1], hash);
         slot = (slot + 1) & mask;
+        index = census->memo_index[slot];
     }
     return found;
+}
+
+// Whether the memo holds `hash`.
+static bool check_attested_memo_has(const CheckAttested* census, CheckAttestedHash hash)
+{
+    bool found = false;
+    if (census->alone)
+    {
+        found = check_attested_memo_has_alone(census, hash);
+    }
+    else
+    {
+        const uint64_t mask = census->memo_mask;
+        uint64_t slot = hash.low & mask;
+        bool probing = true;
+        while (probing)
+        {
+            const CheckAttestedHash entry = census->memo[slot];
+            found = check_attested_equal(entry, hash);
+            probing = !found && entry.low != 0;
+            slot = (slot + 1) & mask;
+        }
+    }
+    return found;
+}
+
+// Index `index` (a hash's in a command of one source file's memo, plus one) into an index table of `mask + 1` slots that
+// has room for it, by the hash's low word `low`.
+static void check_attested_memo_index_put(uint32_t* table, uint64_t mask, uint64_t low, uint32_t index)
+{
+    uint64_t slot = low & mask;
+    while (table[slot] != 0)
+    {
+        slot = (slot + 1) & mask;
+    }
+    table[slot] = index;
+}
+
+// A command of one source file's memo's index table, of `slots` slots, its hashes' indexes in it: whether there was room.
+static bool check_attested_memo_index(CheckAttested* census, uint64_t slots)
+{
+    uint32_t* const table = arena_push_array(&census->memo_arena, slots, sizeof(uint32_t), 64);
+    for (uint64_t h = 0; table != NULL && h < census->memo_count; h += 1)
+    {
+        check_attested_memo_index_put(table, slots - 1, census->memo[h].low, (uint32_t)h + 1);
+    }
+    census->memo_index = table != NULL ? table : census->memo_index;
+    census->memo_mask = table != NULL ? slots - 1 : census->memo_mask;
+    return table != NULL;
+}
+
+// A command of one source file's memo with `hash`, its index table doubled first where it is half full: whether it holds
+// it (false where it would hold more than BUSTER_ATTESTED_ALONE_HASHES, or the arena has no room).
+static bool check_attested_memo_add_alone(CheckAttested* census, CheckAttestedHash hash)
+{
+    const bool below = census->memo_count < BUSTER_ATTESTED_ALONE_HASHES;
+    bool room = below && census->memo_count < (census->memo_mask + 1) / 2;
+    if (below && !room && census->memo_mask + 1 < BUSTER_ATTESTED_MEMO_SLOTS)
+    {
+        room = check_attested_memo_index(census, 2 * (census->memo_mask + 1));
+    }
+    if (room && !check_attested_memo_has_alone(census, hash))
+    {
+        census->memo[census->memo_count] = hash;
+        census->memo_count += 1;
+        check_attested_memo_index_put(census->memo_index, census->memo_mask, hash.low, (uint32_t)census->memo_count);
+    }
+    return room;
 }
 
 // `hash` into a table of `mask + 1` slots that has room for it.
@@ -577,8 +655,8 @@ static void check_attested_memo_put(CheckAttestedHash* table, uint64_t mask, Che
 // has no room).
 static bool check_attested_memo_add(CheckAttested* census, CheckAttestedHash hash)
 {
-    bool room = census->memo_count < (census->memo_mask + 1) / 4;
-    if (!room && census->memo_mask + 1 < BUSTER_ATTESTED_MEMO_SLOTS)
+    bool room = !census->alone && census->memo_count < (census->memo_mask + 1) / 4;
+    if (!census->alone && !room && census->memo_mask + 1 < BUSTER_ATTESTED_MEMO_SLOTS)
     {
         const uint64_t mask = census->memo_mask * 2 + 1;
         CheckAttestedHash* table = arena_push_array(&census->memo_arena, mask + 1, sizeof(CheckAttestedHash), 64);
@@ -599,6 +677,7 @@ static bool check_attested_memo_add(CheckAttested* census, CheckAttestedHash has
     {
         check_attested_memo_put(census->memo, census->memo_mask, hash, &census->memo_count);
     }
+    room = census->alone ? check_attested_memo_add_alone(census, hash) : room;
     // (A hash new to a memo kept across processes is the file's at the lane's close.)
     if (census->memo_count != before && census->fresh != NULL && census->fresh_count < BUSTER_ATTESTED_MEMO_SLOTS)
     {
@@ -1587,8 +1666,12 @@ static bool check_attested_lists_cached(CheckAttested* census, const Parser* par
         // The table is the lane's, out of the first two caches by the next unit: a slot a few declarations on is fetched
         // while this one's list is copied.
         const uint32_t ahead = d + BUSTER_ATTESTED_LIST_AHEAD < declarations ? d + BUSTER_ATTESTED_LIST_AHEAD : d;
-        __builtin_prefetch(census->list_slots + ((census->owns[ahead].low | 1) & census->list_mask));
-        CheckAttestedListSlot* slot = kept ? check_attested_list_slot(census, low, high, length) : NULL;
+        // (A command of one source file's state keeps no cache: each list made, CheckAttested.alone.)
+        if (!census->alone)
+        {
+            __builtin_prefetch(census->list_slots + ((census->owns[ahead].low | 1) & census->list_mask));
+        }
+        CheckAttestedListSlot* slot = kept && !census->alone ? check_attested_list_slot(census, low, high, length) : NULL;
         census->list_blocks[d] = BUSTER_ATTESTED_NONE;
         if (slot != NULL && slot->low != 0)
         {
@@ -2585,6 +2668,36 @@ static bool check_attested_memo_key(int count, char** arguments, char* const* in
     return build.found;
 }
 
+// A command of one source file's memo from the open file `file`'s `records` records, after its header: read whole into
+// the memo's array by one call (its pages the array's own), then each valid record that isn't there yet kept in turn,
+// its index in a table sized once for them and a unit's more, half full. Whether they could be read.
+static bool check_attested_memo_load_alone(CheckAttested* census, int file, uint64_t records)
+{
+    uint64_t slots = BUSTER_ATTESTED_MEMO_FIRST_SLOTS;
+    while (slots < BUSTER_ATTESTED_MEMO_SLOTS && slots / 2 < records + records / 8 + 64)
+    {
+        slots *= 2;
+    }
+    const ssize_t length = (ssize_t)(records * sizeof(CheckAttestedHash));
+    bool valid = census->memo_count == 0 && records <= BUSTER_ATTESTED_ALONE_HASHES &&
+                 pread(file, census->memo, (size_t)length, BUSTER_ATTESTED_MEMO_HEADER) == length;
+    valid = valid && (slots == census->memo_mask + 1 || check_attested_memo_index(census, slots));
+    uint64_t kept = 0;
+    for (uint64_t r = 0; valid && r < records; r += 1)
+    {
+        const CheckAttestedHash hash = census->memo[r];
+        if ((hash.low & 1) != 0 && !check_attested_memo_has_alone(census, hash))
+        {
+            census->memo[kept] = hash;
+            kept += 1;
+            census->memo_count = kept;
+            check_attested_memo_index_put(census->memo_index, census->memo_mask, hash.low, (uint32_t)kept);
+        }
+    }
+    census->memo_loaded = census->memo_count;
+    return valid;
+}
+
 // The memo's file into `census->memo` (counted in memo_loaded): its header checked against the key, then each whole
 // record. Whether the file was there with this key's header.
 static bool check_attested_memo_load(CheckAttested* census)
@@ -2594,13 +2707,47 @@ static bool check_attested_memo_load(CheckAttested* census)
     struct stat status;
     const bool sized = locked && fstat(file, &status) == 0 && status.st_size >= BUSTER_ATTESTED_MEMO_HEADER;
     const uint64_t records = sized ? ((uint64_t)status.st_size - BUSTER_ATTESTED_MEMO_HEADER) / sizeof(CheckAttestedHash) : 0;
-    uint8_t* const bytes = sized && records <= BUSTER_ATTESTED_MEMO_RECORDS ? malloc(BUSTER_ATTESTED_MEMO_HEADER + records * sizeof(CheckAttestedHash)) : NULL;
-    const uint64_t length = bytes != NULL ? BUSTER_ATTESTED_MEMO_HEADER + records * sizeof(CheckAttestedHash) : 0;
-    uint64_t done = 0;
-    while (bytes != NULL && done < length)
+    uint8_t header[BUSTER_ATTESTED_MEMO_HEADER];
+    uint64_t key[2] = { 0 };
+    bool valid = sized && records <= BUSTER_ATTESTED_MEMO_RECORDS && pread(file, header, sizeof(header), 0) == (ssize_t)sizeof(header);
+    if (valid)
     {
-        const ssize_t got = pread(file, bytes + done, length - done, (off_t)done);
-        done = got > 0 ? done + (uint64_t)got : length + 1;
+        memcpy(key, header + 8, sizeof(key));
+    }
+    valid = valid && memcmp(header, BUSTER_ATTESTED_MEMO_MAGIC, 8) == 0 && key[0] == census->memo_key.low && key[1] == census->memo_key.high;
+    if (valid && census->alone)
+    {
+        valid = check_attested_memo_load_alone(census, file, records);
+    }
+    else if (valid)
+    {
+        // The table at the size its records and a unit's more take, at once, past the sizes doubling would leave in its
+        // arena: a quarter full.
+        uint64_t slots = BUSTER_ATTESTED_MEMO_FIRST_SLOTS;
+        while (slots < BUSTER_ATTESTED_MEMO_SLOTS && slots / 4 < records + records / 8 + 256)
+        {
+            slots *= 2;
+        }
+        CheckAttestedHash* const table = slots != census->memo_mask + 1 ? arena_push_array(&census->memo_arena, slots, sizeof(CheckAttestedHash), 64) : NULL;
+        census->memo = table != NULL ? table : census->memo;
+        census->memo_mask = table != NULL ? slots - 1 : census->memo_mask;
+        // The records a block at a time through a buffer on the stack (no copy of the file to fault in), each into the
+        // memo: loaded, not learned, so that none is fresh.
+        CheckAttestedHash* const fresh = census->fresh;
+        census->fresh = NULL;
+        CheckAttestedHash block[256];
+        for (uint64_t r = 0; valid && r < records; r += BUSTER_ARRAY_LENGTH(block))
+        {
+            const uint64_t count = records - r < BUSTER_ARRAY_LENGTH(block) ? records - r : BUSTER_ARRAY_LENGTH(block);
+            const ssize_t length = (ssize_t)(count * sizeof(CheckAttestedHash));
+            valid = pread(file, block, (size_t)length, (off_t)(BUSTER_ATTESTED_MEMO_HEADER + r * sizeof(CheckAttestedHash))) == length;
+            for (uint64_t k = 0; valid && k < count; k += 1)
+            {
+                const bool room = (block[k].low & 1) != 0 && check_attested_memo_add(census, block[k]);
+                census->memo_loaded += room ? 1 : 0;
+            }
+        }
+        census->fresh = fresh;
     }
     if (locked)
     {
@@ -2610,34 +2757,6 @@ static bool check_attested_memo_load(CheckAttested* census)
     {
         close(file);
     }
-    uint64_t key[2] = { 0 };
-    if (done == length && bytes != NULL)
-    {
-        memcpy(key, bytes + 8, sizeof(key));
-    }
-    const bool valid = done == length && bytes != NULL && memcmp(bytes, BUSTER_ATTESTED_MEMO_MAGIC, 8) == 0 && key[0] == census->memo_key.low && key[1] == census->memo_key.high;
-    // The table at the size its records and a unit's more take, at once, past the sizes doubling would leave in its arena
-    // (each page a process faults in).
-    uint64_t slots = BUSTER_ATTESTED_MEMO_FIRST_SLOTS;
-    while (valid && slots < BUSTER_ATTESTED_MEMO_SLOTS && slots / 4 < records + records / 4 + 1024)
-    {
-        slots *= 2;
-    }
-    CheckAttestedHash* const table = slots != census->memo_mask + 1 ? arena_push_array(&census->memo_arena, slots, sizeof(CheckAttestedHash), 64) : NULL;
-    census->memo = table != NULL ? table : census->memo;
-    census->memo_mask = table != NULL ? slots - 1 : census->memo_mask;
-    // (Loaded, not learned: no record of the file is fresh.)
-    CheckAttestedHash* const fresh = census->fresh;
-    census->fresh = NULL;
-    for (uint64_t r = 0; valid && r < records; r += 1)
-    {
-        CheckAttestedHash hash;
-        memcpy(&hash, bytes + BUSTER_ATTESTED_MEMO_HEADER + r * sizeof(CheckAttestedHash), sizeof(hash));
-        const bool room = (hash.low & 1) != 0 && check_attested_memo_add(census, hash);
-        census->memo_loaded += room ? 1 : 0;
-    }
-    census->fresh = fresh;
-    free(bytes);
     return valid;
 }
 
@@ -2646,7 +2765,9 @@ static bool check_attested_memo_load(CheckAttested* census)
 // again with the header and the memo whole.
 static void check_attested_memo_save(CheckAttested* census)
 {
-    const char* const slash = census->memo_path != NULL && census->fresh_count != 0 ? strrchr(census->memo_path, '/') : NULL;
+    // (A command of one source file's fresh hashes are its memo's past those loaded.)
+    const uint64_t fresh_count = census->alone ? census->memo_count - census->memo_loaded : census->fresh_count;
+    const char* const slash = census->memo_path != NULL && fresh_count != 0 ? strrchr(census->memo_path, '/') : NULL;
     if (slash != NULL)
     {
         // The directory, made where it isn't there yet.
@@ -2673,7 +2794,7 @@ static void check_attested_memo_save(CheckAttested* census)
     const uint64_t records = ours ? ((uint64_t)status.st_size - BUSTER_ATTESTED_MEMO_HEADER) / sizeof(CheckAttestedHash) : 0;
     // A file that isn't this key's (new, empty, torn in its header: its name is the key's) or is past its most records, or
     // a torn record, is written again from its start with this lane's memo whole; any other takes the fresh hashes.
-    const bool again = !ours || records + census->fresh_count > BUSTER_ATTESTED_MEMO_RECORDS ||
+    const bool again = !ours || records + fresh_count > BUSTER_ATTESTED_MEMO_RECORDS ||
                        ((uint64_t)status.st_size - BUSTER_ATTESTED_MEMO_HEADER) % sizeof(CheckAttestedHash) != 0;
     bool written = sized && ftruncate(file, again ? 0 : status.st_size) == 0;
     off_t at = again ? 0 : status.st_size;
@@ -2682,9 +2803,12 @@ static void check_attested_memo_save(CheckAttested* census)
         written = pwrite(file, header, sizeof(header), 0) == (ssize_t)sizeof(header);
         at = BUSTER_ATTESTED_MEMO_HEADER;
     }
-    // The records: the fresh ones, or with `again` every slot of the memo.
-    const CheckAttestedHash* const from = again ? census->memo : census->fresh;
-    const uint64_t slots = again ? census->memo_mask + 1 : census->fresh_count;
+    // The records: the fresh ones, or with `again` every slot of the memo (a command of one source file's every hash, its
+    // last BUSTER_ATTESTED_MEMO_RECORDS at most).
+    const uint64_t first = again && census->alone && census->memo_count > BUSTER_ATTESTED_MEMO_RECORDS ? census->memo_count - BUSTER_ATTESTED_MEMO_RECORDS : 0;
+    const CheckAttestedHash* const fresh = census->alone ? census->memo + census->memo_loaded : census->fresh;
+    const CheckAttestedHash* const from = again ? census->memo + first : fresh;
+    const uint64_t slots = again ? (census->alone ? census->memo_count - first : census->memo_mask + 1) : fresh_count;
     CheckAttestedHash block[256];
     uint32_t held = 0;
     for (uint64_t k = 0; written && k <= slots; k += 1)
@@ -2711,6 +2835,7 @@ static void check_attested_memo_save(CheckAttested* census)
         close(file);
     }
     census->fresh_count = 0;
+    census->memo_loaded = census->alone ? census->memo_count : census->memo_loaded;
 }
 
 // A lane's memo kept across processes: the file for `key` in `directory`, loaded, and the hashes portable from here (the
@@ -2731,9 +2856,13 @@ static bool check_attested_memo_open(CheckAttested* census, const char* director
     {
         snprintf(census->memo_path, length, "%s/%016" PRIx64 "%016" PRIx64 ".attested", directory, key[0], key[1]);
     }
-    census->fresh_arena = check_attested_reserve(census, (uint64_t)BUSTER_ATTESTED_MEMO_SLOTS * sizeof(CheckAttestedHash) + 4096);
-    census->fresh = arena_push_array(&census->fresh_arena, BUSTER_ATTESTED_MEMO_SLOTS, sizeof(CheckAttestedHash), 64);
-    const bool room = census->memo_path != NULL && census->fresh != NULL;
+    // (A command of one source file's fresh hashes are its memo's own, CheckAttested.memo_index.)
+    if (!census->alone)
+    {
+        census->fresh_arena = check_attested_reserve(census, (uint64_t)BUSTER_ATTESTED_MEMO_SLOTS * sizeof(CheckAttestedHash) + 4096);
+        census->fresh = arena_push_array(&census->fresh_arena, BUSTER_ATTESTED_MEMO_SLOTS, sizeof(CheckAttestedHash), 64);
+    }
+    const bool room = census->memo_path != NULL && (census->alone || census->fresh != NULL);
     if (room)
     {
         check_attested_memo_load(census);
@@ -2842,13 +2971,11 @@ static bool check_attested_decide(CheckAttested* attested, const Parser* parser,
 {
     attested->stamp += 1;
     const bool scalar = parser->options.scalar;
-    // (Without the lane's caches, the lists by the walk, a token at a time, as the cache makes a miss's.)
-    const bool walked = BUSTER_SCALAR_PATH(scalar) || attested->alone;
-    const bool listed = (walked ? check_attested_lists_walk(attested, parser) : check_attested_lists(attested, parser, scalar)) && check_attested_pragmas(attested, parser, pp);
+    const bool listed = check_attested_lists(attested, parser, scalar) && check_attested_pragmas(attested, parser, pp);
     if (listed)
     {
         // (The vector path's lists made the own hashes, their key.)
-        if (walked)
+        if (BUSTER_SCALAR_PATH(scalar))
         {
             check_attested_hashes(attested, parser, scalar);
         }
@@ -2893,46 +3020,60 @@ static void* check_attested_view_column(Arena* arena, const void* column, uint32
     return bytes != NULL ? bytes + padding : NULL;
 }
 
-// `length` parents from `from` to `to`, each but a root's (BUSTER_PARSE_ROOT) less `shift`: 16 at a time, the last
-// masked; the scalar path's a token at a time is its twin.
-static void check_attested_view_parents(uint32_t* to, const uint32_t* from, uint32_t length, uint32_t shift, bool scalar)
+// A run of `length` read tokens of the parse, from its token `from`, into the view at `at`: every column, a read token's
+// parent (but a root's, BUSTER_PARSE_ROOT) less the skipped tokens before the run, its origin (its index in the parse),
+// and its system level where the passes mapped them (`levels`, or null). The vector path 16 tokens at a time, each
+// column a masked load and store, so that a short run costs no call; the scalar path's a token at a time is its twin.
+static void check_attested_view_run(Parser* view, const Parser* parser, uint8_t* view_levels, const uint8_t* levels, uint32_t* origins, uint32_t from,
+                                    uint32_t at, uint32_t length, bool scalar)
 {
-    uint32_t k = 0;
+    const uint32_t shift = from - at;
     const __m512i root = _mm512_set1_epi32((int32_t)BUSTER_PARSE_ROOT);
     const __m512i down = _mm512_set1_epi32((int32_t)shift);
-    for (; !BUSTER_SCALAR_PATH(scalar) && k < length; k += 16)
-    {
-        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffffu, length - k < 16 ? length - k : 16);
-        const __m512i parent = _mm512_maskz_loadu_epi32(lanes, from + k);
-        const __mmask16 inner = _mm512_mask_cmpneq_epi32_mask(lanes, parent, root);
-        _mm512_mask_storeu_epi32(to + k, lanes, _mm512_mask_sub_epi32(parent, inner, parent, down));
-    }
-    for (; k < length; k += 1)
-    {
-        to[k] = from[k] != BUSTER_PARSE_ROOT ? from[k] - shift : BUSTER_PARSE_ROOT;
-    }
-}
-
-// `length` tokens' origins into `to`: `from`, then each the last's plus one (Parser.origins), 16 at a time, the last
-// masked; the scalar path's a token at a time is its twin.
-static void check_attested_view_origins(uint32_t* to, uint32_t from, uint32_t length, bool scalar)
-{
-    uint32_t k = 0;
     const __m512i lane = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    uint32_t k = 0;
     for (; !BUSTER_SCALAR_PATH(scalar) && k < length; k += 16)
     {
         const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffffu, length - k < 16 ? length - k : 16);
-        _mm512_mask_storeu_epi32(to + k, lanes, _mm512_add_epi32(_mm512_set1_epi32((int32_t)(from + k)), lane));
+        const uint32_t t = from + k;
+        const uint32_t v = at + k;
+        _mm_mask_storeu_epi8(view->tokens.kinds + v, lanes, _mm_maskz_loadu_epi8(lanes, parser->tokens.kinds + t));
+        _mm_mask_storeu_epi8(view->tokens.flags + v, lanes, _mm_maskz_loadu_epi8(lanes, parser->tokens.flags + t));
+        _mm_mask_storeu_epi8(view->tree.roles + v, lanes, _mm_maskz_loadu_epi8(lanes, parser->tree.roles + t));
+        _mm512_mask_storeu_epi32(view->tokens.names + v, lanes, _mm512_maskz_loadu_epi32(lanes, parser->tokens.names + t));
+        _mm512_mask_storeu_epi32(view->tokens.sources + v, lanes, _mm512_maskz_loadu_epi32(lanes, parser->tokens.sources + t));
+        _mm512_mask_storeu_epi32(view->tree.depths + v, lanes, _mm512_maskz_loadu_epi32(lanes, parser->tree.depths + t));
+        const __m512i parent = _mm512_maskz_loadu_epi32(lanes, parser->tree.parents + t);
+        const __mmask16 inner = _mm512_mask_cmpneq_epi32_mask(lanes, parent, root);
+        _mm512_mask_storeu_epi32(view->tree.parents + v, lanes, _mm512_mask_sub_epi32(parent, inner, parent, down));
+        _mm512_mask_storeu_epi32(origins + v, lanes, _mm512_add_epi32(_mm512_set1_epi32((int32_t)t), lane));
+        if (levels != NULL)
+        {
+            _mm_mask_storeu_epi8(view_levels + v, lanes, _mm_maskz_loadu_epi8(lanes, levels + t));
+        }
     }
     for (; k < length; k += 1)
     {
-        to[k] = from + k;
+        const uint32_t t = from + k;
+        const uint32_t v = at + k;
+        view->tokens.kinds[v] = parser->tokens.kinds[t];
+        view->tokens.flags[v] = parser->tokens.flags[t];
+        view->tree.roles[v] = parser->tree.roles[t];
+        view->tokens.names[v] = parser->tokens.names[t];
+        view->tokens.sources[v] = parser->tokens.sources[t];
+        view->tree.depths[v] = parser->tree.depths[t];
+        view->tree.parents[v] = parser->tree.parents[t] != BUSTER_PARSE_ROOT ? parser->tree.parents[t] - shift : BUSTER_PARSE_ROOT;
+        origins[v] = t;
+        if (levels != NULL)
+        {
+            view_levels[v] = levels[t];
+        }
     }
 }
 
 // The view of `parser`'s unit, whose skipped declarations the marks hold (skipped_tokens of its tokens), into
-// CheckAttested.view: its columns copied a run of read declarations at a time (runs between skipped ones), each column's
-// run one copy, its parents moved down; each declaration's place in it; the read tokens' system levels (where the passes
+// CheckAttested.view: its columns copied a run of read declarations at a time (runs between skipped ones,
+// check_attested_view_run), its parents moved down; each declaration's place in it; the read tokens' system levels (where the passes
 // mapped them) and the pragmas' positions moved down by the skipped tokens before them (a pragma inside a declaration
 // makes it ineligible, so that none is inside a skipped one). Whether there was room: without it the reader takes the
 // parse with the marks, as step 2's did.
@@ -2967,11 +3108,13 @@ static bool check_attested_view(CheckAttested* census, const Parser* parser)
     view->origins = origins;
     census->view_begins = arena_push_array(arena, (uint64_t)declarations + 1, sizeof(uint32_t), 64);
     census->view_ends = arena_push_array(arena, (uint64_t)declarations + 1, sizeof(uint32_t), 64);
+    census->view_reads = arena_push_array(arena, (uint64_t)declarations + 1, sizeof(uint32_t), 64);
+    census->view_read_count = 0;
     census->view_levels = census->levels_ready ? arena_push_array(arena, (uint64_t)read + 1, sizeof(uint8_t), 64) : NULL;
     census->view_pragmas = arena_push_array(arena, (uint64_t)parser->tokens.pragma_count + 1, sizeof(uint32_t), 64);
     const bool room = view->tokens.kinds != NULL && view->tokens.names != NULL && view->tokens.sources != NULL && view->tokens.flags != NULL &&
                       view->tree.roles != NULL && view->tree.depths != NULL && view->tree.parents != NULL && origins != NULL && census->view_begins != NULL &&
-                      census->view_ends != NULL && (census->view_levels != NULL || !census->levels_ready) && census->view_pragmas != NULL &&
+                      census->view_ends != NULL && census->view_reads != NULL && (census->view_levels != NULL || !census->levels_ready) && census->view_pragmas != NULL &&
                       (declarations == 0 || census->lasts[declarations - 1] + 1 == count);
     // A run: declarations [`d`, `e`), read, from token `from` (the first's) to `to` (past the last's), its tokens at `at`
     // in the view.
@@ -2987,6 +3130,8 @@ static bool check_attested_view(CheckAttested* census, const Parser* parser)
         {
             census->view_begins[e] = skipped ? at : at + (census->firsts[e] - census->firsts[d]);
             census->view_ends[e] = skipped ? at : at + (census->lasts[e] + 1 - census->firsts[d]);
+            census->view_reads[census->view_read_count] = e;
+            census->view_read_count += skipped ? 0u : 1u;
             e += 1;
         }
         const uint32_t from = census->firsts[d];
@@ -3000,20 +3145,8 @@ static bool check_attested_view(CheckAttested* census, const Parser* parser)
         }
         if (!skipped)
         {
-            const uint32_t length = to - from;
-            memcpy(view->tokens.kinds + at, parser->tokens.kinds + from, length);
-            memcpy(view->tokens.names + at, parser->tokens.names + from, (uint64_t)length * sizeof(uint32_t));
-            memcpy(view->tokens.sources + at, parser->tokens.sources + from, (uint64_t)length * sizeof(uint32_t));
-            memcpy(view->tokens.flags + at, parser->tokens.flags + from, length);
-            memcpy(view->tree.roles + at, parser->tree.roles + from, length);
-            memcpy(view->tree.depths + at, parser->tree.depths + from, (uint64_t)length * sizeof(uint32_t));
-            check_attested_view_parents(view->tree.parents + at, parser->tree.parents + from, length, from - at, scalar);
-            check_attested_view_origins(origins + at, from, length, scalar);
-            if (census->view_levels != NULL)
-            {
-                memcpy(census->view_levels + at, census->token_levels + from, length);
-            }
-            at += length;
+            check_attested_view_run(view, parser, census->view_levels, census->view_levels != NULL ? census->token_levels : NULL, origins, from, at, to - from, scalar);
+            at += to - from;
         }
         d = e;
     }
@@ -3081,8 +3214,12 @@ static bool check_attested_read(CheckAttested* attested, CheckInput* input, cons
         attested->unit_ready = check_attested_decide(attested, parser, pp);
         attested->skipped = attested->unit_ready && attested->mode == CHECK_ATTESTED_MODE_ON && attested->skipped_declarations != 0;
         // The view, where the unit skips the whole of its parse (not a lazily deferred selection's, whose marks are the
-        // parse's): its token indices are the reader's from here, and the unit's.
-        attested->viewing = attested->skipped && deferred_tokens == NULL && original_end == count && check_attested_view(attested, parser);
+        // parse's): its token indices are the reader's from here, and the unit's. A command of one source file's
+        // (CheckAttested.alone) only where it skips a third of the unit's tokens or more: each page of its view is a
+        // fault for the process, some 11 cycles a token it copies, where a token read as a view saves the reader about
+        // 26 over one its marks pass (sqlite3.c, which skips 6% of its tokens, took 4,000 more faults with its view).
+        const bool worth = !attested->alone || 3 * (uint64_t)attested->skipped_tokens >= count;
+        attested->viewing = attested->skipped && worth && deferred_tokens == NULL && original_end == count && check_attested_view(attested, parser);
         if (attested->skipped && !attested->viewing)
         {
             // (The parse with the skipped declarations' marks, check_input_skip, where there was no room for the view.)
@@ -3232,21 +3369,28 @@ static bool check_attested_tree_columns(CheckAttested* census, const uint32_t* p
                                         uint32_t* postorder, uint32_t* positions, uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings,
                                         uint32_t* starts, uint32_t* sizes, Arena* scratch)
 {
-    const uint32_t declarations = census->unit_ready && !census->alone && count == census->token_count && sizes != NULL ? census->declaration_count : 0;
-    bool valid = declarations != 0;
-    for (uint32_t d = 0; valid && d < declarations; d += 1)
+    const bool ready = census->unit_ready && !census->alone && count == census->token_count && sizes != NULL && census->declaration_count != 0;
+    // In a view, its read declarations alone, in order (a skipped one has no tokens, nor columns, and its cached tree's
+    // block isn't touched); otherwise every declaration.
+    const uint32_t declarations = !ready ? 0 : census->viewing ? census->view_read_count : census->declaration_count;
+    bool valid = ready;
+    for (uint32_t r = 0; valid && r < declarations; r += 1)
     {
-        // (In a view, a declaration's place there: a skipped one has no tokens, nor columns.)
+        const uint32_t d = census->viewing ? census->view_reads[r] : r;
         const uint32_t a = census->viewing ? census->view_begins[d] : census->firsts[d];
         const uint32_t length = census->viewing ? census->view_ends[d] - a : census->lasts[d] - a + 1;
         const uint32_t b = a + length - 1;
         // The pools are the lane's, mostly out of the first two caches by the next unit: a list's block a few declarations
         // on, and the kept tree of one half as far, are fetched while this one's columns are written.
-        if (d + BUSTER_ATTESTED_TREE_AHEAD < declarations && census->list_blocks[d + BUSTER_ATTESTED_TREE_AHEAD] != BUSTER_ATTESTED_NONE)
+        const uint32_t ahead = r + BUSTER_ATTESTED_TREE_AHEAD < declarations ? (census->viewing ? census->view_reads[r + BUSTER_ATTESTED_TREE_AHEAD] : r + BUSTER_ATTESTED_TREE_AHEAD) :
+                                                                                BUSTER_ATTESTED_NONE;
+        const uint32_t half = r + BUSTER_ATTESTED_TREE_AHEAD / 2 < declarations ?
+                              (census->viewing ? census->view_reads[r + BUSTER_ATTESTED_TREE_AHEAD / 2] : r + BUSTER_ATTESTED_TREE_AHEAD / 2) : BUSTER_ATTESTED_NONE;
+        if (ahead != BUSTER_ATTESTED_NONE && census->list_blocks[ahead] != BUSTER_ATTESTED_NONE)
         {
-            __builtin_prefetch(census->list_pool + census->list_blocks[d + BUSTER_ATTESTED_TREE_AHEAD]);
+            __builtin_prefetch(census->list_pool + census->list_blocks[ahead]);
         }
-        const uint16_t* const later = d + BUSTER_ATTESTED_TREE_AHEAD / 2 < declarations ? check_attested_tree_of(census, d + BUSTER_ATTESTED_TREE_AHEAD / 2) : NULL;
+        const uint16_t* const later = half != BUSTER_ATTESTED_NONE ? check_attested_tree_of(census, half) : NULL;
         if (later != NULL)
         {
             __builtin_prefetch(later);
@@ -3786,9 +3930,20 @@ static bool check_attested_open(CheckAttested* census)
     }
     const uint64_t keys = 2 * (uint64_t)BUSTER_ATTESTED_MAX_IDS;
     const uint32_t runtimes = check_attested_runtime_count();
-    // Room for every size the memo takes, each table after the last: twice its most slots.
-    census->memo_arena = check_attested_reserve(census, 2 * (uint64_t)BUSTER_ATTESTED_MEMO_SLOTS * sizeof(CheckAttestedHash) + 4096);
-    census->memo = arena_push_array(&census->memo_arena, BUSTER_ATTESTED_MEMO_FIRST_SLOTS, sizeof(CheckAttestedHash), 64);
+    // Room for every size the memo takes, each table after the last: twice its most slots. A command of one source file's:
+    // its hashes' array, then each size of their indexes' table after the last (CheckAttested.memo_index).
+    if (census->alone)
+    {
+        census->memo_arena = check_attested_reserve(census, (uint64_t)BUSTER_ATTESTED_ALONE_HASHES * sizeof(CheckAttestedHash) +
+                                                                2 * (uint64_t)BUSTER_ATTESTED_MEMO_SLOTS * sizeof(uint32_t) + 8192);
+        census->memo = arena_push_array(&census->memo_arena, BUSTER_ATTESTED_ALONE_HASHES, sizeof(CheckAttestedHash), 64);
+        census->memo_index = arena_push_array(&census->memo_arena, BUSTER_ATTESTED_MEMO_FIRST_SLOTS, sizeof(uint32_t), 64);
+    }
+    else
+    {
+        census->memo_arena = check_attested_reserve(census, 2 * (uint64_t)BUSTER_ATTESTED_MEMO_SLOTS * sizeof(CheckAttestedHash) + 4096);
+        census->memo = arena_push_array(&census->memo_arena, BUSTER_ATTESTED_MEMO_FIRST_SLOTS, sizeof(CheckAttestedHash), 64);
+    }
     census->memo_mask = BUSTER_ATTESTED_MEMO_FIRST_SLOTS - 1;
     census->key_arena = check_attested_reserve(census, keys * (sizeof(CheckAttestedKey) + 2 * sizeof(uint64_t)) +
                                       (uint64_t)BUSTER_ATTESTED_MAX_IDS * (sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint64_t)) +
@@ -3808,19 +3963,24 @@ static bool check_attested_open(CheckAttested* census)
         census->runtime_lengths[r] = check_lower_runtime_names[r] != NULL ? (uint32_t)strlen(check_lower_runtime_names[r]) : UINT32_MAX;
     }
     census->unit_arena = check_attested_reserve(census, UINT64_C(1) << 36);
-    // The lists' cache: room for every size its table takes, each after the last, and its pool.
-    census->list_arena = check_attested_reserve(census, 2 * (uint64_t)BUSTER_ATTESTED_LIST_SLOTS * sizeof(CheckAttestedListSlot) + 4096);
-    census->list_slots = arena_push_array(&census->list_arena, BUSTER_ATTESTED_LIST_FIRST_SLOTS, sizeof(CheckAttestedListSlot), 64);
-    census->list_mask = BUSTER_ATTESTED_LIST_FIRST_SLOTS - 1;
-    census->list_pool_arena = check_attested_reserve(census, (uint64_t)BUSTER_ATTESTED_LIST_POOL * sizeof(uint32_t) + 4096);
-    census->list_pool = arena_push_array(&census->list_pool_arena, BUSTER_ATTESTED_LIST_POOL, sizeof(uint32_t), 64);
-    census->tree_pool_arena = check_attested_reserve(census, (uint64_t)BUSTER_ATTESTED_TREE_POOL * sizeof(uint16_t) + 4096);
-    census->tree_pool = arena_push_array(&census->tree_pool_arena, BUSTER_ATTESTED_TREE_POOL, sizeof(uint16_t), 64);
+    // The lists' cache: room for every size its table takes, each after the last, and its pool. A command of one source
+    // file's state keeps none (CheckAttested.alone), so it maps none: three mappings fewer to make, commit and unmap.
+    if (!census->alone)
+    {
+        census->list_arena = check_attested_reserve(census, 2 * (uint64_t)BUSTER_ATTESTED_LIST_SLOTS * sizeof(CheckAttestedListSlot) + 4096);
+        census->list_slots = arena_push_array(&census->list_arena, BUSTER_ATTESTED_LIST_FIRST_SLOTS, sizeof(CheckAttestedListSlot), 64);
+        census->list_mask = BUSTER_ATTESTED_LIST_FIRST_SLOTS - 1;
+        census->list_pool_arena = check_attested_reserve(census, (uint64_t)BUSTER_ATTESTED_LIST_POOL * sizeof(uint32_t) + 4096);
+        census->list_pool = arena_push_array(&census->list_pool_arena, BUSTER_ATTESTED_LIST_POOL, sizeof(uint32_t), 64);
+        census->tree_pool_arena = check_attested_reserve(census, (uint64_t)BUSTER_ATTESTED_TREE_POOL * sizeof(uint16_t) + 4096);
+        census->tree_pool = arena_push_array(&census->tree_pool_arena, BUSTER_ATTESTED_TREE_POOL, sizeof(uint16_t), 64);
+    }
     check_attested_actions(census->kind_actions, census->role_actions);
-    return census->memo != NULL && census->keys != NULL && census->list_marks != NULL && census->body_marks != NULL && census->runtime_lengths != NULL &&
+    return census->memo != NULL && (!census->alone || census->memo_index != NULL) && census->keys != NULL && census->list_marks != NULL &&
+           census->body_marks != NULL && census->runtime_lengths != NULL &&
            census->id_words != NULL &&
            census->unit_arena.base != NULL &&
-           census->list_slots != NULL && census->list_pool != NULL && census->tree_pool != NULL;
+           (census->alone || (census->list_slots != NULL && census->list_pool != NULL && census->tree_pool != NULL));
 }
 
 static void check_attested_close(CheckAttested* census)

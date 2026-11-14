@@ -519,9 +519,15 @@ if(NOT BUSTER_SHIFTS STREQUAL "")
         endif()
         set(directory "${CMAKE_BINARY_DIR}/$<CONFIG>/shifts")
         set(padding "${directory}/padding-${bytes}.o")
+        # Where the start's code order puts the padding before the source's start-ordered functions, the padding also
+        # goes first in .text, which every unit's other code sits in (#2728).
+        set(text_padding 0)
+        if(buster_start_order AND buster_start_order_shift_padded)
+            set(text_padding 1)
+        endif()
         add_custom_command(OUTPUT "${padding}"
             COMMAND "${CMAKE_COMMAND}" "-DOBJECT=${shift_object}" "-DSOURCE=${BUSTER_SHIFT_SOURCE}" "-DSHIFT=${bytes}"
-                "-DOUTPUT=${padding}" "-DCLANG=${CMAKE_C_COMPILER}" "-DREADELF=${BUSTER_READELF}"
+                "-DOUTPUT=${padding}" "-DCLANG=${CMAKE_C_COMPILER}" "-DREADELF=${BUSTER_READELF}" "-DTEXT=${text_padding}"
                 -P "${CMAKE_SOURCE_DIR}/cmake/BusterShiftPadding.cmake"
             DEPENDS "${shift_object}" "${CMAKE_SOURCE_DIR}/cmake/BusterShiftPadding.cmake"
             VERBATIM)
@@ -536,7 +542,7 @@ if(NOT BUSTER_SHIFTS STREQUAL "")
             buster_post_link(compiler_shift_${bytes} "${output}" ARGUMENTS -DPADDING=1 OBJECTS ${shift_objects})
         else()
             buster_post_link(compiler_shift_${bytes} "${output}" ARGUMENTS -DPADDING=1 "-DUNSHIFTED=${compiler}"
-                DEPENDS "${compiler}" OBJECTS ${shift_objects})
+                "-DMOVED=${text_padding}" "-DSHIFT=${bytes}" DEPENDS "${compiler}" OBJECTS ${shift_objects})
         endif()
         list(APPEND shifted "${output}")
     endforeach()

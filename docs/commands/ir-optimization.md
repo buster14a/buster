@@ -32,8 +32,19 @@ requirements. [Command index](README.md).
   operation's row staying for its effects.
   `benchmark-ir-optimize`
   and `benchmark-ir-optimize-passes` include preparation and rewriting costs.
-  [The optimization guide](../../docs/ir-optimization.md) records supported inputs
-  and the source-corpus and target measurements still required for #139.
+- #139's acceptance on real C: `test-ir-source --passes` runs every pass's
+  vector and scalar versions on every function of c-testsuite's subset, the
+  frozen `sqlite3.c` and musl in the correctness list, and
+  `benchmark-ir-source --passes` times them on the 9700X ([the IR
+  guide](ir.md)). The C driver's `--tier1-passes=LIST` turns each pass of
+  `--tier1`'s pipeline on or off, for differential campaigns and run-time
+  measurements, and `--tier1-report` counts what each did ([the Tier 1
+  guide](../../docs/tier1.md)'s "The C driver's `--tier1`"). `test-ir-optimize`
+  runs every fixture's pass masks with and without CFG cleanup's merges
+  (`BUSTER_IR_OPTIMIZE_MERGE`), and `ir_optimize_test_merges` checks the merged
+  blocks, the merged joins' phis and the dropped source regions.
+  [The optimization guide](../../docs/ir-optimization.md) records supported inputs,
+  the pass order and #139's measurements.
 
 The optional `BUSTER_IR_OPTIMIZE_LAYOUT` pass (#1218) changes the rewrite's
 block visitation order, using `ir_optimize_layout.c`'s fall-through chains.

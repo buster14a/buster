@@ -69,9 +69,11 @@
     ENTRY(TIER1, "--tier1") \
     ENTRY(TIER1_FUNCTION_SIZES, "--tier1-function-sizes") \
     ENTRY(TIER1_GVN, "--tier1-gvn") \
+    ENTRY(TIER1_NO_HOLD, "--tier1-no-hold") \
     ENTRY(TIER1_NO_INLINE, "--tier1-no-inline") \
     ENTRY(TIER1_NO_LIFETIMES, "--tier1-no-lifetimes") \
     ENTRY(TIER1_NO_REMATERIALIZE, "--tier1-no-rematerialize") \
+    ENTRY(TIER1_PASSES_EQ, "--tier1-passes=") \
     ENTRY(TIER1_REFUSALS, "--tier1-refusals") \
     ENTRY(TIER1_REPORT, "--tier1-report") \
     ENTRY(TIER1_SCHEDULE_EQ, "--tier1-schedule=") \
