@@ -12666,6 +12666,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else if (match.exact == C_OPTION_POISON_ARENAS)
         {
             poison_arenas = true;
+            lanes->poison_windows = true;
         }
         else if (match.exact == C_OPTION_SHARED_PARTS)
         {

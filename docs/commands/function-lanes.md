@@ -161,8 +161,10 @@ one left set.
 - **What keeps one part:** `--tier1` and `--helper-report`, which read every
   body's stream after every body's code; a unit on lanes, whose parts are the
   lanes'; and a thread whose window can't be reserved.
+- **Poison:** `--poison-arenas` (`CheckProgramLanes.poison_windows`) overwrites
+  each popped window, so that a part that read what another part left shows.
 - **The checks:** `test-check-lanes` emits every generated and failing program
-  by windows of 1, 64 and 2,048 tokens on one lane, by both paths, with `-g`'s
-  rows and unwind tables and without: each one part's object or failure, a part
-  a body at one token. `test-checker-driver`'s Tier 0 inlining fixtures build
+  by windows of 1, 64 and 2,048 tokens on one lane, each window poisoned as it
+  is popped, by both paths, with `-g`'s rows and unwind tables and without: each
+  one part's object or failure, a part a body at one token. `test-checker-driver`'s Tier 0 inlining fixtures build
   by `--emit-window=1` (and the lanes' fixture by 64): the objects of one part.

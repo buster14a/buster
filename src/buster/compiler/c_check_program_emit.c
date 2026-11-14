@@ -847,6 +847,9 @@ struct CheckProgramLanes
     // (check_program_emit_windows). 0, the default, is one window as long as the unit (W = ∞): today's order, and the
     // windows' twin.
     uint32_t window_tokens;
+    // --poison-arenas (a test option): each window's bytes are overwritten as it is popped, so that a part that read what
+    // another part left would show (BUSTER_CHECK_EMIT_WINDOW_POISON).
+    bool poison_windows;
     // --tier1-schedule's variant (BUSTER_CHECK_TIER1_SCHEDULE_*, #172's measurement): none by default.
     uint8_t tier1_schedule;
     CheckTier1Report tier1_report;
@@ -952,6 +955,8 @@ static _Thread_local Arena check_program_thread_columns;
 // as its columns are, so that an emission without lanes inlines what one with them does and makes the same object.
 // Its pages are popped by the next emission's first use; never released.
 static _Thread_local CheckTier0InlineLane check_program_thread_inline;
+// The byte --poison-arenas writes over a popped window (CheckProgramLanes.poison_windows).
+#define BUSTER_CHECK_EMIT_WINDOW_POISON 0xa5
 // The calling thread's window (#2536's step 1, check_program_emit_windows): a window's typed streams and Tier 0 code,
 // popped at its end, so that the next window's pushes find the same pages, resident and in the cache. Base pages
 // throughout: a window is a few megabytes, touched densely. Reserved at the thread's first windowed emission, never
@@ -1086,8 +1091,10 @@ struct CheckEmitRun
     // The driver's --time-stages clock (c_check_clock.c), which the calling thread's laps charge per function when it
     // compiles the bodies alone (check_program_emit_alone): null on the lanes, whose run its caller's mark charges.
     CheckClock* stage_clock;
-    // The windows' tokens when the bodies are compiled alone (CheckProgramLanes.window_tokens): 0 for one part.
+    // The windows' tokens when the bodies are compiled alone (CheckProgramLanes.window_tokens): 0 for one part; and
+    // whether each window is poisoned as it is popped (CheckProgramLanes.poison_windows).
     uint32_t window_tokens;
+    bool poison_windows;
 };
 
 // The typed class of body `b`'s result, as Tier 1's lowering takes it: its RETURNs' class, or for a function without one
@@ -2410,7 +2417,12 @@ static bool check_program_emit_windows(CheckEmitRun* run, CheckEmitLane* lane)
             }
             if (kept)
             {
+                const uint64_t written = window->length;
                 arena_pop_to(window, mark);
+                if (run->poison_windows)
+                {
+                    memset(window->base + mark, BUSTER_CHECK_EMIT_WINDOW_POISON, written - mark);
+                }
                 // Its streams are gone: only a callee's, which stay, are ready.
                 for (uint32_t b = part->lower.first; !early[p] && run->inline_table != NULL && b < end; b += 1)
                 {
@@ -3326,6 +3338,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // The windows (#2536), where the bodies are compiled alone: the plain emission's, since --tier1's inlining and
     // --helper-report read the bodies' streams after every body's code.
     run.window_tokens = lanes != NULL && !tier1 && !lanes->helper_reporting ? lanes->window_tokens : 0;
+    run.poison_windows = lanes != NULL && lanes->poison_windows;
     if (run.tier1_outcomes != 0)
     {
         // A body a failure before it left unreached has no outcome, never success.

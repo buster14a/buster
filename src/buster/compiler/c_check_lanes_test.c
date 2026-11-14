@@ -625,13 +625,15 @@ static uint32_t check_lanes_test_unit(CheckLanesTestTally* tally, CheckLanesTest
             compared += 1;
         }
         // One lane's windows (#2536, CheckProgramLanes.window_tokens): of one token, every body a part, of 64 and of
-        // 2,048: each one window's object or failure, on one lane, never again; of one token, a part a body.
+        // 2,048, each window poisoned as it is popped: each one window's object or failure, on one lane, never again;
+        // of one token, a part a body.
         static const uint32_t windows[] = { 1, 64, 2048 };
         for (uint32_t w = 0; w < BUSTER_ARRAY_LENGTH(windows); w += 1)
         {
             CheckProgramLanes lanes = {
                 .lanes = 1,
                 .window_tokens = windows[w],
+                .poison_windows = true,
             };
             CheckLanesTestEmission windowed = check_lanes_test_emit(unit, parser, pp, identifiers, &lanes, scalar, rows, unwind);
             const uint32_t bodies = unit->selected.program.body_count;
