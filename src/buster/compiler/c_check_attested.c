@@ -290,6 +290,10 @@ struct CheckAttested
     Parser view;
     uint32_t* view_begins;
     uint32_t* view_ends;
+    // The declarations a view reads, in order (`view_read_count` of them), which the reader's tree columns take one after
+    // another without a skipped one's state (check_attested_tree_columns).
+    uint32_t* view_reads;
+    uint32_t view_read_count;
     uint8_t* view_levels;
     uint32_t* view_pragmas;
     // Step 4 (--attested-memo, check_attested_memo_load and check_attested_memo_save): the memo kept across processes, in
@@ -2967,11 +2971,13 @@ static bool check_attested_view(CheckAttested* census, const Parser* parser)
     view->origins = origins;
     census->view_begins = arena_push_array(arena, (uint64_t)declarations + 1, sizeof(uint32_t), 64);
     census->view_ends = arena_push_array(arena, (uint64_t)declarations + 1, sizeof(uint32_t), 64);
+    census->view_reads = arena_push_array(arena, (uint64_t)declarations + 1, sizeof(uint32_t), 64);
+    census->view_read_count = 0;
     census->view_levels = census->levels_ready ? arena_push_array(arena, (uint64_t)read + 1, sizeof(uint8_t), 64) : NULL;
     census->view_pragmas = arena_push_array(arena, (uint64_t)parser->tokens.pragma_count + 1, sizeof(uint32_t), 64);
     const bool room = view->tokens.kinds != NULL && view->tokens.names != NULL && view->tokens.sources != NULL && view->tokens.flags != NULL &&
                       view->tree.roles != NULL && view->tree.depths != NULL && view->tree.parents != NULL && origins != NULL && census->view_begins != NULL &&
-                      census->view_ends != NULL && (census->view_levels != NULL || !census->levels_ready) && census->view_pragmas != NULL &&
+                      census->view_ends != NULL && census->view_reads != NULL && (census->view_levels != NULL || !census->levels_ready) && census->view_pragmas != NULL &&
                       (declarations == 0 || census->lasts[declarations - 1] + 1 == count);
     // A run: declarations [`d`, `e`), read, from token `from` (the first's) to `to` (past the last's), its tokens at `at`
     // in the view.
@@ -2987,6 +2993,8 @@ static bool check_attested_view(CheckAttested* census, const Parser* parser)
         {
             census->view_begins[e] = skipped ? at : at + (census->firsts[e] - census->firsts[d]);
             census->view_ends[e] = skipped ? at : at + (census->lasts[e] + 1 - census->firsts[d]);
+            census->view_reads[census->view_read_count] = e;
+            census->view_read_count += skipped ? 0u : 1u;
             e += 1;
         }
         const uint32_t from = census->firsts[d];
@@ -3232,21 +3240,28 @@ static bool check_attested_tree_columns(CheckAttested* census, const uint32_t* p
                                         uint32_t* postorder, uint32_t* positions, uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings,
                                         uint32_t* starts, uint32_t* sizes, Arena* scratch)
 {
-    const uint32_t declarations = census->unit_ready && !census->alone && count == census->token_count && sizes != NULL ? census->declaration_count : 0;
-    bool valid = declarations != 0;
-    for (uint32_t d = 0; valid && d < declarations; d += 1)
+    const bool ready = census->unit_ready && !census->alone && count == census->token_count && sizes != NULL && census->declaration_count != 0;
+    // In a view, its read declarations alone, in order (a skipped one has no tokens, nor columns, and its cached tree's
+    // block isn't touched); otherwise every declaration.
+    const uint32_t declarations = !ready ? 0 : census->viewing ? census->view_read_count : census->declaration_count;
+    bool valid = ready;
+    for (uint32_t r = 0; valid && r < declarations; r += 1)
     {
-        // (In a view, a declaration's place there: a skipped one has no tokens, nor columns.)
+        const uint32_t d = census->viewing ? census->view_reads[r] : r;
         const uint32_t a = census->viewing ? census->view_begins[d] : census->firsts[d];
         const uint32_t length = census->viewing ? census->view_ends[d] - a : census->lasts[d] - a + 1;
         const uint32_t b = a + length - 1;
         // The pools are the lane's, mostly out of the first two caches by the next unit: a list's block a few declarations
         // on, and the kept tree of one half as far, are fetched while this one's columns are written.
-        if (d + BUSTER_ATTESTED_TREE_AHEAD < declarations && census->list_blocks[d + BUSTER_ATTESTED_TREE_AHEAD] != BUSTER_ATTESTED_NONE)
+        const uint32_t ahead = r + BUSTER_ATTESTED_TREE_AHEAD < declarations ? (census->viewing ? census->view_reads[r + BUSTER_ATTESTED_TREE_AHEAD] : r + BUSTER_ATTESTED_TREE_AHEAD) :
+                                                                                BUSTER_ATTESTED_NONE;
+        const uint32_t half = r + BUSTER_ATTESTED_TREE_AHEAD / 2 < declarations ?
+                              (census->viewing ? census->view_reads[r + BUSTER_ATTESTED_TREE_AHEAD / 2] : r + BUSTER_ATTESTED_TREE_AHEAD / 2) : BUSTER_ATTESTED_NONE;
+        if (ahead != BUSTER_ATTESTED_NONE && census->list_blocks[ahead] != BUSTER_ATTESTED_NONE)
         {
-            __builtin_prefetch(census->list_pool + census->list_blocks[d + BUSTER_ATTESTED_TREE_AHEAD]);
+            __builtin_prefetch(census->list_pool + census->list_blocks[ahead]);
         }
-        const uint16_t* const later = d + BUSTER_ATTESTED_TREE_AHEAD / 2 < declarations ? check_attested_tree_of(census, d + BUSTER_ATTESTED_TREE_AHEAD / 2) : NULL;
+        const uint16_t* const later = half != BUSTER_ATTESTED_NONE ? check_attested_tree_of(census, half) : NULL;
         if (later != NULL)
         {
             __builtin_prefetch(later);
