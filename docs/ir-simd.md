@@ -1530,6 +1530,22 @@ gather's masked-off lanes are 0.
 - A `masked_store` of a `truncate` whose only use it is folds into the
   truncation's memory form, `operation` 2: one `vpmov* [p]{k}`, as the row was.
 
+**Zen 5 rows.** The 45 forms Tier 1 now emits were measured on the 9700X
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-gathers-1840-2026-11-14)):
+
+| Forms | Latency | Throughput | Macro-ops |
+| --- | ---: | ---: | ---: |
+| `vpgather*` of 16 bytes (`dd`, `qd` by a ymm, `qq`) | 16 to 18.5 | 3 to 4 | 13 to 19 |
+| `vpgather*` of 32 bytes (`dd`, `dq` by an xmm, `qd` by a zmm, `qq`) | 17.4 to 25 | 4 to 6.75 | 19 to 35 |
+| `vpgatherdq zmm`, `vpgatherqq zmm` (`vpgatherdd zmm`: 30.1, 12.6) | 22.6, 24.75 | 7, 7 | 38, 40 |
+| `vpcompress* [p]{k}` (the register form: 1 a cycle, 2) | — | 3 | 7 to 8 |
+| `vpmov* [p]{k}` | — | 0.5 | 2 |
+
+The memory compress is no Zen 4-like slow path: at one every 3 cycles it stays
+Tier 1's selection, one instruction, where a register compress, the mask's
+population count into a prefix mask and a masked store would take five or six
+instructions.
+
 Machine rows at `--tier1 -march=znver5`, both compilers compiling this change's
 sources, against main `8023523`:
 
