@@ -83,7 +83,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --operand-diagnostics-only | --label-attributes-only |
-  --attribute-recovery-only | --assert-bool-only] [--in-process] [--clang-server PATH]
+  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; with
@@ -138,7 +138,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   and verifies existing object-output preservation for rejected input.
   `--semantic-recovery-only` runs
   `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,
-  `c_check_attribute_call_recovery_driver_test.c`,
+  `c_check_attribute_call_recovery_driver_test.c`, `c_check_malformed_call_driver_test.c`,
   `c_check_type_attribute_recovery_driver_test.c`, `c_check_attribute_declaration_driver_test.c`,
   `c_check_structural_recovery_driver_test.c` and `c_check_repaired_view_driver_test.c` alone, the whole output and status
   of semantic error recovery's fixtures against clang's on the vector, scalar
@@ -168,6 +168,15 @@ unused-warning fixtures also check exact scope-completion tokens.
   in C99–C17, the call portion before C23, and the label portion in every
   tested standard. This focused section supports sanitizer and in-process/child
   differential checks without running the unrelated recovery fixtures.
+  `--malformed-calls-only` runs the ordinary balanced single-argument recovery
+  cases in `tests/checker/parse-recovery/malformed-calls.*` (#2406), comparing
+  complete GNU89/GNU17/C23 diagnostics and status, both readers, syntax/object
+  output, warning policies, `-fno-builtin` and error limits. Mixed ordinary and
+  attribute-led macro calls cover multiple rounds and repaired/rejected views;
+  metadata contracts keep each callee source paired with its use flag. Boundary
+  controls exclude later arguments, semicolon crossings, mismatched delimiters,
+  member callees and catalog names. Rejected output is preserved and valid
+  cast/`sizeof` controls must produce an ELF object.
   `--type-sugar-only` runs
   `c_check_type_sugar_driver_test.c` alone, the typedef sugar diagnostics keep
   through typedef chains, members and qualified arrays, and const assignment's

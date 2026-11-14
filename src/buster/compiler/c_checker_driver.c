@@ -6735,6 +6735,7 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
         .typo_sources = original->typo_sources,
         .typo_count = original->typo_count,
         .invalid_call_sources = original->invalid_call_sources,
+        .invalid_call_values = original->invalid_call_values,
         .invalid_call_count = original->invalid_call_count,
     };
     memcpy(view->predeclared, original->predeclared, sizeof(view->predeclared));
@@ -10842,6 +10843,57 @@ static bool check_driver_typo_add(CheckDriverTypoEdits* edits, CheckPrefixEdit e
 
 static uint32_t check_driver_skip_end(const Parser* parser, uint32_t token);
 
+// Retain a failed call's name for lookup, without inventing a valid call of its unread arguments (#2406). A complete
+// balanced group is required; semicolons at argument level and mismatched delimiters keep the existing recovery.
+// An ordinary call's later arguments are read even after an invalid first one: leave top-level commas to that recovery.
+// Builtin/catalog names can validate arguments during lookup and are outside this diagnostic-only repair.
+static void check_driver_invalid_call(const Parser* view, ParseDiagnostic* diagnostic, uint32_t callee, uint32_t begin, bool value,
+                                      const CheckDriverTypoEdits* edits)
+{
+    const uint32_t count = view->tokens.count;
+    const InternTable* table = edits->table;
+    const uint32_t identifier = view->tokens.names[callee];
+    const InternSpan span = table->spans[identifier];
+    const char* spelling = (const char*)table->records + span.offset;
+    const bool ordinary = builtin_intrinsic_lookup(spelling, span.length) == NULL;
+    const uint64_t mark = edits->scratch->length;
+    uint8_t* stack = ordinary ? BUSTER_ARENA_PUSH_ARRAY(edits->scratch, uint8_t, count - callee) : NULL;
+    uint32_t depth = 0;
+    uint32_t end = callee + 1;
+    bool balanced = stack != NULL;
+    do
+    {
+        const uint8_t kind = end < count ? view->tokens.kinds[end] : PARSE_KIND_END;
+        const bool open = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+        const bool close = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE;
+        const uint8_t wanted = kind == PARSE_KIND_R_PAREN ? PARSE_KIND_L_PAREN : kind == PARSE_KIND_R_SQUARE ? PARSE_KIND_L_SQUARE : PARSE_KIND_L_BRACE;
+        balanced = balanced && end < count && kind != PARSE_KIND_END && !(depth == 1 && (kind == PARSE_KIND_SEMI || (value && kind == PARSE_KIND_COMMA))) &&
+                   (!close || (depth != 0 && stack[depth - 1] == wanted));
+        if (balanced && open)
+        {
+            stack[depth++] = kind;
+        }
+        else if (balanced && close)
+        {
+            depth -= 1;
+        }
+        end += balanced ? 1u : 0u;
+    }
+    while (balanced && depth != 0);
+    if (balanced && end < count && (value || view->tokens.kinds[end] == PARSE_KIND_SEMI))
+    {
+        diagnostic->resumed = true;
+        diagnostic->resume_delete = true;
+        diagnostic->resume_call = true;
+        diagnostic->resume_callee = callee;
+        diagnostic->resume_call_value = value;
+        diagnostic->resume_begin = begin;
+        diagnostic->resume_end = end;
+        diagnostic->publication = value ? 0 : callee + 1;
+    }
+    arena_pop_to(edits->scratch, mark);
+}
+
 // A parse error just after a name within an expression, before an operand's first token, where the name may be a typo of
 // an expression's keyword or a statement's (`sizeo a`, `retrn 5`): clang's correction there takes the keyword
 // (DiagnoseEmptyLookup's keyword replacement), and the expression is invalid, its rest skipped to the `,`, `;` or closer
@@ -10862,6 +10914,16 @@ static uint32_t check_driver_typo_tail(const Parser* view, const uint32_t* origi
     const InternTable* table = edits->table;
     const uint32_t count = view->tokens.count;
     const uint32_t at = diagnostic->token;
+    const uint8_t argument_kind = at < count ? view->tokens.kinds[at] : PARSE_KIND_END;
+    const bool type_argument = argument_kind == PARSE_KIND_TYPE || argument_kind == PARSE_KIND_QUALIFIER || argument_kind == PARSE_KIND_ATOMIC ||
+                               argument_kind == PARSE_KIND_STRUCT || argument_kind == PARSE_KIND_ENUM || argument_kind == PARSE_KIND_TYPEOF;
+    const bool malformed = diagnostic->message == PARSE_MESSAGE_EXPECTED_EXPRESSION && type_argument && at >= 2 &&
+                           view->tokens.kinds[at - 1] == PARSE_KIND_L_PAREN && view->tokens.kinds[at - 2] == PARSE_KIND_IDENTIFIER &&
+                           (at == 2 || (view->tokens.kinds[at - 3] != PARSE_KIND_PERIOD && view->tokens.kinds[at - 3] != PARSE_KIND_ARROW));
+    if (malformed)
+    {
+        check_driver_invalid_call(view, diagnostic, at - 2, at - 2, true, edits);
+    }
     // The attributes before an implicit int's name, from their first `__attribute__`, after a statement's start.
     const bool call = diagnostic->message == PARSE_MESSAGE_EXPECTED_IDENTIFIER_OR_PAREN && view->language.standard < 2023 && at + 1 < count &&
                       view->tokens.kinds[at + 1] == PARSE_KIND_L_PAREN;
@@ -10894,44 +10956,7 @@ static uint32_t check_driver_typo_tail(const Parser* view, const uint32_t* origi
         // Keep an empty call only to perform that lookup and implicit declaration, then cut it before expression
         // checking. Catalog-recognized builtin spellings, including library names, can prepare arguments during
         // lookup and retain the existing recovery.
-        const uint32_t identifier = view->tokens.names[at];
-        const InternSpan span = table->spans[identifier];
-        const char* spelling = (const char*)table->records + span.offset;
-        const bool ordinary = builtin_intrinsic_lookup(spelling, span.length) == NULL;
-        const uint64_t mark = edits->scratch->length;
-        uint8_t* stack = ordinary ? BUSTER_ARENA_PUSH_ARRAY(edits->scratch, uint8_t, count - at) : NULL;
-        uint32_t depth = 0;
-        uint32_t end = at + 1;
-        bool balanced = stack != NULL;
-        do
-        {
-            const uint8_t kind = end < count ? view->tokens.kinds[end] : PARSE_KIND_END;
-            const bool open = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
-            const bool close = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE;
-            const uint8_t wanted = kind == PARSE_KIND_R_PAREN ? PARSE_KIND_L_PAREN : kind == PARSE_KIND_R_SQUARE ? PARSE_KIND_L_SQUARE : PARSE_KIND_L_BRACE;
-            balanced = balanced && end < count && kind != PARSE_KIND_END && !(kind == PARSE_KIND_SEMI && depth == 1) &&
-                       (!close || (depth != 0 && stack[depth - 1] == wanted));
-            if (balanced && open)
-            {
-                stack[depth++] = kind;
-            }
-            else if (balanced && close)
-            {
-                depth -= 1;
-            }
-            end += balanced ? 1u : 0u;
-        }
-        while (balanced && depth != 0);
-        if (balanced && end < count && view->tokens.kinds[end] == PARSE_KIND_SEMI)
-        {
-            diagnostic->resumed = true;
-            diagnostic->resume_delete = true;
-            diagnostic->resume_call = true;
-            diagnostic->resume_begin = first;
-            diagnostic->resume_end = end;
-            diagnostic->publication = at + 1;
-        }
-        arena_pop_to(edits->scratch, mark);
+        check_driver_invalid_call(view, diagnostic, at, first, false, edits);
     }
     bool fresh = attributed && !call;
     for (uint32_t r = 0; fresh && r < edits->rejected_count; r += 1)
@@ -11388,6 +11413,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             parser->typo_sources = NULL;
             parser->typo_count = 0;
             parser->invalid_call_sources = NULL;
+            parser->invalid_call_values = NULL;
             parser->invalid_call_count = 0;
             ready = parse_translation_unit(parser, pp);
             parse_failed = !ready;

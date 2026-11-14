@@ -8921,6 +8921,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool label_attributes_only = false;
     // --attribute-recovery-only: the label, declaration and call recovery fixtures and their combined source.
     bool attribute_recovery_only = false;
+    // --malformed-calls-only: type-first balanced malformed calls and their independent later diagnostics (#2406).
+    bool malformed_calls_only = false;
     // --operand-diagnostics-only: rejected record and atomic operands, including constant contexts (#2441).
     bool operand_diagnostics_only = false;
     // --assert-bool-only: static assertion boolean conversions, including rejected trees (#2409).
@@ -8967,6 +8969,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--attribute-recovery-only") == 0)
         {
             attribute_recovery_only = true;
+        }
+        else if (strcmp(argv[i], "--malformed-calls-only") == 0)
+        {
+            malformed_calls_only = true;
         }
         else if (strcmp(argv[i], "--operand-diagnostics-only") == 0)
         {
@@ -9024,7 +9030,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
                              (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only +
-                             (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only;
+                             (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only +
+                             (uint32_t)malformed_calls_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -9550,6 +9557,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_label_order(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_attribute_calls(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_attribute_declarations(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+    }
+    if (temporary && malformed_calls_only)
+    {
+        check_test_driver_malformed_calls(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
     }
     if (temporary && type_sugar_only)
     {

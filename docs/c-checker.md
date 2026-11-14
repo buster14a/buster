@@ -5035,6 +5035,32 @@ promotion/suppression and the error limit are checked; rejected compilations
 preserve an existing output, while accepted controls replace it with an ELF
 object. A separate control keeps C23's declaration grammar.
 
+Ordinary identifier calls with one malformed type-first argument use the same
+bounded view (#2406). For `known(int); after_error;`, the callee's lookup,
+implicit declaration, deprecation and availability diagnostics precede the
+original "expected expression" at `int`, and the later statement is checked.
+The view keeps the callee's source separately from the parse error's source;
+its parallel callee-use flags distinguish this value use from attribute-only
+classification through resumed, prefix, repaired and rejected views. The
+silent invalid-use report suppresses synthetic arity and noncallable errors
+while independent operands, such as `pair.missing` in `known(int) +
+pair.missing`, remain checked. Arguments with nested parentheses, brackets and
+braces may be skipped, but a top-level comma remains excluded: Clang reads later
+arguments after an invalid first argument, and an empty-call replacement would
+lose their diagnostics. Member callees, catalog-recognized builtin/library
+names (also with `-fno-builtin`), mismatched delimiters and semicolon-crossing
+calls retain the existing recovery.
+
+`test-checker-driver --malformed-calls-only` reads the original runtime source
+and case catalog in `tests/checker/parse-recovery/malformed-calls.*`. It compares
+complete diagnostics and status with Clang in GNU89, GNU17 and C23, including
+warning promotion/suppression, `-fno-builtin` and error limits, through both
+readers and syntax/object output with one/three requested lanes and deferred
+bodies. Mixed ordinary and attribute-led calls run before C23, including repeated
+macro expansions, multiple recovery rounds and rejected/repaired views. Contract
+checks verify paired metadata and the excluded boundaries. Rejected compilations
+preserve existing output; valid cast and `sizeof` calls produce an ELF object.
+
 Phase 2 covers redeclarations that conflict with a declaration of the same
 name: the visible one in `check_input_bind`'s first test, or its entity's
 linked one in the second (`int k = 1; int k = 2;`). Clang marks such a
