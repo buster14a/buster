@@ -274,14 +274,18 @@ static void check_builtin_library_fold_memory(TypeTable* types, CBuiltinId id, c
     check_builtin_library_fold_call(types, fold, false, action, conversions, result);
 }
 
-// Whether one type of a prototype's encoding, from *position, is `type`: int ('i', and wchar_t's 'w'), size_t's unsigned
-// long ('z'), char ('c'), double ('d'), float ('f') or void ('v'), each const after a 'C' and a pointer to that after a '*'. The table's
-// queries alone read it; it interns nothing, so that a lane's reader asks it as source order's does.
+// Whether one type of a prototype's encoding, from *position, is `type`: int ('i', and wchar_t's 'w'), long ("Li"), long
+// long ("LLi"), size_t's unsigned long ('z'), char ('c'), double ('d'), long double ("Ld"), float ('f') or void ('v'), each
+// const after a 'C' and a pointer to that after a '*'. The table's queries alone read it; it interns nothing, so that a
+// lane's reader asks it as source order's does.
 static bool check_library_plain_type(const TypeTable* types, TypeId type, const char* prototype, uint32_t* position)
 {
+    const uint32_t longs = prototype[*position] != 'L' ? 0 : prototype[*position + 1] != 'L' ? 1 : 2;
+    *position += longs;
     const char code = prototype[*position];
-    const TypeId base = code == 'i' || code == 'w' ? BUSTER_TYPE_INT : code == 'z' ? BUSTER_TYPE_ULONG : code == 'c' ? BUSTER_TYPE_CHAR :
-                        code == 'd' ? BUSTER_TYPE_DOUBLE : code == 'f' ? BUSTER_TYPE_FLOAT : BUSTER_TYPE_VOID;
+    const TypeId integer = longs == 0 ? BUSTER_TYPE_INT : longs == 1 ? BUSTER_TYPE_LONG : BUSTER_TYPE_LLONG;
+    const TypeId base = code == 'i' || code == 'w' ? integer : code == 'z' ? BUSTER_TYPE_ULONG : code == 'c' ? BUSTER_TYPE_CHAR :
+                        code == 'd' ? (longs != 0 ? BUSTER_TYPE_LONG_DOUBLE : BUSTER_TYPE_DOUBLE) : code == 'f' ? BUSTER_TYPE_FLOAT : BUSTER_TYPE_VOID;
     *position += 1;
     const bool constant = prototype[*position] == 'C';
     *position += constant;

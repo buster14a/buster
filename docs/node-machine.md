@@ -955,7 +955,10 @@ A call was the first operator without a code in 12,836 of `sqlite3.c`'s
   takes the rest and is the rule's twin under `--verify`, which compares the
   arguments' conversions too.
 - **T refuses as `callee`** a callee with semantics of its own:
-  - a library builtin's call that the catalogue folds;
+  - a library builtin's call that the catalogue folds or the lowering computes
+    in its place (`check_program_call_library`: `strcmp`'s fold, `fmax`, and
+    `memcpy` of a small constant size, #1373), but not one that stays a plain
+    call (`memcpy` of a size that is no constant);
   - a unit with overload sets;
   - a callee without a prototype, or of a convention other than System V's;
   - a callee that returns twice.

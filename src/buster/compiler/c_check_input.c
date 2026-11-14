@@ -1219,6 +1219,10 @@ struct CheckInput
     // Whether a function's declaration has a cpu_specific or cpu_dispatch attribute (#1447): only then does the program
     // look for those functions' versions (c_check_program_cpu_dispatch.c).
     bool cpu_dispatch;
+    // Whether a declaration has clang's no_builtin attribute (#1958), which only a function's definition takes, before its
+    // body: only then does a marked library call look for its function's (check_input_no_builtin), which walks back to
+    // the body's brace.
+    bool no_builtin;
     // Whether a function is multiversioned by target strings (#1838, c_check_target_versions.c): several target
     // attributes of other strings, target("default") or target_clones. A unit with one is read in source order
     // (check_deferred_bodies), whose binding events say what was used before a declaration.
@@ -1978,11 +1982,13 @@ struct CheckInputReader
     // Per row of the intrinsic catalogue (builtin_intrinsic_infos), whether a declared name's builtin stays the builtin
     // (cbuiltin_source_intrinsic's verdict): 0 not yet asked, 1 it does, 2 it doesn't; null where a reader has none.
     uint8_t* intrinsic_source;
-    // The identifiers of the plain library builtins that clang folds (cbuiltin_library_plain_folds), 0 for one the unit never
-    // spells, looked up at the first call that asks (`library_names_known`, check_input_library_names), and a bit of
-    // `library_names_mask` for each spelled one's low 6 bits, which most calls' callees miss.
+    // The identifiers of the plain library builtins that clang folds or the code computes (cbuiltin_library_plain_folds), 0
+    // for one the unit never spells, looked up at the first call that asks (`library_names_known`,
+    // check_input_library_names), and a bit of `library_names_mask` for each spelled one's low 8 bits, which most calls'
+    // callees miss: a unit that includes <string.h>, <stdlib.h> and <math.h> spells most of the table's names, which would
+    // set nearly half of 64 bits.
     IdentId library_names[BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS];
-    uint64_t library_names_mask;
+    uint64_t library_names_mask[4];
     bool library_names_known;
     // The GNU attribute names' rows by name (check_input_attribute_gnu_rows), which a reader's copy keeps its own of.
     CheckInputGnuRows gnu_rows[1u << BUSTER_CHECK_GNU_ROW_BITS];
@@ -13124,20 +13130,20 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
 static __attribute__((noinline)) void check_input_library_names(CheckInputReader* reader)
 {
     const InternTable* table = reader->pp->table;
-    uint64_t mask = 0;
+    uint64_t mask[4] = { 0 };
     for (uint32_t i = 0; i < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS; i += 1)
     {
         const uint8_t* name = (const uint8_t*)cbuiltin_library_plain_folds[i].name;
         const uint32_t length = (uint32_t)strlen(cbuiltin_library_plain_folds[i].name);
         const IdentId identifier = intern_find_hashed(table, name, length, intern_hash_bytes(name, length));
         reader->library_names[i] = identifier;
-        mask |= identifier != 0 ? UINT64_C(1) << (identifier & 63) : 0;
+        mask[(identifier >> 6) & 3] |= identifier != 0 ? UINT64_C(1) << (identifier & 63) : 0;
     }
-    reader->library_names_mask = mask;
+    memcpy(reader->library_names_mask, mask, sizeof(mask));
     reader->library_names_known = true;
 }
 
-// The mark of a call of `declaration`, a function with external linkage whose name, `name`, shares its low 6 bits with a
+// The mark of a call of `declaration`, a function with external linkage whose name, `name`, shares its low 8 bits with a
 // fold's (check_input_library_declaration): BUSTER_CHECK_LIBRARY_CALL and the fold's index where it is one and clang makes the
 // declaration the builtin, else 0.
 static __attribute__((noinline)) uint32_t check_input_library_match(CheckInputReader* reader, uint32_t declaration, IdentId name)
@@ -13154,6 +13160,12 @@ static __attribute__((noinline)) uint32_t check_input_library_match(CheckInputRe
     return library ? BUSTER_CHECK_LIBRARY_CALL | index : 0;
 }
 
+// Whether an identifier's low 8 bits are a spelled library name's (CheckInputReader.library_names_mask).
+static inline __attribute__((always_inline)) bool check_input_library_masked(const CheckInputReader* reader, IdentId name)
+{
+    return ((reader->library_names_mask[(name >> 6) & 3] >> (name & 63)) & 1) != 0;
+}
+
 // The same declaration permission serves named calls and immutable overload candidates. The latter publish it only
 // for ordinary declarations, after inheriting attributes from their earlier declarations (#1234).
 static inline __attribute__((always_inline)) uint32_t check_input_library_declaration(CheckInputReader* reader, uint32_t declaration)
@@ -13164,17 +13176,17 @@ static inline __attribute__((always_inline)) uint32_t check_input_library_declar
     }
     const Parser* parser = reader->parser;
     const IdentId name = declaration < parser->tokens.count ? parser->tokens.names[declaration] : 0;
-    const bool candidate = name != 0 && ((reader->library_names_mask >> (name & 63)) & 1) != 0 && check_input_linkage(reader->declaration_bits, declaration) == 2 &&
+    const bool candidate = name != 0 && check_input_library_masked(reader, name) && check_input_linkage(reader->declaration_bits, declaration) == 2 &&
                            reader->declaration_kinds[declaration] == C_BINDING_FUNCTION;
     return candidate ? check_input_library_match(reader, declaration, name) : 0;
 }
 
 // The member that marks a call whose designator, at `use`, names the unit's declaration of a plain library builtin that
-// clang folds (#148, cbuiltin_library_plain_folds): BUSTER_CHECK_LIBRARY_CALL and the builtin's index where clang makes that
-// declaration the builtin (Sema's BuiltinAttr: its name a builtin of the unit by pp_library_builtin, a function with
-// external linkage, of the row's prototype), else 0. The checker folds a marked call as __builtin_X's
+// clang folds or the code computes inline (#148, #967, #1373, cbuiltin_library_plain_folds): BUSTER_CHECK_LIBRARY_CALL
+// and the builtin's index where clang makes that declaration the builtin (Sema's BuiltinAttr: its name a builtin of the
+// unit by pp_library_builtin, a function with external linkage, of the row's prototype), else 0. The checker folds a marked call as __builtin_X's
 // (check_builtin_library_fold_plain). Every call through a name asks, so the test of the mask and the linkage is inlined,
-// and a static function's call, or one of a name no fold's identifier shares 6 bits with, goes no further.
+// and a static function's call, or one of a name no fold's identifier shares 8 bits with, goes no further.
 static inline __attribute__((always_inline)) uint32_t check_input_library_call(CheckInputReader* reader, uint32_t use)
 {
     const Parser* parser = reader->parser;
@@ -13184,7 +13196,7 @@ static inline __attribute__((always_inline)) uint32_t check_input_library_call(C
     }
     // The use's own spelling is its declaration's name, which the mask tests before anything else is read.
     const IdentId spelled = use < parser->tokens.count ? parser->tokens.names[use] : 0;
-    const bool masked = ((reader->library_names_mask >> (spelled & 63)) & 1) != 0 && parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER;
+    const bool masked = check_input_library_masked(reader, spelled) && parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER;
     const uint32_t declaration = masked ? reader->output->declarations[use] : BUSTER_CHECK_NONE;
     return masked ? check_input_library_declaration(reader, declaration) : 0;
 }
@@ -13194,7 +13206,7 @@ static inline __attribute__((always_inline)) uint32_t check_input_library_call(C
 // unit's declaration of a plain library builtin in that body rather than compute or fold it (EmitDirectCallee's
 // no-builtin-NAME and no-builtins function attributes), though its constant contexts still fold (the constant
 // evaluator doesn't read the attribute). A string clang warns names no builtin ("*" among them) matches none.
-static __attribute__((noinline)) bool check_input_no_builtin(CheckInputReader* reader, IdentId name, uint32_t token)
+static __attribute__((noinline)) bool check_input_no_builtin_body(CheckInputReader* reader, IdentId name, uint32_t token)
 {
     const Parser* parser = reader->parser;
     // The body the walk is in, or, where a pass after the walk asks (the reader's expression batches), the one that holds
@@ -13229,6 +13241,13 @@ static __attribute__((noinline)) bool check_input_no_builtin(CheckInputReader* r
         }
     }
     return covered;
+}
+
+// check_input_no_builtin_body's answer where the unit has a no_builtin attribute (CheckInput.no_builtin), else false: most
+// units have none, and a marked call of memcpy or memset is common (#1373).
+static inline __attribute__((always_inline)) bool check_input_no_builtin(CheckInputReader* reader, IdentId name, uint32_t token)
+{
+    return reader->output->no_builtin && check_input_no_builtin_body(reader, name, token);
 }
 
 #include "c_check_literal_table_input.c"

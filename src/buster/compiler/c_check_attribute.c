@@ -9189,6 +9189,7 @@ static bool check_input_attribute_definition(CheckInputReader* reader, CheckInpu
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_NO_BUILTIN)
         {
+            reader->output->no_builtin = true;
             attribute->ignored |= !subject.function;
             valid = !subject.function || subject.function_definition;
             if (!valid)

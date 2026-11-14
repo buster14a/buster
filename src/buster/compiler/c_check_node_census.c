@@ -804,8 +804,9 @@ static const CheckInputAttributeKind node_census_result_kinds[] = {
     CHECK_ATTRIBUTE_WARN_UNUSED_RESULT, CHECK_ATTRIBUTE_CONST, CHECK_ATTRIBUTE_PURE,
 };
 
-// Whether a call's callee has semantics of its own (the set's): a library builtin's fold, a printf-family name, an
-// attribute of node_census_callee_kinds, or a function type without a prototype.
+// Whether a call's callee has semantics of its own (the set's): a library builtin's fold or computation
+// (check_program_call_library), a printf-family name, an attribute of node_census_callee_kinds, or a function type
+// without a prototype.
 static bool node_census_callee(const NodeCensusScratch* s, uint32_t call)
 {
     const CheckProgram* program = s->program;
@@ -815,7 +816,7 @@ static bool node_census_callee(const NodeCensusScratch* s, uint32_t call)
     const Parser* parser = program->parser;
     const uint32_t member = graph->members != NULL ? graph->members[call] : 0;
     const uint32_t callee = graph->operand0[call];
-    bool result = (member & BUSTER_CHECK_LIBRARY_CALL) != 0 || callee >= graph->count;
+    bool result = ((member & BUSTER_CHECK_LIBRARY_CALL) != 0 && check_program_call_library(program, call)) || callee >= graph->count;
     if (!result)
     {
         const TypeId function = node_census_function_type(types, check_stream_type(stream, callee));
