@@ -6,7 +6,7 @@ under the lock), except where the desktop's preliminary Zen 4 result is named.
 The 9700X's x86-64 runs cover the four builds and placements used below; the
 shorter znver5 run and the remaining build matrix are still being collected.
 The measurement sources, raw lines, counters, placements and tables are in
-[the record](https://github.com/buster14a/buster-performance/tree/f80fc5f8378de7be18dfb1f0289a3ce24e18067f/docs/measurements/tier1-array-loops-2743-2026-11-14)
+[the record](https://github.com/buster14a/buster-performance/tree/8118cbb9496c4259991acee67ab1f775c098bc78/docs/measurements/tier1-array-loops-2743-2026-11-14)
 (buster-performance#535). The issue is
 [#2743](https://github.com/buster14a/buster/issues/2743).
 [#2750](https://github.com/buster14a/buster/issues/2750)'s independent fix for
@@ -73,7 +73,7 @@ The design consequently ranks the work as follows:
    vector rows Tier 1 already emits.
 2. **Loop unrolling:** the separate 1.41 component in clang's scalar loops.
    It should be designed and measured on the vector loops after step 1, not
-   hidden inside their legality rules.
+   hidden inside their legality rules. Filed as the unowned follow-up #2755.
 3. **Back-end residuals in explicit vector loops:** constants and splats,
    rematerialized loop bounds, unfolded loads, extra moves around masked
    operations and the clamp/max shapes. The owned issues remain separate:
@@ -328,7 +328,7 @@ which loops improve.
    matrix.
 4. **Default and follow-ups:** enable only with the full 9700X result and
    compile-cost record. Design unrolling on the resulting vector loops
-   separately. Keep #1344, #2676, #2718 and #2719 with their existing owners,
+   separately (#2755). Keep #1344, #2676, #2718 and #2719 with their existing owners,
    and file placement or address-selection work only when the remaining
    znver5 evidence isolates it.
 
