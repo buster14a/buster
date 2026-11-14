@@ -8449,6 +8449,16 @@ constant evaluation of its own initializer (`(typeof(x)){0}`,
 any use does, recording its declaration, so that the finish's scan of the
 initializer reports it at the use, with clang's message.
 
+Within a statement expression, cached deduction keeps a prepared x86 builtin's
+callee as an expression operand (#2717). The ordered reader's `ignored` mark
+means the retained graph uses the intrinsic call record, not that the callee is
+declaration syntax. Its recorded function type remains available to the cached
+reader; the existing argument and immediate checks still apply. Original runtime
+fixtures cover both reported forms, nested deduction, direct and explicitly
+typed controls, and a rejected nonconstant immediate. The same accepted source
+is compiled and linked for x86-64-v3, and compared with Clang in execution when
+the host supports that target.
+
 Clang's errors, at its places: `__auto_type` anywhere but a declaration's own
 specifiers (a parameter's, a member's, a type name's) at the keyword
 (`CheckInputReader.specifier_auto_type`); a typedef's and a function's at the
