@@ -78,9 +78,12 @@ static uint64_t check_tier1_inline_generations = 0;
 // replace theirs at link time (weak or selectany, or a late weak one, `#pragma weak`'s: CheckProgram.weak_late_keys),
 // as clang's IR makes such a definition weak or linkonce, whose calls LLVM's inliner keeps (isInterposable); and
 // BUSTER_CHECK_TIER1_INLINE_ROOTED where an attribute keeps a definition's code whatever its callers expand (used, a
-// constructor's or destructor's, an interrupt handler's, a multiversioned one's, an alias's, ifunc's or weakref's, a
-// section's, retain, patchable_function_entry, naked; and the interposable ones). The attributed declarations are found
-// 16 tokens at a time, as the emission's scan of them is (check_input_attributed_next), with its scalar twin.
+// constructor's or destructor's, an interrupt handler's, a multiversioned one's, an alias's, ifunc's or weakref's,
+// retain, patchable_function_entry, naked; and the interposable ones). A section, an attribute's or a pragma's, keeps
+// none: clang's inliner expands such a function as any other and drops an internal one nothing calls, and the compiler's
+// own checker, all of it under `#pragma clang section` (#502), lost the single-site class and its dead functions to it
+// (#2541). The attributed declarations are found 16 tokens at a time, as the emission's scan of them is
+// (check_input_attributed_next), with its scalar twin.
 #define BUSTER_CHECK_TIER1_INLINE_INTERPOSABLE 1u
 #define BUSTER_CHECK_TIER1_INLINE_ROOTED 2u
 static void check_tier1_inline_marks(const CheckProgram* program, bool scalar, uint8_t* marks)
@@ -103,7 +106,7 @@ static void check_tier1_inline_marks(const CheckProgram* program, bool scalar, u
                 const bool rooted = interposable || kind == CHECK_ATTRIBUTE_USED || kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR ||
                                     kind == CHECK_ATTRIBUTE_INTERRUPT || kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES ||
                                     kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || kind == CHECK_ATTRIBUTE_CPU_DISPATCH || kind == CHECK_ATTRIBUTE_ALIAS ||
-                                    kind == CHECK_ATTRIBUTE_IFUNC || kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_SECTION || kind == CHECK_ATTRIBUTE_RETAIN ||
+                                    kind == CHECK_ATTRIBUTE_IFUNC || kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_RETAIN ||
                                     kind == CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY || kind == CHECK_ATTRIBUTE_NAKED;
                 marks[object] |= attribute->ignored ? 0 : (interposable ? BUSTER_CHECK_TIER1_INLINE_INTERPOSABLE : 0) | (rooted ? BUSTER_CHECK_TIER1_INLINE_ROOTED : 0);
             }
@@ -169,14 +172,6 @@ static bool check_tier1_inline_table(const CheckProgram* program, const CheckPro
         for (uint32_t k = 0; k < program->initializer_reference_count; k += 1)
         {
             const uint32_t object = program->initializer_references[k];
-            marks[object <= input->token_count ? object : 0] |= BUSTER_CHECK_TIER1_INLINE_ROOTED;
-        }
-        // A section's placement (an attribute's or a pragma's).
-        const CheckInputSections* sections = input->sections;
-        for (uint32_t k = 0; sections != NULL && k < sections->placement_count; k += 1)
-        {
-            const uint32_t token = sections->placements[k].token;
-            const uint32_t object = token < input->token_count ? input->objects[token] : 0;
             marks[object <= input->token_count ? object : 0] |= BUSTER_CHECK_TIER1_INLINE_ROOTED;
         }
         for (uint32_t k = 0; k < program->alias_count; k += 1)
@@ -726,10 +721,12 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
     IrCheck check = ir_check(output != 0 && analyses != 0 && !function->calls_returns_twice ? IR_OK : IR_ERROR_UNSUPPORTED, BUSTER_IR_NONE, 0);
     if (check.error == IR_OK)
     {
-        // Under -g with its source identities, which its callers' expansions carry as an instance's (#2541 step 3).
-        check = inlining->sources ? ir_lower_typed_target_sources(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered, scalar) :
-                scalar            ? ir_lower_typed_target_scalar(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered) :
-                                    ir_lower_typed_target(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered);
+        // As the function's own pipeline lowers it (check_tier1_compile): a vector wider than the target moves whole is taken,
+        // for check_tier1_passes' split (#1624), else a summary of a function with one is refused and its calls stay calls
+        // (the compiler's own scalar-host build, whose AVX-512 types are wider than x86-64's: #2541). Under -g with its
+        // source identities, which its callers' expansions carry as an instance's (#2541 step 3).
+        check = inlining->sources ? ir_lower_typed_target_pieces_sources(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered, scalar) :
+                                    ir_lower_typed_target_pieces(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered, scalar);
     }
     IrFunction expanded = lowered;
     uint32_t inlined = 0;

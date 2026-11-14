@@ -733,15 +733,15 @@ static uint32_t check_debug_tier1_inline_locations(const char* transcript)
     return many != NULL ? (uint32_t)strtoul(many + strlen(": t1i_square. ("), NULL, 10) : one != NULL ? 1 : 0;
 }
 
-// Whether gdb's backtrace in `transcript` has frame `frame` as `function` at `line` of the fixture: "#N  ", the frame's
+// Whether gdb's backtrace in `transcript` has frame `frame` as `function` at `line` of `file`: "#N  ", the frame's
 // address and " in " where gdb prints them (a frame's pc past its line's start), the function, its arguments, and the
 // file (its directory where gdb shows one) at the line.
-static bool check_debug_tier1_inline_frame(const char* transcript, uint32_t frame, const char* function, uint32_t line)
+static bool check_debug_tier1_inline_frame_in(const char* transcript, uint32_t frame, const char* function, const char* file, uint32_t line)
 {
     char start[32];
-    char place[64];
+    char place[96];
     snprintf(start, sizeof(start), "\n#%u  ", frame);
-    snprintf(place, sizeof(place), "dbg_tier1_inline.c:%u\n", line);
+    snprintf(place, sizeof(place), "%s:%u\n", file, line);
     const char* found = transcript != NULL ? strstr(transcript, start) : NULL;
     const char* name = found != NULL ? found + strlen(start) : NULL;
     if (name != NULL && name[0] == '0' && name[1] == 'x')
@@ -755,6 +755,12 @@ static bool check_debug_tier1_inline_frame(const char* transcript, uint32_t fram
     const char* at = name != NULL ? strstr(name, place) : NULL;
     return name != NULL && strncmp(name, function, length) == 0 && name[length] == ' ' && name[length + 1] == '(' && end != NULL && at != NULL &&
            at + strlen(place) - 1 == end;
+}
+
+// The same in the fixture's file.
+static bool check_debug_tier1_inline_frame(const char* transcript, uint32_t frame, const char* function, uint32_t line)
+{
+    return check_debug_tier1_inline_frame_in(transcript, frame, function, "dbg_tier1_inline.c", line);
 }
 
 // gdb's `break t1i_square` on `program` (check_debug_tier1_inline_break_script, written beside the fixture): `expected`
@@ -889,4 +895,128 @@ static void check_debug_tier1_inline_test(CheckDebugTestTally* tally, const char
                                   check_debug_tier1_inline_frame(transcript.pointer, 3, "main", 22),
                             "gdb's backtrace shows the dead callees' expanded frames", report);
     check_debug_tier1_inline_break(tally, linked, directory, 2, arena);
+}
+
+// #2541: expanded callees from another file than the function's. A header's two static callees, the inner expanded into
+// the outer there and both into the main file's functions: their code's rows are the header's lines, and an instance's
+// DW_AT_call_file is its call's file, the main file's or the header's. gdb, stopped in the noinline function the inner
+// one calls, shows each frame at its call's line in its own file, in an executable and in a linked -c -g object (whose
+// static callees are dead).
+static const char check_debug_tier1_header_source[] =
+    "int printf(const char *, ...);\n"
+    "volatile int t1h_sink;\n"
+    "__attribute__((noinline)) void t1h_mark(int y)\n"
+    "{\n"
+    "    t1h_sink = y;\n"
+    "}\n"
+    "#include \"dbg_t1h.h\"\n"
+    "static int t1h_twice(int x)\n"
+    "{\n"
+    "    return t1h_square(x) + t1h_square(x + 1);\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    int total = 0;\n"
+    "    for (int i = 0; i < 3; i += 1)\n"
+    "    {\n"
+    "        total += t1h_twice(i);\n"
+    "    }\n"
+    "    printf(\"T1H %d\\n\", total);\n"
+    "    return total != 25;\n"
+    "}\n";
+
+static const char check_debug_tier1_header_header[] =
+    "static int t1h_inner(int y)\n"
+    "{\n"
+    "    t1h_mark(y);\n"
+    "    return y;\n"
+    "}\n"
+    "static int t1h_square(int x)\n"
+    "{\n"
+    "    int y = x * x;\n"
+    "    return t1h_inner(y) + 1;\n"
+    "}\n";
+
+static const char check_debug_tier1_header_script[] =
+    "set pagination off\n"
+    "break t1h_mark\n"
+    "run\n"
+    "bt\n"
+    "printf \"GDB-T1H-DONE\\n\"\n"
+    "kill\n";
+
+// gdb's backtrace of `program` from t1h_mark: each expanded callee's frame in its own file.
+static void check_debug_tier1_header_read(CheckDebugTestTally* tally, const char* program, const char* script, const char* directory, Arena* arena)
+{
+    char report[PATH_MAX + 24];
+    char errors[PATH_MAX + 24];
+    snprintf(report, sizeof(report), "%s.t1h-gdb", program);
+    snprintf(errors, sizeof(errors), "%s.t1h-errors", program);
+    char* gdb[] = { (char*)"gdb", (char*)"-nx", (char*)"-batch", (char*)"-directory", (char*)directory, (char*)"-x", (char*)script, (char*)program, NULL };
+    const bool inspected = object_test_run(gdb, report, errors) == 0;
+    const String8 transcript = inspected ? foreign_test_read(arena, report) : (String8){ 0 };
+    const bool done = transcript.pointer != NULL && strstr(transcript.pointer, "GDB-T1H-DONE\n") != NULL;
+    check_debug_test_expect(tally, done && check_debug_tier1_inline_frame_in(transcript.pointer, 0, "t1h_mark", "dbg_t1h.c", 5) &&
+                                  check_debug_tier1_inline_frame_in(transcript.pointer, 1, "t1h_inner", "dbg_t1h.h", 3) &&
+                                  check_debug_tier1_inline_frame_in(transcript.pointer, 2, "t1h_square", "dbg_t1h.h", 9) &&
+                                  check_debug_tier1_inline_frame_in(transcript.pointer, 3, "t1h_twice", "dbg_t1h.c", 10) &&
+                                  check_debug_tier1_inline_frame_in(transcript.pointer, 4, "main", "dbg_t1h.c", 17),
+                            "gdb's backtrace shows expanded callees from a header at their lines there", report);
+}
+
+static void check_debug_tier1_header_test(CheckDebugTestTally* tally, const char* directory, Arena* arena)
+{
+    char source[PATH_MAX];
+    char header[PATH_MAX];
+    char script[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/dbg_t1h.c", directory);
+    snprintf(header, sizeof(header), "%s/dbg_t1h.h", directory);
+    snprintf(script, sizeof(script), "%s/dbg_t1h.gdb", directory);
+    const bool written = foreign_test_write(source, check_debug_tier1_header_source, sizeof(check_debug_tier1_header_source) - 1) &&
+                         foreign_test_write(header, check_debug_tier1_header_header, sizeof(check_debug_tier1_header_header) - 1) &&
+                         foreign_test_write(script, check_debug_tier1_header_script, sizeof(check_debug_tier1_header_script) - 1);
+    check_debug_test_expect(tally, written, "write the Tier 1 header-callee fixture and its debugger script", directory);
+    static const CheckDebugTier1ValuesVariant variants[] = {
+        { .name = "default" },
+        { .name = "scalar", .scalar = true },
+    };
+    String8 baseline = { 0 };
+    for (uint32_t v = 0; written && v < BUSTER_ARRAY_LENGTH(variants); v += 1)
+    {
+        char program[PATH_MAX];
+        snprintf(program, sizeof(program), "%s/dbg_t1h_%s", directory, variants[v].name);
+        const bool built = check_debug_tier1_values_compile(tally, source, NULL, program, variants + v, "1", true, false, arena);
+        const String8 debug = built ? foreign_test_read(arena, program) : (String8){ 0 };
+        check_debug_test_expect(tally, v == 0 || (baseline.pointer != NULL && debug.pointer != NULL && baseline.length == debug.length &&
+                                                  memcmp(baseline.pointer, debug.pointer, debug.length) == 0),
+                                "the header callees' DWARF is byte-identical by both paths", program);
+        baseline = v == 0 ? debug : baseline;
+        char report[PATH_MAX + 24];
+        char errors[PATH_MAX + 24];
+        snprintf(report, sizeof(report), "%s.t1h-verify", program);
+        snprintf(errors, sizeof(errors), "%s.t1h-errors", program);
+        char* verify[] = { (char*)"llvm-dwarfdump", (char*)"--verify", program, NULL };
+        const bool verified = built && object_test_run(verify, report, errors) == 0;
+        const String8 verification = verified ? foreign_test_read(arena, report) : (String8){ 0 };
+        check_debug_test_expect(tally, verification.pointer != NULL && strstr(verification.pointer, "No errors.") != NULL,
+                                "the header callees' DWARF passes llvm-dwarfdump --verify", report);
+        if (built)
+        {
+            check_debug_tier1_header_read(tally, program, script, directory, arena);
+        }
+    }
+    char object[PATH_MAX];
+    char linked[PATH_MAX];
+    char errors[PATH_MAX + 24];
+    snprintf(object, sizeof(object), "%s/dbg_t1h.o", directory);
+    snprintf(linked, sizeof(linked), "%s/dbg_t1h_linked", directory);
+    snprintf(errors, sizeof(errors), "%s.err", linked);
+    const bool compiled = written && check_debug_tier1_values_compile(tally, source, NULL, object, variants, "1", true, true, arena);
+    char* link[] = { (char*)"cc", (char*)"-o", linked, object, NULL };
+    const bool joined = compiled && object_test_run(link, "/dev/null", errors) == 0;
+    check_debug_test_expect(tally, joined, "the header-callee object links", errors);
+    if (joined)
+    {
+        check_debug_tier1_header_read(tally, linked, script, directory, arena);
+    }
 }

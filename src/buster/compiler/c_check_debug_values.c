@@ -868,10 +868,10 @@ static uint32_t check_debug_inline_ranges(const CheckDebugBody* source, DebugWri
 }
 
 // Body `body`'s described instance `k` and its subtree, nested as their expansions were (#2541 step 3): a
-// DW_TAG_inlined_subroutine each, whose abstract origin is its callee's DW_TAG_subprogram, at its call's line in the
-// function's file, over its code and its nested instances' code. An instance without code, or undescribed, is left out with
+// DW_TAG_inlined_subroutine each, whose abstract origin is its callee's abstract instance, at its call's file and line,
+// over its code and its nested instances' code. An instance without code, or undescribed, is left out with
 // its subtree. Explicit stack, no recursion: the instances list each subtree in order.
-static void check_debug_inline_write(CheckDebugValues* values, uint32_t body, uint32_t k, uint32_t file)
+static void check_debug_inline_write(CheckDebugValues* values, uint32_t body, uint32_t k)
 {
     const CheckDebugBody* source = values->rows->values + body;
     const uint32_t end = check_debug_inline_end(source, k);
@@ -895,7 +895,7 @@ static void check_debug_inline_write(CheckDebugValues* values, uint32_t body, ui
             debug_integer(&values->info, values->function_offsets[instance.body], 4);
             check_debug_value_field(values, DEBUG_SECTION_RNGLISTS, values->ranges.size);
             check_debug_inline_ranges(source, &values->ranges, values->address_indices[body], j, subtree);
-            debug_uleb(&values->info, file);
+            debug_uleb(&values->info, instance.call_file);
             debug_uleb(&values->info, instance.call_line);
             values->inline_open[depth++] = j;
         }
@@ -1121,7 +1121,7 @@ static void check_debug_values_write(CheckDebugValues* values)
                 }
                 while (next_inline < ordered && (uint32_t)(values->inline_order[next_inline] >> 32) == token)
                 {
-                    check_debug_inline_write(values, b, (uint32_t)values->inline_order[next_inline], function.file);
+                    check_debug_inline_write(values, b, (uint32_t)values->inline_order[next_inline]);
                     next_inline += 1;
                 }
                 while (depth != 0 && values->scopes[depth - 1] <= token)
@@ -1135,7 +1135,7 @@ static void check_debug_values_write(CheckDebugValues* values)
             {
                 if (k < first_inline || k >= next_inline)
                 {
-                    check_debug_inline_write(values, b, (uint32_t)values->inline_order[k], function.file);
+                    check_debug_inline_write(values, b, (uint32_t)values->inline_order[k]);
                 }
             }
             debug_integer(&values->info, 0, 1); // subprogram children
