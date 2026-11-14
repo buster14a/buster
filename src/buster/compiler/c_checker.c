@@ -159,6 +159,9 @@ struct CheckOverloadCall
 {
     uint32_t node;
     uint32_t head;
+    // A target call may replace an ordinary set installed by an unrelated overloadable declaration (#2424).
+    // Keep its source value's captured head, plus one; zero uses the selected head's existing capture rule.
+    uint32_t captured_head;
 };
 
 typedef enum CheckRegionProofOp
@@ -1502,7 +1505,7 @@ static bool check_graph_validate_lists(const CheckGraph* graph)
         const uint32_t library = candidate->library_call;
         result = (candidate->previous == BUSTER_CHECK_NONE || candidate->previous < i) && candidate->declaration != BUSTER_CHECK_NONE &&
                  candidate->canonical != BUSTER_CHECK_NONE &&
-                 (flags & ~(BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_UNAVAILABLE | BUSTER_CHECK_OVERLOAD_DEFINED)) == 0 &&
+                 (flags & ~(BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_UNAVAILABLE | BUSTER_CHECK_OVERLOAD_DEFINED | BUSTER_CHECK_OVERLOAD_TARGET)) == 0 &&
                  (library == 0 || ((library & BUSTER_CHECK_LIBRARY_CALL) != 0 && (library & ~BUSTER_CHECK_LIBRARY_CALL) < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS &&
                                   (flags & BUSTER_CHECK_OVERLOADABLE) == 0));
     }
@@ -1608,7 +1611,8 @@ static bool check_graph_validate_node(const CheckGraph* graph, uint32_t node, ui
     if (result && state->overloads < graph->overload_count && graph->overload_calls[state->overloads].node <= node)
     {
         const CheckOverloadCall* call = graph->overload_calls + state->overloads;
-        result = call->node == node && op == CHECK_OP_CALL && call->head < graph->overload_candidate_count;
+        result = call->node == node && op == CHECK_OP_CALL && call->head < graph->overload_candidate_count &&
+                 call->captured_head <= graph->overload_candidate_count;
         state->overloads += 1;
     }
     if (result)
@@ -3149,8 +3153,10 @@ static inline __attribute__((always_inline)) void check_graph_node_action(TypeTa
     {
         const uint32_t head = overload ? graph->overload_calls[stream->overload_count].head :
                               action.operands[0].overload_head != 0 ? action.operands[0].overload_head - 1 : BUSTER_CHECK_NONE;
+        const uint32_t source = overload && graph->overload_calls[stream->overload_count].captured_head != 0 ?
+                                graph->overload_calls[stream->overload_count].captured_head : head + 1;
         const bool captured = action.operands[0].overload_head == 0 ||
-                              (overload && action.operands[0].overload_head == head + 1);
+                              (overload && action.operands[0].overload_head == source);
         if (!captured)
         {
             result = (CheckActionResult){ .diagnostic = CHECK_DIAG_INVALID_TYPE };

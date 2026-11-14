@@ -6216,9 +6216,10 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                 // Share the text renderer, not the sparse walk's selection or ordering. The exact semantic
                 // catalogue separately compares this spelling and its caret against Clang (#1107).
                 uint32_t location = phase == 2 ? extra[index].token : token;
+                uint32_t offset = 0;
                 PPOutputDiagnosticNote notes[BUSTER_CHECK_SEMANTIC_NOTES] = { 0 };
                 const char* message = phase == 2 ? extra[index].message :
-                                      phase == 1 ? check_semantic_expression(parser, pp, input, stream, types, stream->reports + index, &spell, &location, notes, scratch) :
+                                      phase == 1 ? check_semantic_expression(parser, pp, input, stream, types, stream->reports + index, &spell, &location, &offset, notes, scratch) :
                                                    check_semantic_input(parser, pp, input, types, input->reports + index, &spell, scratch);
                 const uint32_t source = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
                 if (phase == 0 && input->reports[index].message == CHECK_INPUT_UNDECLARED && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
@@ -6230,6 +6231,11 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                 else if (source != BUSTER_CHECK_NONE)
                 {
                     pp_diagnose_output(pp, PP_SEVERITY_ERROR, source, "%s", message);
+                }
+                else if (offset != 0 && location < count)
+                {
+                    const uint32_t at = parser->tokens.sources[location];
+                    pp_diagnose_output_location_at(pp, PP_SEVERITY_ERROR, at, pp->output.locations[at] + offset, parser->tokens.sources[token], PP_DIAGNOSTIC_SEMANTIC, "%s", message);
                 }
                 else
                 {
