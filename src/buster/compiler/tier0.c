@@ -5582,7 +5582,10 @@ static void tier0_extend(Tier0Writer* writer, uint32_t class, uint32_t reg)
 }
 
 // A copy of at most this many bytes moves 8 bytes at a time, as Tier 1 does: a small aggregate is often built by 8-byte
-// stores, and a 16-byte load spanning two of them can't forward (#1375). Larger copies keep 16-byte moves.
+// stores, and a 16-byte load spanning two of them can't forward (#1375). Larger copies keep 16-byte moves: on the
+// 9700X, 8-byte pieces copy a 64-byte struct just built in 0.63 times the cycles, but a cold 128- or 256-byte source in
+// 1.75 to 1.77 times, store-bound (#1375's record, buster-performance's named-results-1375-2026-11-13). A width chosen
+// from what last wrote the source is #2693.
 #define BUSTER_TIER0_COPY_NARROW_BYTES 32
 
 // The widest piece a copy of `size` bytes uses: 8 for a small aggregate, 16 for a larger one.
