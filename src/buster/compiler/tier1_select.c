@@ -3339,10 +3339,10 @@ static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
     // An allocation and a restore move rsp (#141): no load folds past either, so none reads memory a restore released.
     // A fence of any order and scope (#1059), a signal fence's too, is a compiler barrier: no load folds into a consumer
     // past it, so that the access stays on the fence's side the program put it. A volatile or atomic load is one too, and
-    // an atomic read/modify/write, and a masked store (#1840). These are the nodes with an effect, which the plan
-    // materializes whatever their uses.
+    // an atomic read/modify/write, and a masked or compressing store (#1840). These are the nodes with an effect, which
+    // the plan materializes whatever their uses.
     return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || op == IR_ALLOCA || op == IR_STACK_RESTORE || op == IR_FENCE || op == IR_ATOMIC_RMW ||
-           op == IR_MASKED_STORE || (op == IR_LOAD && (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0);
+           op == IR_MASKED_STORE || op == IR_COMPRESS_STORE || (op == IR_LOAD && (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0);
 }
 
 // Whether a fold may not move a load past `node` (#1059's audit): a barrier, or any other load, since the typed stream
@@ -3351,7 +3351,7 @@ static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
 // the last of these before the consumer the load itself), but past no other load.
 static bool tier1_select_fold_barrier(const IrFunction* function, uint32_t node)
 {
-    return tier1_select_barrier(function, node) || function->op[node] == IR_LOAD || function->op[node] == IR_MASKED_LOAD;
+    return tier1_select_barrier(function, node) || function->op[node] == IR_LOAD || function->op[node] == IR_MASKED_LOAD || function->op[node] == IR_GATHER;
 }
 
 // Each node's barriers entry (Tier1SelectForest.barriers), a running maximum of the barriers' positions plus one: the
@@ -3384,7 +3384,8 @@ static void tier1_select_barriers(const IrFunction* function, uint32_t count, ui
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ALLOCA)) |
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_RESTORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_FENCE)) |
                                    _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ATOMIC_RMW)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) |
-                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_MASKED_LOAD)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_MASKED_STORE))) & active;
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_MASKED_LOAD)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_MASKED_STORE)) |
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_COMPRESS_STORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_GATHER))) & active;
         __m512i at = _mm512_maskz_add_epi32(barrier, lanes, _mm512_set1_epi32((int)first));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 15));
         at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 14));
