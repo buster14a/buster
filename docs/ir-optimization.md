@@ -12,7 +12,11 @@ Include `ir_optimize.c` after `ir.c` and `dominators.c`.
 an `IrCheck`. `ir_optimize_options()` selects SCCP, dead-code removal and CFG
 cleanup, a 64-sweep limit, and the vector path. The `passes` bits are
 `BUSTER_IR_OPTIMIZE_SCCP`, `BUSTER_IR_OPTIMIZE_DCE` and
-`BUSTER_IR_OPTIMIZE_CFG`; `scalar` selects the worklist twins. A zero sweep
+`BUSTER_IR_OPTIMIZE_CFG`; `scalar` selects the worklist twins. Tier 1 also
+asks for `_LAYOUT` (#1218), `_IDENTITY` (#2554) and `_MERGE`, CFG cleanup's
+merges of single-predecessor chains (#139, `ir_optimize_merges`: "#139's
+acceptance" below and [the Tier 1 guide](tier1.md)), which the default
+leaves off. A zero sweep
 limit immediately uses worklist completion. It never publishes a partially
 converged optimistic analysis.
 
@@ -339,57 +343,207 @@ address-keyed trace, so that pair compares values and statuses alone.
 regeneration of the pairs. The [text tools guide](ir-tools.md#pass-fixtures-in-the-text-form)
 has the fixture-by-fixture record and the exact contracts.
 
-## Remaining issue scope and acceptance
+## #139's acceptance
 
-The SCCP/dead-code/CFG group and the following separate slices are implemented
-against the shared IR, with local verifier and independent execution checks:
+The passes, and the guides that record each one:
 
-- [Value numbering](ir-value-numbering.md) uses congruence partition
-  refinement, dominance-qualified substitution and an independent scoped
-  scalar expression table. Cyclic congruences are compared semantically.
-- [Loop-invariant motion](ir-loop-motion.md) consumes #174's loops and
-  dominance, with exact vector/worklist output and conservative total-operation
-  motion into existing dedicated preheaders.
-- [Private-field scalar replacement](ir-scalar-replacement.md) splits
-  nonescaping, disjoint constant-offset fields. Tests compose its output with
-  both upstream #134 promotion paths, including conditional stores and loops.
-- [Bounded inlining](ir-inlining.md) processes acyclic call-graph components
-  from callees to callers, expands small single-block leaf bodies, and preserves
-  recursive calls and explicit growth limits. Vector cost admission has a
-  scalar twin; rewriting preserves caller control flow and ordered effects.
-- The [additional pass-cost harness](ir-optimization-measurements.md) measures
-  complete GVN, LICM and field-splitting calls on frozen inputs. Its local
-  sanitizer smoke checks provide no target performance claim.
+- **SCCP, dead-code removal and CFG cleanup:** this guide.
+- **CFG cleanup's merges (`BUSTER_IR_OPTIMIZE_MERGE`):** this guide, and [the
+  Tier 1 guide](tier1.md)'s "The C driver's `--tier1`".
+- **[Value numbering](ir-value-numbering.md):** congruence partition
+  refinement, with an independent scoped scalar expression table; cyclic
+  congruences are compared semantically.
+- **[Loop-invariant motion](ir-loop-motion.md):** total operations into existing
+  dedicated preheaders of #174's loops.
+- **[Private-field scalar replacement](ir-scalar-replacement.md):** nonescaping,
+  disjoint constant-offset fields.
+- **[Inlining](ir-inlining.md):** #2541's summaries and general splice.
 
-These slices do not complete #139. The following work remains tracked:
+Each has before/after fixtures, built in C and in the text form (#175), with
+both twins and an independent executor. #139's last items close as follows.
+The record is buster-performance's [`ssa-passes-139-2026-11-14`](https://github.com/buster14a/buster-performance/tree/c61db97a94c50c8f896ac5f4a58fb35bb44a23fe/docs/measurements/ssa-passes-139-2026-11-14).
 
-- Scalar floating numeric evaluation needs an explicit environment contract.
-- CFG cleanup still needs nonempty single-predecessor merging and metadata
-  compaction where measurements justify its cost.
-- Inlining still needs general callee CFG and stack-object cloning, measured
-  profitability, complete translation-unit driver integration and vector
-  operand rebasing beyond the current vector cost-admission sweep.
-- The aggregate-size limit, motion profitability, pass order and repetitions
-  require measurement. Conservative operation and alias exclusions are
-  documented by each implemented stage.
-- Complete pipeline integration, corpus and randomized-IR qualification,
-  all-pass and individual-pass differential tests, and 9700X compile-time
-  and emitted-program runtime acceptance remain pending.
+### The pipeline and the order
 
-Each transformation requires before/after verifier checks and independent
-execution comparisons. Every function of the source corpora and randomized
-IR must exercise the sweep and scalar paths; #142 must compare passes both on
-and individually off. Those checks must use the complete source-lowering
-and compiler-consumer pipeline. Local diagnostic tests do not satisfy 9700X
-acceptance.
+`--tier1`'s order is: lowering; the unit's inlining from summaries (#2541);
+SROA (`+sroa`); #866's solver (`+gvn`); promotion; the wide integers'
+halves and the wide vectors' pieces; truth simplification; threading;
+if-conversion; LICM (`+licm`); and the optimizer, which runs SCCP, dead-code
+removal, CFG cleanup and its merges, layout and identities, then the final
+verification that selection reads. `--tier1-passes=` turns each pass on or
+off ([the Tier 1 guide](tier1.md)). By default SCCP, dead-code removal, CFG
+cleanup, the merges and the inlining run; LICM, SROA and the solver don't,
+and none repeats. The measurements below decided this.
 
-The required measurements are full pass time, including operand preparation,
-analysis, remapping, allocation and verifier costs where enabled, plus emitted
-program time for `speedtest1` and the corpora. They must report useful items,
-bytes and peak scratch, compare both implementations in separately locked
-9700X runs on CPU 2, and include sustained vector work and work after a lighter
-phase. A kernel-only result cannot select the final pass order or discharge
-the compiler performance criteria.
+### Agreement of the twins
+
+- **The corpora.** `test-ir-source --passes` ([the IR guide](commands/ir.md))
+  runs every pass by both versions on every function of c-testsuite's subset
+  (430 functions), the frozen `sqlite3.c` (2,602) and musl (2,775, 1,355
+  units). It covers SROA, the solver (exact against its complete-refinement
+  oracle, semantic against its scalar twin), the optimizer's rows, LICM, and
+  the inliner per caller. Every pass's versions agree on every function. On
+  `sqlite3.c` the scalar solver removes the same 93,467 instructions as the
+  partition. The correctness list runs it on all three.
+- **Random IR.** `test-ir-metamorphic`'s combination row now includes the
+  merges. A run of seed 139 over 2,000 cases (14,000 variants, 1,568,000
+  checked executions through both twins of every pass) passed. The pass
+  fixtures run every pass mask, with and without the merges, on both paths.
+
+### #142's differential campaigns
+
+Csmith `0cdc7103` and YARPGen `1adb290f` (#142's pins), seeds 5000 to 5039
+of each, 80 programs per campaign, against clang -O0 and -O2 at both of
+Buster's tiers, with Tier 1 as `--tier1 --tier1-passes=+all` and with each
+pass turned off from there. Each campaign ran on a cloud host, a correctness
+run and no timing:
+
+| Tier 1 | Programs | Passed | Failed: clang -O0's link | Failed: clang -O0's 30 s bound |
+| --- | ---: | ---: | ---: | ---: |
+| `+all` | 80 | 66 | 8 | 6 |
+| `+all,-sccp` | 80 | 66 | 8 | 6 |
+| `+all,-dce` | 80 | 66 | 8 | 6 |
+| `+all,-cfg` | 80 | 66 | 8 | 6 |
+| `+all,-merge` | 80 | 66 | 8 | 6 |
+| `+all,-gvn` | 80 | 66 | 8 | 6 |
+| `+all,-licm` | 80 | 66 | 8 | 6 |
+| `+all,-sroa` | 80 | 66 | 8 | 6 |
+| `+all,-inline` | 80 | 66 | 8 | 6 |
+| `+all` with `--scalar` | 80 | 66 | 8 | 6 |
+
+A passed case means both of Buster's tiers and both clang modes compiled,
+ran and printed the same output. The same 14 cases fail in every campaign,
+each first at a step of clang -O0's:
+- **8 YARPGen programs:** their arrays need more than the small code model
+  reaches, so clang's link refuses them (`relocation truncated to fit`).
+  Buster's link refuses 7 of them the same way. For the eighth, Buster links,
+  and the cloud host's memory limit killed its executables at about 7 GB.
+- **6 Csmith programs:** every build's run passes the 30-second bound, clang
+  -O2's too.
+
+No case shows a difference or a failure of Buster at either tier: 660
+accepted comparisons of Tier 1's pipeline, 66 per configuration. The ledgers
+are in the record. Each case's every mode is listed there.
+
+### Compile time per pass, both versions
+
+`benchmark-ir-source --passes` on the 9700X (CPU 2, under the lock) on the
+frozen `sqlite3.c`: each pass's public call over all 2,602 functions (599,220
+lowered IR instructions), medians of 21 rounds. Each call includes its
+checks, analyses, rewrite and verification, which dominate the single-pass
+rows.
+
+| Pass | Vector, ms | Scalar, ms | Vector, ns an instruction | Scalar, ns an instruction | Scalar / vector |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SROA (Tier 1's options), on the lowered form | 46.3 | 63.3 | 77.2 | 105.7 | 1.37 |
+| #866's solver, on the lowered form | 49.3 | 59.4 | 82.3 | 99.2 | 1.21 |
+| SCCP alone | 42.9 | 46.7 | 71.6 | 77.9 | 1.09 |
+| Dead-code removal alone | 38.2 | 47.0 | 63.8 | 78.4 | 1.23 |
+| CFG cleanup alone | 30.9 | 40.4 | 51.6 | 67.4 | 1.30 |
+| CFG cleanup and its merges | 33.1 | 41.6 | 55.3 | 69.5 | 1.26 |
+| SCCP, dead-code removal and CFG cleanup | 50.4 | 53.1 | 84.2 | 88.6 | 1.05 |
+| Tier 1's set (with the merges, layout, identities) | 54.2 | 56.9 | 90.5 | 95.0 | 1.05 |
+| LICM | 55.8 | 58.3 | 93.1 | 97.2 | 1.04 |
+| The inliner, 1,794 callers' units | 22.8 | 30.4 | 38.0 | 50.8 | 1.34 |
+
+The optimizer's rows and LICM take the promoted form, 480,852 instructions.
+The merges cost 2.2 ms over CFG cleanup alone on the vector path (1.3 ms on
+the scalar), or 4 ns a lowered instruction. Their predecessor counts are one
+scalar pass over the executable edges, a scatter of one count per edge, which
+that bound includes; the chain heads come from the threading's pointer jumping,
+with its vector and scalar twins.
+
+The whole driver, `--tier1 --lanes 1 -c sqlite3.c`, 11 runs each by
+`time-runs`, in user cycles:
+
+| `--tier1-passes=` | User cycles, M | Against the default | Wall, ms |
+| --- | ---: | ---: | ---: |
+| (the default) | 2,459.1 | | 481.8 |
+| `-sccp` | 2,500.5 | +1.7% | 470.3 |
+| `-dce` | 2,582.3 | +5.0% | 484.9 |
+| `-cfg` | 2,474.0 | +0.6% | 472.9 |
+| `-merge` | 2,473.0 | +0.6% | 484.8 |
+| `-inline` | 2,099.4 | −14.6% | 416.0 |
+| `+gvn` | 3,247.3 | +32.0% | 604.5 |
+| `+licm` | 3,023.3 | +22.9% | 565.5 |
+| `+sroa` | 3,248.5 | +32.1% | 624.8 |
+| `+all` | 4,177.3 | +69.9% | 773.1 |
+| `-all` | 2,234.6 | −9.1% | 420.7 |
+
+The default passes earn their compile time: turning SCCP, dead-code removal
+or CFG cleanup off makes the rest of the pipeline do more. The merges save
+0.6% of the compile's cycles: 8,003 of `sqlite3.c`'s blocks join their
+predecessors, which leaves allocation and emission fewer blocks. Against main
+`ca1ede6a`, whose objects head's `--tier1-passes=-merge` reproduces byte for
+byte (speedtest1's unit and Lua's 33 units), head's `--tier1` takes 2,457.5 M
+user cycles to main's 2,463.3 M (−0.23%), and Tier 0's compile is unchanged
+(586.9 M to main's 588.1 M).
+
+### Run time per pass
+
+`measure-tier1-programs` on the 9700X (CPU 2, 11 rounds of a Williams design
+per run) with each variant beside the default `--tier1`. Every build gives
+speedtest1's verification hash and each Lua script's clang -O0 output. The
+default's medians varied by about 0.3% on speedtest1 and 0.8% on Lua between
+the five runs; earlier records place code-placement effects at about 1.5%.
+
+Each variant against the default `--tier1` of the same run, in user cycles and
+instructions (speedtest1's wall time is mostly its database's I/O):
+
+| `--tier1-passes=` | speedtest1, cycles | speedtest1, instructions | Lua, cycles | Lua, instructions |
+| --- | ---: | ---: | ---: | ---: |
+| `-sccp` | +3.7% | +9.4% | +5.8% | +5.3% |
+| `-dce` | +24.4% | +54.9% | +22.9% | +46.7% |
+| `-cfg` | +0.0% | +0.0% | −1.0% | −0.0% |
+| `-merge` | −0.6% | −0.1% | +2.0% | −0.0% |
+| `-inline` | +4.4% | +3.0% | +1.5% | +0.6% |
+| `+gvn` | −0.8% | +4.5% | +11.0% | +10.5% |
+| `+licm` | +5.3% | +6.2% | +57.9% | +56.0% |
+| `+sroa` | −1.6% | −0.4% | −0.6% | +0.1% |
+| `+all` | +2.6% | +7.6% | +58.3% | +60.7% |
+| `-all` | +34.2% | +66.7% | +26.9% | +52.5% |
+
+The default `--tier1` took 1.30 to 1.32 times clang -O2's user cycles on
+speedtest1 and 1.19 to 1.21 times on Lua. Head's `--tier1-passes=-merge`
+writes main's objects, so the `-merge` row is head against main.
+
+What the measurements decided:
+- **SCCP, dead-code removal and the inlining** pay at run time, and turning
+  them off makes the compile slower as well. All the default passes off cost
+  34% of speedtest1's cycles and 27% of Lua's.
+- **CFG cleanup's threading** is neutral at run time, since the layout already
+  makes a jump to the next block a fall-through. It saves 0.6% of the compile.
+- **The merges** stay on. They save 0.6% of the compile, take 0.35% from
+  `sqlite3.c`'s Tier 1 text (1,100,264 to 1,096,408 bytes) and 439 call-save
+  stores from its 15,424. Their run-time change, 0.1% fewer instructions, is
+  inside code placement's noise either way.
+- **#866's solver** stays off: Lua runs 11% more cycles. Its class
+  representatives lengthen live ranges that the allocator then spills, as the
+  value-numbering guide's earlier measurement found. It also costs 32% of the
+  compile.
+- **LICM** stays off: Lua runs 58% more cycles. Its moved values live across
+  their loops, where they spill (#1189's breakdown).
+- **SROA** stays off: at most 1.6% fewer cycles, inside the noise, with no
+  fewer instructions, for 32% more compile. It splits the driver's one-slot
+  scalars, which promotion takes anyway, and the aggregates that matter escape
+  to calls until the inlining removes those calls. The inlining's expansions
+  already run it where they copy aggregates.
+- **Repetition:** no pass runs twice. The optimizer cleans up after the passes
+  before it, the inlining's summaries are optimized once each, and nothing
+  measured here would gain from a second round.
+
+### What stays open
+
+Each item #139's design or guide named that this close-out doesn't finish has
+an issue of its own:
+- **Value numbering with memory** (repeated loads, store-to-load forwarding):
+  #2718.
+- **A policy under which LICM and the solver pay** (register pressure, values
+  Tier 1 recomputes kept at their users): #2719.
+- **Scalar floating folding** under #1450's floating-environment contract:
+  #2720.
+- **Inlining callees with control flow, its classes and budgets:** #2541 and its
+  claimed steps. Its unit refusal of a variadic or unprototyped call: #2721.
 
 ## Algorithm sources and provenance
 

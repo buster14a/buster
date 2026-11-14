@@ -132,6 +132,41 @@ Put `--benchmark-self-test` first. Shared correctness CI checks the classic bit
 builtins with `-march=x86-64` and `-march=znver5`, including functions that add
 and remove BMI, LZCNT and POPCNT through their target attributes (#1374).
 
+`./build/compiler test-ir-source --passes [preprocessor options] file...`
+(`ir_source_passes.c`) is #139's twin check on real C. It prepares, lowers and
+promotes every function as `test-ir-source` does, then runs each of #139's
+passes by its vector and its scalar version:
+- SROA with Tier 1's options, on the lowered form;
+- #866's solver on the lowered form: its acyclic numbering must give its
+  complete-refinement oracle's function, and its scalar available-expression
+  twin must accept the function and remove no more instructions;
+- the optimizer on the promoted form, with SCCP alone, dead-code removal
+  alone, CFG cleanup alone and with its merges, the three together, and
+  Tier 1's set (the three with the merges, layout and identities);
+- LICM on the promoted form;
+- for each caller, the inliner on a unit of the caller and its direct callees
+  among the file's functions, as the C driver's expansion builds one, with
+  the caller alone rewritten and #2541's general splice on.
+
+Both versions must give the same function, counts and decisions. SROA's,
+the solver's and the inliner's results must also promote. A refusal both
+versions give alike is counted, not failed: `IR_ERROR_UNSUPPORTED`, and the
+inliner's `IR_ERROR_TYPE` for a caller with an unprototyped or variadic call
+of one of the unit's functions, whose `IrCall` lists every argument. Any other
+error or difference fails the command, with a line naming the file,
+function and pass. The correctness list runs it on c-testsuite's subset, the
+frozen `sqlite3.c` and musl, every pass agreeing on all 5,807 functions.
+
+`./build/compiler benchmark-ir-source --passes [--only PASS] [preprocessor
+options] file...` times the same passes by both versions on the same inputs.
+The inputs are prepared outside the time, and so are the callers' units that
+both inliner versions take. Each pass runs over the whole corpus by each
+version, in 21 rounds that alternate which runs first, after a warm-up of
+each. A run is the public call with its checks, analyses, rewrite and
+verification. The report gives each version's median total and its
+nanoseconds, cycles and instructions per lowered IR instruction. Run it
+under the 9700X's lock, pinned to one CPU.
+
 `./build/compiler benchmark-ir [--instructions N] [--passes N] [--only
 scalar|vector|uses|cfg] [--after-scalar MS]` measures the verifier and derived
 builders on small and large synthetic functions. `benchmark-ir-lowering
