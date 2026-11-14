@@ -347,6 +347,8 @@ struct IrSroaAssembly
     uint8_t bytes;
     uint8_t uniform;
     uint8_t seen;
+    // An access of the block's that leaves the slot's bytes (ir_sroa_fields refuses its slot): nothing is decided after it.
+    uint8_t outside;
     uint8_t image[BUSTER_IR_SROA_ASSEMBLE_BYTES];
 };
 
@@ -415,20 +417,25 @@ static void ir_sroa_assemble(IrSroaWork* work, IrSroaAssembly* states, uint32_t*
             const uint64_t size = root != BUSTER_IR_NONE ? f->slots[root].size : 0;
             const uint64_t offset = root != BUSTER_IR_NONE ? work->offsets[f->a[i]] : 0;
             const uint64_t bytes = root != BUSTER_IR_NONE ? ir_sroa_access_bytes(f, i) : 0;
-            if (root != BUSTER_IR_NONE && work->refused[root] == 0 && work->dead[i] == 0 && size <= BUSTER_IR_SROA_ASSEMBLE_BYTES && bytes != 0 && offset <= size &&
-                bytes <= size - offset)
+            const bool tracked = root != BUSTER_IR_NONE && work->refused[root] == 0 && work->dead[i] == 0 && size <= BUSTER_IR_SROA_ASSEMBLE_BYTES;
+            const bool inside = bytes != 0 && offset <= size && bytes <= size - offset;
+            if (tracked && states[root].seen == 0)
+            {
+                touched[touched_count++] = root;
+                states[root] = (IrSroaAssembly){
+                    .value = BUSTER_IR_NONE,
+                    .load = BUSTER_IR_NONE,
+                    .uniform = 1,
+                    .seen = 1,
+                };
+            }
+            if (tracked && !inside)
+            {
+                states[root].outside = 1;
+            }
+            if (tracked && inside && states[root].outside == 0)
             {
                 IrSroaAssembly* state = &states[root];
-                if (state->seen == 0)
-                {
-                    touched[touched_count++] = root;
-                    *state = (IrSroaAssembly){
-                        .value = BUSTER_IR_NONE,
-                        .load = BUSTER_IR_NONE,
-                        .uniform = 1,
-                        .seen = 1,
-                    };
-                }
                 const uint64_t range = (bytes == 64 ? UINT64_MAX : (UINT64_C(1) << bytes) - 1) << offset;
                 if (op == IR_STORE)
                 {
