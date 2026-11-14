@@ -13460,10 +13460,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // The functions' unwind tables, as clang has them: by default, unless freestanding or an option turns them off.
     const bool unwind_tables = parsed && predefines_unwind_tables(&options.predefines, options.freestanding);
     options.defer_history = !lazy_system_headers && !scalar && !source_rows;
-    // With -g a unit's DWARF describes every type its table holds (c_check_debug_values.c), a skipped declaration's too, so
-    // -g skips nothing; --attested=verify, which skips nothing, still runs.
-    const uint8_t command_attested = (uint8_t)(scalar || (attested == CHECK_ATTESTED_MODE_ON && (options.predefines.debug || options.predefines.debug_modules)) ?
-                                               CHECK_ATTESTED_MODE_OFF : attested);
+    // (-g skips too: a unit's DWARF describes what its definitions reach, check_debug_value_roots, which a skipped
+    // declaration is not.)
+    const uint8_t command_attested = (uint8_t)(scalar ? CHECK_ATTESTED_MODE_OFF : attested);
     // A memo kept across processes is keyed by the compiler's build: one that can't be identified keeps none.
     uint64_t attested_key[2] = { 0 };
     const bool memo_keyed = parsed && attested_memo != NULL && command_attested != CHECK_ATTESTED_MODE_OFF &&

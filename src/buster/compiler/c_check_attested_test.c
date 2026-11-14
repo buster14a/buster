@@ -465,7 +465,8 @@ static __attribute__((noinline)) void check_test_attested_compile(CheckTest* tes
         check_attested_test_compiled_remove(directory, "off", units);
         check_attested_test_compiled_remove(directory, "on", units);
     }
-    // -g: the DWARF describes every type the unit's table holds, so nothing is skipped; and --scalar skips nothing.
+    // -g: the DWARF describes what the unit's definitions reach (check_debug_value_roots), which no skipped declaration is,
+    // so -g skips, and its objects are --attested=off's; and --scalar skips nothing.
     {
         // (Each command in the directory `debug`, which its DWARF names, moved aside after it.)
         const char* debug[] = { "-nostdinc", "-std=gnu17", "-g", "--lanes", "1", "-c" };
@@ -477,8 +478,8 @@ static __attribute__((noinline)) void check_test_attested_compile(CheckTest* tes
         snprintf(to, sizeof(to), "%s/on", directory);
         const bool on = written && check_attested_test_compile(directory, "debug", "on", debug, BUSTER_ARRAY_LENGTH(debug), units - 2, 0) && rename(from, to) == 0;
         check_test_expect(test, off && on && check_attested_test_compiled_same(directory, "on", "off", units - 2, true) &&
-                                    check_units_attested_last[CHECK_ATTESTED_SUMMARY_UNITS] == 0,
-                          "-g runs no attested declarations' passes, and its objects are --attested=off's");
+                                    check_units_attested_last[CHECK_ATTESTED_SUMMARY_SKIPPED] != 0,
+                          "-g skips attested declarations, and its objects (their DWARF) are --attested=off's");
         check_attested_test_compiled_remove(directory, "on", units);
         const char* scalar[] = { "-nostdinc", "-std=gnu17", "--scalar", "--lanes", "1", "-c" };
         const bool scalar_on = written && check_attested_test_compile(directory, "on", "on", scalar, BUSTER_ARRAY_LENGTH(scalar), units - 2, 0);

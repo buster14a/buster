@@ -229,10 +229,10 @@ the census below measures, run in the compile). `--attested=MODE` picks:
   a build ID (the CI toolchain's lld adds none) is keyed by its executable
   file's identity instead: device, inode, size and modification time.
 - **`off`:** no passes and no state. `--scalar` is `off` (its reader is the
-  skip's oracle), and so is `on` with `-g`, whose DWARF describes every type
-  the unit's table holds (`c_check_debug_values.c`), a skipped declaration's
-  too; `verify` runs with `-g`. A command of one source file has no memo and
-  runs none.
+  skip's oracle). `-g` skips: a unit's DWARF describes what its definitions
+  reach, as clang's does (`check_debug_value_roots` in
+  `c_check_debug_values.c`), which no skipped declaration is. A command of one
+  source file has no memo and runs none.
 
 As the reader ends, while it has its binding events, it tests each reading's
 file-scope `DECLARE` and `USE` events and its tags' completions against the
@@ -258,7 +258,10 @@ contradictions and the unlisted events. `test-checker --attested` (in
 `c_check_attested_test.c`) compiles a fixture's units by each mode: by `-c`
 with two units' errors (one an undeclared call whose typo correction suggests a
 skipped prototype), on two lanes, by `-fsyntax-only -Wall -Wextra`, with `-g`
-and with `--scalar`, each object and the diagnostics `--attested=off`'s bytes;
+(which skips) and with `--scalar`, each object and the diagnostics
+`--attested=off`'s bytes; and every field of the reader's state by class
+(`check_test_attested_fields`: CheckInput's and CheckInputReader's, read by
+`__builtin_dump_struct`, fail when one has no class);
 and `test-check-units`' every object of a command against the unit's alone is
 the skip's test on its programs. The design's "Steps 1 and 2" has the 9700X's
 results.
