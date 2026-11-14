@@ -2872,6 +2872,22 @@ static bool check_test_program_switch_run(const CheckLowerWriter* writer, uint64
     return valid && destination == expected && depth == 0;
 }
 
+// Boundaries may fall more than once inside one target_clones body. All of its copies must belong to one part, even
+// when moving the boundaries makes some parts empty; unrelated bodies retain their original boundaries.
+static void check_test_program_clone_parts(CheckTest* test)
+{
+    CheckProgramBody bodies[8] = {
+        { .opening = 1 }, { .opening = 2 }, { .opening = 2 }, { .opening = 2 },
+        { .opening = 3 }, { .opening = 4 }, { .opening = 4 }, { .opening = 5 },
+    };
+    uint64_t boundaries[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
+    const uint64_t expected[] = { 0, 1, 4, 4, 4, 5, 7, 7, 8 };
+    const CheckProgram program = { .bodies = bodies };
+    CheckEmitRun run = { .program = &program, .body_count = 8, .boundaries = boundaries };
+    check_program_emit_group_copies(&run, 8);
+    check_test_expect(test, memcmp(boundaries, expected, sizeof(expected)) == 0, "clone copies stay together across empty parts");
+}
+
 // #1371's checked-case producer contract, without another large source string in the compiler. The source-order
 // records are permuted, contain empty intervals and repeated destinations, and span both ends of each integer type.
 // Real source-to-native coverage, including selector effects and control flow, lives in tests/driver/tier1_sparse_switch.c.
@@ -4084,6 +4100,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     {
         check_test_program_declaring(test);
         check_test_program_refused(test);
+        check_test_program_clone_parts(test);
         check_test_program_sparse_switches(test);
         check_test_program_type_facts(test);
         check_test_program_selection(test, clang);
