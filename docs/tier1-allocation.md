@@ -1602,6 +1602,15 @@ instructions; Lua's `lvm.c` compiles in the same time. In callgrind's count of
 the scalar host build, the same compile runs +0.25% (`tier1_cfg_prepare`'s
 sequences, the consumer's pass and the allocator's avoidance).
 
+**Run time on the 9700X** (#2553's method: Lua's objects in 33 link orders,
+speedtest1 after 8 pads, 5 and 7 rounds, each a hold of the lock, `perf stat` on
+CPU 2; 1,762 runs, none failed). Lua's five scripts run −0.44% instructions and
+−0.36% cycles, an interval of −0.79% to +0.08%; `arithmetic`, whose loops run
+`//` and `%`, takes −1.51% cycles (−1.94% to −1.08%) and is faster at 30 of the
+33 orders. speedtest1 runs −0.53% instructions in the same time: +0.09% cycles,
+−0.66% to +0.83%. Statically, speedtest1's edge moves go from 35,590 to 36,035,
+where values move out of the registers their webs avoid; Lua's don't change.
+
 ## Rematerialization
 
 `Tier1RematerializationInput` is a borrowed column view of selection facts,
