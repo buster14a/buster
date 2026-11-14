@@ -64,18 +64,12 @@ static void check_test_intrinsic_input_storage(CheckTest* test, const Parser* pa
                     {
                         clean = output.intrinsic_ids[i] == 0;
                     }
+                    // Every id the table has is filled (check_input_intrinsic_fill), so every entry is the exact answer.
                     for (uint32_t i = 0; clean && i < pp->table->count; i += 1)
                     {
-                        bool operand = false;
-                        for (uint32_t token = 0; token < parser->tokens.count; token += 1)
-                        {
-                            operand |= parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_OPERAND &&
-                                       parser->tokens.names[token] == i;
-                        }
                         const InternSpan span = pp->table->spans[i];
-                        const BuiltinIntrinsicInfo* info = operand ? builtin_intrinsic_lookup((const char*)pp->table->records + span.offset, span.length) : 0;
-                        const uint32_t expected = !operand ? UINT32_MAX : info == 0 ? 0 :
-                                                  UINT32_C(0x80000000) | (uint32_t)(info - builtin_intrinsic_infos);
+                        const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)pp->table->records + span.offset, span.length);
+                        const uint32_t expected = info == 0 ? 0 : UINT32_C(0x80000000) | (uint32_t)(info - builtin_intrinsic_infos);
                         clean = reader.intrinsic_names[i] == expected;
                     }
                     check_test_expect(test, clean, "intrinsic initialization overwrites poisoned active columns and sentinel");
@@ -440,7 +434,7 @@ static void check_test_intrinsic_no_scratch_large(CheckTest* test)
 // of no row (short and long), checked against an independent scan of every token by the exact search alone. Each unit
 // runs on a fresh table on both paths, and in turn on two tables that the units share, one a path's, which grow past
 // their first room between units. Every run must give the oracle's distinct rows and calls, leave each name's code
-// exact and none pending, and give the unit's cache the exact answer of each name it has or UINT32_MAX.
+// exact, and give the unit's cache the exact answer of each name it has or UINT32_MAX for one not looked up.
 enum
 {
     CHECK_TEST_INTRINSIC_MEMO_UNITS = 6,
@@ -577,9 +571,8 @@ static void check_test_intrinsic_memo(CheckTest* test)
     for (uint32_t u = 0; units != NULL && u < CHECK_TEST_INTRINSIC_MEMO_UNITS; u += 1)
     {
         CheckIntrinsicMemoUnit* unit = units + u;
-        // Unit 1 opens with 600 tokens of one row's name and its near miss, so that on a fresh table more than 64 operands
-        // wait for a batch of two names; the others draw each unit's spellings from a band of the pool, so that later
-        // units meet names earlier ones had.
+        // Unit 1 opens with 600 tokens of one row's name and its near miss; the others draw each unit's spellings from a
+        // band of the pool, so that later units meet names earlier ones had.
         unit->deferring = u % 2 == 1;
         for (uint32_t i = 0; i < CHECK_TEST_INTRINSIC_MEMO_TOKENS;)
         {
@@ -658,8 +651,85 @@ static void check_test_intrinsic_memo(CheckTest* test)
     free(units);
 }
 
+// #2654's fill of the memo in id order: tables of every catalogue name, a near miss of each and short names, the last of
+// them under four bytes so that their four-byte reads would pass the written records, filled on the vector path and on the
+// scalar path, in one step and in two. The 16-lane filter must pass exactly the ids its scalar twin passes, and every id's
+// code must be the binary search's.
+static void check_test_intrinsic_fill(CheckTest* test)
+{
+    InternTable tables[3] = { 0 };
+    bool ready = intern_initialize(&tables[0]) && intern_initialize(&tables[1]) && intern_initialize(&tables[2]);
+    for (uint32_t pass = 0; ready && pass < 2; pass += 1)
+    {
+        for (uint32_t t = 0; ready && t < 3; t += 1)
+        {
+            InternTable* table = tables + t;
+            for (uint32_t i = 0; ready && i < BUSTER_BUILTIN_INTRINSIC_COUNT; i += 1)
+            {
+                const BuiltinIntrinsicInfo* info = builtin_intrinsic_infos + (pass == 0 ? i : BUSTER_BUILTIN_INTRINSIC_COUNT - 1 - i);
+                char near[160];
+                const uint32_t length = info->name_length < sizeof(near) - 2 ? info->name_length : (uint32_t)sizeof(near) - 2;
+                memcpy(near, info->name, length);
+                near[length] = pass == 0 ? 'x' : '_';
+                ready = intern_find_or_add(table, (const uint8_t*)info->name, info->name_length) != 0 &&
+                        intern_find_or_add(table, (const uint8_t*)near, length + 1) != 0;
+            }
+            for (uint32_t i = 0; ready && i < 26 * 27; i += 1)
+            {
+                char spelling[3] = { (char)('a' + i % 26), (char)('a' + i / 26 - 1), 0 };
+                ready = intern_find_or_add(table, (const uint8_t*)spelling, i < 26 ? 1 : 2) != 0;
+            }
+            const char* tail[] = { "abc", "q", "zz", "x" };
+            for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(tail); i += 1)
+            {
+                char spelling[8];
+                const int length = snprintf(spelling, sizeof(spelling), "%s%u", pass == 0 ? tail[i] : "", pass == 0 ? 0 : i);
+                ready = intern_find_or_add(table, (const uint8_t*)spelling, (uint32_t)(pass == 0 ? strlen(tail[i]) : (uint64_t)length)) != 0;
+            }
+            // Table 0 is filled once, on the vector path, after both passes' ids; table 1 on the scalar path and table 2 on
+            // the vector path after each pass, the second fill taking only the ids the second pass added.
+            uint16_t* rows = ready && (t != 0 || pass == 1) ? intern_intrinsic_rows(table) : NULL;
+            ready = rows != NULL || (t == 0 && pass == 0);
+            if (rows != NULL)
+            {
+                check_input_intrinsic_fill(table, rows, t == 1);
+            }
+        }
+        const uint64_t written = tables[0].record_arena.length - (uint64_t)(tables[0].records - tables[0].record_arena.base);
+        bool lanes = ready && tables[0].count == tables[1].count;
+        for (uint32_t first = 0; lanes && first < tables[0].count; first += 16)
+        {
+            const __mmask16 mask = (__mmask16)_bzhi_u32(UINT32_MAX, tables[0].count - first < 16 ? tables[0].count - first : 16);
+            uint32_t scalar = 0;
+            for (uint32_t lane = 0; lane < 16 && first + lane < tables[0].count; lane += 1)
+            {
+                scalar |= (uint32_t)check_input_intrinsic_candidate(&tables[0], first + lane) << lane;
+            }
+            lanes = BUSTER_SCALAR_PATH(false) || check_input_intrinsic_candidates(&tables[0], first, mask, written) == scalar;
+        }
+        check_test_expect(test, lanes, "the 16-lane filter passes exactly the ids its scalar twin passes, short spellings at the records' end included");
+        bool exact = ready;
+        for (uint32_t t = pass == 0 ? 1 : 0; exact && t < 3; t += 1)
+        {
+            for (uint32_t name = 1; exact && name < tables[t].count; name += 1)
+            {
+                exact = tables[t].intrinsic_rows[name] == check_test_intrinsic_exact_code(&tables[t], name);
+            }
+            exact = exact && tables[t].intrinsic_known == tables[t].count;
+        }
+        exact = exact && (pass == 0 || (memcmp(tables[0].intrinsic_rows, tables[1].intrinsic_rows, tables[0].count * sizeof(uint16_t)) == 0 &&
+                                        memcmp(tables[0].intrinsic_rows, tables[2].intrinsic_rows, tables[0].count * sizeof(uint16_t)) == 0));
+        check_test_expect(test, exact, "both paths fill every id with the binary search's code, in one step or two");
+    }
+    check_test_expect(test, ready, "the fill fixtures' tables initialize");
+    intern_release(&tables[2]);
+    intern_release(&tables[1]);
+    intern_release(&tables[0]);
+}
+
 static __attribute__((noinline)) void check_test_intrinsic_inputs(CheckTest* test, const char* clang)
 {
+    check_test_intrinsic_fill(test);
     check_test_intrinsic_no_scratch_large(test);
     check_test_intrinsic_memo(test);
     const CheckIntrinsicInputFixture fixtures[] =

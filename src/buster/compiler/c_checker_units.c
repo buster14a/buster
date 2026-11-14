@@ -2660,6 +2660,11 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             ready = check_asm_index_initialize();
         }
+        // And the intrinsic catalogue's exact table (#2654), which every unit's intrinsic set-up reads, whatever it emits.
+        if (ready && !builtin_intrinsic_table_ready)
+        {
+            ready = builtin_intrinsic_table_initialize();
+        }
         // A baked executable starts with the semantics tables built (baked.h, #590), and x86_semantics_initialize rebuilds
         // them unconditionally, writing the baked pages: only an executable that isn't baked runs it (#1571).
         if (ready && command->mixed_inputs)
