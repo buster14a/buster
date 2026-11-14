@@ -513,7 +513,12 @@ static int check_test_driver_spawn_stream(char* const* arguments, char** text, b
         char* served = NULL;
         const int served_status = check_test_driver_clang_request(arguments, &served, stdout_capture);
         status = check_test_driver_child(arguments, text, stdout_capture, true);
-        check_test_driver_compare_runs(arguments, status, *text, served_status, served);
+        // An unavailable reply has no compiler result to compare (#2421). The child still supplies this run's
+        // diagnostics and status; every complete reply, including a rejected compilation, remains compared.
+        if (served_status >= 0)
+        {
+            check_test_driver_compare_runs(arguments, status, *text, served_status, served);
+        }
         free(served);
     }
     else
@@ -8750,6 +8755,8 @@ static void check_test_driver_float_classify(CheckTest* test, const char* execut
 #include "c_check_hardening_driver_test.c"
 #include "c_check_deep_driver_test.c"
 #include "c_check_fp_contract_driver_test.c"
+#include "c_check_run_modes_driver_test.c"
+#include "c_check_oracle_status_driver_test.c"
 
 static int run_checker_driver_tests(int argc, char** argv)
 {
@@ -8777,6 +8784,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool call_counts_only = false;
     // --fp-contract-only: scalar contraction's command-line, pragma and native result matrix alone (#1239).
     bool fp_contract_only = false;
+    // --run-modes-only: persistent-oracle failure and differential-comparison controls (#2421).
+    bool run_modes_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -8824,6 +8833,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             fp_contract_only = true;
         }
+        else if (strcmp(argv[i], "--run-modes-only") == 0)
+        {
+            run_modes_only = true;
+        }
         else if (strcmp(argv[i], "--lazy-system-headers") == 0)
         {
             lazy = true;
@@ -8856,7 +8869,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
                              (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only +
-                             (uint32_t)operand_diagnostics_only;
+                             (uint32_t)operand_diagnostics_only + (uint32_t)run_modes_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -10238,6 +10251,11 @@ static int run_checker_driver_tests(int argc, char** argv)
                 check_test_driver_cpu_pinning(&test, executable, directory);
             }
         }
+    }
+    if (temporary && (run_modes_only || (!focused && !lazy && check_test_driver_takes())))
+    {
+        check_test_driver_run_modes(&test, clang, directory);
+        check_test_driver_oracle_status(&test);
     }
     if (temporary)
     {

@@ -12856,6 +12856,10 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
             // declaration still (#1447's semantic recovery, phase 2): the report moves past, and the declaration isn't
             // bound or linked.
             dropped = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
+            if (dropped && kind == C_BINDING_FUNCTION)
+            {
+                check_input_alias_conflict(reader, token, point, reader->output->recovered_count - 1, false);
+            }
         }
         else
         {
@@ -12977,6 +12981,7 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                 }
                 if (recovered && function_redefinition)
                 {
+                    check_input_alias_conflict(reader, token, point, reader->output->recovered_count - 1, true);
                     check_input_invalid_declare(reader, token);
                     kept_invalid = true;
                 }
