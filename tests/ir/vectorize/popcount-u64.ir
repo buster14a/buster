@@ -1,0 +1,24 @@
+function (ptr, i64) -> i64 {
+b0:
+  %0 = param.ptr 0
+  %1 = param.i64 1
+  %2 = const.i64 0x00000000000000000000000000000000
+  %3 = br.void b1
+b1:
+  %4 = phi.i64 [%2, b0], [%13, b2]
+  %5 = phi.i64 [%2, b0], [%15, b2]
+  %6 = icmp.i1 %5, %1 ult
+  %7 = cbr.void %6, b2, b3
+b2:
+  %8 = address.ptr %0 + %5 * 8 offset=0
+  %9 = load.i64 %8 align=1
+  %10 = intrinsic.i64 %9 popcnt
+  %11 = trunc.i32 %10
+  %12 = sext.i64 %11
+  %13 = add.i64 %4, %12
+  %14 = const.i64 0x00000000000000000000000000000001
+  %15 = add.i64 %5, %14
+  %16 = br.void b1
+b3:
+  %17 = ret.void %4
+}
