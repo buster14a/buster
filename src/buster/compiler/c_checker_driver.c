@@ -6501,7 +6501,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                  "initializer for variable '%.*s' with type '%s' contains multiple expressions",
                                                  (int)intern_length(pp->table, name), intern_bytes(pp->table, name), c23 ? "auto" : "__auto_type");
                         }
-                        else if (phase == 0 && (input->reports[index].message == CHECK_INPUT_AUTO_TYPE_INITIALIZER || input->reports[index].message == CHECK_INPUT_AUTO_TYPE_SELF) &&
+                        else if (phase == 0 && ((input->reports[index].message == CHECK_INPUT_AUTO_TYPE_INITIALIZER && input->reports[index].type == 0) ||
+                                               input->reports[index].message == CHECK_INPUT_AUTO_TYPE_SELF) &&
                                  token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
                         {
                             // An __auto_type variable's errors at its name, or at a use of it, name it as clang's do.

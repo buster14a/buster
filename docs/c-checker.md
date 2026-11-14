@@ -8593,9 +8593,17 @@ spelling when an `_Atomic` specifier rebuilds the type. The note is at the entit
 earlier declaration, "previous definition is here" for a definition or a
 tentative one (`CHECK_REDECLARATION_AUTO_TYPE`). The reader stops there, as at
 other initialized invalid declarations, so clang's later errors aren't given.
+The combination of `_Atomic` and `restrict` among an `__auto_type` declaration's
+specifiers reports "restrict requires a pointer or reference
+('_Atomic(__auto_type)' is invalid)" at each declarator's name, including later
+comma declarators. The rejected restrict is dropped, so the existing atomic
+deduction and later independent diagnostics still run. The report uses the
+unqualified placeholder even with const or volatile, as Clang does, and keeps
+the name's macro expansion notes. A missing initializer reports its qualified
+placeholder type after the restrict error, even at the same name. This recovery
+does not permit object emission.
 Refused by name: `_Atomic` and `restrict` through a declarator
-(`_Atomic __auto_type *p`, whose initializer clang finds incompatible) or
-together (clang's restrict error names `_Atomic(__auto_type)`), `_Atomic` of an
+(`_Atomic __auto_type *p`, whose initializer clang finds incompatible), `_Atomic` of an
 atomic value (clang's error names the placeholder's type), `restrict` of a value
 that is no pointer to an object (clang's `restrict int`, which the placeholder
 can't be told from), and other type-changing attributes besides the handled
@@ -8621,6 +8629,16 @@ first error's line, on both paths, and its programs (`local-labels`,
 `auto-type`) run natively against clang -O0's code. `test-checker-driver`
 compares each error's line and column, and its text where the driver's message
 is clang's (`c_checker_driver_gnu_test.c`).
+
+The original `tests/driver/auto-qualifiers/` runtime sources compare complete
+Clang diagnostics for the combined atomic/restrict specifiers in every order,
+GNU restrict spellings, macros, comma groups and later independent errors.
+Missing initializers retain both errors, and `typeof` assertions check the
+recovered atomic types. Accepted neighboring atomic and restricted-pointer
+declarations check that deduction and emission remain valid; C23 constexpr
+and inferred-auto comma groups guard the continuation flags. The shared driver
+harness covers GNU17 and C23, both kernels, one/three requested lanes, syntax
+and object routes, and default, `-Werror` and `-w` policies.
 
 The original runtime sources in `tests/driver/auto-address/` run through the
 address-space driver's existing diagnostic harness in GNU17 and C23 modes.

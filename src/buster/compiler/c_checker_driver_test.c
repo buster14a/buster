@@ -8703,6 +8703,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_generic_attribute_driver_test.c"
 #include "c_check_unused_result_driver_test.c"
 #include "c_check_address_space_driver_test.c"
+#include "c_check_auto_qualifier_driver_test.c"
 #include "c_check_sizeof_array_decay_driver_test.c"
 #include "c_check_format_bitint_driver_test.c"
 #include "c_check_shift_count_driver_test.c"
@@ -9730,6 +9731,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_generic_attributes,
             check_test_driver_unused_results,
             check_test_driver_address_spaces,
+            check_test_driver_auto_qualifiers,
             check_test_driver_sizeof_array_decay,
         };
         for (uint32_t s = 0; !lazy && s < BUSTER_ARRAY_LENGTH(sweeps); s += 1)

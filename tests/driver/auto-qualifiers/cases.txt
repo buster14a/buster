@@ -1,0 +1,8 @@
+# source name, warnings, errors, notes, C23-only (otherwise GNU17 and C23)
+atomic-restrict-order 0 9 0 0
+atomic-restrict-group 0 6 0 0
+atomic-restrict-macro 0 3 1 0
+atomic-restrict-recovery 0 4 0 0
+atomic-restrict-uninitialized 0 3 0 0
+valid 0 0 0 0
+constexpr-group 0 0 0 1

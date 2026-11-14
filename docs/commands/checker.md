@@ -895,6 +895,16 @@ default/`-Werror`/`-w` policies compare complete diagnostics with Clang.
 These lane options exercise the existing scheduling requests; they do not by
 themselves establish that a particular body is admitted to deferred checking.
 
+`c_check_auto_qualifier_driver_test.c` uses that same harness for the original
+`tests/driver/auto-qualifiers/` sources (#1844): the rejected combination of
+atomic and restrict specifiers on `__auto_type` diagnoses each declarator,
+then drops restrict and continues atomic deduction. Specifier order, GNU
+spellings, macro locations, comma groups, missing initializers, recovered types,
+later errors and accepted neighboring declarations are checked in GNU17 and
+C23, including preservation of output after a rejected unit. A C23 constexpr
+comma group guards the continuation flags. The source names and expected
+diagnostic counts come from the runtime `cases.txt` catalog.
+
 `c_check_format_bitint_driver_test.c` adds 25 original fixtures to
 `test-checker-driver` through the shared default-warning harness. Independent
 warning counts and complete Clang diagnostics cover narrow and equal-width
