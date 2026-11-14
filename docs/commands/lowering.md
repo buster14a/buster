@@ -164,11 +164,26 @@ takes changes the templates too: run the command on `sqlite3.c`, Lua and
 c-testsuite. [The lowering guide](../../docs/c-lowering.md)'s "Node templates
 over a body: the first path (#1048)" has the coverage and the measurements.
 
-Unsigned power-of-two division and remainder normalize proven integer constants
-from their source type before testing the arithmetic-width value. The regression
-includes negative signed char/short/int constants widened to U32/U64, their
-compound assignments, and positive narrow constants that still select shifts or
-masks. Source `_BitInt` values retain ordinary lowering in this optimization.
+Division and remainder by a proven constant power of two (#1386,
+`check_lower_power`) normalize the constant from its source type before testing
+the arithmetic-width value. Unsigned U32/U64 by 2^k, and signed by 1, become a
+shift or a mask. Signed I32/I64 by a positive 2^k become the bias sequence
+`(x + ((x >> (W - 1)) & (2^k - 1))) >> k`, or `x - (that sum & -2^k)` for the
+remainder, whose DUPs keep the dividend (`check_lower_signed_power_entries`). A
+pointer difference by a power-of-two element size is an arithmetic shift, exact
+since the difference is a multiple of the size, and by a size of 1 nothing. The
+batch fragments, the node templates and the node machine's expressions leave a
+rewritten root to the tasks; the node machine's updates write a shift or a mask
+as the tasks do and leave a signed sequence, past their row's 8 entries, to
+them. The regressions (`c_check_power_divmod_test.c`) cover negative signed
+char/short/int constants widened to U32/U64, their compound assignments,
+positive narrow constants that still select shifts or masks, and signed
+quotients and remainders at both ends of I32 and I64 against independent
+expectations. They also cover promoted narrow operands, pointer differences of
+1- to 32-byte elements, and controls that keep their division: negative
+divisors, the sign bit's, a `_BitInt`'s, divisors with effects or that aren't
+constants, and element sizes of 3, 12 and a variable-length array's. Source
+`_BitInt` values retain ordinary lowering in this optimization.
 
 ## Node machine census (#2524)
 
