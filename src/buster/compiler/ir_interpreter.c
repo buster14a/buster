@@ -108,45 +108,54 @@ static const InterpreterNativeBinding* ir_interpreter_find_native(const IrInterp
     return result;
 }
 
-static bool ir_interpreter_symbol_address(const IrInterpreterProgram* program, SymbolId symbol, InterpreterValue* value)
+// The address a symbol names, a function's, a native's, a label's or a data binding's, and whether it names one: returned
+// rather than written through a pointer, so that ir_interpret's value stays out of memory (#2758, interpreter_load_value).
+typedef struct IrInterpreterAddress IrInterpreterAddress;
+struct IrInterpreterAddress
+{
+    uint64_t address;
+    bool found;
+};
+
+static IrInterpreterAddress ir_interpreter_symbol_address(const IrInterpreterProgram* program, SymbolId symbol)
 {
     const uint32_t function = ir_interpreter_find_function(program, symbol, 0, false);
     const InterpreterNativeBinding* native = ir_interpreter_find_native(program, symbol, 0, false);
-    bool found = false;
+    IrInterpreterAddress result = { 0 };
     if (function != UINT32_MAX)
     {
-        *value = (InterpreterValue){ .low = (uintptr_t)program->functions[function].function };
-        found = true;
+        result.address = (uintptr_t)program->functions[function].function;
+        result.found = true;
     }
     else if (native != 0)
     {
-        *value = (InterpreterValue){ .low = (uintptr_t)native->address };
-        found = true;
+        result.address = (uintptr_t)native->address;
+        result.found = true;
     }
     else
     {
-        for (uint32_t f = 0; f < program->function_count && !found; f += 1)
+        for (uint32_t f = 0; f < program->function_count && !result.found; f += 1)
         {
             const IrInterpreterFunction* binding = &program->functions[f];
-            for (uint32_t k = 0; binding->labels != 0 && binding->function != 0 && k < binding->function->label_count && !found; k += 1)
+            for (uint32_t k = 0; binding->labels != 0 && binding->function != 0 && k < binding->function->label_count && !result.found; k += 1)
             {
                 if (binding->labels[k] == symbol)
                 {
-                    *value = (InterpreterValue){ .low = (uintptr_t)&binding->function->labels[k] };
-                    found = true;
+                    result.address = (uintptr_t)&binding->function->labels[k];
+                    result.found = true;
                 }
             }
         }
-        for (uint32_t b = 0; b < program->binding_count && !found; b += 1)
+        for (uint32_t b = 0; b < program->binding_count && !result.found; b += 1)
         {
             if (program->bindings[b].symbol == symbol)
             {
-                *value = (InterpreterValue){ .low = (uintptr_t)program->bindings[b].bytes };
-                found = true;
+                result.address = (uintptr_t)program->bindings[b].bytes;
+                result.found = true;
             }
         }
     }
-    return found;
+    return result;
 }
 
 // A variadic definition's incoming arguments (#148), named and unnamed, as its call passes them: each one's value (an
@@ -302,8 +311,10 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
         }
         else
         {
-            memset(frame->values, 0, ((uint64_t)function->instruction_count + 1) * sizeof(InterpreterValue));
-            memset(frame->defined, 0, (uint64_t)function->instruction_count + 1);
+            // The values and their defined bytes start as the arena left them: the verifier proved every reachable use
+            // dominated by its definition, so a frame reads only the values it wrote, and ir_interpret reads an
+            // instruction's a and b only where ir_value_mask says they are values. Clearing them cost every call
+            // (instruction_count + 1) * 17 bytes, most of a small function's call under a sanitizer (#2758).
             for (uint32_t p = 0; p < count; p += 1)
             {
                 frame->arguments[p] = interpreter_value_from_integer(interpreter_value_integer(arguments[p]), function->parameter_types[p]);
@@ -316,6 +327,9 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
         InterpreterNativeArea anchors = {
             0
         };
+        // The slots' bytes and their defined bytes, each pushed after the one before, cleared at once past the loop:
+        // one memset a frame rather than two a slot (#2758).
+        uint8_t* const slots_begin = (uint8_t*)arena->base + arena->length;
         for (uint32_t s = 0; s < function->slot_count && status == INTERPRETER_OK; s += 1)
         {
             // The overflow area: the call's argument area, aligned as rsp is at the call (an argument's offset there,
@@ -334,8 +348,6 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
             }
             else
             {
-                memset(bytes, 0, size);
-                memset(defined, 0, size);
                 frame->slots[s] = (uintptr_t)bytes + named;
                 const bool added = interpreter_memory_add(runtime, bytes + named, size - named, defined + named, true, owner);
                 if (!added)
@@ -354,6 +366,10 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
                     anchors.stack_capacity = size;
                 }
             }
+        }
+        if (status == INTERPRETER_OK && function->slot_count != 0)
+        {
+            memset(slots_begin, 0, (uint64_t)((uint8_t*)arena->base + arena->length - slots_begin));
         }
         if (status == INTERPRETER_OK && incoming != 0)
         {
@@ -653,7 +669,9 @@ static unsigned __int128 ir_interpreter_intrinsic(uint32_t operation, uint32_t b
     return result;
 }
 
-static InterpreterStatus ir_interpreter_operation(const IrFunction* function, uint32_t instruction, InterpreterValue av, InterpreterValue bv, InterpreterValue* value)
+// A scalar operation's value, returned rather than written through a pointer so that ir_interpret's value stays out of
+// memory (#2758, interpreter_load_value), and its status in *status_out.
+static InterpreterValue ir_interpreter_operation(const IrFunction* function, uint32_t instruction, InterpreterValue av, InterpreterValue bv, InterpreterStatus* status_out)
 {
     const uint8_t op = function->op[instruction];
     const uint8_t type = function->type[instruction];
@@ -664,6 +682,7 @@ static InterpreterStatus ir_interpreter_operation(const IrFunction* function, ui
     unsigned __int128 result = 0;
     bool raw_result = true;
     InterpreterStatus status = INTERPRETER_OK;
+    InterpreterValue value = { 0 };
     switch (op)
     {
     case IR_COPY:
@@ -802,7 +821,7 @@ static InterpreterStatus ir_interpreter_operation(const IrFunction* function, ui
             default: number = a / b; break;
             }
         }
-        *value = interpreter_value_float_value(number, type);
+        value = interpreter_value_float_value(number, type);
         raw_result = false;
         break;
     }
@@ -824,7 +843,7 @@ static InterpreterStatus ir_interpreter_operation(const IrFunction* function, ui
     }
     case IR_FTRUNC:
     case IR_FEXT:
-        *value = interpreter_value_float_value(interpreter_value_float(av, at), type);
+        value = interpreter_value_float_value(interpreter_value_float(av, at), type);
         raw_result = false;
         break;
     case IR_SITOFP:
@@ -845,7 +864,7 @@ static InterpreterStatus ir_interpreter_operation(const IrFunction* function, ui
         {
             number = op == IR_SITOFP ? (long double)signed_value : (long double)left;
         }
-        *value = interpreter_value_float_value(number, type);
+        value = interpreter_value_float_value(number, type);
         raw_result = false;
         break;
     }
@@ -861,9 +880,10 @@ static InterpreterStatus ir_interpreter_operation(const IrFunction* function, ui
     }
     if (status == INTERPRETER_OK && raw_result)
     {
-        *value = interpreter_value_from_integer(result, type);
+        value = interpreter_value_from_integer(result, type);
     }
-    return status;
+    *status_out = status;
+    return value;
 }
 
 static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterpreterProgram* program, SymbolId entry, const InterpreterValue* arguments, uint32_t argument_count, const InterpreterOptions* requested_options, Arena* arena)
@@ -928,6 +948,10 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
             }
         }
     }
+    // A vector result's lanes, cleared at each step of a frame with vectors (ir_interpreter_simd_storage's), the only
+    // frames that read them: declared for the whole run, as a sanitizer's build poisons and clears at every step a local
+    // of a step's own that it keeps in memory, as it keeps part of this one (#2758).
+    IrSimdValue wide_value = { 0 };
     while (result.status == INTERPRETER_OK && depth != 0)
     {
         IrInterpreterFrame* frame = &frames[depth - 1];
@@ -968,15 +992,21 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
             const uint32_t a = function->a[i];
             const uint32_t b = function->b[i];
             const uint32_t c = function->c[i];
-            const InterpreterValue av = a < function->instruction_count ? frame->values[a] : (InterpreterValue){ 0 };
-            const InterpreterValue bv = b < function->instruction_count ? frame->values[b] : (InterpreterValue){ 0 };
+            // Its a and b where the operand table has them as values, 0 where they are metadata (a constant's index, a
+            // call's symbol): a frame's values the frame hasn't written are the arena's leftovers (ir_interpreter_frame).
+            const uint32_t value_operands = ir_value_mask(function, i);
+            const InterpreterValue av = (value_operands & 1) != 0 ? frame->values[a] : (InterpreterValue){ 0 };
+            const InterpreterValue bv = (value_operands & 2) != 0 ? frame->values[b] : (InterpreterValue){ 0 };
             InterpreterValue value = { 0 };
-            IrSimdValue wide_value = {0};
+            if (frame->vector_values != 0)
+            {
+                wide_value = (IrSimdValue){ 0 };
+            }
             bool store_value = type != IR_VOID;
             bool defined = true;
             // The operand table describes value operands, not metadata. Select and phi consume only their chosen
             // incoming value; dead undef alternatives remain legal. COPY can carry undef until a semantic use.
-            uint8_t operands = (uint8_t)ir_value_mask(function, i);
+            uint8_t operands = (uint8_t)value_operands;
             if (op == IR_RET && a != BUSTER_IR_NONE)
             {
                 operands = 1;
@@ -1128,21 +1158,31 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     }
                 } break;
                 case IR_ALLOCA:
-                    result.status = interpreter_stack_allocate(&frame->dynamic, av.low, depth, &runtime, arena, &value.low);
+                {
+                    // The address in a local of the case's own, as value's address isn't taken (interpreter_load_value).
+                    uint64_t address = 0;
+                    result.status = interpreter_stack_allocate(&frame->dynamic, av.low, depth, &runtime, arena, &address);
+                    value.low = address;
                     break;
+                }
                 case IR_STACK_SAVE:
+                {
                     // A frame address (#1847) is a machine frame's, which the interpreter's frames don't have.
-                    result.status = function->flags[i] == BUSTER_IR_STACK_SAVE_FRAME ? INTERPRETER_UNSUPPORTED : interpreter_stack_save(&frame->dynamic, &runtime, arena, &value.low);
+                    uint64_t handle = 0;
+                    result.status = function->flags[i] == BUSTER_IR_STACK_SAVE_FRAME ? INTERPRETER_UNSUPPORTED : interpreter_stack_save(&frame->dynamic, &runtime, arena, &handle);
+                    value.low = handle;
                     break;
+                }
                 case IR_STACK_RESTORE:
                     result.status = interpreter_stack_restore(&frame->dynamic, av.low, &runtime, arena);
                     break;
                 case IR_SYMBOL_ADDR:
-                    if (!ir_interpreter_symbol_address(program, a, &value))
-                    {
-                        result.status = INTERPRETER_SYMBOL;
-                    }
+                {
+                    const IrInterpreterAddress symbol = ir_interpreter_symbol_address(program, a);
+                    value.low = symbol.address;
+                    result.status = symbol.found ? result.status : INTERPRETER_SYMBOL;
                     break;
+                }
                 case IR_ADDRESS:
                     value.low = av.low + (b == BUSTER_IR_NONE ? 0 : bv.low * function->addresses[c].scale) + (uint64_t)function->addresses[c].offset;
                     break;
@@ -1151,8 +1191,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 {
                     const uint8_t memory_type = op == IR_LOAD ? type : function->type[b];
                     const uint32_t bytes = (ir_type_bits[memory_type] + 7) / 8;
-                    void* loaded = ir_vector_type(memory_type) ? (void*)&wide_value : (void*)&value;
-                    const void* stored = op == IR_STORE && ir_vector_type(memory_type) ? (const void*)&frame->vector_values[frame->vector_indices[b]] : (const void*)&bv;
+                    const bool observable = (function->flags[i] & BUSTER_IR_OBSERVABLE) != 0;
                     // An access in a segment (#1447, BUSTER_IR_SEGMENT) is an offset from its base, which the interpreter
                     // doesn't model.
                     result.status = (function->flags[i] & BUSTER_IR_SEGMENT) != 0 ? INTERPRETER_UNSUPPORTED : interpreter_memory_access(&runtime, av.low, bytes, op == IR_STORE);
@@ -1161,44 +1200,32 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     {
                         result.status = INTERPRETER_MEMORY;
                     }
-                    if (result.status == INTERPRETER_OK)
+                    if (result.status == INTERPRETER_OK && ir_vector_type(memory_type))
                     {
-                        if (op == IR_LOAD)
+                        // A vector's bytes, through lanes of the access's own, past them 0 (a scalar's go by value,
+                        // interpreter_load_value's reason); a volatile one's a byte at a time.
+                        IrSimdValue lanes = { 0 };
+                        uint8_t* own = op == IR_LOAD ? (uint8_t*)lanes.words : (uint8_t*)frame->vector_values[frame->vector_indices[b]].words;
+                        uint8_t* memory = (uint8_t*)(uintptr_t)av.low;
+                        uint8_t* destination = op == IR_LOAD ? own : memory;
+                        const uint8_t* source = op == IR_LOAD ? memory : own;
+                        for (uint32_t byte = 0; observable && byte < bytes; byte += 1)
                         {
-                            if ((function->flags[i] & BUSTER_IR_OBSERVABLE) != 0)
-                            {
-                                uint8_t* destination = loaded;
-                                const volatile uint8_t* source = (const volatile uint8_t*)(uintptr_t)av.low;
-                                for (uint32_t byte = 0; byte < bytes; byte += 1)
-                                {
-                                    destination[byte] = source[byte];
-                                }
-                            }
-                            else
-                            {
-                                memcpy(loaded, (const void*)(uintptr_t)av.low, bytes);
-                            }
-                            if (!ir_vector_type(type))
-                            {
-                                value = interpreter_value_from_integer(interpreter_value_integer(value), type);
-                            }
+                            ((volatile uint8_t*)destination)[byte] = ((const volatile uint8_t*)source)[byte];
                         }
-                        else
+                        if (!observable)
                         {
-                            if ((function->flags[i] & BUSTER_IR_OBSERVABLE) != 0)
-                            {
-                                volatile uint8_t* destination = (volatile uint8_t*)(uintptr_t)av.low;
-                                const uint8_t* source = stored;
-                                for (uint32_t byte = 0; byte < bytes; byte += 1)
-                                {
-                                    destination[byte] = source[byte];
-                                }
-                            }
-                            else
-                            {
-                                memcpy((void*)(uintptr_t)av.low, stored, bytes);
-                            }
+                            memcpy(destination, source, bytes);
                         }
+                        wide_value = op == IR_LOAD ? lanes : wide_value;
+                    }
+                    else if (result.status == INTERPRETER_OK && op == IR_LOAD)
+                    {
+                        value = interpreter_value_from_integer(interpreter_value_integer(interpreter_load_value(av.low, bytes, observable)), type);
+                    }
+                    else if (result.status == INTERPRETER_OK)
+                    {
+                        interpreter_store_value(av.low, bv, bytes, observable);
                     }
                     break;
                 }
@@ -1455,7 +1482,11 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                             .result_size = result_size,
                             .chain = chain,
                         };
-                        const bool invoked = ir_interpreter_native_arguments(program, types, passed, request.passed, call.argument_count) && interpreter_native_invoke(&request, &value);
+                        // The result through a local of the native call's own, as value's address isn't taken
+                        // (interpreter_load_value).
+                        InterpreterValue returned = { 0 };
+                        const bool invoked = ir_interpreter_native_arguments(program, types, passed, request.passed, call.argument_count) && interpreter_native_invoke(&request, &returned);
+                        value = returned;
                         if (!invoked)
                         {
                             result.status = INTERPRETER_NATIVE;
@@ -1556,12 +1587,15 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                         (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_MOVEMASK || c == BUSTER_IR_INTRINSIC_CVTT ||
                                                 c == BUSTER_IR_INTRINSIC_BITSHUFFLE)))
                     {
-                        result.status = ir_interpreter_simd_operation(frame, i, &wide_value);
-                        value.low = wide_value.words[0];
+                        // Through lanes of the operation's own, as wide_value's address isn't taken (interpreter_load_value).
+                        IrSimdValue lanes = { 0 };
+                        result.status = ir_interpreter_simd_operation(frame, i, &lanes);
+                        wide_value = lanes;
+                        value.low = lanes.words[0];
                     }
                     else
                     {
-                        result.status = ir_interpreter_operation(function, i, av, bv, &value);
+                        value = ir_interpreter_operation(function, i, av, bv, &result.status);
                     }
                     break;
                 }
