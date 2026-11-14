@@ -106,7 +106,7 @@ static void check_test_repair_faults(CheckTest* test, const Parser* parser, Prep
     arena_release(&output);
 }
 
-static void check_test_repair_pragma_faults(CheckTest* test, const Parser* parser, Preprocessor* pp)
+static void check_test_repair_pragma_faults(CheckTest* test, const Parser* parser, Preprocessor* pp, uint32_t pack_errors)
 {
     Arena output = arena_reserve(65536);
     Arena scratch = arena_reserve(65536);
@@ -122,7 +122,8 @@ static void check_test_repair_pragma_faults(CheckTest* test, const Parser* parse
         const uint32_t before = check_diagnostic_parse_end(parser);
         const bool ready = check_diagnostic_original_pragmas(&input, parser, pp, before, &output, &scratch);
         check_test_expect(test, ready && !input.resource && input.fp_pragma_count != 0 && input.diagnostic_pragmas != 0 && scratch.length == 19 &&
-                               input.graph.count == 0 && input.fp_environments == 0 && input.cx_limited_ranges == 0,
+                               input.graph.count == 0 && input.fp_environments == 0 && input.cx_limited_ranges == 0 && input.pack_log2 == NULL &&
+                               (input.pack_pragmas != NULL ? input.pack_pragmas->error_count : 0) == pack_errors,
                           "original pragma scan initializes poisoned storage without publishing a semantic environment or graph");
         const uint64_t capacity = output.capacity;
         const uint64_t required = output.length;
@@ -131,8 +132,9 @@ static void check_test_repair_pragma_faults(CheckTest* test, const Parser* parse
             output.length = 33;
             output.capacity = limit;
             const bool valid = check_diagnostic_original_pragmas(&input, parser, pp, before, &output, &scratch);
-            check_test_expect(test, !valid && input.resource && input.fp_pragma_count == 0 && input.fp_pragmas == 0 && input.diagnostic_pragmas == 0 &&
-                                   output.length == 33 && scratch.length == 19, "every original pragma output exhaustion rolls back the complete result");
+            check_test_expect(test, !valid && input.resource && input.fp_pragma_count == 0 && input.fp_pragmas == 0 && input.diagnostic_pragmas == 0 && input.pack_pragmas == NULL &&
+                                   input.pragma_warnings.events == NULL && input.pragma_warnings.count == 0 && output.length == 33 && scratch.length == 19,
+                              "every original pragma output exhaustion rolls back the complete result");
         }
         output.capacity = capacity;
         const uint64_t scratch_capacity = scratch.capacity;
@@ -142,19 +144,115 @@ static void check_test_repair_pragma_faults(CheckTest* test, const Parser* parse
             output.length = 33;
             scratch.capacity = limit;
             recovered = check_diagnostic_original_pragmas(&input, parser, pp, before, &output, &scratch);
-            check_test_expect(test, scratch.length == 19 && (recovered ? !input.resource && input.fp_pragma_count != 0 :
-                                   input.resource && input.fp_pragmas == 0 && input.diagnostic_pragmas == 0 && output.length == 33),
+            check_test_expect(test, scratch.length == 19 && (recovered ? !input.resource && input.fp_pragma_count != 0 &&
+                                   (input.pack_pragmas != NULL ? input.pack_pragmas->error_count : 0) == pack_errors :
+                                   input.resource && input.fp_pragmas == 0 && input.diagnostic_pragmas == 0 && input.pack_pragmas == NULL &&
+                                   input.pragma_warnings.events == NULL && input.pragma_warnings.count == 0 && output.length == 33),
                               "every original pragma scratch exhaustion rolls back and sufficient storage recovers");
         }
         check_test_expect(test, recovered, "original pragma scan recovers after scratch capacity is restored");
         scratch.capacity = scratch_capacity;
         output.length = 33;
         check_test_expect(test, !check_diagnostic_original_pragmas(&input, parser, pp, before, &output, &output) && input.resource &&
-                               output.length == 33 && input.fp_pragmas == 0 && input.diagnostic_pragmas == 0,
+                               output.length == 33 && input.fp_pragmas == 0 && input.diagnostic_pragmas == 0 && input.pack_pragmas == NULL,
                           "original pragma scan rejects aliased scratch and output without changing the arena");
     }
     arena_release(&scratch);
     arena_release(&output);
+}
+
+static void check_test_repair_pack_pragmas(CheckTest* test)
+{
+    static const struct
+    {
+        const char* source;
+        uint32_t errors;
+        uint8_t warning;
+    } fixtures[] =
+    {
+        { "#pragma options align=mac68k\n#pragma clang diagnostic error \"-Wunknown-pragmas\"\n#pragma STDC FENV_ACCESS UNCERTAIN\n#pragma options foo\nint bad=;\n", 1, CHECK_PACK_ALIGN_EXPECTED_ALIGN },
+        { "int bad=;\n#pragma options align=mac68k\nint next;\n", 1, 0 },
+        { "int bad=;\n#pragma align=mac68k\n", 1, 0 },
+        { "int bad=;\n#pragma align=mac68k\n#pragma options align=mac68k\nint next;\n", 2, 0 },
+        { "void f(void) {\n#pragma align=mac68k\nint bad=;\n}\n", 1, 0 },
+        { "void f(void) { int bad=;\n#pragma align=mac68k\n}\n", 1, 0 },
+        { "void f(void) { {\n#pragma align=mac68k\nint bad=;\n} }\n", 1, 0 },
+        { "struct S {\n#pragma align=mac68k\nint bad=;\n};\n", 1, 0 },
+        { "int bad=\n#pragma align=mac68k\n;\n", 0, 0 },
+        { "int bad\n#pragma align=mac68k\nint next;\n", 0, 0 },
+        { "int bad[]={\n#pragma align=mac68k\n1;};\n", 0, 0 },
+        { "enum E {\n#pragma align=mac68k\nA}; int bad=;\n", 0, 0 },
+        { "#pragma align=mac68k extra\nint bad=;\n", 0, CHECK_PACK_ALIGN_EXTRA },
+        { "#define mac68k packed\n#pragma align=mac68k\nint bad=;\n", 0, 0 },
+        { "int prior=;\n#pragma options align=mac68k\n#pragma options foo\nint value;\n", 1, CHECK_PACK_ALIGN_EXPECTED_ALIGN },
+        { "int bad\n#pragma options foo\n#pragma align=mac68k\nint next;\n", 0, CHECK_PACK_ALIGN_EXPECTED_ALIGN },
+    };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
+    {
+        static InternTable identifiers;
+        static Preprocessor pp;
+        static Parser parser;
+        const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+        const bool initialized = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
+                                 pp_run_source(&pp, "/tmp/buster-original-align.c", (const uint8_t*)fixtures[f].source, (uint32_t)strlen(fixtures[f].source));
+        check_test_expect(test, initialized, "original align pragma source initializes");
+        for (uint32_t path = 0; initialized && path < 2; path += 1)
+        {
+            Arena output = arena_reserve(UINT64_C(1) << 20);
+            Arena scratch = arena_reserve(UINT64_C(1) << 20);
+            const ParseOptions parse_options = { .scalar = path == 0 };
+            const bool ready = output.base != NULL && scratch.base != NULL && parse_initialize(&parser, &parse_options, options.language);
+            check_test_expect(test, ready, "original align pragma parser initializes");
+            if (ready)
+            {
+                const bool parsed = parse_translation_unit(&parser, &pp);
+                check_test_expect(test, !parsed && parser.errors != 0, "original align pragma fixture rejects its malformed declaration");
+                Parser original = parser;
+                original.tree = (ParseTree){ 0 };
+                original.postorder = NULL;
+                CheckInput input;
+                const bool retained = check_diagnostic_original_pragmas(&input, &original, &pp, check_diagnostic_parse_end(&original), &output, &scratch);
+                const CheckInputPackPragmas* history = retained ? input.pack_pragmas : NULL;
+                const uint32_t warnings = fixtures[f].warning != CHECK_PACK_ALIGN_NONE;
+                bool correct = retained && !input.resource && input.pack_log2 == NULL && input.graph.count == 0 && scratch.length == 0 &&
+                               (history != NULL ? history->count : 0) == fixtures[f].errors + warnings &&
+                               (history != NULL ? history->error_count : 0) == fixtures[f].errors && input.pragma_warnings.count == warnings;
+                for (uint32_t r = 0; correct && history != NULL && r < history->count; r += 1)
+                {
+                    const CheckInputPackPragma* record = history->records + r;
+                    correct = record->handled == 1 && record->align && record->operation == CHECK_PACK_UNKNOWN &&
+                              !record->has_alignment && record->depth_before == 0 && record->depth_after == 0 &&
+                              history->maximum_depth == 0 && history->unmatched_pushes == 0 && history->current == BUSTER_CHECK_NONE &&
+                              (record->error ? record->diagnostic_source == record->source_begin + 2 :
+                                               record->align_warning == fixtures[f].warning && (record->warnings & CHECK_PACK_WARNING_SYNTAX) != 0) &&
+                              (r == 0 || history->records[r - 1].source_begin < record->source_begin);
+                }
+                if (correct && warnings != 0)
+                {
+                    const CheckWarningEvent* event = input.pragma_warnings.events;
+                    const CheckInputPackPragma* record = check_input_pack_warning(&input, event);
+                    const char* message = record != NULL ? check_input_pack_message(record, event, &scratch) : NULL;
+                    const char* expected = fixtures[f].warning == CHECK_PACK_ALIGN_EXTRA ? "extra tokens at end of '#pragma align' - ignored" :
+                                                                                         "expected 'align' following '#pragma options' - ignored";
+                    correct = record != NULL && event->id == CHECK_WARNING_ID_IGNORED_PRAGMA && event->source == record->diagnostic_source &&
+                              event->payload.token == record->source_begin && !check_input_pack_semantic(record, event) &&
+                              message != NULL && strcmp(message, expected) == 0;
+                }
+                char description[160];
+                snprintf(description, sizeof(description), "original align boundary fixture %u path %u retains %u errors and %u syntax warnings", f, path, fixtures[f].errors, warnings);
+                check_test_expect(test, correct, description);
+                if (f == 0 && path == 0)
+                {
+                    check_test_repair_pragma_faults(test, &original, &pp, 1);
+                }
+            }
+            parse_release(&parser);
+            arena_release(&scratch);
+            arena_release(&output);
+        }
+        pp_release(&pp);
+        intern_release(&identifiers);
+    }
 }
 
 static void check_test_repair_fixture(CheckTest* test, const CheckRepairFixture* fixture, const char* path, const ParseTestClang* oracle, bool faults)
@@ -351,7 +449,7 @@ static void check_test_repair_fixture(CheckTest* test, const CheckRepairFixture*
             }
             if (path_index == 0 && strcmp(fixture->name, "promoted pragma before the first malformed declaration") == 0)
             {
-                check_test_repair_pragma_faults(test, &original, &pp);
+                check_test_repair_pragma_faults(test, &original, &pp, 0);
             }
             snprintf(description, sizeof(description), "%s: %s first line %u, Clang %u, expected %u", fixture->name,
                      path_index == 0 ? "scalar" : "vector", lines[path_index], oracle->line, fixture->line);
@@ -922,6 +1020,7 @@ static __attribute__((noinline)) void check_test_repairs(CheckTest* test, const 
         }
     }
     check_test_repair_report_boundaries(test);
+    check_test_repair_pack_pragmas(test);
     for (uint32_t i = 0; i < FILE_COUNT; i += 1)
     {
         snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);

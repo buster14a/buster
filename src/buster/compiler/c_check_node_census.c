@@ -299,6 +299,7 @@ static const uint8_t node_census_warning_classes[CHECK_WARNING_ID_COUNT] = {
     [CHECK_WARNING_ID_TYPE_SAFETY] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_UNEVALUATED_EXPRESSION] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_UNDERLYING_CV_QUALIFIER] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_UNDERLYING_ATOMIC_QUALIFIER] = NODE_CENSUS_WARNING_OUTSIDE,
     [CHECK_WARNING_ID_PRAGMA_PACK] = NODE_CENSUS_WARNING_OUTSIDE,
     [CHECK_WARNING_ID_PRAGMA_PACK_NOTICE] = NODE_CENSUS_WARNING_OUTSIDE,
     [CHECK_WARNING_ID_POINTER_TO_INT_CAST] = NODE_CENSUS_WARNING_TESTED,
@@ -340,6 +341,8 @@ static const uint8_t node_census_warning_classes[CHECK_WARNING_ID_COUNT] = {
     [CHECK_WARNING_ID_INCOMPATIBLE_POINTER_TYPES] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_INCOMPATIBLE_FUNCTION_POINTER_TYPES] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_RETURN_MISMATCH] = NODE_CENSUS_WARNING_TESTED,
+    // An atomic record member is refused by the type test, including an arrow whose own result is scalar.
+    [CHECK_WARNING_ID_ATOMIC_ACCESS] = NODE_CENSUS_WARNING_TESTED,
 };
 
 // Which of the warnings the silence tests stand for the unit enables anywhere (check_common_enabled): the actions' warning
@@ -801,8 +804,9 @@ static const CheckInputAttributeKind node_census_result_kinds[] = {
     CHECK_ATTRIBUTE_WARN_UNUSED_RESULT, CHECK_ATTRIBUTE_CONST, CHECK_ATTRIBUTE_PURE,
 };
 
-// Whether a call's callee has semantics of its own (the set's): a library builtin's fold, a printf-family name, an
-// attribute of node_census_callee_kinds, or a function type without a prototype.
+// Whether a call's callee has semantics of its own (the set's): a library builtin's fold or computation
+// (check_program_call_library), a printf-family name, an attribute of node_census_callee_kinds, or a function type
+// without a prototype.
 static bool node_census_callee(const NodeCensusScratch* s, uint32_t call)
 {
     const CheckProgram* program = s->program;
@@ -812,7 +816,7 @@ static bool node_census_callee(const NodeCensusScratch* s, uint32_t call)
     const Parser* parser = program->parser;
     const uint32_t member = graph->members != NULL ? graph->members[call] : 0;
     const uint32_t callee = graph->operand0[call];
-    bool result = (member & BUSTER_CHECK_LIBRARY_CALL) != 0 || callee >= graph->count;
+    bool result = ((member & BUSTER_CHECK_LIBRARY_CALL) != 0 && check_program_call_library(program, call)) || callee >= graph->count;
     if (!result)
     {
         const TypeId function = node_census_function_type(types, check_stream_type(stream, callee));
@@ -1321,6 +1325,8 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
     // The set.
     tests |= !node_census_coded(op) ? UINT64_C(1) << NODE_CENSUS_OPERATOR : 0;
     tests |= node_census_special_type(types, v.type) ? UINT64_C(1) << NODE_CENSUS_TYPE : 0;
+    tests |= types->atomic_records && (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && check_common_atomic_member(graph, stream, types, node) ?
+             UINT64_C(1) << NODE_CENSUS_TYPE : 0;
     tests |= (v.flags & BUSTER_CHECK_BIT_FIELD) != 0 ? UINT64_C(1) << NODE_CENSUS_BIT_FIELD : 0;
     const bool copies = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT || op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA ||
                         op == CHECK_OP_CAST || op == CHECK_OP_CALL;

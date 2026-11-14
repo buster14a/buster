@@ -12,7 +12,7 @@
       "generator": "Ninja Multi-Config",
       "cacheVariables": {
         "CMAKE_CONFIGURATION_TYPES": "Debug;Release;Develop",
-        "CMAKE_DEFAULT_BUILD_TYPE": "Release",
+        "CMAKE_DEFAULT_BUILD_TYPE": "Develop",
         "CMAKE_C_COMPILER": "clang",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "BUSTER_HOST_RUNTIME": "",

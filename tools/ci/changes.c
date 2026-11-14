@@ -411,7 +411,7 @@ static const ChangesModule changes_modules[] = {
     // main, Tier 0's column among them.
     {
         .name = "tier1_programs",
-        .sources = "tier1_programs_measure|profile|compile_measure|c_check_program_lower[a-z0-9_]*|c_check_program_emit|c_check_tier1[a-z0-9_]*|ir|"
+        .sources = "tier1_programs_measure|profile|compile_measure|c_checker_driver|c_checker_units|c_option_table|c_check_program_lower[a-z0-9_]*|c_check_program_emit|c_check_tier1[a-z0-9_]*|ir|"
                    "ir_validate|ir_lower[a-z0-9_]*|ssa|ssa_ir|dominators|ir_optimize[a-z0-9_]*|ir_thread|tier1_[a-z0-9_]*",
     },
     // #1059's paired measurements (measure-helpers): the primitives' kernels and speedtest1 by both tiers, each as the
@@ -1811,6 +1811,17 @@ static const ChangesFixture changes_fixtures[] = {
         .unmeasured = "checker lexer",
     },
     {
+        // #2053: runtime fixtures and their catalogs are under tests/, never Markdown, which counts as documentation.
+        .name = "the checker's runtime fixtures and catalog are code",
+        .files = "tests/checker/sources/catalog.tsv tests/checker/sources/0001.c",
+        .outputs_true = "code",
+    },
+    {
+        .name = "a Markdown file under tests/ is documentation, so no fixture or catalog is one",
+        .files = "tests/checker/sources/README.md",
+        .outputs_false = "code",
+    },
+    {
         .name = "docs/performance alone counts as code, for the qualification",
         .files = "docs/performance/buster-manifest-v1.schema.json",
         .outputs_true = "code performance",
@@ -1860,6 +1871,26 @@ static const ChangesFixture changes_fixtures[] = {
         .name = "the timing alone runs Tier 1's program measurement",
         .files = "src/buster/compiler/profile.c",
         .outputs_true = "tier1_programs",
+    },
+    {
+        .name = "the Tier 1 function-size reader alone runs the corpus qualification",
+        .files = "src/buster/compiler/tier1_code_size.c",
+        .outputs_true = "code tier1_programs",
+    },
+    {
+        .name = "the driver's manifest publication feeds the corpus qualification",
+        .files = "src/buster/compiler/c_checker_driver.c",
+        .outputs_true = "code tier1_programs",
+    },
+    {
+        .name = "per-unit manifest publication feeds the corpus qualification",
+        .files = "src/buster/compiler/c_checker_units.c",
+        .outputs_true = "code tier1_programs",
+    },
+    {
+        .name = "the manifest option feeds the corpus qualification",
+        .files = "src/buster/compiler/c_option_table.c",
+        .outputs_true = "code tier1_programs",
     },
     {
         .name = "the checker's lowering alone feeds Tier 1's programs",
@@ -3183,7 +3214,12 @@ static bool changes_main_policy(Text workflow)
         { 6, "        run: bash tools/ci/nightly.sh coverage \"$RUNNER_TEMP/coverage\"" },
         { 6, "          COVERAGE_RESULT: ${{ steps.coverage.outcome }}" },
         { 6, "          AUXILIARY: ${{ needs.changes.outputs.auxiliary }}" },
-        { 6, "    needs: [changes, evidence, policy, test, fuzz, benchmarks, auxiliary-build, auxiliary-build-pgo, auxiliary-selfhost, auxiliary-tier1-problem]" },
+        { 6, "    needs: [changes, evidence, glue, policy, test, fuzz, benchmarks, auxiliary-build, auxiliary-build-pgo, auxiliary-selfhost, auxiliary-tier1-problem]" },
+        { 6, "          GLUE_RESULT: ${{ needs.glue.result }}" },
+        // The CI glue's fixtures run on pull requests and candidates beside the rows, which don't wait for them (#2658);
+        // the aggregate requires them (tools/ci/qualification.c's qualification_evidence).
+        { 3, "    name: CI glue fixtures" },
+        { 3, "    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'" },
         { 7, "    uses: ./.github/workflows/build.yml" },
         { 7, "    if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',build,') }}" },
         { 7, "    uses: ./.github/workflows/build-pgo.yml" },
@@ -3399,6 +3435,9 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
         { "  auxiliary-tier1-problem:", "github.event_name == 'merge_group' && ", "", "an auxiliary workflow called on every event" },
         { "  qualification:", ", auxiliary-build-pgo, ", ", ", "the aggregate doesn't wait for an auxiliary workflow" },
         { "  qualification:", "          AUXILIARY: ${{ needs.changes.outputs.auxiliary }}\n", "", "a candidate's auxiliary workflows unchecked" },
+        { "  qualification:", ", glue, ", ", ", "the aggregate doesn't wait for the CI glue's fixtures" },
+        { "  qualification:", "          GLUE_RESULT: ${{ needs.glue.result }}\n", "", "the aggregate ignores the CI glue's fixtures" },
+        { "  glue:", "    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'", "    if: github.event_name == 'pull_request'", "a candidate skips the CI glue's fixtures" },
         { "  qualification:", " && !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'hotfix')) }}", " && !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'hotfix')) && github.event_name != 'merge_group' }}", "a candidate without the required aggregate" },
         { "  qualification:", " && !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'hotfix')) }}", " && !contains(github.event.pull_request.labels.*.name, 'hotfix') }}", "a hotfix label that could skip more than a pull request's aggregate" },
         { "  qualification:", "        if: github.event_name == 'merge_group'\n", "        if: false\n", "a candidate's coverage unchecked" },

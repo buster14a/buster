@@ -748,7 +748,7 @@ without it:
 ## Reproduction
 
 ```sh
-./build.sh
+./build.sh --config Release
 ./build/compiler test-files
 ./build/compiler test-files --flat src
 clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h

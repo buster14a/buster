@@ -7,12 +7,17 @@
 
 cmake_minimum_required(VERSION 3.25)
 
-# Debug, Release and Develop, and Release when a build names no configuration, as ./build.sh builds.
+# Debug, Release and Develop, and Develop when a build names no configuration, as ./build.sh builds (Release where a
+# tree has no Develop, as BUSTER_PGO's has Release alone). Release is the configuration every timing measures.
 if(NOT DEFINED CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_CONFIGURATION_TYPES "Debug;Release;Develop" CACHE STRING "The configurations: any of Debug, Release and Develop")
 endif()
 if(NOT DEFINED CMAKE_DEFAULT_BUILD_TYPE)
-    set(CMAKE_DEFAULT_BUILD_TYPE Release CACHE STRING "The configuration a build that names none builds")
+    if("Develop" IN_LIST CMAKE_CONFIGURATION_TYPES)
+        set(CMAKE_DEFAULT_BUILD_TYPE Develop CACHE STRING "The configuration a build that names none builds")
+    else()
+        set(CMAKE_DEFAULT_BUILD_TYPE Release CACHE STRING "The configuration a build that names none builds")
+    endif()
 endif()
 
 # The flags are the build description's alone. Clear the cache before project() enables C and compiles/links its
@@ -63,7 +68,25 @@ include(cmake/BusterSettings.cmake)
 buster_settings_normalize()
 buster_settings_tools("${CMAKE_C_COMPILER}")
 buster_settings_linker()
-message(STATUS "buster: variant ${buster_variant}, stage 1 linker: ${buster_linker}, static: ${buster_static}")
+# The start's code order (#1444, cmake/BusterStartOrder.cmake): in a static link, every unit's functions in sections of
+# their own, whatever the linker, so that switching it relinks alone; and with lld, the ones small compiles run
+# (cmake/BusterStartOrder.txt) placed together before .text.
+set(buster_start_order FALSE)
+if(buster_static)
+    list(APPEND buster_host_flags -ffunction-sections)
+    list(APPEND buster_flags -ffunction-sections)
+endif()
+if(buster_static AND buster_lld)
+    set(buster_start_order TRUE)
+    include(cmake/BusterStartOrder.cmake)
+    set(start_order_list "${CMAKE_SOURCE_DIR}/cmake/BusterStartOrder.txt")
+    set(start_order_script "${CMAKE_BINARY_DIR}/start-order.ld")
+    set(start_order_symbols "${CMAKE_BINARY_DIR}/start-order.symbols")
+    buster_start_order_files("${start_order_list}" "${start_order_script}" "${start_order_symbols}" "${BUSTER_SHIFT_SOURCE}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${start_order_list}" "${CMAKE_SOURCE_DIR}/cmake/BusterStartOrder.cmake")
+    list(APPEND buster_linker_flags "-Wl,-T,${start_order_script}" "-Wl,--symbol-ordering-file=${start_order_symbols}" -Wl,--no-warn-symbol-ordering)
+endif()
+message(STATUS "buster: variant ${buster_variant}, stage 1 linker: ${buster_linker}, static: ${buster_static}, start order: ${buster_start_order}")
 if(buster_pgo AND "Debug" IN_LIST CMAKE_CONFIGURATION_TYPES)
     message(FATAL_ERROR "buster: BUSTER_PGO builds the Release configuration alone; configure with CMAKE_CONFIGURATION_TYPES=Release")
 endif()
@@ -290,6 +313,9 @@ function(buster_link target)
         buster_link_arguments(before after)
         target_link_options(${target} PRIVATE ${before})
         target_link_libraries(${target} PRIVATE ${after})
+    endif()
+    if(buster_start_order)
+        set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS "${start_order_script}" "${start_order_symbols}")
     endif()
 endfunction()
 

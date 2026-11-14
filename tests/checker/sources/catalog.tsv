@@ -1,0 +1,420 @@
+buster-fixtures v1 checker-sources
+# The checker's shared source fixtures (c_checker_test.c, check_test_sources; #2053): ID, FILE, FLAGS, NAME, tab-separated.
+0001	0001.c	-	empty translation unit
+0002	0002.c	-	global declaration
+0003	0003.c	-	return integer arithmetic
+0004	0004.c	-	parameter promotions
+0005	0005.c	-	typedef declaration
+0006	0006.c	-	local initialization
+0007	0007.c	-	const initialization
+0008	0008.c	-	local scope shadowing
+0009	0009.c	-	pointer read
+0010	0010.c	-	pointer subscript
+0011	0011.c	-	pointer qualification
+0012	0012.c	-	global address initializer
+0013	0013.c	-	bool of a defined object's address
+0014	0014.c	-	bool of a strong external address
+0015	0015.c	-	bool of a wrapped address
+0016	0016.c	-	bool of an automatic address in a static initializer
+0017	0017.c	rejected	bool of a weak address
+0018	0018.c	rejected	bool of a weak definition's address
+0019	0019.c	-	pointer index that wraps in 64 bits
+0020	0020.c	rejected	bool of an address named by pragma weak
+0021	0021.c	-	bool of an address an ignored pragma weak names
+0022	0022.c	-	bool of an address a pragma weak after it names
+0023	0023.c	-	global array initializer
+0024	0024.c	-	address cancels void pointer indirection
+0025	0025.c	-	address cancels null pointer indirection
+0026	0026.c	-	address cancels absolute pointer indirection
+0027	0027.c	-	register pointer does not make its pointee register
+0028	0028.c	-	grouped comma expression
+0029	0029.c	-	comma condition
+0030	0030.c	-	comma subscript
+0031	0031.c	-	local static address initializer
+0032	0032.c	-	null pointer assignment
+0033	0033.c	-	constant static initializer
+0034	0034.c	-	floating return conversion
+0035	0035.c	-	sizeof expression
+0036	0036.c	-	sizeof constant array
+0037	0037.c	-	call arguments
+0038	0038.c	-	short-circuit constant
+0039	0039.c	-	GNU folded-constant extension
+0040	0040.c	-	conditional constant
+0041	0041.c	-	floating immediate ICE cast
+0042	0042.c	-	C integer literal types
+0043	0043.c	rejected	undeclared identifier
+0044	0044.c	rejected	scope no longer visible
+0045	0045.c	rejected	const assignment
+0046	0046.c	rejected	const parameter assignment
+0047	0047.c	rejected	register parameter address
+0048	0048.c	rejected	register local address
+0049	0049.c	rejected	register address keeps first failing source line
+0050	0050.c	rejected	discarded register array still decays
+0051	0051.c	-	GNU discarded void indirection
+0052	0052.c	rejected	floating remainder
+0053	0053.c	rejected	address rvalue
+0054	0054.c	rejected	dereference integer
+0055	0055.c	rejected	incompatible pointer initialization
+0056	0056.c	rejected	missing call argument
+0057	0057.c	rejected	calling nonfunction
+0058	0058.c	rejected	false static assertion
+0059	0059.c	rejected	division in required ICE
+0060	0060.c	rejected	nonconstant static initializer
+0061	0061.c	rejected	automatic address static initializer
+0062	0062.c	rejected	duplicate global definition
+0063	0063.c	rejected	duplicate function definition
+0064	0064.c	rejected	retained prior prototype
+0065	0065.c	rejected	duplicate parameter name
+0066	0066.c	rejected	restrict requires pointer to object
+0067	0067.c	rejected	definition conflicts with prior prototype
+0068	0068.c	rejected	invalid integer suffix
+0069	0069.c	rejected	basic universal character name before C23
+0070	0070.c	-	record declaration
+0071	0071.c	-	struct whose only named member is a flexible array member
+0072	0072.c	rejected	flexible array member before another member
+0073	0073.c	-	enum with a fixed underlying type
+0074	0074.c	-	fixed enum: enumerators of the base's type before C23
+0075	0075.c	gnu23	fixed enum: enumerators of the enum's type after its list in C23
+0076	0076.c	rejected	fixed enum: C23's enumerator types refused before it
+0077	0077.c	rejected,gnu23	fixed enum: earlier enumerator types refused in C23
+0078	0078.c	rejected	fixed enum: an enumerator past its type
+0079	0079.c	rejected	fixed enum: the successor past its type
+0080	0080.c	rejected	fixed enum: redeclared with another type
+0081	0081.c	rejected	fixed enum: an enum without one given one
+0082	0082.c	rejected	fixed enum: one with it defined without it
+0083	0083.c	rejected	fixed enum: defined twice
+0084	0084.c	rejected	fixed enum: a floating type
+0085	0085.c	-	attributes after a bit-field's width
+0086	0086.c	-	fixed enum: aligned after its body
+0087	0087.c	-	fixed enum: aligned after a body that asks its layout
+0088	0088.c	-	fixed enum: aligned after a body that names a pointer to it
+0089	0089.c	rejected,unsupported	fixed enum: aligned after a body that names it otherwise
+0090	0090.c	-	fixed enum: attributes in its base, and references without it
+0091	0091.c	-	attributes after a tag's name: a reference
+0092	0092.c	rejected	fixed enum: declared alone without it
+0093	0093.c	rejected	fixed enum: defined, then declared alone without it
+0094	0094.c	rejected	fixed enum: restrict in its base
+0095	0095.c	rejected	fixed enum: a vector in its base
+0096	0096.c	-	labels as values
+0097	0097.c	rejected	labels as values: an undeclared label
+0098	0098.c	rejected	labels as values: outside a function
+0099	0099.c	rejected	labels as values: a computed goto without labels
+0100	0100.c	rejected	labels as values: into a variable-length array's scope
+0101	0101.c	rejected	labels as values: into a statement expression
+0102	0102.c	rejected	labels as values: a computed goto of an integer
+0103	0103.c	-	labels as values: a computed goto's whole expression
+0104	0104.c	rejected	labels as values: a computed goto of a conditional's integer
+0105	0105.c	-	local labels: a statement expression's, expanded twice
+0106	0106.c	-	local labels: nested blocks' and the function's
+0107	0107.c	-	local labels: an address of one
+0108	0108.c	rejected	local labels: one its block doesn't define
+0109	0109.c	rejected	local labels: a goto from outside the block
+0110	0110.c	rejected	local labels: one defined twice
+0111	0111.c	rejected	local labels: the function's after the block
+0112	0112.c	-	__auto_type: a statement expression's maximum
+0113	0113.c	-	__auto_type: lvalue conversion and decay
+0114	0114.c	-	__auto_type: file scope, static, a loop's, structures and compound literals
+0115	0115.c	rejected	__auto_type: its own initializer names it
+0116	0116.c	rejected	__auto_type: its own initializer's type query names it
+0117	0117.c	rejected	__auto_type: without an initializer
+0118	0118.c	rejected	__auto_type: a parameter's
+0119	0119.c	rejected	__auto_type: a function's result
+0120	0120.c	rejected	__auto_type: a typedef's
+0121	0121.c	rejected	__auto_type: a type name's
+0122	0122.c	rejected	__auto_type: an initializer list
+0123	0123.c	rejected	__auto_type: an array
+0124	0124.c	rejected	__auto_type: a bit-field's value
+0125	0125.c	rejected	__auto_type: a void value
+0126	0126.c	rejected	__auto_type: a signedness
+0127	0127.c	-	__auto_type: pointer declarators
+0128	0128.c	-	__auto_type: later declarators
+0129	0129.c	rejected	__auto_type: later declarators' different deductions
+0130	0130.c	rejected	__auto_type: a pointer declarator of no pointer
+0131	0131.c	-	__auto_type: a linked name declared before
+0132	0132.c	-	__auto_type: an _Alignas the deduced type allows
+0133	0133.c	rejected	__auto_type: an _Alignas below the deduced type's
+0134	0134.c	rejected	__auto_type: an _Alignas below a decayed pointer's
+0135	0135.c	-	__auto_type: the specifiers' qualifiers
+0136	0136.c	rejected	__auto_type: an assignment to a const one
+0137	0137.c	gnu23	C23 auto: lvalue conversion, decay, pointer declarators and later declarators
+0138	0138.c	gnu23	C23 auto: file scope, a loop's, a parenthesized declarator and the storage class with a type
+0139	0139.c	rejected,gnu23	C23 auto: without an initializer
+0140	0140.c	rejected,gnu23	C23 auto: an initializer list
+0141	0141.c	rejected,gnu23	C23 auto: an array
+0142	0142.c	rejected,gnu23	C23 auto: two declarators of different types
+0143	0143.c	gnu23	C23 constexpr: objects in constant expressions
+0144	0144.c	rejected,gnu23	C23 constexpr: not a constant expression
+0145	0145.c	rejected,gnu23	C23 constexpr: a pointer that isn't null
+0146	0146.c	rejected,gnu23	C23 constexpr: an integer not exactly representable
+0147	0147.c	rejected,gnu23	C23 constexpr: a negative value in an unsigned type
+0148	0148.c	rejected,gnu23	C23 constexpr: a floating value not exactly representable
+0149	0149.c	rejected,gnu23	C23 constexpr: an aggregate's initializer isn't constant
+0150	0150.c	rejected,gnu23	C23 constexpr: a discarded read isn't a constant expression
+0151	0151.c	rejected,gnu23	C23 constexpr: an aggregate's discarded read isn't a constant expression
+0152	0152.c	gnu23	C23 constexpr: a discarded constant still initializes
+0153	0153.c	rejected,gnu23	C23 constexpr: without an initializer
+0154	0154.c	rejected,gnu23	C23 constexpr: a typedef
+0155	0155.c	-	definition's parameter-list tag in its body
+0156	0156.c	-	body's definition completes its parameter-list tag
+0157	0157.c	-	body's forward declaration keeps its parameter-list tag
+0158	0158.c	rejected	inner block's forward declaration hides a parameter-list tag
+0159	0159.c	-	parameter-list tags of a bound and a typeof in the body
+0160	0160.c	-	body's prototype names its parameter-list tag
+0161	0161.c	rejected	definition's parameter-list tag ends with its body
+0162	0162.c	rejected	prototype's parameter-list tag ends with it
+0163	0163.c	rejected	prototype's parameter-list tag isn't the file scope's
+0164	0164.c	rejected	nested prototype's tag ends before the body
+0165	0165.c	rejected	return type's prototype tag ends before the body
+0166	0166.c	rejected	typeof's prototype tag in a parameter list ends with the prototype
+0167	0167.c	rejected	file-scope typeof's prototype tag ends with the prototype
+0168	0168.c	rejected	block-scope typeof's prototype tag ends with the prototype
+0169	0169.c	rejected	typeof's prototype tag in a parameter list doesn't reach the body
+0170	0170.c	-	typeof's prototype names the visible tag
+0171	0171.c	-	builtin operands' prototype tags are each their own
+0172	0172.c	rejected	nested prototype's tag in a typeof ends with each prototype
+0173	0173.c	-	register parameter's prototype tag ends with the prototype
+0174	0174.c	rejected,gnu23	raw register parameter's prototype tag ends with the prototype
+0175	0175.c	rejected,gnu23	raw attributed parameter's prototype tag ends with the prototype
+0176	0176.c	rejected,gnu23	raw function type of a register parameter
+0177	0177.c	-	struct defined in a definition's parameter list
+0178	0178.c	-	enum defined in a definition's parameter list, its constants in the body
+0179	0179.c	-	definition in a sizeof in a parameter's array bound, its tag in later parameters and the body
+0180	0180.c	-	parameter-list definitions' nested tags and constants in the body
+0181	0181.c	-	parameter-list constant in a later parameter's bound
+0182	0182.c	-	parameter-list constant shadows the file scope's in the body alone
+0183	0183.c	-	prototype's list is a scope of its own
+0184	0184.c	-	parameter list's redefinition of a tag only warns
+0185	0185.c	-	definitions in a member's parameters and array bound
+0186	0186.c	-	definitions in array bounds at file and block scope
+0187	0187.c	-	definitions in a type name's parameters and a variable bound
+0188	0188.c	gnu23	enum of a fixed underlying type defined in a parameter list
+0189	0189.c	rejected	prototype's parameter-list constant ends with it
+0190	0190.c	rejected	prototype's parameter-list definition isn't the file scope's
+0191	0191.c	rejected	definition in a prototype's array bound ends with it
+0192	0192.c	rejected	nested prototype's constant ends before the body
+0193	0193.c	rejected	return type's prototype constant ends before the body
+0194	0194.c	rejected	parameter and later enumeration constant of one list conflict
+0195	0195.c	rejected	enumeration constant and later parameter of one list conflict
+0196	0196.c	rejected	body's declaration conflicts with its parameter-list constant
+0197	0197.c	rejected	body's definition redefines its parameter-list definition
+0198	0198.c	rejected	bound's nested prototype's constant ends before the body
+0199	0199.c	rejected	bound's nested prototype's definition isn't the body's
+0200	0200.c	-	bound's nested prototype's constant doesn't conflict with a parameter
+0201	0201.c	rejected	bound's nested prototype's definition doesn't complete the list's tag
+0202	0202.c	-	bound's nested prototype's definition beside the list's
+0203	0203.c	-	enumerator value's nested prototype's constant doesn't conflict
+0204	0204.c	rejected	file-scope bound's nested prototype's definition ends with it
+0205	0205.c	rejected	member bound's nested prototype's definition ends with it
+0206	0206.c	-	nested prototype's constant in its own later bound
+0207	0207.c	-	bound's definition before a statement expression
+0208	0208.c	-	bound's definition after a statement expression
+0209	0209.c	-	bound's definition between statement expressions
+0210	0210.c	-	atomic read-modify-write builtins and their result types
+0211	0211.c	-	atomic min and max
+0212	0212.c	rejected	an atomic min of a pointer refused
+0213	0213.c	rejected	an atomic and of a float refused
+0214	0214.c	rejected	an atomic compare-exchange of a float refused
+0215	0215.c	rejected	an atomic exchange of a const object refused
+0216	0216.c	rejected	an atomic read-modify-write of a _BitInt refused
+0217	0217.c	rejected	an atomic fetch with an order too few refused
+0218	0218.c	-	sized legacy atomics, the legacy minimum and maximum, and their result types
+0219	0219.c	rejected	a legacy maximum of a long refused
+0220	0220.c	rejected	a legacy minimum with a protected variable refused
+0221	0221.c	-	wrapping atomics, the byte flag and the lock-free queries
+0222	0222.c	-	the lock-free queries of a function's pointee and of a tag completed after them
+0223	0223.c	rejected	an atomic wrapping increment of a float refused
+0224	0224.c	rejected	the byte flag of a const object refused
+0225	0225.c	-	generic atomics of records, arrays and long double
+0226	0226.c	rejected	a generic atomic load of an _Atomic object refused
+0227	0227.c	rejected	a generic atomic store's incompatible value pointer refused
+0228	0228.c	-	scoped, HIP and OpenCL atomics
+0229	0229.c	rejected	a scoped atomic's invalid scope refused
+0230	0230.c	rejected	a HIP atomic's invalid scope refused
+0231	0231.c	rejected	an OpenCL atomic of a plain object refused
+0232	0232.c	rejected	a HIP atomic of an _Atomic object refused
+0233	0233.c	-	an atomic IEEE maximum of a _Complex float
+0234	0234.c	-	an atomic IEEE maximum of a _Float16
+0235	0235.c	-	an atomic IEEE minimum of a __bf16
+0236	0236.c	-	an atomic IEEE maximum_num of a __float128
+0237	0237.c	rejected	an atomic IEEE maximum of a long double refused
+0238	0238.c	-	an atomic IEEE maximum of a double by an int
+0239	0239.c	rejected	an atomic IEEE maximum with an argument too many refused
+0240	0240.c	rejected	an atomic IEEE maximum of a const float refused
+0241	0241.c	-	an atomic IEEE minimum_num with an order past seq_cst
+0242	0242.c	rejected	an atomic IEEE maximum of an int refused
+0243	0243.c	rejected	an atomic IEEE minimum of a pointer refused
+0244	0244.c	rejected	an atomic IEEE maximum_num of a _Bool refused
+0245	0245.c	rejected	an atomic IEEE maximum of a struct refused
+0246	0246.c	rejected	an atomic IEEE maximum of a value, not its address, refused
+0247	0247.c	-	an atomic IEEE maximum of a float by an int
+0248	0248.c	rejected	an atomic IEEE maximum by a pointer refused
+0249	0249.c	rejected	an atomic IEEE minimum_num with arguments too few refused
+0250	0250.c	rejected	an atomic IEEE maximum of an _Atomic float refused
+0251	0251.c	-	an atomic IEEE minimum of a volatile double by a float
+0252	0252.c	-	an atomic IEEE maximum with its order known at run time
+0253	0253.c	rejected	a scoped atomic IEEE maximum's invalid scope refused
+0254	0254.c	rejected	a scoped atomic IEEE minimum_num without its scope refused
+0255	0255.c	rejected	an atomic minimum of a long double refused
+0256	0256.c	rejected	an atomic IEEE maximum of an int by a float refused
+0257	0257.c	-	an atomic IEEE maximum of a _Complex long double
+0258	0258.c	-	an atomic IEEE minimum_num of a _Complex double
+0259	0259.c	-	an atomic minimum of a _Complex long double
+0260	0260.c	-	an atomic IEEE maximum of an over-aligned float
+0261	0261.c	rejected	an atomic IEEE maximum of a vector refused
+0262	0262.c	rejected	an atomic IEEE maximum of an enum refused
+0263	0263.c	rejected	an atomic IEEE maximum with two arguments too many refused
+0264	0264.c	-	a scoped atomic IEEE maximum_num
+0265	0265.c	rejected	an atomic IEEE minimum of a const volatile float refused
+0266	0266.c	rejected	an atomic IEEE minimum by a null pointer refused
+0267	0267.c	rejected	an atomic IEEE maximum through a void pointer refused
+0268	0268.c	-	128-bit operands of the overflow builtins
+0269	0269.c	-	the rotates, unpredictable and assume
+0270	0270.c	rejected	a rotate of a struct refused
+0271	0271.c	rejected	an assumption of a struct refused
+0272	0272.c	-	rdtsc, pause and xgetbv
+0273	0273.c	-	the build's immediates of the x86 builtins in range
+0274	0274.c	rejected	a gather's scale refused
+0275	0275.c	rejected	a scatter's scale refused
+0276	0276.c	-	unsigned one-bit _BitInt
+0277	0277.c	rejected	signed one-bit _BitInt refused
+0278	0278.c	-	a typedef of an unsigned _BitInt keeps it unsigned
+0279	0279.c	gnu23	bit-precise constants
+0280	0280.c	gnu23	bit-precise constants past 128 bits
+0281	0281.c	rejected,gnu23	a bit-precise suffix of mixed case
+0282	0282.c	-	no_builtin on definitions
+0283	0283.c	rejected	no_builtin on a declaration refused
+0284	0284.c	rejected	no_builtin with a number refused
+0285	0285.c	-	FP_CONTRACT at file scope and a compound's start
+0286	0286.c	rejected	FP_CONTRACT inside a compound refused
+0287	0287.c	-	loop hints before each kind of loop
+0288	0288.c	-	loop hint counts and widths
+0289	0289.c	-	the unroll pragmas
+0290	0290.c	rejected	a loop hint before another statement refused
+0291	0291.c	rejected	a loop hint before a block refused
+0292	0292.c	rejected	a loop hint before a labeled loop refused
+0293	0293.c	rejected	a loop hint after a do-while refused
+0294	0294.c	rejected	a loop hint before a closing brace refused
+0295	0295.c	rejected	an unroll pragma before another statement refused
+0296	0296.c	rejected	a loop hint at file scope refused
+0297	0297.c	rejected	a loop hint's invalid argument refused
+0298	0298.c	rejected	a loop hint's invalid option refused
+0299	0299.c	rejected	a loop hint without an option refused
+0300	0300.c	rejected	a loop hint without parentheses refused
+0301	0301.c	rejected	a loop hint left open refused
+0302	0302.c	rejected	a loop hint's zero count refused
+0303	0303.c	rejected	a loop hint's count past int refused
+0304	0304.c	gnu23	a pack pragma's bit-precise values: small ones apply, past 64 and past 128 bits ignored
+0305	0305.c	gnu23	a loop hint's bit-precise counts accepted
+0306	0306.c	rejected,gnu23	a loop hint's bit-precise count past 64 bits refused
+0307	0307.c	rejected,gnu23	a loop hint's bit-precise count past 128 bits refused
+0308	0308.c	rejected	a loop hint's floating count refused
+0309	0309.c	rejected	duplicate loop hints refused
+0310	0310.c	rejected	duplicate loop hints across pragmas refused
+0311	0311.c	rejected	duplicate loop hint counts refused
+0312	0312.c	rejected	an unroll pragma beside a loop hint refused
+0313	0313.c	rejected	incompatible loop hints refused
+0314	0314.c	rejected	incompatible unroll hints refused
+0315	0315.c	-	GCC unroll without a count
+0316	0316.c	rejected	an unroll count in empty parentheses refused
+0317	0317.c	rejected	a GCC unroll count in empty parentheses refused
+0318	0318.c	rejected	an unroll count no expression starts with refused
+0319	0319.c	rejected	an unclosed unroll_and_jam count refused
+0320	0320.c	rejected,unsupported	an unroll count's expression unsupported
+0321	0321.c	-	the unroll pragmas clang drops, and one it reads a literal from
+0322	0322.c	rejected	an unroll count clang reads a literal from, twice, refused
+0323	0323.c	rejected	GCC unroll beside unroll refused
+0324	0324.c	rejected	an empty unroll_count refused
+0325	0325.c	rejected	an empty interleave_count refused
+0326	0326.c	rejected	an empty vectorize_width refused
+0327	0327.c	rejected	an empty pipeline_initiation_interval refused
+0328	0328.c	rejected	a clang loop count no expression starts with refused
+0329	0329.c	rejected	a clang loop count of a statement keyword refused
+0330	0330.c	rejected	an unroll count of a statement keyword refused
+0331	0331.c	rejected	an unroll count of a type keyword refused
+0332	0332.c	rejected	an unroll count of typeof refused
+0333	0333.c	rejected,unsupported	an unroll count of sizeof unsupported
+0334	0334.c	rejected,unsupported	a clang loop count of an enumerator unsupported
+0335	0335.c	-	loop pragmas clang drops, at file scope and before a statement
+0336	0336.c	-	a dropped clang loop pragma's arguments and hints unchecked
+0337	0337.c	-	what follows a loop hint's argument ignored
+0338	0338.c	-	licm and vectorize_predicate's assume_safety
+0339	0339.c	rejected	licm enabled refused
+0340	0340.c	rejected	licm twice refused
+0341	0341.c	rejected	a vectorize_width count without its kind refused
+0342	0342.c	rejected,unsupported,undecided	an enumerator count beside unroll(full) unsupported
+0343	0343.c	rejected,unsupported,undecided	an enumerator width beside vectorize(disable) unsupported
+0344	0344.c	rejected	an enumerator count before an invalid state refused
+0345	0345.c	rejected,unsupported,undecided	a misplaced enumerator count unsupported
+0346	0346.c	rejected,unsupported,undecided	a misplaced count of a variable unsupported
+0347	0347.c	rejected,unsupported,undecided	a misplaced unroll count of a variable unsupported
+0348	0348.c	rejected,unsupported,undecided	an enumerator unroll count after unroll(enable) unsupported
+0349	0349.c	rejected,unsupported,undecided	an enumerator count before unroll(full)'s pragma unsupported
+0350	0350.c	rejected,unsupported,undecided	an enumerator width before vectorize(disable)'s pragma unsupported
+0351	0351.c	rejected,unsupported,undecided	an enumerator unroll count before another unsupported
+0352	0352.c	rejected,unsupported,undecided	a variable's count before unroll(full)'s pragma unsupported
+0353	0353.c	rejected,unsupported,undecided	a count divided by zero before unroll(full)'s pragma unsupported
+0354	0354.c	rejected,unsupported,undecided	an enumerator count of 0 before unroll(full)'s pragma unsupported
+0355	0355.c	rejected	an enumerator unroll count at file scope refused
+0356	0356.c	-	struct-valued elements of an inferred array
+0357	0357.c	-	reversed subscripts in an inferred array
+0358	0358.c	-	chains of 15, 16 and 17 steps in an inferred array
+0359	0359.c	-	operators' values in an inferred array
+0360	0360.c	-	casts and operands of no type in an inferred array
+0361	0361.c	-	a conditional's arms in an inferred array
+0362	0362.c	-	vector lanes in an inferred array
+0363	0363.c	-	a vector condition's ?: in an inferred array
+0364	0364.c	-	an extension vector's logic and swizzles in an inferred array
+0365	0365.c	-	an extended vector's lanes through a pointer
+0366	0366.c	-	intrinsics' results in an inferred array
+0367	0367.c	rejected	an intrinsic immediate cannot discard side effects
+0368	0368.c	-	compound literals in static initializers
+0369	0369.c	rejected	a compound literal of a parameter in a static's initializer refused
+0370	0370.c	rejected	an automatic compound literal's address in a static's initializer refused
+0371	0371.c	rejected	a struct where an inferred array's member goes refused
+0372	0372.c	rejected	incompatible loop hints across pragmas refused
+0373	0373.c	rejected	incompatible pipeline hints refused
+0374	0374.c	rejected,unsupported	a loop hint's constant expression unsupported
+0375	0375.c	-	an inferred array of compound literals, calls and conditionals
+0376	0376.c	-	an inferred array with braces elided
+0377	0377.c	unsigned-char	unsigned plain char: values
+0378	0378.c	unsigned-char	unsigned plain char: character constants
+0379	0379.c	gnu23,unsigned-char	unsigned plain char: a char-based enum and u8 constants in C23
+0380	0380.c	rejected,unsigned-char	unsigned plain char: a signed conversion refused
+0381	0381.c	rejected,unsigned-char	unsigned plain char: a signed character constant refused
+0382	0382.c	rejected,gnu23	signed plain char: a char-based enum past its range refused in C23
+0383	0383.c	-	mode attribute: the base's signedness kept
+0384	0384.c	rejected	multiversioning: always_inline beside target default
+0385	0385.c	rejected	multiversioning: noinline beside target default
+0386	0386.c	rejected	multiversioning: flatten beside target default
+0387	0387.c	rejected	multiversioning: cold beside target default
+0388	0388.c	rejected	multiversioning: hot beside target default
+0389	0389.c	rejected	multiversioning: weak beside target default
+0390	0390.c	rejected	multiversioning: const beside target default
+0391	0391.c	rejected	multiversioning: pure beside target default
+0392	0392.c	rejected	multiversioning: naked beside target default
+0393	0393.c	rejected	multiversioning: alias beside target default
+0394	0394.c	rejected	multiversioning: target_clones beside target
+0395	0395.c	rejected	multiversioning: cpu_specific beside target
+0396	0396.c	-	multiversioning: used beside target default
+0397	0397.c	-	multiversioning: nothrow beside target default
+0398	0398.c	rejected	multiversioning: a second target version checks the first declaration
+0399	0399.c	rejected	multiversioning: cpu_dispatch beside target
+0400	0400.c	rejected	multiversioning: aligned beside target default
+0401	0401.c	rejected	multiversioning: may_alias beside target default
+0402	0402.c	-	multiversioning: inline nonnull beside target default
+0403	0403.c	rejected	multiversioning: a block-scope declaration beside target default
+0404	0404.c	rejected	multiversioning: several declarators beside target default
+0405	0405.c	-	multiversioning: a cpu_specific declaration alone is accepted (#1447)
+0406	0406.c	-	multiversioning: cpu_specific versions and their dispatcher (#1447)
+0407	0407.c	rejected	multiversioning: cpu_specific of an unknown CPU (#1447)
+0408	0408.c	rejected	multiversioning: cpu_dispatch of an unknown CPU (#1447)
+0409	0409.c	rejected	multiversioning: cpu_specific versions of one CPU (#1447)
+0410	0410.c	rejected	multiversioning: cpu_dispatch redeclared with other CPUs (#1447)
+0411	0411.c	rejected	multiversioning: a plain redeclaration of a cpu_specific function (#1447)
+0412	0412.c	rejected	multiversioning: cpu_specific beside a target version (#1447)
+0413	0413.c	rejected	multiversioning: a cpu_specific version's other return type (#1447)
+0414	0414.c	rejected	multiversioning: a cpu_specific version redefined (#1447)
+0415	0415.c	rejected	multiversioning: a cpu_specific main (#1447)
+0416	0416.c	-	multiversioning: C23-only attributes are ignored in gnu17
+0417	0417.c	gnu23	multiversioning: C23-only attributes are ignored in gnu23
+0418	0418.c	rejected	multiversioning: no_builtin on a declaration still reports the conflict

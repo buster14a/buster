@@ -3,10 +3,12 @@
 `src/buster/compiler/ir_optimize_inline.c` implements the small-function
 inlining slice of [#139](https://github.com/buster14a/buster/issues/139).
 It consumes the shared [`IrFunction`](ir.md) representation, SSA's or the
-lowering's memory form. The C driver's `--tier1` runs it on each body's
-always_inline callees, whatever their control flow (#1282 and #2541, [the Tier 1
-guide](tier1.md)'s "Inlining"); inlining by size thresholds in the C driver, and
-its corpus and performance acceptance, remain pending.
+lowering's memory form. The C driver's `--tier1` runs it on each body's calls of
+the unit's always_inline functions, whatever their control flow, and of its
+small internal functions, from summaries built once a unit (#1282 and #2541,
+[the Tier 1 guide](tier1.md)'s "Inlining"); the larger reach, its budgets and
+its corpus acceptance are [the unit inlining design](tier1-unit-inlining.md)'s
+later steps.
 
 The first scope expanded single-block leaf bodies with no stack objects; #1282
 takes a straight chain of blocks, stack objects, SIMD values and machine rows,
@@ -39,6 +41,14 @@ IrCheck ir_optimize_inline(const IrInlineUnit* unit, Arena* output,
 | `symbols` | `uint32_t[count]`, strictly increasing, nonzero IDs below `symbol_count`. |
 | `flags` | `uint8_t[count]`, explicit internal-linkage, noinline and variadic facts. |
 | `symbol_count` | The same exclusive symbol bound used by every body. |
+| `limits` | Optional `uint32_t[count]`: each function's cost limit as a callee (#2541's classes), in place of `IrInlineOptions.maximum_cost` for all; a call whose cost is past its callee's limit is `IR_INLINE_COST`. Null for the one threshold. |
+| `only` | 1 + the index of the only function rewritten, or 0 for all (#2541's summaries). The others are finished callees, taken as they are: their calls are `IR_INLINE_DISABLED` and their output function is their input's descriptor. |
+
+With `IrInlineOptions.trusted`, the unit's functions are taken as verified IR
+(a lowering's or an optimizer's output) and the rewritten functions are not
+verified on the way out: the caller verifies them before anything reads them,
+as `--tier1`'s driver does by SROA or promotion. Without it, every input and
+every rewritten output is verified, as before.
 
 The metadata producer is responsible for marking a definition
 `BUSTER_IR_INLINE_INTERNAL` only when its binding is fixed within the unit.
@@ -217,8 +227,8 @@ claiming the complete data-parallel or throughput acceptance of #139.
 
 ## Callees with control flow (#2541)
 
-With `IrInlineOptions.control_flow` (off by default; `--tier1` sets it for its
-always_inline callees), a callee that isn't one straight line is a candidate
+With `IrInlineOptions.control_flow` (off by default; `--tier1` sets it for all
+its callees), a callee that isn't one straight line is a candidate
 whatever its control flow: blocks, phis, `br`, `cbr`, `switch`, several
 returns or none, `unreachable`, and calls of its own, direct, indirect, row,
 body or with ABI records. It is refused (`IR_INLINE_BODY`) with labels, as a
@@ -279,7 +289,7 @@ and nested calls, by each path, with `--verify`.
 name and currently accepts none. `./build/compiler test-ir-inline` runs it,
 and the 9700X job's test step runs that command with the other optimizer tests.
 
-Local optimized runs pass **106,889 checks**, including **14,256 independent
+Local optimized runs pass **106,931 checks**, including **14,288 independent
 interpreter executions** (94,759 and 6,432 before #2541's fixtures; 59,741
 checks, with ASan/UBSan too, before the side-table growth case below).
 The interpreter executes calls using an explicit frame stack, and a call with
@@ -330,6 +340,15 @@ predecessor remap, a switch case's constant rebase, a parameter's binding, the
 vector path's value shift and one entry of its kind tables, the scalar twin's
 `cbr` block base, the lifetime ends before the result's copy, and a caller
 branch's remap.
+
+The per-callee limits and the caller-only rewrite (`IrInlineUnit.limits` and
+`only`, #2541 step 1) have a fixture of their own: a caller of three callees,
+one under its limit, one past it (`IR_INLINE_COST`), and one that calls the
+second, rewritten alone. The two others' output functions must be their input
+descriptors, their calls `IR_INLINE_DISABLED`, two of the caller's calls kept,
+and the unit must run on the interpreter as before (16 argument pairs); a
+limits column in the output arena's tail and an `only` past the unit's count
+are refused.
 
 ## Reach in `--tier1`
 

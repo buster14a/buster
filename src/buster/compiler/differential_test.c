@@ -33,16 +33,11 @@ static DifferentialOptions differential_test_options(const char* output, const c
     options.csmith = tool;
     options.yarpgen = tool;
     options.fixture = true;
-    // Only the scenarios whose fixture hangs (pause() forever) need a short watchdog; the others keep the harness's
-    // own, which a command that finishes never waits out. One second for every command was still a cold start's
-    // bound under load: on a hosted shard running the lifecycle's eight harnesses at once, beside three other
-    // suites, a passing scenario's clang -O0 step was recorded as clang-o0-compile:timeout (run 43064400880).
-    // In a hang scenario every command shares the second, the reference and Tier 0 runs before the hang too.
-    const bool hangs = strcmp(scenario, "compile-timeout") == 0 || strcmp(scenario, "run-timeout") == 0 || strcmp(scenario, "generator-timeout") == 0;
-    if (hangs)
-    {
-        options.timeout_ms = 1000;
-    }
+    // Startup and preflight are successful stages even in a hang scenario. Only its intended command gets the
+    // private short watchdog, so loaded/sanitized lifecycle runs cannot time out before reaching that command.
+    options.fixture_timeout_label = strcmp(scenario, "compile-timeout") == 0 ? "buster-tier1-compile" :
+                                    strcmp(scenario, "run-timeout") == 0 ? "buster-tier1-run" :
+                                    strcmp(scenario, "generator-timeout") == 0 ? "generate" : NULL;
     options.output_limit = 4096;
     options.source_limit = 4096;
     options.generator_mask = 1u << generator;
@@ -60,6 +55,20 @@ static DifferentialOptions differential_test_options(const char* output, const c
     // This is one argv entry. A shell implementation would expand or split it; the manifest must retain it literally.
     differential_add(arguments, "literal space ' quote \" dollar $() ; * utf8 \xc3\xa9 byte \xff");
     return options;
+}
+
+static void differential_test_timeouts(DifferentialTests* tests)
+{
+    DifferentialOptions options = differential_defaults();
+    options.timeout_ms = 12345;
+    options.fixture_timeout_label = "buster-tier1-compile";
+    differential_test_check(tests, differential_timeout_ms(&options, "buster-tier1-compile", false) == options.timeout_ms, "production ignores private fixture timeout selection");
+    options.fixture = true;
+    differential_test_check(tests, differential_timeout_ms(&options, "buster-tier1-compile", true) == options.timeout_ms, "preflight ignores private fixture timeout selection");
+    differential_test_check(tests, differential_timeout_ms(&options, "buster-tier1-run", false) == options.timeout_ms, "other fixture stages keep the configured timeout");
+    differential_test_check(tests, differential_timeout_ms(&options, "buster-tier1-compile", false) == 1000, "selected fixture stage gets the short timeout");
+    options.fixture_timeout_label = NULL;
+    differential_test_check(tests, differential_timeout_ms(&options, "buster-tier1-compile", false) == options.timeout_ms, "ordinary fixtures keep the configured timeout");
 }
 
 static void differential_test_processes(DifferentialTests* tests, const char* directory, const char* fixture)
@@ -231,6 +240,12 @@ static void differential_test_campaigns(DifferentialTests* tests, const char* di
     for (unsigned i = 0; i < sizeof(scenarios) / sizeof(scenarios[0]); ++i)
     {
         DifferentialOptions options = differential_test_options(directory, fixture, scenarios[i], 0);
+        if (strcmp(scenarios[i], "compile-timeout") == 0)
+        {
+            // Preflight uses the same stage label as the deliberate later hang. It must retain its ordinary
+            // deadline even when this successful probe intentionally takes longer than the short watchdog.
+            differential_add(&options.tier1_args, "--fixture-slow-probe");
+        }
         DifferentialSummary summary = {0};
         const int result = differential_campaign(&options, &summary);
         differential_test_check(tests, result == (i == 0 ? 0 : 1), scenarios[i]);
@@ -243,6 +258,23 @@ static void differential_test_campaigns(DifferentialTests* tests, const char* di
             differential_test_process_record(&summary);
         }
         differential_test_check(tests, signature_matches, "failure class retained");
+        const char* timed = strcmp(scenarios[i], "compile-timeout") == 0 ? "buster-tier1-compile.json" :
+                            strcmp(scenarios[i], "run-timeout") == 0 ? "buster-tier1-run.json" :
+                            strcmp(scenarios[i], "generator-timeout") == 0 ? "generate.json" : NULL;
+        if (timed != NULL)
+        {
+            differential_test_check(tests, differential_contains(summary.last_case, timed, "\"status\":\"timeout\"") &&
+                                          differential_contains(summary.last_case, timed, "\"timeout_ms\":1000,"), "deliberate hang records the selected short deadline");
+        }
+        if (strcmp(scenarios[i], "compile-timeout") == 0)
+        {
+            char preflight[PATH_MAX];
+            const bool recorded = differential_path(preflight, sizeof(preflight), summary.directory, "preflight");
+            differential_test_check(tests, recorded && differential_contains(preflight, "buster-tier1-compile.json", "\"status\":\"ok\"") &&
+                                          differential_contains(preflight, "buster-tier1-compile.json", "\"timeout_ms\":30000,"), "slow preflight keeps the ordinary deadline");
+            differential_test_check(tests, differential_contains(summary.last_case, "clang-o0-compile.json", "\"status\":\"ok\"") &&
+                                          differential_contains(summary.last_case, "clang-o0-compile.json", "\"timeout_ms\":30000,"), "successful reference compile keeps the ordinary deadline");
+        }
         differential_test_check(tests, differential_contains(summary.directory, "summary.json", "\"campaign_passed\":0"), "fixtures cannot become compiler evidence");
         differential_test_check(tests, differential_contains(summary.last_case, "generate.json", "literal space ' quote \\\" dollar $() ; *"), "argv quoting preserved");
         differential_test_check(tests, differential_contains(summary.last_case, "generate.json", "utf8 \xc3\xa9 byte \\ufffd"), "executed Unicode arguments remain valid JSON text");
@@ -489,6 +521,7 @@ static void differential_test_config(DifferentialTests* tests, const char* direc
     {
         argument[0] = 0;
         DifferentialOptions options = differential_test_options(directory, fixture, "pass", 0);
+        options.fixture_timeout_label = "buster-tier1-compile";
         options.seed = UINT64_MAX;
         differential_add(&options.buster_args, argument);
         size_t size = 0;
@@ -506,6 +539,7 @@ static void differential_test_config(DifferentialTests* tests, const char* direc
             DifferentialOptions loaded = differential_defaults();
             valid = valid && differential_load_config(boundary, storage, BUSTER_DIFFERENTIAL_CONFIG_BYTES, &loaded);
             differential_test_check(tests, valid && loaded.seed == UINT64_MAX && loaded.buster_args.count == 2 && strcmp(loaded.buster_args.values[1], argument) == 0, "maximum-size configuration round trips exact argument bytes");
+            differential_test_check(tests, valid && loaded.fixture_timeout_label == NULL && loaded.timeout_ms == options.timeout_ms, "private fixture deadline is absent from replay configuration");
             argument[length] = 'x';
             argument[length + 1] = 0;
             char rejected[PATH_MAX];
@@ -609,6 +643,7 @@ static int run_differential_tests(int argc, char** argv)
     if (valid)
     {
         differential_test_parsing(&tests);
+        differential_test_timeouts(&tests);
         differential_test_json(&tests);
         differential_test_config(&tests, directory, fixture);
         differential_test_processes(&tests, directory, fixture);

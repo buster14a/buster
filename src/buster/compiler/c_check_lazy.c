@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Optional system-header body checking (#155). Include after c_environment.c and c_parser_bindings.c, before
-// c_check_input.c. Syntax is always parsed. This adapter uses the parser's resolved declaration identities to
-// prove which system static/inline bodies are unreachable from ordinary bodies and file-scope uses. It never
+// Optional system-header body checking (#155, #1364). Include after c_environment.c and c_parser_bindings.c, before
+// c_check_input.c. Syntax is always parsed. The tree planner certifies simple declaration identities and uses
+// without replaying the grammar; ambiguous inputs retain the exact resolved-binding planner below. Both prove
+// which system static/inline bodies are unreachable from ordinary bodies and file-scope uses. Neither ever
 // substitutes its conservative checking-demand graph for the checked semantic references used for emission.
 // The shared #129 solver supplies independent scalar/vector traversals; INLINE_ONLY is deliberately absent here:
 // referencing an inline body demands semantic checking even when that body has no emitted definition.
@@ -36,6 +37,8 @@ typedef enum CheckLazyStatus
     CHECK_LAZY_INVALID,
     CHECK_LAZY_OK,
     CHECK_LAZY_RESOURCE,
+    // Internal admission result: retry the exact binding planner, with both arena marks unchanged.
+    CHECK_LAZY_UNSUPPORTED,
 } CheckLazyStatus;
 
 typedef struct CheckLazyBody CheckLazyBody;
@@ -59,6 +62,10 @@ struct CheckLazy
     uint32_t deferred_count;
     uint32_t reference_count;
     uint32_t binding_event_count;
+    uint32_t tree_tokens;
+    uint32_t replay_tokens;
+    // The tree proved no body can be skipped, without constructing unused demand edges.
+    bool tree_all_selected;
     uint64_t retained_bytes;
     CBindingStatistics bindings;
     CLoweringStatistics reachability;
@@ -177,7 +184,8 @@ static uint32_t check_lazy_header(const Parser* parser, const Preprocessor* pp, 
     return flags;
 }
 
-static bool check_lazy_plan(CheckLazy* result, const Parser* parser, const Preprocessor* pp, Arena* output, Arena* scratch, bool scalar)
+// Keep the independent grammar/resolver path as the fallback and differential oracle for the tree certificate.
+static bool check_lazy_replay(CheckLazy* result, const Parser* parser, const Preprocessor* pp, Arena* output, Arena* scratch, bool scalar)
 {
     (void)scalar;
 
@@ -361,6 +369,7 @@ static bool check_lazy_plan(CheckLazy* result, const Parser* parser, const Prepr
             candidate.deferred_count = body_count - plan.selected_count;
             candidate.reference_count = references;
             candidate.binding_event_count = bindings.events.count;
+            candidate.replay_tokens = count;
             candidate.bindings = bindings.statistics;
             candidate.reachability = plan.statistics;
             candidate.retained_bytes = temporary - mark;
@@ -371,6 +380,89 @@ static bool check_lazy_plan(CheckLazy* result, const Parser* parser, const Prepr
     arena_pop_to(output, valid ? temporary : mark);
     arena_pop_to(scratch, scratch_mark);
     *result = valid ? candidate : (CheckLazy){ .status = candidate.status == CHECK_LAZY_OK ? CHECK_LAZY_INVALID : candidate.status };
+    return valid;
+}
+
+#include "c_check_lazy_tree.c"
+
+// The compile driver needs no body identities or mask when opaque references already require eager checking.
+// Prove that policy before either planner tries to classify declarators: an asm label in an otherwise unusual
+// header must not force a whole-unit grammar replay just to select every body. This allocates nothing, and its
+// count is used only for opt-in reporting. The metadata-producing check_lazy_plan retains its complete contract.
+static bool check_lazy_eager(const Parser* parser, const Preprocessor* pp, bool scalar, uint32_t* selected)
+{
+    const bool valid = parser != NULL && pp != NULL && pp->table != NULL && parser->errors == 0 && parser->fatal == PARSE_MESSAGE_NONE &&
+                       parser->tree.roles != NULL && parser->tokens.kinds != NULL && parser->tokens.names != NULL;
+    const uint32_t count = valid ? parser->tokens.count : 0;
+    const uint8_t* const roles = valid ? parser->tree.roles : NULL;
+    const uint8_t* const kinds = valid ? parser->tokens.kinds : NULL;
+    const uint32_t* const names = valid ? parser->tokens.names : NULL;
+    static const char* const spellings[] = { "alias", "__alias__", "ifunc", "__ifunc__", "cleanup", "__cleanup__" };
+    IdentId opaque_names[BUSTER_ARRAY_LENGTH(spellings)] = { 0 };
+    bool opaque = valid && pp->options.no_history;
+    for (uint32_t name = 0; valid && !opaque && name < BUSTER_ARRAY_LENGTH(spellings); name += 1)
+    {
+        opaque_names[name] = intern_find(pp->table, (const uint8_t*)spellings[name], (uint32_t)strlen(spellings[name]));
+    }
+    uint32_t bodies = 0;
+    for (uint64_t block = 0; block < count; block += 64)
+    {
+        const uint32_t live = count - block < 64 ? (uint32_t)(count - block) : 64;
+#if BUSTER_HOST_VECTOR
+        if (!scalar)
+        {
+            const __mmask64 active = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
+            const __m512i role = _mm512_maskz_loadu_epi8(active, roles + block);
+            bodies += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(active, role, _mm512_set1_epi8(PARSE_ROLE_OPEN_BODY)));
+            if (!opaque)
+            {
+                const __m512i kind = _mm512_maskz_loadu_epi8(active, kinds + block);
+                opaque = _mm512_mask_cmpeq_epi8_mask(active, kind, _mm512_set1_epi8(PARSE_KIND_ASM)) != 0;
+            }
+            for (uint32_t lane = 0; !opaque && lane < live; lane += 16)
+            {
+                const uint32_t remaining = live - lane;
+                const __mmask16 present = remaining < 16 ? (__mmask16)((1u << remaining) - 1) : (__mmask16)UINT16_MAX;
+                const __m512i ids = _mm512_maskz_loadu_epi32(present, names + block + lane);
+                for (uint32_t name = 0; !opaque && name < BUSTER_ARRAY_LENGTH(opaque_names); name += 1)
+                {
+                    opaque = opaque_names[name] != 0 && _mm512_mask_cmpeq_epi32_mask(present, ids, _mm512_set1_epi32((int32_t)opaque_names[name])) != 0;
+                }
+            }
+        }
+        else
+#else
+        (void)scalar;
+#endif
+        {
+            for (uint32_t lane = 0; lane < live; lane += 1)
+            {
+                const uint32_t token = (uint32_t)block + lane;
+                bodies += roles[token] == PARSE_ROLE_OPEN_BODY;
+                opaque |= kinds[token] == PARSE_KIND_ASM;
+                for (uint32_t name = 0; !opaque && name < BUSTER_ARRAY_LENGTH(opaque_names); name += 1)
+                {
+                    opaque = opaque_names[name] != 0 && names[token] == opaque_names[name];
+                }
+            }
+        }
+    }
+    *selected = opaque ? bodies : 0;
+    return opaque;
+}
+
+static bool check_lazy_plan(CheckLazy* result, const Parser* parser, const Preprocessor* pp, Arena* output, Arena* scratch, bool scalar)
+{
+    const CheckLazyStatus status = check_lazy_tree_plan(result, parser, pp, output, scratch, scalar);
+    bool valid = status == CHECK_LAZY_OK;
+    if (status == CHECK_LAZY_UNSUPPORTED)
+    {
+        valid = check_lazy_replay(result, parser, pp, output, scratch, scalar);
+    }
+    else if (valid)
+    {
+        result->tree_tokens = parser->tokens.count;
+    }
     return valid;
 }
 

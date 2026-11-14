@@ -19,6 +19,9 @@
 //   - spill-report: label-spills' output with samples at labels, after them, at a label it doesn't have, in another
 //     function and in other copies of the static function, before its labels too (#236's review): the slots, their widths and the source locations of their hottest spills and reloads; labels that aren't
 //     numbered in order;
+//   - start-order: local functions of main.c's units by their FILE symbols (two parts of one), a unit's global and the C
+//     library's functions by name, a split's alias, a benchmark's function whose name a unit's static shares (left out),
+//     two sample files that repeat functions, and symbols without functions;
 //   - branch-misses: records with M, P and neither, a field that isn't one and one of a branch at 0, with the load bias
 //     and the disassembly's instructions, and an address the disassembly doesn't have; then 10,000 branches, which grow
 //     the table, without a disassembly;
@@ -251,6 +254,45 @@ static const char profile_test_branch_misses[] = "branch-misses: 5 records of 3 
                                                  "        1005             2         3  66.67%  f+0x5: jne    1000 <f>\n"
                                                  "        100a             1         1  33.33%  f+0xa: jmp    1020 <g>\n"
                                                  "        1011             0         1   0.00%  (not an instruction of the disassembly)\n";
+
+// readelf -sW of an executable of main.c's unit, main_unit_checker.c in two parts (with a split's alias), a benchmark's
+// object and the C library after it, whose locals have no FILE symbol of their own: two copies of the static `helper`
+// in units and one in the benchmark, a global of the checker's unit, a large size in hexadecimal, and an undefined
+// function.
+static const char profile_test_start_symbols[] = "\n"
+                                                 "Symbol table '.symtab' contains 17 entries:\n"
+                                                 "   Num:    Value          Size Type    Bind   Vis      Ndx Name\n"
+                                                 "     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND \n"
+                                                 "     1: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS main.c\n"
+                                                 "     2: 0000000000401020    16 FUNC    LOCAL  DEFAULT   11 main_driver\n"
+                                                 "     3: 0000000000401000    32 FUNC    LOCAL  DEFAULT   11 helper\n"
+                                                 "     4: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS main_unit_checker.c\n"
+                                                 "     5: 0000000000402000    64 FUNC    LOCAL  DEFAULT   11 helper\n"
+                                                 "     6: 0000000000402040    32 FUNC    LOCAL  DEFAULT   11 check_one\n"
+                                                 "     7: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS main_unit_checker.c\n"
+                                                 "     8: 0000000000402060    16 FUNC    LOCAL  DEFAULT   11 check_two\n"
+                                                 "     9: 0000000000402060    16 FUNC    LOCAL  DEFAULT   11 check_two.buster_split\n"
+                                                 "    10: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS c_lexer_benchmark.c\n"
+                                                 "    11: 0000000000403000    16 FUNC    LOCAL  DEFAULT   11 helper\n"
+                                                 "    12: 0000000000404000    48 FUNC    LOCAL  DEFAULT   11 _int_malloc\n"
+                                                 "    13: 0000000000402080 0x100 FUNC    GLOBAL DEFAULT   11 check_entry\n"
+                                                 "    14: 0000000000405000    32 FUNC    GLOBAL DEFAULT   11 memset\n"
+                                                 "    15: 0000000000400100    16 FUNC    GLOBAL DEFAULT   11 _start\n"
+                                                 "    16: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND absent\n";
+
+// perf script -F ip,brstack of them: ips and records, a record whose source is in no function, and repeats.
+static const char profile_test_start_samples[] = "          401004 0x402044/0x401000/P/-/-/0//NON_SPEC_CORRECT_PATH  0x403004/0x404010/M/-/-/1//NON_SPEC_CORRECT_PATH\n"
+                                                 "          405010\n"
+                                                 "          402170 0x500000/0x402064/P/-/-/0//NON_SPEC_CORRECT_PATH\n";
+
+static const char profile_test_start_order[] = "# start-order: 9 addresses, 1 of them in no function; 3 local functions of main.c's units (0 KB) and 3 by name (0 KB), "
+                                               "1 left out that share a unit's function's name\n"
+                                               "main.c helper\n"
+                                               "main_unit_checker.c check_one\n"
+                                               "main_unit_checker.c check_two\n"
+                                               "- check_entry\n"
+                                               "- _int_malloc\n"
+                                               "- memset\n";
 
 typedef struct ProfileTest ProfileTest;
 struct ProfileTest
@@ -486,6 +528,24 @@ static void profile_test_text_tools(ProfileTest* test)
 
     ok = profile_branch_misses(&test->arena, &test->report, profile_test_string(profile_test_brstack), 0x400000, profile_test_string(profile_test_branch_disassembly), 30);
     profile_test_check(test, "branch-misses", ok, true, profile_report_text(&test->report), profile_test_branch_misses);
+
+    // Two sample files, the second one repeating the first's _start and memset: each function once.
+    const String8 start_samples[] = { profile_test_string(profile_test_start_samples), profile_test_string("400104 0x405008/0x400100/P/-/-/0//\n") };
+    ok = profile_start_order(&test->arena, &test->report, profile_test_string(profile_test_start_symbols), start_samples, 2);
+    profile_test_check(test, "start-order", ok, true, profile_report_text(&test->report),
+                       "# start-order: 12 addresses, 1 of them in no function; 3 local functions of main.c's units (0 KB) and 4 by name (0 KB), "
+                       "1 left out that share a unit's function's name\n"
+                       "- _start\n"
+                       "main.c helper\n"
+                       "main_unit_checker.c check_one\n"
+                       "main_unit_checker.c check_two\n"
+                       "- check_entry\n"
+                       "- _int_malloc\n"
+                       "- memset\n");
+    ok = profile_start_order(&test->arena, &test->report, profile_test_string(profile_test_start_symbols), start_samples, 1);
+    profile_test_check(test, "start-order of one file", ok, true, profile_report_text(&test->report), profile_test_start_order);
+    ok = profile_start_order(&test->arena, &test->report, profile_test_string("Symbol table '.symtab' contains 0 entries:\n"), start_samples, 1);
+    profile_test_check(test, "start-order without functions", ok, false, profile_report_text(&test->report), "start-order: no functions in the symbols\n");
 }
 
 // 10,000 branches, branch b recorded b % 3 + 1 times and mispredicted b % 3 times: the table grows past its first

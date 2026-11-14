@@ -13,7 +13,7 @@ On the approved 9700X, with **each command separately** inside the host's
 `EXCLUSIVE_OWNER=<name> ~/buster-fast-bench/exclusive.sh` wrapper:
 
 ```sh
-./build.sh
+./build.sh --config Release
 ./build/compiler assemble -o /tmp/sum.o examples/assembler/sum.s
 clang examples/assembler/caller.c /tmp/sum.o -o /tmp/assembler-example
 /tmp/assembler-example

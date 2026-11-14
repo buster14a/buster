@@ -85,7 +85,8 @@ requirements. [Command index](README.md).
   for supported inputs and the complete C-source acceptance still pending.
 - `measure-tier1-programs --clang PATH [--tcc PATH] --sqlite DIR --speedtest DIR
   --lua DIR --scripts DIR [--runs N] [--warmups N] [--directory DIR] [--keep]
-  [--uncounted] [--variant OPTION]...` (`tier1_programs_measure.c`, #138 and #1189) builds the
+  [--uncounted] [--variant OPTION]... [--check-code-size[=lua|sqlite|all]] [--sizes-only]`
+  (`tier1_programs_measure.c`, #138, #1189 and #1116) builds the
   programs Tier 1 is measured by against clang -O2: speedtest1 (DIR/sqlite3.c,
   DIR/speedtest1.c, #136's flags and options) and Lua 5.4.8's interpreter (its
   33 sources) running the five scripts of the `cc3387f` record. Each is built
@@ -117,6 +118,44 @@ requirements. [Command index](README.md).
   with OPTION after its options, named `--tier1 OPTION`, checked and timed as
   every build is, with its medians against `--tier1`'s in the table (#172's
   `--variant --tier1-schedule=post`: [the scheduling guide](../tier1-scheduling.md)).
+- The same command reports **function sizes** separately for SQLite's
+  `sqlite3.c` and all **34 Lua sources**, including `luac.c` and its `PrintCode`.
+  Each source is compiled to a relocatable object by Tier 1 and Clang `-O0`
+  with the same corpus flags. Exact symbol names match within that source;
+  the runtime benchmark's SQLite unity build and linked startup code do not
+  enter this comparison. The versioned `--tier1-function-sizes` manifest
+  identifies actual source bodies and their tier; its sizes are checked
+  against ELF function symbols before use. Helpers, fallback bodies,
+  unmatched functions and executable-section totals have separate counters.
+  Every report requires complete Tier 1 accounting and nonempty matched
+  evidence. `--check-code-size` (or `=all`) also requires all emitted Tier 1
+  function bytes no greater than Clang's matched bytes **for each corpus and
+  each requested Tier 1 variant**. `--check-code-size=lua` or `=sqlite` enforces
+  only that corpus while retaining both reports and their `enforced` fields.
+  Repeated selectors combine their corpora. An
+  unmatched Tier 1 body still costs its full bytes and contributes no Clang
+  bytes. This conservatively handles functions Clang inlines everywhere and
+  omits; a missing counterpart can only make the bound harder to satisfy.
+  One larger function can be offset by smaller functions in the same corpus.
+  A missing report, failed compile or malformed object fails the command even
+  for a corpus without an enforced byte bound; failure files are retained.
+  `--sizes-only` runs only this deterministic comparison and requires only
+  `--clang`, `--sqlite` and `--lua`, with no scripts, speedtest source,
+  hardware counters or timed program runs. Its object compiles run sequentially
+  and the Tier 1 compiler uses one lane:
+
+  ```sh
+  ./build/compiler measure-tier1-programs --sizes-only --check-code-size=lua --clang clang --sqlite /path/to/sqlite --lua /path/to/lua/src
+  ```
+
+  The regular program measurement reports the same sizes before timing, and
+  its existing 9700X CI step enforces the Lua bound. Hosted correctness uses
+  the same Lua gate, the existing compiler build and verified offline inputs;
+  SQLite and `test-c-testsuite --tier1 --code-size` report their current size
+  status without enforcing the threshold. It also checks the size reader and
+  command with original synthetic sources. PR and merge-queue hardware policy
+  is unchanged. These deterministic size checks make no runtime-performance
+  claim and require no 9700X run.
 - `measure-tier1-rows --clang PATH [--base COMPILER] [--src DIR] [--lexer
   FILE]... [--march ARCH] [--rounds N] [--passes N] [--runs N] [--warmups N]
   [--directory DIR] [--keep] [--uncounted]` (`tier1_rows_measure.c`, #1283)

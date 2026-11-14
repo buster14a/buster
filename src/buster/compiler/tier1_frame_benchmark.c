@@ -129,7 +129,7 @@ static __attribute__((noinline, aligned(64))) Tier1FrameError tier1_frame_benchm
             {
                 if (scalar)
                 {
-                    tier1_frame_color_scalar(request, prepared);
+                    tier1_frame_color_scalar(prepared);
                 }
                 else
                 {

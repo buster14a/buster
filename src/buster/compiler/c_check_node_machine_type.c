@@ -785,7 +785,12 @@ static inline __attribute__((always_inline)) bool node_machine_member(NodeMachin
         space = taken ? type_address_space(type_extended_qualifiers(types, type_element(types, record))) : 0;
         record = taken ? type_strip_aligned(types, type_element(types, record)) : record;
     }
-    const uint8_t kind = type_kind(types, record);
+    uint8_t kind = type_kind(types, record);
+    if (__builtin_expect(kind == BUSTER_TYPE_KIND_ATOMIC, 0))
+    {
+        record = type_strip_aligned(types, type_element(types, record));
+        kind = type_kind(types, record);
+    }
     // A `.` of an address constant, a static object's member (its base held whole by the columns, so with no bit offset).
     const bool address = !arrow && base.constant_kind == CHECK_CONSTANT_ADDRESS && (columns->standings[a] & BUSTER_NODE_MACHINE_WIDE) == 0;
     taken = taken && space == 0 && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && (base.constant_kind == CHECK_CONSTANT_NONE || address);
@@ -1183,7 +1188,7 @@ static bool node_machine_arguments(NodeMachine* machine, uint32_t r, uint32_t no
 
 // Whether call record `r` (node `node`, callee record `a`) has a callee with semantics of its own, which the machine
 // leaves to the pipeline (docs/node-machine.md, "T: bind and type"): a library builtin's call that the catalogue folds or
-// computes (the reader's BUSTER_CHECK_LIBRARY_CALL), any call in a unit with overload sets, a callee without a prototype
+// computes (the reader's BUSTER_CHECK_LIBRARY_CALL, check_program_call_library), any call in a unit with overload sets, a callee without a prototype
 // or of another convention than System V's (what check_lower_convention_call refuses, and the conventions that keep more
 // registers), more arguments than Tier 0's calls take, or a callee that returns twice (check_lower_calls_twice's and
 // check_lower_indirect_twice's, which the lowering marks its function for). The census refuses before it the callees
@@ -1196,7 +1201,7 @@ static bool node_machine_callee_refused(const NodeMachine* machine, uint32_t r, 
     const TypeTable* types = machine->types;
     const uint32_t member = graph->members != NULL ? graph->members[node] : 0;
     const TypeId function = node_machine_callee_function(machine, a);
-    bool refused = (member & BUSTER_CHECK_LIBRARY_CALL) != 0 || graph->overload_candidate_count != 0 || function == 0 ||
+    bool refused = ((member & BUSTER_CHECK_LIBRARY_CALL) != 0 && check_program_call_library(program, node)) || graph->overload_candidate_count != 0 || function == 0 ||
                    columns->argument_counts[r] > BUSTER_TIER0_MAX_CALL_ARGUMENTS;
     refused = refused || (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0 ||
               type_function_abi_kind(types, function) != TYPE_FUNCTION_ABI_SYSV || type_function_has_parameter_abis(types, function);
@@ -2096,7 +2101,7 @@ static bool node_machine_same_values(const CheckValue* left, const CheckValue* r
 }
 
 // Whether record `r`'s columns are what the action gives it: --verify's twin check of a node a row or a rule typed.
-static bool node_machine_same_as_action(const NodeMachine* machine, uint32_t r, CheckOp op)
+static __attribute__((cold, noinline)) bool node_machine_same_as_action(const NodeMachine* machine, uint32_t r, CheckOp op)
 {
     const NodeMachineColumns* columns = machine->columns;
     CheckActionResult result;
@@ -2117,6 +2122,15 @@ static bool node_machine_same_as_action(const NodeMachine* machine, uint32_t r, 
     return same;
 }
 
+// A leaf's value made whole first, into record `r`'s columns, for a leaf they don't hold field by field: rare (a payload
+// row, an overload set or another category), and kept off T's loop's path. Its overload set.
+static __attribute__((cold, noinline)) uint32_t node_machine_leaf_whole(NodeMachine* machine, uint32_t r, uint32_t slot)
+{
+    const CheckValue value = check_graph_leaf_at(machine->graph, slot);
+    node_machine_put_value(machine, r, &value);
+    return value.overload_head;
+}
+
 // A leaf's value, check_graph_leaf_at's, into record `r`'s columns: from its record field by field where the columns hold
 // it whole (no payload row and no overload set: its integer alone), and else made whole first. Its overload set.
 static inline __attribute__((always_inline)) uint32_t node_machine_leaf(NodeMachine* machine, uint32_t r, uint32_t node)
@@ -2125,15 +2139,13 @@ static inline __attribute__((always_inline)) uint32_t node_machine_leaf(NodeMach
     const uint32_t slot = graph->leaf_slots[node];
     const CheckGraphLeaf* leaf = graph->dense_leaves == NULL ? graph->leaf_records + slot : NULL;
     uint32_t overload = 0;
-    if (leaf != NULL && leaf->row == 0 && leaf->overload_head == 0 && leaf->category <= CHECK_FUNCTION && leaf->constant_kind <= CHECK_CONSTANT_LABEL_DIFFERENCE)
+    if (__builtin_expect(leaf != NULL && leaf->row == 0 && leaf->overload_head == 0 && leaf->category <= CHECK_FUNCTION && leaf->constant_kind <= CHECK_CONSTANT_LABEL_DIFFERENCE, 1))
     {
         node_machine_record(machine, r, leaf->type, (CheckCategory)leaf->category, leaf->flags, (CheckConstantKind)leaf->constant_kind, leaf->object, leaf->integer);
     }
     else
     {
-        const CheckValue value = check_graph_leaf_at(graph, slot);
-        node_machine_put_value(machine, r, &value);
-        overload = value.overload_head;
+        overload = node_machine_leaf_whole(machine, r, slot);
     }
     return overload;
 }
@@ -2144,6 +2156,19 @@ static inline __attribute__((always_inline)) uint32_t node_machine_record_of(uin
 {
     const uint32_t record = operand - first;
     return operand == BUSTER_CHECK_NONE ? UINT32_MAX : operand >= first && record < r ? record : BUSTER_NODE_MACHINE_MOST;
+}
+
+// Record `r`'s value by the action, for the nodes T's rules leave to it: its refusal by the action's diagnostic.
+static __attribute__((cold, noinline)) NodeMachineRefusal node_machine_type_action(NodeMachine* machine, uint32_t r, CheckOp op, bool call)
+{
+    CheckActionResult result;
+    memset(&result, 0, sizeof(result));
+    node_machine_action(machine, r, op, machine->argument_conversions + (call ? machine->columns->argument_first[r] : 0), &result);
+    const NodeMachineRefusal refusal = result.diagnostic != CHECK_DIAG_NONE ? NODE_MACHINE_REFUSED_DIAGNOSTIC : NODE_MACHINE_TAKEN;
+    node_machine_store(machine, r, op, &result);
+    machine->action_nodes += 1;
+    machine->action_ops[op] += 1;
+    return refusal;
 }
 
 // T: every record's value and its operands' conversions, up the postorder, for the expression of `count` records, graph
@@ -2173,7 +2198,7 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
             const TypeId type = columns->value_types[r];
             word = node_machine_word(machine, type);
             const bool valid = (word & BUSTER_NODE_MACHINE_WORD_VALID) != 0 && (uint8_t)(word >> 16) != BUSTER_TYPE_KIND_VARIABLE_ARRAY;
-            refusal = context ? NODE_MACHINE_REFUSED_CONTEXT : overload != 0 || !valid ? NODE_MACHINE_REFUSED_LEAF : NODE_MACHINE_TAKEN;
+            refusal = __builtin_expect(context, 0) ? NODE_MACHINE_REFUSED_CONTEXT : __builtin_expect(overload != 0 || !valid, 0) ? NODE_MACHINE_REFUSED_LEAF : NODE_MACHINE_TAKEN;
             columns->left[r] = UINT32_MAX;
             columns->right[r] = UINT32_MAX;
             columns->lowest[r] = r;
@@ -2195,38 +2220,38 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
             lowest = b < r && columns->lowest[b] < lowest ? columns->lowest[b] : lowest;
             columns->lowest[r] = c < r && columns->lowest[c] < lowest ? columns->lowest[c] : lowest;
             const bool call = op == CHECK_OP_CALL;
-            if (!node_machine_code(op))
+            // The refusals and the action's nodes are rare (none and 0.3% of sqlite3.c's), and kept off the loop's path.
+            if (__builtin_expect(!node_machine_code(op), 0))
             {
                 refusal = NODE_MACHINE_REFUSED_CODE;
             }
-            else if (a == BUSTER_NODE_MACHINE_MOST || b == BUSTER_NODE_MACHINE_MOST || c == BUSTER_NODE_MACHINE_MOST ||
-                     (call ? a == UINT32_MAX || !node_machine_arguments(machine, r, node) : graph->argument_counts[node] != 0))
+            else if (__builtin_expect(a == BUSTER_NODE_MACHINE_MOST || b == BUSTER_NODE_MACHINE_MOST || c == BUSTER_NODE_MACHINE_MOST ||
+                                          (call ? a == UINT32_MAX || !node_machine_arguments(machine, r, node) : graph->argument_counts[node] != 0),
+                                      0))
             {
                 refusal = NODE_MACHINE_REFUSED_SHAPE;
             }
-            else if (context)
+            else if (__builtin_expect(context, 0))
             {
                 refusal = NODE_MACHINE_REFUSED_CONTEXT;
             }
-            else if (call && node_machine_callee_refused(machine, r, node, a))
+            else if (__builtin_expect(call && node_machine_callee_refused(machine, r, node, a), 0))
             {
                 refusal = NODE_MACHINE_REFUSED_CALLEE;
             }
-            else if (!machine->scalar && (a != UINT32_MAX || op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF) && (c == UINT32_MAX || op == CHECK_OP_CONDITIONAL) &&
-                     ((node_machine_row_operators[op] != NODE_MACHINE_ROW_NONE && node_machine_row(machine, r, op, a, b)) || node_machine_rule(machine, r, node, op, a, b)))
+            else if (__builtin_expect(!machine->scalar && (a != UINT32_MAX || op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF) && (c == UINT32_MAX || op == CHECK_OP_CONDITIONAL) &&
+                                          ((node_machine_row_operators[op] != NODE_MACHINE_ROW_NONE && node_machine_row(machine, r, op, a, b)) || node_machine_rule(machine, r, node, op, a, b)),
+                                      1))
             {
                 machine->row_nodes += 1;
-                machine->twin_differences += machine->verify && !node_machine_same_as_action(machine, r, op);
+                if (__builtin_expect(machine->verify, 0))
+                {
+                    machine->twin_differences += !node_machine_same_as_action(machine, r, op);
+                }
             }
             else
             {
-                CheckActionResult result;
-                memset(&result, 0, sizeof(result));
-                node_machine_action(machine, r, op, machine->argument_conversions + (call ? columns->argument_first[r] : 0), &result);
-                refusal = result.diagnostic != CHECK_DIAG_NONE ? NODE_MACHINE_REFUSED_DIAGNOSTIC : NODE_MACHINE_TAKEN;
-                node_machine_store(machine, r, op, &result);
-                machine->action_nodes += 1;
-                machine->action_ops[op] += 1;
+                refusal = node_machine_type_action(machine, r, op, call);
             }
             word = node_machine_word(machine, columns->value_types[r]);
         }

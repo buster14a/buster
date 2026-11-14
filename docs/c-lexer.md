@@ -124,7 +124,7 @@ From that directory, for each of `baseline` and `candidate`:
 
 ```sh
 cd candidate
-EXCLUSIVE_OWNER=lexer-reproduce ~/buster-fast-bench/exclusive.sh ./build.sh
+EXCLUSIVE_OWNER=lexer-reproduce ~/buster-fast-bench/exclusive.sh ./build.sh --config Release
 cd ..
 EXCLUSIVE_OWNER=lexer-reproduce ~/buster-fast-bench/exclusive.sh taskset -c 2 candidate/build/compiler benchmark-lexer corpus-libc
 EXCLUSIVE_OWNER=lexer-reproduce ~/buster-fast-bench/exclusive.sh taskset -c 2 candidate/build/compiler benchmark-lexer --cplusplus corpus-cpp
