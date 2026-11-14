@@ -1417,8 +1417,9 @@ The tests:
   width and both opcodes among it.
 - **`test-ir-simd`:** the 60 rows (10 moves, load and store, 3 widths) decode
   at exactly their features. Each is refused without a feature it needs and
-  under 7 changes. A scatter is now the machine-row test's row of no result
-  (a compress-store was, until compressing stores became the IR's own, below).
+  under 7 changes. A scatter whose 2-byte mask isn't its 4 lanes' is now the
+  machine-row test's row of no result (a compress-store was, until compressing
+  stores became the IR's own, and then a scatter, until scatters did, below).
 - **`test-tier1-masks`:** `vmovdqu8` to `vmovdqu64` at each width, load and
   store (24 rows), under a mask from the input, through both lowering paths,
   the interpreter at every stage and Tier 1 natively, against C's lanes. Each
@@ -1553,8 +1554,9 @@ sources, against main `8023523`:
 | --- | ---: | ---: |
 | `main_unit_backend.c` | 93 | 1 |
 
-The one left is the scatter, whose four values (base, index, vector, mask)
-need a fourth operand no IR instruction has.
+The one left was the scatter, whose four values (base, index, vector, mask)
+needed a fourth operand no IR instruction had; [scatters](#scatters-1840)
+below give it one.
 
 The tests:
 
@@ -1581,6 +1583,128 @@ The tests:
   compiler's results on `test-ir`, `test-tier1-masks`, `test-tier1-select`,
   `test-tier1-pipeline`, `test-ssa-ir`, `test-ir-parse`, `test-tier1-cfg` and
   `test-dataflow`, and the same object for `--tier1 -c main_unit_backend.c`.
+
+## Scalar fused multiply-adds (#1840)
+
+`fma` (`IR_FMA`) is a float's or a double's multiply-add, rounded once:
+
+```text
+%6 = fma.f64 %0, %1, %2
+```
+
+- **Operands:** a, b and c are of the result's type, `f32` or `f64`. No
+  flags; the rounding is MXCSR's, as `fadd`'s.
+- **Semantics:** `a * b + c` rounded once. Where a, b or c is a NaN, the first
+  of them in that order, quieted. Where the product or the sum of numbers is
+  invalid (an infinity times zero, or infinities of opposite signs), the
+  default NaN, `0xfff8000000000000` (`0xffc00000` for a float).
+- **Why that NaN order.** x86's FMA3 forms take the formula's operands in order
+  whatever their encoding: `vfmadd213sd b, a, c` (b's register the
+  destination), `vfmadd231sd c, a, b` and `vfmadd132sd a, c, b` all give a's
+  NaN over b's. Measured over the 3,375 triples of 15 doubles each (NaNs of
+  both signs and payloads, a signaling one, infinities, zeros, subnormals, and
+  products that round) on an Intel Xeon and on the Ryzen 7 9700X: no triple
+  differs between the forms or from the model. `test-ir-simd` checks the model
+  against the host's `vfmadd213sd` and `ss` on 4,096 triples each.
+- **Model:** `ir_fma_bits`, the NaN order above and otherwise the host's
+  `__builtin_fma` (one rounding), which the interpreter runs and nothing folds.
+- **Passes:** as `fadd`'s: an optimizer root unless it folds (it doesn't), and
+  neither GVN's nor LICM's (it reads MXCSR and can raise exceptions).
+
+**Decoder** (`ir_simd_typed_fma`): `__builtin_elementwise_fma` of a float or a
+double (`check_vector_scalar_row`) and a contracted `a * b + c` or `c + a * b`
+(#1239, `check_vector_contract_row`) are two records: `vfmadd213ss` or `sd`
+(VEX's, or EVEX's at AVX512F) of three FLOATING roles, then the reg field's
+register's copy into the result (`vmovaps`, either encoding). The row is
+`IR_FMA` of its vvvv, reg and rm operands in that order, at a target with FMA.
+Tier 1 emits FMA's VEX forms, so at a target of AVX512F's EVEX forms alone
+the row stays a machine row. Both row builders live in
+`c_check_program_vector_convert.c`, which the backend unit compiles, so that
+`test-ir-simd` decodes the front end's own rows: 18 at x86-64-v3, znver5 and
+AVX512F without VL, none decoded without FMA. Nine changed rows each (an
+immediate, a decoration, memory, a role twice, another copy, another class, a
+result's bytes, a third record) aren't `IR_FMA`.
+
+**Tier 1** (`TIER1_RULE_FLOAT_FMA`): the FMA3 form whose destination holds an
+operand already, the other two in the formula's order: `vfmadd213` where it is
+b's, `231` where it is c's, `132` where it is a's; otherwise b's copy into the
+destination, then `213`. Each form computes the same bits (above).
+`x86_semantics.c` has the `132` forms' effects beside the `213` and `231` ones'
+(the code certificate refuses a record of a form it can't read).
+
+**Tests:** `test-tier1-select` expands each case at both widths;
+`test-tier1-masks` takes 8 programs (the builtin's, the two contractions' and a
+row whose roles make Tier 1 choose `132`, of floats and doubles) through the
+IR's interpreter at every stage and Tier 1 natively against the host's
+`vfmadd213`, each with an operand used twice and a result fed back into the
+next statement.
+
+`main_unit_backend.c`'s 20 rows of #2644's contractions are `fma` now: at
+`--tier1 -march=znver5` its machine rows fall from 21 to 1, the scatter.
+
+## Scatters (#1840)
+
+The scatter is a store of four values, a base, an index vector, the stored
+vector and a mask, where every IR instruction had three operand fields. It
+takes the ternary intrinsics' extra operands (`ir_intrinsic_ternary_c`): its
+`c` holds the extra array's index, kind 0, and the extra array the stored
+vector and then the mask.
+
+```text
+scatter.void %0, %1, %4, %3 scale=4 lanes=i32
+```
+
+- **Operands:** `a:ptr` the base and `b` the index vector of a dword or a
+  qword per lane, as a gather's; then the stored vector, whose lanes the flags
+  name (i32 or i64), and the mask of those lanes. `alignment_log2` is the
+  scale's log2 (0 to 3), as a gather's. No result.
+- **Semantics:** lane i, where the mask's bit i is set, is written at
+  `a + sext(b[i]) * scale`, the lanes in order from lane 0, so that of two
+  set lanes at one address the higher lane's bytes stay (x86's order); a clear
+  lane writes nothing and can't fault. A store's effect, of any memory.
+- **Operands beyond three:** `ir_extra_value_count` and `ir_extra_value` give
+  an instruction's values in the extra array, one for a ternary intrinsic and
+  two for a scatter, and every pass that walked a ternary intrinsic's third
+  value walks them: operand counts and positions (3 and 4), the uses, the
+  verifier, the interpreter's definedness, the rebuild, GVN, LICM, inlining,
+  if-conversion, threading, SSA, the vector splits and the wide lowering.
+- **Passes:** a barrier and an optimizer root, as a masked store; if-conversion
+  takes it as a write.
+
+**Decoder** (`ir_simd_typed_scatter`): one record of `vpscatterdd` to
+`vpscatterqq` (or `vscatterdps` to `vscatterqpd`) of a U64 base, a mask, an
+index vector and a stored vector, whose index has an element per lane
+(`ir_simd_scatter_forms`, 10 shapes, all of x86's): the 16-byte `dq` and the
+64-byte `qd` have none. It needs AVX512F, VL where a vector is below 64 bytes,
+and DQ for a byte mask, as the masked stores' moves do.
+
+**Tier 1** (`tier1_select_scatter`): the scatter clears its mask register as
+it goes, so Tier 1 copies the mask into `r11d` first and back after
+(`kmovw`), as the gathers do; the form is the shape's `vpscatter`.
+
+**Zen 5:** 10 `MEMORY_INDEX` rows, measured on the 9700X with a scatter shape
+in the harness (no chain through its index: a scatter has no result): one
+every 3 to 17 cycles by width, 16 to 88 macro-ops.
+
+**Tests:**
+
+- **`test-ir-parse`:** `tests/ir/gathers.ir` adds three scatters, dwords and
+  qwords by both index widths, round-tripping.
+- **`test-ir-simd`:** 80 scatter rows (10 shapes, integers and floats, 4
+  scales) decode at exactly their features, each refused without one it needs
+  and under 7 changes.
+- **`test-tier1-select`:** the scatter is a barrier in both scans; dropping it
+  from the vector scan's barriers fails the barrier oracle.
+- **`test-tier1-masks`:** 10 scatters (every integer shape, each at its own
+  scale) under a mask from the input, through the IR's interpreter at every
+  stage and Tier 1 natively, against C's lanes. The indices repeat, so the
+  higher lane's bytes must win; in the fourth statement every masked-off
+  lane's index points far past every buffer, so the interpreter's binding
+  checks prove a clear lane is never written. An interpreter that wrote the
+  lanes from the highest down fails it.
+
+With scatters `main_unit_backend.c` has no machine rows left at `--tier1
+-march=znver5` (21 before this change's FMA and scatters).
 
 ## One lane's moves and movemasks (#1840)
 

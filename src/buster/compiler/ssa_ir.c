@@ -437,9 +437,9 @@ static IrError ssa_ir_layout(SsaIrWork* work)
                 {
                     work->sizes.extra_count += f->c[i];
                 }
-                else if (ir_ternary_instruction(f, i))
+                else if (ir_extra_value_count(f, i) != 0)
                 {
-                    work->sizes.extra_count += 1;
+                    work->sizes.extra_count += ir_extra_value_count(f, i);
                 }
             }
         }
@@ -616,11 +616,14 @@ static void ssa_ir_fill(const SsaIrWork* work, IrFunction* f)
                     {
                         f->a[instruction] = work->slots[input->a[i]];
                     }
-                    else if (ir_ternary_instruction(input, i))
+                    else if (ir_extra_value_count(input, i) != 0)
                     {
-                        // A ternary intrinsic's third operand (#1840), in the extra array.
+                        // A ternary intrinsic's third operand, or a scatter's stored vector and mask (#1840), in the extra array.
                         f->c[instruction] = ir_intrinsic_ternary_c(input->c[i], extra);
-                        f->extra[extra++] = ssa_ir_value(work, ir_intrinsic_third(input, i));
+                        for (uint32_t k = 0, extra_values = ir_extra_value_count(input, i); k < extra_values; k += 1)
+                        {
+                            f->extra[extra++] = ssa_ir_value(work, ir_extra_value(input, i, k));
+                        }
                     }
                     else if (op == IR_CALL || op == IR_CALL_INDIRECT)
                     {

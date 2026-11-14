@@ -204,9 +204,12 @@ static void ir_thread_escapes_extra(IrThreadWork* work, uint32_t i)
             ir_thread_escape(work, f->extra[f->a[i] + p * 2 + 1], f->extra[f->a[i] + p * 2]);
         }
     }
-    else if (ir_ternary_instruction(f, i))
+    else if (ir_extra_value_count(f, i) != 0)
     {
-        ir_thread_escape(work, ir_intrinsic_third(f, i), block);
+        for (uint32_t k = 0, extra_values = ir_extra_value_count(f, i); k < extra_values; k += 1)
+        {
+            ir_thread_escape(work, ir_extra_value(f, i, k), block);
+        }
     }
     else if (op == IR_CALL || op == IR_CALL_INDIRECT)
     {
@@ -718,9 +721,9 @@ static IrError ir_thread_rewrite(const IrThreadWork* work, Arena* output, Arena*
         {
             extras += f->calls[f->b[i]].argument_count;
         }
-        else if (ir_ternary_instruction(f, i))
+        else if (ir_extra_value_count(f, i) != 0)
         {
-            extras += 1;
+            extras += ir_extra_value_count(f, i);
         }
     }
     error = error == IR_OK && extras > UINT32_MAX ? IR_ERROR_LIMIT : error;
@@ -842,10 +845,13 @@ static IrError ir_thread_rewrite(const IrThreadWork* work, Arena* output, Arena*
                         view.extra[extra++] = values[f->extra[call.argument_first + k]];
                     }
                 }
-                else if (ir_ternary_instruction(f, i))
+                else if (ir_extra_value_count(f, i) != 0)
                 {
                     view.c[out] = ir_intrinsic_ternary_c(f->c[i], extra);
-                    view.extra[extra++] = values[ir_intrinsic_third(f, i)];
+                    for (uint32_t k = 0, extra_values = ir_extra_value_count(f, i); k < extra_values; k += 1)
+                    {
+                        view.extra[extra++] = values[ir_extra_value(f, i, k)];
+                    }
                 }
                 else if (i + 1 == end && work->actions[block] == BUSTER_IR_THREAD_COPY)
                 {

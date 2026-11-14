@@ -1980,67 +1980,78 @@ static __attribute__((noinline)) bool node_machine_conditional(NodeMachine* mach
 }
 
 // T's direct rules for the operators whose type a lookup gives, each by its action's own steps for the common case, the
-// action taking the rest: whether one typed record `r` (node `node`, operator `op`, operands' records `a` and `b`).
-static bool node_machine_rule(NodeMachine* machine, uint32_t r, uint32_t node, CheckOp op, uint32_t a, uint32_t b)
+// action taking the rest: whether one typed record `r` (node `node`, operator `op`, operands' records `a` and `b`). One
+// case an operator. Out of line, with the rules it calls inlined into it: T's loop, the leaves' and the rows', stays 4.4
+// KB where it was 11.8 KB, and the three sweeps' code then keeps C's warmer in the instruction cache, at every placement
+// measured (docs/node-machine.md, "T's loop without its rules").
+static __attribute__((noinline)) bool node_machine_rule(NodeMachine* machine, uint32_t r, uint32_t node, CheckOp op, uint32_t a, uint32_t b)
 {
     bool typed = false;
-    if (op == CHECK_OP_CAST)
+    switch (op)
     {
-        typed = node_machine_discard(machine, r, node, a) || node_machine_cast(machine, r, node, a);
-    }
-    else if (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF)
-    {
-        typed = node_machine_query(machine, r, node, op, a);
-    }
-    else if (op == CHECK_OP_COMMA)
-    {
-        typed = node_machine_comma(machine, r, a, b);
-    }
-    else if (op == CHECK_OP_CONDITIONAL)
-    {
-        typed = node_machine_conditional(machine, r, node, a, b, node_machine_operand(machine, r, 2));
-    }
-    else if (op == CHECK_OP_POSITIVE || (node_machine_row_operators[op] != NODE_MACHINE_ROW_NONE && op != CHECK_OP_ADD && op != CHECK_OP_SUBTRACT))
-    {
-        // An operator of the rows that the row didn't type: its integer constants' fold, or a pointer's equality with a null
-        // pointer constant.
-        typed = node_machine_fold(machine, r, op, a, b) || node_machine_null_compare(machine, r, op, a, b);
-    }
-    else if (op == CHECK_OP_ARROW || op == CHECK_OP_MEMBER)
-    {
-        typed = node_machine_member(machine, r, node, op, a);
-    }
-    else if (op == CHECK_OP_CONDITION || op == CHECK_OP_NOT)
-    {
-        typed = node_machine_truth(machine, r, op, a);
-    }
-    else if (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR)
-    {
-        typed = node_machine_logic(machine, r, op, a, b);
-    }
-    else if (op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT)
-    {
-        typed = node_machine_store_rule(machine, r, node, op, a, b);
-    }
-    else if (op == CHECK_OP_ADDRESS)
-    {
-        typed = node_machine_address_rule(machine, r, a);
-    }
-    else if (op == CHECK_OP_DEREFERENCE)
-    {
-        typed = node_machine_dereference(machine, r, a);
-    }
-    else if (op == CHECK_OP_SUBSCRIPT || op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT)
-    {
-        typed = node_machine_pointer_rule(machine, r, node, op, a, b) || (op != CHECK_OP_SUBSCRIPT && node_machine_fold(machine, r, op, a, b));
-    }
-    else if (op == CHECK_OP_CALL)
-    {
-        typed = node_machine_call_rule(machine, r, node, a);
-    }
-    else if (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)
-    {
-        typed = node_machine_update_rule(machine, r, node, op, a, b) || node_machine_update_pointer_rule(machine, r, node, op, a, b);
+        case CHECK_OP_CAST:
+        {
+            typed = node_machine_discard(machine, r, node, a) || node_machine_cast(machine, r, node, a);
+        } break;
+        case CHECK_OP_ARROW: case CHECK_OP_MEMBER:
+        {
+            typed = node_machine_member(machine, r, node, op, a);
+        } break;
+        case CHECK_OP_CALL:
+        {
+            typed = node_machine_call_rule(machine, r, node, a);
+        } break;
+        case CHECK_OP_CONDITION: case CHECK_OP_NOT:
+        {
+            typed = node_machine_truth(machine, r, op, a);
+        } break;
+        case CHECK_OP_ASSIGN: case CHECK_OP_INITIALIZE: case CHECK_OP_CONVERT:
+        {
+            typed = node_machine_store_rule(machine, r, node, op, a, b);
+        } break;
+        case CHECK_OP_SUBSCRIPT: case CHECK_OP_ADD: case CHECK_OP_SUBTRACT:
+        {
+            typed = node_machine_pointer_rule(machine, r, node, op, a, b) || (op != CHECK_OP_SUBSCRIPT && node_machine_fold(machine, r, op, a, b));
+        } break;
+        case CHECK_OP_ADDRESS:
+        {
+            typed = node_machine_address_rule(machine, r, a);
+        } break;
+        case CHECK_OP_DEREFERENCE:
+        {
+            typed = node_machine_dereference(machine, r, a);
+        } break;
+        case CHECK_OP_LOGICAL_AND: case CHECK_OP_LOGICAL_OR:
+        {
+            typed = node_machine_logic(machine, r, op, a, b);
+        } break;
+        case CHECK_OP_SIZEOF: case CHECK_OP_ALIGNOF:
+        {
+            typed = node_machine_query(machine, r, node, op, a);
+        } break;
+        case CHECK_OP_COMMA:
+        {
+            typed = node_machine_comma(machine, r, a, b);
+        } break;
+        case CHECK_OP_CONDITIONAL:
+        {
+            typed = node_machine_conditional(machine, r, node, a, b, node_machine_operand(machine, r, 2));
+        } break;
+        case CHECK_OP_PRE_INCREMENT: case CHECK_OP_PRE_DECREMENT: case CHECK_OP_POST_INCREMENT: case CHECK_OP_POST_DECREMENT: case CHECK_OP_ADD_ASSIGN:
+        case CHECK_OP_SUBTRACT_ASSIGN: case CHECK_OP_MULTIPLY_ASSIGN: case CHECK_OP_DIVIDE_ASSIGN: case CHECK_OP_REMAINDER_ASSIGN: case CHECK_OP_SHIFT_LEFT_ASSIGN:
+        case CHECK_OP_SHIFT_RIGHT_ASSIGN: case CHECK_OP_BIT_AND_ASSIGN: case CHECK_OP_BIT_OR_ASSIGN: case CHECK_OP_BIT_XOR_ASSIGN:
+        {
+            typed = node_machine_update_rule(machine, r, node, op, a, b) || node_machine_update_pointer_rule(machine, r, node, op, a, b);
+        } break;
+        default:
+        {
+            // A unary plus, and an operator of the rows (but `+` and `-`, above) that its row didn't type: its integer
+            // constants' fold, or a pointer's equality with a null pointer constant.
+            if (op == CHECK_OP_POSITIVE || node_machine_row_operators[op] != NODE_MACHINE_ROW_NONE)
+            {
+                typed = node_machine_fold(machine, r, op, a, b) || node_machine_null_compare(machine, r, op, a, b);
+            }
+        } break;
     }
     return typed;
 }
@@ -2178,15 +2189,21 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
     NodeMachineColumns* columns = machine->columns;
     const CheckGraph* graph = machine->graph;
     NodeMachineRefusal refusal = count != 0 && count <= BUSTER_NODE_MACHINE_MOST && root >= first + count - 1 ? NODE_MACHINE_TAKEN : NODE_MACHINE_REFUSED_SHAPE;
+    // The expression's range, kept in locals for the loop as well as in the machine for the rules: the machine's fields
+    // would be loaded again after each of the loop's stores.
+    const uint32_t records = refusal == NODE_MACHINE_TAKEN ? count : 0;
     machine->first = first;
     machine->root = root;
-    machine->count = refusal == NODE_MACHINE_TAKEN ? count : 0;
+    machine->count = records;
     machine->wide_count = 0;
     machine->argument_total = 0;
+    // The nodes a row or a rule typed, counted here and added to the machine's once: a store into the machine at each
+    // record would make every read of its fields after it a load again (-fno-strict-aliasing).
+    uint64_t rows = 0;
     uint32_t r = 0;
-    while (refusal == NODE_MACHINE_TAKEN && r < machine->count)
+    while (refusal == NODE_MACHINE_TAKEN && r < records)
     {
-        const uint32_t node = node_machine_node(machine, r);
+        const uint32_t node = r + 1 == records ? root : first + r;
         const CheckOp op = graph->ops[node];
         const bool context = (graph->contexts != NULL && graph->contexts[node] != 0) ||
                              (graph->fp_environments != NULL && (graph->fp_environments[node] & (BUSTER_CHECK_FP_ENV_ACCESS | BUSTER_CHECK_FP_EVAL_MASK)) != 0);
@@ -2211,9 +2228,9 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
         }
         else
         {
-            const uint32_t a = node_machine_record_of(graph->operand0[node], machine->first, r);
-            const uint32_t b = node_machine_record_of(graph->operand1[node], machine->first, r);
-            const uint32_t c = node_machine_record_of(graph->operand2[node], machine->first, r);
+            const uint32_t a = node_machine_record_of(graph->operand0[node], first, r);
+            const uint32_t b = node_machine_record_of(graph->operand1[node], first, r);
+            const uint32_t c = node_machine_record_of(graph->operand2[node], first, r);
             columns->left[r] = a;
             columns->right[r] = b;
             // Its subtree's least record (a call's arguments' too, node_machine_arguments).
@@ -2244,7 +2261,7 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
                                           ((node_machine_row_operators[op] != NODE_MACHINE_ROW_NONE && node_machine_row(machine, r, op, a, b)) || node_machine_rule(machine, r, node, op, a, b)),
                                       1))
             {
-                machine->row_nodes += 1;
+                rows += 1;
                 if (__builtin_expect(machine->verify, 0))
                 {
                     machine->twin_differences += !node_machine_same_as_action(machine, r, op);
@@ -2260,8 +2277,13 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
         columns->words[r] = word;
         columns->facts[r] = facts;
         columns->value_classes[r] = (facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : (uint8_t)word;
-        machine->stopped = r;
         r += refusal == NODE_MACHINE_TAKEN;
+    }
+    machine->row_nodes += rows;
+    // The record T stopped at: the one that refused, or else the last; none where the shape refused before the loop.
+    if (records != 0)
+    {
+        machine->stopped = refusal == NODE_MACHINE_TAKEN ? r - 1 : r;
     }
     return refusal;
 }
