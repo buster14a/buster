@@ -8,6 +8,8 @@
 # failure, a lower bound (`lower-bound`); where it has none, the row's median per CPU times its CPUs (`unmeasured`),
 # which `costs refresh` also gives a command the inventory adds. The costs only deal the commands to the shards: a
 # stale cost makes a shard longer, never a test go missing.
+# `derived` is a share of the cost of a heading the inventory split into several (`costs split`, #2658), its weight's,
+# until a collect over logs that have the new heading measures it.
 # `first-shard` is how much longer shard 1's job ran than the others' besides their commands, the medians' difference
 # with each job scaled as its samples are: the steps the row runs once, which the deal adds to shard 1's schedule.
 # `peak` is a command's largest peak memory over its samples, in MiB, and `runner-memory` the smallest memory of the
@@ -28,6 +30,17 @@
 #: cpu 9 0.80 AMD EPYC 9V74 80-Core Processor
 #: cpu 2 0.81 INTEL(R) XEON(R) PLATINUM 8573C
 #: cpu 1 0.87 Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+#: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 8)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 2 of 8)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 3 of 8)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 4 of 8)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 5 of 8)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 6 of 8)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 7 of 8)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 8 of 8)
+#: derived Test the C lexer as C++
+#: derived Test the C lexer with C11's raw-string prefixes
+#: derived Test the C lexer with the R and LR raw-string prefixes
 #: peak 8 Check unity fixture ownership without rebuilding
 #: peak 154 Test the foreign inputs [8 CPUs]
 #: peak 901 Check the no-recursion rule on the call graph [8 CPUs]
@@ -64,10 +77,14 @@
 #: peak 67 Test the preprocessor's cases against clang (part 3 of 4)
 #: peak 69 Test the preprocessor's cases against clang (part 4 of 4)
 #: peak 242 Test the parser's snippets against clang
-#: peak 201 Test the semantic driver's diagnostics and emission against clang (part 1 of 4)
-#: peak 335 Test the semantic driver's diagnostics and emission against clang (part 2 of 4)
-#: peak 200 Test the semantic driver's diagnostics and emission against clang (part 3 of 4)
-#: peak 244 Test the semantic driver's diagnostics and emission against clang (part 4 of 4)
+#: peak 201 Test the semantic driver's diagnostics and emission against clang (part 1 of 8)
+#: peak 335 Test the semantic driver's diagnostics and emission against clang (part 2 of 8)
+#: peak 200 Test the semantic driver's diagnostics and emission against clang (part 3 of 8)
+#: peak 244 Test the semantic driver's diagnostics and emission against clang (part 4 of 8)
+#: peak 201 Test the semantic driver's diagnostics and emission against clang (part 5 of 8)
+#: peak 335 Test the semantic driver's diagnostics and emission against clang (part 6 of 8)
+#: peak 200 Test the semantic driver's diagnostics and emission against clang (part 7 of 8)
+#: peak 244 Test the semantic driver's diagnostics and emission against clang (part 8 of 8)
 #: peak 44 Check narrow-unsigned sign comparisons and admitted deferred diagnostics [2 CPUs]
 #: peak 241 Test the per-file jobs on the frozen musl units
 #: peak 976 Test the per-file jobs on the repository's translation units
@@ -86,6 +103,8 @@
 #: peak 259 Lower c-testsuite's programs and the frozen SQLite source with node templates as the tasks do
 #: peak 257 Lower every function of c-testsuite's programs and the frozen SQLite and musl sources into the IR
 #: peak 22 Test the C lexer as C++
+#: peak 22 Test the C lexer with C11's raw-string prefixes
+#: peak 22 Test the C lexer with the R and LR raw-string prefixes
 #: peak 4524 Compare main.c's checking and its functions and objects with clang's
 #: peak 488 Check semantic mutants of the frozen SQLite and musl sources against Clang
 #: peak 2208 Compile main.c by -c, its referenced definitions and all of them, by both paths
@@ -205,10 +224,14 @@
 68.4 Test the preprocessor's cases against clang (part 3 of 4)
 40.6 Test the preprocessor's cases against clang (part 4 of 4)
 102.6 Test the parser's snippets against clang
-236.2 Test the semantic driver's diagnostics and emission against clang (part 1 of 4)
-207.2 Test the semantic driver's diagnostics and emission against clang (part 2 of 4)
-189.2 Test the semantic driver's diagnostics and emission against clang (part 3 of 4)
-253.5 Test the semantic driver's diagnostics and emission against clang (part 4 of 4)
+160.1 Test the semantic driver's diagnostics and emission against clang (part 1 of 8)
+89.4 Test the semantic driver's diagnostics and emission against clang (part 2 of 8)
+101.3 Test the semantic driver's diagnostics and emission against clang (part 3 of 8)
+117.9 Test the semantic driver's diagnostics and emission against clang (part 4 of 8)
+76.0 Test the semantic driver's diagnostics and emission against clang (part 5 of 8)
+117.7 Test the semantic driver's diagnostics and emission against clang (part 6 of 8)
+87.8 Test the semantic driver's diagnostics and emission against clang (part 7 of 8)
+135.5 Test the semantic driver's diagnostics and emission against clang (part 8 of 8)
 6.3 Check narrow-unsigned sign comparisons and admitted deferred diagnostics [2 CPUs]
 72.9 Test the per-file jobs on the frozen musl units
 77.8 Test the per-file jobs on the repository's translation units
@@ -226,7 +249,9 @@
 72.9 Test typed postorder checking and source fixtures (part 1 of 8)
 4.8 Lower c-testsuite's programs and the frozen SQLite source with node templates as the tasks do
 33.8 Lower every function of c-testsuite's programs and the frozen SQLite and musl sources into the IR
-39.9 Test the C lexer as C++
+14.6 Test the C lexer as C++
+13.1 Test the C lexer with C11's raw-string prefixes
+12.1 Test the C lexer with the R and LR raw-string prefixes
 50.1 Compare main.c's checking and its functions and objects with clang's
 70.5 Check semantic mutants of the frozen SQLite and musl sources against Clang
 72.5 Compile main.c by -c, its referenced definitions and all of them, by both paths
