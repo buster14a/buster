@@ -9339,16 +9339,17 @@ static const char* check_driver_census_verdict(const CheckProgram* program, cons
     return verdict;
 }
 
-// --selection-census's report (#2536's step 2.1, check_program_census_walk and _scan), on stderr: the bodies, those with a
-// dropped arm, the exact selection's bodies and symbols (its data's too); for each census (the scan's, where it has one), the bodies whose candidates' references aren't their own,
-// those of them without a dropped arm, those whose candidates miss one of their own, its verdict
-// (check_driver_census_verdict) with the extra bodies and symbols, and its TSC ticks; and the references pass's ticks.
+// --selection-census's report (#2536's step 2.1, check_program_census_walk and _scan), on stderr, in two lines. The
+// first: the bodies, those with a dropped arm, the exact selection's bodies and symbols (its data's too); for each census
+// (the scan's, where it has one), the bodies whose candidates' references aren't their own, those of them without a
+// dropped arm, those whose candidates miss one of their own, and its verdict (check_driver_census_verdict) with the extra
+// bodies and symbols. The second, selection-census-ticks: the references pass's TSC ticks and each census's, which differ
+// between any two runs, as --time-stages' report lines do.
 static void check_driver_selection_census(const CheckProgram* program, const CheckDataPrepared* data, const CheckProgramSelection* selected, CLoweringMode mode,
                                           bool scalar, bool keep_sectioned, Arena* output, Arena* scratch)
 {
-    fprintf(stderr, "selection-census\tbodies\t%u\tdropped\t%u\tselected-bodies\t%u\tselected-symbols\t%u\treferences-ticks\t%llu", program->body_count,
-            program->census_dropped_bodies, selected->program.body_count, selected->program.symbol_count + selected->data.count,
-            (unsigned long long)program->census_references_ticks);
+    fprintf(stderr, "selection-census\tbodies\t%u\tdropped\t%u\tselected-bodies\t%u\tselected-symbols\t%u", program->body_count, program->census_dropped_bodies,
+            selected->program.body_count, selected->program.symbol_count + selected->data.count);
     const CheckProgramCensus* censuses[] = { &program->census_walk, &program->census_scan, &program->census_arms };
     const char* names[] = { "walk", "scan", "arms" };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(censuses); c += 1)
@@ -9359,10 +9360,11 @@ static void check_driver_selection_census(const CheckProgram* program, const Che
         const char* verdict = census->first != NULL ? check_driver_census_verdict(program, census, data, selected, mode, scalar, keep_sectioned, &bodies, &objects,
                                                                                   output, scratch) :
                                                       "none";
-        fprintf(stderr, "\t%s\tdiffering\t%u\tunarmed\t%u\tmissing\t%u\tselection\t%s\textra-bodies\t%lld\textra-symbols\t%lld\tticks\t%llu", names[c],
-                census->differing, census->unarmed, census->missing, verdict, (long long)bodies, (long long)objects, (unsigned long long)census->ticks);
+        fprintf(stderr, "\t%s\tdiffering\t%u\tunarmed\t%u\tmissing\t%u\tselection\t%s\textra-bodies\t%lld\textra-symbols\t%lld", names[c], census->differing,
+                census->unarmed, census->missing, verdict, (long long)bodies, (long long)objects);
     }
-    fprintf(stderr, "\n");
+    fprintf(stderr, "\nselection-census-ticks\treferences\t%llu\twalk\t%llu\tscan\t%llu\tarms\t%llu\n", (unsigned long long)program->census_references_ticks,
+            (unsigned long long)program->census_walk.ticks, (unsigned long long)program->census_scan.ticks, (unsigned long long)program->census_arms.ticks);
 }
 
 // The checked program's code and data, as -c writes them: its object at `output_path`, or with `kept` (one of several
