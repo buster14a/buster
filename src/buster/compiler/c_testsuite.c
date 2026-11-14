@@ -394,7 +394,8 @@ static bool c_testsuite_ran(const CTestsuite* suite, const char* program, const 
     return passed;
 }
 
-// Whether the object at `object` defines the functions and objects that clang -O0 -c's object of `source` does; if not,
+// Whether the object at `object` defines the functions and objects that clang -O0 -c's object of `source` does (but for
+// the local functions --tier1's inlining left without code, which `code_report`, the -c compile's log, counts); if not,
 // why, in `detail`: the first difference.
 static bool c_testsuite_symbols(const CTestsuite* suite, const char* source, const char* directory, const char* object, const char* code_report,
                                Tier1CodeSize* code_size, char* detail, uint64_t capacity)
@@ -441,14 +442,28 @@ static bool c_testsuite_symbols(const CTestsuite* suite, const char* source, con
     }
     if (valid)
     {
+        // With --tier1, the functions the inlining left without code (#2541 step 2: the -c compile's report's `dead`)
+        // may be clang's alone: every difference then a local function clang's object has, and no more than those.
+        uint64_t report_length = 0;
+        char* compile_report = suite->tier1 ? c_testsuite_read(code_report, &report_length) : 0;
+        const char* line = compile_report != 0 ? strstr(compile_report, "tier1\tfunctions=") : 0;
+        const char* field = line != 0 ? strstr(line, "\tdead=") : 0;
+        const uint32_t dead = field != 0 ? (uint32_t)strtoul(field + strlen("\tdead="), 0, 10) : 0;
+        free(compile_report);
         char report[192];
-        const uint32_t differences = lowering_symbols_compare(&ours, "-c", &theirs, "clang -O0 -c", NULL, 0, report, sizeof(report));
+        LoweringDifference listed[64];
+        const uint32_t differences = lowering_symbols_compare(&ours, "-c", &theirs, "clang -O0 -c", listed, BUSTER_ARRAY_LENGTH(listed), report, sizeof(report));
+        uint32_t dropped = 0;
+        for (uint32_t k = 0; k < differences && k < BUSTER_ARRAY_LENGTH(listed); k += 1)
+        {
+            dropped += !listed[k].first && listed[k].symbol->type == BUSTER_LINK_SYMBOL_FUNCTION && listed[k].symbol->binding == BUSTER_LINK_SYMBOL_LOCAL;
+        }
         char* line_end = strchr(report, '\n');
         if (line_end != 0)
         {
             *line_end = 0;
         }
-        valid = differences == 0;
+        valid = differences == 0 || (dropped == differences && dropped <= dead);
         if (!valid)
         {
             snprintf(detail, capacity, "cross-check: the object's symbols aren't clang -O0 -c's: %s, %u in all", report, differences);
