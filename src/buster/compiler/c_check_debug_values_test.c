@@ -97,10 +97,21 @@ static const char check_debug_values_fixture[] =
     "    printf(\"VALUES-DYNAMIC %d %d %d %d %d\\n\", n, array[0], array[2], local, aligned);\n"
     "    return 0;\n"
     "}\n"
+    "typedef struct Named { long a[5]; } Named;\n"
+    "Named debug_named(int n)\n"
+    "{\n"
+    "    Named named;\n"
+    "    for (int i=0; i<5; i++) named.a[i]=n+i;\n"
+    "#line 500 \"dbg_values.c\"\n"
+    "    printf(\"VALUES-NAMED %ld %ld\\n\", named.a[0], named.a[4]);\n"
+    "    return named;\n"
+    "}\n"
     "int main(void)\n"
     "{\n"
     "    debug_values(10,2.5,&initialized_global);\n"
     "    debug_dynamic(3);\n"
+    "    Named named=debug_named(5);\n"
+    "    value_sink=(int)named.a[1];\n"
     "    return 0;\n"
     "}\n";
 
@@ -110,6 +121,7 @@ static const char* const check_debug_values_expected[] = {
     "VALUES-INNER 99",
     "VALUES-OUTER 11",
     "VALUES-DYNAMIC 3 3 5 10 37",
+    "VALUES-NAMED 5 9",
 };
 
 static void check_debug_values_test_read(CheckDebugTestTally* tally, const char* program, Arena* arena)
@@ -137,6 +149,7 @@ static void check_debug_values_test_read(CheckDebugTestTally* tally, const char*
         "break dbg_values.c:200",
         "break dbg_values.c:300",
         "break dbg_values.c:400",
+        "break dbg_values.c:500",
         "run",
         "printf \"GDB-VALUES-A %d %.1f %d %d %d %d %d %d %d %d %d %d %d\\n\", number, fraction, *pointer, local, frame, array[2], node.x, node.flag, node.delta, box.integer, mode, *alias, aligned",
         "printf \"GDB-VALUES-G %d %d %d %d\\n\", initialized_global, hidden_global, zero_global, static_local",
@@ -152,6 +165,9 @@ static void check_debug_values_test_read(CheckDebugTestTally* tally, const char*
         "printf \"GDB-VALUES-OUTER %d\\n\", shadow",
         "continue",
         "printf \"GDB-VALUES-DYNAMIC %d %d %d %d %d\\n\", n, array[0], array[2], local, aligned",
+        "continue",
+        // A named return value is built where the hidden pointer points (#1375), which its location follows.
+        "printf \"GDB-VALUES-NAMED %ld %ld\\n\", named.a[0], named.a[4]",
         "continue",
     };
     snprintf(report, sizeof(report), "%s.values-gdb", program);

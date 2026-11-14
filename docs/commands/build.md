@@ -308,8 +308,9 @@ built (`bake-tables`, `baked.c`, #590): the state that `x86_encoder_initialize`,
 `x86_semantics_initialize`, `x86_zen5_initialize`, `tier0_initialize`,
 `unwind_initialize`, `tier1_select_initialize`,
 `check_lower_runtime_names_initialize` (the lowering's runtime functions' names'
-lengths and hashes, #442) and `check_asm_index_initialize` (the asm matcher's
-index of every form, #2532) write is in a section of its own (`buster_baked`:
+lengths and hashes, #442), `check_asm_index_initialize` (the asm matcher's
+index of every form, #2532) and `builtin_intrinsic_table_initialize` (the
+intrinsic catalogue's exact table, #2654) write is in a section of its own (`buster_baked`:
 `BUSTER_BAKED` for state main.c's units share, `BUSTER_BAKED_UNIT` for a
 module's statics, baked in the checker's unit, the C driver's), so a compile
 starts with them built; the file's build ID is recomputed over the baked
@@ -1015,6 +1016,69 @@ as do invalid values of `BUSTER_PGO` and `BUSTER_PGO_TRAIN`; the settings'
 checks make each refusal before any tree is configured, and
 `.github/workflows/build-pgo.yml` runs them on GitHub's runner with a `clang`
 that fails at any compile.
+
+## The start's code order
+
+A small compile's code is spread over the executable: on the 9700X, an empty
+file's `-fsyntax-only` ran 185 functions in 52 of `.text`'s 64 KB windows, the
+stretch the kernel maps at a fault on a file's pages (fault-around), and
+`hello.c`'s `-c` 532 in 106 (#1444). Each window it touches is a fault. So
+where lld links the static executable, the functions that small compiles run
+go first, together, in a section of their own before `.text`
+(`.text.buster_start`), and the C library's ones right after it, first in
+`.text`. The checker's own code stays in its section, `.text.buster_checker`
+(one section of each unit, `main.c`'s pragmas, #502), which holds 18 of the
+empty file's windows and 60 of `hello.c`'s.
+
+- **The list:** `cmake/BusterStartOrder.txt`, the functions in the order the
+  profiled build had them, `UNIT NAME` for a local function of one of
+  `main.c`'s units and `- NAME` for any other: a global one, whose name is the
+  link's alone, or the C library's.
+- **Each unit's copy apart:** every unit compiles a copy of the static helpers
+  it uses, and a symbol ordering file, which names symbols, moves every copy:
+  one built so faulted more (75 times against 69 in `.text`, #1444's opening
+  report). So the units are compiled with `-ffunction-sections`, and the link
+  script (`cmake/BusterStartOrder.cmake` writes `start-order.ld` into the
+  tree at configuration) names each function by its unit's object, the unit's
+  own (`*/UNIT.c.o`) or its parallel parts' join (`*/UNIT/native.o`), and its
+  section (`.text.NAME`, `.text.unlikely.NAME`, `.text.hot.NAME`). The
+  others go by name in a symbol ordering file (`start-order.symbols`), which
+  puts their sections first in `.text`, right after; `start-order` leaves out
+  any whose name a unit's static shares, which the name would move too.
+- **Shifts:** a shifted link's padding (`.text.buster_shift_padding`, above)
+  goes in `.text.buster_start` right before the shift source's first
+  function, so that the shift moves that unit's code there too.
+- **Where:** a static link by lld (`start order: TRUE` in the configure
+  step's status line). Every static build compiles with
+  `-ffunction-sections`, whatever its linker, so that switching
+  `BUSTER_LINKER` relinks alone; a static link by mold or GNU ld lays the
+  sections out without the script. The sanitizers', fuzzing and
+  `BUSTER_HOST_RUNTIME`'s dynamic links compile without it.
+  `-ffunction-sections` alone made `.text` 6 KB longer (0.02%): a jump to
+  another function's section can't take the assembler's short form.
+- **A stale list:** a function that is gone, renamed or no longer an object's
+  matches nothing and stays out; a link whose list matches nothing at all
+  fails (the script's `ASSERT`), which a changed object path would make.
+
+On the 9700X, the empty file's `-fsyntax-only` then took 54 faults in the
+executable's code (44 in `.text`, 10 in `.text.buster_start`) against 67, and
+`hello.c`'s `-c` 90 against 114, with 18% to 33% fewer iTLB misses in the
+small compiles. With the same change's `.bss` advice and token columns, they
+ran 4.1% to 5.8% faster from a cold start, a file-first `-c` 8.7%, while
+`main.c`'s `-fsyntax-only` and `sqlite3.c`'s `-c` stayed within their floors
+([the record](https://github.com/buster14a/buster-performance/tree/0880281cac17cceb9749d19b1554873e51028928/docs/measurements/start-order-1444-2026-11-13)).
+
+Refresh the list when small compiles' code has moved, from a Release build of
+the tree as the benchmark builds are, on the 9700X under its lock: sample each
+control (`perf record -b -e instructions:u -c 4999`, a few hundred processes
+of each of an empty file's `-fsyntax-only` and `-E -P`, `tiny.c`'s `-c` and
+`hello.c`'s `-c`, `perf script -F ip,brstack` of each), take the executable's
+symbols (`readelf -sW`), then write the list with `start-order` below the
+header, which names the revision, the host and the commands:
+
+```sh
+./build/compiler start-order symbols.txt syntax.txt preprocess.txt tiny.txt hello.txt > body.txt
+```
 
 ## Experiments
 

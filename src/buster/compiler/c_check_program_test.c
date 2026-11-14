@@ -2128,11 +2128,15 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                                       "the signed longs' overflow builtins are add, imul and cmp rows with seto, on both paths");
                 }
             }
-            if (strcmp(name, "unsigned-power-two-divmod") == 0)
+            // #1386's power-of-two fixtures divide nowhere: their quotients and remainders are shifts and masks, the
+            // signed one's with DUPs (its bias sequence), and its pointer differences shifts.
+            const bool signed_powers = strcmp(name, "signed-power-two-divmod") == 0;
+            if (signed_powers || strcmp(name, "unsigned-power-two-divmod") == 0)
             {
                 uint32_t divides = 0;
                 uint32_t shifts = 0;
                 uint32_t masks = 0;
+                uint32_t dups = 0;
                 for (uint32_t p = 0; p < 2; p += 1)
                 {
                     for (uint32_t b = 0; b < lower[p].count; b += 1)
@@ -2143,11 +2147,13 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                             divides += function->kinds[e] == BUSTER_TYPED_DIV || function->kinds[e] == BUSTER_TYPED_MOD;
                             shifts += function->kinds[e] == BUSTER_TYPED_SHR;
                             masks += function->kinds[e] == BUSTER_TYPED_AND;
+                            dups += function->kinds[e] == BUSTER_TYPED_DUP;
                         }
                     }
                 }
-                check_test_expect(test, divides == 0 && shifts != 0 && masks != 0,
-                                  "unsigned constant powers of two lower to shifts/masks on both paths without division");
+                check_test_expect(test, divides == 0 && shifts != 0 && masks != 0 && (!signed_powers || dups != 0),
+                                  signed_powers ? "signed constant powers of two and pointer differences lower without division on both paths"
+                                                : "unsigned constant powers of two lower to shifts/masks on both paths without division");
                 CheckProgramLowered templated = { 0 };
                 bool same = check_program_lower_templates(&templated, &program, true, &output, &scratch) && templated.count == lower[0].count &&
                             templated.template_mismatches == 0;
@@ -2379,11 +2385,13 @@ static void check_test_program_initializer_facts(CheckTest* test)
 }
 
 static void check_test_program_clears(CheckTest* test, const char* clang);
+static void check_test_program_named_results(CheckTest* test, const char* clang);
 
 static void check_test_program_initializers(CheckTest* test, const char* clang)
 {
     check_test_program_initializer_facts(test);
     check_test_program_clears(test, clang);
+    check_test_program_named_results(test, clang);
     check_test_program_source(test,
         "struct P{int x,y,z;};int tested(int n){int calls=0;"
         "struct P p={x:++calls,.x=n,y:5,6};"
@@ -3065,10 +3073,12 @@ static void check_test_program_sparse_switches(CheckTest* test)
 #include "c_check_program_asm_test.c"
 #include "c_check_program_copy_test.c"
 #include "c_check_program_clear_test.c"
+#include "c_check_program_named_result_test.c"
 #include "c_check_program_folds_test.c"
 #include "c_check_program_fence_test.c"
 #include "c_check_program_atomic_access_test.c"
 #include "c_check_program_atomic_rmw_test.c"
+#include "c_check_program_bit_unit_test.c"
 #include "c_check_program_vector_test.c"
 #include "c_check_program_x86_test.c"
 #include "c_check_program_x86_rest_test.c"
@@ -4373,6 +4383,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "int tested(int n){struct P6 a={1,2};struct P7 b={3,-4};struct P3 c[2]={{5,-6},{7,8}};a.x=(unsigned long long)n*0x123456789ULL;"
             "b.y=(long long)n*-0x1234567891LL;c[1].z=n*-30001;a.x+=7;b.y--;int t=(int)(c[1].z++);c[0].z^=n;"
             "return (int)(a.x%1013)+(int)(b.y%1019)+c[1].z+c[0].z*3+a.k+b.k*5+c[0].k+c[1].k*7+t*11;}", "bit-field-packed-spans", clang);
+        check_test_program_bit_units(test, clang);
         check_test_program_source(test,
             "int tested(int n){unsigned x=(unsigned)n|1;return __builtin_popcount(x)+__builtin_clz(x)+__builtin_ctz(x)+"
             "__builtin_parity(x)+__builtin_ffs((int)x)+(int)(__builtin_bswap16((unsigned short)x)%101);}", "integer-builtin-runtime", clang);

@@ -370,6 +370,20 @@ build/costs --self-test --root .
   scaled to the slowest CPU as samples are. Only jobs whose commands all passed
   count (a failure skips the later steps), and not the vector row's draws, which
   also wait for their collector; without both kinds of job the line is left out.
+- **Peak memory (#2031).** `#: peak MIB TITLE` is a command's largest peak
+  memory over the row's samples, failed ones included (a command that ran out of
+  memory peaked where it failed), from the runner's `, N MiB peak`. `#:
+  runner-memory MIB` is the smallest MemTotal any log's runner reported (the
+  sanitizer rows' host report, `memory: N kB`); every hosted row draws the same
+  runners, so each table takes it. `parallel` holds the commands running at once
+  to 90% of the runner's memory by their peaks, and the deal simulates the same
+  ([parallel](parallel.md#the-parallel-runner)). The first peaks came from three
+  queue candidates after #2651 (43481775079, 43486864508, 43487074169), 159 logs
+  over every row. The largest were 7,813 MiB (Tier 0's inlining test under TSan
+  and in the vector draws) and 4.5–5.1 GiB (`main.c`'s comparison with clang, the
+  parser and the per-file jobs on the repository's units). The runners had
+  15,982 MiB. Without the bound, one vector draw's four largest commands would
+  have needed 15,922 MiB at once.
 - **Provenance.** The `#:` lines record the row, the runner's CPUs, the
   revisions measured and the CPUs drawn, each with its jobs.
 - **Collect.** After a full run (the nightly snapshot's, or a dispatched
@@ -386,6 +400,13 @@ build/costs --self-test --root .
   without the line, from its caller's one configuration), and its shard from its
   report, which must be the item's; a candidate that took no item has no
   report, and `costs.sh` skips it.
+- **Peaks.** `bash tools/ci/costs.sh --peaks LOGS_DIRECTORY RUN...` fetches the
+  runs' logs as a collect does and runs `costs peaks --tests
+  tools/ci/correctness.tests --costs tools/ci/costs LOG...`. It writes each row's
+  peaks and the runners' memory into the existing tables and keeps their costs,
+  for logs from runs since #2651, whose headings carry `MiB peak`. A command the
+  logs don't sample keeps its peak. A later collect over such logs writes the
+  peaks itself.
 - **Seed.** A row without logs yet takes another row's measurements: `build/costs
   seed --tests tools/ci/correctness.tests --costs tools/ci/costs --row
   vector-address-O3 --from native-address-O3`. Its `#: seeded ROW` line, first

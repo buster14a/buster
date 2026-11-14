@@ -1127,6 +1127,16 @@ alone at 287.2 MB against main's 293.7 MB, with 396 more faults. Its observed
 medians were 138.7 against 139.9 ms, from three unpaired runs each, which
 establish no difference in time.
 
+The file cache's token columns took a huge page each for far less (#1444): the
+four-byte ones, the starts' and the values', of a unit that includes
+`stdio.h` (18,000 tokens) filled 72 KB, 8 KB past their 64 KB of base pages, so
+each cleared 2 MB for two pages, two of the six huge pages of a hello world's
+`-c` on the 9700X. They now start with 256 KB of base pages
+(`BUSTER_FILE_CACHE_COLUMN_SMALL_BYTES`, 64K tokens, about 64 faults, less
+than a huge page costs to clear), and `sqlite3.c`'s 1.3 million tokens take
+48 more faults a column; a group of more than four lanes keeps
+`BUSTER_FILES_COLUMN_SMALL_BYTES` past lane 0.
+
 ### Partly used huge pages, and three changes not taken (#628)
 
 A map of each push's resident pages at the three peaks of `-c sqlite3.c`, with
@@ -2046,10 +2056,31 @@ keeps the scripts, the receipts and the profiles.
   pages, so every process took the huge-page advice and a split mapping, +0.6% for a single-file process. It now
   starts at 8 KB and doubles.
 
-**What's left.** A unit whose names the table has never seen still pays for looking each of them up. `-c sqlite3.c`
-has 10.8 K: the filter's key loads from the spellings, and the false positives' binary searches. The set-up takes
-384 samples of 20 compiles against main's 399, which is about 3.8 M cycles a compile, the same as before. A sharper
-filter or an exact table is the next step there.
+**A cold unit (#2654).** A unit whose names the table had never seen still paid for looking each of them up:
+`-c sqlite3.c` has 10.8 K, each through the filter's key loads and, for a candidate, a binary search of about twelve
+libc `memcmp` calls. Its set-up took 384 samples of 20 compiles against main's 399, about 3.8 M cycles a compile.
+
+- **The fill.** Before the operand pass, the set-up gives every id the table has not yet looked up its code, in id
+  order: 16 ids at once on the vector path, with the scalar test as its twin.
+- **The exact table.** The fill's candidates go to an exact table of the catalogue, baked into the executable, with
+  one compare where the binary search made twelve.
+- **The operand pass.** It then meets only known codes, and reads each operand's code by a scalar loop. 16-lane
+  gathers ran mostly empty, since operands are about a fifth of the tokens: they took 252 and 159 samples where the
+  loop takes 216 and 105.
+
+Measured on the 9700X, main `447192ef` against `3a1001e0`, each build from fresh copies ([the
+record](https://github.com/buster14a/buster-performance/tree/6916592a6af93c3d43de22a9fd449fb360cfc1cd/docs/measurements/intrinsic-fill-2654-2026-11-13)):
+
+| workload | wall time | user cycles | the set-up's samples |
+| --- | ---: | ---: | ---: |
+| `-c sqlite3.c` | 124.00 → 123.48 ms, −0.42% (−0.52% to −0.21% over copies) | −0.24% | 384 → 207 (−46%) |
+| musl's 1,336 units, one command | 726.66 → 723.98 ms, −0.37% (−0.46% to −0.21%) | −0.38% | 148 → 115 (−22%) |
+| c-testsuite's 220 units, one command | 58.38 → 58.31 ms, −0.11% (−0.41% to +0.30%) | −0.01% | |
+| three c-testsuite units, one process each | within the copies' spread | | |
+
+The objects and diagnostics are the same bytes as main's, on the vector path and with `--scalar`. What the set-up
+still costs is mostly its walk over the unit's token columns, which this pass reads apart from the counts' walk over
+the same columns.
 
 ## What remains of check-input (#1671)
 
@@ -2361,6 +2392,56 @@ rather than 1,192 ms.
 About 5.5 ms of the growth remains in the reader. The largest parts are the expressions' coded walk (#1038), the
 binding answers' other per-event loops, the declarations' steps, the intrinsics' setup (#893) and the controls.
 
+### What grew back by 13 November, and a rare column read in place (#1489)
+
+#529's, #1489's and #1671's changes took `check-input` below the build before #1049. By 13 November it had grown
+again. Measured in the same rounds on the 9700X (5 rounds, CPU 2, one lock grant a compile):
+
+| build | `check-input` |
+| --- | ---: |
+| `aca9e53a`, before #1049 | 45.16 ms |
+| `829eb71a`, after #1671's cuts (7 November) | 43.64 ms |
+| main `b7a95eed` (13 November) | 46.17 ms |
+
+The issue's own figure for `0eca996a` stands: its build measured 59.39 ms in a separate set of rounds that day.
+
+**Where it grew.** Builds of four of the 649 first-parent commits between the two mains measure 43.58 ms at
+`829eb71a`, 44.42 ms 81 commits on, 44.81 ms 243 commits on, and 46.24 ms at `b7a95eed`. Profiles of `cycles:u` and
+`instructions:u`, mapped to inlined frames, find most of it in the declaration steps' own code:
+
+- `check_input_declarator_step` has 6 M more instructions, `check_input_declaration` 4.3 M and `check_input_specifiers`
+  3 M, out of 1,351 M for the whole compile.
+- The binding answers have 5.4 M more, 2.1 M of them `-Wunused-but-set-variable`'s marks (#2409).
+
+These are the tests and record fields of the new diagnostics' and recoveries' paths (#1447). They are spread over the
+steps, so no one of them is worth more than about 0.3 ms. #2694 tracks them, beside #1671's restructuring.
+
+**The rare column.** The first 81 commits also took the stage from 4,171 page faults to 4,850. A profile of
+`page-faults` put 679 of them in `check_input_bind_checked`. #1453's `__private_extern__` test read
+`declaration_storage` with a plain load at every declaration. That column is a rare one, 4 bytes a token, and the loads
+touched nearly all its base pages, though few entries are written. The test now reads through `BUSTER_CHECK_RARE`, as
+the column's other readers do ("The rare columns read only where written", above). Against main `32560e46`, in 9
+rounds and 5 of `perf stat`:
+
+| | main | this change |
+| --- | ---: | ---: |
+| `check-input` | 46.03 ms | 45.72 ms |
+| its page faults | 4,900 | 4,364 |
+| task-clock | 122.72 ms | 122.57 ms |
+| instructions:u | 1,354.95 M | 1,355.29 M |
+
+The objects and the diagnostics are the same bytes. So are the `-Wall -Wextra` diagnostics of `sqlite3.c` and of the
+compiler's own main.c, on both paths, with this change and the two below. The faults map the zero page, so they cost
+little time, and the mask adds 0.34 M instructions. Two other changes were measured and left out, since neither was
+faster in time or cycles:
+- The set-only marks kept only for local declarations added 0.04 M instructions: the sparse lookup that skips the
+  others costs what it saves.
+- The unused declarations' four token columns kept as one of flag bits took 0.16 M instructions off, but its rounds'
+  cycles came out 0.45% above main's.
+
+The [measurement record](https://github.com/buster14a/buster-performance/tree/ecbcca3dcf12818d5b7319aec7faefdc376b258c/docs/measurements/check-input-1489-regrowth-2026-11-13)
+has the method, the receipts and the profiles.
+
 ## The compiler's own code and a profile (#880)
 
 [#880](https://github.com/buster14a/buster/issues/880) found the 9700X's front end starved: op cache misses 2 to 2.6
@@ -2661,6 +2742,17 @@ The LBR's totals by function move with a build's layout. `check_graph_run`'s mis
 with the blocks and 590 without them, where its code is main's. So the site counts above, not the functions' totals,
 show what each form removed.
 
+**What the leaves cost.** That bounds what a batch can save. Main's cycle samples were 24,314 of them over 8 compiles,
+the LBR run's own, each attributed to its whole inlined chain by `llvm-symbolizer`.
+- `check_graph_run` takes 4.75% of the compile's user cycles.
+- Its leaves, `check_graph_leaf` and the stores it inlines, take 0.30%, and the leaf test 0.12%.
+- The other nodes' actions take 3.98%.
+
+So a batch that also wrote the leaves 16 at a time could save at most those 0.42%. It would read the leaves' records,
+32 bytes each, and take each field out of them by permutes. It would then store the fields into the stream's columns
+masked, and scatter the types into the strided conversions. That costs about as many cycles as the scalar stores, so
+the saving would be a fraction of the 0.42%, within the placements' spread above. The leaves stay one at a time.
+
 **Not taken:**
 - **`check_common_evaluated_tree`'s roots** (0.75% of the entries). `sqlite3.c` has dropped ranges, so each root
   still tests its token. A form that tests every node's token is no cheaper than the misses it saves.
@@ -2670,6 +2762,30 @@ show what each form removed.
   costs more than the misses it saves.
 - **The flush's chain of purities** (`check_input_batch_record`, 1.5%). It is serial through the purity mask, and a
   fixed 16-lane loop is no faster.
+- **`check_common_own_reach`'s dispatch on the operator** (`check_common_candidate_bits`, 1.8%).
+  - The reach scan's candidates could be taken a group of operators at a time, so that the test's outcome repeats.
+    A reach's bits are a union up the parents, so the groups' order changes nothing.
+  - The function takes 1.34% of the cycles, and the test's misses about a twentieth of that, some 0.4 M cycles a
+    compile.
+  - Sorting the candidates into groups costs about as much: a pass of operator compares, compress stores and counts
+    per 16 nodes.
+
+**The reach and root scans (round 2).** At main `447192ef`, after #2655, the warnings' two other refill scans were
+the next sites with a branch-free form:
+- `check_common_next_reach_op`, 0.69% of the LBR's mispredicted entries;
+- `check_common_next_root`, 0.51%.
+
+They now list 64 items or more per refill too. One reads the operators, the other the parents once
+`check_common_parents` has written them, and no pass writes either while the scan runs. The comparisons that the reach
+scan lists ahead change no reach, a union up the parents.
+- **Objects:** the same bytes in every mode above.
+- **Mispredicted branches:** 3.413 M → 3.362 M (−1.5%), and the taken ones −1.8%. Instructions +0.06%.
+- **The sites:** the roots' leave the list. The reach scan's 108 entries fall to 39: its refill loop's own end, missed
+  once per 64 items or more instead of once per group of 16 nodes.
+- **Over placements**, in the same three-round method: user cycles −0.07%, −0.18% and −0.31% against main, with main
+  against itself at +0.17%, −0.03% and −0.05%. Each round's range over the placements reaches just past 0 (+0.10%,
+  +0.04% and +0.01%). So the change is no slower and is lower in every round, but within the floor by
+  `docs/profiling.md`'s rule.
 
 **A trap in the method.** An executable run many times from the same file had its text collapsed into file huge pages
 (`peak-rss-start-kb` 5,636 against 1,908). That took about 3 ms of user time and added as much system time, which
@@ -2678,7 +2794,9 @@ skewed the first comparisons by stage. Every figure above comes from fresh copie
 The record ([buster-performance#494](https://github.com/buster14a/buster-performance/pull/494),
 [`branch-free-sites-892-2026-11-13`](https://github.com/buster14a/buster-performance/tree/b9f27bd6f79544a96c4225a6a36be84b86130dfa/docs/measurements/branch-free-sites-892-2026-11-13))
 has the scripts, every run's counters, site lists and object hashes, the placements' and the stages' runs, and the
-receipts.
+receipts. Round 2's record, with item 6's cycle samples, is
+[buster-performance#507](https://github.com/buster14a/buster-performance/pull/507)
+([`branch-free-scans-892-2026-11-13`](https://github.com/buster14a/buster-performance/tree/b1c16a14ae986d7e448978ab12be216fc3bf4ca6/docs/measurements/branch-free-scans-892-2026-11-13)).
 
 ## Linking is not in the 194.8 ms
 

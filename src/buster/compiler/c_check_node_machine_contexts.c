@@ -140,15 +140,17 @@ static CheckLowerTemplate node_machine_logical(NodeMachine* machine, uint32_t r,
     return kind;
 }
 
-// Whether the unsigned division or remainder at record `r` (or its update's) is by a constant power of two, which the
-// tasks write as a shift or a mask (check_lower_unsigned_power), into `right` its count or its mask: the templates leave
-// such a node to the tasks, and an update writes it as they do.
-static bool node_machine_unsigned_power(const NodeMachine* machine, uint32_t r, uint8_t class, uint8_t binary, uint64_t* right)
+// How the tasks write the division or remainder at record `r` (or its update's) in `class` (check_lower_power's answer,
+// BUSTER_CHECK_LOWER_POWER_*), read from the records: by a constant power of two, a shift or a mask, its count or mask
+// into `right`, or a signed one's bias sequence, its k into `right`. The templates leave such a node to the tasks; an
+// update writes a shift or a mask as they do, and leaves a signed one's sequence to them.
+static uint8_t node_machine_power(const NodeMachine* machine, uint32_t r, uint8_t class, uint8_t binary, uint64_t* right)
 {
-    bool replace = false;
+    uint8_t answer = BUSTER_CHECK_LOWER_POWER_NONE;
     const uint32_t b = node_machine_record_right(machine, r);
     const TypeId converted = node_machine_record_converted(machine, r, 1);
-    if ((binary == BUSTER_TYPED_DIV || binary == BUSTER_TYPED_MOD) && (class == BUSTER_TYPED_CLASS_U32 || class == BUSTER_TYPED_CLASS_U64) && b < r &&
+    *right = 0;
+    if ((binary == BUSTER_TYPED_DIV || binary == BUSTER_TYPED_MOD) && class >= BUSTER_TYPED_CLASS_I32 && class <= BUSTER_TYPED_CLASS_U64 && b < r &&
         (node_machine_facts(machine, converted) & BUSTER_CHECK_LOWER_TYPE_BIT_INT) == 0)
     {
         const TypeId type = node_machine_record_type(machine, b);
@@ -156,22 +158,14 @@ static bool node_machine_unsigned_power(const NodeMachine* machine, uint32_t r, 
         const uint8_t source_class = node_machine_class(machine, type);
         const bool plain_integer = source_class >= BUSTER_TYPED_CLASS_I8 && source_class <= BUSTER_TYPED_CLASS_U64 &&
                                    (node_machine_facts(machine, type) & BUSTER_CHECK_LOWER_TYPE_BIT_INT) == 0;
-        uint64_t bits = node_machine_record_integer(machine, b);
-        if (plain_integer && source_class <= BUSTER_TYPED_CLASS_U32)
-        {
-            const uint32_t width = 8u << ((source_class - 1) / 2);
-            const uint64_t mask = (UINT64_C(1) << width) - 1;
-            bits &= mask;
-            bits |= (source_class & 1) != 0 && (bits >> (width - 1)) != 0 ? ~mask : 0;
-        }
-        const uint64_t divisor = class == BUSTER_TYPED_CLASS_U32 ? (uint32_t)bits : bits;
-        replace = plain_integer && node_machine_record_constant_kind(machine, b) == CHECK_CONSTANT_INTEGER && node_machine_record_fault(machine, b) == CHECK_FAULT_NONE &&
-                  node_machine_record_category(machine, b) == CHECK_RVALUE && !node_machine_record_overloaded(machine, b) &&
-                  (node_machine_record_flags(machine, b) & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 && op != CHECK_OP_STATEMENT_VALUE &&
-                  op != CHECK_OP_INITIALIZE && op != CHECK_OP_BUILTIN_QUERY && divisor != 0 && (divisor & (divisor - 1)) == 0;
-        *right = replace ? (binary == BUSTER_TYPED_DIV ? (uint64_t)__builtin_ctzll(divisor) : divisor - 1) : 0;
+        const bool proven = plain_integer && node_machine_record_constant_kind(machine, b) == CHECK_CONSTANT_INTEGER && node_machine_record_fault(machine, b) == CHECK_FAULT_NONE &&
+                            node_machine_record_category(machine, b) == CHECK_RVALUE && !node_machine_record_overloaded(machine, b) &&
+                            (node_machine_record_flags(machine, b) & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 && op != CHECK_OP_STATEMENT_VALUE &&
+                            op != CHECK_OP_INITIALIZE && op != CHECK_OP_BUILTIN_QUERY;
+        uint8_t kind = binary;
+        answer = proven ? check_lower_power_divisor(source_class, node_machine_record_integer(machine, b), class, &kind, right) : BUSTER_CHECK_LOWER_POWER_NONE;
     }
-    return replace;
+    return answer;
 }
 
 static bool node_machine_scalar_class(uint8_t class)
@@ -223,7 +217,11 @@ static __attribute__((noinline)) bool node_machine_update_plan(const NodeMachine
     const uint8_t computing = check_lower_computed(calculated_class);
     uint8_t kind = increment ? (subtract ? BUSTER_TYPED_SUB : BUSTER_TYPED_ADD) : check_lower_binary(op);
     uint64_t constant = 0;
-    const bool power = takes && !increment && !pointer && node_machine_unsigned_power(machine, r, computing, kind, &constant);
+    const uint8_t answer = takes && !increment && !pointer ? node_machine_power(machine, r, computing, kind, &constant) : BUSTER_CHECK_LOWER_POWER_NONE;
+    // A signed power of two's sequence (check_lower_signed_power_entries) is past an update's row
+    // (BUSTER_NODE_MACHINE_ROW_MOST): the machine leaves the update to the tasks.
+    takes = takes && answer != BUSTER_CHECK_LOWER_POWER_SIGNED;
+    const bool power = answer == BUSTER_CHECK_LOWER_POWER_MASK;
     kind = power ? (kind == BUSTER_TYPED_DIV ? BUSTER_TYPED_SHR : BUSTER_TYPED_AND) : kind;
     constant = !increment                                    ? constant :
                calculated_class == BUSTER_TYPED_CLASS_F32 ? UINT32_C(0x3f800000) :
@@ -410,7 +408,7 @@ static CheckLowerTemplate node_machine_classify(NodeMachine* machine, uint32_t r
         const uint8_t class_a = node_machine_class(machine, type_a);
         const uint8_t class_b = node_machine_class(machine, type_b);
         uint64_t power_right = 0;
-        const bool power = node_machine_unsigned_power(machine, r, class, check_lower_binary(op), &power_right);
+        const bool power = node_machine_power(machine, r, class, check_lower_binary(op), &power_right) != BUSTER_CHECK_LOWER_POWER_NONE;
         if (class_a >= BUSTER_TYPED_CLASS_I8 && class_a <= BUSTER_TYPED_CLASS_F64 && class_b >= BUSTER_TYPED_CLASS_I8 && class_b <= BUSTER_TYPED_CLASS_F64 &&
             !node_machine_aggregate(machine, type_a) && !power)
         {
@@ -511,7 +509,7 @@ static CheckLowerTemplate node_machine_classify_call(NodeMachine* machine, uint3
 // an expression with labels runs it, and it reads the labeled records alone (C listed them in `stack`, their subtrees'
 // first records after them): a walk of every record cost C 125 cycles a new taken node on sqlite3.c on the 9700X, three
 // times its average, by its branches. Scalar: an expression has a few, and their order is the tree's.
-static void node_machine_number_labels(NodeMachine* machine)
+static __attribute__((noinline)) void node_machine_number_labels(NodeMachine* machine)
 {
     const uint32_t labeled = machine->label_count / 2;
     uint32_t* records = machine->stack;
@@ -562,7 +560,7 @@ static NodeMachineRefusal node_machine_contexts(NodeMachine* machine, uint8_t co
             machine->stopped = r;
         }
     }
-    if (refusal == NODE_MACHINE_TAKEN && machine->label_count != 0)
+    if (__builtin_expect(refusal == NODE_MACHINE_TAKEN && machine->label_count != 0, 0))
     {
         node_machine_number_labels(machine);
     }
