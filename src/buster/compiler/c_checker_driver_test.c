@@ -328,10 +328,11 @@ static int check_test_driver_clang_request(char* const* arguments, char** text, 
 }
 
 // Whether a line (of `length` bytes) is one of --time-stages' report lines (c_check_clock.c, and run_check_command_mode's
-// worker budget), whose times, faults, sizes and lanes that worked differ between any two runs, as two children's do.
+// worker budget) or --selection-census' ticks, whose times, faults, sizes and lanes that worked differ between any two
+// runs, as two children's do.
 static bool check_test_driver_timing_line(const char* line, size_t length)
 {
-    static const char* const markers[] = { "time-stage\t", "time-check\t", "time-process\t", "time-write\t" };
+    static const char* const markers[] = { "time-stage\t", "time-check\t", "time-process\t", "time-write\t", "selection-census-ticks\t" };
     static const char budget[] = "worker-budget\t";
     bool timing = length >= sizeof(budget) - 1 && memcmp(line, budget, sizeof(budget) - 1) == 0;
     for (uint32_t i = 0; !timing && i < BUSTER_ARRAY_LENGTH(markers); i += 1)
@@ -436,7 +437,7 @@ static void check_test_driver_compare_runs(char* const* arguments, int status, c
     bool reports = false;
     for (uint32_t i = 1; !reports && arguments[i] != NULL; i += 1)
     {
-        reports = strcmp(arguments[i], "--time-stages") == 0 || strcmp(arguments[i], "--lane-cpus") == 0;
+        reports = strcmp(arguments[i], "--time-stages") == 0 || strcmp(arguments[i], "--lane-cpus") == 0 || strcmp(arguments[i], "--selection-census") == 0;
     }
     const bool same_text = text != NULL && other_text != NULL &&
                            (strcmp(text, other_text) == 0 || (reports && check_test_driver_same_lines(text, other_text)));
@@ -951,6 +952,102 @@ static void check_test_driver_static_label(CheckTest* test, const char* executab
     }
     unlink(source);
     unlink(object);
+}
+
+// --selection-census (#2536's step 2.1): on a unit whose exact selection leaves out a function only a constant if's dead arm
+// calls (`arm`) and one only an association _Generic doesn't select names (`association`), and leaves out of its symbols
+// a string literal only sizeof reads and memcpy, a call of which the code computes, the report's three censuses, by both
+// paths: each a superset (no body misses a reference); the walk's selection keeps both functions, the scan's both and
+// the two symbols, the pruned scan's the association alone; then the ticks' line. A unit of overloads has no scan, and one
+// of one function the same references everywhere. Each object is the one without the option.
+static void check_test_driver_selection_census(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "static int arm(void) { return 1; }\n"
+                                  "static int association(void) { return 2; }\n"
+                                  "static int operand(void) { return 3; }\n"
+                                  "static void release(int* p) { (void)p; }\n"
+                                  "static char buffer[8];\n"
+                                  "int main(int argc, char** argv)\n"
+                                  "{\n"
+                                  "    int r = 0;\n"
+                                  "    if (0)\n"
+                                  "    {\n"
+                                  "        r = arm();\n"
+                                  "    }\n"
+                                  "    r += _Generic(r, long: association, default: operand)() == 3;\n"
+                                  "    r += 1 ? 0 : operand();\n"
+                                  "    r += (int)sizeof \"literal\";\n"
+                                  "    __builtin_memcpy(buffer, argv[0], 4);\n"
+                                  "    {\n"
+                                  "        __attribute__((cleanup(release))) int held = argc;\n"
+                                  "        r += held;\n"
+                                  "    }\n"
+                                  "    return r;\n"
+                                  "}\n";
+    static const char overloads[] = "static int __attribute__((overloadable)) pick(int x) { return x; }\n"
+                                    "static int __attribute__((overloadable)) pick(double x) { return (int)x; }\n"
+                                    "int main(void) { return pick(1); }\n";
+    static const char plain[] = "int main(void) { return 0; }\n";
+    static const char* const sources[] = { program, overloads, plain };
+    static const char* const expected[][5] = {
+        {
+            "selection-census\tbodies\t5\tdropped\t1\tselected-bodies\t3\t",
+            "\twalk\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t2\textra-symbols\t2\t",
+            "\tscan\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t2\textra-symbols\t4\t",
+            "\tarms\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t1\textra-symbols\t1\n",
+            "\nselection-census-ticks\treferences\t",
+        },
+        {
+            "selection-census\tbodies\t3\tdropped\t0\tselected-bodies\t2\t",
+            "\twalk\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\t",
+            "\tscan\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tnone\t",
+            "\tarms\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tnone\textra-bodies\t0\textra-symbols\t0\n",
+            "\nselection-census-ticks\treferences\t",
+        },
+        {
+            "selection-census\tbodies\t1\tdropped\t0\tselected-bodies\t1\t",
+            "\twalk\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\t",
+            "\tscan\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\t",
+            "\tarms\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\textra-bodies\t0\textra-symbols\t0\n",
+            "\nselection-census-ticks\treferences\t",
+        },
+    };
+    static const char* const names[] = { "dead calls", "overloads", "one function" };
+    char source[256];
+    char object[256];
+    char reference[256];
+    snprintf(source, sizeof(source), "%s/selection_census.c", directory);
+    snprintf(object, sizeof(object), "%s/selection_census.o", directory);
+    snprintf(reference, sizeof(reference), "%s/selection_census_reference.o", directory);
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+    {
+        const bool written = parse_test_write(source, sources[s], strlen(sources[s]));
+        check_test_expect(test, written, "the selection census's fixture is written");
+        for (uint32_t path = 0; written && path < 2; path += 1)
+        {
+            char* const census_vector[] = { (char*)executable, "--selection-census", "-w", "-c", "-o", object, source, NULL };
+            char* const census_scalar[] = { (char*)executable, "--selection-census", "--scalar", "-w", "-c", "-o", object, source, NULL };
+            char* const plain_vector[] = { (char*)executable, "-w", "-c", "-o", reference, source, NULL };
+            char* const plain_scalar[] = { (char*)executable, "--scalar", "-w", "-c", "-o", reference, source, NULL };
+            char* text = NULL;
+            const int status = check_test_driver_spawn(path == 0 ? census_vector : census_scalar, &text);
+            bool reported = status == 0 && text != NULL;
+            for (uint32_t e = 0; reported && e < BUSTER_ARRAY_LENGTH(expected[s]); e += 1)
+            {
+                reported = strstr(text, expected[s][e]) != NULL;
+            }
+            free(text);
+            text = NULL;
+            const int plain_status = check_test_driver_spawn(path == 0 ? plain_vector : plain_scalar, &text);
+            free(text);
+            char description[160];
+            snprintf(description, sizeof(description), "--selection-census on %s%s: its censuses, and the object without it", names[s], path == 0 ? "" : ", scalar");
+            check_test_expect(test, reported && plain_status == 0 && check_test_driver_same_files(object, reference), description);
+        }
+    }
+    unlink(source);
+    unlink(object);
+    unlink(reference);
 }
 
 // Builtins clang's Sema takes and its code generation refuses for x86 (#148), which -c refuses by name on both paths:
@@ -10164,6 +10261,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                 check_test_driver_asm_symbols(&test, executable, directory);
                 check_test_driver_setjmp_held(&test, executable, directory);
                 check_test_driver_static_label(&test, executable, directory);
+                check_test_driver_selection_census(&test, executable, directory);
                 check_test_driver_codegen_refusals(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())

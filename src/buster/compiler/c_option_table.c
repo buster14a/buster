@@ -63,6 +63,7 @@
     ENTRY(POISON_ARENAS, "--poison-arenas") \
     ENTRY(PREDEFINES, "--predefines") \
     ENTRY(SCALAR, "--scalar") \
+    ENTRY(SELECTION_CENSUS, "--selection-census") \
     ENTRY(SHARED_PARTS, "--shared-parts") \
     ENTRY(TARGET_EQ, "--target=") \
     ENTRY(TIER0_NO_INLINE, "--tier0-no-inline") \
