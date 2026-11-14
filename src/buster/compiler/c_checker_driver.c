@@ -6528,7 +6528,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 spell.lengths[s] = intern_length(pp->table, s);
                             }
                             const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
-                            const String8 declared = check_semantic_auto_type_spelling(types, report->type, scratch);
+                            const String8 declared = check_semantic_auto_type_spelling(parser, pp, input, types, &spell, report->type, token, scratch);
                             const String8 initializer = spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, (TypeId)report->value, report->type_spelling) : (String8){ 0 };
                             const uint32_t name = parser->tokens.names[token];
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
