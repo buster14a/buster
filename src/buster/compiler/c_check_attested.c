@@ -2900,46 +2900,60 @@ static void* check_attested_view_column(Arena* arena, const void* column, uint32
     return bytes != NULL ? bytes + padding : NULL;
 }
 
-// `length` parents from `from` to `to`, each but a root's (BUSTER_PARSE_ROOT) less `shift`: 16 at a time, the last
-// masked; the scalar path's a token at a time is its twin.
-static void check_attested_view_parents(uint32_t* to, const uint32_t* from, uint32_t length, uint32_t shift, bool scalar)
+// A run of `length` read tokens of the parse, from its token `from`, into the view at `at`: every column, a read token's
+// parent (but a root's, BUSTER_PARSE_ROOT) less the skipped tokens before the run, its origin (its index in the parse),
+// and its system level where the passes mapped them (`levels`, or null). The vector path 16 tokens at a time, each
+// column a masked load and store, so that a short run costs no call; the scalar path's a token at a time is its twin.
+static void check_attested_view_run(Parser* view, const Parser* parser, uint8_t* view_levels, const uint8_t* levels, uint32_t* origins, uint32_t from,
+                                    uint32_t at, uint32_t length, bool scalar)
 {
-    uint32_t k = 0;
+    const uint32_t shift = from - at;
     const __m512i root = _mm512_set1_epi32((int32_t)BUSTER_PARSE_ROOT);
     const __m512i down = _mm512_set1_epi32((int32_t)shift);
-    for (; !BUSTER_SCALAR_PATH(scalar) && k < length; k += 16)
-    {
-        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffffu, length - k < 16 ? length - k : 16);
-        const __m512i parent = _mm512_maskz_loadu_epi32(lanes, from + k);
-        const __mmask16 inner = _mm512_mask_cmpneq_epi32_mask(lanes, parent, root);
-        _mm512_mask_storeu_epi32(to + k, lanes, _mm512_mask_sub_epi32(parent, inner, parent, down));
-    }
-    for (; k < length; k += 1)
-    {
-        to[k] = from[k] != BUSTER_PARSE_ROOT ? from[k] - shift : BUSTER_PARSE_ROOT;
-    }
-}
-
-// `length` tokens' origins into `to`: `from`, then each the last's plus one (Parser.origins), 16 at a time, the last
-// masked; the scalar path's a token at a time is its twin.
-static void check_attested_view_origins(uint32_t* to, uint32_t from, uint32_t length, bool scalar)
-{
-    uint32_t k = 0;
     const __m512i lane = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    uint32_t k = 0;
     for (; !BUSTER_SCALAR_PATH(scalar) && k < length; k += 16)
     {
         const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffffu, length - k < 16 ? length - k : 16);
-        _mm512_mask_storeu_epi32(to + k, lanes, _mm512_add_epi32(_mm512_set1_epi32((int32_t)(from + k)), lane));
+        const uint32_t t = from + k;
+        const uint32_t v = at + k;
+        _mm_mask_storeu_epi8(view->tokens.kinds + v, lanes, _mm_maskz_loadu_epi8(lanes, parser->tokens.kinds + t));
+        _mm_mask_storeu_epi8(view->tokens.flags + v, lanes, _mm_maskz_loadu_epi8(lanes, parser->tokens.flags + t));
+        _mm_mask_storeu_epi8(view->tree.roles + v, lanes, _mm_maskz_loadu_epi8(lanes, parser->tree.roles + t));
+        _mm512_mask_storeu_epi32(view->tokens.names + v, lanes, _mm512_maskz_loadu_epi32(lanes, parser->tokens.names + t));
+        _mm512_mask_storeu_epi32(view->tokens.sources + v, lanes, _mm512_maskz_loadu_epi32(lanes, parser->tokens.sources + t));
+        _mm512_mask_storeu_epi32(view->tree.depths + v, lanes, _mm512_maskz_loadu_epi32(lanes, parser->tree.depths + t));
+        const __m512i parent = _mm512_maskz_loadu_epi32(lanes, parser->tree.parents + t);
+        const __mmask16 inner = _mm512_mask_cmpneq_epi32_mask(lanes, parent, root);
+        _mm512_mask_storeu_epi32(view->tree.parents + v, lanes, _mm512_mask_sub_epi32(parent, inner, parent, down));
+        _mm512_mask_storeu_epi32(origins + v, lanes, _mm512_add_epi32(_mm512_set1_epi32((int32_t)t), lane));
+        if (levels != NULL)
+        {
+            _mm_mask_storeu_epi8(view_levels + v, lanes, _mm_maskz_loadu_epi8(lanes, levels + t));
+        }
     }
     for (; k < length; k += 1)
     {
-        to[k] = from + k;
+        const uint32_t t = from + k;
+        const uint32_t v = at + k;
+        view->tokens.kinds[v] = parser->tokens.kinds[t];
+        view->tokens.flags[v] = parser->tokens.flags[t];
+        view->tree.roles[v] = parser->tree.roles[t];
+        view->tokens.names[v] = parser->tokens.names[t];
+        view->tokens.sources[v] = parser->tokens.sources[t];
+        view->tree.depths[v] = parser->tree.depths[t];
+        view->tree.parents[v] = parser->tree.parents[t] != BUSTER_PARSE_ROOT ? parser->tree.parents[t] - shift : BUSTER_PARSE_ROOT;
+        origins[v] = t;
+        if (levels != NULL)
+        {
+            view_levels[v] = levels[t];
+        }
     }
 }
 
 // The view of `parser`'s unit, whose skipped declarations the marks hold (skipped_tokens of its tokens), into
-// CheckAttested.view: its columns copied a run of read declarations at a time (runs between skipped ones), each column's
-// run one copy, its parents moved down; each declaration's place in it; the read tokens' system levels (where the passes
+// CheckAttested.view: its columns copied a run of read declarations at a time (runs between skipped ones,
+// check_attested_view_run), its parents moved down; each declaration's place in it; the read tokens' system levels (where the passes
 // mapped them) and the pragmas' positions moved down by the skipped tokens before them (a pragma inside a declaration
 // makes it ineligible, so that none is inside a skipped one). Whether there was room: without it the reader takes the
 // parse with the marks, as step 2's did.
@@ -3011,20 +3025,8 @@ static bool check_attested_view(CheckAttested* census, const Parser* parser)
         }
         if (!skipped)
         {
-            const uint32_t length = to - from;
-            memcpy(view->tokens.kinds + at, parser->tokens.kinds + from, length);
-            memcpy(view->tokens.names + at, parser->tokens.names + from, (uint64_t)length * sizeof(uint32_t));
-            memcpy(view->tokens.sources + at, parser->tokens.sources + from, (uint64_t)length * sizeof(uint32_t));
-            memcpy(view->tokens.flags + at, parser->tokens.flags + from, length);
-            memcpy(view->tree.roles + at, parser->tree.roles + from, length);
-            memcpy(view->tree.depths + at, parser->tree.depths + from, (uint64_t)length * sizeof(uint32_t));
-            check_attested_view_parents(view->tree.parents + at, parser->tree.parents + from, length, from - at, scalar);
-            check_attested_view_origins(origins + at, from, length, scalar);
-            if (census->view_levels != NULL)
-            {
-                memcpy(census->view_levels + at, census->token_levels + from, length);
-            }
-            at += length;
+            check_attested_view_run(view, parser, census->view_levels, census->view_levels != NULL ? census->token_levels : NULL, origins, from, at, to - from, scalar);
+            at += to - from;
         }
         d = e;
     }
