@@ -1045,6 +1045,10 @@ static _Thread_local CheckTier0InlineLane check_program_thread_inline;
 // workers takes 1.6% fewer user cycles by them than by one window as long as the unit, and one worker as many, from 2,048
 // tokens on; below that a window's own cost shows at one worker (docs/all-core-path.md's "Step 1's result").
 #define BUSTER_CHECK_EMIT_WINDOW_TOKENS 2048
+
+// The name of a provisional selection's placeholder symbol (#2536's step 2.2b, check_driver_provisional), a local `.L`
+// one, which no object keeps.
+#define BUSTER_CHECK_PLACEHOLDER_NAME ".Lbuster_placeholder"
 // The byte --poison-arenas writes over a popped window (CheckProgramLanes.poison_windows).
 #define BUSTER_CHECK_EMIT_WINDOW_POISON 0xa5
 // The calling thread's window (#2536's step 1, check_program_emit_windows): a window's typed streams and Tier 0 code,
@@ -4747,6 +4751,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const bool record = parser->tree.roles[object - 1] == PARSE_ROLE_CLOSE_CALL;
             const int length = snprintf(spelling, sizeof(spelling), record ? ".Lbuster_cfstring_%u" : ".Lbuster_string_%u", parse_origin(parser, object - 1) + 1);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
+        }
+        else if (object == 0)
+        {
+            // A provisional selection's placeholder (#2536's step 2.2b, check_driver_provisional): the symbol of an object
+            // that only the candidates keep, which nothing refers to and the object leaves out.
+            name = link_add_name(&result->link, (const uint8_t*)BUSTER_CHECK_PLACEHOLDER_NAME, (uint32_t)(sizeof(BUSTER_CHECK_PLACEHOLDER_NAME) - 1));
+            flags = BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_NOTYPE;
         }
         else if (object != 0 && object - 1 < parser->tokens.count && parser->tree.roles[object - 1] == PARSE_ROLE_LABEL)
         {
