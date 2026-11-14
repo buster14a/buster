@@ -809,6 +809,10 @@ struct CheckLowerWriter
     // unit without bit-fields.
     const uint16_t* bit_units;
     uint32_t hidden;
+    // The local that the function builds where `hidden` points, every return naming it (#1375,
+    // check_lower_named_result), or BUSTER_CHECK_NONE; and whether it is a compound literal's, which a return evaluates.
+    uint32_t named_result;
+    bool named_compound;
     // A variadic definition's (#137): va_start's offsets past the named registers, from the function's own call as
     // abi_assign gives it, and the anchors of its incoming frame (the register save area and the overflow area), made at
     // its first va_start.
@@ -15395,11 +15399,155 @@ static bool check_lower_init_reentry(CheckLowerWriter* writer)
     return writer->init_reentry;
 }
 
+// Whether return control `control` (a RETURN's or a RESULT's) leaves the function's hidden result where its storage is
+// the local of object `*object` (0 before the first that names one), which it then sets: a plain return without a value
+// (the end that falls off, a non-void function's `return;`) leaves it anything, and one with a value must name that
+// object whole, of the result's type, and with no volatile part. A RESULT, or a RETURN of a kept or a musttail value,
+// is a body's with cleanups or a tail call's, which keep the copy.
+static bool check_lower_named_return(CheckLowerWriter* writer, CheckControl control, uint32_t* object)
+{
+    const CheckProgram* program = writer->program;
+    const TypeTable* types = program->types;
+    const CheckStream* stream = program->stream;
+    const CheckGraph* graph = &program->input->graph;
+    const bool plain = control.kind == CHECK_CONTROL_RETURN && control.target != BUSTER_CHECK_CONTROL_KEPT && control.target != BUSTER_CHECK_CONTROL_TAIL;
+    const bool valued = plain && control.node != BUSTER_CHECK_NONE;
+    // The value's conversion to the result's type, which lowers its operand's address alone for an aggregate of that type.
+    uint32_t node = valued ? control.node : BUSTER_CHECK_NONE;
+    for (uint32_t level = 0; level < 4 && node < stream->count && graph->ops[node] == CHECK_OP_CONVERT; level += 1)
+    {
+        node = graph->operand0[node];
+    }
+    const bool named = node < stream->count && graph->ops[node] == CHECK_OP_VALUE;
+    const CheckValue value = named ? check_stream_value(stream, node) : (CheckValue){ 0 };
+    const bool whole = named && value.category == CHECK_LVALUE && value.object != 0 && value.object < program->object_count && value.offset == 0 &&
+                       value.bit_width == 0 && value.object_bit_offset == 0 && (*object == 0 || *object == value.object) &&
+                       type_unqualified(type_strip_aligned(types, value.type)) == type_unqualified(type_strip_aligned(types, writer->result)) &&
+                       !check_lower_copy_volatile(writer, &value, writer->result);
+    *object = whole ? value.object : *object;
+    return (plain && !valued) || whole;
+}
+
+_Static_assert(sizeof(CheckControl) == 16 && __builtin_offsetof(CheckControl, kind) == 12, "check_lower_named_result reads a control's kind as its fourth word");
+
+// The local that a function returning a struct or union through its hidden pointer builds in the caller's storage
+// (#1375), as clang's named return value optimization does at -O0 too, or BUSTER_CHECK_NONE: an automatic object of the
+// body's own (no parameter: past `first_local`), of the result's size and of at most its canonical alignment, the
+// hidden pointer's, that every return names (check_lower_named_return). Its addresses then read the hidden pointer
+// (check_lower_named_rewrite), and its returns copy nothing. The caller's storage is unaliased during the call, a fresh
+// object (#1549's destinations, or clang's sret, which is noalias), so no other access sees the object's bytes move.
+// A return with cleanups whose value is a named return value as clang's Sema has it (check_control_named) comes after
+// them, as clang's code returns the object the cleanups may write; any other keeps its value first (a RESULT, then a
+// kept RETURN) and the copy. A body that names a returns-twice function keeps the copy too, as #1549's destinations do.
+// The vector path takes 16 controls' kinds at a time, from four registers of four controls, and tests the returns among
+// them; the scalar twin tests each control.
+static uint32_t check_lower_named_result(CheckLowerWriter* writer, uint32_t first_local)
+{
+    const CheckProgram* program = writer->program;
+    const TypeTable* types = program->types;
+    const CheckProgramBody* body = writer->body;
+    const CheckControl* controls = program->controls + body->first;
+    const uint32_t count = body->count;
+    const uint8_t kind = check_action_kind(types, writer->result);
+    bool eligible = (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && !check_lower_init_reentry(writer);
+    uint32_t object = 0;
+    uint32_t i = 0;
+    if (!BUSTER_SCALAR_PATH(writer->scalar))
+    {
+        // Each register's kinds, its words 3, 7, 11 and 15, and the next register's, its 19, 23, 27 and 31 of the pair.
+        const __m512i select = _mm512_setr_epi32(3, 7, 11, 15, 19, 23, 27, 31, 3, 7, 11, 15, 19, 23, 27, 31);
+        for (; eligible && i < count; i += 16)
+        {
+            const uint32_t lanes = count - i < 16 ? count - i : 16;
+            const uint32_t* words = (const uint32_t*)(const void*)(controls + i);
+            __m512i quarters[4];
+            for (uint32_t q = 0; q < 4; q += 1)
+            {
+                const uint32_t held = lanes > 4 * q ? (lanes - 4 * q < 4 ? lanes - 4 * q : 4) : 0;
+                quarters[q] = _mm512_maskz_loadu_epi32((__mmask16)((1u << (4 * held)) - 1), words + 16 * q);
+            }
+            const __m512i low = _mm512_permutex2var_epi32(quarters[0], select, quarters[1]);
+            const __m512i high = _mm512_permutex2var_epi32(quarters[2], select, quarters[3]);
+            const __m512i kinds = _mm512_inserti64x4(low, _mm512_castsi512_si256(high), 1);
+            const __mmask16 active = (__mmask16)((1u << lanes) - 1);
+            uint32_t returns = (uint32_t)(_mm512_mask_cmpeq_epi32_mask(active, kinds, _mm512_set1_epi32(CHECK_CONTROL_RETURN)) |
+                                          _mm512_mask_cmpeq_epi32_mask(active, kinds, _mm512_set1_epi32(CHECK_CONTROL_RESULT)));
+            for (; eligible && returns != 0; returns &= returns - 1)
+            {
+                eligible = check_lower_named_return(writer, controls[i + (uint32_t)__builtin_ctz(returns)], &object);
+            }
+        }
+    }
+    for (; eligible && i < count; i += 1)
+    {
+        const bool returns = controls[i].kind == CHECK_CONTROL_RETURN || controls[i].kind == CHECK_CONTROL_RESULT;
+        eligible = !returns || check_lower_named_return(writer, controls[i], &object);
+    }
+    const uint32_t local = eligible && object != 0 ? check_lower_local_of(writer, object) : BUSTER_CHECK_NONE;
+    const bool owned = local < writer->local_count && local >= first_local && writer->indirect[local] == BUSTER_CHECK_LOWER_VLA_NONE &&
+                       writer->local_sizes[local] == type_size(types, writer->result) &&
+                       writer->local_alignments[local] <= type_alignment_log2(types, type_strip_aligned(types, writer->result));
+    writer->named_compound = owned && check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_COMPOUND);
+    return owned ? local : BUSTER_CHECK_NONE;
+}
+
+// The named result's (check_lower_named_result's) addresses, the hidden pointer's value (#1375): each LOCAL_ADDRESS of it
+// a LOCAL of `hidden`, which pushes the same U64. No other entry names it, as an object's local has none of LOCAL,
+// STORE_LOCAL and SET_LOCAL, no lifetime event (check_lower_lifetime) and no call's result (check_lower_init_call):
+// one that did fails the body. Its bytes the caller's, it is then a value's local that no entry reads, without a frame
+// slot. The vector path tests 8 entries at a time and stores the rewritten ones under their mask; the scalar twin tests
+// each.
+static void check_lower_named_rewrite(CheckLowerWriter* writer)
+{
+    const uint32_t local = writer->named_result;
+    const uint32_t count = writer->count;
+    uint8_t* kinds = writer->kinds;
+    uint64_t* values = writer->values;
+    bool invalid = false;
+    uint32_t e = 0;
+    if (!BUSTER_SCALAR_PATH(writer->scalar))
+    {
+        const __m512i named = _mm512_set1_epi64((int64_t)local);
+        for (; e < count; e += 8)
+        {
+            const __mmask8 active = (__mmask8)((1u << (count - e < 8 ? count - e : 8)) - 1);
+            const __m512i kind = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(active, kinds + e));
+            const __mmask8 naming = _mm512_mask_cmpeq_epi64_mask(active, _mm512_maskz_loadu_epi64(active, values + e), named);
+            const __mmask8 address = _mm512_mask_cmpeq_epi64_mask(naming, kind, _mm512_set1_epi64(BUSTER_TYPED_LOCAL_ADDRESS));
+            const __mmask8 value = _mm512_mask_cmpeq_epi64_mask(naming, kind, _mm512_set1_epi64(BUSTER_TYPED_LOCAL)) |
+                                   _mm512_mask_cmpeq_epi64_mask(naming, kind, _mm512_set1_epi64(BUSTER_TYPED_STORE_LOCAL)) |
+                                   _mm512_mask_cmpeq_epi64_mask(naming, kind, _mm512_set1_epi64(BUSTER_TYPED_SET_LOCAL));
+            _mm512_mask_storeu_epi64(values + e, address, _mm512_set1_epi64((int64_t)writer->hidden));
+            _mm_mask_storeu_epi8(kinds + e, address, _mm_set1_epi8(BUSTER_TYPED_LOCAL));
+            invalid |= value != 0;
+        }
+    }
+    for (; e < count; e += 1)
+    {
+        const bool naming = values[e] == local;
+        const bool address = naming && kinds[e] == BUSTER_TYPED_LOCAL_ADDRESS;
+        invalid |= naming && (kinds[e] == BUSTER_TYPED_LOCAL || kinds[e] == BUSTER_TYPED_STORE_LOCAL || kinds[e] == BUSTER_TYPED_SET_LOCAL);
+        kinds[e] = address ? BUSTER_TYPED_LOCAL : kinds[e];
+        values[e] = address ? writer->hidden : values[e];
+    }
+    if (invalid)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    writer->local_sizes[local] = 0;
+    writer->local_alignments[local] = 0;
+    writer->local_classes[local] = BUSTER_TYPED_CLASS_U64;
+    writer->value_classes[local] = BUSTER_TYPED_CLASS_U64;
+    writer->local_flags[local] = 0;
+}
+
 // A whole automatic object initialized by one call can be that call's hidden result object (#1549). The destination
 // is passed to this call's expansion only: its argument tasks, including nested calls, keep their own result objects.
 // Keep a copy for volatile objects, a different result type, register returns, insufficient canonical ABI alignment,
 // and self references. A body with source labels can reenter an initializer after its destination has escaped, so it
 // keeps the ordinary path too, as does a body that names a returns-twice function. No assignment reaches this helper.
+// Nor does the function's named result (#1375): its address is the hidden pointer's value, which a call's result object
+// (Tier0Function.call_result_objects, a frame object) can't be, so its call returns into an object of its own.
 static bool check_lower_init_call(CheckLowerWriter* writer, const CheckInitializer* plan, uint32_t declaration, uint32_t local, TypeId destination)
 {
     const CheckProgram* program = writer->program;
@@ -15415,7 +15563,7 @@ static bool check_lower_init_call(CheckLowerWriter* writer, const CheckInitializ
     const bool inplace = single && type_unqualified(canonical) == type_unqualified(type_strip_aligned(types, destination)) &&
                          writer->abi_table->results[type_index(result)].kind == BUSTER_ABI_RESULT_MEMORY &&
                          type_size(types, result) == writer->local_sizes[local] && plan->object_size == writer->local_sizes[local] &&
-                         writer->local_alignments[local] >= type_alignment_log2(types, canonical) &&
+                         writer->local_alignments[local] >= type_alignment_log2(types, canonical) && local != writer->named_result &&
                          !check_lower_init_names_destination(writer, declaration) && !check_lower_init_reentry(writer);
     if (inplace)
     {
@@ -15929,9 +16077,10 @@ static void check_lower_switch_dispatch(CheckLowerWriter* writer, uint32_t table
 }
 
 // A return of a struct or a union (`node` its value, the bytes' address; or none, for the end of the function): through
-// the hidden pointer, its bytes copied where parameter 0 points and that address returned; in registers, the bytes'
-// address, which Tier 0's epilogue loads them from (a frame object's of its own at the end); and an empty one's
-// nothing, as a void function's. The end's frame object is there only for a function whose end is reached.
+// the hidden pointer, its bytes copied where parameter 0 points (but the named result's, built there: #1375) and that
+// address returned; in registers, the bytes' address, which Tier 0's epilogue loads them from (a frame object's of its
+// own at the end); and an empty one's nothing, as a void function's. The end's frame object is there only for a
+// function whose end is reached.
 static void check_lower_return_aggregate(CheckLowerWriter* writer, uint32_t node)
 {
     const TypeTable* types = writer->program->types;
@@ -15942,7 +16091,17 @@ static void check_lower_return_aggregate(CheckLowerWriter* writer, uint32_t node
     {
         check_lower_instruction(writer, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, writer->hidden);
-        if (node != BUSTER_CHECK_NONE && !check_lower_aggregate(writer, writer->result))
+        if (node != BUSTER_CHECK_NONE && writer->named_result != BUSTER_CHECK_NONE)
+        {
+            // The named result (#1375), already where the hidden pointer points: nothing to copy. A compound literal's is
+            // initialized where it is evaluated, which a declared object's name needn't be.
+            if (writer->named_compound)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
+                check_lower_expression(writer, node, false, 0);
+            }
+        }
+        else if (node != BUSTER_CHECK_NONE && !check_lower_aggregate(writer, writer->result))
         {
             // A demoted vector result: its value is not an address the copy can take, so it lands in the result
             // object first and the object's bytes are copied where the hidden pointer points.
@@ -16691,7 +16850,11 @@ static void check_lower_lifetime(CheckLowerWriter* writer, CheckControl control)
     {
         const uint32_t object = input->objects[d];
         const uint32_t local = object < program->object_count ? writer->local_map[object] : BUSTER_CHECK_NONE;
-        if (local < writer->local_count && writer->lifetime_count < program->lifetime_event_count)
+        if (local == writer->named_result)
+        {
+            // The named result's storage is the caller's (#1375), which no slot of the frame shares.
+        }
+        else if (local < writer->local_count && writer->lifetime_count < program->lifetime_event_count)
         {
             writer->lifetime_entries[writer->lifetime_count] = writer->count;
             writer->lifetime_locals[writer->lifetime_count] = local | end;
@@ -18274,6 +18437,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->token = body.declaration;
         check_lower_source(writer, body.declaration);
         writer->hidden = BUSTER_CHECK_NONE;
+        writer->named_result = BUSTER_CHECK_NONE;
+        writer->named_compound = false;
         writer->variadic = !bare && (types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
         writer->save_anchor = BUSTER_CHECK_NONE;
         writer->overflow_anchor = BUSTER_CHECK_NONE;
@@ -18517,6 +18682,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             writer->result_object = check_lower_temporary_of(writer, result);
         }
         const uint32_t locals = check_lower_local_body(program, b);
+        const uint32_t first_declared = writer->local_count;
         for (uint32_t slot = bare ? 0 : shared->local_start[locals + 1]; !bare && slot < shared->local_start[locals + 2]; slot += 1)
         {
             const uint32_t declaration = shared->local_tokens[slot];
@@ -18612,6 +18778,11 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 }
             }
         }
+        // The local its returns name, built in the caller's storage (#1375), before any statement takes its address.
+        if (!bare && writer->hidden != BUSTER_CHECK_NONE && aggregate_result && status->status == CHECK_PROGRAM_OK)
+        {
+            writer->named_result = check_lower_named_result(writer, first_declared);
+        }
         // #1048's node templates: the body's nodes' contexts and closed subtrees' entries, before its statements.
         writer->template_ready = false;
         if (writer->templates && !bare && status->status == CHECK_PROGRAM_OK)
@@ -18704,6 +18875,10 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             {
                 check_lower_fail(writer, CHECK_PROGRAM_INVALID);
             }
+        }
+        if (writer->named_result != BUSTER_CHECK_NONE && status->status == CHECK_PROGRAM_OK)
+        {
+            check_lower_named_rewrite(writer);
         }
         if (writer->owners != NULL)
         {
@@ -18916,6 +19091,13 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                         {
                             bindings[local] = (CheckDebugBinding){ .token = parameter };
                         }
+                    }
+                    if (writer->named_result < writer->local_count && writer->hidden < writer->local_count)
+                    {
+                        // The named result's bytes are where the hidden pointer points (#1375), as a variable-length array's
+                        // are where its local points.
+                        bindings[writer->hidden] = (CheckDebugBinding){ .token = bindings[writer->named_result].token, .indirect = true };
+                        bindings[writer->named_result] = (CheckDebugBinding){ .token = BUSTER_CHECK_NONE };
                     }
                 }
                 else
