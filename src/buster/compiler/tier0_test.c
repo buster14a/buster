@@ -6756,6 +6756,13 @@ static int run_tier0_tests(int argc, char** argv)
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_forwarded_calls(&tally);
+                tier0_test_report("forwarded calls", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
             for (uint32_t s = 0; s < 7; s += 1)
             {
                 Tier0TestTally tally = { 0, 0 };

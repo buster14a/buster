@@ -240,8 +240,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   reentry, and which labels keep the copy, at both scan paths' lengths; and #1375's named results
   (`c_check_program_named_result_test.c`): no copy or frame bytes on either side of the inline copy's limit, unions,
   compound literals, escaping addresses, statement expressions and cleanups, every excluded shape's copy, and a native
-  run of each against clang -O0's code on a dirtied stack. `tests/interpreter/source.c`
-  also exercises direct, nested and indirect aggregate call initializers through the typed and Tier 1 source checks.
+  run of each against clang -O0's code on a dirtied stack; and #2684's forwarded results (`c_check_program_forward_test.c`):
+  a `return f(...);` and a named result's call initializer that pass the hidden pointer on, with no copy, memmove or
+  object on either side of the inline copy's limit, through conversions, selections and pointers, every excluded shape's
+  copy (kept returns, returns-twice bodies, self-references, conditionals, commas), and a native run of each against
+  clang -O0's code into storage the run before poisoned. `tests/interpreter/source.c` also exercises direct, nested and
+  indirect aggregate call initializers and forwarded returns through the typed and Tier 1 source checks.
   `--program-vectors` selects the vector, x86 builtin and half-precision programs alone (`c_check_program_vector_test.c`,
   `c_check_program_x86_test.c`, `c_check_program_vector_builtins_test.c`, `c_check_program_fp16_test.c`,
   `c_check_program_half_test.c`), run against clang -O0's code where the host has their features.

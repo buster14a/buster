@@ -347,7 +347,18 @@ without aggregates:
 - **Calls' results:** `call_result_objects[c]`, 1 + the local index of the object that receives call c's aggregate
   result, or 0. A result in registers is stored into the object after the call; for one through a hidden pointer, the
   object's address goes in rdi. The call's class is VOID: its result is the object, which the stream reads through
-  `LOCAL_ADDRESS`.
+  `LOCAL_ADDRESS`. Or `BUSTER_TIER0_RESULT_HIDDEN` (`UINT32_MAX`, which no local index plus one reaches; #2684): in a
+  function whose own result goes through a hidden pointer, a call whose result goes through one too and is the
+  function's own (its type, size and ABI, which the front end knows) passes the function's own hidden pointer on,
+  parameter 0's value, in rdi, after its arguments' moves (`tier0_emit_hidden_pointer`, a `mov` from parameter 0's
+  home where an object's takes a `lea`, one record either way), so that its callee writes the result where the
+  function's caller wants it, as clang `-O0` passes its `sret` pointer on for `return f();`. It is no tail call: the
+  frame, the arguments' evaluation and the `RETURN` after it stay. Each such call is a reference of parameter 0
+  (`tier0_hidden_references`, as a tail call that passes the pointer on is), which a function that calls so keeps
+  in a callee-saved register or its slot, never an argument's register.
+- **The forwarded result's bytes:** `hidden_size` and `hidden_alignment`, the bytes of a result through a hidden
+  pointer and their alignment's log2 (at most 2^30), which such a call writes, or 0. Tier 0 needs neither: `ir_lower`'s
+  slot for such a call's result and the interpreter's native calls take them.
 - **The function's own result:** `result_size`, its bytes when it returns in registers, else 0. Every `RETURN` then
   returns the address of the bytes (U64), from which the epilogue loads the result registers while the frame they may
   be in is still there, and control reaches the function's end only through a `RETURN`. A result through a hidden
@@ -403,13 +414,16 @@ and parameters are the typed stream's, which `tier0_validate` checks, as the com
 whose kind, registers or slot doesn't fit the size (`tier0_parts_valid`), a register outside the convention's or one
 that another part, another argument of the call or another parameter takes, a slot outside its call's stack area or an
 incoming one past int32, a call's stack alignment past 2^30, a result object that isn't an object with room for the
-registers' whole widths, a hidden pointer without an object or where an argument takes rdi, a function whose hidden
+registers' whole widths, a hidden pointer without an object or where an argument takes rdi, a call that passes the
+function's own hidden pointer on but is a tail call, has a result not through a hidden pointer, is in a function whose
+own result isn't through one, or of no `hidden_size` or a `hidden_alignment` past 2^30, a function whose hidden
 result pointer isn't parameter 0 in rdi, and an aggregate result of more than two registers. A function returning an
 aggregate, in registers or through the hidden pointer, must leave rax an address at every `RETURN`, which must be of
 U64, and mustn't reach its end without one. `test-tier0`'s aggregate and parameter errors break each rule (below).
 
 The producer (`c_check_program_lower.c`, [the checker guide](c-checker.md)) gives every call site with an aggregate
-result an object of its own, a function with a hidden result pointer its parameter 0, and an aggregate parameter's
+result an object of its own (but a whole-object initializer's destination, #1549, and a call that passes the function's
+own hidden pointer on, #2684), a function with a hidden result pointer its parameter 0, and an aggregate parameter's
 object its alignment, whatever it is (past 16, its function's frame is realigned, and a call's outgoing area aligned
 past 16 realigns its caller's); `docs/calling-convention.md` has the cross-check of C that this compiler compiles
 against clang's and GCC's.
@@ -1114,6 +1128,13 @@ is compiled by both paths, encoded by both encoders and run from a driver, and t
   released the whole frame leaves.
 
 What the probe returns must reach the driver, through the hidden pointer too.
+
+Its "forwarded calls" (#2684) make the hidden fixture's function, in each of the five frames, a call that passes the
+function's own hidden pointer on (`BUSTER_TIER0_RESULT_HIDDEN`) and a `RETURN` of parameter 0 after it: both paths
+must load rdi from parameter 0's home right before the call, with no `lea` into it, and the probe, which now runs in
+the function's frame, must find the driver's hidden pointer in rdi and its arguments where their locations say; the
+bytes it writes there must reach the driver, and rax must return the pointer. Then each of the call's rules is broken
+once, which `tier0_validate` and both compile paths refuse as metadata.
 
 ## Preserving frames (#147)
 

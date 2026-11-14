@@ -9,7 +9,8 @@
 
 // What a unit's lowering makes of its functions, by each path: whether it calls memset (`clears`) and memmove (`moves`),
 // its largest function's typed entries and object bytes, its inline copies, the addresses it discards as soon as it
-// makes them (an in-place call's dead lea before #1549's follow-up), and how many jumps go back (a loop's).
+// makes them (an in-place call's dead lea before #1549's follow-up), how many jumps go back (a loop's), and how many
+// calls pass their function's own hidden pointer on (#2684, BUSTER_TIER0_RESULT_HIDDEN).
 typedef struct CheckTestClearShape CheckTestClearShape;
 struct CheckTestClearShape
 {
@@ -19,6 +20,7 @@ struct CheckTestClearShape
     uint32_t backward;
     uint32_t copies;
     uint32_t dead_addresses;
+    uint32_t forwarded;
     uint64_t object_bytes;
 };
 
@@ -73,6 +75,10 @@ static bool check_test_program_clear_lower(const char* source, bool scalar, Chec
             shape->backward += branch && function->values[i] <= i;
             shape->copies += kind == BUSTER_TYPED_COPY;
             shape->dead_addresses += kind == BUSTER_TYPED_DISCARD && i != 0 && function->kinds[i - 1] == BUSTER_TYPED_LOCAL_ADDRESS;
+        }
+        for (uint32_t c = 0; function->call_result_objects != NULL && c < function->call_count; c += 1)
+        {
+            shape->forwarded += function->call_result_objects[c] == BUSTER_TIER0_RESULT_HIDDEN;
         }
     }
     parse_release(&parser);
