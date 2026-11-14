@@ -1,0 +1,13 @@
+buster-fixtures v1 checker-sources
+function-later	function-later.c	rejected	weak alias call after the target is declared
+function-existing	function-existing.c	rejected	weak alias call with an existing target
+variable-later	variable-later.c	rejected	weak alias variable redeclaration after a later target
+variable-existing	variable-existing.c	rejected	weak alias variable redeclaration with an existing target
+variable-reference	variable-reference.c	rejected	weak alias variable reference is ambiguous
+defined-variable-reference	defined-variable-reference.c	rejected	reference remains ambiguous when the alias is already defined
+variable-repeated	variable-repeated.c	rejected	repeated declarations after a weak alias retain both errors
+combined	combined.c	rejected	weak alias errors preserve the rest of the translation unit
+before-target	before-target.c	-	a weak alias clone is not visible before its target declaration
+local-shadow	local-shadow.c	-	local shadows do not name the weak alias
+defined-alias	defined-alias.c	rejected	a call is ambiguous even when the alias was already defined
+missing-target	missing-target.c	-	a genuinely missing weak alias target still warns

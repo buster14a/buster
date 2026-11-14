@@ -253,8 +253,7 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
     const bool evaluated = self == BUSTER_CHECK_NONE && check_input_evaluate_cached_at(reader, begin, end, &value, &failed);
     // The specifiers' _Atomic and restrict, the deduced type's (#1844, check_input_auto_type_qualifiers; their declarators'
     // deductions, check_input_c23_auto_deduce, apply them). Refused by name: either through a declarator (`_Atomic
-    // __auto_type *p`, whose initializer clang always finds incompatible), an _Atomic of an atomic value (clang's error
-    // names the placeholder's type), and a restrict of a value that is no pointer to an object, whose `restrict int` the
+    // __auto_type *p`, whose initializer clang always finds incompatible), and a restrict of a value that is no pointer to an object, whose `restrict int` the
     // placeholder can't be told from.
     // The placeholder itself, or under a declarator's pointers and arrays.
     TypeId marker = placeholder;
@@ -297,7 +296,69 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
     }
     else if (refused)
     {
-        check_input_report(reader, declaration, CHECK_INPUT_UNSUPPORTED);
+        const bool atomic_value = atomic && !declarator && adjusted_kind == BUSTER_TYPE_KIND_ATOMIC;
+        const uint32_t before = reader->output->report_count;
+        check_input_report(reader, declaration, atomic_value ? CHECK_INPUT_AUTO_TYPE_ATOMIC_INITIALIZER : CHECK_INPUT_UNSUPPORTED);
+        if (atomic_value && reader->output->report_count > before)
+        {
+            CheckInputReport* report = reader->output->reports + before;
+            report->type = placeholder;
+            report->value = value.type;
+            report->completion = end;
+            // Follow the value-producing side of groups and commas. An unrelated cast in a discarded operand must not
+            // supply the result's typedef spelling, even when its canonical type happens to match.
+            uint32_t root = reader->first_child[assignment];
+            while (root != BUSTER_CHECK_NONE && root < assignment)
+            {
+                root = reader->next_child[root];
+            }
+            for (uint32_t steps = 0; root < end && steps < 64; steps += 1)
+            {
+                uint32_t operands[4] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+                uint32_t opener = BUSTER_CHECK_NONE;
+                const uint32_t count = check_input_attribute_operands(parser, root, begin, end, operands, &opener);
+                if (parser->tree.roles[root] == PARSE_ROLE_CLOSE_GROUP && count == 1)
+                {
+                    root = operands[0];
+                }
+                else if (parser->tokens.kinds[root] == PARSE_KIND_COMMA && check_input_attribute_comma(parser, root) && count == 2)
+                {
+                    root = operands[1];
+                }
+                else
+                {
+                    const bool cast = parser->tree.roles[root] == PARSE_ROLE_CLOSE_CAST;
+                    const uint32_t spelling = check_input_token_type_spelling(reader->output, parser, root, cast);
+                    if (spelling < reader->output->token_count && spelling != 0 &&
+                        type_same_canonical(types, reader->declared_types[spelling], value.type) == TYPE_ANSWER_YES)
+                    {
+                        report->type_spelling = spelling;
+                    }
+                    break;
+                }
+            }
+            // Keep a usable declaration after diagnosing the invalid double-atomic deduction. This lets the ordinary
+            // expression and warning walks retain the initializer and later statements without accepting the unit.
+            if (!reader->lane && check_input_recover_reports(reader, before))
+            {
+                check_input_invalid_declare(reader, declaration);
+                result = check_input_type_result(reader, type_qualify(types, adjusted, qualifiers));
+                reader->declared_types[declaration] = result;
+                reader->query_types[assignment] = result;
+                check_input_noderef_set(reader->output, declaration, noderef);
+                check_input_noderef_set(reader->output, assignment, noderef);
+                reader->initializers[assignment] = check_init_aggregate(types, result) ? 2 : 1;
+                if (check_input_linkage(reader->declaration_bits, declaration) != 0)
+                {
+                    const uint32_t name = parser->tokens.names[declaration];
+                    reader->linked_types[name] = result;
+                    if (reader->deferred != 0)
+                    {
+                        check_deferred_linked(reader, name, declaration);
+                    }
+                }
+            }
+        }
     }
     else if ((value.flags & BUSTER_CHECK_BIT_FIELD) != 0)
     {

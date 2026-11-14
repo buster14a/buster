@@ -3145,6 +3145,59 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
     check_test_driver_warning_fixtures_dealt(test, clang, executable, directory, fixtures, fixture_count, false);
 }
 
+// Original diagnostic regressions kept as runtime data. Each catalog row is FILE, WARNINGS, ERRORS, NOTES, NAME,
+// separated by tabs; source files and the catalog live together below the checker fixture root.
+static void check_test_driver_warning_catalog(CheckTest* test, const char* clang, const char* executable, const char* directory,
+                                              const char* suite)
+{
+    CheckTestFixtures storage = { .storage = arena_reserve(UINT64_C(1) << 26) };
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s/catalog.tsv", check_test_fixture_root, suite);
+    uint64_t length = 0;
+    char* catalog = check_test_fixture_read(&storage, path, &length);
+    static const char header[] = "buster-fixtures v1 checker-warnings\n";
+    bool valid = catalog != NULL && length >= sizeof(header) - 1 && memcmp(catalog, header, sizeof(header) - 1) == 0 && catalog[length - 1] == '\n';
+    check_test_expect(test, valid, "runtime warning catalog is readable and has its header");
+    uint32_t cases = 0;
+    char* cursor = valid ? catalog + sizeof(header) - 1 : NULL;
+    while (valid && cursor < catalog + length)
+    {
+        char* end = strchr(cursor, '\n');
+        valid = end != NULL;
+        if (valid)
+        {
+            *end = 0;
+            if (*cursor != '#')
+            {
+                char file[128];
+                char name[512];
+                CheckDriverDefaultWarningFixture fixture = { 0 };
+                int consumed = 0;
+                valid = sscanf(cursor, "%127[^\t]\t%u\t%u\t%u\t%511[^\n]%n", file, &fixture.warnings, &fixture.errors,
+                               &fixture.notes, name, &consumed) == 5 && cursor[consumed] == 0 && check_test_fixture_word(file, 127);
+                check_test_expect(test, valid, "runtime warning catalog row is well formed");
+                if (valid)
+                {
+                    snprintf(path, sizeof(path), "%s/%s/%s", check_test_fixture_root, suite, file);
+                    uint64_t source_length = 0;
+                    fixture.source = check_test_fixture_read(&storage, path, &source_length);
+                    fixture.name = name;
+                    valid = fixture.source != NULL && source_length != 0;
+                    check_test_expect(test, valid, "runtime warning source is readable");
+                    if (valid)
+                    {
+                        check_test_driver_warning_fixtures(test, clang, executable, directory, &fixture, 1);
+                        cases += 1;
+                    }
+                }
+            }
+            cursor = end + 1;
+        }
+    }
+    check_test_expect(test, valid && cases != 0, "runtime warning catalog is complete and nonempty");
+    arena_release(&storage.storage);
+}
+
 // The default warnings' sweep, the driver's longest: a long sweep, one unit per fixture, which its caller doesn't deal.
 static void check_test_driver_default_warnings(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
