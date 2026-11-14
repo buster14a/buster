@@ -2541,13 +2541,37 @@ static bool check_attested_memo_ignored(const char* argument, char* const* input
     return ignored;
 }
 
+// The program's executable file's identity, where its link has no build ID (the CI toolchain's lld adds none): its
+// device, inode, size and modification time, which a build or a copy changes, into `build`.
+static void check_attested_build_file(CheckAttestedBuild* build)
+{
+    struct stat status;
+    if (stat("/proc/self/exe", &status) == 0)
+    {
+        const uint64_t words[5] = { (uint64_t)status.st_dev, (uint64_t)status.st_ino, (uint64_t)status.st_size, (uint64_t)status.st_mtim.tv_sec,
+                                    (uint64_t)status.st_mtim.tv_nsec };
+        CheckAttestedHash hash = { .low = BUSTER_ATTESTED_K0, .high = BUSTER_ATTESTED_K2 };
+        for (uint32_t w = 0; w < BUSTER_ARRAY_LENGTH(words); w += 1)
+        {
+            hash = check_attested_step(hash, words[w]);
+        }
+        build->hash = hash;
+        build->found = true;
+    }
+}
+
 // A memo's key (`key`, two words) for the command of `count` arguments whose inputs are `inputs`: the compiler's build
-// and every argument but those check_attested_memo_ignored leaves out, in order. Whether the build has an ID: without
-// one there is no key, and no memo kept across processes.
+// (its GNU build ID, or without one its executable file's identity) and every argument but those
+// check_attested_memo_ignored leaves out, in order. Whether the build has an identity: without one there is no key, and
+// no memo kept across processes.
 static bool check_attested_memo_key(int count, char** arguments, char* const* inputs, uint32_t input_count, uint64_t* key)
 {
     CheckAttestedBuild build = { 0 };
     check_attested_build_note(&build);
+    if (!build.found)
+    {
+        check_attested_build_file(&build);
+    }
     CheckAttestedHash hash = build.hash;
     for (int i = 0; build.found && i < count; i += 1)
     {

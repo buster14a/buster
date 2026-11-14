@@ -13158,13 +13158,13 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // -g skips nothing; --attested=verify, which skips nothing, still runs.
     const uint8_t command_attested = (uint8_t)(scalar || (attested == CHECK_ATTESTED_MODE_ON && (options.predefines.debug || options.predefines.debug_modules)) ?
                                                CHECK_ATTESTED_MODE_OFF : attested);
-    // A memo kept across processes is keyed by the compiler's build: a build without an ID keeps none.
+    // A memo kept across processes is keyed by the compiler's build: one that can't be identified keeps none.
     uint64_t attested_key[2] = { 0 };
     const bool memo_keyed = parsed && attested_memo != NULL && command_attested != CHECK_ATTESTED_MODE_OFF &&
                             check_attested_memo_key(count, arguments, inputs, input_count, attested_key);
     if (parsed && attested_memo != NULL && command_attested != CHECK_ATTESTED_MODE_OFF && !memo_keyed)
     {
-        fprintf(stderr, "warning: --attested-memo keeps no memo: the compiler has no build ID\n");
+        fprintf(stderr, "warning: --attested-memo keeps no memo: the compiler's build can't be identified\n");
     }
     const CheckDriverCommand command = {
         .options = options,
