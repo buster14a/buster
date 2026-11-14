@@ -227,19 +227,28 @@ static void check_test_common_candidate_comparison_tail(CheckTest* test)
     values[1] = (CheckValue){ .type = BUSTER_TYPE_INT, .flags = BUSTER_CHECK_ICE, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = 300 };
     const CheckGraph graph = { .count = COUNT, .ops = ops, .operand0 = left, .operand1 = right };
     const CheckStream stream = { .count = COUNT, .dense_values = values };
-    const TypeTable types = { 0 };
+    const TypeCapacity capacity = { 0 };
+    Arena type_storage = arena_reserve(type_capacity_bytes(capacity));
+    Arena type_index = arena_reserve(type_index_capacity_bytes(capacity));
+    TypeTable types = { 0 };
+    const bool ready = type_initialize(&types, &type_storage, &type_index, capacity);
     const CheckCommonCandidates candidates = { .count = COUNT, .blocks = BLOCKS, .masks = masks };
     CheckCommonScan scan = { 0 };
     uint32_t listed = 0;
     uint32_t tested = 0;
     const uint32_t next = check_common_next_reach_op(&graph, &candidates, false, comparisons, &listed, &scan);
-    check_common_range_drain(&graph, &stream, &types, parents, reach, comparisons, &tested, listed);
-    bool same = next == COUNT && listed == 48 && tested == listed;
+    if (ready)
+    {
+        check_common_range_drain(&graph, &stream, &types, parents, reach, comparisons, &tested, listed);
+    }
+    bool same = ready && next == COUNT && listed == 48 && tested == listed;
     for (uint32_t node = 2; node < COUNT; node += 1)
     {
         same &= (reach[node] & BUSTER_CHECK_REACH_SIGN) != 0;
     }
     check_test_expect(test, same, "common candidates: drain every comparison after the last reach candidate");
+    arena_release(&type_index);
+    arena_release(&type_storage);
 }
 
 static void check_test_common_candidate_exhaustion(CheckTest* test)
