@@ -509,7 +509,7 @@ static CheckLowerTemplate node_machine_classify_call(NodeMachine* machine, uint3
 // an expression with labels runs it, and it reads the labeled records alone (C listed them in `stack`, their subtrees'
 // first records after them): a walk of every record cost C 125 cycles a new taken node on sqlite3.c on the 9700X, three
 // times its average, by its branches. Scalar: an expression has a few, and their order is the tree's.
-static void node_machine_number_labels(NodeMachine* machine)
+static __attribute__((noinline)) void node_machine_number_labels(NodeMachine* machine)
 {
     const uint32_t labeled = machine->label_count / 2;
     uint32_t* records = machine->stack;
@@ -560,7 +560,7 @@ static NodeMachineRefusal node_machine_contexts(NodeMachine* machine, uint8_t co
             machine->stopped = r;
         }
     }
-    if (refusal == NODE_MACHINE_TAKEN && machine->label_count != 0)
+    if (__builtin_expect(refusal == NODE_MACHINE_TAKEN && machine->label_count != 0, 0))
     {
         node_machine_number_labels(machine);
     }
