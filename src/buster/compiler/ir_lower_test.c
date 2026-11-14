@@ -4098,6 +4098,232 @@ static void ir_lower_test_hoisted_loops(IrLowerTestTally* tally)
     arena_release(&execution);
 }
 
+// #2618: a symbol defined at P for its takes in a loop, where some path from P takes it nowhere, splits into groups by the
+// child of P (in the dominator tree) that dominates each take, where no path takes two groups' or P is a value join. Three
+// functions of p (local 0), with r (local 1) and j (local 2), each taking one symbol twice in each of its groups:
+//     h4: r = 0; if (p == 1) { j = 2; while (j != 0) { r = r + (&s1 - &s1) + 1; j = j - 1; } return r; }
+//         if (p == 2) { j = 2; while (j != 0) { r = r + (&s1 - &s1) + 2; j = j - 1; } return r; } return r + 5;
+//     h5: r = 0; if (p == 1) { j = 2; while (j != 0) { r = r + (&s2 - &s2) + 1; j = j - 1; } }
+//         if (p != 3) r = r + (&s2 - &s2) + 4; return r;
+//     h6: r = 0; if (!(p == 1 ? 0 : 1)) { j = 2; while (j != 0) { r = r + (&s3 - &s3) + 1; j = j - 1; } goto t; }
+//         if (p == 3) goto e; t: r = r + (&s3 - &s3) + 4; e: return r;
+// h4's groups are its two cases' loops, each entered from P (block 1) alone: s1 is defined before each loop (blocks 2
+// and 7), none at P. h5's join (block 5) is entered from P and from the loop, and a path taking both groups' would
+// compute s2 twice: P keeps the one definition (block 1). h6's P is the join of its `?:` (block 4), which #2554's
+// threading copies into its predecessors: its loop's group is defined before the loop (block 7), and t's at t (block
+// 10). Both lowering paths give the same IR, which the interpreter runs for p = 1, 2 and 3, and promotion takes.
+static void ir_lower_test_hoisted_split(IrLowerTestTally* tally)
+{
+    static const uint8_t h4_kinds[] = {
+        BUSTER_TYPED_CONST, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_BRANCH_TRUE,
+        BUSTER_TYPED_CONST, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_SUB, BUSTER_TYPED_ADD, BUSTER_TYPED_CONST, BUSTER_TYPED_ADD, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_JUMP,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_RETURN,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_BRANCH_TRUE,
+        BUSTER_TYPED_CONST, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_SUB, BUSTER_TYPED_ADD, BUSTER_TYPED_CONST, BUSTER_TYPED_ADD, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_JUMP,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_RETURN,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_ADD, BUSTER_TYPED_RETURN,
+    };
+    static const uint8_t h4_classes[] = {
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_VOID,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_VOID,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+    };
+    static const uint64_t h4_values[] = {
+        0, 1,
+        0, 1, 0, 25,
+        2, 2,
+        2, 23,
+        1, 1, 1, 0, 0, 1, 0, 1,
+        2, 1, 0, 2, 8,
+        1, 0,
+        0, 2, 0, 48,
+        2, 2,
+        2, 46,
+        1, 1, 1, 0, 0, 2, 0, 1,
+        2, 1, 0, 2, 31,
+        1, 0,
+        1, 5, 0, 0,
+    };
+    static const uint8_t h5_kinds[] = {
+        BUSTER_TYPED_CONST, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_BRANCH_TRUE,
+        BUSTER_TYPED_CONST, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_SUB, BUSTER_TYPED_ADD, BUSTER_TYPED_CONST, BUSTER_TYPED_ADD, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_JUMP,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_SUB, BUSTER_TYPED_ADD, BUSTER_TYPED_CONST, BUSTER_TYPED_ADD, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_RETURN,
+    };
+    static const uint8_t h5_classes[] = {
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_VOID,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+    };
+    static const uint64_t h5_values[] = {
+        0, 1,
+        0, 1, 0, 23,
+        2, 2,
+        2, 23,
+        1, 2, 2, 0, 0, 1, 0, 1,
+        2, 1, 0, 2, 8,
+        0, 3, 0, 35,
+        1, 2, 2, 0, 0, 4, 0, 1,
+        1, 0,
+    };
+    static const uint8_t h6_kinds[] = {
+        BUSTER_TYPED_CONST, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_CONST, BUSTER_TYPED_JUMP_VALUE,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_JUMP,
+        BUSTER_TYPED_CONST, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_SUB, BUSTER_TYPED_ADD, BUSTER_TYPED_CONST, BUSTER_TYPED_ADD, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_JUMP,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_SUB, BUSTER_TYPED_ADD, BUSTER_TYPED_CONST, BUSTER_TYPED_ADD, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_RETURN,
+    };
+    static const uint8_t h6_classes[] = {
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_VOID,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_VOID,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+    };
+    static const uint64_t h6_values[] = {
+        0, 1,
+        0, 1, 0, 8,
+        1, 9,
+        0,
+        15,
+        0, 3, 0, 40,
+        32,
+        2, 2,
+        2, 32,
+        1, 3, 3, 0, 0, 1, 0, 1,
+        2, 1, 0, 2, 17,
+        1, 3, 3, 0, 0, 4, 0, 1,
+        1, 0,
+    };
+    static const uint8_t local_classes[3] = { BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_I32 };
+    static const uint8_t local_flags[3] = { 0 };
+    _Static_assert(BUSTER_ARRAY_LENGTH(h4_kinds) == BUSTER_ARRAY_LENGTH(h4_classes) && BUSTER_ARRAY_LENGTH(h4_kinds) == BUSTER_ARRAY_LENGTH(h4_values), "h4's columns");
+    _Static_assert(BUSTER_ARRAY_LENGTH(h5_kinds) == BUSTER_ARRAY_LENGTH(h5_classes) && BUSTER_ARRAY_LENGTH(h5_kinds) == BUSTER_ARRAY_LENGTH(h5_values), "h5's columns");
+    _Static_assert(BUSTER_ARRAY_LENGTH(h6_kinds) == BUSTER_ARRAY_LENGTH(h6_classes) && BUSTER_ARRAY_LENGTH(h6_kinds) == BUSTER_ARRAY_LENGTH(h6_values), "h6's columns");
+    const AbiLocation parameter = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { X86_REGISTER_RDI } };
+    const Tier0Function base = {
+        .local_classes = local_classes,
+        .local_flags = local_flags,
+        .local_count = 3,
+        .parameter_count = 1,
+        .parameters = &parameter,
+    };
+    Tier0Function sources[3] = { base, base, base };
+    sources[0].kinds = h4_kinds;
+    sources[0].classes = h4_classes;
+    sources[0].values = h4_values;
+    sources[0].count = BUSTER_ARRAY_LENGTH(h4_kinds);
+    sources[1].kinds = h5_kinds;
+    sources[1].classes = h5_classes;
+    sources[1].values = h5_values;
+    sources[1].count = BUSTER_ARRAY_LENGTH(h5_kinds);
+    sources[2].kinds = h6_kinds;
+    sources[2].classes = h6_classes;
+    sources[2].values = h6_values;
+    sources[2].count = BUSTER_ARRAY_LENGTH(h6_kinds);
+    const char* names[3] = {
+        "a symbol taken in two cases' loops entered from P alone is defined before each loop",
+        "a symbol whose groups a path takes in turn keeps its one definition at P",
+        "a symbol whose P is a value join is defined in each group",
+    };
+    static const uint32_t symbols[3] = { 1, 2, 3 };
+    static const uint32_t expected_counts[3] = { 2, 1, 2 };
+    static const uint32_t expected_blocks[3] = { (1u << 2) | (1u << 7), 1u << 1, (1u << 7) | (1u << 10) };
+    static const uint64_t arguments[3] = { 1, 2, 3 };
+    static const uint64_t expected_results[3][3] = { { 2, 4, 5 }, { 6, 4, 0 }, { 6, 4, 0 } };
+    Arena output = arena_reserve(1ull << 24);
+    Arena twin_output = arena_reserve(1ull << 24);
+    Arena promoted = arena_reserve(1ull << 24);
+    Arena twin_promoted = arena_reserve(1ull << 24);
+    Arena scratch = arena_reserve(1ull << 24);
+    Arena execution = arena_reserve(1ull << 24);
+    const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && twin_promoted.base != 0 && scratch.base != 0 && execution.base != 0;
+    ir_lower_test_expect(tally, ready, "hoisted splits' arenas", 0, 0);
+    Tier0TestData data = { 0 };
+    data.offsets[1] = 8;
+    data.offsets[2] = 16;
+    uint8_t globals[24] = { 0 };
+    for (uint32_t which = 0; ready && which < 3; which += 1)
+    {
+        IrFunction function = { 0 };
+        ir_lower_test_expect(tally, tier0_validate(&sources[which]).error == TIER0_OK && tier0_validate_scalar(&sources[which]).error == TIER0_OK, "Tier 0 takes the hoisted splits' functions", 0, which);
+        if (ir_lower_test_lower(tally, &sources[which], IR_I64, 5, &output, &twin_output, &scratch, &function, 0, which))
+        {
+            uint32_t taken = 0;
+            const uint32_t blocks = ir_lower_test_symbol_blocks(&function, symbols[which], &taken);
+            ir_lower_test_expect(tally, taken == expected_counts[which] && blocks == expected_blocks[which], names[which], 0, which);
+            if (taken != expected_counts[which] || blocks != expected_blocks[which])
+            {
+                fprintf(stderr, "  h%u: %u takes of s%u in blocks 0x%x\n", which + 4, taken, symbols[which], blocks);
+            }
+            for (uint32_t a = 0; a < 3; a += 1)
+            {
+                bool fault = false;
+                const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 3, &data, globals, &arguments[a], 1, &execution, &fault);
+                ir_lower_test_expect(tally, !fault && actual == expected_results[which][a], "the hoisted splits' functions compute their results", arguments[a], which);
+            }
+            ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, 0, which);
+        }
+        arena_pop_to(&output, 0);
+        arena_pop_to(&twin_output, 0);
+        arena_pop_to(&promoted, 0);
+        arena_pop_to(&twin_promoted, 0);
+        arena_pop_to(&scratch, 0);
+        arena_pop_to(&execution, 0);
+    }
+    arena_release(&output);
+    arena_release(&twin_output);
+    arena_release(&promoted);
+    arena_release(&twin_promoted);
+    arena_release(&scratch);
+    arena_release(&execution);
+}
+
 // The expected results of ir_lower_test_depth_types' functions, by C: f, and g = 100 + f.
 static uint64_t ir_lower_test_depth_types_expected(uint64_t p, bool pending)
 {
@@ -4955,6 +5181,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         ir_lower_test_hoisted_symbols(&tally);
         ir_lower_test_hoisted_places(&tally);
         ir_lower_test_hoisted_loops(&tally);
+        ir_lower_test_hoisted_split(&tally);
         ir_lower_test_depth_types(&tally);
         ir_lower_test_guarded(&tally);
         const Tier0ProgramOptions values =
