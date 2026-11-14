@@ -15,8 +15,10 @@
 # SHIFT_SOURCE's first function, so that its placements move that unit's code here too. And SYMBOLS, the `- NAME` lines'
 # names, a symbol ordering file for the global functions and the C library's (which the static link places after every
 # object): lld puts their sections first in .text, right after the units' local ones. The checker's own code
-# (.text.buster_checker, main.c) is one section of each unit, which stays where it is. Each file is written only when
-# its text changes, so that an unchanged list relinks nothing.
+# (.text.buster_checker, main.c) is one section of each unit, which the script can't reorder: where a unit's native
+# code is generated in parallel parts (BusterCodegen.cmake), buster_start_order_unit below writes the names the split
+# (tools/codegen/split.c --first) puts first in that section. Each file is written only when its text changes, so that
+# an unchanged list relinks nothing.
 
 function(buster_start_order_write path text)
     set(current "")
@@ -64,4 +66,28 @@ function(buster_start_order_files list script symbols shift_source)
         "}\nINSERT BEFORE .text;\n")
     buster_start_order_write("${script}" "${text}")
     buster_start_order_write("${symbols}" "${names}")
+endfunction()
+
+# The start's order inside unit UNIT's named sections (#1444): LIST's names of UNIT's own functions (`UNIT.c NAME`) and
+# of the global ones (`- NAME`, which any unit may define), in LIST's order, one a line, written to PATH for the
+# parallel split's --first, which puts those that the unit defines in .text.buster_checker first in that section.
+# `count` is the number of UNIT's own lines; with none, PATH is removed and the split takes no list.
+function(buster_start_order_unit list unit path count)
+    file(STRINGS "${list}" lines)
+    set(names "")
+    set(own 0)
+    foreach(line IN LISTS lines)
+        if(line MATCHES "^${unit}\\.c ([A-Za-z_][A-Za-z0-9_.]*)$")
+            string(APPEND names "${CMAKE_MATCH_1}\n")
+            math(EXPR own "${own} + 1")
+        elseif(line MATCHES "^- ([A-Za-z_.][A-Za-z0-9_.@]*)$")
+            string(APPEND names "${CMAKE_MATCH_1}\n")
+        endif()
+    endforeach()
+    if(own EQUAL 0)
+        file(REMOVE "${path}")
+    else()
+        buster_start_order_write("${path}" "${names}")
+    endif()
+    set(${count} ${own} PARENT_SCOPE)
 endfunction()

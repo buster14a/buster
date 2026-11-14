@@ -114,8 +114,9 @@ must be exactly the expected one:
 - `start-order`: functions of main.c's units by their `FILE` symbols (one
   unit in two parts), a global past its unit's locals, a parallel split's
   alias, a benchmark's and the C library's functions, a name a unit's static
-  shares (left out), two sample files that repeat functions, and symbols
-  without functions (an error);
+  shares (left out), two sample files that repeat functions, the second's
+  new one listed after the first's, and symbols without functions (an
+  error);
 - `ab`: the order of a Williams design (#1311) for 1 to 17 trees, each
   tree at every place and after every other equally often over the period,
   and runs that succeed, fail and can't start, with
@@ -143,7 +144,8 @@ compared over their placements and copies; under `ab`), `hot-loops FUNCTION DISA
 FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]`, `branch-misses BRSTACK [--bias
 ADDRESS] [--disassembly FILE] [--branches N]` and `start-order SYMBOLS
 SAMPLES...` (the functions that `perf script -F ip,brstack` samples ran, by
-their copies in `readelf -sW` of the executable, for
+their copies in `readelf -sW` of the executable, grouped by the first sample
+file that ran each, smallest command first, each group in address order, for
 `cmake/BusterStartOrder.txt`: the build guide's "The start's code order");
 `docs/profiling.md` has the
 perf and objdump commands that make their inputs. Run `ab` itself outside the

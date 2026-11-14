@@ -711,8 +711,11 @@ command the link uses wait for every unit's object (the backend's parts waited
 for the checker's bitcode, 14.5 s, then competed with its parts).
 
 The executable's code is the single object's: every function at the same
-address with the same instructions. The split keeps what the code generator
-saw. A function another part refers to stays local where it is defined, so its
+address with the same instructions, but where the start's order puts the
+functions small compiles run first in `.text.buster_checker` ([The start's
+code order](#the-starts-code-order)), which moves them and what follows them
+in that section, each with the same instructions. The split keeps what the
+code generator saw. A function another part refers to stays local where it is defined, so its
 jumps relax as before (a near tail call's two-byte `jmp`); a hidden alias,
 `NAME.buster_split`, names it for the other parts. A code part reads strong
 constants' initializers `available_externally`, so a string's bytes still fold
@@ -1041,13 +1044,18 @@ where lld links the static executable, the functions that small compiles run
 go first, together, in a section of their own before `.text`
 (`.text.buster_start`), and the C library's ones right after it, first in
 `.text`. The checker's own code stays in its section, `.text.buster_checker`
-(one section of each unit, `main.c`'s pragmas, #502), which holds 18 of the
-empty file's windows and 60 of `hello.c`'s.
+(one section of each unit, `main.c`'s pragmas, #502), which held 18 of the
+empty file's windows and 60 of `hello.c`'s and which no link script can
+reorder: Release's parallel split puts the list's functions of that section
+first in it.
 
-- **The list:** `cmake/BusterStartOrder.txt`, the functions in the order the
-  profiled build had them, `UNIT NAME` for a local function of one of
-  `main.c`'s units and `- NAME` for any other: a global one, whose name is the
-  link's alone, or the C library's.
+- **The list:** `cmake/BusterStartOrder.txt`, `UNIT NAME` for a local
+  function of one of `main.c`'s units and `- NAME` for any other: a global
+  one, whose name is the link's alone, or the C library's. The functions go by
+  the smallest command that ran each, an empty file's `-fsyntax-only` first,
+  then what `-E -P`, `tiny.c`'s `-c` and `hello.c`'s `-c` add, each command's
+  in the order the profiled build had them: the smallest compile's code is
+  together, and each larger one's follows it.
 - **Each unit's copy apart:** every unit compiles a copy of the static helpers
   it uses, and a symbol ordering file, which names symbols, moves every copy:
   one built so faulted more (75 times against 69 in `.text`, #1444's opening
@@ -1059,6 +1067,19 @@ empty file's windows and 60 of `hello.c`'s.
   others go by name in a symbol ordering file (`start-order.symbols`), which
   puts their sections first in `.text`, right after; `start-order` leaves out
   any whose name a unit's static shares, which the name would move too.
+- **Inside the checker's section:** at configuration,
+  `BusterStartOrder.cmake` writes each Release split unit's names, its own
+  lines' and the `- NAME` ones in the list's order, to
+  `start-order/UNIT.txt` in the tree. The split (`tools/codegen/split.c
+  --first`) puts each function they name that the unit defines in a named
+  section, `.text.buster_checker`, before that section's first unlisted
+  function, in the list's order, before it plans the parts; every other
+  function keeps its order, and every function its instructions. A list that
+  moves nothing fails the split, as a stale one would. The checker's unit
+  puts 269 functions, 1.95 MB of its 5.4 MB, there. Develop's parts
+  (`presplit`, dealt by file) and Release's single compiles
+  (`BUSTER_BUILD_DEFINES`, `BUSTER_PGO`, so `BUSTER_CHECKER_OFFSET`'s builds
+  too) keep the section in source order.
 - **Shifts:** a shifted link's padding (`.text.buster_shift_padding`, above)
   goes in `.text.buster_start` right before the shift source's first
   function, so that the shift moves that unit's code there too.
@@ -1082,13 +1103,29 @@ ran 4.1% to 5.8% faster from a cold start, a file-first `-c` 8.7%, while
 `main.c`'s `-fsyntax-only` and `sqlite3.c`'s `-c` stayed within their floors
 ([the record](https://github.com/buster14a/buster-performance/tree/0880281cac17cceb9749d19b1554873e51028928/docs/measurements/start-order-1444-2026-11-13)).
 
+The checker's section then held 31 of the empty file's 57 code faults and
+64 of `hello.c`'s 94. With its functions in the list's order and the list
+sampled with a period per process (below), the empty file's `-fsyntax-only`
+took 35 code faults (14 in the checker's section), `tiny.c`'s `-c` 50 against
+85 and `hello.c`'s 61 against 94, with 8% to 13% fewer iTLB misses. From a
+cold start they ran 8.3%, 9.4% and 4.1% faster against floors of 2.5%, 3.2%
+and 1.5%; `-E -P`, `main.c`'s `-fsyntax-only` and `sqlite3.c`'s `-c` stayed
+within theirs ([the
+record](https://github.com/buster14a/buster-performance/tree/256c516de9f30d80da1a750b80a98909c005c138/docs/measurements/checker-start-order-1444-2026-11-14)).
+
 Refresh the list when small compiles' code has moved, from a Release build of
 the tree as the benchmark builds are, on the 9700X under its lock: sample each
-control (`perf record -b -e instructions:u -c 4999`, a few hundred processes
-of each of an empty file's `-fsyntax-only` and `-E -P`, `tiny.c`'s `-c` and
-`hello.c`'s `-c`, `perf script -F ip,brstack` of each), take the executable's
-symbols (`readelf -sW`), then write the list with `start-order` below the
-header, which names the revision, the host and the commands:
+control, a few hundred processes of each of an empty file's `-fsyntax-only`
+and `-E -P`, `tiny.c`'s `-c` and `hello.c`'s `-c`, each process under a `perf
+record -b -e instructions:u -c PERIOD` of its own with a different period
+(4999 + 2i for the i-th), and `perf script -F ip,brstack` of them all. A
+compile is deterministic: under one period every process is sampled at about
+the same instructions, and the short functions those samples miss stay out
+of the list in every run; the 2026-11-13 list, sampled so, left out functions
+that an empty file's compile runs. Take the executable's symbols (`readelf
+-sW`), then write the list with `start-order` below the header, which names
+the revision, the host and the commands, giving the samples smallest command
+first, the order it groups them by:
 
 ```sh
 ./build/compiler start-order symbols.txt syntax.txt preprocess.txt tiny.txt hello.txt > body.txt

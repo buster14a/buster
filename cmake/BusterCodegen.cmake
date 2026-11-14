@@ -6,7 +6,8 @@
 # compile database. tools/codegen/split.c partitions that optimized IR in module order; Ninja schedules a single-threaded
 # Clang backend job per part; a relocatable link joins the parts in order and restores the source unit's original public
 # symbols before the ordinary final link. The code is the single object's, function for function, at the same
-# addresses. No C boundary or private state moves between source units. The Debug configuration compiles them as usual.
+# addresses, but where the start's order puts the functions small compiles run first in .text.buster_checker (#1444). No
+# C boundary or private state moves between source units. The Debug configuration compiles them as usual.
 #
 # The Develop configuration (docs/commands/build.md, "Develop"; docs/stage1-build-design.md) splits every main.c unit
 # before the optimizer instead: the unit compiles C to bitcode without any LLVM pass, tools/codegen/presplit.c deals its
@@ -279,13 +280,26 @@ function(buster_codegen_unit name)
     set(exports "${directory}/exports.txt")
     set(locals "${directory}/locals.txt")
     set(stamp "${directory}/split.stamp")
+    # The start's order (#1444, BusterStartOrder.cmake): where the link places the functions small compiles run, the
+    # split puts the unit's ones in .text.buster_checker, which the link can't reorder, first in that section.
+    set(first "")
+    set(options "")
+    if(buster_start_order)
+        set(first "${CMAKE_BINARY_DIR}/start-order/${name}.txt")
+        buster_start_order_unit("${start_order_list}" "${name}" "${first}" own)
+        if(own EQUAL 0)
+            set(first "")
+        else()
+            set(options --first "${first}")
+        endif()
+    endif()
     add_custom_command(OUTPUT "${stamp}"
         BYPRODUCTS ${parts} "${exports}" "${locals}"
         COMMAND "${CMAKE_COMMAND}" "-DINPUT=$<TARGET_OBJECTS:buster_${name}>" "-DDIRECTORY=${directory}"
             "-DSPLIT=${BUSTER_CODEGEN_SPLIT}" "-DNM=${BUSTER_CODEGEN_NM}" "-DPARTITIONS=${BUSTER_CODEGEN_PARTITIONS}"
-            -P "${scripts}/BusterCodegenSplit.cmake"
+            "-DOPTIONS=${options}" -P "${scripts}/BusterCodegenSplit.cmake"
         DEPENDS "$<TARGET_OBJECTS:buster_${name}>" "${BUSTER_CODEGEN_SPLIT}" "${BUSTER_CODEGEN_NM}"
-            "${scripts}/BusterCodegenSplit.cmake"
+            "${scripts}/BusterCodegenSplit.cmake" ${first}
         COMMENT "Partitioning ${name}'s optimized IR"
         ${explicit}
         VERBATIM)
