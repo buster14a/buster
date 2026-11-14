@@ -3260,6 +3260,14 @@ static uint32_t tier1_select_node_fixed(const IrFunction* function, const Tier1S
     return body ? function->asm_bodies[pattern->immediate].touched & 0xffffu : tier1_select_fixed_registers(pattern->rule);
 }
 
+// The operand a fixed-register rule reads in its fixed register and leaves there (#2767): a shift's count, in cl, which
+// tier1_select_fixed reads in place where it is in rcx and then writes nothing of rcx but a destination there. Its
+// consumers save no count around its own shift, and its range may keep rcx across it. BUSTER_IR_NONE for another rule.
+static uint32_t tier1_select_fixed_reader(const Tier1SelectPattern* pattern)
+{
+    return pattern->rule == TIER1_RULE_SHIFT ? pattern->values[1] : BUSTER_IR_NONE;
+}
+
 typedef struct Tier1SelectPlan Tier1SelectPlan;
 struct Tier1SelectPlan
 {
