@@ -1167,10 +1167,12 @@ evicted it, and the back edge moved the table into it on every iteration.
   handler's entry, as each takes the first one's convention (`luaV_execute`
   ran 93.5 M more instructions that way).
 - **Resting.** A recipe's range with no use, starting where nothing requires
-  it, takes no free register where its hint names none. It took one, and the
-  edges into its block then moved or recomputed the value into it, though the
-  block never read it: in `luaV_execute`, frame objects' addresses through the
-  handlers' blocks.
+  it, takes no free register where its hint is another range's opening that
+  took none: the convention of a block it takes, as `hexFunc`'s header takes
+  its body's. It took one, and the edges into its block then moved or
+  recomputed the value into it, though the block never read it. A range
+  hinted to a closing that a call left without a register keeps taking one
+  (below).
 - **Definitions no edge reads.** A definition whose register fragment reaches
   its block's end is left out where no edge leaving the block reads it: each
   successor the value is live into enters with its recipe, and no phi takes it
@@ -1190,25 +1192,37 @@ the resting rule 12.54 M and 127.28 M of it alone: `luaV_execute` −125.8 M,
 | evicted before a read, by a required value | −1.99 M | −0.24 M |
 | the same, and by a hinted value | −2.27 M | −0.31 M |
 | the same, and by a call's clobber | −1.53 M | +92.9 M |
-| resting alone | −12.54 M | −127.28 M |
+| resting alone, on openings and closings | −12.54 M | −127.28 M |
 | both, with the opening's memory hint | −14.11 M | −127.28 M |
+
+Main's #2592 (the operand sink, "Increments after their last reader" above)
+removed much of the same traffic in `luaV_execute` since. On main `98186d5c`,
+resting on closings too gained speedtest1 8.90 M but cost Lua's scripts 7.64 M:
+`luaV_execute`'s dispatch join, whose ranges then rested where a handler's call
+had taken `disptab`'s register, recomputed it on every dispatch (14.3 M more
+`lea`s, and 45 M more moves). Resting on openings alone gains speedtest1 1.73 M
+and Lua 0.34 M there, and keeps `hexFunc`'s header without a register.
 
 `tier1_allocate_hints_test.c`'s traces check the three eviction sites and the
 resting range, and its quiet-range trace now gives its register up.
 
-With #2685's ties, the IR guide's folded takes (#2618) and the definitions no
-edge reads, by callgrind at main `389d25b9` against it, speedtest1 runs
-2,851.20 M instructions instead of 2,871.10 M (−0.69%) and Lua's five scripts
-5,080.78 M instead of 5,235.80 M (−2.96%; `arithmetic` −6.6%, `calls` −4.7%,
-`tables` −2.7%): `luaV_execute` −139.3 M, and no Lua function more.
-speedtest1's largest losses are `sqlite3BtreeIndexMoveto` +0.09 M and
-`sqlite3WhereBegin` +0.09 M, against `sqlite3VdbeExec` −4.83 M and
-`sqlite3_str_vappendf` −2.04 M. The definitions no edge reads are 0.22 M and
-9.62 M of it (`luaV_execute` −9.50 M, `sqlite3ExprCodeTarget` −0.18 M).
+With #2685's ties, the IR guide's folded takes (#2618), the eviction before a
+read, resting on openings and the definitions no edge reads, by callgrind at
+main `98186d5c` (after #2592) against it, speedtest1 runs 2,865.62 M
+instructions instead of 2,878.38 M (−0.44%) and Lua's five scripts 5,100.92 M
+instead of 5,122.80 M (−0.43%; each script −0.14% to −0.88%): `luaV_execute`
+−7.04 M, `index2value` −9.14 M, and no Lua function more. speedtest1's largest
+losses are `allocateBtreePage` +0.22 M and `sqlite3BtreeIndexMoveto` +0.09 M,
+against `sqlite3VdbeExec` −3.02 M, `sqlite3AddInt64` −0.96 M and
+`insertCellFast` −0.96 M. Before #2592, at main `389d25b9` and with resting on
+closings too, the change took speedtest1 from 2,871.10 M to 2,851.20 M (−0.69%)
+and Lua's scripts from 5,235.80 M to 5,080.78 M (−2.96%; `luaV_execute`
+−139.3 M); #2592 took most of `luaV_execute`'s part on its own.
 
 On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/4cbed5edd1ca723aabb3c523bc024b59e78c2440/docs/measurements/tier1-ties-unread-2618-2685-2026-11-14),
-#2593's method, a hold of the lock per round), main `389d25b9` against #2714's
-head, without the definitions no edge reads: Lua's five scripts take 0.9875 of
+#2593's method, a hold of the lock per round), main `389d25b9` against the
+change's first form (`282d1157`: resting on closings too, without the
+definitions no edge reads, before #2592): Lua's five scripts take 0.9875 of
 the time (95% interval 0.9599 to 1.0160) over six link orders, with 2.75% fewer
 instructions at each, faster at five of them and 3.3% slower at one; speedtest1
 takes 0.9941 (0.9907 to 0.9974) over six layouts, its cycles lower at all six.
