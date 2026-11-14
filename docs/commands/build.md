@@ -120,13 +120,48 @@ date. Release is for the product and every timing, Develop for edits and tests
 
 The flags differ from a direct clang command only in the build's mechanics:
 CMake's depfile options, `CMAKE_INTDIR`, a definition no source reads, the
-include directory and the source as absolute paths, and
+include directory and the source as absolute paths,
 `-fmacro-prefix-map=SOURCE_DIR/=`, which keeps `__FILE__` (assert's messages)
-relative to the source directory, as it is when clang runs from there. With
+relative to the source directory, as it is when clang runs from there, and,
+where the debug information is line tables alone (Develop, and a sanitizer
+build's Release), [the code generator's variable-location
+option](#line-tables-variable-locations). With
 `BUSTER_DEBUG_INFO=0` the Release executable is the old `build.sh`'s byte for
 byte (the CI configuration, checked at `x86-64`); with `-g`, its allocated
 sections are, and only `.debug_str` and `.debug_line_str` (source paths) and
 the build ID, a hash over the whole file, differ.
+
+### Line tables' variable locations
+
+A compile whose debug information is line tables alone has no variables to
+locate, yet LLVM's default variable-location pass, the instruction-referencing
+LiveDebugValues, still analyzes every function's machine values: in a clean
+x86-64 MSan build, its "Live DEBUG_VALUE analysis" took 188 s of the units'
+and parts' 1,815 s of compiles (`-ftime-trace` on each compile, #2739), 17% of
+a part of the checker's unit, whose instrumented functions are long. So
+Develop and a sanitizer build's Release compile with `-mllvm
+-experimental-debug-variable-locations=false` (`BUSTER_LINE_TABLES_CODEGEN` in
+`cmake/BusterSettings.cmake`), units and parts' jobs alike: the older pass,
+which has nothing to track either, takes none of that time, and the objects
+are the same, byte for byte. A `-g` compile keeps LLVM's default, since the
+two passes locate variables differently. It is a build option rather than a
+flag of the code, as `-fmacro-prefix-map` is, so `print-compile-flags` leaves
+it out (the correctness inventory hands those flags to the compiler's own
+driver).
+
+**Measured** in a 4-CPU container (Intel Xeon, 2.1 GHz) with CI's toolchain,
+clean builds at `c471f32f`, before and after
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/build-trace-2739-2026-11-14)):
+
+| Build | Before | After | CPU time (Ninja's steps) |
+| --- | ---: | ---: | ---: |
+| x86-64 MSan Release, 4 jobs (a hosted row's product) | 450.3 s | 399.9 s | 1,737 → 1,582 s |
+| native Develop, 4 jobs (`./build.sh`'s default) | 124.7 s | 125.8 s | 484 → 489 s |
+
+Both executables' allocated sections are the same before and after, byte for
+byte (the debug strings differ by the checkouts' directory names). The pass
+costs what the instrumented code's long functions make it cost: an
+uninstrumented Develop build gains nothing measurable.
 
 ## The toolchain
 

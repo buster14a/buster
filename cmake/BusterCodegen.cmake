@@ -309,8 +309,8 @@ function(buster_codegen_unit name)
     foreach(part RANGE ${BUSTER_CODEGEN_PARTITIONS})
         set(object "${directory}/part${part}.o")
         add_custom_command(OUTPUT "${object}"
-            COMMAND "${CMAKE_C_COMPILER}" -x ir ${buster_host_flags} ${debug} -fno-stack-protector ${buster_sanitizer_flags}
-                ${optimization} -Wall -Werror -Xclang -disable-llvm-passes -Wno-unused-command-line-argument
+            COMMAND "${CMAKE_C_COMPILER}" -x ir ${buster_host_flags} ${debug} ${buster_release_line_tables} -fno-stack-protector
+                ${buster_sanitizer_flags} ${optimization} -Wall -Werror -Xclang -disable-llvm-passes -Wno-unused-command-line-argument
                 -c "${directory}/part${part}.bc" -o "${object}"
             DEPENDS "${directory}/part${part}.bc"
             COMMENT "Generating ${name}'s native part ${part}"
@@ -367,8 +367,8 @@ function(buster_develop_unit name)
     foreach(part RANGE ${partitions})
         set(object "${directory}/part${part}.o")
         add_custom_command(OUTPUT "${object}"
-            COMMAND "${CMAKE_C_COMPILER}" -x ir ${buster_host_flags} ${BUSTER_DEVELOP_CONFIGURATION_DEBUG} -fno-stack-protector
-                ${buster_optimization} -Wall -Werror -Wno-unused-command-line-argument -c "${directory}/part${part}.bc" -o "${object}"
+            COMMAND "${CMAKE_C_COMPILER}" -x ir ${buster_host_flags} ${BUSTER_DEVELOP_CONFIGURATION_DEBUG} ${BUSTER_LINE_TABLES_CODEGEN}
+                -fno-stack-protector ${buster_optimization} -Wall -Werror -Wno-unused-command-line-argument -c "${directory}/part${part}.bc" -o "${object}"
             DEPENDS "${directory}/part${part}.bc"
             COMMENT "Optimizing and generating ${name}'s part ${part}"
             COMMAND_EXPAND_LISTS
