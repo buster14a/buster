@@ -17,6 +17,7 @@
 #define BUSTER_CHECK_OVERLOADABLE 0x01u
 #define BUSTER_CHECK_OVERLOAD_UNAVAILABLE 0x02u
 #define BUSTER_CHECK_OVERLOAD_DEFINED 0x04u
+#define BUSTER_CHECK_OVERLOAD_TARGET 0x08u
 
 typedef struct CheckOverloadCandidate CheckOverloadCandidate;
 struct CheckOverloadCandidate
@@ -144,7 +145,7 @@ static bool check_overload_candidate_valid(const TypeTable* table, const CheckOv
     const uint32_t fold = library & ~BUSTER_CHECK_LIBRARY_CALL;
     bool valid = type_is_valid(table, type) && check_action_kind(table, type) == BUSTER_TYPE_KIND_FUNCTION &&
                  candidate->declaration != UINT32_MAX && candidate->canonical != UINT32_MAX &&
-                 (flags & ~(BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_UNAVAILABLE | BUSTER_CHECK_OVERLOAD_DEFINED)) == 0;
+                 (flags & ~(BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_UNAVAILABLE | BUSTER_CHECK_OVERLOAD_DEFINED | BUSTER_CHECK_OVERLOAD_TARGET)) == 0;
     if (valid && library != 0)
     {
         valid = (library & BUSTER_CHECK_LIBRARY_CALL) != 0 && fold < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS &&
@@ -376,7 +377,8 @@ static CheckOverloadResult check_overload_argument(TypeTable* table, const Check
     return selected;
 }
 
-static uint8_t check_overload_conversion(const TypeTable* table, const CheckValue* value, TypeId parameter, const CheckOverloadContext* context, bool* full)
+static uint8_t check_overload_conversion(const TypeTable* table, const CheckValue* value, TypeId parameter, const CheckOverloadContext* context,
+                                         bool strict_function_pointers, bool* full)
 {
     const TypeId source = type_unqualified(type_strip_aligned(table, value->type));
     const TypeId target = type_unqualified(type_strip_aligned(table, parameter));
@@ -441,7 +443,12 @@ static uint8_t check_overload_conversion(const TypeTable* table, const CheckValu
                 }
                 else
                 {
-                    rank = CHECK_OVERLOAD_BAD_POINTER;
+                    // A target set or several distinct functions require a viable function signature (#2424).
+                    // A singleton ordinary C call retains its configurable function-pointer conversion.
+                    const bool function_mismatch = strict_function_pointers && compatible == TYPE_ANSWER_NO &&
+                                                   check_action_kind(table, from) == BUSTER_TYPE_KIND_FUNCTION &&
+                                                   check_action_kind(table, to) == BUSTER_TYPE_KIND_FUNCTION;
+                    rank = function_mismatch ? CHECK_OVERLOAD_IMPOSSIBLE : CHECK_OVERLOAD_BAD_POINTER;
                 }
             }
         }
@@ -617,6 +624,7 @@ static CheckOverloadResult check_overload_select(TypeTable* table, const CheckOv
     bool valid = request != 0 && (request->count == 0 || request->candidates != 0) &&
                  (request->argument_count == 0 || request->arguments != 0) && (request->head == UINT32_MAX || request->head < request->count);
     uint32_t length = 0;
+    bool multiple = false;
     for (uint32_t current = valid ? request->head : UINT32_MAX; valid && current != UINT32_MAX; current = request->candidates[current].previous)
     {
         const CheckOverloadCandidate* candidate = &request->candidates[current];
@@ -627,6 +635,8 @@ static CheckOverloadResult check_overload_select(TypeTable* table, const CheckOv
         {
             valid = (table->types.flags[type_index(type_strip_aligned(table, candidate->type))] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
         }
+        // Several declarations of one function still use ordinary C argument conversion.
+        multiple |= valid && candidate->canonical != request->candidates[request->head].canonical;
         length += 1;
     }
     bool full = false;
@@ -685,6 +695,7 @@ static CheckOverloadResult check_overload_select(TypeTable* table, const CheckOv
             const TypeId* parameters = type_parameters(table, function, &parameter_count);
             const bool prototype = (table->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
             const bool variadic = (table->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
+            const bool strict_function_pointers = multiple || (candidate->flags & BUSTER_CHECK_OVERLOAD_TARGET) != 0;
             bool viable = !prototype || (request->argument_count >= parameter_count && (variadic || request->argument_count == parameter_count));
             uint8_t* row = ranks + (uint64_t)active_count * request->argument_count;
             uint32_t failed_argument = UINT32_MAX;
@@ -708,7 +719,7 @@ static CheckOverloadResult check_overload_select(TypeTable* table, const CheckOv
                         viable = converted.diagnostic == CHECK_DIAG_NONE;
                     }
                 }
-                row[i] = viable ? (fixed ? check_overload_conversion(table, &argument, parameters[i], &request->context, &full) : CHECK_OVERLOAD_ELLIPSIS) : CHECK_OVERLOAD_IMPOSSIBLE;
+                row[i] = viable ? (fixed ? check_overload_conversion(table, &argument, parameters[i], &request->context, strict_function_pointers, &full) : CHECK_OVERLOAD_ELLIPSIS) : CHECK_OVERLOAD_IMPOSSIBLE;
                 viable = row[i] != CHECK_OVERLOAD_IMPOSSIBLE;
                 failed_argument = viable ? failed_argument : i;
             }

@@ -159,6 +159,9 @@ struct CheckOverloadCall
 {
     uint32_t node;
     uint32_t head;
+    // A target call may replace an ordinary set installed by an unrelated overloadable declaration (#2424).
+    // Keep its source value's captured head, plus one; zero uses the selected head's existing capture rule.
+    uint32_t captured_head;
 };
 
 typedef enum CheckRegionProofOp
@@ -296,9 +299,12 @@ struct CheckGraph
     const CheckConstValues* const_values;
     const CheckConstWarning* const_warnings;
     uint32_t const_warning_count;
-    // Optional lexical floating environment and evaluation-method state. Zero/null means source evaluation in the
-    // translation environment. Evaluation methods also apply to constants; ACCESS alone retains runtime dependence.
+    // Optional lexical floating environment, evaluation method and contraction policy. Without this column the
+    // source graph uses fp_contract_default; zero-initialized handwritten graphs forbid contraction. A column entry
+    // replaces that default, so zero explicitly means off. Evaluation also applies to constants; ACCESS alone retains
+    // runtime dependence. Both fields survive graph slicing; policy bits carry no node IDs to relocate.
     uint8_t* fp_environments;
+    uint8_t fp_contract_default;
     // Runtime arithmetic warning suppression for semantically checked source branches disconnected by SELECT.
     // Only integer overflow, shift counts and negative shifted values may be suppressed; constraints survive.
     uint8_t* warning_suppressed;
@@ -1455,6 +1461,7 @@ static bool check_graph_recorded_equal(const CheckGraph* graph, const CheckGraph
 static bool check_graph_validate_lists(const CheckGraph* graph)
 {
     bool result = graph->count <= graph->capacity && graph->count <= (1u << 30) && graph->argument_count <= graph->argument_capacity && graph->argument_count <= (1u << 30);
+    result = result && (graph->fp_contract_default & ~BUSTER_CHECK_FP_CONTRACT_MASK) == 0 && graph->fp_contract_default != BUSTER_CHECK_FP_CONTRACT_MASK;
     // Records' rows (#628): no more than their room, and a column of them where there is any. Each record's row is
     // checked at its node (check_graph_leaf_valid_at), so that every row a reader takes is a row of the column.
     result = result && (graph->dense_leaves != NULL || graph->leaf_records == NULL ||
@@ -1502,7 +1509,7 @@ static bool check_graph_validate_lists(const CheckGraph* graph)
         const uint32_t library = candidate->library_call;
         result = (candidate->previous == BUSTER_CHECK_NONE || candidate->previous < i) && candidate->declaration != BUSTER_CHECK_NONE &&
                  candidate->canonical != BUSTER_CHECK_NONE &&
-                 (flags & ~(BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_UNAVAILABLE | BUSTER_CHECK_OVERLOAD_DEFINED)) == 0 &&
+                 (flags & ~(BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_UNAVAILABLE | BUSTER_CHECK_OVERLOAD_DEFINED | BUSTER_CHECK_OVERLOAD_TARGET)) == 0 &&
                  (library == 0 || ((library & BUSTER_CHECK_LIBRARY_CALL) != 0 && (library & ~BUSTER_CHECK_LIBRARY_CALL) < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS &&
                                   (flags & BUSTER_CHECK_OVERLOADABLE) == 0));
     }
@@ -1555,7 +1562,8 @@ static bool check_graph_validate_node(const CheckGraph* graph, uint32_t node, ui
     result = result && (graph->contexts == 0 || (graph->contexts[node] & ~(BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC |
                                                                        BUSTER_CHECK_CONTEXT_GNU_CONSTANT | BUSTER_CHECK_CONTEXT_VALUE)) == 0);
     result = result && (graph->fp_environments == NULL || ((graph->fp_environments[node] & ~BUSTER_CHECK_FP_ENV_MASK) == 0 &&
-                        (graph->fp_environments[node] & BUSTER_CHECK_FP_EVAL_MASK) != BUSTER_CHECK_FP_EVAL_MASK));
+                        (graph->fp_environments[node] & BUSTER_CHECK_FP_EVAL_MASK) != BUSTER_CHECK_FP_EVAL_MASK &&
+                        (graph->fp_environments[node] & BUSTER_CHECK_FP_CONTRACT_MASK) != BUSTER_CHECK_FP_CONTRACT_MASK));
     result = result && (graph->warning_suppressed == NULL ||
                         (graph->warning_suppressed[node] & ~(CHECK_WARNING_INTEGER_OVERFLOW | CHECK_WARNING_SHIFT_COUNT_NEGATIVE |
                                                            CHECK_WARNING_SHIFT_COUNT_OVERFLOW | CHECK_WARNING_SHIFT_NEGATIVE_VALUE)) == 0);
@@ -1608,7 +1616,8 @@ static bool check_graph_validate_node(const CheckGraph* graph, uint32_t node, ui
     if (result && state->overloads < graph->overload_count && graph->overload_calls[state->overloads].node <= node)
     {
         const CheckOverloadCall* call = graph->overload_calls + state->overloads;
-        result = call->node == node && op == CHECK_OP_CALL && call->head < graph->overload_candidate_count;
+        result = call->node == node && op == CHECK_OP_CALL && call->head < graph->overload_candidate_count &&
+                 call->captured_head <= graph->overload_candidate_count;
         state->overloads += 1;
     }
     if (result)
@@ -1759,6 +1768,8 @@ static bool check_graph_validate_block(const CheckGraph* graph, uint32_t node, u
         valid &= _mm512_testn_epi32_mask(environments, _mm512_set1_epi32((int)~BUSTER_CHECK_FP_ENV_MASK));
         valid &= _mm512_cmpneq_epi32_mask(_mm512_and_si512(environments, _mm512_set1_epi32(BUSTER_CHECK_FP_EVAL_MASK)),
                                          _mm512_set1_epi32(BUSTER_CHECK_FP_EVAL_MASK));
+        valid &= _mm512_cmpneq_epi32_mask(_mm512_and_si512(environments, _mm512_set1_epi32(BUSTER_CHECK_FP_CONTRACT_MASK)),
+                                         _mm512_set1_epi32(BUSTER_CHECK_FP_CONTRACT_MASK));
     }
     if (graph->warning_suppressed != NULL)
     {
@@ -1894,6 +1905,11 @@ static bool check_graph_relaxed_token(const CheckGraph* graph, uint32_t token)
     return relaxed;
 }
 
+static inline uint8_t check_graph_fp_contract(const CheckGraph* graph, uint32_t node)
+{
+    return (graph->fp_environments != NULL ? graph->fp_environments[node] : graph->fp_contract_default) & BUSTER_CHECK_FP_CONTRACT_MASK;
+}
+
 // Construct one semantic view at the graph boundary. Diagnostic node ids and source ends are independent.
 // The stream marks required constant evaluation for receipt reads and half arithmetic; branch selection and runtime
 // effects stay in their own graph columns.
@@ -1907,7 +1923,7 @@ static CheckContext check_graph_context(const CheckGraph* graph, uint32_t node, 
         .source_position = graph->source_positions != NULL ? graph->source_positions[node] : BUSTER_CHECK_NONE,
         .extensions = graph->extensions | (check_graph_relaxed_token(graph, token) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0),
         // A unit that changes its floating-point environment (#pragma STDC FENV_ACCESS and the like) is rare (#1175).
-        .fp_environment = __builtin_expect(graph->fp_environments != NULL, 0) ? graph->fp_environments[node] : 0,
+        .fp_environment = __builtin_expect(graph->fp_environments != NULL, 0) ? graph->fp_environments[node] : graph->fp_contract_default,
         .const_values = graph->const_values,
         .constant_evaluated = constant_evaluated,
     };
@@ -3149,8 +3165,10 @@ static inline __attribute__((always_inline)) void check_graph_node_action(TypeTa
     {
         const uint32_t head = overload ? graph->overload_calls[stream->overload_count].head :
                               action.operands[0].overload_head != 0 ? action.operands[0].overload_head - 1 : BUSTER_CHECK_NONE;
+        const uint32_t source = overload && graph->overload_calls[stream->overload_count].captured_head != 0 ?
+                                graph->overload_calls[stream->overload_count].captured_head : head + 1;
         const bool captured = action.operands[0].overload_head == 0 ||
-                              (overload && action.operands[0].overload_head == head + 1);
+                              (overload && action.operands[0].overload_head == source);
         if (!captured)
         {
             result = (CheckActionResult){ .diagnostic = CHECK_DIAG_INVALID_TYPE };

@@ -1,0 +1,19 @@
+buster-fixtures v1 checker-sources
+# check_test_transparent_types's source fixtures (c_check_transparent_type_test.c; #2053): ID, FILE, FLAGS, NAME, tab-separated.
+0001	0001.c	-	transparent function first member both declaration orders
+0002	0002.c	-	transparent function second member both declaration orders
+0003	0003.c	-	transparent function pointer and ordinary nominal identity
+0004	0004.c	-	transparent unrelated union parameters remain incompatible
+0005	0005.c	-	transparent top qualifier matching
+0006	0006.c	-	transparent atomic candidate remains distinct
+0007	0007.c	-	transparent array candidate does not decay
+0008	0008.c	rejected	transparent first floating member is ignored
+0009	0009.c	-	transparent later floating member is allowed
+0010	0010.c	-	transparent first atomic floating member is allowed
+0011	0011.c	-	transparent member declaration alignment does not change validation
+0012	0012.c	rejected	transparent incomplete forward annotation stays ignored
+0013	0013.c	rejected	transparent composite first order constrains later calls
+0014	0014.c	rejected	transparent composite reverse order constrains later calls
+0015	0015.c	rejected	transparent function pointer before activation stays incompatible
+0016	0016.c	-	transparent function pointer after activation is compatible
+0017	0017.c	-	transparent recursive callback relation terminates

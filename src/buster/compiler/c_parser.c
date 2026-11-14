@@ -2684,8 +2684,16 @@ struct Parser
     // Beside each token, a name a diagnostic's argument there is spelled by instead of its source, or 0; or NULL for none:
     // a statement start's typo corrected to a keyword or a type name (#1447, check_driver_typo_errors).
     const uint32_t* respelled;
+    // Source indices of name corrections made before this recovery view (#2250), in source order. Borrowed from
+    // the driver's edit list, so another typo search counts them toward the same unit's spell-checking limit.
+    const uint32_t* typo_sources;
+    uint32_t typo_count;
     // Borrowed through checking and emission, like the tokens' source indices. Resource bytes stay owned by pp.
     const Preprocessor* preprocessor;
+    // Beside each token of a view that leaves a parse's tokens out (#2531's step 3, c_check_attested.c's
+    // check_attested_view), its index in that parse, which names the objects a token numbers (parse_origin); or NULL
+    // where the indices are the parse's own.
+    const uint32_t* origins;
     ParseTokens tokens;
     ParseTree tree;
     // The tree in postorder, for a unit without errors: the token at each position, and with ParseOptions.sizes its
@@ -2740,6 +2748,14 @@ struct Parser
     ParseVectorBuffers buffers;
     IdentId predeclared[BUSTER_PARSE_PREDECLARED_TYPEDEFS];
 };
+
+// Token `token`'s index in the parse `parser` was made from (Parser.origins): its own, but in a view that leaves tokens
+// out. The local labels numbered by a token (a string literal's, .Lbuster_string_N) take it, so that a view's object is
+// the parse's to the byte.
+static inline __attribute__((unused)) uint32_t parse_origin(const Parser* parser, uint32_t token)
+{
+    return parser->origins != NULL ? parser->origins[token] : token;
+}
 
 // A compact #embed operand's immutable bytes. Synthetic parsers have no preprocessor and therefore no resources.
 static __attribute__((unused)) const uint8_t* parse_embed_bytes(const Parser* parser, uint32_t token, uint32_t* length)

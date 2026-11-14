@@ -77,6 +77,21 @@ static const CheckDriverDefaultWarningFixture check_driver_out_of_range_fixtures
         .warnings = 16,
     },
     {
+        // A long tail of comparisons can be listed ahead of the final reach candidate. Every batch must be tested.
+        .name = "many trailing out of range comparisons",
+        .source = "int many(unsigned char c) { return\n"
+                  "    (c > 300) + (c > 300) + (c > 300) + (c > 300) + (c > 300) + (c > 300) +\n"
+                  "    (c > 300) + (c > 300) + (c > 300) + (c > 300) + (c > 300) + (c > 300) +\n"
+                  "    (c > 300) + (c > 300) + (c > 300) + (c > 300) + (c > 300) + (c > 300) +\n"
+                  "    (c > 300) + (c > 300) + (c > 300) + (c > 300) + (c > 300) + (c > 300) +\n"
+                  "    (c > 300) + (c > 300) + (c > 300) + (c > 300) + (c > 300) + (c > 300) +\n"
+                  "    (c > 300) + (c > 300) + (c > 300) + (c > 300) + (c > 300) + (c > 300) +\n"
+                  "    (c > 300) + (c > 300) + (c > 300) + (c > 300) + (c > 300) + (c > 300) +\n"
+                  "    (c > 300) + (c > 300) + (c > 300) + (c > 300) + (c > 300) + (c > 300); }\n",
+        .warnings = 48,
+        .compare_warning_text = true,
+    },
+    {
         // The vector test's type rule: an int or a long class operand against a constant its type covers is no candidate,
         // a narrower one's constant is (an int's against a long constant), and a boolean operator's always is.
         .name = "constants out of range of builtin types",

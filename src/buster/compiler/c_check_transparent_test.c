@@ -70,40 +70,8 @@ static __attribute__((noinline)) void check_test_transparent_calls(CheckTest* te
                           "transparent member conversion begins at the exact activation cutoff");
     }
     arena_release(&history);
-    const CheckSourceFixture fixtures[] = {
-        { .name = "transparent pointer and null arguments", .source = "typedef union __attribute__((transparent_union)){void*p;int*q;}U;void f(U);void g(int*p){f(p);f(0);f((void*)0);}\n" },
-        { .name = "transparent qualifier discard remains incompatible", .source = "typedef union __attribute__((transparent_union)){void*p;int*q;}U;void f(U);void g(const int*p){f(p);}\n", .rejected = true },
-        { .name = "transparent object-function extension remains incompatible", .source = "typedef union __attribute__((transparent_union)){void*p;int*q;}U;void f(U);void g(void){f(g);}\n", .rejected = true },
-        { .name = "transparent arithmetic member uses assignment conversions", .source = "typedef union __attribute__((transparent_union)){int i;unsigned u;}U;void f(U);void g(short s,long l,float x){f(s);f(l);f(x);}\n" },
-        { .name = "transparent atomic member uses value conversion", .source = "typedef union __attribute__((transparent_union)){_Atomic(float) x;int i;}U;void f(U);void g(float x){f(x);}\n" },
-        { .name = "transparent conversion is limited to parameters", .source = "typedef union __attribute__((transparent_union)){int i;unsigned u;}U;U x=1;\n", .rejected = true },
-        { .name = "transparent attribute source activation rejects earlier call", .source = "union U{int a;unsigned b;};void f(union U);\nvoid before(void){f(1);}\ntypedef union U T __attribute__((transparent_union));\nvoid after(void){f(1);}\n", .rejected = true },
-        { .name = "transparent attribute source activation permits later call", .source = "union U{int a;unsigned b;};void f(union U);typedef union U T __attribute__((transparent_union));void after(void){f(1);}\n" },
-    };
-    char directory[] = "/tmp/buster-check-transparent-XXXXXX";
-    bool ready = mkdtemp(directory) != NULL;
-    char paths[BUSTER_ARRAY_LENGTH(fixtures)][160];
-    char* pointers[BUSTER_ARRAY_LENGTH(fixtures)];
-    ParseTestClang outcomes[BUSTER_ARRAY_LENGTH(fixtures)];
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
-    {
-        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
-        pointers[i] = paths[i];
-        ready = ready && parse_test_write(paths[i], fixtures[i].source, strlen(fixtures[i].source));
-    }
-    const char* mode = "-std=gnu17";
-    const bool checked = ready && parse_test_clang(clang, &mode, 1, pointers, BUSTER_ARRAY_LENGTH(fixtures), outcomes);
-    check_test_expect(test, checked, "independent transparent-union oracle runs");
-    for (uint32_t i = 0; checked && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
-    {
-        check_test_expect(test, outcomes[i].rejected == fixtures[i].rejected, fixtures[i].name);
-        check_test_source(test, fixtures + i, paths[i], outcomes + i);
-    }
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
-    {
-        unlink(paths[i]);
-    }
-    rmdir(directory);
+    // Its source fixtures are runtime data (#2053): tests/checker/transparent, which check_test_suite reads and runs.
+    check_test_suite(test, clang, "checker/transparent", "independent transparent-union oracle runs");
 }
 
 #endif
