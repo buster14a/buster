@@ -1691,7 +1691,10 @@ none of its subset's programs makes a name twice in clang's objects.
   At `d12fd583` its 12,016 differences are all explained: 7 folded, 11,845
   dropped and 164 inlined. The dropped ones were the other units' commands,
   each behind a `BUSTER_IN_UNIT` branch whose condition is a constant, which
-  `-c` now leaves out as clang does (#1108).
+  `-c` now leaves out as clang does (#1108). Since #1398's step 3 leaves out
+  the callees Tier 0 spliced at every call, 8 remain on 2026-11-14: 5 folded
+  and 3 inlined, the vector lexer's `scan_lines`, `write_chunk` and
+  `tokenize_chunks`, whose shapes the splice refuses (step 5).
 
 On corpora, clang -O0 decides three things in its code otherwise than the
 selection. The harness explains a difference with one of them only from the
