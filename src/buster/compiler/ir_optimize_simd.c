@@ -671,9 +671,24 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
             result = ir_simd_evaluate(&action, pointers, 0, 0, 0, value) ? IROPT_CONSTANT : IROPT_OVERDEFINED;
         }
     }
-    else if (op == IR_INTRINSIC && f->c[i] == BUSTER_IR_INTRINSIC_AES)
+    else if (op == IR_INTRINSIC && f->c[i] == BUSTER_IR_INTRINSIC_BITSHUFFLE)
     {
-        // An AES round (#1840), folded by the model once both operands are constant.
+        // A bit shuffle into a mask (#1840), folded by the model once both vectors are constant.
+        const uint8_t left = work->states[a];
+        const uint8_t right = work->states[b];
+        result = left == IROPT_OVERDEFINED || right == IROPT_OVERDEFINED ? IROPT_OVERDEFINED : left == IROPT_UNKNOWN || right == IROPT_UNKNOWN ? IROPT_UNKNOWN : IROPT_CONSTANT;
+        if (result == IROPT_CONSTANT)
+        {
+            const IrSimdValue operands[2] = { ir_optimize_simd_value(work, a), ir_optimize_simd_value(work, b) };
+            const IrSimdValue* pointers[3] = { &operands[0], &operands[1], 0 };
+            const IrSimdShape shape = ir_simd_shape(f->type[a]);
+            const IrSimdAction action = { .operation = IR_SIMD_BITSHUFFLE, .result = ir_simd_shape(f->type[i]), .operands = { shape, shape, IR_SIMD_NONE } };
+            result = ir_simd_evaluate(&action, pointers, 0, 0, 0, value) ? IROPT_CONSTANT : IROPT_OVERDEFINED;
+        }
+    }
+    else if (op == IR_INTRINSIC && (f->c[i] == BUSTER_IR_INTRINSIC_AES || f->c[i] == BUSTER_IR_INTRINSIC_QUADWORD_OP))
+    {
+        // An AES round or a quadword operation (#1840), folded by the model once both operands are constant.
         const uint8_t left = work->states[a];
         const uint8_t right = work->states[b];
         result = left == IROPT_OVERDEFINED || right == IROPT_OVERDEFINED ? IROPT_OVERDEFINED : left == IROPT_UNKNOWN || right == IROPT_UNKNOWN ? IROPT_UNKNOWN : IROPT_CONSTANT;
@@ -682,14 +697,19 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
             const IrSimdValue operands[2] = { ir_optimize_simd_value(work, a), ir_optimize_simd_value(work, b) };
             const IrSimdValue* pointers[3] = { &operands[0], &operands[1], 0 };
             const IrSimdShape shape = ir_simd_shape(f->type[i]);
-            const IrSimdAction action = { .operation = IR_SIMD_AES, .result = shape, .operands = { shape, shape, IR_SIMD_NONE }, .index = f->flags[i] };
+            const IrSimdAction action = {
+                .operation = f->c[i] == BUSTER_IR_INTRINSIC_AES ? IR_SIMD_AES : IR_SIMD_QUADWORD_OP,
+                .result = shape,
+                .operands = { shape, shape, IR_SIMD_NONE },
+                .index = f->flags[i],
+            };
             result = ir_simd_evaluate(&action, pointers, 0, 0, 0, value) ? IROPT_CONSTANT : IROPT_OVERDEFINED;
         }
     }
     else if (op == IR_INTRINSIC && ir_intrinsic_ternary(f->c[i]))
     {
-        // A permute of two tables or a bitwise function of three vectors (#1840), its third operand in the extra array,
-        // folded by the model as the others.
+        // A permute of two tables, a bitwise function of three vectors, a compress, an expand or a funnel shift (#1840), its
+        // third operand in the extra array, folded by the model as the others.
         const uint32_t third = ir_intrinsic_third(f, i);
         const uint8_t states[3] = { work->states[a], work->states[b], work->states[third] };
         const bool over = states[0] == IROPT_OVERDEFINED || states[1] == IROPT_OVERDEFINED || states[2] == IROPT_OVERDEFINED;
@@ -699,7 +719,7 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
         {
             const IrSimdValue operands[3] = { ir_optimize_simd_value(work, a), ir_optimize_simd_value(work, b), ir_optimize_simd_value(work, third) };
             const IrSimdValue* pointers[3] = { &operands[0], &operands[1], &operands[2] };
-            static const uint8_t operations[] = { IR_SIMD_PERMUTE2, IR_SIMD_TERNLOG, IR_SIMD_COMPRESS, IR_SIMD_EXPAND };
+            static const uint8_t operations[] = { IR_SIMD_PERMUTE2, IR_SIMD_TERNLOG, IR_SIMD_COMPRESS, IR_SIMD_EXPAND, IR_SIMD_FUNNEL };
             const IrSimdAction action = {
                 .operation = (IrSimdOperation)operations[ir_intrinsic_kind(f->c[i]) - BUSTER_IR_INTRINSIC_TERNARY],
                 .result = ir_simd_shape(f->type[i]),

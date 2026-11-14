@@ -1916,6 +1916,7 @@ static void check_constant_prototype_open(CheckConstantInput* input, uint32_t to
 }
 
 static uint32_t check_typo_walk_value(CheckInputReader* reader, uint32_t token);
+static void check_typo_suggestion(const CheckInputReader* reader, uint32_t token, uint32_t* detail, uint32_t* subject);
 
 // Whether the walk has reported `token`'s undeclared name already: a declarator may read its constant again.
 static bool check_constant_name_reported(const CheckInput* output, uint32_t token)
@@ -1967,6 +1968,10 @@ static void check_constant_name(CheckConstantInput* input, uint32_t token)
             }
             const uint32_t name = parser->tokens.names[declaration];
             output->resource |= c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, check_input_use_point(reader, token)) == 0;
+        }
+        else if (reported)
+        {
+            check_typo_suggestion(reader, token, &output->reports[before].detail, &output->reports[before].subject);
         }
         reader->constant_named += reported ? 1u : 0u;
         reader->constant_missing += reported && !corrected ? 1u : 0u;

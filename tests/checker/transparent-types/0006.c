@@ -1,0 +1,1 @@
+typedef union __attribute__((transparent_union)){_Atomic(int)i;unsigned u;}U;typedef void F(U);typedef void I(int);typedef void A(_Atomic(int));_Static_assert(!__builtin_types_compatible_p(F,I),"atomic");_Static_assert(__builtin_types_compatible_p(F,A),"atomic match");

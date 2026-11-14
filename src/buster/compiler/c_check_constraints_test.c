@@ -3053,6 +3053,18 @@ static const CheckSemanticFixture check_semantic_fixtures[] =
         "no member named 'b' in 'struct s'",
     },
     {
+        "typedef float v4 __attribute__((ext_vector_type(4))); void f(v4 v) { (void)v.xq; }\n",
+        "typedef float v4 __attribute__((ext_vector_type(4))); void f(v4 v) { (void)v.xy; }\n",
+        79,
+        "illegal vector component name 'q'",
+    },
+    {
+        "typedef float v4 __attribute__((ext_vector_type(4))); void f(v4 *p) { (void)p->xq; }\n",
+        "typedef float v4 __attribute__((ext_vector_type(4))); void f(v4 *p) { (void)p->xy; }\n",
+        80,
+        "illegal vector component name 'q'",
+    },
+    {
         "void f(void) { const int c = 1; c = 2; }\n",
         "void f(void) { int c = 1; c = 2; }\n",
         35,

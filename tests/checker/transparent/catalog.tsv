@@ -1,0 +1,10 @@
+buster-fixtures v1 checker-sources
+# check_test_transparent_calls's source fixtures (c_check_transparent_test.c; #2053): ID, FILE, FLAGS, NAME, tab-separated.
+0001	0001.c	-	transparent pointer and null arguments
+0002	0002.c	rejected	transparent qualifier discard remains incompatible
+0003	0003.c	rejected	transparent object-function extension remains incompatible
+0004	0004.c	-	transparent arithmetic member uses assignment conversions
+0005	0005.c	-	transparent atomic member uses value conversion
+0006	0006.c	rejected	transparent conversion is limited to parameters
+0007	0007.c	rejected	transparent attribute source activation rejects earlier call
+0008	0008.c	-	transparent attribute source activation permits later call

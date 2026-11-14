@@ -1053,7 +1053,8 @@ static __attribute__((aligned(64))) bool ir_optimize_visit(IrOptimizeWork* work,
         // queued again by each incoming edge and value, and would otherwise meet all of them on every visit (#1729).
         if (work->states[i] != IROPT_OVERDEFINED)
         {
-            if (ir_vector_type(f->type[i]) || op == IR_VCMP || (op == IR_BITCAST && ir_vector_type(f->type[f->a[i]])))
+            if (ir_vector_type(f->type[i]) || op == IR_VCMP || (op == IR_BITCAST && ir_vector_type(f->type[f->a[i]])) ||
+                (op == IR_INTRINSIC && f->c[i] == BUSTER_IR_INTRINSIC_BITSHUFFLE))
             {
                 changed = ir_optimize_simd_visit(work, i, queue);
             }
@@ -1548,6 +1549,26 @@ static __attribute__((aligned(64))) void ir_optimize_dce(IrOptimizeWork* work, I
     }
 }
 
+// Structural verification has already checked same-block use order, including in dead regions. Only executable
+// source regions impose cross-block dominance here: the optimizer will remove the other regions before selection.
+static IrCheck ir_optimize_check_reachable(const IrFunction* function, const IrCfg* cfg, const Dominators* dominators)
+{
+    IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
+    for (uint32_t i = 0; check.error == IR_OK && i < function->instruction_count; i += 1)
+    {
+        const uint64_t count = ir_operand_count(function, i);
+        for (uint32_t number = 0; check.error == IR_OK && number < count; number += 1)
+        {
+            const IrOperand operand = ir_operand(function, i, number, cfg->instruction_blocks[i]);
+            if (dominators->rpo_index[operand.block] != BUSTER_DOMINATOR_NONE && !dominators_dominates(dominators, cfg->instruction_blocks[operand.value], operand.block))
+            {
+                check = ir_check(IR_ERROR_DOMINANCE, i, operand.position);
+            }
+        }
+    }
+    return check;
+}
+
 // `simd`: admission for callers that model vectors and masks. SCCP, GVN and LICM set it; SROA's default does not.
 // The first SIMD SCCP transfer allocates its sparse wide lattice, so this common preparation stays scalar-sized.
 // `scalar` picks the passes' twin, and `verify_scalar` the verifier's (ir_optimize's AUTO verifies with the vector
@@ -1561,7 +1582,9 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare_twins(IrOptimize
     work->function = function;
     work->scratch = scratch;
     work->scalar = scalar;
-    IrCheck check = BUSTER_SCALAR_PATH(verify_scalar) ? ir_verify_scalar(function, scratch, 0) : ir_verify(function, scratch, 0);
+    // Retain the CFG built by the structural verifier. No input changes before the optimizer consumes it, so
+    // rebuilding the same graph here would repeat its edge enumeration, deduplication and instruction map.
+    IrCheck check = ir_verify_cfg(function, scratch, output, !BUSTER_SCALAR_PATH(verify_scalar), &work->cfg);
     if (check.error == IR_OK && !simd && ir_function_has_simd_path(function, !scalar))
     {
         check.error = IR_ERROR_UNSUPPORTED;
@@ -1572,12 +1595,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare_twins(IrOptimize
     {
         check = ir_check(IR_ERROR_PHI, 0, 0);
     }
-    // Verified above, the graph and the use lists are built without checking the function again, as ir_build_cfg and
-    // ir_build_uses would, which checked its shape and rows three times and its graph twice in each preparation (#786).
-    if (check.error == IR_OK)
-    {
-        check.error = ir_cfg_validated(function, scratch, output, &work->cfg);
-    }
+    // The use lists consume the same verified revision without repeating its shape, row or graph checks.
     if (check.error == IR_OK)
     {
         check.error = BUSTER_SCALAR_PATH(verify_scalar) ? ir_uses_validated_scalar(function, scratch, output, &work->uses) : ir_uses_validated(function, scratch, output, &work->uses);
@@ -1599,19 +1617,9 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare_twins(IrOptimize
         const DominatorStatus status = dominators_analyze(scratch, output, &cfg, options, &work->dominators);
         check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_DOMINANCE;
     }
-    // Dead regions are valid IR. Check SSA for executable source regions without rejecting dead cross-block uses;
-    // their instructions disappear before the final full dominance verifier runs.
-    for (uint32_t i = 0; check.error == IR_OK && i < function->instruction_count; i += 1)
+    if (check.error == IR_OK)
     {
-        const uint64_t count = ir_operand_count(function, i);
-        for (uint32_t number = 0; check.error == IR_OK && number < count; number += 1)
-        {
-            const IrOperand operand = ir_operand(function, i, number, work->cfg.instruction_blocks[i]);
-            if (work->dominators.rpo_index[operand.block] != BUSTER_DOMINATOR_NONE && !dominators_dominates(&work->dominators, work->cfg.instruction_blocks[operand.value], operand.block))
-            {
-                check = ir_check(IR_ERROR_DOMINANCE, i, operand.position);
-            }
-        }
+        check = ir_optimize_check_reachable(function, &work->cfg, &work->dominators);
     }
     if (check.error == IR_OK)
     {
@@ -2232,18 +2240,48 @@ static IrCheck ir_optimize_verify_twins(const IrFunction* function, Arena* outpu
     (void)verify_scalar;
 
     const uint64_t mark = scratch->length;
-    IrOptimizeWork verification = { 0 };
-    IrCheck check = ir_optimize_prepare_twins(&verification, function, output, scratch, BUSTER_SCALAR_PATH(scalar), BUSTER_SCALAR_PATH(verify_scalar), true);
+    // Final verification needs one CFG and dominator tree, not optimizer use lists, lattice or work queues.
+    // This still rebuilds fresh analyses independently of the retained optimizer-to-selector handoff.
+    IrCfg cfg = { 0 };
+    Dominators dominators = { 0 };
+    IrCheck check = ir_verify_cfg(function, scratch, output, !BUSTER_SCALAR_PATH(verify_scalar), &cfg);
+    if (check.error == IR_OK)
+    {
+        const DominatorCfg graph = {
+            .block_count = cfg.block_count,
+            .edge_count = cfg.edge_count,
+            .entry = function->block_count == 0 ? BUSTER_DOMINATOR_NONE : 0,
+            .successor_offsets = cfg.successor_offsets,
+            .successors = cfg.successors,
+            .predecessor_offsets = cfg.predecessor_offsets,
+            .predecessors = cfg.predecessors,
+        };
+        DominatorOptions options = dominators_options();
+        options.outputs = 0;
+        options.path = BUSTER_SCALAR_PATH(verify_scalar) ? DOMINATOR_SCALAR : DOMINATOR_AUTO;
+        const DominatorStatus status = dominators_analyze(scratch, output, &graph, options, &dominators);
+        check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_DOMINANCE;
+    }
     if (check.error == IR_OK)
     {
         const IrDominance dominance = {
-            .enter = verification.dominators.preorder,
-            .leave = verification.dominators.subtree_end,
+            .enter = dominators.preorder,
+            .leave = dominators.subtree_end,
             .block_count = function->block_count,
         };
-        // ir_optimize_prepare_twins verified the function whole on the verifier's path, so only the graph against the
-        // dominance it built is left to check (#1379).
-        check = ir_verify_graph(function, scratch, &dominance, !BUSTER_SCALAR_PATH(verify_scalar));
+        // The unchanged revision's joins and same-block order already passed. Check the new tree and full SSA
+        // dominance, including unreachable cross-block uses, without rebuilding or rechecking the graph.
+        check = ir_verify_dominance(function, &cfg, &dominance, !BUSTER_SCALAR_PATH(verify_scalar));
+        if (check.error == IR_ERROR_DOMINANCE && check.instruction != BUSTER_IR_NONE)
+        {
+            // The former preparation-first verifier reported reachable-use errors before dead-region errors.
+            // Preserve that diagnostic priority on failure without a second operand walk for valid output.
+            const IrCheck reachable = ir_optimize_check_reachable(function, &cfg, &dominators);
+            if (reachable.error != IR_OK)
+            {
+                check = reachable;
+            }
+        }
     }
     arena_pop_to(scratch, mark);
     return check;

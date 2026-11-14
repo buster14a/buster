@@ -91,6 +91,76 @@ static void check_test_target_versions_diagnostics(CheckTest* test, const char* 
         "__attribute__((target(\"avx2\"), used)) int f(void) { return 1; }\n"
         "__attribute__((target(\"default\"), noinline)) int f(void) { return 0; }\n",
         "void h(void) { __attribute__((target(\"default\"))) int f(void); __attribute__((target(\"avx2\"))) int f(void); }\n",
+        // A visible target overload set diagnoses the default candidate (#2424), including parenthesized and
+        // address-of callees. A compatible function pointer and call remain valid.
+        "__attribute__((target(\"default\"))) int f(int a) { return a; }\n"
+        "__attribute__((target(\"avx2\"))) int f(int b) { return b; }\n"
+        "void calls(void) { f(); f(1, 2); (f)(); (&f)(); }\n"
+        "int (*bad)(void) = f;\nint (*good)(int) = &f;\nint valid(void) { return f(1); }\n",
+        // Unnamed and multiple parameters use the count wording; a zero-parameter candidate has no argument name.
+        "__attribute__((target(\"default\"))) int f(int, long);\n"
+        "__attribute__((target(\"avx2\"))) int f(int a, long b) { return a + b; }\n"
+        "__attribute__((target(\"default\"))) int z(void) { return 0; }\n"
+        "__attribute__((target(\"avx2\"))) int z(void) { return 1; }\n"
+        "void calls(void) { f(); f(1); f(1, 2, 3); z(1); }\n",
+        // Nonviable conversions use overload notes; C's viable bad-pointer conversions and qualifier warnings still
+        // name the default's parameter, rather than the latest version's parameter.
+        "struct S { int x; };\n"
+        "__attribute__((target(\"default\"))) int f(int *a) { return *a; }\n"
+        "__attribute__((target(\"avx2\"))) int f(int *b) { return *b; }\n"
+        "int calls(struct S s, double *p, const int *q) { f(1); f(1.0); f(p); f(q); (&f)(p); (&f)(q); f(s); return f(0); }\n",
+        // Incompatible function pointers are not viable for target candidates; ordinary overloadable calls retain
+        // their configurable conversion. Matching function designators, pointers and compatible old-style types work.
+        "int plain(int);\nint matching(double);\n"
+        "__attribute__((target(\"default\"))) int f(int a) { return a; }\n"
+        "__attribute__((target(\"avx2\"))) int f(int b) { return b; }\n"
+        "__attribute__((target(\"default\"))) int take(int (*a)(double)) { return a(1); }\n"
+        "__attribute__((target(\"avx2\"))) int take(int (*b)(double)) { return b(2); }\n"
+        "__attribute__((overloadable)) int ordinary(int (*p)(double));\n"
+        "void calls(int (*p)(int), int (**pp)(int)) { take(plain); take(f); take(&f); take(p); take(*pp); take((*pp)); take((int (*)(int))p); ordinary(plain); ordinary(f); ordinary(&f); }\n"
+        "int valid(int (*p)(double), int (*old)()) { return take(matching) + take(p) + take(old); }\n",
+        // An ordinary overload set with distinct functions also resolves pointer signatures strictly. Target and
+        // plain function arguments, pointer lvalues and compatible controls retain their respective diagnostics.
+        "int plain(int);\n"
+        "__attribute__((target(\"default\"))) int f(int a) { return a; }\n"
+        "__attribute__((target(\"avx2\"))) int f(int b) { return b; }\n"
+        "__attribute__((overloadable)) int h(int (*cb)(double));\n__attribute__((overloadable)) int h(void);\n"
+        "__attribute__((overloadable)) int accept(int (*cb)(int));\n__attribute__((overloadable)) int accept(void);\n"
+        "void rejected(int (*p)(int)) { h(f); h(&f); h(plain); h(p); }\n"
+        "int valid(int (*p)(int)) { return accept(f) + accept(&f) + accept(plain) + accept(p); }\n",
+        // A plain callee's unresolved ordinary overloaded argument remains an argument conversion diagnostic.
+        "__attribute__((overloadable)) int f(int);\n__attribute__((overloadable)) int f(double);\n"
+        "void take(int (*cb)(char));\nvoid rejected(void) { take(f); take(&f); }\n",
+        // Address mismatches keep the overload-set source type, with the default's arity, parameter or return-type
+        // note for initialization; assignment omits that note, and passing keeps its normal parameter note.
+        "__attribute__((target(\"default\"))) int f(int a) { return a; }\n"
+        "__attribute__((target(\"avx2\"))) int f(int b) { return b; }\n"
+        "int (*arity)(void) = f;\nint (*parameter)(double) = &f;\ndouble (*result)(int) = f;\n"
+        "typedef int (*FP)(double);\nvoid take(FP p);\n"
+        "void assign(void) { arity = f; parameter = &f; take(f); take(&f); (&take)(f); }\nFP returned(void) { return f; }\n",
+        // The candidate is retained at each use: a later version cannot change an earlier ordinary call, and a
+        // default redeclaration changes only later notes.
+        "__attribute__((target(\"default\"))) int f(int early);\nvoid before(void) { f(); }\n"
+        "__attribute__((target(\"avx2\"))) int f(int other) { return other; }\nvoid middle(void) { f(); }\n"
+        "__attribute__((target(\"default\"))) int f(int late) { return late; }\nvoid after(void) { f(); }\n"
+        "int (*p)(void) = f;\n",
+        // A block declaration or an object hides the outer set. A lone default and target_clones are ordinary calls.
+        "__attribute__((target(\"default\"))) int f(int a) { return a; }\n"
+        "__attribute__((target(\"avx2\"))) int f(int b) { return b; }\n"
+        "void local(void) { __attribute__((target(\"default\"))) int f(int c); f(); }\n"
+        "void pointer(void) { int (*f)(int) = 0; f(); }\nvoid outer(void) { f(); }\n"
+        "__attribute__((target(\"default\"))) int d(int x) { return x; }\n"
+        "__attribute__((target_clones(\"avx2\", \"default\"))) int c(int x) { return x; }\n"
+        "void plain(void) { d(); c(); }\n",
+        // Nested calls are visited in source order but their graph nodes put the inner call first. Their sparse
+        // overload receipts coexist with ordinary overloadable calls and preserve valid dispatch and pointer uses.
+        "__attribute__((target(\"default\"))) int f(int a) { return a; }\n"
+        "__attribute__((target(\"avx2\"))) int f(int a) { return a + 1; }\n"
+        "__attribute__((target(\"default\"))) int g(int a) { return a; }\n"
+        "__attribute__((target(\"avx2\"))) int g(int a) { return a + 2; }\n"
+        "__attribute__((overloadable)) int h(int a) { return a; }\n"
+        "__attribute__((overloadable)) int h(double a) { return (int)a; }\n"
+        "int (*p)(int) = f;\nint valid(void) { return f(g(1)) + h(f(2)) + f(h(3)) + (&f)(4) + p(5); }\n",
         // target_clones: redeclarations with and without the attribute, the same list spelled otherwise, after a plain declaration.
         "__attribute__((target_clones(\"avx2\",\"default\"))) int f(void);\n"
         "int f(void);\n"
@@ -320,6 +390,30 @@ static void check_test_target_versions_diagnostics(CheckTest* test, const char* 
         "__attribute__((target_clones(\"avx2\", \"avx2\", \"default\"))) int f(void) { return 1; }\n",
         "__attribute__((target_clones(\"avx2,bmi\", \"default\"))) int f(void) { return 1; }\n",
         "__attribute__((target_clones(\"adx\", \"default\"))) int f(void) { return 1; }\n",
+        // A target overload's nonviable integer conversion stays a hard no-match even when -Wint-conversion is off.
+        "__attribute__((target(\"default\"))) int f(int *a) { return *a; }\n"
+        "__attribute__((target(\"avx2\"))) int f(int *b) { return *b; }\nvoid calls(void) { f(1); f(1.0); }\n",
+        "__attribute__((target(\"default\"))) int f(int *a) { return *a; }\n"
+        "__attribute__((target(\"avx2\"))) int f(int *b) { return *b; }\nvoid calls(double *p, const int *q) { f(p); f(q); (&f)(p); (&f)(q); }\n",
+        "__attribute__((target(\"default\"))) int f(int a) { return a; }\n"
+        "__attribute__((target(\"avx2\"))) int f(int b) { return b; }\nint (*p)(void) = f;\n"
+        "typedef int (*FP)(double);\nvoid take(FP p);\nvoid assign(void) { p = &f; take(f); (&take)(f); }\nFP returned(void) { return f; }\n"
+        "void sink(int (*ok)(int), int bad);\nvoid mixed(void) { sink(f, \"x\"); }\n"
+        "void take_pair(int *a, FP b);\nvoid ordered(const int *q) { take_pair(q, f); }\n",
+        // Suppressing incompatible-function-pointer diagnostics never makes a target candidate viable, including
+        // an argument that is itself a target set. The ordinary overloadable control follows the warning option.
+        "int plain(int);\n"
+        "__attribute__((target(\"default\"))) int f(int a) { return a; }\n"
+        "__attribute__((target(\"avx2\"))) int f(int b) { return b; }\n"
+        "__attribute__((target(\"default\"))) int take(int (*a)(double)) { return a(1); }\n"
+        "__attribute__((target(\"avx2\"))) int take(int (*b)(double)) { return b(2); }\n"
+        "__attribute__((overloadable)) int ordinary(int (*p)(double));\n"
+        "void calls(void) { take(plain); take(f); take(&f); ordinary(plain); ordinary(f); ordinary(&f); }\n",
+        "int plain(int);\n"
+        "__attribute__((target(\"default\"))) int f(int a) { return a; }\n"
+        "__attribute__((target(\"avx2\"))) int f(int b) { return b; }\n"
+        "__attribute__((overloadable)) int h(int (*cb)(double));\n__attribute__((overloadable)) int h(void);\n"
+        "void rejected(int (*p)(int)) { h(f); h(&f); h(plain); h(p); }\n",
     };
     static const char* const options[] = {
         "-Werror",
@@ -329,6 +423,12 @@ static void check_test_target_versions_diagnostics(CheckTest* test, const char* 
         "-Wno-target-clones-mixed-specifiers",
         "-Werror=target-clones-mixed-specifiers",
         "-Wno-ignored-attributes",
+        "-Wno-int-conversion",
+        "-Wno-error=int-conversion",
+        "-Wno-incompatible-pointer-types",
+        "-Wno-error=incompatible-pointer-types",
+        "-Wno-incompatible-function-pointer-types",
+        "-Wno-error=incompatible-function-pointer-types",
     };
     enum { LINES = 65536, LONG = 8192 };
     // Long lists, built here: past 64 versions (a version first seen there and repeated), past an offset of 1024 bytes in

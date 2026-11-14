@@ -43,6 +43,62 @@ entry points both verify the resulting SSA and remapped CFG. See the
 [Tier 1 command guide](tier1.md#block-placement-and-critical-edge-fall-through-1218)
 for its ordering policy, regression coverage and measurement boundaries.
 
+## Verification work and retained analyses (#1379)
+
+Every first validity boundary remains enabled. `ir_verify_cfg` checks shape,
+rows, phi/switch metadata and same-block operand order, retaining the CFG it
+built for the next consumer of that exact immutable revision. Optimizer
+preparation consumes this CFG, constructs dominators and checks reachable
+cross-block uses. It still permits dead regions that optimization will remove.
+
+Final verification constructs one CFG and one dominator tree. After the
+structural check, `ir_verify_dominance` validates the new tree view and every
+operand's strict SSA dominance without repeating the phi/switch scan. The
+ordinary final verifier rebuilds its analyses independently of the retained
+optimizer-to-selector product and allocates no optimizer use lists, lattice,
+liveness or work queues. Its failure path preserves the former priority of
+reachable-use diagnostics over dead-region diagnostics.
+
+The remaining boundaries in the ordinary C `--tier1` path are:
+
+| Boundary | Row checks | CFG builds | Phi/switch scans | Operand-order/dominance scans |
+| --- | ---: | ---: | ---: | ---: |
+| Lowered output | 1 | 1 | 1 | 1 |
+| Promotion preparation | 0 | 1 | 0 | 1 reachable-use scan |
+| Promoted output | 1 | 1 | 1 | 1 |
+| Optimizer preparation | 1 | 1 | 1 | 1 order scan and 1 reachable-use scan |
+| Final retained verification | 1 | 1 | 1 | 1 order scan and 1 strict dominance scan |
+
+Compared with `b7a95eed`, optimizer preparation builds one CFG instead of two;
+final retained verification scans phi/switch metadata once instead of twice.
+Ordinary optimizer-result verification, also used by GVN, LICM and SROA,
+builds one CFG instead of three and performs no unused optimizer preparation.
+The current inline-summary pipeline passes its verified lowering or expansion
+result through the existing verified-input promotion API. Candidate transforms
+can build additional CFGs; optional passes add their own validity boundaries.
+
+There is no cross-mutation cache. New descriptors, in-place rewrites, shared
+side-table edits and arena retirement still follow the existing revision and
+ownership rules. Failed CFG validation publishes nothing and restores both
+arena marks. Retained-final counters distinguish one structural `graph_checks`
+from one `dominance_checks`; the latter is a separate operand walk. `--verify`
+continues to enable the driver's allocation/code certificates and scheduler
+cross-checks; these IR validity checks run with or without it.
+
+`test-ir-optimize` compares retained and ordinary results with a fresh scalar
+full verifier and independently rebuilt CFG/dominators. Its boundary fixtures
+cover malformed rows, phi edges, switch and call payloads, invalid tree views,
+diagnostic precedence, unreachable regions, allocation failures and unchanged
+caller prefixes. The existing ownership, invalidation, generation exhaustion,
+same-address reuse and scratch-poisoning tests remain. `test-ir` also rejects
+invalid third-operand dominance for every ternary intrinsic kind, vector width
+and verification-batch lane on both twins.
+
+These are reductions in repeated work, not a measured compile-time claim.
+The issue's few-percent verifier-share target requires current SQLite/Lua
+profiles and paired A/A and A/B qualification on an approved main/scheduled
+9700X campaign, with raw evidence in `buster-performance`.
+
 ## Bounded scalar if-conversion (#1382)
 
 The C Tier 1 driver runs `ir_if_convert.c` after promotion, wide splitting and

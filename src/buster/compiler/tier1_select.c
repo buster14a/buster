@@ -353,6 +353,17 @@ typedef enum Tier1SelectRule
 // A unary operation of each of values[0]'s lanes (#1840): `immediate` the IR's flags, one record of
 // ir_simd_lane_unary_forms' (vpopcntb to vpopcntq, vplzcntd, vplzcntq, vpconflictd, vpconflictq).
 #define BUSTER_TIER1_VECTOR_LANE_UNARY 28
+// A bit shuffle into a mask (#1840): vpshufbitqmb of values[0]'s quadwords (vvvv) by values[1]'s byte indices (rm) into
+// the destination's opmask register, under values[2]'s as its writemask where it is a mask's AND (#1847's compare's
+// way), at the vectors' width.
+#define BUSTER_TIER1_VECTOR_BITSHUFFLE 29
+// A quadword operation (#1840): `immediate` the IR's flags, its operation; ir_simd_quadword_op_forms' form of values[0]
+// (vvvv) and values[1] (rm) into the destination.
+#define BUSTER_TIER1_VECTOR_QUADWORD_OP 30
+// A funnel shift (#1840, tier1_select_funnel): `operation` the IR's flags (its lanes and direction), values[0] the high
+// half, values[1] the low half and values[2] the counts; or, where the halves are one value and the counts a constant
+// in every lane (`condition` 1), a rotate by that count, `immediate`, of values[0] alone.
+#define BUSTER_TIER1_VECTOR_FUNNEL 31
 // A floating operation at its own rounding of values[0] and values[1] (#1840): `immediate` the IR's flags, one record of
 // ir_simd_fround_forms' with the rounding in its decorations.
 #define BUSTER_TIER1_VECTOR_FROUND 26
@@ -1562,6 +1573,69 @@ static void tier1_select_ternlog(Tier1SelectRecords* result, const Tier1SelectHo
     tier1_select_append(result, record);
 }
 
+// A funnel shift (#1840, BUSTER_TIER1_VECTOR_FUNNEL). A rotate by an immediate (`condition` 1): vprold to vprorq of the
+// vector (rm) into the destination (vvvv; reg the opcode's extension), and for words VBMI2's vpshldw or vpshrdw of it
+// twice into the destination (reg). Otherwise vpshldvw to vpshrdvq (ir_simd_funnel_forms), whose destination is their
+// first source: the high half for a left shift, the low half for a right one, the other half in vvvv and the counts in
+// rm. The destination takes that half first by a move where it isn't already its register, and where it holds the other
+// half or the counts instead, the vector class's scratch register keeps them across that move.
+static void tier1_select_funnel(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
+{
+    const uint32_t flags = (uint32_t)holes->operation;
+    const uint32_t size = (flags & 3) != 0 ? flags & 3 : 2;
+    const uint32_t right = (flags >> 2) & 1;
+    const uint32_t width = holes->width == 16 ? 0 : holes->width == 32 ? 1 : 2;
+    const uint8_t x = destination & 15;
+    const uint8_t high = holes->left & 15;
+    if (holes->condition != 0 && size == 1)
+    {
+        const X86Instruction record = { .form = ir_simd_word_rotate_forms[right][width], .reg = x, .vvvv = high, .rm = high, .mode = BUSTER_X86_REGISTER_DIRECT,
+                                        .immediate = (int32_t)(holes->immediate & 15) };
+        tier1_select_append(result, record);
+    }
+    else if (holes->condition != 0)
+    {
+        const X86Instruction record = { .form = ir_simd_rotate_forms[right][size - 2][width], .vvvv = x, .rm = high, .mode = BUSTER_X86_REGISTER_DIRECT,
+                                        .immediate = (int32_t)(holes->immediate & 63) };
+        tier1_select_append(result, record);
+    }
+    else
+    {
+        const uint8_t scratch = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+        const uint8_t tied = right != 0 ? holes->right & 15 : high;
+        uint8_t other = right != 0 ? high : holes->right & 15;
+        uint8_t counts = holes->third & 15;
+        if (x != tied)
+        {
+            if (other == x || counts == x)
+            {
+                tier1_select_append(result, tier1_select_class_move(scratch, x, holes->width, false));
+            }
+            other = other == x ? scratch : other;
+            counts = counts == x ? scratch : counts;
+            tier1_select_append(result, tier1_select_class_move(x, tied, holes->width, false));
+        }
+        const X86Instruction record = { .form = ir_simd_funnel_forms[right][size - 1][width], .reg = x, .vvvv = other, .rm = counts, .mode = BUSTER_X86_REGISTER_DIRECT };
+        tier1_select_append(result, record);
+    }
+}
+
+// Whether `value` is a vector constant of `width` bytes whose lanes of `lane_bits` are all one value, that value modulo
+// the lanes' bits into `count` (#1840: a funnel shift's counts, which it reads so).
+static bool tier1_select_lane_splat(const IrFunction* function, uint32_t value, uint32_t width, uint32_t lane_bits, uint64_t* count)
+{
+    bool result = value < function->instruction_count && function->op[value] == IR_VCONST && function->a[value] < function->vector_constant_count && lane_bits >= 16;
+    const IrSimdValue* payload = result ? &function->vector_constants[function->a[value]] : 0;
+    const uint32_t lanes = width * 8 / (lane_bits != 0 ? lane_bits : 64);
+    const uint64_t first = result ? ir_simd_lane_read(payload, lane_bits, 0) & (lane_bits - 1) : 0;
+    for (uint32_t lane = 1; result && lane < lanes; lane += 1)
+    {
+        result = (ir_simd_lane_read(payload, lane_bits, lane) & (lane_bits - 1)) == first;
+    }
+    *count = first;
+    return result;
+}
+
 // A compress or an expand (#1840): vpcompressb to vpcompressq (the destination in rm) and vpexpandb to vpexpandq (in reg)
 // merge into their destination under the mask, so it takes the passthrough first by a move where it isn't already its
 // register; where it holds the source instead, the vector class's scratch register keeps the source across that move.
@@ -1660,6 +1734,16 @@ static void tier1_select_lane(Tier1SelectRecords* result, const Tier1SelectHoles
     if (kind == BUSTER_TIER1_VECTOR_MOVEMASK)
     {
         tier1_select_append(result, tier1_select_register_record(ir_simd_movemask_forms[size][width == 32], x, holes->left & 15));
+    }
+    else if (kind == BUSTER_TIER1_VECTOR_LANE_EXTRACT && holes->source_width != 0)
+    {
+        // Lane 0 into an SSE carrier (#1840, `source_width` its bytes, 4 or 8): the vector's low bytes in the carrier's
+        // register, which may hold anything past them (every row reads a carrier zero-extended); moved zero-extended into
+        // another register, and nothing in its own.
+        if (x != (holes->left & 15))
+        {
+            tier1_select_append(result, tier1_select_carrier_move(x, holes->left & 15, holes->source_width, holes->vex ? BUSTER_TIER1_ENCODING_VEX : BUSTER_TIER1_ENCODING_EVEX));
+        }
     }
     else if (kind == BUSTER_TIER1_VECTOR_LANE_EXTRACT)
     {
@@ -2514,6 +2598,29 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
                 .rm = complement ? left : right,
                 .mode = BUSTER_X86_REGISTER_DIRECT,
                 .immediate = complement ? 0x55 : 0,
+            };
+            tier1_select_append(&result, record);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_FUNNEL)
+        {
+            tier1_select_funnel(&result, holes, destination);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_QUADWORD_OP)
+        {
+            const uint16_t form = ir_simd_quadword_op_forms[holes->immediate & 1][width == 16 ? 0 : width == 32 ? 1 : 2];
+            const X86Instruction record = { .form = form, .reg = x, .vvvv = left, .rm = right, .mode = BUSTER_X86_REGISTER_DIRECT };
+            tier1_select_append(&result, record);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_BITSHUFFLE)
+        {
+            static const uint16_t forms[3] = { X86_FORM_VPSHUFBITQMB_K_X_XM128, X86_FORM_VPSHUFBITQMB_K_Y_YM256, X86_FORM_VPSHUFBITQMB_K_Z_ZM512 };
+            const X86Instruction record = {
+                .form = forms[width == 16 ? 0 : width == 32 ? 1 : 2],
+                .reg = (uint8_t)(destination & 7),
+                .vvvv = left,
+                .rm = right,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .decorations = (uint8_t)(holes->third & BUSTER_X86_DECORATION_MASK),
             };
             tier1_select_append(&result, record);
         }
@@ -5022,8 +5129,9 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
 static bool tier1_select_masked_compare(const Tier1SelectForest* forest, uint32_t node, uint32_t value)
 {
     const IrFunction* function = forest->function;
-    const bool compare = value < function->instruction_count && function->op[value] == IR_VCMP && function->type[value] == function->type[node] &&
-                         function->c[value] < IR_PREDICATE_COUNT && function->a[value] < function->instruction_count;
+    const bool compare = value < function->instruction_count && function->type[value] == function->type[node] && function->a[value] < function->instruction_count &&
+                         ((function->op[value] == IR_VCMP && function->c[value] < IR_PREDICATE_COUNT) ||
+                          (function->op[value] == IR_INTRINSIC && function->c[value] == BUSTER_IR_INTRINSIC_BITSHUFFLE));
     return compare && tier1_select_vector_width(function->type[function->a[value]]) != 0 && tier1_select_tree_child(forest, node, value);
 }
 
@@ -5081,7 +5189,10 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     // A vector's (#141): the stored vector's width for a store, the result's for the others, and a comparison's operands';
     // none in a function without vectors.
     const uint32_t vector_width = forest->vectors ? tier1_select_vector_width(op == IR_STORE && b < function->instruction_count ? function->type[b] : type) : 0;
-    const uint32_t compare_width = forest->vectors && op == IR_VCMP && a < function->instruction_count ? tier1_select_vector_width(function->type[a]) : 0;
+    // A comparison's operands' width, and a bit shuffle's into a mask (#1840).
+    const uint32_t compare_width = forest->vectors && (op == IR_VCMP || (op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_BITSHUFFLE)) && a < function->instruction_count ?
+                                       tier1_select_vector_width(function->type[a]) :
+                                       0;
     // The vector class's value's width, a floating value's or a vector's: its loads', stores' and phis' rules are one.
     const uint32_t class_width = float_width != 0 ? float_width : vector_width;
     // A vector's operations (#141), behind one test: a function without vectors pays no other here.
@@ -5089,7 +5200,8 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
                                                    op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_LANE_OP) || ir_intrinsic_ternary(c) ||
                                                                            c == BUSTER_IR_INTRINSIC_AES || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_REDUCE ||
-                                                                           c == BUSTER_IR_INTRINSIC_LANE_UNARY || c == BUSTER_IR_INTRINSIC_FROUND)))) ||
+                                                                           c == BUSTER_IR_INTRINSIC_LANE_UNARY || c == BUSTER_IR_INTRINSIC_FROUND ||
+                                                                           c == BUSTER_IR_INTRINSIC_QUADWORD_OP)))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -5251,6 +5363,42 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.intrinsic_cost = 1;
             tier1_select_add_candidate(forest, node, &candidates, base);
         }
+        else if (vector_width != 0 && op == IR_INTRINSIC && ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_FUNNEL && ir_intrinsic_ternary(c))
+        {
+            // A funnel shift (#1840): a rotate by an immediate where its halves are one value and its counts a constant in
+            // every lane, first, as the bottom-up path takes its kind's first candidate; and by its counts' register.
+            const uint32_t third = ir_intrinsic_third(function, node);
+            const uint32_t flags = function->flags[node];
+            uint64_t count = 0;
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_FUNNEL;
+            base.operation = (uint8_t)flags;
+            base.values[0] = a;
+            base.intrinsic_cost = 1;
+            if (a == b && tier1_select_lane_splat(function, third, vector_width, 8u << (flags & 3), &count))
+            {
+                Tier1SelectPattern rotate = base;
+                rotate.condition = 1;
+                rotate.immediate = count;
+                tier1_select_add_candidate(forest, node, &candidates, rotate);
+            }
+            base.values[1] = b;
+            base.values[2] = third;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_QUADWORD_OP)
+        {
+            // A quadword operation (#1840): its operation in the IR's flags.
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_QUADWORD_OP;
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            base.values[1] = b;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
         else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_AES)
         {
             // An AES round (#1840): its round in the IR's flags.
@@ -5360,7 +5508,18 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 tier1_select_add_candidate(forest, node, &candidates, base);
             }
         }
-        else if (compare_width != 0 && mask_width != 0 && c < IR_PREDICATE_COUNT)
+        else if (compare_width != 0 && mask_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_BITSHUFFLE)
+        {
+            // A bit shuffle into a mask (#1840): vpshufbitqmb of values[0]'s quadwords by values[1]'s bytes.
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)compare_width;
+            base.scale = BUSTER_TIER1_VECTOR_BITSHUFFLE;
+            base.values[0] = a;
+            base.values[1] = b;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (compare_width != 0 && mask_width != 0 && op == IR_VCMP && c < IR_PREDICATE_COUNT)
         {
             // A comparison of signed integer lanes less than a zero vector (#1840: a vector's sign bits as a mask,
             // vpmovb2m to vpmovq2m), first, as the bottom-up path takes its kind's first candidate.
@@ -5474,15 +5633,17 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         // ir_simd_typed_compare_mask, whose writemask isn't every lane, ir_typed_unmasked): the comparison under that mask
         // as its writemask, `{k}`, which leaves 0 in the lanes the writemask doesn't have, one vpcmp or vcmpps as the
         // row's was. The comparison is the AND's tree child, either operand, the left one first.
+        // A bit shuffle into a mask (#1840) ANDed with another is vpshufbitqmb under it the same way.
         const uint32_t compared = op != IR_AND ? BUSTER_IR_NONE : tier1_select_masked_compare(forest, node, a) ? a : tier1_select_masked_compare(forest, node, b) ? b : BUSTER_IR_NONE;
         if (compared != BUSTER_IR_NONE)
         {
+            const bool shuffle = function->op[compared] == IR_INTRINSIC;
             Tier1SelectPattern masked = base;
             masked.rule = TIER1_RULE_VECTOR;
             masked.width = (uint8_t)tier1_select_vector_width(function->type[function->a[compared]]);
-            masked.scale = BUSTER_TIER1_VECTOR_COMPARE;
-            masked.condition = (uint8_t)function->c[compared];
-            masked.source_width = function->flags[compared];
+            masked.scale = shuffle ? BUSTER_TIER1_VECTOR_BITSHUFFLE : BUSTER_TIER1_VECTOR_COMPARE;
+            masked.condition = shuffle ? 0 : (uint8_t)function->c[compared];
+            masked.source_width = shuffle ? 0 : function->flags[compared];
             masked.values[0] = function->a[compared];
             masked.values[1] = function->b[compared];
             masked.values[2] = compared == a ? b : a;
@@ -6588,10 +6749,11 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     else if (forest->vectors && op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_MOVEMASK) && a < function->instruction_count)
     {
         // A vector's lane, or its lanes' sign bits, into a general register (#1840): TIER1_RULE_VECTOR's of the vector's
-        // width, its destination the general one.
+        // width, its destination the general one; or lane 0 into an SSE carrier, `source_width` its bytes.
         base.rule = TIER1_RULE_VECTOR;
         base.width = (uint8_t)tier1_select_vector_width(function->type[a]);
         base.scale = c == BUSTER_IR_INTRINSIC_MOVEMASK ? BUSTER_TIER1_VECTOR_MOVEMASK : BUSTER_TIER1_VECTOR_LANE_EXTRACT;
+        base.source_width = (uint8_t)(c == BUSTER_IR_INTRINSIC_LANE_EXTRACT ? tier1_select_float_width(type) : 0);
         base.immediate = function->flags[node];
         base.values[0] = a;
         base.intrinsic_cost = 1;
