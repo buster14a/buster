@@ -11278,8 +11278,9 @@ static __attribute__((noinline, cold)) void tier0_direct_references(const Tier0F
 static uint32_t tier0_x87_transfer_slot(const X86Instruction* record, const Tier0Frame* frame)
 {
     const int64_t displacement = (int64_t)record->displacement - ((int64_t)frame->memory_area + frame->bias);
+    const uint32_t depths = frame->memory_depths > BUSTER_TIER0_INTEGER_DEPTHS ? frame->memory_depths : BUSTER_TIER0_INTEGER_DEPTHS;
     const bool slot = record->mode == BUSTER_X86_MEMORY_BASE && record->rm == frame->base && displacement >= 0 &&
-                      displacement < (int64_t)frame->memory_depths * BUSTER_TIER0_MEMORY_SLOT_BYTES &&
+                      displacement < (int64_t)depths * BUSTER_TIER0_MEMORY_SLOT_BYTES &&
                       (displacement & (BUSTER_TIER0_MEMORY_SLOT_BYTES - 1)) == 0;
     return slot ? (uint32_t)(displacement / BUSTER_TIER0_MEMORY_SLOT_BYTES) : BUSTER_X87_TRANSFER_NONE;
 }
@@ -11300,7 +11301,7 @@ static void tier0_x87_transfers(const Tier0Function* function, const Tier0Entrie
         const uint64_t mark = scratch->length;
         const uint32_t count = code->count;
         const uint32_t entry_count = function->count;
-        const uint32_t depths = frame->memory_depths;
+        const uint32_t depths = frame->memory_depths > BUSTER_TIER0_INTEGER_DEPTHS ? frame->memory_depths : BUSTER_TIER0_INTEGER_DEPTHS;
         X86Instruction* const records = code->records;
         const uint32_t* const positions = entries->positions;
         uint32_t* tokens = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count);

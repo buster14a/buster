@@ -1635,6 +1635,10 @@ static __attribute__((noinline)) void tier0_test_x87_transfer_reference(Tier0Tes
         {
             value = -value;
         }
+        else if (which == 6)
+        {
+            value = value + shared->in[2];
+        }
     }
     memcpy(shared->transfer_expected, (const void*)&value, 10);
 }
@@ -1661,7 +1665,7 @@ static void tier0_test_x87_transfer_input(Tier0TestX87Program* program, uint32_t
 static void tier0_test_x87_transfers(Tier0TestTally* tally, const Tier0TestX87Abi* abi, Tier0TestX87Shared* shared)
 {
     static const char* const names[] = { "direct sum", "ordered chain", "duplicate", "kept local store", "kept pointer store", "raw copy", "fence" };
-    static const uint32_t stores[] = { 3, 5, 5, 5, 6, 2, 4 };
+    static const uint32_t stores[] = { 3, 5, 5, 5, 6, 2, 5 };
     static const uint32_t precision[] = { 0, 2, 3 };
     Arena arena = arena_reserve(1ull << 24);
     uint8_t* image = calloc(2, 4 * BUSTER_TIER0_TEST_PAGE);
@@ -1709,6 +1713,8 @@ static void tier0_test_x87_transfers(Tier0TestTally* tally, const Tier0TestX87Ab
         else if (which == 6)
         {
             tier0_test_x87_emit(&program, BUSTER_TYPED_FENCE, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_FENCE_SIGNAL | BUSTER_TYPED_FENCE_SEQ_CST);
+            tier0_test_x87_transfer_input(&program, 2);
+            tier0_test_x87_emit(&program, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_F80, 0);
         }
         tier0_test_x87_emit(&program, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_F80, 0);
         tier0_test_x87_emit(&program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
