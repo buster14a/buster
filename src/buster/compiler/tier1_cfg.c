@@ -144,6 +144,9 @@ struct Tier1CfgInput
     const uint32_t* clobbers;
     uint32_t clobber_count;
     uint32_t clobber_registers[BUSTER_TIER1_ALLOCATE_CLASSES];
+    // Optional (#2618), per value: nonzero for a recipe that keeps its register at a join (Tier1AllocationInput's
+    // resident_values), the preferred problem's #2574 hot recipes.
+    const uint8_t* resident;
     // Optional (#2685), two per value: the values whose registers its definition may take, in preference order, or
     // BUSTER_TIER1_CFG_NONE: a two-address instruction's first operand, which its destination is otherwise a copy of. The
     // definition's interval takes one where that operand's interval ends at the definition, and nothing else hints it.
@@ -960,6 +963,7 @@ struct Tier1CfgPieces
     uint8_t* remat;
     uint32_t* hints;
     uint32_t* hint_intervals;
+    uint8_t* joins;
     uint32_t* split_positions;
     uint32_t* split_values;
     uint64_t count;
@@ -983,6 +987,7 @@ static void tier1_cfg_piece(Tier1CfgPieces* pieces, const Tier1CfgInput* input, 
         pieces->remat[i] = input->rematerializable != 0 ? input->rematerializable[v] : 0;
         pieces->hints[i] = hint;
         pieces->hint_intervals[i] = earlier;
+        pieces->joins[i] = 0;
         if (split)
         {
             pieces->split_positions[pieces->splits] = start;
@@ -1958,10 +1963,11 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                 pieces.remat = ready ? arena_push(output, interval_count + 1, 1) : 0;
                 pieces.hints = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 pieces.hint_intervals = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+                pieces.joins = ready ? arena_push(output, interval_count + 1, 1) : 0;
                 use_offsets = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 pieces.split_positions = ready ? arena_push_array(scratch, split_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
                 pieces.split_values = ready ? arena_push_array(scratch, split_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-                ready = ready && pieces.starts != 0 && pieces.ends != 0 && pieces.values != 0 && pieces.allowed != 0 && pieces.classes != 0 && pieces.remat != 0 && pieces.hints != 0 && pieces.hint_intervals != 0 && use_offsets != 0 && pieces.split_positions != 0 && pieces.split_values != 0;
+                ready = ready && pieces.starts != 0 && pieces.ends != 0 && pieces.values != 0 && pieces.allowed != 0 && pieces.classes != 0 && pieces.remat != 0 && pieces.hints != 0 && pieces.hint_intervals != 0 && pieces.joins != 0 && use_offsets != 0 && pieces.split_positions != 0 && pieces.split_values != 0;
                 pieces.fill = ready;
             }
             if (ready)
@@ -2045,6 +2051,19 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                                     const bool anchored = !modeled && anchor != BUSTER_TIER1_CFG_NONE && exit_stamps[anchor] == v + 1;
                                     const uint32_t earlier = modeled ? entry_pieces[model] : anchored ? exit_pieces[anchor] | BUSTER_TIER1_ALLOCATE_HINT_EXIT : BUSTER_TIER1_CFG_NONE;
                                     tier1_cfg_piece(&pieces, input, v, from, to, piece == 0 && defined_here ? phi_hints[v] : v, earlier, piece != 0);
+                                    // A range entering a join (#2618): its predecessor count, and whether one is laid
+                                    // out at or after it, for an unused recipe to rest there (Tier1AllocationInput.join_starts).
+                                    const uint32_t incoming = entry && !defined_here ? input->predecessor_offsets[b + 1] - input->predecessor_offsets[b] : 0;
+                                    uint32_t later = 0;
+                                    for (uint32_t q = input->predecessor_offsets[b]; pieces.fill && incoming >= BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM && q < input->predecessor_offsets[b + 1]; q += 1)
+                                    {
+                                        later += input->predecessors[q] >= b;
+                                    }
+                                    if (pieces.fill && incoming >= BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM)
+                                    {
+                                        const uint32_t count = incoming < BUSTER_TIER1_ALLOCATE_JOIN_COUNT ? incoming : BUSTER_TIER1_ALLOCATE_JOIN_COUNT;
+                                        pieces.joins[pieces.count - 1] = (uint8_t)(count | (later != 0 ? BUSTER_TIER1_ALLOCATE_JOIN_LATER : 0));
+                                    }
                                 }
                                 if (entry)
                                 {
@@ -2100,6 +2119,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                     .classes = pieces.classes,
                     .hint_values = pieces.hints,
                     .hint_intervals = pieces.hint_intervals,
+                    .join_starts = pieces.joins,
                     .rematerializable = input->rematerializable != 0 ? pieces.remat : 0,
                     .use_offsets = use_offsets,
                     .use_positions = input->use_positions,
@@ -2170,6 +2190,7 @@ static void tier1_cfg_problem_registers(const Tier1CfgInput* input, Tier1Allocat
     }
     intervals->clobbers = input->clobbers;
     intervals->clobber_count = input->clobber_count;
+    intervals->resident_values = input->resident;
 }
 
 // One assignment (3. above) over the prepared intervals, for `input`'s registers and `column`, the registers each
@@ -2592,6 +2613,8 @@ struct Tier1CfgPreference
     const uint32_t* clobbers;
     uint32_t clobber_count;
     uint32_t clobber_registers[BUSTER_TIER1_ALLOCATE_CLASSES];
+    // The preferred problem's resident recipes (Tier1CfgInput.resident, #2618), or none.
+    const uint8_t* resident;
     bool verdict;
 };
 
@@ -2608,6 +2631,7 @@ static __attribute__((unused)) bool tier1_cfg_preferred(const Tier1CfgInput* inp
     preferred->allowed_registers = allowed;
     preferred->clobbers = preference->clobbers;
     preferred->clobber_count = preference->clobber_count;
+    preferred->resident = preference->resident;
     for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
     {
         preferred->registers[c] = preference->registers[c];
@@ -2769,7 +2793,8 @@ static __attribute__((unused)) uint32_t tier1_cfg_differs(const Tier1CfgInput* i
            tier1_cfg_same_column(a->allowed_registers, b->allowed_registers, count * 4) && tier1_cfg_same_column(a->classes, b->classes, count);
     differs = same || differs != 0 ? differs : 2;
     same = same && tier1_cfg_same_column(a->hint_values, b->hint_values, count * 4) && tier1_cfg_same_column(a->hint_intervals, b->hint_intervals, count * 4) &&
-           tier1_cfg_same_column(a->rematerializable, b->rematerializable, count) && tier1_cfg_same_column(a->flags, b->flags, count) && tier1_cfg_same_column(a->hints, b->hints, count);
+           tier1_cfg_same_column(a->rematerializable, b->rematerializable, count) && tier1_cfg_same_column(a->flags, b->flags, count) && tier1_cfg_same_column(a->hints, b->hints, count) &&
+           tier1_cfg_same_column(a->join_starts, b->join_starts, count) && tier1_cfg_same_column(a->resident_values, b->resident_values, input->value_count);
     differs = same || differs != 0 ? differs : 3;
     same = same && tier1_cfg_same_column(a->use_offsets, b->use_offsets, (count + 1) * 4) && a->use_positions == b->use_positions && a->use_required == b->use_required;
     differs = same || differs != 0 ? differs : 4;

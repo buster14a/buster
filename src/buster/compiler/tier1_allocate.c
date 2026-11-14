@@ -46,6 +46,14 @@
 #define BUSTER_TIER1_ALLOCATE_MEMORY_HINT 0xfeu
 // In a hint_intervals entry: the named interval's register at its end, rather than at its start (#2553).
 #define BUSTER_TIER1_ALLOCATE_HINT_EXIT 0x80000000u
+// A closing's byte in `last` while its interval, evicted by a clobber, is out of its register (#2735): noted as no hint at
+// its end, not as BUSTER_TIER1_ALLOCATE_MEMORY_HINT. Never a register or a hint a reader takes.
+#define BUSTER_TIER1_ALLOCATE_CLOBBERED 0xfdu
+// A join_starts byte (#2618): the block's predecessors, saturating, and whether one is laid out at or after the block.
+#define BUSTER_TIER1_ALLOCATE_JOIN_COUNT 0x7fu
+#define BUSTER_TIER1_ALLOCATE_JOIN_LATER 0x80u
+// The predecessors from which an unused recipe rests at a block's entry (#2618).
+#define BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM 3
 
 typedef struct Tier1FixedIntervals Tier1FixedIntervals;
 struct Tier1FixedIntervals
@@ -80,6 +88,15 @@ struct Tier1AllocationInput
     // is the one (#2553): a block's entry takes its values' places at the exit of a block that dominates it, and a phi
     // its operand's at a predecessor's.
     const uint32_t* hint_intervals;
+    // Optional, with hint_intervals (#2618): per interval, a join_starts byte where it enters its block from another one,
+    // the block's predecessor count and BUSTER_TIER1_ALLOCATE_JOIN_LATER; 0 for any other interval. A recipe the
+    // interval doesn't use rests at a join of BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM or more predecessors where its hint is
+    // no predecessor's closing or a predecessor comes later, rather than make each edge recompute it: sqlite3VdbeExec's
+    // dispatch join, laid out after its first successor.
+    const uint8_t* join_starts;
+    // Optional, per value (#2618): nonzero for a recipe that keeps its register at a join all the same, #2574's hot ones
+    // (Lua's disptab), which every handler's tail already holds.
+    const uint8_t* resident_values;
     const uint8_t* rematerializable;
     // Both use columns may be absent (next use then conservatively means interval end). Otherwise each slice is
     // sorted, contains positions inside its interval, and may be empty. Duplicate positions are legal.
@@ -280,7 +297,8 @@ static uint8_t tier1_allocation_value_hint(const Tier1AllocationInput* columns, 
     // A hinted interval whose own value already had a place, in an interval earlier in layout, keeps it: a loop's header
     // after its body takes the register the body gave its phi, not its operand's.
     const uint8_t own = value != UINT32_MAX ? last[columns->values[interval]] : UINT8_MAX;
-    return opening != UINT8_MAX ? opening : own != UINT8_MAX ? own : value != UINT32_MAX ? last[value] : UINT8_MAX;
+    const bool named_place = opening != UINT8_MAX && opening != BUSTER_TIER1_ALLOCATE_CLOBBERED;
+    return named_place ? opening : own != UINT8_MAX ? own : value != UINT32_MAX ? last[value] : UINT8_MAX;
 }
 
 static void tier1_allocation_note_opening(const Tier1AllocationInput* columns, uint8_t* last, uint32_t interval, uint32_t chosen)
@@ -292,11 +310,14 @@ static void tier1_allocation_note_opening(const Tier1AllocationInput* columns, u
 }
 
 // An interval's register as it ends, or none (#2553): read by the intervals that name it with BUSTER_TIER1_ALLOCATE_HINT_EXIT.
+// An interval a clobber last evicted ends with no hint (#2735): the range after it shouldn't wait in memory because a call
+// took the register, as luaV_execute's dispatch join would for disptab, which a handler's call evicts.
 static void tier1_allocation_note_closing(const Tier1AllocationInput* columns, uint8_t* last, uint32_t interval, uint32_t held)
 {
     if (last != 0 && columns->hint_intervals != 0)
     {
-        last[(uint64_t)columns->value_count + 1 + columns->count + interval] = held < 32 ? (uint8_t)held : BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
+        uint8_t* closing = &last[(uint64_t)columns->value_count + 1 + columns->count + interval];
+        *closing = held < 32 ? (uint8_t)held : *closing == BUSTER_TIER1_ALLOCATE_CLOBBERED ? UINT8_MAX : BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
     }
 }
 
@@ -468,6 +489,12 @@ static void tier1_allocation_evict(const Tier1AllocationInput* columns, Tier1All
     }
     kinds[victim] = kind;
     regs[victim] = UINT8_MAX;
+    // A later eviction is no clobber's: the closing is noted as usual unless the clobber site marks it again.
+    uint8_t* closing = last != 0 && columns->hint_intervals != 0 ? &last[(uint64_t)columns->value_count + 1 + columns->count + victim] : 0;
+    if (closing != 0 && *closing == BUSTER_TIER1_ALLOCATE_CLOBBERED)
+    {
+        *closing = UINT8_MAX;
+    }
 }
 
 static bool tier1_allocation_required_at(const Tier1AllocationInput* input, uint32_t interval, uint32_t position)
@@ -555,6 +582,10 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
                 if (tier1_allocation_spill_kind(&columns, victim) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && !tier1_allocation_required_at(&columns, victim, position))
                 {
                     tier1_allocation_evict(&columns, pieces, victim, position, begins, kinds, regs, last, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, false);
+                    if (last != 0 && columns.hint_intervals != 0)
+                    {
+                        last[(uint64_t)columns.value_count + 1 + columns.count + victim] = BUSTER_TIER1_ALLOCATE_CLOBBERED;
+                    }
                     active[r] = UINT32_MAX;
                     occupied &= ~(1u << r);
                 }
@@ -619,12 +650,22 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             claimed &= ~mine;
             uint32_t chosen = UINT32_MAX;
             // An unused recipe rests where its hint is another range's opening that took no register: the convention of the
-            // block it takes, whose edges then recompute nothing for it (hexFunc's header, after its body). A range's
-            // closing after a call took the register isn't one: luaV_execute's dispatch join then took no register for
-            // disptab, which every dispatch recomputed.
+            // block it takes, whose edges then recompute nothing for it (hexFunc's header, after its body).
             const uint32_t named = last != 0 && columns.hint_intervals != 0 ? columns.hint_intervals[interval] : UINT32_MAX;
-            const bool rests = follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT && named != UINT32_MAX && (named & BUSTER_TIER1_ALLOCATE_HINT_EXIT) == 0;
-            if (idle && (!recomputed || open == 0 || rests))
+            const bool opening = named == UINT32_MAX || (named & BUSTER_TIER1_ALLOCATE_HINT_EXIT) == 0;
+            const bool rests = follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT && named != UINT32_MAX && opening;
+            // A recipe whose hint is memory, which its last range ended in, takes no register at its start either: it
+            // waits for its first read, where a required use gives it one. jsonLookupStep's sqlite3CtypeMap, read past a
+            // loop, otherwise took the register the loop's frame address followed and made each iteration swap them
+            // (#2618). A closing a call emptied gives no such hint (tier1_allocation_note_closing).
+            const bool waits = recomputed && !use_event && !required && follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
+            // An unused recipe entering a join rests there too, unless it is resident or its hint is a closing of the
+            // predecessors before it, which already hold it (lua_getmetatable's zero): each edge would recompute it, where
+            // its reads after the join, on fewer paths, do (sqlite3VdbeExec's frame address at its dispatch join).
+            const uint8_t join = columns.join_starts != 0 ? columns.join_starts[interval] : 0;
+            const bool resident = columns.resident_values != 0 && columns.resident_values[columns.values[interval]] != 0;
+            const bool joins = (join & BUSTER_TIER1_ALLOCATE_JOIN_COUNT) >= BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM && !resident && (opening || (join & BUSTER_TIER1_ALLOCATE_JOIN_LATER) != 0);
+            if ((idle && (!recomputed || open == 0 || rests || joins)) || waits)
             {
             }
             else if (open != 0 || (free != 0 && required))

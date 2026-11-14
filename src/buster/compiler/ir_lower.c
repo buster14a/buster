@@ -1447,6 +1447,58 @@ static bool ir_typed_hoistable(const Tier0Function* input, uint32_t entry)
 // are listed once, counted by an open-addressed table of the symbols, sized to twice the takes, and numbered in entry
 // order, which the emission reads with a cursor as it does the tables'. Scalar past the compare: it visits the takes
 // alone, a few in a hundred of a function's entries. False where the arena is short.
+// Whether a take's address is only a call's argument (#2618): the first entry that pops it, within its block, is a call
+// taking it as an argument, not as an indirect call's target. The take's own lea puts the address in the argument's
+// register; a hoisted address would be a move there, no fewer instructions, for a register held from its definition on
+// (sqlite3Select's sqlite3ExprListDeleteGeneric, passed to sqlite3ParserAddCleanup on rare paths, was computed on each
+// call). The walk follows the stack's depth over the entries that push and pop without leaving the block, and stops at
+// anything else; a long argument list past a few dozen entries keeps the take hoistable. Scalar: a few entries per take.
+static bool ir_typed_argument(const Tier0Function* input, const IrTypedPlan* plan, uint32_t entry)
+{
+    uint32_t depth = 1;
+    bool argument = false;
+    bool walking = true;
+    for (uint32_t j = entry + 1; walking && j < input->count && j < entry + 48; j += 1)
+    {
+        const uint8_t kind = input->kinds[j];
+        const bool leader = plan->block_firsts[plan->entry_blocks[j]] == j;
+        const bool push = kind == BUSTER_TYPED_CONST || kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_GLOBAL ||
+                          kind == BUSTER_TYPED_GLOBAL_ADDRESS || kind == BUSTER_TYPED_FRAME_ADDRESS;
+        const bool unary = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_NEG || kind == BUSTER_TYPED_NOT || kind == BUSTER_TYPED_CONVERT ||
+                           kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_STORE_GLOBAL;
+        const bool popping = kind == BUSTER_TYPED_SET_LOCAL || kind == BUSTER_TYPED_SET_GLOBAL || kind == BUSTER_TYPED_DISCARD;
+        const bool binary = kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET || (kind >= BUSTER_TYPED_ADD && kind <= BUSTER_TYPED_GE);
+        if (leader)
+        {
+            walking = false;
+        }
+        else if (push)
+        {
+            depth += 1;
+        }
+        else if (unary)
+        {
+            walking = depth > 1;
+        }
+        else if (popping)
+        {
+            walking = depth > 1;
+            depth -= 1;
+        }
+        else if (binary)
+        {
+            walking = depth > 2;
+            depth -= kind == BUSTER_TYPED_SET ? 2 : 1;
+        }
+        else
+        {
+            argument = kind == BUSTER_TYPED_CALL && depth <= input->call_argument_counts[input->values[j]];
+            walking = false;
+        }
+    }
+    return argument;
+}
+
 static bool ir_typed_plan_hoisted(const Tier0Function* input, IrTypedPlan* plan, Arena* scratch)
 {
     const uint32_t* tables = input->table_addresses;
@@ -1468,7 +1520,7 @@ static bool ir_typed_plan_hoisted(const Tier0Function* input, IrTypedPlan* plan,
         {
             table += 1;
         }
-        if (input->kinds[i] == BUSTER_TYPED_GLOBAL_ADDRESS && ir_typed_hoistable(input, i) && !(table < table_count && tables[table] == i))
+        if (input->kinds[i] == BUSTER_TYPED_GLOBAL_ADDRESS && ir_typed_hoistable(input, i) && !(table < table_count && tables[table] == i) && !ir_typed_argument(input, plan, i))
         {
             taken[addresses] = i;
             addresses += 1;

@@ -4626,6 +4626,18 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
             hot_count += pass == 1 && hot[v] == 1 && (caller & BUSTER_TIER1_EMIT_CFG_RESIDENT) != 0;
         }
     }
+    // The hot recipes keep their registers at joins in the preferred problem (#2618): every handler's tail of a dispatch
+    // loop holds Lua's disptab already, where an unused recipe of no loop's rests (Tier1AllocationInput.resident_values).
+    uint32_t hot_recipes = 0;
+    for (uint32_t v = 0; ok && v < input->value_count; v += 1)
+    {
+        hot_recipes += hot[v] == 1;
+    }
+    uint8_t* resident = ok && hot_recipes != 0 ? ir_allocate(output, (uint64_t)input->value_count + 1, 1, &ok) : 0;
+    for (uint32_t v = 0; resident != 0 && v < input->value_count; v += 1)
+    {
+        resident[v] = hot[v] == 1;
+    }
     // The calls' definition phases clobber the caller-saved registers in the preferred problem, where a hot value leaves
     // one of them: its recomputation, where it is next needed, stands for a save and a reload around the call.
     uint32_t* clobbers = ok && hot_count != 0 ? ir_allocate(output, (uint64_t)call_count + 1, 4, &ok) : 0;
@@ -4641,6 +4653,7 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
             0,
             0,
         },
+        .resident = resident,
     };
     *preferred = allowed;
     *crossing = count;
@@ -4711,6 +4724,7 @@ static Tier1EmitError tier1_emit_cfg_two_calls(const Tier1SelectPlan* plan, cons
             clobbering.clobber_registers[1],
             clobbering.clobber_registers[2],
         },
+        .resident = clobbering.resident,
     };
     error = error == TIER1_EMIT_OK && moved != 0 && !tier1_cfg_preferred(input, &preference, output, &problem) ? TIER1_EMIT_MEMORY : error;
     if (error == TIER1_EMIT_OK && moved != 0)
@@ -4771,6 +4785,7 @@ static Tier1EmitError tier1_emit_cfg_one_call(const Tier1SelectPlan* plan, const
                 clobbering.clobber_registers[1],
                 clobbering.clobber_registers[2],
             },
+            .resident = clobbering.resident,
             .verdict = true,
         };
         const uint32_t* preferred = 0;
