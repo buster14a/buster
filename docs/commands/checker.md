@@ -572,6 +572,31 @@ line. The cases' bytes are the table's literals as clang compiled them, compared
 byte for byte when they moved (buster-performance's
 `fixtures-runtime-2053-2026-11-13`).
 
+Ten test files' own source tables, 596 cases, are runtime data in the same
+format, a directory a suite under `tests/checker/`, which `check_test_suite`
+(`c_checker_test.c`) reads and runs. Each case is written to a file, clang
+`-fsyntax-only -std=gnu17` checks them all at once, and then each case's
+acceptance is compared with clang's and `check_test_source` checks both paths,
+as the tables' own loops did. There are no generated cases.
+
+| Suite | Cases | Runner (its test file) |
+| --- | ---: | --- |
+| `align` | 67 | `check_test_align_sources` (`c_check_program_align_test.c`) |
+| `classify` | 20 | `check_test_classify_sources` (`c_check_program_classify_test.c`) |
+| `cleanup` | 71 | `check_test_cleanup_sources` (`c_check_cleanup_test.c`) |
+| `const-alias` | 53 | `check_test_const_alias_sources` (`c_check_const_alias_test.c`) |
+| `float-constants` | 8 | `check_test_float_constant_sources` (`c_check_program_constants_test.c`) |
+| `generic-builtins` | 268 | `check_test_generic_builtin_sources` (`c_check_program_generic_builtins_test.c`) |
+| `library` | 21 | `check_test_library_sources` (`c_check_program_library_test.c`) |
+| `musttail` | 63 | `check_test_musttail_sources` (`c_check_musttail_test.c`) |
+| `transparent` | 8 | the end of `check_test_transparent_calls` (`c_check_transparent_test.c`) |
+| `transparent-types` | 17 | the end of `check_test_transparent_types` (`c_check_transparent_type_test.c`) |
+
+A table's comments are `#` lines of its catalog, above the cases they described.
+The other test files' tables stay C for now: they build their sources when they
+run, pair each case with data of their own, or pick cases by index (#2053 lists
+them).
+
 ## System-header token bitmap and MSan (#1610)
 
 The source reader maps parser tokens' source indices to system-header bits in

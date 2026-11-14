@@ -872,10 +872,14 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
                     use_cursors[v] += 1;
                 }
             }
+            // A definition's own use requires its register, but a recipe's (#2618): where values read sooner hold every
+            // register, the allocator gives the recipe none, the cheapest choice, which leaves the definition out
+            // (tier1_emit_cfg_dead_definition), where it found none and failed the assignment, whose second try, with
+            // every definition freed, spilled.
             if (defined != BUSTER_TIER1_CFG_NONE && !tier1_select_entry_parameter(function, node) && function->op[node] != IR_PHI)
             {
                 use_positions[use_cursors[defined]] = base + 2 * node + 1;
-                use_required[use_cursors[defined]] = 1;
+                use_required[use_cursors[defined]] = rematerializable[defined] == 0;
                 use_cursors[defined] += 1;
             }
         }
@@ -1842,7 +1846,9 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t ed
 // keeps v (or the phi) in the same one, with no move at all (#141: sqlite3VdbeExec's join of an error code). Its
 // records can then be left out, the value recomputed where it is used (an edge's move or a fragment's transition takes
 // the recipe rather than the register), as the definition's records only compute a value: a constant, an address or a
-// copy of one. A use at position p > the definition is node (p - base) / 2's.
+// copy of one. So is a definition the allocator gave no register (#2618), whose first fragment recomputes it: its own use
+// isn't required, and values read sooner held every register (tier1_dropped_test.c's g). A use at position p > the
+// definition is node (p - base) / 2's.
 static bool tier1_emit_cfg_dead_definition(const Tier1EmitResult* emitted, uint32_t v, uint32_t definition, const uint8_t* dropped, uint32_t base)
 {
     const Tier1CfgAllocation* cfg = &emitted->cfg;
@@ -1854,15 +1860,18 @@ static bool tier1_emit_cfg_dead_definition(const Tier1EmitResult* emitted, uint3
     const uint32_t end = interval != BUSTER_TIER1_CFG_NONE ? cfg->intervals.ends[interval] : 0;
     const bool inside = last && end != input->block_starts[tier1_cfg_block_of(input, end - 1) + 1];
     const uint32_t block = interval != BUSTER_TIER1_CFG_NONE ? tier1_cfg_block_of(input, definition) : 0;
-    bool dead = interval != BUSTER_TIER1_CFG_NONE && cfg->intervals.starts[interval] == definition && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER &&
-                allocation->ends[first] < input->block_starts[block + 1] && (inside || (!last && allocation->kinds[first + 1] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE));
+    const bool starts = interval != BUSTER_TIER1_CFG_NONE && cfg->intervals.starts[interval] == definition;
+    // Given no register at all (#2618: its definition's use isn't required), the first fragment recomputes it.
+    const bool bare = starts && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
+    bool dead = starts && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER && allocation->ends[first] < input->block_starts[block + 1] &&
+                (inside || (!last && allocation->kinds[first + 1] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE));
     // Uses are sorted: the definition's own (at its position), then those the first fragment serves, before its end.
     for (uint32_t u = dead ? input->use_offsets[v] : 0; dead && u < input->use_offsets[v + 1]; u += 1)
     {
         const uint32_t position = input->use_positions[u];
         dead = position <= definition || position >= allocation->ends[first] || dropped[(position - base) / 2] != 0;
     }
-    return dead;
+    return dead || bare;
 }
 
 // A jump of `form` to `goal` (a block, or an edge's stub with BUSTER_TIER1_EMIT_CFG_STUB), resolved once every block's
@@ -3354,6 +3363,99 @@ static uint64_t tier1_emit_cfg_x87_node_records(const Tier1SelectPlan* plan, uin
     return records;
 }
 
+// Optional transport of a canonical F80 result to its sole consumer (#1387). Use the complete IR use list, including
+// repeated operands, calls and phi edges. Only the selected producer's own private store and the selected consumer's
+// matching load are annotated; raw loads and constants keep their initial materialization. The shared record proof
+// preserves both waiting points and every metadata index, and declines barriers, right operands and excess pressure.
+static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitResult* emitted, uint32_t records, const uint32_t* block_first, uint32_t blocks, bool vector, Arena* output, Arena* scratch)
+{
+    const IrFunction* function = plan->function;
+    const uint32_t nodes = function->instruction_count;
+    const uint64_t mark = scratch->length;
+    IrUses uses = { 0 };
+    bool ok = emitted->prepared.x87_count != 0 && ir_uses_path(function, scratch, output, &uses, vector) == IR_OK;
+    uint32_t* tokens = ok ? ir_allocate(scratch, (uint64_t)records + 1, 4, &ok) : 0;
+    uint8_t* eligible = ok ? ir_allocate(scratch, (uint64_t)records + 1, 1, &ok) : 0;
+    uint8_t* boundaries = ok ? ir_allocate(scratch, (uint64_t)records + 1, 1, &ok) : 0;
+    uint8_t* canonical = ok ? ir_allocate(scratch, (uint64_t)nodes + 1, 1, &ok) : 0;
+    if (ok)
+    {
+        memset(tokens, 0xff, ((uint64_t)records + 1) * 4);
+        memset(eligible, 0, (uint64_t)records + 1);
+        memset(boundaries, 0, (uint64_t)records + 1);
+        memset(canonical, 0, (uint64_t)nodes + 1);
+        boundaries[0] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
+        boundaries[records] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
+        for (uint32_t b = 0; b < blocks; b += 1)
+        {
+            boundaries[block_first[b]] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
+        }
+        for (uint32_t node = 0; node < nodes; node += 1)
+        {
+            const uint32_t first = emitted->code.node_first[node];
+            const uint32_t end = node + 1 < nodes ? emitted->code.node_first[node + 1] : records;
+            const uint32_t op = function->op[node];
+            const uint32_t a = function->a[node];
+            const bool arithmetic = op == IR_FADD || op == IR_FSUB || op == IR_FMUL || op == IR_FDIV;
+            const bool converts = op == IR_SITOFP || op == IR_UITOFP || op == IR_FEXT;
+            const bool copied = (op == IR_COPY || op == IR_FNEG) && a < node && canonical[a] != 0;
+            canonical[node] = function->type[node] == IR_F80 && (arithmetic || converts || copied);
+            boundaries[first] |= BUSTER_X87_TRANSFER_BOUNDARY;
+            boundaries[end] |= BUSTER_X87_TRANSFER_BOUNDARY;
+            const bool barrier = (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0 || op == IR_PHI ||
+                                 tier1_select_function_call(function, node) || plan->patterns[node].rule == TIER1_RULE_ROW || plan->patterns[node].rule == TIER1_RULE_ASM;
+            if (barrier)
+            {
+                boundaries[first] |= BUSTER_X87_TRANSFER_CUT;
+                boundaries[end] |= BUSTER_X87_TRANSFER_CUT;
+            }
+        }
+        for (uint32_t node = 0; node < nodes; node += 1)
+        {
+            const bool single = uses.offsets[node + 1] - uses.offsets[node] == 1;
+            const uint32_t user = single ? uses.uses[uses.offsets[node]].instruction : BUSTER_IR_NONE;
+            const bool candidate = canonical[node] != 0 && single && user < nodes && !plan->covered[node] && !plan->covered[user] &&
+                                   plan->patterns[node].rule == TIER1_RULE_X87 && plan->patterns[user].rule == TIER1_RULE_X87;
+            int32_t offset = 0;
+            if (candidate && tier1_emit_cfg_x87_offset(function, emitted, node, &offset))
+            {
+                const uint32_t first = emitted->code.node_first[node];
+                const uint32_t end = node + 1 < nodes ? emitted->code.node_first[node + 1] : records;
+                const uint32_t use_first = emitted->code.node_first[user];
+                const uint32_t use_end = user + 1 < nodes ? emitted->code.node_first[user + 1] : records;
+                uint32_t store = BUSTER_X87_TRANSFER_NONE;
+                uint32_t load = BUSTER_X87_TRANSFER_NONE;
+                uint32_t stores = 0;
+                uint32_t loads = 0;
+                for (uint32_t r = first; r < end; r += 1)
+                {
+                    const X86Instruction* record = &emitted->code.records[r];
+                    const bool found = record->form == X86_FORM_FSTP_M80 && record->mode == BUSTER_X86_MEMORY_BASE &&
+                                       record->rm == emitted->frame.base_register && record->displacement == offset;
+                    store = found ? r : store;
+                    stores += found;
+                }
+                for (uint32_t r = use_first; r < use_end; r += 1)
+                {
+                    const X86Instruction* record = &emitted->code.records[r];
+                    const bool found = record->form == X86_FORM_FLD_M80 && record->mode == BUSTER_X86_MEMORY_BASE &&
+                                       record->rm == emitted->frame.base_register && record->displacement == offset;
+                    load = found ? r : load;
+                    loads += found;
+                }
+                if (stores == 1 && loads == 1 && store < load)
+                {
+                    tokens[store] = store;
+                    tokens[load] = store;
+                    eligible[store] = 1;
+                }
+            }
+        }
+        (void)x87_transfer_records(emitted->code.records, records, tokens, eligible, boundaries, vector);
+    }
+    arena_pop_to(scratch, mark);
+}
+
 static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool vector, bool certify, bool sources, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
 {
     const IrFunction* function = plan->function;
@@ -3501,7 +3603,9 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             // incoming slot into its first fragment's place, a register or its own slot (tier1_emit_cfg_entry, #141).
             const bool stacked = function->op[node] == IR_PARAM && tier1_select_parameter_place(function, function->a[node]).kind == BUSTER_TIER1_PLACE_STACK;
             const bool defines = start == input->definitions[v] && function->op[node] != IR_PHI && !stacked;
-            error = !defines || allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER ? error : TIER1_EMIT_ALLOCATION;
+            // A recipe's definition may have none (#2618), and is then left out (tier1_emit_cfg_dead_definition).
+            const bool recomputed = allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && input->rematerializable != 0 && input->rematerializable[v] != 0;
+            error = !defines || allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER || recomputed ? error : TIER1_EMIT_ALLOCATION;
             for (uint32_t f = first + 1; error == TIER1_EMIT_OK && f < allocation->fragment_offsets[i + 1]; f += 1)
             {
                 const uint8_t kind = allocation->kinds[f];
@@ -3657,9 +3761,10 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             if (error == TIER1_EMIT_OK && v != BUSTER_TIER1_CFG_NONE && selected)
             {
                 error = interval != BUSTER_TIER1_CFG_NONE && cfg->intervals.starts[interval] == use + 1 ? error : TIER1_EMIT_ALLOCATION;
-                // Its class's register, by location: a mask's is the opmask class's (#179).
+                // Its class's register, by location: a mask's is the opmask class's (#179). A definition left out has none.
                 const uint32_t base_location = 32 * tier1_emit_class(&emitted->prepared, node);
-                transitions.registers[node] = error == TIER1_EMIT_OK ? (uint8_t)(base_location + allocation->registers[allocation->fragment_offsets[interval]]) : UINT8_MAX;
+                const bool held = error == TIER1_EMIT_OK && allocation->kinds[allocation->fragment_offsets[interval]] == BUSTER_TIER1_ALLOCATE_REGISTER;
+                transitions.registers[node] = held ? (uint8_t)(base_location + allocation->registers[allocation->fragment_offsets[interval]]) : UINT8_MAX;
             }
             Tier1SelectHoles holes = { 0 };
             // A call's outgoing area in a dynamic frame (tier1_emit_cfg_call_area), released after it returns.
@@ -3670,8 +3775,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             if (error == TIER1_EMIT_OK && selected)
             {
                 const Tier1SelectPattern* pattern = &plan->patterns[node];
-                // A long double (#141) is in its frame object, no register.
-                bool registered = function->type[node] == IR_VOID || function->type[node] == IR_F80 || tier1_emit_cfg_holds(emitted, node, transitions.registers[node]);
+                // A long double (#141) is in its frame object, no register; a definition left out writes none.
+                bool registered = dropped[node] != 0 || function->type[node] == IR_VOID || function->type[node] == IR_F80 || tier1_emit_cfg_holds(emitted, node, transitions.registers[node]);
                 for (uint32_t p = 0; p < BUSTER_TIER1_SELECT_VALUES; p += 1)
                 {
                     const uint32_t value = pattern->values[p];
@@ -4062,6 +4167,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     if (error == TIER1_EMIT_OK)
     {
         tier1_select_requests_flush(&requests, buffer.records);
+        tier1_emit_cfg_x87_transfers(plan, emitted, buffer.count, block_first, blocks, vector, output, scratch);
     }
     if (error == TIER1_EMIT_OK && x86_validate(buffer.records, buffer.count) != buffer.count)
     {
