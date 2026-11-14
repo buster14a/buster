@@ -1041,8 +1041,9 @@ where lld links the static executable, the functions that small compiles run
 go first, together, in a section of their own before `.text`
 (`.text.buster_start`), and the C library's ones right after it, first in
 `.text`. The checker's own code stays in its section, `.text.buster_checker`
-(one section of each unit, `main.c`'s pragmas, #502), which holds 18 of the
-empty file's windows and 60 of `hello.c`'s.
+(one section of each unit, which starts on a page, `main.c`'s pragmas, #502),
+which holds 18 of the empty file's windows and 60 of `hello.c`'s; the script
+puts every unit's together, between `.text.buster_start` and `.text`.
 
 - **The list:** `cmake/BusterStartOrder.txt`, the functions in the order the
   profiled build had them, `UNIT NAME` for a local function of one of
@@ -1061,7 +1062,19 @@ empty file's windows and 60 of `hello.c`'s.
   any whose name a unit's static shares, which the name would move too.
 - **Shifts:** a shifted link's padding (`.text.buster_shift_padding`, above)
   goes in `.text.buster_start` right before the shift source's first
-  function, so that the shift moves that unit's code there too.
+  function when it has one there (`main.c` and the checker's and the front
+  end's units), so that the shift moves that unit's code there too, and a
+  second one (`.text.buster_shift_padding_text`, first in the symbol ordering
+  file) goes first in `.text`, so that every unit's code there moves by the
+  shift (its multiple of 64 bytes: the C library's string functions, first
+  in `.text`, and some of the units' functions are aligned to 64); another
+  source's padding stays right before its objects in `.text`. While the checker's sections were in `.text`, each unit's,
+  page-aligned and empty where the unit has none of the checker's code,
+  started its functions on a page, and `.text` itself started on one after
+  the first padding: no shift short of a page moved `.text`'s code (#2728).
+  A shifted link's post-link step checks that `main_unit_backend` moved by
+  the shift's multiple of 64, give or take whole pages (the start's padding
+  can push the page-aligned checker's sections by one).
 - **Where:** a static link by lld (`start order: TRUE` in the configure
   step's status line). Every static build compiles with
   `-ffunction-sections`, whatever its linker, so that switching
@@ -1114,8 +1127,17 @@ their code's placements (#509, "Comparing two versions" in
 9700X. The padding is a section of its own, `.text.buster_shift_padding`,
 with the source's `.text`'s alignment and `SHF_GNU_RETAIN`, which the linkers
 place right before the source's objects; the step fails when the linker dropped
-it. The padding moves units' `.text`, never the page-aligned `.text.buster_checker`
-that holds the checker's own code. To place that code, build with
+it. Where lld links with the start's code order ([below](#the-starts-code-order)),
+a source with start-ordered functions (`main.c`, the 9700X job's) has its
+padding before them and again first in `.text`, and the step also fails when
+`main_unit_backend` didn't move by the shift's multiple of 64 bytes (and whole
+pages). Such a
+shift moves code to other pages and 4 KB offsets but not within its 64-byte
+lines, where a function's place can change a small benchmark's time by more:
+the same main moved `run_c_environment_benchmark` by 16 to 48 bytes and ran
+`benchmark-environments` up to 1.5% slower, and `benchmark-unwind` up to 4.8%
+(#2728). The padding moves units' code, never the page-aligned
+`.text.buster_checker` that holds the checker's own code. To place that code, build with
 `BUSTER_BUILD_DEFINES=-DBUSTER_CHECKER_OFFSET=N` (`main.c`, a multiple of 16 below
 4,096), one full build per offset (#1233).
 
