@@ -24,8 +24,9 @@ requirements. [Command index](README.md).
   `check_program_select`), `--selection-census` reporting on stderr, beside
   the unit's exact references, the candidates a selection before #2536's
   windows could take, by a walk from every root, a scan of the value nodes and
-  the scan pruned of what no control evaluates, with their selections against
-  the exact one and their cost (step 2.1's test option, no change to the
+  the scan pruned of what no control evaluates, by the writer's dead arms and
+  by the pass's own before the bodies' controls (step 2.2a), with their
+  selections against the exact one and their cost (step 2.1's test option, no change to the
   object: [the design](../all-core-path.md#step-2-the-selection-after-the-windows)), `--tier1` compiling each function Tier 1's pipeline
   takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, both tiers'
   code the emission's `EmittedCode`, #1056, their unwind tables alike; with `-g`
