@@ -9356,8 +9356,8 @@ static void check_driver_selection_census(const CheckProgram* program, const Che
 {
     fprintf(stderr, "selection-census\tbodies\t%u\tdropped\t%u\tselected-bodies\t%u\tselected-symbols\t%u", program->body_count, program->census_dropped_bodies,
             selected->program.body_count, selected->program.symbol_count + selected->data.count);
-    const CheckProgramCensus* censuses[] = { &program->census_walk, &program->census_scan, &program->census_arms };
-    const char* names[] = { "walk", "scan", "arms" };
+    const CheckProgramCensus* censuses[] = { &program->census_walk, &program->census_scan, &program->census_arms, &program->census_pass };
+    const char* names[] = { "walk", "scan", "arms", "pass" };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(censuses); c += 1)
     {
         const CheckProgramCensus* census = censuses[c];
@@ -9369,8 +9369,9 @@ static void check_driver_selection_census(const CheckProgram* program, const Che
         fprintf(stderr, "\t%s\tdiffering\t%u\tunarmed\t%u\tmissing\t%u\tselection\t%s\textra-bodies\t%lld\textra-symbols\t%lld", names[c], census->differing,
                 census->unarmed, census->missing, verdict, (long long)bodies, (long long)objects);
     }
-    fprintf(stderr, "\nselection-census-ticks\treferences\t%llu\twalk\t%llu\tscan\t%llu\tarms\t%llu\n", (unsigned long long)program->census_references_ticks,
-            (unsigned long long)program->census_walk.ticks, (unsigned long long)program->census_scan.ticks, (unsigned long long)program->census_arms.ticks);
+    fprintf(stderr, "\nselection-census-ticks\treferences\t%llu\twalk\t%llu\tscan\t%llu\tarms\t%llu\tpass\t%llu\n", (unsigned long long)program->census_references_ticks,
+            (unsigned long long)program->census_walk.ticks, (unsigned long long)program->census_scan.ticks, (unsigned long long)program->census_arms.ticks,
+            (unsigned long long)program->census_pass.ticks);
 }
 
 // The checked program's code and data, as -c writes them: its object at `output_path`, or with `kept` (one of several
