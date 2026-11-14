@@ -23,7 +23,8 @@
 //   - driver helpers preserve version thresholds, description failures and publication without redundant copies;
 //   - BUSTER_TOOLCHAIN refuses unknown values, takes PATH's release clang as it is and otherwise a staged toolchain only
 //     once its marker is written, and never downloads in the check;
-//   - the parallel native generation's splitter links llvm-config's system libraries at paths the host lacks by name;
+//   - the parallel native generation's splitter links llvm-config's system libraries at paths the host lacks by name,
+//     and its start list (--first) puts the functions it names first in their named section (#1444);
 //   - fresh build.sh, direct CMake and preset trees ignore hostile CFLAGS/LDFLAGS before probing C, including cached
 //     global/configuration flags, in generated compile/link commands and real unit compiles;
 //   - a clean --all during a build waits for it, and then removes every tree and the published files;
@@ -3561,6 +3562,8 @@ static void check_codegen_system_libraries(void)
 
 // Exercise the real CMake split/merge helpers on two independent translation units with colliding private names.
 // Copies keep the source edits, malformed IR and export-manifest failures inside the disposable fixture tree.
+static void check_split_first(void);
+
 static void check_parallel_codegen(void)
 {
     char directory[PATH_MAX];
@@ -3808,6 +3811,7 @@ static void check_parallel_codegen(void)
         fail("the recovered codegen graph was not unchanged: %s", log.data);
     }
     free(log.data);
+    check_split_first();
     if (chdir(root) != 0)
     {
         fail("can't return to %s", root);
@@ -3832,6 +3836,92 @@ static bool line_holding(const char* text, const char* needle, char* line, size_
         snprintf(line, size, "%.*s", (int)length, start);
     }
     return held;
+}
+
+// The start's order inside a named section (#1444, tools/codegen/split.c --first), run in the parallel-codegen
+// fixture's directory with the splitter it built: the functions a list names that a module defines in a named section
+// go first in that section, in the list's order, and the rest keep theirs; a listed function outside any named section,
+// and a name the module doesn't define, move nothing; and a list that moves nothing fails the split.
+static void check_split_first(void)
+{
+    write_file("first.c",
+               "#pragma clang section text = \".text.fixture_first\"\n"
+               "__attribute__((noinline)) int first_a(int x) { return x + 1; }\n"
+               "__attribute__((noinline)) int first_b(int x) { return x * 3; }\n"
+               "__attribute__((noinline)) int first_c(int x) { return x - 5; }\n"
+               "__attribute__((noinline)) int first_d(int x) { return x ^ 7; }\n"
+               "#pragma clang section text = \"\"\n"
+               "__attribute__((noinline)) int first_plain(int x) { return x << 1; }\n"
+               "int first_entry(int x) { return first_a(x) + first_b(x) + first_c(x) + first_d(x) + first_plain(x); }\n",
+               0644);
+    write_file("first.txt", "first_c\nfirst_missing\nfirst_plain\nfirst_a\n", 0644);
+    write_file("stale.txt", "first_missing\nfirst_plain\n", 0644);
+    char* compile[] = { "clang", "-O2", "-emit-llvm", "-c", "first.c", "-o", "first.bc", 0 };
+    char* parts[] = { "mkdir", "-p", "first-parts", "stale-parts", 0 };
+    char* split[] = { "out/codegen-tools/split", "first.bc", "1", "first-parts", "--first", "first.txt", 0 };
+    char* stale[] = { "out/codegen-tools/split", "first.bc", "1", "stale-parts", "--first", "stale.txt", 0 };
+    char* generate[] = { "clang", "-c", "-x", "ir", "first-parts/part0.bc", "-o", "first-parts/part0.o", 0 };
+    char* sections[] = { "readelf", "-SW", "first-parts/part0.o", 0 };
+    char* symbols[] = { "readelf", "-sW", "first-parts/part0.o", 0 };
+    Text log = capture(compile);
+    free(log.data);
+    log = capture(parts);
+    free(log.data);
+    log = capture(split);
+    free(log.data);
+    if (run("stale-split.log", 0, stale) == 0)
+    {
+        fail("the split took a start list that names no function of the module's named sections");
+    }
+    log = capture(generate);
+    free(log.data);
+    // The section's index, then its functions by address.
+    Text table = capture(sections);
+    char line[512];
+    unsigned index = 0;
+    const char* bracket = line_holding(table.data, " .text.fixture_first ", line, sizeof(line)) ? strchr(line, '[') : 0;
+    if (bracket == 0 || sscanf(bracket + 1, "%u", &index) != 1)
+    {
+        fail("the split's part has no .text.fixture_first: %s", table.data);
+    }
+    free(table.data);
+    // The section's functions (readelf -sW: Num: Value Size Type Bind Vis Ndx Name), by address.
+    Text listing = capture(symbols);
+    unsigned long long values[8];
+    char names[8][64];
+    uint32_t count = 0;
+    for (char* row = strtok(listing.data, "\n"); row != 0; row = strtok(0, "\n"))
+    {
+        unsigned long long value = 0;
+        char type[16];
+        char section[16];
+        char name[64];
+        if (sscanf(row, "%*s %llx %*s %15s %*s %*s %15s %63s", &value, type, section, name) == 4 && strcmp(type, "FUNC") == 0 &&
+            (unsigned)strtoul(section, 0, 10) == index && strcmp(section, "UND") != 0 && count < 8)
+        {
+            uint32_t at = count;
+            while (at != 0 && values[at - 1] > value)
+            {
+                values[at] = values[at - 1];
+                memcpy(names[at], names[at - 1], sizeof(names[at]));
+                at -= 1;
+            }
+            values[at] = value;
+            snprintf(names[at], sizeof(names[at]), "%s", name);
+            count += 1;
+        }
+    }
+    free(listing.data);
+    char order[8 * 64 + 8] = "";
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        snprintf(order + strlen(order), sizeof(order) - strlen(order), "%s ", names[i]);
+    }
+    if (strcmp(order, "first_c first_a first_b first_d ") != 0)
+    {
+        fail("the split's start list didn't put first_c and first_a first in .text.fixture_first, the rest in order: %s", order);
+    }
+    pass("the split puts a start list's functions of a named section first in it, in the list's order, and refuses a stale list");
 }
 
 // The parts of a sanitizer build's units (#2639), on the fixture's two units: AddressSanitizer's joined objects keep
