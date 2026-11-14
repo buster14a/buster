@@ -74,8 +74,9 @@ static void check_test_driver_attribute_recovery(CheckTest* test, const char* cl
     static const char sentinel[] = "preserve the existing object\n";
     char object[PATH_MAX];
     snprintf(object, sizeof(object), "%s/attribute-recovery.o", directory);
-    for (uint32_t c = 0; available && c < 17; c += 1)
+    for (uint32_t c = 0; available && c < 36; c += 1)
     {
+        const bool accepted = c == 9 || c == 35;
         char define[64];
         snprintf(define, sizeof(define), "-DBUSTER_CASE=%u", c);
         for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(standards); s += 1)
@@ -87,8 +88,8 @@ static void check_test_driver_attribute_recovery(CheckTest* test, const char* cl
                 const int oracle = check_test_driver_spawn(arguments, &expected);
                 char expected_lines[8192] = { 0 };
                 const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, sizeof(expected_lines));
-                check_test_expect(test, lines && (oracle == 0) == (c == 9), "attribute recovery oracle status");
-                if (lines && c != 9 && o != 1)
+                check_test_expect(test, lines && (oracle == 0) == accepted, "attribute recovery oracle status");
+                if (lines && !accepted && o != 1)
                 {
                     check_test_expect(test, strstr(expected_lines, "use of undeclared identifier 'undeclared_after'") != NULL,
                                       "attribute recovery oracle retains the later independent error");
@@ -114,7 +115,7 @@ static void check_test_driver_attribute_recovery(CheckTest* test, const char* cl
                     char actual_lines[8192] = { 0 };
                     const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, sizeof(actual_lines)) &&
                                       strcmp(expected_lines, actual_lines) == 0;
-                    if (mode == 2 && c != 9)
+                    if (mode == 2 && !accepted)
                     {
                         char* contents = NULL;
                         const int descriptor = open(object, O_RDONLY);
@@ -124,6 +125,16 @@ static void check_test_driver_attribute_recovery(CheckTest* test, const char* cl
                             close(descriptor);
                         }
                         free(contents);
+                    }
+                    else if (mode == 2)
+                    {
+                        const int descriptor = open(object, O_RDONLY);
+                        unsigned char magic[4] = { 0 };
+                        preserved &= descriptor >= 0 && read(descriptor, magic, sizeof(magic)) == (ssize_t)sizeof(magic) && memcmp(magic, "\177ELF", sizeof(magic)) == 0;
+                        if (descriptor >= 0)
+                        {
+                            close(descriptor);
+                        }
                     }
                     char description[4096];
                     snprintf(description, sizeof(description), "attribute recovery %u, %s %s, mode %u: status %d (clang %d), lines\n%s(clang\n%s)",
