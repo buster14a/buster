@@ -423,8 +423,9 @@ stack) and returns in st0; a struct of one returns in st0, and a struct of a `_C
 - **A value** takes an integer depth, as an address does, and lives in that depth's 16-byte slot of the frame
   (`Tier0Frame.memory_area`: a slot per integer depth after the fixed slots, in a function with long double values). An entry
   loads its operands from their slots onto the x87 stack, computes, and stores its result into its slot, leaving the x87
-  stack empty, so that nothing lives there across entries, calls or joins. Every F80 entry is deferred: emitted by
-  `tier0_emit_x87` and counted by `tier0_count_x87`, an entry at a time, as calls are.
+  stack empty. Every F80 entry is deferred: emitted by `tier0_emit_x87` and counted by `tier0_count_x87`, an entry at a
+  time, as calls are. After emission, the bounded transfer pass below may keep a canonical single-use result across
+  consecutive entries; calls, joins and unsupported sequences retain the empty-stack convention.
 - **Its locals and parameters are objects** of 16 bytes aligned to 16, and its globals are reached through their
   addresses: there is no `GLOBAL`, `STORE_GLOBAL` or `SET_GLOBAL` of F80, and a front end reads a global with `LOAD` and
   writes it with `STORE` or `SET`, the address first. `LOCAL`, `STORE_LOCAL` and `SET_LOCAL` of F80 name an object of
@@ -456,6 +457,30 @@ stack) and returns in st0; a struct of one returns in st0, and a struct of a `_C
   function returning a struct in x87 registers loads its parts from the address its `RETURN` gives.
 
 Each truncation restores the control word it changed, which the convention has callee-saved, and MXCSR is untouched.
+
+**Private transfers (#1387).** `tier0_x87_transfers` assigns a distinct token to each private F80 spill generation and
+counts its actual reloads through the typed stack's lifetimes. A destructive consumer admits a token only after one
+read; `DUP`, kept stores and values carried across labels or calls keep their homes when another use can follow.
+Arithmetic and widening conversions produce canonical results, and a copy or negation may carry that fact forward.
+Raw F80 loads, local-object reads and constant materialization retain their first transfer: their signaling-NaN and
+unsupported-encoding behavior is outside this optimization's proof. Deep-slot functions keep baseline emission.
+
+The shared `x87_transfer.c` planner examines regions of at most 64 records. It can replace a canonical private
+`fstpt` with `fld st(0)` and its sole subsequent `fldt` with `fstp st(0)` when that reload begins with the baseline x87
+stack empty. The two register copies preserve both original waiting points; one pair may be live, and the planner
+checks that intervening instructions never push physical depth past eight. Every arithmetic operation, source load,
+destination write and operand order stays in place. An independent symbolic replay validates the proposal before
+publication. Calls, control/environment operations, memory effects other than admitted x87 transfers, mandatory
+fences and unknown records end a region. Record counts and indices stay fixed, so entry rows, branches, relocations,
+separate scalar/vector measuring and frame metadata keep their existing contracts. A rejected plan or scratch
+allocation leaves the original records intact.
+
+`test-tier0` checks direct destination stores, ordered subtraction/division chains, duplicate uses, both kinds of kept
+stores, raw-copy and fence fallbacks, and scalar/vector record equality. Native arithmetic fixtures compare all four
+rounding modes and all three supported precision settings with explicit full-width C intermediates, including result
+bytes, exception flags, empty-stack state and preserved control words. A driver fixture also checks that a pending
+unmasked x87 exception does not trap at a literal before an intervening volatile store.
+
 `tier0_validate` refuses a local of the class that isn't an object, a global read or stored as an F80 value, a constant
 past the column, an integer operation of the class or a branch on it, an F80 argument anywhere but its 16 bytes of the
 outgoing area at a multiple of 16, a `RETURN` of F80 from a function whose result isn't one long double in st0 and of

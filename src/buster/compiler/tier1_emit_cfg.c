@@ -3363,6 +3363,99 @@ static uint64_t tier1_emit_cfg_x87_node_records(const Tier1SelectPlan* plan, uin
     return records;
 }
 
+// Optional transport of a canonical F80 result to its sole consumer (#1387). Use the complete IR use list, including
+// repeated operands, calls and phi edges. Only the selected producer's own private store and the selected consumer's
+// matching load are annotated; raw loads and constants keep their initial materialization. The shared record proof
+// preserves both waiting points and every metadata index, and declines barriers, right operands and excess pressure.
+static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitResult* emitted, uint32_t records, const uint32_t* block_first, uint32_t blocks, bool vector, Arena* output, Arena* scratch)
+{
+    const IrFunction* function = plan->function;
+    const uint32_t nodes = function->instruction_count;
+    const uint64_t mark = scratch->length;
+    IrUses uses = { 0 };
+    bool ok = emitted->prepared.x87_count != 0 && ir_uses_path(function, scratch, output, &uses, vector) == IR_OK;
+    uint32_t* tokens = ok ? ir_allocate(scratch, (uint64_t)records + 1, 4, &ok) : 0;
+    uint8_t* eligible = ok ? ir_allocate(scratch, (uint64_t)records + 1, 1, &ok) : 0;
+    uint8_t* boundaries = ok ? ir_allocate(scratch, (uint64_t)records + 1, 1, &ok) : 0;
+    uint8_t* canonical = ok ? ir_allocate(scratch, (uint64_t)nodes + 1, 1, &ok) : 0;
+    if (ok)
+    {
+        memset(tokens, 0xff, ((uint64_t)records + 1) * 4);
+        memset(eligible, 0, (uint64_t)records + 1);
+        memset(boundaries, 0, (uint64_t)records + 1);
+        memset(canonical, 0, (uint64_t)nodes + 1);
+        boundaries[0] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
+        boundaries[records] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
+        for (uint32_t b = 0; b < blocks; b += 1)
+        {
+            boundaries[block_first[b]] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
+        }
+        for (uint32_t node = 0; node < nodes; node += 1)
+        {
+            const uint32_t first = emitted->code.node_first[node];
+            const uint32_t end = node + 1 < nodes ? emitted->code.node_first[node + 1] : records;
+            const uint32_t op = function->op[node];
+            const uint32_t a = function->a[node];
+            const bool arithmetic = op == IR_FADD || op == IR_FSUB || op == IR_FMUL || op == IR_FDIV;
+            const bool converts = op == IR_SITOFP || op == IR_UITOFP || op == IR_FEXT;
+            const bool copied = (op == IR_COPY || op == IR_FNEG) && a < node && canonical[a] != 0;
+            canonical[node] = function->type[node] == IR_F80 && (arithmetic || converts || copied);
+            boundaries[first] |= BUSTER_X87_TRANSFER_BOUNDARY;
+            boundaries[end] |= BUSTER_X87_TRANSFER_BOUNDARY;
+            const bool barrier = (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0 || op == IR_PHI ||
+                                 tier1_select_function_call(function, node) || plan->patterns[node].rule == TIER1_RULE_ROW || plan->patterns[node].rule == TIER1_RULE_ASM;
+            if (barrier)
+            {
+                boundaries[first] |= BUSTER_X87_TRANSFER_CUT;
+                boundaries[end] |= BUSTER_X87_TRANSFER_CUT;
+            }
+        }
+        for (uint32_t node = 0; node < nodes; node += 1)
+        {
+            const bool single = uses.offsets[node + 1] - uses.offsets[node] == 1;
+            const uint32_t user = single ? uses.uses[uses.offsets[node]].instruction : BUSTER_IR_NONE;
+            const bool candidate = canonical[node] != 0 && single && user < nodes && !plan->covered[node] && !plan->covered[user] &&
+                                   plan->patterns[node].rule == TIER1_RULE_X87 && plan->patterns[user].rule == TIER1_RULE_X87;
+            int32_t offset = 0;
+            if (candidate && tier1_emit_cfg_x87_offset(function, emitted, node, &offset))
+            {
+                const uint32_t first = emitted->code.node_first[node];
+                const uint32_t end = node + 1 < nodes ? emitted->code.node_first[node + 1] : records;
+                const uint32_t use_first = emitted->code.node_first[user];
+                const uint32_t use_end = user + 1 < nodes ? emitted->code.node_first[user + 1] : records;
+                uint32_t store = BUSTER_X87_TRANSFER_NONE;
+                uint32_t load = BUSTER_X87_TRANSFER_NONE;
+                uint32_t stores = 0;
+                uint32_t loads = 0;
+                for (uint32_t r = first; r < end; r += 1)
+                {
+                    const X86Instruction* record = &emitted->code.records[r];
+                    const bool found = record->form == X86_FORM_FSTP_M80 && record->mode == BUSTER_X86_MEMORY_BASE &&
+                                       record->rm == emitted->frame.base_register && record->displacement == offset;
+                    store = found ? r : store;
+                    stores += found;
+                }
+                for (uint32_t r = use_first; r < use_end; r += 1)
+                {
+                    const X86Instruction* record = &emitted->code.records[r];
+                    const bool found = record->form == X86_FORM_FLD_M80 && record->mode == BUSTER_X86_MEMORY_BASE &&
+                                       record->rm == emitted->frame.base_register && record->displacement == offset;
+                    load = found ? r : load;
+                    loads += found;
+                }
+                if (stores == 1 && loads == 1 && store < load)
+                {
+                    tokens[store] = store;
+                    tokens[load] = store;
+                    eligible[store] = 1;
+                }
+            }
+        }
+        (void)x87_transfer_records(emitted->code.records, records, tokens, eligible, boundaries, vector);
+    }
+    arena_pop_to(scratch, mark);
+}
+
 static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool vector, bool certify, bool sources, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
 {
     const IrFunction* function = plan->function;
@@ -4074,6 +4167,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     if (error == TIER1_EMIT_OK)
     {
         tier1_select_requests_flush(&requests, buffer.records);
+        tier1_emit_cfg_x87_transfers(plan, emitted, buffer.count, block_first, blocks, vector, output, scratch);
     }
     if (error == TIER1_EMIT_OK && x86_validate(buffer.records, buffer.count) != buffer.count)
     {
