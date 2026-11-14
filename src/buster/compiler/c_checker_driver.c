@@ -10426,6 +10426,8 @@ struct CheckDriverCommand
     uint32_t window_tokens;
     // --tier1-schedule=post|pre (#172): BUSTER_CHECK_TIER1_SCHEDULE_*.
     uint8_t tier1_schedule;
+    // --tier1-passes='s turned passes (#139): BUSTER_CHECK_TIER1_PASS_*.
+    uint8_t tier1_passes;
     CheckTier1Report* tier1_report;
     FILE* tier1_refusals;
     FILE* tier1_function_sizes;
@@ -10451,6 +10453,58 @@ struct CheckDriverDeferred
     WorkerBudgetLease lease;
     bool return_failed;
 };
+
+// --tier1-passes='s list (#139's measurement): comma-separated items, each + or - and then a pass's name (sccp, dce, cfg,
+// merge, licm, sroa, gvn or inline) or all, applied in turn to the passes the earlier options left on: the default
+// pipeline's (SCCP, dead-code removal, CFG cleanup, its merges and the inlining), with --tier1-gvn's and --tier1-no-inline's changes where they
+// came first. `toggled` holds the BUSTER_CHECK_TIER1_PASS_* bits that differ from the default; `gvn` and `no_inline` are
+// the two passes with options of their own. Returns false, and leaves all three as they were, for an empty list or item,
+// an item without its sign, or an unknown name.
+#define BUSTER_CHECK_DRIVER_PASS_GVN 64u
+#define BUSTER_CHECK_DRIVER_PASS_INLINE 128u
+static bool check_driver_tier1_passes(const char* list, uint8_t* toggled, bool* gvn, bool* no_inline)
+{
+    static const char* const names[] = { "sccp", "dce", "cfg", "merge", "licm", "sroa", "gvn", "inline", "all" };
+    static const uint32_t bits[] = {
+        BUSTER_CHECK_TIER1_PASS_SCCP,
+        BUSTER_CHECK_TIER1_PASS_DCE,
+        BUSTER_CHECK_TIER1_PASS_CFG,
+        BUSTER_CHECK_TIER1_PASS_MERGE,
+        BUSTER_CHECK_TIER1_PASS_LICM,
+        BUSTER_CHECK_TIER1_PASS_SROA,
+        BUSTER_CHECK_DRIVER_PASS_GVN,
+        BUSTER_CHECK_DRIVER_PASS_INLINE,
+        BUSTER_CHECK_TIER1_PASSES_ALL | BUSTER_CHECK_DRIVER_PASS_GVN | BUSTER_CHECK_DRIVER_PASS_INLINE,
+    };
+    _Static_assert(BUSTER_ARRAY_LENGTH(names) == BUSTER_ARRAY_LENGTH(bits), "a bit for each name");
+    _Static_assert((BUSTER_CHECK_TIER1_PASSES_ALL & (BUSTER_CHECK_DRIVER_PASS_GVN | BUSTER_CHECK_DRIVER_PASS_INLINE)) == 0, "the driver's own bits are apart");
+    uint32_t on = (BUSTER_CHECK_TIER1_PASSES_DEFAULT ^ *toggled) | (*gvn ? BUSTER_CHECK_DRIVER_PASS_GVN : 0) | (*no_inline ? 0 : BUSTER_CHECK_DRIVER_PASS_INLINE);
+    bool valid = *list != 0;
+    const char* item = list;
+    while (valid && *item != 0)
+    {
+        const char* comma = strchr(item, ',');
+        const uint64_t length = comma != NULL ? (uint64_t)(comma - item) : strlen(item);
+        const bool signed_item = length > 1 && (item[0] == '+' || item[0] == '-');
+        uint32_t found = 0;
+        for (uint32_t k = 0; signed_item && k < BUSTER_ARRAY_LENGTH(names); k += 1)
+        {
+            found = strlen(names[k]) == length - 1 && memcmp(names[k], item + 1, length - 1) == 0 ? bits[k] : found;
+        }
+        valid = found != 0;
+        on = !valid ? on : item[0] == '+' ? on | found : on & ~found;
+        item = comma != NULL ? comma + 1 : item + length;
+        // A comma ends an item and starts another: none may follow the last one.
+        valid = valid && (comma == NULL || *item != 0);
+    }
+    if (valid)
+    {
+        *toggled = (uint8_t)((on ^ BUSTER_CHECK_TIER1_PASSES_DEFAULT) & BUSTER_CHECK_TIER1_PASSES_ALL);
+        *gvn = (on & BUSTER_CHECK_DRIVER_PASS_GVN) != 0;
+        *no_inline = (on & BUSTER_CHECK_DRIVER_PASS_INLINE) == 0;
+    }
+    return valid;
+}
 
 // A strict, ordered list of distinct CPUs already in the caller's affinity mask. A CPU list is an opt-in control
 // for a reproducible campaign, so malformed or unavailable entries must not silently select a different placement.
@@ -12664,6 +12718,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool tier1_gvn = false;
     bool tier1_schedule_seen = false;
     bool invalid_tier1_schedule = false;
+    bool tier1_passes_seen = false;
+    bool invalid_tier1_passes = false;
     // --helper-report prints, on standard error, how many uses of each helper family the lowering took directly and how
     // many call their helper, the helpers planned and the units refused (#1059, CheckHelperReport).
     bool helper_report = false;
@@ -12898,6 +12954,18 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             lanes->tier1_no_lifetimes = true;
         }
+        else if (match.joined == C_OPTION_TIER1_PASSES_EQ)
+        {
+            // #139's measurement: Tier 1's passes turned on (+NAME) or off (-NAME), item by item, from the default pipeline.
+            const bool known = check_driver_tier1_passes(arguments[i] + 15, &lanes->tier1_passes, &lanes->tier1_gvn, &lanes->tier1_no_inline);
+            tier1_gvn = lanes->tier1_gvn;
+            tier1_passes_seen = true;
+            if (!known)
+            {
+                fprintf(stderr, "error: --tier1-passes= takes a comma-separated list of +NAME and -NAME, NAME being sccp, dce, cfg, merge, licm, sroa, gvn, inline or all\n");
+            }
+            invalid_tier1_passes |= !known;
+        }
         else if (match.joined == C_OPTION_TIER1_SCHEDULE_EQ)
         {
             // #172's measurement: Tier 1's code scheduled block by block after allocation (post) or before selection
@@ -13130,7 +13198,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL && linker_ready;
     invalid_lanes |= pinned_cpus_seen && (!lanes->every_lane || pinned_cpu_count != lanes->lanes);
     bool parsed = reserved && arguments_ready && linker_valid && !runtime_path_refused && codegen.error == CHECK_REQUEST_ACCEPTED && !missing_value &&
-                  !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_attested && !invalid_helper_forms && !invalid_tier1_schedule && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+                  !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_attested && !invalid_helper_forms && !invalid_tier1_schedule && !invalid_tier1_passes && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     if (parsed && (stdin_count > 1 || invalid_stdin))
     {
         fprintf(stderr, "error: standard input may appear once and requires -x c, assembler or assembler-with-cpp when compiling\n");
@@ -13154,7 +13222,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // instrumentation, ABI layouts and the language/target. The Tier 1 combination check has no source dependency.
     const CheckRequestRefusal refusal = parsed ? check_request_refusal(&request, &options, emit_object || link) : codegen;
     const bool invalid_tier1 = !lanes->tier1 && (lanes->tier1_strict || tier1_report || lanes->tier1_refusals != NULL || lanes->tier1_no_rematerialize ||
-                                               tier1_gvn || lanes->tier1_no_lifetimes || lanes->tier1_no_inline || tier1_schedule_seen);
+                                               tier1_gvn || lanes->tier1_no_lifetimes || lanes->tier1_no_inline || tier1_schedule_seen || tier1_passes_seen);
     const bool libraries_ready = !parsed || refusal.error != CHECK_REQUEST_ACCEPTED || !link || mixed_inputs || libraries.count == 0 ||
                                  worker_budget.dry_run || invalid_tier1 || check_driver_named_archives(&libraries, runtime_kind, &arena, &mixed_inputs);
     if (parsed && libraries_ready && stdin_count != 0)
@@ -13247,6 +13315,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier0_no_inline = lanes->tier0_no_inline,
         .window_tokens = lanes->window_tokens,
         .tier1_schedule = lanes->tier1_schedule,
+        .tier1_passes = lanes->tier1_passes,
         .tier1_report = &lanes->tier1_report,
         .tier1_refusals = lanes->tier1_refusals,
         .tier1_function_sizes = lanes->tier1_function_sizes,
@@ -13282,7 +13351,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     else if (!parsed)
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
-                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-function-sizes] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-function-sizes] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre] [--tier1-passes=LIST]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }
     // The rest of the request's refusals (check_request_refusal), before any source, worker session or output is
@@ -13308,7 +13377,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                                                     tier1_report ? "--tier1-report" : lanes->tier1_refusals != NULL ? "--tier1-refusals" :
                                                     lanes->tier1_no_rematerialize ? "--tier1-no-rematerialize" : tier1_gvn ? "--tier1-gvn" :
                                                     lanes->tier1_no_lifetimes ? "--tier1-no-lifetimes" : lanes->tier1_no_inline ? "--tier1-no-inline" :
-                                                    "--tier1-schedule");
+                                                    tier1_passes_seen ? "--tier1-passes=" : "--tier1-schedule");
     }
     else
     {

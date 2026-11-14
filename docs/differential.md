@@ -47,6 +47,12 @@ environment variable is set to the actual executable, directory or revision):
 ./build/compiler test-differential --buster "$BUSTER" --tier0-default --tier1-arg --tier1 --csmith "$CSMITH" --csmith-include "$CSMITH_INCLUDE" --yarpgen "$YARPGEN" --clang clang --generator both --seed 138 --count 10 --revision "$BUSTER_REVISION" --generator-revision "$GENERATOR_REVISIONS" --output /tmp/buster-differential
 ```
 
+Tier 1's optimization passes are turned on and off for a campaign by
+`--tier1-arg --tier1-passes=LIST` ([the Tier 1 guide](tier1.md)'s "The C
+driver's `--tier1`"). #139's campaigns ran every pass on (`+all`) and each one
+off from there (`+all,-sccp` and so on); [the optimization
+guide](ir-optimization.md)'s "#139's acceptance" has their counts.
+
 `--count` is the number of programs **per generator**, with consecutive seeds
 starting at `--seed`. The defaults are both generators, both tiers, seed 1 and
 one program per generator. `--tiers 0` explicitly selects an early Tier 0-only

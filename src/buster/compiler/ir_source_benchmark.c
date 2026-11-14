@@ -10,6 +10,7 @@
 // tier0_benchmark_measure.c, whose clock, counters and medians it takes.
 //
 //   build/compiler benchmark-ir-source [--only VARIANT] [--after-scalar MS] [--functions] [preprocessor options] file...
+//   build/compiler benchmark-ir-source --passes [--only PASS] [preprocessor options] file... (ir_source_passes.c)
 //
 // The files' functions are prepared as test-ir-source prepares them (ir_source_prepare), each lowered once by both
 // paths, which must agree, into the IR the verifier, promotion and GVN variants read, and promoted once by both (and
@@ -581,7 +582,9 @@ static int ir_source_benchmark_command(int count, char** arguments, bool testing
 
 static int run_ir_source_benchmark(int count, char** arguments)
 {
-    return ir_source_benchmark_command(count, arguments, false);
+    // --passes first: #139's passes by both versions (ir_source_passes.c).
+    const bool passes = count > 0 && strcmp(arguments[0], "--passes") == 0;
+    return passes ? run_ir_source_passes_benchmark(count - 1, arguments + 1) : ir_source_benchmark_command(count, arguments, false);
 }
 
 static int run_ir_source_benchmark_tests(int count, char** arguments)

@@ -807,9 +807,10 @@ static void ir_optimize_test_joins(IrOptimizeTest* test, Arena* input, Arena* ve
             IrFunction function = { 0 };
             const bool created = ir_optimize_test_chain(input, &function, arms, kind);
             ir_optimize_test_expect(test, created && ir_verify(&function, scratch, 0).error == IR_OK, "join chain fixture verifies");
-            for (uint32_t passes = 0; created && passes < 8; passes += 1)
+            // The three passes' masks, each also with the merges (#139).
+            for (uint32_t passes = 0; created && passes < 16; passes += 1)
             {
-                ir_optimize_test_compare(test, &function, vector, scalar, scratch, passes);
+                ir_optimize_test_compare(test, &function, vector, scalar, scratch, (passes & 7) | ((passes & 8) != 0 ? BUSTER_IR_OPTIMIZE_MERGE : 0));
             }
             arena_pop_to(input, 0);
         }
@@ -1162,7 +1163,7 @@ static void ir_optimize_test_records(IrOptimizeTest* test, Arena* input, Arena* 
         IrFunction f = { 0 };
         const bool created = kind < 3 ? ir_optimize_test_labels(input, &f, kind) : ir_optimize_test_aggregate_call(input, &f);
         ir_optimize_test_expect(test, created && ir_verify(&f, scratch, 0).error == IR_OK, "labels and ABI records fixtures verify");
-        for (uint32_t passes = 0; created && passes < 32; passes += 1)
+        for (uint32_t passes = 0; created && passes < 64; passes += 1)
         {
             ir_optimize_test_compare(test, &f, vector, scalar, scratch, passes);
         }
@@ -1340,7 +1341,7 @@ static void ir_optimize_test_identities(IrOptimizeTest* test, Arena* input, Aren
     const bool created = ir_optimize_test_identity(input, &f);
     ir_optimize_test_expect(test, created && ir_verify(&f, scratch, 0).error == IR_OK, "identities fixture verifies");
     ir_optimize_test_expect(test, created && ir_optimize_test_identities_left(&f) == 13, "identities fixture has its thirteen identities");
-    for (uint32_t passes = 0; created && passes < 32; passes += 1)
+    for (uint32_t passes = 0; created && passes < 64; passes += 1)
     {
         ir_optimize_test_compare(test, &f, vector, scalar, scratch, passes);
     }
@@ -1532,6 +1533,151 @@ static void ir_optimize_test_debug_bindings(IrOptimizeTest* test, Arena* input, 
     arena_pop_to(input, im);
 }
 
+// #139's merges (BUSTER_IR_OPTIMIZE_MERGE, ir_optimize_merges), by both paths, which ir_optimize_test_compare also runs on
+// every fixture's masks with the bit. The diamond's constant conditions (kinds 0 and 1) leave b0's branch one way under
+// SCCP: the arm and the join join b0, and the join's phi is the arm's value, so one block and no phi remain. Its parameter's
+// and undef's conditions, and every kind without SCCP, keep their four blocks and the phi. The jump chain of four blocks
+// becomes one block with the merges alone (each block's only predecessor jumps to it) and with CFG cleanup's threading
+// too. A merged block's source regions are dropped and its head's kept (c_check_tier1_debug_regions.c's rule): the chain's
+// regions are b1's and b3's, of one local, and b0's of another.
+static void ir_optimize_test_merges(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
+{
+    const uint64_t im = input->length;
+    for (uint32_t kind = 0; kind < 4; kind += 1)
+    {
+        IrFunction f = { 0 };
+        const bool created = ir_optimize_test_diamond(input, &f, kind);
+        ir_optimize_test_expect(test, created, "merge diamond fixture allocation");
+        for (uint32_t run = 0; created && run < 4; run += 1)
+        {
+            const bool sccp = (run & 1) != 0;
+            IrOptimizeOptions options = ir_optimize_options();
+            options.passes = (sccp ? BUSTER_IR_OPTIMIZE_SCCP : 0) | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_MERGE;
+            options.path = (run & 2) != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
+            const uint64_t mark = vector->length;
+            IrOptimizeResult result = { 0 };
+            const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
+            bool phi = false;
+            for (uint32_t i = 0; check.error == IR_OK && i < result.function.instruction_count; i += 1)
+            {
+                phi |= result.function.op[i] == IR_PHI;
+            }
+            const bool folded = sccp && kind < 2;
+            ir_optimize_test_expect(test,
+                                    check.error == IR_OK && result.merged_blocks == (folded ? 2u : 0u) && result.function.block_count == (folded ? 1u : 4u) && phi == !folded,
+                                    "a branch SCCP leaves one way merges its arm and join, the join's phi its arm's value; no other block merges");
+            arena_pop_to(vector, mark);
+        }
+        arena_pop_to(input, im);
+    }
+    // A join's phi that the merges forward, read through an identity (`p + 0`, #2554), which ir_optimize_identities
+    // sent to the phi before the merges ran: the identity's users must read the phi's arm value. b0 branches on a
+    // constant to b1's sum of the parameter or b2's product; b3's phi meets them and returns its sum with zero.
+    {
+        IrFunction join = { 0 };
+        const IrSizes sizes = {
+            .instruction_count = 12,
+            .block_count = 4,
+            .constant_count = 2,
+            .extra_count = 4,
+            .parameter_count = 1,
+        };
+        const bool built = ir_create(input, &sizes, &join) == IR_OK;
+        if (built)
+        {
+            join.parameter_types[0] = IR_I64;
+            join.result_type = IR_I64;
+            join.constants[0].low = 1;
+            join.constants[1].low = 0;
+            join.block_offsets[1] = 4;
+            join.block_offsets[2] = 6;
+            join.block_offsets[3] = 8;
+            join.block_offsets[4] = 12;
+            ir_optimize_test_instruction(&join, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 1, IR_CONST, IR_I1, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 2, IR_CONST, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 3, IR_CBR, IR_VOID, 1, 1, 2);
+            ir_optimize_test_instruction(&join, 4, IR_ADD, IR_I64, 0, 0, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 5, IR_BR, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 6, IR_MUL, IR_I64, 0, 0, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 7, IR_BR, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 8, IR_PHI, IR_I64, 0, 2, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 9, IR_ADD, IR_I64, 8, 2, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 10, IR_ADD, IR_I64, 9, 0, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 11, IR_RET, IR_VOID, 10, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            join.extra[0] = 1;
+            join.extra[1] = 4;
+            join.extra[2] = 2;
+            join.extra[3] = 6;
+        }
+        ir_optimize_test_expect(test, built && ir_verify(&join, scratch, 0).error == IR_OK, "merged identity join fixture verifies");
+        for (uint32_t passes = 0; built && passes < 64; passes += 1)
+        {
+            ir_optimize_test_compare(test, &join, vector, scalar, scratch, passes);
+        }
+        for (uint32_t path = 0; built && path < 2; path += 1)
+        {
+            IrOptimizeOptions options = ir_optimize_options();
+            options.passes = BUSTER_IR_OPTIMIZE_PASSES;
+            options.path = path != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
+            const uint64_t mark = vector->length;
+            IrOptimizeResult result = { 0 };
+            const IrCheck check = ir_optimize(&join, vector, scratch, options, &result);
+            ir_optimize_test_expect(test, check.error == IR_OK && result.function.block_count == 1 && result.merged_blocks == 2,
+                                    "an identity of a merged join's phi reads the phi's arm value");
+            arena_pop_to(vector, mark);
+        }
+        arena_pop_to(input, im);
+    }
+    IrFunction chain = { 0 };
+    bool ready = ir_optimize_test_jumps(input, &chain, 4, false);
+    if (ready)
+    {
+        uint8_t flags[] = { BUSTER_IR_DEBUG_BIND_REGIONS, BUSTER_IR_DEBUG_BIND_REGIONS };
+        IrDebugRegion regions[] =
+        {
+            { .literal = 17, .local = 0, .block = 1, .begin = 2, .end = 3, .block_end = 3, .value = BUSTER_IR_NONE,
+              .next = BUSTER_IR_NONE, .kind = IR_DEBUG_BIND_CONSTANT, .bytes = 8, .type = IR_I64 },
+            { .literal = 17, .local = 0, .block = 3, .begin = 4, .end = 5, .block_end = 5, .value = BUSTER_IR_NONE,
+              .next = BUSTER_IR_NONE, .kind = IR_DEBUG_BIND_CONSTANT, .bytes = 8, .type = IR_I64 },
+            { .literal = 5, .local = 1, .block = 0, .begin = 0, .end = 1, .block_end = 1, .value = BUSTER_IR_NONE,
+              .next = BUSTER_IR_NONE, .kind = IR_DEBUG_BIND_CONSTANT, .bytes = 8, .type = IR_I64 },
+        };
+        const IrDebugInfo seed = { .entry_count = 5, .local_count = 2, .regions = regions, .region_count = BUSTER_ARRAY_LENGTH(regions), .binding_flags = flags };
+        ready = ir_debug_create(input, &chain, &seed);
+    }
+    ir_optimize_test_expect(test, ready, "merge chain fixture allocated");
+    for (uint32_t run = 0; ready && run < 4; run += 1)
+    {
+        IrOptimizeOptions options = ir_optimize_options();
+        options.passes = (run & 1) != 0 ? BUSTER_IR_OPTIMIZE_MERGE : BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_MERGE;
+        options.path = (run & 2) != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
+        const uint64_t vm = vector->length;
+        const uint64_t sm = scalar->length;
+        IrOptimizeResult described = { 0 };
+        IrOptimizeResult plain = { 0 };
+        IrFunction control = chain;
+        control.debug = NULL;
+        const IrCheck a = ir_optimize(&chain, vector, scratch, options, &described);
+        const IrCheck b = ir_optimize(&control, scalar, scratch, options, &plain);
+        // With the threading, b1 and b2 are threaded away and b3 joins b0; with the merges alone each of the three joins.
+        const uint32_t merged = (run & 1) != 0 ? 3 : 1;
+        bool exact = a.error == IR_OK && b.error == IR_OK && ir_optimize_test_equal(&described.function, &plain.function) && described.function.block_count == 1 &&
+                     described.merged_blocks == merged && described.function.instruction_count == 2;
+        if (exact)
+        {
+            const IrDebugInfo* debug = described.function.debug;
+            exact = debug != NULL && debug->region_count == 3 && debug->regions[0].block == BUSTER_IR_NONE && debug->regions[0].kind == IR_DEBUG_BIND_UNAVAILABLE &&
+                    debug->regions[1].block == BUSTER_IR_NONE && debug->regions[1].kind == IR_DEBUG_BIND_UNAVAILABLE && debug->regions[2].block == 0 &&
+                    debug->regions[2].kind == IR_DEBUG_BIND_CONSTANT && debug->regions[2].literal == 5;
+        }
+        ir_optimize_test_expect(test, exact, "a jump chain merges into one block, dropping the merged blocks' source regions and keeping its head's");
+        arena_pop_to(vector, vm);
+        arena_pop_to(scalar, sm);
+    }
+    arena_pop_to(input, im);
+}
+
 static void ir_optimize_test_debug_blocks(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
 {
     const uint64_t im = input->length;
@@ -1593,7 +1739,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             IrFunction function = { 0 };
             const bool created = ir_optimize_test_diamond(&input, &function, kind);
             ir_optimize_test_expect(test, created, "diamond fixture allocation");
-            for (uint32_t passes = 0; created && passes < 32; passes += 1)
+            for (uint32_t passes = 0; created && passes < 64; passes += 1)
             {
                 ir_optimize_test_compare(test, &function, &vector, &scalar, &scratch, passes);
             }
@@ -1602,7 +1748,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
         IrFunction loop = { 0 };
         const bool loop_created = ir_optimize_test_loop(&input, &loop);
         ir_optimize_test_expect(test, loop_created, "loop fixture allocation");
-        for (uint32_t passes = 0; loop_created && passes < 32; passes += 1)
+        for (uint32_t passes = 0; loop_created && passes < 64; passes += 1)
         {
             ir_optimize_test_compare(test, &loop, &vector, &scalar, &scratch, passes);
         }
@@ -1612,7 +1758,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             IrFunction effects = { 0 };
             const bool effects_created = ir_optimize_test_effects(&input, &effects, kind != 0);
             ir_optimize_test_expect(test, effects_created, "effects fixture allocation");
-            for (uint32_t passes = 0; effects_created && passes < 32; passes += 1)
+            for (uint32_t passes = 0; effects_created && passes < 64; passes += 1)
             {
                 ir_optimize_test_compare(test, &effects, &vector, &scalar, &scratch, passes);
             }
@@ -1620,7 +1766,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             IrFunction switch_function = { 0 };
             const bool switch_created = ir_optimize_test_switch(&input, &switch_function, kind != 0);
             ir_optimize_test_expect(test, switch_created, "switch fixture allocation");
-            for (uint32_t passes = 0; switch_created && passes < 32; passes += 1)
+            for (uint32_t passes = 0; switch_created && passes < 64; passes += 1)
             {
                 ir_optimize_test_compare(test, &switch_function, &vector, &scalar, &scratch, passes);
             }
@@ -1632,6 +1778,8 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             {
                 ir_optimize_test_compare(test, &jumps, &vector, &scalar, &scratch, 7);
                 ir_optimize_test_compare(test, &jumps, &vector, &scalar, &scratch, 15);
+                ir_optimize_test_compare(test, &jumps, &vector, &scalar, &scratch, 7 | BUSTER_IR_OPTIMIZE_MERGE);
+                ir_optimize_test_compare(test, &jumps, &vector, &scalar, &scratch, 15 | BUSTER_IR_OPTIMIZE_MERGE);
             }
             arena_pop_to(&input, 0);
         }
@@ -1652,9 +1800,11 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             if (created)
             {
                 ir_optimize_test_compare(test, &function, &vector, &scalar, &scratch, 7);
+                ir_optimize_test_compare(test, &function, &vector, &scalar, &scratch, 7 | BUSTER_IR_OPTIMIZE_MERGE);
             }
             arena_pop_to(&input, 0);
         }
+        ir_optimize_test_merges(test, &input, &vector, &scalar, &scratch);
     }
     arena_release(&scratch);
     arena_release(&scalar);

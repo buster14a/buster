@@ -924,6 +924,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 // #866's GVN variants on real source's lowered IR are part of #131's IR benchmark, which needs GVN's definitions.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_source_benchmark.c"
+#include "buster/compiler/ir_source_passes.c"
 #include "buster/compiler/ir_optimize_passes_benchmark.c"
 #include "buster/compiler/ir_metamorphic.c"
 #endif

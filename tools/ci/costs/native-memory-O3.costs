@@ -39,6 +39,7 @@
 #: derived Test the semantic driver's diagnostics and emission against clang (part 6 of 8)
 #: derived Test the semantic driver's diagnostics and emission against clang (part 7 of 8)
 #: derived Test the semantic driver's diagnostics and emission against clang (part 8 of 8)
+#: unmeasured Run #139's passes by both versions on every function of c-testsuite's programs and the frozen SQLite and musl sources
 #: derived Test the C lexer as C++
 #: derived Test the C lexer with C11's raw-string prefixes
 #: derived Test the C lexer with the R and LR raw-string prefixes
@@ -250,6 +251,7 @@
 178.7 Test typed postorder checking and source fixtures (part 1 of 8)
 17.1 Lower c-testsuite's programs and the frozen SQLite source with node templates as the tasks do
 174.5 Lower every function of c-testsuite's programs and the frozen SQLite and musl sources into the IR
+35.6 Run #139's passes by both versions on every function of c-testsuite's programs and the frozen SQLite and musl sources
 271.3 Test the C lexer as C++
 243.1 Test the C lexer with C11's raw-string prefixes
 225.4 Test the C lexer with the R and LR raw-string prefixes

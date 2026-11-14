@@ -21,7 +21,10 @@
 // Tier 1 alone requests identities' forwarding too (#2554, ir_optimize_identities): an integer operation that SCCP
 // proves returns one of its operands unchanged is that operand to its users, and is neither kept nor emitted.
 #define BUSTER_IR_OPTIMIZE_IDENTITY 16u
-#define BUSTER_IR_OPTIMIZE_PASSES (BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_LAYOUT | BUSTER_IR_OPTIMIZE_IDENTITY)
+// CFG cleanup's merges (#139, ir_optimize_merges): a block whose single predecessor has it as its single successor joins
+// it. The C driver's Tier 1 requests it; the shared optimizer's default keeps each block, as its other clients expect.
+#define BUSTER_IR_OPTIMIZE_MERGE 32u
+#define BUSTER_IR_OPTIMIZE_PASSES (BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_LAYOUT | BUSTER_IR_OPTIMIZE_IDENTITY | BUSTER_IR_OPTIMIZE_MERGE)
 #define BUSTER_IR_OPTIMIZE_AUTO 0u
 #define BUSTER_IR_OPTIMIZE_VECTOR 1u
 #define BUSTER_IR_OPTIMIZE_SCALAR 2u
@@ -57,6 +60,8 @@ struct IrOptimizeResult
     uint32_t folded;
     uint32_t removed_instructions;
     uint32_t removed_blocks;
+    // CFG cleanup's merged blocks (ir_optimize_merges): each joins its single predecessor; removed_blocks counts them too.
+    uint32_t merged_blocks;
     bool worklist_fallback;
 };
 
@@ -1666,6 +1671,134 @@ static const uint8_t ir_optimize_rewrite_kinds[BUSTER_IR_OP_TABLE] = {
     [IR_BR_INDIRECT] = 5,
 };
 
+// CFG cleanup's merges (#139): a kept block (not threaded away, executable) other than the entry, without a label, whose one
+// incoming edge after threading comes from a block whose one executable successor it is, through a br, or a cbr or switch
+// that SCCP left one way, joins that predecessor: the rewrite drops the predecessor's jump and goes on with the block's
+// instructions. A chain of such blocks becomes one block. `next` takes each block's merged successor (BUSTER_IR_NONE for
+// none) and `heads` each block's chain head, itself for a block that merges into none: the predecessors' functional graph
+// resolved by pointer jumping (ir_optimize_thread_targets, with its vector and scalar twins), as the threading's targets
+// are. A merged block's phis each have one executable incoming value, which becomes the phi's users' operand, as an
+// identity's does (`work->forward`); its phis folded to constants stay constants. The predecessor counts are one pass over
+// the executable edges, a scatter of one count per edge. Returns the merges' count in *merges.
+static IrError ir_optimize_merges(IrOptimizeWork* work, const uint32_t* threads, Arena* scratch, bool scalar, uint32_t* next, uint32_t* heads, uint32_t* merges)
+{
+    const IrFunction* f = work->function;
+    const uint32_t count = f->block_count;
+    bool ok = true;
+    uint32_t* incoming = ir_allocate(scratch, count, sizeof(uint32_t), &ok);
+    uint32_t* from = ir_allocate(scratch, count, sizeof(uint32_t), &ok);
+    uint32_t* direct = ir_allocate(scratch, count, sizeof(uint32_t), &ok);
+    uint8_t* labelled = ir_allocate(scratch, count, sizeof(uint8_t), &ok);
+    IrError error = ok ? IR_OK : IR_ERROR_MEMORY;
+    *merges = 0;
+    for (uint32_t block = 0; error == IR_OK && block < count; block += 1)
+    {
+        incoming[block] = 0;
+        labelled[block] = 0;
+        next[block] = BUSTER_IR_NONE;
+        direct[block] = block;
+    }
+    // A label's block keeps its own block: its address is taken (#131), at its block as threaded.
+    for (uint32_t label = 0; error == IR_OK && label < f->label_count; label += 1)
+    {
+        const uint32_t block = f->labels[label];
+        if (block != BUSTER_IR_NONE)
+        {
+            labelled[block] = 1;
+            labelled[threads[block]] = 1;
+        }
+    }
+    for (uint32_t block = 0; error == IR_OK && block < count; block += 1)
+    {
+        if (work->blocks[block] != 0 && threads[block] == block)
+        {
+            for (uint32_t edge = work->cfg.successor_offsets[block]; edge < work->cfg.successor_offsets[(uint64_t)block + 1]; edge += 1)
+            {
+                const uint32_t target = threads[work->cfg.successors[edge]];
+                incoming[target] += work->edges[edge] != 0;
+                from[target] = work->edges[edge] != 0 ? block : from[target];
+            }
+        }
+    }
+    for (uint32_t block = 1; error == IR_OK && block < count; block += 1)
+    {
+        const bool kept = work->blocks[block] != 0 && threads[block] == block && labelled[block] == 0 && incoming[block] == 1;
+        const uint32_t predecessor = kept ? from[block] : BUSTER_IR_NONE;
+        const uint32_t successor = predecessor != BUSTER_IR_NONE && predecessor != block ? ir_optimize_single_successor(work, predecessor) : BUSTER_IR_NONE;
+        const uint8_t jump = successor != BUSTER_IR_NONE ? f->op[f->block_offsets[(uint64_t)predecessor + 1] - 1] : IR_OP_COUNT;
+        if (successor != BUSTER_IR_NONE && threads[successor] == block && (jump == IR_BR || jump == IR_CBR || jump == IR_SWITCH))
+        {
+            direct[block] = predecessor;
+            next[predecessor] = block;
+            *merges += 1;
+        }
+    }
+    if (error == IR_OK && !ir_optimize_thread_targets(scratch, direct, count, heads, scalar))
+    {
+        error = IR_ERROR_MEMORY;
+    }
+    // Every chain starts at a block that merges into none: the entry's reachable graph has no cycle of merges, since a
+    // cycle's first block reached would have two predecessors. A head that merges anyway (a corrupt graph) undoes them all.
+    bool chained = true;
+    for (uint32_t block = 0; error == IR_OK && block < count; block += 1)
+    {
+        chained = chained && direct[heads[block]] == heads[block];
+    }
+    for (uint32_t block = 0; error == IR_OK && !chained && block < count; block += 1)
+    {
+        next[block] = BUSTER_IR_NONE;
+        heads[block] = block;
+        *merges = 0;
+    }
+    // The merged blocks' phis: each one's one executable incoming value.
+    for (uint32_t block = 0; error == IR_OK && *merges != 0 && block < count; block += 1)
+    {
+        for (uint32_t i = f->block_offsets[block]; heads[block] != block && i < f->block_offsets[(uint64_t)block + 1] && f->op[i] == IR_PHI; i += 1)
+        {
+            uint32_t value = BUSTER_IR_NONE;
+            for (uint32_t k = 0; work->states[i] != IROPT_CONSTANT && k < f->b[i]; k += 1)
+            {
+                const uint32_t predecessor = f->extra[f->a[i] + k * 2];
+                value = work->edges[ir_optimize_edge(&work->cfg, predecessor, block)] != 0 ? f->extra[f->a[i] + k * 2 + 1] : value;
+            }
+            if (value != BUSTER_IR_NONE && work->forward == 0)
+            {
+                work->forward = ir_allocate(scratch, f->instruction_count, sizeof(uint32_t), &ok);
+                error = ok ? IR_OK : IR_ERROR_MEMORY;
+                if (ok)
+                {
+                    memset(work->forward, 0xff, (uint64_t)f->instruction_count * sizeof(uint32_t));
+                }
+            }
+            if (value != BUSTER_IR_NONE && work->forward != 0)
+            {
+                work->forward[i] = value;
+            }
+        }
+    }
+    // Every forward goes to its root, so the rewrite reads one step: a forwarded phi's value may be another merged
+    // block's phi or an identity, and an identity's root (ir_optimize_identities resolved them before the merges) may
+    // be a merged block's phi, now forwarded itself.
+    for (uint32_t i = 0; error == IR_OK && *merges != 0 && work->forward != 0 && i < f->instruction_count; i += 1)
+    {
+        if (work->forward[i] != BUSTER_IR_NONE)
+        {
+            uint32_t root = work->forward[i];
+            while (work->forward[root] != BUSTER_IR_NONE)
+            {
+                root = work->forward[root];
+            }
+            for (uint32_t at = i; work->forward[at] != root;)
+            {
+                const uint32_t following = work->forward[at];
+                work->forward[at] = root;
+                at = following;
+            }
+        }
+    }
+    return error;
+}
+
 static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* work, Arena* output, Arena* scratch, IrOptimizeOptions options, IrFunction* result)
 {
     const IrFunction* f = work->function;
@@ -1694,6 +1827,20 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
     {
         error = IR_ERROR_MEMORY;
     }
+    // Each block's merged successor and chain head (ir_optimize_merges), with BUSTER_IR_OPTIMIZE_MERGE; else none and itself.
+    uint32_t* next = ir_allocate(scratch, f->block_count, sizeof(uint32_t), &ok);
+    uint32_t* heads = ir_allocate(scratch, f->block_count, sizeof(uint32_t), &ok);
+    error = error == IR_OK && !ok ? IR_ERROR_MEMORY : error;
+    uint32_t merges = 0;
+    if (error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_MERGE) != 0)
+    {
+        error = ir_optimize_merges(work, threads, scratch, BUSTER_SCALAR_PATH(options.scalar), next, heads, &merges);
+    }
+    for (uint32_t block = 0; error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_MERGE) == 0 && block < f->block_count; block += 1)
+    {
+        next[block] = BUSTER_IR_NONE;
+        heads[block] = block;
+    }
     uint32_t* order = NULL;
     uint32_t order_count = f->block_count;
     if (error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_LAYOUT) != 0)
@@ -1720,14 +1867,16 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
     }
     for (uint32_t position = 0; error == IR_OK && position < order_count; position += 1)
     {
-        const uint32_t block = order != NULL ? order[position] : position;
-        if (work->blocks[block] != 0 && threads[block] == block)
+        const uint32_t head = order != NULL ? order[position] : position;
+        // A chain's blocks (ir_optimize_merges) are its head's, in turn: each one's jump to the next is dropped.
+        for (uint32_t block = work->blocks[head] != 0 && threads[head] == head && heads[head] == head ? head : BUSTER_IR_NONE; block != BUSTER_IR_NONE; block = next[block])
         {
-            blocks[block] = sizes.block_count++;
+            blocks[block] = block == head ? sizes.block_count++ : blocks[head];
+            const uint32_t end = next[block] != BUSTER_IR_NONE ? f->block_offsets[(uint64_t)block + 1] - 1 : f->block_offsets[(uint64_t)block + 1];
             // A folded phi becomes a constant after every surviving phi. Ordinary instruction order is unchanged.
             for (uint32_t phase = 0; phase < 2; phase += 1)
             {
-                for (uint32_t i = f->block_offsets[block]; i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+                for (uint32_t i = f->block_offsets[block]; i < end; i += 1)
                 {
                     const bool phi = f->op[i] == IR_PHI && work->states[i] != IROPT_CONSTANT;
                     if (work->live[i] != 0 && phi == (phase == 0) && ir_optimize_forwarded(work, i) == i)
@@ -1859,10 +2008,13 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
         uint32_t instructions = 0;
         for (uint32_t position = 0; position < order_count; position += 1)
         {
-            const uint32_t block = order != NULL ? order[position] : position;
-            if (blocks[block] != BUSTER_IR_NONE)
+            const uint32_t head = order != NULL ? order[position] : position;
+            if (blocks[head] != BUSTER_IR_NONE && heads[head] == head)
             {
-                candidate.block_offsets[blocks[block]] = instructions;
+                candidate.block_offsets[blocks[head]] = instructions;
+            }
+            for (uint32_t block = blocks[head] != BUSTER_IR_NONE && heads[head] == head ? head : BUSTER_IR_NONE; block != BUSTER_IR_NONE; block = next[block])
+            {
                 for (uint32_t phase = 0; phase < 2; phase += 1)
                 {
                     for (uint32_t i = f->block_offsets[block]; i < f->block_offsets[(uint64_t)block + 1]; i += 1)
@@ -2002,6 +2154,18 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
         }
         candidate.block_offsets[candidate.block_count] = candidate.instruction_count;
         ir_debug_remap(f, &candidate, values, NULL, blocks);
+        // A merged block's source regions are dropped (c_check_tier1_debug_regions.c's rule for a merger): their
+        // original block's end isn't its head's, whose block they would share.
+        for (uint32_t k = 0; candidate.debug != NULL && merges != 0 && k < candidate.debug->region_count; k += 1)
+        {
+            const uint32_t block = f->debug->regions[k].block;
+            if (block != BUSTER_IR_NONE && heads[block] != block)
+            {
+                candidate.debug->regions[k].block = BUSTER_IR_NONE;
+                candidate.debug->regions[k].kind = IR_DEBUG_BIND_UNAVAILABLE;
+                candidate.debug->regions[k].value = BUSTER_IR_NONE;
+            }
+        }
         if (candidate.debug != NULL && work->forward != 0)
         {
             // An identity's binding is its operand's value (#2554), of the same type and bits: the remap above gave its
@@ -2067,6 +2231,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
         }
         work->statistics.removed_instructions = f->instruction_count > candidate.instruction_count ? f->instruction_count - candidate.instruction_count : 0;
         work->statistics.removed_blocks = f->block_count - candidate.block_count;
+        work->statistics.merged_blocks = merges;
         *result = candidate;
     }
     return error;

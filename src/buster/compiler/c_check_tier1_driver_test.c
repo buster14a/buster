@@ -1128,12 +1128,14 @@ static bool check_test_tier1_field(const char* text, const char* name, uint64_t*
 // The function `name` in `-c`'s object at `path`: its bytes, decoded by the scalar disassembler into `records` (room for
 // `capacity`), and its relocations, each one's offset from the function's start and type (as R_X86_64_PC32) in
 // `offsets` and `types` (room for `capacity` too). Returns how many records, *relocation_count set, or 0 on a failure.
+// It sets the disassembler's tables up itself: test-checker-driver deals its units to --part's parts in turn, so no
+// caller may count on an earlier unit of its part having done it.
 static uint32_t check_test_tier1_function(const char* path, const char* name, X86Decoded* records, uint32_t capacity, uint32_t* offsets, uint32_t* types, uint32_t* relocation_count)
 {
     uint64_t length = 0;
     uint8_t* bytes = check_test_driver_read_aligned(path, &length);
     CheckTestElf elf;
-    bool valid = bytes != NULL && check_test_elf_open(&elf, (String8){ .pointer = (char*)bytes, .length = length });
+    bool valid = bytes != NULL && x86_disassembler_initialize() && check_test_elf_open(&elf, (String8){ .pointer = (char*)bytes, .length = length });
     const Elf64_Sym* function = NULL;
     for (uint64_t i = 1; valid && function == NULL && i < elf.symbol_count; i += 1)
     {
@@ -1864,6 +1866,229 @@ static void check_test_driver_tier1_gvn(CheckTest* test, const char* clang, cons
     char object_b[512];
     snprintf(object_a, sizeof(object_a), "%s/tier1-gvn-two-a.o", directory);
     snprintf(object_b, sizeof(object_b), "%s/tier1-gvn-two-b.o", directory);
+    unlink(object_a);
+    unlink(object_b);
+    unlink(first);
+    unlink(second);
+    unlink(source);
+    unlink(reference);
+}
+
+// The --tier1-passes= fixture (#139): tier1_passes gives each pass of Tier 1's pipeline something to do: a constant
+// compare (SCCP), an unused product (dead-code removal), a branch whose arms only call, leaving an empty block that jumps
+// to a join without phis (CFG cleanup), a loop-invariant sum (LICM), a struct local (SROA), a repeated sum (#866's
+// solver) and two small static callees (the inlining).
+static const char check_test_tier1_passes_source[] =
+    "#include <stdio.h>\n"
+    "struct tier1_passes_pair { long low; long high; };\n"
+    "static long tier1_passes_twice(long x) { return x * 2 + 1; }\n"
+    "static struct tier1_passes_pair tier1_passes_make(long a) { struct tier1_passes_pair p = { a, a * 2 }; return p; }\n"
+    "long tier1_passes(const long* values, long n, long k)\n"
+    "{\n"
+    "    struct tier1_passes_pair pair = tier1_passes_make(k + 4);\n"
+    "    const long scale = 3;\n"
+    "    long total = 0;\n"
+    "    long unused = n * 77;\n"
+    "    for (long i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        long invariant = k * scale + (n + 3) * k;\n"
+    "        if (scale > 4)\n"
+    "            total -= values[i];\n"
+    "        else\n"
+    "            total += values[i] * (n + 3) + invariant + tier1_passes_twice(i);\n"
+    "    }\n"
+    "    if (k > 0)\n"
+    "    {\n"
+    "        if (n > 50)\n"
+    "        {\n"
+    "            printf(\"long\\n\");\n"
+    "        }\n"
+    "    }\n"
+    "    else\n"
+    "    {\n"
+    "        printf(\"negative\\n\");\n"
+    "    }\n"
+    "    long repeated = (k + n) * (k + n);\n"
+    "    return total + pair.low + pair.high + repeated;\n"
+    "}\n"
+    "int main(int argc, char** argv)\n"
+    "{\n"
+    "    long values[100];\n"
+    "    for (long i = 0; i < 100; i += 1)\n"
+    "        values[i] = i * argc;\n"
+    "    printf(\"%ld %ld\\n\", tier1_passes(values, 100, argc), tier1_passes(values, 7, -argc));\n"
+    "    return 0;\n"
+    "}\n";
+
+// The report's counters of #139's passes (CheckTier1Counts' folded to gvn_removed, and the inlining's).
+typedef struct CheckTestTier1Passes CheckTestTier1Passes;
+struct CheckTestTier1Passes
+{
+    uint64_t inlined;
+    uint64_t folded;
+    uint64_t removed_instructions;
+    uint64_t removed_blocks;
+    uint64_t merged_blocks;
+    uint64_t licm_moved;
+    uint64_t sroa_split;
+    uint64_t gvn_removed;
+};
+
+// The fixture compiled into `output` by --tier1 with `passes` (as "--tier1-passes=-sccp", or NULL for the default) and
+// --verify, by the scalar path where `scalar` asks: whether it compiled with every function Tier 1's and reported each
+// counter, into *counters.
+static bool check_test_tier1_passes_build(const char* executable, const char* source, const char* output, const char* passes, bool scalar, CheckTestTier1Passes* counters)
+{
+    char* arguments[16] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "--verify" };
+    uint32_t count = 5;
+    if (passes != NULL)
+    {
+        arguments[count++] = (char*)passes;
+    }
+    if (scalar)
+    {
+        arguments[count++] = "--scalar";
+    }
+    arguments[count++] = "-o";
+    arguments[count++] = (char*)output;
+    arguments[count++] = (char*)source;
+    arguments[count] = NULL;
+    char* text = NULL;
+    const int status = check_test_driver_spawn(arguments, &text);
+    *counters = (CheckTestTier1Passes){ 0 };
+    const char* every = "";
+    const bool reported = check_test_tier1_field(text, "inlined", &counters->inlined) && check_test_tier1_field(text, "folded", &counters->folded) &&
+                          check_test_tier1_field(text, "removed_instructions", &counters->removed_instructions) &&
+                          check_test_tier1_field(text, "removed_blocks", &counters->removed_blocks) && check_test_tier1_field(text, "merged_blocks", &counters->merged_blocks) &&
+                          check_test_tier1_field(text, "licm_moved", &counters->licm_moved) &&
+                          check_test_tier1_field(text, "sroa_split", &counters->sroa_split) && check_test_tier1_field(text, "gvn_removed", &counters->gvn_removed);
+    const bool taken = check_test_tier1_taken(text, &every, 1);
+    if (status != 0 && text != NULL)
+    {
+        fprintf(stderr, "%s", text);
+    }
+    free(text);
+    return status == 0 && reported && taken;
+}
+
+// --tier1-passes= (#139): the fixture by each path with each pass of Tier 1's pipeline turned from its default, and with
+// all on and all off. Each build keeps every function Tier 1's and prints clang's build's output, and the report's counter
+// of the pass it turned says that the option reached that pass: off, the pass did nothing (or less than by default, for
+// dead-code removal and CFG cleanup, whose counts include what the rewrite drops whatever the passes); on, it did
+// something it doesn't do by default. Then two files in one command: each unit's lanes take the option too.
+static void check_test_driver_tier1_passes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char source[512];
+    char reference[512];
+    snprintf(source, sizeof(source), "%s/tier1-passes.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-passes-clang", directory);
+    const bool written = parse_test_write(source, check_test_tier1_passes_source, sizeof(check_test_tier1_passes_source) - 1);
+    char* clang_arguments[] = { (char*)clang, "-O0", "-o", reference, source, NULL };
+    char* clang_text = NULL;
+    const bool referenced = written && check_test_driver_spawn(clang_arguments, &clang_text) == 0;
+    free(clang_text);
+    char expected[256] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the passes fixture runs");
+    static const char* const variants[] = {
+        "--tier1-passes=-sccp", "--tier1-passes=-dce", "--tier1-passes=-cfg", "--tier1-passes=+licm", "--tier1-passes=+sroa",
+        "--tier1-passes=+gvn", "--tier1-passes=-inline", "--tier1-passes=+all", "--tier1-passes=-all", "--tier1-passes=-merge",
+    };
+    for (uint32_t path = 0; ran && path < 2; path += 1)
+    {
+        char output[512];
+        snprintf(output, sizeof(output), "%s/tier1-passes-%u", directory, path);
+        CheckTestTier1Passes plain;
+        const bool plain_built = check_test_tier1_passes_build(executable, source, output, NULL, path != 0, &plain);
+        char actual[256] = { 0 };
+        check_test_expect(test, plain_built && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                          "the passes fixture's default --tier1 build prints clang's build's output, every function Tier 1's");
+        // By default every pass of the pipeline but LICM, SROA and the solver does something.
+        check_test_expect(test, plain_built && plain.inlined != 0 && plain.folded != 0 && plain.removed_instructions != 0 && plain.removed_blocks != 0 &&
+                                    plain.merged_blocks != 0 && plain.licm_moved == 0 && plain.sroa_split == 0 && plain.gvn_removed == 0,
+                          "the default pipeline inlines, folds, removes and merges, and runs neither LICM, SROA nor the solver");
+        printf("  Tier 1's passes, %s path: inlined %" PRIu64 ", folded %" PRIu64 ", removed %" PRIu64 " instructions and %" PRIu64 " blocks (%" PRIu64 " merged) by default\n",
+               path == 0 ? "vector" : "scalar", plain.inlined, plain.folded, plain.removed_instructions, plain.removed_blocks, plain.merged_blocks);
+        for (uint32_t v = 0; plain_built && v < BUSTER_ARRAY_LENGTH(variants); v += 1)
+        {
+            CheckTestTier1Passes with;
+            const bool built = check_test_tier1_passes_build(executable, source, output, variants[v], path != 0, &with);
+            char variant_output[256] = { 0 };
+            const bool same = built && check_test_driver_capture(output, variant_output, sizeof(variant_output)) && strcmp(variant_output, expected) == 0;
+            const bool reached = v == 0   ? with.folded == 0 :
+                                 v == 1   ? with.removed_instructions < plain.removed_instructions :
+                                 v == 2   ? with.removed_blocks < plain.removed_blocks :
+                                 v == 3   ? with.licm_moved != 0 :
+                                 v == 4   ? with.sroa_split != 0 :
+                                 v == 5   ? with.gvn_removed != 0 :
+                                 v == 6   ? with.inlined == 0 :
+                                 v == 7   ? with.inlined != 0 && with.folded != 0 && with.merged_blocks != 0 && with.licm_moved != 0 && with.sroa_split != 0 &&
+                                            with.gvn_removed != 0 :
+                                 v == 8   ? with.inlined == 0 && with.folded == 0 && with.removed_instructions < plain.removed_instructions && with.merged_blocks == 0 &&
+                                            with.licm_moved == 0 && with.sroa_split == 0 && with.gvn_removed == 0 :
+                                            with.merged_blocks == 0 && with.removed_blocks < plain.removed_blocks;
+            check_test_expect(test, same, variants[v]);
+            check_test_expect(test, built && reached, variants[v]);
+            if (!(built && reached))
+            {
+                printf("  %s, %s path: inlined %" PRIu64 " folded %" PRIu64 " removed %" PRIu64 "/%" PRIu64 " merged %" PRIu64 " licm %" PRIu64 " sroa %" PRIu64 " gvn %" PRIu64 "\n",
+                       variants[v], path == 0 ? "vector" : "scalar", with.inlined, with.folded, with.removed_instructions, with.removed_blocks, with.merged_blocks,
+                       with.licm_moved, with.sroa_split, with.gvn_removed);
+            }
+        }
+        unlink(output);
+    }
+    // Two source files in one command (c_checker_units.c's lanes): -c writes each unit's object in the working directory, so
+    // the command runs inside `directory`.
+    char first[512];
+    char second[512];
+    snprintf(first, sizeof(first), "%s/tier1-passes-two-a.c", directory);
+    snprintf(second, sizeof(second), "%s/tier1-passes-two-b.c", directory);
+    static const char other[] = "long tier1_passes_two_other(long x)\n{\n    return x + 1;\n}\n";
+    const bool two = parse_test_write(first, check_test_tier1_passes_source, sizeof(check_test_tier1_passes_source) - 1) &&
+                     parse_test_write(second, other, sizeof(other) - 1);
+    check_test_expect(test, two, "the passes two-file fixture writes");
+    char resolved[4096];
+    const char* program = realpath(executable, resolved) != NULL ? resolved : executable;
+    char quoted_directory[4096];
+    char quoted_program[4096];
+    char quoted_first[4096];
+    char quoted_second[4096];
+    char script[16384] = { 0 };
+    const bool quoted = two && check_test_tier1_quoted(quoted_directory, sizeof(quoted_directory), directory) &&
+                        check_test_tier1_quoted(quoted_program, sizeof(quoted_program), program) &&
+                        check_test_tier1_quoted(quoted_first, sizeof(quoted_first), first) && check_test_tier1_quoted(quoted_second, sizeof(quoted_second), second);
+    const int length = quoted ? snprintf(script, sizeof(script), "cd '%s' && '%s' --tier1 --tier1-passes=+licm,-sccp --tier1-report -c '%s' '%s'", quoted_directory,
+                                         quoted_program, quoted_first, quoted_second)
+                              : -1;
+    check_test_expect(test, length > 0 && (size_t)length < sizeof(script), "the passes two-file command fits its buffer");
+    char* arguments[] = { "sh", "-c", script, NULL };
+    char* text = NULL;
+    const int status = length > 0 ? check_test_driver_spawn(arguments, &text) : -1;
+    // The report's tier1 lines: one per unit or one summed over them.
+    uint64_t moved = 0;
+    uint64_t folded = 0;
+    for (const char* line = text; line != NULL && *line != 0;)
+    {
+        const char* end = strchr(line, '\n');
+        const size_t span = end != NULL ? (size_t)(end - line) : strlen(line);
+        if (span > 6 && memcmp(line, "tier1\t", 6) == 0)
+        {
+            char field[4096];
+            const size_t kept = span < sizeof(field) - 1 ? span : sizeof(field) - 1;
+            snprintf(field, sizeof(field), "%.*s", (int)kept, line);
+            uint64_t value = 0;
+            moved += check_test_tier1_field(field, "licm_moved", &value) ? value : 0;
+            folded += check_test_tier1_field(field, "folded", &value) ? value : 0;
+        }
+        line = end != NULL ? end + 1 : NULL;
+    }
+    free(text);
+    check_test_expect(test, status == 0 && moved != 0 && folded == 0, "--tier1-passes= reaches the lanes of a command of several files");
+    char object_a[512];
+    char object_b[512];
+    snprintf(object_a, sizeof(object_a), "%s/tier1-passes-two-a.o", directory);
+    snprintf(object_b, sizeof(object_b), "%s/tier1-passes-two-b.o", directory);
     unlink(object_a);
     unlink(object_b);
     unlink(first);

@@ -470,8 +470,8 @@ unreachable block. Rebuilding validates the original and replacement. Its
 bounded SIMD ID-remap kernel has a scalar twin; canonical texts must match
 exactly. Both complete verifiers check reachable dominance. Both text-parser
 paths must stabilize print/parse/print. For each variant, SCCP, DCE, CFG cleanup,
-their combination, GVN, LICM and scalar replacement run through their scalar and
-vector paths. Optimized arrays may differ; checked execution must preserve the
+their combination with CFG cleanup's merges (Tier 1's, #139), GVN, LICM and
+scalar replacement run through their scalar and vector paths. Optimized arrays may differ; checked execution must preserve the
 independent result and guarded global-memory observations.
 
 The default six cases cover every shape and are in the shared correctness

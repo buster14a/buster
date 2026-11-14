@@ -481,13 +481,29 @@ struct CheckEmitGrowth
 // The C driver's --tier1 (c_check_tier1.c, #138's piece for #140): each body Tier 1's pipeline takes compiled by it,
 // explicitly unsupported bodies by Tier 0; resource/internal failures stop emission. The lane owns each step's
 // output and the steps' scratch, reserved at the
-// lane's first body and emptied for each, and the forms the lane's last target allows (X86_FORM_COUNT entries).
-#define BUSTER_CHECK_TIER1_STEPS 8
+// lane's first body and emptied for each, and the forms the lane's last target allows (X86_FORM_COUNT entries). Every
+// lane reserves the first BUSTER_CHECK_TIER1_STEPS_ALWAYS steps; the others are the optional passes' outputs, reserved
+// only where an option runs the pass: step 7 #866's solver's (--tier1-gvn), 8 SROA's and 9 LICM's (--tier1-passes=).
+#define BUSTER_CHECK_TIER1_STEPS 10
+#define BUSTER_CHECK_TIER1_STEPS_ALWAYS 7
 // --tier1-schedule's variants (#172): none, each block's records after allocation (c_check_tier1_schedule.c), or each
 // block's IR instructions before selection and allocation (tier1_schedule_ir.c).
 #define BUSTER_CHECK_TIER1_SCHEDULE_NONE 0
 #define BUSTER_CHECK_TIER1_SCHEDULE_POST 1
 #define BUSTER_CHECK_TIER1_SCHEDULE_PRE 2
+// --tier1-passes= (#139): the passes of Tier 1's pipeline whose default the option turns over, a bit each, so that 0 is
+// the default pipeline, which runs SCCP, dead-code removal, CFG cleanup and its merges, and neither LICM nor SROA on every
+// function. SCCP's, dead-code removal's, CFG cleanup's and the merges' bits are ir_optimize.c's BUSTER_IR_OPTIMIZE_SCCP,
+// DCE, CFG and MERGE. #866's solver and the inlining keep their own options (--tier1-gvn, --tier1-no-inline), which the
+// option's list sets too.
+#define BUSTER_CHECK_TIER1_PASS_SCCP 1u
+#define BUSTER_CHECK_TIER1_PASS_DCE 2u
+#define BUSTER_CHECK_TIER1_PASS_CFG 4u
+#define BUSTER_CHECK_TIER1_PASS_LICM 8u
+#define BUSTER_CHECK_TIER1_PASS_SROA 16u
+#define BUSTER_CHECK_TIER1_PASS_MERGE 32u
+#define BUSTER_CHECK_TIER1_PASSES_DEFAULT (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE)
+#define BUSTER_CHECK_TIER1_PASSES_ALL (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA)
 
 typedef struct CheckTier1Lane CheckTier1Lane;
 struct CheckTier1Lane
@@ -498,8 +514,8 @@ struct CheckTier1Lane
     uint8_t* allowed;
     X86Target target;
     bool reserved;
-    // Whether the solver's arena (step 6) is among the reserved steps: --tier1-gvn's, only.
-    bool gvn_reserved;
+    // Which optional steps are among the reserved ones: bit k for step BUSTER_CHECK_TIER1_STEPS_ALWAYS + k.
+    uint8_t optional_reserved;
     bool targeted;
     // The emission's inline callees (#1282, #2541, c_check_tier1_inline.c), null for none; and the two arenas of the run's
     // lane state this lane takes the bodies on, where the summaries it builds live until the run ends: their functions'
@@ -508,6 +524,9 @@ struct CheckTier1Lane
     Arena* summaries;
     // --tier1-schedule's variant (BUSTER_CHECK_TIER1_SCHEDULE_*, #172), which the emission sets for each body.
     uint8_t schedule;
+    // --tier1-passes='s turned passes (BUSTER_CHECK_TIER1_PASS_*, #139), which the emission sets for each body: its own
+    // pipeline and the summaries it builds for the unit's callers (c_check_tier1_inline.c) run the same passes.
+    uint8_t passes;
 };
 
 // The unit's inline callees (#1282, check_tier1_inline_table): by symbol (of `symbol_count`), the index plus one of the body
@@ -575,6 +594,16 @@ struct CheckTier1Counts
     uint32_t schedule_moved;
     // The expressions the operand sink moved (#2592, tier1_schedule_ir_sink).
     uint32_t sunk;
+    // What #139's passes did to it (--tier1-passes=): the optimizer's folded constants, the instructions and blocks its
+    // output has fewer than its input (SCCP, dead-code removal, CFG cleanup and its merges together) and the blocks merged
+    // into their predecessors, LICM's moved values, SROA's split slots and #866's solver's removed instructions.
+    uint32_t folded;
+    uint32_t removed_instructions;
+    uint32_t removed_blocks;
+    uint32_t merged_blocks;
+    uint32_t licm_moved;
+    uint32_t sroa_split;
+    uint32_t gvn_removed;
 };
 
 #define BUSTER_CHECK_TIER1_OPERATIONS 256
@@ -613,6 +642,13 @@ struct CheckTier1Report
     uint64_t schedule_blocks;
     uint64_t schedule_moved;
     uint64_t sunk;
+    uint64_t folded;
+    uint64_t removed_instructions;
+    uint64_t removed_blocks;
+    uint64_t merged_blocks;
+    uint64_t licm_moved;
+    uint64_t sroa_split;
+    uint64_t gvn_removed;
 };
 
 // #1059's coverage of the operations a helper may implement, summed over a command's units (--helper-report): each
@@ -861,6 +897,8 @@ struct CheckProgramLanes
     uint64_t squeeze_window;
     // --tier1-schedule's variant (BUSTER_CHECK_TIER1_SCHEDULE_*, #172's measurement): none by default.
     uint8_t tier1_schedule;
+    // --tier1-passes='s turned passes (BUSTER_CHECK_TIER1_PASS_*, #139's measurement): 0, the default pipeline, by default.
+    uint8_t tier1_passes;
     CheckTier1Report tier1_report;
     FILE* tier1_refusals;
     FILE* tier1_function_sizes;
@@ -1642,6 +1680,7 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
     // The summaries this lane builds live in its lane state's arena of the run (#2541): another lane may read them.
     lane->tier1->summaries = run->tier1_inline != NULL && run->tier1_inline->arenas != NULL ? &run->tier1_inline->arenas[2 * (lane - run->lane_states)] : NULL;
     lane->tier1->schedule = run->lanes->tier1_schedule;
+    lane->tier1->passes = run->lanes->tier1_passes;
     CheckTier1Outcome outcome = naked ? check_tier1_failure(CHECK_TIER1_NAKED, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_NAKED, UINT32_MAX, 0) :
                                         check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
                                                             !run->lanes->tier1_no_rematerialize, run->lanes->tier1_gvn, run->verify, run->sources, lane->scratch,
@@ -5190,6 +5229,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->tier1_report.schedule_blocks += compiled ? counts->schedule_blocks : 0;
         lanes->tier1_report.schedule_moved += compiled ? counts->schedule_moved : 0;
         lanes->tier1_report.sunk += compiled ? counts->sunk : 0;
+        lanes->tier1_report.folded += compiled ? counts->folded : 0;
+        lanes->tier1_report.removed_instructions += compiled ? counts->removed_instructions : 0;
+        lanes->tier1_report.removed_blocks += compiled ? counts->removed_blocks : 0;
+        lanes->tier1_report.merged_blocks += compiled ? counts->merged_blocks : 0;
+        lanes->tier1_report.licm_moved += compiled ? counts->licm_moved : 0;
+        lanes->tier1_report.sroa_split += compiled ? counts->sroa_split : 0;
+        lanes->tier1_report.gvn_removed += compiled ? counts->gvn_removed : 0;
     }
     if (!valid)
     {
