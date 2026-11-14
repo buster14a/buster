@@ -8,8 +8,11 @@
 // - constants stored: each store an immediate's, no constant made in a register first;
 // - shifts by zero and multiplications by one: none;
 // - a computed goto's dispatch: an indirect jump at each handler's end, no jump to the shared one;
-// - and #2592's fetch, `i = *pc++` at each handler's end: the load before the increment, which adds in pc's register, so
-//   that no move precedes the handlers' indirect jumps (the function's first fetch, of its parameter, may still move).
+// - #2592's fetch, `i = *pc++` at each handler's end: the load before the increment, which adds in pc's register, so
+//   that no move precedes the handlers' indirect jumps (the function's first fetch, of its parameter, may still move);
+// - and #2745's objects a vector's value initializes whole, as the intrinsics' wrappers are (a struct's, a union's, a
+//   compound literal's): no store of zeros before the vector's, while a volatile object and a union whose designator
+//   moves to another member after the vector's (whose rest clang leaves zeros) keep their eight.
 
 #if defined(BUSTER_TIER1_PATTERNS_SUBJECT)
 
@@ -168,6 +171,56 @@ fetch_halt:
     return stack[sp - 1];
 }
 
+typedef long long patterns_vector __attribute__((vector_size(64)));
+typedef struct
+{
+    patterns_vector v;
+} patterns_wrapper;
+typedef union
+{
+    patterns_vector v;
+    unsigned long long q[8];
+} patterns_lanes;
+
+__attribute__((noinline)) void patterns_whole_literal(patterns_wrapper* out, const patterns_vector* p)
+{
+    *out = (patterns_wrapper){ .v = *p };
+}
+
+__attribute__((noinline)) void patterns_whole_declaration(patterns_wrapper* out, const patterns_vector* p)
+{
+    patterns_wrapper r = { *p };
+    *out = r;
+}
+
+__attribute__((noinline)) void patterns_whole_union(patterns_lanes* out, const patterns_vector* p)
+{
+    patterns_lanes r = { .v = *p };
+    *out = r;
+}
+
+__attribute__((noinline)) unsigned long long patterns_whole_member(const patterns_vector* p)
+{
+    patterns_lanes r = { .v = *p };
+    return r.q[3] ^ r.q[6];
+}
+
+// The override is the point: clang's -Winitializer-overrides would say so.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winitializer-overrides"
+__attribute__((noinline)) void patterns_whole_override(patterns_lanes* out, const patterns_vector* p)
+{
+    patterns_lanes r = { .v = *p, .q[1] = 5 };
+    *out = r;
+}
+#pragma clang diagnostic pop
+
+__attribute__((noinline)) void patterns_whole_volatile(patterns_wrapper* out, const patterns_vector* p)
+{
+    volatile patterns_wrapper r = { *p };
+    *out = r;
+}
+
 #elif defined(BUSTER_TIER1_PATTERNS_ORACLE)
 
 #include <limits.h>
@@ -195,6 +248,22 @@ int patterns_field(const unsigned int* code, const int* table);
 char* patterns_scale(char* p, unsigned long n);
 long patterns_dispatch(const unsigned char* code, long* stack);
 long patterns_fetch(const unsigned int* pc, long* stack);
+typedef long long patterns_vector __attribute__((vector_size(64)));
+typedef struct
+{
+    patterns_vector v;
+} patterns_wrapper;
+typedef union
+{
+    patterns_vector v;
+    unsigned long long q[8];
+} patterns_lanes;
+void patterns_whole_literal(patterns_wrapper* out, const patterns_vector* p);
+void patterns_whole_declaration(patterns_wrapper* out, const patterns_vector* p);
+void patterns_whole_union(patterns_lanes* out, const patterns_vector* p);
+unsigned long long patterns_whole_member(const patterns_vector* p);
+void patterns_whole_override(patterns_lanes* out, const patterns_vector* p);
+void patterns_whole_volatile(patterns_wrapper* out, const patterns_vector* p);
 
 int main(void)
 {
@@ -268,6 +337,32 @@ int main(void)
     const unsigned int words[] = { 6 << 2 | 1, 4 << 2 | 1, 3, 0, 0, 2 };
     long fetched[8] = { 0 };
     valid = patterns_fetch(words, fetched) == 14 && valid;
+    patterns_vector vector;
+    unsigned long long lanes[8];
+    for (int l = 0; l < 8; l += 1)
+    {
+        lanes[l] = 0x0101010101010101ull * (unsigned long long)(l + 1) + (unsigned long long)l;
+        vector[l] = (long long)lanes[l];
+    }
+    patterns_wrapper wrapper;
+    memset(&wrapper, 0x5a, sizeof(wrapper));
+    patterns_whole_literal(&wrapper, &vector);
+    valid = memcmp(&wrapper, lanes, sizeof(lanes)) == 0 && valid;
+    memset(&wrapper, 0x5a, sizeof(wrapper));
+    patterns_whole_declaration(&wrapper, &vector);
+    valid = memcmp(&wrapper, lanes, sizeof(lanes)) == 0 && valid;
+    memset(&wrapper, 0x5a, sizeof(wrapper));
+    patterns_whole_volatile(&wrapper, &vector);
+    valid = memcmp(&wrapper, lanes, sizeof(lanes)) == 0 && valid;
+    patterns_lanes united;
+    memset(&united, 0x5a, sizeof(united));
+    patterns_whole_union(&united, &vector);
+    valid = memcmp(united.q, lanes, sizeof(lanes)) == 0 && valid;
+    valid = patterns_whole_member(&vector) == (lanes[3] ^ lanes[6]) && valid;
+    const unsigned long long overridden[8] = { 0, 5, 0, 0, 0, 0, 0, 0 };
+    memset(&united, 0x5a, sizeof(united));
+    patterns_whole_override(&united, &vector);
+    valid = memcmp(united.q, overridden, sizeof(overridden)) == 0 && valid;
     puts(valid ? "Tier 1 patterns native oracle: pass" : "Tier 1 patterns native oracle: FAIL");
     return valid ? 0 : 1;
 }
@@ -330,6 +425,8 @@ typedef enum PatternsKind
     PATTERNS_SHIFT,
     PATTERNS_DISPATCH,
     PATTERNS_FETCH,
+    PATTERNS_WHOLE,
+    PATTERNS_CLEARED,
 } PatternsKind;
 
 typedef struct PatternsFunction PatternsFunction;
@@ -350,6 +447,12 @@ static const PatternsFunction patterns_functions[] = {
     { "patterns_scale", PATTERNS_SHIFT },
     { "patterns_dispatch", PATTERNS_DISPATCH },
     { "patterns_fetch", PATTERNS_FETCH },
+    { "patterns_whole_literal", PATTERNS_WHOLE },
+    { "patterns_whole_declaration", PATTERNS_WHOLE },
+    { "patterns_whole_union", PATTERNS_WHOLE },
+    { "patterns_whole_member", PATTERNS_WHOLE },
+    { "patterns_whole_override", PATTERNS_CLEARED },
+    { "patterns_whole_volatile", PATTERNS_CLEARED },
 };
 
 #define BUSTER_PATTERNS_COUNT (sizeof(patterns_functions) / sizeof(patterns_functions[0]))
@@ -392,6 +495,8 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     // in place (an add, where a lea into another register would leave the edge a move back).
     unsigned clean = 0;
     unsigned increments = 0;
+    // Stores of a zero immediate to memory: an object's clear's.
+    unsigned zeros = 0;
     for (unsigned i = 0; i < body->count; i += 1)
     {
         const PatternsInstruction* instruction = &body->instructions[i];
@@ -403,6 +508,7 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
         shifts += (strncmp(operation, "shl", 3) == 0 || strncmp(operation, "shr", 3) == 0 || strncmp(operation, "sar", 3) == 0) && strncmp(operands, "$0x0,", 5) == 0;
         const bool move = strncmp(operation, "mov", 3) == 0 && strncmp(operation, "movz", 4) != 0 && strncmp(operation, "movs", 4) != 0;
         immediates += move && operands[0] == '$' && patterns_memory(destination);
+        zeros += move && strncmp(operands, "$0x0,", 5) == 0 && patterns_memory(destination);
         registers += move && operands[0] == '%' && patterns_memory(destination);
         constants += (move && operands[0] == '$' && !patterns_memory(destination)) || (strncmp(operation, "xor", 3) == 0 && comma != NULL && strncmp(operands, destination, (size_t)(comma - operands)) == 0);
         const bool jump = strcmp(operation, "jmp") == 0;
@@ -438,11 +544,17 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     case PATTERNS_FETCH:
         valid = valid && indirect >= 4 && clean >= 3 && increments >= 3;
         break;
+    case PATTERNS_WHOLE:
+        valid = valid && zeros == 0;
+        break;
+    case PATTERNS_CLEARED:
+        valid = valid && zeros == 8;
+        break;
     }
     if (!valid)
     {
-        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u\n",
-                function->name, body->definitions, sets, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments);
+        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u zero-stores=%u\n",
+                function->name, body->definitions, sets, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, zeros);
     }
     return valid;
 }

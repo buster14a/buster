@@ -2464,10 +2464,13 @@ What the lowering covers past scalars (#145's programs):
   median increases 0.79% with overlapping ranges. The report preserves these
   limits and the full evidence.
 - **Initializers.** A local object's plan is applied in order: the object is
-  cleared first unless its first part writes it whole (zeros, or an
-  aggregate's copy of the object's size, as `T x = *p;` and `T x = f();`, which
-  writes its padding too), then each part's zeros, bytes or value is stored, an
-  aggregate's copied. Zeros of up to 128 bytes are stores of 8 down to 1 bytes;
+  cleared first unless its first part writes it whole (zeros, an aggregate's
+  copy of the object's size, as `T x = *p;` and `T x = f();`, which writes its
+  padding too, or a vector's value of at least the object's size, as the
+  intrinsics' wrappers' `(U512){ .v = x }`, whose store writes every byte of
+  its padding-free type, #2745; a scalar's doesn't count, as `long double`'s
+  store writes 10 of its 16 bytes), then each part's zeros, bytes or value is
+  stored, an aggregate's copied. Zeros of up to 128 bytes are stores of 8 down to 1 bytes;
   past 128 bytes (`BUSTER_CHECK_LOWER_FILL_UNROLLED`) they are one call of the
   target C library's `memset`, as clang `-O0`'s code clears them (#1376), the
   whole object's and each zero part's. Each such call is counted with the
