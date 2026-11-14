@@ -1279,6 +1279,21 @@ three rounds, against 0.98% to 1.07% before; main against itself, within 0.07%.
 The ties' work stays scalar: one test of a node's rule and two loads of its
 pattern, in a pass that reads the pattern anyway.
 
+After #2592, on the 9700X ([the record's section 6](https://github.com/buster14a/buster-performance/tree/01844589ee71fe62c8eea4e0cfd3c87b201a3de6/docs/measurements/tier1-ties-unread-2618-2685-2026-11-14),
+the same method), main `98186d5e` against the change as merged (`c6900890`'s
+code): Lua's five scripts take 1.0022 of the time (95% interval 0.9912 to
+1.0133) over six link orders and speedtest1 1.0003 (0.9934 to 1.0073) over
+six layouts, for 0.44% and 0.45% fewer instructions; `sqlite3.c`'s
+`--tier1 -c` takes 0.69% more cycles for 0.42% more instructions. What the
+change gains after #2592 is those instructions; the time doesn't resolve it.
+Lua's `arithmetic` script moves with the link order (0.973 to 1.079): at order
+1, linked after pads that move all the code by whole 64-byte lines, the change's
+build mispredicts 330 K more branches and runs 7.9% to 9.0% more cycles at one
+phase of address bit 6, and 0.5% to 0.7% more at the other, where main's is
+the same at both. The extra mispredictions fall in `luaV_mod`, whose code the
+change leaves the same, and in `luaV_execute`'s dispatch: the predictor's
+aliasing at the change's branch addresses, not instructions it adds.
+
 ## Rematerialization
 
 `Tier1RematerializationInput` is a borrowed column view of selection facts,
