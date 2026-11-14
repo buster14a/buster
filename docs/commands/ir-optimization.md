@@ -81,7 +81,8 @@ On the compiler's own lexer by `--tier1`, `c_tokenize` went from 30.20 to
 instruction counted; the record is
 [buster-performance's](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-vector-lexer-breakdown-1344-2026-11-14).
 What it leaves are true constants that Tier 1's constant rule still builds
-below `rsp`.
+below `rsp` (#2744), but for those whose quadwords are one value, which are a
+`mov` and a `vpbroadcastq` at EVEX targets (13.46 instructions per byte).
 
 ## Verification work and retained analyses (#1379)
 

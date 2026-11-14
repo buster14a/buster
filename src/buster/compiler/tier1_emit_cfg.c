@@ -2152,14 +2152,40 @@ static bool tier1_emit_cfg_x87_offset(const IrFunction* function, const Tier1Emi
 // A vector constant of no simpler kind (#141, BUSTER_TIER1_VECTOR_CONSTANT, whose constant's index is the pattern's
 // `immediate`): its words as immediates into the red zone below rsp, a sign-extended imm32's mov qword or two mov dword
 // each, and the vector loaded from there by vmovdqu32 of its width (vmovdqu at a target without AVX512VL, #1281) into its register, as Tier 0 builds one in its slot
-// (tier0_emit_vector_value). A function with one keeps its frame out of the red zone (tier1_emit_cfg_frame_flags).
+// (tier0_emit_vector_value). A function with one keeps its frame out of the red zone (tier1_emit_cfg_frame_flags). The
+// emitted code's certificate replays this function for the node's records (tier1_certificate_emitted.c), so both
+// change together.
 static Tier1EmitError tier1_emit_cfg_vector_constant(const IrFunction* function, const Tier1SelectHoles* holes, Tier1EmitBuffer* buffer)
 {
     const uint32_t width = holes->width;
     const uint64_t index = holes->immediate;
     Tier1EmitError error = index < function->vector_constant_count && (width == 16 || width == 32 || width == 64) ? TIER1_EMIT_OK : TIER1_EMIT_INVALID;
     const int32_t first = -(int32_t)width;
-    for (uint32_t w = 0; error == TIER1_EMIT_OK && w < width / 8; w += 1)
+    // A constant whose quadwords are one value (#2744's step 1; one whose doublewords are is BUSTER_TIER1_VECTOR_SPLAT's,
+    // so this is _mm512_set1_epi64(63)'s kind): at EVEX's level, the quadword into the scratch general register, by the
+    // shortest mov that holds it (tier1_rematerialize's choice), and vpbroadcastq from it. Two records and no memory,
+    // where the stores below were eight and their load one that no store forwards to: on the compiler's own lexer by
+    // --tier1, 1,188 of the 3,157 constants c_tokenize built in 9,076 bytes.
+    bool uniform = error == TIER1_EMIT_OK && tier1_select_holes_encoding(holes) == BUSTER_TIER1_ENCODING_EVEX;
+    for (uint32_t w = 1; uniform && w < width / 8; w += 1)
+    {
+        uniform = function->vector_constants[index].words[w] == function->vector_constants[index].words[0];
+    }
+    if (uniform)
+    {
+        const uint64_t value = function->vector_constants[index].words[0];
+        const bool zero_extended = value <= UINT32_MAX;
+        const bool sign_extended = (int64_t)value == (int64_t)(int32_t)value;
+        const X86Instruction move = {
+            .form = zero_extended ? X86_FORM_MOV_R32_IMM32 : sign_extended ? X86_FORM_MOV_RM64_IMM32 : X86_FORM_MOV_R64_IMM64,
+            .rm = BUSTER_TIER1_SELECT_SCRATCH,
+            .immediate = (int32_t)value,
+            .displacement = zero_extended || sign_extended ? 0 : (int32_t)(value >> 32),
+        };
+        const uint32_t broadcast = width == 16 ? X86_FORM_VPBROADCASTQ_X_R64 : width == 32 ? X86_FORM_VPBROADCASTQ_Y_R64 : X86_FORM_VPBROADCASTQ_Z_R64;
+        error = tier1_emit_append(buffer, move) && tier1_emit_append(buffer, tier1_select_register_record(broadcast, (uint8_t)(holes->destination & 15), BUSTER_TIER1_SELECT_SCRATCH)) ? error : TIER1_EMIT_MEMORY;
+    }
+    for (uint32_t w = 0; !uniform && error == TIER1_EMIT_OK && w < width / 8; w += 1)
     {
         const uint64_t word = function->vector_constants[index].words[w];
         const bool fits = x86_immediate_encodes(X86_FORM_MOV_RM64_IMM32, (int64_t)word);
@@ -2176,7 +2202,7 @@ static Tier1EmitError tier1_emit_cfg_vector_constant(const IrFunction* function,
         }
     }
     const X86Instruction load = { .form = tier1_select_class_forms(width, tier1_select_holes_encoding(holes))->load, .reg = (uint8_t)(holes->destination & 15), .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = first };
-    error = error != TIER1_EMIT_OK || tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
+    error = error != TIER1_EMIT_OK || uniform || tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
     return error;
 }
 
