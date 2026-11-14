@@ -305,20 +305,36 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
             report->type = placeholder;
             report->value = value.type;
             report->completion = end;
-            if (begin + 1 == end && parser->tokens.kinds[begin] == PARSE_KIND_IDENTIFIER)
+            // Follow the value-producing side of groups and commas. An unrelated cast in a discarded operand must not
+            // supply the result's typedef spelling, even when its canonical type happens to match.
+            uint32_t root = reader->first_child[assignment];
+            while (root != BUSTER_CHECK_NONE && root < assignment)
             {
-                report->type_spelling = check_input_token_type_spelling(reader->output, parser, begin, false);
+                root = reader->next_child[root];
             }
-            for (uint32_t token = begin; token < end; token += 1)
+            for (uint32_t steps = 0; root < end && steps < 64; steps += 1)
             {
-                if (report->type_spelling == 0 && parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST)
+                uint32_t operands[4] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+                uint32_t opener = BUSTER_CHECK_NONE;
+                const uint32_t count = check_input_attribute_operands(parser, root, begin, end, operands, &opener);
+                if (parser->tree.roles[root] == PARSE_ROLE_CLOSE_GROUP && count == 1)
                 {
-                    const uint32_t spelling = check_input_token_type_spelling(reader->output, parser, token, true);
+                    root = operands[0];
+                }
+                else if (parser->tokens.kinds[root] == PARSE_KIND_COMMA && check_input_attribute_comma(parser, root) && count == 2)
+                {
+                    root = operands[1];
+                }
+                else
+                {
+                    const bool cast = parser->tree.roles[root] == PARSE_ROLE_CLOSE_CAST;
+                    const uint32_t spelling = check_input_token_type_spelling(reader->output, parser, root, cast);
                     if (spelling < reader->output->token_count && spelling != 0 &&
                         type_same_canonical(types, reader->declared_types[spelling], value.type) == TYPE_ANSWER_YES)
                     {
                         report->type_spelling = spelling;
                     }
+                    break;
                 }
             }
             // Keep a usable declaration after diagnosing the invalid double-atomic deduction. This lets the ordinary
