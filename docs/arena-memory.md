@@ -113,13 +113,15 @@ empty file's or sqlite3.c's, writes 11 pages in three 2 MB stretches; with
 transparent huge pages `always`, as on the 9700X, two of them took a huge page
 each, 4 MB cleared for 44 KB of statics. Tests and benchmarks keep their
 `.bss` as the kernel gives it. The advice comes before the process reads or
-writes any of `.bss` (`main_driver`, for a command that starts with an option,
-as a compile's do), because it doesn't undo a touch before it: a
-read maps the huge zero page over its 2 MB, and a write there, even after the
-advice, then takes a huge page of its own. Until #1444, `arena_page_policy`'s
+writes any of `.bss` (`main_driver`), because it doesn't undo a touch before
+it: a read maps the huge zero page over its 2 MB, and a write there, even after
+the advice, then takes a huge page of its own. Until #1444, `arena_page_policy`'s
 statics were written first, and that page took one of an empty file's two huge
-pages. The `check` and `parse` commands, and a source command whose first
-argument is a file, still advise after `arena_page_policy` and take that page.
+pages. `main_driver` advises for a first argument that is an option, as a
+compile's usually is, or that holds a byte no command's name has, such as a file
+first (`hello.c -o hello`, `main_source_first`), and for `check`, `parse` and
+`measure-attested`. A first argument of a name's bytes alone (a file named `a`)
+is a source command's only once no command has taken it, and is advised then.
 
 ## Finite address spaces
 

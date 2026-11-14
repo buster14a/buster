@@ -360,7 +360,7 @@ static CheckLowerTemplateUse check_lower_template_classify(const CheckLowerWrite
     {
         uint8_t binary = check_lower_binary(op);
         uint64_t right = 0;
-        const bool power = check_lower_unsigned_power(writer, node, class, &binary, &right);
+        const bool power = check_lower_power(writer, node, class, &binary, &right) != BUSTER_CHECK_LOWER_POWER_NONE;
         // A rewritten right operand no longer has its child's original entries. Leave this root to the task loop;
         // its children may still be closed templates. The fast twin makes the same choice below.
         // The shifts' and compares' counts are of these classes too, so check_lower_count adds nothing.
@@ -1091,7 +1091,7 @@ static CheckLowerTemplateFast check_lower_template_fast(const CheckLowerWriter* 
         {
             uint8_t selected = binary;
             uint64_t right = 0;
-            const bool power = check_lower_unsigned_power(writer, node, class, &selected, &right);
+            const bool power = check_lower_power(writer, node, class, &selected, &right) != BUSTER_CHECK_LOWER_POWER_NONE;
             if (check_lower_template_class(check_lower_class(writer, type_a)) && check_lower_template_class(check_lower_class(writer, type_b)) &&
                 !check_lower_aggregate(writer, type_a) && !power)
             {

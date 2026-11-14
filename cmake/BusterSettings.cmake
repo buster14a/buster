@@ -567,6 +567,8 @@ function(buster_settings_linker)
         list(APPEND flags -Wl,-O0)
     endif()
     set(buster_linker_flags ${flags} PARENT_SCOPE)
+    # Whether the linker is lld, which the start's code order needs (cmake/BusterStartOrder.cmake).
+    set(buster_lld ${lld} PARENT_SCOPE)
     # Whether the link merges identical constants and strings across objects (SHF_MERGE): every linker but lld at
     # -O0. The parallel parts' join keeps the flags for one that does (BusterCodegenMerge.cmake).
     if(lld)
