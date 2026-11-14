@@ -193,6 +193,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_LABEL_REDEFINITION: result = "redefinition of label"; break;
         case CHECK_INPUT_LABEL_AMBIGUOUS: result = "reference to label is ambiguous"; break;
         case CHECK_INPUT_AUTO_TYPE_INITIALIZER: result = "declaration with deduced type '__auto_type' requires an initializer"; break;
+        case CHECK_INPUT_AUTO_ATOMIC_POINTER: result = "variable with atomic deduced pointee has incompatible initializer"; break;
         case CHECK_INPUT_AUTO_TYPE_SELF: result = "variable declared with deduced type '__auto_type' cannot appear in its own initializer"; break;
         case CHECK_INPUT_AUTO_TYPE_CONTEXT: result = "'__auto_type' not allowed here"; break;
         case CHECK_INPUT_AUTO_TYPE_LIST: result = "cannot use '__auto_type' with initializer list in C"; break;
@@ -6604,7 +6605,12 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         }
                         else
                         {
+                            // The variable's name can be a macro argument; clang points to the argument and notes its
+                            // parameter's expansion site for the incompatible atomic-pointee initializer (#1844).
+                            const bool arguments = pp->diagnostic_arguments;
+                            pp->diagnostic_arguments |= phase == 0 && input->reports[index].message == CHECK_INPUT_AUTO_ATOMIC_POINTER;
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s", message);
+                            pp->diagnostic_arguments = arguments;
                         }
                         pp_diagnostic_suborder(pp, previous, phase == 0 ? input->reports[index].suborder :
                                                              argument_first < count ? (uint64_t)parser->tokens.sources[argument_first] + 1u : 0);
@@ -7721,6 +7727,8 @@ static bool check_driver_rejected_recovered(const Parser* parser, const CheckInp
 {
     bool recovered = false;
     bool stopped = false;
+    bool restrict_specifier = false;
+    bool atomic_initializer = false;
     // A recovered implicit-int redeclaration keeps no new binding or initializer conversion, but Sema still builds
     // its initializer expression (#2332). Reread it for those warnings; its known redefinition is not published again.
     uint32_t declaration = bodied && parser->recovered_types != NULL && input->invalid_declarations != NULL &&
@@ -7742,12 +7750,20 @@ static bool check_driver_rejected_recovered(const Parser* parser, const CheckInp
     {
         const bool at = input->reports[i].token == token;
         const bool corrected = input->reports[i].message == CHECK_INPUT_UNDECLARED_CORRECTED && input->reports[i].recovered;
-        const bool keeps = corrected || (!bodied && check_driver_report_keeps_valid(input->reports + i)) ||
+        const bool initializer = input->reports[i].recovered && input->reports[i].message == CHECK_INPUT_AUTO_ATOMIC_POINTER;
+        const bool restricted = input->reports[i].recovered && input->reports[i].message == CHECK_INPUT_RESTRICT_NOT_POINTER;
+        // A rejected atomic-pointee declaration has no initializer conversion, but its expression still contributes
+        // warnings, just as the recovered implicit-int initializer does. Its known error is not published again.
+        const bool keeps = corrected || initializer || (!bodied && check_driver_report_keeps_valid(input->reports + i)) ||
                            (implicit && input->reports[i].recovered && input->reports[i].message == CHECK_INPUT_REDECLARATION);
         recovered |= at && keeps;
-        stopped |= at && !keeps;
+        atomic_initializer |= at && initializer;
+        restrict_specifier |= at && restricted;
+        stopped |= at && !keeps && !restricted;
     }
-    return recovered && !stopped;
+    // A dropped restrict specifier at the same name does not remove that atomic pointer's initializer expression.
+    // Restrict errors without this recovered initializer keep their existing rejected-view behavior.
+    return recovered && !stopped && (!restrict_specifier || atomic_initializer);
 }
 
 // Whether the first reading's errors at `token` count in the scopes around it (check_driver_error_scoped): one does, or
@@ -10704,6 +10720,29 @@ static bool check_driver_tier1_passes(const char* list, uint8_t* toggled, bool* 
     return valid;
 }
 
+// Numeric command options are unsigned decimal words, not libc's signed/whitespace-prefixed conversions. Check the
+// bound before each multiply so neither a negative magnitude nor an overflowing word can become another valid value.
+static bool check_driver_unsigned_decimal(const char* text, uint64_t maximum, uint64_t* value)
+{
+    const uint64_t quotient = maximum / 10;
+    const uint32_t remainder = (uint32_t)(maximum % 10);
+    uint64_t number = 0;
+    bool valid = text != NULL && text[0] != 0;
+    const char* cursor = text;
+    while (valid && *cursor != 0)
+    {
+        const uint32_t digit = (uint32_t)(uint8_t)*cursor - (uint32_t)'0';
+        valid = digit < 10 && (number < quotient || (number == quotient && digit <= remainder));
+        if (valid)
+        {
+            number = number * 10 + digit;
+        }
+        cursor += 1;
+    }
+    *value = valid ? number : 0;
+    return valid;
+}
+
 // A strict, ordered list of distinct CPUs already in the caller's affinity mask. A CPU list is an opt-in control
 // for a reproducible campaign, so malformed or unavailable entries must not silently select a different placement.
 static uint32_t check_driver_cpu_list(const char* text, uint32_t* cpus, uint32_t capacity)
@@ -13310,9 +13349,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else if (match.exact == C_OPTION_LANES || match.joined == C_OPTION_LANES_EQ)
         {
             const char* value = arguments[i][7] == '=' ? arguments[i] + 8 : i + 1 < count ? arguments[++i] : 0;
-            char* end = 0;
-            const unsigned long lane_count = value != 0 ? strtoul(value, &end, 10) : 0;
-            invalid_lanes |= value == 0 || end == value || *end != 0 || lane_count == 0 || lane_count > BUSTER_CHECK_EMIT_MAX_LANES;
+            uint64_t lane_count = 0;
+            invalid_lanes |= !check_driver_unsigned_decimal(value, BUSTER_CHECK_EMIT_MAX_LANES, &lane_count) || lane_count == 0;
             lanes->lanes = (uint32_t)lane_count;
             lanes->every_lane = true;
         }
@@ -13321,9 +13359,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             // #2536's step 1: one lane's emission by windows of about N tokens (check_program_emit_windows); 0 is one
             // window as long as the unit, and BUSTER_CHECK_EMIT_WINDOW_TOKENS the default.
             const char* value = arguments[i] + 14;
-            char* end = NULL;
-            const unsigned long tokens = strtoul(value, &end, 10);
-            const bool known = end != value && *end == 0 && tokens <= UINT32_MAX;
+            uint64_t tokens = 0;
+            const bool known = check_driver_unsigned_decimal(value, UINT32_MAX, &tokens);
             if (!known)
             {
                 fprintf(stderr, "error: --emit-window= takes a count of tokens\n");
@@ -13334,9 +13371,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else if (match.exact == C_OPTION_WORKER_BUDGET || match.joined == C_OPTION_WORKER_BUDGET_EQ)
         {
             const char* value = arguments[i][15] == '=' ? arguments[i] + 16 : i + 1 < count ? arguments[++i] : NULL;
-            char* end = NULL;
-            const unsigned long workers = value != NULL ? strtoul(value, &end, 10) : 0;
-            invalid_lanes |= value == NULL || end == value || *end != 0 || workers == 0 || workers > BUSTER_CHECK_EMIT_MAX_LANES;
+            uint64_t workers = 0;
+            invalid_lanes |= !check_driver_unsigned_decimal(value, BUSTER_CHECK_EMIT_MAX_LANES, &workers) || workers == 0;
             worker_budget.maximum = (uint32_t)workers;
         }
         else if (match.exact == C_OPTION_FLAZY_SYSTEM_HEADERS)
@@ -13381,16 +13417,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         }
         else if (match.joined == C_OPTION_UNITS_MEMORY_EQ)
         {
-            char* end = NULL;
-            units_memory = strtoull(arguments[i] + 15, &end, 10);
-            invalid_units_memory |= end == arguments[i] + 15 || *end != 0 || units_memory == 0 || arguments[i][15] == '-';
+            invalid_units_memory |= !check_driver_unsigned_decimal(arguments[i] + 15, UINT64_MAX, &units_memory) || units_memory == 0;
         }
         else if (match.exact == C_OPTION_ID_ORDER || match.joined == C_OPTION_ID_ORDER_EQ)
         {
             const char* value = arguments[i][10] == '=' ? arguments[i] + 11 : i + 1 < count ? arguments[++i] : NULL;
-            char* end = NULL;
-            id_order = value != NULL ? strtoull(value, &end, 10) : 0;
-            invalid_id_order |= value == NULL || end == value || *end != 0;
+            invalid_id_order |= !check_driver_unsigned_decimal(value, UINT64_MAX, &id_order);
             id_ordered = true;
         }
         else if (match.exact == C_OPTION_TIME_STAGES)
