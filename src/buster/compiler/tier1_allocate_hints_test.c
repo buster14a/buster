@@ -476,7 +476,8 @@ static void tier1_allocation_test_waits(Tier1AllocationTestTally* tally, Arena* 
 // An unused recipe entering a join (#2618, Tier1AllocationInput.join_starts), with two registers of which the ranges may
 // take r0: recipe value 0 takes r0 at 0, read at 1, and holds it to its end at 10; its range at 10 isn't read. Named by the
 // first range's closing, it takes r0 there unless it enters a join of three that a predecessor reaches from later, where it
-// rests; resident, it takes r0 all the same. Named by the first range's opening, it rests at a join of three alone.
+// rests; resident, it takes r0 all the same, and without the resident column, which recipes keep theirs isn't known: it
+// takes r0 too. Named by the first range's opening, it rests at a join of three alone.
 static void tier1_allocation_test_joins(Tier1AllocationTestTally* tally, Arena* arena)
 {
     const uint32_t starts[2] = { 0, 10 };
@@ -494,15 +495,18 @@ static void tier1_allocation_test_joins(Tier1AllocationTestTally* tally, Arena* 
     const uint8_t earlier[2] = { 0, 3 };
     const uint8_t later[2] = { 0, 3 | BUSTER_TIER1_ALLOCATE_JOIN_LATER };
     const uint8_t resident[1] = { 1 };
-    const uint8_t* joins[] = { no_join, earlier, later, later, earlier };
-    const uint32_t* named[] = { closing, closing, closing, closing, opening };
-    const bool rests[] = { false, false, true, false, true };
+    const uint8_t transient[1] = { 0 };
+    const uint8_t* joins[] = { no_join, earlier, later, later, earlier, later };
+    const uint32_t* named[] = { closing, closing, closing, closing, opening, closing };
+    const uint8_t* residents[] = { transient, transient, transient, resident, transient, 0 };
+    const bool rests[] = { false, false, true, false, true, false };
     const char* names[] = {
         "an unused recipe outside a join takes its closing's register",
         "an unused recipe entering a join its predecessors precede takes its closing's register",
         "an unused recipe entering a join a later predecessor reaches rests",
         "a resident recipe entering a join takes its closing's register",
         "an unused recipe entering a join named by an opening rests",
+        "without the resident column, a recipe entering a join takes its closing's register",
     };
     for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(names); fixture += 1)
     {
@@ -515,7 +519,7 @@ static void tier1_allocation_test_joins(Tier1AllocationTestTally* tally, Arena* 
             .hint_values = values,
             .hint_intervals = named[fixture],
             .join_starts = joins[fixture],
-            .resident_values = fixture == 3 ? resident : 0,
+            .resident_values = residents[fixture],
             .rematerializable = rematerializable,
             .use_offsets = use_offsets,
             .use_positions = use_positions,

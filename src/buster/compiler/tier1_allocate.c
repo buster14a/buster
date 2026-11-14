@@ -94,8 +94,9 @@ struct Tier1AllocationInput
     // no predecessor's closing or a predecessor comes later, rather than make each edge recompute it: sqlite3VdbeExec's
     // dispatch join, laid out after its first successor.
     const uint8_t* join_starts;
-    // Optional, per value (#2618): nonzero for a recipe that keeps its register at a join all the same, #2574's hot ones
-    // (Lua's disptab), which every handler's tail already holds.
+    // Optional, per value (#2618): nonzero for a recipe that keeps its register at a join all the same, one read on every
+    // iteration of its loops (Lua's disptab, a switch's table in a loop), which every predecessor already holds. Recipes
+    // rest at joins only with this column: without it, which recipes those are isn't known.
     const uint8_t* resident_values;
     const uint8_t* rematerializable;
     // Both use columns may be absent (next use then conservatively means interval end). Otherwise each slice is
@@ -663,7 +664,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             // predecessors before it, which already hold it (lua_getmetatable's zero): each edge would recompute it, where
             // its reads after the join, on fewer paths, do (sqlite3VdbeExec's frame address at its dispatch join).
             const uint8_t join = columns.join_starts != 0 ? columns.join_starts[interval] : 0;
-            const bool resident = columns.resident_values != 0 && columns.resident_values[columns.values[interval]] != 0;
+            const bool resident = columns.resident_values == 0 || columns.resident_values[columns.values[interval]] != 0;
             const bool joins = (join & BUSTER_TIER1_ALLOCATE_JOIN_COUNT) >= BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM && !resident && (opening || (join & BUSTER_TIER1_ALLOCATE_JOIN_LATER) != 0);
             if ((idle && (!recomputed || open == 0 || rests || joins)) || waits)
             {

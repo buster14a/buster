@@ -4626,18 +4626,25 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
             hot_count += pass == 1 && hot[v] == 1 && (caller & BUSTER_TIER1_EMIT_CFG_RESIDENT) != 0;
         }
     }
-    // The hot recipes keep their registers at joins in the preferred problem (#2618): every handler's tail of a dispatch
-    // loop holds Lua's disptab already, where an unused recipe of no loop's rests (Tier1AllocationInput.resident_values).
-    uint32_t hot_recipes = 0;
-    for (uint32_t v = 0; ok && v < input->value_count; v += 1)
-    {
-        hot_recipes += hot[v] == 1;
-    }
-    uint8_t* resident = ok && hot_recipes != 0 ? ir_allocate(output, (uint64_t)input->value_count + 1, 1, &ok) : 0;
+    // The recipes read on every iteration of the loops they are live across, whether they cross a call or not, keep their
+    // registers at joins in the preferred problem (#2618, Tier1AllocationInput.resident_values): every handler's tail
+    // holds Lua's disptab already, and every case's a switch's table in a loop (tier1_table_loop's), where an unused recipe
+    // read in a few of a loop's blocks rests. The problem rests recipes at joins only with this column, which the plain
+    // problem hasn't. A pass of its own: tier1_emit_cfg_hot_recipes's budget is shared by its candidates.
+    uint8_t* resident = ok ? ir_allocate(output, (uint64_t)input->value_count + 1, 1, &ok) : 0;
+    uint32_t recipes = 0;
     for (uint32_t v = 0; resident != 0 && v < input->value_count; v += 1)
     {
-        resident[v] = hot[v] == 1;
+        uint32_t root = v;
+        while (parents[root] != root)
+        {
+            root = parents[root];
+        }
+        const bool recipe = input->classes[v] == BUSTER_TIER1_ALLOCATE_GPR && root == v && input->rematerializable != 0 && input->rematerializable[v] != 0;
+        resident[v] = recipe ? 2 : 0;
+        recipes += recipe;
     }
+    ok = ok && (recipes == 0 || tier1_emit_cfg_hot_recipes(input, intervals, recipes, output, scratch, resident));
     // The calls' definition phases clobber the caller-saved registers in the preferred problem, where a hot value leaves
     // one of them: its recomputation, where it is next needed, stands for a save and a reload around the call.
     uint32_t* clobbers = ok && hot_count != 0 ? ir_allocate(output, (uint64_t)call_count + 1, 4, &ok) : 0;
