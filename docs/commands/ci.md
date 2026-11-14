@@ -465,7 +465,7 @@ The test job in `9700x.yml` gives each row its count (`shards`):
 | Row | Shards | Why |
 | --- | ---: | --- |
 | plain, both | 4 | `tools/ci/nightly.c` counts the plain rows' shards as one N; more native shards each rebuild the compiler for under a minute less |
-| `x86-64` TSan, MSan | 6 | a portable row's extra shard costs a minute of setup; 6 reach the rows' longest commands |
+| `x86-64` TSan, MSan | 7 | a portable row's extra shard costs a minute of setup; 7 reach the rows' longest commands (#2703: with #2712's finer parts, `costs plan` gives MSan 975 s as 6 and 841 s as 7, TSan 909 and 872 s, at the same runner-minutes) |
 | `vector`, each configuration | 4 | its items, `BUSTER_VECTOR_ITEMS`, which its draws are sized for; the take gives the run step its configuration's count |
 | others | 4 | already shorter than the run's longest row |
 
