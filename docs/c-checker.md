@@ -2937,10 +2937,13 @@ What the lowering covers past scalars (#145's programs):
   name as a swizzle only in a unit whose type table has an extended vector
   (`TypeTable.ext_vectors`), growing its list past the `.` members it counted;
   a struct's `->` member is unaffected. Swizzles aren't lowered: `-c` refuses
-  both spellings as a member access. The checker's swizzle diagnostics are its
-  own words, not clang's ("illegal vector component name", "vector is not
-  assignable (contains duplicate components)", "address of vector element
-  requested", a `vector_size` vector's "is not a structure or union"): #2096.
+  both spellings as a member access. The cold diagnostic renderer gives clang's
+  vector member errors (#2096): the first illegal component character at its
+  operator-relative byte, an out-of-range component at the operator, duplicate
+  components on assignment, and an element's forbidden address. GNU vectors
+  keep the non-record-base error and their typedef spelling. A duplicate or
+  temporary swizzle's address gets the rvalue error, while ordinary records and
+  valid swizzles keep their existing semantics.
   Extended vectors' `!`, `&&` and `||` compare each lane with zero and return
   all-one or all-zero signed lanes. Both operands are evaluated; these vector
   operators do not short-circuit. Half-precision truth uses scalar conversions
@@ -3595,16 +3598,28 @@ What the lowering covers past scalars (#145's programs):
     `isUsed`) is read from the binding events: an evaluated use that reached
     its declarations, outside its own body. A unit with a multiversioned
     function is read in source order for it (`CheckInput.target_multiversion`,
-    `check_deferred_bodies`).
+    `check_deferred_bodies`). Each use of a visible `target` overload set
+    retains its latest default declaration in `CheckInput.target_candidates`
+    (#2424), respecting scope and declaration order. Calls use an isolated
+    default candidate through the existing overload checker: wrong arity or
+    a nonviable argument gives "no matching function" and the default's
+    candidate note. The candidate's `BUSTER_CHECK_OVERLOAD_TARGET` bit rejects
+    incompatible function-pointer signatures, as do ordinary overload sets
+    with multiple distinct functions. An ordinary singleton keeps its
+    configurable conversion. C's viable object-pointer
+    conversions keep their warning policy and note the default's parameter.
+    A mismatched function-pointer
+    initialization or assignment spells the source as '<overloaded function
+    type>'; initialization also notes the default's signature. Passing or returning it uses
+    the same source spelling, with the callee's parameter note when passing.
+    A lone target version and `target_clones` keep ordinary-call diagnostics.
   - *Tests.* `test-checker-driver --target-versions-only` compares each unit's
     whole output with clang's by the vector path, the scalar one and with the
     bodies deferred.
-  - *Differences from clang.* Where several versions are visible, clang
-    resolves a reference as an overload set. A call of the wrong arity or
-    argument types gets this checker's call errors, not "no matching function"
-    with its candidate notes. A reference other than a call, which clang
-    resolves only against a function pointer type and a default version,
-    is accepted. A different calling convention isn't compared.
+  - *Differences from clang.* A reference other than a call without a default
+    version or without a function-pointer target is still accepted in cases
+    where clang cannot resolve its overload set. A different calling
+    convention isn't compared.
   - *Code* (`c_check_program_target_versions.c`, as clang's
     `emitMultiVersionFunctions` and `EmitX86MultiVersionResolver` make it). A
     name's versions form a group (`CheckProgram.target_groups`). A `target`
@@ -5017,9 +5032,8 @@ on past it. A declaration of another version is another entity's, checked
 as any, and one of the invalid version's that follows it is a redefinition of
 it again, noted there, as clang's `CheckMultiVersionAdditionalDecl` finds it.
 A call of a `target` multiversioned name keeps its other versions, as clang's
-overload resolution does. Its argument errors are still the plain call's
-wording, not clang's "no matching function", as with every multiversioned
-call.
+overload resolution does. Its visible default is the overload checker's
+candidate (#2424), so invalid arguments name that candidate in their notes.
 
 `check_driver_rejected_warnings` follows clang's `ActOnPopScope`: a scope in
 which an error occurred gives no unused-variable warning, nested scopes'
@@ -5481,7 +5495,12 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   each, an implicitly declared function's among them in its block. A library
   function's implicit declaration stays one after its block, as clang
   declares the builtin at file scope (`printf` called in one function is
-  `printff`'s correction in the next). A name whose length differs
+  `printff`'s correction in the next). Predefined typedefs are candidates from
+  the start, with declaration notes that have no source location (#2250).
+  A builtin function's name becomes a candidate at its first use, before its
+  arguments, and stays one after the block; its note points to that first use.
+  A feature query alone introduces no builtin declaration. Visible declarations
+  shadow both kinds of candidate. A name whose length differs
   from the typo's by more than a third of it is skipped
   (`TypoCorrectionConsumer::addName`), and so is one further than
   (length + 2) / 3 by Levenshtein's distance. The nearest is taken if no other
@@ -5631,12 +5650,23 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   calls', and clang's search at each call of a prototyped function with too
   few or too many arguments (`TryTypoCorrectionForCall`, which suggests
   nothing in C). The calls' suggestions past the limit are dropped once the
-  values' are known (`check_typo_finish`).
+  values' are known (`check_typo_finish`). Recovery views retain the source
+  positions of already corrected names, so rereading a builtin or type typo
+  does not renew that budget (`Parser.typo_sources`, #2250).
+
+A builtin suggestion is read again through the driver's existing name-edit
+view, preserving the original typo error and its first-use note before the
+corrected expression's diagnostics. Its normal argument checks, warnings
+and direct-call constraint still run. Predefined-type corrections
+at statements and parameters use the same view with the predefined name,
+and retain their locationless declaration notes.
 
 The search runs only after an undeclared name, so a valid unit pays nothing.
 It replays the binding stream's scope stack once per unit (`CheckTypoScope`,
-one for the walk's calls and one for the answers' values), then prefilters
-the visible names by length (`3 * |difference| <= length`) in AVX-512. Each
+one for the walk's calls and one for the answers' values), alongside the
+effective parse's builtin operands. Both operand discovery and the candidate
+length prefilter (`3 * |difference| <= length`) have AVX-512 and scalar paths.
+Predefined types and used builtins share the existing candidate filter. Each
 distance comes from Myers's bit-parallel algorithm, with the candidate's
 equality masks from byte compares; names over 64 bytes, and the scalar path,
 use the dynamic-programming table, the twin that `test-checker` checks against
@@ -5645,11 +5675,6 @@ use the dynamic-programming table, the twin that `test-checker` checks against
 with an undeclared name fails them and is read again in source order.
 
 Left as they were:
-
-- No search offers a builtin's name or a predefined type's (clang's
-  `use of undeclared identifier '__builtin_absx'; did you mean
-  '__builtin_abs'?`, or `'__builtin_ms_va_list'` for
-  `__builtin_c23_va_start` named outside a call before C23).
 
 - A parameter's correction to a storage class (`statc v` to `static`) reads
   the parameter with it, but buster lacks clang's "invalid storage class
@@ -6881,6 +6906,39 @@ probe's climb stopping at a token shallower than the operand
 token's start. `test-checker-driver` checks the parents by both paths and the
 starts against their definitions on random graphs and trees whose columns end
 at `PROT_NONE` pages (`c_check_common_tree_test.c`).
+
+The vector warning driver classifies its immutable operator column once
+(`c_check_common_candidates.c`, #1340). Eight classes cover reach, comparisons,
+returned addresses, calls, static selections, evaluation masks, discarded
+values and shifts. Each class has one 16-bit mask per 16 nodes, with the
+classes in separate contiguous columns: one byte per node, rounded to 16
+nodes. Full batches classify 64 operators with one byte-table lookup; the
+last loads are masked to the logical count. The reach, format, return-stack,
+static-selection, operand-mask, discarded-value and detached-shift passes
+consume these masks in ascending node order and retain their semantic tests.
+The comparison masks also supply the existing 16-comparison batches.
+
+The parent pass retains immutable parentless membership while counting its
+distinct children, at one bit per node, rounded to 64 nodes. The tree path
+expands it into the initial evaluated and used bytes, and the evaluation and
+emission scans reuse it instead of reloading four bytes of parent per node.
+Control flow and selections still change their separate evaluated marks.
+Displaced roots, statement expressions and initializer publication still use
+the existing root-order machinery. A graph that fails the tree check keeps
+the original fallback; the scalar driver allocates neither index and still
+visits every node as its independent oracle. Empty graphs allocate nothing,
+and allocation failure reports the existing common-warning capacity error.
+Both indexes belong to the warning driver's scratch region and expire before
+backend processing. Their combined payload is about 1.125 bytes per node;
+this is a storage and scan-work description, not a measured timing result.
+
+`c_check_common_candidates_test.c` compares the lookup and scalar classifier
+with independent operator predicates, every operator across lane boundaries,
+invalid operator IDs, protected input and exact-capacity output tails,
+independent readers, and allocation failure. The tree tests also compare the
+root bitmap with an independent edge walk on valid and rejected trees and
+verify cached, uncached and scalar root enumeration.
+
 The expression walk starts only at a root that reaches something or whose
 discarded expression may get the statement's unused-value warning, and enters
 only the subtrees that hold its walk's bit; every warning keeps its order. The default-ignored warnings' work runs only

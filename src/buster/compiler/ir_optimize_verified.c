@@ -33,6 +33,7 @@ struct IrVerifiedAnalysis
     uint32_t shape_checks;
     uint32_t row_checks;
     uint32_t graph_checks;
+    uint32_t dominance_checks;
     uint32_t cfg_builds;
     uint32_t dominator_builds;
 };
@@ -61,8 +62,9 @@ static __attribute__((unused)) bool ir_verified_current(const IrVerifiedAnalysis
 }
 
 // The shared verifier's exact shape, row, phi, switch and SSA checks, with its CFG retained instead of rebuilt.
-// The first graph check preserves the structural boundary before dominance construction. The second checks full
-// dominance, including same-block order. Both use ir.c's verifier, not a weaker optimizer-specific substitute.
+// The graph check preserves the structural boundary before dominance construction. The final check validates the
+// new tree and full dominance, including same-block order; unchanged phi/switch metadata is not checked again.
+// Both use ir.c's verifier, not a weaker optimizer-specific substitute.
 // On failure neither result nor the analysis arena is published; scratch is restored on every path. The analysis
 // and scratch arenas must be distinct; aliasing them is an argument error, refused before either is touched.
 static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Arena* scratch, bool scalar, IrVerifiedAnalysis* result)
@@ -70,26 +72,13 @@ static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Ar
     const uint64_t analysis_mark = analyses->length;
     const uint64_t scratch_mark = scratch->length;
     IrVerifiedAnalysis candidate = { 0 };
-    IrCheck check = ir_check(analyses == scratch ? IR_ERROR_METADATA : IR_OK, BUSTER_IR_NONE, 0);
+    IrCheck check = ir_verify_cfg(function, analyses, scratch, !BUSTER_SCALAR_PATH(scalar), &candidate.cfg);
     if (check.error == IR_OK)
     {
         candidate.shape_checks += 1;
-        check = ir_check_shape(function);
-    }
-    if (check.error == IR_OK)
-    {
         candidate.row_checks += 1;
-        check = ir_check_rows(function, !BUSTER_SCALAR_PATH(scalar));
-    }
-    if (check.error == IR_OK)
-    {
         candidate.cfg_builds += 1;
-        check.error = ir_cfg_validated(function, analyses, scratch, &candidate.cfg);
-    }
-    if (check.error == IR_OK)
-    {
         candidate.graph_checks += 1;
-        check = ir_check_graph(function, &candidate.cfg, scratch, 0, !BUSTER_SCALAR_PATH(scalar));
     }
     arena_pop_to(scratch, scratch_mark);
     if (check.error == IR_OK)
@@ -117,8 +106,8 @@ static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Ar
             .leave = candidate.dominators.subtree_end,
             .block_count = candidate.dominators.block_count,
         };
-        candidate.graph_checks += 1;
-        check = ir_check_graph(function, &candidate.cfg, scratch, &dominance, !BUSTER_SCALAR_PATH(scalar));
+        candidate.dominance_checks += 1;
+        check = ir_verify_dominance(function, &candidate.cfg, &dominance, !BUSTER_SCALAR_PATH(scalar));
     }
     if (check.error == IR_OK)
     {

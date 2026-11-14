@@ -2684,6 +2684,10 @@ struct Parser
     // Beside each token, a name a diagnostic's argument there is spelled by instead of its source, or 0; or NULL for none:
     // a statement start's typo corrected to a keyword or a type name (#1447, check_driver_typo_errors).
     const uint32_t* respelled;
+    // Source indices of name corrections made before this recovery view (#2250), in source order. Borrowed from
+    // the driver's edit list, so another typo search counts them toward the same unit's spell-checking limit.
+    const uint32_t* typo_sources;
+    uint32_t typo_count;
     // Borrowed through checking and emission, like the tokens' source indices. Resource bytes stay owned by pp.
     const Preprocessor* preprocessor;
     // Beside each token of a view that leaves a parse's tokens out (#2531's step 3, c_check_attested.c's

@@ -412,7 +412,10 @@ shuffles, aligns and shuffles of lanes are its `permute`, `shuffle`, `align` and
 as the immediate form the constant's indices are, and as `vpshufb` otherwise.
 Their integer lanes' extensions and truncations, `__builtin_convertvector`'s and
 the `vpmov*` builtins', are its `extend` and `truncate` (#1840, its
-"Conversions"), each one EVEX instruction of `BUSTER_TIER1_VECTOR_CONVERT`.
+"Conversions"), each one EVEX instruction of `BUSTER_TIER1_VECTOR_CONVERT`; an
+extension's source may be an SSE carrier, and a cast into one is a
+`lane_extract` of lane 0, moved into the carrier's register where it isn't the
+vector's (#1840, its "Casts into SSE carriers and their extensions").
 A vector's shift by one scalar count, the x86 builtins' shifts by an int, is
 its `shift` (#1840, its "Shifts by a scalar count"), `BUSTER_TIER1_VECTOR_SHIFT`:
 the immediate form where the count is a constant, else `vmovd` of the count into
@@ -434,6 +437,16 @@ The compresses and expands are its `compress` and `expand` (#1840, its
 the mask into the destination, which takes the passthrough first.
 The AES rounds are its `aes` (#1840, its "AES rounds"), `BUSTER_TIER1_VECTOR_AES`:
 `vaesenc` or `vaesenclast`, EVEX, or VEX where the target has no VL.
+The bit shuffles into a mask are its `bitshuffle` (#1840, its "Bit shuffles into
+a mask"), `BUSTER_TIER1_VECTOR_BITSHUFFLE`: `vpshufbitqmb`, under the writemask
+where a mask's AND takes it.
+The multishifts and sums of absolute differences are its `quadword_op` (#1840,
+its "Quadword operations"), `BUSTER_TIER1_VECTOR_QUADWORD_OP`:
+`vpmultishiftqb` or `vpsadbw`.
+The funnel shifts and rotates are its `funnel` (#1840, its "Funnel shifts and
+rotates"), `BUSTER_TIER1_VECTOR_FUNNEL`: a rotate by an immediate where its
+halves are one value and its counts a constant, else `vpshldv` or `vpshrdv`
+into the tied half's register.
 
 ### Inlining (#1282, #2541)
 

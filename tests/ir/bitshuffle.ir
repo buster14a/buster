@@ -1,0 +1,11 @@
+function (ptr) -> void {
+b0:
+  %0 = param.ptr 0
+  %1 = load.v4i32 %0 align=16
+  %2 = load.v8i32 %0 align=32
+  %3 = load.v16i32 %0 align=64
+  %4 = intrinsic.m16 %1, %1 bitshuffle
+  %5 = intrinsic.m32 %2, %2 bitshuffle
+  %6 = intrinsic.m64 %3, %3 bitshuffle
+  %7 = ret.void
+}

@@ -1740,6 +1740,7 @@ static void tier1_wide_test_boundaries(Tier1WideTest* test)
 }
 
 #include "tier1_wide_vectors_test.c"
+#include "tier1_x87_transfer_test.c"
 
 static __attribute__((unused)) int run_tier1_wide_tests(int argc, char** argv)
 {
@@ -1826,6 +1827,7 @@ static __attribute__((unused)) int run_tier1_wide_tests(int argc, char** argv)
             if (file == 0)
             {
                 tier1_wide_test_boundaries(&test);
+                tier1_x87_transfer_tests(&test);
                 tier1_wide_vectors(&test);
                 tier1_wide_test_shared_slices(&test);
                 tier1_wide_test_limit(&test);

@@ -10,73 +10,8 @@
 
 static __attribute__((noinline)) void check_test_float_constant_sources(CheckTest* test, const char* clang)
 {
-    static const CheckSourceFixture fixtures[] =
-    {
-        { .name = "float constants: folds in constant expressions",
-          .source = "_Static_assert(__builtin_issignaling(__builtin_nans(\"\")) && __builtin_issignaling(__builtin_nansf(\"1\")) &&\n"
-                    "__builtin_issignaling(__builtin_nansl(\"0x10\")), \"\");\n"
-                    "_Static_assert(__builtin_isnan(__builtin_nanf16(\"\")) && __builtin_issignaling(__builtin_nansf16(\"\")) &&\n"
-                    "!__builtin_issignaling(__builtin_nanf16(\"3\")) && __builtin_isinf(__builtin_inff16()) && __builtin_isinf(__builtin_huge_valf16()), \"\");\n"
-                    "_Static_assert(__builtin_isnan(__builtin_nanf128(\"9\")) && __builtin_issignaling(__builtin_nansf128(\"\")) &&\n"
-                    "__builtin_isinf(__builtin_inff128()) && __builtin_isinf(-__builtin_huge_valf128()) && __builtin_signbit(-__builtin_nansf128(\"\")), \"\");\n"
-                    "_Static_assert(!__builtin_issignaling((double)__builtin_nansf(\"\")) && !__builtin_issignaling(-(float)__builtin_nans(\"\")) &&\n"
-                    "__builtin_issignaling(-__builtin_nans(\"2\")) && __builtin_fpclassify(0, 1, 2, 3, 4, __builtin_nansf16(\"\")) == 0, \"\");\n"
-                    "int a[__builtin_isinf(__builtin_inff16()) + __builtin_isfpclass(__builtin_nansf128(\"\"), 1) + 1];\n" },
-        { .name = "float constants: result types",
-          .source = "_Static_assert(_Generic(__builtin_nans(\"\"), double: 1, default: 0) && _Generic(__builtin_nansf(\"\"), float: 1, default: 0) &&\n"
-                    "_Generic(__builtin_nansl(\"\"), long double: 1, default: 0), \"\");\n"
-                    "_Static_assert(_Generic(__builtin_nanf16(\"\"), _Float16: 1, default: 0) && _Generic(__builtin_nansf16(\"\"), _Float16: 1, default: 0) &&\n"
-                    "_Generic(__builtin_inff16(), _Float16: 1, default: 0) && _Generic(__builtin_huge_valf16(), _Float16: 1, default: 0), \"\");\n"
-                    "_Static_assert(_Generic(__builtin_nanf128(\"\"), __float128: 1, default: 0) && _Generic(__builtin_nansf128(\"\"), __float128: 1, default: 0) &&\n"
-                    "_Generic(__builtin_inff128(), __float128: 1, default: 0) && _Generic(__builtin_huge_valf128(), __float128: 1, default: 0), \"\");\n" },
-        { .name = "float constants: static initializers",
-          .source = "static const __float128 q[] = { __builtin_inff128(), -__builtin_nanf128(\"5\"), __builtin_nansf128(\"\") };\n"
-                    "static _Float16 h = __builtin_nansf16(\"1\");\nstruct S { double d; __float128 q; _Float16 h; } s = { __builtin_nans(\"\"), "
-                    "__builtin_huge_valf128(), __builtin_inff16() };\nconst __float128* p = q;\n" },
-        { .name = "float constants: exact __float128 initializers",
-          .source = "static __float128 a = 0;\nstatic __float128 b = 1.5;\nstatic __float128 c = 1.5q;\n"
-                    "static __float128 d = 0.1;\nstatic __float128 e = 1.5L;\nstatic __float128 f = 18446744073709551615ULL;\n"
-                    "static __float128 g = (__int128)1 << 100;\n"
-                    "int tested(void){return (int)(a+b+c+d+e+(f!=0)+(g!=0));}\n" },
-        { .name = "float constants: an integer's payload", .source = "double f(void)\n{\nreturn __builtin_nans(1);\n}\n", .rejected = true },
-        { .name = "float constants: nansf16 without its payload", .source = "_Float16 f(void)\n{\nreturn __builtin_nansf16();\n}\n",
-          .rejected = true },
-        { .name = "float constants: inff128 of an argument", .source = "__float128 f(void)\n{\nreturn __builtin_inff128(1);\n}\n", .rejected = true },
-        { .name = "float constants: nanf128 of two payloads", .source = "__float128 f(void)\n{\nreturn __builtin_nanf128(\"\", \"\");\n}\n",
-          .rejected = true },
-    };
-    enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(fixtures) };
-    char directory[] = "/tmp/buster-checker-float-constants-XXXXXX";
-    const bool made = mkdtemp(directory) != 0;
-    bool ready = made;
-    char paths[FILE_COUNT][160];
-    char* pointers[FILE_COUNT];
-    ParseTestClang outcomes[FILE_COUNT];
-    for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
-    {
-        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
-        pointers[i] = paths[i];
-        ready = parse_test_write(paths[i], fixtures[i].source, strlen(fixtures[i].source));
-    }
-    const char* arguments[] = { "-std=gnu17" };
-    ready = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), pointers, FILE_COUNT, outcomes);
-    check_test_expect(test, ready, "the constant floating builtins' Clang oracle ran");
-    for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
-    {
-        char description[192];
-        snprintf(description, sizeof(description), "%s: expectation differs from Clang", fixtures[i].name);
-        check_test_expect(test, outcomes[i].rejected == fixtures[i].rejected, description);
-        check_test_source(test, &fixtures[i], paths[i], &outcomes[i]);
-    }
-    for (uint32_t i = 0; made && i < FILE_COUNT; i += 1)
-    {
-        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
-        unlink(paths[i]);
-    }
-    if (made)
-    {
-        rmdir(directory);
-    }
+    // Its source fixtures are runtime data (#2053): tests/checker/float-constants, which check_test_suite reads and runs.
+    check_test_suite(test, clang, "checker/float-constants", "the constant floating builtins' Clang oracle ran");
 }
 
 // An FNV-1a hash of objects' bytes, and the values whose bytes the programs hash: each builtin's in static data, in an

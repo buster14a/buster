@@ -1,0 +1,326 @@
+buster-fixtures v1 checker-sources
+# check_test_generic_builtin_sources's source fixtures (c_check_program_generic_builtins_test.c; #2053): ID, FILE, FLAGS, NAME, tab-separated.
+0001	0001.c	-	generic: classify_type's classes
+0002	0002.c	-	generic: eh_return_data_regno's registers
+0003	0003.c	-	generic: launder's and dwarf_cfa's types
+0004	0004.c	-	generic: the leaves' prototypes
+0005	0005.c	-	generic: the unwinder's, the rounding mode's, the pointer's and the trap's leaves
+0006	0006.c	rejected	generic: verbose_trap of a variable
+0007	0007.c	rejected	generic: verbose_trap of a null pointer
+0008	0008.c	rejected	generic: verbose_trap of a dollar
+# A const array's string (#1917's review): a known one's, an automatic array's, a const record's member array's and a
+# const pointer's pointee's too, with a `$` is clang's error; through a cast to void * clang's evaluator loses the
+# array's designator, its error too, and through casts between pointers to char it reads it (#1843).
+0009	0009.c	rejected	generic: verbose_trap of a const array's dollar
+0010	0010.c	-	generic: verbose_trap of a const array
+0011	0011.c	-	generic: verbose_trap of an automatic const array
+0012	0012.c	rejected	generic: verbose_trap of an automatic const array's dollar
+0013	0013.c	-	generic: verbose_trap of a member array
+0014	0014.c	rejected	generic: verbose_trap of a member array's dollar
+0015	0015.c	-	generic: verbose_trap of a const pointer's value
+0016	0016.c	rejected	generic: verbose_trap of a const array through void *
+0017	0017.c	-	generic: verbose_trap of a const array through char pointers
+0018	0018.c	-	generic: verbose_trap of a literal through void *
+0019	0019.c	rejected	generic: verbose_trap of a dollar under a cast
+0020	0020.c	rejected	generic: verbose_trap of one argument
+0021	0021.c	rejected	generic: set_flt_rounds of nothing
+0022	0022.c	rejected	generic: extend_pointer of an integer
+0023	0023.c	-	generic: the alloca variants', checks' and addresses' types
+0024	0024.c	rejected	generic: alloca_with_align of 24 bits
+0025	0025.c	rejected	generic: alloca_with_align of 4 bits
+0026	0026.c	rejected	generic: alloca_with_align of 0 bits
+0027	0027.c	rejected	generic: alloca_with_align of a variable
+0028	0028.c	rejected	generic: alloca_with_align past INT32_MAX
+0029	0029.c	rejected	generic: alloca_with_align of one
+0030	0030.c	rejected	generic: allow_runtime_check of a variable
+0031	0031.c	rejected	generic: allow_runtime_check in a constant
+0032	0032.c	rejected	generic: allow_sanitize_check of undefined
+0033	0033.c	rejected	generic: annotation of a double
+0034	0034.c	rejected	generic: annotation of a variable string
+0035	0035.c	rejected	generic: annotation of a wide string
+0036	0036.c	rejected	generic: annotation in a constant
+0037	0037.c	rejected	generic: function_start of an object
+0038	0038.c	rejected	generic: function_start of a pointer
+# __builtin_function_start's operand evaluates to a function at offset 0, as clang's getAsBuiltinConstantDeclRef reads
+# it: a named function's address and its casts are, a conditional's, a null pointer's and an offset one aren't
+# (#1126's review).
+0039	0039.c	-	generic: function_start of a function's address
+0040	0040.c	rejected	generic: function_start of a conditional
+0041	0041.c	rejected	generic: function_start of a null pointer
+0042	0042.c	rejected	generic: function_start of an offset
+0043	0043.c	rejected	generic: function_start of an offset address
+0044	0044.c	-	generic: function_start of folded addresses
+0045	0045.c	rejected	generic: function_start of an object's address
+0046	0046.c	rejected	generic: function_start of a folded object's address
+0047	0047.c	rejected	generic: function_start of a folded string
+0048	0048.c	rejected	generic: function_start of a cast pointer
+0049	0049.c	rejected	generic: addressof of an rvalue
+0050	0050.c	rejected	generic: addressof of a bit-field
+0051	0051.c	rejected	generic: addressof of a register
+0052	0052.c	rejected	generic: eh_return_data_regno of a variable
+0053	0053.c	rejected	generic: eh_return_data_regno of a double
+0054	0054.c	rejected	generic: classify_type of nothing
+0055	0055.c	rejected	generic: classify_type of two
+0056	0056.c	rejected	generic: launder of a void pointer
+0057	0057.c	rejected	generic: launder of a function pointer
+0058	0058.c	rejected	generic: launder of an integer
+0059	0059.c	rejected	generic: launder of an incomplete type
+0060	0060.c	rejected	generic: launder of two
+0061	0061.c	rejected	generic: dwarf_cfa of a level
+0062	0062.c	rejected	generic: memcpy_inline of a variable size
+0063	0063.c	rejected	generic: memset_inline of a variable size
+0064	0064.c	-	generic: assume_dereferenceable of a variable size
+0065	0065.c	rejected	generic: debugtrap of an argument
+0066	0066.c	rejected	generic: clear_cache of one
+0067	0067.c	rejected	generic: vectorelements of an integer
+0068	0068.c	rejected	generic: vectorelements of an integer type
+# #1126's review: a comma expression's operand, its last operand's type (both orders of two widths), and a type
+# before a comma, which clang's parser refuses.
+0069	0069.c	-	generic: vectorelements of a comma expression
+0070	0070.c	rejected	generic: vectorelements of a type and an expression
+# #1126's review: omp_required_simd_align's operand is alignof's, an array's base element type, which must be a
+# complete object type.
+0071	0071.c	rejected	generic: omp_required_simd_align of void
+0072	0072.c	rejected	generic: omp_required_simd_align of an incomplete struct
+0073	0073.c	rejected	generic: omp_required_simd_align of a function type
+0074	0074.c	rejected	generic: omp_required_simd_align of an incomplete struct's array
+0075	0075.c	-	generic: omp_required_simd_align of complete types
+# clang's type traits of C (#148): an int constant in every context, of each kind of type, and an incomplete
+# record's or enumeration's error, the destructible ones' of an array's base element too.
+0076	0076.c	-	generic: type traits' values and contexts
+0077	0077.c	rejected	generic: is_destructible of an incomplete struct
+0078	0078.c	rejected	generic: is_nothrow_destructible of an incomplete union
+0079	0079.c	rejected	generic: is_bitwise_cloneable of an incomplete struct
+0080	0080.c	rejected	generic: is_bitwise_cloneable of an incomplete enum
+0081	0081.c	rejected	generic: ptrauth_type_discriminator of a type
+0082	0082.c	rejected	generic: ptrauth_type_discriminator in a constant
+0083	0083.c	rejected	generic: is_destructible of an expression
+# __builtin_setjmp and __builtin_longjmp (#148): a buffer of five pointers, longjmp's value a constant 1 wherever the
+# call is, and buffers of other types, which clang refuses.
+0084	0084.c	-	generic: setjmp and longjmp
+0085	0085.c	rejected	generic: longjmp of 2
+# A builtin's name in parentheses is its call's callee, which clang's call looks through (#1242's review): in a
+# constant expression and in code.
+0086	0086.c	-	generic: a builtin's name in parentheses
+0087	0087.c	rejected	generic: longjmp of a variable
+0088	0088.c	rejected	generic: longjmp of 0 where it can't run
+0089	0089.c	rejected	generic: setjmp of an array of longs
+0090	0090.c	rejected	generic: setjmp of an array of char pointers
+0091	0091.c	rejected	generic: LINE of an argument
+0092	0092.c	rejected	generic: complex of an int
+0093	0093.c	rejected	generic: complex of an int second
+0094	0094.c	rejected	generic: complex of two types
+0095	0095.c	rejected	generic: complex of a complex
+0096	0096.c	rejected	generic: complex of an atomic
+0097	0097.c	rejected	generic: complex of one
+0098	0098.c	rejected	generic: complex's address
+0099	0099.c	rejected	generic: complex of variables in static data
+0100	0100.c	-	generic: complex of a const object in static data
+0101	0101.c	-	generic: complex in a static assertion
+0102	0102.c	rejected	generic: fence of an int
+0103	0103.c	rejected	generic: fence of a pointer
+0104	0104.c	rejected	generic: fence of an atomic
+0105	0105.c	rejected	generic: fence of a complex integer
+0106	0106.c	rejected	generic: fence of an integer vector
+0107	0107.c	rejected	generic: fence of two
+0108	0108.c	-	generic: fence in constant contexts
+0109	0109.c	-	generic: fence of float vectors and complex values
+0110	0110.c	rejected	generic: xray of an integer for its string
+# BPF's preserve_access_index (#148): its operand's value of its type, which clang's Sema takes of any expression, an
+# rvalue and never a constant; and HLSL's resource pointer, void(...) in C, of any arguments but void ones.
+0111	0111.c	-	generic: preserve_access_index
+0112	0112.c	rejected	generic: preserve_access_index of none
+0113	0113.c	rejected	generic: preserve_access_index of two
+0114	0114.c	rejected	generic: preserve_access_index's address
+0115	0115.c	rejected	generic: preserve_access_index assigned
+0116	0116.c	rejected	generic: preserve_access_index in a constant
+0117	0117.c	-	generic: hlsl resource pointer
+# clear_padding (#148): a pointer as written to a complete object type that isn't const, volatile and _Atomic ones
+# and a pointer to a variable length array among them.
+0118	0118.c	-	generic: clear_padding
+0119	0119.c	rejected	generic: clear_padding of void
+0120	0120.c	rejected	generic: clear_padding of an incomplete struct
+0121	0121.c	rejected	generic: clear_padding of an int
+0122	0122.c	rejected	generic: clear_padding of const
+0123	0123.c	rejected	generic: clear_padding of a function pointer
+0124	0124.c	rejected	generic: clear_padding of an array
+0125	0125.c	rejected	generic: clear_padding of an incomplete array
+0126	0126.c	rejected	generic: clear_padding of two
+0127	0127.c	rejected	generic: clear_padding's value
+# eh_return (#148): void(size_t, void*), which doesn't return. CFString's argument is an ordinary literal past its
+# parentheses and casts, NSString's any const char *, each a const __NSConstantString *, whose record is made
+# where an operand's evaluation reaches it first.
+0128	0128.c	-	generic: eh_return and constant strings
+# A constant CFString of a literal is an address constant (#148): a static initializer of one, cast to long or offset,
+# and NSString's, at file scope and in a function.
+0129	0129.c	-	generic: constant strings in static initializers
+# clang's evaluator takes any NSString call as an address constant, of no literal too (#1785), whose static data -c
+# refuses by name (c_checker_driver_test.c's code generation refusals).
+0130	0130.c	-	generic: NSString of no literal in static initializers
+0131	0131.c	rejected	generic: NSStrings compared in a static initializer
+0132	0132.c	rejected	generic: eh_return of one
+0133	0133.c	rejected	generic: eh_return of a pointer offset
+0134	0134.c	rejected	generic: eh_return's value
+0135	0135.c	rejected	generic: CFString of a pointer
+0136	0136.c	rejected	generic: CFString of a wide literal
+0137	0137.c	rejected	generic: CFString of a UTF-8 literal
+0138	0138.c	rejected	generic: CFString of __func__
+0139	0139.c	rejected	generic: CFString of none
+0140	0140.c	rejected	generic: CFString as an int
+0141	0141.c	rejected	generic: NSString of an int
+# The Microsoft and z/OS lists (#148): each ms builtin's list an lvalue of exactly char * (clang's char *&), and
+# va_arg's where it is one; ms_va_start in an ms_abi variadic function alone, every other start out of one;
+# z/OS's lists char ** parameters.
+0142	0142.c	-	generic: Microsoft and z/OS lists
+0143	0143.c	rejected	generic: ms_va_start out of ms_abi
+0144	0144.c	rejected	generic: va_start in ms_abi
+0145	0145.c	rejected	generic: zos_va_start in ms_abi
+0146	0146.c	rejected	generic: ms_va_start with fixed args
+0147	0147.c	rejected	generic: ms_va_end of a const list
+0148	0148.c	rejected	generic: ms_va_end of an unsigned char pointer
+0149	0149.c	rejected	generic: ms_va_copy of a temporary
+0150	0150.c	rejected	generic: ms_va_copy of a const char pointer
+0151	0151.c	rejected	generic: va_arg of a const char pointer
+0152	0152.c	rejected	generic: va_arg of a char pointer temporary
+0153	0153.c	rejected	generic: zos_va_start of a void list
+0154	0154.c	rejected	generic: zos_va_start with fixed args
+0155	0155.c	rejected	generic: zos_va_copy of one
+0156	0156.c	rejected	generic: zos_va_end's value
+# infer_alloc_token (#148): a size_t of arguments that never run, an integer constant expression of the type a
+# sizeof among them gives (through groupings and + - * / << >>, or a variable's initializer), LLVM's SipHash of
+# its name without tag keywords, past half the tokens for a type holding a pointer (uintptr_t's typedef chain
+# too, a member's included); no constant where no type is inferred.
+0157	0157.c	-	generic: infer_alloc_token
+# call_with_static_chain (#148): a call as written of no builtin (a catalog one, a header's leaf or a library
+# builtin's external declaration), the call's value, and a pointer chain.
+0158	0158.c	-	generic: call_with_static_chain
+0159	0159.c	rejected	generic: call_with_static_chain of a name
+0160	0160.c	rejected	generic: call_with_static_chain of a grouping
+0161	0161.c	rejected	generic: call_with_static_chain of a builtin
+0162	0162.c	rejected	generic: call_with_static_chain of a library builtin
+0163	0163.c	rejected	generic: call_with_static_chain of an int chain
+0164	0164.c	rejected	generic: call_with_static_chain of a null constant
+0165	0165.c	rejected	generic: call_with_static_chain of one
+# The os_log builtins (#148): a buffer that converts to void *, a format that is an ordinary or UTF-8 literal past its
+# parentheses and casts, data of less than 256 bytes each; the buffer's size a size_t integer constant expression of
+# the layout, whatever its data's types; __builtin_os_log_format's format checks refusing a struct or a complex
+# value a specifier takes and a mask of other than 1 to 8 bytes, one after a %P without its length too (the checks go
+# on past it, as the layout doesn't); escaped percent signs, and specifiers past the format's NUL, of no items (#1329);
+# and a %P without its length whose positional width has no argument, the pointer's item alone (#1335's review).
+0166	0166.c	-	generic: os_log
+0167	0167.c	rejected	generic: os_log of an int buffer
+0168	0168.c	rejected	generic: os_log of a pointer format
+0169	0169.c	rejected	generic: os_log of a wide format
+0170	0170.c	rejected	generic: os_log of a struct
+0171	0171.c	rejected	generic: os_log of a complex width
+0172	0172.c	rejected	generic: os_log of a long mask
+0173	0173.c	rejected	generic: os_log of a long mask after an unlengthened pointer
+0174	0174.c	rejected	generic: os_log of an empty mask
+0175	0175.c	rejected	generic: os_log of a big argument
+0176	0176.c	rejected	generic: os_log of no buffer
+0177	0177.c	rejected	generic: os_log of no format
+# Up to 255 data arguments past the operands' 32-bit mask, as clang's BuiltinOSLogFormat takes them, and no more (#1785).
+0178	0178.c	-	generic: os_log of 255 data arguments
+0179	0179.c	rejected	generic: os_log of 256 data arguments
+0180	0180.c	rejected	generic: os_log_format of 256 data arguments
+# dump_struct (#148): a pointer to a complete struct or union and a function or a function pointer that takes clang's
+# generated calls (variadic past the rest of the arguments and the format, or without a prototype).
+0181	0181.c	-	generic: dump_struct
+0182	0182.c	rejected	generic: dump_struct of a struct
+0183	0183.c	rejected	generic: dump_struct of an int pointer
+0184	0184.c	rejected	generic: dump_struct of an incomplete struct
+0185	0185.c	rejected	generic: dump_struct of no callable
+0186	0186.c	rejected	generic: dump_struct of a fixed printer
+0187	0187.c	rejected	generic: dump_struct of a missing context
+0188	0188.c	rejected	generic: dump_struct of a wrong context
+0189	0189.c	rejected	generic: dump_struct of an int format
+0190	0190.c	rejected	generic: dump_struct of a _BitInt bit-field
+0191	0191.c	rejected	generic: dump_struct of a nested __int128 bit-field
+# The bit-field after more sibling records than the walk's 64 levels of nesting (#1405's review).
+0192	0192.c	rejected	generic: dump_struct of a bit-field after 65 sibling records
+0193	0193.c	rejected	generic: dump_struct's value
+# clang's counted_by family (#148): on flexible array members and pointers, wherever written, its count a member
+# declared before it (an enclosing record's through an anonymous one); __builtin_counted_by_ref a pointer to it,
+# or a void * of a member of none, in sizeof, typeof and _Generic too, and its value stored through.
+0194	0194.c	-	generic: counted_by
+0195	0195.c	rejected	generic: counted_by of a later member
+0196	0196.c	rejected	generic: counted_by of a bool
+0197	0197.c	rejected	generic: counted_by on an int
+0198	0198.c	rejected	generic: counted_by in a union
+0199	0199.c	rejected	generic: sized_by on an array
+0200	0200.c	rejected	generic: counted_by_ref returned
+0201	0201.c	rejected	generic: counted_by_ref of no member
+# __builtin_available (#148): a _Bool of no constant expression, its specs names and numbers of nothing of the
+# unit's, a typedef's name among them; a spec's error and the list's, at file scope and in a function.
+0202	0202.c	-	generic: available
+0203	0203.c	rejected	generic: available of no version
+0204	0204.c	rejected	generic: available of an unknown platform
+0205	0205.c	rejected	generic: available of a zero version
+0206	0206.c	rejected	generic: available without a star
+0207	0207.c	rejected	generic: available of a repeated platform
+0208	0208.c	rejected	generic: available of an old anyAppleOS
+0209	0209.c	rejected	generic: available as a constant
+0210	0210.c	rejected	generic: available's static
+0211	0211.c	rejected	generic: infer_alloc_token of none
+0212	0212.c	rejected	generic: infer_alloc_token of void
+0213	0213.c	rejected	generic: infer_alloc_token of no type
+0214	0214.c	rejected	generic: infer_alloc_token of a cast
+0215	0215.c	rejected	generic: infer_alloc_token's static
+# __builtin_invoke(f, a...) is the call f(a...) in C (#148): of a function, a pointer to one and a member of one,
+# with a prototype's conversions and a variadic one's promotions; its errors are the call's.
+0216	0216.c	-	generic: invoke
+0217	0217.c	rejected	generic: invoke of none
+0218	0218.c	rejected	generic: invoke of too many
+0219	0219.c	rejected	generic: invoke of too few
+0220	0220.c	rejected	generic: invoke of an int
+0221	0221.c	rejected	generic: invoke's address
+# Any builtin's name that no call takes is clang's "builtin functions must be directly called".
+0222	0222.c	rejected	generic: a builtin's address
+0223	0223.c	rejected	generic: a builtin's value
+0224	0224.c	rejected	generic: invoke in a constant
+0225	0225.c	rejected	generic: hlsl resource pointer of void
+0226	0226.c	rejected	generic: hlsl resource pointer's value
+0227	0227.c	rejected	generic: xray typed event of two
+0228	0228.c	rejected	generic: warn_memset_zero_len of one
+0229	0229.c	rejected	generic: relocate of const
+0230	0230.c	rejected	generic: relocate of a struct
+0231	0231.c	rejected	generic: relocate of an atomic
+0232	0232.c	rejected	generic: relocate of an array
+0233	0233.c	rejected	generic: relocate of two types
+0234	0234.c	rejected	generic: relocate of a pointer and an array
+0235	0235.c	rejected	generic: relocate of void
+0236	0236.c	rejected	generic: relocate of a pointer size
+0237	0237.c	-	generic: relocate of enums, arrays and vectors
+0238	0238.c	rejected	generic: operator_new in C
+0239	0239.c	rejected	generic: operator_delete in C
+# More arguments than the operands' 32-bit mask has bits: refused before the mask is made (#1126's review).
+0240	0240.c	rejected	generic: operator_new of 33 arguments
+0241	0241.c	rejected	generic: operator_delete of 33 arguments
+0242	0242.c	rejected	generic: ptrauth_auth
+0243	0243.c	rejected	generic: ptrauth_auth_and_resign
+0244	0244.c	rejected	generic: ptrauth_auth_load_relative_and_sign
+0245	0245.c	rejected	generic: ptrauth_auth_with_pc_and_resign
+0246	0246.c	rejected	generic: ptrauth_blend_discriminator
+0247	0247.c	rejected	generic: ptrauth_sign_constant
+0248	0248.c	rejected	generic: ptrauth_sign_generic_data
+0249	0249.c	rejected	generic: ptrauth_sign_unauthenticated
+0250	0250.c	rejected	generic: ptrauth_string_discriminator
+0251	0251.c	rejected	generic: ptrauth_strip
+0252	0252.c	rejected	generic: cpu_is of an unknown name
+0253	0253.c	rejected	generic: cpu_is of a vendor's two
+0254	0254.c	rejected	generic: cpu_is of a wide string
+0255	0255.c	rejected	generic: cpu_supports of a variable
+0256	0256.c	rejected	generic: cpu_supports in static data
+0257	0257.c	rejected	generic: cpu_supports in a static assertion
+0258	0258.c	-	generic: cpu_supports of an unknown feature
+# The literal-only arguments refuse an explicit cast, which annotation's string takes, and accept parentheses (#1126's review).
+0259	0259.c	rejected	generic: allow_sanitize_check of a cast literal
+0260	0260.c	rejected	generic: allow_runtime_check of a cast literal
+0261	0261.c	rejected	generic: cpu_supports of a cast literal
+0262	0262.c	rejected	generic: cpu_supports of a void pointer literal
+0263	0263.c	rejected	generic: cpu_is of a cast literal
+0264	0264.c	rejected	generic: cpu_is of a cast parenthesized literal
+0265	0265.c	-	generic: literal-only arguments in parentheses
+0266	0266.c	rejected	generic: cpu_init of an argument
+0267	0267.c	rejected	generic: cpu_init's value
+0268	0268.c	-	generic: complex of qualified and aligned operands
