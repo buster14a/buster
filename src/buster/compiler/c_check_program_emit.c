@@ -5055,9 +5055,17 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     for (uint32_t b = 0; valid && b < count + helpers->count; b += 1)
     {
         const bool source_body = b < count;
-        // A dead function (#2541 step 2) defines no label of its own (check_tier1_inline_dead).
+        // A dead function (#2541 step 2) defines no label of its own (check_tier1_inline_dead). Its symbol, which no fixup
+        // names, is what check_program_sections makes of any internal one no definition emitted, a global undefined
+        // reference that the object leaves out, already here: the emission's link then passes link_check for a caller
+        // that writes it without -c's sections, as the tests' in-process programs do (#1398 step 3).
         if (source_body && dead != NULL && dead[b] != 0)
         {
+            const SymbolId symbol = check_program_body_symbol(program, b);
+            if ((result->link.symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL && result->link.symbols.source[symbol] == BUSTER_LINK_SOURCE_NONE)
+            {
+                result->link.symbols.flags[symbol] = (uint8_t)((result->link.symbols.flags[symbol] & ~BUSTER_LINK_SYMBOL_BINDING) | BUSTER_LINK_SYMBOL_GLOBAL);
+            }
             continue;
         }
         // A helper's code as the emission takes it (emitted_from_tier0, below), a body's as its lane made it.
