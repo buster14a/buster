@@ -54,6 +54,42 @@ changes and `lstat` still reports the link. `/dev/null` works as a sink and is
 never replaced. Other special destinations are refused. Stdout writes are
 checked but cannot be rolled back.
 
+### Destination admission complexity (#1314)
+
+`dependency_check_destinations_counted` observes each source, primary artifact
+and dependency destination once. For multiple implicit destinations, its first
+scan produces a compact array of protected source/artifact identities, skipping
+stdin. `dependency_index_prepare` builds three independent sorted pointer
+columns over that immutable array: full path, existing `(device, inode)`, and
+existing parent `(device, inode, basename)`. A path contributes every applicable
+key; an existing-file key does not replace its other keys. Later destinations
+use `dependency_index_overlaps` to search the columns. A dangling symlink on
+either side still rejects an overlap conservatively when the opposite set is
+nonempty. Repeated sources, artifacts and dependency destinations are allowed;
+only a dependency destination overlapping a source or primary artifact fails.
+
+The index owns no strings or filesystem resources. It borrows the command's
+NUL-terminated path spellings and its arena-resident identity records until
+admission ends. Each column has capacity equal to the protected-path count,
+but lookup and sorting read only its initialized entries. In-place iterative
+heapsort and binary search bound key comparisons by `O(N log N)` for `N`
+units, including duplicate or adversarial key order. String comparisons still
+cost the bytes examined. Filename and index storage and filesystem probes
+remain `O(N)`; implicit objects allocate one name each. A single/shared
+destination uses a direct scan without an index. Stdout, disabled and empty
+requests retain their no-work paths, and exhausted capacity refuses admission
+before any output is opened.
+
+The driver tests exercise index queries against the independent filesystem
+alias matrix and synthetic keys, including empty sets, duplicates, invalid
+identity fields, dangling links and capacity failures. The admission regression
+counts actual filesystem probes and key comparisons through 1,024 units and
+bounds arena use and growth on successive doublings. These are deterministic
+complexity checks, not timing measurements. The index currently uses scalar
+ordering and lookup; SIMD sorting and end-to-end `-MMD -c` throughput remain
+9700X measurement questions. Admission retains its existing nontransactional
+snapshot semantics against concurrent external filesystem changes.
+
 ## Standard input and information probes
 
 `-E -`, `-E -dM -` and `-x c -` read standard input once into bounded command-owned

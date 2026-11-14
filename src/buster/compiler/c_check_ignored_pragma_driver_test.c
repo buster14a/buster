@@ -672,6 +672,103 @@ static void check_test_driver_pack_includes(CheckTest* test, const char* clang, 
     }
 }
 
+// #2449: a target-rejected alignment is still consumed by the parser. It leaves the pack stack alone, diagnoses
+// once in source order and keeps later declarations available, including when only an original pragma view survives.
+static void check_test_driver_pack_errors(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const struct
+    {
+        const char* source;
+        const char* option;
+        uint32_t errors;
+    } cases[] = {
+        { "#pragma options align=mac68k\nint value;\n", NULL, 1 },
+        { "#pragma options align=mac68k\n#pragma options foo\nint value;\n", NULL, 1 },
+        { "int prior = ;\n#pragma options align=mac68k\n#pragma options foo\nint value;\n", NULL, 2 },
+        { "#pragma align=mac68k\n#pragma align=reset\nint value;\n", NULL, 1 },
+        { "#pragma pack(push,1)\n#pragma options align=mac68k\nstruct S{char c;int x;};\n"
+          "_Static_assert(sizeof(struct S)==5,\"unchanged\");\n#pragma options align=reset\n"
+          "struct T{char c;int x;};_Static_assert(sizeof(struct T)==8,\"restored\");\n#pragma options align=reset\n", NULL, 1 },
+        { "#pragma options align=mac68k\nint value = 1 + (void)0;\n", NULL, 2 },
+        { "int value = ;\n#pragma options align=mac68k\n", NULL, 2 },
+        { "#pragma options align=mac68k\nint value = ;\n", NULL, 2 },
+        { "int value;\n#pragma options align=mac68k\n", NULL, 1 },
+        { "#define SET_ALIGN _Pragma(\"options align=mac68k\")\nSET_ALIGN\nint value;\n", NULL, 1 },
+        { "_Pragma(\"align=mac68k\")\nint value;\n", NULL, 1 },
+        { "#define SET_ALIGN _Pragma(\"  options align=mac68k\")\n#define APPLY_ALIGN SET_ALIGN\nAPPLY_ALIGN\nint value;\n", NULL, 1 },
+        { "#define APPLY_PRAGMA(x) _Pragma(#x)\nAPPLY_PRAGMA(options align=mac68k)\nint value;\n", NULL, 1 },
+        { "#pragma clang diagnostic ignored \"-Weverything\"\n#pragma options align=mac68k\nint value;\n", "-w", 1 },
+        { "#pragma options align=mac68k\n#pragma options align=reset\nint value;\n", "-Wno-pragmas", 1 },
+        { "#pragma options align=mac68k\n#pragma options align=reset\nint value;\n", "-Werror=ignored-pragmas", 2 },
+        { "#pragma options align=mac68k extra\nint value;\n", NULL, 0 },
+    };
+    static const char sentinel[] = "previous object\n";
+    char source[512];
+    char object[512];
+    snprintf(source, sizeof(source), "%s/pack-errors.c", directory);
+    snprintf(object, sizeof(object), "%s/pack-errors.o", directory);
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        const bool written = parse_test_write(source, cases[c].source, strlen(cases[c].source));
+        check_test_expect(test, written, "alignment error fixture is written");
+        for (uint32_t language = 0; written && language < 2; language += 1)
+        {
+            for (uint32_t mode = 0; mode < 2; mode += 1)
+            {
+                char* arguments[12] = { (char*)clang, language == 0 ? "-std=gnu17" : "-std=gnu23", "-fno-caret-diagnostics",
+                                        mode == 0 ? "-fsyntax-only" : "-c", source, "-o", object };
+                uint32_t count = 7;
+                if (cases[c].option != NULL)
+                {
+                    arguments[count++] = (char*)cases[c].option;
+                }
+                char* expected = NULL;
+                const int oracle = check_test_driver_spawn(arguments, &expected);
+                check_test_expect(test, expected != NULL && (oracle != 0) == (cases[c].errors != 0) &&
+                                  check_test_pragma_diagnostics(expected, ": error: ") == cases[c].errors,
+                                  "Clang reports the alignment fixture's independent errors");
+                // Macro scratch buffers have implementation-specific coordinates; retain their notes and all
+                // real source locations, as the existing pragma history comparisons do.
+                pp_test_normalize_scratch(expected);
+                for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+                {
+                    const bool saved = parse_test_write(object, sentinel, sizeof(sentinel) - 1);
+                    check_test_expect(test, saved, "an existing output is installed before a rejected compilation");
+                    arguments[0] = (char*)executable;
+                    arguments[count] = scalar != 0 ? "--scalar" : NULL;
+                    char* actual = NULL;
+                    const int result = check_test_driver_spawn(arguments, &actual);
+                    pp_test_normalize_scratch(actual);
+                    const bool equal = expected != NULL && actual != NULL && (result == 0) == (oracle == 0) && strcmp(actual, expected) == 0;
+                    if (!equal)
+                    {
+                        fprintf(stderr, "alignment error case %u language %u mode %u scalar %u: clang=%d buster=%d\nclang: %s\nbuster: %s\n",
+                                c, language, mode, scalar, oracle, result, expected != NULL ? expected : "", actual != NULL ? actual : "");
+                    }
+                    check_test_expect(test, equal, "alignment errors and subsequent diagnostics match Clang's whole output");
+                    if (cases[c].errors != 0)
+                    {
+                        char bytes[sizeof(sentinel)] = { 0 };
+                        FILE* file = fopen(object, "rb");
+                        const size_t length = file != NULL ? fread(bytes, 1, sizeof(bytes), file) : 0;
+                        const bool preserved = file != NULL && !ferror(file) && length == sizeof(sentinel) - 1 &&
+                                               memcmp(bytes, sentinel, sizeof(sentinel) - 1) == 0;
+                        if (file != NULL)
+                        {
+                            fclose(file);
+                        }
+                        check_test_expect(test, preserved, "a rejected alignment leaves the existing output intact");
+                    }
+                    free(actual);
+                }
+                free(expected);
+            }
+        }
+    }
+    unlink(object);
+    unlink(source);
+}
+
 static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char target_ignored[] =
@@ -808,9 +905,6 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
     } refused[] = {
         // A target the unit doesn't define (#1849: clang's "alias must point to a defined variable or function").
         { "#pragma weak alias = target\nextern int target;\n", "weak", NULL, NULL, NULL },
-        // mac68k is clang's error on this target (#1849), which the checker refuses by name.
-        { "#pragma align=mac68k\nstruct S{char c;int n;};\n", "align", NULL, NULL, NULL },
-        { "#pragma options align=mac68k\nstruct S{char c;int n;};\n", "options", NULL, NULL, NULL },
         { "#pragma omp parallel\nint object;\n", "omp", "-fopenmp", NULL, "-fopenmp" },
         { "#pragma omp parallel\nint object;\n", "omp", "-fno-openmp", "-fopenmp", "-fopenmp" },
         { "#undef _OPENMP\n#pragma omp parallel\nint object;\n", "omp", "-fopenmp", NULL, "-fopenmp" },
@@ -887,6 +981,7 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
         }
     }
     check_test_driver_pragma_system(test, clang, executable, directory);
+    check_test_driver_pack_errors(test, clang, executable, directory);
     check_test_driver_pragma_execution(test, executable, directory);
     check_test_driver_fp_pragma_errors(test, clang, executable, directory);
     check_test_driver_fp_evaluation(test, clang, executable, directory);

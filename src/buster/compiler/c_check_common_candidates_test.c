@@ -16,6 +16,8 @@ static bool check_test_common_candidate(CheckCommonCandidate kind, CheckOp op)
         {
             switch (op)
             {
+                case CHECK_OP_MEMBER:
+                case CHECK_OP_ARROW:
                 case CHECK_OP_INITIALIZE:
                 case CHECK_OP_ASSIGN:
                 case CHECK_OP_CONVERT:

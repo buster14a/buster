@@ -547,6 +547,31 @@ static const CheckDriverDefaultWarningFixture check_driver_shift_count_fixtures[
         .warnings = 4,
     },
     {
+        .name = "a body's shift overflow precedes a later shift precedence warning",
+        .source = "int f(int x)\n{\n    int v = 3 << 31;\n    int y = 1 << 3 + 1;\n    return v + y;\n}\n",
+        .warnings = 2,
+        .notes = 1,
+    },
+    {
+        .name = "unreachable and unevaluated shift overflow keeps its source order",
+        .source = "int f(void){int a=sizeof(3<<31);int b=1<<2+1;return a+b;int c=3<<31;int d=1<<3+1;}\n",
+        .warnings = 4,
+        .notes = 2,
+    },
+    {
+        .name = "shift overflow warns before a deferred negative shift and a later precedence warning",
+        .source = "int f(void){int a=-1<<2;int b=3<<31;int c=1<<3+1;return a+b+c;}\n",
+        .warnings = 3,
+        .notes = 1,
+    },
+    {
+        .name = "source suppression of shift overflow preserves later precedence diagnostics",
+        .source = "int f(void){\n#pragma clang diagnostic ignored \"-Wshift-overflow\"\n"
+                  "int a=3<<31;int b=1<<3+1;return a+b;}\n",
+        .warnings = 1,
+        .notes = 1,
+    },
+    {
         .name = "unreachable folded shifts drop their runtime warnings and keep their overflow",
         .source = "int a(int x){return x;x=1<<32;x=-1<<1;x=3<<31;x=-1<<2;return x;}\n"
                   "int b(int x){if(x)return 1;else return 2;x=1<<33;}\n"

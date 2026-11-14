@@ -17,9 +17,10 @@
 // Source argument slices are half-open parser-token intervals, excluding commas and parentheses. Their actual
 // count is retained even when it disagrees with the prototype. No argument is evaluated here. Call ids are index+1
 // at the original CLOSE_CALL only, with zero everywhere else and at the token sentinel. Name-cache entries are
-// UINT32_MAX for an unscanned name, zero for a miss, the high bit plus a catalogue index for a hit not yet decoded,
-// otherwise a dense declaration index+1. Initialization requires
-// fresh output/cache fields; a TU with no exact operand candidates allocates no intrinsic storage.
+// UINT32_MAX for a name the intern table's memo hasn't looked up (none of the ids the table has when the unit's set-up
+// runs, which fills them), zero for a miss, the high bit plus a catalogue index for a hit not yet decoded, otherwise a dense
+// declaration index+1. Initialization requires fresh output/cache fields; a TU with no exact operand candidates
+// allocates no intrinsic storage.
 #ifndef BUSTER_C_CHECK_INTRINSIC_INPUT_INCLUDED
 #define BUSTER_C_CHECK_INTRINSIC_INPUT_INCLUDED
 
@@ -86,9 +87,10 @@ static TypeId check_input_intrinsic_type(const CheckInputReader* reader, uint32_
     return type;
 }
 
-// The tokens from `first` of the next 64 (a bit each) that are identifier operands outside the deferred bodies, which
-// the intrinsics' tables are sized for. The vector path tests 64 at once; the scalar path, its twin, takes every token,
-// and the caller tests each.
+// The tokens from `first` (a multiple of 64) of the next 64 (a bit each) that are identifier operands outside the deferred
+// bodies and the declarations attested declarations skip (CheckInputReader.skips, which the walk never reads), which the
+// intrinsics' tables are sized for. The vector path tests 64 at once; the scalar path, its twin, takes every token, and
+// the caller tests each.
 static uint64_t check_input_intrinsic_operands(const CheckInputReader* reader, uint32_t first)
 {
     const Parser* parser = reader->parser;
@@ -103,6 +105,7 @@ static uint64_t check_input_intrinsic_operands(const CheckInputReader* reader, u
         {
             result &= ~check_input_scan_nonzero(deferred_tokens, first, count);
         }
+        result &= reader->skips != NULL ? ~reader->skips[first / 64] : ~UINT64_C(0);
     }
     return result;
 }
@@ -111,113 +114,243 @@ static bool check_input_intrinsic_operand(const CheckInputReader* reader, uint32
 {
     const Parser* parser = reader->parser;
     const uint8_t* deferred_tokens = reader->output->deferred_tokens;
+    const bool skipped = reader->skips != NULL && (reader->skips[token / 64] >> (token % 64) & 1) != 0;
     return parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_OPERAND &&
-           (deferred_tokens == 0 || reader->deferred != 0 || !deferred_tokens[token]);
+           (deferred_tokens == 0 || reader->deferred != 0 || !deferred_tokens[token]) && !skipped;
 }
 
-// Looks the batch's `lanes` names up, and records each intrinsic found in the cache: false without a cache to record it.
-static bool check_input_intrinsic_lookup(const Parser* parser, BuiltinIntrinsicName* names, const uint32_t* names_in_batch, uint32_t lanes,
-                                         uint32_t* cache, uint32_t* declarations)
+// The codes of the intern table's memo of each name's catalogue answer (InternTable.intrinsic_rows, #893): a name not
+// looked up yet, a name no row has, or the row plus BUSTER_CHECK_INTRINSIC_ROW.
+#define BUSTER_CHECK_INTRINSIC_UNKNOWN 0u
+#define BUSTER_CHECK_INTRINSIC_MISS 1u
+#define BUSTER_CHECK_INTRINSIC_ROW 2u
+_Static_assert(BUSTER_BUILTIN_INTRINSIC_COUNT < UINT16_MAX - BUSTER_CHECK_INTRINSIC_ROW, "a code for each catalogue row");
+
+// The code of a name that the catalogue's filter passed: its row's by the exact table, or a miss's.
+static uint16_t check_input_intrinsic_code(const InternTable* table, uint32_t name)
 {
-    const BuiltinIntrinsicInfo* infos[8];
-    builtin_intrinsic_lookup_batch(names, infos, lanes, BUSTER_SCALAR_PATH(parser->options.scalar));
-    bool valid = true;
-    for (uint32_t lane = 0; valid && lane < lanes; lane += 1)
+    const InternSpan span = table->spans[name];
+    const BuiltinIntrinsicInfo* info = builtin_intrinsic_table_lookup((const char*)table->records + span.offset, span.length);
+    const uint32_t row = info != NULL ? (uint32_t)(info - builtin_intrinsic_infos) : 0;
+    return (uint16_t)(info != NULL ? BUSTER_CHECK_INTRINSIC_ROW + row : BUSTER_CHECK_INTRINSIC_MISS);
+}
+
+// Whether the catalogue's filter passes `name` (c_builtin_intrinsic_filter.c): its spelling's first and last four bytes
+// and length hashed to a bit of the filter. The scalar twin of check_input_intrinsic_candidates' lanes.
+static bool check_input_intrinsic_candidate(const InternTable* table, uint32_t name)
+{
+    const InternSpan span = table->spans[name];
+    bool result = false;
+    if (span.length != 0)
     {
-        if (infos[lane] != 0)
+        const uint32_t hash = builtin_intrinsic_filter_hash(builtin_intrinsic_filter_key((const char*)table->records + span.offset, span.length));
+        result = ((builtin_intrinsic_filter_bits[hash / 64] >> (hash % 64)) & 1) != 0;
+    }
+    return result;
+}
+
+// Of the 16 ids from `first` (all below the table's count, `lanes` of them), those the catalogue's filter passes, a bit
+// each: their spans read 16 at once, each spelling's first and last four bytes gathered from the records, the key and
+// hash of builtin_intrinsic_filter_key and builtin_intrinsic_filter_hash computed in the lanes, and the filter's bits
+// gathered. A spelling of under four bytes is gathered from its first byte and masked to its length, where four bytes from
+// it lie within the records written (`written`); the others, the table's last records, take the scalar test.
+static uint32_t check_input_intrinsic_candidates(const InternTable* table, uint32_t first, __mmask16 lanes, uint64_t written)
+{
+    const __m512i low = _mm512_maskz_loadu_epi64((__mmask8)lanes, table->spans + first);
+    const __m512i high = _mm512_maskz_loadu_epi64((__mmask8)(lanes >> 8), table->spans + first + 8);
+    const __m512i evens = _mm512_set_epi32(30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4, 2, 0);
+    const __m512i offsets = _mm512_permutex2var_epi32(low, evens, high);
+    const __m512i lengths = _mm512_permutex2var_epi32(low, _mm512_add_epi32(evens, _mm512_set1_epi32(1)), high);
+    const __mmask16 named = _mm512_mask_test_epi32_mask(lanes, lengths, lengths);
+    const __mmask16 whole = _mm512_mask_cmpge_epu32_mask(named, lengths, _mm512_set1_epi32(4));
+    // The caller keeps the records within INT32_MAX bytes, so an offset is a gather's index and four past it fits.
+    const __mmask16 near = _mm512_mask_cmple_epu32_mask(named, _mm512_add_epi32(offsets, _mm512_set1_epi32(4)), _mm512_set1_epi32((int32_t)written));
+    const __mmask16 gathered = whole | (named & ~whole & near);
+    const __m512i heads = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), gathered, offsets, table->records, 1);
+    const __m512i last_offsets = _mm512_sub_epi32(_mm512_add_epi32(offsets, lengths), _mm512_set1_epi32(4));
+    const __m512i tails = _mm512_mask_i32gather_epi32(heads, whole, last_offsets, table->records, 1);
+    // Under four bytes: the bytes past the length cleared, and the last four the same as the first.
+    const __m512i keep = _mm512_srlv_epi32(_mm512_set1_epi32(-1), _mm512_sub_epi32(_mm512_set1_epi32(32), _mm512_slli_epi32(lengths, 3)));
+    const __m512i first_bytes = _mm512_mask_mov_epi32(heads, named & ~whole, _mm512_and_si512(heads, keep));
+    const __m512i last_bytes = _mm512_mask_mov_epi32(tails, named & ~whole, first_bytes);
+    const __m512i key = _mm512_xor_si512(_mm512_xor_si512(first_bytes, _mm512_rol_epi32(last_bytes, 13)), _mm512_mullo_epi32(lengths, _mm512_set1_epi32((int32_t)0x9e3779b9u)));
+    const __m512i mixed = _mm512_mullo_epi32(_mm512_xor_si512(key, _mm512_srli_epi32(key, 16)), _mm512_set1_epi32(0x7feb352d));
+    const __m512i hash = _mm512_and_si512(_mm512_xor_si512(mixed, _mm512_srli_epi32(mixed, 15)), _mm512_set1_epi32((int32_t)(BUSTER_BUILTIN_INTRINSIC_FILTER_BITS - 1u)));
+    const __m512i words = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), gathered, _mm512_srli_epi32(hash, 5), builtin_intrinsic_filter_bits, 4);
+    const __m512i bits = _mm512_srlv_epi32(words, _mm512_and_si512(hash, _mm512_set1_epi32(31)));
+    uint32_t result = _mm512_mask_test_epi32_mask(gathered, bits, _mm512_set1_epi32(1));
+    for (uint32_t rest = named & ~gathered; rest != 0; rest &= rest - 1)
+    {
+        const uint32_t lane = (uint32_t)__builtin_ctz(rest);
+        result |= (uint32_t)check_input_intrinsic_candidate(table, first + lane) << lane;
+    }
+    return result;
+}
+
+// Gives every id of `table` from `rows`' first unknown one (InternTable.intrinsic_known) to its count its code, in id
+// order, which is its records' order: each id the catalogue's filter passes is looked up in the exact table, and every
+// other is a miss's. The vector path filters 16 ids at once (check_input_intrinsic_candidates); the scalar path, its twin,
+// tests each (check_input_intrinsic_candidate). A command's later units fill only the ids that came since.
+static void check_input_intrinsic_fill(InternTable* table, uint16_t* rows, bool scalar)
+{
+    (void)scalar;
+    const uint64_t written = table->record_arena.length - (uint64_t)(table->records - table->record_arena.base);
+    const bool lanes_reach = written <= INT32_MAX;
+    uint32_t name = table->intrinsic_known;
+    if (!BUSTER_SCALAR_PATH(scalar) && lanes_reach)
+    {
+        for (; name < table->count; name += 16)
         {
-            valid = cache != 0;
-            if (valid)
+            const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, table->count - name < 16 ? table->count - name : 16);
+            _mm512_mask_storeu_epi16(rows + name, (__mmask32)lanes, _mm512_set1_epi16((short)BUSTER_CHECK_INTRINSIC_MISS));
+            for (uint32_t passed = check_input_intrinsic_candidates(table, name, lanes, written); passed != 0; passed &= passed - 1)
             {
-                cache[names_in_batch[lane]] = UINT32_C(0x80000000) | (uint32_t)(infos[lane] - builtin_intrinsic_infos);
-                *declarations += 1;
+                const uint32_t id = name + (uint32_t)__builtin_ctz(passed);
+                rows[id] = check_input_intrinsic_code(table, id);
             }
         }
     }
-    return valid;
+    else
+    {
+        for (; name < table->count; name += 1)
+        {
+            rows[name] = check_input_intrinsic_candidate(table, name) ? check_input_intrinsic_code(table, name) : (uint16_t)BUSTER_CHECK_INTRINSIC_MISS;
+        }
+    }
+    table->intrinsic_known = table->count;
 }
 
+// What the operands pass finds: the distinct rows the unit's operands name, a bit each, and how many, and their operands
+// that a call's shape follows, which the tables are sized for.
+typedef struct CheckInputIntrinsicScan CheckInputIntrinsicScan;
+struct CheckInputIntrinsicScan
+{
+    uint64_t seen[(BUSTER_BUILTIN_INTRINSIC_COUNT + 63) / 64];
+    uint32_t declarations;
+    uint32_t calls;
+};
+
+// The operand `token`, whose name has `code`: a row's counts toward the tables, another nothing.
+static void check_input_intrinsic_count(CheckInputIntrinsicScan* scan, const Parser* parser, uint32_t token, uint32_t code)
+{
+    if (code >= BUSTER_CHECK_INTRINSIC_ROW)
+    {
+        const uint32_t row = code - BUSTER_CHECK_INTRINSIC_ROW;
+        const uint64_t bit = UINT64_C(1) << (row % 64);
+        scan->declarations += (scan->seen[row / 64] & bit) == 0;
+        scan->seen[row / 64] |= bit;
+        scan->calls += check_input_intrinsic_call_shape(parser, token);
+    }
+}
+
+// The unit's name cache from the memo: UINT32_MAX for a name not looked up, 0 for one no row has, and the high bit and
+// the row for a row's. The vector path converts 32 codes at once; the scalar path, its twin, one.
+static void check_input_intrinsic_cache(uint32_t* cache, const uint16_t* rows, uint32_t count, bool scalar)
+{
+    (void)scalar;
+    if (BUSTER_SCALAR_PATH(scalar))
+    {
+        for (uint32_t name = 0; name < count; name += 1)
+        {
+            const uint32_t code = rows[name];
+            cache[name] = code == BUSTER_CHECK_INTRINSIC_UNKNOWN ? UINT32_MAX : code == BUSTER_CHECK_INTRINSIC_MISS ? 0 :
+                                                                               UINT32_C(0x80000000) | (code - BUSTER_CHECK_INTRINSIC_ROW);
+        }
+    }
+    else
+    {
+        for (uint32_t name = 0; name < count; name += 32)
+        {
+            const __mmask32 lanes = _bzhi_u32(UINT32_MAX, count - name < 32 ? count - name : 32);
+            const __m512i codes = _mm512_maskz_loadu_epi16(lanes, rows + name);
+            for (uint32_t half = 0; half < 2; half += 1)
+            {
+                const __m256i part = half == 0 ? _mm512_castsi512_si256(codes) : _mm512_extracti64x4_epi64(codes, 1);
+                const __m512i code = _mm512_cvtepu16_epi32(part);
+                const __m512i found = _mm512_or_si512(_mm512_sub_epi32(code, _mm512_set1_epi32((int32_t)BUSTER_CHECK_INTRINSIC_ROW)),
+                                                      _mm512_set1_epi32(INT32_MIN));
+                const __mmask16 unknown = _mm512_cmpeq_epi32_mask(code, _mm512_set1_epi32((int32_t)BUSTER_CHECK_INTRINSIC_UNKNOWN));
+                const __mmask16 miss = _mm512_cmpeq_epi32_mask(code, _mm512_set1_epi32((int32_t)BUSTER_CHECK_INTRINSIC_MISS));
+                const __m512i value = _mm512_mask_mov_epi32(_mm512_mask_mov_epi32(found, unknown, _mm512_set1_epi32(-1)), miss, _mm512_setzero_si512());
+                _mm512_mask_storeu_epi32(cache + name + half * 16, (__mmask16)(lanes >> (half * 16)), value);
+            }
+        }
+    }
+}
+
+// Of the operands `selected` of the 64 tokens from `first`, those whose name's code isn't a miss's, which most operands'
+// is: a load of each one's code, branch-free. It stays scalar by measurement (#2654): operands are about a fifth of the
+// tokens, so 16-lane gathers of the codes ran mostly empty, and on the 9700X the set-up's functions took 252 samples
+// of 20 compiles of sqlite3.c and 159 of 3 of musl's 1,336-unit command with them, against 216 and 105 with this loop.
+static uint64_t check_input_intrinsic_unresolved(const Parser* parser, const uint16_t* rows, uint32_t first, uint64_t selected)
+{
+    uint64_t result = 0;
+    for (uint64_t bits = selected; bits != 0; bits &= bits - 1)
+    {
+        const uint32_t lane = (uint32_t)__builtin_ctzll(bits);
+        result |= (uint64_t)(rows[parser->tokens.names[first + lane]] != BUSTER_CHECK_INTRINSIC_MISS) << lane;
+    }
+    return result;
+}
+
+// The operands `selected` of the 64 tokens from `first` that need more than a miss's code, a row's, counted: on the
+// scalar path every token, each tested as an operand. Out of the operands' loop, since few take it.
+static __attribute__((noinline)) void check_input_intrinsic_take(CheckInputIntrinsicScan* scan, const CheckInputReader* reader, const uint16_t* rows, uint32_t first,
+                                                                 uint64_t selected, bool scalar)
+{
+    const Parser* parser = reader->parser;
+    for (; selected != 0; selected &= selected - 1)
+    {
+        const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
+        if (!scalar || check_input_intrinsic_operand(reader, token))
+        {
+            check_input_intrinsic_count(scan, parser, token, rows[parser->tokens.names[token]]);
+        }
+    }
+}
+
+// The tables for the unit's intrinsics. The memo first gets the codes of the table's ids it hasn't (check_input_intrinsic_fill,
+// in id order, once for the table's every unit); then one pass over the unit's operands (check_input_intrinsic_operands)
+// counts the distinct rows they name and their call-shaped operands. The vector path finds the operands 64 tokens at once,
+// without the scalar test of each, and reads their codes (check_input_intrinsic_unresolved); only a row's go on
+// (check_input_intrinsic_take). The scalar path, its twin, tests each token. Both give each name its exact code and the
+// same counts. Only a unit with a row's name takes storage: then the name cache, from the memo, in scratch, and the tables.
 static bool check_input_intrinsic_initialize(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
-    const InternTable* table = reader->pp->table;
+    InternTable* table = reader->pp->table;
     CheckInput* output = reader->output;
+    const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
     const uint64_t mark = reader->arena->length;
     const uint64_t scratch_mark = reader->scratch->length;
-    BuiltinIntrinsicName names[8];
-    uint32_t names_in_batch[8];
-    uint32_t* cache = 0;
-    uint32_t lanes = 0;
-    uint32_t declarations = 0;
-    uint32_t calls = 0;
-    bool valid = true;
-    bool without_cache = false;
+    uint16_t* rows = (builtin_intrinsic_table_ready || builtin_intrinsic_table_initialize()) ? intern_intrinsic_rows(table) : NULL;
+    CheckInputIntrinsicScan scan = { 0 };
+    bool valid = rows != NULL;
+    if (valid)
+    {
+        check_input_intrinsic_fill(table, rows, scalar);
+    }
     // #113's deferred bodies are read after this pass, which sizes the tables for them too, as source order does.
     for (uint32_t first = 0; valid && first < parser->tokens.count; first += 64)
     {
-        for (uint64_t selected = check_input_intrinsic_operands(reader, first); valid && selected != 0; selected &= selected - 1)
+        const uint64_t operands = check_input_intrinsic_operands(reader, first);
+        const uint64_t taken = scalar ? operands : check_input_intrinsic_unresolved(parser, rows, first, operands);
+        if (taken != 0)
         {
-            const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
-            if (check_input_intrinsic_operand(reader, token))
-            {
-                const uint32_t name = parser->tokens.names[token];
-                if (cache == 0 && !without_cache)
-                {
-                    cache = arena_push_array(reader->scratch, table->count, sizeof(uint32_t), 64);
-                    without_cache = cache == 0;
-                    if (!without_cache)
-                    {
-                        memset(cache, 0xff, (uint64_t)table->count * sizeof(uint32_t));
-                    }
-                }
-                // Without scratch, look up every operand, including repeated names. A hit fails immediately because its
-                // tables need the cache; an all-miss unit succeeds without a quadratic search of earlier operands.
-                const bool fresh = without_cache || cache[name] == UINT32_MAX;
-                if (fresh)
-                {
-                    const InternSpan span = table->spans[name];
-                    names[lanes] = (BuiltinIntrinsicName){ (const char*)table->records + span.offset, span.length };
-                    names_in_batch[lanes] = name;
-                    if (!without_cache)
-                    {
-                        cache[name] = 0;
-                    }
-                    lanes += 1;
-                }
-            }
-            if (lanes == BUSTER_ARRAY_LENGTH(names))
-            {
-                valid = check_input_intrinsic_lookup(parser, names, names_in_batch, lanes, cache, &declarations);
-                lanes = 0;
-            }
+            check_input_intrinsic_take(&scan, reader, rows, first, taken, scalar);
         }
     }
-    if (valid && lanes != 0)
+    if (valid && scan.declarations != 0)
     {
-        valid = check_input_intrinsic_lookup(parser, names, names_in_batch, lanes, cache, &declarations);
-        lanes = 0;
-    }
-    if (valid && declarations != 0)
-    {
-        for (uint32_t first = 0; first < parser->tokens.count; first += 64)
-        {
-            for (uint64_t selected = check_input_intrinsic_operands(reader, first); selected != 0; selected &= selected - 1)
-            {
-                const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
-                if (check_input_intrinsic_operand(reader, token) && cache[parser->tokens.names[token]] != UINT32_MAX &&
-                    (cache[parser->tokens.names[token]] & UINT32_C(0x80000000)) != 0)
-                {
-                    calls += check_input_intrinsic_call_shape(parser, token);
-                }
-            }
-        }
+        uint32_t* cache = arena_push_array(reader->scratch, table->count, sizeof(uint32_t), 64);
         uint32_t* ids = arena_push_array(reader->arena, (uint64_t)parser->tokens.count + 1, sizeof(uint32_t), 64);
         uint8_t* source = arena_push_array(reader->arena, BUSTER_BUILTIN_INTRINSIC_COUNT, 1, 64);
-        CheckInputIntrinsicDeclaration* declaration_records = arena_push_array(reader->arena, declarations, sizeof(CheckInputIntrinsicDeclaration), 8);
-        CheckInputIntrinsicCall* call_records = calls != 0 ? arena_push_array(reader->arena, calls, sizeof(CheckInputIntrinsicCall), 8) : 0;
-        valid = cache != 0 && ids != 0 && declaration_records != 0 && (calls == 0 || call_records != 0);
+        CheckInputIntrinsicDeclaration* declaration_records = arena_push_array(reader->arena, scan.declarations, sizeof(CheckInputIntrinsicDeclaration), 8);
+        CheckInputIntrinsicCall* call_records = scan.calls != 0 ? arena_push_array(reader->arena, scan.calls, sizeof(CheckInputIntrinsicCall), 8) : 0;
+        valid = cache != 0 && ids != 0 && declaration_records != 0 && (scan.calls == 0 || call_records != 0);
         if (valid)
         {
+            check_input_intrinsic_cache(cache, rows, table->count, scalar);
             memset(ids, 0, ((uint64_t)parser->tokens.count + 1) * sizeof(uint32_t));
             if (source != NULL)
             {
@@ -228,15 +361,11 @@ static bool check_input_intrinsic_initialize(CheckInputReader* reader)
             output->intrinsic_ids = ids;
             output->intrinsic_declarations = declaration_records;
             output->intrinsic_declaration_count = 0;
-            output->intrinsic_declaration_capacity = declarations;
+            output->intrinsic_declaration_capacity = scan.declarations;
             output->intrinsic_calls = call_records;
             output->intrinsic_call_count = 0;
-            output->intrinsic_call_capacity = calls;
+            output->intrinsic_call_capacity = scan.calls;
         }
-    }
-    else if (valid)
-    {
-        reader->scratch->length = scratch_mark;
     }
     if (!valid)
     {

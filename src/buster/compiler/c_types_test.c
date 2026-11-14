@@ -2575,6 +2575,57 @@ static bool type_test_printing(Arena* arena)
             arena_pop_to(arena, length);
         }
         type_test_expect(&tally, type_test_prints(table, BUSTER_TYPE_BOOL, BUSTER_TYPE_PRINT_C23, "bool", arena), "printing", "bool in C23");
+        // Alignment is layout information, not a printed type level. A typedef may name the wrapper or the
+        // underlying level, by type or by declarator occurrence, without duplicating a pointer/array suffix (#2212).
+        const TypeId aligned_char = type_aligned(table, BUSTER_TYPE_CHAR, 3);
+        const TypeId aligned_int = type_aligned(table, BUSTER_TYPE_INT, 1);
+        const TypeId aligned_pointer = type_aligned(table, int_pointer, 5);
+        const TypeId aliases[] = {
+            aligned_char,
+            aligned_char,
+            aligned_int,
+            aligned_pointer,
+        };
+        const TypeId aliased_types[] = {
+            BUSTER_TYPE_CHAR,
+            type_pointer(table, aligned_char),
+            type_array(table, aligned_int, 2),
+            aligned_pointer | BUSTER_TYPE_CONST,
+        };
+        const String8 alias_names[] = {
+            BUSTER_S8("C"),
+            BUSTER_S8("C"),
+            BUSTER_S8("I"),
+            BUSTER_S8("P"),
+        };
+        const char* alias_texts[] = {
+            "C",
+            "C *",
+            "I[2]",
+            "const P",
+        };
+        const uint32_t order = 0;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(aliases); i += 1)
+        {
+            for (uint32_t placed = 0; placed < 2; placed += 1)
+            {
+                const uint64_t mark = arena->length;
+                const TypeNames sugar = {
+                    .alias_types = aliases + i,
+                    .alias_names = alias_names + i,
+                    .alias_count = 1,
+                    .alias_order = placed != 0 ? &order : NULL,
+                    .alias_order_count = placed,
+                };
+                const String8 text = type_print(table, arena, aliased_types[i], (String8){ 0 }, &sugar, 0);
+                char detail[256];
+                snprintf(detail, sizeof(detail), "aligned typedef %u placed=%u: \"%.*s\" against \"%s\"", i, placed, (int)text.length,
+                         text.pointer, alias_texts[i]);
+                type_test_expect(&tally, text.length == strlen(alias_texts[i]) && memcmp(text.pointer, alias_texts[i], text.length) == 0,
+                                 "printing", detail);
+                arena_pop_to(arena, mark);
+            }
+        }
         // A name goes where the declarator's name goes.
         const uint64_t length = arena->length;
         const String8 named = type_print(table, arena, type_pointer(table, type_array(table, BUSTER_TYPE_INT, 3)), BUSTER_S8("p"), 0, 0);

@@ -6,7 +6,10 @@
 // This administrative predicate is outside compiler/measurement hot paths.
 //
 // The `evidence` job (tools/ci/nightly.sh) must succeed in every run, and says
-// whether the 9700X job was admitted. A pull request, draft or ready, never is
+// whether the 9700X job was admitted. On a pull request and a merge-queue
+// candidate, the CI glue's fixtures (the `glue` job, which runs beside the rows
+// rather than before them, #2658) must have passed too, and elsewhere have been
+// skipped: the evidence counts as passed only with them as their event requires. A pull request, draft or ready, never is
 // (#2055): the context passes on its hosted correctness alone and says that
 // native correctness and measurements run on its merged state in the nightly
 // window. A merge-queue candidate (#1430) never is either: it passes on the
@@ -118,6 +121,17 @@ static Result qualification_result(const char* name)
 {
     static const char* const names[] = { "success", "failure", "cancelled", "skipped" };
     return (Result)qualification_find(getenv(name), names, sizeof(names) / sizeof(names[0]));
+}
+
+// The evidence input: the `evidence` job's result where the glue job's (GLUE_RESULT) is the one its event requires,
+// passed on a pull request and a merge-queue candidate, which alone run it, and skipped on the others; a failure
+// otherwise, so that a glue job that failed, was cancelled, didn't run where it should or ran where it shouldn't can't
+// pass the aggregate.
+static Result qualification_evidence(Result evidence, Result glue, Event event)
+{
+    const bool runs = event == EVENT_PR || event == EVENT_MERGE_GROUP;
+    const bool expected = glue == (runs ? RESULT_SUCCESS : RESULT_SKIPPED);
+    return expected ? evidence : RESULT_FAILURE;
 }
 
 static bool qualification_no_code(const Qualification* input)
@@ -253,6 +267,22 @@ static int qualification_test(void)
     }
     failures += expected == NULL || allowed_count != sizeof(allowed) / sizeof(allowed[0]);
     free(expected);
+    // The glue job's result folded into the evidence input, over every event and both results: the evidence passes
+    // through only where the glue job did what its event requires.
+    for (uint32_t event = 0; event < EVENT_COUNT; event += 1)
+    {
+        for (uint32_t evidence = 0; evidence < RESULT_COUNT; evidence += 1)
+        {
+            for (uint32_t glue = 0; glue < RESULT_COUNT; glue += 1)
+            {
+                const bool runs = event == EVENT_PR || event == EVENT_MERGE_GROUP;
+                const bool expected = runs ? glue == RESULT_SUCCESS : glue == RESULT_SKIPPED;
+                const Result want = expected ? (Result)evidence : RESULT_FAILURE;
+                checks += 1;
+                failures += qualification_evidence((Result)evidence, (Result)glue, (Event)event) != want;
+            }
+        }
+    }
     printf("qualification --self-test: %u checks, %u failures\n", checks, failures);
     return failures != 0;
 }
@@ -276,8 +306,9 @@ int main(int argc, char** argv)
         const bool skip = hardware != NULL && strcmp(hardware, "skip") == 0;
         const char* purpose = getenv("PURPOSE");
         const char* nightly = purpose != NULL && (strcmp(purpose, "backlog") == 0 || strcmp(purpose, "snapshot") == 0) ? "nightly" : purpose;
+        const Event event = (Event)qualification_find(getenv("EVENT_NAME"), events, sizeof(events) / sizeof(events[0]));
         Qualification input = {
-            .event = (Event)qualification_find(getenv("EVENT_NAME"), events, sizeof(events) / sizeof(events[0])),
+            .event = event,
             .code = (Code)qualification_find(getenv("CODE_CHANGED"), codes, sizeof(codes) / sizeof(codes[0])),
             .draft = draft == 1,
             .purpose = (Purpose)qualification_find(nightly != NULL ? nightly : "", purposes, sizeof(purposes) / sizeof(purposes[0])),
@@ -285,7 +316,7 @@ int main(int argc, char** argv)
             .changes = qualification_result("CHANGES_RESULT"),
             .size = qualification_result("SIZE_RESULT"),
             .hooks = qualification_result("DCO_RESULT"),
-            .evidence = qualification_result("EVIDENCE_RESULT"),
+            .evidence = qualification_evidence(qualification_result("EVIDENCE_RESULT"), qualification_result("GLUE_RESULT"), event),
             .tests = qualification_result("TEST_RESULT"),
             .fuzz = qualification_result("FUZZ_RESULT"),
             .native = qualification_result("BENCHMARK_RESULT"),

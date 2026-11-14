@@ -107,7 +107,11 @@ static bool ir_lower_test_frame(IrLowerTestFrame* frame, const IrFunction* funct
     if (ok)
     {
         memset(frame->values, 0, ((uint64_t)function->instruction_count + 1) * sizeof(uint64_t));
-        memcpy(frame->arguments, arguments, (size_t)count * sizeof(uint64_t));
+        // A call without arguments may pass none (a null pointer), which memcpy may not take even for no bytes.
+        if (count != 0)
+        {
+            memcpy(frame->arguments, arguments, (size_t)count * sizeof(uint64_t));
+        }
         for (uint32_t s = 0; s < function->slot_count && ok; s += 1)
         {
             // A variadic definition's anchors, as an all-integer call lays them out: the arguments' first six in the
@@ -3900,6 +3904,200 @@ static void ir_lower_test_hoisted_places(IrLowerTestTally* tally)
     arena_release(&execution);
 }
 
+// #2618: a definition lifted out of a loop must be able to keep its register there. Three functions of p (local 0),
+// with r (local 1) and j (local 2), and c(), which returns 1 (symbol 5, the program's second function):
+//     h1: r = 0; while (p != 0) { r = r + (&s1 - &s1) + c(); p = p - 1; } return r;
+//     h2: r = 0; while (p != 0) { if (p == 2) r = r + (&s2 - &s2) + 1; p = p - 1; } return r;
+//     h3: r = 0; while (p != 0) { r = r + (&s3 - &s3) + c(); j = 2; while (j != 0) { r = r + (&s3 - &s3) + 1; j = j - 1; } p = p - 1; } return r;
+// h1's every iteration calls, so its two takes stay their own, in the loop's body (block 3); so do h2's, which one
+// iteration alone reaches (block 4). h3's outer loop calls on every iteration too, but its inner loop, which takes s3 on
+// every iteration of its own, calls on none: s3 is defined once, before the outer loop (block 1), as Lua's disptab is.
+// Both lowering paths give the same IR, which the interpreter runs and promotion takes.
+static void ir_lower_test_hoisted_loops(IrLowerTestTally* tally)
+{
+    static const uint8_t h1_kinds[] = {
+        BUSTER_TYPED_CONST, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_SUB, BUSTER_TYPED_ADD, BUSTER_TYPED_CALL, BUSTER_TYPED_ADD,
+        BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_JUMP,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_RETURN,
+    };
+    static const uint8_t h1_classes[] = {
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_VOID,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+    };
+    static const uint64_t h1_values[] = {
+        0, 1,
+        0, 17,
+        1, 1, 1, 0, 0, 0, 0,
+        1, 0, 1, 0, 0, 2,
+        1, 0,
+    };
+    static const uint8_t h2_kinds[] = {
+        BUSTER_TYPED_CONST, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_BRANCH_TRUE,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_SUB, BUSTER_TYPED_ADD, BUSTER_TYPED_CONST, BUSTER_TYPED_ADD, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_JUMP,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_RETURN,
+    };
+    static const uint8_t h2_classes[] = {
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_VOID,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+    };
+    static const uint64_t h2_values[] = {
+        0, 1,
+        0, 21,
+        0, 2, 0, 16,
+        1, 2, 2, 0, 0, 1, 0, 1,
+        0, 1, 0, 0, 2,
+        1, 0,
+    };
+    static const uint8_t h3_kinds[] = {
+        BUSTER_TYPED_CONST, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_SUB, BUSTER_TYPED_ADD, BUSTER_TYPED_CALL, BUSTER_TYPED_ADD,
+        BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_SUB, BUSTER_TYPED_ADD, BUSTER_TYPED_CONST, BUSTER_TYPED_ADD,
+        BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_JUMP,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_CONST, BUSTER_TYPED_SUB, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_JUMP,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_RETURN,
+    };
+    static const uint8_t h3_classes[] = {
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_VOID,
+        BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_VOID,
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
+    };
+    static const uint64_t h3_values[] = {
+        0, 1,
+        0, 34,
+        1, 3, 3, 0, 0, 0, 0,
+        1, 2, 2,
+        2, 29,
+        1, 3, 3, 0, 0, 1, 0,
+        1, 2, 1, 0, 2, 14,
+        0, 1, 0, 0, 2,
+        1, 0,
+    };
+    static const uint8_t c_kinds[] = { BUSTER_TYPED_CONST, BUSTER_TYPED_RETURN };
+    static const uint8_t c_classes[] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64 };
+    static const uint64_t c_values[] = { 1, 0 };
+    static const uint8_t local_classes[3] = { BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_I32 };
+    static const uint8_t local_flags[3] = { 0 };
+    _Static_assert(BUSTER_ARRAY_LENGTH(h1_kinds) == BUSTER_ARRAY_LENGTH(h1_classes) && BUSTER_ARRAY_LENGTH(h1_kinds) == BUSTER_ARRAY_LENGTH(h1_values), "h1's columns");
+    _Static_assert(BUSTER_ARRAY_LENGTH(h2_kinds) == BUSTER_ARRAY_LENGTH(h2_classes) && BUSTER_ARRAY_LENGTH(h2_kinds) == BUSTER_ARRAY_LENGTH(h2_values), "h2's columns");
+    _Static_assert(BUSTER_ARRAY_LENGTH(h3_kinds) == BUSTER_ARRAY_LENGTH(h3_classes) && BUSTER_ARRAY_LENGTH(h3_kinds) == BUSTER_ARRAY_LENGTH(h3_values), "h3's columns");
+    const AbiLocation parameter = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { X86_REGISTER_RDI } };
+    const AbiCall call = { .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2, .result = { .kind = BUSTER_ABI_RESULT_REGISTERS, .registers = { BUSTER_ABI_RAX, BUSTER_ABI_REGISTER_NONE } } };
+    const SymbolId target = 5;
+    const uint32_t first = 0;
+    const uint32_t count = 0;
+    const uint8_t variadic = 0;
+    const Tier0Function base = {
+        .local_classes = local_classes,
+        .local_flags = local_flags,
+        .local_count = 3,
+        .parameter_count = 1,
+        .parameters = &parameter,
+        .call_targets = &target,
+        .call_first = &first,
+        .call_argument_counts = &count,
+        .call_variadic = &variadic,
+        .calls = &call,
+        .call_count = 1,
+    };
+    Tier0Function sources[3] = { base, base, base };
+    sources[0].kinds = h1_kinds;
+    sources[0].classes = h1_classes;
+    sources[0].values = h1_values;
+    sources[0].count = BUSTER_ARRAY_LENGTH(h1_kinds);
+    sources[1].kinds = h2_kinds;
+    sources[1].classes = h2_classes;
+    sources[1].values = h2_values;
+    sources[1].count = BUSTER_ARRAY_LENGTH(h2_kinds);
+    sources[1].call_count = 0;
+    sources[2].kinds = h3_kinds;
+    sources[2].classes = h3_classes;
+    sources[2].values = h3_values;
+    sources[2].count = BUSTER_ARRAY_LENGTH(h3_kinds);
+    const Tier0Function callee = {
+        .kinds = c_kinds,
+        .classes = c_classes,
+        .values = c_values,
+        .count = BUSTER_ARRAY_LENGTH(c_kinds),
+    };
+    const char* names[3] = {
+        "takes in a loop whose every iteration calls stay their own",
+        "takes on one iteration of a loop stay their own",
+        "a symbol an inner loop takes on its iterations without calls is defined before the outer loop",
+    };
+    static const uint32_t symbols[3] = { 1, 2, 3 };
+    static const uint32_t expected_counts[3] = { 2, 2, 1 };
+    static const uint32_t expected_blocks[3] = { 1u << 3, 1u << 4, 1u << 1 };
+    // Each function's result for p = 3: three iterations of c() alone, one of the take's iteration, and three of c()
+    // and two inner iterations.
+    static const uint64_t expected_results[3] = { 3, 1, 9 };
+    Arena output = arena_reserve(1ull << 24);
+    Arena twin_output = arena_reserve(1ull << 24);
+    Arena promoted = arena_reserve(1ull << 24);
+    Arena twin_promoted = arena_reserve(1ull << 24);
+    Arena scratch = arena_reserve(1ull << 24);
+    Arena execution = arena_reserve(1ull << 24);
+    const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && twin_promoted.base != 0 && scratch.base != 0 && execution.base != 0;
+    ir_lower_test_expect(tally, ready, "hoisted loops' arenas", 0, 0);
+    Tier0TestData data = { 0 };
+    data.offsets[1] = 8;
+    data.offsets[2] = 16;
+    uint8_t globals[24] = { 0 };
+    for (uint32_t which = 0; ready && which < 3; which += 1)
+    {
+        IrFunction functions[2] = { 0 };
+        ir_lower_test_expect(tally, tier0_validate(&sources[which]).error == TIER0_OK && tier0_validate_scalar(&sources[which]).error == TIER0_OK, "Tier 0 takes the hoisted loops' functions", 0, which);
+        if (ir_lower_test_lower(tally, &sources[which], IR_I64, 6, &output, &twin_output, &scratch, &functions[0], 0, which) &&
+            ir_lower_test_lower(tally, &callee, IR_I64, 6, &output, &twin_output, &scratch, &functions[1], 0, which))
+        {
+            uint32_t taken = 0;
+            const uint32_t blocks = ir_lower_test_symbol_blocks(&functions[0], symbols[which], &taken);
+            ir_lower_test_expect(tally, taken == expected_counts[which] && blocks == expected_blocks[which], names[which], 0, which);
+            if (taken != expected_counts[which] || blocks != expected_blocks[which])
+            {
+                fprintf(stderr, "  h%u: %u takes of s%u in blocks 0x%x\n", which + 1, taken, symbols[which], blocks);
+            }
+            const uint64_t p = 3;
+            bool fault = false;
+            const uint64_t actual = ir_lower_test_interpret(functions, 2, 0, 3, &data, globals, &p, 1, &execution, &fault);
+            ir_lower_test_expect(tally, !fault && actual == expected_results[which], "the hoisted loops' functions compute their results", p, which);
+            ir_lower_test_promote(tally, &functions[0], &promoted, &twin_promoted, &scratch, 0, which);
+        }
+        arena_pop_to(&output, 0);
+        arena_pop_to(&twin_output, 0);
+        arena_pop_to(&promoted, 0);
+        arena_pop_to(&twin_promoted, 0);
+        arena_pop_to(&scratch, 0);
+        arena_pop_to(&execution, 0);
+    }
+    arena_release(&output);
+    arena_release(&twin_output);
+    arena_release(&promoted);
+    arena_release(&twin_promoted);
+    arena_release(&scratch);
+    arena_release(&execution);
+}
+
 // The expected results of ir_lower_test_depth_types' functions, by C: f, and g = 100 + f.
 static uint64_t ir_lower_test_depth_types_expected(uint64_t p, bool pending)
 {
@@ -4756,6 +4954,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         ir_lower_test_indirect_jump(&tally);
         ir_lower_test_hoisted_symbols(&tally);
         ir_lower_test_hoisted_places(&tally);
+        ir_lower_test_hoisted_loops(&tally);
         ir_lower_test_depth_types(&tally);
         ir_lower_test_guarded(&tally);
         const Tier0ProgramOptions values =

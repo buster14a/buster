@@ -5,8 +5,8 @@
 // end and restart at one position, which the level rule alone gives each other's registers, of a range that takes an
 // earlier one's opening register over its own value's last, and of one that takes an earlier one's closing register
 // (BUSTER_TIER1_ALLOCATE_HINT_EXIT, #2553) after the scan moved it; and random inputs on both paths against the interval
-// verifier, the position occupancy oracle and an independent reference of the common path's hint rule.
-// Included by tier1_allocate_test.c.
+// verifier, the position occupancy oracle and an independent reference of the common path's hint rule; and traces of a
+// recipe that gives its register to a value its hint names (#2618). Included by tier1_allocate_test.c.
 
 // The common path's rule with hints, written over positions as tier1_allocation_test_levels writes it, with the free
 // registers as a set per level: a start whose hinted register is free takes it, from the level above that holds it
@@ -199,9 +199,94 @@ static void tier1_allocation_test_idle(Tier1AllocationTestTally* tally, Arena* a
     }
 }
 
+// A value without a recipe takes its hinted register from a recipe that no use requires there (#2618): value 0 leaves r0
+// at 4 and starts again at 8, where its hint names r0, which recipe value 1, defined at 5, holds. In the first trace the
+// recipe leaves r0 at 8, recomputed into r1 for its required use at 11; in the second its use at 8 requires it there, so
+// it keeps r0 and value 0 takes r1. The masks keep both production paths on the scan.
+static void tier1_allocation_test_yields(Tier1AllocationTestTally* tally, Arena* arena)
+{
+    const uint32_t starts[3] = { 0, 5, 8 };
+    const uint32_t ends[3] = { 4, 12, 12 };
+    const uint32_t values[3] = { 0, 1, 0 };
+    const uint32_t allowed[3] = { 3, 3, 3 };
+    const uint8_t classes[3] = { 0 };
+    const uint8_t rematerializable[3] = { 0, 1, 0 };
+    const uint32_t use_offsets[][4] = {
+        { 0, 1, 3, 4 },
+        { 0, 1, 4, 5 },
+    };
+    const uint32_t use_positions[][5] = {
+        { 0, 5, 11, 10 },
+        { 0, 5, 8, 11, 10 },
+    };
+    const uint8_t required[5] = { 1, 1, 1, 1, 1 };
+    const uint32_t fragments[] = { 5, 3 };
+    const uint8_t expected_kinds[][5] = {
+        { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER },
+        { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER },
+    };
+    const uint8_t expected_registers[][5] = {
+        { 0, 0, UINT8_MAX, 1, 0 },
+        { 0, 0, 1 },
+    };
+    const uint32_t expected_starts[][5] = {
+        { 0, 5, 8, 11, 8 },
+        { 0, 5, 8 },
+    };
+    const char* names[] = {
+        "a recipe gives a value without one the register its hint names",
+        "a recipe a use requires keeps its register from a hinted value",
+    };
+    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(names); fixture += 1)
+    {
+        const Tier1AllocationInput input = {
+            .starts = starts,
+            .ends = ends,
+            .values = values,
+            .allowed_registers = allowed,
+            .classes = classes,
+            .hint_values = values,
+            .rematerializable = rematerializable,
+            .use_offsets = use_offsets[fixture],
+            .use_positions = use_positions[fixture],
+            .use_required = required,
+            .use_count = use_offsets[fixture][3],
+            .count = 3,
+            .value_count = 2,
+            .position_count = 12,
+            .registers = { 7 },
+        };
+        Tier1Allocation outputs[3] = { { 0 } };
+        bool produced = true;
+        const uint64_t saved = arena->length;
+        for (uint32_t path = 0; path < 3; path += 1)
+        {
+            const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &outputs[path]) : path == 1 ? tier1_allocate_scalar(&input, arena, &outputs[path]) : tier1_allocate_scan_reference(&input, arena, &outputs[path]);
+            const Tier1Allocation* output = &outputs[path];
+            bool valid = error == TIER1_ALLOCATION_OK && output->fragment_count == fragments[fixture] && output->spill_count == 0 && tier1_allocation_verify(&input, output) && tier1_allocation_test_occupancy(&input, output);
+            valid = valid && memcmp(output->kinds, expected_kinds[fixture], fragments[fixture]) == 0 && memcmp(output->registers, expected_registers[fixture], fragments[fixture]) == 0;
+            valid = valid && memcmp(output->starts, expected_starts[fixture], fragments[fixture] * sizeof(uint32_t)) == 0;
+            produced &= error == TIER1_ALLOCATION_OK;
+            tier1_allocation_test_expect(tally, valid, names[fixture]);
+            if (!valid && error == TIER1_ALLOCATION_OK)
+            {
+                fprintf(stderr, "  path %u: %u fragments:", path, output->fragment_count);
+                for (uint32_t f = 0; f < output->fragment_count; f += 1)
+                {
+                    fprintf(stderr, " %u@%u/r%u", output->kinds[f], output->starts[f], output->registers[f]);
+                }
+                fprintf(stderr, "\n");
+            }
+        }
+        tier1_allocation_test_expect(tally, produced && tier1_allocation_test_equal(&input, &outputs[0], &outputs[1]), "both production paths give a recipe's register to a hinted value alike");
+        arena_pop_to(arena, saved);
+    }
+}
+
 static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* arena, uint64_t seed)
 {
     tier1_allocation_test_idle(tally, arena);
+    tier1_allocation_test_yields(tally, arena);
     // Two values, each with two adjacent ranges: a [0, 10) [10, 20), b [2, 10) [10, 20). Ends come first in input
     // order, a's then b's, so the level rule gives a's second range b's register and b's a's.
     {

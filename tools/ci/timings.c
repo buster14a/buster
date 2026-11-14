@@ -7,9 +7,11 @@
 //
 // `timings --queue` reports the merge queue's candidates instead (#1430): one
 // line per completed candidate run, its id, outcome (merged, passed, failed,
-// cancelled), wall seconds and runner seconds. A candidate that didn't merge
-// spent its runner time on nothing that landed, the cost of rebuilds and of
-// failures the review of #1430 asks to be reported.
+// cancelled), wall seconds and runner seconds, then its hosted jobs' waits for
+// a runner (#2031): the longest job's seconds from its creation to its start,
+// all of theirs summed, and how many jobs they are. A candidate that didn't
+// merge spent its runner time on nothing that landed, the cost of rebuilds and
+// of failures the review of #1430 asks to be reported.
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -222,6 +224,11 @@ struct QueueCandidates
     uint64_t runner[BUSTER_TIMINGS_OUTCOMES];
     // The merged candidates' wall times, for their quantiles.
     TimingSeries merged;
+    // Each candidate's longest hosted job wait for a runner, of those whose jobs waited at all, and every job's waits
+    // summed and counted.
+    TimingSeries longest;
+    uint64_t waited;
+    uint64_t jobs;
 };
 
 static bool queue_add(QueueCandidates* queue, const char* input)
@@ -229,7 +236,7 @@ static bool queue_add(QueueCandidates* queue, const char* input)
     size_t length = strlen(input);
     bool valid = length != 0 && length < BUSTER_TIMINGS_LINE && input[length - 1] == '\n';
     char line[BUSTER_TIMINGS_LINE];
-    char* fields[4] = { NULL };
+    char* fields[7] = { NULL };
     size_t count = 0;
     if (valid)
     {
@@ -253,26 +260,35 @@ static bool queue_add(QueueCandidates* queue, const char* input)
     uint64_t id = 0;
     uint64_t wall = 0;
     uint64_t runner = 0;
+    uint64_t longest = 0;
+    uint64_t waited = 0;
+    uint64_t jobs = 0;
     size_t outcome = BUSTER_TIMINGS_OUTCOMES;
     if (valid)
     {
         outcome = timing_name(fields[1], queue_outcomes, BUSTER_TIMINGS_OUTCOMES);
         valid = outcome < BUSTER_TIMINGS_OUTCOMES && timing_number(fields[0], UINT64_MAX, &id) && id != 0;
         valid = valid && timing_number(fields[2], BUSTER_TIMINGS_SECONDS, &wall) && timing_number(fields[3], BUSTER_TIMINGS_RUNNER, &runner);
+        // The longest wait is one of the summed ones: none without a job, and at most their sum with one.
+        valid = valid && timing_number(fields[4], BUSTER_TIMINGS_SECONDS, &longest) && timing_number(fields[5], BUSTER_TIMINGS_RUNNER, &waited) &&
+                timing_number(fields[6], BUSTER_TIMINGS_CANDIDATES, &jobs);
+        valid = valid && longest <= waited && (jobs != 0 || waited == 0) && waited <= longest * jobs;
         valid = valid && queue->count < BUSTER_TIMINGS_CANDIDATES;
         for (size_t i = 0; i < queue->count && valid; i += 1)
         {
             valid = queue->ids[i] != id;
         }
     }
+    valid = valid && (outcome != 0 || queue->merged.count < BUSTER_TIMINGS_SAMPLES) && (jobs == 0 || queue->longest.count < BUSTER_TIMINGS_SAMPLES);
     if (valid && outcome == 0)
     {
-        valid = queue->merged.count < BUSTER_TIMINGS_SAMPLES;
-        if (valid)
-        {
-            queue->merged.samples[queue->merged.count] = (TimingSample){ .id = id, .seconds = (uint32_t)wall };
-            queue->merged.count += 1;
-        }
+        queue->merged.samples[queue->merged.count] = (TimingSample){ .id = id, .seconds = (uint32_t)wall };
+        queue->merged.count += 1;
+    }
+    if (valid && jobs != 0)
+    {
+        queue->longest.samples[queue->longest.count] = (TimingSample){ .id = id, .seconds = (uint32_t)longest };
+        queue->longest.count += 1;
     }
     if (valid)
     {
@@ -280,6 +296,8 @@ static bool queue_add(QueueCandidates* queue, const char* input)
         queue->count += 1;
         queue->candidates[outcome] += 1;
         queue->runner[outcome] += runner;
+        queue->waited += waited;
+        queue->jobs += jobs;
     }
     return valid;
 }
@@ -332,6 +350,11 @@ static int queue_report(FILE* input, FILE* output)
         {
             fprintf(output, "\nMerged candidates' wall time, from the run's start to its last update: median %.1f min, p95 %.1f min (%zu candidates).\n", median / 60, (double)p95 / 60, queue->merged.count);
         }
+        if (timing_quantiles(&queue->longest, &median, &p95))
+        {
+            fprintf(output, "\nHosted jobs' waits for a runner, from each job's creation to its start: each candidate's longest, median %.1f s and p95 %u s (%zu candidates); every job's, mean %.1f s over %llu jobs.\n",
+                    median, p95, queue->longest.count, (double)queue->waited / (double)queue->jobs, (unsigned long long)queue->jobs);
+        }
         valid = fflush(output) == 0;
     }
     free(queue);
@@ -343,28 +366,38 @@ static unsigned int queue_test(unsigned int* checks)
     unsigned int failures = 0;
     QueueCandidates* queue = calloc(1, sizeof(QueueCandidates));
     const char* invalid[] = {
-        "", "1\tmerged\t60\t600", "0\tmerged\t60\t600\n", "1\tqueued\t60\t600\n", "1\tmerged\t604801\t600\n",
-        "1\tmerged\t60\n", "1\tmerged\t60\t600\textra\n", "1\tmerged\t-1\t600\n", "1\tmerged\t60\t604800001\n",
+        "", "1\tmerged\t60\t600\t0\t0\t0", "0\tmerged\t60\t600\t0\t0\t0\n", "1\tqueued\t60\t600\t0\t0\t0\n", "1\tmerged\t604801\t600\t0\t0\t0\n",
+        "1\tmerged\t60\t600\n", "1\tmerged\t60\t600\t0\t0\t0\textra\n", "1\tmerged\t-1\t600\t0\t0\t0\n", "1\tmerged\t60\t604800001\t0\t0\t0\n",
+        // Waits: a longest wait past their sum, a wait without a job, a sum past the longest for each job, a wait past a
+        // week, and more jobs than candidates may hold.
+        "1\tmerged\t60\t600\t5\t4\t2\n", "1\tmerged\t60\t600\t0\t3\t0\n", "1\tmerged\t60\t600\t2\t9\t4\n", "1\tmerged\t60\t600\t604801\t604801\t1\n",
+        "1\tmerged\t60\t600\t1\t1\t1025\n",
     };
     for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i += 1)
     {
         *checks += 1;
         failures += queue_add(queue, invalid[i]);
     }
-    const char* valid[] = { "1\tmerged\t2236\t54720\n", "2\tfailed\t240\t1800\n", "3\tcancelled\t600\t6000\n", "4\tpassed\t2200\t54000\n", "5\tmerged\t2400\t55000\n" };
+    const char* valid[] = {
+        "1\tmerged\t2236\t54720\t3\t204\t102\n", "2\tfailed\t240\t1800\t0\t0\t0\n", "3\tcancelled\t600\t6000\t411\t500\t2\n",
+        "4\tpassed\t2200\t54000\t9\t90\t10\n",   "5\tmerged\t2400\t55000\t0\t0\t96\n",
+    };
     for (size_t i = 0; i < sizeof(valid) / sizeof(valid[0]); i += 1)
     {
         *checks += 1;
         failures += !queue_add(queue, valid[i]);
     }
     *checks += 1;
-    failures += queue_add(queue, "3\tmerged\t60\t60\n");
+    failures += queue_add(queue, "3\tmerged\t60\t60\t0\t0\t0\n");
     *checks += 1;
     failures += queue->count != 5 || queue->candidates[0] != 2 || queue->runner[0] != 109720 || queue->candidates[1] != 1 || queue->runner[2] != 1800 || queue->runner[3] != 6000 || queue->merged.count != 2;
     double median = 0;
     uint32_t p95 = 0;
     *checks += 1;
     failures += !timing_quantiles(&queue->merged, &median, &p95) || median != 2318 || p95 != 2400;
+    // The waits: every candidate whose jobs waited, their longest 0, 3, 9 and 411 s, and 794 s over 210 jobs.
+    *checks += 1;
+    failures += queue->longest.count != 4 || queue->waited != 794 || queue->jobs != 210 || !timing_quantiles(&queue->longest, &median, &p95) || median != 6 || p95 != 411;
     free(queue);
     return failures;
 }

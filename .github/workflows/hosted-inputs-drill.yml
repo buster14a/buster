@@ -4,7 +4,7 @@ name: Hosted release-input outage drill
 # cache: upstream down (the pinned GHCR mirror must supply every input), the mirror down (upstream must rebuild the same
 # installed tree), and both down (preparation must fail within its bound). A host is taken down through /etc/hosts, so
 # every request to it is refused. The weekly run also catches a pinned mirror publication that has gone missing.
-# The offline jobs (#2275) take down Ubuntu's mirrors and GitHub's git, release and package hosts while a shard sets up
+# The offline jobs (#2275) take down Ubuntu's mirrors, GitHub's git, release and package hosts, and Lua while a shard sets up
 # from the run's handoff, and while a preparation finds every input in its cache: both must succeed without them.
 on:
   pull_request:
@@ -175,10 +175,10 @@ jobs:
     uses: ./.github/workflows/prepare-hosted-tools.yml
 
   # A shard's setup, as hosted-correctness.yml's shards run it, reaching only GitHub's checkout, cache and artifact
-  # services. Ubuntu's mirrors, packages.microsoft.com and GitHub's release, raw and package hosts go down before the
+  # services. Ubuntu's mirrors, packages.microsoft.com, Lua and GitHub's release, raw and package hosts go down before the
   # handoff's restore; github.com and codeload.github.com, which fetch the action's own steps, go down right after it.
   offline-shard:
-    name: A shard's setup with Ubuntu's mirrors and GitHub's git and release hosts down
+    name: A shard's setup with Ubuntu's mirrors, GitHub's sources and Lua down
     needs: offline-prepare
     runs-on: ubuntu-26.04
     timeout-minutes: 30
@@ -191,10 +191,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Take Ubuntu's mirrors and GitHub's release and package hosts down
+      - name: Take Ubuntu's mirrors, GitHub's release and package hosts and Lua down
         run: >-
           bash tools/ci/hosts-down.sh --apt packages.microsoft.com objects.githubusercontent.com
           release-assets.githubusercontent.com raw.githubusercontent.com ghcr.io pkg-containers.githubusercontent.com
+          www.lua.org lua.org
 
       - name: Restore the run's verified inputs
         uses: ./.github/actions/hosted-tools
@@ -207,13 +208,14 @@ jobs:
       - name: Install official Clang 23.1.4 and test tools
         run: bash tools/ci/setup-hosted.sh
 
-      - name: Fetch the baseline runtime, the frozen corpus, c-testsuite and SQLite
+      - name: Fetch the baseline runtime, the frozen corpus, c-testsuite, SQLite and Lua
         run: |
           set -euo pipefail
           bash tools/ci/setup-baseline-runtime.sh
           bash tools/ci/fetch-corpus.sh "$RUNNER_TEMP/preprocessor-391e729af658"
           bash tools/ci/fetch-c-testsuite.sh build/c-testsuite
           bash tools/ci/fetch-sqlite.sh build/sqlite
+          bash tools/ci/hosted-offline.sh lua build/lua
 
       - name: Run the installed tools
         run: |
@@ -222,7 +224,7 @@ jobs:
           for tool in gdb tcc qemu-x86_64 valgrind tclsh8.6 perf; do command -v "$tool"; done
           valgrind --version
           qemu-x86_64 --version | head -n 1
-          printf 'Setup reached no external host: the apt closure, the baseline runtime, the corpus and both mirrors came from the handoff.\n' | tee -a "$GITHUB_STEP_SUMMARY"
+          printf 'Setup reached no external host: the apt closure, the baseline runtime, the corpus, both mirrors and Lua came from the handoff.\n' | tee -a "$GITHUB_STEP_SUMMARY"
 
   # A preparation whose caches hold every input contacts no external host: a cold preparation (a cache miss) fetches
   # each input once and saves them in a cache of this run's own, then, with every source down, a fresh restore of that
@@ -248,7 +250,7 @@ jobs:
           bash tools/ci/hosted-offline.sh prepare "$RUNNER_TEMP/hosted-offline" 2> "$RUNNER_TEMP/cold.log" || status=$?
           cat "$RUNNER_TEMP/cold.log" >&2
           [ "$status" -eq 0 ] || exit "$status"
-          for input in apt baseline corpus c-testsuite sqlite; do
+          for input in apt baseline corpus c-testsuite sqlite lua; do
               grep -q "input=$input source=network" "$RUNNER_TEMP/cold.log" || { echo "::error::$input was not acquired"; exit 1; }
           done
 
@@ -263,7 +265,8 @@ jobs:
           set -euo pipefail
           rm -rf -- "$RUNNER_TEMP/hosted-offline"
           bash tools/ci/hosts-down.sh --apt packages.microsoft.com github.com codeload.github.com objects.githubusercontent.com \
-              release-assets.githubusercontent.com raw.githubusercontent.com ghcr.io pkg-containers.githubusercontent.com
+              release-assets.githubusercontent.com raw.githubusercontent.com ghcr.io pkg-containers.githubusercontent.com \
+              www.lua.org lua.org
 
       - name: Restore the inputs
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -279,7 +282,7 @@ jobs:
           bash tools/ci/hosted-offline.sh prepare "$RUNNER_TEMP/hosted-offline" 2> "$RUNNER_TEMP/warm.log" || status=$?
           cat "$RUNNER_TEMP/warm.log" >&2
           [ "$status" -eq 0 ] || exit "$status"
-          for input in apt baseline corpus c-testsuite sqlite; do
+          for input in apt baseline corpus c-testsuite sqlite lua; do
               grep -q "input=$input source=cache" "$RUNNER_TEMP/warm.log" || { echo "::error::$input did not come from the cache"; exit 1; }
           done
           ! grep -q 'source=network' "$RUNNER_TEMP/warm.log" || { echo '::error::the warm preparation fetched an input'; exit 1; }

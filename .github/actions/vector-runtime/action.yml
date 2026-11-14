@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+name: Vector artifact runtime
+description: Run the vector draw's fixed shell script with this job's artifact-service credentials, without REST artifact polling.
+inputs:
+  script:
+    description: Static workflow shell source; pass changing values through the step's environment.
+    required: true
+outputs:
+  name:
+    description: Assignment or compiler-product artifact selected by the script.
+  count:
+    description: Number of candidates needed by the next draw.
+  candidates:
+    description: JSON array of the next draw's candidates.
+  digest:
+    description: SHA-256 of the selected compiler product.
+runs:
+  using: node24
+  main: index.cjs

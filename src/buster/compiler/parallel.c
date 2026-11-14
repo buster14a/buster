@@ -3,7 +3,7 @@
 //
 // The runner the 9700X job runs its tests through, for the parallel command:
 //
-//   build/compiler parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [LIST]
+//   build/compiler parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [--memory MIB] [LIST]
 //
 // LIST (standard input without one) is a list of commands. Each starts at a heading, a line `== TITLE`, and its script
 // is the lines after it, up to the next heading; before the first heading there may be blank lines and comments (`#`).
@@ -31,7 +31,10 @@
 // FILE that names its runner's CPUs (`#: runner-cpus N`, as tools/ci/costs.c's tables do) deals each command to the
 // shard that, run on N CPUs, would end the earliest with it (test_deal_scheduled, #2031), shard 1 later by its
 // row's once-only steps where FILE gives them (`#: first-shard SECONDS`). The deal depends on the list
-// and the costs alone, never on the machine, so that the N shards run every command once.
+// and the costs alone, never on the machine, so that the N shards run every command once. Where FILE gives commands'
+// peak memory (`#: peak MIB TITLE`, #2031), a command also waits for memory: the running commands' peaks and its own
+// fit in 90% of the machine's (--memory MIB, or MemTotal), or it runs alone, and the summary names one past that
+// budget; the deal simulates the same with FILE's runner's memory (`#: runner-memory MIB`).
 //
 // The report never holds up the run. A command's output is read into memory when it ends and its capture closed, so
 // that only running commands hold one, however many have ended before the report reaches them; and the report goes out
@@ -112,6 +115,9 @@ struct ParallelCommand
     uint64_t line;
     // The CPUs it keeps busy: its title's N, or 1.
     uint64_t cpus;
+    // Its peak memory in MiB, as the costs give it (`#: peak`, #2031), or 0 when they don't: what it holds of the
+    // memory the commands running at once may hold.
+    uint64_t peak;
 };
 
 typedef struct ParallelList ParallelList;
@@ -329,6 +335,11 @@ static ParallelList parallel_list_parse(Arena* arena, String8 text)
 #define BUSTER_PARALLEL_DEFAULT_COST_MILLISECONDS 10000ull
 // The most milliseconds a cost may give: a day of 1,024 CPUs, far past any command, so that sums of costs can't overflow.
 #define BUSTER_PARALLEL_MAX_COST_MILLISECONDS (86400000ull * 1024)
+// The most MiB a peak or a runner's memory may give, 4 PiB, so that sums of peaks can't overflow.
+#define BUSTER_PARALLEL_MAX_MEBIBYTES (1ull << 32)
+// The share of a machine's memory, in percent, that the commands running at once may hold by their peaks (#2031): the
+// rest is the runner's own, the system's and the page cache's.
+#define BUSTER_PARALLEL_MEMORY_PERCENT 90
 
 typedef struct ParallelCosts ParallelCosts;
 struct ParallelCosts
@@ -342,6 +353,11 @@ struct ParallelCosts
     // `#: first-shard SECONDS` line, or 0 without one: the scheduled deal starts shard 1 that much later (#2031).
     uint64_t first_milliseconds;
     bool first_given;
+    // Each command's peak memory in MiB, by its place in the list, from `#: peak MIB TITLE` lines, 0 without one; and
+    // the runner's memory, from a `#: runner-memory MIB` line, or 0 without one: with both, the scheduled deal holds the
+    // commands running at once to their share of it (#2031).
+    uint64_t* peaks;
+    uint64_t runner_memory;
     // The first problem: what it is, or null, and its line (from 1).
     const char* error;
     uint64_t error_line;
@@ -379,26 +395,44 @@ static uint64_t parallel_cost_seconds(String8 line, uint64_t* milliseconds)
     return valid && whole != 0 ? i : 0;
 }
 
+// A whole number of MiB, at most BUSTER_PARALLEL_MAX_MEBIBYTES: the length it read, or 0 for none.
+static uint64_t parallel_mebibytes_read(String8 line, uint64_t* mebibytes)
+{
+    uint64_t i = 0;
+    uint64_t value = 0;
+    bool valid = true;
+    while (valid && i < line.length && line.pointer[i] >= '0' && line.pointer[i] <= '9')
+    {
+        value = value * 10 + (uint64_t)(line.pointer[i] - '0');
+        valid = value <= BUSTER_PARALLEL_MAX_MEBIBYTES;
+        i += 1;
+    }
+    *mebibytes = valid ? value : 0;
+    return valid ? i : 0;
+}
+
 // Reads `text`'s costs for the list's commands: each line not blank nor a comment is `SECONDS TITLE`, a command's cost in
 // seconds of the CPUs it holds (its time, times its CPUs), then blanks, then its title as its heading has it. A title the
 // list doesn't have is left out (a command since removed); a command without a line costs its CPUs times 10 s. One
 // comment may be `#: runner-cpus N`, N from 1 to 1,024: the CPUs of the runner whose times the costs are (the tables
 // that tools/ci/costs.c generates say so), which the deal then simulates. Another may be `#: first-shard SECONDS`: the
-// time of the steps that shard 1 alone runs besides its commands, which the simulated deal adds to shard 1's.
+// time of the steps that shard 1 alone runs besides its commands, which the simulated deal adds to shard 1's. Lines
+// `#: peak MIB TITLE` give commands' peak memory, in MiB, and one `#: runner-memory MIB` the runner's (#2031).
 static ParallelCosts parallel_costs_parse(Arena* arena, const ParallelList* list, String8 text)
 {
     // The list stays as it is while the costs are stored.
     const uint64_t count = list->count;
     const ParallelCommand* const commands = list->commands;
-    ParallelCosts result = { .milliseconds = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count + 1) };
+    ParallelCosts result = { .milliseconds = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count + 1), .peaks = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count + 1) };
     bool* given = BUSTER_ARENA_PUSH_ARRAY(arena, bool, count + 1);
-    if (result.milliseconds == 0 || given == 0)
+    if (result.milliseconds == 0 || result.peaks == 0 || given == 0)
     {
         result.error = "out of memory for the costs";
     }
     for (uint64_t i = 0; result.error == 0 && i < count; i += 1)
     {
         result.milliseconds[i] = commands[i].cpus * BUSTER_PARALLEL_DEFAULT_COST_MILLISECONDS;
+        result.peaks[i] = 0;
         given[i] = false;
     }
     uint64_t position = 0;
@@ -425,6 +459,10 @@ static ParallelCosts parallel_costs_parse(Arena* arena, const ParallelList* list
         const uint64_t runner_length = sizeof(runner) - 1;
         static const char first[] = "#: first-shard ";
         const uint64_t first_length = sizeof(first) - 1;
+        static const char memory[] = "#: runner-memory ";
+        const uint64_t memory_length = sizeof(memory) - 1;
+        static const char peak[] = "#: peak ";
+        const uint64_t peak_length = sizeof(peak) - 1;
         if (memchr(line.pointer, 0, line.length) != 0)
         {
             result.error = "a NUL byte";
@@ -462,6 +500,57 @@ static ParallelCosts parallel_costs_parse(Arena* arena, const ParallelList* list
             }
             result.first_milliseconds = timed ? seconds : result.first_milliseconds;
             result.first_given = true;
+        }
+        else if (line.length >= memory_length && memcmp(line.pointer, memory, memory_length) == 0)
+        {
+            // The MiB, then nothing but blanks.
+            const String8 rest = { .pointer = line.pointer + memory_length, .length = line.length - memory_length };
+            uint64_t mebibytes = 0;
+            const uint64_t read = parallel_mebibytes_read(rest, &mebibytes);
+            const bool sized = read != 0 && mebibytes != 0 && parallel_blank_line((String8){ .pointer = rest.pointer + read, .length = rest.length - read });
+            if (!sized || result.runner_memory != 0)
+            {
+                result.error = sized ? "a runner's memory that an earlier line gives" : "a runner's memory that isn't MIB";
+                result.error_line = line_number;
+            }
+            result.runner_memory = sized ? mebibytes : result.runner_memory;
+        }
+        else if (line.length >= peak_length && memcmp(line.pointer, peak, peak_length) == 0)
+        {
+            // The MiB, blanks, then a title the list may have (one it doesn't is a command since removed).
+            const String8 rest = { .pointer = line.pointer + peak_length, .length = line.length - peak_length };
+            uint64_t mebibytes = 0;
+            const uint64_t read = parallel_mebibytes_read(rest, &mebibytes);
+            uint64_t start = read;
+            uint64_t end = rest.length;
+            while (start < end && parallel_is_blank(rest.pointer[start]))
+            {
+                start += 1;
+            }
+            while (end > start && parallel_is_blank(rest.pointer[end - 1]))
+            {
+                end -= 1;
+            }
+            const String8 title = { .pointer = rest.pointer + start, .length = end - start };
+            uint64_t found = count;
+            for (uint64_t i = 0; i < count; i += 1)
+            {
+                found = found == count && parallel_equal(commands[i].title, title) ? i : found;
+            }
+            if (read == 0 || start == read || title.length == 0)
+            {
+                result.error = "a peak that isn't MIB TITLE";
+                result.error_line = line_number;
+            }
+            else if (found != count && result.peaks[found] != 0)
+            {
+                result.error = "a title that an earlier peak has";
+                result.error_line = line_number;
+            }
+            else if (found != count)
+            {
+                result.peaks[found] = mebibytes;
+            }
         }
         else if (!parallel_blank_line(line) && !parallel_comment_line(line))
         {
@@ -505,18 +594,21 @@ static ParallelCosts parallel_costs_parse(Arena* arena, const ParallelList* list
 // Deals the list's commands to `shards` shards by their costs (test_deal: the costliest first, each to the shard whose
 // commands cost the least so far): a command's shard, from 0, goes in assigned[i]. Costs that name their runner's CPUs
 // deal as test_deal_scheduled does instead: the costliest first, each to the shard that, run on that many CPUs as
-// parallel_run runs it, would end the earliest with it (#2031), shard 1 ending `first` milliseconds later than its
-// commands alone: the time of its row's once-only steps. The deal needs room for no more shards than commands,
-// however many --shard asks for.
-static bool parallel_shards(Arena* arena, const ParallelList* list, const uint64_t* costs, uint64_t runner_cpus, uint64_t first, uint64_t shards, uint64_t* assigned)
+// parallel_run runs it, would end the earliest with it (#2031), shard 1 ending the costs' first-shard time later than
+// its commands alone: the time of its row's once-only steps. Where the costs give the runner's memory too, the simulated
+// shards hold the commands running at once to their share of it by their peaks, as parallel_run does. The deal needs
+// room for no more shards than commands, however many --shard asks for.
+static bool parallel_shards(Arena* arena, const ParallelList* list, const ParallelCosts* costs, uint64_t shards, uint64_t* assigned)
 {
     const uint64_t count = list->count;
+    const uint64_t runner_cpus = costs->runner_cpus;
     uint64_t* order = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count + 1);
     uint64_t* loads = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (shards < count ? shards : count) + 1);
     uint64_t* held = runner_cpus != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count + 1) : 0;
     uint64_t* ends = runner_cpus != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, runner_cpus + 1) : 0;
     uint64_t* holds = runner_cpus != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, runner_cpus + 1) : 0;
-    const bool valid = order != 0 && loads != 0 && (runner_cpus == 0 || (held != 0 && ends != 0 && holds != 0));
+    uint64_t* memories = runner_cpus != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, runner_cpus + 1) : 0;
+    const bool valid = order != 0 && loads != 0 && (runner_cpus == 0 || (held != 0 && ends != 0 && holds != 0 && memories != 0));
     if (valid && runner_cpus != 0)
     {
         // A command of more CPUs than the runner's runs alone, holding them all.
@@ -524,24 +616,26 @@ static bool parallel_shards(Arena* arena, const ParallelList* list, const uint64
         {
             held[i] = list->commands[i].cpus < runner_cpus ? list->commands[i].cpus : runner_cpus;
         }
-        test_deal_scheduled(costs, held, count, shards, runner_cpus, first, order, loads, assigned, ends, holds);
+        const uint64_t budget = costs->runner_memory * BUSTER_PARALLEL_MEMORY_PERCENT / 100;
+        test_deal_scheduled(costs->milliseconds, held, costs->peaks, count, shards, runner_cpus, budget, costs->first_milliseconds, order, loads, assigned, ends, holds, memories);
     }
     else if (valid)
     {
-        test_deal(costs, count, shards, order, loads, assigned);
+        test_deal(costs->milliseconds, count, shards, order, loads, assigned);
     }
     return valid;
 }
 
-// The list's commands that the deal gives shard `shard` (from 0), in the list's order, as a list of their own.
-static ParallelList parallel_list_shard(Arena* arena, const ParallelList* list, const uint64_t* costs, uint64_t runner_cpus, uint64_t first, uint64_t shard, uint64_t shards)
+// The list's commands that the deal gives shard `shard` (from 0), in the list's order, as a list of their own, each with
+// its peak from the costs.
+static ParallelList parallel_list_shard(Arena* arena, const ParallelList* list, const ParallelCosts* costs, uint64_t shard, uint64_t shards)
 {
     // The list stays as it is while the shard's commands are copied.
     const uint64_t count = list->count;
     const ParallelCommand* const commands = list->commands;
     ParallelList result = { .commands = BUSTER_ARENA_PUSH_ARRAY(arena, ParallelCommand, count + 1) };
     uint64_t* assigned = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count + 1);
-    if (result.commands == 0 || assigned == 0 || !parallel_shards(arena, list, costs, runner_cpus, first, shards, assigned))
+    if (result.commands == 0 || assigned == 0 || !parallel_shards(arena, list, costs, shards, assigned))
     {
         result.error = "out of memory for the shard";
     }
@@ -552,6 +646,7 @@ static ParallelList parallel_list_shard(Arena* arena, const ParallelList* list, 
         if (assigned[i] == shard)
         {
             kept[kept_count] = commands[i];
+            kept[kept_count].peak = costs->peaks[i];
             kept_count += 1;
         }
     }
@@ -580,6 +675,9 @@ struct ParallelOptions
     uint64_t shard;
     uint64_t shards;
     uint64_t listed;
+    // The memory, in MiB, that the commands running at once may hold by their peaks (#2031): 90% of the machine's. 0 is
+    // no limit.
+    uint64_t memory;
 };
 
 typedef enum ParallelState
@@ -608,6 +706,11 @@ struct ParallelResult
     // The CPU time of its shell and of the processes under it that were waited for, in nanoseconds: wait4's user and
     // system times, once it has ended.
     uint64_t cpu;
+    // The peak resident memory, in KiB, of the largest of its shell and the processes under it that were waited for:
+    // wait4's ru_maxrss, once it has ended (#2031). It is one process's peak, not the sum of those that ran at once, and
+    // a process the runner killed after the shell ended isn't counted. It is at least the runner's own peak: the shell
+    // starts in the runner's memory (posix_spawn), whose peak its exec records.
+    uint64_t memory;
     // Why it couldn't start (an errno), or 0.
     int start_error;
     ParallelState state;
@@ -655,6 +758,12 @@ static uint64_t parallel_clock(void)
 static double parallel_seconds(uint64_t nanoseconds)
 {
     return (double)nanoseconds / (double)BUSTER_PARALLEL_NANOSECONDS;
+}
+
+// KiB as whole MiB, rounded up: a process that touched any memory reports at least 1.
+static uint64_t parallel_mebibytes(uint64_t kibibytes)
+{
+    return kibibytes / 1024 + (kibibytes % 1024 != 0);
 }
 
 // Appends bytes at the arena's end, where the part of the report being built grows. False when the arena is full.
@@ -731,7 +840,8 @@ static void parallel_outcome(const ParallelResult* result, const ParallelOptions
     }
     else
     {
-        snprintf(text, size, "%s in %.1f s, %.1f s of CPU", reason, parallel_seconds(result->end - result->start), parallel_seconds(result->cpu));
+        snprintf(text, size, "%s in %.1f s, %.1f s of CPU, %llu MiB peak", reason, parallel_seconds(result->end - result->start), parallel_seconds(result->cpu),
+                 (unsigned long long)parallel_mebibytes(result->memory));
     }
 }
 
@@ -941,8 +1051,20 @@ static bool parallel_render(Arena* arena, const ParallelCommand* command, const 
     return built;
 }
 
+// Whether a command that ran kept clearly more CPUs busy than it holds (#2031): its CPU time over its time past 1.5 times
+// its CPUs, and past them by a second of CPU or more. Its processes then took CPUs the runner gave other commands, and
+// its heading needs a larger `[N CPUs]`, or the test fewer processes at once (test_process_cpus).
+static bool parallel_overcommitted(const ParallelResult* result)
+{
+    const uint64_t wall = result->end > result->start ? result->end - result->start : 0;
+    const uint64_t held = result->cpus * wall;
+    return result->state == PARALLEL_STATE_ENDED && result->start_error == 0 && wall != 0 && result->cpu * 2 > held * 3 && result->cpu - held >= BUSTER_PARALLEL_NANOSECONDS;
+}
+
 // The report's last part, built at the arena's end once every command has ended or won't start: the summary line, then a
-// line (or with --github an annotation) for each command that failed. Sets *full when the arena can't hold it.
+// line (or with --github an annotation) for each command that failed, then a line (or a warning) for each that kept more
+// CPUs busy than it holds, and for each whose peak the memory budget can't hold (#2031), which ran alone. Sets *full
+// when the arena can't hold it.
 static String8 parallel_render_summary(Arena* arena, const ParallelList* list, const ParallelOptions* options, const ParallelResult* results, const ParallelSummary* summary,
                                        uint64_t jobs, int signal_error, bool* full)
 {
@@ -975,6 +1097,40 @@ static String8 parallel_render_summary(Arena* arena, const ParallelList* list, c
                                                     parallel_append_escaped(arena, outcome_text, false)
                                               : parallel_append(arena, "parallel: ", 10) && parallel_append(arena, title.pointer, title.length) && parallel_append(arena, " ", 1) &&
                                                     parallel_append(arena, outcome_text.pointer, outcome_text.length));
+            built = built && parallel_append(arena, "\n", 1);
+        }
+    }
+    for (uint64_t i = 0; i < list->count; i += 1)
+    {
+        if (parallel_overcommitted(&results[i]))
+        {
+            char busy[BUSTER_PARALLEL_OUTCOME_BYTES];
+            const int busy_length = snprintf(busy, sizeof(busy), "kept %.1f CPUs busy, more than the %llu it holds", (double)results[i].cpu / (double)(results[i].end - results[i].start),
+                                             (unsigned long long)results[i].cpus);
+            const String8 busy_text = { .pointer = busy, .length = busy_length > 0 ? (uint64_t)busy_length : 0 };
+            const String8 title = list->commands[i].title;
+            built = built && busy_length > 0 &&
+                    (options->github ? parallel_append(arena, "::warning title=", 16) && parallel_append_escaped(arena, title, true) && parallel_append(arena, "::", 2) &&
+                                           parallel_append_escaped(arena, busy_text, false)
+                                     : parallel_append(arena, "parallel: ", 10) && parallel_append(arena, title.pointer, title.length) && parallel_append(arena, " ", 1) &&
+                                           parallel_append(arena, busy_text.pointer, busy_text.length));
+            built = built && parallel_append(arena, "\n", 1);
+        }
+    }
+    for (uint64_t i = 0; i < list->count; i += 1)
+    {
+        if (options->memory != 0 && list->commands[i].peak > options->memory && results[i].state == PARALLEL_STATE_ENDED && results[i].start_error == 0)
+        {
+            char needs[BUSTER_PARALLEL_OUTCOME_BYTES];
+            const int needs_length = snprintf(needs, sizeof(needs), "needs %llu MiB at its peak, past the %llu MiB the commands at once may hold, so it ran alone",
+                                              (unsigned long long)list->commands[i].peak, (unsigned long long)options->memory);
+            const String8 needs_text = { .pointer = needs, .length = needs_length > 0 ? (uint64_t)needs_length : 0 };
+            const String8 title = list->commands[i].title;
+            built = built && needs_length > 0 &&
+                    (options->github ? parallel_append(arena, "::warning title=", 16) && parallel_append_escaped(arena, title, true) && parallel_append(arena, "::", 2) &&
+                                           parallel_append_escaped(arena, needs_text, false)
+                                     : parallel_append(arena, "parallel: ", 10) && parallel_append(arena, title.pointer, title.length) && parallel_append(arena, " ", 1) &&
+                                           parallel_append(arena, needs_text.pointer, needs_text.length));
             built = built && parallel_append(arena, "\n", 1);
         }
     }
@@ -1046,9 +1202,9 @@ static uint64_t parallel_cpu_time(const struct rusage* usage)
 
 // Reaps every running command whose shell has ended, at `now`, after killing whatever it left in its process group (its
 // shell, a zombie until it is reaped, still holds the group's id), and builds its part of the report. Returns how many it
-// reaped, whose CPUs it takes from *used; sets *full when the arena can't hold a part.
+// reaped, whose CPUs it takes from *used and whose peaks from *memory_used; sets *full when the arena can't hold a part.
 static uint64_t parallel_reap(Arena* arena, const ParallelList* list, const ParallelOptions* options, ParallelResult* results, uint64_t count, uint64_t now, uint64_t* used,
-                              bool* full)
+                              uint64_t* memory_used, bool* full)
 {
     uint64_t reaped = 0;
     for (uint64_t i = 0; i < count; i += 1)
@@ -1070,11 +1226,13 @@ static uint64_t parallel_reap(Arena* arena, const ParallelList* list, const Para
             } while (waited < 0 && errno == EINTR);
             result->status = status;
             result->cpu = waited == result->pid ? parallel_cpu_time(&usage) : 0;
+            result->memory = waited == result->pid && usage.ru_maxrss > 0 ? (uint64_t)usage.ru_maxrss : 0;
             result->skipped = waited == result->pid && WIFEXITED(status) && WEXITSTATUS(status) == BUSTER_PARALLEL_SKIP_STATUS && !result->timed_out;
             result->passed = waited == result->pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 && !result->timed_out;
             result->state = PARALLEL_STATE_ENDED;
             result->end = now;
             *used -= result->cpus;
+            *memory_used -= list->commands[i].peak;
             *full = !parallel_render(arena, &list->commands[i], options, result) || *full;
             reaped += 1;
         }
@@ -1197,8 +1355,9 @@ static ParallelSummary parallel_run(Arena* arena, const ParallelList* list, cons
     String8 closing = { 0 };
     uint64_t started = 0;
     uint64_t running = 0;
-    // The CPUs the running commands hold.
+    // The CPUs the running commands hold, and the memory by their peaks, in MiB.
     uint64_t used = 0;
+    uint64_t memory_used = 0;
     uint64_t stops = 0;
     // The part of the report being written, and how much of it is.
     uint64_t part = 0;
@@ -1211,14 +1370,17 @@ static ParallelSummary parallel_run(Arena* arena, const ParallelList* list, cons
     while (!done)
     {
         // The next command in the list's order, once the running commands' CPUs leave room for its own (all of --jobs,
-        // for one of more: it runs alone); until then, the commands after it wait too.
-        while (stops == 0 && !killed && signal_fd >= 0 && started < list->count && used + parallel_held(&list->commands[started], jobs) <= jobs)
+        // for one of more: it runs alone), and their peaks room for its peak in the memory they may hold (#2031: one
+        // past it runs alone); until then, the commands after it wait too.
+        while (stops == 0 && !killed && signal_fd >= 0 && started < list->count && used + parallel_held(&list->commands[started], jobs) <= jobs &&
+               test_deal_memory_fits(list->commands[started].peak, memory_used, running, options->memory))
         {
             ParallelResult* result = &results[started];
             result->cpus = parallel_held(&list->commands[started], jobs);
             parallel_start(&list->commands[started], options, &previous_mask, &environment, result, parallel_clock() - origin);
             running += result->state == PARALLEL_STATE_RUNNING;
             used += result->state == PARALLEL_STATE_RUNNING ? result->cpus : 0;
+            memory_used += result->state == PARALLEL_STATE_RUNNING ? list->commands[started].peak : 0;
             summary.peak = running > summary.peak ? running : summary.peak;
             // A command that couldn't start has ended.
             if (result->state == PARALLEL_STATE_ENDED)
@@ -1291,7 +1453,7 @@ static ParallelSummary parallel_run(Arena* arena, const ParallelList* list, cons
                     results[i].timed_out = true;
                 }
             }
-            running -= parallel_reap(arena, list, options, results, started, after, &used, &summary.memory_full);
+            running -= parallel_reap(arena, list, options, results, started, after, &used, &memory_used, &summary.memory_full);
             if (pending && !output.lost && (!polling_output || fds[1].revents != 0))
             {
                 parallel_output_write(&output, next, &offset);
@@ -1402,6 +1564,14 @@ static String8 parallel_read_path(Arena* arena, const char* path)
     return text;
 }
 
+// The machine's memory in MiB, sysconf's pages times their size (the kernel's MemTotal), or 0 where it can't say.
+static uint64_t parallel_machine_memory(void)
+{
+    const long pages = sysconf(_SC_PHYS_PAGES);
+    const long size = sysconf(_SC_PAGESIZE);
+    return pages > 0 && size > 0 ? (uint64_t)pages * (uint64_t)size / (1024 * 1024) : 0;
+}
+
 // argv[0] is the command's name, parallel.
 static int run_parallel_command(int argc, char** argv)
 {
@@ -1409,6 +1579,8 @@ static int run_parallel_command(int argc, char** argv)
     ParallelOptions options = { .shell = "bash", .output = STDOUT_FILENO };
     const char* path = 0;
     const char* costs_path = 0;
+    // The machine's memory in MiB (--memory), or 0 for its MemTotal.
+    uint64_t memory = 0;
     bool valid = true;
     int i = 1;
     while (valid && i < argc)
@@ -1438,6 +1610,11 @@ static int run_parallel_command(int argc, char** argv)
             costs_path = argv[i + 1];
             i += 2;
         }
+        else if (strcmp(argv[i], "--memory") == 0 && memory == 0 && i + 1 < argc && parallel_count(argv[i + 1], BUSTER_PARALLEL_MAX_MEBIBYTES, &value) && value != 0)
+        {
+            memory = value;
+            i += 2;
+        }
         else if (path == 0 && argv[i][0] != '-')
         {
             path = argv[i];
@@ -1452,7 +1629,7 @@ static int run_parallel_command(int argc, char** argv)
     valid = valid && (costs_path == 0 || options.shards != 0);
     if (!valid)
     {
-        fprintf(stderr, "usage: parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [LIST]\n");
+        fprintf(stderr, "usage: parallel [--jobs N] [--timeout SECONDS] [--github] [--shard K/N [--costs FILE]] [--memory MIB] [LIST]\n");
     }
     else
     {
@@ -1488,7 +1665,7 @@ static int run_parallel_command(int argc, char** argv)
                 // The shard's commands, dealt by the costs (each command's CPUs times 10 s without a file of them).
                 costs = parallel_costs_parse(&arena, &list, costs_text);
                 options.listed = list.count;
-                list = costs.error == 0 ? parallel_list_shard(&arena, &list, costs.milliseconds, costs.runner_cpus, costs.first_milliseconds, options.shard - 1, options.shards) : list;
+                list = costs.error == 0 ? parallel_list_shard(&arena, &list, &costs, options.shard - 1, options.shards) : list;
                 if (costs.error != 0)
                 {
                     fprintf(stderr, "parallel: %s:%llu: %s\n", costs_path, (unsigned long long)costs.error_line, costs.error);
@@ -1512,6 +1689,10 @@ static int run_parallel_command(int argc, char** argv)
                 // lanes don't run. On the 9700X (8 cores, 15 CPUs online) the job's tests took 21.3 to 22.4 s with 8 jobs,
                 // and 22.9 to 23.3 s with 15, in which test-lanes took 2.3 to 2.9 s rather than 0.2.
                 options.jobs = options.jobs != 0 ? options.jobs : lane_core_count();
+                // The commands at once may hold 90% of the machine's memory by their peaks (#2031), which only the costs'
+                // `#: peak` lines give.
+                memory = memory != 0 ? memory : parallel_machine_memory();
+                options.memory = memory * BUSTER_PARALLEL_MEMORY_PERCENT / 100;
                 fflush(stdout);
                 result = parallel_run(&arena, &list, &options, results).succeeded ? 0 : 1;
             }

@@ -954,6 +954,20 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], operation->permute - 1u, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
     }
+    else if (operation->shuffle_immediate != 0)
+    {
+        // A byte shuffle by an immediate (#1840): the IR's shuffle of the vector by its kind's indices at the immediate,
+        // the same in every 16-byte lane, a constant.
+        uint8_t lane[BUSTER_IR_SHUFFLE_LANE_BYTES];
+        ir_simd_shuffle_immediate_indices(operation->shuffle_immediate - 1u, operation->immediate, lane);
+        uint64_t words[8] = {0};
+        for (uint32_t at = 0; at < ir_type_bits[type] / 8; at += BUSTER_IR_SHUFFLE_LANE_BYTES)
+        {
+            memcpy((uint8_t*)words + at, lane, sizeof(lane));
+        }
+        const uint32_t indices = ir_typed_vector_constant(sink, type, words);
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], indices, BUSTER_IR_INTRINSIC_SHUFFLE, 0);
+    }
     else if (operation->width_change != 0)
     {
         // A width change (#1840), its part in its flags; a masked extract's merged into its second operand under its third
@@ -1493,6 +1507,100 @@ static bool ir_typed_anticipated(const uint32_t* offsets, const uint32_t* succes
     return anticipated || open;
 }
 
+// Whether every iteration of `loop` takes the symbol whose takes' nodes `reads` stamps `stamp` (#2618): a depth-first walk
+// of the loop's body from its header, which a take stops, fails where it finds an edge back to the header. `walk` stamps
+// the nodes it reaches in `seen`. A walk that spends the shared `budget` finds no such edge.
+static bool ir_typed_loop_every(const Dominators* dominators, const uint32_t* offsets, const uint32_t* successors, const uint32_t* reads, uint32_t* seen, uint32_t* stack, uint32_t loop, uint32_t stamp, uint32_t walk, uint64_t* budget)
+{
+    const uint32_t header = dominators->loop_header[loop];
+    bool back = false;
+    uint32_t depth = 0;
+    seen[header] = walk;
+    stack[depth] = header;
+    depth += reads[header] != stamp;
+    while (!back && depth != 0 && *budget != 0)
+    {
+        depth -= 1;
+        const uint32_t node = stack[depth];
+        for (uint32_t e = offsets[node]; !back && *budget != 0 && e < offsets[node + 1]; e += 1)
+        {
+            const uint32_t next = successors[e];
+            *budget -= 1;
+            back = next == header;
+            if (!back && seen[next] != walk && reads[next] != stamp && dominators_loop_contains(dominators, loop, next))
+            {
+                seen[next] = walk;
+                stack[depth] = next;
+                depth += 1;
+            }
+        }
+    }
+    return !back;
+}
+
+// Whether `loop` has an iteration that calls nothing (#2618): a depth-first walk of its body from its header through the
+// nodes without a call (`calls`), which succeeds where it finds an edge back to the header, as one that spends the shared
+// `budget` does. `walk` stamps the nodes it reaches in `seen`.
+static bool ir_typed_loop_quiet(const Dominators* dominators, const uint32_t* offsets, const uint32_t* successors, const uint8_t* calls, uint32_t* seen, uint32_t* stack, uint32_t loop, uint32_t walk, uint64_t* budget)
+{
+    const uint32_t header = dominators->loop_header[loop];
+    bool back = false;
+    uint32_t depth = 0;
+    seen[header] = walk;
+    stack[depth] = header;
+    depth += calls[header] == 0;
+    while (!back && depth != 0 && *budget != 0)
+    {
+        depth -= 1;
+        const uint32_t node = stack[depth];
+        for (uint32_t e = offsets[node]; !back && *budget != 0 && e < offsets[node + 1]; e += 1)
+        {
+            const uint32_t next = successors[e];
+            *budget -= 1;
+            back = next == header;
+            if (!back && seen[next] != walk && calls[next] == 0 && dominators_loop_contains(dominators, loop, next))
+            {
+                seen[next] = walk;
+                stack[depth] = next;
+                depth += 1;
+            }
+        }
+    }
+    return back || *budget == 0;
+}
+
+// Whether symbol k's definition, lifted out of `loop`, the outermost loop of its takes' nearest common dominator, can keep
+// its register over that loop (#2618): every iteration of the loop takes it, and so does every iteration of a loop of its
+// nest that holds a take (each take's innermost loop and its parents up to `loop`, `marks` stamping those tried), which
+// also has an iteration that calls nothing. Where every iteration calls, Tier 1 gives the value a callee-saved register
+// over the loop, which the loop's own values crowd, or recomputes it after each call (sqlite3_str_vappendf's fmtinfo,
+// read through every conversion of its format loop, which appends each piece); where some iteration doesn't take it,
+// the definition runs on every entry for takes that may never run (sqlite3StrICmp's sqlite3UpperToLower, read where two
+// characters differ, mostly as the loop ends). Lua's disptab passes: its dispatch loop's handlers that call nothing,
+// each ending in the dispatch's take. Each walk takes the next stamp of `*walk`, which stays above every symbol's own.
+static bool ir_typed_loop_resident(const IrTypedPlan* plan, const Dominators* dominators, const uint32_t* offsets, const uint32_t* successors, const uint8_t* calls, const uint32_t* firsts, const uint32_t* order, const uint32_t* reads,
+                                   uint32_t* seen, uint32_t* stack, uint32_t* marks, uint32_t k, uint32_t loop, uint32_t* walk, uint64_t* budget)
+{
+    *walk += 1;
+    const bool every = ir_typed_loop_every(dominators, offsets, successors, reads, seen, stack, loop, k + 1, *walk, budget);
+    bool resident = false;
+    for (uint32_t x = firsts[k]; every && !resident && x < firsts[k + 1]; x += 1)
+    {
+        const uint32_t node = plan->entry_blocks[plan->hoisted_entries[order[x]]] + 1;
+        uint32_t inner = dominators_loop_contains(dominators, loop, node) ? dominators->block_loop[node] : BUSTER_DOMINATOR_NONE;
+        while (!resident && inner != BUSTER_DOMINATOR_NONE && marks[inner] != k + 1)
+        {
+            marks[inner] = k + 1;
+            *walk += 1;
+            resident = inner == loop || ir_typed_loop_every(dominators, offsets, successors, reads, seen, stack, inner, k + 1, *walk, budget);
+            *walk += 1;
+            resident = resident && ir_typed_loop_quiet(dominators, offsets, successors, calls, seen, stack, inner, *walk, budget);
+            inner = inner == loop ? BUSTER_DOMINATOR_NONE : dominators->loop_parent[inner];
+        }
+    }
+    return resident;
+}
+
 // Where each hoisted address is defined (#2593). The preheader computed every one at the function's entry, so a path
 // that never read it, as yy_find_shift_action's early return, computed it anyway, and one live across a call took a
 // callee-saved register that the prologue then saved. Over the typed CFG (ir_typed_successors) and its dominators and
@@ -1500,9 +1608,11 @@ static bool ir_typed_anticipated(const uint32_t* offsets, const uint32_t* succes
 // to the nearest common dominator of its reachable takes' blocks, P, and then:
 //
 // - where P is inside a loop, to the immediate dominator of its outermost loop's header, outside it, as loop-invariant
-//   code motion hoists it, if some take is inside that loop: Lua's luaV_execute keeps disptab in its register over the
-//   dispatch loop, defined before it. Where none is (yy_action, read on two of the loop's exits alone) the takes stay
-//   their own;
+//   code motion hoists it, if some take is inside that loop and the value can keep its register there
+//   (ir_typed_loop_resident, #2618): Lua's luaV_execute keeps disptab in its register over the dispatch loop, defined
+//   before it. Where no take is inside it (yy_action, read on two of the loop's exits alone), or where the value would
+//   only hold a register over iterations that don't read it or that call (sqlite3StrICmp, sqlite3_str_vappendf), the
+//   takes stay their own;
 // - otherwise at P, where some take is inside a loop, or where every path from P takes it before leaving the function
 //   (ir_typed_anticipated): sqlite3GetToken's aiClass, read by its switch. A path that takes it nowhere (powerOfTen's
 //   aBase, sqlite3VdbeMemSetText's destructor compared on two branches) leaves the takes their own, as before #2574,
@@ -1516,8 +1626,9 @@ static bool ir_typed_anticipated(const uint32_t* offsets, const uint32_t* succes
 // whose loops are irreducible, leaves its takes their own. The dominators' matrices past their limit leave every
 // definition in the preheader, as #2574 did. The other rules measured are in docs/ir.md. Scalar past the dominators'
 // analysis, which has its own vector path: it visits each block's last entry once, and each symbol's takes and walks,
-// in the functions with a hoisted symbol alone. The dominators' columns go on `output`, popped before return. False
-// where an arena is short.
+// in the functions with a hoisted symbol alone, the loops' walks in those with loops, each walk's edges taken from a
+// shared budget of sixteen per edge, past which a loop keeps its definition lifted. The dominators' columns go on
+// `output`, popped before return. False where an arena is short.
 static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan, Arena* output, Arena* scratch, bool vector)
 {
     bool ok = true;
@@ -1599,7 +1710,21 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan, 
     uint32_t* reads = order != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 1) : 0;
     uint32_t* seen = reads != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 1) : 0;
     uint32_t* stack = seen != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 1) : 0;
-    ok = ok && (!placed || stack != 0);
+    // For the loops' tests (#2618): per node, whether one of its entries calls; per loop, the symbol whose takes tried it.
+    const bool looping = stack != 0 && dominators.loop_count != 0;
+    uint8_t* calls = looping ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)nodes + 1) : 0;
+    uint32_t* marks = calls != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)dominators.loop_count + 1) : 0;
+    ok = ok && (!placed || stack != 0) && (!looping || marks != 0);
+    if (marks != 0)
+    {
+        memset(calls, 0, (uint64_t)nodes + 1);
+        memset(marks, 0, ((uint64_t)dominators.loop_count + 1) * sizeof(uint32_t));
+        for (uint32_t i = 0; i < input->count; i += 1)
+        {
+            const uint8_t kind = input->kinds[i];
+            calls[plan->entry_blocks[i] + 1] |= kind == BUSTER_TYPED_CALL || kind == BUSTER_TYPED_TAIL_CALL;
+        }
+    }
     if (stack != 0)
     {
         memset(firsts, 0, ((uint64_t)symbols + 2) * sizeof(uint32_t));
@@ -1619,8 +1744,10 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan, 
             firsts[plan->hoisted_numbers[t] + 1] += 1;
         }
     }
-    // The walks' budget: eight visits of each edge.
+    // The walks' budget: eight visits of each edge, and the loops' sixteen.
     uint64_t budget = 8 * ((uint64_t)edges + 1);
+    uint64_t loop_budget = 16 * ((uint64_t)edges + 1);
+    uint32_t walk = symbols + 1;
     for (uint32_t k = 0; ok && k < symbols; k += 1)
     {
         uint32_t place = 0;
@@ -1666,7 +1793,7 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan, 
             {
                 inside |= dominators_loop_contains(&dominators, loop, plan->entry_blocks[plan->hoisted_entries[order[x]]] + 1);
             }
-            kept = reachable >= 2 && (loop != BUSTER_DOMINATOR_NONE ? inside && !irreducible :
+            kept = reachable >= 2 && (loop != BUSTER_DOMINATOR_NONE ? inside && !irreducible && ir_typed_loop_resident(plan, &dominators, offsets, successors, calls, firsts, order, reads, seen, stack, marks, k, loop, &walk, &loop_budget) :
                                                                       looped || ir_typed_anticipated(offsets, successors, reads, seen, stack, ancestor, k + 1, &budget));
             place = loop != BUSTER_DOMINATOR_NONE ? dominators.idom[dominators.loop_header[loop]] : ancestor;
             while (kept && place > low)

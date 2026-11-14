@@ -8843,6 +8843,7 @@ static bool predefines_test_refused(void);
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 #include "c_preprocessor_print_test.c"
 #include "c_preprocessor_system_warning_test.c"
+#include "c_preprocessor_warning_possible_test.c"
 #include "c_preprocessor_directives_test.c"
 #include "c_preprocessor_order_test.c"
 #include "c_preprocessor_batch_test.c"
@@ -9166,6 +9167,7 @@ static bool pp_test_sections(PPTestDeal* deal, const char* directory, bool with_
     passed &= PP_TEST_SECTION(deal, 3, pp_test_print_spelling_paths(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_print_lines(directory));
     passed &= PP_TEST_SECTION(deal, 6, pp_test_system_warnings(directory, with_clang));
+    passed &= PP_TEST_SECTION(deal, 1, pp_test_warning_possible(directory));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_pragma_origins(directory, with_clang));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_embed_text(fuzz->seed));
     passed &= PP_TEST_SECTION(deal, 1, pp_test_embed_lookups(directory, with_clang));

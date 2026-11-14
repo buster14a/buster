@@ -322,6 +322,33 @@ what #681 had, an A/B on the 9700X; the comparison above is one for
 `sqlite3.c` and the checker's unit. In the Develop configuration it needs
 none.
 
+**Measured as #2626 (2026-11-13), and refused.** Every `*_test.c` and
+`*_tests.c` that `main.c` includes (121 of them, but `foreign_test.c`, which
+includes a benchmark's unit) between `#pragma clang optimize off` and `on`, as
+#681's are, on the 9700X with CI's toolchain
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/release-tests-optnone-2626-2026-11-13)):
+
+- **The build gains what the design said:** a clean build 72.0 s and 71.7 s
+  to 67.6 s and 68.5 s with `-g`, an edit of the backend's unit 31.8 s and
+  32.0 s to 19.1 s and 19.0 s, and of the front end's 21.0 s and 20.8 s to
+  13.3 s, in two rounds.
+- **The product doesn't hold.** 24 of the 9700X job's 69 benchmarks run other
+  code: `benchmark-assembler` +7.45% instructions, `benchmark-ir-lowering`
+  +3.75%, `benchmark-dominators --cfg` +1.80%, `benchmark-calling-convention`
+  +1.08%, the front end's and the checker's by 0.1% to 0.9%. Over four
+  placements `benchmark-assembler` runs **+3.66%** user cycles (+3.09% to
+  +4.53%; the base against itself -0.05%, -0.69% to +0.73%): outside its
+  floor. The tests' own functions call product helpers, and an `optnone` caller
+  keeps a helper's out-of-line copy alive, so the product's own call to it
+  loses the inliner's last-call-to-static bonus (#2624's finding 2). The
+  assembler's tests are in `benchmark-assembler`'s unit.
+- **The tests run 11.5% slower** (the design's 21 commands, 34.1 s and 34.2 s
+  to 38.1 s twice).
+
+By the issue's rule Release keeps optimizing its tests. A narrower set (the
+units whose benchmarks don't move) would need its own A/B; the edits it would
+speed are Develop's, which already compiles the tests unoptimized.
+
 ### 3. Benchmark and tool objects: on demand, or sharing objects
 
 Beside the eleven `main.c` units the build compiles 32 units of their own: 29
@@ -574,7 +601,8 @@ part*.o --join, as #2058's--> unit.o --link--> compiler.link --bake--> compiler
 
 The name is the implementation's to choose. `./build.sh` keeps building
 Release by default until the owner changes that; a session asks for Develop as
-it asks for Debug today. Sanitizer, fuzzing and profile-guided builds keep the
+it asks for Debug today. (The owner did on 2026-11-13: `./build.sh` builds
+Develop, and every timing names `--config Release`.) Sanitizer, fuzzing and profile-guided builds keep the
 whole-unit compile, as they do with #2058.
 
 ### The splitter's rules
