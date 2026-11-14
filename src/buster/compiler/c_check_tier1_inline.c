@@ -47,8 +47,9 @@
 #define BUSTER_CHECK_TIER1_INLINE_CLASS_NONE 0u
 #define BUSTER_CHECK_TIER1_INLINE_CLASS_ALWAYS 1u
 #define BUSTER_CHECK_TIER1_INLINE_CLASS_SMALL 2u
-// The small class's bounds (#2541 step 1, the prototype's c64): a summary of at most this many instructions, each call of
-// it expanded at an inliner cost (ir_optimize_inline.c's units) of at most this.
+// The small class's bounds (#2541 step 2's sweep on speedtest1, Lua and the compiler, from step 1's 256 and 64): a summary of
+// at most this many instructions, each call of it expanded at an inliner cost (ir_optimize_inline.c's units) of at most
+// this.
 #define BUSTER_CHECK_TIER1_INLINE_SMALL_SIZE 1024u
 #define BUSTER_CHECK_TIER1_INLINE_SMALL_COST 256u
 // The single-site class's bounds (#2541 step 2): a summary of at most this many instructions, its call expanded at an
@@ -346,11 +347,11 @@ static void check_tier1_inline_addressed(const CheckTier1Inline* inlining, bool 
 
 // The unit stage (the file's comment), once, by the first lane to need it while the others wait: the candidates' call
 // graph's components (Tarjan's, iterative), each member of a component of several bodies or of a body that calls itself
-// marked cyclic; each candidate's direct calls (CheckTier1Inline.sites); and with holding (#2541 step 2), the candidates
-// whose code is held back (CheckTier1Inline.held): internal ones kept by nothing but their calls (not rooted), whose
-// address no code takes (check_tier1_inline_addressed) and that are in no cycle, whose expansions should leave them
-// dead. Its temporaries are in `scratch`. False where they don't fit, which leaves every candidate cyclic: none is
-// expanded, held back, and every body keeps its calls.
+// marked cyclic; each candidate's direct calls (CheckTier1Inline.sites, saturated where some code takes its address,
+// check_tier1_inline_addressed); and with holding (#2541 step 2), the candidates whose code is held back
+// (CheckTier1Inline.held): internal ones kept by nothing but their calls (not rooted), whose address no code takes and
+// that are in no cycle, whose expansions should leave them dead. Its temporaries are in `scratch`. False where they don't
+// fit, which leaves every candidate cyclic: none is expanded or held back, and every body keeps its calls.
 static bool check_tier1_inline_stage(Arena* scratch, const CheckTier1Inline* inlining)
 {
     uint32_t state = __atomic_load_n(inlining->stage, __ATOMIC_ACQUIRE);
@@ -462,18 +463,21 @@ static bool check_tier1_inline_stage(Arena* scratch, const CheckTier1Inline* inl
             memset(inlining->cyclic, 1, (uint64_t)count + 1);
         }
         arena_pop_to(scratch, mark);
-        // The held candidates, by the bodies' addresses taken (a byte past the bodies takes the other symbols').
-        uint8_t* addressed = valid && inlining->holding ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
+        // The bodies' addresses taken (a byte past the bodies takes the other symbols'): a candidate whose address some code
+        // takes is no single-site one (its site count saturated) and isn't held. Where they don't fit, none is either.
+        uint8_t* addressed = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
         if (addressed != 0)
         {
             memset(addressed, 0, (uint64_t)count + 1);
             check_tier1_inline_addressed(inlining, inlining->scalar, addressed);
-            for (uint32_t b = 0; b < count; b += 1)
-            {
-                const bool held = inlining->classes[b] != BUSTER_CHECK_TIER1_INLINE_CLASS_NONE && inlining->ready[b] != 0 && inlining->rooted[b] == 0 &&
-                                  addressed[b] == 0 && inlining->cyclic[b] == 0;
-                inlining->held[b] = held ? BUSTER_CHECK_TIER1_INLINE_HELD : 0;
-            }
+        }
+        for (uint32_t b = 0; b < count; b += 1)
+        {
+            const bool taken = addressed == 0 || addressed[b] != 0;
+            inlining->sites[b] = taken ? UINT32_MAX : inlining->sites[b];
+            const bool held = inlining->holding && inlining->classes[b] != BUSTER_CHECK_TIER1_INLINE_CLASS_NONE && inlining->ready[b] != 0 && inlining->rooted[b] == 0 &&
+                              !taken && inlining->cyclic[b] == 0;
+            inlining->held[b] = held ? BUSTER_CHECK_TIER1_INLINE_HELD : 0;
         }
         arena_pop_to(scratch, mark);
         lane_publish(inlining->stage, BUSTER_CHECK_TIER1_INLINE_READY);
@@ -511,7 +515,8 @@ static Arena* check_tier1_inline_arena(CheckTier1Lane* lane, uint32_t which)
 }
 
 // Whether candidate body `b` is of the single-site class (#2541 step 2): a small one, internal and kept by nothing but its
-// calls (CheckTier1Inline.rooted), with one direct call in the unit, whose expansion leaves it dead.
+// calls (CheckTier1Inline.rooted), with one direct call in the unit and its address taken by no code (the unit stage
+// saturates such a body's site count), whose expansion leaves it dead.
 static bool check_tier1_inline_single(const CheckTier1Inline* inlining, uint32_t b)
 {
     return inlining->classes[b] == BUSTER_CHECK_TIER1_INLINE_CLASS_SMALL && inlining->rooted[b] == 0 && inlining->sites[b] == 1;
