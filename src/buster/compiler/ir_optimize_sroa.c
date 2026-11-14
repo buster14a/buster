@@ -13,6 +13,13 @@
 // used otherwise escapes it. A store that a later store of the same slot in its block overwrites, with no load of the
 // slot between, is dead: it becomes a lifetime start of a sink slot no access reaches (which promotion then drops), so
 // that a zeroed object's stores don't overlap the vector field that overwrites them.
+//
+// A vector assembled in memory (#1344): clang's headers write _mm512_set1_epi8, _mm512_setzero_si512, _mm512_set_epi64
+// and their kin as vector compound literals, which the typed stream initializes as objects (each element's store, then
+// one load of the whole vector), so that a splat of bytes was 72 stores and a load no store forwards to. A vector load
+// whose every byte the block's stores before it wrote becomes the value they wrote (ir_sroa_assemble): a vector
+// constant where every byte is a constant's, or a splat where every store wrote the same scalar. The stores then
+// have no load to reach and go with their fields.
 
 typedef struct IrSroaOptions IrSroaOptions;
 struct IrSroaOptions
@@ -29,6 +36,8 @@ struct IrSroaResult
     uint32_t split_slots;
     uint32_t fields;
     uint32_t refused_slots;
+    // The vector loads that became the constant or the splat their block's stores wrote (#1344).
+    uint32_t assembled;
     uint64_t scratch_bytes;
 };
 
@@ -56,6 +65,16 @@ struct IrSroaWork
     // Per instruction, whether it is a dead store (ir_sroa_dead_stores), and how many there are.
     uint8_t* dead;
     uint32_t dead_count;
+    // Per instruction (ir_sroa_assemble, #1344): whether it is a vector load that becomes a constant
+    // (BUSTER_IR_SROA_ASSEMBLED_CONSTANT, `assembled_values` its index among `assembled_constants`) or a splat
+    // (BUSTER_IR_SROA_ASSEMBLED_SPLAT, `assembled_values` its scalar); and each load's first equal load of its block
+    // (`same`, itself where there is none), since the typed stream reads a local again for each use.
+    uint8_t* assembled;
+    uint32_t* assembled_values;
+    uint32_t* same;
+    IrSimdValue* assembled_constants;
+    uint32_t assembled_constant_count;
+    uint32_t assembled_count;
     IrSroaResult statistics;
 };
 
@@ -309,6 +328,162 @@ static void ir_sroa_dead_stores(IrSroaWork* work, uint64_t* lows, uint64_t* high
     }
 }
 
+#define BUSTER_IR_SROA_ASSEMBLED_CONSTANT 1
+#define BUSTER_IR_SROA_ASSEMBLED_SPLAT 2
+// The widest object whose bytes a mask of 64 bits tracks: a vector of 64 bytes.
+#define BUSTER_IR_SROA_ASSEMBLE_BYTES 64
+
+// What a block's stores so far have made of a slot of at most 64 bytes (ir_sroa_assemble): the bytes they wrote
+// (`covered`), those of them a constant's (`constant`, their values in `image`), and whether every store wrote the same
+// scalar (`uniform`: `value`, of `bytes` bytes, at offsets that are its multiples). `load` is the slot's first load
+// since its last store, which later loads of the same bytes and type equal.
+typedef struct IrSroaAssembly IrSroaAssembly;
+struct IrSroaAssembly
+{
+    uint64_t covered;
+    uint64_t constant;
+    uint32_t value;
+    uint32_t load;
+    uint8_t bytes;
+    uint8_t uniform;
+    uint8_t seen;
+    uint8_t image[BUSTER_IR_SROA_ASSEMBLE_BYTES];
+};
+
+// A scalar's bits where it is a constant, through the conversions the typed stream leaves between a literal and its
+// store (a truncation, an extension, a copy), into *bits; false for any other value.
+static bool ir_sroa_constant_bits(const IrFunction* f, uint32_t value, uint64_t* bits)
+{
+    bool known = false;
+    uint64_t result = 0;
+    // The conversions from the stored value down to the constant, at most four, applied back in reverse.
+    uint32_t chain[4];
+    uint32_t depth = 0;
+    uint32_t at = value;
+    bool walking = true;
+    while (walking)
+    {
+        const uint32_t op = f->op[at];
+        const bool scalar = ir_splat_scalar_type(f->type[at]);
+        if (op == IR_CONST && scalar)
+        {
+            result = f->constants[f->a[at]].low;
+            known = true;
+            walking = false;
+        }
+        else if ((op == IR_TRUNC || op == IR_ZEXT || op == IR_SEXT || op == IR_COPY) && scalar && f->type[at] >= IR_I8 && f->type[at] <= IR_I64 && depth < 4 &&
+                 f->type[f->a[at]] >= IR_I8 && f->type[f->a[at]] <= IR_I64)
+        {
+            chain[depth++] = at;
+            at = f->a[at];
+        }
+        else
+        {
+            walking = false;
+        }
+    }
+    for (uint32_t k = depth; known && k-- > 0;)
+    {
+        const uint32_t i = chain[k];
+        const uint32_t from = ir_type_bits[f->type[f->a[i]]];
+        const uint32_t to = ir_type_bits[f->type[i]];
+        const uint64_t source = from >= 64 ? result : result & ((UINT64_C(1) << from) - 1);
+        const uint64_t extended = f->op[i] == IR_SEXT && from < 64 ? (uint64_t)((int64_t)(source << (64 - from)) >> (64 - from)) : source;
+        result = to >= 64 ? extended : extended & ((UINT64_C(1) << to) - 1);
+    }
+    *bits = result;
+    return known;
+}
+
+// The vector loads the block's stores decide (#1344, work->assembled): each reachable block's loads and stores of the
+// slots not refused, of at most 64 bytes, in order. A slot not refused has no access but its loads and stores, and
+// a dead store's bytes no load reads, so the stores walked are all that write the bytes a load of the block reads once
+// they cover them; across blocks nothing is assumed. A load equals the slot's earlier load of the same bytes and type
+// with no store between (work->same), which is how 64 reads of one parameter are one scalar. `states` has a slot's
+// room each, zeroed; `touched` the block's instructions'.
+static void ir_sroa_assemble(IrSroaWork* work, IrSroaAssembly* states, uint32_t* touched)
+{
+    const IrFunction* f = work->ir.function;
+    for (uint32_t r = 0; r < work->ir.dominators.reachable_count; r += 1)
+    {
+        const uint32_t block = work->ir.dominators.rpo[r];
+        uint32_t touched_count = 0;
+        for (uint32_t i = f->block_offsets[block]; i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+        {
+            const uint32_t op = f->op[i];
+            const uint32_t root = (op == IR_LOAD || op == IR_STORE) ? work->roots[f->a[i]] : BUSTER_IR_NONE;
+            const uint64_t size = root != BUSTER_IR_NONE ? f->slots[root].size : 0;
+            const uint64_t offset = root != BUSTER_IR_NONE ? work->offsets[f->a[i]] : 0;
+            const uint64_t bytes = root != BUSTER_IR_NONE ? ir_sroa_access_bytes(f, i) : 0;
+            if (root != BUSTER_IR_NONE && work->refused[root] == 0 && work->dead[i] == 0 && size <= BUSTER_IR_SROA_ASSEMBLE_BYTES && bytes != 0 && offset <= size &&
+                bytes <= size - offset)
+            {
+                IrSroaAssembly* state = &states[root];
+                if (state->seen == 0)
+                {
+                    touched[touched_count++] = root;
+                    *state = (IrSroaAssembly){ .value = BUSTER_IR_NONE, .load = BUSTER_IR_NONE, .uniform = 1, .seen = 1 };
+                }
+                const uint64_t range = (bytes == 64 ? UINT64_MAX : (UINT64_C(1) << bytes) - 1) << offset;
+                if (op == IR_STORE)
+                {
+                    const uint32_t stored = f->b[i];
+                    const uint32_t type = f->type[stored];
+                    // The value as its first equal load, where it is a load of this block's.
+                    const uint32_t value = work->same[stored];
+                    uint64_t bits = 0;
+                    if (bytes <= 8 && ir_sroa_constant_bits(f, stored, &bits))
+                    {
+                        memcpy(state->image + offset, &bits, bytes);
+                        state->constant |= range;
+                    }
+                    else
+                    {
+                        state->constant &= ~range;
+                    }
+                    const bool lane = ir_splat_scalar_type(type) && offset % bytes == 0 && (state->value == BUSTER_IR_NONE || (state->value == value && state->bytes == bytes));
+                    state->uniform = state->uniform != 0 && lane;
+                    state->value = value;
+                    state->bytes = (uint8_t)bytes;
+                    state->covered |= range;
+                    state->load = BUSTER_IR_NONE;
+                }
+                else
+                {
+                    const uint32_t first = state->load;
+                    if (first != BUSTER_IR_NONE && work->offsets[f->a[first]] == offset && f->type[first] == f->type[i])
+                    {
+                        work->same[i] = first;
+                    }
+                    else
+                    {
+                        state->load = i;
+                    }
+                    if (ir_vector_type(f->type[i]) && (state->constant & range) == range)
+                    {
+                        IrSimdValue constant = { 0 };
+                        memcpy(constant.words, state->image + offset, bytes);
+                        work->assembled[i] = BUSTER_IR_SROA_ASSEMBLED_CONSTANT;
+                        work->assembled_values[i] = work->assembled_constant_count;
+                        work->assembled_constants[work->assembled_constant_count++] = constant;
+                        work->assembled_count += 1;
+                    }
+                    else if (ir_vector_type(f->type[i]) && state->uniform != 0 && (state->covered & range) == range && offset % state->bytes == 0)
+                    {
+                        work->assembled[i] = BUSTER_IR_SROA_ASSEMBLED_SPLAT;
+                        work->assembled_values[i] = state->value;
+                        work->assembled_count += 1;
+                    }
+                }
+            }
+        }
+        for (uint32_t k = 0; k < touched_count; k += 1)
+        {
+            states[touched[k]].seen = 0;
+        }
+    }
+}
+
 // The exact interval/key query over `root`'s fields alone, in creation order (#1366): its field of `offset` and `type`, and
 // whether another of its fields overlaps the access. The caller proves offset+size is inside the source slot, so ends
 // cannot wrap. Both paths walk the root's chain. A root has a handful of fields (one per distinct access, 16 for a
@@ -344,7 +519,8 @@ static void ir_sroa_fields(IrSroaWork* work, bool scalar)
     const IrFunction* f = work->ir.function;
     for (uint32_t i = 0; i < f->instruction_count; i += 1)
     {
-        if ((f->op[i] == IR_LOAD || f->op[i] == IR_STORE) && work->roots[f->a[i]] != BUSTER_IR_NONE && work->dead[i] == 0)
+        // An assembled load (#1344) reads no memory any more, so it makes no field.
+        if ((f->op[i] == IR_LOAD || f->op[i] == IR_STORE) && work->roots[f->a[i]] != BUSTER_IR_NONE && work->dead[i] == 0 && work->assembled[i] == 0)
         {
             const uint32_t root = work->roots[f->a[i]];
             const uint64_t offset = work->offsets[f->a[i]];
@@ -425,6 +601,23 @@ static IrError ir_sroa_view(IrSroaWork* work, Arena* scratch, IrFunction* result
         view.alignment_log2 = ir_allocate(scratch, f->instruction_count, 1, &ok);
         view.slots = ir_allocate(scratch, slots, sizeof(IrSlot), &ok);
         view.slot_count = slots;
+        if (work->assembled_constant_count != 0)
+        {
+            // The assembled constants (#1344) after the function's own, which its IR_VCONSTs index as before.
+            const uint64_t constants = (uint64_t)f->vector_constant_count + work->assembled_constant_count;
+            IrSimdValue* values = constants <= UINT32_MAX ? ir_allocate(scratch, constants, sizeof(IrSimdValue), &ok) : NULL;
+            ok = ok && values != NULL;
+            if (ok)
+            {
+                if (f->vector_constant_count != 0)
+                {
+                    memcpy(values, f->vector_constants, (uint64_t)f->vector_constant_count * sizeof(IrSimdValue));
+                }
+                memcpy(values + f->vector_constant_count, work->assembled_constants, (uint64_t)work->assembled_constant_count * sizeof(IrSimdValue));
+                view.vector_constants = values;
+                view.vector_constant_count = (uint32_t)constants;
+            }
+        }
         error = ok ? IR_OK : IR_ERROR_MEMORY;
     }
     if (error == IR_OK && !ir_debug_create(scratch, &view, f->debug))
@@ -484,7 +677,20 @@ static IrError ir_sroa_view(IrSroaWork* work, Arena* scratch, IrFunction* result
                 view.a[i] = firsts[f->a[i]];
             }
             const uint32_t root = work->roots[i];
-            if (work->dead[i] != 0 && work->refused[work->roots[f->a[i]]] == 0)
+            if (work->assembled[i] != 0)
+            {
+                // The value the block's stores wrote (#1344), whatever becomes of the slot: its uses were all understood
+                // when the load was decided.
+                const bool constant = work->assembled[i] == BUSTER_IR_SROA_ASSEMBLED_CONSTANT;
+                view.op[i] = constant ? IR_VCONST : IR_INTRINSIC;
+                view.flags[i] = 0;
+                view.alignment_log2[i] = 0;
+                view.a[i] = constant ? f->vector_constant_count + work->assembled_values[i] : work->assembled_values[i];
+                view.b[i] = BUSTER_IR_NONE;
+                view.c[i] = constant ? BUSTER_IR_NONE : BUSTER_IR_INTRINSIC_SPLAT;
+                work->statistics.assembled += 1;
+            }
+            else if (work->dead[i] != 0 && work->refused[work->roots[f->a[i]]] == 0)
             {
                 if (view.debug != NULL)
                 {
@@ -598,10 +804,18 @@ static __attribute__((unused)) IrCheck ir_optimize_sroa(const IrFunction* functi
         work.root_last = ir_allocate(scratch, function->slot_count, 4, &ok);
         work.field_next = ir_allocate(scratch, n, 4, &ok);
         work.dead = ir_allocate(scratch, n, 1, &ok);
+        work.assembled = ir_allocate(scratch, n, 1, &ok);
+        work.assembled_values = ir_allocate(scratch, n, 4, &ok);
+        work.same = ir_allocate(scratch, n, 4, &ok);
         check.error = ok ? IR_OK : IR_ERROR_MEMORY;
         if (ok && n != 0)
         {
             memset(work.dead, 0, n);
+            memset(work.assembled, 0, n);
+        }
+        for (uint32_t i = 0; ok && i < n; i += 1)
+        {
+            work.same[i] = i;
         }
     }
     IrFunction view = { 0 };
@@ -622,6 +836,28 @@ static __attribute__((unused)) IrCheck ir_optimize_sroa(const IrFunction* functi
             check.error = ok ? IR_OK : IR_ERROR_MEMORY;
             arena_pop_to(scratch, mark);
         }
+    }
+    if (check.error == IR_OK && options.flagged && options.simd)
+    {
+        // The vectors the stores assemble (#1344), once the dead stores are known: a constant a vector load of the
+        // function at most, kept past the walk's own state.
+        bool ok = true;
+        uint64_t loads = 0;
+        for (uint32_t i = 0; i < function->instruction_count; i += 1)
+        {
+            loads += function->op[i] == IR_LOAD && ir_vector_type(function->type[i]);
+        }
+        work.assembled_constants = loads != 0 ? ir_allocate(scratch, loads, sizeof(IrSimdValue), &ok) : NULL;
+        const uint64_t mark = scratch->length;
+        IrSroaAssembly* states = loads != 0 ? ir_allocate(scratch, function->slot_count, sizeof(IrSroaAssembly), &ok) : NULL;
+        uint32_t* touched = loads != 0 ? ir_allocate(scratch, function->instruction_count, 4, &ok) : NULL;
+        if (ok && loads != 0)
+        {
+            memset(states, 0, (uint64_t)function->slot_count * sizeof(IrSroaAssembly));
+            ir_sroa_assemble(&work, states, touched);
+        }
+        check.error = ok ? IR_OK : IR_ERROR_MEMORY;
+        arena_pop_to(scratch, mark);
     }
     if (check.error == IR_OK)
     {
