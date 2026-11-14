@@ -1570,6 +1570,65 @@ static void ir_optimize_test_merges(IrOptimizeTest* test, Arena* input, Arena* v
         }
         arena_pop_to(input, im);
     }
+    // A join's phi that the merges forward, read through an identity (`p + 0`, #2554), which ir_optimize_identities
+    // sent to the phi before the merges ran: the identity's users must read the phi's arm value. b0 branches on a
+    // constant to b1's sum of the parameter or b2's product; b3's phi meets them and returns its sum with zero.
+    {
+        IrFunction join = { 0 };
+        const IrSizes sizes = {
+            .instruction_count = 12,
+            .block_count = 4,
+            .constant_count = 2,
+            .extra_count = 4,
+            .parameter_count = 1,
+        };
+        const bool built = ir_create(input, &sizes, &join) == IR_OK;
+        if (built)
+        {
+            join.parameter_types[0] = IR_I64;
+            join.result_type = IR_I64;
+            join.constants[0].low = 1;
+            join.constants[1].low = 0;
+            join.block_offsets[1] = 4;
+            join.block_offsets[2] = 6;
+            join.block_offsets[3] = 8;
+            join.block_offsets[4] = 12;
+            ir_optimize_test_instruction(&join, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 1, IR_CONST, IR_I1, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 2, IR_CONST, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 3, IR_CBR, IR_VOID, 1, 1, 2);
+            ir_optimize_test_instruction(&join, 4, IR_ADD, IR_I64, 0, 0, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 5, IR_BR, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 6, IR_MUL, IR_I64, 0, 0, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 7, IR_BR, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 8, IR_PHI, IR_I64, 0, 2, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 9, IR_ADD, IR_I64, 8, 2, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 10, IR_ADD, IR_I64, 9, 0, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&join, 11, IR_RET, IR_VOID, 10, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            join.extra[0] = 1;
+            join.extra[1] = 4;
+            join.extra[2] = 2;
+            join.extra[3] = 6;
+        }
+        ir_optimize_test_expect(test, built && ir_verify(&join, scratch, 0).error == IR_OK, "merged identity join fixture verifies");
+        for (uint32_t passes = 0; built && passes < 64; passes += 1)
+        {
+            ir_optimize_test_compare(test, &join, vector, scalar, scratch, passes);
+        }
+        for (uint32_t path = 0; built && path < 2; path += 1)
+        {
+            IrOptimizeOptions options = ir_optimize_options();
+            options.passes = BUSTER_IR_OPTIMIZE_PASSES;
+            options.path = path != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
+            const uint64_t mark = vector->length;
+            IrOptimizeResult result = { 0 };
+            const IrCheck check = ir_optimize(&join, vector, scratch, options, &result);
+            ir_optimize_test_expect(test, check.error == IR_OK && result.function.block_count == 1 && result.merged_blocks == 2,
+                                    "an identity of a merged join's phi reads the phi's arm value");
+            arena_pop_to(vector, mark);
+        }
+        arena_pop_to(input, im);
+    }
     IrFunction chain = { 0 };
     bool ready = ir_optimize_test_jumps(input, &chain, 4, false);
     if (ready)
