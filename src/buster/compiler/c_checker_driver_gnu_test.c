@@ -190,6 +190,7 @@ static void check_test_driver_gnu_scopes(CheckTest* test, const char* clang, con
         { "an atomic auto-type retains the initializer's typedef", NULL, "atomic-typedef.c" },
         { "an atomic auto-type retains the initialized object's typedef", NULL, "atomic-typedef-object.c" },
         { "an atomic auto-type retains its initializer's comma warnings", NULL, "atomic-comma.c" },
+        { "an invalid atomic auto-type stays bound without cascading diagnostics", NULL, "atomic-recovery.c" },
     };
     for (uint32_t i = 0; executable != NULL && i < BUSTER_ARRAY_LENGTH(every); i += 1)
     {

@@ -326,6 +326,7 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
             // expression and warning walks retain the initializer and later statements without accepting the unit.
             if (!reader->lane && check_input_recover_reports(reader, before))
             {
+                check_input_invalid_declare(reader, declaration);
                 result = check_input_type_result(reader, type_qualify(types, adjusted, qualifiers));
                 reader->declared_types[declaration] = result;
                 reader->query_types[assignment] = result;
