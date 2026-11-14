@@ -592,6 +592,8 @@ struct CheckTier1Counts
     // With --tier1-schedule (#172), the blocks scheduled and the records or IR instructions that changed places.
     uint32_t schedule_blocks;
     uint32_t schedule_moved;
+    // The expressions the operand sink moved (#2592, tier1_schedule_ir_sink).
+    uint32_t sunk;
     // What #139's passes did to it (--tier1-passes=): the optimizer's folded constants, the instructions and blocks its
     // output has fewer than its input (SCCP, dead-code removal, CFG cleanup and its merges together) and the blocks merged
     // into their predecessors, LICM's moved values, SROA's split slots and #866's solver's removed instructions.
@@ -639,6 +641,7 @@ struct CheckTier1Report
     uint64_t inlined_calls;
     uint64_t schedule_blocks;
     uint64_t schedule_moved;
+    uint64_t sunk;
     uint64_t folded;
     uint64_t removed_instructions;
     uint64_t removed_blocks;
@@ -1981,6 +1984,22 @@ static void check_program_emit_take(CheckEmitRun* run, CheckEmitLane* lane, uint
     }
 }
 
+// Copies of a target_clones body share the lowering's local and control maps. Keep all copies in one part so that
+// different writers cannot update those maps concurrently. Empty parts are harmless and preserve the parts' indices.
+static void check_program_emit_group_copies(CheckEmitRun* run, uint64_t parts)
+{
+    const CheckProgramBody* bodies = run->program->bodies;
+    for (uint64_t p = 1; p < parts; p += 1)
+    {
+        uint64_t boundary = run->boundaries[p];
+        while (boundary != 0 && boundary < run->body_count && bodies[boundary].opening == bodies[boundary - 1].opening)
+        {
+            boundary += 1;
+        }
+        run->boundaries[p] = boundary;
+    }
+}
+
 // Every lane's entry: the parts by cost (CheckEmitRun.costs), taken costliest first.
 static void check_program_emit_lane(void* argument)
 {
@@ -1988,6 +2007,17 @@ static void check_program_emit_lane(void* argument)
     const uint32_t index = lane_index();
     CheckEmitLane* lane = run->lane_states + index;
     const uint64_t parts = lane_parts_by_cost(run->costs, run->body_count, run->boundaries, run->orders[index]);
+    if (run->program->body_options != NULL)
+    {
+        // Every lane finishes reading the original boundaries before lane 0 adjusts them.
+        lane_sync();
+        if (index == 0)
+        {
+            check_program_emit_group_copies(run, parts);
+        }
+        lane_sync();
+        lane_parts_order(run->costs, run->boundaries, parts, run->orders[index]);
+    }
     if (run->inline_table != NULL)
     {
         // Every part's lowering, then, once the lanes have met, every part's code (#1282).
@@ -2117,6 +2147,11 @@ static uint32_t check_program_emit_growing(LaneFlow* flow, CheckEmitRun* run, Ch
                                            WorkerBudgetLease* leases, uint32_t* lease_count)
 {
     const uint64_t parts = parts_cut_by_cost(run->costs, run->body_count, (uint64_t)BUSTER_CHECK_EMIT_GROW_PARTS_PER_LANE * lanes, run->boundaries, run->orders[0]);
+    if (run->program->body_options != NULL)
+    {
+        check_program_emit_group_copies(run, parts);
+        lane_parts_order(run->costs, run->boundaries, parts, run->orders[0]);
+    }
     // The costliest part first, as in every lane's order, then the others in source order: lane 0 alone takes most of
     // them, and in source order its lowering and code keep more of one lane's locality than in cost order.
     uint32_t* order = run->orders[0];
@@ -2311,6 +2346,11 @@ static void check_program_share_run(CheckEmitShare* share, uint64_t taken, uint3
 static void check_program_emit_shared(CheckEmitRun* run, CheckEmitBoard* board, uint32_t index, uint32_t active, uint32_t pause_microseconds)
 {
     const uint64_t parts = parts_by_cost(run->costs, run->body_count, active, run->boundaries, run->orders[0]);
+    if (run->program->body_options != NULL)
+    {
+        check_program_emit_group_copies(run, parts);
+        lane_parts_order(run->costs, run->boundaries, parts, run->orders[0]);
+    }
     for (uint64_t p = 0; p < parts; p += 1)
     {
         run->parts[p].lower.first = (uint32_t)run->boundaries[p];
@@ -4891,6 +4931,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->tier1_report.inlined_calls += compiled ? counts->inlined_calls : 0;
         lanes->tier1_report.schedule_blocks += compiled ? counts->schedule_blocks : 0;
         lanes->tier1_report.schedule_moved += compiled ? counts->schedule_moved : 0;
+        lanes->tier1_report.sunk += compiled ? counts->sunk : 0;
         lanes->tier1_report.folded += compiled ? counts->folded : 0;
         lanes->tier1_report.removed_instructions += compiled ? counts->removed_instructions : 0;
         lanes->tier1_report.removed_blocks += compiled ? counts->removed_blocks : 0;

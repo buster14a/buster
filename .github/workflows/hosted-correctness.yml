@@ -743,7 +743,14 @@ jobs:
           if [ "$BUSTER_HOST_ARCH" = vector ]; then
               shards=$BUSTER_VECTOR_SHARDS
           fi
-          "$BUSTER_COMPILER" parallel --github --jobs "$(nproc)" --timeout "$timeout" \
+          # A pull request's or a merge-queue candidate's shard stops at its first failing command (#2703), as its row
+          # and its run do: the rest would only hold the runner, and the failure's report, until they ended (a 2.8 s
+          # failure showed 820 s later). Pushes, the daily run and dispatches run every command, for their coverage.
+          fail_fast=()
+          if [ "$GITHUB_EVENT_NAME" = pull_request ] || [ "$GITHUB_EVENT_NAME" = merge_group ]; then
+              fail_fast=(--fail-fast)
+          fi
+          "$BUSTER_COMPILER" parallel --github --jobs "$(nproc)" --timeout "$timeout" "${fail_fast[@]}" \
             --shard "$BUSTER_SHARD/$shards" \
             --costs "tools/ci/costs/$BUSTER_HOST_ARCH-$BUSTER_SANITIZER-O$BUSTER_SANITIZER_OPTIMIZATION.costs" < tools/ci/correctness.tests
           oracle="${XDG_CACHE_HOME:-$HOME/.cache}/buster/oracle"

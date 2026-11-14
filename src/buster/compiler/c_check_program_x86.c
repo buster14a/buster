@@ -650,6 +650,224 @@ static void check_x86_lower_reduce_row(const CheckX86LowerRule* rule, Tier0Opera
     row->result_class = scalar_class;
 }
 
+// A blend of 16 bytes into VECTOR(0) by a constant mask of `low` and `high`, its bits b's (VECTOR(1)) where set and a's
+// (VECTOR(0)) elsewhere: the mask's halves moved from a scratch register (MOVABS, MOVQ, PUNPCKLQDQ) into VECTOR(2), then
+// a ^ ((a ^ b) & mask), which moves the bits alone, as clang's PAND, PANDN and POR of the mask's constant do. A mask of
+// no bits is a's, and one of every bit b's. The count of records.
+static uint32_t check_x86_lower_blend_mask(Tier0Operation* row, uint64_t low, uint64_t high)
+{
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint8_t v2 = BUSTER_TIER0_ROLE_VECTOR(2);
+    const uint8_t v3 = BUSTER_TIER0_ROLE_VECTOR(3);
+    const uint8_t scratch = BUSTER_TIER0_ROLE_SCRATCH(0);
+    uint32_t r = 0;
+    if (low == UINT64_MAX && high == UINT64_MAX)
+    {
+        row->records[r++] = check_x86_lower_record(X86_FORM_MOVUPS_X_XM, v0, 0, v1);
+    }
+    else if (low != 0 || high != 0)
+    {
+        const uint64_t halves[2] = { low, high };
+        for (uint32_t h = 0; h < (high != 0 ? 2u : 1u); h += 1)
+        {
+            row->records[r] = check_x86_lower_record(X86_FORM_MOV_R64_IMM64, 0, 0, scratch);
+            row->records[r].immediate = (int32_t)(uint32_t)halves[h];
+            row->records[r++].displacement = (int32_t)(uint32_t)(halves[h] >> 32);
+            row->records[r++] = check_x86_lower_record(X86_FORM_MOVQ_X_RM64, h == 0 ? v2 : v3, 0, scratch);
+        }
+        if (high != 0)
+        {
+            row->records[r++] = check_x86_lower_record(X86_FORM_PUNPCKLQDQ_X_XM128, v2, 0, v3);
+        }
+        row->records[r++] = check_x86_lower_record(X86_FORM_XORPS_X_XM128, v1, 0, v0);
+        row->records[r++] = check_x86_lower_record(X86_FORM_ANDPS_X_XM128, v1, 0, v2);
+        row->records[r++] = check_x86_lower_record(X86_FORM_XORPS_X_XM128, v0, 0, v1);
+    }
+    return r;
+}
+
+// SSE2's sequences of the 16-byte builtins whose instructions a target without AVX-512 hasn't (#1834), as LLVM expands
+// them in a target_clones copy whose features lack them (clang refuses the builtins elsewhere): or false, the row
+// unchanged, where the target has the instruction (check_vector_baseline_row's forms take it) or the builtin has none.
+// Each replaces the EVEX or VEX row its rule gives, with its operands, in VECTOR(0) and VECTOR(1) or INTEGER(1), and its
+// result:
+//   - palignr (without SSSE3): (a:b) shifted right by the immediate's bytes, b's PSRLDQ ORed with a's PSLLDQ, a's PSRLDQ
+//     past 16, zeros past 31;
+//   - pblendw, blendps, blendpd (without SSE4.1) and pblendd (without AVX2): b's elements where the immediate's bits are
+//     set, a's elsewhere, by a mask (check_x86_lower_blend_mask), or BLENDPS's by dwords with SSE4.1;
+//   - vec_ext_v16qi (without SSE4.1's PEXTRB): the byte's word by PEXTRW, shifted right by 8 for an odd byte;
+//   - vec_set_v16qi, v4si and v2di (without PINSRB, PINSRD and PINSRQ): the byte merged into its word by PEXTRW and
+//     PINSRW; the dword's halves by two PINSRWs; the qword by MOVQ, then MOVSD's or PUNPCKLQDQ's of it;
+//   - vpermilpd (without AVX): SHUFPD's of a and a by the immediate's 2 bits;
+//   - cmpps and cmppd (without AVX): clang's predicate (check_x86_lower_float_predicate) by CMPPS's 8, with a greater-than's
+//     operands swapped into a copy; EQ_UQ by CMPEQPS ORed with CMPUNORDPS, NEQ_OQ by CMPNEQPS ANDed with CMPORDPS,
+//     FALSE by XORPS and TRUE by PCMPEQD, as LLVM selects them. In a function with FENV_ACCESS the predicate is the
+//     immediate's 5 bits, and those past 7 (the signaling ones among them) stay refused.
+// roundps, roundpd, dpps and mpsadbw have none: clang's backend fails to select them there.
+static bool check_x86_lower_sse2_row(const X86Target* target, const CheckX86LowerRule* rule, uint64_t immediate, bool strict, Tier0Operation* row)
+{
+    const uint64_t features = target->features;
+    const bool ssse3 = (features & BUSTER_X86_FEATURE(SSSE3)) != 0;
+    const bool sse41 = (features & BUSTER_X86_FEATURE(SSE41)) != 0;
+    const bool avx = (features & BUSTER_X86_FEATURE(AVX)) != 0;
+    const bool avx2 = (features & BUSTER_X86_FEATURE(AVX2)) != 0;
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint8_t v2 = BUSTER_TIER0_ROLE_VECTOR(2);
+    const uint8_t s0 = BUSTER_TIER0_ROLE_SCRATCH(0);
+    const uint8_t s1 = BUSTER_TIER0_ROLE_SCRATCH(1);
+    const uint32_t form = rule->form;
+    Tier0Operation out = *row;
+    uint32_t r = 0;
+    bool taken = false;
+    if (rule->bytes == 16 && rule->family == CHECK_X86_LOWER_BINARY_IMMEDIATE && form == X86_FORM_VPALIGNR_X_X_XM128_IMM8_EVEX && !ssse3)
+    {
+        const uint32_t count = (uint32_t)(immediate & 0xff);
+        taken = true;
+        if (count == 0)
+        {
+            out.records[r++] = check_x86_lower_record(X86_FORM_MOVUPS_X_XM, v0, 0, v1);
+        }
+        else if (count < 16)
+        {
+            out.records[r] = check_x86_lower_record(X86_FORM_PSRLDQ_X_IMM8, 0, 0, v1);
+            out.records[r++].immediate = (int32_t)count;
+            out.records[r] = check_x86_lower_record(X86_FORM_PSLLDQ_X_IMM8, 0, 0, v0);
+            out.records[r++].immediate = (int32_t)(16 - count);
+            out.records[r++] = check_x86_lower_record(X86_FORM_POR_X_XM128, v0, 0, v1);
+        }
+        else if (count > 16 && count < 32)
+        {
+            out.records[r] = check_x86_lower_record(X86_FORM_PSRLDQ_X_IMM8, 0, 0, v0);
+            out.records[r++].immediate = (int32_t)(count - 16);
+        }
+        else if (count >= 32)
+        {
+            out.records[r++] = check_x86_lower_record(X86_FORM_XORPS_X_XM128, v0, 0, v0);
+        }
+    }
+    else if (rule->bytes == 16 && rule->family == CHECK_X86_LOWER_BINARY_IMMEDIATE &&
+             (((form == X86_FORM_VPBLENDW_X_X_XM128_IMM8 || form == X86_FORM_VBLENDPS_X_X_XM128_IMM8 || form == X86_FORM_VBLENDPD_X_X_XM128_IMM8) && !sse41) ||
+              (form == X86_FORM_VPBLENDD_X_X_XM128_IMM8 && !avx2)))
+    {
+        taken = true;
+        if (sse41)
+        {
+            out.records[r] = check_x86_lower_record(X86_FORM_BLENDPS_X_XM128_IMM8, v0, 0, v1);
+            out.records[r++].immediate = (int32_t)(immediate & 15);
+        }
+        else
+        {
+            // Each of the immediate's bits (8 of words, 4 of dwords, 2 of qwords) sets its element's bits in the mask.
+            const uint32_t element = form == X86_FORM_VPBLENDW_X_X_XM128_IMM8 ? 2 : form == X86_FORM_VBLENDPD_X_X_XM128_IMM8 ? 8 : 4;
+            uint64_t halves[2] = { 0, 0 };
+            for (uint32_t i = 0; i < 16 / element; i += 1)
+            {
+                if ((immediate >> i & 1) != 0)
+                {
+                    const uint32_t bit = (i * element * 8) & 63;
+                    const uint64_t ones = element == 8 ? UINT64_MAX : ((UINT64_C(1) << (element * 8)) - 1) << bit;
+                    halves[i * element / 8] |= ones;
+                }
+            }
+            r = check_x86_lower_blend_mask(&out, halves[0], halves[1]);
+        }
+    }
+    else if (rule->bytes == 16 && rule->family == CHECK_X86_LOWER_EXTRACT && form == X86_FORM_VPEXTRB_RM32_X_IMM8_EVEX && !sse41)
+    {
+        const uint32_t index = (uint32_t)(immediate & 15);
+        taken = true;
+        out.records[r] = check_x86_lower_record(X86_FORM_PEXTRW_R32_X_IMM8, BUSTER_TIER0_ROLE_INTEGER_RESULT, 0, v0);
+        out.records[r++].immediate = (int32_t)(index >> 1);
+        if ((index & 1) != 0)
+        {
+            out.records[r] = check_x86_lower_record(X86_FORM_SHR_RM32_IMM8, 0, 0, BUSTER_TIER0_ROLE_INTEGER_RESULT);
+            out.records[r++].immediate = 8;
+        }
+    }
+    else if (rule->bytes == 16 && rule->family == CHECK_X86_LOWER_INSERT && form == X86_FORM_VPINSRB_X_X_RM32_IMM8_EVEX && !sse41)
+    {
+        // The byte's word, its other byte kept and the value's low byte put in its place, back into the word.
+        const uint32_t index = (uint32_t)(immediate & 15);
+        const bool odd = (index & 1) != 0;
+        taken = true;
+        out.records[r] = check_x86_lower_record(X86_FORM_PEXTRW_R32_X_IMM8, s0, 0, v0);
+        out.records[r++].immediate = (int32_t)(index >> 1);
+        out.records[r] = check_x86_lower_record(X86_FORM_AND_RM32_IMM32, 0, 0, s0);
+        out.records[r++].immediate = odd ? 0x00ff : 0xff00;
+        out.records[r++] = check_x86_lower_record(X86_FORM_MOV_R32_RM32, s1, 0, BUSTER_TIER0_ROLE_INTEGER(1));
+        out.records[r] = check_x86_lower_record(odd ? X86_FORM_SHL_RM32_IMM8 : X86_FORM_AND_RM32_IMM32, 0, 0, s1);
+        out.records[r++].immediate = odd ? 8 : 0xff;
+        out.records[r++] = check_x86_lower_record(X86_FORM_OR_R32_RM32, s0, 0, s1);
+        out.records[r] = check_x86_lower_record(X86_FORM_PINSRW_X_RM32_IMM8, v0, 0, s0);
+        out.records[r++].immediate = (int32_t)(index >> 1);
+    }
+    else if (rule->bytes == 16 && rule->family == CHECK_X86_LOWER_INSERT && form == X86_FORM_VPINSRD_X_X_RM32_IMM8_EVEX && !sse41)
+    {
+        const uint32_t index = (uint32_t)(immediate & 3);
+        taken = true;
+        out.records[r] = check_x86_lower_record(X86_FORM_PINSRW_X_RM32_IMM8, v0, 0, BUSTER_TIER0_ROLE_INTEGER(1));
+        out.records[r++].immediate = (int32_t)(2 * index);
+        out.records[r++] = check_x86_lower_record(X86_FORM_MOV_R32_RM32, s0, 0, BUSTER_TIER0_ROLE_INTEGER(1));
+        out.records[r] = check_x86_lower_record(X86_FORM_SHR_RM32_IMM8, 0, 0, s0);
+        out.records[r++].immediate = 16;
+        out.records[r] = check_x86_lower_record(X86_FORM_PINSRW_X_RM32_IMM8, v0, 0, s0);
+        out.records[r++].immediate = (int32_t)(2 * index + 1);
+    }
+    else if (rule->bytes == 16 && rule->family == CHECK_X86_LOWER_INSERT && form == X86_FORM_VPINSRQ_X_X_RM64_IMM8_EVEX && !sse41)
+    {
+        taken = true;
+        out.records[r++] = check_x86_lower_record(X86_FORM_MOVQ_X_RM64, v1, 0, BUSTER_TIER0_ROLE_INTEGER(1));
+        out.records[r++] = check_x86_lower_record((immediate & 1) == 0 ? X86_FORM_MOVSD_X_XM64 : X86_FORM_PUNPCKLQDQ_X_XM128, v0, 0, v1);
+    }
+    else if (rule->bytes == 16 && rule->family == CHECK_X86_LOWER_UNARY_IMMEDIATE && form == X86_FORM_VPERMILPD_X_XM128_IMM8_EVEX && !avx)
+    {
+        taken = true;
+        out.records[r] = check_x86_lower_record(X86_FORM_SHUFPD_X_XM128_IMM8, v0, 0, v0);
+        out.records[r++].immediate = (int32_t)(immediate & 3);
+    }
+    else if (rule->bytes == 16 && rule->family == CHECK_X86_LOWER_BINARY_IMMEDIATE && rule->fixed == CHECK_X86_PREDICATE_FCMP &&
+             (form == X86_FORM_VCMPPS_X_X_XM128_IMM8 || form == X86_FORM_VCMPPD_X_X_XM128_IMM8) && !avx)
+    {
+        bool swap = false;
+        const uint32_t predicate = check_x86_lower_float_predicate(immediate, strict, &swap);
+        const uint32_t compare = form == X86_FORM_VCMPPS_X_X_XM128_IMM8 ? X86_FORM_CMPPS_X_XM128_IMM8 : X86_FORM_CMPPD_X_XM128_IMM8;
+        taken = predicate < 8 || (!strict && (predicate == 0x08 || predicate == 0x0b || predicate == 0x0c || predicate == 0x0f));
+        if (taken && predicate < 8)
+        {
+            // A greater-than's operands swapped: b compared with a in b's register, then moved.
+            out.records[r] = check_x86_lower_record(compare, swap ? v1 : v0, 0, swap ? v0 : v1);
+            out.records[r++].immediate = (int32_t)predicate;
+            if (swap)
+            {
+                out.records[r++] = check_x86_lower_record(X86_FORM_MOVUPS_X_XM, v0, 0, v1);
+            }
+        }
+        else if (taken && (predicate == 0x08 || predicate == 0x0c))
+        {
+            // EQ_UQ: equal or unordered; NEQ_OQ: not equal and ordered.
+            const bool equal = predicate == 0x08;
+            out.records[r++] = check_x86_lower_record(X86_FORM_MOVUPS_X_XM, v2, 0, v0);
+            out.records[r] = check_x86_lower_record(compare, v0, 0, v1);
+            out.records[r++].immediate = equal ? 0 : 4;
+            out.records[r] = check_x86_lower_record(compare, v2, 0, v1);
+            out.records[r++].immediate = equal ? 3 : 7;
+            out.records[r++] = check_x86_lower_record(equal ? X86_FORM_ORPS_X_XM128 : X86_FORM_ANDPS_X_XM128, v0, 0, v2);
+        }
+        else if (taken)
+        {
+            out.records[r++] = check_x86_lower_record(predicate == 0x0b ? X86_FORM_XORPS_X_XM128 : X86_FORM_PCMPEQD_X_XM128, v0, 0, v0);
+        }
+    }
+    if (taken)
+    {
+        out.record_count = (uint8_t)r;
+        *row = out;
+    }
+    return taken;
+}
+
 // The row of an x86 builtin's call on a target: its records, operands and result, or the reason it has none.
 // `immediate` is its immediate argument's constant value (the rule's `immediate`'s), which a record takes and no operand
 // is, and `round` its rounding control's (its last argument's, where the rule has one). `mask` is a MASK_UNARY's or
@@ -1639,6 +1857,11 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
             row->records[1] = check_x86_lower_record(rule->element == 8 ? X86_FORM_MOVQ_RM64_X : X86_FORM_MOVD_RM32_X, v1, 0, BUSTER_TIER0_ROLE_INTEGER_RESULT);
             row->record_count = 2;
             needed &= ~(BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ));
+        }
+        else if (older && check_x86_lower_sse2_row(target, rule, immediate, strict, row))
+        {
+            // As check_vector_baseline_row's below: the EVEX or VEX forms' requirements, which SSE2's sequence hasn't.
+            needed &= ~(BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX) | BUSTER_X86_FEATURE(AVX2));
         }
         else if (older && check_vector_baseline_row(target, row, &baseline))
         {

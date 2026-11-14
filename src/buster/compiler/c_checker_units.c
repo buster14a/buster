@@ -2399,6 +2399,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             __atomic_fetch_add(&report->inlined_calls, unit_report->inlined_calls, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->schedule_blocks, unit_report->schedule_blocks, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->schedule_moved, unit_report->schedule_moved, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->sunk, unit_report->sunk, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->folded, unit_report->folded, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->removed_instructions, unit_report->removed_instructions, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->removed_blocks, unit_report->removed_blocks, __ATOMIC_RELAXED);

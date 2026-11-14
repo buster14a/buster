@@ -643,7 +643,7 @@ static void check_test_graph_break(CheckTest* test, CheckGraph* graph, uint32_t 
         case 2: graph->operand1[node] = graph->operand1[node] == BUSTER_CHECK_NONE ? (node != 0 ? node - 1 : 0) : BUSTER_CHECK_NONE; break;
         case 3: graph->operand2[node] = graph->operand2[node] == BUSTER_CHECK_NONE ? 0 : node + 1; break;
         case 4: graph->contexts[node] |= 0x10; break;
-        case 5: graph->fp_environments[node] |= 0x80; break;
+        case 5: graph->fp_environments[node] |= BUSTER_CHECK_FP_CONTRACT_MASK; break;
         case 6: graph->warning_suppressed[node] |= (uint8_t)CHECK_WARNING_DISCARDED_QUALIFIERS; break;
         case 7: graph->members[node] = graph->ops[node] == CHECK_OP_STATEMENT_VALUE ? 0x20 : 0; break;
         case 8: graph->argument_offsets[node] += 1; break;

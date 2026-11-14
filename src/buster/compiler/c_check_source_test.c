@@ -193,7 +193,7 @@ static void check_test_source_fp_history(CheckTest* test, bool complex)
                             if (intern_length(&identifiers, name) == strlen(names[item]) && memcmp(intern_bytes(&identifiers, name), names[item], strlen(names[item])) == 0)
                             {
                                 found += 1;
-                                check_test_expect(test, input.fp_environments[token] == (complex ? 0 : expected[item]) &&
+                                check_test_expect(test, input.fp_environments[token] == (BUSTER_CHECK_FP_CONTRACT_ON | (complex ? 0 : expected[item])) &&
                                                   input.cx_limited_ranges[token] == (complex ? expected[item] : 0),
                                                   "floating policy restores its enclosing scope without changing the other policy");
                             }

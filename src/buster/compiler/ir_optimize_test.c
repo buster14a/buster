@@ -1821,6 +1821,7 @@ static int ir_optimize_text_print_fixtures(void);
 #endif
 #include "ir_if_convert_test.c"
 #include "ir_thread_test.c"
+#include "tier1_sink_ir_test.c"
 
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 
@@ -1861,6 +1862,7 @@ static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
         ir_optimize_test_simd(&test);
         ir_if_convert_tests(&test);
         ir_thread_tests(&test);
+        tier1_sink_ir_tests(&test);
         ir_optimize_text_tests(&test);
         printf("ir-optimize: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;
