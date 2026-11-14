@@ -158,8 +158,42 @@ the `&&`/`||` truth values with their dead and repeated rows. The C driver
 tests also check native results against Clang and decode actual `cmov`/branch
 shapes. These include #1382's nested clamp, `&&` and `||` values, and loops
 whose only conditional branch is the loop's. A running max and a reload after
-a call keep their branches. Runtime measurements are in
-[the Tier 1 command guide](commands/ir-optimization.md#bounded-scalar-if-conversion-1382).
+a call keep their branches.
+
+Measured effect (#2674, the 9700X, CPU 2): #1382's kernels compiled by main
+`b7a95eed`'s Tier 1 and by #2674's `fab53452`, called from a clang -O2 driver in
+another object, median `cycles:u` of five rounds
+([record](https://github.com/buster14a/buster-performance/tree/2c957f4be1b74bdaba6d81d4f2b92e93222ffbe5/docs/measurements/tier1-if-convert-1382-2026-11-13)).
+The scalar kernels take 50 M calls on xorshift64's high bits, about 310 Mcycles
+of which is the driver's loop. The loops take 80 passes over 2^20 such bytes.
+
+| kernel | main | `fab53452` | clang -O2 -fno-vectorize |
+| --- | ---: | ---: | ---: |
+| `x < 0 ? 0 : x > 255 ? 255 : x` | 1,146.8 | 341.3 | 332.5 |
+| `a < 128 && b < 128` | 1,131.6 | 344.3 | 335.9 |
+| `(a < b) && (b < c \|\| c == 0)` | 1,321.8 | 371.3 | 349.9 |
+| `if (a[i] > 128) s += a[i]` | 1,327.1 | 162.1 | 93.3 |
+| `s += a[i] > 128 ? a[i] : -a[i]` | 1,349.5 | 203.5 | 150.6 |
+| `m = a[i] > m ? a[i] : m` | 90.4 | 90.4 | 72.0 |
+
+Each converted kernel's 25 to 42 M branch misses fell to a few thousand. #2674's
+first commit had put the running max's comparison on its loop's carried chain
+(342.1 Mcycles, 3.78 times main), which the recurrence rule removed. The sums'
+remaining gap is clang's unrolling and the `setcc; test` that each `cmov`
+waits for ([#2676](https://github.com/buster14a/buster/issues/2676)). The
+truth values are i1 selects, where clang uses `and`/`or`
+([#2677](https://github.com/buster14a/buster/issues/2677)).
+
+The pass costs about 1.2% of sqlite3.c's `--tier1 -c` user cycles. That is
+2,163.6 against 2,138.4 Mcycles over 11 runs, with 0.63% more instructions. Its
+object has 0.17% more text, 678 `cmov`s against 422, and 16,266 conditional
+jumps against 16,503. The time spreads over the rounds' analysis and rewrite
+without a hot spot. Storing the per-row maps plus one instead of setting them
+up each round measured 0.25% slower, and was dropped.
+
+The lookup of a phi's entry from a block stops at the first one. Without the
+early exit, clang vectorized the scan into AVX-512 masked gathers, which
+MemorySanitizer reports as reading uninitialized lanes.
 
 SCCP tracks a state and two-word constant per instruction and an executable
 byte per deduplicated CFG edge. It sweeps executable blocks in reverse
