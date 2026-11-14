@@ -825,6 +825,16 @@ instructions by function:
   copy of the whole unit, and the arguments every call passes as the same
   constant are written into their functions, which are otherwise as clang
   wrote them (`--constant-arguments`, 310 in the checker's unit).
+- **A part promotes the arguments only of a function it sees every call
+  of.** The whole unit passes `check_action_operand_value`'s 96-byte operand
+  in two vector registers; the parts, which call it through its alias,
+  passed its address, and its wide loads waited on the caller's narrower
+  stores: `benchmark-check-units` ran 0.72% more cycles and the checker on
+  musl's source 1.85%, outside their floors, with as many instructions. So
+  the same child inlines the `always_inline` bodies and runs argument
+  promotion, and each part that calls a function whose parameters that
+  rewrites holds a local copy of it, whatever its size (`--copy-promoted`;
+  20 copies of that one, 0.3% more code in the checker's unit).
 
 TODO-MEASURE
 

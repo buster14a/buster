@@ -765,6 +765,16 @@ below). Its options (`BUSTER_RELEASE_SPLIT_OPTIONS`) add:
   `instruction_is_valid`. Running the whole simplification before the split
   instead, and again in each part, reshaped code the whole unit's pipeline
   shapes once (`benchmark-environments` ran 2.7% slower).
+- **The whole unit's argument promotion** (`--copy-promoted`): the same
+  child inlines the `always_inline` bodies and runs argument promotion, and a
+  static function that is only ever called and whose parameters that
+  rewrites goes to each part that calls it as a local copy, whatever its
+  size. A part promotes a function only when it sees its every call: the
+  parts kept `check_action_operand_value`'s 96-byte operand, which the whole
+  unit passes in two vector registers, in memory, where its loads waited on
+  the caller's narrower stores (`benchmark-check-units` ran 0.72% slower,
+  the checker on musl's source 1.85%). The checker's unit holds 20 copies of
+  it, and 0.3% more code.
 - **A part reads bodies by what SROA leaves of them** (`--simplified-size`):
   up to 200 instructions, and up to 2.5 times that for vector code, as LLVM's
   inliner raises its threshold for it (`asm_word_registers_vector`, 721
