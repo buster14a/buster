@@ -4733,6 +4733,19 @@ static void check_common_range_batch(const CheckGraph* graph, const CheckStream*
     }
 }
 
+// Drain a scan's listed comparisons, including a tail longer than one vector batch.
+static void check_common_range_drain(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const uint32_t* parents, uint8_t* reach,
+                                     const uint32_t* comparisons, uint32_t* tested, uint32_t listed)
+{
+    while (comparisons != NULL && *tested < listed)
+    {
+        const uint32_t remaining = listed - *tested;
+        const uint32_t live = remaining < 16 ? remaining : 16;
+        check_common_range_batch(graph, stream, types, parents, reach, comparisons + *tested, live);
+        *tested += live;
+    }
+}
+
 // The reach scan consumes the shared REACH and COMPARE masks. With `comparisons`, each block's comparison nodes are
 // appended to it (`*listed` of them so far) for -Wtautological-constant-out-of-range-compare's batches
 // (check_common_range_lanes): a block holds one or two comparisons, and the batches' gathers take 16 at once.
@@ -10684,11 +10697,7 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
         }
         // The scan may list many comparisons after its last reach candidate. Drain every remaining batch, not just the
         // first 16, including when no reach candidate was found at all.
-        for (; comparisons != NULL && tested < listed; tested += 16)
-        {
-            const uint32_t remaining = listed - tested;
-            check_common_range_batch(graph, stream, types, parents, reach, comparisons + tested, remaining < 16 ? remaining : 16);
-        }
+        check_common_range_drain(graph, stream, types, parents, reach, comparisons, &tested, listed);
         // (Short of scratch for the list, the facts fail as a whole rather than leave comparisons out.)
         const bool short_of = enabled->out_of_range && !enabled->sign_compare && comparisons == NULL;
         check_common_assertion_reach(graph, stream, reach);
