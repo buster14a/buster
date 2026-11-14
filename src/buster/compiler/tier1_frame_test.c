@@ -584,19 +584,32 @@ static void tier1_frame_test_limits(Tier1FrameTest* test, Arena* output, Arena* 
     scratch->capacity = scratch->length + 32;
     tier1_frame_test_refusal(test, &request, output, scratch, TIER1_FRAME_CAPACITY);
     // Scratch with room for the columns but not for a stamp a row: the indices are sorted instead, to the same answers.
-    request.slots.column_count = 1u << 20;
-    indices[1] = (1u << 20) - 1;
-    scratch->capacity = scratch->length + 4096;
-    tier1_frame_test_case(test, &request, output, scratch, true);
-    indices[1] = 0;
-    tier1_frame_test_refusal(test, &request, output, scratch, TIER1_FRAME_INVALID);
-    indices[1] = 1u << 20;
-    tier1_frame_test_refusal(test, &request, output, scratch, TIER1_FRAME_INVALID);
+    static uint32_t wide[4][4096];
+    for (uint32_t row = 0; row < 4096; row += 4095)
+    {
+        wide[0][row] = 0;
+        wide[1][row] = 4;
+        wide[2][row] = 8;
+        wide[3][row] = 8;
+    }
+    Tier1FrameRequest sparse = request;
+    sparse.slots.start = wide[0];
+    sparse.slots.end = wide[1];
+    sparse.slots.size = wide[2];
+    sparse.slots.alignment = wide[3];
+    sparse.slots.column_count = 4096;
+    for (uint32_t room = 0; room < 2; room += 1)
+    {
+        scratch->capacity = room != 0 ? scratch_capacity : scratch->length + 2048;
+        indices[1] = 4095;
+        tier1_frame_test_case(test, &sparse, output, scratch, true);
+        indices[1] = 0;
+        tier1_frame_test_refusal(test, &sparse, output, scratch, TIER1_FRAME_INVALID);
+        indices[1] = 4096;
+        tier1_frame_test_refusal(test, &sparse, output, scratch, TIER1_FRAME_INVALID);
+    }
     scratch->capacity = scratch_capacity;
-    indices[1] = (1u << 20) - 1;
-    tier1_frame_test_case(test, &request, output, scratch, true);
     indices[1] = 1;
-    request.slots.column_count = 2;
     tier1_frame_test_refusal(test, &request, output, output, TIER1_FRAME_INVALID);
     AbiCall call = {
         .stack_alignment_log2 = 3,
