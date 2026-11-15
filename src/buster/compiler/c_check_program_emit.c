@@ -966,11 +966,6 @@ struct CheckProgramLanes
     // A test's room for one lane's window, past which its pushes fail as in a reservation the address space cut short:
     // the bodies then go again as one part (check_program_emit_windows_again). 0 for the window's whole capacity.
     uint64_t squeeze_window;
-    // --deferred-lowering (a test option, #2536's step 2.2c.3): a lowering that reads none of the controls' totals
-    // (CheckLowerShared.deferred), on one lane, without --tier1: the objects are the same. A test's first room for its
-    // writer's calls and arguments, which each part's fit grows (CheckLowerShared.deferred_call_room): 0 for the bound.
-    bool deferred_lowering;
-    uint32_t deferred_call_room;
     // --tier1-schedule's variant (BUSTER_CHECK_TIER1_SCHEDULE_*, #172's measurement): none by default.
     uint8_t tier1_schedule;
     // --tier1-passes='s turned passes (BUSTER_CHECK_TIER1_PASS_*, #139's measurement): 0, the default pipeline, by default.
@@ -990,6 +985,11 @@ struct CheckProgramLanes
     // driver keeps in .bss so that a compile touches only those it uses (#652).
     uint32_t arenas_used;
     CheckProgramLaneArenas arenas[BUSTER_CHECK_EMIT_MAX_LANES];
+    // --deferred-lowering (a test option, #2536's step 2.2c.3): a lowering that reads none of the controls' totals
+    // (CheckLowerShared.deferred), on one lane, without --tier1: the objects are the same. A test's first room for its
+    // writer's calls and arguments, which each part's fit grows (CheckLowerShared.deferred_call_room): 0 for the bound.
+    bool deferred_lowering;
+    uint32_t deferred_call_room;
 };
 
 // Whether --tier1's tables are built (check_program_emit_timed), once per process.

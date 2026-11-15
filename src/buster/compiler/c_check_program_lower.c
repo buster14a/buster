@@ -951,12 +951,6 @@ struct CheckLowerWriter
     uint32_t* lifetime_entries;
     uint32_t* lifetime_locals;
     uint32_t lifetime_count;
-    // With CheckLowerShared.deferred (#2536's step 2.2c.3), the arena of the writer's columns and the labels' and the
-    // lifetimes' rooms, which check_lower_writer_fit grows for a body that needs more (the entries' room is `capacity`,
-    // the calls' the ABI's); NULL where the columns share an arena with a part's work, which no growth may push on.
-    Arena* columns;
-    uint32_t label_room;
-    uint32_t lifetime_room;
     // The writer's room for the program's label symbols (CheckProgramLowered.label_symbols), which its parts take one after
     // another (check_lower_part): `label_symbol_used` of it kept by the parts before the current one.
     SymbolId* label_symbol_room;
@@ -1005,6 +999,12 @@ struct CheckLowerWriter
     bool template_check;
     uint64_t template_fast_nodes;
     uint64_t template_mismatches;
+    // The rooms of `label_entries` and `lifetime_entries`, the controls' and the lifetime events' (#2536's step 2.2c.3:
+    // a deferred lowering's are the bounds it takes, CheckLowerShared.deferred); and with it, the arena of the writer's
+    // columns, where check_lower_fit_calls pushes the calls' and the ABI's again for a part that needs more room.
+    uint32_t label_room;
+    uint32_t lifetime_room;
+    Arena* columns;
 };
 
 // The local that holds `object` (an index of local_map) in the body being lowered, or none (CheckLowerWriter.local_map).
@@ -18710,18 +18710,6 @@ struct CheckLowerShared
 {
     const CheckProgram* program;
     CheckProgramLowered* lowered;
-    // A lowering that reads none of the controls' totals (#2536's step 2.2c.3, check_lower_prepare's `deferred`), as the
-    // windows' will, which lower some bodies before the checker has written the rest: the rooms take the bounds the
-    // checker's setup knows (CheckProgram.control_capacity, chain_stop_capacity), the calls' is fitted to each part's
-    // cleanups (check_lower_deferred_part), and the jump tables are decided with each part's lowering, for the bodies up
-    // to its end (`deferred_tables`).
-    bool deferred;
-    CheckLowerDeferred* deferred_tables;
-    // The room of the jump tables' labels' symbols: CheckProgramLowered.case_symbol_count, or a deferred lowering's bound.
-    uint32_t case_symbol_room;
-    // A test's first room for a deferred lowering's writer's calls and arguments, which each part's fit grows
-    // (CheckProgramLanes.deferred_call_room): 0 for the program's bound.
-    uint32_t deferred_call_room;
     CheckLowerSwitchTrees switch_trees;
     // Every type's classification, made before the bodies: a body's struct or union result decides its returns
     // (check_lower_by_value), and a variadic definition's named registers its va_start.
@@ -18796,6 +18784,17 @@ struct CheckLowerShared
     // The first of the jump tables' provisional symbols (check_lower_switch_tables decided the tables), after the runtime
     // functions': table t's address is provisional_tables + t while the bodies compile.
     SymbolId provisional_tables;
+    // The room of the jump tables' labels' symbols: CheckProgramLowered.case_symbol_count, or a deferred lowering's bound.
+    uint32_t case_symbol_room;
+    // A lowering that reads none of the controls' totals (#2536's step 2.2c.3, check_lower_prepare's `deferred`), as the
+    // windows' will, which lower some bodies before the checker has written the rest: the rooms take the bounds the
+    // checker's setup knows (CheckProgram.control_capacity, chain_stop_capacity), the calls' is fitted to each part's
+    // cleanups (check_lower_deferred_part), and the jump tables are decided with each part's lowering, for the bodies up
+    // to its end (`deferred_tables`). A test's first room for its writer's calls and arguments, which each part's fit
+    // grows (CheckProgramLanes.deferred_call_room): 0 for the program's bound.
+    bool deferred;
+    uint32_t deferred_call_room;
+    CheckLowerDeferred* deferred_tables;
 };
 
 // The steps of a part's lowering (check_lower_part) that can fail, in the order source order's lowering takes them for
@@ -19199,6 +19198,36 @@ static uint64_t check_lower_cleanup_calls(const CheckProgram* program, uint32_t 
     return calls;
 }
 
+// A deferred lowering's tables (CheckLowerShared.deferred_tables): their room in `lowered` from `output`, of
+// check_lower_switch_room's bound, and the cases' from `scratch`, which each part's lowering takes
+// (check_lower_deferred_part); and the bound of their labels' symbols. Out of line, so that the preparation every lowering
+// runs is laid out as it was. False where an arena has no room or the labels' bound has no 32-bit count.
+static __attribute__((noinline)) bool check_lower_prepare_tables(CheckLowerShared* shared, CheckProgramLowered* lowered, const CheckProgram* program, Arena* output,
+                                                                 Arena* scratch)
+{
+    uint64_t labels = 0;
+    const uint32_t room = check_lower_switch_room(program, true, &labels);
+    CheckLowerDeferred* tables = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerDeferred, 1);
+    const bool tabled = tables != NULL && room != 0 && program->stream != 0;
+    lowered->tables = tabled ? BUSTER_ARENA_PUSH_ARRAY(output, CheckLowerTable, room) : NULL;
+    CheckLowerCaseRange* cases = tabled ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerCaseRange, program->case_count) : NULL;
+    CheckLowerCaseRange* sorted = tabled ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerCaseRange, program->case_count) : NULL;
+    const bool valid = tables != NULL && labels < UINT32_MAX && (!tabled || (lowered->tables != NULL && cases != NULL && sorted != NULL));
+    if (valid)
+    {
+        *tables = (CheckLowerDeferred){
+            .capacity = tabled ? room : 0,
+            .cases = cases,
+            .sorted = sorted,
+            .output = output,
+            .scratch = scratch,
+        };
+        shared->deferred_tables = tables;
+        shared->case_symbol_room = (uint32_t)labels;
+    }
+    return valid;
+}
+
 // What the lowering of every body shares (CheckLowerShared), its tables from `scratch`, and the program's lowering's
 // columns from `output`: its helpers, its label symbols' room, its functions and, with `sources`, their entries' tokens.
 // A `deferred` one reads none of the controls' totals (CheckLowerShared.deferred). Returns false with `lowered`'s failure
@@ -19391,29 +19420,10 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     }
     // Every switch's jump table, decided before the bodies, or a deferred lowering's room for them, which each part's
     // lowering decides (check_lower_deferred_part); the label symbols' room holds the tables' labels too.
-    uint64_t case_labels = 0;
-    const uint32_t table_room = deferred ? check_lower_switch_room(program, true, &case_labels) : 0;
-    CheckLowerDeferred* deferred_tables = valid && deferred ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerDeferred, 1) : NULL;
-    const bool tabled = deferred_tables != NULL && table_room != 0 && program->stream != 0;
-    lowered->tables = tabled ? BUSTER_ARENA_PUSH_ARRAY(output, CheckLowerTable, table_room) : NULL;
-    CheckLowerCaseRange* deferred_cases = tabled ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerCaseRange, program->case_count) : NULL;
-    CheckLowerCaseRange* deferred_sorted = tabled ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerCaseRange, program->case_count) : NULL;
-    valid = valid && (!deferred || (deferred_tables != NULL && case_labels < UINT32_MAX)) &&
-            (!tabled || (lowered->tables != NULL && deferred_cases != NULL && deferred_sorted != NULL));
-    if (valid && deferred)
-    {
-        *deferred_tables = (CheckLowerDeferred){
-            .capacity = tabled ? table_room : 0,
-            .cases = deferred_cases,
-            .sorted = deferred_sorted,
-            .output = output,
-            .scratch = scratch,
-        };
-        shared->deferred_tables = deferred_tables;
-    }
-    valid = valid && (deferred || check_lower_switch_tables(lowered, &shared->switch_trees, program, sparse_trees, output, scratch));
-    valid = valid && (uint64_t)shared->provisional_tables + (deferred ? table_room : lowered->table_count) < UINT32_MAX;
-    shared->case_symbol_room = deferred ? (uint32_t)case_labels : lowered->case_symbol_count;
+    valid = valid && (deferred ? check_lower_prepare_tables(shared, lowered, program, output, scratch) :
+                                 check_lower_switch_tables(lowered, &shared->switch_trees, program, sparse_trees, output, scratch));
+    valid = valid && (uint64_t)shared->provisional_tables + (deferred ? shared->deferred_tables->capacity : lowered->table_count) < UINT32_MAX;
+    shared->case_symbol_room = deferred ? shared->case_symbol_room : lowered->case_symbol_count;
     const uint64_t label_room = valid ? (uint64_t)shared->label_symbol_capacity + shared->case_symbol_room : 0;
     lowered->label_symbols = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, label_room) : 0;
     valid &= label_room == 0 || lowered->label_symbols != 0;
