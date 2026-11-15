@@ -26,6 +26,7 @@
 _Static_assert(BUSTER_TIER1_ACCESS_DIRECT == BUSTER_TIER0_ACCESS_DIRECT && BUSTER_TIER1_ACCESS_GOT == BUSTER_TIER0_ACCESS_GOT && BUSTER_TIER1_ACCESS_LOCAL_EXEC == BUSTER_TIER0_ACCESS_LOCAL_EXEC &&
                    BUSTER_TIER1_ACCESS_INITIAL_EXEC == BUSTER_TIER0_ACCESS_INITIAL_EXEC,
                "Tier 1 reads Tier 0's access column");
+_Static_assert(BUSTER_TIER1_EMIT_LITERAL == BUSTER_EMITTED_LITERAL, "Tier 1's literals' targets are the emitted code's (#2744)");
 
 // The emitter's nested cause domains, indexed by Tier1EmitCause. The public emitter error wraps these; the outcome
 // keeps the nested cause and error too, and the full table is regression-tested below (test-check-lanes).
@@ -728,11 +729,14 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     uint32_t* branches = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)selected->branch_count + 1) : 0;
     uint32_t* targets = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)selected->branch_count + 1) : 0;
     LinkReference* references = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)emitted.reference_count + 1) : 0;
+    // Its literals (#2744, EmittedLiteral), which its references name as Tier 1 numbered them (BUSTER_TIER1_EMIT_LITERAL).
+    EmittedLiteral* literals = stage == CHECK_TIER1_COMPILED && emitted.literal_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, EmittedLiteral, emitted.literal_count) : 0;
     // Each label's first record, where the emission defines its symbol (#789).
     uint32_t* labels = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)emitted.label_count + 1) : 0;
     // Its frame's events (#1056); with -g, source/storage ranges are published only after final record scheduling.
     EmissionFrameEvent* frames = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, EmissionFrameEvent, (uint64_t)emitted.frame_event_count + 1) : 0;
-    if (stage == CHECK_TIER1_COMPILED && (records == 0 || branches == 0 || targets == 0 || references == 0 || labels == 0 || frames == 0))
+    if (stage == CHECK_TIER1_COMPILED && (records == 0 || branches == 0 || targets == 0 || references == 0 || labels == 0 || frames == 0 ||
+                                          (emitted.literal_count != 0 && literals == 0)))
     {
         arena_pop_to(output, mark);
         outcome = check_tier1_failure(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_OUTPUT, BUSTER_IR_NONE, 0);
@@ -753,6 +757,11 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         if (emitted.reference_count != 0)
         {
             memcpy(references, emitted.references, (uint64_t)emitted.reference_count * sizeof(LinkReference));
+        }
+        for (uint32_t k = 0; k < emitted.literal_count; k += 1)
+        {
+            memcpy(literals[k].words, emitted.literals[k].words, sizeof(literals[k].words));
+            literals[k].width = emitted.literal_widths[k];
         }
         if (emitted.label_count != 0)
         {
@@ -832,6 +841,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .branch_count = selected->branch_count,
             .references = references,
             .reference_count = emitted.reference_count,
+            .literals = literals,
+            .literal_count = emitted.literal_count,
             .label_records = labels,
             .label_count = emitted.label_count,
             .local_count = sources ? function->local_count : 0,

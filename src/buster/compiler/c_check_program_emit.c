@@ -2569,9 +2569,14 @@ static bool check_program_emit_window_keep(CheckEmitRun* run, uint32_t b, Arena*
     }
     const uint32_t* asm_label_names = check_program_emit_window_copy(kept, window, mark, code->asm_label_names, code->asm_label_count, sizeof(uint32_t), &valid);
     const Tier0Home* local_homes = check_program_emit_window_copy(kept, window, mark, code->local_homes, code->local_count, sizeof(Tier0Home), &valid);
+    // Its literals (#2744), which only Tier 1's code has: windows are Tier 0's (CheckEmitRun.window_tokens), so a body's
+    // count is checked before anything else is (a window's every body otherwise pays a call for none).
+    const EmittedLiteral* literals = code->literal_count != 0 ? check_program_emit_window_copy(kept, window, mark, code->literals, code->literal_count, sizeof(EmittedLiteral), &valid) :
+                                                                code->literals;
     if (valid)
     {
         code->references = references;
+        code->literals = literals;
         code->records = records;
         code->asm_label_names = asm_label_names;
         code->local_homes = local_homes;
@@ -3526,6 +3531,114 @@ static bool check_program_access(CheckProgramCode* code, const CheckProgram* pro
     return valid;
 }
 
+// The unit's literal pool (#2744, EmittedLiteral): the distinct literals of its live bodies' codes, `count` entries, each
+// the first literal of its width and bytes in source order (`first`: its body << 32 | its index among the body's
+// literals), each body's literals' entries (`entries`, body b's from `offsets[b]` to `offsets[b + 1]`), and the entries'
+// symbols, entry u's symbol_base + u.
+typedef struct CheckEmitLiterals CheckEmitLiterals;
+struct CheckEmitLiterals
+{
+    uint64_t* first;
+    uint32_t* entries;
+    uint32_t* offsets;
+    uint32_t count;
+    SymbolId symbol_base;
+};
+
+// The pool's sections (#2744), as GCC's mergeable constants have them: read-only data of entries of one width, which a
+// linker merges across objects (SHF_MERGE, the width the entry size): a 16-byte literal's, a 32-byte one's, a 64-byte
+// one's. clang puts its 64-byte constants in .rodata, unmerged.
+static const ObjectAtomSection check_program_literal_sections[3] = {
+    { .name = { .pointer = (char*)".rodata.cst16", .length = sizeof(".rodata.cst16") - 1 }, .type = SHT_PROGBITS, .flags = SHF_ALLOC | SHF_MERGE, .entry_size = 16 },
+    { .name = { .pointer = (char*)".rodata.cst32", .length = sizeof(".rodata.cst32") - 1 }, .type = SHT_PROGBITS, .flags = SHF_ALLOC | SHF_MERGE, .entry_size = 32 },
+    { .name = { .pointer = (char*)".rodata.cst64", .length = sizeof(".rodata.cst64") - 1 }, .type = SHT_PROGBITS, .flags = SHF_ALLOC | SHF_MERGE, .entry_size = 64 },
+};
+
+// A literal's width, 16, 32 or 64 bytes, as its pool's section's index (check_program_literal_sections); 3 for another.
+static uint32_t check_program_literal_class(const EmittedLiteral* literal)
+{
+    return literal->width == 16 ? 0u : literal->width == 32 ? 1u : literal->width == 64 ? 2u : 3u;
+}
+
+// A literal's hash, of its width and its words up to it (those past it are zero): each word mixed in by a multiply, and
+// the result's high bits folded down, so that the table's mask reads all of them.
+static uint64_t check_program_literal_hash(const EmittedLiteral* literal)
+{
+    uint64_t hash = literal->width * 0x9e3779b97f4a7c15ull;
+    for (uint32_t w = 0; w < literal->width / 8 && w < 8; w += 1)
+    {
+        hash = (hash ^ literal->words[w]) * 0xff51afd7ed558ccdull;
+    }
+    return hash ^ (hash >> 32);
+}
+
+// The pool of the live bodies' literals (#2744): bodies 0 to `count` - 1 of `codes`, but those `dead` marks (null for
+// none), whose literals are `room` at most. Its entries are numbered in source order of their first literals, so that the
+// unit's object is the same at any number of lanes. A table of twice as many slots as literals (a power of two) by their
+// hash tells them apart, one probe each mostly: a unit's literals are its Tier 1 bodies' vector constants, tens to a few
+// hundred, a pass too small for vectors to pay. Its columns in `scratch`.
+// Returns false for want of memory, or for a literal of another width than 16, 32 or 64 bytes.
+static bool check_program_emit_literals(CheckEmitLiterals* literals, const EmittedCode* codes, uint32_t count, const uint8_t* dead, uint64_t room, Arena* scratch)
+{
+    uint64_t capacity = 16;
+    while (capacity < 2 * room)
+    {
+        capacity *= 2;
+    }
+    *literals = (CheckEmitLiterals){ 0 };
+    literals->offsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1);
+    literals->entries = room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, room) : 0;
+    literals->first = room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, room) : 0;
+    uint32_t* slots = room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity) : 0;
+    bool valid = literals->offsets != 0 && (room == 0 || (literals->entries != 0 && literals->first != 0 && slots != 0));
+    if (valid && room != 0)
+    {
+        memset(slots, 0, capacity * sizeof(uint32_t));
+    }
+    uint64_t at = 0;
+    for (uint32_t b = 0; valid && b < count; b += 1)
+    {
+        literals->offsets[b] = (uint32_t)at;
+        const uint32_t own = dead == NULL || dead[b] == 0 ? codes[b].literal_count : 0;
+        valid = at + own <= room;
+        for (uint32_t k = 0; valid && k < own; k += 1)
+        {
+            const EmittedLiteral* literal = codes[b].literals + k;
+            valid = check_program_literal_class(literal) < 3;
+            uint64_t slot = valid ? check_program_literal_hash(literal) & (capacity - 1) : 0;
+            uint32_t entry = valid ? UINT32_MAX : 0;
+            while (entry == UINT32_MAX)
+            {
+                const uint32_t held = slots[slot];
+                const uint64_t first = held != 0 ? literals->first[held - 1] : 0;
+                const EmittedLiteral* other = held != 0 ? codes[first >> 32].literals + (uint32_t)first : 0;
+                if (held == 0)
+                {
+                    entry = literals->count;
+                    literals->first[entry] = (uint64_t)b << 32 | k;
+                    literals->count = entry + 1;
+                    slots[slot] = entry + 1;
+                }
+                else if (other->width == literal->width && memcmp(other->words, literal->words, literal->width) == 0)
+                {
+                    entry = held - 1;
+                }
+                else
+                {
+                    slot = (slot + 1) & (capacity - 1);
+                }
+            }
+            literals->entries[at + k] = entry;
+        }
+        at += own;
+    }
+    if (valid)
+    {
+        literals->offsets[count] = (uint32_t)at;
+    }
+    return valid;
+}
+
 // With `verify`, every function's records must pass x86_validate before they are sized and encoded (the tests', and
 // #145's c-testsuite harness's, check of Tier 0's output), or the emission fails with CHECK_PROGRAM_BACKEND; without
 // it, only their branch columns are checked (branch_sizing_validate_branches), which sizing needs inside each
@@ -4310,9 +4423,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         valid = false;
     }
     uint64_t references = 0;
+    // The bodies' literals (#2744): the pool's entries, symbols and names at most, its atoms among the units'.
+    uint64_t literal_room = 0;
     for (uint32_t b = 0; valid && b < count; b += 1)
     {
         references += run.codes[b].reference_count;
+        literal_room += run.codes[b].literal_count;
         result->records += run.codes[b].count;
         result->deferred += run.codes[b].deferred;
     }
@@ -4602,14 +4718,17 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         cpu_symbols += program->input->symbol_pragmas->records[i].alias_target != BUSTER_CHECK_NONE ? 1u : 0u;
     }
     const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + pools->count + runtime.atoms + (frames != 0 ? 1 : 0) +
-                                (valid ? result->lowered.table_count : 0) + file_atoms + structor_count + unit_atoms + patched + cpu_atoms;
+                                (valid ? result->lowered.table_count : 0) + file_atoms + structor_count + unit_atoms + patched + cpu_atoms + literal_room;
     const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries + structor_count + unit_fixups + patched +
                                  cpu_fixups;
     const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references + runtime.wide_addends + unit_wide;
     const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.symbols +
-                                  unit_symbols + patched + cpu_symbols;
+                                  unit_symbols + patched + cpu_symbols + literal_room;
     const uint64_t name_count = (uint64_t)program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.names +
-                                unit_names + patched + cpu_symbols;
+                                unit_names + patched + cpu_symbols + literal_room;
+    // A unit with literals keeps every symbol below their provisional targets (BUSTER_EMITTED_LITERAL), so that a target
+    // past it is a literal's however the runtime functions' and jump tables' references were renamed.
+    valid = valid && (literal_room == 0 || symbol_count < BUSTER_EMITTED_LITERAL);
     valid = valid && atom_count < UINT32_MAX && fixup_count < UINT32_MAX && wide_count < UINT32_MAX && symbol_count < UINT32_MAX &&
             name_count < UINT32_MAX && (uint64_t)data_capacity.priorities + runtime.priorities + structor_count < UINT32_MAX;
     const LinkCapacity capacity = {
@@ -4956,6 +5075,20 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             rows->dead = kept_dead;
         }
     }
+    // The literal pool (#2744, check_program_emit_literals): the live bodies' distinct literals, each an entry with its
+    // symbol, local, with a name a source can't spell, as clang's .LCPI labels are, which -c's object keeps where a
+    // relocation of a merged section needs it (object_uses_section_symbol); the program's definition, as a jump table's.
+    CheckEmitLiterals literals = { 0 };
+    valid = valid && (literal_room == 0 || check_program_emit_literals(&literals, run.codes, count, dead, literal_room, scratch));
+    literals.symbol_base = valid ? (SymbolId)result->link.symbols.count : 0;
+    for (uint32_t u = 0; valid && u < literals.count; u += 1)
+    {
+        char spelling[48];
+        const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_literal_%u", u);
+        const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
+        valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_NOTYPE,
+                                            binding != NULL ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE) == literals.symbol_base + u;
+    }
     // Every symbol of the program's exists: an executable's runtime joins now, before the program's atoms, with the
     // symbols this emission and the static data will define marked as the program's definitions (bind.c).
     for (uint32_t b = 0; valid && binding != NULL && b < count + helpers->count + binding->data_count; b += 1)
@@ -5047,16 +5180,40 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             references[i].target = valid ? asm_symbols[references[i].target] : 0;
         }
     }
+    // Every reference of a literal (#2744: BUSTER_EMITTED_LITERAL + k, its body's literal k) takes its pool entry's symbol,
+    // in the live bodies with literals: last, as no symbol, provisional or not, reaches the tag. One that names no literal
+    // of its body's is the code's own failure.
+    for (uint32_t b = 0; valid && literals.count != 0 && b < count; b += 1)
+    {
+        const EmittedCode* code = run.codes + b;
+        const uint32_t first = literals.offsets[b];
+        const uint32_t own = literals.offsets[b + 1] - first;
+        for (uint32_t i = 0; valid && own != 0 && i < code->reference_count; i += 1)
+        {
+            const uint32_t target = code->references[i].target;
+            const bool literal = target >= BUSTER_EMITTED_LITERAL;
+            valid = !literal || target - BUSTER_EMITTED_LITERAL < own;
+            code->references[i].target = literal && valid ? literals.symbol_base + literals.entries[first + target - BUSTER_EMITTED_LITERAL] : target;
+        }
+        if (!valid)
+        {
+            result->status = CHECK_PROGRAM_BACKEND;
+            result->reason = "a Tier 1 literal's reference names no literal of its function";
+            result->token = program->bodies[b].declaration;
+        }
+    }
     // The bodies' atoms, symbols and fixups in source order, each body's code as its lane made it, then the helpers', which
     // are encoded here: the labels' symbols, each function's after the ones before it (CheckProgramLowered.label_symbols),
     // and with unwind tables each function's frame, as its code is sized.
     check_clock_mark(stage_clock, CHECK_STAGE_EMIT_SETUP);
-    result->unit_atoms = valid && unit_atoms != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, unit_atoms) : 0;
-    result->unit_sections = valid && unit_atoms != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, ObjectAtomSection, unit_atoms) : 0;
+    // The units' atoms with their sections, and the literal pool's after them (#2744).
+    const uint64_t sectioned_atoms = unit_atoms + literals.count;
+    result->unit_atoms = valid && sectioned_atoms != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, sectioned_atoms) : 0;
+    result->unit_sections = valid && sectioned_atoms != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, ObjectAtomSection, sectioned_atoms) : 0;
     result->unit_atom_count = 0;
     result->unit_temporary = valid && unit_symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, unit_symbols) : 0;
     result->unit_temporary_count = 0;
-    valid = valid && (unit_atoms == 0 || (result->unit_atoms != 0 && result->unit_sections != 0)) &&
+    valid = valid && (sectioned_atoms == 0 || (result->unit_atoms != 0 && result->unit_sections != 0)) &&
             (unit_symbols == 0 || result->unit_temporary != 0);
     // The file-scope assembly's atoms, symbols and fixups (check_program_asm_plan_file), before the functions', as clang's
     // assembly output has a module's asm first: each atom in its section in -c's object (CheckProgramCode.asm_sections).
@@ -5399,6 +5556,26 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         if (valid)
         {
             result->link.symbols.source[symbol] = BUSTER_LINK_SOURCE_PROGRAM;
+        }
+    }
+    // The literal pool's entries (#2744): each an atom of its own, aligned to its width so that no load of it splits a line,
+    // in its width's mergeable section (check_program_literal_sections), as an asm unit's atom is in its own.
+    for (uint32_t u = 0; valid && u < literals.count; u += 1)
+    {
+        const uint64_t first = literals.first[u];
+        const EmittedLiteral* literal = run.codes[first >> 32].literals + (uint32_t)first;
+        const uint32_t class = check_program_literal_class(literal);
+        const uint32_t width = literal->width;
+        uint8_t* data = arena_push(bytes, width, width);
+        const AtomId atom = data != 0 ? link_add_atom(&result->link, BUSTER_LINK_CLASS_RODATA, (uint8_t)(4 + class), width, memcpy(data, literal->words, width), 0) : 0;
+        const SymbolId symbol = literals.symbol_base + u;
+        valid = atom != 0 && link_define_symbol(&result->link, symbol, atom, 0, width);
+        if (valid)
+        {
+            result->link.symbols.source[symbol] = BUSTER_LINK_SOURCE_PROGRAM;
+            result->unit_atoms[result->unit_atom_count] = atom;
+            result->unit_sections[result->unit_atom_count] = check_program_literal_sections[class];
+            result->unit_atom_count += 1;
         }
     }
     // The constructors' and destructors' entries (#147): a pointer to the function each, in an init or fini array atom
