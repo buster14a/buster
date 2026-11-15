@@ -6,8 +6,97 @@
 // scalar/vector readers run through the direct linker and through an ELF object linked by the system toolchain.
 // Clang supplies an external comparison; zero errors is also stated independently.
 
+// A selected object's .rodata must have only the selected function's initializer image. The full checked control
+// table also contains the unused function's initializer; --lower-all deliberately keeps that function and its image.
+static void check_test_driver_selected_initializer_pool(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char source[] = "tests/driver/selected_initializer_pool.c";
+    char reference[256], object[256];
+    snprintf(reference, sizeof(reference), "%s/selected-init-pool-clang.o", directory);
+    snprintf(object, sizeof(object), "%s/selected-init-pool.o", directory);
+    char* text = NULL;
+    char* reference_arguments[] = { (char*)clang, "-std=gnu17", "-O0", "-c", "-o", reference, source, NULL };
+    const int reference_status = check_test_driver_spawn(reference_arguments, &text);
+    if (reference_status != 0 && text != NULL)
+    {
+        fprintf(stderr, "%s", text);
+    }
+    free(text);
+    Arena reference_arena = arena_reserve(UINT64_C(1) << 22);
+    CheckTestElf reference_elf = { 0 };
+    const bool reference_read = reference_status == 0 && reference_arena.base != NULL &&
+                                check_test_elf_open(&reference_elf, object_test_read_file(&reference_arena, reference));
+    const Elf64_Shdr* reference_rodata = NULL;
+    for (uint32_t s = 0; reference_read && s < reference_elf.section_count; s += 1)
+    {
+        const char* name = check_test_elf_section_name(&reference_elf, s);
+        if (name != NULL && strcmp(name, ".rodata") == 0)
+        {
+            reference_rodata = reference_elf.sections + s;
+        }
+    }
+    const bool reference_valid = reference_rodata != NULL && reference_rodata->sh_size == 256 &&
+                                 check_test_elf_range(reference_elf.file, reference_rodata->sh_offset, reference_rodata->sh_size) &&
+                                 check_test_elf_defined(&reference_elf, "used") != 0 && check_test_elf_defined(&reference_elf, "dead") == 0;
+    check_test_expect(test, reference_valid, "Clang emits the live initializer image and omits the dead function");
+    for (uint32_t mode = 0; mode < 4; mode += 1)
+    {
+        const bool scalar = (mode & 1) != 0;
+        const bool all = (mode & 2) != 0;
+        char* arguments[12] = { (char*)executable };
+        uint32_t count = 1;
+        if (scalar)
+        {
+            arguments[count++] = "--scalar";
+        }
+        if (all)
+        {
+            arguments[count++] = "--lower-all";
+        }
+        arguments[count++] = "-std=gnu17";
+        arguments[count++] = "-c";
+        arguments[count++] = "-o";
+        arguments[count++] = object;
+        arguments[count++] = source;
+        arguments[count] = NULL;
+        text = NULL;
+        const int status = check_test_driver_spawn(arguments, &text);
+        if (status != 0 && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        free(text);
+        Arena arena = arena_reserve(UINT64_C(1) << 22);
+        CheckTestElf elf = { 0 };
+        const bool read = status == 0 && arena.base != NULL && check_test_elf_open(&elf, object_test_read_file(&arena, object));
+        const Elf64_Shdr* rodata = NULL;
+        for (uint32_t s = 0; read && s < elf.section_count; s += 1)
+        {
+            const char* name = check_test_elf_section_name(&elf, s);
+            if (name != NULL && strcmp(name, ".rodata") == 0)
+            {
+                rodata = elf.sections + s;
+            }
+        }
+        const bool shape = read && rodata != NULL && rodata->sh_size == (all ? 512 : 256) &&
+                           check_test_elf_range(elf.file, rodata->sh_offset, rodata->sh_size) &&
+                           check_test_elf_defined(&elf, "used") != 0 && (check_test_elf_defined(&elf, "dead") != 0) == all;
+        const bool bytes = shape && (all || (reference_valid && memcmp(elf.file.pointer + rodata->sh_offset,
+                                  reference_elf.file.pointer + reference_rodata->sh_offset, 256) == 0));
+        char description[160];
+        snprintf(description, sizeof(description), "selected initializer pools match object selection (%s, %s)",
+                 scalar ? "scalar" : "vector", all ? "all bodies" : "selected bodies");
+        check_test_expect(test, bytes, description);
+        arena_release(&arena);
+        unlink(object);
+    }
+    arena_release(&reference_arena);
+    unlink(reference);
+}
+
 static void check_test_driver_string_pool(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+    check_test_driver_selected_initializer_pool(test, clang, executable, directory);
     static const char program[] =
         "int printf(const char*, ...);\n"
         "static const char *dead(void) { return \"survivor\"; }\n"
