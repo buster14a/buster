@@ -8,9 +8,15 @@
 // statement expression (their starts), a callee without arguments as another's argument (two insertions at one entry),
 // parameters of four classes (bindings one after its argument), a callee with a loop, one with two returns (refused, a
 // call), a cycle of two (its closing call a call), a callee through a pointer, a pointer parameter, long double, a struct
-// argument and result in registers, a chain of wrappers (_mm256_mask_add_epi32's), and intrinsics of 16, 32 and 64
-// bytes. Built at x86-64-v4 by the vector path, the scalar twin and --tier0-no-inline: each runs as clang -O0's build
-// does where the host has x86-64-v4, the two paths' objects are the same bytes, and the control's differs.
+// argument and result in registers, a chain of wrappers (_mm256_mask_add_epi32's), intrinsics of 16, 32 and 64
+// bytes, and a callee that calls a runtime function (an __int128 division's __divti3), which a caller in another part,
+// with no runtime call of its own, takes by its final symbol (the default windows lower each callee as a part of its
+// own: its provisional symbol named no symbol, #1398). Built at x86-64-v4 by the vector path, the scalar twin and
+// --tier0-no-inline: each runs as clang -O0's build does where the host has x86-64-v4, the two paths' objects are the
+// same bytes, and the control's differs. The object leaves out the callees spliced at every call (#1398 step 3) and keeps
+// those a call or an address still refers to (the cycle's, the one of two returns, the one whose address is taken), as
+// the control keeps every one; and it is the same bytes by 4 lanes and without holding the callees' code for the last
+// pass (--tier0-no-hold).
 //
 // The lanes' fixture (#1398's review): a chain of 20 always_inline functions, past the expansion's depth bound, and a
 // cycle of two, reached from 40 roots at every depth, which the lanes take in an order their timing decides. Which
@@ -36,6 +42,7 @@ static const char check_test_tier0_inline_source[] =
     "AI int pong(int n) { return n <= 0 ? 0 : ping(n - 1) + 1; }\n"
     "AI void bump(int* p, int k) { *p += k; }\n"
     "AI long double ld(long double x, int k) { return x * k + 0.5L; }\n"
+    "AI __int128 quot(__int128 a, __int128 b) { return a / b; }\n"
     "static __attribute__((noinline)) int kept(int x) { return x * 7; }\n"
     "__attribute__((noinline)) __m512i mix(__m512i a, __m512i b, __m512i c)\n"
     "{\n"
@@ -87,7 +94,8 @@ static const char check_test_tier0_inline_source[] =
     "    for (int i = 0; i < n; i += 1) bump(&b, i % 3 ? add3(i, 1, 2) : seven());\n"
     "    long double l = ld(ld(1.25L, n), m);\n"
     "    int (*fp)(int, int, int) = add3;\n"
-    "    return (long long)x * 1000003 + y * 1009 + z * 17 + (long long)(d * 8) + s * 101 + r * 7 + b + (long long)(l * 4) + fp(n, m, 2);\n"
+    "    return (long long)x * 1000003 + y * 1009 + z * 17 + (long long)(d * 8) + s * 101 + r * 7 + b + (long long)(l * 4) + fp(n, m, 2) +\n"
+    "           (long long)quot((__int128)n << 70, 12345 + m);\n"
     "}\n"
     "int main(void)\n"
     "{\n"
@@ -350,6 +358,47 @@ static void check_test_driver_tier0_inline(CheckTest* test, const char* clang, c
     check_test_expect(test, made[0] && made[2] && !check_test_driver_same_files(objects[0], objects[2]), "--tier0-no-inline keeps the calls the splice inlines");
     check_test_expect(test, made[0] && made[3] && made[4] && check_test_driver_same_files(objects[0], objects[3]) && check_test_driver_same_files(objects[0], objects[4]),
                       "windows of one token make the object of one window, by both paths");
+    // The callees left out (#1398 step 3): those spliced at every call, wrappers among them; the others a kept call or an
+    // address refers to, and the noinline function. The control defines them all.
+    static const char* const spliced[] = { "swap", "twist", "mixf", "seven", "sum_to", "bump", "ld", "quot", "_mm512_add_epi32", "_mm256_mask_add_epi32", "_mm_slli_epi32" };
+    static const char* const still_called[] = { "add3", "sgn", "ping", "pong", "kept" };
+    for (uint32_t build = 0; build < 3; build += 2)
+    {
+        Arena arena = arena_reserve(UINT64_C(1) << 26);
+        CheckTestElf elf = { 0 };
+        const bool read = made[build] && arena.base != 0 && check_test_elf_open(&elf, object_test_read_file(&arena, objects[build]));
+        bool kept = read;
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(still_called); k += 1)
+        {
+            kept = kept && check_test_elf_defined(&elf, still_called[k]) != 0;
+        }
+        bool left = read;
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(spliced); k += 1)
+        {
+            left = left && (check_test_elf_defined(&elf, spliced[k]) == 0) == (build == 0);
+        }
+        check_test_expect(test, kept && left, build == 0 ? "Tier 0's object leaves out the callees it spliced at every call and keeps the referenced ones" :
+                                                           "--tier0-no-inline's object defines every callee");
+        arena_release(&arena);
+    }
+    // The last pass's code is the lanes' (#1398 step 3): the same object by 4 lanes and with every callee's code made on
+    // its lane.
+    char by_lanes[512];
+    char unheld[512];
+    snprintf(by_lanes, sizeof(by_lanes), "%s/tier0-inline-lanes4.o", directory);
+    snprintf(unheld, sizeof(unheld), "%s/tier0-inline-unheld.o", directory);
+    char* lanes_arguments[] = { (char*)executable, "-march=x86-64-v4", "--lanes", "4", "-c", "-o", by_lanes, unit, NULL };
+    char* unheld_arguments[] = { (char*)executable, "-march=x86-64-v4", "--tier0-no-hold", "-c", "-o", unheld, unit, NULL };
+    text = NULL;
+    const bool lanes_built = made[0] && check_test_driver_spawn(lanes_arguments, &text) == 0;
+    free(text);
+    text = NULL;
+    const bool unheld_built = made[0] && check_test_driver_spawn(unheld_arguments, &text) == 0;
+    free(text);
+    const bool same = lanes_built && unheld_built && check_test_driver_same_files(objects[0], by_lanes) && check_test_driver_same_files(objects[0], unheld);
+    unlink(by_lanes);
+    unlink(unheld);
+    check_test_expect(test, same, "Tier 0's inlining fixture is the same object by 4 lanes and with --tier0-no-hold");
     for (uint32_t build = 0; build < 5; build += 1)
     {
         if (made[build])

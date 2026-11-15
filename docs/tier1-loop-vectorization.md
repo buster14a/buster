@@ -229,8 +229,10 @@ The design consequently ranks the work as follows:
    and arithmetic rows into the vector rows Tier 1 already emits.
 2. **Loop unrolling:** the separate 1.41 and 1.64 components in clang's
    scalar loops. It should be designed and measured on the vector loops after
-   step 1, not hidden inside their legality rules. Filed as the unowned
-   follow-up #2755.
+   step 1, not hidden inside their legality rules. #2755's pass
+   ([loop unrolling](tier1-loop-unrolling.md)) unrolls today's scalar counted
+   loops and takes a vector main loop the same way; it asks this pass to mark
+   its scalar remainders, which it then refuses.
 3. **Back-end residuals in explicit vector loops:** the 1.29 same-source gap
    at znver5, including constants and splats, rematerialized loop bounds,
    unfolded loads, extra moves around masked operations and the clamp/max

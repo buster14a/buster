@@ -256,6 +256,9 @@ enum
     CHECK_WARNING_ID_UNDERLYING_ATOMIC_QUALIFIER = 162,
     // Member access on an atomic struct/union (#2444): a deferred runtime warning that defaults to an error.
     CHECK_WARNING_ID_ATOMIC_ACCESS = 163,
+    // Zero-size records and constant arrays (#2409), both ignored by default. Only the array warning is pedantic's.
+    CHECK_WARNING_ID_CXX_ZERO_SIZE_RECORD = 164,
+    CHECK_WARNING_ID_ZERO_LENGTH_ARRAY = 165,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -552,6 +555,10 @@ typedef enum CheckWarningEventKind
     // one with members (unnamed bit-fields), "struct without named members is a GNU extension", else "empty struct is a GNU
     // extension".
     CHECK_WARNING_EVENT_GNU_EMPTY_STRUCT,
+    // A zero-size record's C++ compatibility warning: data bit 0 selects union, bit 1 nonempty, bit 2 multiple named members.
+    CHECK_WARNING_EVENT_CXX_ZERO_SIZE_RECORD,
+    // A written or inferred zero array bound: at the bound or empty initializer. data marks a multi-token diagnostic range.
+    CHECK_WARNING_EVENT_ZERO_LENGTH_ARRAY,
     // __builtin_cpu_supports's literal of a feature clang doesn't know (#1843, check_input_cpu_supports_literal), at the
     // builtin's name: the description's message.
     CHECK_WARNING_EVENT_INVALID_CPU_SUPPORTS,

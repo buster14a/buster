@@ -900,6 +900,69 @@ static void tier1_cfg_test_two_problems(Tier1CfgTestTally* tally, const Tier1Cfg
     arena_pop_to(output, mark);
 }
 
+// A block's first successor in layout, or BUSTER_TIER1_CFG_NONE.
+static uint32_t tier1_cfg_test_first_successor(const Tier1CfgInput* input, uint32_t b)
+{
+    uint32_t first = BUSTER_TIER1_CFG_NONE;
+    for (uint32_t s = input->successor_offsets[b]; s < input->successor_offsets[b + 1]; s += 1)
+    {
+        first = input->successors[s] < first ? input->successors[s] : first;
+    }
+    return first;
+}
+
+// The range that interval i's block c gives as its continuation (#2774), from the intervals alone, where i leaves c at its
+// end: c's first successor in layout, where the value enters it (a range of it covers that block's start, which isn't its
+// definition's block) and i doesn't go on into it as the next block; there, the range starting at that block's start
+// where that block comes no later than c; else the range covering the start of the block whose entry it takes its
+// opening from: its predecessors' first successor where no earlier block reaches it, else its own first successor where
+// that comes before it, which must come no later than c, and not be the value's definition's.
+static uint32_t tier1_cfg_test_continuation(const Tier1CfgInput* input, const Tier1CfgAllocation* result, uint32_t i, uint32_t c)
+{
+    const Tier1AllocationInput* intervals = &result->intervals;
+    const uint32_t v = intervals->values[i];
+    const uint32_t home = tier1_cfg_block_of(input, input->definitions[v]);
+    const bool goes_on = intervals->ends[i] > input->block_starts[c + 1];
+    const uint32_t first = tier1_cfg_test_first_successor(input, c);
+    const uint32_t next = goes_on && first == c + 1 ? BUSTER_TIER1_CFG_NONE : first;
+    const bool enters = next != BUSTER_TIER1_CFG_NONE && home != next && tier1_cfg_interval_oracle(result, v, input->block_starts[next]) != BUSTER_TIER1_CFG_NONE;
+    uint32_t model = BUSTER_TIER1_CFG_NONE;
+    bool reached = false;
+    for (uint32_t p = enters && next > c ? input->predecessor_offsets[next] : 0; enters && next > c && p < input->predecessor_offsets[next + 1]; p += 1)
+    {
+        const uint32_t sibling = tier1_cfg_test_first_successor(input, input->predecessors[p]);
+        reached |= input->predecessors[p] < next;
+        model = sibling < next && sibling < model ? sibling : model;
+    }
+    const uint32_t joined = enters && next > c ? tier1_cfg_test_first_successor(input, next) : BUSTER_TIER1_CFG_NONE;
+    model = reached || model == BUSTER_TIER1_CFG_NONE ? (joined < next ? joined : BUSTER_TIER1_CFG_NONE) : model;
+    const uint32_t taken = !enters ? BUSTER_TIER1_CFG_NONE : next <= c ? next : model;
+    const uint32_t entry = taken <= c && home != taken ? tier1_cfg_interval_oracle(result, v, input->block_starts[taken]) : BUSTER_TIER1_CFG_NONE;
+    return entry != BUSTER_TIER1_CFG_NONE && (next > c || intervals->starts[entry] == input->block_starts[taken]) ? entry : BUSTER_TIER1_CFG_NONE;
+}
+
+// #2774: each interval's continuation, recomputed from the intervals alone: the last that the blocks it leaves at their
+// ends give (tier1_cfg_test_continuation), or none.
+static bool tier1_cfg_test_continuations(const Tier1CfgInput* input, const Tier1CfgAllocation* result)
+{
+    const Tier1AllocationInput* intervals = &result->intervals;
+    bool same = intervals->continuation_intervals != 0;
+    for (uint32_t i = 0; same && i < intervals->count; i += 1)
+    {
+        const uint32_t from = tier1_cfg_block_of(input, intervals->starts[i]);
+        const uint32_t to = tier1_cfg_block_of(input, intervals->ends[i] - 1);
+        uint32_t expected = BUSTER_TIER1_CFG_NONE;
+        for (uint32_t c = from; c <= to; c += 1)
+        {
+            const bool leaves = c < to || intervals->ends[i] == input->block_starts[c + 1];
+            const uint32_t given = leaves ? tier1_cfg_test_continuation(input, result, i, c) : BUSTER_TIER1_CFG_NONE;
+            expected = given != BUSTER_TIER1_CFG_NONE ? given : expected;
+        }
+        same = intervals->continuation_intervals[i] == expected;
+    }
+    return same;
+}
+
 static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* input, Arena* output, Arena* scratch, const char* name, bool mutate, uint8_t temp_slots, uint32_t split_moves, bool must_allocate)
 {
     Tier1CfgError errors[2] = {
@@ -938,6 +1001,7 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
             }
             tier1_cfg_test_expect(tally, verified, "the CFG checker accepts the allocation");
             tier1_cfg_test_expect(tally, tier1_cfg_test_lookup(input, &result), "block intervals match the binary search");
+            tier1_cfg_test_expect(tally, tier1_cfg_test_continuations(input, &result), "each live-out range names its value's range at its first successor's entry");
             tier1_cfg_test_expect(tally, tier1_cfg_test_certify(tally, input, &result, output, scratch, true), "the certificate checker proves the allocation");
             tier1_cfg_test_expect(tally, tier1_cfg_test_avoided(tally, input, &result, scratch), "each range avoids its phi web's fixed sequences' registers, but its own readings'");
             if (result.intervals.count <= 600)

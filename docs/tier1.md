@@ -173,22 +173,34 @@ applied in turn, each `+` or `-` and then a pass's name: `sccp`, `dce`, `cfg`
 (on every function, with #1282's options, before the solver and promotion),
 `vectors` (#2781's value numbering and LICM on vector and mask values alone),
 `vectorize` (#2743's loop vectorizer, [its guide](tier1-loop-vectorization.md)),
-`gvn` (as `--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or
+`unroll` (#2755's [loop unrolling](tier1-loop-unrolling.md)), `gvn` (as
+`--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or
 `all`. The default is SCCP, dead-code removal, CFG cleanup, its merges, the
 inlining and `vectors`. The restricted value numbering runs before promotion;
 LICM runs after if-conversion, before the optimizer, which cleans up after it,
-and the loop vectorizer after LICM. Explicit `+gvn` or `+licm` runs that pass
-on every value instead of its restricted counterpart. A function that value
-numbering, LICM, SROA or the loop vectorizer refuses goes on as it was.
-The summaries the unit's inlining builds run the same passes, and with SROA,
-as with the solver, a candidate compiles from its own pipeline.
+then the loop vectorizer, then the unroller. Explicit `+gvn` or `+licm` runs
+that pass on every value instead of its restricted counterpart. A function that
+value numbering, LICM, SROA or the loop vectorizer refuses goes on as it was,
+and so does one past the unroller's loop analysis.
+The summaries the unit's inlining builds run the same passes but the
+unroller, which their callers run on what they expand (a summary's size is
+the loop's own, and an expanded loop is unrolled once); a candidate whose
+code comes from its summary takes the unroller on the summary's optimized
+function, then the sink and the optimizer again where a loop unrolled. With
+SROA, as with the solver, a candidate compiles from its own pipeline.
 `--tier1-report` gives each pass's counts: `folded` constants,
 `removed_instructions` and `removed_blocks` (the optimizer's output against
 its input, merges included), `merged_blocks`, `licm_moved`, `sroa_split`
 (slots) and `gvn_removed`; with `vectorize`, a `tier1-vectorize` line gives the
 loops examined (each back edge's header once, outer loops included), those vectorized by their widest vector (`bytes16`,
 `bytes32`, `bytes64`), their reductions and run-time overlap tests (`guards`),
-and the refused loops by reason (`refused.shape` to `refused.width`).
+and the refused loops by reason (`refused.shape` to `refused.width`). With
+`+unroll`, a `tier1-unroll` line follows wherever a loop was seen: the natural
+loops (`loops`), how many were `unrolled`, each refusal's count by its name
+(`outer`, `irreducible`, `preheader`, `latch`, `exit`, `call`, `control`,
+`stack`, `test`, `predicate`, `bound`, `induction`, `size`, `growth`), and the
+main loops' `copies`, the `reductions` they split and the instructions they
+`added`.
 
 CFG cleanup's merges join a block to its predecessor when that predecessor is
 its only one and it is the predecessor's only executable successor. The block
@@ -591,13 +603,20 @@ compiled, and `dead` counts the functions left without code (below);
 refers to once its callers have expanded its calls gets no code, symbol, frame
 or jump table (`check_tier1_inline_dead`), as LLVM's GlobalDCE drops it. A
 candidate is *rooted*, and keeps its code whatever its callers do, where an
-attribute keeps it (used, constructor, destructor, interrupt, target, an
-alias's, ifunc's or weakref's, retain, patchable_function_entry, weak,
-selectany), static data's initializers (`CheckProgram.initializer_references`)
-or an alias names it, or where it has several versions. A section, an
-attribute's or a pragma's, keeps none: clang's inliner expands such a function
-as any other and drops an internal one nothing calls (#2541; the compiler's
-own checker is all under `#pragma clang section`). The others are alive where a kept body's code refers to them
+attribute keeps it (used, constructor, destructor, interrupt, target_clones,
+cpu_specific, cpu_dispatch, an alias's, ifunc's or weakref's, retain,
+patchable_function_entry, weak, selectany), static data's initializers
+(`CheckProgram.initializer_references`) or an alias names it, or where it has
+several versions (target attributes of other strings,
+`BUSTER_CHECK_PROGRAM_TARGET_VERSIONS`). A section, an attribute's or a
+pragma's, keeps none: clang's inliner expands such a function as any other and
+drops an internal one nothing calls (#2541; the compiler's own checker is all
+under `#pragma clang section`). Nor does a target attribute alone, since
+#1398's step 3: LLVM's GlobalDCE drops a dead internal function whatever its
+target, and every `<immintrin.h>` wrapper has one, so an expanded wrapper kept
+its code until then. Without `--tier1` the same columns, last pass and dead set
+serve Tier 0's callees ([the Tier 0 guide](commands/tier0.md#inlining-always_inline-functions-1398)).
+The others are alive where a kept body's code refers to them
 (a call no caller expanded, a Tier 0 fallback's, an address taken), followed
 from each body reached. So that a dead function costs no selection,
 allocation or emission, the unit stage marks the candidates that may die (not

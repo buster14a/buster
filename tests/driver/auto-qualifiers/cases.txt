@@ -4,5 +4,14 @@ atomic-restrict-group 0 6 0 0
 atomic-restrict-macro 0 3 1 0
 atomic-restrict-recovery 0 4 0 0
 atomic-restrict-uninitialized 0 3 0 0
+atomic-pointer-qualifiers 0 10 0 0
+atomic-pointer-types 0 10 0 0
+atomic-pointer-bitfields 1 18 0 0
+atomic-pointer-group 0 4 0 0
+atomic-pointer-recovery 0 3 0 0
+atomic-pointer-macro 0 3 2 0
+atomic-pointer-order 4 5 0 0
+atomic-pointer-storage 0 5 0 0
+atomic-pointer-valid 0 0 0 0
 valid 0 0 0 0
 constexpr-group 0 0 0 1

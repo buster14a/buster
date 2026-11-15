@@ -504,6 +504,9 @@ static bool check_prefix_resumes(const Parser* view, const ParseDiagnostic* diag
                                          view->tokens.kinds[callee] == PARSE_KIND_IDENTIFIER &&
                                          view->tokens.kinds[callee + 1] == PARSE_KIND_L_PAREN &&
                                          view->tokens.kinds[diagnostic->resume_end - 1] == PARSE_KIND_R_PAREN));
+    const uint32_t arguments = diagnostic->resume_call_arguments;
+    valid = valid && (arguments == 0 || (diagnostic->resume_call && diagnostic->resume_call_value && arguments > diagnostic->token &&
+                                        arguments < diagnostic->resume_end - 1 && view->tokens.kinds[arguments - 1] == PARSE_KIND_COMMA));
     return valid;
 }
 
@@ -524,6 +527,7 @@ static ParseDiagnostic check_prefix_original_diagnostic(const ParseDiagnostic* d
     result.resume_delete = false;
     result.resume_end = 0;
     result.resume_begin = 0;
+    result.resume_call_arguments = 0;
     result.resume_colon = false;
     return result;
 }
@@ -767,7 +771,8 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             ordered &= !taken || begin > last;
             last = taken ? (diagnostic->resume_end != 0 ? diagnostic->resume_end - 1 : diagnostic->token) : last;
             insert += taken && !diagnostic->resume_delete;
-            retained += taken && diagnostic->resume_call ? 3u : 0u;
+            const uint32_t arguments = diagnostic->resume_call_arguments;
+            retained += taken && diagnostic->resume_call ? arguments != 0 ? 2u + diagnostic->resume_end - arguments : 3u : 0u;
             repairs += taken;
             discard += taken && diagnostic->resume_end != 0 ? diagnostic->resume_end - begin : 0;
             // At most one tail is taken in a round (limit above). A tail starting before its error also removes
@@ -832,10 +837,11 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                     {
                         if (diagnostic->resume_call)
                         {
-                            const uint32_t call[] = { diagnostic->resume_callee, diagnostic->resume_callee + 1, diagnostic->resume_end - 1 };
-                            for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(call); c += 1)
+                            const uint32_t arguments = diagnostic->resume_call_arguments != 0 ? diagnostic->resume_call_arguments : diagnostic->resume_end - 1;
+                            const uint32_t retained_call = 2u + diagnostic->resume_end - arguments;
+                            for (uint32_t c = 0; c < retained_call; c += 1)
                             {
-                                const uint32_t token = call[c];
+                                const uint32_t token = c < 2 ? diagnostic->resume_callee + c : arguments + c - 2;
                                 view->tokens.kinds[written] = current->tokens.kinds[token];
                                 view->tokens.names[written] = current->tokens.names[token];
                                 view->tokens.sources[written] = current->tokens.sources[token];
