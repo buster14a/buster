@@ -2017,6 +2017,93 @@ static void ir_inline_test_debug_instances(IrInlineTest* test, Arena* input, Are
     arena_pop_to(twin, 0);
 }
 
+// #2541: an expansion's callee's parameters under -g are the caller's last locals, each bound to its argument where the
+// callee never assigns it (BUSTER_IR_DEBUG_BIND_INSTANCE), and the instance names them; where the callee assigns one,
+// the local stays without a binding. `assigned` gives the callee's parameter an assignment.
+static void ir_inline_test_debug_parameters(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch, bool assigned)
+{
+    IrFunction functions[2];
+    functions[0] = ir_inline_test_function(test, input, (IrSizes){
+                                                            .instruction_count = 3,
+                                                            .block_count = 1,
+                                                            .extra_count = 1,
+                                                            .call_count = 1,
+                                                            .call_type_count = 1,
+                                                            .parameter_count = 1,
+                                                        },
+                                           IR_I64);
+    functions[1] = ir_inline_test_leaf(test, input, IR_I64);
+    // The caller's parameter and the callee's, each an entry-bound local with its initial binding; the callee's assignment
+    // of its parameter at its entry 1, where `assigned`.
+    uint8_t caller_flags[] = { BUSTER_IR_DEBUG_BIND_ENTRY };
+    uint8_t callee_flags[] = { BUSTER_IR_DEBUG_BIND_ENTRY };
+    IrDebugBinding caller_bindings[] = { { .local = 0, .entry = BUSTER_IR_NONE, .value = 0, .anchor = BUSTER_IR_NONE, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 } };
+    IrDebugBinding callee_bindings[] = {
+        { .local = 0, .entry = BUSTER_IR_NONE, .value = 0, .anchor = BUSTER_IR_NONE, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+        { .local = 0, .entry = 1, .value = 2, .anchor = BUSTER_IR_NONE, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
+    };
+    const IrDebugInfo caller_seed = { .entry_count = 5, .local_count = 1, .bindings = caller_bindings, .binding_count = 1, .binding_flags = caller_flags, .first_block_end = 5 };
+    const IrDebugInfo callee_seed = { .entry_count = 4, .local_count = 1, .bindings = callee_bindings, .binding_count = assigned ? 2 : 1, .binding_flags = callee_flags,
+                                      .first_block_end = 4 };
+    if (test->failures == 0 && ir_debug_create(input, &functions[0], &caller_seed) && ir_debug_create(input, &functions[1], &callee_seed))
+    {
+        functions[0].parameter_types[0] = IR_I64;
+        functions[0].extra[0] = 0;
+        ir_inline_test_node(&functions[0], 0, IR_PARAM, IR_I64, 0, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_call(&functions[0], 1, 0, 2, 0, 1, IR_I64);
+        ir_inline_test_node(&functions[0], 2, IR_RET, IR_VOID, 1, UINT32_MAX, UINT32_MAX);
+        functions[0].debug->origins[0] = 0;
+        functions[0].debug->origins[1] = 1;
+        functions[0].debug->origins[2] = 4;
+        functions[1].debug->origins[1] = 1;
+        functions[1].debug->origins[2] = 2;
+        functions[1].debug->origins[3] = 3;
+        const uint32_t symbols[] = {
+            1,
+            2,
+        };
+        const uint8_t flags[] = {
+            0,
+            BUSTER_IR_INLINE_INTERNAL,
+        };
+        const IrInlineUnit unit = {
+            .functions = functions,
+            .symbols = symbols,
+            .flags = flags,
+            .count = 2,
+            .symbol_count = 128,
+            .only = 1,
+        };
+        IrInlineResult result = { 0 };
+        if (ir_inline_test_run(test, &unit, ir_inline_options(), output, twin, scratch, &result))
+        {
+            const IrFunction* caller = &result.functions[0];
+            const IrDebugInfo* debug = caller->debug;
+            const bool local = debug != NULL && debug->local_count == 2 && debug->binding_flags[1] == BUSTER_IR_DEBUG_BIND_INSTANCE && debug->inline_count == 1 &&
+                               debug->inlines[0].local == 1 && debug->inlines[0].local_count == 1;
+            ir_inline_test_expect(test, result.inlined_calls == 1 && local, "an expansion's callee's parameter is the caller's last local, the instance's");
+            // The caller's own binding first; the parameter's, an initial one, last, its value the argument's: the caller's
+            // parameter, which the expansion's add takes.
+            uint32_t argument = BUSTER_IR_NONE;
+            for (uint32_t n = 0; caller != NULL && n < caller->instruction_count; n += 1)
+            {
+                argument = caller->op[n] == IR_PARAM ? n : argument;
+            }
+            const bool bound = debug != NULL && debug->binding_count == 2 && debug->bindings[1].local == 1 && debug->bindings[1].entry == BUSTER_IR_NONE &&
+                               debug->bindings[1].kind == IR_DEBUG_BIND_VALUE && debug->bindings[1].value == argument;
+            const bool unbound = debug != NULL && debug->binding_count == 1;
+            ir_inline_test_expect(test, assigned ? unbound : bound,
+                                  assigned ? "a parameter its callee assigns has no binding in its expansion" : "an unassigned parameter is bound to its argument");
+            const uint64_t mark = scratch->length;
+            ir_inline_test_expect(test, ir_verify_path(caller, scratch, 0, true).error == IR_OK, "a caller with its expansions' parameters verifies");
+            arena_pop_to(scratch, mark);
+        }
+    }
+    arena_pop_to(input, 0);
+    arena_pop_to(output, 0);
+    arena_pop_to(twin, 0);
+}
+
 static void ir_inline_test_failures(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
 {
     IrFunction functions[2];
@@ -2170,6 +2257,8 @@ static __attribute__((unused)) int run_ir_optimize_inline_tests(int argc, char**
         ir_inline_test_side_table_growth(&test, &input, &output, &twin, &scratch);
         ir_inline_test_stale_rows(&test, &input, &output, &twin, &scratch);
         ir_inline_test_debug_instances(&test, &input, &output, &twin, &scratch);
+        ir_inline_test_debug_parameters(&test, &input, &output, &twin, &scratch, false);
+        ir_inline_test_debug_parameters(&test, &input, &output, &twin, &scratch, true);
         ir_inline_test_failures(&test, &input, &output, &twin, &scratch);
         ir_inline_test_simd(&test, &input, &output, &twin, &scratch);
         ir_inline_test_general(&test, &input, &output, &twin, &scratch);

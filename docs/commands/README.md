@@ -62,7 +62,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-gnu, benchmark-gnu` | `c_gnu.c` | [gnu](gnu.md) |
 | `test-import, benchmark-import` | `import.c` | [import](import.md) |
 | `test-ir, test-ir-lowering, benchmark-ir` | `ir.c` | [ir](ir.md) |
-| `test-ir-optimize, test-ir-gvn, test-ir-licm, test-ir-unroll` | `ir_optimize.c`, `ir_optimize_unroll.c` | [ir-optimization](ir-optimization.md) |
+| `test-ir-optimize, test-ir-gvn, test-ir-licm, test-ir-vectorize, test-ir-unroll` | `ir_optimize.c`, `ir_vectorize_loops.c`, `ir_optimize_unroll.c` | [ir-optimization](ir-optimization.md) |
 | `test-ir-parse, reduce-ir, interpret-ir, interpret-c` | `ir_parse.c`, `interpreter_source.c` | [ir-tools](ir-tools.md) |
 | `test-lanes, benchmark-lanes` | `lane.c` | [lanes](lanes.md) |
 | `test-lexer, benchmark-lexer` | `c_lexer.c` | [lexer](lexer.md) |

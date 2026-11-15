@@ -377,6 +377,16 @@ typedef enum Tier1SelectRule
 // scale's log2, `width` its stored vector's bytes and `source_width` its index's; values[0] the base, values[1] the
 // index, values[2] the mask and values[3] the stored vector.
 #define BUSTER_TIER1_VECTOR_SCATTER 33
+// A pairwise operation (#2780): `immediate` the IR's flags, its operation; ir_simd_pairwise_forms' form of values[0]
+// (vvvv) and values[1] (rm) into the destination.
+#define BUSTER_TIER1_VECTOR_PAIRWISE 34
+// A dot product (#2780, tier1_select_dot): `immediate` the IR's flags, its operation; values[0] the accumulator, which
+// the destination takes first unless it holds it, values[1] in vvvv and values[2] in rm.
+#define BUSTER_TIER1_VECTOR_DOT 35
+// A blend by a vector's signs (#2780): `vselect (vcmp lt s, 0), b, a` of bytes, doublewords or quadwords at 16 or 32
+// bytes, whose comparison the select alone reads, as vpblendvb, vblendvps or vblendvpd; `source_width` the lanes
+// (IrSimdLane), values[0] a (vvvv), values[1] b (rm), values[2] s (the immediate's bits 7 to 4).
+#define BUSTER_TIER1_VECTOR_BLENDV 36
 // A floating operation at its own rounding of values[0] and values[1] (#1840): `immediate` the IR's flags, one record of
 // ir_simd_fround_forms' with the rounding in its decorations.
 #define BUSTER_TIER1_VECTOR_FROUND 26
@@ -1312,6 +1322,11 @@ static void tier1_select_width_change(Tier1SelectRecords* result, const Tier1Sel
         const uint16_t form = width == 32 ? X86_FORM_VEXTRACTI64X4_YM256_Z_IMM8 : other == 64 ? X86_FORM_VEXTRACTI32X4_XM128_Z_IMM8 : X86_FORM_VEXTRACTI32X4_XM128_Y_IMM8;
         tier1_select_append(result, (X86Instruction){ .form = form, .reg = left, .rm = x, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = (int32_t)part });
     }
+    else if (kind == 1 && other < 16)
+    {
+        // A widen of an SSE carrier (#2780): its 4 or 8 bytes, the rest zeroed (vinsertps, vmovq).
+        tier1_select_append(result, tier1_select_carrier_move(x, left, other, BUSTER_TIER1_ENCODING_EVEX));
+    }
     else if (kind == 1)
     {
         // EVEX's move of the narrower width, never legacy SSE's movaps, which keeps the register's bytes past 16.
@@ -1545,6 +1560,36 @@ static void tier1_select_permute2(Tier1SelectRecords* result, const Tier1SelectH
 // A bitwise function of three vectors (#1840): vpternlogd (ir_simd_ternlog_forms) computes table bit (reg << 2 | vvvv << 1
 // | rm) into its first operand's register. The operand whose register the destination already holds is the first, the
 // table's bits permuted for the new order; where it holds none of them, the first operand is moved into it first.
+// A dot product (#2780, BUSTER_TIER1_VECTOR_DOT): vpdpbusd to vpdpwssds (ir_simd_dot_forms) of values[1] (vvvv) and
+// values[2] (rm) into the destination, which holds the accumulator, values[0], first: moved there unless it holds it,
+// after an operand the destination holds is saved in the vector class's scratch register, as a funnel shift's.
+static void tier1_select_dot(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
+{
+    const uint8_t scratch = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+    const uint8_t x = destination & 15;
+    const uint8_t accumulator = holes->left & 15;
+    uint8_t first = holes->right & 15;
+    uint8_t second = holes->third & 15;
+    if (x != accumulator)
+    {
+        if (first == x || second == x)
+        {
+            tier1_select_append(result, tier1_select_class_move(scratch, x, holes->width, false));
+        }
+        first = first == x ? scratch : first;
+        second = second == x ? scratch : second;
+        tier1_select_append(result, tier1_select_class_move(x, accumulator, holes->width, false));
+    }
+    const X86Instruction record = {
+        .form = ir_simd_dot_forms[holes->immediate & 3][holes->width == 16 ? 0 : holes->width == 32 ? 1 : 2],
+        .reg = x,
+        .vvvv = first,
+        .rm = second,
+        .mode = BUSTER_X86_REGISTER_DIRECT,
+    };
+    tier1_select_append(result, record);
+}
+
 static void tier1_select_ternlog(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
 {
     const uint8_t x = destination & 15;
@@ -2589,7 +2634,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         else if (kind == BUSTER_TIER1_VECTOR_LANE_UNARY)
         {
             const uint32_t flags = (uint32_t)holes->immediate;
-            const uint16_t form = ir_simd_lane_unary_forms[(flags >> 2) % 3][flags & 3][width == 16 ? 0 : width == 32 ? 1 : 2];
+            const uint16_t form = ir_simd_lane_unary_forms[(flags >> 2) & 3][flags & 3][width == 16 ? 0 : width == 32 ? 1 : 2];
             tier1_select_append(&result, tier1_select_register_record(form, x, left));
         }
         else if (kind == BUSTER_TIER1_VECTOR_CVTT)
@@ -2633,6 +2678,20 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
                 .reg = extend ? x : left,
                 .rm = extend ? left : x,
                 .mode = BUSTER_X86_REGISTER_DIRECT,
+            };
+            tier1_select_append(&result, record);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_BLENDV)
+        {
+            // AVX's and AVX2's VEX forms, their sign vector's register in the immediate's bits 7 to 4.
+            const uint32_t lanes = holes->source_width == IR_SIMD_LANE_I8 ? 0 : holes->source_width == IR_SIMD_LANE_I32 ? 1 : 2;
+            const X86Instruction record = {
+                .form = ir_simd_blendv_forms[lanes][width == 16 ? 0 : 1],
+                .reg = x,
+                .vvvv = left,
+                .rm = right,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .immediate = (int32_t)((holes->third & 15) << 4),
             };
             tier1_select_append(&result, record);
         }
@@ -2698,11 +2757,17 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         {
             tier1_select_funnel(&result, holes, destination);
         }
-        else if (kind == BUSTER_TIER1_VECTOR_QUADWORD_OP)
+        else if (kind == BUSTER_TIER1_VECTOR_QUADWORD_OP || kind == BUSTER_TIER1_VECTOR_PAIRWISE)
         {
-            const uint16_t form = ir_simd_quadword_op_forms[holes->immediate & 1][width == 16 ? 0 : width == 32 ? 1 : 2];
+            const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
+            const uint16_t form = kind == BUSTER_TIER1_VECTOR_QUADWORD_OP ? ir_simd_quadword_op_forms[holes->immediate & 3][at] :
+                                                                         ir_simd_pairwise_forms[holes->immediate % BUSTER_IR_PAIRWISE_OPERATIONS][at];
             const X86Instruction record = { .form = form, .reg = x, .vvvv = left, .rm = right, .mode = BUSTER_X86_REGISTER_DIRECT };
             tier1_select_append(&result, record);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_DOT)
+        {
+            tier1_select_dot(&result, holes, destination);
         }
         else if (kind == BUSTER_TIER1_VECTOR_BITSHUFFLE)
         {
@@ -5404,7 +5469,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                                                    op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_LANE_OP) || ir_intrinsic_ternary(c) ||
                                                                            c == BUSTER_IR_INTRINSIC_AES || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_REDUCE ||
                                                                            c == BUSTER_IR_INTRINSIC_LANE_UNARY || c == BUSTER_IR_INTRINSIC_FROUND ||
-                                                                           c == BUSTER_IR_INTRINSIC_QUADWORD_OP)))) ||
+                                                                           c == BUSTER_IR_INTRINSIC_QUADWORD_OP || c == BUSTER_IR_INTRINSIC_PAIRWISE)))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -5445,11 +5510,13 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         {
             // A width change (#1840): the other vector's width, and the part in the IR's flags.
             const uint32_t other = c == BUSTER_IR_INTRINSIC_INSERT ? b : a;
+            // A widen of an SSE carrier (#2780): its 4 or 8 bytes.
+            const uint32_t other_type = other < function->instruction_count ? function->type[other] : IR_VOID;
             base.rule = TIER1_RULE_VECTOR;
             base.width = (uint8_t)vector_width;
             base.scale = BUSTER_TIER1_VECTOR_WIDTH_CHANGE;
             base.operation = (uint8_t)(c - BUSTER_IR_INTRINSIC_EXTRACT);
-            base.source_width = other < function->instruction_count ? (uint8_t)tier1_select_vector_width(function->type[other]) : 0;
+            base.source_width = other_type == IR_F32 ? 4 : other_type == IR_F64 ? 8 : other < function->instruction_count ? (uint8_t)tier1_select_vector_width(other_type) : 0;
             base.immediate = function->flags[node];
             base.values[0] = a;
             if (c == BUSTER_IR_INTRINSIC_INSERT)
@@ -5599,6 +5666,31 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.immediate = function->flags[node];
             base.values[0] = a;
             base.values[1] = b;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_PAIRWISE)
+        {
+            // A pairwise operation (#2780): its operation in the IR's flags.
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_PAIRWISE;
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            base.values[1] = b;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_DOT && ir_intrinsic_ternary(c))
+        {
+            // A dot product (#2780): its accumulator a, b, and its third operand the extra array's (ir_intrinsic_third).
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_DOT;
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            base.values[1] = b;
+            base.values[2] = ir_intrinsic_third(function, node);
             base.intrinsic_cost = 1;
             tier1_select_add_candidate(forest, node, &candidates, base);
         }
@@ -5761,6 +5853,25 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 expand.values[0] = a;
                 expand.intrinsic_cost = 1;
                 tier1_select_add_candidate(forest, node, &candidates, expand);
+            }
+            // A select under a comparison of a vector's lanes less than zero whose only use it is (#2780): vpblendvb,
+            // vblendvps or vblendvpd at 16 or 32 bytes, of bytes, doublewords or quadwords, the comparison folded.
+            const uint32_t selected = function->flags[node];
+            if ((vector_width == 16 || vector_width == 32) && (selected == IR_SIMD_LANE_I8 || selected == IR_SIMD_LANE_I32 || selected == IR_SIMD_LANE_I64) &&
+                tier1_select_tree_child(forest, node, a) && function->op[a] == IR_VCMP && function->c[a] == IR_LT && function->flags[a] == selected &&
+                function->b[a] < function->instruction_count && tier1_select_vector_fill(function, function->b[a], vector_width) == 0)
+            {
+                Tier1SelectPattern blend = base;
+                blend.rule = TIER1_RULE_VECTOR;
+                blend.width = (uint8_t)vector_width;
+                blend.scale = BUSTER_TIER1_VECTOR_BLENDV;
+                blend.source_width = (uint8_t)selected;
+                blend.values[0] = c;
+                blend.values[1] = b;
+                blend.values[2] = function->a[a];
+                blend.intrinsic_cost = 1;
+                tier1_select_fold(forest, node, a, &blend);
+                tier1_select_add_candidate(forest, node, &candidates, blend);
             }
             // A select of a gather whose only use it is, under the gather's own mask at its lanes (#1840): the gather merged
             // into w, or into zeros where w is a zero vector.
@@ -6037,6 +6148,25 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             narrowed.immediate = function->flags[b];
             narrowed.source_width = (uint8_t)tier1_select_vector_width(function->type[function->a[b]]);
             narrowed.values[2] = function->a[b];
+            // A truncation of 8 lanes into 8 bytes under a mask of 8 lanes zero-extended to the bytes' 16 (#2780: bitcast,
+            // zext, bitcast, each read by the next alone): the instruction reads the 8 lanes' bits of the narrow mask's
+            // register.
+            const uint32_t widened = c < function->instruction_count && function->op[c] == IR_BITCAST && function->type[c] == IR_M16 && tier1_select_tree_child(forest, node, c) ?
+                                         function->a[c] :
+                                         BUSTER_IR_NONE;
+            const uint32_t bits = widened != BUSTER_IR_NONE && function->op[widened] == IR_ZEXT && function->type[widened] == IR_I16 && tier1_select_tree_child(forest, c, widened) ?
+                                      function->a[widened] :
+                                      BUSTER_IR_NONE;
+            const uint32_t narrow = bits != BUSTER_IR_NONE && function->op[bits] == IR_BITCAST && function->type[bits] == IR_I8 && tier1_select_tree_child(forest, widened, bits) &&
+                                            function->a[bits] < function->instruction_count && function->type[function->a[bits]] == IR_M8 ?
+                                        function->a[bits] :
+                                        BUSTER_IR_NONE;
+            const uint32_t source_lanes = (uint32_t)narrowed.source_width >> (function->flags[b] & 3);
+            if (narrow != BUSTER_IR_NONE && source_lanes == 8 && ((function->flags[b] >> 2) & 3) == 0)
+            {
+                narrowed.values[1] = narrow;
+                narrowed.fold_count += 3;
+            }
             if (tier1_select_convert_form(1, function->flags[b], base.width, narrowed.source_width) != X86_FORM_NONE)
             {
                 tier1_select_fold(forest, node, b, &narrowed);

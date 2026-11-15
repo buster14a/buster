@@ -225,7 +225,8 @@ static bool debug_test_decode(const DebugUnit* unit, const DebugOutput* output, 
             // clears the flag).
             const DebugFunction* entry = &unit->functions[function];
             const uint32_t index = entry->first_row + row;
-            valid &= address == addresses[function] + unit->offsets[index] && line == unit->lines[index] && file == entry->file &&
+            const uint32_t row_file = unit->row_files != 0 ? unit->row_files[index] : entry->file;
+            valid &= address == addresses[function] + unit->offsets[index] && line == unit->lines[index] && file == row_file &&
                      prologue_end == (row + 1 == entry->prologue_end);
             prologue_end = false;
             row += 1;
@@ -248,6 +249,7 @@ static bool debug_test_units(void)
     uint32_t b_addresses[3];
     uint32_t offsets[129];
     uint32_t lines[129];
+    uint32_t row_files[129];
     const uint64_t addresses[] = { 0x401000, 0x204000, 0x100000000ull };
     String8 files[] = { BUSTER_S8("start.c"), BUSTER_S8("leaf.c") };
     DebugFunction functions[3] = {
@@ -280,12 +282,17 @@ static bool debug_test_units(void)
         .lines = lines,
     };
     valid &= a_bytes != 0 && b_bytes != 0;
-    for (uint32_t count = 0; valid && count <= 129; count += 1)
+    // Every count with each row in its function's file, then with rows in other files (DebugUnit.row_files, #2541): runs of
+    // three and four, so that a change falls at every place of a vector group and on the body's row.
+    for (uint32_t test = 0; valid && test < 2 * 130; test += 1)
     {
+        const uint32_t count = test % 130;
+        unit.row_files = test >= 130 ? row_files : 0;
         for (uint32_t row = 0; row < count; row += 1)
         {
             offsets[row] = row * 30000000u;
             lines[row] = row % 3 == 0 ? INT32_MAX : row % 3 == 1 ? 0 : row * 10000000u;
+            row_files[row] = row % 7 < 3 ? 1 : 0;
         }
         unit.row_count = count;
         functions[0].row_count = count;
@@ -333,6 +340,7 @@ static bool debug_test_units(void)
     DebugOutput output = debug_test_output(b_bytes, b_addresses, 3);
     if (valid)
     {
+        unit.row_files = 0;
         unit.row_count = 1;
         functions[0].row_count = 1;
         functions[0].prologue_end = 0;
@@ -350,6 +358,12 @@ static bool debug_test_units(void)
         functions[1].file = 2;
         valid &= debug_write(&unit, &output, false) == DEBUG_ERROR_INPUT;
         functions[1].file = 1;
+        // A row's file past the unit's files.
+        unit.row_files = row_files;
+        row_files[0] = 2;
+        valid &= debug_write(&unit, &output, false) == DEBUG_ERROR_INPUT;
+        row_files[0] = 0;
+        unit.row_files = 0;
         // A body's row past the function's rows.
         functions[0].prologue_end = 2;
         valid &= debug_write(&unit, &output, false) == DEBUG_ERROR_INPUT;
@@ -373,7 +387,7 @@ static bool debug_test_units(void)
     }
     free(a_bytes);
     free(b_bytes);
-    printf("debug units: every tail through 129, line decoding, bodies' rows, files, empty sequences, capacity, invalid input and late addresses: %s\n", valid ? "pass" : "FAIL");
+    printf("debug units: every tail through 129, line decoding, bodies' rows, files, rows in other files, empty sequences, capacity, invalid input and late addresses: %s\n", valid ? "pass" : "FAIL");
     return valid;
 }
 

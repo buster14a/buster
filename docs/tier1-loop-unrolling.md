@@ -160,8 +160,8 @@ none.
 
 ## With vectorization and LICM
 
-The pass runs after if-conversion and `+licm`, before the operand sink and the
-optimizer, whose SCCP, dead-code removal and merges clean the copies up: the
+The pass runs after if-conversion, `+licm` and `+vectorize`, before the operand
+sink and the optimizer, whose SCCP, dead-code removal and merges clean the copies up: the
 copies' dead tests and increments go, and their blocks merge into one where the
 body was one. LICM first moves invariant computations into the preheader once,
 not into every copy; the unroller doesn't move anything itself.
@@ -177,15 +177,20 @@ then the sink and the optimizer again where a loop unrolled
 whole pipeline again, which made `-c` of `sqlite3.c` about 23% slower locally;
 this way the unroller's share is the cost below.
 
-[The loop vectorizer's design](tier1-loop-vectorization.md) puts that pass
-before this one. Its vector main loop is then this pass's input: a counted
-loop whose step is the vector's lane count and whose bound its preheader
-computes, which this pass admits like any other, its vector reductions carried
-(the reduction rules take integer scalars; a vector accumulator split is the
-same rule over vector `add`, and is that pass's to add with its own tests). Its
-scalar remainder runs fewer than `w` iterations, and unrolling it can only add
-code: the vectorizer is to mark its remainders' headers, which this pass will
-refuse by that mark. Neither pass's legality rules depend on the other's.
+The loop vectorizer (#2743, [its design](tier1-loop-vectorization.md),
+`--tier1-passes=+vectorize`) runs before this pass: it writes `steps[10]` and
+this pass `steps[11]`. With both on, #2743's kernels at znver5 show how they
+meet: the vectorizer takes 12 of the 27 loops, and this pass refuses all 24
+loops it made (the 12 vector loops and their 12 scalar remainders) by its
+preheader rule, which wants one block entering the loop by an unconditional
+branch; the vectorizer's loops have none. The pass unrolls 12 of the loops the
+vectorizer refused, as it does alone, and every kernel's digest is the default
+build's. So the remainders, which run fewer than `w` iterations and would only
+grow, are never unrolled. Unrolling a vector main loop (more vector
+accumulators) is the next step: it needs the preheader rule to take the
+vectorizer's entry and a vector reduction split (the reduction rules take
+integer scalars), each with its own tests, and the remainders refused by a mark
+rather than by their shape.
 
 ## Data-parallel parts and their twins
 
@@ -402,7 +407,7 @@ invalidation tracked across if-conversion and LICM.
   callee-saved register; giving a busy leaf loop those registers is the
   allocator's change ([#2819](https://github.com/buster14a/buster/issues/2819)),
   and would let more accumulators pay.
-- **The vectorizer's loops**, as above, once that pass exists.
+- **The vectorizer's main loops**, as above.
 - **The back end's floating-point code**: folded loads
   ([#2829](https://github.com/buster14a/buster/issues/2829)), which would let
   `i32_to_f32` and `saxpy_f32` gain as clang's unrolled loops do, and VEX forms
