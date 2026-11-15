@@ -74,7 +74,7 @@ static void check_test_driver_attribute_recovery(CheckTest* test, const char* cl
     static const char sentinel[] = "preserve the existing object\n";
     char object[PATH_MAX];
     snprintf(object, sizeof(object), "%s/attribute-recovery.o", directory);
-    for (uint32_t c = 0; available && c < 36; c += 1)
+    for (uint32_t c = 0; available && c < 48; c += 1)
     {
         const bool accepted = c == 9 || c == 35;
         char define[64];

@@ -741,6 +741,8 @@ struct CheckControlWriter
 {
     CheckProgram* program;
     const Parser* parser;
+    // The index of the body the writer builds (check_control_build), which its regions record (CheckProgramRegion.body).
+    uint32_t body;
     // The body's children lists, by token: each token's first and last child and its siblings, which check_control_begin
     // builds from the body's tokens alone (check_control_children).
     uint32_t* first;
@@ -2777,7 +2779,7 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
         const CheckInputRegion* source = input->regions + r;
         CheckProgramRegion* region = writer->program->regions + r;
         region->first = writer->count - writer->first_entry;
-        region->body = writer->program->body_count;
+        region->body = writer->body;
         region->node = input->token_nodes[source->closing];
         region->result = source->result;
         uint32_t stop = BUSTER_CHECK_NONE;
@@ -5477,8 +5479,53 @@ static uint32_t check_program_constant_arms(CheckControlWriter* writer, const ui
     return joined;
 }
 
-static bool check_program(CheckProgram* program, const Parser* parser, const CheckInput* input, CheckStream* stream,
-                          const TypeTable* types, CheckProgramOptions options, Arena* output, Arena* scratch)
+// The state check_program keeps between its parts (#2536's step 2.2c.1): its setup's columns, the writer, the loop's
+// place and the tail's inputs, so that its bodies' loop can run a range of bodies at a time.
+typedef struct CheckProgramRun CheckProgramRun;
+struct CheckProgramRun
+{
+    CheckProgram* program;
+    const Parser* parser;
+    const CheckInput* input;
+    CheckStream* stream;
+    const TypeTable* types;
+    CheckProgramOptions options;
+    Arena* output;
+    Arena* scratch;
+    Arena controls;
+    CheckControlWriter writer;
+    CheckProgramTargetEvents target_events;
+    const uint8_t* return_facts;
+    uint32_t* openings;
+    uint32_t* seen;
+    uint32_t* nodes;
+    uint32_t* stack;
+    uint64_t* reference_items;
+    uint64_t* reference_sort;
+    uint8_t* needed;
+    uint32_t* token_first;
+    uint32_t* node_next;
+    uint32_t* plan_first;
+    uint64_t* planned;
+    uint32_t* plan_next;
+    uint64_t* dropped_ranges;
+    CheckControl* entries;
+    uint64_t mark;
+    uint64_t temporary;
+    uint32_t count;
+    uint32_t body_count;
+    uint32_t next_body;
+    uint32_t reference_count;
+    bool valid;
+    // Whether the tail's part over the needed marks ran before the loop (check_program_symbols), and its answer.
+    bool symbols;
+    bool symbols_valid;
+};
+
+// check_program's first part (#2536's step 2.2c.1): the program's setup, its columns and the writer, and the candidates'
+// pass, kept in `run` for the bodies' loop (check_program_bodies) and the tail (check_program_finish). Whether all went.
+static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, const Parser* parser, const CheckInput* input, CheckStream* stream,
+                                const TypeTable* types, CheckProgramOptions options, Arena* output, Arena* scratch)
 {
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
@@ -5789,6 +5836,24 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     valid = valid && (body_count == 0 || program->bodies != 0) && (switch_capacity == 0 || program->switches != 0) &&
             (input->region_count == 0 || (program->regions != 0 && program->region_reached != 0)) && program->object_symbols != 0 &&
             program->object_declarations != 0 && (asm_targets == 0 || program->asm_targets != 0);
+    // Each body's own fields (#2536's step 2.2c.2): its declaration, opening brace, object and whether it is main, which
+    // the tail's part over the needed marks reads (check_program_symbols), so that it can run before the loop, which
+    // writes the rest. The bodies are all the program's from here on.
+    for (uint32_t b = 0; valid && b < body_count; b += 1)
+    {
+        const uint32_t declaration = check_sparse_get(input->body_declarations, openings[b]);
+        program->bodies[b] = (CheckProgramBody){
+            .declaration = declaration,
+            .opening = openings[b],
+            .object = input->objects[declaration],
+        };
+        if (options.identifiers != 0)
+        {
+            const uint32_t name = parser->tokens.names[declaration];
+            program->bodies[b].is_main = intern_length(options.identifiers, name) == 4 && memcmp(intern_bytes(options.identifiers, name), "main", 4) == 0;
+        }
+    }
+    program->body_count = valid ? body_count : 0;
     // An asm statement in an arm the writer leaves out has no entry, which fills its targets: none. No region is reached
     // before the bodies' references are walked.
     if (valid && asm_targets != 0)
@@ -5895,49 +5960,95 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         program->census_pass_arms = arm_count;
         arena_pop_to(scratch, mark);
     }
-    uint32_t reference_count = 0;
-    for (uint32_t b = 0; valid && b < body_count && program->status == CHECK_PROGRAM_OK; b += 1)
+    *run = (CheckProgramRun){
+        .program = program,
+        .parser = parser,
+        .input = input,
+        .stream = stream,
+        .types = types,
+        .options = options,
+        .output = output,
+        .scratch = scratch,
+        .controls = controls,
+        .writer = writer,
+        .target_events = target_events,
+        .return_facts = return_facts,
+        .openings = openings,
+        .seen = seen,
+        .nodes = nodes,
+        .stack = stack,
+        .reference_items = reference_items,
+        .reference_sort = reference_sort,
+        .needed = needed,
+        .token_first = token_first,
+        .node_next = node_next,
+        .plan_first = plan_first,
+        .planned = planned,
+        .plan_next = plan_next,
+        .dropped_ranges = dropped_ranges,
+        .entries = entries,
+        .mark = mark,
+        .temporary = temporary,
+        .count = count,
+        .body_count = body_count,
+        .valid = valid,
+    };
+    return valid;
+}
+
+// check_program's loop (#2536's step 2.2c.1): the bodies from the run's next to `end`, each's controls, return flow,
+// chains and references, in token order, as the loop over them all would make them.
+static void check_program_bodies(CheckProgramRun* run, uint32_t end)
+{
+    CheckProgram* program = run->program;
+    const CheckProgramOptions* options = &run->options;
+    Arena* output = run->output;
+    Arena* scratch = run->scratch;
+    const uint8_t* return_facts = run->return_facts;
+    const uint32_t* openings = run->openings;
+    uint32_t* seen = run->seen;
+    uint32_t* nodes = run->nodes;
+    uint32_t* stack = run->stack;
+    uint64_t* reference_items = run->reference_items;
+    uint64_t* reference_sort = run->reference_sort;
+    uint8_t* needed = run->needed;
+    CheckControl* entries = run->entries;
+    const bool valid = run->valid;
+    const uint32_t last = end < run->body_count ? end : run->body_count;
+    CheckControlWriter* writer = &run->writer;
+    uint32_t reference_count = run->reference_count;
+    for (uint32_t b = run->next_body; valid && b < last && program->status == CHECK_PROGRAM_OK; b += 1)
     {
         const uint32_t token = openings[b];
-        const uint32_t declaration = check_sparse_get(input->body_declarations, token);
-        const uint32_t start = writer.count;
-        const uint32_t label_first = writer.label_position_count;
-        const uint32_t exit_start = writer.exit_count;
-        check_control_build(&writer, token);
+        const uint32_t start = writer->count;
+        const uint32_t label_first = writer->label_position_count;
+        const uint32_t exit_start = writer->exit_count;
+        writer->body = b;
+        check_control_build(writer, token);
         // Its source labels' places, from their numbers, before check_program_return_flow takes the writer's labels.
-        for (uint32_t l = label_first; l < writer.label_position_count; l += 1)
+        for (uint32_t l = label_first; l < writer->label_position_count; l += 1)
         {
-            const uint32_t label = writer.label_positions[l];
-            writer.label_positions[l] = label < writer.label_count ? writer.labels[label] : BUSTER_CHECK_NONE;
+            const uint32_t label = writer->label_positions[l];
+            writer->label_positions[l] = label < writer->label_count ? writer->labels[label] : BUSTER_CHECK_NONE;
         }
-        CheckProgramBody* body = &program->bodies[program->body_count++];
-        *body = (CheckProgramBody)
+        // Its own fields the setup wrote (check_program_begin); the controls' and the references' here.
+        CheckProgramBody* body = &program->bodies[b];
+        body->first = start;
+        body->count = writer->count - start;
+        body->entry_count = writer->entry_count;
+        body->reference_first = reference_count;
+        body->label_first = label_first;
+        body->label_count = writer->label_position_count - label_first;
+        body->cleanup_first = writer->cleanup_first;
+        body->cleanup_count = writer->cleanup_count;
+        check_program_return_flow(writer, body, return_facts, options->return_warnings, options->noreturn_warnings);
+        program->exit_count = writer->exit_count;
+        if (writer->exit_count != exit_start && program->status == CHECK_PROGRAM_OK)
         {
-            .declaration = declaration,
-            .opening = token,
-            .object = input->objects[declaration],
-            .first = start,
-            .count = writer.count - start,
-            .entry_count = writer.entry_count,
-            .reference_first = reference_count,
-            .label_first = label_first,
-            .label_count = writer.label_position_count - label_first,
-            .cleanup_first = writer.cleanup_first,
-            .cleanup_count = writer.cleanup_count,
-        };
-        if (options.identifiers != 0)
-        {
-            const uint32_t name = parser->tokens.names[declaration];
-            body->is_main = intern_length(options.identifiers, name) == 4 && memcmp(intern_bytes(options.identifiers, name), "main", 4) == 0;
+            check_program_chains(writer, body, exit_start, scratch);
         }
-        check_program_return_flow(&writer, body, return_facts, options.return_warnings, options.noreturn_warnings);
-        program->exit_count = writer.exit_count;
-        if (writer.exit_count != exit_start && program->status == CHECK_PROGRAM_OK)
-        {
-            check_program_chains(&writer, body, exit_start, scratch);
-        }
-        const uint64_t references_start = options.selection_census ? __rdtsc() : 0;
-        body->reference_count = check_program_references(program, entries + start, body->entry_count, program->body_count, seen, nodes, stack, reference_items, needed);
+        const uint64_t references_start = options->selection_census ? __rdtsc() : 0;
+        body->reference_count = check_program_references(program, entries + start, body->entry_count, b + 1, seen, nodes, stack, reference_items, needed);
         if (body->reference_count > UINT32_MAX - reference_count)
         {
             check_program_fail(program, CHECK_PROGRAM_RESOURCE, token);
@@ -5951,7 +6062,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             }
             // The existing bounded radix kernel sorts high 32-bit keys. Reuse its scalar/vector twins, keeping
             // this body's canonical object IDs compact instead of rescanning the entire translation unit.
-            uint64_t* sorted = c_bindings_sort(reference_items, reference_sort, body->reference_count, !BUSTER_SCALAR_PATH(options.scalar), varying);
+            uint64_t* sorted = c_bindings_sort(reference_items, reference_sort, body->reference_count, !BUSTER_SCALAR_PATH(options->scalar), varying);
             uint32_t* output_references = body->reference_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, body->reference_count) : 0;
             if (body->reference_count != 0 && output_references == 0)
             {
@@ -5969,10 +6080,114 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 }
             }
             reference_count += body->reference_count;
-            program->census_references_ticks += options.selection_census ? __rdtsc() - references_start : 0;
+            program->census_references_ticks += options->selection_census ? __rdtsc() - references_start : 0;
         }
     }
-    valid = valid && program->status == CHECK_PROGRAM_OK;
+    run->reference_count = reference_count;
+    run->next_body = last > run->next_body ? last : run->next_body;
+}
+
+// check_program's tail (#2536's step 2.2c.1): after the bodies' loop, the builtins, the censuses, the controls' copy, the
+// static objects, aliases and symbols, the targets' checks, and the failure's or the success's last word. Whether the
+// program is valid.
+// The tail's part over the needed marks (#2536's step 2.2c.2): the static objects, the roots, the groups, the aliases and
+// asm labels, the symbols' numbering, the late weak declarations, the targets and the attributes' and patchable entries'
+// keys, given `valid`. Of the bodies it reads their own fields alone (CheckProgramBody's declaration and object), which
+// the setup writes, and it neither reads nor writes the loop's columns: it can run before the loop, as
+// --provisional-selection runs it over the candidates' marks. Whether all went.
+static bool check_program_symbols(CheckProgramRun* run, uint8_t* needed, bool valid)
+{
+    CheckProgram* program = run->program;
+    CheckProgramOptions options = run->options;
+    Arena* output = run->output;
+    Arena* scratch = run->scratch;
+    CheckProgramTargetEvents* events = &run->target_events;
+    const uint32_t count = run->count;
+    if (valid)
+    {
+        memset(program->object_symbols, 0, ((uint64_t)count + 1) * sizeof(SymbolId));
+        memset(program->object_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        // The naked functions' first declarations with the attribute, in token order (CheckProgram.object_naked): the
+        // column comes with the unit's first one. And the functions' target attributes, which check_program_targets reads.
+        const bool naked_room = options.prepared_data != NULL ? check_program_static_prepared(program, options.prepared_data, needed, output, events) :
+                                                              check_program_static_objects(program, needed, output, BUSTER_SCALAR_PATH(options.scalar), events);
+        // The constant CFStrings' records' references, the last ones, are no roots (#148): a live record's are needed
+        // (check_program_alias_number).
+        const CheckDataPrepared* prepared = options.prepared_data;
+        const uint32_t roots = prepared != NULL && options.initializer_references == prepared->references &&
+                               prepared->cfstring_reference_first < options.initializer_reference_count ? prepared->cfstring_reference_first :
+                                                                                                          options.initializer_reference_count;
+        for (uint32_t i = 0; i < roots; i += 1)
+        {
+            const uint32_t object = options.initializer_references[i];
+            if (object != 0 && object <= count)
+            {
+                needed[object] = 1;
+            }
+            else if (object != 0)
+            {
+                check_program_fail(program, CHECK_PROGRAM_INVALID, 0);
+            }
+        }
+        // clang's cpu_specific and cpu_dispatch groups (#1447), whose members' references take their groups' symbols as
+        // the symbols are numbered.
+        const bool grouped = (!program->input->cpu_dispatch || check_program_cpu_groups(program, events, output)) &&
+                             (!program->input->target_multiversion ||
+                              check_program_target_groups(program, events, options.initializer_references, options.initializer_reference_count, output));
+        // GNU's alias, ifunc and weakref attributes (#147): the unit's entries, whose aliases' and ifuncs' objects are
+        // needed, and whose referenced weakrefs take their targets' symbols as the symbols are numbered.
+        const bool aliased = grouped && (events->alias_count == 0 ||
+                                         check_program_aliases(program, events, needed, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
+        // Asm labels naming another object's symbol (#1979), whose objects take that symbol as the symbols are numbered.
+        const bool labelled = aliased && (events->label_count == 0 || check_program_label_merges(program, events, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
+        valid = naked_room && labelled && check_program_alias_number(program, needed, program->alias_states, BUSTER_SCALAR_PATH(options.scalar), output);
+    }
+    valid = valid && (events->weak_count == 0 || check_program_weak_late(program, events, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
+    if (valid && program->status == CHECK_PROGRAM_OK && !check_program_targets(program, &options, events, output, scratch))
+    {
+        program->status = CHECK_PROGRAM_RESOURCE;
+    }
+    if (valid && program->status == CHECK_PROGRAM_OK && !check_program_attribute_keys(program, events, BUSTER_SCALAR_PATH(options.scalar), output, scratch))
+    {
+        program->status = CHECK_PROGRAM_RESOURCE;
+    }
+    if (valid && program->status == CHECK_PROGRAM_OK && !check_program_patchable_keys(program, events, BUSTER_SCALAR_PATH(options.scalar), output, scratch))
+    {
+        program->status = CHECK_PROGRAM_RESOURCE;
+    }
+    return valid;
+}
+
+static bool check_program_finish(CheckProgramRun* run)
+{
+    CheckProgram* program = run->program;
+    const Parser* parser = run->parser;
+    const CheckInput* input = run->input;
+    CheckStream* stream = run->stream;
+    CheckProgramOptions options = run->options;
+    Arena* output = run->output;
+    Arena* scratch = run->scratch;
+    Arena controls = run->controls;
+    const uint32_t* openings = run->openings;
+    uint32_t* seen = run->seen;
+    uint32_t* nodes = run->nodes;
+    uint32_t* stack = run->stack;
+    uint64_t* reference_items = run->reference_items;
+    uint64_t* reference_sort = run->reference_sort;
+    uint8_t* needed = run->needed;
+    uint32_t* token_first = run->token_first;
+    uint32_t* node_next = run->node_next;
+    uint32_t* plan_first = run->plan_first;
+    uint64_t* planned = run->planned;
+    uint32_t* plan_next = run->plan_next;
+    uint64_t* dropped_ranges = run->dropped_ranges;
+    CheckControl* entries = run->entries;
+    const uint64_t mark = run->mark;
+    const uint64_t temporary = run->temporary;
+    const uint32_t count = run->count;
+    const uint32_t reference_count = run->reference_count;
+    const CheckControlWriter writer = run->writer;
+    bool valid = run->valid && program->status == CHECK_PROGRAM_OK;
     program->builtin_count = valid ? check_program_builtins(&input->graph, nodes, NULL, BUSTER_SCALAR_PATH(options.scalar)) : 0;
     program->builtin_nodes = valid && program->builtin_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->builtin_count) : 0;
     valid = valid && (program->builtin_count == 0 || program->builtin_nodes != 0);
@@ -6072,56 +6287,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         {
             check_program_fail(program, CHECK_PROGRAM_RESOURCE, BUSTER_CHECK_NONE);
         }
-        memset(program->object_symbols, 0, ((uint64_t)count + 1) * sizeof(SymbolId));
-        memset(program->object_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        // The naked functions' first declarations with the attribute, in token order (CheckProgram.object_naked): the
-        // column comes with the unit's first one. And the functions' target attributes, which check_program_targets reads.
-        const bool naked_room = options.prepared_data != NULL ? check_program_static_prepared(program, options.prepared_data, needed, output, &target_events) :
-                                                              check_program_static_objects(program, needed, output, BUSTER_SCALAR_PATH(options.scalar), &target_events);
-        // The constant CFStrings' records' references, the last ones, are no roots (#148): a live record's are needed
-        // (check_program_alias_number).
-        const CheckDataPrepared* prepared = options.prepared_data;
-        const uint32_t roots = prepared != NULL && options.initializer_references == prepared->references &&
-                               prepared->cfstring_reference_first < options.initializer_reference_count ? prepared->cfstring_reference_first :
-                                                                                                          options.initializer_reference_count;
-        for (uint32_t i = 0; i < roots; i += 1)
-        {
-            const uint32_t object = options.initializer_references[i];
-            if (object != 0 && object <= count)
-            {
-                needed[object] = 1;
-            }
-            else if (object != 0)
-            {
-                check_program_fail(program, CHECK_PROGRAM_INVALID, 0);
-            }
-        }
-        // clang's cpu_specific and cpu_dispatch groups (#1447), whose members' references take their groups' symbols as
-        // the symbols are numbered.
-        const bool grouped = (!program->input->cpu_dispatch || check_program_cpu_groups(program, &target_events, output)) &&
-                             (!program->input->target_multiversion ||
-                              check_program_target_groups(program, &target_events, options.initializer_references, options.initializer_reference_count, output));
-        // GNU's alias, ifunc and weakref attributes (#147): the unit's entries, whose aliases' and ifuncs' objects are
-        // needed, and whose referenced weakrefs take their targets' symbols as the symbols are numbered.
-        const bool aliased = grouped && (target_events.alias_count == 0 ||
-                                         check_program_aliases(program, &target_events, needed, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
-        // Asm labels naming another object's symbol (#1979), whose objects take that symbol as the symbols are numbered.
-        const bool labelled = aliased && (target_events.label_count == 0 || check_program_label_merges(program, &target_events, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
-        valid = naked_room && labelled && check_program_alias_number(program, needed, program->alias_states, BUSTER_SCALAR_PATH(options.scalar), output);
     }
-        valid = valid && (target_events.weak_count == 0 || check_program_weak_late(program, &target_events, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
-    if (valid && program->status == CHECK_PROGRAM_OK && !check_program_targets(program, &options, &target_events, output, scratch))
-    {
-        program->status = CHECK_PROGRAM_RESOURCE;
-    }
-    if (valid && program->status == CHECK_PROGRAM_OK && !check_program_attribute_keys(program, &target_events, BUSTER_SCALAR_PATH(options.scalar), output, scratch))
-    {
-        program->status = CHECK_PROGRAM_RESOURCE;
-    }
-    if (valid && program->status == CHECK_PROGRAM_OK && !check_program_patchable_keys(program, &target_events, BUSTER_SCALAR_PATH(options.scalar), output, scratch))
-    {
-        program->status = CHECK_PROGRAM_RESOURCE;
-    }
+    // The tail's part over the needed marks, unless it ran before the loop over the candidates' (check_program).
+    valid = run->symbols ? valid && run->symbols_valid : check_program_symbols(run, needed, valid);
     if (valid && program->status == CHECK_PROGRAM_OK && !check_program_x86_diagnostics(program, stream, scratch))
     {
         program->status = CHECK_PROGRAM_RESOURCE;
@@ -6143,6 +6311,36 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     arena_pop_to(scratch, temporary);
     arena_release(&controls);
     return valid;
+}
+
+static bool check_program(CheckProgram* program, const Parser* parser, const CheckInput* input, CheckStream* stream,
+                          const TypeTable* types, CheckProgramOptions options, Arena* output, Arena* scratch)
+{
+    // The loop a body at a time, as the windows will run it a window's bodies at a time.
+    CheckProgramRun run;
+    check_program_begin(&run, program, parser, input, stream, types, options, output, scratch);
+    // With the candidates (--provisional-selection, #2536's step 2.2c.2), the tail's part over the needed marks first,
+    // over the candidates' references, which hold the exact ones: as the windows will need it before the loop. The
+    // selection makes its symbols and the weakrefs' states again from its own references, so the objects are the same.
+    if (options.candidates && run.valid && program->status == CHECK_PROGRAM_OK && program->census_pass.first != NULL)
+    {
+        uint64_t total = 0;
+        for (uint32_t b = 0; b < run.body_count; b += 1)
+        {
+            total += program->census_pass.counts[b];
+        }
+        for (uint64_t r = 0; r < total; r += 1)
+        {
+            run.needed[program->census_pass.references[r]] = 1;
+        }
+        run.symbols_valid = check_program_symbols(&run, run.needed, true);
+        run.symbols = true;
+    }
+    for (uint32_t b = 0; b < run.body_count; b += 1)
+    {
+        check_program_bodies(&run, b + 1);
+    }
+    return check_program_finish(&run);
 }
 
 #include "c_check_program_symbol_pragma.c"

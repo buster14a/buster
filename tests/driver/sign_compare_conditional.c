@@ -203,6 +203,163 @@ int nested_modifying_conditional(int y, int c, unsigned n)
     return result + y;
 }
 
+// The folded result alone cannot suppress the source-range warning: the condition modifies an object.
+int folded_modifying_left(int y, unsigned n)
+{
+    int less = ((y = 0) ? -1 : 3) < n;
+    int less_equal = ((y = 0) ? -1 : 3) <= n;
+    int greater = ((y = 0) ? -1 : 3) > n;
+    int greater_equal = ((y = 0) ? -1 : 3) >= n;
+    int equal = ((y = 0) ? -1 : 3) == n;
+    int unequal = ((y = 0) ? -1 : 3) != n;
+    return less + less_equal + greater + greater_equal + equal + unequal + y;
+}
+
+int folded_modifying_right(int y, unsigned long n)
+{
+    int less = n < ((y = 0) ? -1 : 3);
+    int less_equal = n <= ((y = 0) ? -1 : 3);
+    int greater = n > ((y = 0) ? -1 : 3);
+    int greater_equal = n >= ((y = 0) ? -1 : 3);
+    int equal = n == ((y = 0) ? -1 : 3);
+    int unequal = n != ((y = 0) ? -1 : 3);
+    return less + less_equal + greater + greater_equal + equal + unequal + y;
+}
+
+int folded_modifying_true(int y, unsigned n)
+{
+    int result = ((y = 1) ? 3 : -1) < n;
+    return result + y;
+}
+
+int folded_nested_modifying(int y, int z, unsigned n)
+{
+    int result = ((y = 0) ? ((z = 0) ? -1 : 3) : 9) < n;
+    return result + y + z;
+}
+
+int folded_statement_condition(int y, unsigned n)
+{
+    int result = (({ y = 0; }) ? -1 : 3) < n;
+    return result + y;
+}
+
+int folded_selected_condition(int y, unsigned n)
+{
+    int result = (_Generic(0, int: (y = 0)) ? -1 : 3) < n;
+    return result + y;
+}
+
+int folded_positive_comparisons(int y)
+{
+    int greater = ((y = 0) ? -1 : 3) > 0u;
+    int less_equal = 0u >= ((y = 0) ? -1 : 3);
+    return greater + less_equal + y;
+}
+
+int folded_signed_cast(int y, unsigned n)
+{
+    int result = (int)((y = 0) ? -1 : 3) < n;
+    return result + y;
+}
+
+int folded_cast_nonnegative(int y, unsigned n)
+{
+    int result = (int)((y = 0) ? 2 : 3) < n;
+    return result + y;
+}
+
+int folded_unary_positive(int y, unsigned n)
+{
+    int result = +((y = 0) ? -1 : 3) < n;
+    return result + y;
+}
+
+int folded_generic_result(int y, unsigned n)
+{
+    int result = _Generic(0, int: ((y = 0) ? -1 : 3)) < n;
+    return result + y;
+}
+
+int folded_chosen_result(int y, unsigned n)
+{
+    int result = __builtin_choose_expr(1, ((y = 0) ? -1 : 3), 0) < n;
+    return result + y;
+}
+
+int folded_extension_result(int y, unsigned n)
+{
+    int result = __extension__ (((y = 0) ? -1 : 3)) < n;
+    return result + y;
+}
+
+int folded_nested_wrappers(int y, unsigned n)
+{
+    int result = +_Generic(0, int: (signed char)+((y = 0) ? -1 : 3)) < n;
+    return result + y;
+}
+
+// Both-arm proofs and independently safe constant-comparison rules still suppress these warnings.
+int folded_modifying_nonnegative(int y, unsigned n)
+{
+    int result = ((y = 0) ? 2 : 3) < n;
+    return result + y;
+}
+
+int folded_reversed_safe_constants(int y)
+{
+    int equal = 1u == ((y = 0) ? -1 : 3);
+    int unequal = 1u != ((y = 0) ? -1 : 3);
+    int less = 0u > ((y = 0) ? -1 : 3);
+    int greater_equal = 0u <= ((y = 0) ? -1 : 3);
+    return equal + unequal + less + greater_equal + y;
+}
+
+int folded_nonnegative_wrappers(int y, unsigned n)
+{
+    int unary = +((y = 0) ? 2 : 3) < n;
+    int generic = _Generic(0, int: ((y = 0) ? 2 : 3)) < n;
+    int chosen = __builtin_choose_expr(1, ((y = 0) ? 2 : 3), 0) < n;
+    int extension = __extension__ (((y = 0) ? 2 : 3)) < n;
+    return unary + generic + chosen + extension + y;
+}
+
+int folded_representable_cast(int y, unsigned n)
+{
+    int result = (long)((y = 0) ? -1 : 3) < n;
+    return result + y;
+}
+
+// These GNU conditions are evaluable without side effects even though they are not standard ICEs.
+int folded_pure_statement(unsigned n)
+{
+    return (({ 0; }) ? -1 : 3) < n;
+}
+
+int folded_pure_comma(unsigned n)
+{
+    return (((void)0, 0) ? -1 : 3) < n;
+}
+
+int folded_unevaluated_modification(int y, unsigned n)
+{
+    int result = (1 ? 3 : (y = -1)) < n;
+    return result + y;
+}
+
+// An assignment or comma's range follows its result; do not globally reject every modifying folded value.
+int folded_assignment_result(int y, unsigned n)
+{
+    int result = (y = 3) < n;
+    return result + y;
+}
+
+int folded_comma_result(int y, unsigned n)
+{
+    int result = ((y = 3), 3) < n;
+    return result + y;
+}
+
 // A balanced tree leaves many pending arms, and every arm still has a nonnegative result.
 #define POS_0 a
 #define POS_1 (c ? POS_0 : POS_0)

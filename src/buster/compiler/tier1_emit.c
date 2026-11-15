@@ -50,6 +50,10 @@ _Static_assert(BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT == BUSTER_TIER1_FRAME_MA
 // The records a node of a fixed-register rule writes past its share, BUSTER_TIER1_SELECT_RECORDS_PER_NODE: its sequence's,
 // and the saves and restores of the two fixed registers a division takes (tier1_emit_fixed).
 #define BUSTER_TIER1_EMIT_FIXED_RECORDS (BUSTER_TIER1_SELECT_FIXED_RECORDS + 4 - BUSTER_TIER1_SELECT_RECORDS_PER_NODE)
+// The first of the literals' provisional targets (#2744, Tier1EmitResult.literals): literal k's references name
+// BUSTER_TIER1_EMIT_LITERAL + k, past every symbol a function's access column has (Tier1EmitOptions.symbol_count), as the
+// C driver's EmittedCode has them (BUSTER_EMITTED_LITERAL, which c_check_tier1.c checks is the same).
+#define BUSTER_TIER1_EMIT_LITERAL 0x80000000u
 
 typedef enum Tier1EmitError
 {
@@ -283,6 +287,16 @@ struct Tier1EmitResult
     // The references' room: a call's each, and in the CFG consumer a symbol's address's each too, with its options'
     // symbols' access (Tier1EmitOptions.symbol_access).
     uint32_t reference_capacity;
+    // The literals its code loads (#2744, tier1_emit_cfg_literal): each one of the function's vector constants
+    // (IrFunction.vector_constants) at one width, `literal_count` of them, its bytes past the width zero; a reference whose
+    // target is BUSTER_TIER1_EMIT_LITERAL + k is to literal k (the emitted code's EmittedLiteral, which the C driver's
+    // merge places in the unit's pool). And by constant, each width's literal (16, 32 and 64 bytes, three entries a
+    // constant) plus one, 0 for none, which the code's certificate reads to find the literal it checks.
+    IrSimdValue* literals;
+    uint8_t* literal_widths;
+    uint32_t literal_count;
+    uint32_t literal_capacity;
+    uint32_t* literal_of;
     // The nodes of fixed-register rules (tier1_select_fixed_registers), whose sequences take records past a node's share.
     uint32_t fixed_count;
     // In the CFG consumer, the callee-saved registers its values may take (live across a call), and those they took,
@@ -1859,6 +1873,49 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
         }
     }
     return error;
+}
+
+// The bytes a native test's mapping needs past its code for `emitted`'s literals (#2744, tier1_emit_place_literals): a
+// slot of 64 bytes each, and the slack that aligns the first.
+static __attribute__((unused)) uint64_t tier1_emit_literal_bytes(const Tier1EmitResult* emitted)
+{
+    return emitted->literal_count != 0 ? 64 * (uint64_t)emitted->literal_count + 63 : 0;
+}
+
+// `emitted`'s literals (#2744) placed in a native test's mapping `machine` of `capacity` bytes, from `pool` on (past the
+// code): literal k in the 64-byte slot k after `pool` rounded up to 64, which aligns it to its width as the C driver's pool
+// does, and each reference to one written into the code, the literal's distance from its record's end (x86_encode's
+// fixup end in `ends`, one per marked record in record order). The code's other references are the caller's. False where
+// the slots don't fit, a reference names no literal of the code's, or a distance doesn't fit in 32 bits.
+static __attribute__((unused)) bool tier1_emit_place_literals(const Tier1EmitResult* emitted, uint8_t* machine, const uint32_t* ends, uint64_t pool, uint64_t capacity)
+{
+    const uint64_t first = (pool + 63) & ~UINT64_C(63);
+    bool valid = emitted->literal_count == 0 || first + 64 * (uint64_t)emitted->literal_count <= capacity;
+    for (uint32_t k = 0; valid && k < emitted->literal_count; k += 1)
+    {
+        memcpy(machine + first + 64 * (uint64_t)k, emitted->literals[k].words, sizeof(emitted->literals[k].words));
+    }
+    uint32_t marked = UINT32_MAX;
+    uint32_t previous = UINT32_MAX;
+    for (uint32_t i = 0; valid && i < emitted->reference_count; i += 1)
+    {
+        const LinkReference* reference = &emitted->references[i];
+        marked += reference->instruction != previous ? 1 : 0;
+        previous = reference->instruction;
+        const bool literal = reference->target >= BUSTER_TIER1_EMIT_LITERAL;
+        const uint32_t k = reference->target - BUSTER_TIER1_EMIT_LITERAL;
+        valid = !literal || (k < emitted->literal_count && reference->kind == BUSTER_LINK_FIXUP_PC32 && reference->instruction < emitted->code.count);
+        const uint32_t end = valid && literal ? ends[marked] : 0;
+        const uint32_t distance = valid && literal ? x86_fixup_distance(emitted->code.records[reference->instruction].form, reference->field) : 0;
+        const int64_t relative = valid && literal ? (int64_t)(first + 64 * (uint64_t)k) + reference->addend - (int64_t)end : 0;
+        valid = valid && (!literal || (end >= distance && relative == (int64_t)(int32_t)relative));
+        if (valid && literal)
+        {
+            const int32_t field = (int32_t)relative;
+            memcpy(machine + end - distance, &field, sizeof(field));
+        }
+    }
+    return valid;
 }
 
 #include "tier1_emit_cfg.c"

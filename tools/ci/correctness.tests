@@ -893,6 +893,26 @@ lexer=(--tier1 -fno-asynchronous-unwind-tables -march=znver5 -Isrc -fwrapv -funs
 cmp "$objects/one.o" "$objects/four.o"
 test "$(objdump -dr "$objects/four.o" | grep -c 'R_X86_64_PLT32.*memmove')" -ge 18
 rm -r "$objects"
+== Link Tier 1's literal pools with clang's and merge their equal entries
+# #2744: a vector constant no broadcast makes is a literal its function's code loads rip-relative, which -c's object puts
+# in the unit's pool: .rodata.cst16 here, mergeable (SHF_MERGE, entry size 16) and aligned to 16, its load relocated
+# against a local symbol. Two units with the same constant, by strict Tier 1 for the baseline (any host runs them), linked
+# with a main by clang: the program prints clang -O0's output, and the linker merged the two entries into one.
+objects=$(mktemp -d)
+printf '%s\n' '#include <emmintrin.h>' 'long long a(long long x)' '{' \
+    '    return _mm_cvtsi128_si64(_mm_add_epi32(_mm_cvtsi64_si128(x), _mm_set_epi32(0x0badf00d, 0x0ddba11, 0x5eed1e55, 0x7e57ab1e)));' '}' > "$objects/a.c"
+sed 's/long long a(/long long b(/' "$objects/a.c" > "$objects/b.c"
+printf '%s\n' '#include <stdio.h>' 'long long a(long long x);' 'long long b(long long x);' \
+    'int main(void) { printf("%llx %llx\n", (unsigned long long)a(1), (unsigned long long)b(2)); return 0; }' > "$objects/main.c"
+"$BUSTER_COMPILER" --tier1 --tier1-strict -march=x86-64 -c -o "$objects/a.o" "$objects/a.c"
+"$BUSTER_COMPILER" --tier1 --tier1-strict -march=x86-64 -c -o "$objects/b.o" "$objects/b.c"
+readelf -SW "$objects/a.o" | grep -Eq '\.rodata\.cst16 +PROGBITS +0+ +[0-9a-f]+ +0+10 +10 +AM +0 +0 +16$'
+objdump -dr "$objects/a.o" | grep -q 'R_X86_64_PC32[[:space:]]*\.Lbuster_literal_0-0x4$'
+clang -o "$objects/tier1" "$objects/main.c" "$objects/a.o" "$objects/b.o"
+clang -O0 -o "$objects/clang" "$objects/main.c" "$objects/a.c" "$objects/b.c"
+cmp <("$objects/tier1") <("$objects/clang")
+test "$(od -An -tx1 -v "$objects/tier1" | tr -d ' \n' | grep -o 1eab577e551eed5e11badd000df0ad0b | wc -l)" -eq 1
+rm -r "$objects"
 == Test dominators, frontiers and natural loops
 "$BUSTER_COMPILER" test-dominators
 "$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/dominators.c
@@ -931,6 +951,7 @@ test "$("$BUSTER_COMPILER" test-ir-source --print fetched tests/ir-source/atomic
 "$BUSTER_COMPILER" test-ir-optimize
 "$BUSTER_COMPILER" test-ir-gvn
 "$BUSTER_COMPILER" test-ir-licm
+"$BUSTER_COMPILER" test-ir-unroll
 "$BUSTER_COMPILER" test-ir-sroa
 # #2743: the loop vectorizer's fixtures by both paths at 16, 32 and 64 bytes against the interpreter, and its mutants.
 "$BUSTER_COMPILER" test-ir-vectorize
@@ -959,7 +980,8 @@ clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags
 == Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
 # #2554: the subject compiles at Tier 1 with no fallback, by both host paths, and runs against Clang's oracle; objdump
 # checks that the truth values became branches, constants are stores' immediates, no shift by zero is left, each
-# computed goto has its own indirect jump and (#2676) each select of a comparison is a cmov of its flags, with no setcc.
+# computed goto has its own indirect jump, (#2676) each select of a comparison is a cmov of its flags, with no setcc, and
+# (#2745) no object a vector's value writes whole is zeroed first.
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns
 ./build/test-driver-tier1-patterns "$BUSTER_COMPILER" "$(command -v clang)"
