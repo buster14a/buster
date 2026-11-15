@@ -227,7 +227,8 @@ static bool check_lower_init_pools(CheckLowerInitializers* pools, const CheckPro
     }
     // The selected program retains the full control table, including unselected bodies. Only the selected bodies'
     // ranges contribute pools and clearing calls. A target_clones copy can visit a range again; selection is a set.
-    for (uint32_t b = 0; valid && count != 0 && b < program->body_count; b += 1)
+    // A provisional selection supplies its own initialize_list instead of controls.
+    for (uint32_t b = 0; valid && count != 0 && program->initialize_list == NULL && b < program->body_count; b += 1)
     {
         const CheckProgramBody* body = program->bodies + b;
         for (uint32_t c = 0; c < body->count; c += 1)
@@ -237,6 +238,13 @@ static bool check_lower_init_pools(CheckLowerInitializers* pools, const CheckPro
             {
                 selected[control->target] = 1;
             }
+        }
+    }
+    for (uint32_t i = 0; valid && count != 0 && program->initialize_list != NULL && i < program->initialize_list_count; i += 1)
+    {
+        if (program->initialize_list[i] < count)
+        {
+            selected[program->initialize_list[i]] = 1;
         }
     }
     uint64_t capacity = 0;

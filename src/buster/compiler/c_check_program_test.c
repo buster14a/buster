@@ -2404,6 +2404,17 @@ static void check_test_program_initializer_facts(CheckTest* test)
         }
         check_test_expect(test, pooled && scratch.length == 0,
                           "initializer pools follow selected body controls, including shared clone controls");
+        const uint32_t listed[] = { 10, 11, 11, COUNT };
+        program.initialize_list = listed;
+        program.initialize_list_count = 4;
+        pools = (CheckLowerInitializers){ 0 };
+        pooled = check_lower_init_pools(&pools, &program, facts, types.table.types.count, &output, &scratch) && pools.count == 2;
+        for (uint32_t i = 0; pooled && i < COUNT; i += 1)
+        {
+            pooled = pools.first[i + 1] - pools.first[i] == (i == 10 || i == 11);
+        }
+        check_test_expect(test, pooled && scratch.length == 0,
+                          "a provisional initializer list replaces body controls and deduplicates its plans");
         scratch.capacity = 65536;
     }
     arena_release(&scratch);
