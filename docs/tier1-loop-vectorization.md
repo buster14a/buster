@@ -161,7 +161,12 @@ conversions are EVEX forms in Tier 1. The refusals that remain have issues:
 remainder (#2807), and strided accesses and narrow-into-wide counts (#2808).
 Compiling sqlite3.c with the option cost 2.30% more user cycles at znver5 and
 1.51% at x86-64 in the first build, which built a CFG and dominators for each
-candidate function; the rerun with the terminator walk is in the record.
+candidate function; with the terminator walk and no row work in functions
+without an admitted loop, 1.04% and 0.44%. Without unit inlining on both sides
+the pass costs 7.9 M instructions (+0.17%) at either target; the rest is the
+pass running on inlined bodies and, at znver5, Tier 1's later stages on the
+64-byte loop that inlining copies into `sqlite3VdbeExec`, about 61 M
+instructions more than the same loop at 16 bytes (#2831).
 
 ## What the measurements rank
 
