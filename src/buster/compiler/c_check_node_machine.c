@@ -395,6 +395,14 @@ struct NodeMachine
     uint32_t* call_records;
     uint32_t call_count;
     uint32_t temporary_count;
+    // node_machine_lower's (c_check_node_machine_lower.c), which writes the tape back from its columns' ends: its first
+    // entry's place in them (X's tape starts at 0), each label's entry as its place from the tape's end, by the label's
+    // number in the sweep's order (`label_ends`), the labeled records in that order (`label_met`) and each call's CALL's
+    // place from the tape's end (`call_ends`).
+    uint32_t entry_first;
+    uint32_t* label_ends;
+    uint32_t* label_met;
+    uint32_t* call_ends;
     // The record T, C or X stopped at, for a refusal's report.
     uint32_t stopped;
 };
@@ -456,6 +464,9 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
     machine->label_entries = node_machine_column(arena, 2 * most, sizeof(uint32_t), 58);
     machine->calls_written = node_machine_column(arena, most, sizeof(uint32_t), 60);
     machine->call_records = node_machine_column(arena, most, sizeof(uint32_t), 62);
+    machine->label_ends = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 2 * most);
+    machine->label_met = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
+    machine->call_ends = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
     machine->arguments = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
     machine->argument_conversions = BUSTER_ARENA_PUSH_ARRAY(arena, CheckConversion, most);
     machine->argument_values = BUSTER_ARENA_PUSH_ARRAY(arena, CheckValue, BUSTER_TIER0_MAX_CALL_ARGUMENTS);
@@ -469,7 +480,7 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
                       machine->calls_written != NULL && machine->call_records != NULL && machine->arguments != NULL && machine->argument_conversions != NULL &&
                       machine->argument_values != NULL && machine->verified != NULL && machine->stack != NULL && machine->consumers != NULL &&
                       machine->updates != NULL && machine->pointers != NULL && machine->const_pointers != NULL &&
-                      machine->argument_memo != NULL;
+                      machine->argument_memo != NULL && machine->label_ends != NULL && machine->label_met != NULL && machine->call_ends != NULL;
     if (room)
     {
         node_machine_forget(machine);
@@ -623,7 +634,7 @@ static inline int64_t node_machine_record_offset(const NodeMachine* machine, uin
 }
 
 // Whether its value's truth is known, check_action_truth's answer for its value made whole, and into `truth` that truth.
-static inline bool node_machine_record_truth(const NodeMachine* machine, uint32_t r, bool* truth)
+static inline __attribute__((always_inline)) bool node_machine_record_truth(const NodeMachine* machine, uint32_t r, bool* truth)
 {
     CheckValue value;
     node_machine_record_value(machine, r, &value);

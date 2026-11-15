@@ -7,7 +7,7 @@
 // expression the tasks lowered is read again from the finished graph, stream and parser's tree, by the tests the machine
 // would make before it takes it. Include after c_check_lower_inventory.c.
 //
-//   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--passes N] [--repeat N]] [preprocessor options] file...
+//   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--fused] [--interleave N] [--passes N] [--repeat N]] [preprocessor options] file...
 //
 // A full expression is a tree of the tasks' pops under one root: a pop that a statement's control pushed (an expression
 // statement's, a condition's, a return's, a switch's, an initializer's) or a nested control (a statement expression's).
@@ -500,6 +500,15 @@ struct NodeCensusScratch
     // The current expression's temporaries' locals, by their number on the tape, and how many it has met.
     uint32_t* temporary_locals;
     uint32_t temporary_count;
+    // The current expression's records' consumers, for the fused sweep's census (node_shadow_fusion).
+    uint32_t* consumers;
+    // --fused: the three sweeps' tape, labels' entries and calls' records, kept for the comparison with the one sweep's
+    // (node_shadow_fused).
+    uint8_t* fused_kinds;
+    uint8_t* fused_classes;
+    uint64_t* fused_tape;
+    uint32_t* fused_labels;
+    uint32_t* fused_calls;
 };
 
 static double node_census_share(uint64_t part, uint64_t whole)
@@ -1754,11 +1763,25 @@ struct NodeShadowExpression
     uint32_t count;
     uint32_t object;
     TypeId target;
+    // Its body's stamp (NodeCensusScratch.body_stamp), its root pop's flags and its root's kind (NodeCensusRoot): the
+    // interleaved sets' chunks by bodies and the census's walk again (--interleave).
+    uint32_t body;
     uint8_t context;
+    uint8_t flags;
+    uint8_t kind;
 };
 
-// The sweeps timed: T alone, T and C, and all three.
-#define BUSTER_NODE_SHADOW_SWEEPS 3u
+// The sets timed: T alone, T and C, and all three; with --fused, T and then C and X as one sweep (node_machine_lower);
+// and with --interleave N, the census's own walk of each expression (node_census_expression: other code over the same
+// nodes, as the reader's is where a compile runs the machine) alone, then before the three sweeps, and before T and the
+// one sweep with --fused. The interleaved sets take the expressions by chunks of N (a body's for 0): the walk of each of a
+// chunk's expressions, then the sweeps of each, so that a set less the walk alone is what the sweeps cost where other
+// code runs between two of the machine's runs, and N is how many expressions a run takes.
+#define BUSTER_NODE_SHADOW_SWEEPS 7u
+#define BUSTER_NODE_SHADOW_SET_FUSED 3u
+#define BUSTER_NODE_SHADOW_SET_WALK 4u
+#define BUSTER_NODE_SHADOW_SET_WALK_SWEEPS 5u
+#define BUSTER_NODE_SHADOW_SET_WALK_FUSED 6u
 
 // One expression's result, for the shadow's tests (NodeShadow.records_out): its root's line and the machine's refusal.
 typedef struct NodeShadowRecord NodeShadowRecord;
@@ -1808,6 +1831,35 @@ struct NodeShadow
     // lowering's by its number from the expression's first and by its entry (node_shadow_same_label).
     uint64_t labeled_expressions;
     uint64_t labels;
+    // The fused sweep's census (node_shadow_fusion): the taken expressions' records evaluated and not; of these, those
+    // whose consumer isn't evaluated either; the evaluated records whose context their consumer's own context gives (a
+    // SELECT's operand, a comma's second operand), and of those, the ones not evaluated as plain values; the evaluated
+    // calls, and those below another; the records followed by a segment or an update's first row; the update plans; and
+    // the expressions with anything such a sweep settles after the records' visits.
+    uint64_t fusion_evaluated;
+    uint64_t fusion_unevaluated;
+    uint64_t fusion_wasted;
+    uint64_t fusion_inherited;
+    uint64_t fusion_inherited_other;
+    uint64_t fusion_calls;
+    uint64_t fusion_nested_calls;
+    uint64_t fusion_hooked;
+    uint64_t fusion_updates;
+    uint64_t fusion_settled_expressions;
+    // --fused: C and X as one sweep (c_check_node_machine_lower.c), run after the three sweeps on every expression T
+    // typed: those whose refusal, tape, labels or calls differ from C's and X's, which must be none.
+    bool fused;
+    uint64_t fused_expressions;
+    uint64_t fused_differences;
+    // --interleave N: the interleaved sets' chunk (0: a body's expressions), the current file's scratch for the census's
+    // walk in the timing passes, the walks' tests (so that the walks aren't dead code), and the sweeps' own TSC ticks in
+    // an interleaved set: the last pass's, and each file's least over the passes, summed.
+    bool interleave;
+    uint32_t chunk;
+    NodeCensusScratch* scratch;
+    uint64_t walk_tests;
+    uint64_t inner_ticks;
+    uint64_t inner[BUSTER_NODE_SHADOW_SWEEPS];
     // T's nodes by row and by action, and the row-typed nodes the action types otherwise (--verify).
     uint64_t row_nodes;
     uint64_t action_nodes;
@@ -1985,6 +2037,109 @@ static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* ma
     return same && t == machine->entry_count;
 }
 
+// The fused sweep's census (docs/node-machine.md, "A fused sweep: what it would settle later"): for a taken expression,
+// what a T that classified each record's operands, as C does, at the record's own visit, up the postorder, would leave to
+// a later step. A record's consumer decides its context and target, but where they are the consumer's own context (a
+// SELECT's operand and a comma's second operand, check_lower_template_classify's), which its consumer's consumer gives
+// later; a record its consumer doesn't evaluate costs that visit nothing, but one whose consumer isn't evaluated either
+// was classified for nothing; and a call's depth among the evaluated calls, which numbers its row, is its ancestors'.
+static void node_shadow_fusion(NodeShadow* shadow, NodeCensusScratch* s, const NodeMachine* machine)
+{
+    const uint32_t count = machine->count;
+    uint32_t* consumers = s->consumers;
+    for (uint32_t r = 0; r < count; r += 1)
+    {
+        consumers[r] = UINT32_MAX;
+    }
+    for (uint32_t r = 0; r < count; r += 1)
+    {
+        const CheckOp op = node_machine_record_op(machine, r);
+        const uint32_t operands[3] = {
+            node_machine_record_left(machine, r),
+            node_machine_record_right(machine, r),
+            op == CHECK_OP_CONDITIONAL ? node_machine_record_third(machine, r) : UINT32_MAX,
+        };
+        for (uint32_t k = 0; k < 3; k += 1)
+        {
+            if (operands[k] < r)
+            {
+                consumers[operands[k]] = r;
+            }
+        }
+        for (uint32_t i = 0; op == CHECK_OP_CALL && i < node_machine_record_argument_count(machine, r); i += 1)
+        {
+            const uint32_t argument = node_machine_record_argument(machine, r, i);
+            if (argument < r)
+            {
+                consumers[argument] = r;
+            }
+        }
+    }
+    uint64_t settled = 0;
+    for (uint32_t r = 0; r < count; r += 1)
+    {
+        const uint8_t state = node_machine_record_state(machine, r);
+        const bool evaluated = (state & BUSTER_NODE_MACHINE_EVALUATED) != 0;
+        const uint32_t consumer = consumers[r];
+        const bool consumer_evaluated = consumer < count && (node_machine_record_state(machine, consumer) & BUSTER_NODE_MACHINE_EVALUATED) != 0;
+        const CheckOp consumer_op = consumer < count ? node_machine_record_op(machine, consumer) : CHECK_OP_COUNT;
+        const bool inherited = evaluated && (consumer_op == CHECK_OP_SELECT || (consumer_op == CHECK_OP_COMMA && r == node_machine_record_right(machine, consumer)));
+        const bool wasted = !evaluated && consumer < count && !consumer_evaluated;
+        const bool nested = evaluated && node_machine_record_op(machine, r) == CHECK_OP_CALL && node_machine_record_call_depth(machine, r) != 0;
+        shadow->fusion_evaluated += evaluated;
+        shadow->fusion_unevaluated += !evaluated;
+        shadow->fusion_wasted += wasted;
+        shadow->fusion_inherited += inherited;
+        shadow->fusion_inherited_other += inherited && node_machine_record_context(machine, r) != 0;
+        shadow->fusion_calls += evaluated && node_machine_record_op(machine, r) == CHECK_OP_CALL;
+        shadow->fusion_nested_calls += nested;
+        shadow->fusion_hooked += evaluated && state > BUSTER_NODE_MACHINE_EVALUATED;
+        settled += inherited || wasted || nested;
+    }
+    shadow->fusion_updates += machine->update_count;
+    shadow->fusion_settled_expressions += settled != 0;
+}
+
+// --fused, after the three sweeps ran on the expression with `refusal` (C's or X's, or none): C and X as one sweep on the
+// same records, its refusal, tape, labels and calls compared with theirs, which are its exact twin.
+static void node_shadow_fused(NodeShadow* shadow, NodeCensusScratch* s, NodeMachineRefusal refusal, uint8_t context, TypeId target, uint32_t object)
+{
+    NodeMachine* machine = s->machine;
+    const uint32_t entries = machine->entry_count;
+    const uint32_t labels = machine->label_count;
+    const uint32_t calls = machine->call_count;
+    const uint32_t temporaries = machine->temporary_count;
+    const bool taken = refusal == NODE_MACHINE_TAKEN;
+    if (taken)
+    {
+        memcpy(s->fused_kinds, machine->kinds, entries);
+        memcpy(s->fused_classes, machine->classes, entries);
+        memcpy(s->fused_tape, machine->tape, (uint64_t)entries * sizeof(uint64_t));
+        memcpy(s->fused_labels, machine->label_entries, (uint64_t)labels * sizeof(uint32_t));
+        memcpy(s->fused_calls, machine->call_records, (uint64_t)calls * sizeof(uint32_t));
+    }
+    const NodeMachineRefusal fused = node_machine_lower(machine, context, target, object);
+    bool same = fused == refusal;
+    if (same && taken)
+    {
+        const uint32_t at = machine->entry_first;
+        same = machine->entry_count == entries && machine->label_count == labels && machine->call_count == calls && machine->temporary_count == temporaries &&
+               memcmp(s->fused_kinds, machine->kinds + at, entries) == 0 && memcmp(s->fused_classes, machine->classes + at, entries) == 0 &&
+               memcmp(s->fused_tape, machine->tape + at, (uint64_t)entries * sizeof(uint64_t)) == 0 &&
+               memcmp(s->fused_labels, machine->label_entries, (uint64_t)labels * sizeof(uint32_t)) == 0 &&
+               memcmp(s->fused_calls, machine->call_records, (uint64_t)calls * sizeof(uint32_t)) == 0;
+    }
+    shadow->fused_expressions += 1;
+    shadow->fused_differences += !same;
+    if (!same && shadow->listed < node_census_list)
+    {
+        shadow->listed += 1;
+        printf("node-shadow: fused difference file=%s line=%u refusal=%s (fused %s) entries=%u (fused %u) labels=%u (%u) calls=%u (%u)\n", s->file,
+               node_census_line(s->pp, s->program->parser, s->program->input->graph.tokens[node_machine_node(machine, machine->count - 1)]),
+               node_machine_refusal_names[refusal], node_machine_refusal_names[fused], entries, machine->entry_count, labels, machine->label_count, calls, machine->call_count);
+    }
+}
+
 // The shadow of the census's taken expression whose root pop is `p` of the body's `pops`, of root kind `context`, whose
 // walk reached `walked` nodes, `nodes` of them evaluated.
 static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, const CheckLowerOwnerPop* pops, uint32_t p, NodeCensusRoot context, uint32_t walked,
@@ -2013,6 +2168,7 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
     const uint64_t twins = machine->twin_differences;
     const uint64_t memo_fills = machine->memo_fills;
     const uint64_t memo_rules = machine->memo_rules;
+    const bool ran = refusal == NODE_MACHINE_TAKEN;
     refusal = refusal == NODE_MACHINE_TAKEN ? node_machine_run(machine, first, root, records, root_context, pop->target, object) : refusal;
     shadow->memo_fills += machine->memo_fills - memo_fills;
     shadow->memo_rules += machine->memo_rules - memo_rules;
@@ -2056,6 +2212,7 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
         shadow->entry_differences += !entries;
         shadow->labeled_expressions += machine->label_count != 0;
         shadow->labels += machine->label_count;
+        node_shadow_fusion(shadow, s, machine);
         shadow->row_nodes += machine->row_nodes - row_nodes;
         shadow->action_nodes += machine->action_nodes - action_nodes;
         shadow->twin_differences += machine->twin_differences - twins;
@@ -2077,9 +2234,17 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
                 .count = records,
                 .object = object,
                 .target = pop->target,
+                .body = s->body_stamp,
                 .context = root_context,
+                .flags = pop->flags,
+                .kind = (uint8_t)context,
             };
         }
+    }
+    // The one sweep, for every expression T typed: C and X took it or refused it.
+    if (shadow->fused && ran && (refusal == NODE_MACHINE_TAKEN || refusal == NODE_MACHINE_REFUSED_TEMPLATE || refusal == NODE_MACHINE_REFUSED_ROW))
+    {
+        node_shadow_fused(shadow, s, refusal, root_context, pop->target, object);
     }
 }
 
@@ -2106,23 +2271,75 @@ static uint64_t node_shadow_read(int counter)
     return value;
 }
 
-// Each of the file's taken expressions through the sweeps of set `sweeps` (0: T, 1: T and C, 2: all three).
-static void node_shadow_sweep(NodeMachine* machine, const NodeShadow* shadow, uint32_t sweeps)
+// One expression through the sweeps of set `sweeps`: T alone, T and C, or all three; or T and the one sweep of C and X.
+static inline __attribute__((always_inline)) void node_shadow_sweep_one(NodeMachine* machine, const NodeShadowExpression* expression, uint32_t sweeps)
 {
-    for (uint32_t i = 0; i < shadow->timed_count; i += 1)
+    const bool fused = sweeps == BUSTER_NODE_SHADOW_SET_FUSED || sweeps == BUSTER_NODE_SHADOW_SET_WALK_FUSED;
+    NodeMachineRefusal refusal = node_machine_type(machine, expression->first, expression->root, expression->count);
+    if (fused)
     {
-        const NodeShadowExpression* expression = shadow->timed + i;
-        // --repeat: each expression's sweeps again at once, its inputs in the caches as the reader leaves them in step 2.
-        for (uint32_t time = 0; time < shadow->repeat; time += 1)
+        if (refusal == NODE_MACHINE_TAKEN)
         {
-            NodeMachineRefusal refusal = node_machine_type(machine, expression->first, expression->root, expression->count);
-            if (sweeps >= 1 && refusal == NODE_MACHINE_TAKEN)
+            node_machine_lower(machine, expression->context, expression->target, expression->object);
+        }
+    }
+    else
+    {
+        if (sweeps >= 1 && refusal == NODE_MACHINE_TAKEN)
+        {
+            refusal = node_machine_contexts(machine, expression->context, expression->target, expression->object);
+        }
+        if (sweeps >= 2 && refusal == NODE_MACHINE_TAKEN)
+        {
+            node_machine_expand(machine, expression->object);
+        }
+    }
+}
+
+// Each of the file's taken expressions through set `sweeps` (the sets' comment). An interleaved set takes them by chunks:
+// the census's walk of each of a chunk's expressions, then the sweeps of each, whose TSC ticks alone are the pass's
+// `inner_ticks`.
+static void node_shadow_sweep(NodeMachine* machine, NodeShadow* shadow, uint32_t sweeps)
+{
+    shadow->inner_ticks = 0;
+    if (sweeps >= BUSTER_NODE_SHADOW_SET_WALK)
+    {
+        uint64_t inner = 0;
+        uint32_t base = 0;
+        while (base < shadow->timed_count)
+        {
+            uint32_t end = base + 1;
+            while (end < shadow->timed_count && (shadow->chunk == 0 ? shadow->timed[end].body == shadow->timed[base].body : end - base < shadow->chunk))
             {
-                refusal = node_machine_contexts(machine, expression->context, expression->target, expression->object);
+                end += 1;
             }
-            if (sweeps >= 2 && refusal == NODE_MACHINE_TAKEN)
+            for (uint32_t i = base; i < end; i += 1)
             {
-                node_machine_expand(machine, expression->object);
+                const NodeShadowExpression* expression = shadow->timed + i;
+                uint32_t walked = 0;
+                shadow->walk_tests += node_census_expression(shadow->scratch, expression->root, expression->flags, (NodeCensusRoot)expression->kind, &walked);
+            }
+            if (sweeps != BUSTER_NODE_SHADOW_SET_WALK)
+            {
+                const uint64_t t0 = __rdtsc();
+                for (uint32_t i = base; i < end; i += 1)
+                {
+                    node_shadow_sweep_one(machine, shadow->timed + i, sweeps);
+                }
+                inner += __rdtsc() - t0;
+            }
+            base = end;
+        }
+        shadow->inner_ticks = inner;
+    }
+    else
+    {
+        for (uint32_t i = 0; i < shadow->timed_count; i += 1)
+        {
+            // --repeat: each expression's sweeps again at once, its inputs in the caches as the reader leaves them in step 2.
+            for (uint32_t time = 0; time < shadow->repeat; time += 1)
+            {
+                node_shadow_sweep_one(machine, shadow->timed + i, sweeps);
             }
         }
     }
@@ -2138,33 +2355,43 @@ static void node_shadow_time(NodeShadow* shadow, NodeMachine* machine, uint64_t 
     const bool verify = machine->verify;
     const uint64_t memo_fills = machine->memo_fills;
     const uint64_t memo_rules = machine->memo_rules;
+    const bool enabled[BUSTER_NODE_SHADOW_SWEEPS] = { true, true, true, shadow->fused, shadow->interleave, shadow->interleave, shadow->interleave && shadow->fused };
     machine->verify = false;
-    uint64_t least[BUSTER_NODE_SHADOW_SWEEPS][3];
+    uint64_t least[BUSTER_NODE_SHADOW_SWEEPS][4];
     memset(least, 0xff, sizeof(least));
-    for (uint32_t pass = 0; pass < shadow->passes; pass += 1)
+    // A set's passes run one after another, so that its least follows its own code, whichever other sets are timed: with
+    // the sets taken in turn inside a pass, a file's T ran after the walk's sets and read 7 cycles a node more on Lua.
+    for (uint32_t sweeps = 0; sweeps < BUSTER_NODE_SHADOW_SWEEPS; sweeps += 1)
     {
-        for (uint32_t sweeps = 0; sweeps < BUSTER_NODE_SHADOW_SWEEPS; sweeps += 1)
+        for (uint32_t pass = 0; pass < shadow->passes; pass += 1)
         {
-            node_machine_forget(machine);
-            const uint64_t c0 = node_shadow_read(cycles);
-            const uint64_t i0 = node_shadow_read(instructions);
-            const uint64_t t0 = __rdtsc();
-            node_shadow_sweep(machine, shadow, sweeps);
-            const uint64_t t1 = __rdtsc();
-            const uint64_t i1 = node_shadow_read(instructions);
-            const uint64_t c1 = node_shadow_read(cycles);
-            const uint64_t measured[3] = { c1 - c0, i1 - i0, t1 - t0 };
-            for (uint32_t k = 0; k < 3; k += 1)
+            if (enabled[sweeps])
             {
-                least[sweeps][k] = measured[k] < least[sweeps][k] ? measured[k] : least[sweeps][k];
+                node_machine_forget(machine);
+                const uint64_t c0 = node_shadow_read(cycles);
+                const uint64_t i0 = node_shadow_read(instructions);
+                const uint64_t t0 = __rdtsc();
+                node_shadow_sweep(machine, shadow, sweeps);
+                const uint64_t t1 = __rdtsc();
+                const uint64_t i1 = node_shadow_read(instructions);
+                const uint64_t c1 = node_shadow_read(cycles);
+                const uint64_t measured[4] = { c1 - c0, i1 - i0, t1 - t0, shadow->inner_ticks };
+                for (uint32_t k = 0; k < 4; k += 1)
+                {
+                    least[sweeps][k] = measured[k] < least[sweeps][k] ? measured[k] : least[sweeps][k];
+                }
             }
         }
     }
     for (uint32_t sweeps = 0; shadow->passes != 0 && sweeps < BUSTER_NODE_SHADOW_SWEEPS; sweeps += 1)
     {
-        shadow->cycles[sweeps] += least[sweeps][0];
-        shadow->instructions[sweeps] += least[sweeps][1];
-        shadow->ticks[sweeps] += least[sweeps][2];
+        if (enabled[sweeps])
+        {
+            shadow->cycles[sweeps] += least[sweeps][0];
+            shadow->instructions[sweeps] += least[sweeps][1];
+            shadow->ticks[sweeps] += least[sweeps][2];
+            shadow->inner[sweeps] += least[sweeps][3];
+        }
     }
     shadow->timed_nodes += shadow->passes != 0 ? nodes : 0;
     shadow->counted = cycles >= 0;
@@ -2191,6 +2418,12 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
            shadow->value_differences, shadow->entry_differences, shadow->twin_differences, shadow->row_nodes, shadow->action_nodes,
            shadow->verify ? ", verified" : "");
     printf("node-shadow: labels=%" PRIu64 " in taken expressions=%" PRIu64 "\n", shadow->labels, shadow->labeled_expressions);
+    printf("node-shadow: fusion evaluated=%" PRIu64 " unevaluated=%" PRIu64 " (under an unevaluated consumer %" PRIu64 ") inherited-context=%" PRIu64 " (not a value %" PRIu64
+           ") calls=%" PRIu64 " (below a call %" PRIu64 ") segments-or-splits=%" PRIu64 " updates=%" PRIu64 " labeled-expressions=%" PRIu64
+           " expressions-settled-later=%" PRIu64 " of %" PRIu64 "\n",
+           shadow->fusion_evaluated, shadow->fusion_unevaluated, shadow->fusion_wasted, shadow->fusion_inherited, shadow->fusion_inherited_other, shadow->fusion_calls,
+           shadow->fusion_nested_calls, shadow->fusion_hooked, shadow->fusion_updates, shadow->labeled_expressions, shadow->fusion_settled_expressions,
+           shadow->taken_expressions);
     printf("node-shadow: argument-memo filled=%" PRIu64 " by-rule=%" PRIu64 " (taken calls' arguments %" PRIu64 ")\n", shadow->memo_fills, shadow->memo_rules,
            shadow->arguments);
     for (uint32_t r = 1; r < NODE_MACHINE_REFUSALS; r += 1)
@@ -2213,14 +2446,27 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
             printf("node-shadow: action-typed op=%s nodes=%" PRIu64 "\n", lower_inventory_op_names[op] != NULL ? lower_inventory_op_names[op] : "?", action_ops[op]);
         }
     }
-    static const char* const sweep_names[BUSTER_NODE_SHADOW_SWEEPS] = { "T", "T+C", "T+C+X" };
+    if (shadow->fused)
+    {
+        printf("node-shadow: fused expressions=%" PRIu64 " differences=%" PRIu64 "\n", shadow->fused_expressions, shadow->fused_differences);
+    }
+    static const char* const sweep_names[BUSTER_NODE_SHADOW_SWEEPS] = { "T", "T+C", "T+C+X", "T+CX", "walk", "walk;T+C+X", "walk;T+CX" };
+    const bool timed[BUSTER_NODE_SHADOW_SWEEPS] = { true, true, true, shadow->fused, shadow->interleave, shadow->interleave, shadow->interleave && shadow->fused };
     for (uint32_t k = 0; shadow->timed_nodes != 0 && k < BUSTER_NODE_SHADOW_SWEEPS; k += 1)
     {
-        printf("node-shadow: time sweeps=%s passes=%u repeat=%u cycles=%" PRIu64 " instructions=%" PRIu64 " ticks=%" PRIu64 " per-evaluated-node: cycles=%.1f instructions=%.1f "
-               "ticks=%.1f%s\n",
-               sweep_names[k], shadow->passes, shadow->repeat, shadow->cycles[k], shadow->instructions[k], shadow->ticks[k], (double)shadow->cycles[k] / (double)shadow->timed_nodes,
-               (double)shadow->instructions[k] / (double)shadow->timed_nodes, (double)shadow->ticks[k] / (double)shadow->timed_nodes,
-               shadow->counted ? "" : " (no cycle counter)");
+        if (timed[k])
+        {
+            printf("node-shadow: time sweeps=%s passes=%u repeat=%u cycles=%" PRIu64 " instructions=%" PRIu64 " ticks=%" PRIu64 " per-evaluated-node: cycles=%.1f "
+                   "instructions=%.1f ticks=%.1f%s\n",
+                   sweep_names[k], shadow->passes, shadow->repeat, shadow->cycles[k], shadow->instructions[k], shadow->ticks[k],
+                   (double)shadow->cycles[k] / (double)shadow->timed_nodes, (double)shadow->instructions[k] / (double)shadow->timed_nodes,
+                   (double)shadow->ticks[k] / (double)shadow->timed_nodes, shadow->counted ? "" : " (no cycle counter)");
+            if (k > BUSTER_NODE_SHADOW_SET_WALK)
+            {
+                printf("node-shadow: interleaved sweeps=%s chunk=%u sweeps' own ticks=%" PRIu64 " per-evaluated-node: ticks=%.1f\n", sweep_names[k], shadow->chunk,
+                       shadow->inner[k], (double)shadow->inner[k] / (double)shadow->timed_nodes);
+            }
+        }
     }
 }
 
@@ -2355,11 +2601,17 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
             s.local_objects = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, locals);
             s.local_stamps = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, locals);
             s.temporary_locals = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, BUSTER_NODE_MACHINE_MOST);
+            s.consumers = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, BUSTER_NODE_MACHINE_MOST);
+            s.fused_kinds = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, BUSTER_NODE_MACHINE_TAPE_MOST);
+            s.fused_classes = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, BUSTER_NODE_MACHINE_TAPE_MOST);
+            s.fused_tape = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint64_t, BUSTER_NODE_MACHINE_TAPE_MOST);
+            s.fused_labels = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, 2 * BUSTER_NODE_MACHINE_MOST);
+            s.fused_calls = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, BUSTER_NODE_MACHINE_MOST);
             shadow->timed_capacity = (uint32_t)(owners.count < UINT32_MAX ? owners.count : UINT32_MAX);
             shadow->timed = BUSTER_ARENA_PUSH_ARRAY(&scratch, NodeShadowExpression, (uint64_t)shadow->timed_capacity + 1);
             shadow->timed_count = 0;
-            room = s.object_locals != NULL && s.object_stamps != NULL && s.local_objects != NULL && s.local_stamps != NULL && s.temporary_locals != NULL &&
-                   shadow->timed != NULL &&
+            room = s.object_locals != NULL && s.object_stamps != NULL && s.local_objects != NULL && s.local_stamps != NULL && s.temporary_locals != NULL && s.consumers != NULL &&
+                   s.fused_kinds != NULL && s.fused_classes != NULL && s.fused_tape != NULL && s.fused_labels != NULL && s.fused_calls != NULL && shadow->timed != NULL &&
                    node_machine_begin(&machine, &selected.program, shadow->scalar, shadow->verify, &scratch);
             if (room)
             {
@@ -2398,6 +2650,7 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                 {
                     shadow->action_ops[op] += machine.action_ops[op];
                 }
+                shadow->scratch = &s;
                 node_shadow_time(shadow, &machine, shadow->file_nodes);
                 shadow->file_nodes = 0;
             }
@@ -2495,6 +2748,17 @@ static int run_node_census(int count, char** arguments)
         {
             shadow.verify = true;
         }
+        else if (strcmp(arguments[i], "--fused") == 0)
+        {
+            shadow.fused = true;
+        }
+        else if (strcmp(arguments[i], "--interleave") == 0)
+        {
+            uint64_t number = 0;
+            valid = i + 1 < count && check_corpus_number(arguments[++i], &number) && number <= 65536;
+            shadow.interleave = true;
+            shadow.chunk = (uint32_t)number;
+        }
         else if (strcmp(arguments[i], "--passes") == 0)
         {
             uint64_t number = 0;
@@ -2525,7 +2789,7 @@ static int run_node_census(int count, char** arguments)
             }
         }
     }
-    valid = valid && file_count != 0 && (shadowed || (!shadow.scalar && !shadow.verify));
+    valid = valid && file_count != 0 && (shadowed || (!shadow.scalar && !shadow.verify && !shadow.fused && !shadow.interleave));
     NodeCensus census = { .shadow = shadowed ? &shadow : NULL };
     for (uint32_t i = 0; valid && i < file_count; i += 1)
     {
@@ -2546,7 +2810,7 @@ static int run_node_census(int count, char** arguments)
     }
     free(files);
     free(options);
-    const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0);
+    const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0 || shadow.fused_differences != 0);
     return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
 }
 

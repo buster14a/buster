@@ -163,7 +163,7 @@ static __attribute__((noinline)) bool node_machine_sinks(const NodeMachine* mach
 // CHECK_LOWER_TEMPLATE_NONE. A condition the program knows (check_program_runtime_truth's, from its record) leaves its
 // untaken operand unevaluated and numbers no label; a conditional of one operand twice (`a ?: b`), whose condition the
 // tasks keep in a temporary, is the tasks'.
-static CheckLowerTemplate node_machine_logical(NodeMachine* machine, uint32_t r, CheckOp op, uint8_t class)
+static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_logical(NodeMachine* machine, uint32_t r, CheckOp op, uint8_t class)
 {
     const uint32_t a = node_machine_record_left(machine, r);
     const uint32_t b = node_machine_record_right(machine, r);
@@ -368,7 +368,7 @@ static __attribute__((noinline)) CheckLowerTemplate node_machine_classify_update
 // object a root INITIALIZE initializes. The refusals every operator shares and a folded constant come first, then one
 // case an operator, each with its own tests alone (a record's case was a chain of tests on its facts, which C fetched for
 // every record: docs/node-machine.md, "C's and X's dispatch").
-static CheckLowerTemplate node_machine_classify(NodeMachine* machine, uint32_t r, uint32_t object, NodeMachineUse* use)
+static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_classify(NodeMachine* machine, uint32_t r, uint32_t object, NodeMachineUse* use)
 {
     const CheckProgram* program = machine->program;
     const TypeTable* types = machine->types;
@@ -584,7 +584,7 @@ static CheckLowerTemplate node_machine_classify(NodeMachine* machine, uint32_t r
 // its conversion's type, as the call's tasks push them. BUSTER_NODE_MACHINE_TEMPLATE_CALL, or CHECK_LOWER_TEMPLATE_NONE
 // for any other call: a struct's, a union's, a long double's, a 128-bit integer's, a half-precision or an atomic value's
 // argument, parameter or result, which the lowering passes otherwise.
-static CheckLowerTemplate node_machine_classify_call(NodeMachine* machine, uint32_t r)
+static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_classify_call(NodeMachine* machine, uint32_t r)
 {
     const TypeTable* types = machine->types;
     const uint32_t a = node_machine_record_left(machine, r);
