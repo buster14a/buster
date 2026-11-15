@@ -68,6 +68,7 @@ struct CheckDebugBenchmark
     uint32_t* lines[2];
     uint32_t* kept_offsets[2];
     uint32_t* kept_lines[2];
+    uint32_t* kept_keys[2];
     uint64_t kept[2];
 };
 
@@ -110,12 +111,12 @@ static uint64_t check_debug_benchmark_keep(CheckDebugBenchmark* benchmark, uint3
     for (uint32_t b = 0; b < program->body_count; b += 1)
     {
         const uint32_t first = rows->first[b];
-        // The function's file is its first raw row's, its declaration's or the body's start's.
-        const uint32_t key = rows->counts[b] != 0 ? benchmark->keys[0][first] : 0;
         uint32_t* offsets = benchmark->kept_offsets[path] + kept;
         uint32_t* lines = benchmark->kept_lines[path] + kept;
-        kept += path == 0 ? check_debug_keep_scalar(rows->offsets + first, benchmark->keys[0] + first, benchmark->lines[0] + first, rows->counts[b], key, rows->bodies[b], offsets, lines) :
-                            check_debug_keep(rows->offsets + first, benchmark->keys[0] + first, benchmark->lines[0] + first, rows->counts[b], key, rows->bodies[b], offsets, lines);
+        uint32_t* keys = benchmark->kept_keys[path] + kept;
+        kept += path == 0 ? check_debug_keep_scalar(rows->offsets + first, benchmark->keys[0] + first, benchmark->lines[0] + first, rows->counts[b], rows->bodies[b], offsets, lines,
+                                                    keys) :
+                            check_debug_keep(rows->offsets + first, benchmark->keys[0] + first, benchmark->lines[0] + first, rows->counts[b], rows->bodies[b], offsets, lines, keys);
     }
     return kept;
 }
@@ -237,6 +238,7 @@ static void check_debug_benchmark_release(CheckDebugBenchmark* benchmark)
         free(benchmark->lines[path]);
         free(benchmark->kept_offsets[path]);
         free(benchmark->kept_lines[path]);
+        free(benchmark->kept_keys[path]);
     }
     free(benchmark->closings);
 }
@@ -351,7 +353,9 @@ static int run_check_debug_benchmark(int argc, char** argv)
         benchmark.lines[side] = malloc(((uint64_t)rows->count + BUSTER_CHECK_DEBUG_SLACK) * sizeof(uint32_t));
         benchmark.kept_offsets[side] = malloc(((uint64_t)rows->count + BUSTER_CHECK_DEBUG_SLACK) * sizeof(uint32_t));
         benchmark.kept_lines[side] = malloc(((uint64_t)rows->count + BUSTER_CHECK_DEBUG_SLACK) * sizeof(uint32_t));
-        ready = benchmark.keys[side] != 0 && benchmark.lines[side] != 0 && benchmark.kept_offsets[side] != 0 && benchmark.kept_lines[side] != 0;
+        benchmark.kept_keys[side] = malloc(((uint64_t)rows->count + BUSTER_CHECK_DEBUG_SLACK) * sizeof(uint32_t));
+        ready = benchmark.keys[side] != 0 && benchmark.lines[side] != 0 && benchmark.kept_offsets[side] != 0 && benchmark.kept_lines[side] != 0 &&
+                benchmark.kept_keys[side] != 0;
     }
     benchmark.closings = ready ? malloc(((uint64_t)program->body_count + 1) * sizeof(uint32_t)) : 0;
     ready = ready && benchmark.closings != 0 && check_debug_source(&benchmark.source, &pp, &parser, &benchmark.unit.arena);
@@ -374,7 +378,8 @@ static int run_check_debug_benchmark(int argc, char** argv)
         benchmark.kept[0] = check_debug_benchmark_keep(&benchmark, 0);
         benchmark.kept[1] = check_debug_benchmark_keep(&benchmark, 1);
         same = same && benchmark.kept[0] == benchmark.kept[1] && memcmp(benchmark.kept_offsets[0], benchmark.kept_offsets[1], benchmark.kept[0] * sizeof(uint32_t)) == 0 &&
-               memcmp(benchmark.kept_lines[0], benchmark.kept_lines[1], benchmark.kept[0] * sizeof(uint32_t)) == 0;
+               memcmp(benchmark.kept_lines[0], benchmark.kept_lines[1], benchmark.kept[0] * sizeof(uint32_t)) == 0 &&
+               memcmp(benchmark.kept_keys[0], benchmark.kept_keys[1], benchmark.kept[0] * sizeof(uint32_t)) == 0;
         CheckDebug debugs[2];
         bool built = true;
         uint8_t* sections[2][BUSTER_DEBUG_SECTIONS] = { { 0 } };

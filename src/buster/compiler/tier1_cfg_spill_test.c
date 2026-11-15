@@ -59,8 +59,8 @@ static void tier1_cfg_test_spill_prefix(Tier1CfgTestTally* tally)
     tier1_cfg_test_expect(tally, !tier1_cfg_slot_current(&result, prefix, 0, 0, 0) && !tier1_cfg_slot_current(&result, prefix, 0, 12, 0), "positions outside the value's intervals have no current slot");
 }
 
-// A phi starts in memory because the header's first position blocks its only register, then reloads at a split.
-// Its self edge needs no store. A different operand must still store, even when the old phi has a current slot:
+// A phi starts in memory because the header's first position blocks its only register; its piece after the split
+// waits in the slot until its use reloads it (#2768). Its self edge needs no store. A different operand must still store, even when the old phi has a current slot:
 // an exit-block use keeps it live while the new operand takes the register. The back edge is critical.
 static void tier1_cfg_test_spill_edges(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
 {
@@ -118,7 +118,7 @@ static void tier1_cfg_test_spill_edges(Tier1CfgTestTally* tally, Arena* output, 
                 },
             };
             input.registers[class] = mask;
-            tier1_cfg_test_case(tally, &input, output, scratch, "current slot on a critical loop edge", false, 0, 1, true);
+            tier1_cfg_test_case(tally, &input, output, scratch, "current slot on a critical loop edge", false, 0, 0, true);
             for (uint32_t path = 0; path < 2; path += 1)
             {
                 const uint64_t saved = output->length;

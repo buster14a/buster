@@ -80,6 +80,10 @@ struct EmittedInline
     uint32_t count;
     uint32_t parent;
     uint32_t call;
+    // Its callee's parameters' locals [local, local + local_count) past the function's own (IrDebugInline's, #2541),
+    // whose ranges are among EmittedCode.local_ranges.
+    uint32_t local;
+    uint32_t local_count;
 };
 
 // A literal of a body's code (#2744): read-only bytes its code loads rip-relative, a vector constant of `width` bytes (16,

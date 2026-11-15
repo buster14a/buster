@@ -2983,7 +2983,8 @@ What the lowering covers past scalars (#145's programs):
   values are captured before later operands run, including a wide condition
   whose original object an arm overwrites; the omitted middle operand is
   evaluated once. Scalar arms splat at their element type. Non-boolean logical
-  operations and selections are bounded to 1,024 elements. Scalar-condition
+  operations and selections take any number of elements, on register-width
+  pieces (#2216). Scalar-condition
   `?:` keeps the usual short-circuit behavior. Clang rejects `&&` and `||` of
   boolean vectors, and whole-vector `++` and `--` of either vector kind; the
   checker rejects them too. Compound assignments and increments of an element
@@ -3476,8 +3477,32 @@ What the lowering covers past scalars (#145's programs):
     bits (5 past 32 bits) and xors the integer products of every pair of
     classes into its sum's class (`check_lower_sequence_clmul`), so that each
     class's carries stay in the other classes' positions. These expansions, ordered floating sums
-    and floating reduction trees are bounded to 1,024 elements and preserve
-    the ordinary rows' element-type and target-feature refusals.
+    and floating reduction trees take any number of elements (#2216: their
+    entries grow with the elements, or with the pieces for the trees) and
+    preserve the ordinary rows' element-type and target-feature refusals.
+    A `_BitInt` past 128 bits, whose value is its limbs' frame object's
+    address, takes the integer elementwise builtins limb by limb
+    (`check_lower_limb_elements_emit`, #2410): its arguments' addresses go
+    into temporaries and a deferred task (`CHECK_LOWER_LIMB_ELEMENTS`) runs
+    each builtin's recipe on U64 limbs without branches, as LLVM computes its
+    intrinsic on the iN, the result's top limb extended from the width. max
+    and min select by the limbs' compare's mask; abs is `(a ^ s) + (s & 1)`
+    with its carry, s the sign's limb; add_sat and sub_sat select the bound
+    (all ones, zeros, or the largest value xor a's sign) by the wrapped
+    result's overflow (an unsigned compare, or the top limbs' sign);
+    popcount, clzg and ctzg are the scalar builtins' limb counts
+    (`check_lower_limb_bits_popcount`, `check_lower_limb_bits_zeros`), a
+    fallback selected where the value is zero, and bitreverse is
+    `__builtin_bitreverseg`'s recipe. fshl and fshr reduce the count's bits,
+    unsigned, modulo the width, then shift through the limb shifts by less
+    than the width, `(a << s) | ((b >> 1) >> (w - 1 - s))`; clang's own code
+    refuses a variable count at a width no power of two (LLVM's remainder of
+    it is a library call that x86-64 has none of), where this one's equals
+    the constant's. pdep and pext go a mask limb at a time, each taking
+    `popcount(m_i)` bits at the sum of the counts before it, by BMI2's 64-bit
+    row or Hacker's Delight's expansion; clmul xors the 64-bit products of
+    limb pairs (PCLMULQDQ's two halves, or the 128-bit expansion's product),
+    quadratic in the limbs, and is refused by name past 4,096 bits.
   - boolean elementwise builtins use packed bit operations at scalar and
     register-sized widths: max and saturating add are OR; min, pdep, pext
     and clmul are AND; saturating subtract is `a & ~b`; popcount and
@@ -3523,8 +3548,8 @@ What the lowering covers past scalars (#145's programs):
   AVX-512 VBMI2), and gathers and scatters of 8- and 16-bit elements, which no
   instruction gathers or scatters (clang's code takes each element in turn); a shuffle by a vector
   of indices; bit reversal without GFNI (or, of bytes, AVX512-BMM); funnel
-  shifts of 8-bit elements outside 16-byte vectors or without XOP; the integer elementwise functions of
-  scalars wider than 128 bits (`_BitInt` past 128 bits, #2410); nontemporal builtins of scalars and at underaligned addresses; bit
+  shifts of 8-bit elements outside 16-byte vectors or without XOP; carry-less products of `_BitInt`s
+  past 4,096 bits (#2410); nontemporal builtins of scalars and at underaligned addresses; bit
   casts of other types; and the rows whose extensions the target hasn't
   (BITALG, VPOPCNTDQ, VBMI2, DQ, GFNI, BMI2) are refused by name. Shuffles of
   8-bit elements without VBMI's VPERMT2B, and of 16-bit ones without BW's
@@ -4430,11 +4455,15 @@ What the lowering covers past scalars (#145's programs):
   earlier alias or ifunc of the declaration) that is also an alias or ifunc,
   "definition 'f' cannot also be an alias", after which clang's handler drops
   the attribute and the declaration stays a valid definition, as the reader
-  does (the report is a recovered one, #2449: later uses of it are quiet;
-  left: a function's definition with an alias after an alias declaration of
-  it lacks clang's two "redefinition of 'f'" errors around it); and
-  a weakref with external
-  linkage, in a block, without a target or on a typedef. A static variable's
+  does (the report is a recovered one, #2449: later uses of it are quiet).
+  A repeated function definition keeps the declaration and body redefinition
+  reports around its alias/ifunc error, with the earlier definition's notes;
+  parser-position warnings come first, and late-attribute warnings retain
+  their order before or after the declaration conflict. The runtime alias
+  fixture compares full diagnostic streams under both language modes,
+  warning/error-limit policies, both readers and deferred bodies, including
+  preservation of an existing output on rejection. The checker also diagnoses
+  a weakref with external linkage, in a block, without a target or on a typedef. A static variable's
   alias or weakref is no tentative definition, and an alias, ifunc or weakref
   target defines its entity for later redeclarations, functions' and
   variables'. A variable's alias right after a tentative definition (the
@@ -5034,6 +5063,32 @@ rounds, deeply nested unread arguments, and builtin exclusion. Warning
 promotion/suppression and the error limit are checked; rejected compilations
 preserve an existing output, while accepted controls replace it with an ELF
 object. A separate control keeps C23's declaration grammar.
+
+Ordinary identifier calls with one malformed type-first argument use the same
+bounded view (#2406). For `known(int); after_error;`, the callee's lookup,
+implicit declaration, deprecation and availability diagnostics precede the
+original "expected expression" at `int`, and the later statement is checked.
+The view keeps the callee's source separately from the parse error's source;
+its parallel callee-use flags distinguish this value use from attribute-only
+classification through resumed, prefix, repaired and rejected views. The
+silent invalid-use report suppresses synthetic arity and noncallable errors
+while independent operands, such as `pair.missing` in `known(int) +
+pair.missing`, remain checked. Arguments with nested parentheses, brackets and
+braces may be skipped, but a top-level comma remains excluded: Clang reads later
+arguments after an invalid first argument, and an empty-call replacement would
+lose their diagnostics. Member callees, catalog-recognized builtin/library
+names (also with `-fno-builtin`), mismatched delimiters and semicolon-crossing
+calls retain the existing recovery.
+
+`test-checker-driver --malformed-calls-only` reads the original runtime source
+and case catalog in `tests/checker/parse-recovery/malformed-calls.*`. It compares
+complete diagnostics and status with Clang in GNU89, GNU17 and C23, including
+warning promotion/suppression, `-fno-builtin` and error limits, through both
+readers and syntax/object output with one/three requested lanes and deferred
+bodies. Mixed ordinary and attribute-led calls run before C23, including repeated
+macro expansions, multiple recovery rounds and rejected/repaired views. Contract
+checks verify paired metadata and the excluded boundaries. Rejected compilations
+preserve existing output; valid cast and `sizeof` calls produce an ELF object.
 
 Phase 2 covers redeclarations that conflict with a declaration of the same
 name: the visible one in `check_input_bind`'s first test, or its entity's
@@ -8614,14 +8669,16 @@ the name's macro expansion notes. A missing initializer reports its qualified
 placeholder type after the restrict error, even at the same name. This recovery
 does not permit object emission.
 Refused by name: `_Atomic` and `restrict` through a declarator
-(`_Atomic __auto_type *p`, whose initializer clang finds incompatible), `_Atomic` of an
-atomic value (clang's error names the placeholder's type), `restrict` of a value
-that is no pointer to an object (clang's `restrict int`, which the placeholder
-can't be told from), and other type-changing attributes besides the handled
-vector, mode and address-space attributes. An incompatible address-space
-pointee initializer is rejected by the assignment check, whose message names
-the deduced type rather than clang's undeduced placeholder. A redeclaration of
-an atomic entity takes its type, as clang's
+(`_Atomic __auto_type *p`, whose initializer clang finds incompatible),
+`restrict` of a value that is no pointer to an object (clang's `restrict int`,
+which the placeholder can't be told from), and other type-changing attributes
+besides the handled vector, mode and address-space attributes. An incompatible
+address-space pointee initializer is rejected by the assignment check, whose
+message names the deduced type rather than clang's undeduced placeholder. An
+`_Atomic` placeholder initialized by an atomic value reports the incompatible
+initializer with both types, keeps its expression's warnings, and recovers the
+invalid declaration without cascading errors from later uses. A redeclaration
+of an atomic entity takes its type, as clang's
 `mergeTypes` merges it (#1844): a plain placeholder any atomic type
 (`_Atomic int r; __auto_type r = 1;` is an `_Atomic int`, and so is
 `__auto_type *p` after `_Atomic int *p`), and an `_Atomic` one an atomic type
@@ -8891,7 +8948,12 @@ change, it refused such a declaration by name.
   so its name cannot hide a later undeclared-name error; a C23 list keeps its
   declaration. The original `tests/driver/attribute_recovery.c` fixtures compare
   both language modes, readers, warning policy, deferred checking and output
-  preservation. Mixed statement/nonstatement attributes, string subscripts and
+  preservation. GNU statement-attribute classification skips each balanced
+  argument group, so a subscript within a malformed string argument is not
+  mistaken for a C23 attribute list. Its string and delimiter errors are
+  retained without a spurious declaration error at the following expression;
+  nested groups, macros, repeated subscripts, labels, controls and later errors
+  are covered by the same fixtures. Mixed statement/nonstatement attributes and
   unmatched outer lists still have recovery gaps. In C99 through C17, an
   attributed grouped or pointer declarator with no type
   (`__attribute__((unused)) (x)++;`, or `*p = 1;`) now retains its missing-type
@@ -11607,12 +11669,14 @@ thread-local storage or a section (`CheckInputSymbolPragma.alias_target`): the
 selection keeps TARGET's definition as an alias's base, and
 `check_program_define_pragma_aliases` adds a weak symbol of ALIAS's name at
 it, of its type and size, after the aliases' (in the unit of several lanes
-that has TARGET's definition). The rest stay refused by name where clang's
-Sema errors: an ALIAS declared before the pragma and named after it ("reference
-to 'ALIAS' is ambiguous", clang's lookup then finds two declarations), defined
-after it ("redefinition of 'ALIAS'"), declared after it with another kind or
-type, and a TARGET the unit doesn't define ("alias must point to a defined
-variable or function"); and an ALIAS of internal linkage. This is separate
+that has TARGET's definition). Once the clone is visible, references to an
+earlier function or object declaration report clang's ambiguity and candidate
+notes, including when ALIAS was already defined; local shadows and references
+before a later TARGET declaration keep their own lookup. Later object
+redeclarations report clang's redefinition and prior-definition notes. Other
+unmodeled shapes remain refused by name, including declarations with another
+kind or type, a TARGET the unit doesn't define, and an ALIAS of internal linkage.
+This is separate
 from ordinary weak binding. `test-checker-driver`
 (`c_check_symbol_pragma_driver_test.c`) compares the supported shapes'
 symbols and programs with clang's, by both paths.
