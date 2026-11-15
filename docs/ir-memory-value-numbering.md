@@ -230,6 +230,11 @@ folded becomes a register's value, which takes a move or a longer live range.
 The loads the pass removes are cheap ones: the same bytes were just read, an
 L1 hit, or just written, a store Zen 5 forwards to the load.
 
+Zen 5's dispatched loads (`ls_dispatch.ld_dispatch`, `perf stat`, ten runs
+of each) confirm what the pass removes: speedtest1 0.9332 of them, Lua's five
+scripts 0.9605. In those runs the cycles were 1.0074 and 0.9832: again a loss
+on speedtest1 and a gain on Lua of about the noise's size.
+
 The compile time is not within noise. `measure-compile --runs 11 --variant
 --tier1-passes=-memory` of `--tier1 --lanes 1 -c sqlite3.c`, the same
 executable: 653.6 ms with the pass against 634.6 ms without (1.030, 3,516.4 M
