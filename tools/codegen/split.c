@@ -43,8 +43,9 @@
 // the code generator's time grows faster than a function's instructions. --padded-starts drops the alignment rule
 // below: a part may start at any function, and the relocatable link then pads the part's start in a text section to
 // the greatest alignment it holds there (at most 48 bytes a part, 63 with an aligned(64) function), so the functions
-// after it move by that much and their code is the same. Without them the plan is Release's, whose addresses are the
-// single module's.
+// after it move by that much. Their instructions are the same; a function that aligns a block beyond its own alignment
+// can pad it differently (one in the MSan executable, 16 bytes shorter). Without them the plan is Release's, whose
+// addresses are the single module's.
 //
 // --verify runs LLVM's verifier on each part; --report prints each part's functions and estimated cost to stderr.
 // The input is parsed once; the parts are written by one child process each, forked after the plan, as many at once as
@@ -222,17 +223,19 @@ static SplitSection split_function_section(LLVMValueRef function)
     return result;
 }
 
-// The code generator's measured cost of a function of `instructions` IR instructions in `blocks` blocks (--codegen-costs,
-// #2639), in units of a small function's instruction: per instruction it grows with the function's size, from 0.035 ms
-// (300 to 1,000 instructions) to 0.09 ms (over 30,000) in the MSan checker unit's parts, with each block adding two
-// instructions' worth and each function about 30, the fixed work of a small one. optnone's fast instruction selector
-// takes a quarter of an instruction's time, as split_function_cost's count says. Fit to every function's time in that
-// unit's eight parts (-ftime-trace in a 4-CPU container), whose longest part then took 82.3 s to generate against 95.7 s
-// planned by instruction count, and 72.9 s with --padded-starts (the eight 537 s in all).
-static uint64_t split_codegen_cost(uint64_t instructions, uint64_t blocks, bool optnone)
+// The code generator's measured cost of a function of `instructions` IR instructions (--codegen-costs, #2639), in units of
+// a mid-sized function's instruction. Per instruction the time grows with the function's size: in the checker unit's
+// parts on the 9700X, from 0.013 (MSan), 0.011 (ASan) and 0.015 ms (TSan) in functions of 300 to 1,000 instructions to
+// 0.036, 0.031 and 0.034 ms in those over 30,000. Each function costs about 60 instructions besides, a small one's
+// selection and a part's work for each definition it holds. optnone's fast instruction selector takes 13% (MSan) to 22%
+// (ASan) of an instruction's time: a quarter, as split_function_cost's count says. Of the forms tried on every
+// function's time in the three sanitizers' parts (-ftime-trace), with their parts' other time, this one plans the
+// shortest longest part over all three: with --padded-starts 29.6, 15.8 and 7.4 s, where an even share is 27.8, 14.7
+// and 7.0 s and the instruction count's plan 36.5, 18.6 and 8.0 s.
+static uint64_t split_codegen_cost(uint64_t instructions, bool optnone)
 {
-    const uint64_t work = optnone ? (instructions + 3) / 4 : instructions + 2 * blocks + instructions * instructions / 50000;
-    return work + 30;
+    const uint64_t work = optnone ? (instructions + 3) / 4 : instructions + instructions * instructions / 50000;
+    return work + 60;
 }
 
 // The estimated cost of generating the function's code: its instructions, a quarter of them under optnone, which the
@@ -240,20 +243,18 @@ static uint64_t split_codegen_cost(uint64_t instructions, uint64_t blocks, bool 
 static uint64_t split_function_cost(LLVMValueRef function, bool codegen)
 {
     uint64_t count = 0;
-    uint64_t blocks = 0;
     for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(function); block != 0; block = LLVMGetNextBasicBlock(block))
     {
         for (LLVMValueRef instruction = LLVMGetFirstInstruction(block); instruction != 0; instruction = LLVMGetNextInstruction(instruction))
         {
             count += 1;
         }
-        blocks += 1;
     }
     const bool optnone = split_has_attribute(function, "optnone");
     uint64_t cost = 0;
     if (codegen)
     {
-        cost = split_codegen_cost(count, blocks, optnone);
+        cost = split_codegen_cost(count, optnone);
     }
     else
     {
