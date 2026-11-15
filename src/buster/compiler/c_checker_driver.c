@@ -10700,7 +10700,7 @@ struct CheckDriverDeferred
 
 // --tier1-passes='s list (#139's measurement): comma-separated items, each + or - and then a pass's name (sccp, dce, cfg,
 // merge, licm, sroa, memory, gvn or inline) or all, applied in turn to the passes the earlier options left on: the default
-// pipeline's (SCCP, dead-code removal, CFG cleanup, its merges, value numbering with memory and the inlining), with
+// pipeline's (SCCP, dead-code removal, CFG cleanup, its merges and the inlining), with
 // --tier1-gvn's and --tier1-no-inline's changes where they came first. `toggled` holds the BUSTER_CHECK_TIER1_PASS_* bits that differ from the default; `gvn` and `no_inline` are
 // the two passes with options of their own. Returns false, and leaves all three as they were, for an empty list or item,
 // an item without its sign, or an unknown name.

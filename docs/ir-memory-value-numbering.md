@@ -12,7 +12,8 @@ built: the CFG, the use lists, the dominator tree and SCCP's constants. It makes
 no function of its own. A load it removes forwards its value as an identity
 does (`IrOptimizeWork.forward`): its users read the value, dead-code removal
 keeps the value for them, and the rewrite leaves the load out. The C driver's
-`--tier1` runs it ("The pipeline" below).
+`--tier1` runs it with `--tier1-passes=+memory` (or `+all`); by default it
+doesn't, which "Measurements" below decided.
 
 ## Keys
 
@@ -208,36 +209,66 @@ The whole pass by each version, each over the corpus in runs of its own
 The record is buster-performance's
 [`memory-value-numbering-2718-2026-11-14`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/memory-value-numbering-2718-2026-11-14).
 
-**Which rules pay.** A prototype (`42a7c1e`) measured three policies on the
-9700X by `measure-tier1-programs --runs 11 --variant`, user cycles against
-`--tier1` without the pass:
+**Run time decides the default.** On the final code (`566770b`, against main
+`750f6a0`), `measure-tier1-programs --runs 11 --variant
+--tier1-passes=-memory` on the 9700X gave, in user cycles with the pass and
+without:
 
-| Policy | speedtest1 | Lua's five scripts |
-| --- | ---: | ---: |
-| Every rule (shipped) | 0.9968 | 0.9745 |
-| No forwarding from a load a user could fold | 0.9957 | 0.9961 |
-| One block, one key's own stores | 1.0104 | 0.9918 |
+| Program | With | Without | With / without |
+| --- | ---: | ---: | ---: |
+| speedtest1 | 738.1 M | 736.2 M | 1.0026 |
+| Lua's five scripts | 981.3 M | 984.9 M | 0.9963 |
+| calls.lua | 108.4 M | 113.5 M | 0.955 |
+| tables.lua | 195.8 M | 197.4 M | 0.991 |
+| strings.lua | 235.2 M | 233.2 M | 1.009 |
+| arithmetic.lua | 156.9 M | 154.9 M | 1.013 |
+| closures.lua | 285.0 M | 286.0 M | 0.996 |
 
-`--tier1`'s own row varied by 0.8% for speedtest1 and 1.0% for Lua across the
-three runs, so speedtest1's differences are within noise and Lua's gain from
-every rule is not. The instructions go up (1.0108 and 1.0168 for every rule):
-a load that a comparison or an arithmetic instruction had folded becomes a
-register's value, which takes a move or a longer live range. The cycles still
-go down, so the pass forwards from foldable loads too.
+Both totals are within the runs' noise, about 1%, and the instructions go up
+(+1.0% and +1.7%). A load that a comparison or an arithmetic instruction had
+folded becomes a register's value, which takes a move or a longer live range.
+The loads the pass removes are cheap ones: the same bytes were just read, an
+L1 hit, or just written, a store Zen 5 forwards to the load.
+
+The compile time is not within noise. `measure-compile --runs 11 --variant
+--tier1-passes=-memory` of `--tier1 --lanes 1 -c sqlite3.c`, the same
+executable: 653.6 ms with the pass against 634.6 ms without (1.030, 3,516.4 M
+against 3,410.8 M user cycles, 8,447.5 M against 8,371.0 M instructions).
+`lvm.c` took 1.011 times main's. So `--tier1` leaves the pass off, and
+`--tier1-passes=+memory` (or `+all`) runs it. Off, `--tier1`'s objects are
+main's byte for byte (speedtest1's unit and Lua's 33 units).
+
+A prototype (`42a7c1e`), measured against main `1935a91`, had found every rule
+paying on Lua: 0.9745 of the cycles, against 0.9961 with no forwarding from a
+load a user could fold, and 0.9918 within one block and one key. Callgrind
+counts nearly the same code from both versions of the pass (arithmetic.lua's
+instructions +5.8% in each), but the program without the pass got faster in
+between: arithmetic.lua 166.4 M to 154.9 M cycles. #2773 (#2768: Tier 1's
+allocation ranges that wait in their value's slot) is main's only Tier 1
+change in between.
+
+**Compile time by both versions.** `benchmark-ir-source --passes` on
+`sqlite3.c` (2,602 functions, 599,619 lowered IR instructions), medians of 21
+rounds:
+
+| Row | Vector, ms | Scalar, ms | Scalar / vector |
+| --- | ---: | ---: | ---: |
+| Tier 1's set (`tier1`) | 49.8 | 47.7 | 0.96 |
+| Tier 1's set with the pass (`tier1-memory`) | 56.3 | 56.6 | 1.01 |
+| The pass and dead-code removal (`memory`) | 31.2 | 40.3 | 1.29 |
+
+In the driver the pass costs about twice what the `tier1-memory` row adds,
+since it runs after the inlining, on larger functions: on the scalar host,
+callgrind counts 203 M more instructions in `check_tier1_passes`, which the
+pass is inlined into, and 100 M fewer in selection and emission.
 
 **Loads removed.** Callgrind's exact counts of the programs' own code, pass
-on against off, both built by the final code: speedtest1's data reads 691.4 M
-to 647.2 M (-6.39%), Lua's five scripts' 1,022.5 M to 974.1 M (-4.74%);
-instructions +1.02% and +1.88%; text 0.58% and 0.26% smaller. In speedtest1's
-unit the pass forwards 3,367 loads, and the allocator's reloads go from 11,712
-to 12,110. On the corpora, `test-ir-source --passes`'s `memory` row forwards
-47 loads in c-testsuite's subset, 3,136 in `sqlite3.c` and 2,973 in musl.
-
-**Place in `--tier1`.** On by default, in the optimizer after SCCP and the
-identities and before dead-code removal, on the analyses already built.
-`--tier1-passes=-memory` gives main's objects byte for byte. The final head's
-9700X run time, loads dispatched and compile time by both versions are pending
-in the record.
+on against off: speedtest1's data reads 691.4 M to 647.2 M (-6.39%), Lua's
+five scripts' 1,022.5 M to 974.1 M (-4.74%); instructions +1.02% and +1.88%;
+text 0.58% and 0.26% smaller. In speedtest1's unit the pass forwards 3,367
+loads, and the allocator's reloads go from 11,712 to 12,110. On the corpora,
+`test-ir-source --passes`'s `memory` row forwards 47 loads in c-testsuite's
+subset, 3,136 in `sqlite3.c` and 2,973 in musl.
 
 The implementation is original. Forwarding loads along a dominator tree with a
 scoped table is the textbook available-expression technique of early CSE
