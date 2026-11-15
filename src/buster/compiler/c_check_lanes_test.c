@@ -3228,6 +3228,7 @@ static void check_lanes_test_session_growth(CheckLanesTestTally* tally, const ch
 }
 
 static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* directory, const char* executable);
+static void check_tier1_test_refused_reach(CheckLanesTestTally* tally, const char* directory, const char* executable);
 
 static int run_check_lanes_tests(int argc, char** argv)
 {
@@ -3236,6 +3237,7 @@ static int run_check_lanes_tests(int argc, char** argv)
     bool keep = false;
     uint32_t programs = 6;
     bool tier1_outcomes_only = false;
+    bool refused_reach_only = false;
     uint64_t id_order = 153;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
@@ -3263,6 +3265,10 @@ static int run_check_lanes_tests(int argc, char** argv)
         {
             tier1_outcomes_only = true;
         }
+        else if (strcmp(argv[i], "--refused-reach-only") == 0)
+        {
+            refused_reach_only = true;
+        }
         else if (strcmp(argv[i], "--keep") == 0)
         {
             keep = true;
@@ -3272,7 +3278,7 @@ static int run_check_lanes_tests(int argc, char** argv)
             options = false;
         }
     }
-    check_lanes_test_expect(&tally, options, "options: [--executable PATH] [--seed N] [--programs N] [--id-order N] [--tier1-outcomes] [--keep]", 0);
+    check_lanes_test_expect(&tally, options, "options: [--executable PATH] [--seed N] [--programs N] [--id-order N] [--tier1-outcomes] [--refused-reach-only] [--keep]", 0);
     char resolved[PATH_MAX];
     const ssize_t resolved_length = strcmp(executable, "/proc/self/exe") == 0 ? readlink(executable, resolved, sizeof(resolved) - 1) : -1;
     if (resolved_length > 0)
@@ -3285,7 +3291,11 @@ static int run_check_lanes_tests(int argc, char** argv)
     snprintf(directory, sizeof(directory), "%s/buster-check-lanes-XXXXXX", temporary);
     const bool made = options && mkdtemp(directory) != 0;
     check_lanes_test_expect(&tally, made, "make the test's directory", directory);
-    if (made)
+    if (made && refused_reach_only)
+    {
+        check_tier1_test_refused_reach(&tally, directory, executable);
+    }
+    else if (made)
     {
         check_tier1_outcome_tests(&tally, directory, executable);
         if (!tier1_outcomes_only)
@@ -3317,6 +3327,9 @@ static int run_check_lanes_tests(int argc, char** argv)
             check_lanes_test_session_growth(&tally, directory, programs, 0, true);
             check_lanes_test_benchmark_sections(&tally, executable, directory);
         }
+    }
+    if (made)
+    {
         if (!keep && tally.failures == 0)
         {
             char* remove[] = { (char*)"rm", (char*)"-rf", directory, 0 };
