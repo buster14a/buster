@@ -47,7 +47,8 @@ struct CheckProgramSelection
 //   block-scope static's roots, which count only where code that clang emits declares it (check_program_token_emitted,
 //   which reads the loop's left-out ranges): those declarations' tokens, groups and roots (`static_count` of them), each
 //   selection's to add;
-// - each body's eager answer (check_program_body_eager), 0 where none is made yet, else 1 more than the answer.
+// - each body's eager answer (check_program_body_eager), 0 where none is made yet, else 1 more than the answer;
+// - the objects whose linkage names bound a section, which read no reference either.
 // The caller makes the columns (check_program_select_shared_make), in an arena that outlives both selections.
 typedef struct CheckProgramSelectShared CheckProgramSelectShared;
 struct CheckProgramSelectShared
@@ -63,6 +64,13 @@ struct CheckProgramSelectShared
     uint32_t body_count;
     uint32_t static_count;
     bool ready;
+    // The objects whose linkage names bound a section (check_program_select_bounds), of a program of `bound_objects`
+    // objects, where `bounds_ready`.
+    uint32_t* bounded;
+    String8* bounded_names;
+    uint32_t bounded_count;
+    uint32_t bound_objects;
+    bool bounds_ready;
 };
 
 // A CheckProgramSelectShared's columns for `data` and `body_count` bodies, in `arena`, none made yet. Whether there was
@@ -87,6 +95,127 @@ static bool check_program_select_shared_make(CheckProgramSelectShared* shared, c
         memset(shared->eager, 0, (uint64_t)body_count + 1);
     }
     return made;
+}
+
+// The objects whose linkage names are a section's bound (#1122), in object order: each one's object and the section its
+// bound names (link_bound_suffix_bytes of its linkage name: the first asm label of its declarations in token order, as
+// check_program_emit names its symbol, or else its identifier), into *bounded and *names in `output`; their count, or
+// UINT32_MAX where there's no room. Only a name of __start_ or __stop_ and an identifier makes one, so the list is short
+// (#2536's step 2.2c.4, part 3: an object-sized column of every object's bound, written and read whole, cost main.c's
+// selection about two fifths of its time). The asm labels come from the tokens with attributes
+// (check_input_attributed_next, 16 at a time on the vector path), and the declared objects from object_declarations, 16
+// at a time on the vector path; the scalar path, the twin, reads each one.
+static uint32_t check_program_select_bounds(const CheckProgram* full, uint32_t objects, bool scalar, uint32_t** bounded, String8** names, Arena* output,
+                                            Arena* scratch)
+{
+    (void)scalar;
+
+    const CheckInput* input = full->input;
+    const Parser* parser = full->parser;
+    const Preprocessor* pp = parser->preprocessor;
+    const uint32_t tokens = input->token_count;
+    const CheckSparseWide attributes = input->attributes;
+    const uint64_t mark = scratch->length;
+    // The asm labels, in token and attribute order: each one's object and text, counted, then listed.
+    uint64_t* keys = NULL;
+    String8* texts = NULL;
+    uint32_t label_count = 0;
+    bool valid = true;
+    for (uint32_t pass = 0; valid && pass < 2; pass += 1)
+    {
+        label_count = 0;
+        for (uint32_t first = check_input_attributed_next(attributes, 0, tokens, scalar); first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens, scalar))
+        {
+            for (uint32_t selected = check_input_attributed_group(attributes, first, tokens, scalar); selected != 0; selected &= selected - 1)
+            {
+                const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
+                const uint32_t object = input->objects[token];
+                const CheckInputAttributes* records = object != 0 && object < objects && input->declarations[token] == token &&
+                                                      !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) ? check_input_attributes_at(input, token) : 0;
+                for (uint32_t i = 0; records != 0 && i < records->count; i += 1)
+                {
+                    const CheckInputAttribute* attribute = records->records + i;
+                    const bool label = attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !attribute->ignored && attribute->text.length != 0;
+                    if (label && keys != NULL)
+                    {
+                        // Its place in token order in the low half, which the sort keeps for each object's first.
+                        keys[label_count] = ((uint64_t)object << 32) | label_count;
+                        texts[label_count] = attribute->text;
+                    }
+                    label_count += label ? 1 : 0;
+                }
+            }
+        }
+        if (pass == 0)
+        {
+            keys = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, 2 * (uint64_t)label_count + 1);
+            texts = BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)label_count + 1);
+            valid = keys != NULL && texts != NULL;
+        }
+    }
+    const uint64_t* sorted = valid && label_count > 1 ? c_bindings_sort(keys, keys + label_count, label_count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : keys;
+    // The declared objects, in order, each against the labels' cursor; a bound one listed.
+    uint32_t* objects_listed = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)objects + label_count) : NULL;
+    String8* bounds_listed = objects_listed != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)objects + label_count) : NULL;
+    valid = valid && bounds_listed != NULL;
+    uint32_t count = 0;
+    uint32_t cursor = 0;
+    const uint32_t* declarations = full->object_declarations;
+    for (uint32_t block = 1; valid && block < objects; block += 16)
+    {
+        uint32_t present = 0;
+        if (!BUSTER_SCALAR_PATH(scalar))
+        {
+            const __mmask16 inside = (__mmask16)(objects - block >= 16 ? 0xffff : (1u << (objects - block)) - 1);
+            const __m512i declared = _mm512_maskz_loadu_epi32(inside, declarations + block);
+            present = (uint32_t)_mm512_mask_cmpneq_epu32_mask(inside, declared, _mm512_set1_epi32((int)BUSTER_CHECK_NONE));
+        }
+        else
+        {
+            for (uint32_t k = 0; k < 16 && block + k < objects; k += 1)
+            {
+                present |= declarations[block + k] != BUSTER_CHECK_NONE ? 1u << k : 0;
+            }
+        }
+        for (uint32_t lanes = present; lanes != 0; lanes &= lanes - 1)
+        {
+            const uint32_t object = block + (uint32_t)__builtin_ctz(lanes);
+            while (cursor < label_count && (uint32_t)(sorted[cursor] >> 32) < object)
+            {
+                cursor += 1;
+            }
+            const bool labelled = cursor < label_count && (uint32_t)(sorted[cursor] >> 32) == object;
+            const String8 label = labelled ? texts[(uint32_t)sorted[cursor]] : (String8){ 0 };
+            const IdentId name = parser->tokens.names[declarations[object]];
+            const String8 bound = labelled ? link_bound_suffix_bytes((const uint8_t*)label.pointer, (uint32_t)label.length, 0) :
+                                  name != 0 ? link_bound_suffix_bytes(intern_bytes(pp->table, name), intern_length(pp->table, name), 0) : (String8){ 0 };
+            objects_listed[count] = object;
+            bounds_listed[count] = bound;
+            count += bound.length != 0 ? 1 : 0;
+        }
+    }
+    // A labelled object of no declaration the scan saw, whose label is its linkage name all the same.
+    for (uint32_t i = 0; valid && i < label_count; i += 1)
+    {
+        const uint32_t object = (uint32_t)(sorted[i] >> 32);
+        const bool first = i == 0 || (uint32_t)(sorted[i - 1] >> 32) != object;
+        const String8 label = texts[(uint32_t)sorted[i]];
+        const String8 bound = first && declarations[object] == BUSTER_CHECK_NONE ? link_bound_suffix_bytes((const uint8_t*)label.pointer, (uint32_t)label.length, 0) :
+                                                                                   (String8){ 0 };
+        objects_listed[count] = object;
+        bounds_listed[count] = bound;
+        count += bound.length != 0 ? 1 : 0;
+    }
+    *bounded = valid ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : NULL;
+    *names = *bounded != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, String8, (uint64_t)count + 1) : NULL;
+    valid = valid && *names != NULL;
+    if (valid)
+    {
+        memcpy(*bounded, objects_listed, (uint64_t)count * sizeof(uint32_t));
+        memcpy(*names, bounds_listed, (uint64_t)count * sizeof(String8));
+    }
+    arena_pop_to(scratch, mark);
+    return valid ? count : UINT32_MAX;
 }
 
 // The roots a declaration's `attributes` make its definition: used (but not retain, which keeps the section of a
@@ -939,6 +1068,12 @@ static bool check_program_select_shared(CheckProgramSelection* result, const Che
     uint32_t body_references = 0;
     uint32_t data_references = 0;
     CLowering plan = { 0 };
+    // Whether this selection listed the bounded objects (check_program_select_bounds), which a shared one keeps once it
+    // stands.
+    bool bounds_made = false;
+    uint32_t* made_bounded = NULL;
+    String8* made_bounded_names = NULL;
+    uint32_t made_bounded_count = 0;
     if (valid)
     {
         memset(object_definitions, 0, (uint64_t)objects * sizeof(uint32_t));
@@ -1202,34 +1337,25 @@ static bool check_program_select_shared(CheckProgramSelection* result, const Che
         // fixpoint; each pass lists the needed objects' sections, few, which each placement compares.
         const CheckInputSections* sections = input->sections;
         const Preprocessor* pp = full->parser->preprocessor;
-        const Parser* parser = full->parser;
         bool grow = valid && mode == C_LOWERING_REACHABLE && pp != 0 && sections != 0 && sections->placement_count != 0;
-        String8* object_bounds = grow && !keep_sectioned ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, objects) : 0;
-        String8* needed_bounds = object_bounds != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, objects) : 0;
-        valid = valid && (!grow || keep_sectioned || needed_bounds != 0);
-        if (needed_bounds != 0)
+        // The objects whose linkage names bound a section (check_program_select_bounds): a shared selection's where an
+        // earlier one listed them.
+        const bool bounds = grow && !keep_sectioned;
+        const bool bounds_shared = bounds && shared != NULL && shared->bounds_ready && shared->bound_objects == objects;
+        uint32_t* bounded = bounds_shared ? shared->bounded : NULL;
+        String8* bounded_names = bounds_shared ? shared->bounded_names : NULL;
+        uint32_t bounded_count = bounds_shared ? shared->bounded_count : 0;
+        if (bounds && !bounds_shared)
         {
-            memset(object_bounds, 0, (uint64_t)objects * sizeof(String8));
-            for (uint32_t token = 0; token < input->token_count; token += 1)
-            {
-                const uint32_t object = input->objects[token];
-                const CheckInputAttributes* attributes = object != 0 && object < objects && input->declarations[token] == token &&
-                                                         !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER) ? check_input_attributes_at(input, token) : 0;
-                for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
-                {
-                    const CheckInputAttribute* attribute = attributes->records + i;
-                    object_bounds[object] = attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !attribute->ignored && object_bounds[object].length == 0 ? attribute->text : object_bounds[object];
-                }
-            }
-            for (uint32_t object = 1; object < objects; object += 1)
-            {
-                const uint32_t declaration = full->object_declarations[object];
-                const IdentId name = declaration != BUSTER_CHECK_NONE ? parser->tokens.names[declaration] : 0;
-                const String8 label = object_bounds[object];
-                object_bounds[object] = label.length != 0 ? link_bound_suffix_bytes((const uint8_t*)label.pointer, (uint32_t)label.length, 0) :
-                                        name != 0 ? link_bound_suffix_bytes(intern_bytes(pp->table, name), intern_length(pp->table, name), 0) : (String8){ 0 };
-            }
+            bounded_count = check_program_select_bounds(full, objects, scalar, &bounded, &bounded_names, output, scratch);
+            valid = valid && bounded_count != UINT32_MAX;
+            made_bounded = bounded;
+            made_bounded_names = bounded_names;
+            made_bounded_count = bounded_count;
         }
+        bounds_made = bounds && !bounds_shared && valid;
+        String8* needed_bounds = bounds && valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)bounded_count + 1) : 0;
+        valid = valid && (!bounds || needed_bounds != 0);
         while (valid && grow)
         {
             grow = false;
@@ -1248,10 +1374,10 @@ static bool check_program_select_shared(CheckProgramSelection* result, const Che
                 }
             }
             uint32_t bound_count = 0;
-            for (uint32_t object = 1; needed_bounds != 0 && object < objects; object += 1)
+            for (uint32_t i = 0; needed_bounds != 0 && i < bounded_count; i += 1)
             {
-                needed_bounds[bound_count] = object_bounds[object];
-                bound_count += needed[object] != 0 && object_bounds[object].length != 0;
+                needed_bounds[bound_count] = bounded_names[i];
+                bound_count += needed[bounded[i]] != 0 ? 1 : 0;
             }
             for (uint32_t p = 0; p < sections->placement_count; p += 1)
             {
@@ -1485,6 +1611,14 @@ static bool check_program_select_shared(CheckProgramSelection* result, const Che
     {
         candidate.defined_functions = full->body_count;
         candidate.defined_objects = data->count;
+        if (bounds_made && shared != NULL)
+        {
+            shared->bounded = made_bounded;
+            shared->bounded_names = made_bounded_names;
+            shared->bounded_count = made_bounded_count;
+            shared->bound_objects = objects;
+            shared->bounds_ready = true;
+        }
         candidate.statistics = plan.statistics;
         candidate.status = CHECK_PROGRAM_OK;
         candidate.program.output_bytes = output->length - mark;
