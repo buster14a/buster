@@ -10,6 +10,9 @@
 // - a computed goto's dispatch: an indirect jump at each handler's end, no jump to the shared one;
 // - #2592's fetch, `i = *pc++` at each handler's end: the load before the increment, which adds in pc's register, so
 //   that no move precedes the handlers' indirect jumps (the function's first fetch, of its parameter, may still move);
+// - and #2768's handler that calls in one arm, as Lua's OP_GETTABUP does: the loop's values it spills around the call
+//   wait in their slots for their next use, so that the join after the call reloads none of them into a register the
+//   loop keeps another value in, and every handler's indirect jump follows its table's load at once;
 // - and #2745's objects a vector's value initializes whole, as the intrinsics' wrappers are (a struct's, a union's, a
 //   compound literal's): no store of zeros before the vector's, while a volatile object and a union whose designator
 //   moves to another member after the vector's (whose rest clang leaves zeros) keep their eight.
@@ -171,6 +174,71 @@ fetch_halt:
     return stack[sp - 1];
 }
 
+// #2768: Lua's OP_GETTABUP, a lookup that calls in one arm and a miss that calls in the other, and two handlers that use
+// the loop's values more than the fetch uses pc. More values live across the calls than there are callee-saved
+// registers.
+struct patterns_state
+{
+    long* base;
+    const long* constants;
+    long** upvalues;
+    long trap;
+};
+long* patterns_lookup(long* table, long key);
+long patterns_miss(struct patterns_state* s, long* table, long key, long* ra);
+long patterns_hook(struct patterns_state* s, const unsigned int* pc);
+
+#define BUSTER_PATTERNS_A(i) (((i) >> 2) & 7)
+#define BUSTER_PATTERNS_B(i) (((i) >> 5) & 7)
+#define BUSTER_PATTERNS_K(i) (((i) >> 8) & 7)
+
+__attribute__((noinline)) long patterns_spilled(struct patterns_state* s, const unsigned int* pc)
+{
+    static void* const table[] = { &&spilled_get, &&spilled_add, &&spilled_halt, &&spilled_push };
+    long* base = s->base;
+    const long* constants = s->constants;
+    long** upvalues = s->upvalues;
+    long trap = s->trap;
+    unsigned int i = *pc++;
+    goto* table[i & 3];
+spilled_get:
+    {
+        long* ra = base + BUSTER_PATTERNS_A(i);
+        long* upvalue = upvalues[BUSTER_PATTERNS_B(i) & 3];
+        long key = constants[BUSTER_PATTERNS_K(i)];
+        long* slot = 0;
+        if (upvalue[0] == 0x45)
+        {
+            slot = patterns_lookup(upvalue, key);
+        }
+        if (slot != 0)
+        {
+            *ra = *slot;
+        }
+        else
+        {
+            trap = patterns_miss(s, upvalue, key, ra);
+        }
+        if (trap != 0)
+        {
+            trap = patterns_hook(s, pc);
+            base = s->base;
+        }
+        i = *pc++;
+        goto* table[i & 3];
+    }
+spilled_add:
+    base[BUSTER_PATTERNS_A(i)] += base[BUSTER_PATTERNS_B(i)] + constants[0] + upvalues[0][1] + constants[6] * upvalues[2][1] + (constants[7] ^ upvalues[3][1]) + trap;
+    i = *pc++;
+    goto* table[i & 3];
+spilled_push:
+    base[BUSTER_PATTERNS_A(i)] = constants[BUSTER_PATTERNS_B(i)] + constants[2] + upvalues[1][1] + constants[5] * upvalues[2][2] + (constants[4] ^ upvalues[3][2]) + trap;
+    i = *pc++;
+    goto* table[i & 3];
+spilled_halt:
+    return base[BUSTER_PATTERNS_A(i)];
+}
+
 typedef long long patterns_vector __attribute__((vector_size(64)));
 typedef struct
 {
@@ -248,6 +316,14 @@ int patterns_field(const unsigned int* code, const int* table);
 char* patterns_scale(char* p, unsigned long n);
 long patterns_dispatch(const unsigned char* code, long* stack);
 long patterns_fetch(const unsigned int* pc, long* stack);
+struct patterns_state
+{
+    long* base;
+    const long* constants;
+    long** upvalues;
+    long trap;
+};
+long patterns_spilled(struct patterns_state* s, const unsigned int* pc);
 typedef long long patterns_vector __attribute__((vector_size(64)));
 typedef struct
 {
@@ -264,6 +340,128 @@ void patterns_whole_union(patterns_lanes* out, const patterns_vector* p);
 unsigned long long patterns_whole_member(const patterns_vector* p);
 void patterns_whole_override(patterns_lanes* out, const patterns_vector* p);
 void patterns_whole_volatile(patterns_wrapper* out, const patterns_vector* p);
+
+#define BUSTER_PATTERNS_A(i) (((i) >> 2) & 7)
+#define BUSTER_PATTERNS_B(i) (((i) >> 5) & 7)
+#define BUSTER_PATTERNS_K(i) (((i) >> 8) & 7)
+#define BUSTER_PATTERNS_WORD(operation, a, b, k) ((unsigned int)(operation) | (unsigned int)(a) << 2 | (unsigned int)(b) << 5 | (unsigned int)(k) << 8)
+
+// patterns_spilled's callees: a hit for a key that isn't negative, a miss that stores its own result and asks for the
+// hook where the key is odd, and a hook that counts its calls and the instructions they come after.
+static unsigned long spilled_calls;
+static long spilled_positions;
+static const unsigned int* spilled_program;
+
+long* patterns_lookup(long* table, long key)
+{
+    spilled_calls += 1;
+    return key >= 0 ? &table[1 + (key & 1)] : 0;
+}
+
+long patterns_miss(struct patterns_state* s, long* table, long key, long* ra)
+{
+    spilled_calls += 1;
+    *ra = key * 3 + table[0] + (s->base == ra);
+    return key & 1;
+}
+
+long patterns_hook(struct patterns_state* s, const unsigned int* pc)
+{
+    spilled_calls += 1;
+    spilled_positions += pc - spilled_program;
+    return s->trap;
+}
+
+// patterns_spilled's semantics by a switch, for Clang to compile.
+static long spilled_reference(struct patterns_state* s, const unsigned int* pc)
+{
+    long* base = s->base;
+    const long* constants = s->constants;
+    long** upvalues = s->upvalues;
+    long trap = s->trap;
+    long result = 0;
+    bool running = true;
+    while (running)
+    {
+        const unsigned int i = *pc++;
+        switch (i & 3)
+        {
+        case 0:
+        {
+            long* ra = base + BUSTER_PATTERNS_A(i);
+            long* upvalue = upvalues[BUSTER_PATTERNS_B(i) & 3];
+            const long key = constants[BUSTER_PATTERNS_K(i)];
+            long* slot = upvalue[0] == 0x45 ? patterns_lookup(upvalue, key) : 0;
+            if (slot != 0)
+            {
+                *ra = *slot;
+            }
+            else
+            {
+                trap = patterns_miss(s, upvalue, key, ra);
+            }
+            if (trap != 0)
+            {
+                trap = patterns_hook(s, pc);
+                base = s->base;
+            }
+            break;
+        }
+        case 1:
+            base[BUSTER_PATTERNS_A(i)] += base[BUSTER_PATTERNS_B(i)] + constants[0] + upvalues[0][1] + constants[6] * upvalues[2][1] + (constants[7] ^ upvalues[3][1]) + trap;
+            break;
+        case 3:
+            base[BUSTER_PATTERNS_A(i)] = constants[BUSTER_PATTERNS_B(i)] + constants[2] + upvalues[1][1] + constants[5] * upvalues[2][2] + (constants[4] ^ upvalues[3][2]) + trap;
+            break;
+        default:
+            result = base[BUSTER_PATTERNS_A(i)];
+            running = false;
+            break;
+        }
+    }
+    return result;
+}
+
+// One run of patterns_spilled or its reference over fresh state: the result, the registers' final values and the calls.
+static bool spilled_run(bool reference, long* result, long* registers, unsigned long* calls, long* positions)
+{
+    static const unsigned int program[] = {
+        BUSTER_PATTERNS_WORD(0, 1, 0, 2),
+        BUSTER_PATTERNS_WORD(0, 2, 1, 3),
+        BUSTER_PATTERNS_WORD(3, 3, 4, 0),
+        BUSTER_PATTERNS_WORD(1, 1, 3, 0),
+        BUSTER_PATTERNS_WORD(0, 4, 2, 1),
+        BUSTER_PATTERNS_WORD(1, 4, 1, 0),
+        BUSTER_PATTERNS_WORD(0, 5, 3, 3),
+        BUSTER_PATTERNS_WORD(1, 5, 4, 0),
+        BUSTER_PATTERNS_WORD(2, 4, 0, 0),
+    };
+    static const long constants[8] = { 2, -7, 5, 8, 11, -3, 4, 6 };
+    long tables[4][4] = {
+        { 0x45, 10, 20, 30 },
+        { 3, 40, 50, 60 },
+        { 0x45, 70, 80, 90 },
+        { 0x45, 100, 110, 120 },
+    };
+    long* upvalues[4] = { tables[0], tables[1], tables[2], tables[3] };
+    for (unsigned r = 0; r < 8; r += 1)
+    {
+        registers[r] = (long)r * 1000 + 1;
+    }
+    struct patterns_state state = {
+        .base = registers,
+        .constants = constants,
+        .upvalues = upvalues,
+        .trap = 0,
+    };
+    spilled_program = program;
+    spilled_calls = 0;
+    spilled_positions = 0;
+    *result = reference ? spilled_reference(&state, program) : patterns_spilled(&state, program);
+    *calls = spilled_calls;
+    *positions = spilled_positions;
+    return state.base == registers;
+}
 
 int main(void)
 {
@@ -337,6 +535,16 @@ int main(void)
     const unsigned int words[] = { 6 << 2 | 1, 4 << 2 | 1, 3, 0, 0, 2 };
     long fetched[8] = { 0 };
     valid = patterns_fetch(words, fetched) == 14 && valid;
+    long spilled_results[2];
+    long spilled_registers[2][8];
+    unsigned long spilled_counts[2];
+    long spilled_hooks[2];
+    for (unsigned reference = 0; reference < 2; reference += 1)
+    {
+        valid = spilled_run(reference != 0, &spilled_results[reference], spilled_registers[reference], &spilled_counts[reference], &spilled_hooks[reference]) && valid;
+    }
+    // Three lookups, two of which hit, and two misses, one of which asks for the hook: six calls.
+    valid = spilled_results[0] == spilled_results[1] && memcmp(spilled_registers[0], spilled_registers[1], sizeof(spilled_registers[0])) == 0 && spilled_counts[0] == spilled_counts[1] && spilled_counts[0] == 6 && spilled_hooks[0] == spilled_hooks[1] && spilled_hooks[0] != 0 && valid;
     patterns_vector vector;
     unsigned long long lanes[8];
     for (int l = 0; l < 8; l += 1)
@@ -425,6 +633,7 @@ typedef enum PatternsKind
     PATTERNS_SHIFT,
     PATTERNS_DISPATCH,
     PATTERNS_FETCH,
+    PATTERNS_SPILLED,
     PATTERNS_WHOLE,
     PATTERNS_CLEARED,
 } PatternsKind;
@@ -447,6 +656,7 @@ static const PatternsFunction patterns_functions[] = {
     { "patterns_scale", PATTERNS_SHIFT },
     { "patterns_dispatch", PATTERNS_DISPATCH },
     { "patterns_fetch", PATTERNS_FETCH },
+    { "patterns_spilled", PATTERNS_SPILLED },
     { "patterns_whole_literal", PATTERNS_WHOLE },
     { "patterns_whole_declaration", PATTERNS_WHOLE },
     { "patterns_whole_union", PATTERNS_WHOLE },
@@ -495,7 +705,9 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     // in place (an add, where a lea into another register would leave the edge a move back).
     unsigned clean = 0;
     unsigned increments = 0;
-    // Stores of a zero immediate to memory: an object's clear's.
+    // Indirect jumps right after the load of their target, with nothing between them (#2768).
+    unsigned loaded = 0;
+    // Stores of a zero immediate to memory: an object's clear's (#2745).
     unsigned zeros = 0;
     for (unsigned i = 0; i < body->count; i += 1)
     {
@@ -517,6 +729,8 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
         const PatternsInstruction* before = i != 0 ? &body->instructions[i - 1] : NULL;
         const bool moved = before != NULL && strcmp(before->operation, "mov") == 0 && before->operands[0] == '%' && !patterns_memory(before->operands);
         clean += jump && operands[0] == '*' && !moved;
+        const char* loaded_comma = before != NULL ? strrchr(before->operands, ',') : NULL;
+        loaded += jump && operands[0] == '*' && loaded_comma != NULL && strcmp(before->operation, "mov") == 0 && patterns_memory(before->operands) && strcmp(loaded_comma + 1, operands + 1) == 0;
         if (jump && operands[0] != '*')
         {
             const unsigned long long target = strtoull(operands, NULL, 16);
@@ -544,6 +758,9 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     case PATTERNS_FETCH:
         valid = valid && indirect >= 4 && clean >= 3 && increments >= 3;
         break;
+    case PATTERNS_SPILLED:
+        valid = valid && indirect >= 4 && loaded + 1 >= indirect;
+        break;
     case PATTERNS_WHOLE:
         valid = valid && zeros == 0;
         break;
@@ -553,8 +770,8 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     }
     if (!valid)
     {
-        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u zero-stores=%u\n",
-                function->name, body->definitions, sets, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, zeros);
+        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u loaded-jumps=%u zero-stores=%u\n",
+                function->name, body->definitions, sets, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, loaded, zeros);
     }
     return valid;
 }

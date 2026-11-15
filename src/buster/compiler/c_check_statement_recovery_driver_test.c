@@ -16,6 +16,7 @@
 // Include after c_check_semantic_recovery_driver_test.c, whose reader this takes.
 
 #include "c_check_attribute_call_recovery_driver_test.c"
+#include "c_check_malformed_call_driver_test.c"
 
 // #2406: a malformed block item must not hide the complete statements after its semicolon. These are runtime data,
 // compared as complete diagnostic streams, including each first error, keyword correction, later name and error limit.
@@ -108,6 +109,7 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
 {
     check_test_driver_parse_statement_recovery(test, clang, executable, directory);
     check_test_driver_attribute_calls(test, clang, executable, directory);
+    check_test_driver_malformed_calls(test, clang, executable, directory);
     static const char* const fixtures[] = {
         // #2438: a case operand's non-integer type is diagnosed before its constant value, on ordinary and wide
         // switches. Parentheses and range endpoints retain their own beginning; integer nonconstants and faults keep

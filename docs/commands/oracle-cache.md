@@ -516,6 +516,9 @@ as a stalled, unanswered request (#2761). A server that gives no
 answer in time is stopped (killed) and the run runs as a child, so a stalled
 server costs its limit rather than hanging until the command's own (#2263,
 whose shard ran three commands to the 600 s limit).
+The reply's signed 32-bit status must be a process exit code, 0 through 255.
+An out-of-range status fails the request and stops the server; it is not
+truncated to eight bits, which could turn a malformed status into success (#2740).
 
 The private transport tests force small socket buffers, partial writes and
 repeated signals. They cover an expired deadline on a writable socket, a
@@ -544,6 +547,10 @@ and printed (`oracle_serve_compare`) and fails the test
 and runs that fit but that the server couldn't take, which ran as children;
 then the server's answers and their time, in total and per answer, and the
 requests that ran past their limit, each also printed as it happens).
+A lost, truncated or timed-out reply has no compiler result to compare. In
+differential mode too, that request is counted as unserved and the ordinary
+run supplies its result; the next complete reply is compared normally (#2421).
+Nonzero compiler exits are complete replies and still participate in comparison.
 
 A test that starts its clang itself, outside the cache (`test-preprocessor`'s
 fuzz batch, `preprocessor_fuzz_clang_process`), sends those runs to the same
