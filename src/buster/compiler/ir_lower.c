@@ -2317,19 +2317,23 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_offset(IrTypedSin
 }
 
 // COPY's `bytes` (at most BUSTER_TIER0_MAX_COPY_BYTES) as a load and a store per piece, each the widest integer that
-// fits what remains: 32 pairs of i64 at most. The typed stream's ranges are the same or apart, so each piece's load
-// before its store reads the source's bytes either way. Their alignment is unknown, as LOAD's is.
-static __attribute__((always_inline)) inline void ir_typed_copy_pointers(IrTypedSink* sink, uint32_t destination, uint32_t source, uint64_t bytes)
+// fits what remains: 32 pairs of i64 at most; or, with `wide`, 16 bytes at a time as a vector's (IR_V4I32), the last
+// 16 ending at the end, and below 16 bytes as integers. The typed stream's ranges are the same or apart, so each piece's
+// load before its store reads the source's bytes either way, overlapping pieces too. Their alignment is unknown, as
+// LOAD's is.
+static __attribute__((always_inline)) inline void ir_typed_copy_pointers(IrTypedSink* sink, uint32_t destination, uint32_t source, uint64_t bytes, bool wide)
 {
     uint64_t offset = 0;
     while (offset < bytes)
     {
         const uint64_t remaining = bytes - offset;
-        const uint32_t piece = remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
-        const IrType type = piece == 8 ? IR_I64 : piece == 4 ? IR_I32 : piece == 2 ? IR_I16 : IR_I8;
-        const uint32_t loaded = ir_typed_emit(sink, IR_LOAD, type, ir_typed_offset(sink, source, offset), BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-        ir_typed_emit(sink, IR_STORE, IR_VOID, ir_typed_offset(sink, destination, offset), loaded, BUSTER_IR_NONE, 0);
-        offset += piece;
+        const bool vector = wide && bytes >= 16;
+        const uint64_t at = vector && remaining < 16 ? bytes - 16 : offset;
+        const uint32_t piece = vector ? 16 : remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
+        const IrType type = piece == 16 ? IR_V4I32 : piece == 8 ? IR_I64 : piece == 4 ? IR_I32 : piece == 2 ? IR_I16 : IR_I8;
+        const uint32_t loaded = ir_typed_emit(sink, IR_LOAD, type, ir_typed_offset(sink, source, at), BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        ir_typed_emit(sink, IR_STORE, IR_VOID, ir_typed_offset(sink, destination, at), loaded, BUSTER_IR_NONE, 0);
+        offset = at + piece;
     }
 }
 
@@ -2348,11 +2352,11 @@ static IrType ir_typed_vector_whole(AbiLocation location, uint64_t size, uint8_t
     return whole && width < 3 && ((allowed >> width) & 1) != 0 ? types[width] : IR_VOID;
 }
 
-static __attribute__((always_inline)) inline void ir_typed_copy(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint64_t bytes)
+static __attribute__((always_inline)) inline void ir_typed_copy(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint64_t bytes, bool wide)
 {
     const uint32_t destination = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, destination_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
     const uint32_t source = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, source_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-    ir_typed_copy_pointers(sink, destination, source, bytes);
+    ir_typed_copy_pointers(sink, destination, source, bytes, wide);
 }
 
 // Whether the function takes or returns an aggregate by value (an object parameter, a result in registers from its bytes
