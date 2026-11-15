@@ -255,8 +255,8 @@ typedef enum Tier1SelectRule
 // - ZERO (a constant of zeros, or undef): vpxord of the destination with itself;
 // - ONES (every bit): vpternlogd of the destination with itself, 0xff;
 // - SPLAT (every lane `immediate`): the lane into the scratch general register and vpbroadcastd from it;
-// - CONSTANT (any other, its index in `immediate`): its words as immediates into the red zone below rsp and a load, which
-//   the CFG consumer writes (tier1_emit_cfg_vector_constant), having the constant's payload; or, where its quadwords are
+// - CONSTANT (any other, its index in `immediate`): its literal's rip-relative load, which the CFG consumer writes
+//   (tier1_emit_cfg_vector_constant, #2744's literal pool), having the constant's payload; or, where its quadwords are
 //   one value and the target has EVEX's forms, the quadword into the scratch general register and vpbroadcastq (#2744);
 // - COPY of values[0], vmovdqa64 at the width, none where the allocation gave both one register;
 // - BINARY of values[0] and values[1], `operation` its index among add, sub, mul, and, or and xor (vpaddd, vpsubd,
@@ -4243,7 +4243,10 @@ static uint32_t tier1_select_parts_of(const uint8_t* registers, bool high, bool 
     // copy keeps them as padding.
     const bool vector_first = first && (registers[0] & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
     const uint32_t whole = !one && !slot && vector_first && !second && size >= 16 ? (size >= 64 ? 64 : size >= 32 ? 32 : 16) : 0;
-    // GetByteVectorType's two doubles carry a 17--23-byte record's first 16 bytes; stack copies retain its C size.
+    // GetByteVectorType's two doubles carry a 17--23-byte record's first 16 bytes; stack copies retain its C size. A
+    // larger record of a size no vector register has (#2113) carries its <size / 8 x double> in a YMM or ZMM register
+    // wider than it, which Tier 0 loads and stores in pieces (tier0_payload_load): Tier 1 leaves its functions to Tier 0
+    // (no part matches here), as it does a PAYLOAD stack slot (tier1_select_record_supported's flags), until #2798.
     bool valid = size != 0 && (size <= 16 || (whole != 0 && (whole == size || (whole == 16 && size < 24)))) && shape;
     uint32_t count = 0;
     for (uint32_t k = 0; valid && k < (one ? 1u : 2u); k += 1)

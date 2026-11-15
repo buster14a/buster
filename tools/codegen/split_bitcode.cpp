@@ -6,19 +6,27 @@
 // split.c's bitcode output (split_write_bitcode). Clang's -emit-llvm keeps the module's use-list order, and code
 // generation follows it (a block's predecessors, a value's users): a partition written without it compiles to different
 // instructions. LLVM's C API writes bitcode without it, so this call takes the choice as an argument. split.c's parts
-// also erase the aliases they don't emit (split_erase_alias), and its start order moves a function within the module's
-// list (split_move_function), which LLVM's C API can't.
+// also erase the aliases they don't emit (split_erase_alias) and delete the other parts' bodies a block at a time
+// (split_delete_blocks), and its start order moves a function within the module's list (split_move_function), which
+// LLVM's C API can't.
 //
 // presplit.c's parts (split_clone_part, split_write_part): a module's clone with chosen definitions alone, and its
 // bitcode without the use-list order, which the optimizer that follows each part doesn't need (the part's object then
-// depends on its bitcode's bytes alone).
+// depends on its bitcode's bytes alone). Its argument promotion inlines a function's always_inline callees into it
+// first (split_inline_always), as the optimizer's mandatory inliner does.
 
 #include <llvm-c/Core.h>
+#include <llvm-c/TargetMachine.h>
+#include <llvm/Analysis/InlineCost.h>
+#include <llvm/Analysis/TargetTransformInfo.h>
+#include <llvm/IR/Attributes.h>
+#include <llvm/Target/TargetMachine.h>
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/DebugInfo.h>
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/DerivedTypes.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/raw_ostream.h>
@@ -66,6 +74,22 @@ extern "C" bool split_erase_alias(LLVMValueRef alias)
     return unused;
 }
 
+// split.c's parts (split_delete_body): `function`'s blocks go, as llvm::Function::deleteBody drops them, every
+// instruction's operands first and then the blocks, without replacing each instruction's uses one at a time. The rest of
+// the definition (its linkage, metadata and personality) is split.c's to change.
+extern "C" void split_delete_blocks(LLVMValueRef function)
+{
+    llvm::Function* value = llvm::cast<llvm::Function>(llvm::unwrap(function));
+    for (llvm::BasicBlock& block : *value)
+    {
+        block.dropAllReferences();
+    }
+    while (!value->empty())
+    {
+        value->begin()->eraseFromParent();
+    }
+}
+
 // split.c's start order (split_order_first): `function` goes right before `before` in their module's list of functions,
 // the order the code generator emits them in. The written bitcode keeps the use-list order whatever the functions'
 // order, so each function's code stays what it was.
@@ -75,6 +99,49 @@ extern "C" void split_move_function(LLVMValueRef function, LLVMValueRef before)
     llvm::Function* next = llvm::cast<llvm::Function>(llvm::unwrap(before));
     llvm::Module::FunctionListType& list = moved->getParent()->getFunctionList();
     list.splice(next->getIterator(), list, moved->getIterator());
+}
+
+// presplit.c's argument promotion (presplit_promote_arguments): every call `function` makes to an always_inline body
+// inlined into it, and the calls those bring, until it makes none, as the optimizer's mandatory inliner does before
+// anything else, and where it does: a callee whose attributes or target features the caller's don't allow stays a call
+// (the encoder's helpers for features its caller lacks, whose vector code the caller's subtarget can't generate).
+// Returns the calls it inlined.
+extern "C" uint32_t split_inline_always(LLVMValueRef function, LLVMTargetMachineRef machine)
+{
+    llvm::Function* caller = llvm::cast<llvm::Function>(llvm::unwrap(function));
+    llvm::TargetMachine* target = reinterpret_cast<llvm::TargetMachine*>(machine);
+    uint32_t inlined = 0;
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        llvm::SmallVector<llvm::CallBase*, 16> calls;
+        for (llvm::BasicBlock& block : *caller)
+        {
+            for (llvm::Instruction& instruction : block)
+            {
+                llvm::CallBase* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                llvm::Function* callee = call != nullptr ? call->getCalledFunction() : nullptr;
+                const bool always = callee != nullptr && callee != caller && !callee->isDeclaration() && !callee->isInterposable() &&
+                                    callee->hasFnAttribute(llvm::Attribute::AlwaysInline);
+                if (always && llvm::isInlineViable(*callee).isSuccess() && llvm::AttributeFuncs::areInlineCompatible(*caller, *callee) &&
+                    target->getTargetTransformInfo(*caller).areInlineCompatible(caller, callee))
+                {
+                    calls.push_back(call);
+                }
+            }
+        }
+        for (llvm::CallBase* call : calls)
+        {
+            llvm::InlineFunctionInfo information;
+            if (llvm::InlineFunction(*call, information).isSuccess())
+            {
+                inlined += 1;
+                changed = true;
+            }
+        }
+    }
+    return inlined;
 }
 
 // `module`'s clone in the same context: every global value declared, and the `count` in `keep` defined as they are.

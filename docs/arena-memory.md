@@ -126,13 +126,65 @@ is a source command's only once no command has taken it, and is advised then.
 ## Finite address spaces
 
 `PROT_NONE` still counts toward `RLIMIT_AS`. With a finite limit, each ordinary
-arena admits at most one 128th of it, rounded down to a page. This leaves room
-for the compiler's many simultaneously live arenas instead of letting the first
-64 GiB request greedily consume the available space. A valid large mapping
-refused with `ENOMEM` or `EINVAL` also activates a 64 MiB per-arena fallback for
-that thread. Valgrind's address manager can report `EINVAL` for a layout it
-cannot represent. These are admission ceilings, not guarantees that an arbitrary
-workload or number of threads will fit.
+arena's reservation admits at most one 128th of it, rounded down to a page, its
+share (`arena_reservation_limit`). This leaves room for the compiler's many
+simultaneously live arenas instead of letting the first 64 GiB request greedily
+consume the available space. A valid large mapping refused with `ENOMEM` or
+`EINVAL` also activates a 64 MiB share for that thread (compact reservations).
+Valgrind's address manager can report `EINVAL` for a layout it cannot represent.
+
+A share alone held a modest unit's largest arenas short (#1118): a 130-line
+program that includes 45 libc and POSIX headers (450 KB of `-E` output) needed
+5 GB of address space where clang needs less than 1 GB, failing below that as
+its parser's columns outgrew 8 MB, its type table 16 MB and its reader's input
+32 MB, while most of the compile's 30 or so such arenas use a few kilobytes.
+So a reservation its share would cut short grows instead
+(`arena_reserve_growing`): it claims a slot of the address space of its own,
+16 GiB from 17 TiB, and maps there its first page, inaccessible, below its base.
+Each commit then maps its pages writable in place past the mapping
+(`MAP_FIXED_NOREPLACE`, `arena_grow`), a quarter more than it maps or 64 KB,
+whichever is more, or only what the push needs once that is refused, and once
+more after the thread's pool is unmapped. It isn't doubled, as `arena_commit`'s
+commits are: what an arena maps past its pushes is address space the limit then
+denies the others, and a quarter takes a unit's largest arena, 126 MiB, in
+about 34 extensions. The base never moves, so no published pointer does,
+and the limit is shared by what the arenas use, not by how many there are. The
+slot records how far its mapping reaches, since a copy of the arena may have
+grown it, and the arena finds that rather than mapping over it. A growing arena
+is never pooled: its release unmaps it and frees its slot. Its capacity is its
+request, up to its slot.
+
+The slots are past a non-PIE executable and its heap, and ASan's shadow (to
+16 TiB), below a PIE executable (85 TiB), and far below the mappings the kernel
+places unasked, which take the highest free addresses below the stack (127
+TiB): none reaches them while a finite limit holds. A slot something else holds
+(`EEXIST`) stays claimed and the next is tried; a kernel that takes the address
+only as a hint (before Linux 4.17), or a runtime that refuses it, ends growth
+for the process, whose reservations then take their shares. A sanitizer's
+runtime lays out the address space itself, so those builds, which inject
+resource failures instead (`BUSTER_SANITIZER_RESOURCES`), take their shares.
+
+A lane's arenas grow too, and its emission maps its writer's columns whole,
+each with room for any of the unit's bodies, so each lane maps tens of
+megabytes: a generated unit of 2,000 functions (500 KB) compiled in 700 MiB on
+one lane, 800 on two and 1 GiB on four. Under a finite limit the C driver's
+default lanes are therefore at most one, and one more for each 512 MiB the
+limit leaves past what the process maps as it starts
+(`check_driver_address_lanes`); `--lanes N` still takes N.
+
+With both, the issue's program compiles and links from 448 MiB, of which the
+executable's own image (its `.bss` the tests' and benchmarks' arrays) is 279
+MiB, and maps 207 MiB at its peak under a 1 GiB limit; before, it needed 4 to
+5 GiB. Below what it needs, each command fails with a fatal error that names what ran out,
+followed by a note that names the limit (`RLIMIT_AS`, `ulimit -v`) and the
+bytes it refused; an arena's failure to reserve (`arena_report_failure`) names
+the limit itself. A stage's failure for memory is never reported at a token of
+the source, though Tier 0's per-function limits still are at their function's
+(#622). Below the image itself the kernel refuses the executable before it
+runs. These are admission rules, not guarantees that an arbitrary workload or
+number of threads will fit: a table committed whole as it is reserved
+(`arena_reserve_tables`) maps its whole size at once, and those whose sizes the
+share decides (`arena_capacity_shift`) keep that shape.
 
 A compile's commands (the driver's, `check` and `parse`) read the limit once,
 before they start any thread (`arena_limits_fix`, #652): they never change it,
@@ -256,7 +308,10 @@ under a finite `RLIMIT_DATA`), the pool's choice of mapping by base pages,
 layout and room, the smallest first and the latest released of equal ones,
 borrowed/measuring arenas, overflow rollback, a real
 `mprotect` refusal injected with a child-only seccomp filter, and 32 simultaneous
-large logical requests under a 2 GiB address-space limit. Another isolated child
+64 GiB requests under a 2 GiB address-space limit, each growing to 32 MiB past
+its 16 MiB share with its base fixed, a push past the limit refused as a
+reservation without changing the arena or its bytes, and room a release gives
+back taken by the next growth (#1118). Another isolated child
 refuses large inaccessible mappings with `EINVAL`, exercising the compact retry
 without relying on Valgrind's current address layout.
 

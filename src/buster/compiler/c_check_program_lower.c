@@ -4323,6 +4323,34 @@ static bool check_lower_constant_conversion(uint8_t source, uint8_t from_facts, 
     return folds;
 }
 
+// Whether a value is an integer constant that check_lower_expand writes as one CONST, of an integer class, into which its
+// conversions then fold (check_lower_fold_conversion): its class and facts, its constant's kind and fault, its flags, its
+// category and its op, as a stream's value or a node machine's record has them. A conditional asks it of its arms
+// (check_lower_conditional_target, node_machine_logical).
+static bool check_lower_integer_constant(uint8_t class, uint8_t facts, CheckConstantKind kind, CheckFault fault, uint32_t flags, CheckCategory category, CheckOp op)
+{
+    const uint8_t refused = BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_COMPLEX | BUSTER_CHECK_LOWER_TYPE_ADDRESS | BUSTER_CHECK_LOWER_TYPE_BIT_INT;
+    return class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64 && (facts & refused) == 0 && kind == CHECK_CONSTANT_INTEGER && fault == CHECK_FAULT_NONE &&
+           (flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 && category == CHECK_RVALUE && op != CHECK_OP_INITIALIZE &&
+           op != CHECK_OP_BUILTIN_QUERY && op != CHECK_OP_STATEMENT_VALUE;
+}
+
+// Whether a conditional of class `joined` and facts `joined_facts`, whose consumer converts its value to class `target`
+// and facts `target_facts`, converts each arm to the target instead, where an arm is an integer constant
+// (check_lower_integer_constant, #2678): a conversion of the joined value follows the label where the arms meet, so it
+// can't fold into either arm's CONST, as it can in the arm. It goes there where it would fold into a constant of the
+// joined class (check_lower_constant_conversion's classes and facts) and the target is an integer's or _Bool's. A
+// floating target keeps the join's conversion: Tier 1 has no select of floating values, so its arms' constants would
+// take a branch where the join's integer select is a cmov (on the 9700X, `s += p[i] > 0 ? 3 : 1` into a double, a
+// coin's condition: 223.4 ms for 40.5 with the conversion after the join, in constant-arms-2678-2026-11-15), and Tier 0
+// writes each arm's floating CONST as a movabs and a movq, no fewer than its constant and the join's cvtsi2sd.
+static bool check_lower_conditional_sinks(uint8_t joined, uint8_t joined_facts, uint8_t target, uint8_t target_facts)
+{
+    uint8_t class = 0;
+    uint64_t bits = 0;
+    return target >= BUSTER_TYPED_CLASS_I8 && target <= BUSTER_TYPED_CLASS_U64 && check_lower_constant_conversion(joined, joined_facts, target, target_facts, &class, &bits);
+}
+
 // The entries of a signed division or remainder (`kind` DIV or MOD) by 2^k (`shift` k, 1 to the class's bits less 2) of
 // the value on top, in `class` (I32 or I64), in the order they run, into `kinds` and `values` (all of `class`): 8 for a
 // division and 10 for a remainder, their count. The bias, the dividend's sign through every bit masked to its low k bits,
@@ -11754,9 +11782,100 @@ static __attribute__((noinline)) void check_lower_bit_int_node(CheckLowerWriter*
     }
 }
 
-// A conditional's arm, converted to its type `type`: a vector's conditional (`vector`) splats a scalar arm, as a
-// vector operator splats a scalar operand (check_lower_vector_operand).
-static inline __attribute__((always_inline)) void check_lower_logical_arm(CheckLowerWriter* writer, uint32_t node, uint32_t arm, TypeId type, bool vector)
+// The conditional or logical operator at `node`, of type `type`, of arms `b` and `c` (a conditional's, graph nodes;
+// BUSTER_CHECK_NONE for an arm a known condition leaves unevaluated, and for a logical operator's), one of which is a
+// constant where `constant` says so (a logical operator's 0 or 1): the type its consumer converts its value to where
+// that conversion goes into its arms (check_lower_conditional_sinks, #2678), its task then taken off the stack, or 0.
+// The conversion is check_lower_convert_operand's, the task under the node's EXPRESSION, tagged with its node. A
+// conditional's arms then each convert to its type and on to the target (check_lower_logical_arm), a constant one's both
+// folding into its CONST; a logical operator writes its 0 or 1 in the target's class and converts its second operand's
+// truth before the jump to the join (check_lower_logical). The other arm's CONVERT is the one the join had. Out of line,
+// as only these ask.
+static __attribute__((noinline)) TypeId check_lower_conditional_target(CheckLowerWriter* writer, uint32_t node, TypeId type, uint32_t b, uint32_t c, bool constant)
+{
+    TypeId target = 0;
+    if (writer->depth != 0)
+    {
+        const CheckLowerTask below = check_lower_task_unpack(writer->tasks[writer->depth - 1]);
+        if (below.kind == CHECK_LOWER_CONVERSION && below.value == (uint64_t)node + 1 && below.node == type)
+        {
+            const CheckStream* stream = writer->program->stream;
+            const CheckGraph* graph = &writer->program->input->graph;
+            for (uint32_t k = 0; k < 2; k += 1)
+            {
+                const uint32_t arm = k == 0 ? b : c;
+                if (arm < stream->count && check_stream_constant_kind(stream, arm) == CHECK_CONSTANT_INTEGER)
+                {
+                    const CheckValue value = check_stream_value(stream, arm);
+                    constant |= check_lower_integer_constant(check_lower_value_class(writer, value.type), check_lower_facts(writer, value.type), value.constant_kind,
+                                                             value.fault, value.flags, value.category, graph->ops[arm]);
+                }
+            }
+            if (constant && check_lower_conditional_sinks(check_lower_value_class(writer, type), check_lower_facts(writer, type), check_lower_value_class(writer, below.type),
+                                                          check_lower_facts(writer, below.type)))
+            {
+                target = below.type;
+                writer->depth -= 1;
+                writer->settled = writer->depth < writer->settled ? writer->depth : writer->settled;
+            }
+        }
+    }
+    return target;
+}
+
+// The conversion from a conditional's type `type` to `target` that its consumer's went into its arm `arm` as (operand 1
+// or 2 of `node`; check_lower_conditional_target), pushed before the arm's own, tagged with the arm's node. Out of line:
+// check_lower_expand's copies inline the arms.
+static __attribute__((noinline)) void check_lower_arm_target(CheckLowerWriter* writer, uint32_t node, uint32_t arm, TypeId type, TypeId target)
+{
+    const CheckGraph* graph = &writer->program->input->graph;
+    const uint32_t child = arm == 1 ? graph->operand1[node] : graph->operand2[node];
+    check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CONVERSION, .node = type, .type = target, .value = (uint64_t)child + 1 });
+}
+
+// How a conditional or a logical operator of class `class` joins its arms (check_lower_logical): the type its consumer's
+// conversion went into the arms to (check_lower_conditional_target; 0 for none), the class of the value the arms join
+// with, and a logical operator's constant (1 for ||, 0 for &&) and its class.
+typedef struct CheckLowerJoin CheckLowerJoin;
+struct CheckLowerJoin
+{
+    uint64_t constant;
+    TypeId target;
+    uint8_t joined;
+    uint8_t constant_class;
+};
+
+// check_lower_logical's CheckLowerJoin for `node` (op `op`, of type `type` and class `class`, of operand 1 `b`, its
+// condition known where `known`, `truth` then its value), whose consumer's conversion is the task under its EXPRESSION:
+// that conversion goes into the arms (check_lower_conditional_target) for a conditional where an arm it evaluates is a
+// constant, and for a logical operator unless a known condition leaves it its second operand's truth, which has none.
+// Out of line, as check_lower_expand's copies inline check_lower_logical and only such a node with such a conversion asks.
+static __attribute__((noinline)) CheckLowerJoin check_lower_join(CheckLowerWriter* writer, uint32_t node, CheckOp op, TypeId type, uint8_t class, uint32_t b, bool known,
+                                                                 bool truth)
+{
+    const bool conditional = op == CHECK_OP_CONDITIONAL;
+    const bool decided = known && !conditional && (op == CHECK_OP_LOGICAL_OR) == truth;
+    const uint32_t c = conditional ? writer->program->input->graph.operand2[node] : BUSTER_CHECK_NONE;
+    CheckLowerJoin join = { .constant = op == CHECK_OP_LOGICAL_OR, .target = 0, .joined = class, .constant_class = BUSTER_TYPED_CLASS_I32 };
+    join.target = conditional ? check_lower_conditional_target(writer, node, type, known && !truth ? BUSTER_CHECK_NONE : b, known && truth ? BUSTER_CHECK_NONE : c, false) :
+                  !known || decided ? check_lower_conditional_target(writer, node, type, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, true) : 0;
+    if (join.target != 0)
+    {
+        join.joined = check_lower_value_class(writer, join.target);
+        if (!conditional)
+        {
+            (void)check_lower_constant_conversion(BUSTER_TYPED_CLASS_I32, check_lower_facts(writer, type), join.joined, check_lower_facts(writer, join.target),
+                                                  &join.constant_class, &join.constant);
+        }
+    }
+    return join;
+}
+
+// A conditional's arm, converted to its type `type`, and on to `target` where its consumer's conversion went into its
+// arms (check_lower_conditional_target; 0 for none), that conversion's task tagged with the arm's node, so that it folds
+// into a constant arm's CONST after the arm's own: a vector's conditional (`vector`) splats a scalar arm, as a vector
+// operator splats a scalar operand (check_lower_vector_operand).
+static inline __attribute__((always_inline)) void check_lower_logical_arm(CheckLowerWriter* writer, uint32_t node, uint32_t arm, TypeId type, bool vector, TypeId target)
 {
     if (vector)
     {
@@ -11764,6 +11883,10 @@ static inline __attribute__((always_inline)) void check_lower_logical_arm(CheckL
     }
     else
     {
+        if (target != 0)
+        {
+            check_lower_arm_target(writer, node, arm, type, target);
+        }
         check_lower_operand(writer, node, arm, false, type);
     }
 }
@@ -11776,15 +11899,28 @@ static inline __attribute__((always_inline)) void check_lower_logical(CheckLower
 {
     const bool reuse = op == CHECK_OP_CONDITIONAL && a == b;
     bool truth = false;
-    if (check_program_runtime_truth(program, node, a, &truth))
+    const bool known = check_program_runtime_truth(program, node, a, &truth);
+    const bool conditional = op == CHECK_OP_CONDITIONAL;
+    const bool decided = known && !conditional && (op == CHECK_OP_LOGICAL_OR) == truth;
+    // Whether the task under this node's EXPRESSION is its consumer's conversion (check_lower_convert_operand's, tagged
+    // with its node), which may go into the arms (check_lower_join), as a scalar's: the one test inlined here.
+    const CheckLowerTask below = writer->depth != 0 ? check_lower_task_unpack(writer->tasks[writer->depth - 1]) : (CheckLowerTask){ 0 };
+    const bool converted = below.kind == CHECK_LOWER_CONVERSION && below.value == (uint64_t)node + 1;
+    const CheckLowerJoin join = converted && !vector && !reuse ? check_lower_join(writer, node, op, value->type, class, b, known, truth) :
+                                (CheckLowerJoin){ .constant = op == CHECK_OP_LOGICAL_OR, .target = 0, .joined = class, .constant_class = BUSTER_TYPED_CLASS_I32 };
+    const TypeId target = join.target;
+    const uint8_t joined = join.joined;
+    const uint8_t constant_class = join.constant_class;
+    const uint64_t constant = join.constant;
+    if (known)
     {
-        if (op == CHECK_OP_CONDITIONAL)
+        if (conditional)
         {
-            check_lower_logical_arm(writer, node, truth ? 1 : 2, value->type, vector);
+            check_lower_logical_arm(writer, node, truth ? 1 : 2, value->type, vector, target);
         }
-        else if ((op == CHECK_OP_LOGICAL_AND && !truth) || (op == CHECK_OP_LOGICAL_OR && truth))
+        else if (decided)
         {
-            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, truth);
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, constant_class, constant);
         }
         else
         {
@@ -11802,16 +11938,16 @@ static inline __attribute__((always_inline)) void check_lower_logical(CheckLower
         const uint32_t end = check_lower_label(writer);
         const uint32_t retained = reuse ? check_lower_temporary(writer, check_lower_class(writer, type_a)) : BUSTER_CHECK_NONE;
         check_lower_mark(writer, end);
-        if (op == CHECK_OP_CONDITIONAL)
+        if (conditional)
         {
-            check_lower_logical_arm(writer, node, 2, value->type, vector);
+            check_lower_logical_arm(writer, node, 2, value->type, vector, target);
         }
         else
         {
-            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, op == CHECK_OP_LOGICAL_OR);
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, constant_class, constant);
         }
         check_lower_mark(writer, alternate);
-        check_lower_instruction(writer, class == BUSTER_TYPED_CLASS_VOID ? BUSTER_TYPED_JUMP : BUSTER_TYPED_JUMP_VALUE, class, end);
+        check_lower_instruction(writer, joined == BUSTER_TYPED_CLASS_VOID ? BUSTER_TYPED_JUMP : BUSTER_TYPED_JUMP_VALUE, joined, end);
         if (op == CHECK_OP_CONDITIONAL)
         {
             if (reuse)
@@ -11828,11 +11964,16 @@ static inline __attribute__((always_inline)) void check_lower_logical(CheckLower
             }
             else
             {
-                check_lower_logical_arm(writer, node, 1, value->type, vector);
+                check_lower_logical_arm(writer, node, 1, value->type, vector, target);
             }
         }
         else
         {
+            // The second operand's truth, converted where the conversion went into the arms.
+            if (target != 0)
+            {
+                check_lower_convert(writer, value->type, target);
+            }
             check_lower_truth(writer, type_b, false);
             check_lower_operand(writer, node, 1, false, type_b);
         }
@@ -16848,15 +16989,22 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
             }
         }
         // What the parts leave out is zero (C11 6.7.9p21), which static storage has before any part: an object is
-        // cleared first, unless its first part writes it whole, zeros or an aggregate's copy (`T x = *p;`), which
-        // writes every byte, its padding's too. A volatile object keeps its clear's stores.
+        // cleared first, unless its first part writes it whole: zeros, an aggregate's copy (`T x = *p;`), which writes
+        // every byte, its padding's too, or a vector's value (#2745, the intrinsics' wrappers' `(U512){ .v = x }`),
+        // whose store writes every byte of its type (check_lower_vector_bytes), which has no padding. A scalar's store
+        // can write fewer bytes than its type's size (long double's 10 of 16), so it doesn't count. A volatile object
+        // keeps its clear's stores.
         const CheckInitPart* first = plan->count != 0 ? plan->parts : NULL;
         const bool cleared = first != NULL && first->kind == CHECK_INIT_CLEAR && first->bit_offset == 0 && first->bit_width == 0 &&
                              object && first->byte_count >= writer->local_sizes[local];
-        const bool copied = first != NULL && first->kind == CHECK_INIT_VALUE && first->bit_offset == 0 && first->bit_width == 0 && object &&
-                            first->overload_candidate == 0 && check_lower_aggregate(writer, first->type) &&
-                            type_size(program->types, first->type) >= writer->local_sizes[local] && !check_lower_init_volatile_object(writer, plan, destination);
-        if (object && !cleared && !copied && pool == BUSTER_CHECK_NONE)
+        const bool valued = first != NULL && first->kind == CHECK_INIT_VALUE && first->bit_offset == 0 && first->bit_width == 0 && object &&
+                            first->overload_candidate == 0 && !check_lower_init_volatile_object(writer, plan, destination);
+        const bool aggregate = valued && check_lower_aggregate(writer, first->type);
+        const bool vector = valued && check_lower_class(writer, first->type) == BUSTER_TYPED_CLASS_VECTOR;
+        const uint64_t written = aggregate ? type_size(program->types, first->type) : vector ? check_lower_vector_bytes(program->types, first->type) : 0;
+        // An object has bytes (local_sizes' nonzero), so a part that writes none never covers it.
+        const bool whole = object && written >= writer->local_sizes[local];
+        if (object && !cleared && !whole && pool == BUSTER_CHECK_NONE)
         {
             check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CLEAR, .type = writer->local_sizes[local], .value = local, .library = library });
         }

@@ -429,8 +429,8 @@ revision validation must be recorded separately.
 the first tests of this issue written in the IR's text form, and
 `tests/ir/optimize/*.ir` are those fixtures: hand-written before/after pairs for
 SCCP alone, DCE alone, CFG cleanup alone, the combined set the C driver's
-`--tier1` runs, value numbering, loop-invariant motion and private-field
-replacement. `test-ir-optimize` parses each pair with both parser paths, runs
+`--tier1` runs, value numbering, loop-invariant motion, private-field
+replacement and loop unrolling (#2755). `test-ir-optimize` parses each pair with both parser paths, runs
 the pass with both optimizer twins, requires the vector result's canonical
 print to be the after file's bytes, reparses it to the after file's function,
 and executes both sides on eighteen inputs through the same independent
@@ -463,6 +463,9 @@ The passes, and the guides that record each one:
 - **[Inlining](ir-inlining.md):** #2541's summaries and general splice.
 - **[Loop vectorization](tier1-loop-vectorization.md):** #2743's measured
   design, not yet an implemented pass.
+- **[Loop unrolling](tier1-loop-unrolling.md):** #2755's counted innermost
+  loops, a main loop of copies before the original as its remainder, off by
+  default (`+unroll`).
 
 Each implemented pass has before/after fixtures, built in C and in the text form (#175), with
 both twins and an independent executor. #139's last items close as follows.
@@ -471,14 +474,16 @@ The record is buster-performance's [`ssa-passes-139-2026-11-14`](https://github.
 ### The pipeline and the order
 
 `--tier1`'s order is: lowering; the unit's inlining from summaries (#2541);
-SROA (`+sroa`); #866's solver (`+gvn`); promotion; the wide integers'
-halves and the wide vectors' pieces; truth simplification; threading;
-if-conversion; LICM (`+licm`); and the optimizer, which runs SCCP, the
-identities, value numbering with memory (`+memory`, #2718), dead-code removal,
-CFG cleanup and its merges and layout, then the final verification that
-selection reads. `--tier1-passes=` turns each pass on or off ([the Tier 1
-guide](tier1.md)). By default SCCP, dead-code removal, CFG cleanup, the
-merges and the inlining run; LICM, SROA, the solver and value numbering with
+SROA (`+sroa`); #866's solver (`+gvn`) or its vector/mask-only form
+(`vectors`); promotion; the wide integers' halves and the wide vectors'
+pieces; truth simplification; threading; if-conversion; LICM (`+licm`) or its
+vector/mask-only form; the unroller (`+unroll`, #2755); and the optimizer,
+which runs SCCP, the identities, value numbering with memory (`+memory`,
+#2718), dead-code removal, CFG cleanup and its merges and layout, then the
+final verification that selection reads. `--tier1-passes=` turns each pass on
+or off ([the Tier 1 guide](tier1.md)). By default SCCP, dead-code removal, CFG
+cleanup, the merges, the inlining and the vector/mask-only passes run;
+unrestricted LICM, SROA, the unroller, the solver and value numbering with
 memory don't, and none repeats. The measurements below decided this, and
 [#2718's](ir-memory-value-numbering.md#measurements) for value numbering with
 memory.
@@ -651,7 +656,8 @@ an issue of its own:
 - **Scalar floating folding** under #1450's floating-environment contract:
   #2720.
 - **Inlining callees with control flow, its classes and budgets:** #2541 and its
-  claimed steps. Its unit refusal of a variadic or unprototyped call: #2721.
+  steps. A variadic or unprototyped call is the call's decision, not the unit's
+  error (#2721).
 
 ## Algorithm sources and provenance
 

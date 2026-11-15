@@ -13,6 +13,16 @@
 # mold or GNU ld, the sanitizer builds' dynamic links) merges the single object's with every other object's, so the
 # parts keep the flag there: cleared, their 548 KB of strings that other units repeat stayed in an MSan executable.
 #
+# SECTIONS, where given, is presplit's list of the named sections whose start-ordered functions it gave sections of
+# their own (presplit --first, #1444): the relocatable link puts each into one section again, part 0's section first
+# (the module's assembly starts it on a page), then those functions in the list's order, part 0's other functions of it
+# and the other parts' section.
+#
+# UNREFERENCED, where given (the units in parts, presplit's), is tools/codegen/unreferenced.c: the relocatable link
+# discards the parts' local functions, and the data the code generator gave them, that no live section refers to. A
+# local function another part names keeps presplit's alias there, which the whole unit's optimizer, seeing every call
+# inlined or folded away, would have dropped (the checker's unit kept 170 such sections, 115 KB).
+#
 # llvm-objcopy clears GRP_COMDAT on every section group whose signature symbol is local, as the code generator's
 # sanitizer groups are (AddressSanitizer's module constructor and destructor, which the linker keeps once among the
 # units): COMDAT, tools/codegen/comdat.c, sets it again on the joined object's groups that the parts had as comdats.
@@ -62,7 +72,34 @@ else()
         math(EXPR index "${index} + 1")
     endforeach()
 endif()
-execute_process(COMMAND "${LLD}" -r -O0 --threads=1 ${unmerged} -o "${merged}" RESULT_VARIABLE status)
+set(text "")
+if(DEFINED UNREFERENCED AND NOT UNREFERENCED STREQUAL "")
+    execute_process(COMMAND "${UNREFERENCED}" "${OUTPUT}.unreferenced" ${unmerged} RESULT_VARIABLE status)
+    if(NOT status EQUAL 0)
+        file(REMOVE "${OUTPUT}.unreferenced" ${copies})
+        message(FATAL_ERROR "BusterCodegenMerge.cmake: couldn't find ${OUTPUT}'s unreferenced sections")
+    endif()
+    file(READ "${OUTPUT}.unreferenced" dead)
+    file(REMOVE "${OUTPUT}.unreferenced")
+    if(NOT dead STREQUAL "")
+        # First, so that a discarded section matches nothing after it.
+        string(APPEND text "    /DISCARD/ :\n    {\n${dead}    }\n")
+    endif()
+endif()
+if(DEFINED SECTIONS AND EXISTS "${SECTIONS}")
+    file(STRINGS "${SECTIONS}" named)
+    list(GET unmerged 0 head)
+    foreach(section IN LISTS named)
+        string(APPEND text "    ${section} : { \"${head}\"(${section}) *(SORT_BY_NAME(${section}.buster_first.*)) "
+            "*(${section}.buster_rest) *(${section}) }\n")
+    endforeach()
+endif()
+set(script "")
+if(NOT text STREQUAL "")
+    file(WRITE "${OUTPUT}.ld" "SECTIONS\n{\n${text}}\n")
+    set(script -T "${OUTPUT}.ld")
+endif()
+execute_process(COMMAND "${LLD}" -r -O0 --threads=1 ${script} ${unmerged} -o "${merged}" RESULT_VARIABLE status)
 if(copies)
     file(REMOVE ${copies})
 endif()

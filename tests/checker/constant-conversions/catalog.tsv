@@ -3,7 +3,7 @@ buster-fixtures v1 checker-sources
 # Each runs natively against clang's build of it; its NAME selects the checks of its entries and code.
 # The issue's four functions, their code checked: first in the unit, then a driver whose own conversions are of no constant.
 code	code.c	-	constant-conversion-code
-# Every kind of conversion that folds into its constant's CONST, which no integer CONST then precedes a CONVERT.
+# Every kind of conversion that folds into its constant's CONST, a conditional's and a logical operator's arms' among them: no integer CONST then precedes a CONVERT.
 folds	folds.c	-	constant-conversions
-# Conversions that keep their entries: rounding ones, after a label joining two values, and of the memory classes.
+# Conversions that keep their entries: rounding ones, a conditional's of no constant arm or to double after the label joining them, and of the memory classes.
 controls	controls.c	-	constant-conversion-controls

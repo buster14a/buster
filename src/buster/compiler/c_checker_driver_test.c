@@ -676,6 +676,135 @@ static void check_test_driver_reservation_failure(CheckTest* test)
 #endif
 }
 
+// The address space a process of the executable at `path` maps for its image before it runs: its loadable segments'
+// pages. 0 if it can't be read. Unused where a sanitizer leaves check_test_driver_address_limit out.
+static __attribute__((unused)) uint64_t check_test_driver_image_bytes(const char* path)
+{
+    uint64_t result = 0;
+    Elf64_Ehdr header;
+    FILE* file = fopen(path, "rb");
+    bool valid = file != NULL && fread(&header, sizeof(header), 1, file) == 1 && memcmp(header.e_ident, ELFMAG, SELFMAG) == 0 &&
+                 header.e_phentsize == sizeof(Elf64_Phdr) && fseek(file, (long)header.e_phoff, SEEK_SET) == 0;
+    for (uint32_t i = 0; valid && i < header.e_phnum; i += 1)
+    {
+        Elf64_Phdr segment;
+        valid = fread(&segment, sizeof(segment), 1, file) == 1;
+        const uint64_t start = segment.p_vaddr & ~UINT64_C(4095);
+        const uint64_t end = (segment.p_vaddr + segment.p_memsz + 4095) & ~UINT64_C(4095);
+        result += valid && segment.p_type == PT_LOAD ? end - start : 0;
+    }
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    return valid ? result : 0;
+}
+
+// Runs the executable at arguments[0] under a soft RLIMIT_AS of `limit` bytes, with its standard error into *text (the
+// caller frees it). Returns its exit status, -2 if a signal ended it, or -1 if it couldn't run. Unused where a sanitizer
+// leaves check_test_driver_address_limit out.
+static __attribute__((unused)) int check_test_driver_limited(char* const* arguments, uint64_t limit, char** text)
+{
+    FILE* captured = tmpfile();
+    int status = 0;
+    pid_t child = -1;
+    size_t length = 0;
+    *text = NULL;
+    if (captured != NULL)
+    {
+        fflush(NULL);
+        child = fork();
+        if (child == 0)
+        {
+            struct rlimit space;
+            bool ready = getrlimit(RLIMIT_AS, &space) == 0 && (space.rlim_max == RLIM_INFINITY || limit <= (uint64_t)space.rlim_max);
+            space.rlim_cur = (rlim_t)limit;
+            const int output = open("/dev/null", O_WRONLY | O_CLOEXEC);
+            ready = ready && output >= 0 && dup2(output, STDOUT_FILENO) >= 0 && dup2(fileno(captured), STDERR_FILENO) >= 0 && unsetenv("MAKEFLAGS") == 0 &&
+                    setrlimit(RLIMIT_AS, &space) == 0;
+            if (ready)
+            {
+                execv(arguments[0], arguments);
+            }
+            _exit(127);
+        }
+    }
+    pid_t waited = -1;
+    do
+    {
+        waited = child > 0 ? waitpid(child, &status, 0) : -1;
+    }
+    while (waited < 0 && child > 0 && errno == EINTR);
+    const bool read = captured != NULL && waited == child && pp_test_read_output(captured, text, &length);
+    if (captured != NULL)
+    {
+        fclose(captured);
+    }
+    return !read ? -1 : WIFEXITED(status) ? WEXITSTATUS(status) : -2;
+}
+
+// #1118: a header-free unit of about 180,000 tokens (2,000 structures, their typedefs and functions), a modest program's
+// size, under a finite RLIMIT_AS, run as a process of its own so that the limit holds its whole address space. Each arena
+// once took a 128th of the limit at most, so that a 130-line program of 45 libc headers needed 5 GB where clang needs
+// less than 1: with 768 MiB past the executable's image (about 1 GiB for Release's 280 MiB), this unit compiles to an
+// object, its arenas grown past their shares, on the lanes the limit affords whatever the host's cores
+// (check_driver_address_lanes: two). With 32 MiB past it, it fails as a fatal error that names the limit, never as an
+// error at one of its lines nor by a signal. A sanitizer's runtime lays the address space out itself, so its builds
+// leave this out, as check_test_driver_reservation_failure's limit.
+static void check_test_driver_address_limit(CheckTest* test, const char* executable, const char* directory)
+{
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer) || __has_feature(undefined_behavior_sanitizer)
+    (void)test;
+    (void)executable;
+    (void)directory;
+#else
+    char source[PATH_MAX];
+    char object[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/address-limit.c", directory);
+    snprintf(object, sizeof(object), "%s/address-limit.o", directory);
+    FILE* file = fopen(source, "w");
+    bool written = file != NULL;
+    for (uint32_t i = 0; written && i < 2000; i += 1)
+    {
+        written = fprintf(file,
+                          "struct s%u { int a; long b; char c[%u]; struct s%u* next; };\n"
+                          "typedef struct s%u t%u;\n"
+                          "long f%u(t%u* p, int x)\n{\n    long y = (long)x * %u + p->a;\n    if (y > p->b)\n    {\n        p->b = y;\n    }\n"
+                          "    return p->next != 0 ? p->b + p->c[0] : y;\n}\n",
+                          i, i % 13 + 1, i, i, i, i, i, i) > 0;
+    }
+    written = written && fputs("int main(void)\n{\n    t0 v = { 0 };\n    return (int)f0(&v, 1) - 1;\n}\n", file) >= 0;
+    if (file != NULL)
+    {
+        written = fclose(file) == 0 && written;
+    }
+    const uint64_t image = check_test_driver_image_bytes(executable);
+    check_test_expect(test, written && image != 0, "the address limit's unit and image size are available");
+    char* arguments[] = { (char*)executable, (char*)"-c", source, (char*)"-o", object, NULL };
+    char* text = NULL;
+    const int fits = written && image != 0 ? check_test_driver_limited(arguments, image + (UINT64_C(768) << 20), &text) : -1;
+    check_test_expect(test, fits == 0, "a modest unit compiles under an address-space limit of 768 MiB past the executable's image");
+    if (fits != 0 && text != NULL)
+    {
+        fprintf(stderr, "%s", text);
+    }
+    free(text);
+    text = NULL;
+    const int short_limit = written && image != 0 ? check_test_driver_limited(arguments, image + (UINT64_C(32) << 20), &text) : -1;
+    // A diagnostic at a place in the unit names its file.
+    const bool placed = text != NULL && strstr(text, "address-limit.c:") != NULL;
+    const bool named = text != NULL && strstr(text, "fatal error: ") != NULL && strstr(text, "RLIMIT_AS") != NULL;
+    check_test_expect(test, short_limit == 1 && named && !placed, "an address-space limit too small fails as a fatal error that names it, at no line of the unit");
+    if (!(short_limit == 1 && named && !placed) && text != NULL)
+    {
+        fprintf(stderr, "%s", text);
+    }
+    free(text);
+    unlink(object);
+    unlink(source);
+#endif
+}
+
 // Whether the files at `a` and `b` can be read and have the same bytes.
 static bool check_test_driver_same_files(const char* a, const char* b)
 {
@@ -9008,6 +9137,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool operand_diagnostics_only = false;
     // --assert-bool-only: static assertion boolean conversions, including rejected trees (#2409).
     bool assert_bool_only = false;
+    // --record-extensions-only: zero-length arrays and zero-size records, their policies and output preservation.
+    bool record_extensions_only = false;
+    // --auto-qualifiers-only: qualified __auto_type declarations and recovered atomic pointees (#1844).
+    bool auto_qualifiers_only = false;
     // --type-sugar-only: the type sugar section alone (#1447).
     bool type_sugar_only = false;
     // --asm-definitions-only: what inline assembly defines, against clang's objects and builds, alone (#1848).
@@ -9065,6 +9198,14 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             assert_bool_only = true;
         }
+        else if (strcmp(argv[i], "--record-extensions-only") == 0)
+        {
+            record_extensions_only = true;
+        }
+        else if (strcmp(argv[i], "--auto-qualifiers-only") == 0)
+        {
+            auto_qualifiers_only = true;
+        }
         else if (strcmp(argv[i], "--type-sugar-only") == 0)
         {
             type_sugar_only = true;
@@ -9118,7 +9259,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
                              (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only +
                              (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only +
-                             (uint32_t)run_modes_only + (uint32_t)malformed_calls_only;
+                             (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only +
+                             (uint32_t)run_modes_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -9657,9 +9799,18 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_operand_diagnostics(&test, clang, executable, directory);
     }
+    if (temporary && auto_qualifiers_only)
+    {
+        check_test_driver_auto_qualifiers(&test, clang, executable, directory);
+    }
     if (temporary && assert_bool_only)
     {
         check_test_driver_assert_bool(&test, clang, executable, directory);
+    }
+    if (temporary && record_extensions_only)
+    {
+        check_test_driver_gnu_empty_struct(&test, clang, executable, directory);
+        check_test_driver_record_extensions(&test, clang, executable, directory);
     }
     if (temporary && call_counts_only)
     {
@@ -9749,6 +9900,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_reservation_failure(&test);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
+            check_test_driver_address_limit(&test, executable != NULL ? executable : "/proc/self/exe", directory);
         }
         if (!lazy && check_test_driver_takes())
         {
@@ -9885,6 +10040,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_reserved_macro,
             check_test_driver_integer_overflow,
             check_test_driver_gnu_empty_struct,
+            check_test_driver_record_extensions,
             check_test_driver_unused_but_set,
             check_test_driver_out_of_range,
             check_test_driver_conditional_mismatches,

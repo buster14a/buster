@@ -127,6 +127,7 @@ static bool check_tier0_inline_splice(const CheckEmitRun* run, CheckTier0InlineL
             .callees = callees,
             .callee_count = count,
             .vector_bytes = check_tier0_inline_transport(check_tier1_inline_target(table->program, b)),
+            .shapes = run->tier0_inline_shapes,
         };
         valid = run->scalar ? tier0_inline_scalar(&input, arena, result) : tier0_inline(&input, arena, result);
     }
@@ -146,7 +147,7 @@ static bool check_tier0_inline_splice(const CheckEmitRun* run, CheckTier0InlineL
 static void check_tier0_inline_visit(const CheckEmitRun* run, CheckTier0InlineLane* lane, uint32_t v, uint32_t* components, uint32_t* depth)
 {
     uint32_t body = 0;
-    if (tier0_inline_callee_valid(&run->lowered->functions[v], &body))
+    if (tier0_inline_callee_valid(&run->lowered->functions[v], run->tier0_inline_shapes, &body))
     {
         lane->visits += 1;
         lane->indices[v] = lane->visits;
@@ -277,4 +278,25 @@ static bool check_tier0_inline_body(CheckEmitRun* run, CheckEmitLane* lane, uint
         valid = check_tier0_inline_splice(run, cache, table, b, function, arena, result);
     }
     return valid && any;
+}
+
+// Whether callee body `b`'s own code waits for the emission's last pass (#1398 step 3), as Tier 1's held candidates' does
+// (check_tier1_inline_held): without --tier1, with holding (CheckTier1Inline.holding: -c's object, not under -g,
+// -fpatchable-function-entry or in a unit with asm), one the table held (nothing roots it) whose stream the splice takes
+// (tier0_inline_callee_valid), so that its callers should splice every call and leave it dead. The last pass makes the
+// code of each held one that emitted code still refers to (a call a caller kept: a cycle's, past the depth bound or a
+// target its caller lacks; an address), and the merge leaves the others out (check_tier1_inline_dead). It waits
+// (BUSTER_CHECK_TIER1_INLINE_WAITING), which the last pass reads once the lanes are done: this lane alone writes body
+// `b`'s byte.
+static bool check_tier0_inline_held(const CheckEmitRun* run, uint32_t b)
+{
+    const CheckTier1Inline* table = run->tier0_inline;
+    uint32_t body = 0;
+    const bool held = table != NULL && table->holding && table->stage == 0 && b < table->body_count && table->held[b] == BUSTER_CHECK_TIER1_INLINE_HELD &&
+                      table->released[b] == 0 && tier0_inline_callee_valid(&run->lowered->functions[b], run->tier0_inline_shapes, &body);
+    if (held)
+    {
+        table->held[b] = BUSTER_CHECK_TIER1_INLINE_WAITING;
+    }
+    return held;
 }

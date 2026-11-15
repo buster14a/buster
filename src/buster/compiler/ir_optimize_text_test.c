@@ -23,6 +23,7 @@ typedef enum IrOptimizeTextPass
     IR_OPTIMIZE_TEXT_LICM,
     IR_OPTIMIZE_TEXT_SROA,
     IR_OPTIMIZE_TEXT_MEMORY,
+    IR_OPTIMIZE_TEXT_UNROLL,
 } IrOptimizeTextPass;
 
 typedef struct IrOptimizeTextFixture IrOptimizeTextFixture;
@@ -53,6 +54,7 @@ static const IrOptimizeTextFixture ir_optimize_text_fixtures[] = {
     { .name = "memory-blocks", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
     { .name = "memory-addresses", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
     { .name = "memory-volatile", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
+    { .name = "unroll-loops", .pass = IR_OPTIMIZE_TEXT_UNROLL, .effects = true },
 };
 
 // A fixture's diagnostic names the pair, so that a failure points at the file to read without a printout of the
@@ -149,6 +151,15 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, 
         check = ir_optimize_licm(input, output, scratch, options, &pass);
         result = pass.function;
         changed = pass.moved;
+    }
+    else if (fixture->pass == IR_OPTIMIZE_TEXT_UNROLL)
+    {
+        IrUnrollOptions options = ir_unroll_options();
+        options.scalar = scalar;
+        IrUnrollResult pass = { 0 };
+        check = ir_optimize_unroll(input, output, scratch, options, &pass);
+        result = pass.function;
+        changed = pass.copies;
     }
     else if (fixture->pass == IR_OPTIMIZE_TEXT_SROA)
     {

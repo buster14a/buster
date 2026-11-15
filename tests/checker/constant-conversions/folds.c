@@ -2,7 +2,10 @@
 // extended), to an unsigned int, to narrow integers, to _Bool, and to float and double where exact (a negative value's,
 // 2^31 unsigned's and 2^63 unsigned long's too); as operands of the arithmetic, the comparisons and pointer arithmetic, a
 // subscript, a call's arguments, returns, initializers, assignments and compound assignments, and in a statement
-// expression's body, whose function tracks its stack.
+// expression's body, whose function tracks its stack. A conditional's or a logical operator's value converted by its
+// consumer converts in each arm instead where an arm is a constant and the target an integer or _Bool, which then folds:
+// one constant arm or two, to long, unsigned long through the conditional's unsigned type (c ? -1 : 2u) and _Bool,
+// nested, as an operand, and with a condition known at compile time.
 typedef unsigned long U;
 
 U add1(U i) { return i + 1; }
@@ -38,6 +41,22 @@ long init(void) { long a = 5; double d = 3; U u = -1; return a + (long)d + (long
 U acc(U x) { x += 1; x *= 3; x <<= 2; x -= 5; x |= 16; return x; }
 double dacc(double d) { d *= 2; d += 1; d -= -4; return d; }
 U se(U x) { return ({ U t = x + 1; t * 2; }) + 3; }
+long sel(int c, int x) { return c ? x : 1; }
+long sel2(int c, int x) { return c ? 1 : x; }
+long both(int c) { return c ? 1 : 2; }
+U mix(int c) { return c ? -1 : 2u; }
+_Bool bsel(int c, int x) { return c ? x : 5; }
+long nest(int c, int d, int x) { return c ? (d ? 1 : x) : 2; }
+long addsel(int c, long y) { return y + (c ? 1 : -2); }
+int psel(int* p, int c) { return *(p + (c ? 1 : -1)); }
+long lg(int a, int b) { return a && b; }
+long lo(int a, int b) { return a || !b; }
+_Bool bl(int a, int b) { return a && b; }
+static int touched;
+static int touch(void) { touched += 1; return touched; }
+long decided_or(int x) { return (touch(), 1) || x; }
+long decided_and(int x) { return (touch(), 0) && x; }
+long known_arm(int x) { return (touch(), 1) ? 7 : x; }
 
 static unsigned h;
 static void see(U v) { h = h * 31u + (unsigned)v + (unsigned)(v >> 32); }
@@ -58,5 +77,15 @@ int tested(int n)
     see(b5()); see(b0()); see(bset(n & 1)); see((U)sh((short)n)); see(uc());
     see((U)p1(a + 2)); see(pz() == 0); see((U)at()); see((U)call());
     see((U)r7()); see((U)(long)r2()); see((U)(long)rf()); see((U)init()); see(acc(u)); see((U)(long)dacc(d)); see(se(u));
+    for (int k = 0; k < 4; k++)
+    {
+        int c = (n >> k) & 1;
+        int e = (n >> (k + 1)) & 1;
+        see((U)sel(c, n)); see((U)sel2(c, n)); see((U)both(c)); see(mix(c)); see(bsel(c, n & k));
+        see((U)nest(c, e, n)); see((U)addsel(c, l)); see((U)psel(a + 2, c));
+        see((U)lg(c, e)); see((U)lo(c, e)); see(bl(c, e));
+    }
+    touched = 0;
+    see((U)decided_or(n)); see((U)decided_and(n)); see((U)known_arm(n)); see((U)touched);
     return (int)(h & 0x7fffffff);
 }

@@ -2462,6 +2462,9 @@ static bool check_input_attribute_suppress_parse(CheckInputReader* reader, Check
                 if (attribute->standard)
                 {
                     check_input_attribute_suppress_error(reader, attributes, attribute, end, CHECK_ARGUMENT_EXPECTED_COMMA, false, BUSTER_CHECK_NONE);
+                    // Clang recovers this failed separator through the C23 list's closing brackets. Later items in
+                    // this list are unread; attributes before it and in following lists still apply (#2332).
+                    *cursor = list_end;
                 }
                 else
                 {

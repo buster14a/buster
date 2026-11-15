@@ -83,10 +83,15 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --operand-diagnostics-only | --label-attributes-only |
-  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --run-modes-only] [--in-process] [--clang-server PATH]
+  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --record-extensions-only | --auto-qualifiers-only |
+  --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
-  `check_test_driver_named_ucns`; with
+  `check_test_driver_named_ucns`; a generated unit of about 180,000 tokens as
+  a process of its own under an `RLIMIT_AS` of 768 MiB past the executable's
+  image, about 1 GiB for Release, which it must compile, and of 32 MiB past
+  it, where it must fail with a fatal error that names the limit and no error
+  at a line of the unit, #1118, `check_test_driver_address_limit`; with
   `--lazy-system-headers`, only the checks that pass the driver
   `-flazy-system-headers`, including the real system-header lazy-policy
   fixtures and eager/lazy object comparisons, since the others run the same either way, and
@@ -139,6 +144,13 @@ unused-warning fixtures also check exact scope-completion tokens.
   complete diagnostics and exit status under warning promotion/suppression,
   error limits, source policy, C17/C23, both reader choices and lane requests,
   and verifies existing object-output preservation for rejected input.
+  `--record-extensions-only` runs the existing GNU empty-record checks plus the runtime
+  `tests/driver/record-extensions/` catalogue for zero-size-record C++ compatibility and
+  zero-length-array warnings (#2409). Complete GNU17/C23 diagnostics cover explicit and
+  inferred bounds, nested dimensions, typedef and compound-literal reuse, folded/VLA
+  controls, direct and nested flexible members, macros, source pragmas and system headers.
+  The shared harness checks suppression/promotion, scalar/default readers, one/three
+  requested lanes, syntax/object modes, rejected-output preservation and accepted object twins.
   `--semantic-recovery-only` runs
   `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,
   `c_check_attribute_call_recovery_driver_test.c`, `c_check_malformed_call_driver_test.c`,
@@ -164,21 +176,30 @@ unused-warning fixtures also check exact scope-completion tokens.
   implicit-int-declaration and attribute-led-call fixtures together. The string
   lists include malformed string subscripts through parentheses and macros,
   repeated and split lists, valid adjacent-string controls and an assumption
-  with a subscript. Their errors retain later diagnostics and existing object
+  with a subscript. A malformed C23 suppress separator discards the remaining
+  items in that list, while earlier items and later separate lists retain their
+  diagnostics and effects. Inner-parenthesis and non-string-argument recovery
+  controls keep the following items. Their errors retain later diagnostics and existing object
   output, and accepted controls must produce an ELF object. Its `attribute-recovery-integration.c`
   combines their recovery paths in two functions, preserving the complete
   diagnostic order and later independent errors. The declaration portion runs
   in C99–C17, the call portion before C23, and the label portion in every
   tested standard. This focused section supports sanitizer and in-process/child
   differential checks without running the unrelated recovery fixtures.
-  `--malformed-calls-only` runs the ordinary balanced single-argument recovery
+  `--malformed-calls-only` runs the ordinary balanced type-first call recovery
   cases in `tests/checker/parse-recovery/malformed-calls.*` (#2406), comparing
   complete GNU89/GNU17/C23 diagnostics and status, both readers, syntax/object
   output, warning policies, `-fno-builtin` and error limits. Mixed ordinary and
   attribute-led macro calls cover multiple rounds and repaired/rejected views;
-  metadata contracts keep each callee source paired with its use flag. Boundary
-  controls exclude later arguments, semicolon crossings, mismatched delimiters,
-  member callees and catalog names. Rejected output is preserved and valid
+  metadata contracts keep each callee source paired with its use flag. The diagnostic
+  view discards the unread first argument and retains later arguments after its
+  first top-level comma, including their lookup and type errors. The invalid callee
+  prevents artificial arity, argument-conversion and noncallable diagnostics while
+  keeping independent argument checks and warnings. Consecutive type-first repairs
+  and nested calls retain their original parse errors through successive rounds;
+  a new parse error after a valid retained argument still uses existing recovery.
+  Boundary controls exclude empty later arguments, semicolon crossings, mismatched
+  delimiters, member callees and catalog names. Rejected output is preserved and valid
   cast/`sizeof` controls must produce an ELF object.
   `--type-sugar-only` runs
   `c_check_type_sugar_driver_test.c` alone, the typedef sugar diagnostics keep
@@ -237,7 +258,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes; and
   #1376's clears (`c_check_program_clear_test.c`): each path's shape (memset past 128 bytes, no loop, no clear before
-  a whole object's copy, compound literals in place, a volatile object's stores) and native runs on a dirtied stack.
+  a whole object's copy, compound literals in place, a volatile object's stores) and native runs on a dirtied stack;
+  #2745's: no store of zeros before a vector's value of the object's size (a struct's, a union's by either member, a
+  nested struct's, a compound literal's, the vector object's own, at 16, 32 and 64 bytes), the clears that stay (a
+  volatile object or member, a wider object or union member, a union whose designator moves on, a long double's), and
+  their native runs.
   The same group covers #1549's hidden-result call initializers: copy, temporary and discarded-address elimination,
   nested and indirect calls, only members and elements, alignment, volatile and self-reference fallbacks, assignments,
   reentry, and which labels keep the copy, at both scan paths' lengths; and #1375's named results
@@ -288,9 +313,15 @@ unused-warning fixtures also check exact scope-completion tokens.
   with `--executable build/compiler` under a two-CPU grant; the shared correctness inventory
   supplies that grant. `tests/driver/sign_compare_conditional.c` covers both operand orientations, every comparison,
   nested/selected arms, casts, side-effecting conditions, GNU controls, a balanced 128-leaf tree and live sibling
-  diagnostics. General arithmetic expression ranges and bitfield ranges remain separate, as does the existing
-  fully folded conditional gap: `((y = 0) ? -1 : 3) < u` still loses Clang's warning because the older constant
-  shortcut accepts its folded result. This change leaves that shortcut and the global evaluation facts intact.
+  diagnostics. A fully folded signed conditional such as `((y = 0) ? -1 : 3) < u` uses its folded result only when
+  evaluating it has no side effects or unevaluable discarded operand; otherwise the two-arm range proof runs.
+  A folded operand's strictly decreasing unary chain exposes a conditional inside a selection, unary `+` or
+  explicit cast. Selections and unary `+` preserve the arm proof; an explicit cast keeps its target type's range.
+  Harmless GNU constant conditions, assignments and commas retain their existing range rules, as do equality
+  with representable unsigned constants and the zero-unsigned relational controls. The fixture checks all six
+  comparisons in both operand orientations, nested and statement-expression conditions, wrappers and quiet controls.
+  General arithmetic and bitfield ranges, assignment/comma result wrappers and folded unsigned-operand shortcuts
+  remain separate; global evaluation facts are unchanged.
   `c_check_noderef_driver_test.c`, in the attribute-effects driver section,
   compares original GNU `noderef` placement, propagation, conversion,
   address-cancellation and unevaluated-expression fixtures with pinned Clang
@@ -941,6 +972,12 @@ later errors and accepted neighboring declarations are checked in GNU17 and
 C23, including preservation of output after a rejected unit. A C23 constexpr
 comma group guards the continuation flags. The source names and expected
 diagnostic counts come from the runtime `cases.txt` catalog.
+The same catalog checks `_Atomic __auto_type` pointer initializers: exact
+placeholder and source-type spellings, nested and qualified pointers, typedefs,
+macro notes, comma declarators, recovered invalid uses, later errors and warning
+order. `test-checker-driver --auto-qualifiers-only` runs these sources alone.
+Their requested lane settings include the existing source-order fallback for
+invalid-binding recovery.
 
 `c_check_format_bitint_driver_test.c` adds 25 original fixtures to
 `test-checker-driver` through the shared default-warning harness. Independent

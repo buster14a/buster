@@ -900,6 +900,69 @@ static void tier1_cfg_test_two_problems(Tier1CfgTestTally* tally, const Tier1Cfg
     arena_pop_to(output, mark);
 }
 
+// A block's first successor in layout, or BUSTER_TIER1_CFG_NONE.
+static uint32_t tier1_cfg_test_first_successor(const Tier1CfgInput* input, uint32_t b)
+{
+    uint32_t first = BUSTER_TIER1_CFG_NONE;
+    for (uint32_t s = input->successor_offsets[b]; s < input->successor_offsets[b + 1]; s += 1)
+    {
+        first = input->successors[s] < first ? input->successors[s] : first;
+    }
+    return first;
+}
+
+// The range that interval i's block c gives as its continuation (#2774), from the intervals alone, where i leaves c at its
+// end: c's first successor in layout, where the value enters it (a range of it covers that block's start, which isn't its
+// definition's block) and i doesn't go on into it as the next block; there, the range starting at that block's start
+// where that block comes no later than c; else the range covering the start of the block whose entry it takes its
+// opening from: its predecessors' first successor where no earlier block reaches it, else its own first successor where
+// that comes before it, which must come no later than c, and not be the value's definition's.
+static uint32_t tier1_cfg_test_continuation(const Tier1CfgInput* input, const Tier1CfgAllocation* result, uint32_t i, uint32_t c)
+{
+    const Tier1AllocationInput* intervals = &result->intervals;
+    const uint32_t v = intervals->values[i];
+    const uint32_t home = tier1_cfg_block_of(input, input->definitions[v]);
+    const bool goes_on = intervals->ends[i] > input->block_starts[c + 1];
+    const uint32_t first = tier1_cfg_test_first_successor(input, c);
+    const uint32_t next = goes_on && first == c + 1 ? BUSTER_TIER1_CFG_NONE : first;
+    const bool enters = next != BUSTER_TIER1_CFG_NONE && home != next && tier1_cfg_interval_oracle(result, v, input->block_starts[next]) != BUSTER_TIER1_CFG_NONE;
+    uint32_t model = BUSTER_TIER1_CFG_NONE;
+    bool reached = false;
+    for (uint32_t p = enters && next > c ? input->predecessor_offsets[next] : 0; enters && next > c && p < input->predecessor_offsets[next + 1]; p += 1)
+    {
+        const uint32_t sibling = tier1_cfg_test_first_successor(input, input->predecessors[p]);
+        reached |= input->predecessors[p] < next;
+        model = sibling < next && sibling < model ? sibling : model;
+    }
+    const uint32_t joined = enters && next > c ? tier1_cfg_test_first_successor(input, next) : BUSTER_TIER1_CFG_NONE;
+    model = reached || model == BUSTER_TIER1_CFG_NONE ? (joined < next ? joined : BUSTER_TIER1_CFG_NONE) : model;
+    const uint32_t taken = !enters ? BUSTER_TIER1_CFG_NONE : next <= c ? next : model;
+    const uint32_t entry = taken <= c && home != taken ? tier1_cfg_interval_oracle(result, v, input->block_starts[taken]) : BUSTER_TIER1_CFG_NONE;
+    return entry != BUSTER_TIER1_CFG_NONE && (next > c || intervals->starts[entry] == input->block_starts[taken]) ? entry : BUSTER_TIER1_CFG_NONE;
+}
+
+// #2774: each interval's continuation, recomputed from the intervals alone: the last that the blocks it leaves at their
+// ends give (tier1_cfg_test_continuation), or none.
+static bool tier1_cfg_test_continuations(const Tier1CfgInput* input, const Tier1CfgAllocation* result)
+{
+    const Tier1AllocationInput* intervals = &result->intervals;
+    bool same = intervals->continuation_intervals != 0;
+    for (uint32_t i = 0; same && i < intervals->count; i += 1)
+    {
+        const uint32_t from = tier1_cfg_block_of(input, intervals->starts[i]);
+        const uint32_t to = tier1_cfg_block_of(input, intervals->ends[i] - 1);
+        uint32_t expected = BUSTER_TIER1_CFG_NONE;
+        for (uint32_t c = from; c <= to; c += 1)
+        {
+            const bool leaves = c < to || intervals->ends[i] == input->block_starts[c + 1];
+            const uint32_t given = leaves ? tier1_cfg_test_continuation(input, result, i, c) : BUSTER_TIER1_CFG_NONE;
+            expected = given != BUSTER_TIER1_CFG_NONE ? given : expected;
+        }
+        same = intervals->continuation_intervals[i] == expected;
+    }
+    return same;
+}
+
 static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* input, Arena* output, Arena* scratch, const char* name, bool mutate, uint8_t temp_slots, uint32_t split_moves, bool must_allocate)
 {
     Tier1CfgError errors[2] = {
@@ -938,6 +1001,7 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
             }
             tier1_cfg_test_expect(tally, verified, "the CFG checker accepts the allocation");
             tier1_cfg_test_expect(tally, tier1_cfg_test_lookup(input, &result), "block intervals match the binary search");
+            tier1_cfg_test_expect(tally, tier1_cfg_test_continuations(input, &result), "each live-out range names its value's range at its first successor's entry");
             tier1_cfg_test_expect(tally, tier1_cfg_test_certify(tally, input, &result, output, scratch, true), "the certificate checker proves the allocation");
             tier1_cfg_test_expect(tally, tier1_cfg_test_avoided(tally, input, &result, scratch), "each range avoids its phi web's fixed sequences' registers, but its own readings'");
             if (result.intervals.count <= 600)
@@ -1801,6 +1865,91 @@ static void tier1_cfg_test_local_phis(Tier1CfgTestTally* tally, Arena* output, A
 // A wide join with one distinct local operand per predecessor, and optionally one value live through all arms.
 // The fixed scratch allowance admits preparation proportional to the blocks and actual live memberships. At 8,193
 // arms the old four matrices alone exceed 32 MiB; the allowance is 8 MiB. This checks capacity, not elapsed time.
+// #2782: a handler that an earlier block's `goto` and a later dispatch's multiway branch both enter (Lua's OP_TFORCALL,
+// after OP_TFORPREP) takes the dispatch's convention for its phi: the phi's register where the handler starts is its
+// operand's along the branch at the branch's first successor's entry, not the `goto` operand's, which can't share the
+// dispatch's value's register. Block 4 branches to blocks 1, 2 and 3; block 2 computes y from pc, which lives on past it,
+// and goes to block 3, whose phi joins y and pc, and which branches to block 4 or out to block 5: with one successor, its
+// phi would take the dispatch's phi's place by #2734's alternate alone.
+static void tier1_cfg_test_dispatch_entry(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
+{
+    static Tier1CfgTestBuilder builder;
+    memset(&builder, 0, sizeof(builder));
+    builder.block_count = 6;
+    for (uint32_t b = 0; b < builder.block_count; b += 1)
+    {
+        builder.instructions[b] = 4;
+    }
+    builder.registers[BUSTER_TIER1_ALLOCATE_GPR] = 0xf;
+    builder.registers[BUSTER_TIER1_ALLOCATE_VECTOR] = 0xf;
+    builder.registers[BUSTER_TIER1_ALLOCATE_MASK] = 0x1e;
+    builder.scratch[BUSTER_TIER1_ALLOCATE_GPR] = 11;
+    builder.scratch[BUSTER_TIER1_ALLOCATE_VECTOR] = 15;
+    builder.scratch[BUSTER_TIER1_ALLOCATE_MASK] = 0;
+    const uint32_t registers = builder.registers[BUSTER_TIER1_ALLOCATE_GPR];
+    tier1_cfg_test_edge(&builder, 0, 4);
+    tier1_cfg_test_edge(&builder, 1, 4);
+    tier1_cfg_test_edge(&builder, 2, 3);
+    tier1_cfg_test_edge(&builder, 3, 4);
+    tier1_cfg_test_edge(&builder, 3, 5);
+    tier1_cfg_test_edge(&builder, 4, 1);
+    tier1_cfg_test_edge(&builder, 4, 2);
+    tier1_cfg_test_edge(&builder, 4, 3);
+    const uint32_t start = tier1_cfg_test_value(&builder, 0, 0, BUSTER_TIER1_ALLOCATE_GPR, registers);
+    const uint32_t x = tier1_cfg_test_value(&builder, 1, 1, BUSTER_TIER1_ALLOCATE_GPR, registers);
+    const uint32_t y = tier1_cfg_test_value(&builder, 2, 1, BUSTER_TIER1_ALLOCATE_GPR, registers);
+    // pc, the dispatch's phi, then the handler's: each takes the other.
+    const uint32_t pc_operands[] = {
+        start,
+        x,
+        builder.value_count + 1,
+    };
+    const uint32_t pc = tier1_cfg_test_phi(&builder, 4, BUSTER_TIER1_ALLOCATE_GPR, pc_operands);
+    const uint32_t joined_operands[] = {
+        y,
+        pc,
+    };
+    const uint32_t joined = tier1_cfg_test_phi(&builder, 3, BUSTER_TIER1_ALLOCATE_GPR, joined_operands);
+    tier1_cfg_test_definition_use(&builder, start);
+    tier1_cfg_test_use(&builder, pc, 1, 0, true);
+    tier1_cfg_test_definition_use(&builder, x);
+    tier1_cfg_test_use(&builder, pc, 2, 0, true);
+    tier1_cfg_test_definition_use(&builder, y);
+    tier1_cfg_test_use(&builder, pc, 2, 2, true);
+    tier1_cfg_test_use(&builder, joined, 3, 0, true);
+    const uint64_t saved = output->length;
+    Tier1CfgInput input = { 0 };
+    const bool built = tier1_cfg_test_build(&builder, output, &input);
+    tier1_cfg_test_expect(tally, built, "dispatch-entry fixture builds");
+    for (uint32_t path = 0; built && path < 2; path += 1)
+    {
+        const uint64_t mark = output->length;
+        Tier1CfgAllocation result = { 0 };
+        const Tier1CfgError error = path == 0 ? tier1_cfg_allocate(&input, output, scratch, &result) : tier1_cfg_allocate_scalar(&input, output, scratch, &result);
+        tier1_cfg_test_expect(tally, error == TIER1_CFG_OK, "dispatch-entry fixture allocates");
+        if (error == TIER1_CFG_OK)
+        {
+            uint32_t handler = 0;
+            uint32_t convention = 0;
+            uint32_t taken = 0;
+            uint8_t kinds[3] = { 0 };
+            const bool found = tier1_cfg_location(&result, joined, input.block_starts[3], &handler, &kinds[0]) && tier1_cfg_location(&result, pc, input.block_starts[1], &convention, &kinds[1]) &&
+                               tier1_cfg_location(&result, y, input.block_starts[3] - 1, &taken, &kinds[2]);
+            tier1_cfg_test_expect(tally, found && kinds[0] == BUSTER_TIER1_ALLOCATE_REGISTER && kinds[1] == BUSTER_TIER1_ALLOCATE_REGISTER && taken != convention,
+                                  "the dispatch-entry fixture's goto operand can't take the dispatch's register");
+            tier1_cfg_test_expect(tally, found && handler == convention, "a handler a goto enters takes the dispatch's convention for its phi");
+            Tier1CfgCheck check;
+            tier1_cfg_test_expect(tally, tier1_cfg_verify(&input, &result, scratch, &check), "the independent checker accepts the dispatch-entry fixture");
+        }
+        arena_pop_to(output, mark);
+    }
+    if (built)
+    {
+        tier1_cfg_test_case(tally, &input, output, scratch, "dispatch entry", true, 0, 0, true);
+    }
+    arena_pop_to(output, saved);
+}
+
 static void tier1_cfg_test_phi_storage(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
 {
     const uint32_t widths[] = {
@@ -2549,6 +2698,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
             tier1_cfg_test_undefined(&tally, &output, &scratch);
             tier1_cfg_test_dominance(&tally, &output, &scratch);
             tier1_cfg_test_local_phis(&tally, &output, &scratch);
+            tier1_cfg_test_dispatch_entry(&tally, &output, &scratch);
             tier1_cfg_test_phi_storage(&tally, &output, &scratch);
             tier1_cfg_test_current_slots(&tally, &output, &scratch);
             tier1_cfg_test_edge_views(&tally, &scratch);

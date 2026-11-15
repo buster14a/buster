@@ -570,6 +570,8 @@ struct CheckConstantPart
     uint8_t kind;
     uint8_t flags;
     bool noderef;
+    // A zero ICE bound keeps the same extension warning as the ordinary declarator reader (#2409).
+    bool zero_length;
 };
 
 typedef struct CheckConstantParameter CheckConstantParameter;
@@ -1135,6 +1137,7 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                     valid = check_action_i64(reader->types, &bound, &extent) && extent >= 0;
                     part.kind = BUSTER_TYPE_KIND_ARRAY;
                     part.extent = (uint64_t)extent;
+                    part.zero_length = valid && extent == 0 && check_input_integer_ice(reader, &bound);
                     if (valid)
                     {
                         // (Its comma operators' left operands' -Wunused-value isn't given here: their check reads constants
@@ -1298,6 +1301,23 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                         type = check_input_type_result(reader, part->kind == BUSTER_TYPE_KIND_ARRAY ? type_array(reader->types, type, part->extent) :
                                part->kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY ? type_variable_array(reader->types, type, (uint32_t)part->extent) :
                                                                               type_incomplete_array(reader->types, type));
+                        if (type != 0 && part->zero_length)
+                        {
+                            // Type names in typeof and constant queries use this reader. Their dimensions complete
+                            // inside out; the sparse key prevents a later ordinary or constant read from repeating one.
+                            const CheckWarningEvent event = {
+                                .id = CHECK_WARNING_ID_ZERO_LENGTH_ARRAY,
+                                .kind = CHECK_WARNING_EVENT_ZERO_LENGTH_ARRAY,
+                                .token = part->token + 1,
+                                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                                .flags = BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
+                                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                                .completion = i,
+                                .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = parser->tree.parents[part->token] > part->token + 2 },
+                            };
+                            check_input_warning_once(reader, &event);
+                            type = !reader->output->resource ? type : 0;
+                        }
                         noderef = check_input_noderef_wrap(reader, noderef);
                     }
                     noderef = part->noderef ? check_input_noderef_mark(reader, noderef) : noderef;

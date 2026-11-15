@@ -149,6 +149,9 @@ struct Arena
     // arena is never pooled (its writable extent is unknown); capacity is clamped below them, so no push reaches
     // them, and release unmaps the whole reservation.
     bool unaccounted;
+    // Whether the arena grows its mapping in place as its pushes reach past it (#1118: arena_reserve_growing), in a slot of
+    // the address space that is its own: then its mapping_bytes are all writable but its first page, and equal committed.
+    bool grows;
     // The requested ceiling can exceed capacity after a constrained-address-space reservation.
     uint64_t requested_capacity;
     // For an owned mapping, the capacity it was laid out for, at least capacity (0 for borrowed storage, including
@@ -389,6 +392,50 @@ ArenaLimits arena_limits;
 static ArenaLimits arena_limits;
 #endif
 
+// Growing reservations (#1118). Under a finite RLIMIT_AS, an arena that asks for more than its share (arena_reservation_limit)
+// would hold only that share, a 128th of the limit, which a large part of a modest unit outgrows (a 130-line program of 45
+// libc headers needed 5 GB: its parser's columns outgrew 8 MB, its type table 16 MB and its reader's input 32 MB), while
+// most of the 30 or so such arenas a compile reserves use a few kilobytes. Such an arena instead takes a slot of the address
+// space of its own, BUSTER_ARENA_SLOT_BYTES from BUSTER_ARENA_SLOT_REGION, and maps there only what its pushes commit:
+// its first page, inaccessible, at its reservation, and then each commit's pages, writable, in place past its mapping
+// (MAP_FIXED_NOREPLACE), so that its base never moves and the limit is shared by what the arenas use, not by how many there
+// are. The region is past the kernel's placement of a non-PIE executable and its heap, below a PIE executable's
+// (0x555555554000, 85 TB), and far below the mappings the kernel places unasked (below the stack, at 127 TB), which take
+// the highest addresses free: none reaches it while a finite limit holds. It is also past ASan's shadow (to 16 TB), but a
+// sanitizer's runtime lays the address space out itself, and those builds inject their resource failures instead
+// (BUSTER_SANITIZER_RESOURCES), so they reserve as before. A slot something else already holds (EEXIST) is left claimed
+// and the next one tried; a kernel that took the address only as a hint (before Linux 4.17), or a runtime that refuses
+// it, marks the region unusable for the rest of the process, whose reservations then take their shares, as before.
+#define BUSTER_ARENA_GROWTH (!BUSTER_SANITIZER_RESOURCES)
+#define BUSTER_ARENA_SLOT_REGION (0x110000000000ull)
+#define BUSTER_ARENA_SLOT_BYTES (16ull << 30)
+#define BUSTER_ARENA_SLOT_COUNT 4096
+// The capacity a growing arena may have: its slot but the room its base may sit past the slot's start (a huge page).
+#define BUSTER_ARENA_GROWTH_CAPACITY (BUSTER_ARENA_SLOT_BYTES - BUSTER_ARENA_HUGE_PAGE_BYTES)
+// How many slots a reservation tries that something else holds, before it takes its share instead.
+#define BUSTER_ARENA_SLOT_TRIES 8
+
+// The slots of growing arenas: each one's bytes mapped from the start of its arena's mapping (base - mapping_offset), 0 for
+// a free slot and 1 for one claimed with nothing of an arena's mapped yet (or held by something else's mapping). The slot,
+// not the arena, records how far its mapping reaches, since a copy of the arena may have grown it (arena_grow).
+// Reservations on every thread claim and free them, so they are read and written atomically; main.c's units share them.
+typedef struct ArenaSlots ArenaSlots;
+struct ArenaSlots
+{
+    uint64_t bytes[BUSTER_ARENA_SLOT_COUNT];
+    // Where the next claim starts looking.
+    uint32_t cursor;
+    // Set once a slot's mapping was refused for a reason other than memory, or placed elsewhere.
+    bool refused;
+};
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+extern ArenaSlots arena_slots;
+#elif defined(BUSTER_UNIT)
+ArenaSlots arena_slots;
+#else
+static ArenaSlots arena_slots;
+#endif
+
 // The share of a finite RLIMIT_AS that one arena admits, or BUSTER_ARENA_MAX_CAPACITY.
 static uint64_t arena_address_share(void)
 {
@@ -457,12 +504,29 @@ static uint64_t arena_reservation_limit(void)
     return result & ~(BUSTER_ARENA_PAGE_BYTES - 1);
 }
 
+// " under an address-space limit (...) of N MiB" where RLIMIT_AS is finite, for a reservation's failure to name the limit
+// that refused it (#1118), or else an empty string.
+static __attribute__((unused)) void arena_limit_text(char* text, uint64_t size)
+{
+    struct rlimit space;
+    text[0] = 0;
+    if (getrlimit(RLIMIT_AS, &space) == 0 && space.rlim_cur != RLIM_INFINITY)
+    {
+        snprintf(text, size, " under an address-space limit (RLIMIT_AS, ulimit -v) of %llu MiB", (unsigned long long)((uint64_t)space.rlim_cur >> 20));
+    }
+}
+
 static __attribute__((unused)) void arena_report_failure(FILE* stream, const char* operation, uint64_t requested)
 {
     const ArenaFailure failure = arena_failure;
-    fprintf(stream, "fatal error: can't %s memory for %s (%llu bytes requested): %s\n",
+    char limit[96] = "";
+    if (!failure.commit)
+    {
+        arena_limit_text(limit, sizeof(limit));
+    }
+    fprintf(stream, "fatal error: can't %s memory for %s (%llu bytes requested): %s%s\n",
             failure.commit ? "commit" : "reserve", operation,
-            (unsigned long long)(failure.bytes != 0 ? failure.bytes : requested), strerror(failure.error != 0 ? failure.error : ENOMEM));
+            (unsigned long long)(failure.bytes != 0 ? failure.bytes : requested), strerror(failure.error != 0 ? failure.error : ENOMEM), limit);
 }
 
 // The pooled arena a reservation of `capacity` bytes, `small` of them base pages, takes, or BUSTER_ARENA_POOL_SLOTS for
@@ -510,6 +574,182 @@ static int arena_reservation_flags(uint64_t capacity, uint64_t small, uint64_t m
     return MAP_PRIVATE | MAP_ANONYMOUS | (advised && arena_stack_base_pages ? MAP_STACK : 0);
 }
 
+// A free slot of the growing arenas', claimed (1), or BUSTER_ARENA_SLOT_COUNT for none.
+static uint32_t arena_slot_claim(void)
+{
+    uint32_t result = BUSTER_ARENA_SLOT_COUNT;
+    const uint32_t start = __atomic_fetch_add(&arena_slots.cursor, 1, __ATOMIC_RELAXED);
+    for (uint32_t i = 0; result == BUSTER_ARENA_SLOT_COUNT && i < BUSTER_ARENA_SLOT_COUNT; i += 1)
+    {
+        const uint32_t slot = (start + i) % BUSTER_ARENA_SLOT_COUNT;
+        uint64_t expected = 0;
+        const bool free = __atomic_load_n(&arena_slots.bytes[slot], __ATOMIC_RELAXED) == 0;
+        result = free && __atomic_compare_exchange_n(&arena_slots.bytes[slot], &expected, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED) ? slot : result;
+    }
+    return result;
+}
+
+// The slot of a growing arena's mapping.
+static uint32_t arena_slot_of(const uint8_t* mapping)
+{
+    return (uint32_t)(((uintptr_t)mapping - BUSTER_ARENA_SLOT_REGION) / BUSTER_ARENA_SLOT_BYTES);
+}
+
+// A growing arena of `capacity` bytes (at most BUSTER_ARENA_GROWTH_CAPACITY), `small` of them base pages, for a reservation
+// of `requested`: its base placed in its slot as arena_reserve_policy places it in a mapping of its own, so that base +
+// small is on a huge-page boundary, and its mapping its first page, inaccessible, below the base. The rest of the slot is
+// mapped as its pushes reach it (arena_grow). Returns an arena without capacity where no slot can take it.
+static Arena arena_reserve_growing(uint64_t capacity, uint64_t requested, uint64_t small)
+{
+    Arena result = { 0 };
+    const uint64_t offset = capacity > small ? ((BUSTER_ARENA_PAGE_BYTES + small + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(BUSTER_ARENA_HUGE_PAGE_BYTES - 1)) - small :
+                                               BUSTER_ARENA_PAGE_BYTES;
+    bool done = false;
+    for (uint32_t tries = 0; !done && tries < BUSTER_ARENA_SLOT_TRIES; tries += 1)
+    {
+        const uint32_t slot = arena_slot_claim();
+        uint8_t* wanted = slot < BUSTER_ARENA_SLOT_COUNT ? (uint8_t*)(uintptr_t)(BUSTER_ARENA_SLOT_REGION + slot * BUSTER_ARENA_SLOT_BYTES + offset - BUSTER_ARENA_PAGE_BYTES) : 0;
+        errno = ENOMEM;
+        uint8_t* mapping = wanted != 0 ? mmap(wanted, BUSTER_ARENA_PAGE_BYTES, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0) : MAP_FAILED;
+        const int error = errno;
+        if (mapping == wanted)
+        {
+            __atomic_store_n(&arena_slots.bytes[slot], BUSTER_ARENA_PAGE_BYTES, __ATOMIC_RELEASE);
+            result = (Arena){
+                .base = mapping + BUSTER_ARENA_PAGE_BYTES,
+                .capacity = capacity,
+                .mapping_offset = BUSTER_ARENA_PAGE_BYTES,
+                .small = small,
+                .grows = true,
+                .mapping_bytes = BUSTER_ARENA_PAGE_BYTES,
+                .committed = BUSTER_ARENA_PAGE_BYTES,
+                .requested_capacity = requested,
+                .reserved = capacity,
+            };
+            done = true;
+        }
+        else if (wanted != 0)
+        {
+            // A kernel that took the address as a hint (MAP_FIXED_NOREPLACE is Linux 4.17's) placed it elsewhere.
+            if (mapping != MAP_FAILED)
+            {
+                munmap(mapping, BUSTER_ARENA_PAGE_BYTES);
+            }
+            // A slot something else holds stays claimed, and the next is tried; the address space refused for its size
+            // ends the reservation, which then takes its share; anything else ends every later one's growth too.
+            const bool held = mapping == MAP_FAILED && error == EEXIST;
+            if (!held)
+            {
+                __atomic_store_n(&arena_slots.bytes[slot], 0, __ATOMIC_RELEASE);
+                done = true;
+            }
+            if (!held && !(mapping == MAP_FAILED && error == ENOMEM))
+            {
+                __atomic_store_n(&arena_slots.refused, true, __ATOMIC_RELAXED);
+            }
+        }
+        else
+        {
+            done = true;
+        }
+    }
+    return result;
+}
+
+// Maps [from, to) of a growing arena's mapping, writable, in place, with the page advice its reservation would give
+// those bytes (arena_reserve_policy, arena_commit): huge past its base pages, unless the host is busy, and base pages
+// below them where those are 2 MB or more.
+static bool arena_extend(Arena* arena, uint8_t* mapping, uint64_t from, uint64_t to)
+{
+    uint8_t* at = mapping + from;
+    const uint64_t small_end = arena->mapping_offset + arena->small;
+    const bool base_pages = arena_pages_busy || to <= small_end;
+    const bool advised = arena_pages_busy || arena->small >= BUSTER_ARENA_HUGE_PAGE_BYTES;
+    const int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | (base_pages && advised && arena_stack_base_pages ? MAP_STACK : 0);
+    uint8_t* mapped = mmap(at, to - from, PROT_READ | PROT_WRITE, flags, -1, 0);
+    const int error = errno;
+    const bool result = mapped == at;
+    if (mapped != MAP_FAILED && !result)
+    {
+        munmap(mapped, to - from);
+    }
+    if (result)
+    {
+        if (advised && !(base_pages && arena_stack_base_pages))
+        {
+            const uint64_t end = arena_pages_busy || to < small_end ? to : small_end;
+            if (end > from)
+            {
+                madvise(at, end - from, MADV_NOHUGEPAGE);
+            }
+        }
+        if (!arena_pages_busy && to > small_end)
+        {
+            const uint64_t begin = from > small_end ? from : small_end;
+            madvise(mapping + begin, to - begin, MADV_HUGEPAGE);
+            arena->huge = true;
+        }
+        __atomic_store_n(&arena_slots.bytes[arena_slot_of(mapping)], to, __ATOMIC_RELEASE);
+    }
+    else
+    {
+        errno = mapped == MAP_FAILED ? error : ENOMEM;
+    }
+    return result;
+}
+
+// arena_commit for a growing arena: its mapping reaches past `end` bytes from its base, extended by a quarter of what it
+// maps or BUSTER_ARENA_SMALL_BYTES, whichever is more, or else to `end` alone, and once more after the thread's pool,
+// whose arenas no one uses, is unmapped. Not doubled, as arena_commit's commits are: what a growing arena maps past its
+// pushes is address space the limit then denies the others, and its extensions are a few dozen syscalls even for the
+// largest arena of a unit (126 MiB in about 34). A copy of the arena may have grown it already: the slot says how far.
+static bool arena_grow(Arena* arena, uint64_t end)
+{
+    const uint64_t offset = arena->mapping_offset;
+    uint8_t* mapping = arena->base - offset;
+    const uint64_t needed = (offset + end + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+    const uint64_t slot_bytes = __atomic_load_n(&arena_slots.bytes[arena_slot_of(mapping)], __ATOMIC_ACQUIRE);
+    const uint64_t mapped = slot_bytes > arena->mapping_bytes ? slot_bytes : arena->mapping_bytes;
+    bool result = needed <= mapped;
+    uint64_t reached = mapped;
+    if (!result)
+    {
+        const uint64_t used = mapped - offset;
+        uint64_t grown = used + (used / 4 > BUSTER_ARENA_SMALL_BYTES ? used / 4 : BUSTER_ARENA_SMALL_BYTES);
+        grown = grown > end ? grown : end;
+        grown = grown < arena->capacity ? grown : arena->capacity;
+        uint64_t target = (offset + grown + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+        const uint64_t limit = (offset + arena->capacity + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+        if (grown > arena->small)
+        {
+            const uint64_t huge = (((uintptr_t)mapping + target + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(BUSTER_ARENA_HUGE_PAGE_BYTES - 1)) - (uintptr_t)mapping;
+            target = huge < limit ? huge : limit;
+        }
+        target = target > needed ? target : needed;
+        result = arena_extend(arena, mapping, mapped, target);
+        reached = result ? target : reached;
+        if (!result && target > needed)
+        {
+            result = arena_extend(arena, mapping, mapped, needed);
+            reached = result ? needed : reached;
+        }
+        ArenaPool* pool = arena_pool;
+        if (!result && errno == ENOMEM && pool != 0 && pool->count != 0)
+        {
+            arena_pool_release(pool);
+            result = arena_extend(arena, mapping, mapped, needed);
+            reached = result ? needed : reached;
+        }
+        if (!result)
+        {
+            arena_failure = (ArenaFailure){ .bytes = needed - mapped, .error = errno };
+        }
+    }
+    arena->mapping_bytes = reached;
+    arena->committed = reached;
+    return result;
+}
+
 // Past the first `small` bytes, base is placed so that base + small starts on a huge-page boundary, a page or more past
 // the mapping's start. The reservation itself is inaccessible and uncharged under strict overcommit; arena_push makes
 // only its used prefix writable.
@@ -533,12 +773,19 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
     small = small > BUSTER_ARENA_SMALL_BYTES ? small : BUSTER_ARENA_SMALL_BYTES;
     small = arena_small_floor > small ? arena_small_floor : small;
     ArenaPool* pool = arena_pool;
-    const uint32_t slot = arena_pool_choose(pool, capacity, small, 0);
-    if (requested != 0 && requested <= BUSTER_ARENA_MAX_CAPACITY && capacity != 0 && slot != BUSTER_ARENA_POOL_SLOTS)
+    // A reservation its share would cut short grows instead, from a slot of its own (arena_reserve_growing, #1118), or else
+    // where none can take it, takes its share as before. A growing arena is never pooled (arena_release).
+    const bool growing = BUSTER_ARENA_GROWTH && requested > limit && requested <= BUSTER_ARENA_MAX_CAPACITY && !__atomic_load_n(&arena_slots.refused, __ATOMIC_RELAXED);
+    if (growing)
+    {
+        result = arena_reserve_growing(requested < BUSTER_ARENA_GROWTH_CAPACITY ? requested : BUSTER_ARENA_GROWTH_CAPACITY, requested, small);
+    }
+    const uint32_t slot = result.base == 0 ? arena_pool_choose(pool, capacity, small, 0) : BUSTER_ARENA_POOL_SLOTS;
+    if (result.base == 0 && requested != 0 && requested <= BUSTER_ARENA_MAX_CAPACITY && capacity != 0 && slot != BUSTER_ARENA_POOL_SLOTS)
     {
         result = arena_pool_take(pool, slot, capacity, requested);
     }
-    else if (requested != 0 && requested <= BUSTER_ARENA_MAX_CAPACITY)
+    else if (result.base == 0 && requested != 0 && requested <= BUSTER_ARENA_MAX_CAPACITY)
     {
         uint64_t mapping_bytes = arena_mapping_bytes(capacity);
         bool allowed = capacity != 0;
@@ -879,7 +1126,17 @@ static Arena arena_measure(void)
 
 static void arena_release(Arena* arena)
 {
-    if (arena->base != 0 && arena->mapping_bytes != 0)
+    if (arena->base != 0 && arena->grows)
+    {
+        // Its mapping as far as its slot says a copy of it may have grown it, unmapped whole, and its slot freed: under the
+        // finite RLIMIT_AS that made it grow, a pooled arena would hold address space another needs.
+        uint8_t* mapping = arena->base - arena->mapping_offset;
+        const uint32_t slot = arena_slot_of(mapping);
+        const uint64_t slot_bytes = __atomic_load_n(&arena_slots.bytes[slot], __ATOMIC_ACQUIRE);
+        munmap(mapping, slot_bytes > arena->mapping_bytes ? slot_bytes : arena->mapping_bytes);
+        __atomic_store_n(&arena_slots.bytes[slot], 0, __ATOMIC_RELEASE);
+    }
+    else if (arena->base != 0 && arena->mapping_bytes != 0)
     {
         ArenaPool* pool = arena_pool;
         uint8_t* mapping = arena->base - arena->mapping_offset;
@@ -988,7 +1245,11 @@ static bool arena_commit(Arena* arena, uint64_t end)
     const uint64_t needed = (offset + end + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
     const uint64_t committed = arena->committed;
     bool result = true;
-    if (arena->mapping_bytes != 0 && needed > committed)
+    if (arena->grows && needed > committed)
+    {
+        result = arena_grow(arena, end);
+    }
+    else if (arena->mapping_bytes != 0 && needed > committed)
     {
         const uint64_t used = committed > offset ? committed - offset : 0;
         uint64_t grown = used > BUSTER_ARENA_SMALL_BYTES ? used * 2 : BUSTER_ARENA_SMALL_BYTES;

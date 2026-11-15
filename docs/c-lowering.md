@@ -1702,7 +1702,12 @@ none of its subset's programs makes a name twice in clang's objects.
   At `d12fd583` its 12,016 differences are all explained: 7 folded, 11,845
   dropped and 164 inlined. The dropped ones were the other units' commands,
   each behind a `BUSTER_IN_UNIT` branch whose condition is a constant, which
-  `-c` now leaves out as clang does (#1108).
+  `-c` now leaves out as clang does (#1108). Since #1398's step 3 leaves out
+  the callees Tier 0 spliced at every call, 8 remain on 2026-11-14: 5 folded
+  and 3 inlined, the vector lexer's `scan_lines`, `write_chunk` and
+  `tokenize_chunks`, whose shapes the splice keeps as calls by default. Step 5's
+  `--tier0-inline-shapes` splices them, leaving the 5 folded ones
+  ([Tier 0 inlining](tier0-inlining.md), #2841).
 
 On corpora, clang -O0 decides three things in its code otherwise than the
 selection. The harness explains a difference with one of them only from the
@@ -1712,7 +1717,7 @@ checked program, never from a name, and fails on any other:
 | --- | --- | --- |
 | folded | ours only: an object that a selected body reads, a const and not volatile scalar with an initializer | Reads its value as a constant (`CodeGenFunction::tryEmitAsConstant`), so nothing needs the object. musl's `math` constants (`pS0`, `pio2_hi`) and Lua's `HOOKKEY` and `CLIBS`. |
 | unselected | clang only: a definition the selection reaches when it also counts the operands that a constant condition never evaluates (`CheckProgramOptions.unselected_operands`) | Emits a `?:` in a branch's condition as branches without folding a constant condition (`CodeGenFunction::EmitBranchOnBoolExpr`), so the dead arm's calls stay. musl's `isnan` and `signbit` call `__FLOAT_BITS` in the dead arm for a `double`. |
-| inlined | ours only: a local function whose definition has `always_inline` | Inlines it at its calls at -O0 too (its always-inliner) and emits none of a local function it inlined everywhere, as SQLite's `SQLITE_INLINE` `allocateSpace` is. Tier 0 doesn't inline: it calls the function, so the object defines it. |
+| inlined | ours only: a local function whose definition has `always_inline` | Inlines it at its calls at -O0 too (its always-inliner) and emits none of a local function it inlined everywhere, as SQLite's `SQLITE_INLINE` `allocateSpace` is. Tier 0 splices such calls too (#1398) and leaves out a callee it spliced at every call (step 3); the object still defines one whose call it keeps (a cycle's, one the splice refuses: two returns, a result in memory), and every one under `--tier0-no-inline`. |
 
 Until #1108 there was a fourth, dropped: a definition only ours had, which
 clang's model left out because only a constant `if`'s dead arm reached it

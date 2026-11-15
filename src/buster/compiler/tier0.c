@@ -1278,20 +1278,32 @@ static bool tier0_vector_value_bytes_valid(uint64_t bytes)
     return bytes == 4 || bytes == 8 || tier0_vector_bytes_valid(bytes);
 }
 
+// Whether a vector register's part of `bytes` is a payload that its register is wider than (#2113): a record SSE, SSEUP's
+// <size / 8 x double> of 24 bytes, in a YMM register, or of 40, 48 or 56, in a ZMM one (abi_vector_payload_bytes), which
+// loads and stores move in pieces (tier0_payload_load, tier0_payload_store) so as not to reach past the record.
+static bool tier0_vector_payload(uint64_t bytes)
+{
+    return bytes == 24 || bytes == 40 || bytes == 48 || bytes == 56;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Aggregates in registers
 
 // A part of an aggregate passed or returned in a register (#137): eightbyte `offset` (0 or 8) and its `bytes` (1 to 8,
-// or 16 for a 16-byte aggregate's only part in an XMM register), in `reg` (Tier 0's numbering: a general register, or
-// BUSTER_TIER0_XMM's), or in a stack slot (BUSTER_TIER0_PART_STACK: a SPLIT location's other part, or the high eightbyte
-// alone on the stack), and how it loads from the aggregate's bytes without reading past them (`load`):
-//   - EXACT: one load of its width, a general register's 1, 2, 4 or 8 bytes (zero-extended) or an XMM one's 4, 8 or 16;
+// or an aggregate's only part in a vector register, its payload: abi_vector_payload_bytes), in `reg` (Tier 0's
+// numbering: a general register, or BUSTER_TIER0_XMM's), or in a stack slot (BUSTER_TIER0_PART_STACK: a SPLIT location's
+// other part, or the high eightbyte alone on the stack), and how it loads from the aggregate's bytes without reading past
+// them (`load`):
+//   - EXACT: one load of its width, a general register's 1, 2, 4 or 8 bytes (zero-extended) or an XMM one's 4, 8 or 16
+//     (and a YMM or ZMM register's 32 or 64), or a payload that no register is as wide as, in pieces (#2113,
+//     tier0_vector_payload);
 //   - OVERLAP: a general register's high part of 3, 5, 6 or 7 bytes, as the 8 bytes that end where it ends, shifted
 //     right past the ones before it;
 //   - TEMPORARY: the rest (a general register's only part of 3, 5, 6 or 7 bytes, an XMM register's of 1, 2, 3, 5, 6 or
 //     7, which only halves make), through an 8-byte temporary in the red zone that its bytes are copied into first.
 // A store from a register (a parameter's arrival, a call's result) writes the register's width, 8 bytes or 16, which an
-// object's frame space, its size rounded up to 8, has room for.
+// object's frame space, its size rounded up to 8, has room for, or a vector register's payload, in pieces past what a
+// register is as wide as.
 #define BUSTER_TIER0_PART_EXACT 0
 #define BUSTER_TIER0_PART_OVERLAP 1
 #define BUSTER_TIER0_PART_TEMPORARY 2
@@ -1368,7 +1380,9 @@ static uint32_t tier0_parts_of(const uint8_t* registers, bool high, bool low, bo
             const bool xmm = reg != BUSTER_ABI_REGISTER_NONE && (reg & BUSTER_ABI_REGISTER_VECTOR) != 0;
             const bool only = !split && registers[1 - k] == BUSTER_ABI_REGISTER_NONE;
             const uint32_t left = size > offset ? size - offset : 0;
-            const uint32_t whole = size >= 64 ? 64 : size >= 32 ? 32 : 16;
+            // A vector register alone holds its payload (#2113): the aggregate's 16, 32 or 64 bytes, or a record's <size /
+            // 8 x double>, its first 16 bytes from 17 to 23 and past them its size rounded down to 8.
+            const uint32_t whole = abi_vector_payload_bytes(size);
             const uint32_t bytes = xmm && only && !high && size >= 16 ? whole : left < 8 ? left : 8;
             const bool exact = xmm ? bytes == 4 || bytes == 8 || bytes >= 16 : bytes == 1 || bytes == 2 || bytes == 4 || bytes == 8;
             parts[count] = (Tier0Part){
@@ -1392,6 +1406,21 @@ static bool tier0_aggregate_whole(AbiLocation location)
     return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0;
 }
 
+// The bytes a copy of an aggregate of `size` bytes on the stack whole at `location` moves: its size, or at a PAYLOAD
+// location its vector payload alone (#2113, a record's <size / 8 x double> that LLVM put on the stack).
+static uint32_t tier0_whole_bytes(AbiLocation location, uint32_t size)
+{
+    return (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0 ? abi_vector_payload_bytes(size) : size;
+}
+
+// The bytes of the stack an aggregate of `size` bytes on the stack whole at `location` takes: its size rounded up to 8,
+// or at a PAYLOAD location its vector register's width (#2113).
+static uint64_t tier0_whole_slot(AbiLocation location, uint32_t size)
+{
+    const bool payload = (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0;
+    return payload ? abi_vector_register_bytes(abi_vector_payload_bytes(size)) : ((uint64_t)size + 7) & ~UINT64_C(7);
+}
+
 // The parts of an aggregate argument or parameter of `size` bytes at `location` (none on the stack whole or ignored).
 static uint32_t tier0_location_parts(AbiLocation location, uint32_t size, Tier0Part* parts)
 {
@@ -1413,7 +1442,9 @@ static bool tier0_parameter_in_place(const Tier0Function* function, uint32_t p)
     const AbiLocation location = function->parameters[p];
     const uint32_t alignment_log2 = tier0_is_object(function, p) ? function->local_alignments[p] : 0;
     const bool aligned = alignment_log2 <= BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 && location.stack_offset % (1u << alignment_log2) == 0;
-    return tier0_is_object(function, p) ? tier0_aggregate_whole(location) && aligned : location.kind == BUSTER_ABI_LOCATION_STACK;
+    // A PAYLOAD slot (#2113) holds the payload alone, which may end before the object's size: its bytes are copied.
+    const bool payload = (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0;
+    return tier0_is_object(function, p) ? tier0_aggregate_whole(location) && aligned && !payload : location.kind == BUSTER_ABI_LOCATION_STACK;
 }
 
 // How many vector registers a vector result wider than the target's registers comes back in (#1193, #137): two or four
@@ -1497,16 +1528,15 @@ static uint32_t tier0_register_bit(uint8_t reg, uint32_t allowed)
 // or the results') or none, and two apart; the first one present (eightbyte 0, or with `high` eightbyte 1 alone), the
 // second only past 8 bytes; with `split`, exactly one present (the other part in a stack slot) and 9 to 16 bytes. A
 // 16-byte aggregate's only XMM part takes the whole register, and so does a 32- or 64-byte one's YMM or ZMM part (a
-// vector's, or a struct of one's), which only an only vector register holds. A 17--23-byte SSE/SSEUP record has a
-// 16-byte payload in that single XMM register, with its remaining bytes absent from register transport.
+// vector's, or a struct of one's), which only an only vector register holds. A record SSE, SSEUP of 17 to 63 bytes has
+// its payload in that single register (#2113, abi_vector_payload_bytes), its remaining bytes absent from it.
 static bool tier0_parts_valid(const uint8_t* registers, bool high, bool split, uint32_t size, uint32_t allowed)
 {
     const bool first = registers[0] != BUSTER_ABI_REGISTER_NONE;
     const bool second = registers[1] != BUSTER_ABI_REGISTER_NONE;
     const uint32_t first_bit = tier0_register_bit(registers[0], allowed);
     const uint32_t second_bit = tier0_register_bit(registers[1], allowed);
-    const bool wide = ((size > 16 && size < 24) || size == 32 || size == 64) && first &&
-                       (registers[0] & BUSTER_ABI_REGISTER_VECTOR) != 0 && !second && !high && !split;
+    const bool wide = size > 16 && size <= 64 && first && (registers[0] & BUSTER_ABI_REGISTER_VECTOR) != 0 && !second && !high && !split;
     bool valid = size != 0 && (size <= 16 || wide) && (!first || first_bit != 0) && (!second || second_bit != 0) && (first_bit & second_bit) == 0;
     if (split)
     {
@@ -1527,7 +1557,8 @@ static bool tier0_aggregate_location_valid(AbiLocation location, uint32_t size, 
     const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
     const bool low = (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
     const bool whole = tier0_aggregate_whole(location);
-    const uint64_t slot = whole ? ((uint64_t)size + 7) & ~UINT64_C(7) : BUSTER_ABI_SLOT_BYTES;
+    const bool payload = (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0;
+    const uint64_t slot = whole ? tier0_whole_slot(location, size) : BUSTER_ABI_SLOT_BYTES;
     const bool stack = location.kind == BUSTER_ABI_LOCATION_STACK || location.kind == BUSTER_ABI_LOCATION_SPLIT;
     bool valid = location.kind == BUSTER_ABI_LOCATION_IGNORE || stack || location.kind == BUSTER_ABI_LOCATION_REGISTERS;
     valid = valid && (!stack || (location.stack_offset % BUSTER_ABI_SLOT_BYTES == 0 && (uint64_t)location.stack_offset + slot <= stack_bytes));
@@ -1540,8 +1571,9 @@ static bool tier0_aggregate_location_valid(AbiLocation location, uint32_t size, 
     {
         valid = valid && tier0_parts_valid(location.registers, high, location.kind == BUSTER_ABI_LOCATION_SPLIT, size, BUSTER_TIER0_ARGUMENT_REGISTERS);
     }
-    // LOW is a STACK location's alone.
+    // LOW is a STACK location's alone, and PAYLOAD a whole one's, of a record past its payload (#2113).
     valid = valid && (!low || location.kind == BUSTER_ABI_LOCATION_STACK);
+    valid = valid && (!payload || (whole && size > abi_vector_payload_bytes(size) && size <= 64));
     return valid;
 }
 
@@ -1567,13 +1599,14 @@ static bool tier0_x87_result_valid(AbiReturn result, uint32_t size)
 // registers at most, 8-byte parts or a 16-, 32- or 64-byte one in a vector register whole, or a value of fewer than 8
 // bytes alone in one register, an eightbyte's part as any other (an _Atomic vector of 4 bytes, which LLVM returns as its
 // value in xmm0, its part_bytes its size, #137); or in x87 registers (tier0_x87_result_valid), a struct of a long
-// double's in st0; or a vector's split across vector registers (tier0_vector_result_parts), its parts its bytes.
+// double's in st0; or a vector's split across vector registers (tier0_vector_result_parts), its parts its bytes. A
+// record's payload in one vector register (#2113) is its part_bytes.
 static bool tier0_aggregate_result_valid(AbiReturn result, uint32_t size)
 {
     const bool high = (result.flags & BUSTER_ABI_FLAG_HIGH) != 0;
-    const bool vector = tier0_vector_bytes_valid(result.part_bytes) && result.registers[1] == BUSTER_ABI_REGISTER_NONE &&
-                        (result.registers[0] & BUSTER_ABI_REGISTER_VECTOR) != 0 && !high &&
-                        (size == result.part_bytes || (result.part_bytes == 16 && size > 16 && size < 24));
+    const bool payload = tier0_vector_bytes_valid(result.part_bytes) || tier0_vector_payload(result.part_bytes);
+    const bool vector = payload && result.registers[1] == BUSTER_ABI_REGISTER_NONE && (result.registers[0] & BUSTER_ABI_REGISTER_VECTOR) != 0 && !high && size >= 16 &&
+                        size <= 64 && result.part_bytes == abi_vector_payload_bytes(size);
     const bool narrow = result.part_bytes != 0 && result.part_bytes < 8 && result.registers[1] == BUSTER_ABI_REGISTER_NONE && !high && size <= 8;
     const bool eightbytes = result.kind == BUSTER_ABI_RESULT_REGISTERS && (result.part_bytes == 8 || narrow || vector) &&
                             result.registers[2] == BUSTER_ABI_REGISTER_NONE && result.registers[3] == BUSTER_ABI_REGISTER_NONE &&
@@ -1585,7 +1618,7 @@ static bool tier0_aggregate_result_valid(AbiReturn result, uint32_t size)
 
 // The bytes a call's aggregate result in registers stores into its object (tier0_emit_call): each part's register whole,
 // 8 bytes from its eightbyte's offset (three elements' 24, tier0_element_parts), or 16, 32 or 64 for a vector's (each of
-// a split one's parts), or 16 for an x87 register's (whose fstp writes 10 of them).
+// a split one's parts) or its payload (#2113), or 16 for an x87 register's (whose fstp writes 10 of them).
 static uint32_t tier0_result_extent(AbiReturn result)
 {
     const bool high = (result.flags & BUSTER_ABI_FLAG_HIGH) != 0;
@@ -1600,7 +1633,7 @@ static uint32_t tier0_result_extent(AbiReturn result)
 }
 
 // The bytes each register of an aggregate result in registers stores whole (tier0_store_part's): a vector register's
-// part's 16, 32 or 64, or an eightbyte's 8.
+// part's 16, 32 or 64 or its payload (#2113), or an eightbyte's 8.
 static uint32_t tier0_result_part_bytes(AbiReturn result)
 {
     return result.part_bytes >= 16 ? result.part_bytes : 8;
@@ -1641,7 +1674,7 @@ static uint64_t tier0_incoming_bytes(const Tier0Function* function)
     {
         const AbiLocation location = function->parameters[p];
         const uint32_t size = tier0_is_object(function, p) ? function->local_sizes[p] : 0;
-        const uint64_t slot = size != 0 && tier0_aggregate_whole(location) ? ((uint64_t)size + 7) & ~UINT64_C(7) : BUSTER_ABI_SLOT_BYTES;
+        const uint64_t slot = size != 0 && tier0_aggregate_whole(location) ? tier0_whole_slot(location, size) : BUSTER_ABI_SLOT_BYTES;
         const bool stack = location.kind == BUSTER_ABI_LOCATION_STACK || location.kind == BUSTER_ABI_LOCATION_SPLIT;
         const uint64_t reach = stack ? (uint64_t)location.stack_offset + slot : 0;
         end = reach > end ? reach : end;
@@ -5688,6 +5721,53 @@ static uint8_t tier0_temporary_base(const Tier0Writer* writer)
     return writer->frame_temporaries ? X86_REGISTER_RBP : X86_REGISTER_RSP;
 }
 
+// The records that load a payload of `bytes` (tier0_vector_payload) from [base + displacement] into vector register
+// `reg` without reading past it: its last 8 or 16 bytes broadcast across the register (vbroadcastsd, vbroadcastf32x4),
+// then the bytes before them inserted over the low lanes (vinsertf128, vinsertf32x4, vinsertf64x4, AVX's or AVX-512F's
+// as the register's width asks), the register's bytes past the payload copies of its last ones. Returns how many, into
+// `records` (3 at most).
+static uint32_t tier0_payload_load(uint8_t reg, uint32_t bytes, uint8_t base, int32_t displacement, X86Instruction* records)
+{
+    const bool zmm = bytes > 32;
+    const int32_t last = displacement + (int32_t)(bytes == 48 ? 32 : bytes - 8);
+    const uint32_t broadcast = !zmm ? X86_FORM_VBROADCASTSD_Y_XM64 : bytes == 48 ? X86_FORM_VBROADCASTF32X4_Z_M128 : X86_FORM_VBROADCASTSD_Z_XM64;
+    uint32_t count = 0;
+    records[count++] = tier0_instruction(broadcast, reg, base, BUSTER_X86_MEMORY_BASE, last, 0);
+    if (bytes == 56)
+    {
+        records[count] = tier0_instruction(X86_FORM_VINSERTF32X4_Z_Z_XM128_IMM8, reg, base, BUSTER_X86_MEMORY_BASE, displacement + 32, 2);
+        records[count].vvvv = reg;
+        count += 1;
+    }
+    records[count] = tier0_instruction(zmm ? X86_FORM_VINSERTF64X4_Z_Z_YM256_IMM8 : X86_FORM_VINSERTF128_Y_Y_XM128_IMM8, reg, base, BUSTER_X86_MEMORY_BASE, displacement, 0);
+    records[count].vvvv = reg;
+    count += 1;
+    return count;
+}
+
+// The records that store a payload of `bytes` (tier0_vector_payload) from vector register `reg` to `rm` (`mode`'s, at
+// `displacement`) without writing past it: its low 16 or 32 bytes, then 16 straight from their lane (vextractf32x4),
+// and the last 8 extracted into the register's low lane (vextractf128, vextractf32x4) and stored (vmovsd), which loses
+// the register's value. Returns how many, into `records` (4 at most).
+static uint32_t tier0_payload_store(uint8_t reg, uint32_t bytes, uint8_t rm, uint8_t mode, int32_t displacement, X86Instruction* records)
+{
+    const bool zmm = bytes > 32;
+    uint32_t count = 0;
+    records[count++] = tier0_instruction(zmm ? X86_FORM_VMOVDQU_YM256_Y : X86_FORM_VMOVDQU_XM128_X, reg, rm, mode, displacement, 0);
+    if (bytes >= 48)
+    {
+        records[count++] = tier0_instruction(X86_FORM_VEXTRACTF32X4_XM128_Z_IMM8, reg, rm, mode, displacement + 32, 2);
+    }
+    if (bytes != 48)
+    {
+        const uint32_t lane = bytes == 24 ? 1 : bytes == 40 ? 2 : 3;
+        records[count++] = tier0_instruction(zmm ? X86_FORM_VEXTRACTF32X4_XM128_Z_IMM8 : X86_FORM_VEXTRACTF128_XM128_Y_IMM8, reg, reg, BUSTER_X86_REGISTER_DIRECT, 0,
+                                             (int32_t)lane);
+        records[count++] = tier0_instruction(X86_FORM_VMOVSD_M64_X, reg, rm, mode, displacement + (int32_t)bytes - 8, 0);
+    }
+    return count;
+}
+
 // Part `part` of an aggregate whose address is in `base` loaded into its register as tier0_parts_of says: one load of its
 // width, the 8 bytes that end where it ends shifted down, or 8 bytes from red zone temporary `temporary`, which holds its
 // bytes.
@@ -5705,6 +5785,16 @@ static void tier0_load_part(Tier0Writer* writer, Tier0Part part, uint8_t base, u
         tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, reg, base, BUSTER_X86_MEMORY_BASE, (int32_t)part.offset + part.bytes - 8, 0));
         tier0_put(writer, tier0_instruction(X86_FORM_SHR_RM64_IMM8, 0, reg, BUSTER_X86_REGISTER_DIRECT, 0, 8 * (8 - part.bytes)));
     }
+    else if (xmm && tier0_vector_payload(part.bytes))
+    {
+        // A payload no register is as wide as (#2113), in pieces that stay inside it.
+        X86Instruction records[3];
+        const uint32_t count = tier0_payload_load(reg, part.bytes, base, part.offset, records);
+        for (uint32_t k = 0; k < count; k += 1)
+        {
+            tier0_put(writer, records[k]);
+        }
+    }
     else
     {
         const uint32_t form = xmm ? (part.bytes == 64   ? X86_FORM_VMOVDQU64_Z_ZM512
@@ -5717,15 +5807,17 @@ static void tier0_load_part(Tier0Writer* writer, Tier0Part part, uint8_t base, u
     }
 }
 
-// How many records tier0_load_part writes.
+// How many records tier0_load_part writes: a payload's pieces (#2113), 2 or 3.
 static uint32_t tier0_part_records(Tier0Part part)
 {
-    return part.load == BUSTER_TIER0_PART_OVERLAP ? 2 : 1;
+    const bool payload = part.reg >= 16 && part.reg != BUSTER_TIER0_PART_STACK && tier0_vector_payload(part.bytes);
+    return part.load == BUSTER_TIER0_PART_OVERLAP ? 2 : payload ? (part.bytes == 56 ? 3u : 2u) : 1;
 }
 
 // A register's part stored whole at `offset` in the object at `home`: 8 bytes, or 16 for a vector's XMM register, and
 // 32 or 64 for its YMM or ZMM register (vmovdqu, which AVX has, for 32; vmovdqu64, AVX-512F's, for 64, a ZMM register
-// being AVX-512F's).
+// being AVX-512F's); a payload that no register is as wide as (#2113) in pieces that stay inside it, which lose the
+// register's value (tier0_payload_store).
 static void tier0_store_part(Tier0Writer* writer, uint8_t reg, uint32_t bytes, Tier0Home home, uint32_t offset)
 {
     const uint32_t vector = bytes == 64   ? X86_FORM_VMOVDQU64_ZM512_Z
@@ -5733,7 +5825,23 @@ static void tier0_store_part(Tier0Writer* writer, uint8_t reg, uint32_t bytes, T
                             : bytes == 16 ? X86_FORM_MOVUPS_XM_X
                                           : X86_FORM_MOVSD_XM64_X;
     const uint32_t form = reg >= 16 ? vector : X86_FORM_MOV_RM64_R64;
-    tier0_put(writer, tier0_instruction(form, (uint8_t)(reg & 15), home.reg, home.mode, home.displacement + (int32_t)offset, 0));
+    X86Instruction records[4];
+    const uint32_t count = reg >= 16 && tier0_vector_payload(bytes) ? tier0_payload_store((uint8_t)(reg & 15), bytes, home.reg, home.mode, home.displacement + (int32_t)offset, records) : 0;
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        tier0_put(writer, records[k]);
+    }
+    if (count == 0)
+    {
+        tier0_put(writer, tier0_instruction(form, (uint8_t)(reg & 15), home.reg, home.mode, home.displacement + (int32_t)offset, 0));
+    }
+}
+
+// How many records tier0_store_part writes: a payload's pieces (#2113), 2 to 4.
+static uint32_t tier0_store_records(uint8_t reg, uint32_t bytes)
+{
+    const bool payload = reg >= 16 && tier0_vector_payload(bytes);
+    return !payload ? 1 : bytes == 48 ? 2 : bytes == 56 ? 4 : 3;
 }
 
 // The depths each stack reaches, as selection takes them.
@@ -5770,8 +5878,9 @@ static Tier0Tops tier0_select_scratch(const Tier0Function* function, const Tier0
                 {
                     general |= parts[k].reg == BUSTER_TIER0_PART_STACK || parts[k].load == BUSTER_TIER0_PART_TEMPORARY;
                 }
-                general |= size != 0 && size <= BUSTER_TIER0_COPY_NARROW_BYTES && tier0_aggregate_whole(location);
-                xmm |= size > BUSTER_TIER0_COPY_NARROW_BYTES && tier0_aggregate_whole(location);
+                const uint32_t copied = tier0_whole_bytes(location, size);
+                general |= copied != 0 && copied <= BUSTER_TIER0_COPY_NARROW_BYTES && tier0_aggregate_whole(location);
+                xmm |= copied > BUSTER_TIER0_COPY_NARROW_BYTES && tier0_aggregate_whole(location);
             }
         }
         const int32_t depth = entries->depths[i];
@@ -5827,7 +5936,7 @@ static __attribute__((noinline)) uint32_t tier0_place_aggregates(const Tier0Func
             aggregate->count = tier0_aggregate_whole(location) ? 0 : (uint8_t)tier0_location_parts(location, size, aggregate->parts);
             if (tier0_aggregate_whole(location))
             {
-                tier0_copy(writer, X86_REGISTER_RSP, (int32_t)location.stack_offset, source, 0, size, general, xmm, false);
+                tier0_copy(writer, X86_REGISTER_RSP, (int32_t)location.stack_offset, source, 0, tier0_whole_bytes(location, size), general, xmm, false);
             }
             for (uint32_t k = 0; k < aggregate->count; k += 1)
             {
@@ -5857,7 +5966,7 @@ static uint32_t tier0_aggregate_records(AbiLocation location, uint32_t size, uin
     Tier0Part parts[2];
     const bool whole = tier0_aggregate_whole(location);
     const uint32_t part_count = whole ? 0 : tier0_location_parts(location, size, parts);
-    uint32_t count = whole ? tier0_copy_records(size, false) : 0;
+    uint32_t count = whole ? tier0_copy_records(tier0_whole_bytes(location, size), false) : 0;
     *own = BUSTER_TIER0_PART_STACK;
     *own_set = 0;
     for (uint32_t k = 0; k < part_count; k += 1)
@@ -5873,13 +5982,15 @@ static uint32_t tier0_aggregate_records(AbiLocation location, uint32_t size, uin
 }
 
 // The records a call's result object takes after its moves (tier0_emit_call's): the lea of its address into rdi for a
-// hidden pointer, or a store per register of a result in registers (tier0_store_result's).
+// hidden pointer, or a store per register of a result in registers (tier0_store_result's), a payload's in pieces.
 static uint32_t tier0_result_object_records(AbiReturn returned)
 {
     uint32_t stores = 0;
     for (uint32_t k = 0; k < BUSTER_ABI_RESULT_PARTS; k += 1)
     {
-        stores += returned.registers[k] != BUSTER_ABI_REGISTER_NONE ? 1u : 0u;
+        const uint8_t reg = returned.registers[k];
+        const bool x87 = (reg & BUSTER_ABI_REGISTER_X87) != 0;
+        stores += reg == BUSTER_ABI_REGISTER_NONE ? 0u : x87 ? 1u : tier0_store_records(tier0_abi_register(reg), tier0_result_part_bytes(returned));
     }
     return returned.kind == BUSTER_ABI_RESULT_MEMORY ? 1 : returned.kind == BUSTER_ABI_RESULT_REGISTERS ? stores : 0;
 }
@@ -9162,7 +9273,7 @@ static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entri
                 if (pass == 0 && whole)
                 {
                     tier0_spill(writer, frame, X86_REGISTER_RAX, slot, true);
-                    tier0_copy(writer, X86_REGISTER_RSP, (int32_t)location.stack_offset, X86_REGISTER_RAX, 0, size,
+                    tier0_copy(writer, X86_REGISTER_RSP, (int32_t)location.stack_offset, X86_REGISTER_RAX, 0, tier0_whole_bytes(location, size),
                                X86_REGISTER_R10, 0, false);
                 }
                 else if (!whole && part_count != 0)
@@ -9941,7 +10052,7 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
             }
             if (tier0_aggregate_whole(location) && !tier0_parameter_in_place(function, p))
             {
-                tier0_copy(writer, homes[p].reg, homes[p].displacement, base, incoming, function->local_sizes[p], X86_REGISTER_RAX, 15, false);
+                tier0_copy(writer, homes[p].reg, homes[p].displacement, base, incoming, tier0_whole_bytes(location, function->local_sizes[p]), X86_REGISTER_RAX, 15, false);
             }
         }
     }
@@ -10017,9 +10128,9 @@ static uint32_t tier0_count_prologue(const Tier0Function* function, const Tier0F
             const uint32_t part_count = tier0_location_parts(location, function->local_sizes[p], parts);
             for (uint32_t k = 0; k < part_count; k += 1)
             {
-                count += parts[k].reg == BUSTER_TIER0_PART_STACK ? 2 : 1;
+                count += parts[k].reg == BUSTER_TIER0_PART_STACK ? 2 : tier0_store_records(parts[k].reg, parts[k].bytes);
             }
-            count += tier0_aggregate_whole(location) && !tier0_parameter_in_place(function, p) ? tier0_copy_records(function->local_sizes[p], false) : 0;
+            count += tier0_aggregate_whole(location) && !tier0_parameter_in_place(function, p) ? tier0_copy_records(tier0_whole_bytes(location, function->local_sizes[p]), false) : 0;
         }
     }
     return count;

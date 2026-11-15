@@ -128,8 +128,9 @@ endfunction()
 
 # The settings, normalized, into buster_<setting> in the caller's scope, and the name of the build tree that keeps
 # them apart from the others (buster_variant): the host ISA, the baseline runtime, the sanitizer and its optimization,
-# fuzzing, and debug information, each of which changes every unit's flags. Runs nothing. Fails for a value no build
-# takes, with the message the settings' checks have always given.
+# fuzzing, debug information and PGO, each of which changes every unit's flags, and Release in parts, which changes
+# the main.c units'. Runs nothing. Fails for a value no build takes, with the message the settings' checks have always
+# given.
 function(buster_settings_normalize)
     set(fuzz "${BUSTER_FUZZ_AVAILABLE}")
     if(fuzz STREQUAL "")
@@ -251,10 +252,12 @@ function(buster_settings_normalize)
         buster_settings_fail("BUSTER_BUILD_DEFINES can't hold a semicolon or \$<")
     endif()
 
-    # Parallel native generation after the ordinary O3 IR pipeline (BusterCodegen.cmake): auto, the default, takes it
-    # where the build's flags allow it and the tools are there (CMakeLists.txt checks them); 1 requires it; 0 never.
-    # A sanitizer build takes it too: its module is instrumented by that pipeline, so the parts generate the single
-    # compile's code (#2639). Fuzzing, PGO, an explicit host runtime and BUSTER_BUILD_DEFINES keep the single compile.
+    # Parallel native generation and the units in parts (BusterCodegen.cmake): auto, the default, takes them where the
+    # build's flags allow it and the tools are there (CMakeLists.txt checks them); 1 requires them; 0 never. Release
+    # generates its two longest units' native code in parts after the ordinary O3 IR pipeline (a sanitizer build's too:
+    # its module is instrumented by that pipeline, so the parts generate the single compile's code, #2639), and Develop
+    # splits its main.c units before the optimizer. Fuzzing, PGO, an explicit host runtime and BUSTER_BUILD_DEFINES
+    # keep the single compile.
     set(parallel_codegen "${BUSTER_PARALLEL_CODEGEN}")
     if(parallel_codegen STREQUAL "")
         set(parallel_codegen auto)
@@ -275,6 +278,21 @@ function(buster_settings_normalize)
         else()
             set(parallel_codegen 1)
         endif()
+    endif()
+
+    # Release in parts (#2559, docs/commands/build.md, "Release in parts"): 1 builds Release's main.c units in parts
+    # before the optimizer, as Develop's, for a short edit loop; 0, the default, keeps Release's units whole through
+    # the optimizer, as the 9700X's gate measured the parts outside its floor. A tree of its own (-parts), so that
+    # switching it rebuilds neither. It needs the units in parts, which a sanitizer build's Release doesn't take.
+    set(release_parts "${BUSTER_RELEASE_PARTS}")
+    if(release_parts STREQUAL "")
+        set(release_parts 0)
+    endif()
+    if(NOT release_parts MATCHES "^(0|1)$")
+        buster_settings_fail("BUSTER_RELEASE_PARTS must be 0 or 1")
+    endif()
+    if(release_parts AND (parallel_codegen STREQUAL "0" OR NOT sanitizer STREQUAL "none"))
+        buster_settings_fail("BUSTER_RELEASE_PARTS=1 requires the units in parts: BUSTER_PARALLEL_CODEGEN not 0, and no sanitizer, fuzzing, PGO, host runtime or BUSTER_BUILD_DEFINES")
     endif()
 
     set(bake 1)
@@ -299,6 +317,9 @@ function(buster_settings_normalize)
     if(pgo)
         string(APPEND variant "-pgo")
     endif()
+    if(release_parts)
+        string(APPEND variant "-parts")
+    endif()
 
     set(buster_fuzz ${fuzz} PARENT_SCOPE)
     set(buster_fuzz_entry "${entry}" PARENT_SCOPE)
@@ -313,6 +334,7 @@ function(buster_settings_normalize)
     set(buster_pgo_train "${pgo_train}" PARENT_SCOPE)
     set(buster_parallel_codegen ${parallel_codegen} PARENT_SCOPE)
     set(buster_parallel_codegen_required ${parallel_codegen_required} PARENT_SCOPE)
+    set(buster_release_parts_required ${release_parts} PARENT_SCOPE)
     set(buster_variant "${variant}" PARENT_SCOPE)
 endfunction()
 

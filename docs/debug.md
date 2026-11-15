@@ -165,11 +165,14 @@ parameters and automatic locals and no code, written before the out-of-line
 one), not the out-of-line `DW_TAG_subprogram`: a reader takes an attribute an
 entry lacks from its origin, and gdb 18 (and CI's) takes the inherited
 `DW_AT_low_pc` over the instance's `DW_AT_ranges` and drops it. A callee's
-parameters are the caller's locals past its own (#2541,
-`BUSTER_IR_DEBUG_BIND_INSTANCE`), each bound to its argument's value where the
-callee never assigns it: the value proof places it at the records of its
-instance's code, and the instance has a `DW_TAG_formal_parameter` with that
-location list. Its other locals have no location. A function every call of
+locals are the caller's past its own (#2541, `BUSTER_IR_DEBUG_BIND_INSTANCE`),
+of their callee's form, their assignments and regions at the instance's origins
+and a parameter's initial binding its argument's value: the value proof reads
+each at a record's origin in its instance (an inner instance's code at its call
+there) and not outside the instance, as it reads the function's own at the
+record's entry, and the instance has a `DW_TAG_formal_parameter` or a
+`DW_TAG_variable` with that location list for each one with a proven location
+(its abstract instance names the others). A function every call of
 which `--tier1` expanded and nothing else keeps (a dead one, `-c` only) has no
 rows, address or `DW_TAG_subprogram` of its own under `-g`, its abstract
 instance alone (`CheckProgramRows.dead`), so `-g` changes no code.

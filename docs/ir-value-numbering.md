@@ -9,6 +9,13 @@ transactional rollback and explicit entry-phi refusal follow the
 [optimization contract](ir-optimization.md). Each stage rebuilds dominance
 after rewriting; no stale CFG or use list is published.
 
+`IrGvnOptions.vectors` (#2781) keeps every scalar alias as its own value after
+congruence analysis, so only vector- and mask-typed values are substituted.
+Scalar congruence may still prove their vector users congruent. Tier 1 enables
+this restricted form by default in functions with vector or mask values;
+`--tier1-gvn` and `+gvn` continue to select the unrestricted solver. The filter
+has a 16-value SIMD path and an exact scalar twin. `test-ir-gvn` checks that
+vector duplicates merge while their duplicate scalar instructions remain.
 The vector path computes the coarsest congruence partition: two values are
 congruent when their opcode, type, flags and semantic metadata match and their
 operands are congruent position by position. Phis compare their incoming
@@ -325,9 +332,10 @@ that 6%, which is why it stays a scalar chain. [The measurement record](https://
 has the scripts, the raw logs and a disclosed invalid first attempt at the
 Tier 1 step (driver options it refused).
 
-The Tier 1 pipeline still does not feed C source through GVN by default, so no
-default C-driver or emitted-code effect is claimed here. Those
-remain #139's integration work. The source-derived rows qualify the pass on
+The measurements in this section predate #2781. Tier 1 still does not feed
+every C value through unrestricted GVN by default; its vector/mask-only form
+is covered by [the Tier 1 guide](tier1.md). The unrestricted integration work
+remains #139's. The source-derived rows qualify the pass on
 real IR; the synthetic rows measure the whole public stage.
 
 ## Tier 1's measurement (#866's last question)
@@ -347,7 +355,7 @@ either way). On the 9700X, at the reviewed head, the same pair is 1,440,195 to
 compiles). After `ir_optimize` the same pass is worse (text +15.8%,
 instructions +40%, 2.5 times the spill traffic), and a cleanup pass after it
 does not recover the regression (205,229 against 205,269 instructions), so it
-is the merge, not dead values, that costs. Routing C source through GVN by
+is the merge, not dead values, that costs. Routing every C value through unrestricted GVN by
 default therefore waits for a variant that accounts for allocation cost; the
 option stays as the reproducible measurement, and [the measurement
 record](https://github.com/buster14a/buster-performance/tree/126886e46a23f095709bffb36c3c57aaafac35b3/docs/measurements/gvn-866-tier1-2026-11-01)

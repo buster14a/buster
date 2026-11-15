@@ -156,11 +156,11 @@ passes by its vector and its scalar version:
 
 Both versions must give the same function, counts and decisions. SROA's,
 the solver's and the inliner's results must also promote. A refusal both
-versions give alike is counted, not failed: `IR_ERROR_UNSUPPORTED`, and the
-inliner's `IR_ERROR_TYPE` for a caller with an unprototyped or variadic call
-of one of the unit's functions, whose `IrCall` lists every argument. Any other
+versions give alike is counted, not failed: `IR_ERROR_UNSUPPORTED`. Any other
 error or difference fails the command, with a line naming the file,
-function and pass. The correctness list runs it on c-testsuite's subset, the
+function and pass; the inliner's unit of a caller with an unprototyped or
+variadic call is no refusal (its signature is that call's decision, #2721:
+c-testsuite's subset and `sqlite3.c` had 7 and 219 such units). The correctness list runs it on c-testsuite's subset, the
 frozen `sqlite3.c` and musl, every pass agreeing on all 5,807 functions.
 
 `./build/compiler benchmark-ir-source --passes [--only PASS] [preprocessor
