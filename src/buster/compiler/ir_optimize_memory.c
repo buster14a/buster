@@ -1056,6 +1056,8 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, bool reques
     // AVX-512's gather indices are signed dwords, and the constants' and addresses' gathers double theirs: larger value
     // spaces take the scalar twin.
     const bool scalar = !BUSTER_VECTOR_PATH(!requested_scalar) || n >= (UINT32_C(1) << 30) || f->address_count >= (UINT32_C(1) << 30);
+    // A host without the vector phases (BUSTER_HOST_VECTOR 0) reads it nowhere.
+    (void)scalar;
     IrMemoryWork m = { .ir = work, .undo_bound = (uint64_t)f->block_count * 2 };
     m.info = ir_memory_push(scratch, n, sizeof(uint32_t), &ok);
     m.follow = ir_memory_push(scratch, n, sizeof(uint32_t), &ok);
