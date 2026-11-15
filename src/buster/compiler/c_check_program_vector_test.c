@@ -245,6 +245,36 @@ static const char check_test_wide_conversions[] =
     "F cf=__builtin_convertvector(a,F);E(cf,1025)C cc=__builtin_convertvector(__builtin_elementwise_abs(f),C);E(cc,1025)"
     "V cv=__builtin_convertvector(c,V);E(cv,1025)D5 cd=__builtin_convertvector(__builtin_shufflevector(f,f,I1024,1),D5);E(cd,1025)return (int)h;}\n";
 
+// Conversion pieces straddle register widths and have a scalar tail. Fold only the defined lanes: an extended vector's
+// padding is not part of its value. The wider destination and wider source exercise different piece boundaries.
+static const char check_test_transport_conversions[] =
+    "#define TYPES(N) typedef int I##N __attribute__((ext_vector_type(N)));typedef unsigned U##N __attribute__((ext_vector_type(N)));"
+    "typedef signed char B##N __attribute__((ext_vector_type(N)));typedef unsigned char C##N __attribute__((ext_vector_type(N)));"
+    "typedef unsigned short S##N __attribute__((ext_vector_type(N)));typedef long long L##N __attribute__((ext_vector_type(N)));"
+    "typedef unsigned long long Q##N __attribute__((ext_vector_type(N)));"
+    "typedef float F##N __attribute__((ext_vector_type(N)));typedef double D##N __attribute__((ext_vector_type(N)));\n"
+    "TYPES(7) TYPES(9) TYPES(15) TYPES(16) TYPES(17) TYPES(32) TYPES(33) TYPES(64) TYPES(65)\n"
+    "#define CASE(N) {I##N a;U##N u;B##N b;C##N c;S##N s;Q##N q;F##N f,g;D##N d;for(int i=0;i<N;i++){"
+    "a[i]=(n+i*13)%201-100;u[i]=0x80000000u+(unsigned)n+(unsigned)i*0x1020304u;b[i]=(signed char)(n+i*17);"
+    "c[i]=(unsigned char)(n+i*17);s[i]=(unsigned short)(n+i*103);q[i]=((unsigned long long)u[i]<<32)|((unsigned)n+i);"
+    "f[i]=(float)((n+i*7)%200)-100.5f;g[i]=(float)(((unsigned)n+i*7u)%200u)+0.5f;d[i]=(double)f[i];}"
+    "F##N af=__builtin_convertvector(a,F##N),uf=__builtin_convertvector(u,F##N);C##N gc=__builtin_convertvector(g,C##N);"
+    "I##N ci=__builtin_convertvector(c,I##N),fi=__builtin_convertvector(f,I##N),di=__builtin_convertvector(d,I##N);"
+    "Q##N sq=__builtin_convertvector(s,Q##N),uq=__builtin_convertvector(u,Q##N);L##N bl=__builtin_convertvector(b,L##N);"
+    "B##N ab=__builtin_convertvector(a,B##N);U##N qu=__builtin_convertvector(q,U##N),au=__builtin_convertvector(a,U##N);"
+    "D##N fd=__builtin_convertvector(f,D##N),qd=__builtin_convertvector(q,D##N);"
+    "h=fold(h,&af,N*sizeof(af[0]));h=fold(h,&uf,N*sizeof(uf[0]));h=fold(h,&gc,N*sizeof(gc[0]));h=fold(h,&ci,N*sizeof(ci[0]));"
+    "h=fold(h,&fi,N*sizeof(fi[0]));h=fold(h,&di,N*sizeof(di[0]));h=fold(h,&sq,N*sizeof(sq[0]));h=fold(h,&uq,N*sizeof(uq[0]));"
+    "h=fold(h,&bl,N*sizeof(bl[0]));h=fold(h,&ab,N*sizeof(ab[0]));h=fold(h,&qu,N*sizeof(qu[0]));h=fold(h,&au,N*sizeof(au[0]));"
+    "h=fold(h,&fd,N*sizeof(fd[0]));h=fold(h,&qd,N*sizeof(qd[0]));}\n"
+    "int tested(int n){unsigned h=2166136261u;CASE(7) CASE(9) CASE(15) CASE(16) CASE(17) CASE(32) CASE(33) CASE(64) CASE(65) return (int)h;}\n";
+
+// A separately emitted conversion makes the native code bound cover the conversion rather than the surrounding setup.
+static const char check_test_transport_conversion_size[] =
+    "typedef int I __attribute__((ext_vector_type(73)));typedef float F __attribute__((ext_vector_type(73)));"
+    "void convert(I *a,F *b){*b=__builtin_convertvector(*a,F);}"
+    "int tested(int n){I a;F b;for(int i=0;i<73;i++)a[i]=n+i;convert(&a,&b);return (int)b[0]+(int)b[72];}\n";
+
 static const char check_test_wide_elements[] =
     BUSTER_CHECK_TEST_WIDE_LANES
     "int tested(int n){SETUP\n"
@@ -626,6 +656,7 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
         // A transport vector's bit builtins element by element where the target's piece has no row: popcount of ints
         // without AVX-512 VPOPCNTDQ (#2216, check_lower_bits_elements), with the rest of the wide elementwise builtins.
         { "vector-wide-elements", check_test_wide_elements },
+        { "vector-transport-conversions", check_test_transport_conversions },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)
     {
@@ -1631,6 +1662,7 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
         { "baseline-wide-quadwords", check_test_wide_quadwords },
         { "baseline-wide-floating", check_test_wide_floating },
         { "baseline-wide-conversions", check_test_wide_conversions },
+        { "baseline-transport-conversions", check_test_transport_conversions },
         { "baseline-wide-elements", check_test_wide_elements },
         { "baseline-wide-logical", check_test_wide_logical },
         { "baseline-wide-shuffle", check_test_wide_shuffle },
@@ -1687,6 +1719,13 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
                 check_test_program_includes = false;
                 free(source);
             }
+        }
+        if (parsed && level == 0)
+        {
+            // A nonzero entry limit also enables the harness's 2,048-byte native code bound; this generous typed-entry
+            // limit leaves the bound to distinguish one-row-per-piece lowering from 73 scalar conversions.
+            check_test_program_source_native_limits(test, check_test_transport_conversion_size, "baseline-transport-conversion-size", clang, false, -1, 10000,
+                                                     &target, (native.features & target.features) == target.features);
         }
         if (parsed && level == 2)
         {

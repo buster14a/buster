@@ -9641,7 +9641,7 @@ static bool check_driver_statement_lists(const CheckProgram* program, const Chec
 // check_driver_provisional_refresh fills in after the loop, and check_driver_provisional_check decides whether it
 // serves. Whether it was made, in *provisional.
 static bool check_driver_provisional_select(CheckProgramSelection* provisional, const CheckProgram* program, const CheckDataPrepared* data, bool scalar,
-                                            Arena* output, Arena* scratch)
+                                            CheckProgramSelectShared* shared, Arena* output, Arena* scratch)
 {
     const CheckProgramCensus* census = &program->census_pass;
     const uint64_t scratch_mark = scratch->length;
@@ -9664,7 +9664,7 @@ static bool check_driver_provisional_select(CheckProgramSelection* provisional, 
     candidates.dropped_range_count = program->census_pass_arms;
     candidates.region_reached = NULL;
     const bool made = census->first != NULL && (copies != NULL || program->body_count == 0) &&
-                      check_program_select_mode(provisional, &candidates, data, C_LOWERING_REACHABLE, scalar, false, output, scratch);
+                      check_program_select_shared(provisional, &candidates, data, C_LOWERING_REACHABLE, scalar, false, shared, output, scratch);
     arena_pop_to(scratch, scratch_mark);
     return made;
 }
@@ -12924,6 +12924,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     // check_driver_provisional_select) where -c's object may take it, and its records filled in after
                     // the loop and the tail.
                     CheckProgramSelection provisional;
+                    // What the provisional selection and the exact one share (#2536's step 2.2c.4, part 3).
+                    CheckProgramSelectShared select_shared = { 0 };
                     bool provisional_made = false;
                     bool program_checked = false;
                     // --windowed-loop's code (#2536's step 2.2c.4, part 2): the provisional selection's, lowered as the loop
@@ -12937,7 +12939,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         CheckProgramRun run;
                         check_program_start(&run, &program, checking, program_input, &stream, &types, program_options, output_arena, scratch);
                         provisional_made = early && run.symbols && run.symbols_valid && program.status == CHECK_PROGRAM_OK &&
-                                           check_driver_provisional_select(&provisional, &program, &data, scalar, output_arena, scratch);
+                                           check_program_select_shared_make(&select_shared, &data, program.body_count, output_arena) &&
+                                           check_driver_provisional_select(&provisional, &program, &data, scalar, &select_shared, output_arena, scratch);
                         CheckDriverLoop loop;
                         uint32_t compound_count = 0;
                         windowed = provisional_made && command->windowed_loop && lanes != NULL &&
@@ -13213,8 +13216,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     if (result == 0 && (emit_object || kept != NULL) && !prefix_only)
                     {
                         CheckProgramSelection selected;
-                        const bool selection = check_program_select_mode(&selected, &program, &data, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar,
-                                                                         kept != NULL, output_arena, scratch);
+                        const bool selection = check_program_select_shared(&selected, &program, &data, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar,
+                                                                           kept != NULL, provisional_made ? &select_shared : NULL, output_arena, scratch);
                         check_clock_mark(stage_clock, CHECK_STAGE_SELECT);
                         if (selection && program.census_walk.first != NULL)
                         {

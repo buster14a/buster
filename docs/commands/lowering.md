@@ -659,3 +659,62 @@ of them calls the census refuses before the shadow's T, which no comparison
 reads). The chunk-boundary text ends with the address of an array no
 declaration points to, whose pointer type T makes itself.
 [The design](../node-machine.md)'s "Step 1: the shadow" has the results.
+
+### The fact words (#2850's step 1)
+
+`./build/compiler measure-node-machine --shadow --facts [--facts-packed] [--facts-window N] [--passes N] [--list N] [preprocessor options] file...`
+(`c_check_node_machine_facts.c`) is step 1 of [the one-core
+path](../one-core-path.md): T's identifier leaves and lookups made from fact
+words, with T's records as the oracle. It runs in the shadow's own pass, after
+the pipeline and the shadow's sweeps; no compile takes any of it.
+
+- **The words.** A declaration's line (32 bytes: its leaf's record's first
+  half), a type's row (64 bytes, by type index: its word, value type,
+  promotion, element, pointer types, return type, and as flags what each
+  lookup's rule asks of the type) and a member's slot (32 bytes, by a hash of
+  the record type and the name). `node_facts_begin` makes the rows;
+  `node_facts_declaration` makes a line the first time its declaration is
+  named and again where the line would change (a type completed since, a weak
+  pragma since); `node_facts_member_fill` fills a slot at its first access.
+- **The windows.** As the shadow takes each expression, `node_facts_append`
+  adds its records to the window at hand: each record's operator, kind (a
+  given record, a literal's leaf, an identifier's leaf, a lookup), operands as
+  distances back, a lookup's class, and T's record of it. A window is a
+  body's expressions, cut where the next expression would take it past 384
+  records (`BUSTER_NODE_FACTS_CUT`). `--facts-packed` lets a window hold
+  several bodies' expressions; `--facts-window N` cuts at N records (16 to
+  4,096). Either implies `--facts`.
+- **The kernel** (`node_facts_window`): the window's identifiers' leaves and
+  its lookups listed sixteen records a step (`node_facts_list`); each leaf one
+  load of its declaration's line and one store of its record
+  (`node_facts_leaves`); then the lookups a class at a time, the lower levels
+  first (`node_facts_batch`, and one loop an operator: `node_facts_arrows`,
+  `_dots`, `_subscripts`, `_calls`, `_discards`). Each lookup has a short
+  path (`node_facts_*_fast`) and behind it its rule (`node_facts_slow`), T's
+  own rule's steps on rows and slots; what neither takes is T's record,
+  counted as left. The kernel's record is one 64-byte line
+  (`NodeFactsRecord`), T's fields together.
+- **The comparison.** A checked pass gives the kernel T's records of the given
+  nodes and poisoned bytes for the leaves and lookups, then compares every
+  field T writes of a record (`node_facts_same`) and the kernel's lists and
+  classes with a record-at-a-time twin (`node_facts_lists_same`). The timed
+  passes follow: `--passes N` of the windows whole, by the cycle, instruction
+  and mispredicted-branch counters; as many of the given records put in place
+  alone, which is taken off; and as many with the two parts' TSC ticks apart,
+  each window run and run again at once.
+
+The report's `node-facts:` lines give the records by kind, the identifiers by
+what they name, the lookups by operator with those left, the given records by
+operator, the differences, the words made (rows, lines, lines made again,
+member slots), the windows, and the times: the kernel's cycles, instructions
+and mispredicted branches a taken leaf or lookup, and a leaf's and a lookup's
+ticks. `--list N` prints the first N records that differ, with both records.
+The command exits 1 on a difference. On a host without the vector paths the
+listing and the leaves run a record at a time and give the same records.
+
+`test-checker` runs `node_facts_test_text` (each kind of leaf and each lookup,
+taken and left) at three window settings: every record T's, the lists the
+twin's, and the counts of leaves, lookups and lookups left the fixture's. A
+rule changed in T needs its step changed in the facts' rule and short path:
+the fixture and the corpora's comparison say where. [The
+design](../one-core-path.md#step-1-the-fact-words) has the results.

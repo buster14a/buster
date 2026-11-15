@@ -7,7 +7,8 @@
 // expression the tasks lowered is read again from the finished graph, stream and parser's tree, by the tests the machine
 // would make before it takes it. Include after c_check_lower_inventory.c.
 //
-//   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--fused] [--interleave N] [--passes N] [--repeat N]] [preprocessor options] file...
+//   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--fused] [--interleave N] [--facts | --facts-packed] [--facts-window N]
+//                                       [--passes N] [--repeat N]] [preprocessor options] file...
 //
 // A full expression is a tree of the tasks' pops under one root: a pop that a statement's control pushed (an expression
 // statement's, a condition's, a return's, a switch's, an initializer's) or a nested control (a statement expression's).
@@ -487,6 +488,8 @@ struct NodeCensusScratch
     // --shadow's: the machine, the current body's function and its entries' owners, and per object and per local the
     // body's map between them (each stamped with the body's number plus one).
     NodeMachine* machine;
+    // --facts: the file's fact words and windows (c_check_node_machine_facts.c), or none.
+    NodeFacts* facts;
     const Tier0Function* function;
     const uint32_t* owners;
     // The log's labels' entries (CheckLowerOwners.labels), which a pop's `label` indexes.
@@ -1951,6 +1954,46 @@ struct NodeShadow
     uint64_t ticks[BUSTER_NODE_SHADOW_SWEEPS];
     uint64_t timed_nodes;
     bool counted;
+    // --facts (#2850's step 1, c_check_node_machine_facts.c): the machine-taken expressions' leaves and lookups from the
+    // fact words, compared with T's records and timed. The files' counts summed (NodeFacts'), the records the kernel's
+    // rules made (`facts_taken_leaves`, `facts_taken_lookups`), those that differ from T's, the words made, and the
+    // kernel's time over each file's windows: its least cycles, instructions and TSC ticks over the passes, the ticks of
+    // its two loops, and those of each window's second run of two in a row (`facts_warm`).
+    bool facts;
+    bool facts_packed;
+    uint32_t facts_window;
+    uint64_t facts_records;
+    uint64_t facts_literals;
+    uint64_t facts_identifiers;
+    uint64_t facts_named[4];
+    uint64_t facts_left_identifiers;
+    uint64_t facts_lookups[BUSTER_NODE_FACTS_LOOKUPS];
+    uint64_t facts_left_lookups[BUSTER_NODE_FACTS_LOOKUPS];
+    uint64_t facts_given[CHECK_OP_COUNT];
+    uint64_t facts_taken_leaves;
+    uint64_t facts_taken_lookups;
+    uint64_t facts_differences;
+    uint64_t facts_list_differences;
+    uint64_t facts_listed;
+    uint64_t facts_failures;
+    uint64_t facts_rows;
+    uint64_t facts_lines;
+    uint64_t facts_line_versions;
+    uint64_t facts_members;
+    uint64_t facts_windows;
+    uint64_t facts_widest;
+    uint64_t facts_row_ticks;
+    uint64_t facts_line_ticks;
+    uint64_t facts_cycles;
+    uint64_t facts_instructions;
+    uint64_t facts_given_cycles;
+    uint64_t facts_given_instructions;
+    uint64_t facts_given_ticks;
+    uint64_t facts_mispredicts;
+    uint64_t facts_given_mispredicts;
+    uint64_t facts_ticks;
+    uint64_t facts_loop_ticks[2];
+    uint64_t facts_warm[2];
     // The current file's taken expressions, and their evaluated nodes.
     NodeShadowExpression* timed;
     uint64_t file_nodes;
@@ -2406,6 +2449,10 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
                 .kind = (uint8_t)context,
             };
         }
+        if (s->facts != NULL)
+        {
+            node_facts_append(s->facts, s->body_stamp);
+        }
     }
     // The one sweep, for every expression T typed: C and X took it or refused it.
     if (shadow->fused && ran && (refusal == NODE_MACHINE_TAKEN || refusal == NODE_MACHINE_REFUSED_TEMPLATE || refusal == NODE_MACHINE_REFUSED_ROW))
@@ -2571,6 +2618,245 @@ static void node_shadow_time(NodeShadow* shadow, NodeMachine* machine, uint64_t 
     if (instructions >= 0)
     {
         close(instructions);
+    }
+}
+
+// --facts, a file's: the kernel (node_facts_window) over each window of the file's machine-taken expressions. First a
+// pass over records no rule has written, whose every identifier's leaf and lookup is compared with T's record
+// (node_facts_same); then the timing: `passes` passes over the windows, and as many with each window run twice in a row,
+// whose second run finds its inputs in the caches.
+static void node_shadow_facts(NodeShadow* shadow, NodeCensusScratch* s)
+{
+    NodeFacts* facts = s->facts;
+    const CheckProgram* program = s->program;
+    const uint32_t windows = facts->record_count != 0 ? facts->window_count + 1 : 0;
+    if (!facts->room)
+    {
+        shadow->facts_failures += 1;
+        printf("node-facts: file=%s failed=\"no room for its windows\"\n", s->file);
+    }
+    else
+    {
+        for (uint32_t window = 0; window < windows; window += 1)
+        {
+            const uint32_t first = facts->windows[window];
+            const uint32_t count = facts->windows[window + 1] - first;
+            node_facts_given(facts, window, true);
+            node_facts_window(facts, window, false);
+            shadow->facts_list_differences += !node_facts_lists_same(facts, window);
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const uint32_t w = first + i;
+                const uint8_t kind = facts->kinds[w];
+                if (kind == BUSTER_NODE_FACTS_IDENTIFIER || kind == BUSTER_NODE_FACTS_LOOKUP)
+                {
+                    const CheckOp op = (CheckOp)facts->ops[w];
+                    const bool leaf = kind == BUSTER_NODE_FACTS_IDENTIFIER;
+                    const bool taken = facts->records[i].taken == 1;
+                    const bool same = node_facts_same(facts, first, i);
+                    shadow->facts_taken_leaves += taken && leaf;
+                    shadow->facts_taken_lookups += taken && !leaf;
+                    shadow->facts_left_identifiers += !taken && leaf;
+                    shadow->facts_left_lookups[leaf ? 0 : node_facts_lookup(op)] += !taken && !leaf;
+                    shadow->facts_differences += !same;
+                    if (!same && shadow->facts_listed < node_census_list)
+                    {
+                        shadow->facts_listed += 1;
+                        printf("node-facts: difference file=%s line=%u op=%s taken=%s type=%u/%u flags=%#x/%#x standing=%#x/%#x object=%u/%u payload=%" PRIu64 "/%" PRIu64
+                               " converted=%u,%u/%u,%u conversion-flags=%#x,%#x/%#x,%#x member-offset=%" PRIu64 "/%" PRIu64 "\n",
+                               s->file, node_census_line(s->pp, program->parser, program->input->graph.tokens[facts->nodes[w]]),
+                               lower_inventory_op_names[op] != NULL ? lower_inventory_op_names[op] : "?", taken ? "yes" : "no", facts->records[i].type, facts->expected_types[w],
+                               facts->records[i].flags, facts->expected_flags[w], facts->records[i].standing, facts->expected_standings[w], facts->records[i].object, facts->expected_objects[w],
+                               facts->records[i].payload, facts->expected_payloads[w], facts->records[i].converted[0], facts->records[i].converted[1],
+                               facts->expected_converted[2 * (uint64_t)w], facts->expected_converted[2 * (uint64_t)w + 1], facts->records[i].conversion_flags[0],
+                               facts->records[i].conversion_flags[1], facts->expected_conversion_flags[2 * (uint64_t)w],
+                               facts->expected_conversion_flags[2 * (uint64_t)w + 1], facts->records[i].member_offset, facts->expected_member_offsets[w]);
+                    }
+                }
+            }
+        }
+        const int cycles = node_shadow_counter(PERF_COUNT_HW_CPU_CYCLES);
+        const int instructions = node_shadow_counter(PERF_COUNT_HW_INSTRUCTIONS);
+        const int mispredicts = node_shadow_counter(PERF_COUNT_HW_BRANCH_MISSES);
+        uint64_t least[12];
+        memset(least, 0xff, sizeof(least));
+        for (uint32_t pass = 0; pass < shadow->passes; pass += 1)
+        {
+            const uint64_t c0 = node_shadow_read(cycles);
+            const uint64_t i0 = node_shadow_read(instructions);
+            const uint64_t m0 = node_shadow_read(mispredicts);
+            const uint64_t t0 = __rdtsc();
+            for (uint32_t window = 0; window < windows; window += 1)
+            {
+                node_facts_given(facts, window, false);
+                node_facts_window(facts, window, false);
+            }
+            const uint64_t t1 = __rdtsc();
+            const uint64_t m1 = node_shadow_read(mispredicts);
+            const uint64_t i1 = node_shadow_read(instructions);
+            const uint64_t c1 = node_shadow_read(cycles);
+            const uint64_t measured[3] = { c1 - c0, i1 - i0, t1 - t0 };
+            for (uint32_t k = 0; k < 3; k += 1)
+            {
+                least[k] = measured[k] < least[k] ? measured[k] : least[k];
+            }
+            least[10] = m1 - m0 < least[10] ? m1 - m0 : least[10];
+        }
+        // The windows' given records put in place and no kernel: what of a pass above is the harness's copying.
+        for (uint32_t pass = 0; pass < shadow->passes; pass += 1)
+        {
+            const uint64_t c0 = node_shadow_read(cycles);
+            const uint64_t i0 = node_shadow_read(instructions);
+            const uint64_t m0 = node_shadow_read(mispredicts);
+            const uint64_t t0 = __rdtsc();
+            for (uint32_t window = 0; window < windows; window += 1)
+            {
+                node_facts_given(facts, window, false);
+            }
+            const uint64_t t1 = __rdtsc();
+            const uint64_t m1 = node_shadow_read(mispredicts);
+            const uint64_t i1 = node_shadow_read(instructions);
+            const uint64_t c1 = node_shadow_read(cycles);
+            const uint64_t measured[3] = { c1 - c0, i1 - i0, t1 - t0 };
+            for (uint32_t k = 0; k < 3; k += 1)
+            {
+                least[7 + k] = measured[k] < least[7 + k] ? measured[k] : least[7 + k];
+            }
+            least[11] = m1 - m0 < least[11] ? m1 - m0 : least[11];
+        }
+        // The two loops apart, by the TSC: each window's run after its given records were put in place, and its run again
+        // at once, when everything it touches is where the first run left it.
+        for (uint32_t pass = 0; pass < shadow->passes; pass += 1)
+        {
+            uint64_t ticks[4] = { 0, 0, 0, 0 };
+            for (uint32_t window = 0; window < windows; window += 1)
+            {
+                node_facts_given(facts, window, false);
+                facts->leaf_ticks = 0;
+                facts->lookup_ticks = 0;
+                node_facts_window(facts, window, true);
+                ticks[0] += facts->leaf_ticks;
+                ticks[1] += facts->lookup_ticks;
+                facts->leaf_ticks = 0;
+                facts->lookup_ticks = 0;
+                node_facts_window(facts, window, true);
+                ticks[2] += facts->leaf_ticks;
+                ticks[3] += facts->lookup_ticks;
+            }
+            for (uint32_t k = 0; k < 4; k += 1)
+            {
+                least[3 + k] = ticks[k] < least[3 + k] ? ticks[k] : least[3 + k];
+            }
+        }
+        if (shadow->passes != 0)
+        {
+            shadow->facts_cycles += least[0];
+            shadow->facts_instructions += least[1];
+            shadow->facts_ticks += least[2];
+            shadow->facts_loop_ticks[0] += least[3];
+            shadow->facts_loop_ticks[1] += least[4];
+            shadow->facts_warm[0] += least[5];
+            shadow->facts_warm[1] += least[6];
+            shadow->facts_given_cycles += least[7];
+            shadow->facts_given_instructions += least[8];
+            shadow->facts_given_ticks += least[9];
+            shadow->facts_mispredicts += least[10];
+            shadow->facts_given_mispredicts += least[11];
+        }
+        if (cycles >= 0)
+        {
+            close(cycles);
+        }
+        if (instructions >= 0)
+        {
+            close(instructions);
+        }
+        if (mispredicts >= 0)
+        {
+            close(mispredicts);
+        }
+        shadow->facts_records += facts->record_total;
+        shadow->facts_literals += facts->literals;
+        shadow->facts_identifiers += facts->identifiers;
+        shadow->facts_named[0] += facts->enumerators;
+        shadow->facts_named[1] += facts->functions;
+        shadow->facts_named[2] += facts->static_objects;
+        shadow->facts_named[3] += facts->automatic_objects;
+        for (uint32_t lookup = 0; lookup < BUSTER_NODE_FACTS_LOOKUPS; lookup += 1)
+        {
+            shadow->facts_lookups[lookup] += facts->lookups[lookup];
+        }
+        for (uint32_t op = 0; op < CHECK_OP_COUNT; op += 1)
+        {
+            shadow->facts_given[op] += facts->given[op];
+        }
+        shadow->facts_rows += facts->row_count;
+        shadow->facts_lines += facts->line_count;
+        shadow->facts_line_versions += facts->line_versions;
+        shadow->facts_members += facts->member_count;
+        shadow->facts_windows += windows;
+        shadow->facts_widest = facts->widest > shadow->facts_widest ? facts->widest : shadow->facts_widest;
+        shadow->facts_row_ticks += facts->row_ticks;
+        shadow->facts_line_ticks += facts->line_ticks;
+    }
+}
+
+// --facts' report: the records by kind, what the kernel's rules made of them and left, the differences, the words, and
+// the kernel's time a record its rules made.
+static void node_shadow_facts_report(const NodeShadow* shadow)
+{
+    uint64_t lookups = 0;
+    uint64_t given = 0;
+    for (uint32_t lookup = 0; lookup < BUSTER_NODE_FACTS_LOOKUPS; lookup += 1)
+    {
+        lookups += shadow->facts_lookups[lookup];
+    }
+    for (uint32_t op = 0; op < CHECK_OP_COUNT; op += 1)
+    {
+        given += shadow->facts_given[op];
+    }
+    const uint64_t taken = shadow->facts_taken_leaves + shadow->facts_taken_lookups;
+    printf("node-facts: records=%" PRIu64 " identifiers=%" PRIu64 " (enumerators=%" PRIu64 " functions=%" PRIu64 " static-objects=%" PRIu64 " automatic-objects=%" PRIu64
+           ") literals=%" PRIu64 " lookups=%" PRIu64 " given=%" PRIu64 "\n",
+           shadow->facts_records, shadow->facts_identifiers, shadow->facts_named[0], shadow->facts_named[1], shadow->facts_named[2], shadow->facts_named[3],
+           shadow->facts_literals, lookups, given);
+    printf("node-facts: taken identifiers=%" PRIu64 " (%.2f%%) lookups=%" PRIu64 " (%.2f%%) differences=%" PRIu64 " list-differences=%" PRIu64 " failures=%" PRIu64 "\n",
+           shadow->facts_taken_leaves, node_census_share(shadow->facts_taken_leaves, shadow->facts_identifiers), shadow->facts_taken_lookups,
+           node_census_share(shadow->facts_taken_lookups, lookups), shadow->facts_differences, shadow->facts_list_differences, shadow->facts_failures);
+    for (uint32_t lookup = 0; lookup < BUSTER_NODE_FACTS_LOOKUPS; lookup += 1)
+    {
+        printf("node-facts: lookup=%s records=%" PRIu64 " left=%" PRIu64 " (%.2f%%)\n", node_facts_lookup_names[lookup], shadow->facts_lookups[lookup],
+               shadow->facts_left_lookups[lookup], node_census_share(shadow->facts_left_lookups[lookup], shadow->facts_lookups[lookup]));
+    }
+    for (uint32_t op = 0; op < CHECK_OP_COUNT; op += 1)
+    {
+        if (shadow->facts_given[op] != 0)
+        {
+            printf("node-facts: given op=%s records=%" PRIu64 " (%.2f%%)\n", lower_inventory_op_names[op] != NULL ? lower_inventory_op_names[op] : "?", shadow->facts_given[op],
+                   node_census_share(shadow->facts_given[op], shadow->facts_records));
+        }
+    }
+    printf("node-facts: words rows=%" PRIu64 " (%.1f ticks each) lines=%" PRIu64 " (%.1f ticks each; %" PRIu64 " a declaration's line made again) member-slots=%" PRIu64
+           " windows=%" PRIu64 " widest=%" PRIu64 "\n",
+           shadow->facts_rows, shadow->facts_rows != 0 ? (double)shadow->facts_row_ticks / (double)shadow->facts_rows : 0.0, shadow->facts_lines,
+           shadow->facts_lines != 0 ? (double)shadow->facts_line_ticks / (double)shadow->facts_lines : 0.0, shadow->facts_line_versions, shadow->facts_members,
+           shadow->facts_windows, shadow->facts_widest);
+    if (shadow->passes != 0 && taken != 0)
+    {
+        // The kernel's own: a pass less the same windows' given records put in place alone. A tick's cycles are the pass's.
+        const uint64_t cycles = shadow->facts_cycles > shadow->facts_given_cycles ? shadow->facts_cycles - shadow->facts_given_cycles : 0;
+        const uint64_t instructions = shadow->facts_instructions > shadow->facts_given_instructions ? shadow->facts_instructions - shadow->facts_given_instructions : 0;
+        const uint64_t mispredicts = shadow->facts_mispredicts > shadow->facts_given_mispredicts ? shadow->facts_mispredicts - shadow->facts_given_mispredicts : 0;
+        const double tick = shadow->facts_ticks != 0 ? (double)shadow->facts_cycles / (double)shadow->facts_ticks : 0.0;
+        printf("node-facts: the kernel a taken leaf or lookup: cycles=%.2f instructions=%.2f mispredicted-branches=%.3f (a pass less its windows' given records put in "
+               "place: %.2f cycles and %.2f instructions a record of the window)\n",
+               (double)cycles / (double)taken, (double)instructions / (double)taken, (double)mispredicts / (double)taken,
+               (double)shadow->facts_given_cycles / (double)shadow->facts_records, (double)shadow->facts_given_instructions / (double)shadow->facts_records);
+        printf("node-facts: the kernel's loops, TSC ticks (%.3f cycles a tick): a leaf=%.2f a lookup=%.2f; a window's second run: a leaf=%.2f a lookup=%.2f\n", tick,
+               shadow->facts_taken_leaves != 0 ? (double)shadow->facts_loop_ticks[0] / (double)shadow->facts_taken_leaves : 0.0,
+               shadow->facts_taken_lookups != 0 ? (double)shadow->facts_loop_ticks[1] / (double)shadow->facts_taken_lookups : 0.0,
+               shadow->facts_taken_leaves != 0 ? (double)shadow->facts_warm[0] / (double)shadow->facts_taken_leaves : 0.0,
+               shadow->facts_taken_lookups != 0 ? (double)shadow->facts_warm[1] / (double)shadow->facts_taken_lookups : 0.0);
     }
 }
 
@@ -2835,6 +3121,7 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
         room = room && s.expression_tests != 0;
         NodeShadow* shadow = census->shadow;
         NodeMachine machine;
+        NodeFacts facts;
         if (room && shadow != NULL)
         {
             uint32_t locals = 1;
@@ -2865,6 +3152,11 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                 memset(s.object_stamps, 0, (uint64_t)objects * sizeof(uint32_t));
                 memset(s.local_stamps, 0, (uint64_t)locals * sizeof(uint32_t));
                 s.machine = &machine;
+            }
+            if (room && shadow->facts)
+            {
+                room = node_facts_begin(&facts, &machine, nodes, shadow->facts_window, shadow->facts_packed, &scratch);
+                s.facts = room ? &facts : NULL;
             }
         }
         if (room)
@@ -2900,6 +3192,10 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                 shadow->scratch = &s;
                 node_shadow_time(shadow, &machine, shadow->file_nodes);
                 shadow->file_nodes = 0;
+                if (s.facts != NULL)
+                {
+                    node_shadow_facts(shadow, &s);
+                }
                 const NodeFrontShadow* front = path->input.node_front;
                 shadow->front_units += front != NULL;
                 shadow->front_unread += shadow->front != 0 && front == NULL;
@@ -3099,6 +3395,22 @@ static int run_node_census(int count, char** arguments)
         {
             shadow.fused = true;
         }
+        else if (strcmp(arguments[i], "--facts") == 0)
+        {
+            shadow.facts = true;
+        }
+        else if (strcmp(arguments[i], "--facts-packed") == 0)
+        {
+            shadow.facts = true;
+            shadow.facts_packed = true;
+        }
+        else if (strcmp(arguments[i], "--facts-window") == 0)
+        {
+            uint64_t number = 0;
+            valid = i + 1 < count && check_corpus_number(arguments[++i], &number) && number >= 16 && number <= BUSTER_NODE_FACTS_WINDOW;
+            shadow.facts = true;
+            shadow.facts_window = (uint32_t)number;
+        }
         else if (strcmp(arguments[i], "--front") == 0 || strcmp(arguments[i], "--front-first") == 0)
         {
             shadow.front = (uint8_t)((shadow.front & ~BUSTER_NODE_FRONT_ORDER) | (strcmp(arguments[i], "--front") == 0 ? BUSTER_NODE_FRONT_AFTER : BUSTER_NODE_FRONT_BEFORE));
@@ -3148,7 +3460,7 @@ static int run_node_census(int count, char** arguments)
             }
         }
     }
-    valid = valid && file_count != 0 && (shadowed || (!shadow.scalar && !shadow.verify && !shadow.fused && !shadow.interleave));
+    valid = valid && file_count != 0 && (shadowed || (!shadow.scalar && !shadow.verify && !shadow.fused && !shadow.interleave && !shadow.facts));
     NodeCensus census = { .shadow = shadowed ? &shadow : NULL };
     for (uint32_t i = 0; valid && i < file_count; i += 1)
     {
@@ -3162,14 +3474,19 @@ static int run_node_census(int count, char** arguments)
         {
             node_shadow_report(&shadow, shadow.action_ops);
         }
+        if (shadow.facts)
+        {
+            node_shadow_facts_report(&shadow);
+        }
     }
     else
     {
-        fprintf(stderr, "usage: compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--passes N] [--repeat N]] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--facts | --facts-packed] [--facts-window N] [--passes N] [--repeat N]] [preprocessor options] file...\n");
     }
     free(files);
     free(options);
     const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0 || shadow.fused_differences != 0 ||
+                                          shadow.facts_differences != 0 || shadow.facts_list_differences != 0 || shadow.facts_failures != 0 ||
                                           shadow.front_differences != 0 || shadow.typed_differences != 0 || shadow.typed_object_differences != 0 ||
                                           shadow.typed_library_differences != 0);
     return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
