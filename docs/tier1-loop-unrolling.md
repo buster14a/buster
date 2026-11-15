@@ -316,6 +316,35 @@ where a taken branch's placement decides; a main loop of eight copies isn't.
 The kernels' text grows from 1,935 to 7,497 bytes (clang without its
 vectorizer: 1,957 to 4,461 with its unroller).
 
+### #2743's kernels at -march=znver5
+
+At placement 0, with every digest matching and the default objects identical,
+Tier 1 / Tier 1 `+unroll` is 1.40 over the 19 loops and 1.05 over the controls
+(cycles 1.39 and 1.05). clang's unroller is worth 1.65 there, so Tier 1 `+unroll`
+stays 1.29 from clang without its vectorizer, against 1.09 without either. The
+difference is the back end's, and two kernels show it:
+
+- **`i32_to_f32`** gains 1.02 (1.009 cycles per element; clang's unrolled loop
+  0.582). Tier 1 converts from a register (`mov; xorps; cvtsi2ss r32`), clang
+  from memory. On the 9700X `cvtsi2ss` from a register runs one per cycle and
+  from memory two (the record's `convert.c`), so the register form caps the loop
+  whether it is unrolled or not.
+- **`saxpy_f32`** runs 0.1944 ns with `+unroll` at every placement and the base
+  0.1840 to 0.1927 (1.0 to 5.7% faster). In the record's `saxpy.c`, Tier 1's
+  eight-copy body runs 1.070 cycles per element and its rolled loop 1.056; with
+  the `x` load folded into `vfmadd231ss` the body runs 1.008, as clang's does
+  (1.009), while VEX moves or the other load order change nothing. Tier 1 folds
+  no load into floating-point arithmetic or conversions:
+  [#2829](https://github.com/buster14a/buster/issues/2829).
+
+The same program found that Tier 1's legacy SSE moves (`movss`, `movd`,
+`cvtsi2ss`), which it writes beside VEX FMAs at znver5, run 6.0 cycles per
+element after a dirty upper state, and that Tier 1 returns from 512-bit code
+without `vzeroupper`: [#2830](https://github.com/buster14a/buster/issues/2830).
+
+The kernels' text grows from 1,807 to 6,969 bytes (clang without its
+vectorizer: 1,853 to 6,661).
+
 ### Real programs
 
 Under callgrind (deterministic instruction counts, Lua's hash seed fixed),
@@ -327,6 +356,18 @@ every entry: `luaD_precall`'s missing-argument loop (+3.8 M of 125.9 M in
 `calls.lua`), `luaD_poscall`, `luaH_resize`. The guard was cut down for them
 (above); a loop whose trip count is usually below the factor gains nothing from
 the main loop, and the pass can't know that.
+
+On the 9700X (`measure-tier1-programs --runs 5 --variant`, medians), every
+build's speedtest1 hash and Lua output match clang -O0's, and `+unroll` against
+`--tier1` costs speedtest1 +1.40% user cycles with 0.17% fewer instructions,
+and Lua's five scripts +0.35% (closures +2.02%, arithmetic −1.07%). Each is one
+code placement, and growing some functions moves every one after them: relinked
+at four placements (speedtest1's object after 0, 528, 1,568 and 2,608 bytes of
+`.text`) and six link orders (Lua's objects), seven rounds each, speedtest1
+averages +0.51% cycles (from −0.12% to +1.26%) and Lua's five scripts −0.48%
+(from −2.34% to +0.95%; closures' +2.0% was its placement). Both are within
+their placements' spread; Lua's calls (+0.5%) follow their guard's +0.73%
+instructions.
 
 ### Compile cost and code growth
 
@@ -362,6 +403,10 @@ invalidation tracked across if-conversion and LICM.
   allocator's change ([#2819](https://github.com/buster14a/buster/issues/2819)),
   and would let more accumulators pay.
 - **The vectorizer's loops**, as above, once that pass exists.
+- **The back end's floating-point code**: folded loads
+  ([#2829](https://github.com/buster14a/buster/issues/2829)), which would let
+  `i32_to_f32` and `saxpy_f32` gain as clang's unrolled loops do, and VEX forms
+  and `vzeroupper` ([#2830](https://github.com/buster14a/buster/issues/2830)).
 
 The implementation is original. LLVM's [loop terminology](https://llvm.org/docs/LoopTerminology.html)
 was consulted for the preheader, latch and exiting-block definitions; no
