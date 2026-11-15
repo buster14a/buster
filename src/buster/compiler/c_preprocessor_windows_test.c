@@ -942,6 +942,42 @@ static uint64_t pp_line_end_test_case(const PPLineEndCase* line_case, uint8_t* m
             }
         }
     }
+    // A whole-prepared file indexes lazily after its first backward query. Recheck every page boundary, including CRLF
+    // across pages, and verify the forward-only path does not allocate. A failed allocation keeps the cursor fallback.
+    if (failures == 0 && line_case->length >= BUSTER_PP_LINE_PAGE_BYTES)
+    {
+        pp.arena = arena_reserve(4096);
+        data.line_pages = 0;
+        data.line_cursor = 0;
+        data.line_cursor_line = 0;
+        pp_line_of(&pp, 0, 1000 + line_case->length, 0);
+        *checks += 1;
+        failures += data.line_pages != 0;
+        const uint32_t backward = pp_line_of(&pp, 0, 1000, 0);
+        *checks += 1;
+        failures += backward != 1 || data.line_pages == 0;
+        if (data.line_pages != 0)
+        {
+            for (uint32_t page = 0; page < page_count; page += 1)
+            {
+                *checks += 1;
+                failures += data.line_pages[page] != before[page * BUSTER_PP_LINE_PAGE_BYTES];
+            }
+        }
+        arena_release(&pp.arena);
+        pp.arena = (Arena){ 0 };
+        data.line_pages = 0;
+        data.line_cursor = 0;
+        data.line_cursor_line = 0;
+        for (uint32_t attempt = 0; attempt < 16; attempt += 1)
+        {
+            const uint32_t at = (attempt & 1) == 0 ? line_case->length : line_case->length / 2;
+            uint32_t column = 0;
+            const uint32_t fallback = pp_line_of(&pp, 0, 1000 + at, &column);
+            *checks += 1;
+            failures += data.line_pages != 0 || fallback != before[at] + 1 || column != at - starts[at] + 1;
+        }
+    }
     free(before);
     free(starts);
     free(pages);
