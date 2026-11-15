@@ -309,7 +309,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -514,6 +514,26 @@ takes its entries.
     and each as a byte, its distance back in the postorder, 255 for that or
     more), a leaf's value, a member's name, a call's arguments and library
     mark, the requested type and the context.
+  - **Its structural bytes** are what #2850's layout reads of a record
+    beside its facts: the operator, the operand count (a call's callee and
+    arguments), the operands' distances back, and, written into an operand's
+    record when its consumer's is made, the consumer's distance forward and
+    the operand's place among the consumer's operands (a callee 0, the
+    arguments from 1). A root, a value a left token took and one nothing
+    takes have no consumer's distance.
+  - **`--front-lean`** is the front that writes only those, the token and a
+    leaf's payload: an identifier's declaration, a literal's type and
+    integer, a string's type and object. An identifier's facts are then a
+    load by its declaration (#2850's fact words), and a member's name, a
+    requested type and a call's library mark are loads by the token. It
+    decides an identifier from its token's own columns and reads none of the
+    chunk's identifier entries; it still reads the literals'. It runs after
+    the walk, or before it with `--front-first`.
+  - **`--front-warm`** touches the front's arrays before its first chunk.
+    They are fresh memory in every unit, and on a host without transparent
+    huge pages their first touch is a cost a unit (half of the front's ticks
+    on musl in a cloud VM, under 2% on the 9700X): with it the ticks are the
+    front's own work.
   - **Values wait on a stack** in groups that share a consumer, a value's
     consumer being its token's parent. A token that only passes values on (a
     list, a separator, a group's closing, a braced initializer's `=`) hands
@@ -530,21 +550,37 @@ takes its entries.
     field by field, operator, operands' nodes, leaf value, member, arguments,
     type, and each distance against the front's own records between the two
     nodes; contexts at the walk's end (`node_front_finish`), where the walk's
-    lists have given theirs. `--front` runs the front after the walk acted at
-    a chunk, `--front-first` before it, where the machine would run: the same
-    records, and the caches' first touches the front's.
+    lists have given theirs. The structural bytes are checked from both
+    sides: the consumer's count and distances against the walk's node's
+    operands, and each operand's own distance forward and place against its
+    consumer; a consumer's distance no compared consumer vouches for is a
+    difference, and so is one on a value still waiting. The lean front's
+    operands are found by its bytes alone (the record that many back; a
+    call's arguments by their places), and its leaves by their payloads.
+    `--front` runs the front after the walk acted at a chunk, `--front-first`
+    before it, where the machine would run: the same records, and the caches'
+    first touches the front's. The front's calls, timers and counts in the
+    coded walk are two functions out of line (`node_front_prepared`,
+    `node_front_acted`), called only where the front runs: inline and never
+    run they cost `-c sqlite3.c` 0.76 M instructions.
   - **The report:** `node-shadow: front after-the-walk|before-the-walk
     tokens=N left=N records=N compared=N differences=0 resets=N
-    waiting-at-the-end=0` (no value may wait when a unit ends), the tokens
-    left by class and the `sizeof` and `_Alignof` ones among them, `front
-    taken-expressions=N (x%) evaluated-nodes=N (y%)` (the machine-taken
+    waiting-at-the-end=0` (no value may wait when a unit ends; `lean` and
+    `warm` after the order where asked), the acting tokens and those left by
+    class (`front class=NAME tokens=N left=N`) and the `sizeof` and
+    `_Alignof` ones among those left, `front taken-expressions=N (x%)
+    evaluated-nodes=N (y%)` (the machine-taken
     expressions whose every record the front made), the operands by distance
     (`within-64`, `in-a-byte`, `further`, a call's arguments and the roots'
     apart: a condition's or a discard's operand is a body away where the
     tree puts the control's closing after it) with the taken expressions that
-    have an operand past 64 records back, and `front ticks=N`. `--list N`
-    lists the first differences and the taken expressions the front missed.
-    A difference fails the command.
+    have an operand past 64 records back, what the layout's byte columns cap
+    (`front structure records-with-more-than-63-operands=N
+    operands-at-a-place-past-3=N`), `front ticks=N`, and the walk's
+    preparation by its parts where the front ran (`walk prepare ticks
+    compact=N identifiers=N literals=N`: the lean front reads the first and
+    the last). `--list N` lists the first differences and the taken
+    expressions the front missed. A difference fails the command.
   - **Where it runs:** beside the coded walk over a whole unit, which is the
     reader's vector path. A unit the scalar walk reads (a build without the
     vector paths, `BUSTER_HOST_ARCH=x86-64`; the parser's scalar option) or
@@ -574,10 +610,11 @@ sweep must give C's and X's refusal, tape, labels and calls for every
 expression of the fixture, nested calls, labels under and around calls and
 several postfix updates through addresses in one expression among them. The
 front runs over the fixture too (after the walk in the `--verify` run, before
-it in the `--scalar` one): every record the walk's node, no value left
-waiting, and each taken line's expressions the front's but those of the lines
-marked `// front: left`. Two generated texts take it to its limits
-(`node_front_test_limits`): a body whose chunk ends fall at every place within
-a library call by its name and through its address, and an initializer with
-more values waiting than the stack holds, with a call astride its last entry.
+it in the `--scalar` one, lean in the `-funsigned-char` one): every record the
+walk's node, no value left waiting, and each taken line's expressions the
+front's but those of the lines marked `// front: left`. Two generated texts
+take it to its limits, whole and lean (`node_front_test_limits`): a body whose
+chunk ends fall at every place within a library call by its name and through
+its address, and an initializer with more values waiting than the stack holds,
+with a call astride its last entry.
 [The design](../node-machine.md)'s "Step 1: the shadow" has the results.
