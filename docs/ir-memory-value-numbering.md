@@ -137,7 +137,40 @@ the gathers' indices are signed dwords.
 
 ### SIMD: what pays
 
-SIMD_PAYS
+The 9700X's phases of the pass, read by the TSC (a patch over `5a4e56b`, in
+the record below), over `sqlite3.c`'s 2,602 functions in `test-ir-source
+--passes`'s `memory` and `tier1-memory` rows, 5,204 calls of each version, in
+millions of ticks:
+
+| Phase | Vector | Scalar |
+| --- | ---: | ---: |
+| Classification | 4.38 | 13.59 |
+| Derivation | 6.32 | 6.73 |
+| Escapes | 1.22 | 2.50 |
+| Events | 0.77 | 5.56 |
+| Addresses (shared) | 3.42 | 2.46 |
+| Hashes and grouping | 4.13 | 3.68 |
+| Overlaps (shared) | 1.89 | 1.17 |
+| Blocks' clear entries (shared) | 3.91 | 2.65 |
+| Walk (shared) | 6.81 | 4.22 |
+| Set-up, classes, dirty bits, event offsets, end | 5.80 | 4.15 |
+| Total | 38.65 | 46.71 |
+
+The test runs each function's vector version first, so the scalar one finds the
+function in the caches: the shared phases, the same code in both columns, took
+1.4 to 1.6 times longer in the vector column. The table understates the vector
+phases: classification is 3.1 times faster, the events 7.2 times and the escapes
+2.0 times even so, and derivation and the hashes are within that bias.
+
+The addresses' chains stay scalar. With a vector version that gathers a round of
+eight chains' next steps, the same phase in the same position took 12.08 M
+ticks, against the scalar walk's 3.42 M: 3.5 times. A chain is a dependent walk
+of a few steps (a field's address is an `inttoptr` of an addition to a
+`ptrtoint`), and each round waits for its gathers' latency with most lanes
+done.
+
+The whole pass by each version, each over the corpus in runs of its own
+(`benchmark-ir-source --passes --only memory`), is in "Measurements" below.
 
 ## Tests
 
@@ -172,7 +205,37 @@ SIMD_PAYS
 
 ## Measurements
 
-MEASUREMENTS
+The record is buster-performance's
+[`memory-value-numbering-2718-2026-11-14`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/memory-value-numbering-2718-2026-11-14).
+
+**Which rules pay.** A prototype (`42a7c1e`) measured three policies on the
+9700X by `measure-tier1-programs --runs 11 --variant`, user cycles against
+`--tier1` without the pass:
+
+| Policy | speedtest1 | Lua's five scripts |
+| --- | ---: | ---: |
+| Every rule (shipped) | 0.9968 | 0.9745 |
+| No forwarding from a load a user could fold | 0.9957 | 0.9961 |
+| One block, one key's own stores | 1.0104 | 0.9918 |
+
+`--tier1`'s own row varied by 0.8% for speedtest1 and 1.0% for Lua across the
+three runs, so speedtest1's differences are within noise and Lua's gain from
+every rule is not. The instructions go up (1.0108 and 1.0168 for every rule):
+a load that a comparison or an arithmetic instruction had folded becomes a
+register's value, which takes a move or a longer live range. The cycles still
+go down, so the pass forwards from foldable loads too.
+
+**Loads removed.** Callgrind's exact counts of the programs' own code,
+pass on against off (the head before the volatile fix, `894d971`): speedtest1's
+data reads 697.0 M to 652.3 M (-6.42%), Lua's five scripts' 1,029.2 M to
+981.3 M (-4.65%); instructions +1.10% and +1.92%. In speedtest1's unit the pass
+forwards 3,369 loads, and the allocator's reloads go from 13,947 to 14,310.
+
+**Place in `--tier1`.** On by default, in the optimizer after SCCP and the
+identities and before dead-code removal, on the analyses already built.
+`--tier1-passes=-memory` gives main's objects byte for byte. The final head's
+9700X run time, loads dispatched and compile time by both versions are pending
+in the record.
 
 The implementation is original. Forwarding loads along a dominator tree with a
 scoped table is the textbook available-expression technique of early CSE

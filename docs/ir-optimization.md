@@ -643,7 +643,7 @@ What the measurements decided:
 Each item #139's design or guide named that this close-out doesn't finish has
 an issue of its own:
 - **Value numbering with memory** (repeated loads, store-to-load forwarding):
-  #2718, since done ([its guide](ir-memory-value-numbering.md)).
+  #2718 ([its guide](ir-memory-value-numbering.md)).
 - **A policy under which LICM and the solver pay** (register pressure, values
   Tier 1 recomputes kept at their users): #2719.
 - **Scalar floating folding** under #1450's floating-environment contract:
