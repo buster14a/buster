@@ -706,6 +706,8 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_node_machine_contexts.c"
 #include "buster/compiler/c_check_node_machine_expand.c"
 #include "buster/compiler/c_check_node_machine_lower.c"
+// #2850's step 1: a leaf's and a lookup's record from one load each, in the shadow (measure-node-machine --shadow --facts).
+#include "buster/compiler/c_check_node_machine_facts.c"
 #endif
 // bake-tables (#590): the backend's tables written into this executable's own file, built, by build.sh, from this
 // unit, whose Tier 0 and unwind copies the C driver above uses (baked.h).

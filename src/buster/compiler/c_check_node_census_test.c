@@ -458,6 +458,95 @@ static bool node_census_test_fixture(const char* directory, const char* name, co
     return valid;
 }
 
+// --facts' fixture (#2850's step 1, c_check_node_machine_facts.c): each kind of identifier's leaf (an automatic object, a
+// parameter, a static object, a function, enumerators) and each lookup the fact words' rules take: `->` and `.`, chained
+// and through a const record; a static record's member, an address constant; `*p`; subscripts of a pointer, of an
+// automatic and a static array, at a variable index and at constant ones (a static array's element's address is folded),
+// and of a member array; calls of a function, a variadic one, a pointer and a member; and discards, written and an
+// expression statement's. Two the rules leave to T's: the members of a record whose type has an aligned typedef's
+// wrapper, through a pointer and of an element (the subscript of a pointer to one they take).
+static const char node_facts_test_text[] =
+    "struct S { long m; long n; int a[4]; unsigned char c; int (*cb)(int); struct S* next; };\n"
+    "typedef struct S Wide __attribute__((aligned(32)));\n"
+    "enum E { E0, E1 = 5, EN = -3 };\n"
+    "int g;\n"
+    "static int sg;\n"
+    "int ga[8];\n"
+    "struct S gs;\n"
+    "int f(int);\n"
+    "int v(int, ...);\n"
+    "void w(void);\n"
+    "long h(struct S* p, int a, int* q, Wide* wp, int (*fp)(int), const struct S* cp)\n"
+    "{\n"
+    "    long y = 0;\n"
+    "    int x = 0;\n"
+    "    int la[4];\n"
+    "    struct S s;\n"
+    "    s.m = a;\n"
+    "    la[1] = a;\n"
+    "    x = a + g + sg;\n"
+    "    x = E1 + EN;\n"
+    "    y = p->m + p->next->n;\n"
+    "    y = s.m + gs.n;\n"
+    "    x = *q;\n"
+    "    x = q[a];\n"
+    "    x = ga[a];\n"
+    "    q = &ga[2];\n"
+    "    q = &gs.a[1];\n"
+    "    x = la[1];\n"
+    "    x = p->a[3];\n"
+    "    x = f(a) + v(a, x, y) + fp(a) + p->cb(a);\n"
+    "    (void)f(a);\n"
+    "    w();\n"
+    "    y = wp->m;\n"
+    "    y = wp[1].n;\n"
+    "    y = cp->m + cp->a[1];\n"
+    "    return y + x;\n"
+    "}\n";
+
+// The facts' fixture written to `directory` and read with `options`, its windows cut at `window` records (0 for the
+// kernel's own cut) and holding several bodies' expressions with `packed`: whether every record the fact words' rules
+// made is T's, the kernel's lists are the twin's, and the leaves, the lookups and those left are the fixture's.
+static bool node_facts_test_fixture(const char* directory, uint32_t window, bool packed, char** options, uint32_t option_count)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/facts.c", directory);
+    bool valid = parse_test_write(path, node_facts_test_text, strlen(node_facts_test_text));
+    NodeShadow shadow = { .facts = true, .facts_packed = packed, .facts_window = window, .passes = 1, .repeat = 1 };
+    NodeCensus census = { .shadow = &shadow };
+    fflush(stdout);
+    valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
+    // Its leaves by what they name (enumerators, functions, static and automatic objects), its lookups by operator (`->`,
+    // `.`, `*`, a subscript, a call, a discard), and those the rules leave.
+    static const uint64_t named[4] = { 2, 4, 6, 44 };
+    static const uint64_t lookups[BUSTER_NODE_FACTS_LOOKUPS] = { 8, 5, 1, 9, 6, 20 };
+    static const uint64_t left[BUSTER_NODE_FACTS_LOOKUPS] = { 1, 1, 0, 0, 0, 0 };
+    bool held = shadow.facts_differences == 0 && shadow.facts_list_differences == 0 && shadow.facts_failures == 0 && shadow.value_differences == 0 &&
+                shadow.facts_left_identifiers == 0;
+    for (uint32_t k = 0; k < 4; k += 1)
+    {
+        held = held && shadow.facts_named[k] == named[k];
+    }
+    for (uint32_t lookup = 0; lookup < BUSTER_NODE_FACTS_LOOKUPS; lookup += 1)
+    {
+        held = held && shadow.facts_lookups[lookup] == lookups[lookup] && shadow.facts_left_lookups[lookup] == left[lookup];
+    }
+    if (!valid || !held)
+    {
+        fprintf(stderr, "test-checker: node-facts: window %u%s: %s: %" PRIu64 " records differ, %" PRIu64 " lists differ, %" PRIu64 " leaves left; named %" PRIu64 " %" PRIu64
+                        " %" PRIu64 " %" PRIu64 "; lookups",
+                window, packed ? " packed" : "", valid ? "read" : "NOT READ", shadow.facts_differences, shadow.facts_list_differences, shadow.facts_left_identifiers,
+                shadow.facts_named[0], shadow.facts_named[1], shadow.facts_named[2], shadow.facts_named[3]);
+        for (uint32_t lookup = 0; lookup < BUSTER_NODE_FACTS_LOOKUPS; lookup += 1)
+        {
+            fprintf(stderr, " %s %" PRIu64 " (left %" PRIu64 ")", node_facts_lookup_names[lookup], shadow.facts_lookups[lookup], shadow.facts_left_lookups[lookup]);
+        }
+        fprintf(stderr, "\n");
+    }
+    unlink(path);
+    return valid && held;
+}
+
 static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
 {
     char directory[] = "/tmp/buster-node-census-XXXXXX";
@@ -499,6 +588,12 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     char* unsigned_char[] = { "-nostdinc", "-Wall", "-Wextra", "-Wshift-sign-overflow", "-Wassign-enum", "-funsigned-char" };
     check_test_expect(test, ready && node_shadow_test_fixture(directory, false, unsigned_char, BUSTER_ARRAY_LENGTH(unsigned_char)),
                       "node-shadow -funsigned-char: the machine converts plain char constants as the unit's char is signed");
+    check_test_expect(test, ready && node_facts_test_fixture(directory, 0, false, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-facts: every leaf and lookup the fact words' rules make is T's record, and what they leave is the fixture's");
+    check_test_expect(test, ready && node_facts_test_fixture(directory, 16, false, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-facts: the same records where a window is cut every 16 records");
+    check_test_expect(test, ready && node_facts_test_fixture(directory, BUSTER_NODE_FACTS_WINDOW, true, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-facts: the same records where a window packs the bodies' expressions to its most");
     // Every warning has the census's class (node_census_warning_classes): one added since fails here until it has one.
     uint32_t unclassified = 0;
     for (uint32_t id = 0; id < CHECK_WARNING_ID_COUNT; id += 1)
