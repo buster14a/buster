@@ -921,6 +921,11 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #else
 #include "buster/compiler/ir_optimize_verified.c"
 #endif
+// #2743: the loop vectorizer of countable innermost loops (Tier 1's --tier1-passes=+vectorize) and its fixtures.
+#include "buster/compiler/ir_vectorize_loops.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+#include "buster/compiler/ir_vectorize_loops_test.c"
+#endif
 // #866's GVN variants on real source's lowered IR are part of #131's IR benchmark, which needs GVN's definitions.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_source_benchmark.c"
@@ -2348,6 +2353,10 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-licm") == 0)
     {
         result = run_ir_licm_tests(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-vectorize") == 0)
+    {
+        result = run_ir_vectorize_tests(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-sroa") == 0)
     {
