@@ -309,7 +309,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -502,6 +502,53 @@ takes its entries.
   `walk`'s is what the sweeps add there, the walk's own slowdown included;
   the line `node-shadow: interleaved` gives the sweeps' own TSC ticks alone,
   to compare with the same set's ticks in the tight loop.
+- `--front` and `--front-first` run **the machine's own front** (step 1b,
+  [the design](../node-machine.md#step-1b-the-machines-own-front)) in the
+  files' one reading. The sweeps above read their inputs from the graph the
+  reader's coded walk writes; the front (`c_check_node_machine_front.c`, which
+  `c_check_expression_input.c` includes; `PPOptions.node_front`) makes the
+  machine's records itself, from each chunk's acting tokens and classes and
+  the chunk's identifier and literal entries, without the walk's value chains
+  or the graph.
+  - **A record** is a node's operator, token, operands (as earlier records,
+    and each as a byte, its distance back in the postorder, 255 for that or
+    more), a leaf's value, a member's name, a call's arguments and library
+    mark, the requested type and the context.
+  - **Values wait on a stack** in groups that share a consumer, a value's
+    consumer being its token's parent. A token that only passes values on (a
+    list, a separator, a group's closing, a braced initializer's `=`) hands
+    its group to its parent in one step (`node_front_pass`). A token the front
+    doesn't model is **left** to the walk: its value is unknown, so is every
+    record that would take it, and the context of what it took. A stack with
+    no room (4,096 values: a static table's elements wait for its end) makes
+    every waiting value unknown, once (`node_front_forget`).
+  - **Between chunks** only the waiting values' records are kept
+    (`node_front_keep`): a condition's value waits for its statement's body,
+    whose tokens the tree puts before the control's closing.
+  - **The comparison** (`node_front_compare`): each record against the walk's
+    node at the same token (a discard's by a search from the record before),
+    field by field, operator, operands' nodes, leaf value, member, arguments,
+    type, and each distance against the front's own records between the two
+    nodes; contexts at the walk's end (`node_front_finish`), where the walk's
+    lists have given theirs. `--front` runs the front after the walk acted at
+    a chunk, `--front-first` before it, where the machine would run: the same
+    records, and the caches' first touches the front's.
+  - **The report:** `node-shadow: front after-the-walk|before-the-walk
+    tokens=N left=N records=N compared=N differences=0 resets=N
+    waiting-at-the-end=0` (no value may wait when a unit ends), the tokens
+    left by class and the `sizeof` and `_Alignof` ones among them, `front
+    taken-expressions=N (x%) evaluated-nodes=N (y%)` (the machine-taken
+    expressions whose every record the front made), the operands by distance
+    (`within-64`, `in-a-byte`, `further`, a call's arguments and the roots'
+    apart: a condition's or a discard's operand is a body away where the
+    tree puts the control's closing after it) with the taken expressions that
+    have an operand past 64 records back, and `front ticks=N`. `--list N`
+    lists the first differences and the taken expressions the front missed.
+    A difference fails the command.
+  - Every shadow run prints `node-shadow: walk ticks classes=N prepare=N
+    actions=N visits=N`, the coded walk's parts in the files' one reading
+    (TSC ticks; the batch's flushes are the actions'): with no front option,
+    the walk as it is.
 
 The report gives the expressions, evaluated nodes and calls taken, each
 refusal's (shape, code, leaf, context, diagnostic, template, row, root,
@@ -519,5 +566,12 @@ construct a line, each taken or refused by a named reason), with `--verify`
 and with `--scalar`, each time with `--fused` and `--interleave 3`: the one
 sweep must give C's and X's refusal, tape, labels and calls for every
 expression of the fixture, nested calls, labels under and around calls and
-several postfix updates through addresses in one expression among them. [The design](../node-machine.md)'s "Step 1: the shadow"
-has the results.
+several postfix updates through addresses in one expression among them. The
+front runs over the fixture too (after the walk in the `--verify` run, before
+it in the `--scalar` one): every record the walk's node, no value left
+waiting, and each taken line's expressions the front's but those of the lines
+marked `// front: left`. Two generated texts take it to its limits
+(`node_front_test_limits`): a body whose chunk ends fall at every place within
+a library call by its name and through its address, and an initializer with
+more values waiting than the stack holds, with a call astride its last entry.
+[The design](../node-machine.md)'s "Step 1: the shadow" has the results.
