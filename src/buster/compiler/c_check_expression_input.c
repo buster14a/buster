@@ -1641,6 +1641,66 @@ static void check_input_expression_numbering(CheckInputReader* reader, uint32_t 
 
 #include "c_check_node_machine_front.c"
 
+// The front's hooks in the coded walk (PPOptions.node_front): out of line and called only where the front runs, so that
+// a compile's walk is its own code but for a test of the front a chunk.
+//
+// After a chunk's acting tokens were compacted (since `start`): the chunk's identifiers' and literals' entries, as the
+// walk makes them, with the preparation's three parts' ticks apart (the lean front reads the compaction's and the
+// literals', not the identifiers' entries); then the front, where it runs before the walk acts at the chunk, where the
+// machine would run. Returns the front's ticks.
+static __attribute__((noinline)) uint64_t node_front_prepared(NodeFront* front, uint8_t fronted, CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes,
+                                                              uint32_t acting, CheckInputIdentifiers* identifiers, CheckInputLiterals* literals, uint64_t start)
+{
+    const uint64_t compacted = __rdtsc();
+    check_input_expression_identifiers(reader, tokens, classes, acting, identifiers, false);
+    const uint64_t identified = __rdtsc();
+    check_input_expression_literals(reader, tokens, classes, acting, literals, false);
+    const uint64_t ready = __rdtsc();
+    front->shadow->compact_ticks += compacted - start;
+    front->shadow->identifier_ticks += identified - compacted;
+    front->shadow->literal_ticks += ready - identified;
+    uint64_t fronting = 0;
+    if ((fronted & BUSTER_NODE_FRONT_ORDER) == BUSTER_NODE_FRONT_BEFORE)
+    {
+        if (front->lean)
+        {
+            node_front_chunk_lean(front, reader, tokens, classes, acting, identifiers, literals);
+        }
+        else
+        {
+            node_front_chunk(front, reader, tokens, classes, acting, identifiers, literals);
+        }
+        fronting = __rdtsc() - ready;
+    }
+    return fronting;
+}
+
+// After the walk acted at a chunk: the chunk's acting tokens counted by class, the batch's nodes written to the graph
+// (the comparison reads it; their ticks, the walk's actions', are returned), the front where it runs after the walk,
+// and the comparison of the chunk's records.
+static __attribute__((noinline)) uint64_t node_front_acted(NodeFront* front, uint8_t fronted, CheckInputReader* reader, CheckInputBatch* batch, const uint32_t* tokens,
+                                                           const uint32_t* classes, uint32_t acting, const CheckInputIdentifiers* identifiers,
+                                                           const CheckInputLiterals* literals)
+{
+    for (uint32_t k = 0; k < acting; k += 1)
+    {
+        front->shadow->acting[(classes[k] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT] += 1;
+    }
+    const uint64_t flushing = __rdtsc();
+    check_input_expression_flush(reader, batch, false);
+    const uint64_t flushed = __rdtsc() - flushing;
+    if ((fronted & BUSTER_NODE_FRONT_ORDER) == BUSTER_NODE_FRONT_AFTER && front->lean)
+    {
+        node_front_chunk_lean(front, reader, tokens, classes, acting, identifiers, literals);
+    }
+    else if ((fronted & BUSTER_NODE_FRONT_ORDER) == BUSTER_NODE_FRONT_AFTER)
+    {
+        node_front_chunk(front, reader, tokens, classes, acting, identifiers, literals);
+    }
+    node_front_compare(front, reader);
+    return flushed;
+}
+
 // The coded walk: the postorder a chunk at a time, compacted to the tokens the walk acts at, each acted at by its class.
 // A DROP's action is nothing but its children's chains joined, which no parent reads (its first value is NONE, as the
 // reader's setup wrote it), so the compaction leaves its tokens out. A unit with expressions past its limit or deferred
@@ -1682,6 +1742,12 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
     // the scratch and its report, with a bit a node the graph has room for, in the output's arena.
     const uint8_t fronted = coded && begin == 0 && stop == count ? reader->pp->options.node_front : 0;
     NodeFront* front = fronted != 0 ? arena_push_array(reader->scratch, 1, sizeof(NodeFront), 64) : NULL;
+    if (front != NULL && (fronted & BUSTER_NODE_FRONT_WARM) != 0)
+    {
+        // Its arrays touched before it reads a chunk: they are fresh memory in every unit, and their first touch is then
+        // no part of its ticks (a unit of a few expressions pays more for the pages than for the front).
+        memset(front, 0, sizeof(NodeFront));
+    }
     if (front != NULL)
     {
         const uint32_t words = reader->output->graph.capacity / 64 + 1;
@@ -1705,6 +1771,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
             front->stack_count = 0;
             front->group_count = 0;
             front->full = false;
+            front->lean = (fronted & BUSTER_NODE_FRONT_LEAN) != 0;
             front->ordinal = 0;
             front->argument_count = 0;
             front->wide_count = 0;
@@ -1730,19 +1797,19 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
         const uint64_t start = __rdtsc();
         const uint32_t end = stop - first < BUSTER_CHECK_EXPRESSION_CHUNK ? stop : first + BUSTER_CHECK_EXPRESSION_CHUNK;
         const uint32_t acting = check_input_expression_compact(reader, first, end, tokens, classes, coded ? dropped : UINT32_MAX, false);
-        if (coded)
+        // Where the front runs its hook makes the entries (a front can only be where the walk is coded), with the front
+        // where it runs before the walk: its ticks are its own, no part's of the walk.
+        uint64_t fronting = 0;
+        if (front != NULL)
+        {
+            fronting = node_front_prepared(front, fronted, reader, tokens, classes, acting, &identifiers, &literals, start);
+        }
+        else if (coded)
         {
             check_input_expression_identifiers(reader, tokens, classes, acting, &identifiers, false);
             check_input_expression_literals(reader, tokens, classes, acting, &literals, false);
         }
         const uint64_t ready = __rdtsc();
-        uint64_t fronting = 0;
-        if (front != NULL && fronted == 2)
-        {
-            // Before the walk acts at the chunk, where the machine would run; its ticks are its own, not the actions'.
-            node_front_chunk(front, reader, tokens, classes, acting, &identifiers, &literals);
-            fronting = __rdtsc() - ready;
-        }
         uint32_t identifier = 0;
         uint32_t literal = 0;
         uint32_t i = 0;
@@ -1771,19 +1838,11 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
             reached[k & 3][(classes[k] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT] += 1;
         }
         const uint64_t done = __rdtsc();
-        prepared += ready - start;
-        acted += done - ready - fronting;
+        prepared += ready - start - fronting;
+        acted += done - ready;
         if (front != NULL)
         {
-            // The comparison reads the graph: the batch's nodes go to it first, as the actions' time.
-            const uint64_t flushing = __rdtsc();
-            check_input_expression_flush(reader, batch, false);
-            acted += __rdtsc() - flushing;
-            if (fronted == 1)
-            {
-                node_front_chunk(front, reader, tokens, classes, acting, &identifiers, &literals);
-            }
-            node_front_compare(front, reader);
+            acted += node_front_acted(front, fronted, reader, batch, tokens, classes, acting, &identifiers, &literals);
         }
     }
     // The last batch's nodes, written as the actions' (and its time theirs).

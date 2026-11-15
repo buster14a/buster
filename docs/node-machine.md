@@ -2275,20 +2275,97 @@ The front could make such a root where its value is given, since it knows the
 consumer's class there, at the price of an order that is no longer the walk's;
 it doesn't.
 
+### The structural bytes, and a lean front
+
+[#2850's step 0](https://github.com/buster14a/buster/issues/2850#issuecomment-6898510406)
+ran the sweeps on byte columns at 16.7 and 20.6 cycles a taken node, where the
+shadow's best is 164. Its layout reads of a record, beside the facts the
+sweeps make, its **structure**: the operator, the operand count, the operands'
+distances back, the parent's distance forward and the place among the
+parent's operands. The front has all of it when it makes a record, so it now
+keeps each as a byte: a consumer's distance and a place are written into an
+operand's record when its consumer's is made. The comparison checks them from
+both sides, and a consumer's distance that no compared consumer vouches for is
+a difference. [The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-lean-front-2524-2026-11-15)
+has the runs.
+
+**The lean front** (`--front-lean`) writes only that, the token and a leaf's
+payload (an identifier's declaration, a literal's type and integer, a string's
+type and object). An identifier's facts are then one load by its declaration,
+which is #2850's step 1; a member's name, a requested type and a call's
+library mark are loads by the token. It decides an identifier from its token's
+own columns, so it reads none of the walk's identifier entries. Its records
+are the same on every corpus, found by their bytes alone: no difference, the
+same expressions made whole.
+
+Before the walk on the 9700X (CPU 2, medians of seven readings in turn, musl's
+of three; ms):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| the walk as it is | 11.91 | 4.24 | 37.59 |
+| #2857's front | 4.94 | 1.85 | 17.32 |
+| the front with the structural bytes, passing tokens first | 4.83 | 1.66 | 15.60 |
+| the lean front | 4.39 | 1.41 | 13.50 |
+| the walk's preparation: its tokens' compaction | 0.47 | 0.30 | 1.87 |
+| its identifiers' entries, which the lean front doesn't read | 0.98 | 0.16 | 1.31 |
+| its literals' entries | 0.86 | 0.23 | 1.40 |
+| tokens, classes, what it reads of the preparation and the front: #2857's | 7.71 | 2.74 | 23.4 |
+| the lean front's | 6.13 | 2.13 | 18.5 |
+
+- **The record's width was not the front's cost.** The lean front makes about
+  half the stores (sixteen a leaf where the whole front makes thirty) and is
+  9% faster than the whole front on `sqlite3.c` (15% on Lua, 13% on musl).
+  The front's time is its walk over the acting tokens: the waiting values'
+  groups, each value's consumer, the class dispatch. By its events the lean
+  front is 48 cycles, 111 instructions and 0.4 mispredicted branches an acting
+  token, where #2857's is 52, 122 and 0.5.
+- **Passing tokens first.** 27% of `sqlite3.c`'s acting tokens and 57% to 59%
+  of Lua's and musl's are lists, separators and groups, and most lists are
+  declarations', with no value below them. Testing whether the top group of
+  waiting values is the token's before the class dispatch, and reading
+  nothing more at a terminator without a value, took 3% off `sqlite3.c`, 12%
+  off Lua and 10% off musl.
+- **What the machine reads is now 51% of the walk** on `sqlite3.c` (65% with
+  #2857's front), 50% on Lua and 49% on musl: about 51 cycles a body token.
+- **What the layout's bytes cap** (step 0 keeps a place up to 3 and a count
+  up to 63): no record has more than 63 operands; 5,098 of `sqlite3.c`'s
+  32,581 arguments are a call's fourth or later (822 of Lua's 10,425, 6,615
+  of musl's 51,040).
+- **First touch is a host's matter.** The front's arrays are fresh memory in
+  every unit. In a cloud VM without transparent huge pages their first touch
+  was half of the front's ticks on musl; on the 9700X it is under 2%
+  (`--front-warm` touches them first).
+- **The hooks stay out of the walk's function.** With the front's calls, its
+  timers and its class counts inline in the coded walk and never run,
+  `-c sqlite3.c` retired 0.76 M more instructions than main and read 0.26%
+  slower from fresh copies of each executable. They are now two functions out
+  of line, called only where the front runs: 0.41 M more instructions (0.03%),
+  and 0.00%, +0.47% and -0.10% in three comparisons. Step 2's splice is in the
+  same loop.
+
 ### What it says of step 2
 
 "Expected gains" took the machine at 55 cycles a body token for a taken
 expression (90 in its conservative case). Measured, it is 65 for its own
-reading and 75 for T and the one sweep in the tight loop, 91 with a body's
-expressions a run: 140 to 156. With the front's coverage (97.76% of the nodes
-of the taken expressions, which hold 96% of all) the same sum gives step 2
-1.23 to 1.25 times on `-c sqlite3.c`: above its gate of 1.2, under the 1.3
-expected. Ten cycles a body token of the machine move it by a hundredth, a
-point of coverage by a third of that. What would move it:
+reading with #2857's front, 51 with the lean one, and 75 for T and the one
+sweep in the tight loop, 91 with a body's expressions a run: 126 to 142 with
+the lean front. With the front's coverage (97.76% of the nodes of the taken
+expressions, which hold 96% of all) the same sum gives step 2 1.25 to 1.27
+times on `-c sqlite3.c` (1.23 to 1.25 with #2857's front): above its gate of
+1.2, under the 1.3 expected. With #2850's sweeps in place of the shadow's (17
+cycles a node, and its step 1's gate of 10 a leaf or lookup), if they carry
+into the compiler, the reading is most of the machine, and the sum is about
+1.35. Ten cycles a body token of the machine move it by a hundredth,
+a point of coverage by a third of that. What would move it:
 
-- **The front's instructions:** 122 an acting token for a stack walk.
-- **T on the front's records.** T reads the graph today, through its own
-  accessors; on the front's records it reads what was just written.
+- **The front's walk:** over a hundred instructions an acting token for a
+  stack walk, lean or not. The structure it derives (counts, distances,
+  places) is the tree's, which the parser's columns hold: making it from them
+  by blocks, not a token at a time, is #2850's step 3.
+- **The sweeps on these records where they run:** #2850's step 2. T on the
+  front's records as the shadow's scalar T would read them was this step's
+  plan before #2850's step 0, and is dropped.
 - **`sizeof` and `_Alignof`,** which the front leaves: 1.5% of `sqlite3.c`'s
   taken expressions and most of musl's missing 5% of nodes.
 - **Where the sweeps run:** 164 cycles a node in the tight loop, 199 a body's

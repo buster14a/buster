@@ -16,6 +16,13 @@
 // value whose consumer never acts is no entry at all. So a token costs its class's case, a load of its parent, and its
 // record's stores, all in arrays a chunk long; nothing is written a token.
 //
+// Beside its operands' distances a record has the other structural bytes of #2850's layout: its operand count, and, once
+// its consumer's record is made, that consumer's distance forward and its place among the consumer's operands. The lean
+// front (PPOptions.node_front's BUSTER_NODE_FRONT_LEAN) writes only those, the token and a literal's or a string's value:
+// an identifier's record is its token and declaration, whose facts are a load away (#2850's fact words), and a member's
+// name, a requested type and a call's library mark are loads by the token. It reads none of the chunk's identifier
+// entries.
+//
 // A token the front has no case for (the walk's own visits, a class's action's rarer branches, a literal whose decoding
 // reports) is left: its values are taken and it gives an unknown one, which leaves its consumer in turn. A full
 // expression with such a token has records only for the subtrees below it, and the shadow counts its nodes as not the
@@ -38,6 +45,24 @@
 // The differing records a file's report lists.
 #define BUSTER_NODE_FRONT_LISTED 16u
 
+// PPOptions.node_front: 0 for no front, BUSTER_NODE_FRONT_AFTER or BUSTER_NODE_FRONT_BEFORE the walk's actions at a
+// chunk, with BUSTER_NODE_FRONT_LEAN for the lean front and BUSTER_NODE_FRONT_WARM for its arrays touched beforehand.
+#define BUSTER_NODE_FRONT_AFTER 1u
+#define BUSTER_NODE_FRONT_BEFORE 2u
+#define BUSTER_NODE_FRONT_ORDER 3u
+#define BUSTER_NODE_FRONT_LEAN 4u
+// The front's arrays touched before its first chunk (measure-node-machine --shadow --front-warm): its ticks without the
+// first touch of fresh memory.
+#define BUSTER_NODE_FRONT_WARM 8u
+// What #2850's layout keeps in its byte columns: an operand count up to 63 and a place up to 3 (step 0's lanes.c); the
+// front's bytes hold up to 255, and the shadow counts what is past the layout's.
+#define BUSTER_NODE_FRONT_COUNT_MOST 63u
+#define BUSTER_NODE_FRONT_PLACE_MOST 3u
+// A lean leaf's kind, in its record's `leaf_categories`.
+#define BUSTER_NODE_FRONT_LEAF_IDENTIFIER 0u
+#define BUSTER_NODE_FRONT_LEAF_LITERAL 1u
+#define BUSTER_NODE_FRONT_LEAF_STRING 2u
+
 // What the shadow reports of the front (CheckInput.node_front), in the output's arena.
 typedef struct NodeFrontShadow NodeFrontShadow;
 struct NodeFrontShadow
@@ -50,7 +75,9 @@ struct NodeFrontShadow
     // The records compared with the walk's nodes, and those that differ: a difference is a failure.
     uint64_t checked;
     uint64_t differences;
-    // The tokens left, by class, and the times a full expression outgrew the front's arrays.
+    // The acting tokens the front read, by class (counted outside its ticks), the tokens left, by class, and the times a
+    // full expression outgrew the front's arrays.
+    uint64_t acting[BUSTER_CHECK_EXPRESSION_CODES];
     uint64_t left[BUSTER_CHECK_EXPRESSION_CODES];
     // Of the tokens left, the sizeof and _Alignof ones.
     uint64_t left_queries;
@@ -77,6 +104,15 @@ struct NodeFrontShadow
     // The calls' arguments, and those further back than BUSTER_NODE_FRONT_NEAR from their call.
     uint64_t arguments;
     uint64_t arguments_past;
+    // The records with more operands than BUSTER_NODE_FRONT_COUNT_MOST, and the operands at a place past
+    // BUSTER_NODE_FRONT_PLACE_MOST (a call's fourth argument and later): what #2850's byte columns cap.
+    uint64_t counts_past;
+    uint64_t places_past;
+    // The walk's preparation of a chunk by its parts, in ticks, where the front ran: the acting tokens' compaction, the
+    // identifiers' entries and the literals'. The lean front reads the first and the last.
+    uint64_t compact_ticks;
+    uint64_t identifier_ticks;
+    uint64_t literal_ticks;
     // A bit a graph node: the nodes with an operand further back than BUSTER_NODE_FRONT_NEAR, no root's.
     uint64_t* past;
     // A byte a graph node: the context the front gives the node's record, compared once the walk has acted at every
@@ -96,6 +132,7 @@ struct NodeFrontShadow
 #define BUSTER_NODE_FRONT_FIELD_TYPE 7u
 #define BUSTER_NODE_FRONT_FIELD_CONTEXT 8u
 #define BUSTER_NODE_FRONT_FIELD_DISTANCE 9u
+#define BUSTER_NODE_FRONT_FIELD_STRUCTURE 10u
 
 // The front's arrays are one block, each a multiple of 4 KB long and BUSTER_NODE_FRONT_STAGGER bytes more: a record's
 // fields, one in each array at the record's index, would otherwise all lie 4 KB apart, in one set of the first-level
@@ -139,6 +176,16 @@ struct NodeFront
     uint8_t distances[3][BUSTER_NODE_FRONT_RECORDS + BUSTER_NODE_FRONT_STAGGER];
     uint8_t roots[BUSTER_NODE_FRONT_RECORDS];
     uint8_t roots_stagger[BUSTER_NODE_FRONT_STAGGER];
+    // The other structural bytes of #2850's layout: a record's operand count (a call's callee and arguments; 255 for
+    // that or more), and, written when its consumer's record is made, the consumer's distance forward (0 for none: a
+    // root, a value a left token took or one nothing takes; BUSTER_NODE_FRONT_FAR for that or more) and its place among
+    // the consumer's operands (a call's callee 0 and its arguments from 1; 255 for that or more).
+    uint8_t counts[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t counts_stagger[BUSTER_NODE_FRONT_STAGGER];
+    uint8_t ups[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t ups_stagger[BUSTER_NODE_FRONT_STAGGER];
+    uint8_t places[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t places_stagger[BUSTER_NODE_FRONT_STAGGER];
     uint32_t ordinals[BUSTER_NODE_FRONT_RECORDS];
     uint8_t ordinals_stagger[BUSTER_NODE_FRONT_STAGGER];
     // The token of the name a record is, or is the address of (a call's library mark reads its callee's), or
@@ -170,6 +217,10 @@ struct NodeFront
     uint8_t leaf_constants_stagger[BUSTER_NODE_FRONT_STAGGER];
     uint16_t wides[BUSTER_NODE_FRONT_RECORDS];
     uint8_t wides_stagger[BUSTER_NODE_FRONT_STAGGER];
+    // The comparison's own: whether a compared consumer found the record at its place and distance (a consumer's
+    // distance no consumer vouches for is a difference).
+    uint8_t vouched[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t vouched_stagger[BUSTER_NODE_FRONT_STAGGER];
     // The walk's node of a record, once compared (BUSTER_CHECK_NONE for one that differed).
     uint32_t nodes[BUSTER_NODE_FRONT_RECORDS];
     uint8_t nodes_stagger[BUSTER_NODE_FRONT_STAGGER];
@@ -184,6 +235,10 @@ struct NodeFront
     uint32_t group_count;
     // Whether the stack is full and its entries forgotten already (node_front_give).
     bool full;
+    // The lean front (BUSTER_NODE_FRONT_LEAN): its records have the structural bytes, the token and a leaf's payload
+    // (`leaf_integers`: an identifier's declaration, a literal's integer, a string's object; `leaf_types`: a literal's
+    // or a string's type; `leaf_categories`: BUSTER_NODE_FRONT_LEAF_*), and none of the other columns.
+    bool lean;
     uint32_t arguments[BUSTER_NODE_FRONT_RECORDS];
     uint8_t arguments_stagger[BUSTER_NODE_FRONT_STAGGER];
     CheckValue wide_values[BUSTER_NODE_FRONT_WIDES];
@@ -302,11 +357,11 @@ static inline void node_front_pass(NodeFront* front, CheckInputReader* reader, u
     }
 }
 
-// `token`'s values, the top group's where the token is its consumer, taken off the stack into `values` in source order:
-// how many, or BUSTER_NODE_FRONT_UNKNOWN where one is unknown or they are more than BUSTER_NODE_FRONT_VALUES.
-static inline uint32_t node_front_values(NodeFront* front, uint32_t token, uint32_t* values)
+// A token's values, the top group's where the token is its consumer (`grouped`), taken off the stack into `values` in
+// source order: how many, or BUSTER_NODE_FRONT_UNKNOWN where one is unknown or they are more than
+// BUSTER_NODE_FRONT_VALUES.
+static inline uint32_t node_front_values(NodeFront* front, bool grouped, uint32_t* values)
 {
-    const bool grouped = front->group_count != 0 && front->group_consumers[front->group_count - 1] == token;
     const uint32_t first = grouped ? front->group_firsts[front->group_count - 1] : front->stack_count;
     const uint32_t count = front->stack_count - first;
     bool known = count <= BUSTER_NODE_FRONT_VALUES;
@@ -338,8 +393,10 @@ static inline void node_front_taken_by_left(NodeFront* front)
 }
 
 // A record of `op` at `token` with operands a, b and c (records, or BUSTER_NODE_FRONT_UNKNOWN for none): its index, or
-// BUSTER_NODE_FRONT_UNKNOWN where the front's arrays are full.
-static inline uint32_t node_front_add(NodeFront* front, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c, CheckInputNodeForm form, TypeId type)
+// BUSTER_NODE_FRONT_UNKNOWN where the front's arrays are full. Each operand's record gets its consumer's distance and its
+// place. The lean front (`lean`, a constant where this is inlined) writes the structural bytes and the token alone.
+static inline __attribute__((always_inline)) uint32_t node_front_add(NodeFront* front, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c, CheckInputNodeForm form,
+                                                                     TypeId type, const bool lean)
 {
     const uint32_t record = front->count;
     uint32_t result = BUSTER_NODE_FRONT_UNKNOWN;
@@ -352,23 +409,43 @@ static inline uint32_t node_front_add(NodeFront* front, CheckOp op, uint32_t tok
         front->tokens[record] = token;
         const uint32_t ordinal = front->ordinal;
         const uint32_t operands[3] = { a, b, c };
-        for (uint32_t k = 0; k < 3; k += 1)
+        uint32_t count = 0;
+        // From the last operand to the first: a conditional with its middle omitted takes its first value twice, and
+        // that value's place is the first.
+        for (uint32_t k = 3; k-- != 0;)
         {
-            const uint32_t distance = operands[k] != BUSTER_NODE_FRONT_UNKNOWN ? ordinal - front->ordinals[operands[k]] : 0;
-            front->operands[k][record] = operands[k];
-            front->distances[k][record] = (uint8_t)(distance < BUSTER_NODE_FRONT_FAR ? distance : BUSTER_NODE_FRONT_FAR);
+            const uint32_t operand = operands[k];
+            const bool present = operand != BUSTER_NODE_FRONT_UNKNOWN;
+            const uint32_t distance = present ? ordinal - front->ordinals[operand] : 0;
+            const uint8_t byte = (uint8_t)(distance < BUSTER_NODE_FRONT_FAR ? distance : BUSTER_NODE_FRONT_FAR);
+            front->distances[k][record] = byte;
+            if (present)
+            {
+                front->ups[operand] = byte;
+                front->places[operand] = (uint8_t)k;
+                count += 1;
+            }
         }
+        front->counts[record] = (uint8_t)count;
+        front->ups[record] = 0;
+        front->places[record] = 0;
         front->ordinals[record] = ordinal;
         front->ordinal = ordinal + 1;
         front->roots[record] = form == CHECK_INPUT_FORM_DISCARD || form == CHECK_INPUT_FORM_INITIALIZER;
-        front->uses[record] = op == CHECK_OP_VALUE ? token : op == CHECK_OP_ADDRESS && a != BUSTER_NODE_FRONT_UNKNOWN && front->ops[a] == CHECK_OP_VALUE ? front->tokens[a] :
-                                                             BUSTER_CHECK_NONE;
-        front->members[record] = 0;
-        front->argument_firsts[record] = 0;
-        front->argument_counts[record] = 0;
-        front->types[record] = type;
-        front->wides[record] = 0;
         front->nodes[record] = BUSTER_CHECK_NONE;
+        if (!lean)
+        {
+            front->operands[0][record] = a;
+            front->operands[1][record] = b;
+            front->operands[2][record] = c;
+            front->uses[record] = op == CHECK_OP_VALUE ? token : op == CHECK_OP_ADDRESS && a != BUSTER_NODE_FRONT_UNKNOWN && front->ops[a] == CHECK_OP_VALUE ? front->tokens[a] :
+                                                                 BUSTER_CHECK_NONE;
+            front->members[record] = 0;
+            front->argument_firsts[record] = 0;
+            front->argument_counts[record] = 0;
+            front->types[record] = type;
+            front->wides[record] = 0;
+        }
         front->count = record + 1;
         result = record;
     }
@@ -381,7 +458,7 @@ static inline uint32_t node_front_leaf(NodeFront* front, uint32_t token, const C
     const bool wide = check_graph_leaf_rest(value);
     const bool room = !wide || front->wide_count < BUSTER_NODE_FRONT_WIDES;
     const uint32_t record = room ? node_front_add(front, CHECK_OP_VALUE, token, BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN,
-                                                  CHECK_INPUT_FORM_LEAF, 0) : BUSTER_NODE_FRONT_UNKNOWN;
+                                                  CHECK_INPUT_FORM_LEAF, 0, false) : BUSTER_NODE_FRONT_UNKNOWN;
     if (record != BUSTER_NODE_FRONT_UNKNOWN)
     {
         front->leaf_types[record] = value->type;
@@ -482,6 +559,8 @@ static void node_front_keep(NodeFront* front)
             front->ordinals[kept] = front->ordinals[record];
             front->uses[kept] = front->uses[record];
             front->nodes[kept] = front->nodes[record];
+            front->ups[kept] = 0;
+            front->places[kept] = 0;
             front->stack[i] = kept;
             kept += 1;
         }
@@ -495,8 +574,9 @@ static void node_front_keep(NodeFront* front)
 // The front's pass over a chunk's `acting` tokens and classes, in the walk's order, with the chunk's identifiers' and
 // literals' entries (check_input_expression_identifiers, check_input_expression_literals): each token's record, or
 // none, by its class.
-static void node_front_chunk(NodeFront* front, CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes, uint32_t acting,
-                             const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals)
+static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront* front, CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes,
+                                                                    uint32_t acting, const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals,
+                                                                    const bool lean)
 {
     const Parser* parser = reader->parser;
     const CheckInput* input = reader->output;
@@ -518,270 +598,356 @@ static void node_front_chunk(NodeFront* front, CheckInputReader* reader, const u
     {
         const uint32_t token = tokens[i];
         const uint32_t code = (classes[i] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
-        // Whether the front leaves the token, and whether the token has a value for its consumer: its record's, or an
-        // unknown one where it is left or the arrays are full.
-        uint32_t record = BUSTER_NODE_FRONT_UNKNOWN;
-        bool value = false;
-        bool left = false;
-        front->taken_count = 0;
-        switch (code)
+        // Whether the top group of the waiting values is the token's: a token that takes values takes that group, and
+        // one that only passes values on has nothing to do without it. Most lists are declarations', with no value
+        // below them: over half of Lua's and musl's acting tokens, a quarter of sqlite3.c's, end here.
+        const bool mine = front->group_count != 0 && front->group_consumers[front->group_count - 1] == token;
+        if (code == CHECK_INPUT_CODE_LIST || code == CHECK_INPUT_CODE_SEPARATOR || code == CHECK_INPUT_CODE_GROUP)
         {
-            case CHECK_INPUT_CODE_LIST:
-            case CHECK_INPUT_CODE_SEPARATOR:
-            case CHECK_INPUT_CODE_GROUP:
+            if (mine)
+            {
                 node_front_pass(front, reader, token);
-                break;
-            case CHECK_INPUT_CODE_IDENTIFIER:
+            }
+        }
+        else
+        {
+            // Whether the front leaves the token, and whether the token has a value for its consumer: its record's, or an
+            // unknown one where it is left or the arrays are full.
+            uint32_t record = BUSTER_NODE_FRONT_UNKNOWN;
+            bool value = false;
+            bool left = false;
+            front->taken_count = 0;
+            switch (code)
             {
-                const uint32_t at = identifier;
-                const uint32_t status = identifiers->status[at];
-                identifier += 1;
-                left = (status & BUSTER_CHECK_IDENTIFIER_ACTED) == 0;
-                value = left || (status & BUSTER_CHECK_IDENTIFIER_NODE) != 0;
-                if (!left && value)
+                case CHECK_INPUT_CODE_IDENTIFIER:
                 {
-                    const CheckValue leaf =
+                    if (lean)
                     {
-                        .type = (TypeId)identifiers->types[at],
-                        .category = (CheckCategory)(identifiers->types[at] >> 32),
-                        .flags = (uint32_t)identifiers->flags[at],
-                        .constant_kind = (CheckConstantKind)(identifiers->flags[at] >> 32),
-                        .integer = (status & BUSTER_CHECK_IDENTIFIER_ENUMERATOR) != 0 ? reader->enum_values[identifiers->declarations[at]] : 0,
-                        .object = (uint32_t)identifiers->objects[at],
-                        .overload_head = (uint32_t)(identifiers->objects[at] >> 32),
-                    };
-                    record = node_front_leaf(front, token, &leaf);
-                }
-                break;
-            }
-            case CHECK_INPUT_CODE_LITERAL:
-            {
-                const uint32_t at = literal;
-                literal += 1;
-                CheckLiteral decoded = { .type = BUSTER_TYPE_INT, .integer = literals->values[at], .valid = true };
-                left = check_input_function_name_token(parser, token) || (literals->values[at] == BUSTER_CHECK_NONE && !node_front_literal(reader, token, &decoded));
-                value = true;
-                if (!left)
-                {
-                    const CheckValue leaf = check_input_literal_value(reader, token, decoded);
-                    record = node_front_leaf(front, token, &leaf);
-                }
-                break;
-            }
-            case CHECK_INPUT_CODE_STRING:
-            {
-                const CheckInitString* string = check_input_string(reader, token);
-                value = string != 0;
-                if (value)
-                {
-                    const CheckValue leaf =
-                    {
-                        .type = string->type,
-                        .category = CHECK_LVALUE,
-                        .flags = BUSTER_CHECK_STATIC_OBJECT | (string->object != 0 ? BUSTER_CHECK_NONNULL_ADDRESS : 0),
-                        .constant_kind = CHECK_CONSTANT_ADDRESS,
-                        .object = string->object,
-                    };
-                    record = node_front_leaf(front, token, &leaf);
-                }
-                break;
-            }
-            case CHECK_INPUT_CODE_PREFIX:
-            case CHECK_INPUT_CODE_POSTFIX:
-            case CHECK_INPUT_CODE_BINARY:
-            case CHECK_INPUT_CODE_CAST:
-            case CHECK_INPUT_CODE_SUBSCRIPT:
-            case CHECK_INPUT_CODE_TERNARY:
-            case CHECK_INPUT_CODE_MEMBER:
-            {
-                const uint32_t count = node_front_values(front, token, values);
-                const uint8_t kind = parser->tokens.kinds[token];
-                CheckOp op = CHECK_OP_COUNT;
-                uint32_t wanted = 1;
-                uint32_t member = 0;
-                switch (code)
-                {
-                    case CHECK_INPUT_CODE_PREFIX:
-                        switch (kind)
+                        // Its status from its token's own columns, as check_input_identifier_entry has it: its class's
+                        // action takes it but in a K&R unit and for a constexpr object's use, and it has a value where it
+                        // has a declared type. Its record is its token and its declaration.
+                        const TypeId type = reader->declared_types[token];
+                        const uint32_t declaration = type != 0 ? input->declarations[token] : 0;
+                        left = input->kr_parameter_count != 0 || (type != 0 && (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0);
+                        value = left || type != 0;
+                        if (!left && value)
                         {
-                            case PARSE_KIND_PLUS: op = CHECK_OP_POSITIVE; break;
-                            case PARSE_KIND_EXTENSION: op = CHECK_OP_SELECT; break;
-                            case PARSE_KIND_MINUS: op = CHECK_OP_NEGATIVE; break;
-                            case PARSE_KIND_EXCLAIM: op = CHECK_OP_NOT; break;
-                            case PARSE_KIND_TILDE: op = CHECK_OP_BIT_NOT; break;
-                            case PARSE_KIND_AMP: op = CHECK_OP_ADDRESS; break;
-                            case PARSE_KIND_STAR: op = CHECK_OP_DEREFERENCE; break;
-                            case PARSE_KIND_PLUSPLUS: op = CHECK_OP_PRE_INCREMENT; break;
-                            case PARSE_KIND_MINUSMINUS: op = CHECK_OP_PRE_DECREMENT; break;
-                            default: break;
+                            record = node_front_add(front, CHECK_OP_VALUE, token, BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN,
+                                                    CHECK_INPUT_FORM_LEAF, 0, true);
+                            if (record != BUSTER_NODE_FRONT_UNKNOWN)
+                            {
+                                front->leaf_categories[record] = BUSTER_NODE_FRONT_LEAF_IDENTIFIER;
+                                front->leaf_integers[record] = declaration;
+                            }
                         }
                         break;
-                    case CHECK_INPUT_CODE_POSTFIX:
-                        op = kind == PARSE_KIND_PLUSPLUS ? CHECK_OP_POST_INCREMENT : kind == PARSE_KIND_MINUSMINUS ? CHECK_OP_POST_DECREMENT : CHECK_OP_COUNT;
-                        break;
-                    case CHECK_INPUT_CODE_BINARY:
-                        op = check_input_binary(kind);
-                        wanted = 2;
-                        break;
-                    case CHECK_INPUT_CODE_CAST:
-                        op = reader->query_types[token] != 0 ? CHECK_OP_CAST : CHECK_OP_COUNT;
-                        break;
-                    case CHECK_INPUT_CODE_SUBSCRIPT:
-                        op = CHECK_OP_SUBSCRIPT;
-                        wanted = 2;
-                        break;
-                    case CHECK_INPUT_CODE_TERNARY:
-                        op = CHECK_OP_CONDITIONAL;
-                        wanted = count == 2 ? 2 : 3;
-                        break;
-                    default:
-                        if (token + 1 < token_count && parser->tree.roles[token + 1] == PARSE_ROLE_MEMBER)
-                        {
-                            op = kind == PARSE_KIND_ARROW ? CHECK_OP_ARROW : CHECK_OP_MEMBER;
-                            member = parser->tokens.names[token + 1];
-                        }
-                        break;
-                }
-                left = op == CHECK_OP_COUNT || count != wanted;
-                value = true;
-                if (!left)
-                {
-                    // A conditional with its middle omitted (x ?: y) takes its first value twice.
-                    const bool omitted = code == CHECK_INPUT_CODE_TERNARY && count == 2;
-                    const uint32_t b = omitted ? values[0] : count >= 2 ? values[1] : BUSTER_NODE_FRONT_UNKNOWN;
-                    const uint32_t c = omitted ? values[1] : count == 3 ? values[2] : BUSTER_NODE_FRONT_UNKNOWN;
-                    record = node_front_add(front, op, token, values[0], b, c, CHECK_INPUT_FORM_OPERATOR, reader->query_types[token]);
-                    if (record != BUSTER_NODE_FRONT_UNKNOWN)
-                    {
-                        front->members[record] = member;
                     }
-                }
-                break;
-            }
-            case CHECK_INPUT_CODE_CALL:
-            {
-                const uint32_t count = node_front_values(front, token, values);
-                left = count == BUSTER_NODE_FRONT_UNKNOWN || count == 0 || input->kr_parameter_count != 0 || input->no_builtin ||
-                       front->argument_count + count > BUSTER_NODE_FRONT_RECORDS;
-                value = true;
-                if (!left)
-                {
-                    record = node_front_add(front, CHECK_OP_CALL, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, CHECK_INPUT_FORM_OPERATOR,
-                                            reader->query_types[token]);
-                    if (record != BUSTER_NODE_FRONT_UNKNOWN)
+                    const uint32_t at = identifier;
+                    const uint32_t status = identifiers->status[at];
+                    identifier += 1;
+                    left = (status & BUSTER_CHECK_IDENTIFIER_ACTED) == 0;
+                    value = left || (status & BUSTER_CHECK_IDENTIFIER_NODE) != 0;
+                    if (!left && value)
                     {
-                        front->members[record] = node_front_library(front, reader, values[0]);
-                        front->argument_firsts[record] = front->argument_count;
-                        front->argument_counts[record] = count - 1;
-                        for (uint32_t k = 1; k < count; k += 1)
+                        const CheckValue leaf =
                         {
-                            front->arguments[front->argument_count] = values[k];
-                            front->argument_count += 1;
+                            .type = (TypeId)identifiers->types[at],
+                            .category = (CheckCategory)(identifiers->types[at] >> 32),
+                            .flags = (uint32_t)identifiers->flags[at],
+                            .constant_kind = (CheckConstantKind)(identifiers->flags[at] >> 32),
+                            .integer = (status & BUSTER_CHECK_IDENTIFIER_ENUMERATOR) != 0 ? reader->enum_values[identifiers->declarations[at]] : 0,
+                            .object = (uint32_t)identifiers->objects[at],
+                            .overload_head = (uint32_t)(identifiers->objects[at] >> 32),
+                        };
+                        record = node_front_leaf(front, token, &leaf);
+                    }
+                    break;
+                }
+                case CHECK_INPUT_CODE_LITERAL:
+                {
+                    const uint32_t at = literal;
+                    literal += 1;
+                    CheckLiteral decoded = { .type = BUSTER_TYPE_INT, .integer = literals->values[at], .valid = true };
+                    left = check_input_function_name_token(parser, token) || (literals->values[at] == BUSTER_CHECK_NONE && !node_front_literal(reader, token, &decoded));
+                    value = true;
+                    if (!left && lean)
+                    {
+                        // Its type and its integer, as the reader decoded them: the rest of its value is the reader's entry.
+                        record = node_front_add(front, CHECK_OP_VALUE, token, BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN,
+                                                CHECK_INPUT_FORM_LEAF, 0, true);
+                        if (record != BUSTER_NODE_FRONT_UNKNOWN)
+                        {
+                            front->leaf_categories[record] = BUSTER_NODE_FRONT_LEAF_LITERAL;
+                            front->leaf_types[record] = decoded.type;
+                            front->leaf_integers[record] = decoded.integer;
                         }
                     }
-                }
-                break;
-            }
-            case CHECK_INPUT_CODE_TERMINATOR:
-            {
-                // Each of its values discarded, a CAST to void, or tested in a condition's context, as the walk's
-                // terminator does; a statement expression's last statement gives the same nodes.
-                const uint32_t count = node_front_values(front, token, values);
-                const bool condition = reader->conditions[token] != 0;
-                bool region = false;
-                if (input->region_count != 0)
-                {
-                    const uint32_t parent = parser->tree.parents[token];
-                    uint32_t selected = parent < token_count ? input->expression_regions[parent] : 0;
-                    if (selected == 0 && parent < token_count && parser->tree.roles[parent] == PARSE_ROLE_LABEL)
+                    else if (!left)
                     {
-                        selected = check_input_labeled_region(reader, parent);
+                        const CheckValue leaf = check_input_literal_value(reader, token, decoded);
+                        record = node_front_leaf(front, token, &leaf);
                     }
-                    region = selected != 0 && input->regions[selected - 1].final_statement == token;
+                    break;
                 }
-                left = count == BUSTER_NODE_FRONT_UNKNOWN || (condition && count > 1) || (region && count != 1);
-                for (uint32_t k = 0; !left && k < count; k += 1)
+                case CHECK_INPUT_CODE_STRING:
                 {
-                    (void)node_front_add(front, condition ? CHECK_OP_CONDITION : CHECK_OP_CAST, token, values[k], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN,
-                                         CHECK_INPUT_FORM_DISCARD, BUSTER_TYPE_VOID);
-                }
-                break;
-            }
-            case CHECK_INPUT_CODE_CONDITION:
-            {
-                const uint32_t count = node_front_values(front, token, values);
-                left = count != 1;
-                if (!left)
-                {
-                    const uint32_t keyword = reader->first_child[token];
-                    const bool switched = keyword < token_count && parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH;
-                    record = node_front_add(front, switched ? CHECK_OP_POSITIVE : CHECK_OP_CONDITION, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN,
-                                            CHECK_INPUT_FORM_OPERATOR, reader->query_types[token]);
-                    if (record != BUSTER_NODE_FRONT_UNKNOWN)
+                    const CheckInitString* string = check_input_string(reader, token);
+                    value = string != 0;
+                    if (value && lean)
                     {
-                        front->roots[record] = 1;
+                        record = node_front_add(front, CHECK_OP_VALUE, token, BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN,
+                                                CHECK_INPUT_FORM_LEAF, 0, true);
+                        if (record != BUSTER_NODE_FRONT_UNKNOWN)
+                        {
+                            front->leaf_categories[record] = BUSTER_NODE_FRONT_LEAF_STRING;
+                            front->leaf_types[record] = string->type;
+                            front->leaf_integers[record] = string->object;
+                        }
                     }
-                }
-                break;
-            }
-            case CHECK_INPUT_CODE_RETURN:
-            {
-                const uint32_t count = node_front_values(front, token, values);
-                const TypeId type = reader->return_types[token];
-                left = type == 0 || count == BUSTER_NODE_FRONT_UNKNOWN || count > 1;
-                if (!left && count == 1)
-                {
-                    record = node_front_add(front, CHECK_OP_CONVERT, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, CHECK_INPUT_FORM_OPERATOR, type);
-                    if (record != BUSTER_NODE_FRONT_UNKNOWN)
+                    else if (value)
                     {
-                        front->roots[record] = 1;
+                        const CheckValue leaf =
+                        {
+                            .type = string->type,
+                            .category = CHECK_LVALUE,
+                            .flags = BUSTER_CHECK_STATIC_OBJECT | (string->object != 0 ? BUSTER_CHECK_NONNULL_ADDRESS : 0),
+                            .constant_kind = CHECK_CONSTANT_ADDRESS,
+                            .object = string->object,
+                        };
+                        record = node_front_leaf(front, token, &leaf);
                     }
+                    break;
                 }
-                break;
-            }
-            case CHECK_INPUT_CODE_INITIALIZE:
-            {
-                // A braced initializer's assignment passes its values on.
-                if (reader->initializers[token] == 2)
+                case CHECK_INPUT_CODE_PREFIX:
+                case CHECK_INPUT_CODE_POSTFIX:
+                case CHECK_INPUT_CODE_BINARY:
+                case CHECK_INPUT_CODE_CAST:
+                case CHECK_INPUT_CODE_SUBSCRIPT:
+                case CHECK_INPUT_CODE_TERNARY:
+                case CHECK_INPUT_CODE_MEMBER:
                 {
-                    node_front_pass(front, reader, token);
-                }
-                else
-                {
-                    const uint32_t count = node_front_values(front, token, values);
-                    left = count != 1;
+                    const uint32_t count = node_front_values(front, mine, values);
+                    const uint8_t kind = parser->tokens.kinds[token];
+                    CheckOp op = CHECK_OP_COUNT;
+                    uint32_t wanted = 1;
+                    uint32_t member = 0;
+                    switch (code)
+                    {
+                        case CHECK_INPUT_CODE_PREFIX:
+                            switch (kind)
+                            {
+                                case PARSE_KIND_PLUS: op = CHECK_OP_POSITIVE; break;
+                                case PARSE_KIND_EXTENSION: op = CHECK_OP_SELECT; break;
+                                case PARSE_KIND_MINUS: op = CHECK_OP_NEGATIVE; break;
+                                case PARSE_KIND_EXCLAIM: op = CHECK_OP_NOT; break;
+                                case PARSE_KIND_TILDE: op = CHECK_OP_BIT_NOT; break;
+                                case PARSE_KIND_AMP: op = CHECK_OP_ADDRESS; break;
+                                case PARSE_KIND_STAR: op = CHECK_OP_DEREFERENCE; break;
+                                case PARSE_KIND_PLUSPLUS: op = CHECK_OP_PRE_INCREMENT; break;
+                                case PARSE_KIND_MINUSMINUS: op = CHECK_OP_PRE_DECREMENT; break;
+                                default: break;
+                            }
+                            break;
+                        case CHECK_INPUT_CODE_POSTFIX:
+                            op = kind == PARSE_KIND_PLUSPLUS ? CHECK_OP_POST_INCREMENT : kind == PARSE_KIND_MINUSMINUS ? CHECK_OP_POST_DECREMENT : CHECK_OP_COUNT;
+                            break;
+                        case CHECK_INPUT_CODE_BINARY:
+                            op = check_input_binary(kind);
+                            wanted = 2;
+                            break;
+                        case CHECK_INPUT_CODE_CAST:
+                            op = reader->query_types[token] != 0 ? CHECK_OP_CAST : CHECK_OP_COUNT;
+                            break;
+                        case CHECK_INPUT_CODE_SUBSCRIPT:
+                            op = CHECK_OP_SUBSCRIPT;
+                            wanted = 2;
+                            break;
+                        case CHECK_INPUT_CODE_TERNARY:
+                            op = CHECK_OP_CONDITIONAL;
+                            wanted = count == 2 ? 2 : 3;
+                            break;
+                        default:
+                            if (token + 1 < token_count && parser->tree.roles[token + 1] == PARSE_ROLE_MEMBER)
+                            {
+                                op = kind == PARSE_KIND_ARROW ? CHECK_OP_ARROW : CHECK_OP_MEMBER;
+                                member = parser->tokens.names[token + 1];
+                            }
+                            break;
+                    }
+                    left = op == CHECK_OP_COUNT || count != wanted;
                     value = true;
                     if (!left)
                     {
-                        record = node_front_add(front, CHECK_OP_INITIALIZE, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, CHECK_INPUT_FORM_INITIALIZER,
-                                                reader->query_types[token]);
+                        // A conditional with its middle omitted (x ?: y) takes its first value twice.
+                        const bool omitted = code == CHECK_INPUT_CODE_TERNARY && count == 2;
+                        const uint32_t b = omitted ? values[0] : count >= 2 ? values[1] : BUSTER_NODE_FRONT_UNKNOWN;
+                        const uint32_t c = omitted ? values[1] : count == 3 ? values[2] : BUSTER_NODE_FRONT_UNKNOWN;
+                        record = node_front_add(front, op, token, values[0], b, c, CHECK_INPUT_FORM_OPERATOR, lean ? 0 : reader->query_types[token], lean);
+                        if (record != BUSTER_NODE_FRONT_UNKNOWN && !lean)
+                        {
+                            front->members[record] = member;
+                        }
                     }
+                    break;
                 }
-                break;
+                case CHECK_INPUT_CODE_CALL:
+                {
+                    const uint32_t count = node_front_values(front, mine, values);
+                    left = count == BUSTER_NODE_FRONT_UNKNOWN || count == 0 || input->kr_parameter_count != 0 || input->no_builtin ||
+                           (!lean && front->argument_count + count > BUSTER_NODE_FRONT_RECORDS);
+                    value = true;
+                    if (!left)
+                    {
+                        record = node_front_add(front, CHECK_OP_CALL, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, CHECK_INPUT_FORM_OPERATOR,
+                                                lean ? 0 : reader->query_types[token], lean);
+                        if (record != BUSTER_NODE_FRONT_UNKNOWN)
+                        {
+                            // Its operands are its callee and its arguments: each argument's record gets the call's distance
+                            // and its place after the callee's.
+                            const uint32_t ordinal = front->ordinals[record];
+                            front->counts[record] = (uint8_t)(count < 255 ? count : 255);
+                            for (uint32_t k = 1; k < count; k += 1)
+                            {
+                                const uint32_t argument = values[k];
+                                const uint32_t distance = ordinal - front->ordinals[argument];
+                                front->ups[argument] = (uint8_t)(distance < BUSTER_NODE_FRONT_FAR ? distance : BUSTER_NODE_FRONT_FAR);
+                                front->places[argument] = (uint8_t)(k < 255 ? k : 255);
+                            }
+                            if (!lean)
+                            {
+                                front->members[record] = node_front_library(front, reader, values[0]);
+                                front->argument_firsts[record] = front->argument_count;
+                                front->argument_counts[record] = count - 1;
+                                for (uint32_t k = 1; k < count; k += 1)
+                                {
+                                    front->arguments[front->argument_count] = values[k];
+                                    front->argument_count += 1;
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+                case CHECK_INPUT_CODE_TERMINATOR:
+                {
+                    // Each of its values discarded, a CAST to void, or tested in a condition's context, as the walk's
+                    // terminator does; a statement expression's last statement gives the same nodes.
+                    const uint32_t count = node_front_values(front, mine, values);
+                    // A terminator with no value (a declaration's, an empty statement's) reads nothing more.
+                    if (count != 0)
+                    {
+                        const bool condition = reader->conditions[token] != 0;
+                        bool region = false;
+                        if (input->region_count != 0)
+                        {
+                            const uint32_t parent = parser->tree.parents[token];
+                            uint32_t selected = parent < token_count ? input->expression_regions[parent] : 0;
+                            if (selected == 0 && parent < token_count && parser->tree.roles[parent] == PARSE_ROLE_LABEL)
+                            {
+                                selected = check_input_labeled_region(reader, parent);
+                            }
+                            region = selected != 0 && input->regions[selected - 1].final_statement == token;
+                        }
+                        left = count == BUSTER_NODE_FRONT_UNKNOWN || (condition && count > 1) || (region && count != 1);
+                        for (uint32_t k = 0; !left && k < count; k += 1)
+                        {
+                            (void)node_front_add(front, condition ? CHECK_OP_CONDITION : CHECK_OP_CAST, token, values[k], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN,
+                                                 CHECK_INPUT_FORM_DISCARD, BUSTER_TYPE_VOID, lean);
+                        }
+                    }
+                    break;
+                }
+                case CHECK_INPUT_CODE_CONDITION:
+                {
+                    const uint32_t count = node_front_values(front, mine, values);
+                    left = count != 1;
+                    if (!left)
+                    {
+                        const uint32_t keyword = reader->first_child[token];
+                        const bool switched = keyword < token_count && parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH;
+                        record = node_front_add(front, switched ? CHECK_OP_POSITIVE : CHECK_OP_CONDITION, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN,
+                                                CHECK_INPUT_FORM_OPERATOR, reader->query_types[token], lean);
+                        if (record != BUSTER_NODE_FRONT_UNKNOWN)
+                        {
+                            front->roots[record] = 1;
+                        }
+                    }
+                    break;
+                }
+                case CHECK_INPUT_CODE_RETURN:
+                {
+                    const uint32_t count = node_front_values(front, mine, values);
+                    const TypeId type = reader->return_types[token];
+                    left = type == 0 || count == BUSTER_NODE_FRONT_UNKNOWN || count > 1;
+                    if (!left && count == 1)
+                    {
+                        record = node_front_add(front, CHECK_OP_CONVERT, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, CHECK_INPUT_FORM_OPERATOR, type,
+                                                lean);
+                        if (record != BUSTER_NODE_FRONT_UNKNOWN)
+                        {
+                            front->roots[record] = 1;
+                        }
+                    }
+                    break;
+                }
+                case CHECK_INPUT_CODE_INITIALIZE:
+                {
+                    // A braced initializer's assignment passes its values on.
+                    if (reader->initializers[token] == 2)
+                    {
+                        node_front_pass(front, reader, token);
+                    }
+                    else
+                    {
+                        const uint32_t count = node_front_values(front, mine, values);
+                        left = count != 1;
+                        value = true;
+                        if (!left)
+                        {
+                            record = node_front_add(front, CHECK_OP_INITIALIZE, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, CHECK_INPUT_FORM_INITIALIZER,
+                                                    reader->query_types[token], lean);
+                        }
+                    }
+                    break;
+                }
+                default:
+                {
+                    // The walk's own visit, whose values and nodes the front doesn't know.
+                    (void)node_front_values(front, mine, values);
+                    left = true;
+                    value = true;
+                    break;
+                }
             }
-            default:
+            if (left)
             {
-                // The walk's own visit, whose values and nodes the front doesn't know.
-                (void)node_front_values(front, token, values);
-                left = true;
-                value = true;
-                break;
+                shadow->left[code] += 1;
+                shadow->left_queries += parser->tokens.kinds[token] == PARSE_KIND_SIZEOF;
+                node_front_taken_by_left(front);
             }
-        }
-        shadow->left[code] += left;
-        if (left)
-        {
-            shadow->left_queries += parser->tokens.kinds[token] == PARSE_KIND_SIZEOF;
-            node_front_taken_by_left(front);
-        }
-        if (value)
-        {
-            node_front_give(front, reader, token, left ? BUSTER_NODE_FRONT_UNKNOWN : record);
+            if (value)
+            {
+                node_front_give(front, reader, token, left ? BUSTER_NODE_FRONT_UNKNOWN : record);
+            }
         }
     }
     shadow->tokens += acting;
     shadow->records += front->count - front->pending;
     shadow->ticks += __rdtsc() - start;
+}
+
+// The front's pass with every column, and the lean one: each its own copy of the loop, which is the lean choice's
+// constant away from the other.
+static __attribute__((noinline)) void node_front_chunk(NodeFront* front, CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes, uint32_t acting,
+                                                       const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals)
+{
+    node_front_chunk_by(front, reader, tokens, classes, acting, identifiers, literals, false);
+}
+
+static __attribute__((noinline)) void node_front_chunk_lean(NodeFront* front, CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes, uint32_t acting,
+                                                            const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals)
+{
+    node_front_chunk_by(front, reader, tokens, classes, acting, identifiers, literals, true);
 }
 
 // The front's own records among the walk's nodes strictly between two of them, counted up to `limit`.
@@ -795,30 +961,80 @@ static uint32_t node_front_made_between(const NodeFrontShadow* shadow, uint32_t 
     return made;
 }
 
-// The records of the chunk just read compared with the walk's nodes, after the walk acted at the chunk's tokens: each
-// record's node is its token's (a discard's the one the walk numbered after the terminator's last value), with the
-// record's operator, its operands' nodes, its leaf's value, its member, its arguments, its requested type and its
-// context. A record that agrees marks its node (NodeFrontShadow.nodes).
+// The record that is the unit's `ordinal`th, among the kept ones and the chunk's (their ordinals rise with their
+// indexes), or BUSTER_NODE_FRONT_UNKNOWN.
+static uint32_t node_front_record_at(const NodeFront* front, uint32_t ordinal)
+{
+    uint32_t low = 0;
+    uint32_t high = front->count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        if (front->ordinals[middle] < ordinal)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low < front->count && front->ordinals[low] == ordinal ? low : BUSTER_NODE_FRONT_UNKNOWN;
+}
+
+// `record`'s operand at `place` by the structural bytes alone: the record back whose consumer's distance ends at
+// `record` with that place, or BUSTER_NODE_FRONT_UNKNOWN where none is within a byte's reach.
+static uint32_t node_front_operand_placed(const NodeFront* front, uint32_t record, uint32_t place)
+{
+    const uint32_t ordinal = front->ordinals[record];
+    uint32_t found = BUSTER_NODE_FRONT_UNKNOWN;
+    for (uint32_t x = record; x != 0 && found == BUSTER_NODE_FRONT_UNKNOWN && ordinal - front->ordinals[x - 1] < BUSTER_NODE_FRONT_FAR; x -= 1)
+    {
+        const uint32_t up = front->ups[x - 1];
+        found = up != 0 && front->ordinals[x - 1] + up == ordinal && front->places[x - 1] == place ? x - 1 : found;
+    }
+    return found;
+}
+
+// The front's records of the chunk against the walk's nodes, after the walk acted at the chunk and its batch went to
+// the graph: each record's node (its token's; a discard's by a search), operator, operands and structural bytes, and
+// what else its front keeps (a leaf's value, a member, a call's arguments and library mark, the requested type; the
+// lean front's leaf payload). A record that agrees gets its node, the node's bit and its context to compare at the
+// walk's end; one that differs is counted and listed.
 static void node_front_compare(NodeFront* front, const CheckInputReader* reader)
 {
     const CheckInput* input = reader->output;
     const CheckGraph* graph = &input->graph;
     NodeFrontShadow* shadow = front->shadow;
+    const bool lean = front->lean;
+    memset(front->vouched + front->pending, 0, front->count - front->pending);
     for (uint32_t record = front->pending; record < front->count; record += 1)
     {
         const uint32_t token = front->tokens[record];
         const CheckInputNodeForm form = (CheckInputNodeForm)front->forms[record];
         const bool discard = form == CHECK_INPUT_FORM_DISCARD;
-        const uint32_t a = front->operands[0][record];
-        const uint32_t operand = a != BUSTER_NODE_FRONT_UNKNOWN ? front->nodes[a] : BUSTER_CHECK_NONE;
+        // Its first three operands as records: the lean front's by their distances back, where each is within the
+        // byte's reach, and every other's as the front kept them.
+        uint32_t operands[3];
+        for (uint32_t k = 0; k < 3; k += 1)
+        {
+            const uint32_t distance = front->distances[k][record];
+            operands[k] = !lean ? front->operands[k][record] : distance != 0 && distance != BUSTER_NODE_FRONT_FAR ? node_front_record_at(front, front->ordinals[record] - distance) :
+                                                                                                                  BUSTER_NODE_FRONT_UNKNOWN;
+        }
+        const uint32_t operand = operands[0] != BUSTER_NODE_FRONT_UNKNOWN ? front->nodes[operands[0]] : BUSTER_CHECK_NONE;
         uint32_t node = BUSTER_CHECK_NONE;
         if (discard)
         {
             // The walk numbers a discard when it acts at the terminator, as the front makes its record: after the node of
-            // the record before it, or else after its value's node (a for's step is discarded after the loop's body).
+            // the record before it, or else after its value's node (a for's step is discarded after the loop's body). It
+            // is the next node at the token with the value for its operand, or, where the lean front's value is past its
+            // byte's reach, the next with the record's operator.
             const uint32_t before = record != 0 ? front->nodes[record - 1] : BUSTER_CHECK_NONE;
-            node = before != BUSTER_CHECK_NONE ? before + 1 : operand != BUSTER_CHECK_NONE ? operand + 1 : BUSTER_CHECK_NONE;
-            while (node < graph->count && operand != BUSTER_CHECK_NONE && (graph->tokens[node] != token || graph->operand0[node] != operand))
+            const bool reached = operand != BUSTER_CHECK_NONE;
+            node = before != BUSTER_CHECK_NONE ? before + 1 : reached ? operand + 1 : BUSTER_CHECK_NONE;
+            while (node < graph->count && (reached || (lean && front->distances[0][record] == BUSTER_NODE_FRONT_FAR)) &&
+                   (graph->tokens[node] != token || (reached ? graph->operand0[node] != operand : graph->ops[node] != (CheckOp)front->ops[record])))
             {
                 node += 1;
             }
@@ -835,6 +1051,18 @@ static void node_front_compare(NodeFront* front, const CheckInputReader* reader)
         else if (graph->ops[node] != (CheckOp)front->ops[record])
         {
             field = BUSTER_NODE_FRONT_FIELD_OPERATOR;
+        }
+        else if (form == CHECK_INPUT_FORM_LEAF && lean)
+        {
+            // The lean leaf: an identifier's node is its token's; a literal has the leaf's type and, an integer, its
+            // value; a string its type and object.
+            const CheckValue theirs = check_graph_leaf_value(graph, node);
+            const uint8_t kind = front->leaf_categories[record];
+            const bool same = kind == BUSTER_NODE_FRONT_LEAF_IDENTIFIER ? front->leaf_integers[record] == (theirs.type != 0 ? input->declarations[token] : 0) :
+                              kind == BUSTER_NODE_FRONT_LEAF_LITERAL ?
+                              front->leaf_types[record] == theirs.type && (theirs.constant_kind != CHECK_CONSTANT_INTEGER || front->leaf_integers[record] == (uint64_t)theirs.integer) :
+                              front->leaf_types[record] == theirs.type && front->leaf_integers[record] == theirs.object;
+            field = same && front->counts[record] == 0 ? 0 : BUSTER_NODE_FRONT_FIELD_LEAF;
         }
         else if (form == CHECK_INPUT_FORM_LEAF)
         {
@@ -858,58 +1086,90 @@ static void node_front_compare(NodeFront* front, const CheckInputReader* reader)
                        front->leaf_integers[record] == (uint64_t)theirs.integer && front->leaf_objects[record] == theirs.object &&
                        front->leaf_heads[record] == theirs.overload_head;
             }
-            field = same ? 0 : BUSTER_NODE_FRONT_FIELD_LEAF;
+            field = same && front->counts[record] == 0 ? 0 : BUSTER_NODE_FRONT_FIELD_LEAF;
         }
         else
         {
-            const uint32_t b = front->operands[1][record];
-            const uint32_t c = front->operands[2][record];
-            const uint32_t second = b != BUSTER_NODE_FRONT_UNKNOWN ? front->nodes[b] : BUSTER_CHECK_NONE;
-            const uint32_t third = c != BUSTER_NODE_FRONT_UNKNOWN ? front->nodes[c] : BUSTER_CHECK_NONE;
-            const bool operands = operand != BUSTER_CHECK_NONE && graph->operand0[node] == operand && graph->operand1[node] == second && graph->operand2[node] == third &&
-                                  (b == BUSTER_NODE_FRONT_UNKNOWN || second != BUSTER_CHECK_NONE) && (c == BUSTER_NODE_FRONT_UNKNOWN || third != BUSTER_CHECK_NONE);
-            bool arguments = graph->argument_counts[node] == front->argument_counts[record];
-            for (uint32_t k = 0; arguments && k < front->argument_counts[record]; k += 1)
-            {
-                const uint32_t argument = front->nodes[front->arguments[front->argument_firsts[record] + k]];
-                arguments = argument != BUSTER_CHECK_NONE && graph->argument_nodes[graph->argument_offsets[node] + k] == argument;
-            }
-            // An operand's distance against the walk's two nodes, which the walk numbers in the same postorder: one more
-            // than the front's own records between them (the walk also numbers the nodes of the tokens the front left).
-            const uint32_t nodes[3] = { operand, second, third };
+            // The walk's node's operands: its three, then a call's arguments. Each of the front's is that node's record,
+            // by the distance where it is within the byte's reach, and its bytes say so from its side: the same
+            // distance forward, and its place. An operand's distance is one more than the front's own records between
+            // the walk's two nodes, which the walk numbers in the same postorder (it also numbers the nodes of the
+            // tokens the front left).
+            const uint32_t theirs[3] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+            const uint32_t argument_count = graph->argument_counts[node];
+            const uint32_t whole = (theirs[0] != BUSTER_CHECK_NONE) + (theirs[1] != BUSTER_CHECK_NONE) + (theirs[2] != BUSTER_CHECK_NONE) + argument_count;
+            bool identity = true;
             bool distances = true;
+            bool structure = front->counts[record] == (whole < 255 ? whole : 255);
             bool past = false;
-            for (uint32_t k = 0; operands && k < 3; k += 1)
+            for (uint32_t k = 0; k < 3; k += 1)
             {
                 const uint32_t distance = front->distances[k][record];
-                const bool present = front->operands[k][record] != BUSTER_NODE_FRONT_UNKNOWN;
-                if (present && front->roots[record] == 0)
+                const uint32_t x = operands[k];
+                if (theirs[k] == BUSTER_CHECK_NONE)
                 {
-                    shadow->operands += 1;
-                    shadow->operands_near += distance <= BUSTER_NODE_FRONT_NEAR;
-                    shadow->operands_byte += distance > BUSTER_NODE_FRONT_NEAR && distance < BUSTER_NODE_FRONT_FAR;
-                    shadow->operands_far += distance == BUSTER_NODE_FRONT_FAR;
+                    identity = identity && x == BUSTER_NODE_FRONT_UNKNOWN && distance == 0;
+                }
+                else
+                {
+                    // The place of an operand taken twice (a conditional's first, its middle omitted) is its first.
+                    const uint32_t place = k == 1 && theirs[1] == theirs[0] ? 0 : k;
+                    const uint32_t between = node_front_made_between(shadow, theirs[k], node, BUSTER_NODE_FRONT_FAR) + 1;
+                    const bool far = distance == BUSTER_NODE_FRONT_FAR;
+                    identity = identity && distance != 0 && (lean && far ? x == BUSTER_NODE_FRONT_UNKNOWN : x != BUSTER_NODE_FRONT_UNKNOWN && front->nodes[x] == theirs[k]);
+                    distances = distances && (far ? between >= BUSTER_NODE_FRONT_FAR : between == distance);
+                    structure = structure && (x == BUSTER_NODE_FRONT_UNKNOWN || (front->ups[x] == distance && front->places[x] == place));
+                    if (x != BUSTER_NODE_FRONT_UNKNOWN)
+                    {
+                        front->vouched[x] = 1;
+                    }
+                    if (front->roots[record] == 0)
+                    {
+                        shadow->operands += 1;
+                        shadow->operands_near += distance <= BUSTER_NODE_FRONT_NEAR;
+                        shadow->operands_byte += distance > BUSTER_NODE_FRONT_NEAR && distance < BUSTER_NODE_FRONT_FAR;
+                        shadow->operands_far += far;
+                        past = past || distance > BUSTER_NODE_FRONT_NEAR;
+                    }
+                    else
+                    {
+                        shadow->root_operands += 1;
+                        shadow->root_operands_past += distance > BUSTER_NODE_FRONT_NEAR;
+                    }
+                }
+            }
+            // A call's arguments, at the places after its callee's: the lean front's are found by their bytes, each
+            // other's is in the front's list. One past a byte's reach is only that far.
+            bool arguments = lean || front->argument_counts[record] == argument_count;
+            for (uint32_t j = 0; arguments && j < argument_count; j += 1)
+            {
+                const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + j];
+                const uint32_t place = j + 1;
+                const uint32_t x = lean ? node_front_operand_placed(front, record, place) : front->arguments[front->argument_firsts[record] + j];
+                const uint32_t between = node_front_made_between(shadow, argument, node, BUSTER_NODE_FRONT_FAR) + 1;
+                if (x == BUSTER_NODE_FRONT_UNKNOWN)
+                {
+                    arguments = between >= BUSTER_NODE_FRONT_FAR;
+                }
+                else
+                {
+                    const uint32_t distance = front->ordinals[record] - front->ordinals[x];
+                    const uint32_t byte = distance < BUSTER_NODE_FRONT_FAR ? distance : BUSTER_NODE_FRONT_FAR;
+                    arguments = front->nodes[x] == argument;
+                    distances = distances && (byte == BUSTER_NODE_FRONT_FAR ? between >= BUSTER_NODE_FRONT_FAR : between == byte);
+                    structure = structure && front->ups[x] == byte && front->places[x] == (place < 255 ? place : 255);
+                    front->vouched[x] = 1;
+                    shadow->arguments_past += distance > BUSTER_NODE_FRONT_NEAR;
                     past = past || distance > BUSTER_NODE_FRONT_NEAR;
                 }
-                else if (present)
-                {
-                    shadow->root_operands += 1;
-                    shadow->root_operands_past += distance > BUSTER_NODE_FRONT_NEAR;
-                }
-                const uint32_t between = present ? node_front_made_between(shadow, nodes[k], node, BUSTER_NODE_FRONT_FAR) + 1 : 0;
-                distances = distances && (!present || (distance == BUSTER_NODE_FRONT_FAR ? between >= BUSTER_NODE_FRONT_FAR : between == distance));
-            }
-            // A call's arguments, which its record lists beside its operands: their distances are counted, not kept.
-            for (uint32_t k = 0; operands && arguments && k < front->argument_counts[record]; k += 1)
-            {
-                const uint32_t distance = front->ordinals[record] - front->ordinals[front->arguments[front->argument_firsts[record] + k]];
                 shadow->arguments += 1;
-                shadow->arguments_past += distance > BUSTER_NODE_FRONT_NEAR;
-                past = past || distance > BUSTER_NODE_FRONT_NEAR;
+                shadow->places_past += place > BUSTER_NODE_FRONT_PLACE_MOST;
             }
-            field = !operands ? BUSTER_NODE_FRONT_FIELD_OPERAND : graph->members[node] != front->members[record] ? BUSTER_NODE_FRONT_FIELD_MEMBER :
-                    !arguments ? BUSTER_NODE_FRONT_FIELD_ARGUMENTS : graph->types[node] != front->types[record] ? BUSTER_NODE_FRONT_FIELD_TYPE :
-                    !distances ? BUSTER_NODE_FRONT_FIELD_DISTANCE : 0;
+            shadow->counts_past += whole > BUSTER_NODE_FRONT_COUNT_MOST;
+            const bool kept = lean || (graph->members[node] == front->members[record] && graph->types[node] == front->types[record]);
+            field = !identity ? BUSTER_NODE_FRONT_FIELD_OPERAND : !lean && graph->members[node] != front->members[record] ? BUSTER_NODE_FRONT_FIELD_MEMBER :
+                    !arguments ? BUSTER_NODE_FRONT_FIELD_ARGUMENTS : !kept ? BUSTER_NODE_FRONT_FIELD_TYPE : !distances ? BUSTER_NODE_FRONT_FIELD_DISTANCE :
+                    !structure ? BUSTER_NODE_FRONT_FIELD_STRUCTURE : 0;
             if (field == 0 && past && node < shadow->node_capacity)
             {
                 shadow->past[node >> 6] |= UINT64_C(1) << (node & 63);
@@ -936,6 +1196,36 @@ static void node_front_compare(NodeFront* front, const CheckInputReader* reader)
             {
                 shadow->difference_tokens[shadow->differences] = token;
                 shadow->difference_fields[shadow->differences] = field;
+            }
+            shadow->differences += 1;
+        }
+    }
+    // A record of the chunk with a consumer's distance has a compared consumer that found it there: a value still
+    // waiting, one a left token took and one nothing takes have none. One past the byte's reach the lean front's
+    // consumer can't name.
+    for (uint32_t record = front->pending; record < front->count; record += 1)
+    {
+        const uint8_t up = front->ups[record];
+        if (up != 0 && front->vouched[record] == 0 && !(lean && up == BUSTER_NODE_FRONT_FAR))
+        {
+            if (shadow->differences < BUSTER_NODE_FRONT_LISTED)
+            {
+                shadow->difference_tokens[shadow->differences] = front->tokens[record];
+                shadow->difference_fields[shadow->differences] = BUSTER_NODE_FRONT_FIELD_STRUCTURE;
+            }
+            shadow->differences += 1;
+        }
+    }
+    // A value still waiting has no consumer yet, whichever chunk made its record.
+    for (uint32_t i = 0; i < front->stack_count; i += 1)
+    {
+        const uint32_t record = front->stack[i];
+        if (record != BUSTER_NODE_FRONT_UNKNOWN && front->ups[record] != 0)
+        {
+            if (shadow->differences < BUSTER_NODE_FRONT_LISTED)
+            {
+                shadow->difference_tokens[shadow->differences] = front->tokens[record];
+                shadow->difference_fields[shadow->differences] = BUSTER_NODE_FRONT_FIELD_STRUCTURE;
             }
             shadow->differences += 1;
         }

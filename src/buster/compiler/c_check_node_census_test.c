@@ -179,8 +179,8 @@ static const char node_census_test_atomic[] =
 // void, an integer, bool and a pointer, constants among them; a static object's members and its array's subscripts,
 // constant and not; a pointer's equality with a null pointer constant; sizeof and _Alignof of a type name and an
 // expression; the comma; and stores of a null pointer constant and of a pointer to a pointer of another pointee.
-// The machine's own front (step 1b) runs over the fixture too, after the walk acted at a chunk and, in the --scalar run,
-// before it, where the reader's walk is the coded one (a build with the vector paths; in one without, it must make
+// The machine's own front (step 1b) runs over the fixture too, after the walk acted at a chunk, before it in the --scalar
+// run and lean in the -funsigned-char one, where the reader's walk is the coded one (a build with the vector paths; in one without, it must make
 // nothing): its every record must be the walk's node, and it must make each taken line's expressions but those of the
 // lines that say `// front: left` (sizeof and _Alignof, which the front leaves to the walk). For the front alone, with
 // no expectation of the machine: a static braced initializer (its elements' value context), an automatic array's and a
@@ -345,8 +345,9 @@ static uint32_t node_shadow_test_named(const char* name, uint32_t length)
 }
 
 // The shadow's fixture written to `directory` and read with `options`, its T by the rows (and verified against the
-// action) or (`scalar`) by the action alone: whether every line held and nothing differed from the pipeline.
-static bool node_shadow_test_fixture(const char* directory, bool scalar, char** options, uint32_t option_count)
+// action) or (`scalar`) by the action alone, with the machine's front as `front` asks (BUSTER_NODE_FRONT_*): whether
+// every line held and nothing differed from the pipeline.
+static bool node_shadow_test_fixture(const char* directory, bool scalar, uint8_t front, char** options, uint32_t option_count)
 {
     char path[512];
     snprintf(path, sizeof(path), "%s/shadow.c", directory);
@@ -359,7 +360,7 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, char** 
         .verify = !scalar,
         .fused = true,
         .interleave = true,
-        .front = scalar ? 2 : 1,
+        .front = front,
         .chunk = 3,
         .passes = 1,
         .repeat = 1,
@@ -582,14 +583,14 @@ static bool node_facts_test_fixture(const char* directory, uint32_t window, bool
     return valid && held;
 }
 
-// The front at its limits, on generated text read with `options`, the front run after the walk acted at a chunk or
-// (`first`) before it. `boundaries`: a body of statements whose tokens are 29 a round, so that the chunks' ends (1,024
+// The front at its limits, on generated text read with `options`, the front run as `front` asks (BUSTER_NODE_FRONT_*:
+// after the walk acted at a chunk or before it, whole or lean). `boundaries`: a body of statements whose tokens are 29 a round, so that the chunks' ends (1,024
 // postorder positions each) fall at every place within a call of a library function by its name and through its address:
 // a callee's record waits for its call in the next chunk, kept with its use. Else (`!boundaries`) more values waiting than
 // the front's stack holds: an automatic array's initializer of some 4,150 elements with ten calls about its 4,096th
 // value, one of them astride the stack's last entry, which must make every waiting value unknown (a reset) and leave the
 // call to the walk. Whether every record was the walk's node, none was left waiting, and the stack was reset as expected.
-static bool node_front_test_limits(const char* directory, bool boundaries, bool first, char** options, uint32_t option_count)
+static bool node_front_test_limits(const char* directory, bool boundaries, uint8_t front, char** options, uint32_t option_count)
 {
     char path[512];
     snprintf(path, sizeof(path), "%s/limits.c", directory);
@@ -619,7 +620,7 @@ static bool node_front_test_limits(const char* directory, bool boundaries, bool 
     valid = valid && length + 256 < capacity && parse_test_write(path, text, length);
     NodeShadow shadow = {
         .scalar = true,
-        .front = first ? 2 : 1,
+        .front = front,
         .passes = 1,
         .repeat = 1,
     };
@@ -635,7 +636,8 @@ static bool node_front_test_limits(const char* directory, bool boundaries, bool 
     {
         fprintf(stderr, "test-checker: node-front %s%s: %s: records %" PRIu64 ", compared %" PRIu64 ", %" PRIu64 " differ, %" PRIu64 " resets, %" PRIu64
                 " values left waiting, in %" PRIu64 " units (%s)\n",
-                boundaries ? "chunk boundaries" : "full stack", first ? " (before the walk)" : "", valid ? "read" : "NOT READ", shadow.front_records, shadow.front_checked,
+                boundaries ? "chunk boundaries" : "full stack", (front & BUSTER_NODE_FRONT_LEAN) != 0 ? " (lean)" : "", valid ? "read" : "NOT READ", shadow.front_records,
+                shadow.front_checked,
                 shadow.front_differences, shadow.front_resets, shadow.front_waiting, shadow.front_units,
                 fronts ? "expected in the one" : "expected in none: no vector paths in this build");
     }
@@ -677,13 +679,13 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         unlink(header);
         rmdir(headers);
     }
-    check_test_expect(test, ready && node_shadow_test_fixture(directory, false, loud, BUSTER_ARRAY_LENGTH(loud)),
+    check_test_expect(test, ready && node_shadow_test_fixture(directory, false, BUSTER_NODE_FRONT_AFTER, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-shadow: the machine takes its codes with the pipeline's values and entries, T's rows the action's, and refuses the rest by reason");
-    check_test_expect(test, ready && node_shadow_test_fixture(directory, true, loud, BUSTER_ARRAY_LENGTH(loud)),
+    check_test_expect(test, ready && node_shadow_test_fixture(directory, true, BUSTER_NODE_FRONT_BEFORE, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-shadow --scalar: T by the action alone gives the pipeline's values and entries");
     // Plain char unsigned: T's rules convert a char constant by the unit's signedness, not the bake's.
     char* unsigned_char[] = { "-nostdinc", "-Wall", "-Wextra", "-Wshift-sign-overflow", "-Wassign-enum", "-funsigned-char" };
-    check_test_expect(test, ready && node_shadow_test_fixture(directory, false, unsigned_char, BUSTER_ARRAY_LENGTH(unsigned_char)),
+    check_test_expect(test, ready && node_shadow_test_fixture(directory, false, BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN, unsigned_char, BUSTER_ARRAY_LENGTH(unsigned_char)),
                       "node-shadow -funsigned-char: the machine converts plain char constants as the unit's char is signed");
     check_test_expect(test, ready && node_facts_test_fixture(directory, 0, false, quiet, BUSTER_ARRAY_LENGTH(quiet)),
                       "node-facts: every leaf and lookup the fact words' rules make is T's record, and what they leave is the fixture's");
@@ -692,12 +694,16 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_facts_test_fixture(directory, BUSTER_NODE_FACTS_WINDOW, true, quiet, BUSTER_ARRAY_LENGTH(quiet)),
                       "node-facts: the same records where a window packs the bodies' expressions to its most");
     // The machine's own front at its limits (step 1b): a chunk's end at every place within a call, and a full stack.
-    check_test_expect(test, ready && node_front_test_limits(directory, true, false, loud, BUSTER_ARRAY_LENGTH(loud)),
+    check_test_expect(test, ready && node_front_test_limits(directory, true, BUSTER_NODE_FRONT_AFTER, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-front: a callee waiting across a chunk's end keeps its use, a library call's mark the walk's");
-    check_test_expect(test, ready && node_front_test_limits(directory, true, true, loud, BUSTER_ARRAY_LENGTH(loud)),
+    check_test_expect(test, ready && node_front_test_limits(directory, true, BUSTER_NODE_FRONT_BEFORE, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-front before the walk: a callee waiting across a chunk's end keeps its use");
-    check_test_expect(test, ready && node_front_test_limits(directory, false, false, loud, BUSTER_ARRAY_LENGTH(loud)),
+    check_test_expect(test, ready && node_front_test_limits(directory, true, BUSTER_NODE_FRONT_BEFORE | BUSTER_NODE_FRONT_LEAN, loud, BUSTER_ARRAY_LENGTH(loud)),
+                      "node-front, lean: a value waiting across a chunk's end gets its consumer's distance and its place there");
+    check_test_expect(test, ready && node_front_test_limits(directory, false, BUSTER_NODE_FRONT_AFTER, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-front: a full stack makes every waiting value unknown and leaves the call astride its end to the walk");
+    check_test_expect(test, ready && node_front_test_limits(directory, false, BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN, loud, BUSTER_ARRAY_LENGTH(loud)),
+                      "node-front, lean: a full stack makes every waiting value unknown");
     // Every warning has the census's class (node_census_warning_classes): one added since fails here until it has one.
     uint32_t unclassified = 0;
     for (uint32_t id = 0; id < CHECK_WARNING_ID_COUNT; id += 1)
