@@ -7,8 +7,11 @@
 // and run natively from a driver. The probe must find each parameter where its location says, the driver's slots past
 // the call's arguments as the driver stored them, rsp where the driver's call left it and the callee-saved registers as
 // the driver had them, which only a jump that released the whole frame leaves; what it returns must reach the driver,
-// through the hidden pointer too. And tier0_validate's rules for tail calls, each broken once. tier0_test.c includes it
-// after the aggregates' tests, whose helpers it uses, for its "tail errors" and "tail calls" checks.
+// through the hidden pointer too. And tier0_validate's rules for tail calls, each broken once. The same functions whose
+// result goes through a hidden pointer, with their tail call made a call that passes that pointer on (#2684,
+// BUSTER_TIER0_RESULT_HIDDEN) and a return of it after: the probe must find the driver's hidden pointer in rdi and its
+// bytes must reach the driver; and that call's rules, each broken once. tier0_test.c includes it after the aggregates'
+// tests, whose helpers it uses, for its "tail errors", "tail calls" and "forwarded calls" checks.
 
 // The frames: none but the parameters' homes; a frame pointer, rsp moved by an ALLOCA; a call first (of a function that
 // clobbers every register a call may), with a local in a callee-saved register across it; an object aligned to 64, which
@@ -308,6 +311,101 @@ static void tier0_test_tail_errors(Tier0TestTally* tally)
     arena_release(&arena);
 }
 
+// A fixture's function whose result goes through a hidden pointer (tier0_test_tail_function's) with its tail call made a
+// call that passes the function's own hidden pointer on (#2684, BUSTER_TIER0_RESULT_HIDDEN), after which the function
+// returns that pointer, parameter 0's value: `return f(...);`'s shape, whose callee writes the result where the
+// function's caller wants it.
+static void tier0_test_tail_forward(Tier0TestTail* tail, const Tier0TestPassing* fixture)
+{
+    Tier0Function* function = &tail->function;
+    tail->kinds[tail->tail] = BUSTER_TYPED_CALL;
+    tail->tails[0] = 0;
+    tail->result_objects[0] = BUSTER_TIER0_RESULT_HIDDEN;
+    uint32_t count = tier0_test_tail_add(tail, function->count, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+    count = tier0_test_tail_add(tail, count, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
+    function->count = count;
+    function->call_tails = 0;
+    function->hidden_size = fixture->result_size;
+    function->hidden_alignment = 3;
+}
+
+// The fixture whose result goes through a hidden pointer, of tier0_test_passings.
+#define BUSTER_TIER0_TEST_TAIL_HIDDEN 12
+
+// The breaks of a forwarding function (tier0_test_tail_forward's), which tier0_validate must refuse as metadata, and both
+// compile paths too: the function's own result not through a hidden pointer, the call's not, no bytes or an alignment
+// past Tier 0's for it, an argument in rdi, which the hidden pointer takes, and a tail call that names it.
+static const char* const tier0_test_forward_breaks[] = {
+    "a forwarded call in a function whose result isn't through a hidden pointer",
+    "a forwarded call whose result isn't through a hidden pointer",
+    "a forwarded call in a function of no hidden_size",
+    "a forwarded call in a function whose hidden_alignment is past 2^30",
+    "a forwarded call's argument in rdi",
+    "a tail call that names the hidden pointer's target",
+};
+
+// The forwarding function of the hidden fixture, valid, then each break of it: refused as metadata at entry 0 by
+// tier0_validate and by both compile paths.
+static void tier0_test_forward_errors(Tier0TestTally* tally)
+{
+    static const char check[] = "forwarded calls";
+    const Tier0TestPassing* fixture = &tier0_test_passings[BUSTER_TIER0_TEST_TAIL_HIDDEN];
+    Arena arena = arena_reserve(1ull << 24);
+    for (uint32_t b = 0; b <= BUSTER_ARRAY_LENGTH(tier0_test_forward_breaks) && arena.base != 0; b += 1)
+    {
+        Tier0TestTail tail;
+        tier0_test_tail_function(&tail, fixture, BUSTER_TIER0_TEST_TAIL_PLAIN, 0x1000, 0x2000);
+        Tier0Function* function = &tail.function;
+        if (b != 6)
+        {
+            tier0_test_tail_forward(&tail, fixture);
+        }
+        switch (b)
+        {
+            case 1:
+                function->result = (AbiReturn)BUSTER_TIER0_TEST_NO_RESULT;
+                break;
+            case 2:
+                tail.calls[0].result = (AbiReturn)BUSTER_TIER0_TEST_RESULT(REGISTERS, 0, 8, BUSTER_ABI_RAX, BUSTER_TIER0_TEST_N);
+                break;
+            case 3:
+                function->hidden_size = 0;
+                break;
+            case 4:
+                function->hidden_alignment = BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 + 1;
+                break;
+            case 5:
+                tail.locations[0].registers[0] = BUSTER_ABI_RDI;
+                break;
+            case 6:
+                tail.result_objects[0] = BUSTER_TIER0_RESULT_HIDDEN;
+                function->hidden_size = fixture->result_size;
+                break;
+            default:
+                break;
+        }
+        const Tier0Check validation = tier0_validate(function);
+        const Tier0Code scalar = tier0_compile_scalar(function, &arena);
+        const Tier0Code vector = tier0_compile(function, &arena);
+        if (b == 0)
+        {
+            tier0_test_expect(tally, validation.error == TIER0_OK && scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector),
+                              check, "the forwarding function: \"%s\" at %u, the paths' errors %d and %d, or the paths differ",
+                              validation.rule != 0 ? validation.rule : "valid", validation.node, scalar.error, vector.error);
+        }
+        else
+        {
+            const bool refused = validation.error == TIER0_ERROR_INVALID && validation.rule != 0 && strcmp(validation.rule, BUSTER_TIER0_TEST_METADATA) == 0 &&
+                                 validation.node == 0;
+            tier0_test_expect(tally, refused && scalar.error == TIER0_ERROR_UNSUPPORTED && vector.error == TIER0_ERROR_UNSUPPORTED, check,
+                              "%s: \"%s\" at %u, and the paths' errors %d and %d", tier0_test_forward_breaks[b - 1], validation.rule != 0 ? validation.rule : "valid",
+                              validation.node, scalar.error, vector.error);
+        }
+        arena_pop_to(&arena, 0);
+    }
+    arena_release(&arena);
+}
+
 // The callee-saved registers (rbx, rbp and r12 to r15) and rsp, as the driver had them at its entry and the probe at
 // its.
 #define BUSTER_TIER0_TEST_TAIL_SAVED_REGISTERS 6
@@ -444,10 +542,14 @@ static __attribute__((no_sanitize("function"))) bool tier0_test_tail_run(Tier0Te
 }
 
 // Each fixture's function in each frame, by both paths: a driver passes the fixture's bytes as its locations say (each
-// register's and each slot's other bytes their own), and the function passes them on to the probe by a tail call.
-static void tier0_test_tail_calls(Tier0TestTally* tally)
+// register's and each slot's other bytes their own), and the function passes them on to the probe by a tail call. With
+// `forwarded`, the hidden fixture's function alone (BUSTER_TIER0_TEST_TAIL_HIDDEN), whose tail call is a call that passes
+// the hidden pointer on (tier0_test_tail_forward), right before which rdi is loaded from parameter 0's home; its probe
+// runs in the function's frame, so that rsp, the slots and the callee-saved registers there are the function's, but rdi
+// must be the driver's hidden pointer, the bytes the probe writes there must reach the driver and rax must return it.
+static void tier0_test_tail_calls_by(Tier0TestTally* tally, bool forwarded)
 {
-    static const char check[] = "tail calls";
+    const char* check = forwarded ? "forwarded calls" : "tail calls";
     Tier0TestTailShared* shared = mmap(0, sizeof(Tier0TestTailShared), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     const uint64_t pages = BUSTER_TIER0_TEST_TAIL_PAGES * BUSTER_TIER0_TEST_PAGE;
     uint8_t* code = mmap(0, pages, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -456,9 +558,10 @@ static void tier0_test_tail_calls(Tier0TestTally* tally)
     // The driver's frame (tier0_test_aggregate_driver's, of every slot) and its call's return address, which the probe
     // finds rsp below the driver's entry by: the function's whole frame released.
     const uint64_t below = (8 * BUSTER_TIER0_TEST_STACK_WORDS + 15) / 16 * 16 + 8 + 8;
-    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(tier0_test_passings) * BUSTER_TIER0_TEST_TAIL_SHAPES && ready; f += 1)
+    const uint32_t fixtures = forwarded ? 1 : BUSTER_ARRAY_LENGTH(tier0_test_passings);
+    for (uint32_t f = 0; f < fixtures * BUSTER_TIER0_TEST_TAIL_SHAPES && ready; f += 1)
     {
-        const Tier0TestPassing* fixture = &tier0_test_passings[f / BUSTER_TIER0_TEST_TAIL_SHAPES];
+        const Tier0TestPassing* fixture = &tier0_test_passings[forwarded ? BUSTER_TIER0_TEST_TAIL_HIDDEN : f / BUSTER_TIER0_TEST_TAIL_SHAPES];
         const uint32_t shape = f % BUSTER_TIER0_TEST_TAIL_SHAPES;
         const char* frame = tier0_test_tail_shapes[shape];
         const bool hidden = fixture->result.kind == BUSTER_ABI_RESULT_MEMORY;
@@ -513,16 +616,34 @@ static void tier0_test_tail_calls(Tier0TestTally* tally)
         Tier0TestTail tail;
         tier0_test_tail_function(&tail, fixture, shape, (uint64_t)(uintptr_t)(code + BUSTER_TIER0_TEST_TAIL_PROBE * BUSTER_TIER0_TEST_PAGE),
                                  (uint64_t)(uintptr_t)(code + BUSTER_TIER0_TEST_TAIL_CLOBBER * BUSTER_TIER0_TEST_PAGE));
+        if (forwarded)
+        {
+            tier0_test_tail_forward(&tail, fixture);
+        }
         ready = ready && tier0_test_aggregate_encode(tally, check, fixture->name, &tail.function, &arena, code);
         const Tier0Code compiled = ready ? tier0_compile(&tail.function, &arena) : (Tier0Code){ .error = TIER0_ERROR_UNSUPPORTED };
         const bool jumps = compiled.error == TIER0_OK && compiled.tail_count == 1 && compiled.tail_records[0] < compiled.count &&
                            compiled.records[compiled.tail_records[0]].form == X86_FORM_JMP_RM64 && compiled.records[compiled.tail_records[0]].rm == X86_REGISTER_R11;
+        // The forwarding call: the last record that calls through r11 (the probe's; the saved registers' frame calls the
+        // clobbering function first), right after rdi is loaded from parameter 0's home, and no lea into rdi.
+        uint32_t probe_call = UINT32_MAX;
+        uint32_t lea_rdi = 0;
+        for (uint32_t r = 0; compiled.error == TIER0_OK && r < compiled.count; r += 1)
+        {
+            const X86Instruction record = compiled.records[r];
+            probe_call = record.form == X86_FORM_CALL_RM64 && record.rm == X86_REGISTER_R11 ? r : probe_call;
+            lea_rdi += record.form == X86_FORM_LEA_R64_M && record.reg == X86_REGISTER_RDI ? 1 : 0;
+        }
+        const bool forwards = compiled.error == TIER0_OK && compiled.tail_count == 0 && probe_call != UINT32_MAX && probe_call != 0 &&
+                              compiled.records[probe_call - 1].form == X86_FORM_MOV_R64_RM64 && compiled.records[probe_call - 1].reg == X86_REGISTER_RDI && lea_rdi == 0;
         const bool framed = shape == BUSTER_TIER0_TEST_TAIL_PLAIN ? !compiled.frame_pointer
                           : shape == BUSTER_TIER0_TEST_TAIL_ALLOCA ? compiled.frame_pointer && compiled.frame_alignment_log2 == 0
                           : shape == BUSTER_TIER0_TEST_TAIL_SAVED ? compiled.frame_saved != 0
                           : shape == BUSTER_TIER0_TEST_TAIL_ALIGNED ? compiled.frame_pointer && compiled.frame_alignment_log2 == 6 && !compiled.frame_base
                                                                     : compiled.frame_alignment_log2 == 6 && compiled.frame_base;
-        ready = ready && tier0_test_expect(tally, jumps && framed, check, "%s, %s: no tail record of a jump through r11, or not the frame its shape makes",
+        ready = ready && tier0_test_expect(tally, (forwarded ? forwards : jumps) && framed, check,
+                                           forwarded ? "%s, %s: no load of rdi from parameter 0's home right before the call, or not the frame its shape makes"
+                                                     : "%s, %s: no tail record of a jump through r11, or not the frame its shape makes",
                                            fixture->name, frame);
         for (uint32_t r = 0; r < BUSTER_TIER0_TEST_TAIL_RUNS && ready; r += 1)
         {
@@ -566,16 +687,17 @@ static void tier0_test_tail_calls(Tier0TestTally* tally)
             const uint32_t argument_bytes = fixture->stack_bytes;
             const Tier0TestTailRegisters* entry = &shared->entry[1 + r];
             const Tier0TestTailRegisters* landed = &shared->probe[1 + r];
-            tier0_test_expect(tally, memcmp(seen->stack + argument_bytes, shared->arguments.stack + argument_bytes, sizeof(seen->stack) - argument_bytes) == 0 &&
-                                         memcmp(landed->saved, entry->saved, sizeof(entry->saved)) == 0 && landed->rsp + below == entry->rsp &&
-                                         (!hidden || seen->general[0] == shared->arguments.general[0]),
-                              check, "%s, %s, run %u: the probe's frame isn't the function's caller's, a callee-saved register changed, or the hidden pointer moved",
+            const bool frame_kept = forwarded || (memcmp(seen->stack + argument_bytes, shared->arguments.stack + argument_bytes, sizeof(seen->stack) - argument_bytes) == 0 &&
+                                                  memcmp(landed->saved, entry->saved, sizeof(entry->saved)) == 0 && landed->rsp + below == entry->rsp);
+            tier0_test_expect(tally, frame_kept && (!hidden || seen->general[0] == shared->arguments.general[0]), check,
+                              "%s, %s, run %u: the probe's frame isn't the function's caller's, a callee-saved register changed, or the hidden pointer moved",
                               fixture->name, frame, r);
+            // A forwarding function returns its own result, the hidden pointer, after the call: rax alone.
             const Tier0TestSeen* returns = &shared->returns[1 + r];
             const uint64_t rax = hidden ? shared->arguments.general[0] : shared->returned.rax;
-            const bool returned = returns->rax == rax && returns->rdx == shared->returned.rdx && memcmp(returns->vectors[0], shared->returned.vectors[0], 16) == 0 &&
-                                  memcmp(returns->vectors[1], shared->returned.vectors[1], 16) == 0 &&
-                                  (!hidden || memcmp(seen->hidden, shared->returned.hidden, fixture->result_size) == 0);
+            const bool registers = forwarded || (returns->rdx == shared->returned.rdx && memcmp(returns->vectors[0], shared->returned.vectors[0], 16) == 0 &&
+                                                 memcmp(returns->vectors[1], shared->returned.vectors[1], 16) == 0);
+            const bool returned = returns->rax == rax && registers && (!hidden || memcmp(seen->hidden, shared->returned.hidden, fixture->result_size) == 0);
             tier0_test_expect(tally, returned, check, "%s, %s, run %u: what the probe returned didn't reach the driver", fixture->name, frame, r);
         }
     }
@@ -588,4 +710,16 @@ static void tier0_test_tail_calls(Tier0TestTally* tally)
     {
         munmap(shared, sizeof(Tier0TestTailShared));
     }
+}
+
+static void tier0_test_tail_calls(Tier0TestTally* tally)
+{
+    tier0_test_tail_calls_by(tally, false);
+}
+
+// The forwarding functions (#2684): their rules, then their runs.
+static void tier0_test_forwarded_calls(Tier0TestTally* tally)
+{
+    tier0_test_forward_errors(tally);
+    tier0_test_tail_calls_by(tally, true);
 }

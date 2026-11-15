@@ -499,6 +499,9 @@ struct Tier0AsmBody
 // An aggregate argument's bytes, at most (Tier0Function.argument_sizes): one on the stack is copied into place by a load
 // and a store per 16 bytes, so that a call's records stay within 8,192 per argument.
 #define BUSTER_TIER0_MAX_ARGUMENT_BYTES (1u << 16)
+// A call's result object (Tier0Function.call_result_objects) that is the function's own hidden pointer's target (#2684):
+// no local index plus one reaches it.
+#define BUSTER_TIER0_RESULT_HIDDEN UINT32_MAX
 
 // A function, as the front end hands it to Tier 0: the body's columns, the locals (parameters first, in order) with
 // their classes and flags, the parameters' locations at entry and the result's (abi_assign of the function's own type),
@@ -530,12 +533,22 @@ struct Tier0AsmBody
 //     multiple of its alignment, and the prologue copies the others' slots into their homes (tier0_parameter_in_place).
 //   - call_result_objects[c] (call_count of them): 1 + the local index of the object that receives call c's aggregate
 //     result, or 0. Its result (AbiCall.result) is REGISTERS, whose parts the call stores in the object, or MEMORY, the
-//     object's address the hidden pointer it passes in rdi. The call's class is VOID: its result is the object's.
+//     object's address the hidden pointer it passes in rdi. The call's class is VOID: its result is the object's. Or
+//     BUSTER_TIER0_RESULT_HIDDEN (#2684), in a function whose own result goes through a hidden pointer, for a call whose
+//     result goes through one too and is the function's own, of its type, size and ABI (the front end's to know):
+//     the call passes the function's own hidden pointer on, parameter 0's value, in rdi, so that its callee writes the
+//     result where the function's caller wants it, as clang -O0 passes its sret pointer on for `return f();`. The
+//     call is no tail call: the function's frame, its arguments' evaluation and its return stay as they are.
 //   - result_size: the bytes of the function's own aggregate result when `result` returns it in registers (REGISTERS),
 //     else 0. Every RETURN has class U64, the address of the result's bytes, which the epilogue loads into the result
 //     registers; control never reaches the function's end but through a RETURN. A result through a hidden pointer
 //     (MEMORY) is the front end's: the pointer is parameter 0 (U64, arriving in rdi), its bytes copied there, and each
 //     RETURN returns it (U64).
+//   - hidden_size and hidden_alignment: the bytes of such a result through a hidden pointer and their alignment's log2
+//     (at most BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2), which a call of BUSTER_TIER0_RESULT_HIDDEN writes, or 0. Tier 0
+//     needs neither; ir_lower's frame object for such a call's result and the interpreter's native calls take them.
+//     hidden_copy is the symbol of the memmove that ir_lower's copy of that object calls where it is past
+//     BUSTER_TIER0_MAX_COPY_BYTES, as the front end's copy of a call's object would, or 0; Tier 0 calls nothing through it.
 // The parts of an aggregate in registers come from abi_assign's locations alone: eightbyte k (0 and 8, or the high one
 // alone with BUSTER_ABI_FLAG_HIGH) in registers[k], a general or an XMM register, an XMM one whole (16 bytes) when it is
 // the only part of a 16-byte aggregate. A vector's value is returned the same way, from its object's bytes (result_size
@@ -630,6 +643,9 @@ struct Tier0Function
     const uint32_t* argument_sizes;
     const uint32_t* call_result_objects;
     uint32_t result_size;
+    uint32_t hidden_size;
+    uint8_t hidden_alignment;
+    SymbolId hidden_copy;
     const uint8_t* symbol_access;
     uint32_t symbol_count;
     const uint64_t* x87_constants;
@@ -1714,7 +1730,9 @@ static bool tier0_tail_call_valid(const Tier0Function* function, uint32_t c)
 // writes out of place: every argument where tier0_place_valid has it in the call's stack area, no register two arguments
 // take, and an aggregate of 64 KB at most; a result object an object with room for what the call stores, its hidden
 // pointer's rdi no argument's; and no hidden pointer without an object, which would point nowhere, but a tail call's,
-// which passes the function's own on (tier0_tail_call_valid).
+// which passes the function's own on (tier0_tail_call_valid), and a call's whose object is the function's own hidden
+// pointer's target (BUSTER_TIER0_RESULT_HIDDEN, #2684): a call of no tail through a hidden pointer, in a function whose
+// result goes through one too (parameter 0, tier0_aggregates_valid), its bytes known (Tier0Function.hidden_size).
 static bool tier0_call_valid(const Tier0Function* function, uint32_t c)
 {
     const uint32_t first = function->call_first[c];
@@ -1740,7 +1758,14 @@ static bool tier0_call_valid(const Tier0Function* function, uint32_t c)
                 (taken & registers) == 0;
         taken |= registers;
     }
-    if (object != 0)
+    if (object == BUSTER_TIER0_RESULT_HIDDEN)
+    {
+        const bool tail = function->call_tails != 0 && function->call_tails[c] != 0;
+        valid = valid && !tail && result.kind == BUSTER_ABI_RESULT_MEMORY && function->result.kind == BUSTER_ABI_RESULT_MEMORY && function->result_size == 0 &&
+                function->parameter_count != 0 && function->hidden_size != 0 && function->hidden_alignment <= BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 &&
+                (taken >> X86_REGISTER_RDI & 1) == 0;
+    }
+    else if (object != 0)
     {
         const uint32_t local = object - 1;
         valid = valid && local < function->local_count && tier0_is_object(function, local);
@@ -4530,18 +4555,21 @@ static uint32_t tier0_depth_registers(int32_t integer_top, int32_t floating_top)
 }
 
 // A tail call whose result goes through a hidden pointer passes the function's own on, parameter 0's (tier0_emit_call's
-// tail), which so has a home: one reference per such call. Both counts' (tier0_count_references), for a function with
-// tail calls alone, out of line.
-static __attribute__((noinline)) void tier0_tail_references(const Tier0Function* function, uint32_t* references)
+// tail), and so does a call whose result object is that pointer's target (BUSTER_TIER0_RESULT_HIDDEN, #2684,
+// tier0_emit_hidden_pointer), which so has a home: one reference per such call. Both counts' (tier0_count_references),
+// for a function with tail calls or result objects alone, out of line.
+static __attribute__((noinline)) void tier0_hidden_references(const Tier0Function* function, uint32_t* references)
 {
     for (uint32_t c = 0; function->local_count != 0 && c < function->call_count; c += 1)
     {
-        references[0] += function->call_tails[c] != 0 && function->calls[c].result.kind == BUSTER_ABI_RESULT_MEMORY ? 1 : 0;
+        const bool tail = function->call_tails != 0 && function->call_tails[c] != 0 && function->calls[c].result.kind == BUSTER_ABI_RESULT_MEMORY;
+        const bool forwarded = function->call_result_objects != 0 && function->call_result_objects[c] == BUSTER_TIER0_RESULT_HIDDEN;
+        references[0] += tail || forwarded ? 1 : 0;
     }
 }
 
 // Each local's references: its LOCAL, LOCAL_ADDRESS, STORE_LOCAL and SET_LOCAL entries (`references` has local_count), and
-// the hidden pointer's that tail calls pass on (tier0_tail_references).
+// the hidden pointer's that calls pass on (tier0_hidden_references).
 static void tier0_count_references(const Tier0Function* function, uint32_t* references)
 {
     const uint8_t* kinds = function->kinds;
@@ -4561,9 +4589,9 @@ static void tier0_count_references(const Tier0Function* function, uint32_t* refe
             references[values[i] >> BUSTER_TYPED_CAS_LOCAL_SHIFT] += 1;
         }
     }
-    if (function->call_tails != 0)
+    if (function->call_tails != 0 || function->call_result_objects != 0)
     {
-        tier0_tail_references(function, references);
+        tier0_hidden_references(function, references);
     }
 }
 
@@ -4593,9 +4621,9 @@ static void tier0_count_references_vector(const Tier0Function* function, uint32_
             references[values[i] >> (kinds[i] == BUSTER_TYPED_ATOMIC_CAS ? BUSTER_TYPED_CAS_LOCAL_SHIFT : 0)] += 1;
         }
     }
-    if (function->call_tails != 0)
+    if (function->call_tails != 0 || function->call_result_objects != 0)
     {
-        tier0_tail_references(function, references);
+        tier0_hidden_references(function, references);
     }
 }
 
@@ -6519,6 +6547,25 @@ static uint32_t tier0_tail_finish(const Tier0Function* function, const Tier0Entr
     return function->call_tails[call] == BUSTER_TIER0_TAIL_EH ? entries->eh_finish : entries->tail_finish;
 }
 
+// The hidden pointer a call whose result goes through one passes in rdi, after its arguments' moves, which leave rdi alone
+// (tier0_call_valid): its result object's address (call_result_objects), or the function's own hidden pointer that the
+// call passes on (BUSTER_TIER0_RESULT_HIDDEN, #2684), parameter 0's value from its home, which a function that calls has
+// in a callee-saved register or its slot (tier0_hidden_references gives it one), never an argument's register. One
+// record either way (tier0_result_object_records).
+static void tier0_emit_hidden_pointer(const Tier0Home* homes, uint32_t object, Tier0Writer* writer)
+{
+    const bool forwarded = object == BUSTER_TIER0_RESULT_HIDDEN;
+    const Tier0Home home = homes[forwarded ? 0 : object - 1];
+    if (forwarded && home.is_register)
+    {
+        tier0_move(writer, X86_REGISTER_RDI, home.reg);
+    }
+    else
+    {
+        tier0_put(writer, tier0_instruction(forwarded ? X86_FORM_MOV_R64_RM64 : X86_FORM_LEA_R64_M, X86_REGISTER_RDI, home.reg, home.mode, home.displacement, 0));
+    }
+}
+
 // A musttail call's last records (tier0_emit_tail's): the hidden pointer, the stack arguments' copy, the teardown and the
 // jump.
 static void tier0_emit_tail_jump(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, uint32_t call, Tier0Writer* writer)
@@ -7078,8 +7125,7 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
     {
         if (object != 0 && returned.kind == BUSTER_ABI_RESULT_MEMORY)
         {
-            const Tier0Home home = homes[object - 1];
-            tier0_put(writer, tier0_instruction(X86_FORM_LEA_R64_M, X86_REGISTER_RDI, home.reg, home.mode, home.displacement, 0));
+            tier0_emit_hidden_pointer(homes, object, writer);
         }
         if (function->call_variadic[call])
         {
@@ -9328,8 +9374,7 @@ static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entri
     {
         if (object != 0 && returned.kind == BUSTER_ABI_RESULT_MEMORY)
         {
-            const Tier0Home home = homes[object - 1];
-            tier0_put(writer, tier0_instruction(X86_FORM_LEA_R64_M, X86_REGISTER_RDI, home.reg, home.mode, home.displacement, 0));
+            tier0_emit_hidden_pointer(homes, object, writer);
         }
         if (function->call_variadic[call])
         {

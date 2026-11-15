@@ -1264,7 +1264,7 @@ static bool interpreter_typed_function_valid(const Tier0Function* function)
     for (uint32_t c = 0; result && c < function->call_count; c += 1)
     {
         const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[c] : 0;
-        result = object == 0 || (object - 1 < function->local_count && tier0_is_object(function, object - 1));
+        result = object == 0 || object == BUSTER_TIER0_RESULT_HIDDEN || (object - 1 < function->local_count && tier0_is_object(function, object - 1));
         if (result && (function->calls != 0 || aggregate_arguments || object != 0))
         {
             result = function->calls != 0 && (function->argument_count == 0 || function->argument_locations != 0) && tier0_call_valid(function, c);
@@ -1830,8 +1830,11 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             const uint32_t call_base = argument_base - indirect;
             const uint64_t address = indirect ? stack[call_base].low : 0;
             const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[value] : 0;
-            const uint64_t destination = object != 0 ? interpreter_typed_local_address(function, locals, frame->local_base, object - 1) : 0;
-            const uint32_t result_size = object != 0 ? function->local_sizes[object - 1] : 0;
+            // A result the call passes the function's own hidden pointer on for (#2684): parameter 0's value, a U64's
+            // cell, and the function's own result's bytes (validated: Tier0Function.hidden_size).
+            const bool forwarded = object == BUSTER_TIER0_RESULT_HIDDEN;
+            const uint64_t destination = forwarded ? locals[frame->local_base].low : object != 0 ? interpreter_typed_local_address(function, locals, frame->local_base, object - 1) : 0;
+            const uint32_t result_size = forwarded ? function->hidden_size : object != 0 ? function->local_sizes[object - 1] : 0;
             if (object != 0 && class != BUSTER_TYPED_CLASS_VOID)
             {
                 result->status = INTERPRETER_INVALID;

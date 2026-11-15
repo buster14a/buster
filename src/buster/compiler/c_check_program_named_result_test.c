@@ -42,10 +42,10 @@ static void check_test_program_named_results(CheckTest* test, const char* clang)
     check_test_program_call_initializer_shape(test, "struct S{long a[8];};void fill(struct S*,int);void done(int*);"
                                                     "struct S f(int n){__attribute__((cleanup(done)))int guard=n;struct S s;fill(&s,n);return s;}",
                                               "named-result-cleanup", 0, false, 0);
-    // The object's own call initializer returns into an object of its own (the call's result object is a frame
-    // object's), which is then copied into the named result.
+    // The object's own call initializer passes the hidden pointer on (#2684, c_check_program_forward_test.c): no copy, no
+    // object of the call's.
     check_test_program_call_initializer_shape(test, "struct S{long a[8];};struct S make(int);struct S f(int n){struct S s=make(n);s.a[0]+=1;return s;}",
-                                              "named-result-call-initializer", 1, false, 64);
+                                              "named-result-call-initializer", 0, false, 0);
 
     // Every other shape keeps its object and its copy.
     check_test_program_call_initializer_shape(test, "struct S{long a[8];};void fill(struct S*,int);"

@@ -172,6 +172,12 @@ frame and one with a base), run natively from a driver: the probe must find the
 arguments where their locations say, the driver's slots past them, rsp and the
 callee-saved registers as the driver left them, and what it returns must reach
 the driver; and `tier0_validate` refusing each of the tail calls' rules once.
+Then forwarded calls (#2684, the same file): the hidden fixture's function in the
+five frames with its tail call made a call that passes the function's own hidden
+pointer on (`BUSTER_TIER0_RESULT_HIDDEN`) and a return of it after, rdi loaded
+from parameter 0's home right before the call, the probe finding the driver's
+hidden pointer in rdi and the bytes it writes reaching the driver; and each of
+that call's rules broken once.
 Every function must pass `tier0_validate`, both
 paths must compile it to the same records, branch columns and references, and
 the records must pass `x86_validate` and the branch columns

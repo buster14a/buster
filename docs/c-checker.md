@@ -2544,11 +2544,8 @@ What the lowering covers past scalars (#145's programs):
   code does; a return that keeps its value first (`CHECK_CONTROL_RESULT`), a
   musttail one, a second object, a parameter, a global, a member or a
   dereference keep the copy, as does a body that names a returns-twice
-  function. The object's own call initializer returns into an object of its
-  own (`call_result_objects` names a frame object, not the hidden pointer's
-  target) and is copied in, which costs the same copy that #1549's
-  destination and the return's would; passing the hidden pointer down to it,
-  and to `return f(...);`, is #2684. Its debug location is the hidden
+  function. The object's own call initializer passes the hidden pointer on
+  (#2684, below). Its debug location is the hidden
   pointer's, dereferenced (`CheckDebugBinding.indirect`, as a VLA's is), by
   both tiers. Register returns keep their path. On the 9700X
   ([record](https://github.com/buster14a/buster-performance/tree/e8c1b78f2c67b5917f7ef19d999aa61372d4e795/docs/measurements/named-results-1375-2026-11-13)),
@@ -2558,6 +2555,31 @@ What the lowering covers past scalars (#145's programs):
   return takes 382.6 → 247.0 and 251.0 → 203.9 (clang `-O0`: 200.4). `-c`'s
   instructions on sqlite3.c and the compiler's `main.c` move by 0.024% at
   most, in either tier.
+  A call whose result is the function's own, through the hidden pointer, passes
+  that pointer on (#2684), as clang `-O0` passes its `sret` pointer on: the
+  value of a plain `return f(...);` (through its conversions to the result's
+  type and the selections around it, `_Generic`'s, `__builtin_choose_expr`'s
+  and `__extension__`'s, as a musttail return looks through them) and the named
+  result's whole-object call initializer. `check_lower_call_forwards` takes a
+  source call (none that `check_program_call_computed` computes inline) of the
+  function's own unqualified type, size and hidden-pointer ABI, whose canonical
+  alignment the caller's storage has; the call's destination is then
+  `BUSTER_CHECK_LOWER_HIDDEN`, its result object `BUSTER_TIER0_RESULT_HIDDEN`
+  ([Tier 0](tier0.md)), and it leaves no address and needs no object and no
+  copy: its callee writes the result where the function's caller wants it.
+  The caller's storage is unaliased during the call, and only the named result
+  names it, so no argument reaches it, but an initializer that names its own
+  object (`check_lower_init_names_destination`), which keeps the call's object.
+  `check_lower_forwards` keeps the copy for a whole body that keeps a return's
+  value before its cleanups (a `CHECK_CONTROL_RESULT`) or names a returns-twice
+  function (`check_lower_init_reentry`), from the body's controls 16 kinds at a
+  time on the vector path (`check_lower_control_kinds`, shared with the named
+  result's search) with a scalar twin. The function's `hidden_size` and
+  `hidden_alignment` give the bytes such a call writes: Tier 1's IR returns
+  them into a slot of its own and copies them there ([the IR](ir.md)), as it
+  did, past 256 bytes by the `memmove` the lowering registers for it
+  (`hidden_copy`, which no Tier 0 entry calls); Tier 0 and the interpreter copy
+  nothing.
   Above 128 bytes of explicit constant payload, dense nonvolatile byte-aligned numeric
   plans use a readonly byte image and one call to the target C library's
   `memcpy` (#598). The call returns the destination and discards it, which is the

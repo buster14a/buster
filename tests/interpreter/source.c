@@ -62,6 +62,30 @@ static Large change_large(Large value)
     return value;
 }
 
+// A call of the function's own result passes its hidden pointer on (#2684): a return of it, through a pointer too, a
+// chain of them, and the named result's call initializer.
+static Large forward_large(Large value)
+{
+    return change_large(value);
+}
+
+static Large forward_twice(Large value)
+{
+    return forward_large(value);
+}
+
+static Large forward_through(Large (*change)(Large), Large value)
+{
+    return change(value);
+}
+
+static Large forward_named(Large value)
+{
+    Large named = forward_large(value);
+    named.values[1] += 100;
+    return named;
+}
+
 static long collect(int count, ...)
 {
     va_list values;
@@ -111,6 +135,12 @@ int main(void)
     const Large indirect_large = large_indirect(large);
     Large assigned = large;
     assigned = change_large(assigned);
+    const Large forwarded = forward_large(large);
+    const Large chained = forward_twice(forward_twice(large));
+    const Large through = forward_through(change_large, large);
+    const Large named = forward_named(large);
+    Large reassigned = large;
+    reassigned = forward_twice(reassigned);
     const div_t quotient = div(20, 6);
     const long sum = collect(8, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 2.5, 4.75L, original);
     const long tail = stacked(1, 2, 3, 4, 5, 6, 7, 8L, 9L);
@@ -132,6 +162,10 @@ int main(void)
                        nested.values[4] == 15 && nested.values[BUSTER_INTERPRETER_LARGE_WORDS - 1] == 27 &&
                        indirect_large.values[4] == 13 && indirect_large.values[BUSTER_INTERPRETER_LARGE_WORDS - 1] == 25 &&
                        assigned.values[4] == 13 && assigned.values[BUSTER_INTERPRETER_LARGE_WORDS - 1] == 25 &&
+                       forwarded.values[4] == 13 && forwarded.values[BUSTER_INTERPRETER_LARGE_WORDS - 1] == 25 && forwarded.values[1] == 3 &&
+                       chained.values[4] == 15 && chained.values[BUSTER_INTERPRETER_LARGE_WORDS - 1] == 27 &&
+                       through.values[4] == 13 && named.values[1] == 103 && named.values[4] == 13 &&
+                       reassigned.values[4] == 13 && reassigned.values[BUSTER_INTERPRETER_LARGE_WORDS - 1] == 25 &&
                        quotient.quot == 3 && quotient.rem == 2 &&
                        sum == 66 && tail == 45 && collect_register_only(3, 5L, 7L) == 15 && collect_aligned(0, aligned) == 161 && labels(0) == 17 && labels(1) == 29 && bytes[63] == 3;
     printf("typed source: %d\n", passed);

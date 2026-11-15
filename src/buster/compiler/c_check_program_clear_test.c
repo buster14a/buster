@@ -10,8 +10,10 @@
 
 // What a unit's lowering makes of its functions, by each path: whether it calls memset (`clears`) and memmove (`moves`),
 // its largest function's typed entries and object bytes, its inline copies, the addresses it discards as soon as it
-// makes them (an in-place call's dead lea before #1549's follow-up), how many jumps go back (a loop's), and its stores
-// of a zero constant (`zero_stores`: a clear's pieces, check_lower_fill's CONST 0 then SET).
+// makes them (an in-place call's dead lea before #1549's follow-up), how many jumps go back (a loop's), its stores of
+// a zero constant (`zero_stores`: a clear's pieces, check_lower_fill's CONST 0 then SET), how many calls pass their
+// function's own hidden pointer on (#2684, BUSTER_TIER0_RESULT_HIDDEN), how many calls of memmove its functions make,
+// and how many give Tier 1's copy of a forwarded result memmove (Tier0Function.hidden_copy).
 typedef struct CheckTestClearShape CheckTestClearShape;
 struct CheckTestClearShape
 {
@@ -21,6 +23,9 @@ struct CheckTestClearShape
     uint32_t backward;
     uint32_t copies;
     uint32_t dead_addresses;
+    uint32_t forwarded;
+    uint32_t move_calls;
+    uint32_t hidden_copies;
     uint32_t zero_stores;
     uint64_t object_bytes;
 };
@@ -78,6 +83,17 @@ static bool check_test_program_clear_lower(const char* source, bool scalar, Chec
             shape->dead_addresses += kind == BUSTER_TYPED_DISCARD && i != 0 && function->kinds[i - 1] == BUSTER_TYPED_LOCAL_ADDRESS;
             shape->zero_stores += kind == BUSTER_TYPED_SET && i != 0 && function->kinds[i - 1] == BUSTER_TYPED_CONST && function->values[i - 1] == 0;
         }
+        for (uint32_t c = 0; function->call_result_objects != NULL && c < function->call_count; c += 1)
+        {
+            shape->forwarded += function->call_result_objects[c] == BUSTER_TIER0_RESULT_HIDDEN;
+        }
+        const SymbolId memmove_symbol = code.lowered.runtime_symbols[CHECK_LOWER_RUNTIME_MEMMOVE];
+        for (uint32_t i = 0; i < function->count; i += 1)
+        {
+            shape->move_calls += function->kinds[i] == BUSTER_TYPED_CALL && memmove_symbol != 0 && function->values[i] < function->call_count &&
+                                 function->call_targets[function->values[i]] == memmove_symbol;
+        }
+        shape->hidden_copies += memmove_symbol != 0 && function->hidden_copy == memmove_symbol;
     }
     parse_release(&parser);
     check_test_types_close(&types);
