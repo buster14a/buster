@@ -7,8 +7,8 @@
 // (check_test_constant_conversion_lowered). The programs are tests/checker/constant-conversions.
 
 // Whether entry `e` of `function` is an integer CONST that a CONVERT follows: the pair the fold leaves none of, a
-// conditional's or a logical operator's constant arm's too, whose CONVERT, after the label that joined the arms, went
-// into them (check_lower_conditional_target).
+// conditional's or a logical operator's constant arm's too, whose CONVERT to an integer or _Bool, after the label that
+// joined the arms, went into them (check_lower_conditional_target).
 static bool check_test_constant_conversion_pair(const Tier0Function* function, uint32_t e)
 {
     return e + 1 < function->count && function->kinds[e] == BUSTER_TYPED_CONST && function->classes[e] >= BUSTER_TYPED_CLASS_I8 &&
@@ -86,7 +86,8 @@ static bool check_test_constant_conversion_kept(const Tier0Function* function, u
 // among them: no integer CONST a CONVERT follows, F32's and F64's CONSTs where the source writes integers, and _Bool's
 // U8 1; "constant-conversion-code" is the issue's four functions'
 // code (check_test_constant_conversion_code); "constant-conversion-controls" keeps the conversions that round: 16777217
-// and 4294967295 to float, 2^53 + 1 and 2^64 - 1 to double.
+// and 4294967295 to float, 2^53 + 1 and 2^64 - 1 to double; and those after the label joining a conditional's arms and
+// a logical operator's converted to double (check_lower_conditional_sinks), whose 3 and 1 a CONVERT to F64 follows.
 static void check_test_constant_conversion_lowered(CheckTest* test, const char* name, const CheckProgramLowered lowered[2], const CheckProgram* program, Arena* output,
                                                    Arena* scratch)
 {
@@ -117,6 +118,8 @@ static void check_test_constant_conversion_lowered(CheckTest* test, const char* 
             rounding |= check_test_constant_conversion_kept(function, UINT64_C(9007199254740993), BUSTER_TYPED_CLASS_F64) ? 2u : 0u;
             rounding |= check_test_constant_conversion_kept(function, UINT64_MAX, BUSTER_TYPED_CLASS_F64) ? 4u : 0u;
             rounding |= check_test_constant_conversion_kept(function, UINT32_MAX, BUSTER_TYPED_CLASS_F32) ? 8u : 0u;
+            rounding |= check_test_constant_conversion_kept(function, 3, BUSTER_TYPED_CLASS_F64) ? 16u : 0u;
+            rounding |= check_test_constant_conversion_kept(function, 1, BUSTER_TYPED_CLASS_F64) ? 32u : 0u;
         }
         if (code)
         {
@@ -124,8 +127,10 @@ static void check_test_constant_conversion_lowered(CheckTest* test, const char* 
         }
         else if (controls)
         {
-            snprintf(description, sizeof(description), "%s (%s): the four constants a conversion rounds keep their CONVERT (found %#x of 0xf)", name, way, rounding);
-            check_test_expect(test, rounding == 0xf, description);
+            snprintf(description, sizeof(description),
+                     "%s (%s): the four constants a conversion rounds, and a conditional's and a logical operator's converted to double, keep their CONVERT (found %#x of 0x3f)",
+                     name, way, rounding);
+            check_test_expect(test, rounding == 0x3f, description);
         }
         else
         {
