@@ -932,7 +932,7 @@ and in 18.2 s against 50.6 s without, and a clean build took 68.1 s against
 benchmark uses it: the 9700X job's whole measure, every benchmark over its
 placements, put 11 of its 69 benchmarks outside their floors of the whole
 units' on 2026-11-15 ([the
-record](https://github.com/buster14a/buster-performance/tree/ce4b38b5d/docs/measurements/release-in-parts-renewed-2559-2026-11-14)).
+record](https://github.com/buster14a/buster-performance/tree/e9ad4b3e8/docs/measurements/release-in-parts-renewed-2559-2026-11-14)).
 Four of them run more instructions (`benchmark-tier1-code-certificate` +1.39%
 user cycles, +0.70% instructions; `sqlite-c-tier1`, `ir-source`, `sqlite-c`)
 and `ir-lowering` +1.00% runs as many in other code: what the whole unit's

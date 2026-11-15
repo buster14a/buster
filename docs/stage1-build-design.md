@@ -858,7 +858,7 @@ instructions by function:
 
 The 9700X job's whole measure, on 2026-11-15, against main with #2733's
 placements (the units whole) and with CI's toolchain
-([the record](https://github.com/buster14a/buster-performance/tree/ce4b38b5d/docs/measurements/release-in-parts-renewed-2559-2026-11-14)):
+([the record](https://github.com/buster14a/buster-performance/tree/e9ad4b3e8/docs/measurements/release-in-parts-renewed-2559-2026-11-14)):
 
 - **The build gained as before:** with `-g` a clean build took 68.1 s against
   73.7 s (503 s of CPU against 436 s) and an edit of `c_check_input.c` 33.1 s
