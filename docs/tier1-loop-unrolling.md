@@ -142,8 +142,8 @@ none.
 - **Accumulators.** Up to 4, halved while the main loop's general values
   (its integer and pointer phis, the outside values it reads, and its bound)
   would pass 7. Tier 1 gives a value that crosses no call the caller-saved
-  registers alone ([the allocation guide](tier1-allocation.md)), nine of them,
-  and a copy's own temporaries take two. Before this rule, `count_eq_u8`'s four
+  registers alone ([the allocation guide](tier1-allocation.md), #2819), nine
+  of them, and a copy's own temporaries take two. Before this rule, `count_eq_u8`'s four
   accumulators spilled the bound and two of them and ran 0.72 times as fast
   locally as without unrolling.
 - **Growth.** At most 4,096 instructions added to a function; a loop that
@@ -258,7 +258,8 @@ MEASUREMENTS
   each with its own proof.
 - **Registers.** The pressure rule exists because Tier 1's leaf code takes no
   callee-saved register; giving a busy leaf loop those registers is the
-  allocator's change, and would let more accumulators pay.
+  allocator's change ([#2819](https://github.com/buster14a/buster/issues/2819)),
+  and would let more accumulators pay.
 - **The vectorizer's loops**, as above, once that pass exists.
 
 The implementation is original. LLVM's [loop terminology](https://llvm.org/docs/LoopTerminology.html)
