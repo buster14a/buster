@@ -1747,8 +1747,20 @@ jump after `OP_TFORLOOP` moves nothing.
   the addresses Lua hashes pointer keys by, which move with the binary, so the
   totals include that effect.
 - **By function.** Without it, no Lua function runs more instructions.
-  speedtest1 runs 0.71 M and 0.77 M fewer: `resolveP2Values` −0.43 M,
+  speedtest1 runs 0.71 M and 0.76 M fewer: `resolveP2Values` −0.43 M,
   `cellSizePtrTableLeaf` −0.14 M, `sqlite3_str_vappendf` −0.10 M to −0.15 M.
+- **The 4 left** are one swap's two moves, run twice: `OP_CLOSE` puts
+  `luaF_close`'s constant arguments 0 and 1 in each other's registers. Such
+  swaps just before a call are #2823; across Lua they are 5.80 M moves through
+  `r11` at 283 sites, almost all outside `luaV_execute`.
+
+**On the 9700X** (#2553's method; main against this, without #2773, whose 132,002
+moves Zen 5 eliminates at rename, too few to time): Lua's five scripts over 33
+link orders take −0.09% cycles (−0.32% to +0.15%), speedtest1 over 8 layouts
+−0.17% (−0.52% to +0.19%). Both are flat, as 0.46 M moves and 0.71 M
+instructions are. `--tier1 --lanes 1 -c` of `sqlite3.c` takes +0.02% cycles and
++0.07% instructions, `lvm.c` −0.08% cycles. The record is buster-performance's
+`docs/measurements/tier1-dispatch-entry-2782-2026-11-15`.
 
 **Tests.**
 
