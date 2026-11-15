@@ -8963,8 +8963,11 @@ change, it refused such a declaration by name.
   clang's locations and order, and later independent declarations are checked.
   An empty parenthesized argument has only its string-literal error. A malformed
   GNU outer tail discards the following complete semicolon-bounded declaration,
-  so its name cannot hide a later undeclared-name error; a C23 list keeps its
-  declaration. The original `tests/driver/attribute_recovery.c` fixtures compare
+  so its name cannot hide a later undeclared-name error. A malformed C23 separator
+  drops the unread items through that list's closing brackets, preserving earlier
+  attributes, later separate lists and the declaration itself. It does not drop
+  later items after an inner-parenthesis recovery or a non-string argument error.
+  The original `tests/driver/attribute_recovery.c` fixtures compare
   both language modes, readers, warning policy, deferred checking and output
   preservation. GNU statement-attribute classification skips each balanced
   argument group, so a subscript within a malformed string argument is not

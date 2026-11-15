@@ -3502,7 +3502,8 @@ static uint32_t check_input_invalid_call_index(const Parser* parser, uint32_t to
 }
 
 // A failed parse's call-shaped lookup is never an expression to check (#2406). The private view has already erased
-// its unread arguments; its ordinary binding and implicit declaration must survive for later statements. Append the
+// its unread first argument (all arguments for an attribute-led call); later arguments and the ordinary binding and
+// implicit declaration must survive for independent checks and later statements. Append the
 // existing silent invalid-use report after lookup, so the normal subtree cuts suppress only this call and its parents.
 static void check_input_invalid_calls(CheckInputReader* reader)
 {

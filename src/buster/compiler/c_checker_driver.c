@@ -11005,7 +11005,7 @@ static uint32_t check_driver_skip_end(const Parser* parser, uint32_t token);
 
 // Retain a failed call's name for lookup, without inventing a valid call of its unread arguments (#2406). A complete
 // balanced group is required; semicolons at argument level and mismatched delimiters keep the existing recovery.
-// An ordinary call's later arguments are read even after an invalid first one: leave top-level commas to that recovery.
+// An ordinary call's later arguments are read even after an invalid first one: retain them after its first comma.
 // Builtin/catalog names can validate arguments during lookup and are outside this diagnostic-only repair.
 static void check_driver_invalid_call(const Parser* view, ParseDiagnostic* diagnostic, uint32_t callee, uint32_t begin, bool value,
                                       const CheckDriverTypoEdits* edits)
@@ -11020,6 +11020,7 @@ static void check_driver_invalid_call(const Parser* view, ParseDiagnostic* diagn
     uint8_t* stack = ordinary ? BUSTER_ARENA_PUSH_ARRAY(edits->scratch, uint8_t, count - callee) : NULL;
     uint32_t depth = 0;
     uint32_t end = callee + 1;
+    uint32_t arguments = 0;
     bool balanced = stack != NULL;
     do
     {
@@ -11027,8 +11028,11 @@ static void check_driver_invalid_call(const Parser* view, ParseDiagnostic* diagn
         const bool open = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
         const bool close = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE;
         const uint8_t wanted = kind == PARSE_KIND_R_PAREN ? PARSE_KIND_L_PAREN : kind == PARSE_KIND_R_SQUARE ? PARSE_KIND_L_SQUARE : PARSE_KIND_L_BRACE;
-        balanced = balanced && end < count && kind != PARSE_KIND_END && !(depth == 1 && (kind == PARSE_KIND_SEMI || (value && kind == PARSE_KIND_COMMA))) &&
+        const bool empty = value && depth == 1 && (kind == PARSE_KIND_COMMA || kind == PARSE_KIND_R_PAREN) &&
+                           view->tokens.kinds[end - 1] == PARSE_KIND_COMMA;
+        balanced = balanced && end < count && kind != PARSE_KIND_END && !empty && !(depth == 1 && kind == PARSE_KIND_SEMI) &&
                    (!close || (depth != 0 && stack[depth - 1] == wanted));
+        arguments = balanced && value && depth == 1 && kind == PARSE_KIND_COMMA && arguments == 0 ? end + 1 : arguments;
         if (balanced && open)
         {
             stack[depth++] = kind;
@@ -11040,12 +11044,14 @@ static void check_driver_invalid_call(const Parser* view, ParseDiagnostic* diagn
         end += balanced ? 1u : 0u;
     }
     while (balanced && depth != 0);
+    // Empty later arguments need their own parse error and keep the existing recovery above.
     if (balanced && end < count && (value || view->tokens.kinds[end] == PARSE_KIND_SEMI))
     {
         diagnostic->resumed = true;
         diagnostic->resume_delete = true;
         diagnostic->resume_call = true;
         diagnostic->resume_callee = callee;
+        diagnostic->resume_call_arguments = arguments;
         diagnostic->resume_call_value = value;
         diagnostic->resume_begin = begin;
         diagnostic->resume_end = end;
