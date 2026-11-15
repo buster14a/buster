@@ -475,7 +475,10 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_location_in_main_file(
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnose_empty_unit(Preprocessor* pp)
 {
     // The main file's own range: its bytes, not the scratch space's; its length past the bytes' terminator.
-    const PPFileData* data = pp->main_file < pp->file_count ? pp->datas + pp->files[pp->main_file].data : NULL;
+    // A record made for a path that could not be read has no data (BUSTER_PP_NONE). Indexing the data table by
+    // that sentinel walks off it (#2828).
+    const uint32_t data_index = pp->main_file < pp->file_count ? pp->files[pp->main_file].data : BUSTER_PP_NONE;
+    const PPFileData* data = data_index < pp->data_count ? pp->datas + data_index : NULL;
     const uint8_t* bytes = data != NULL ? data->bytes : NULL;
     uint32_t range = BUSTER_PP_NONE;
     for (uint32_t r = 0; bytes != NULL && range == BUSTER_PP_NONE && r < pp->range_count; r += 1)
@@ -13685,6 +13688,7 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     pp->diagnostic_run_first = BUSTER_PP_NONE;
     pp->fallback_directory = BUSTER_PP_NONE;
     pp->predefines_data = BUSTER_PP_NONE;
+    pp->main_file = BUSTER_PP_NONE;
     pp->options = *options;
     pp->table = table;
     // No warning's command-line severity read yet, and each may be given (#2547).

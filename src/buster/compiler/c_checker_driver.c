@@ -11502,7 +11502,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         pp->options.collect_diagnostics = true;
         pp_driver_verbose(options, path);
         ready = pp_run_input(pp, path);
-        if (!ready && pp->errors != 0 && !pp->diagnostic_collection_failed && !pp->history_failed)
+        // A fatal before the main file is entered (a --predefines file that can't be read, #2828) has no unit
+        // to recover. Clearing it and diagnosing an empty unit would read a file record that was never loaded.
+        const bool entered = pp->main_file != BUSTER_PP_NONE;
+        if (!ready && entered && pp->errors != 0 && !pp->diagnostic_collection_failed && !pp->history_failed)
         {
             // Only the produced source prefix is parsed after a real preprocessing fatal. Nonfatal errors
             // leave the whole stream. Either remains a rejected unit, independent of publication's cutoff.
