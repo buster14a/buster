@@ -16848,15 +16848,22 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
             }
         }
         // What the parts leave out is zero (C11 6.7.9p21), which static storage has before any part: an object is
-        // cleared first, unless its first part writes it whole, zeros or an aggregate's copy (`T x = *p;`), which
-        // writes every byte, its padding's too. A volatile object keeps its clear's stores.
+        // cleared first, unless its first part writes it whole: zeros, an aggregate's copy (`T x = *p;`), which writes
+        // every byte, its padding's too, or a vector's value (#2745, the intrinsics' wrappers' `(U512){ .v = x }`),
+        // whose store writes every byte of its type (check_lower_vector_bytes), which has no padding. A scalar's store
+        // can write fewer bytes than its type's size (long double's 10 of 16), so it doesn't count. A volatile object
+        // keeps its clear's stores.
         const CheckInitPart* first = plan->count != 0 ? plan->parts : NULL;
         const bool cleared = first != NULL && first->kind == CHECK_INIT_CLEAR && first->bit_offset == 0 && first->bit_width == 0 &&
                              object && first->byte_count >= writer->local_sizes[local];
-        const bool copied = first != NULL && first->kind == CHECK_INIT_VALUE && first->bit_offset == 0 && first->bit_width == 0 && object &&
-                            first->overload_candidate == 0 && check_lower_aggregate(writer, first->type) &&
-                            type_size(program->types, first->type) >= writer->local_sizes[local] && !check_lower_init_volatile_object(writer, plan, destination);
-        if (object && !cleared && !copied && pool == BUSTER_CHECK_NONE)
+        const bool valued = first != NULL && first->kind == CHECK_INIT_VALUE && first->bit_offset == 0 && first->bit_width == 0 && object &&
+                            first->overload_candidate == 0 && !check_lower_init_volatile_object(writer, plan, destination);
+        const bool aggregate = valued && check_lower_aggregate(writer, first->type);
+        const bool vector = valued && check_lower_class(writer, first->type) == BUSTER_TYPED_CLASS_VECTOR;
+        const uint64_t written = aggregate ? type_size(program->types, first->type) : vector ? check_lower_vector_bytes(program->types, first->type) : 0;
+        // An object has bytes (local_sizes' nonzero), so a part that writes none never covers it.
+        const bool whole = object && written >= writer->local_sizes[local];
+        if (object && !cleared && !whole && pool == BUSTER_CHECK_NONE)
         {
             check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CLEAR, .type = writer->local_sizes[local], .value = local, .library = library });
         }

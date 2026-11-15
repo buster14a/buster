@@ -254,7 +254,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes; and
   #1376's clears (`c_check_program_clear_test.c`): each path's shape (memset past 128 bytes, no loop, no clear before
-  a whole object's copy, compound literals in place, a volatile object's stores) and native runs on a dirtied stack.
+  a whole object's copy, compound literals in place, a volatile object's stores) and native runs on a dirtied stack;
+  #2745's: no store of zeros before a vector's value of the object's size (a struct's, a union's by either member, a
+  nested struct's, a compound literal's, the vector object's own, at 16, 32 and 64 bytes), the clears that stay (a
+  volatile object or member, a wider object or union member, a union whose designator moves on, a long double's), and
+  their native runs.
   The same group covers #1549's hidden-result call initializers: copy, temporary and discarded-address elimination,
   nested and indirect calls, only members and elements, alignment, volatile and self-reference fallbacks, assignments,
   reentry, and which labels keep the copy, at both scan paths' lengths; and #1375's named results
