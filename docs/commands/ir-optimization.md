@@ -46,6 +46,36 @@ requirements. [Command index](README.md).
   [The optimization guide](../../docs/ir-optimization.md) records supported inputs,
   the pass order and #139's measurements.
 
+## Loop vectorization (#2743)
+
+`test-ir-vectorize [--seed N] [--print NAME]` (`ir_vectorize_loops_test.c`) runs
+the loop vectorizer's text fixtures, `tests/ir/vectorize/*.ir`: element-wise
+operations of every lane width, fills, copies, sums with widening, a dot
+product, the four other integer reductions, an if-converted conditional sum
+with its unreachable stub, an `int` induction's clamp, byte arithmetic through
+32-bit lanes, population counts, a stencil whose exit test is `i + 1 < n`, an
+in-place `y[i] += k * x[i]`, an invariant start and index offset, a uniform load,
+two loops and a nested one; and one fixture per refusal (a prefix sum, a
+histogram, a strided store, the induction as data, a call, a volatile load, a
+division, FNV-1a's recurrence, a float sum, a width no vector holds, more guards
+than the limit, a reduction's partial value read, an early exit, a step of two).
+Each runs by both parser paths and both of the pass's paths at three targets of
+every operation the IR has, at most 64, 32 and 16 bytes wide, which must give
+the same function and counts; a fixture expects how many loops each width
+vectorizes, or its refusal's reason. Each changed result, and its form after
+the ordinary optimizer (whose final verification checks dominance), runs in the
+shared interpreter against the input on one buffer, its pointers placed apart,
+at one address, a byte, an element and a vector apart either way, at lengths
+around the vectors' boundaries (signed bounds negative too): the same bytes,
+value and status. Four mutants (`BUSTER_IR_VECTORIZE_MUTATE_*`: no overlap
+test, an unrounded tail, a wrong reduction identity, lanes of the wrong width)
+must each be rejected on some fixture. `--print NAME` prints a fixture's
+64-byte result. `test-checker-driver`'s inlining unit compiles a C fixture of
+loops by `--tier1 --tier1-passes=+vectorize --verify` at x86-64 to x86-64-v4 by
+both paths, checks the loops each target vectorizes and that both paths give one
+object, and runs it as clang -O0's build does. [The design and its
+status](../tier1-loop-vectorization.md) has the rules and the measurements.
+
 The optional `BUSTER_IR_OPTIMIZE_LAYOUT` pass (#1218) changes the rewrite's
 block visitation order, using `ir_optimize_layout.c`'s fall-through chains.
 Only the C driver's final Tier 1 optimization enables it by default; other

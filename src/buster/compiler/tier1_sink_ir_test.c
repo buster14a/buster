@@ -5,9 +5,11 @@
 // ir_optimize_test.c's independent executor. Each is parsed twice and sunk by both paths, which must agree exactly, the
 // vector path's permutation checked by tier1_schedule_ir_verify (--verify's reference), the result verified as complete
 // SSA, its expressions where the fixture says (each root right after its anchor, its expression's instructions before
-// it), and the function executed against its input on every parameter below 256 and a few past it. The refusals keep
-// their order: a list's `pp = &p->next` beside `p = p->next`, whose load wants p's register, and an increment whose last
-// reader is a comparison its branch takes from right before it.
+// it), and the function executed against its input on every parameter below 256 and a few past it. A join of pc's own
+// values (Lua's `l_tforloop`), a join of joins (OP_TFORLOOP's fetch) and a join sharing a phi with pc's (OP_TFORCALL's)
+// are of its family. The refusals keep their order:
+// a list's `pp = &p->next` beside `p = p->next`, whose load wants p's register, and an increment whose last reader is a
+// comparison its branch takes from right before it.
 
 #include "tier1_schedule_ir.c"
 
@@ -161,6 +163,267 @@ static const Tier1SinkIrTestFixture tier1_sink_ir_test_fixtures[] = {
         .moved = 3,
         .root = 26,
         .anchor = 27,
+    },
+    {
+        // Lua's OP_TFORCALL fetches inside its handler, then joins its `pc + 1` with the dispatch's pc itself at
+        // `l_tforloop`: that join is the target, and pc's own next value comes from pc, not from it. The increment moves.
+        .name = "rejoin",
+        .text = "function (i64) -> i64 {\n"
+                "  slot $0 size=64 align=8 type=void flags=0x01\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = stack_addr.ptr $0\n"
+                "  %2 = store.void %1, %0 align=1\n"
+                "  %3 = address.ptr %1 offset=8\n"
+                "  %4 = not.i64 %0\n"
+                "  %5 = store.void %3, %4 align=1\n"
+                "  %6 = address.ptr %1 offset=16\n"
+                "  %7 = store.void %6, %0 align=1\n"
+                "  %8 = address.ptr %1 offset=24\n"
+                "  %9 = store.void %8, %4 align=1\n"
+                "  %10 = address.ptr %1 offset=32\n"
+                "  %11 = store.void %10, %0 align=1\n"
+                "  %12 = address.ptr %1 offset=40\n"
+                "  %13 = ptrtoint.i64 %12\n"
+                "  %14 = const.i64 " BUSTER_TIER1_SINK_TEST_C("00") "\n"
+                "  %15 = const.i64 " BUSTER_TIER1_SINK_TEST_C("01") "\n"
+                "  %16 = br.void b1\n"
+                "b1:\n"
+                "  %17 = phi.ptr [%1, b0], [%37, b4]\n"
+                "  %18 = phi.i64 [%14, b0], [%35, b4]\n"
+                "  %19 = phi.i64 [%0, b0], [%36, b4]\n"
+                "  %20 = ptrtoint.i64 %17\n"
+                "  %21 = icmp.i1 %20, %13 ult\n"
+                "  %22 = cbr.void %21, b2, b5\n"
+                "b2:\n"
+                "  %23 = and.i64 %19, %15\n"
+                "  %24 = icmp.i1 %23, %14 ne\n"
+                "  %25 = cbr.void %24, b3, b4\n"
+                "b3:\n"
+                "  %26 = address.ptr %17 offset=4\n"
+                "  %27 = load.i32 %17 align=1\n"
+                "  %28 = zext.i64 %27\n"
+                "  %29 = br.void b4\n"
+                "b4:\n"
+                "  %30 = phi.ptr [%17, b2], [%26, b3]\n"
+                "  %31 = phi.i64 [%14, b2], [%28, b3]\n"
+                "  %32 = load.i32 %30 align=1\n"
+                "  %33 = zext.i64 %32\n"
+                "  %34 = xor.i64 %18, %33\n"
+                "  %35 = add.i64 %34, %31\n"
+                "  %36 = lshr.i64 %19, %15\n"
+                "  %37 = address.ptr %17 offset=8\n"
+                "  %38 = br.void b1\n"
+                "b5:\n"
+                "  %39 = ret.void %18\n"
+                "}\n",
+        .trees = 1,
+        .moved = 1,
+        .root = 26,
+        .anchor = 27,
+    },
+    {
+        // Lua's OP_TFORLOOP after OP_TFORCALL's fetch: the dispatch's increment reads a join of a jump's target and a join
+        // of pc and `pc + 1`, so a join of joins of the target's values, a variable index away. The increment moves.
+        .name = "nested",
+        .text = "function (i64) -> i64 {\n"
+                "  slot $0 size=64 align=8 type=void flags=0x01\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = stack_addr.ptr $0\n"
+                "  %2 = store.void %1, %0 align=1\n"
+                "  %3 = address.ptr %1 offset=8\n"
+                "  %4 = not.i64 %0\n"
+                "  %5 = store.void %3, %4 align=1\n"
+                "  %6 = address.ptr %1 offset=16\n"
+                "  %7 = store.void %6, %0 align=1\n"
+                "  %8 = address.ptr %1 offset=24\n"
+                "  %9 = store.void %8, %4 align=1\n"
+                "  %10 = address.ptr %1 offset=32\n"
+                "  %11 = store.void %10, %0 align=1\n"
+                "  %12 = address.ptr %1 offset=40\n"
+                "  %13 = store.void %12, %4 align=1\n"
+                "  %14 = ptrtoint.i64 %12\n"
+                "  %15 = const.i64 " BUSTER_TIER1_SINK_TEST_C("00") "\n"
+                "  %16 = const.i64 " BUSTER_TIER1_SINK_TEST_C("01") "\n"
+                "  %17 = br.void b1\n"
+                "b1:\n"
+                "  %18 = phi.ptr [%1, b0], [%38, b6]\n"
+                "  %19 = phi.i64 [%15, b0], [%42, b6]\n"
+                "  %20 = phi.i64 [%0, b0], [%43, b6]\n"
+                "  %21 = ptrtoint.i64 %18\n"
+                "  %22 = icmp.i1 %21, %14 ult\n"
+                "  %23 = cbr.void %22, b2, b7\n"
+                "b2:\n"
+                "  %24 = and.i64 %20, %16\n"
+                "  %25 = icmp.i1 %24, %15 ne\n"
+                "  %26 = cbr.void %25, b3, b4\n"
+                "b3:\n"
+                "  %27 = address.ptr %18 offset=4\n"
+                "  %28 = br.void b4\n"
+                "b4:\n"
+                "  %29 = phi.ptr [%18, b2], [%27, b3]\n"
+                "  %30 = lshr.i64 %20, %16\n"
+                "  %31 = and.i64 %30, %16\n"
+                "  %32 = icmp.i1 %31, %15 ne\n"
+                "  %33 = cbr.void %32, b5, b6\n"
+                "b5:\n"
+                "  %34 = and.i64 %20, %15\n"
+                "  %35 = address.ptr %29 + %34 * 4 offset=0\n"
+                "  %36 = br.void b6\n"
+                "b6:\n"
+                "  %37 = phi.ptr [%29, b4], [%35, b5]\n"
+                "  %38 = address.ptr %37 offset=4\n"
+                "  %39 = load.i32 %37 align=1\n"
+                "  %40 = zext.i64 %39\n"
+                "  %41 = xor.i64 %19, %40\n"
+                "  %42 = add.i64 %41, %16\n"
+                "  %43 = lshr.i64 %20, %16\n"
+                "  %44 = br.void b1\n"
+                "b7:\n"
+                "  %45 = ret.void %19\n"
+                "}\n",
+        .trees = 1,
+        .moved = 1,
+        .root = 38,
+        .anchor = 39,
+    },
+    {
+        // Lua's OP_TFORCALL itself: its pc joins the dispatch's pc with OP_TFORPREP's jump, and `l_tforloop` joins its
+        // `pc + 1` with the dispatch's pc: the two joins share it, a join of three values. The increment moves.
+        .name = "shared",
+        .text = "function (i64) -> i64 {\n"
+                "  slot $0 size=64 align=8 type=void flags=0x01\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = stack_addr.ptr $0\n"
+                "  %2 = store.void %1, %0 align=1\n"
+                "  %3 = address.ptr %1 offset=8\n"
+                "  %4 = not.i64 %0\n"
+                "  %5 = store.void %3, %4 align=1\n"
+                "  %6 = address.ptr %1 offset=16\n"
+                "  %7 = store.void %6, %0 align=1\n"
+                "  %8 = address.ptr %1 offset=24\n"
+                "  %9 = store.void %8, %4 align=1\n"
+                "  %10 = address.ptr %1 offset=32\n"
+                "  %11 = store.void %10, %0 align=1\n"
+                "  %12 = address.ptr %1 offset=40\n"
+                "  %13 = store.void %12, %4 align=1\n"
+                "  %14 = ptrtoint.i64 %12\n"
+                "  %15 = const.i64 " BUSTER_TIER1_SINK_TEST_C("00") "\n"
+                "  %16 = const.i64 " BUSTER_TIER1_SINK_TEST_C("01") "\n"
+                "  %17 = br.void b1\n"
+                "b1:\n"
+                "  %18 = phi.ptr [%1, b0], [%43, b6], [%47, b7]\n"
+                "  %19 = phi.i64 [%15, b0], [%41, b6], [%41, b7]\n"
+                "  %20 = phi.i64 [%0, b0], [%42, b6], [%42, b7]\n"
+                "  %21 = ptrtoint.i64 %18\n"
+                "  %22 = icmp.i1 %21, %14 ult\n"
+                "  %23 = cbr.void %22, b2, b8\n"
+                "b2:\n"
+                "  %24 = and.i64 %20, %16\n"
+                "  %25 = icmp.i1 %24, %15 ne\n"
+                "  %26 = cbr.void %25, b3, b4\n"
+                "b3:\n"
+                "  %27 = and.i64 %20, %15\n"
+                "  %28 = address.ptr %18 + %27 * 4 offset=0\n"
+                "  %29 = br.void b4\n"
+                "b4:\n"
+                "  %30 = phi.ptr [%18, b2], [%28, b3]\n"
+                "  %31 = lshr.i64 %20, %16\n"
+                "  %32 = and.i64 %31, %16\n"
+                "  %33 = icmp.i1 %32, %15 ne\n"
+                "  %34 = cbr.void %33, b5, b6\n"
+                "b5:\n"
+                "  %35 = address.ptr %30 offset=4\n"
+                "  %36 = load.i32 %30 align=1\n"
+                "  %37 = br.void b6\n"
+                "b6:\n"
+                "  %38 = phi.ptr [%18, b4], [%35, b5]\n"
+                "  %39 = load.i32 %38 align=1\n"
+                "  %40 = zext.i64 %39\n"
+                "  %41 = xor.i64 %19, %40\n"
+                "  %42 = lshr.i64 %20, %16\n"
+                "  %43 = address.ptr %30 offset=8\n"
+                "  %44 = and.i64 %41, %16\n"
+                "  %45 = icmp.i1 %44, %15 ne\n"
+                "  %46 = cbr.void %45, b1, b7\n"
+                "b7:\n"
+                "  %47 = address.ptr %30 offset=12\n"
+                "  %48 = br.void b1\n"
+                "b8:\n"
+                "  %49 = ret.void %19\n"
+                "}\n",
+        .trees = 1,
+        .moved = 1,
+        .root = 35,
+        .anchor = 36,
+    },
+    {
+        // The same shape around a loop's header, which joins two values: the source the joins share is the loop's, not a
+        // dispatch's, so nothing moves.
+        .name = "loop",
+        .text = "function (i64) -> i64 {\n"
+                "  slot $0 size=64 align=8 type=void flags=0x01\n"
+                "b0:\n"
+                "  %0 = param.i64 0\n"
+                "  %1 = stack_addr.ptr $0\n"
+                "  %2 = store.void %1, %0 align=1\n"
+                "  %3 = address.ptr %1 offset=8\n"
+                "  %4 = not.i64 %0\n"
+                "  %5 = store.void %3, %4 align=1\n"
+                "  %6 = address.ptr %1 offset=16\n"
+                "  %7 = store.void %6, %0 align=1\n"
+                "  %8 = address.ptr %1 offset=24\n"
+                "  %9 = store.void %8, %4 align=1\n"
+                "  %10 = address.ptr %1 offset=32\n"
+                "  %11 = store.void %10, %0 align=1\n"
+                "  %12 = address.ptr %1 offset=40\n"
+                "  %13 = store.void %12, %4 align=1\n"
+                "  %14 = ptrtoint.i64 %12\n"
+                "  %15 = const.i64 " BUSTER_TIER1_SINK_TEST_C("00") "\n"
+                "  %16 = const.i64 " BUSTER_TIER1_SINK_TEST_C("01") "\n"
+                "  %17 = br.void b1\n"
+                "b1:\n"
+                "  %18 = phi.ptr [%1, b0], [%43, b6]\n"
+                "  %19 = phi.i64 [%15, b0], [%41, b6]\n"
+                "  %20 = phi.i64 [%0, b0], [%42, b6]\n"
+                "  %21 = ptrtoint.i64 %18\n"
+                "  %22 = icmp.i1 %21, %14 ult\n"
+                "  %23 = cbr.void %22, b2, b7\n"
+                "b2:\n"
+                "  %24 = and.i64 %20, %16\n"
+                "  %25 = icmp.i1 %24, %15 ne\n"
+                "  %26 = cbr.void %25, b3, b4\n"
+                "b3:\n"
+                "  %27 = and.i64 %20, %15\n"
+                "  %28 = address.ptr %18 + %27 * 4 offset=0\n"
+                "  %29 = br.void b4\n"
+                "b4:\n"
+                "  %30 = phi.ptr [%18, b2], [%28, b3]\n"
+                "  %31 = lshr.i64 %20, %16\n"
+                "  %32 = and.i64 %31, %16\n"
+                "  %33 = icmp.i1 %32, %15 ne\n"
+                "  %34 = cbr.void %33, b5, b6\n"
+                "b5:\n"
+                "  %35 = address.ptr %30 offset=4\n"
+                "  %36 = load.i32 %30 align=1\n"
+                "  %37 = br.void b6\n"
+                "b6:\n"
+                "  %38 = phi.ptr [%18, b4], [%35, b5]\n"
+                "  %39 = load.i32 %38 align=1\n"
+                "  %40 = zext.i64 %39\n"
+                "  %41 = xor.i64 %19, %40\n"
+                "  %42 = lshr.i64 %20, %16\n"
+                "  %43 = address.ptr %30 offset=8\n"
+                "  %44 = br.void b1\n"
+                "b7:\n"
+                "  %45 = ret.void %19\n"
+                "}\n",
+        .trees = 0,
+        .moved = 0,
+        .root = BUSTER_IR_NONE,
+        .anchor = BUSTER_IR_NONE,
     },
     {
         // A list walked through `pp = &p->next; p = p->next`: pp's next value reads p, but p's own next value, the load,

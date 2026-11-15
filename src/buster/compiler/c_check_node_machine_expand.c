@@ -4,7 +4,8 @@
 // #2524's node machine's X sweep (c_check_node_machine.c has the machine): node_machine_expand walks the records up the
 // postorder and writes each evaluated one's row to the tape, its own entries by its template (node_machine_own,
 // check_lower_template_own's, and the logical operators' and the conditional's) and then its conversion's to its target
-// in its context (node_machine_conversion, check_lower_template_conversion's), then its consumer's segment after it
+// in its context (node_machine_conversion, check_lower_template_conversion's; an integer constant's folded into its CONST
+// where it folds, node_machine_fold_conversion), then its consumer's segment after it
 // where it has one (node_machine_hook) or an update's first row (node_machine_split, node_machine_update_first), both
 // behind one test of its state (node_machine_after_row); an update's second row, its own, by node_machine_update_last;
 // a call's CALL by node_machine_call_own, its row numbered as the lowering numbers it. It reads the records T typed and
@@ -261,6 +262,38 @@ static inline __attribute__((always_inline)) bool node_machine_convert(NodeMachi
     return takes;
 }
 
+// Record `r`'s conversion, an integer constant's whose one CONST is tape entry `at`, folded into that CONST where it folds
+// (check_lower_constant_conversion, #2678): whether it did. The tasks fold a constant's own conversion so
+// (check_lower_fold_conversion), and so do the templates (check_lower_template_conversion); a conversion
+// node_machine_convert would write no entry for (in an address or a discarded context, or an empty one) isn't folded.
+static __attribute__((noinline)) bool node_machine_fold_conversion(NodeMachine* machine, uint32_t r, uint32_t at)
+{
+    const TypeId from = node_machine_record_type(machine, r);
+    const TypeId to = node_machine_record_target(machine, r);
+    const uint8_t source = node_machine_record_class(machine, r);
+    bool folded = false;
+    if (node_machine_record_context(machine, r) == 0 && to != 0 && from != to && machine->kinds[at] == BUSTER_TYPED_CONST && machine->classes[at] == source)
+    {
+        const uint8_t from_facts = node_machine_record_facts(machine, r);
+        const uint8_t to_facts = node_machine_facts(machine, to);
+        const uint8_t target = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : node_machine_class(machine, to);
+        // node_machine_convert's (check_lower_conversion_empty's) empty conversion.
+        const bool empty = source == target && source < BUSTER_TYPED_CLASSES &&
+                           ((from_facts ^ to_facts) & (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0 &&
+                           ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) == 0 &&
+                           (to_facts & (BUSTER_CHECK_LOWER_TYPE_BOOL | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0;
+        uint8_t class = 0;
+        uint64_t bits = machine->tape[at];
+        folded = !empty && check_lower_constant_conversion(source, from_facts, target, to_facts, &class, &bits);
+        if (folded)
+        {
+            machine->classes[at] = class;
+            machine->tape[at] = bits;
+        }
+    }
+    return folded;
+}
+
 // Record `r`'s conversion's entries, from its type to its target in its context: whether the templates take it.
 static inline __attribute__((always_inline)) bool node_machine_conversion(NodeMachine* machine, uint32_t r)
 {
@@ -442,7 +475,10 @@ static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t obj
             {
                 node_machine_own(machine, r, r == count - 1 ? object : 0);
             }
-            const bool takes = node_machine_conversion(machine, r);
+            // An integer constant's one CONST takes its conversion where it folds, as the tasks' does (#2678).
+            const bool constant = machine->entry_count == before + 1 && node_machine_record_template(machine, r) == CHECK_LOWER_TEMPLATE_CONSTANT &&
+                                  node_machine_record_constant_kind(machine, r) == CHECK_CONSTANT_INTEGER;
+            const bool takes = (constant && node_machine_fold_conversion(machine, r, before)) || node_machine_conversion(machine, r);
             refusal = !takes || machine->entry_count - before > BUSTER_NODE_MACHINE_ROW_MOST ? NODE_MACHINE_REFUSED_ROW : NODE_MACHINE_TAKEN;
         }
         if (refusal == NODE_MACHINE_TAKEN && state > BUSTER_NODE_MACHINE_EVALUATED)

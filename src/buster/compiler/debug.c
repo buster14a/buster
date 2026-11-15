@@ -73,6 +73,9 @@ struct DebugUnit
     uint32_t function_count;
     const uint32_t* offsets;
     const uint32_t* lines;
+    // Each row's file (an index into `files`), where a function's rows aren't all in its own (DebugFunction.file): an
+    // expanded callee's from another file (#2541). Null for every row in its function's file.
+    const uint32_t* row_files;
     uint32_t row_count;
 };
 
@@ -268,11 +271,20 @@ static void debug_line(const DebugUnit* unit, DebugWriter* writer, uint32_t* add
         uint32_t row = 0;
         uint32_t offset = 0;
         int32_t line = 1;
+        uint32_t file = entry->file;
         // The body's row, which the vector path's groups stop before and the exact path writes with its flag.
         const uint32_t body = entry->prologue_end != 0 ? entry->prologue_end - 1 : UINT32_MAX;
         while (row < entry->row_count)
         {
-            const uint32_t stop = body >= row && body < entry->row_count ? body : entry->row_count;
+            // A row in another file than the row before's (DebugUnit.row_files) stops the groups too: the exact path writes
+            // DW_LNS_set_file before it.
+            uint32_t change = row;
+            while (unit->row_files != 0 && change < entry->row_count && unit->row_files[entry->first_row + change] == file)
+            {
+                change += 1;
+            }
+            const uint32_t last = unit->row_files != 0 ? change : entry->row_count;
+            const uint32_t stop = body >= row && body < last ? body : last;
             for (; !exact && stop - row >= 4; row += 4)
             {
                 const uint32_t first = entry->first_row + row;
@@ -288,6 +300,13 @@ static void debug_line(const DebugUnit* unit, DebugWriter* writer, uint32_t* add
             for (; row < end; row += 1)
             {
                 const uint32_t index = entry->first_row + row;
+                const uint32_t row_file = unit->row_files != 0 ? unit->row_files[index] : file;
+                if (row_file != file)
+                {
+                    debug_integer(writer, 4, 1); // DW_LNS_set_file
+                    debug_uleb(writer, row_file);
+                    file = row_file;
+                }
                 debug_row_scalar(writer, unit->offsets[index] - offset, (int32_t)unit->lines[index] - line, row == body);
                 offset = unit->offsets[index];
                 line = (int32_t)unit->lines[index];
@@ -392,7 +411,8 @@ static DebugError debug_validate(const DebugUnit* unit)
         for (uint32_t row = 0; valid && row < entry->row_count; row += 1)
         {
             const uint32_t index = entry->first_row + row;
-            valid = unit->offsets[index] >= previous && unit->offsets[index] < entry->size && unit->lines[index] <= INT32_MAX;
+            valid = unit->offsets[index] >= previous && unit->offsets[index] < entry->size && unit->lines[index] <= INT32_MAX &&
+                    (unit->row_files == 0 || unit->row_files[index] < unit->file_count);
             previous = unit->offsets[index];
         }
         rows += entry->row_count;
