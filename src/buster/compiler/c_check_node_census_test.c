@@ -276,6 +276,8 @@ static const char node_shadow_test_text[] =
     "    --*q; // machine: taken\n"
     "    u /= 4; // machine: taken\n"
     "    y = x++ + q[1]--; // machine: taken\n"
+    "    y = p->n++ + q[1]-- + p->a[a]++; // machine: taken\n"
+    "    x = a ? q[0]++ : (b && p->a[1]--); // machine: taken\n"
     "    gl += 1; // machine: template\n"
     "    x = a && b++; // machine: taken\n"
     "    x = a ? b++ : --c; // machine: taken\n"
@@ -329,18 +331,30 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, char** 
     snprintf(path, sizeof(path), "%s/shadow.c", directory);
     const char* text = node_shadow_test_text;
     bool valid = parse_test_write(path, text, strlen(text));
-    NodeShadow shadow = { .records_out = calloc(512, sizeof(NodeShadowRecord)), .record_capacity = 512, .scalar = scalar, .verify = !scalar, .passes = 1, .repeat = 1 };
+    NodeShadow shadow = {
+        .records_out = calloc(512, sizeof(NodeShadowRecord)),
+        .record_capacity = 512,
+        .scalar = scalar,
+        .verify = !scalar,
+        .fused = true,
+        .interleave = true,
+        .chunk = 3,
+        .passes = 1,
+        .repeat = 1,
+    };
     NodeCensus census = { .shadow = &shadow };
     fflush(stdout);
     valid = valid && shadow.records_out != NULL && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0 &&
             shadow.record_count < shadow.record_capacity;
+    // C and X as one sweep too: every expression T typed, with C's and X's refusal, tape, labels and calls.
     const bool same = shadow.value_differences == 0 && shadow.entry_differences == 0 && shadow.twin_differences == 0 && shadow.taken_expressions != 0 &&
-                      (scalar || shadow.row_nodes != 0);
+                      (scalar || shadow.row_nodes != 0) && shadow.fused_differences == 0 && shadow.fused_expressions >= shadow.taken_expressions;
     if (!valid || !same)
     {
-        fprintf(stderr, "test-checker: node-shadow%s: %s: values %" PRIu64 ", entries %" PRIu64 ", twin %" PRIu64 " differ; %" PRIu64 " expressions taken, %" PRIu64 " row-typed nodes\n",
-                scalar ? " --scalar" : "", valid ? "read" : "NOT READ", shadow.value_differences, shadow.entry_differences, shadow.twin_differences, shadow.taken_expressions,
-                shadow.row_nodes);
+        fprintf(stderr, "test-checker: node-shadow%s: %s: values %" PRIu64 ", entries %" PRIu64 ", twin %" PRIu64 ", fused %" PRIu64 " (of %" PRIu64 ") differ; %" PRIu64
+                " expressions taken, %" PRIu64 " row-typed nodes\n",
+                scalar ? " --scalar" : "", valid ? "read" : "NOT READ", shadow.value_differences, shadow.entry_differences, shadow.twin_differences, shadow.fused_differences,
+                shadow.fused_expressions, shadow.taken_expressions, shadow.row_nodes);
     }
     uint32_t line = 1;
     const char* at = text;
