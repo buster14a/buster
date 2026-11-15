@@ -50,6 +50,7 @@ typedef enum CheckDebugAbbreviation
     CHECK_DEBUG_INLINED = 37,
     CHECK_DEBUG_ABSTRACT = 38,
     CHECK_DEBUG_INLINED_PARAMETER = 39,
+    CHECK_DEBUG_INLINED_VARIABLE = 40,
 } CheckDebugAbbreviation;
 
 static const uint8_t check_debug_value_abbreviations[] = {
@@ -90,6 +91,7 @@ static const uint8_t check_debug_value_abbreviations[] = {
     0x25, 0x1d, 0x01, 0x31, 0x13, 0x55, 0x17, 0x58, 0x0f, 0x59, 0x0f, 0x00, 0x00, // INLINED
     0x26, 0x2e, 0x01, 0x03, 0x08, 0x49, 0x13, 0x3a, 0x0f, 0x3b, 0x0f, 0x20, 0x0b, 0x00, 0x00, // ABSTRACT
     0x27, 0x05, 0x00, 0x31, 0x13, 0x02, 0x17, 0x00, 0x00, // INLINED_PARAMETER
+    0x28, 0x34, 0x00, 0x31, 0x13, 0x02, 0x17, 0x00, 0x00, // INLINED_VARIABLE
     0,
 };
 
@@ -143,8 +145,8 @@ struct CheckDebugValues
     // (and CI's) takes the inherited DW_AT_low_pc over the instance's DW_AT_ranges, which drops the instance.
     uint32_t* function_offsets;
     uint8_t* expanded;
-    // Per parameter token of an expanded callee, its abstract instance's DW_TAG_formal_parameter's offset, which its
-    // instances' parameters refer to (#2541), set as function_offsets are.
+    // Per parameter or local token of an expanded callee, its abstract instance's DW_TAG_formal_parameter's or
+    // DW_TAG_variable's offset, which its instances' refer to (#2541), set as function_offsets are.
     uint32_t* parameter_dies;
     // Each body's index among the unit's functions (CheckDebug.unit, the bodies with code), its .debug_addr entry's, which
     // DW_AT_low_pc and the lists' DW_RLE/DW_LLE_base_addressx name; BUSTER_CHECK_NONE for a dead one, which has no address.
@@ -880,25 +882,41 @@ static uint32_t check_debug_inline_ranges(const CheckDebugBody* source, DebugWri
     return pairs;
 }
 
-// Instance `instance`'s parameters with proven locations in body `body`'s code (#2541): a DW_TAG_formal_parameter each,
-// whose abstract origin is its callee's abstract instance's and whose location list is its local's
-// (CheckDebugInline.local: parameter p's is local + p). Its callee's other parameters its abstract instance gives,
-// without a location.
+// Whether `token` is an automatic local an abstract instance lists (#2541): an object declared in a body, named, of a
+// valid type, not a parameter (those its parameters list) and without a definition of its own (a static's).
+static bool check_debug_abstract_local(const CheckDebugValues* values, uint32_t token)
+{
+    const CheckInput* input = values->program->input;
+    return check_debug_value_declaration(input, token) && type_is_valid(values->program->types, input->declared_types[token]) && values->parser->tokens.names[token] != 0 &&
+           input->declaration_kinds[token] == C_BINDING_OBJECT && check_sparse_get(input->parameters, token) == BUSTER_CHECK_NONE && !check_debug_value_defined(values, token);
+}
+
+// Instance `instance`'s callee's locals with proven locations in body `body`'s code (#2541): a DW_TAG_formal_parameter
+// for a parameter, a DW_TAG_variable for an automatic local, whose abstract origin is its callee's abstract instance's
+// and whose location list is its local's (CheckDebugInline.local: the callee's local j is local + j, its declaration
+// the callee's own binding's token). Its callee's other parameters and locals its abstract instance gives, without a
+// location.
 static void check_debug_inline_parameters(CheckDebugValues* values, uint32_t body, CheckDebugInline instance)
 {
     const CheckInput* input = values->program->input;
     const CheckDebugBody* source = values->rows->values + body;
-    const uint32_t opening = instance.body < values->program->body_count && values->expanded[instance.body] != 0 ? values->program->bodies[instance.body].opening :
-                                                                                                                  BUSTER_CHECK_NONE;
-    uint32_t p = 0;
-    for (uint32_t token = opening != BUSTER_CHECK_NONE ? check_sparse_get(input->parameters, opening) : BUSTER_CHECK_NONE; token != BUSTER_CHECK_NONE && p < instance.local_count;
-         token = check_sparse_get(input->parameter_next, token))
+    const bool expanded = instance.body < values->program->body_count && values->expanded[instance.body] != 0;
+    const CheckDebugBody* callee = expanded ? values->rows->values + instance.body : NULL;
+    const uint32_t opening = expanded ? values->program->bodies[instance.body].opening : BUSTER_CHECK_NONE;
+    const uint32_t closing = expanded ? values->parser->tree.parents[opening] : 0;
+    // Its parameters are its first locals, in their order; a local's token is one its abstract instance lists, in its body.
+    uint32_t parameter = expanded ? check_sparse_get(input->parameters, opening) : BUSTER_CHECK_NONE;
+    for (uint32_t j = 0; callee != NULL && j < instance.local_count && j < callee->local_count; j += 1)
     {
-        const uint32_t id = instance.local + p;
-        const bool ranged = id < source->local_count && source->location_first != NULL && source->location_first[id] < source->location_first[id + 1];
+        const bool owned = parameter != BUSTER_CHECK_NONE;
+        const uint32_t token = owned ? parameter : callee->bindings[j].token;
+        const bool local = !owned && token > opening && token <= closing && token < input->token_count && check_debug_abstract_local(values, token);
+        parameter = owned ? check_sparse_get(input->parameter_next, parameter) : BUSTER_CHECK_NONE;
+        const uint32_t id = instance.local + j;
+        const bool ranged = (owned || local) && id < source->local_count && source->location_first != NULL && source->location_first[id] < source->location_first[id + 1];
         if (ranged)
         {
-            debug_uleb(&values->info, CHECK_DEBUG_INLINED_PARAMETER);
+            debug_uleb(&values->info, owned ? CHECK_DEBUG_INLINED_PARAMETER : CHECK_DEBUG_INLINED_VARIABLE);
             debug_integer(&values->info, values->parameter_dies[token], 4);
             check_debug_value_field(values, BUSTER_NATIVE_DEBUG_LOCLISTS, values->locations.size);
             debug_integer(&values->locations, 1, 1); // DW_LLE_base_addressx
@@ -928,7 +946,6 @@ static void check_debug_inline_parameters(CheckDebugValues* values, uint32_t bod
             }
             debug_integer(&values->locations, 0, 1);
         }
-        p += 1;
     }
 }
 
@@ -1166,15 +1183,14 @@ static void check_debug_values_write(CheckDebugValues* values)
                 debug_string(&values->info, check_debug_name(values, parser->tokens.names[p]));
                 check_debug_type_reference(values, input->declared_types[p]);
             }
-            // Its automatic locals, without a location (their instances' values aren't proven, #2541), so that a debugger
-            // in an instance's frame names them; flat, as gdb takes a lexical block without addresses.
+            // Its automatic locals, without a location (each instance's has its own, #2541), so that a debugger in an
+            // instance's frame names them; flat, as gdb takes a lexical block without addresses.
             const uint32_t end = parser->tree.parents[body.opening];
             for (uint32_t token = body.opening + 1; token <= end; token += 1)
             {
-                if (check_debug_value_declaration(input, token) && type_is_valid(program->types, input->declared_types[token]) && parser->tokens.names[token] != 0 &&
-                    input->declaration_kinds[token] == C_BINDING_OBJECT && check_sparse_get(input->parameters, token) == BUSTER_CHECK_NONE &&
-                    !check_debug_value_defined(values, token))
+                if (check_debug_abstract_local(values, token))
                 {
+                    values->parameter_dies[token] = (uint32_t)values->info.size;
                     debug_uleb(&values->info, CHECK_DEBUG_UNAVAILABLE_LOCAL);
                     debug_string(&values->info, check_debug_name(values, parser->tokens.names[token]));
                     check_debug_type_reference(values, input->declared_types[token]);

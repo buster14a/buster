@@ -219,14 +219,25 @@ copied instruction takes its callee origin there, and the instance (the
 callee's symbol, its origins, the call's origin and the instance holding that
 call) and the callee's own instances, re-based and nested in it, follow the
 caller's. A caller's slots take no callee local. Where both sidecars have
-bindings, the callee's parameters are the caller's last locals
-(`IrDebugInline.local`, `local_count`, flagged `BUSTER_IR_DEBUG_BIND_INSTANCE`,
-#2541), each with one initial binding to its argument's value where the callee
-never assigns it nor takes its address (`ir_inline_parameter_unassigned`), and
-the callee's own instances' locals follow, re-based; `ir_verify` checks that the
-instances' locals are the function's last, in order, flagged, and that their
-bindings follow the function's others. `test-ir-inline` checks an unassigned
-parameter's binding and an assigned one's absence.
+bindings, every local of the callee is the caller's (`IrDebugInline.local`,
+`local_count`, #2541): the callee's local j is the caller's `local + j`, its own
+locals flagged `BUSTER_IR_DEBUG_BIND_INSTANCE` with their callee's form
+(`ENTRY` or `REGIONS`), then its own instances' locals, re-based. The bindings
+and regions of the locals of a form follow the caller's in the callee's order,
+their entries moved into the instance's origins as its instructions' were
+(`IrDebugInline.block_end` is the callee's first block's end there), their
+values and anchors their copies (a parameter's initial binding is its
+argument's value; an assignment whose value has no copy has no value), and a
+region's block the one its callee block became (a general expansion's each its
+own, a straight line's the block it joined). A local of no form (escaped,
+volatile, not a scalar) keeps no binding, as it has none in its own function's
+proof. `ir_verify` checks that the instances' locals are the function's last,
+in order, flagged; that their bindings follow the function's others, by
+instance and each as the function's own are ordered; and that an assignment or
+region is within its instance's origins, an `ENTRY` local's assignment before
+its first block's end. `test-ir-inline` checks an unassigned parameter's
+binding, an assigned one's assignment at the instance's origin, a formless
+one's absence, and those two bounds' failures.
 
 The four byte columns and three operand columns retain their shared IR
 meanings. Constant/address rows from each expanded body are appended with

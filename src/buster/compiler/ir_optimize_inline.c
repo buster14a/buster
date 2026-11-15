@@ -1640,58 +1640,22 @@ static bool ir_inline_described(const IrFunction* source, uint32_t node, const I
 }
 
 // The locals an expansion of `callee` (sidecar `callee`) gives a caller (sidecar `caller`) under -g (#2541,
-// BUSTER_IR_DEBUG_BIND_INSTANCE): its parameters', one each up to the last its own initial bindings name (a callee's
-// parameters are its first locals), and its own instances' (*nested); none where either sidecar has no bindings.
-static uint32_t ir_inline_parameter_locals(const IrDebugInfo* caller, const IrDebugInfo* callee, uint32_t* nested)
+// BUSTER_IR_DEBUG_BIND_INSTANCE): every one of the callee's, its own and its instances', with their bindings (*bindings)
+// and regions (*regions); none where either sidecar has no bindings.
+static uint32_t ir_inline_callee_locals(const IrDebugInfo* caller, const IrDebugInfo* callee, uint32_t* bindings, uint32_t* regions)
 {
-    uint32_t parameters = 0;
-    *nested = 0;
-    if (caller != NULL && caller->binding_flags != NULL && callee != NULL && callee->binding_flags != NULL)
-    {
-        for (uint32_t k = 0; k < callee->binding_count; k += 1)
-        {
-            const IrDebugBinding binding = callee->bindings[k];
-            const bool own = binding.entry == BUSTER_IR_NONE && binding.local < callee->local_count && callee->binding_flags[binding.local] != BUSTER_IR_DEBUG_BIND_INSTANCE;
-            parameters = own && binding.local + 1 > parameters ? binding.local + 1 : parameters;
-        }
-        *nested = (uint32_t)ir_debug_instance_locals(callee);
-    }
-    return parameters;
+    const bool bound = caller != NULL && caller->binding_flags != NULL && callee != NULL && callee->binding_flags != NULL;
+    *bindings = bound ? callee->binding_count : 0;
+    *regions = bound ? callee->region_count : 0;
+    return bound ? callee->local_count : 0;
 }
 
-// Whether the callee's (sidecar `callee`) local `local` is one its expansion's binding may carry: a parameter of the
-// scalar kind (BUSTER_IR_DEBUG_BIND_ENTRY: no escape, no volatile access) that no binding but its initial one assigns, so
-// that it is its argument's value throughout the instance's code.
-static bool ir_inline_parameter_unassigned(const IrDebugInfo* callee, uint32_t local)
+// A callee's value `value` in the caller (`rewritten`), by `inner_values` (a parameter's is its argument's), of type
+// `type`; NONE where it has no place there.
+static uint32_t ir_inline_debug_value(const IrFunction* callee, uint32_t value, uint8_t type, const uint32_t* inner_values, const IrFunction* rewritten)
 {
-    bool unassigned = local < callee->local_count && callee->binding_flags[local] == BUSTER_IR_DEBUG_BIND_ENTRY;
-    for (uint32_t k = 0; unassigned && k < callee->binding_count; k += 1)
-    {
-        unassigned = callee->bindings[k].local != local || callee->bindings[k].entry == BUSTER_IR_NONE;
-    }
-    return unassigned;
-}
-
-// A callee's binding `binding` in the caller (`rewritten`): its local `local`, its value the callee's mapped by
-// `inner_values` (a parameter's is its argument's), and no anchor; false where the value has no place there (a literal's
-// stays its literal).
-static bool ir_inline_instance_binding(const IrFunction* callee, const IrDebugBinding binding, uint32_t local, const uint32_t* inner_values, const IrFunction* rewritten,
-                                       IrDebugBinding* result)
-{
-    const uint32_t value = binding.kind == IR_DEBUG_BIND_VALUE && binding.value < callee->instruction_count ? inner_values[binding.value] : BUSTER_IR_NONE;
-    const bool placed = binding.kind == IR_DEBUG_BIND_CONSTANT ||
-                        (binding.kind == IR_DEBUG_BIND_VALUE && value < rewritten->instruction_count && rewritten->type[value] == binding.type);
-    *result = (IrDebugBinding){
-        .literal = binding.literal,
-        .local = local,
-        .entry = BUSTER_IR_NONE,
-        .value = binding.kind == IR_DEBUG_BIND_VALUE ? value : BUSTER_IR_NONE,
-        .anchor = BUSTER_IR_NONE,
-        .kind = binding.kind,
-        .bytes = binding.bytes,
-        .type = binding.type,
-    };
-    return placed;
+    const uint32_t mapped = value < callee->instruction_count ? inner_values[value] : BUSTER_IR_NONE;
+    return mapped < rewritten->instruction_count && rewritten->type[mapped] == type ? mapped : BUSTER_IR_NONE;
 }
 
 // A described expansion's identities (#2541 step 3), after it: its callee's origins move past the caller's so far
@@ -1699,7 +1663,7 @@ static bool ir_inline_instance_binding(const IrFunction* callee, const IrDebugBi
 // general body's, a straight line's but its parameters, branches and last return) takes its callee origin there, and
 // the instance and the callee's own instances, nested in it, are appended.
 static void ir_inline_describe(const IrFunction* source, uint32_t node, const IrFunction* callee, uint32_t symbol, const uint32_t* inner_values, bool general,
-                               IrFunction* rewritten)
+                               uint32_t blocks, uint32_t* binding_map, IrFunction* rewritten)
 {
     if (ir_inline_described(source, node, callee))
     {
@@ -1737,40 +1701,78 @@ static void ir_inline_describe(const IrFunction* source, uint32_t node, const Ir
         }
         debug->inline_count = at + 1 + inner->inline_count;
         debug->origin_count = base + ir_debug_origin_limit(inner);
-        // Its callee's parameters as the caller's last locals (#2541, BUSTER_IR_DEBUG_BIND_INSTANCE), each bound to its
-        // argument where the callee never assigns it; then its callee's own instances' locals, bound as there. Each new
-        // binding is an initial one, after the caller's others, in its locals' order (ir_verify's).
-        uint32_t nested_locals = 0;
-        const uint32_t parameters = ir_inline_parameter_locals(debug, inner, &nested_locals);
+        // Its callee's locals as the caller's last (#2541, BUSTER_IR_DEBUG_BIND_INSTANCE): its own, each of its form, then
+        // its own instances', each already an instance's; the callee's local j the caller's local_base + j. The bindings
+        // of those of a form and their regions follow the caller's in the callee's order (`binding_map` has their places,
+        // for the regions' `next`), their entries its origins moved as its instructions' were, their values and anchors
+        // its values' places (an assignment whose value has none is one without a value), and its regions' blocks where
+        // its blocks went: a general body's each its own (`blocks`, its first), a straight line's all the block it joined
+        // (`blocks`). A local of no form (escaped, volatile, or not a scalar) is no instance's to describe, as it is none
+        // of its function's: its bindings stay behind.
+        uint32_t binding_count = 0;
+        uint32_t region_count = 0;
+        const uint32_t locals = ir_inline_callee_locals(debug, inner, &binding_count, &region_count);
         const uint32_t local_base = debug->local_count;
-        const uint32_t inner_base = inner->local_count - nested_locals;
+        const uint32_t binding_base = debug->binding_count;
+        const uint32_t own = inner->local_count - (uint32_t)ir_debug_instance_locals(inner);
         table[at].local = local_base;
-        table[at].local_count = parameters;
+        table[at].local_count = locals != 0 ? own : 0;
+        table[at].block_end = base + inner->first_block_end;
         for (uint32_t j = 0; j < inner->inline_count; j += 1)
         {
-            // (Where either sidecar has no bindings, the helper gives no locals, and the nested instances take none.)
-            const bool bound = debug->binding_flags != NULL && inner->binding_flags != NULL;
-            table[at + 1 + j].local = local_base + parameters + (inner->inlines[j].local >= inner_base ? inner->inlines[j].local - inner_base : 0);
-            table[at + 1 + j].local_count = bound ? inner->inlines[j].local_count : 0;
+            table[at + 1 + j].local = local_base + inner->inlines[j].local;
+            table[at + 1 + j].local_count = locals != 0 ? inner->inlines[j].local_count : 0;
+            table[at + 1 + j].block_end = base + inner->inlines[j].block_end;
         }
-        for (uint32_t i = 0; i < parameters + nested_locals; i += 1)
+        for (uint32_t j = 0; j < locals; j += 1)
         {
-            debug->binding_flags[local_base + i] = BUSTER_IR_DEBUG_BIND_INSTANCE;
+            debug->binding_flags[local_base + j] = (uint8_t)(inner->binding_flags[j] | BUSTER_IR_DEBUG_BIND_INSTANCE);
         }
-        for (uint32_t k = 0; parameters + nested_locals != 0 && k < inner->binding_count; k += 1)
+        uint32_t kept = 0;
+        for (uint32_t k = 0; k < binding_count; k += 1)
         {
             const IrDebugBinding binding = inner->bindings[k];
-            const bool own = binding.entry == BUSTER_IR_NONE && binding.local < parameters && ir_inline_parameter_unassigned(inner, binding.local);
-            const bool nested = binding.entry == BUSTER_IR_NONE && binding.local >= inner_base && binding.local < inner->local_count &&
-                                inner->binding_flags[binding.local] == BUSTER_IR_DEBUG_BIND_INSTANCE;
-            const uint32_t local = own ? local_base + binding.local : local_base + parameters + (binding.local - inner_base);
-            IrDebugBinding mapped;
-            if ((own || nested) && ir_inline_instance_binding(callee, binding, local, inner_values, rewritten, &mapped))
+            const bool formed = binding.local < inner->local_count && (inner->binding_flags[binding.local] & ~BUSTER_IR_DEBUG_BIND_INSTANCE) != 0;
+            binding_map[k] = formed ? binding_base + kept : BUSTER_IR_NONE;
+            if (formed)
             {
-                debug->bindings[debug->binding_count++] = mapped;
+                const uint32_t value = binding.kind == IR_DEBUG_BIND_VALUE ? ir_inline_debug_value(callee, binding.value, binding.type, inner_values, rewritten) : BUSTER_IR_NONE;
+                debug->bindings[binding_base + kept] = (IrDebugBinding){
+                    .literal = binding.literal,
+                    .local = local_base + binding.local,
+                    .entry = binding.entry != BUSTER_IR_NONE ? base + binding.entry : BUSTER_IR_NONE,
+                    .value = value,
+                    .anchor = binding.anchor != BUSTER_IR_NONE ? ir_inline_debug_value(callee, binding.anchor, binding.type, inner_values, rewritten) : BUSTER_IR_NONE,
+                    .kind = binding.kind == IR_DEBUG_BIND_VALUE && value == BUSTER_IR_NONE ? (uint8_t)IR_DEBUG_BIND_UNAVAILABLE : binding.kind,
+                    .bytes = binding.bytes,
+                    .type = binding.type,
+                };
+                kept += 1;
             }
         }
-        debug->local_count = local_base + parameters + nested_locals;
+        for (uint32_t k = 0; k < region_count; k += 1)
+        {
+            const IrDebugRegion region = inner->regions[k];
+            const uint32_t value = region.kind == IR_DEBUG_BIND_VALUE ? ir_inline_debug_value(callee, region.value, region.type, inner_values, rewritten) : BUSTER_IR_NONE;
+            const uint32_t block = region.block >= callee->block_count ? BUSTER_IR_NONE : general ? blocks + region.block : blocks;
+            const bool placed = block != BUSTER_IR_NONE && (region.kind != IR_DEBUG_BIND_VALUE || value != BUSTER_IR_NONE);
+            debug->regions[debug->region_count + k] = (IrDebugRegion){
+                .literal = region.literal,
+                .local = local_base + region.local,
+                .block = block,
+                .begin = base + region.begin,
+                .end = base + region.end,
+                .block_end = base + region.block_end,
+                .value = placed ? value : BUSTER_IR_NONE,
+                .next = region.next < binding_count ? binding_map[region.next] : BUSTER_IR_NONE,
+                .kind = placed ? region.kind : (uint8_t)IR_DEBUG_BIND_UNAVAILABLE,
+                .bytes = region.bytes,
+                .type = region.type,
+            };
+        }
+        debug->local_count = local_base + locals;
+        debug->binding_count = binding_base + kept;
+        debug->region_count += region_count;
     }
 }
 
@@ -1921,6 +1923,7 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
     uint32_t* block_last = ir_allocate(scratch, (uint64_t)source->block_count + 1, 4, &ok);
     uint32_t maximum_callee = 0;
     uint32_t maximum_parameters = 0;
+    uint32_t maximum_bindings = 0;
     IrSizes sizes = {
         .constant_count = source->constant_count,
         .slot_count = source->slot_count,
@@ -1941,8 +1944,10 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
     // an origin and whose callee has a sidecar, each callee's origins past the caller's, its instance and its own.
     uint64_t debug_origins = source->debug != NULL ? ir_debug_origin_limit(source->debug) : 0;
     uint64_t debug_inlines = source->debug != NULL ? source->debug->inline_count : 0;
-    // And their parameters' locals, each with at most one binding (#2541, BUSTER_IR_DEBUG_BIND_INSTANCE).
+    // And their callees' locals, with their bindings and regions (#2541, BUSTER_IR_DEBUG_BIND_INSTANCE).
     uint64_t debug_locals = 0;
+    uint64_t debug_bindings = 0;
+    uint64_t debug_regions = 0;
     for (uint32_t block = 0; ok && block < source->block_count; block += 1)
     {
         block_first[block] = (uint32_t)sizes.block_count;
@@ -1973,9 +1978,12 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                 {
                     debug_origins += ir_debug_origin_limit(callee->debug);
                     debug_inlines += 1 + (uint64_t)callee->debug->inline_count;
-                    uint32_t nested = 0;
-                    debug_locals += ir_inline_parameter_locals(source->debug, callee->debug, &nested);
-                    debug_locals += nested;
+                    uint32_t bindings = 0;
+                    uint32_t regions = 0;
+                    debug_locals += ir_inline_callee_locals(source->debug, callee->debug, &bindings, &regions);
+                    debug_bindings += bindings;
+                    debug_regions += regions;
+                    maximum_bindings = bindings > maximum_bindings ? bindings : maximum_bindings;
                 }
                 if (site_count < 16)
                 {
@@ -2035,7 +2043,7 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
     }
     expanded.count = site_count < 16 ? site_count : 16;
     IrError error = ok ? IR_OK : IR_ERROR_MEMORY;
-    if (debug_origins > BUSTER_IR_INLINE_MAX_TOTAL || debug_inlines > BUSTER_IR_INLINE_MAX_ITEMS || debug_locals > BUSTER_IR_INLINE_MAX_ITEMS || sizes.instruction_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.constant_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.address_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.extra_count > BUSTER_IR_INLINE_MAX_ITEMS ||
+    if (debug_origins > BUSTER_IR_INLINE_MAX_TOTAL || debug_inlines > BUSTER_IR_INLINE_MAX_ITEMS || debug_locals > BUSTER_IR_INLINE_MAX_ITEMS || debug_bindings > BUSTER_IR_INLINE_MAX_ITEMS || debug_regions > BUSTER_IR_INLINE_MAX_ITEMS || sizes.instruction_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.constant_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.address_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.extra_count > BUSTER_IR_INLINE_MAX_ITEMS ||
         sizes.call_type_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.slot_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.vector_constant_count > BUSTER_IR_INLINE_MAX_ITEMS ||
         sizes.row_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.asm_body_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.call_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.block_count > BUSTER_IR_INLINE_MAX_ITEMS ||
         sizes.abi_call_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.passed_count > BUSTER_IR_INLINE_MAX_ITEMS)
@@ -2044,6 +2052,8 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
     }
     uint32_t* inner_values = error == IR_OK ? ir_allocate(scratch, maximum_callee, 4, &ok) : 0;
     uint32_t* parameters = error == IR_OK ? ir_allocate(scratch, maximum_parameters, 4, &ok) : 0;
+    // A described expansion's callee's bindings' places among the caller's (ir_inline_describe), for its regions' `next`.
+    uint32_t* binding_map = error == IR_OK && maximum_bindings != 0 ? ir_allocate(scratch, maximum_bindings, 4, &ok) : 0;
     // The debug regions' blocks (IrDebugRegion.block): a block's own where it isn't split, and none where it is, whose
     // regions no longer have one block.
     uint32_t* debug_blocks = error == IR_OK && source->debug != NULL ? ir_allocate(scratch, (uint64_t)source->block_count + 1, 4, &ok) : 0;
@@ -2075,11 +2085,12 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
         rewritten.debug->inlines = debug_inlines != 0 ? debug_table : NULL;
         rewritten.debug->origin_count = ir_debug_origin_limit(source->debug);
     }
-    // Room for the expansions' parameters' locals and their bindings past the caller's (ir_inline_describe).
+    // Room for the expansions' callees' locals, their bindings and their regions past the caller's (ir_inline_describe).
     if (error == IR_OK && rewritten.debug != NULL && debug_locals != 0 && rewritten.debug->binding_flags != NULL)
     {
         const IrDebugInfo* caller = source->debug;
-        IrDebugBinding* bindings = ir_allocate(output, (uint64_t)caller->binding_count + debug_locals, sizeof(IrDebugBinding), &ok);
+        IrDebugBinding* bindings = ir_allocate(output, (uint64_t)caller->binding_count + debug_bindings, sizeof(IrDebugBinding), &ok);
+        IrDebugRegion* regions = ir_allocate(output, (uint64_t)caller->region_count + debug_regions, sizeof(IrDebugRegion), &ok);
         uint8_t* flags = ir_allocate(output, (uint64_t)caller->local_count + debug_locals, 1, &ok);
         if (ok)
         {
@@ -2087,8 +2098,13 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
             {
                 memcpy(bindings, rewritten.debug->bindings, (uint64_t)caller->binding_count * sizeof(IrDebugBinding));
             }
+            if (caller->region_count != 0)
+            {
+                memcpy(regions, rewritten.debug->regions, (uint64_t)caller->region_count * sizeof(IrDebugRegion));
+            }
             memcpy(flags, rewritten.debug->binding_flags, caller->local_count);
             rewritten.debug->bindings = bindings;
+            rewritten.debug->regions = regions;
             rewritten.debug->binding_flags = flags;
         }
         else
@@ -2217,9 +2233,10 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                         {
                             memcpy(rewritten.passed + bases.passed, callee->passed, (uint64_t)callee->passed_count * sizeof(IrPassed));
                         }
+                        const uint32_t callee_blocks = new_block;
                         ir_inline_expand_general(source, node, callee, shape, kinds, values, inner_values, parameters, &rewritten, bases, options.vector_copies, options.scalar, &cursor,
                                                  &new_block);
-                        ir_inline_describe(source, node, callee, unit->symbols[result->callees[call]], inner_values, true, &rewritten);
+                        ir_inline_describe(source, node, callee, unit->symbols[result->callees[call]], inner_values, true, callee_blocks, binding_map, &rewritten);
                         bases.abi_calls += callee->abi_call_count;
                         bases.passed += callee->passed_count;
                     }
@@ -2229,7 +2246,7 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                         IrInlineBases line = bases;
                         line.abi_calls = 0;
                         ir_inline_expand(source, node, callee, values, inner_values, parameters, &rewritten, line, options.vector_copies, &cursor);
-                        ir_inline_describe(source, node, callee, unit->symbols[result->callees[call]], inner_values, false, &rewritten);
+                        ir_inline_describe(source, node, callee, unit->symbols[result->callees[call]], inner_values, false, new_block - 1, binding_map, &rewritten);
                     }
                     bases.constants += callee->constant_count;
                     bases.vectors += callee->vector_constant_count;

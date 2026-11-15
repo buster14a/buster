@@ -1997,7 +1997,7 @@ static void ir_inline_test_debug_instances(IrInlineTest* test, Arena* input, Are
                                            IR_I64);
     functions[1] = ir_inline_test_leaf(test, input, IR_I64);
     const IrDebugInfo caller_seed = { .entry_count = 5 };
-    const IrDebugInline nested = { .symbol = 9, .first = 4, .count = 2, .parent = BUSTER_IR_NONE, .call = 1 };
+    const IrDebugInline nested = { .symbol = 9, .first = 4, .count = 2, .parent = BUSTER_IR_NONE, .call = 1, .block_end = 5 };
     const IrDebugInfo callee_seed = { .entry_count = 4, .origin_count = 6, .inlines = &nested, .inline_count = 1 };
     if (test->failures == 0 && ir_debug_create(input, &functions[0], &caller_seed) && ir_debug_create(input, &functions[1], &callee_seed))
     {
@@ -2037,7 +2037,7 @@ static void ir_inline_test_debug_instances(IrInlineTest* test, Arena* input, Are
             const bool tabled = debug != NULL && debug->inline_count == 2 && debug->origin_count == 11 && debug->inlines[0].symbol == 2 &&
                                 debug->inlines[0].first == 5 && debug->inlines[0].count == 4 && debug->inlines[0].parent == BUSTER_IR_NONE &&
                                 debug->inlines[0].call == 1 && debug->inlines[1].symbol == 9 && debug->inlines[1].first == 9 && debug->inlines[1].count == 2 &&
-                                debug->inlines[1].parent == 0 && debug->inlines[1].call == 6;
+                                debug->inlines[1].parent == 0 && debug->inlines[1].call == 6 && debug->inlines[0].block_end == 5 && debug->inlines[1].block_end == 10;
             ir_inline_test_expect(test, result.inlined_calls == 1 && tabled, "an expansion's instance and its callee's nested one follow the caller's origins");
             uint32_t constant = 0;
             uint32_t add = 0;
@@ -2057,10 +2057,11 @@ static void ir_inline_test_debug_instances(IrInlineTest* test, Arena* input, Are
     arena_pop_to(twin, 0);
 }
 
-// #2541: an expansion's callee's parameters under -g are the caller's last locals, each bound to its argument where the
-// callee never assigns it (BUSTER_IR_DEBUG_BIND_INSTANCE), and the instance names them; where the callee assigns one,
-// the local stays without a binding. `assigned` gives the callee's parameter an assignment.
-static void ir_inline_test_debug_parameters(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch, bool assigned)
+// #2541: an expansion's callee's locals under -g are the caller's last locals (BUSTER_IR_DEBUG_BIND_INSTANCE, with their
+// callee's form), and the instance names them: its parameter's initial binding is its argument's value, and where the
+// callee assigns it (`assigned`), the assignment follows at the instance's origin, its value the copied instruction. A
+// parameter of no form (`formless`: escaped or volatile) is the instance's local without a binding, its assignments too.
+static void ir_inline_test_debug_parameters(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch, bool assigned, bool formless)
 {
     IrFunction functions[2];
     functions[0] = ir_inline_test_function(test, input, (IrSizes){
@@ -2076,7 +2077,7 @@ static void ir_inline_test_debug_parameters(IrInlineTest* test, Arena* input, Ar
     // The caller's parameter and the callee's, each an entry-bound local with its initial binding; the callee's assignment
     // of its parameter at its entry 1, where `assigned`.
     uint8_t caller_flags[] = { BUSTER_IR_DEBUG_BIND_ENTRY };
-    uint8_t callee_flags[] = { BUSTER_IR_DEBUG_BIND_ENTRY };
+    uint8_t callee_flags[] = { formless ? 0 : BUSTER_IR_DEBUG_BIND_ENTRY };
     IrDebugBinding caller_bindings[] = { { .local = 0, .entry = BUSTER_IR_NONE, .value = 0, .anchor = BUSTER_IR_NONE, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 } };
     IrDebugBinding callee_bindings[] = {
         { .local = 0, .entry = BUSTER_IR_NONE, .value = 0, .anchor = BUSTER_IR_NONE, .kind = IR_DEBUG_BIND_VALUE, .bytes = 8, .type = IR_I64 },
@@ -2119,24 +2120,44 @@ static void ir_inline_test_debug_parameters(IrInlineTest* test, Arena* input, Ar
         {
             const IrFunction* caller = &result.functions[0];
             const IrDebugInfo* debug = caller->debug;
-            const bool local = debug != NULL && debug->local_count == 2 && debug->binding_flags[1] == BUSTER_IR_DEBUG_BIND_INSTANCE && debug->inline_count == 1 &&
-                               debug->inlines[0].local == 1 && debug->inlines[0].local_count == 1;
-            ir_inline_test_expect(test, result.inlined_calls == 1 && local, "an expansion's callee's parameter is the caller's last local, the instance's");
-            // The caller's own binding first; the parameter's, an initial one, last, its value the argument's: the caller's
-            // parameter, which the expansion's add takes.
+            const uint8_t form = formless ? 0 : BUSTER_IR_DEBUG_BIND_ENTRY;
+            const bool local = debug != NULL && debug->local_count == 2 && debug->binding_flags[1] == (BUSTER_IR_DEBUG_BIND_INSTANCE | form) &&
+                               debug->inline_count == 1 && debug->inlines[0].local == 1 && debug->inlines[0].local_count == 1 && debug->inlines[0].block_end == 9;
+            ir_inline_test_expect(test, result.inlined_calls == 1 && local, "an expansion's callee's parameter is the caller's last local, the instance's, of its form");
+            // The caller's own binding first; the parameter's initial one next, its value the argument's: the caller's
+            // parameter, which the expansion's add takes; then its assignment at the instance's origin 5 + 1, its value the
+            // expansion's add.
             uint32_t argument = BUSTER_IR_NONE;
+            uint32_t sum = BUSTER_IR_NONE;
             for (uint32_t n = 0; caller != NULL && n < caller->instruction_count; n += 1)
             {
                 argument = caller->op[n] == IR_PARAM ? n : argument;
+                sum = caller->op[n] == IR_ADD ? n : sum;
             }
-            const bool bound = debug != NULL && debug->binding_count == 2 && debug->bindings[1].local == 1 && debug->bindings[1].entry == BUSTER_IR_NONE &&
+            const bool bound = debug != NULL && debug->binding_count == (assigned ? 3u : 2u) && debug->bindings[1].local == 1 && debug->bindings[1].entry == BUSTER_IR_NONE &&
                                debug->bindings[1].kind == IR_DEBUG_BIND_VALUE && debug->bindings[1].value == argument;
-            const bool unbound = debug != NULL && debug->binding_count == 1;
-            ir_inline_test_expect(test, assigned ? unbound : bound,
-                                  assigned ? "a parameter its callee assigns has no binding in its expansion" : "an unassigned parameter is bound to its argument");
+            const bool reassigned = !assigned || (debug != NULL && debug->binding_count == 3 && debug->bindings[2].local == 1 && debug->bindings[2].entry == 6 &&
+                                                  debug->bindings[2].kind == IR_DEBUG_BIND_VALUE && debug->bindings[2].value == sum);
+            const bool unbound = formless && debug != NULL && debug->binding_count == 1;
+            ir_inline_test_expect(test, formless ? unbound : bound && reassigned,
+                                  formless ? "a parameter of no form has no binding in its expansion" :
+                                  assigned ? "a parameter its callee assigns keeps its assignment at the instance's origin" : "an unassigned parameter is bound to its argument");
             const uint64_t mark = scratch->length;
             ir_inline_test_expect(test, ir_verify_path(caller, scratch, 0, true).error == IR_OK, "a caller with its expansions' parameters verifies");
             arena_pop_to(scratch, mark);
+            // An instance's local's assignment is at its instance's own origins, an ENTRY local's before its first block's
+            // end: one at the caller's own entry, or at the instance's block end, is the verifier's error.
+            if (assigned && !formless && bound && reassigned)
+            {
+                IrDebugBinding* binding = (IrDebugBinding*)&debug->bindings[2];
+                binding->entry = 2;
+                ir_inline_test_expect(test, ir_verify_path(caller, scratch, 0, true).error == IR_ERROR_METADATA, "an instance's local's assignment outside its instance fails");
+                arena_pop_to(scratch, mark);
+                binding->entry = debug->inlines[0].block_end;
+                ir_inline_test_expect(test, ir_verify_path(caller, scratch, 0, true).error == IR_ERROR_METADATA, "an ENTRY instance local's assignment past its first block fails");
+                arena_pop_to(scratch, mark);
+                binding->entry = 6;
+            }
         }
     }
     arena_pop_to(input, 0);
@@ -2299,8 +2320,9 @@ static __attribute__((unused)) int run_ir_optimize_inline_tests(int argc, char**
         ir_inline_test_side_table_growth(&test, &input, &output, &twin, &scratch);
         ir_inline_test_stale_rows(&test, &input, &output, &twin, &scratch);
         ir_inline_test_debug_instances(&test, &input, &output, &twin, &scratch);
-        ir_inline_test_debug_parameters(&test, &input, &output, &twin, &scratch, false);
-        ir_inline_test_debug_parameters(&test, &input, &output, &twin, &scratch, true);
+        ir_inline_test_debug_parameters(&test, &input, &output, &twin, &scratch, false, false);
+        ir_inline_test_debug_parameters(&test, &input, &output, &twin, &scratch, true, false);
+        ir_inline_test_debug_parameters(&test, &input, &output, &twin, &scratch, true, true);
         ir_inline_test_failures(&test, &input, &output, &twin, &scratch);
         ir_inline_test_simd(&test, &input, &output, &twin, &scratch);
         ir_inline_test_general(&test, &input, &output, &twin, &scratch);

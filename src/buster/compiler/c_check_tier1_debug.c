@@ -724,7 +724,7 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
     const uint32_t slots = ir->slot_count;
     const uint32_t locals = function->local_count;
     const Tier1Frame* frame = &emitted->frame;
-    // (Past the function's own locals, its expanded callees' parameters', BUSTER_IR_DEBUG_BIND_INSTANCE: #2541.)
+    // (Past the function's own locals, its expanded callees', BUSTER_IR_DEBUG_BIND_INSTANCE: #2541.)
     bool valid = debug != NULL && debug->instruction_count == nodes && debug->slot_count == slots && debug->entry_count == function->count && debug->local_count >= locals &&
                  (nodes == 0 || debug->origins != NULL) && (slots == 0 || debug->locals != NULL) && (count == 0 || emitted->origins != NULL) &&
                  debug->scalar_count <= locals && (debug->scalar_count == 0 || debug->scalars != NULL) &&
@@ -744,7 +744,8 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
     // outermost call), which every location proof reads.
     uint32_t* entries = valid ? ir_allocate(scratch, (uint64_t)count + 1, 4, &valid) : NULL;
     uint32_t* raw = valid ? ir_allocate(scratch, (uint64_t)count + 1, 4, &valid) : NULL;
-    // And the innermost instance whose code it is (#2541: its parameters' visibility), NONE for the function's own.
+    // And the innermost instance whose code it is (#2541: its callee's locals' visibility, at the raw origin), NONE for the
+    // function's own.
     uint32_t* instances = valid && debug->inline_count != 0 ? ir_allocate(scratch, (uint64_t)count + 1, 4, &valid) : NULL;
     uint8_t* safe = valid ? ir_allocate(scratch, (uint64_t)count + 1, 1, &valid) : NULL;
     uint8_t* seen = valid && record_order != NULL ? ir_allocate(scratch, (uint64_t)count + 1, 1, &valid) : NULL;
@@ -858,7 +859,7 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
     CheckTier1DebugParameters parameters = { 0 };
     CheckTier1DebugConstants constants = { 0 };
     CheckTier1DebugValues values = { 0 };
-    valid = valid && (!bindings || check_tier1_debug_values(function, ir, emitted, record_order, instances, vector, scratch, &values));
+    valid = valid && (!bindings || check_tier1_debug_values(function, ir, emitted, record_order, instances, raw, vector, scratch, &values));
     valid = valid && (bindings || check_tier1_debug_parameters(function, debug, emitted, record_order, vector, scratch, &parameters));
     valid = valid && (bindings || check_tier1_debug_constants(debug, scratch, &constants));
     const uint64_t parameter_ranges = valid && !bindings ? check_tier1_debug_parameter_ranges(&parameters, vector, NULL) : 0;
