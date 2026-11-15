@@ -96,6 +96,10 @@ typedef enum CheckInputMessage
     CHECK_INPUT_AUTO_TYPE_LIST,
     CHECK_INPUT_AUTO_TYPE_ARRAY,
     CHECK_INPUT_AUTO_TYPE_BIT_FIELD,
+    CHECK_INPUT_AUTO_TYPE_ATOMIC_INITIALIZER,
+    CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS,
+    CHECK_INPUT_WEAK_ALIAS_OBJECT_AMBIGUOUS,
+    CHECK_INPUT_WEAK_ALIAS_REDEFINITION,
     // C23's `auto` type specifier (#793): the same errors as __auto_type's, naming `auto` where clang does, and two
     // declarators of one declaration whose deductions differ.
     CHECK_INPUT_AUTO_DEDUCED_INITIALIZER,
@@ -483,6 +487,10 @@ static const char* const check_input_messages[] =
     "cannot use '__auto_type' with initializer list in C",
     "cannot use '__auto_type' with array in C",
     "cannot pass bit-field as __auto_type initializer in C",
+    "incompatible atomic auto type initializer",
+    "ambiguous weak alias reference",
+    "ambiguous weak alias object reference",
+    "weak alias redefinition",
     "declaration with deduced type 'auto' requires an initializer",
     "variable declared with deduced type 'auto' cannot appear in its own initializer",
     "'auto' not allowed here",
@@ -3473,6 +3481,22 @@ static void check_input_recovered_publish(CheckInputReader* reader)
 
 static void check_input_target_versions_calls(CheckInputReader* reader);
 
+// A retained malformed callee's index, or NONE. Original sources survive reparses, synthetic punctuation and macros.
+static uint32_t check_input_invalid_call_index(const Parser* parser, uint32_t token)
+{
+    const uint32_t source = parser->invalid_call_count != 0 ? parser->tokens.sources[token] : 0;
+    uint32_t low = 0;
+    uint32_t high = parser->invalid_call_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = parser->invalid_call_sources[middle] < source;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    return low < parser->invalid_call_count && parser->invalid_call_sources[low] == source ? low : BUSTER_CHECK_NONE;
+}
+
 // A failed parse's call-shaped lookup is never an expression to check (#2406). The private view has already erased
 // its unread arguments; its ordinary binding and implicit declaration must survive for later statements. Append the
 // existing silent invalid-use report after lookup, so the normal subtree cuts suppress only this call and its parents.
@@ -3486,21 +3510,15 @@ static void check_input_invalid_calls(CheckInputReader* reader)
         {
             // Search the sorted original callee sources, not a view's token sources: a repair's synthetic closers
             // have no source, and another diagnostic view may repeat a source for inserted punctuation or casts.
-            const uint32_t source = parser->tokens.sources[token];
-            uint32_t low = 0;
-            uint32_t high = parser->invalid_call_count;
-            while (low < high)
-            {
-                const uint32_t middle = low + (high - low) / 2;
-                const bool before = parser->invalid_call_sources[middle] < source;
-                low = before ? middle + 1 : low;
-                high = before ? high : middle;
-            }
-            if (low < parser->invalid_call_count && parser->invalid_call_sources[low] == source)
+            const uint32_t low = check_input_invalid_call_index(parser, token);
+            if (low < parser->invalid_call_count)
             {
                 // Classification is not a value use: availability/deprecation checks must not read this synthetic call.
                 // Keep the declaration's type and binding events, including an implicit declaration at this same token.
-                reader->output->declarations[token] = BUSTER_CHECK_NONE;
+                if (parser->invalid_call_values == NULL || parser->invalid_call_values[low] == 0)
+                {
+                    reader->output->declarations[token] = BUSTER_CHECK_NONE;
+                }
                 check_input_report(reader, token, CHECK_INPUT_INVALID_USE);
             }
         }
@@ -12921,7 +12939,12 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
     if (!overload && !versions && old != 0 && (reader->bindings.depth[old - 1] == reader->scope_count || linked_visible))
     {
         const uint32_t previous = reader->bindings.declaration[old - 1];
-        const TypeAnswer compatible = kind == C_BINDING_TYPEDEF ? type_same_canonical(reader->types, reader->declared_types[previous], reader->declared_types[token]) :
+        const bool auto_type = kind == C_BINDING_OBJECT && reader->bindings.kind[old - 1] == kind &&
+                               (reader->declaration_flags[token] & BUSTER_CHECK_DECLARATION_GNU_AUTO) != 0 &&
+                               check_input_auto_type_level(reader->types, reader->declared_types[token]);
+        const TypeAnswer compatible = auto_type ? (check_input_auto_type_refused(reader->types, reader->declared_types[token], reader->declared_types[previous]) ?
+                                                   TYPE_ANSWER_NO : TYPE_ANSWER_YES) :
+                                      kind == C_BINDING_TYPEDEF ? type_same_canonical(reader->types, reader->declared_types[previous], reader->declared_types[token]) :
                                       type_compatible(reader->types, reader->declared_types[previous], reader->declared_types[token]);
         reader->output->resource |= compatible == TYPE_ANSWER_FULL;
         const bool repeatable = kind == C_BINDING_TYPEDEF || kind == C_BINDING_FUNCTION || reader->scope_count == 0 ||
@@ -12972,6 +12995,13 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                                               CHECK_INPUT_CONFLICTING_TYPES : CHECK_INPUT_REDECLARATION;
             const uint32_t before = reader->output->report_count;
             check_input_redeclaration_report(reader, token, previous, judged, repeatable, parameter_conflict, true, message);
+            if (auto_type && judged == TYPE_ANSWER_NO && reader->output->report_count == before + 1)
+            {
+                CheckInputReport* report = reader->output->reports + before;
+                report->detail = check_input_redeclaration_extern(reader->parser, token) ? CHECK_REDECLARATION_AUTO_TYPE_EXTERN : CHECK_REDECLARATION_AUTO_TYPE;
+                report->type = reader->declared_types[token];
+                report->value = reader->declared_types[previous];
+            }
             if (implicit_object && reader->output->report_count > before)
             {
                 // After the missing type and its attributes, but before any malformed suffix's parser error.
@@ -12999,6 +13029,10 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                     check_sparse_set(reader->output->sparse_pool, reader->output->initializer_begins, token, BUSTER_CHECK_NONE);
                     check_sparse_set(reader->output->sparse_pool, reader->output->initializer_ends, token, BUSTER_CHECK_NONE);
                 }
+            }
+            if (dropped && kind == C_BINDING_FUNCTION)
+            {
+                check_input_alias_conflict(reader, token, point, reader->output->recovered_count - 1, false);
             }
         }
         else
@@ -13121,6 +13155,7 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                 }
                 if (recovered && function_redefinition)
                 {
+                    check_input_alias_conflict(reader, token, point, reader->output->recovered_count - 1, true);
                     check_input_invalid_declare(reader, token);
                     kept_invalid = true;
                 }

@@ -43,7 +43,16 @@ static void check_test_driver_sign_compare(CheckTest* test, const char* clang, c
         { "wider signed type represents unsigned int", "int f(unsigned b,long m){return b<m;}\n", 0, NULL },
         { "wide signed and unsigned remain different", "int f(unsigned long b,long m){return b<m;}\n", 1, NULL },
         { "both narrow operands promote to signed int", "int f(signed char b,unsigned short m){return b<m;}\n", 0, NULL },
+        { "ordinary conditional result ranges", NULL, 18, NULL },
     };
+    const int file = open("tests/driver/sign_compare_conditional.c", O_RDONLY | O_CLOEXEC);
+    char* conditional_source = NULL;
+    const bool read = file >= 0 && check_test_driver_read_file(file, &conditional_source);
+    check_test_expect(test, read, "conditional sign-comparison fixture is read (run from the repository root)");
+    if (file >= 0)
+    {
+        close(file);
+    }
     static const char* const policies[] = { NULL, "-Werror=sign-compare", "-Wno-sign-compare", "-w" };
     char source[PATH_MAX];
     char object[PATH_MAX];
@@ -58,8 +67,9 @@ static void check_test_driver_sign_compare(CheckTest* test, const char* clang, c
                 continue;
             }
             // Two independent bodies and -c permit actual deferred admission, unlike one-file -fsyntax-only.
-            char unit[4096];
-            const int length = snprintf(unit, sizeof(unit), "%sint sign_compare_anchor(void){return 0;}\n", cases[c].source);
+            char unit[16384];
+            const char* fixture = cases[c].source != NULL ? cases[c].source : conditional_source;
+            const int length = fixture != NULL ? snprintf(unit, sizeof(unit), "%sint sign_compare_anchor(void){return 0;}\n", fixture) : -1;
             const bool written = length >= 0 && (size_t)length < sizeof(unit) && parse_test_write(source, unit, (size_t)length);
             char description[256];
             snprintf(description, sizeof(description), "sign compare %s policy=%u fixture is written", cases[c].name, policy);
@@ -129,4 +139,5 @@ static void check_test_driver_sign_compare(CheckTest* test, const char* clang, c
     }
     unlink(object);
     unlink(source);
+    free(conditional_source);
 }

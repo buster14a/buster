@@ -74,8 +74,9 @@ static void check_test_driver_attribute_recovery(CheckTest* test, const char* cl
     static const char sentinel[] = "preserve the existing object\n";
     char object[PATH_MAX];
     snprintf(object, sizeof(object), "%s/attribute-recovery.o", directory);
-    for (uint32_t c = 0; available && c < 17; c += 1)
+    for (uint32_t c = 0; available && c < 36; c += 1)
     {
+        const bool accepted = c == 9 || c == 35;
         char define[64];
         snprintf(define, sizeof(define), "-DBUSTER_CASE=%u", c);
         for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(standards); s += 1)
@@ -87,8 +88,8 @@ static void check_test_driver_attribute_recovery(CheckTest* test, const char* cl
                 const int oracle = check_test_driver_spawn(arguments, &expected);
                 char expected_lines[8192] = { 0 };
                 const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, sizeof(expected_lines));
-                check_test_expect(test, lines && (oracle == 0) == (c == 9), "attribute recovery oracle status");
-                if (lines && c != 9 && o != 1)
+                check_test_expect(test, lines && (oracle == 0) == accepted, "attribute recovery oracle status");
+                if (lines && !accepted && o != 1)
                 {
                     check_test_expect(test, strstr(expected_lines, "use of undeclared identifier 'undeclared_after'") != NULL,
                                       "attribute recovery oracle retains the later independent error");
@@ -114,7 +115,7 @@ static void check_test_driver_attribute_recovery(CheckTest* test, const char* cl
                     char actual_lines[8192] = { 0 };
                     const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, sizeof(actual_lines)) &&
                                       strcmp(expected_lines, actual_lines) == 0;
-                    if (mode == 2 && c != 9)
+                    if (mode == 2 && !accepted)
                     {
                         char* contents = NULL;
                         const int descriptor = open(object, O_RDONLY);
@@ -124,6 +125,16 @@ static void check_test_driver_attribute_recovery(CheckTest* test, const char* cl
                             close(descriptor);
                         }
                         free(contents);
+                    }
+                    else if (mode == 2)
+                    {
+                        const int descriptor = open(object, O_RDONLY);
+                        unsigned char magic[4] = { 0 };
+                        preserved &= descriptor >= 0 && read(descriptor, magic, sizeof(magic)) == (ssize_t)sizeof(magic) && memcmp(magic, "\177ELF", sizeof(magic)) == 0;
+                        if (descriptor >= 0)
+                        {
+                            close(descriptor);
+                        }
                     }
                     char description[4096];
                     snprintf(description, sizeof(description), "attribute recovery %u, %s %s, mode %u: status %d (clang %d), lines\n%s(clang\n%s)",
@@ -139,6 +150,92 @@ static void check_test_driver_attribute_recovery(CheckTest* test, const char* cl
 }
 
 #include "c_check_label_order_driver_test.c"
+// #2449: a repeated function definition with an alias retains both declaration and body conflicts around the
+// alias handler's error. Original runtime cases include the neighbouring valid and one-error forms, late attributes,
+// C23 spelling and macros. Every rejected compile preserves an existing output, through either reader and deferred
+// bodies, while the valid alias still compiles.
+static void check_test_driver_alias_redefinition(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    const char* source = "tests/driver/alias_redefinition.c";
+    const bool available = access(source, R_OK) == 0;
+    check_test_expect(test, available, "alias redefinition fixture is available (run from the repository root)");
+    static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
+    static const char* const options[] = { "-ferror-limit=0", "-ferror-limit=2", "-w", "-Werror=gcc-compat", "-Werror=ignored-attributes" };
+    static const char sentinel[] = "preserve the existing alias object\n";
+    char object[PATH_MAX];
+    snprintf(object, sizeof(object), "%s/alias-redefinition.o", directory);
+    for (uint32_t c = 0; available && c < 15; c += 1)
+    {
+        char define[64];
+        snprintf(define, sizeof(define), "-DBUSTER_CASE=%u", c);
+        for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(standards); s += 1)
+        {
+            for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(options); o += 1)
+            {
+                char* arguments[] = { (char*)clang, (char*)standards[s], "-fsyntax-only", "-fno-caret-diagnostics", (char*)source, define,
+                                      (char*)options[o], NULL };
+                char* expected = NULL;
+                const int oracle = check_test_driver_spawn(arguments, &expected);
+                char expected_lines[8192] = { 0 };
+                const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, sizeof(expected_lines));
+                check_test_expect(test, lines && oracle == (c == 9 ? 0 : 1), "alias redefinition oracle status");
+                if (lines && c != 9 && o != 1)
+                {
+                    check_test_expect(test, strstr(expected_lines, "use of undeclared identifier 'undeclared_after'") != NULL,
+                                      "alias redefinition retains the later independent error");
+                }
+                for (uint32_t mode = 0; lines && mode < 6; mode += 1)
+                {
+                    char* actual_arguments[16] = { (char*)executable, (char*)standards[s], mode < 2 ? "-fsyntax-only" : "-c",
+                                                  "-fno-caret-diagnostics", (char*)source, define, (char*)options[o] };
+                    uint32_t count = 7;
+                    if (mode == 1 || mode == 3)
+                    {
+                        actual_arguments[count++] = "--scalar";
+                    }
+                    if (mode >= 4)
+                    {
+                        actual_arguments[count++] = "--deferred-bodies";
+                        actual_arguments[count++] = "--lanes";
+                        actual_arguments[count++] = mode == 4 ? "1" : "3";
+                    }
+                    bool output = true;
+                    if (mode >= 2)
+                    {
+                        actual_arguments[count++] = "-o";
+                        actual_arguments[count++] = object;
+                        output = parse_test_write(object, sentinel, sizeof(sentinel) - 1);
+                    }
+                    actual_arguments[count] = NULL;
+                    char* actual = NULL;
+                    const int status = check_test_driver_spawn(actual_arguments, &actual);
+                    char actual_lines[8192] = { 0 };
+                    const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, sizeof(actual_lines)) &&
+                                      strcmp(expected_lines, actual_lines) == 0;
+                    if (mode >= 2)
+                    {
+                        char* contents = NULL;
+                        const int descriptor = open(object, O_RDONLY);
+                        const bool read = descriptor >= 0 && check_test_driver_read_file(descriptor, &contents) && contents != NULL;
+                        output &= read && (strcmp(contents, sentinel) == 0) == (c != 9);
+                        if (descriptor >= 0)
+                        {
+                            close(descriptor);
+                        }
+                        free(contents);
+                    }
+                    char description[4096];
+                    snprintf(description, sizeof(description), "alias redefinition %u, %s %s, mode %u: status %d (clang %d), lines\n%s(clang\n%s)",
+                             c, standards[s], options[o], mode, status, oracle, actual_lines, expected_lines);
+                    check_test_expect(test, same && status == oracle && output, description);
+                    free(actual);
+                }
+                free(expected);
+            }
+        }
+    }
+    unlink(object);
+}
 
 static void check_test_driver_semantic_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
@@ -1509,4 +1606,5 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
     free(actual_lines);
     check_test_driver_attribute_recovery(test, clang, executable, directory);
     check_test_driver_label_order(test, clang, executable, directory);
+    check_test_driver_alias_redefinition(test, clang, executable, directory);
 }

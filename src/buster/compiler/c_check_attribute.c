@@ -9349,7 +9349,8 @@ static bool check_input_attribute_definition(CheckInputReader* reader, CheckInpu
         else if (aliasing && !subject.is_typedef && defining && (subject.function || subject.external || subject.variable_definition))
         {
             const uint32_t reports = reader->output->report_count;
-            check_input_report_subject(reader, attribute->name_token, kind == CHECK_ATTRIBUTE_IFUNC ? CHECK_INPUT_IFUNC_DEFINITION : CHECK_INPUT_ALIAS_DEFINITION,
+            check_input_report_subject(reader, attribute->standard ? attribute->first : attribute->name_token,
+                                       kind == CHECK_ATTRIBUTE_IFUNC ? CHECK_INPUT_IFUNC_DEFINITION : CHECK_INPUT_ALIAS_DEFINITION,
                                        subject.name);
             // clang's alias and ifunc definition errors are after its multiversioning check, though their attributes
             // are earlier in the declaration: order them after the function's name (#839).
@@ -9385,6 +9386,68 @@ static bool check_input_attribute_alias_definition(const CheckInputAttributes* a
                                         (attribute->kind == CHECK_ATTRIBUTE_WEAKREF && attribute->argument_count != 0));
     }
     return alias;
+}
+
+// A function definition that also spells an alias is diagnosed in three semantic steps (#2449): the declaration's
+// conflict, the alias's rejection after merging attributes, and (for a redefinition) the body's repeated conflict.
+// The ordinary binding path already supplies the first report and its recovery. Complete those reports together at
+// the body opening, after parser warnings, retaining the alias handler's source location. Late-attribute warnings
+// precede or follow the declaration conflict according to their order around the alias. This is only called for a
+// recovered function conflict; successful declarations do no scan.
+static void check_input_alias_conflict(CheckInputReader* reader, uint32_t token, uint32_t point, uint32_t conflict, bool repeated)
+{
+    CheckInput* input = reader->output;
+    uint32_t alias = BUSTER_CHECK_NONE;
+    for (uint32_t r = 0; r < conflict; r += 1)
+    {
+        const CheckInputReport* report = input->recovered_reports + r;
+        const bool rejected = report->message == CHECK_INPUT_ALIAS_DEFINITION || report->message == CHECK_INPUT_IFUNC_DEFINITION;
+        if (rejected && report->subject == token + 1 && report->sort == 0 &&
+            (alias == BUSTER_CHECK_NONE || report->token < input->recovered_reports[alias].token))
+        {
+            alias = r;
+        }
+    }
+    if (alias != BUSTER_CHECK_NONE && conflict < input->recovered_count &&
+        check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED))
+    {
+        CheckInputReport* first = input->recovered_reports + conflict;
+        first->completion = point;
+        first->suborder = 2;
+        first->repeated = true;
+        CheckInputReport* attribute = input->recovered_reports + alias;
+        attribute->completion = point;
+        attribute->suborder = 4;
+        attribute->pending = false;
+        const uint32_t alias_token = attribute->token;
+        const CheckInputReport last = *first;
+        const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
+        uint32_t begin = token;
+        for (uint32_t a = 0; attributes != NULL && a < attributes->count; a += 1)
+        {
+            begin = attributes->records[a].first < begin ? attributes->records[a].first : begin;
+        }
+        for (uint32_t w = 0; w < reader->warning_events.count; w += 1)
+        {
+            CheckWarningEvent* event = reader->warning_events.events + w;
+            if (event->kind == CHECK_WARNING_EVENT_LATE_ATTRIBUTE && event->token >= begin && event->token < point)
+            {
+                event->completion = point;
+                event->suborder = event->token < alias_token ? 1u : 3u;
+            }
+        }
+        if (repeated)
+        {
+            const uint32_t before = input->report_count;
+            check_input_report(reader, token, last.message);
+            if (input->report_count == before + 1 && !input->resource)
+            {
+                input->reports[before] = last;
+                input->reports[before].suborder = 5;
+                input->resource |= !check_input_recover_reports(reader, before);
+            }
+        }
+    }
 }
 
 // Whether clang drops `attribute` from a declaration after its entity's definition when the definition (and the
@@ -10759,7 +10822,11 @@ static void check_input_deprecated_use(CheckInputReader* reader, CheckInputDepre
     // The attribute's message, its first argument's string.
     const uint32_t message = attribute != NULL && attribute->argument_first < attribute->argument_end &&
                              parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_STRING ? attribute->argument_first : BUSTER_CHECK_WARNING_NO_SOURCE;
-    if (attribute != NULL && attribute->kind == CHECK_ATTRIBUTE_UNAVAILABLE && pass->errors)
+    // Ordinary malformed calls still use their callee before the parser rejects an argument (#2406). Diagnostic
+    // views suppress general availability errors, but must retain this original use's; attribute-only lookups do not.
+    const uint32_t invalid_call = attribute != NULL && attribute->kind == CHECK_ATTRIBUTE_UNAVAILABLE ? check_input_invalid_call_index(parser, t) : BUSTER_CHECK_NONE;
+    const bool retained_call = invalid_call < parser->invalid_call_count && parser->invalid_call_values != NULL && parser->invalid_call_values[invalid_call] != 0;
+    if (attribute != NULL && attribute->kind == CHECK_ATTRIBUTE_UNAVAILABLE && (pass->errors || retained_call))
     {
         // Its note is at the declaration, not the attribute: at the name of the one the use's lookup finds, or a
         // tag's latest declaration, which an enumerator's note names; an anonymous tag's keyword, whose type the
@@ -10774,6 +10841,7 @@ static void check_input_deprecated_use(CheckInputReader* reader, CheckInputDepre
             reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_UNAVAILABLE_HERE;
             reader->output->reports[before].detail = message != BUSTER_CHECK_WARNING_NO_SOURCE ? message + 1 : 0;
             reader->output->reports[before].completion = completion;
+            reader->output->reports[before].repeated = retained_call;
             // A token's reports print its first alone: the copies after it ride on it.
             reader->output->reports[before].value = copies - 1;
         }
