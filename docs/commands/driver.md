@@ -32,7 +32,11 @@ requirements. [Command index](README.md).
   extra symbols placeholders the object leaves out, the same bytes (step 2.2b's
   test option, which reports on stderr whether it served and its extra symbols;
   executables, `--lower-all` and a unit whose candidates keep an extra body
-  take the exact selection), `--tier1` compiling each function Tier 1's pipeline
+  take the exact selection), `--deferred-lowering` lowering by rooms that read
+  none of the controls' totals and deciding each part's jump tables with its
+  lowering, on one lane without `--tier1`, the same bytes (step 2.2c.3's test
+  option: [the design](../all-core-path.md#step-2-the-selection-after-the-windows)),
+  `--tier1` compiling each function Tier 1's pipeline
   takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, both tiers'
   code the emission's `EmittedCode`, #1056, their unwind tables alike; with `-g`
   Tier 1's rows at the function's granularity, the Tier 1 guide's "Debug

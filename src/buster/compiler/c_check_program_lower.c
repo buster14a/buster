@@ -951,6 +951,12 @@ struct CheckLowerWriter
     uint32_t* lifetime_entries;
     uint32_t* lifetime_locals;
     uint32_t lifetime_count;
+    // With CheckLowerShared.deferred (#2536's step 2.2c.3), the arena of the writer's columns and the labels' and the
+    // lifetimes' rooms, which check_lower_writer_fit grows for a body that needs more (the entries' room is `capacity`,
+    // the calls' the ABI's); NULL where the columns share an arena with a part's work, which no growth may push on.
+    Arena* columns;
+    uint32_t label_room;
+    uint32_t lifetime_room;
     // The writer's room for the program's label symbols (CheckProgramLowered.label_symbols), which its parts take one after
     // another (check_lower_part): `label_symbol_used` of it kept by the parts before the current one.
     SymbolId* label_symbol_room;
@@ -17285,28 +17291,67 @@ static bool check_lower_switch_table(CheckProgramLowered* lowered, uint32_t capa
     return valid;
 }
 
+// The jump tables' room (check_lower_switch_table's `capacity`): a table per switch of four cases or more, of each body,
+// and a target_clones copy's again (#2247, CheckProgram.body_options), of at most a fifth of its controls (its SWITCH and
+// four CASEs each). A `deferred` lowering (CheckLowerShared.deferred) reads no body's controls: a copy's tables are as
+// many as the program's at most. In `labels`, the bound of their labels: one per case and one per table, each copy's
+// again.
+static uint32_t check_lower_switch_room(const CheckProgram* program, bool deferred, uint64_t* labels)
+{
+    const uint32_t tables = program->case_count / 4;
+    uint64_t copies = 0;
+    uint64_t copied = 0;
+    for (uint32_t b = 0; tables != 0 && program->body_options != 0 && b < program->body_count; b += 1)
+    {
+        copies += program->body_options[b] != 0;
+        copied += program->body_options[b] != 0 && !deferred ? program->bodies[b].count : 0;
+    }
+    const uint64_t total = deferred ? (uint64_t)tables * (copies + 1) : (uint64_t)tables + copied / 5;
+    *labels = ((uint64_t)program->case_count + tables) * (copies + 1);
+    return total < UINT32_MAX ? (uint32_t)total : UINT32_MAX;
+}
+
+// The jump tables of bodies `first` to `end` (check_lower_switch_table), after those of the bodies before them, which
+// leave the switches' cursor at *cursor. Only a switch of four cases or more may have a plan, and the program lists
+// those (CheckProgram.switches): the bodies' among them, the two in the controls' order (a selected program's bodies are
+// some of the checked program's, with its controls). Returns false when an arena has no room.
+static bool check_lower_switch_range(CheckProgramLowered* lowered, uint32_t capacity, CheckLowerSwitchTrees* trees, const CheckProgram* program, uint32_t first,
+                                     uint32_t end, uint32_t* cursor, CheckLowerCaseRange* cases, CheckLowerCaseRange* sorted, Arena* output, Arena* scratch)
+{
+    bool valid = true;
+    uint32_t s = *cursor;
+    for (uint32_t b = first; valid && b < end; b += 1)
+    {
+        const CheckProgramBody* body = program->bodies + b;
+        // (A target_clones copy is its body again, right after it, #2247: its switches' tables are its own.)
+        while (s != 0 && program->switches[s - 1] >= body->first)
+        {
+            s -= 1;
+        }
+        while (s < program->switch_count && program->switches[s] < body->first)
+        {
+            s += 1;
+        }
+        for (; valid && s < program->switch_count && program->switches[s] - body->first < body->count; s += 1)
+        {
+            const CheckControl control = program->controls[program->switches[s]];
+            const uint8_t class = check_lower_type_class(program->types, check_stream_type(program->stream, control.node));
+            valid = check_lower_switch_table(lowered, capacity, trees, program, b, program->switches[s] - body->first, class, cases, sorted, output, scratch);
+        }
+    }
+    *cursor = s;
+    return valid;
+}
+
 // Every switch's jump table or none (check_lower_switch_table), before any body is lowered, so that whatever lane lowers
 // a body, the tables and their labels are numbered in source order (#151), the tables in `lowered` from `output`, the
 // cases' room from `scratch`. With `sparse_trees`, large switches without tables retain their sorted intervals there
-// too, for the Tier 1 dispatch. Only a switch of four cases or more may have a plan, and the program lists those
-// (CheckProgram.switches): the bodies' among them, the two in the controls' order (a selected program's bodies are some
-// of the checked program's, with its controls). Returns false when an arena has no room.
+// too, for the Tier 1 dispatch. Returns false when an arena has no room.
 static bool check_lower_switch_tables(CheckProgramLowered* lowered, CheckLowerSwitchTrees* trees, const CheckProgram* program, bool sparse_trees,
                                       Arena* output, Arena* scratch)
 {
-    // A table per switch of four cases or more, of each body: a target_clones copy's again (#2247, CheckProgram.body_options),
-    // of at most a fifth of its controls (its SWITCH and four CASEs each).
-    uint32_t capacity = program->case_count / 4;
-    if (capacity != 0 && program->body_options != 0)
-    {
-        uint64_t copied = 0;
-        for (uint32_t b = 0; b < program->body_count; b += 1)
-        {
-            copied += program->body_options[b] != 0 ? program->bodies[b].count : 0;
-        }
-        const uint64_t total = (uint64_t)capacity + copied / 5;
-        capacity = total < UINT32_MAX ? (uint32_t)total : UINT32_MAX;
-    }
+    uint64_t labels = 0;
+    const uint32_t capacity = check_lower_switch_room(program, false, &labels);
     bool valid = true;
     if (capacity != 0 && program->switch_count != 0 && program->stream != 0)
     {
@@ -17317,25 +17362,7 @@ static bool check_lower_switch_tables(CheckProgramLowered* lowered, CheckLowerSw
         trees->items = sparse_trees ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerSwitchTree, capacity) : NULL;
         valid = lowered->tables != 0 && cases != 0 && sorted != 0 && (!sparse_trees || trees->items != NULL);
         uint32_t s = 0;
-        for (uint32_t b = 0; valid && b < program->body_count; b += 1)
-        {
-            const CheckProgramBody* body = program->bodies + b;
-            // (A target_clones copy is its body again, right after it, #2247: its switches' tables are its own.)
-            while (s != 0 && program->switches[s - 1] >= body->first)
-            {
-                s -= 1;
-            }
-            while (s < program->switch_count && program->switches[s] < body->first)
-            {
-                s += 1;
-            }
-            for (; valid && s < program->switch_count && program->switches[s] - body->first < body->count; s += 1)
-            {
-                const CheckControl control = program->controls[program->switches[s]];
-                const uint8_t class = check_lower_type_class(program->types, check_stream_type(program->stream, control.node));
-                valid = check_lower_switch_table(lowered, capacity, trees, program, b, program->switches[s] - body->first, class, cases, sorted, output, scratch);
-            }
-        }
+        valid = valid && check_lower_switch_range(lowered, capacity, trees, program, 0, program->body_count, &s, cases, sorted, output, scratch);
     }
     return valid;
 }
@@ -17386,7 +17413,7 @@ static void check_lower_switch_dispatch(CheckLowerWriter* writer, uint32_t table
     check_lower_source(writer, writer->table_switch);
     for (uint32_t j = 0; j < item->label_count; j += 1)
     {
-        if (status->label_symbol_count < writer->label_symbol_capacity && writer->label_entry_count <= writer->program->control_count)
+        if (status->label_symbol_count < writer->label_symbol_capacity && writer->label_entry_count < writer->label_room)
         {
             writer->label_tables[writer->label_entry_count] = writer->table_jump_count + 1;
             writer->label_entries[writer->label_entry_count++] = item->labels[j];
@@ -18205,7 +18232,7 @@ static void check_lower_lifetime(CheckLowerWriter* writer, CheckControl control)
         {
             // The named result's storage is the caller's (#1375), which no slot of the frame shares.
         }
-        else if (local < writer->local_count && writer->lifetime_count < program->lifetime_event_count)
+        else if (local < writer->local_count && writer->lifetime_count < writer->lifetime_room)
         {
             writer->lifetime_entries[writer->lifetime_count] = writer->count;
             writer->lifetime_locals[writer->lifetime_count] = local | end;
@@ -18658,6 +18685,21 @@ static uint32_t check_lower_runtime_symbols(CheckProgramLowered* lowered, const 
     return calls;
 }
 
+// The jump tables decided a part at a time (#2536's step 2.2c.3, CheckLowerShared.deferred_tables): the bodies whose
+// tables are decided, a prefix of the program's, the cursor in CheckProgram.switches after them, the tables' room, the
+// cases' room, and the arenas check_lower_switch_tables takes, which a part's decision takes too.
+typedef struct CheckLowerDeferred CheckLowerDeferred;
+struct CheckLowerDeferred
+{
+    uint32_t bodies;
+    uint32_t switch_at;
+    uint32_t capacity;
+    CheckLowerCaseRange* cases;
+    CheckLowerCaseRange* sorted;
+    Arena* output;
+    Arena* scratch;
+};
+
 // The lowering's program-wide state, which check_lower_prepare makes before any body is lowered and the writers of the
 // bodies' parts read (check_lower_part; #151: check_program_emit_lanes lowers a part of the bodies on each of its lanes,
 // with a writer each). The tables a body writes, indexed by its tokens and objects (local_map, switch_locals and
@@ -18668,6 +18710,18 @@ struct CheckLowerShared
 {
     const CheckProgram* program;
     CheckProgramLowered* lowered;
+    // A lowering that reads none of the controls' totals (#2536's step 2.2c.3, check_lower_prepare's `deferred`), as the
+    // windows' will, which lower some bodies before the checker has written the rest: the rooms take the bounds the
+    // checker's setup knows (CheckProgram.control_capacity, chain_stop_capacity), the calls' is fitted to each part's
+    // cleanups (check_lower_deferred_part), and the jump tables are decided with each part's lowering, for the bodies up
+    // to its end (`deferred_tables`).
+    bool deferred;
+    CheckLowerDeferred* deferred_tables;
+    // The room of the jump tables' labels' symbols: CheckProgramLowered.case_symbol_count, or a deferred lowering's bound.
+    uint32_t case_symbol_room;
+    // A test's first room for a deferred lowering's writer's calls and arguments, which each part's fit grows
+    // (CheckProgramLanes.deferred_call_room): 0 for the program's bound.
+    uint32_t deferred_call_room;
     CheckLowerSwitchTrees switch_trees;
     // Every type's classification, made before the bodies: a body's struct or union result decides its returns
     // (check_lower_by_value), and a variadic definition's named registers its va_start.
@@ -19125,17 +19179,37 @@ static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
     return counts;
 }
 
+// The cleanups' calls of controls `first` to `end`: a CLEANUP control's (#147), one per variable at its scope's end, its
+// chain's (#1370); and an EXIT's that keeps its run because a scope end is missing, one per record it leaves. None in a
+// unit without cleanups, which takes no pass over its controls.
+static uint64_t check_lower_cleanup_calls(const CheckProgram* program, uint32_t first, uint32_t end)
+{
+    const CheckInput* input = program->input;
+    uint64_t calls = 0;
+    for (uint32_t i = first; input != 0 && input->cleanup_count != 0 && program->status == CHECK_PROGRAM_OK && i < end; i += 1)
+    {
+        const CheckControl* control = program->controls + i;
+        calls += control->kind == CHECK_CONTROL_CLEANUP;
+        if (control->kind == CHECK_CONTROL_EXIT && control->target < program->exit_count && program->exits[control->target].tail_count == BUSTER_CHECK_NONE)
+        {
+            const CheckProgramExit* exit = program->exits + control->target;
+            calls += (uint64_t)program->chains[exit->first].depth - program->chains[exit->last].depth + 1;
+        }
+    }
+    return calls;
+}
+
 // What the lowering of every body shares (CheckLowerShared), its tables from `scratch`, and the program's lowering's
 // columns from `output`: its helpers, its label symbols' room, its functions and, with `sources`, their entries' tokens.
-// Returns false with `lowered`'s failure (its status, or OK for a resource's), and leaves the arenas' pushes to the
-// caller.
+// A `deferred` one reads none of the controls' totals (CheckLowerShared.deferred). Returns false with `lowered`'s failure
+// (its status, or OK for a resource's), and leaves the arenas' pushes to the caller.
 static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* lowered, const CheckProgram* program, bool scalar, bool sources, bool sparse_trees,
-                                Arena* output, Arena* scratch)
+                                bool deferred, Arena* output, Arena* scratch)
 {
     (void)scalar;
 
     *lowered = (CheckProgramLowered){ .token = BUSTER_CHECK_NONE };
-    *shared = (CheckLowerShared){ .program = program, .lowered = lowered, .scalar = BUSTER_SCALAR_PATH(scalar) };
+    *shared = (CheckLowerShared){ .program = program, .lowered = lowered, .scalar = BUSTER_SCALAR_PATH(scalar), .deferred = deferred };
     const CheckInput* input = program->input;
     const TypeTable* types = program->types;
     const uint32_t count = input != 0 ? input->token_count : 0;
@@ -19173,7 +19247,9 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // A target without AVX-512F and AVX-512VL computes some x86 builtins lane by lane (#2716, check_lower_x86_lanes), past
     // the per-node bounds (check_x86_lanes_room).
     const uint64_t x86_lanes = check_x86_lanes_room(program);
-    const uint64_t capacity64 = (uint64_t)nodes * 32 + (uint64_t)program->control_count * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
+    // A control's entries, up to four: a deferred lowering's bound is the controls' room the checker's setup reserves.
+    const uint64_t controls = deferred ? program->control_capacity : program->control_count;
+    const uint64_t capacity64 = (uint64_t)nodes * 32 + controls * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
                                 varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + asm_operands * 16 + asm_statements * 6 + asm_labels * 4 + (uint64_t)(input != NULL ? input->kr_parameter_count : 0) * 5 +
                                 limb_room.entries + lane_calls * 17 + node_counts.transport_entries + 32 + x86_lanes;
     // A node's lowering takes up to two temporaries, and a 128-bit integer's four more: a division's two operands, a
@@ -19280,19 +19356,9 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // runtime call, independent of its byte size, within the same per-node bounds. A complex _BitInt's past 128 bits makes
     // more, which check_lower_limb_room counts. The runtime functions' provisional symbols (check_lower_runtime) follow
     // the helpers'.
-    // A cleanup's call is a CLEANUP control's (#147): one per variable at its scope's end, its chain's (#1370); and an
-    // EXIT's that keeps its run because a scope end is missing, one per record it leaves.
-    uint64_t cleanup_calls = 0;
-    for (uint32_t i = 0; input != 0 && input->cleanup_count != 0 && program->status == CHECK_PROGRAM_OK && i < program->control_count; i += 1)
-    {
-        const CheckControl* control = program->controls + i;
-        cleanup_calls += control->kind == CHECK_CONTROL_CLEANUP;
-        if (control->kind == CHECK_CONTROL_EXIT && control->target < program->exit_count && program->exits[control->target].tail_count == BUSTER_CHECK_NONE)
-        {
-            const CheckProgramExit* exit = program->exits + control->target;
-            cleanup_calls += (uint64_t)program->chains[exit->first].depth - program->chains[exit->last].depth + 1;
-        }
-    }
+    // The cleanups' calls (check_lower_cleanup_calls): a deferred lowering's writer takes its part's
+    // (check_lower_deferred_part).
+    const uint64_t cleanup_calls = deferred ? 0 : check_lower_cleanup_calls(program, 0, program->control_count);
     const uint64_t abi_capacity64 = (uint64_t)nodes * 3 + program->body_count + errno_calls + asm_statements + lowered->initializers.count + limb_room.calls +
                                     lane_calls + lowered->initializers.extra_calls + cleanup_calls + 1;
     const uint64_t argument_capacity64 = input != 0 ? (uint64_t)input->graph.argument_count + count + (uint64_t)nodes * 4 + errno_calls + asm_statements +
@@ -19323,10 +19389,32 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         const uint32_t object = program->symbol_objects[s];
         shared->label_symbol_capacity += object != 0 && object - 1 < count && program->parser->tree.roles[object - 1] == PARSE_ROLE_LABEL;
     }
-    // Every switch's jump table, decided before the bodies; the label symbols' room holds the tables' labels too.
-    valid = valid && check_lower_switch_tables(lowered, &shared->switch_trees, program, sparse_trees, output, scratch);
-    valid = valid && (uint64_t)shared->provisional_tables + lowered->table_count < UINT32_MAX;
-    const uint64_t label_room = valid ? (uint64_t)shared->label_symbol_capacity + lowered->case_symbol_count : 0;
+    // Every switch's jump table, decided before the bodies, or a deferred lowering's room for them, which each part's
+    // lowering decides (check_lower_deferred_part); the label symbols' room holds the tables' labels too.
+    uint64_t case_labels = 0;
+    const uint32_t table_room = deferred ? check_lower_switch_room(program, true, &case_labels) : 0;
+    CheckLowerDeferred* deferred_tables = valid && deferred ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerDeferred, 1) : NULL;
+    const bool tabled = deferred_tables != NULL && table_room != 0 && program->stream != 0;
+    lowered->tables = tabled ? BUSTER_ARENA_PUSH_ARRAY(output, CheckLowerTable, table_room) : NULL;
+    CheckLowerCaseRange* deferred_cases = tabled ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerCaseRange, program->case_count) : NULL;
+    CheckLowerCaseRange* deferred_sorted = tabled ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerCaseRange, program->case_count) : NULL;
+    valid = valid && (!deferred || (deferred_tables != NULL && case_labels < UINT32_MAX)) &&
+            (!tabled || (lowered->tables != NULL && deferred_cases != NULL && deferred_sorted != NULL));
+    if (valid && deferred)
+    {
+        *deferred_tables = (CheckLowerDeferred){
+            .capacity = tabled ? table_room : 0,
+            .cases = deferred_cases,
+            .sorted = deferred_sorted,
+            .output = output,
+            .scratch = scratch,
+        };
+        shared->deferred_tables = deferred_tables;
+    }
+    valid = valid && (deferred || check_lower_switch_tables(lowered, &shared->switch_trees, program, sparse_trees, output, scratch));
+    valid = valid && (uint64_t)shared->provisional_tables + (deferred ? table_room : lowered->table_count) < UINT32_MAX;
+    shared->case_symbol_room = deferred ? (uint32_t)case_labels : lowered->case_symbol_count;
+    const uint64_t label_room = valid ? (uint64_t)shared->label_symbol_capacity + shared->case_symbol_room : 0;
     lowered->label_symbols = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, label_room) : 0;
     valid &= label_room == 0 || lowered->label_symbols != 0;
     // Every type's classification first: a body's struct or union result decides its returns (check_lower_by_value),
@@ -19549,8 +19637,9 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     const CheckInput* input = program->input;
     const uint32_t capacity = shared->capacity;
     const uint32_t local_capacity = shared->local_capacity;
-    const uint32_t abi_capacity = shared->abi_capacity;
-    const uint32_t argument_capacity = shared->argument_capacity;
+    const uint32_t first_room = shared->deferred ? shared->deferred_call_room : 0;
+    const uint32_t abi_capacity = first_room != 0 && first_room < shared->abi_capacity ? first_room : shared->abi_capacity;
+    const uint32_t argument_capacity = first_room != 0 && first_room < shared->argument_capacity ? first_room : shared->argument_capacity;
     const bool track = program->region_count != 0 || shared->terminal;
     bool valid = true;
     // The lane's copy of the lowering, but its runtime_symbols and runtime_order, which only the program's numbers
@@ -19573,10 +19662,21 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     BUSTER_CHECK_LOWER_ABI(placed, uint32_t, argument_capacity);
     BUSTER_CHECK_LOWER_ABI(placed_registers, uint8_t, argument_capacity);
 #undef BUSTER_CHECK_LOWER_ABI
+    // The controls' totals the writer's columns take, or a deferred lowering's bounds (CheckLowerShared.deferred): the
+    // controls' and the chains' stops' rooms the checker's setup reserves, no lifetime (a deferred lowering has none),
+    // and the tables' room.
+    const CheckLowerDeferred* deferred = shared->deferred_tables;
+    const uint64_t label_entries = (uint64_t)(shared->deferred ? program->control_capacity : program->control_count) + 1;
+    const uint64_t chain_stops = (uint64_t)(shared->deferred ? program->chain_stop_capacity : program->chain_stop_count) + 1;
+    const uint32_t lifetime_room = shared->deferred ? 0 : program->lifetime_event_count;
+    const uint64_t table_room = (uint64_t)(deferred != NULL ? deferred->capacity : shared->lowered->table_count) + 1;
     *writer = (CheckLowerWriter){
         .program = program,
         .output = status,
         .abi = abi,
+        .columns = shared->deferred ? scratch : NULL,
+        .label_room = label_entries <= UINT32_MAX ? (uint32_t)label_entries : UINT32_MAX,
+        .lifetime_room = lifetime_room,
         .capacity = capacity,
         .local_capacity = local_capacity,
         .scalar = BUSTER_SCALAR_PATH(shared->scalar),
@@ -19614,7 +19714,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .switch_trees = &shared->switch_trees,
     };
 #define BUSTER_CHECK_LOWER_COLUMN(field, type, length) writer->field = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, type, length) : 0; valid &= writer->field != 0
-    BUSTER_CHECK_LOWER_COLUMN(chain_destinations, uint32_t, (uint64_t)program->chain_stop_count + 1);
+    BUSTER_CHECK_LOWER_COLUMN(chain_destinations, uint32_t, chain_stops);
     // Give the following columns the same offset modulo 4 KB relative to the task stack as 32-byte
     // records. Padding is at most 4080 bytes, while each active task still touches just 16 bytes.
     BUSTER_CHECK_LOWER_COLUMN(tasks, CheckLowerTaskPacked, (uint64_t)capacity + (capacity & 255u));
@@ -19659,12 +19759,12 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     writer->vector_constant_capacity = BUSTER_CHECK_LOWER_VECTOR_CONSTANTS;
     BUSTER_CHECK_LOWER_COLUMN(vector_constants, uint64_t, 8 * (uint64_t)BUSTER_CHECK_LOWER_VECTOR_CONSTANTS);
     BUSTER_CHECK_LOWER_COLUMN(vector_constant_bytes, uint8_t, BUSTER_CHECK_LOWER_VECTOR_CONSTANTS);
-    BUSTER_CHECK_LOWER_COLUMN(label_entries, uint32_t, (uint64_t)program->control_count + 1);
-    BUSTER_CHECK_LOWER_COLUMN(label_tables, uint32_t, (uint64_t)program->control_count + 1);
-    BUSTER_CHECK_LOWER_COLUMN(table_jumps, uint32_t, (uint64_t)shared->lowered->table_count + 1);
-    BUSTER_CHECK_LOWER_COLUMN(table_addresses, uint32_t, (uint64_t)shared->lowered->table_count + 1);
-    BUSTER_CHECK_LOWER_COLUMN(lifetime_entries, uint32_t, (uint64_t)program->lifetime_event_count + 1);
-    BUSTER_CHECK_LOWER_COLUMN(lifetime_locals, uint32_t, (uint64_t)program->lifetime_event_count + 1);
+    BUSTER_CHECK_LOWER_COLUMN(label_entries, uint32_t, label_entries);
+    BUSTER_CHECK_LOWER_COLUMN(label_tables, uint32_t, label_entries);
+    BUSTER_CHECK_LOWER_COLUMN(table_jumps, uint32_t, table_room);
+    BUSTER_CHECK_LOWER_COLUMN(table_addresses, uint32_t, table_room);
+    BUSTER_CHECK_LOWER_COLUMN(lifetime_entries, uint32_t, (uint64_t)lifetime_room + 1);
+    BUSTER_CHECK_LOWER_COLUMN(lifetime_locals, uint32_t, (uint64_t)lifetime_room + 1);
     BUSTER_CHECK_LOWER_COLUMN(runtimes, uint16_t, CHECK_LOWER_RUNTIMES);
     // #1048's node templates (c_check_program_templates.c): columns for a body's range of nodes, at most
     // BUSTER_CHECK_LOWER_TEMPLATE_NODES of them, and its scratch entries. Address space alone until a body touches it.
@@ -19691,7 +19791,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     }
     writer->template_check = shared->template_check;
 #undef BUSTER_CHECK_LOWER_COLUMN
-    const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
+    const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->case_symbol_room;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
     valid &= label_room == 0 || writer->label_symbol_room != 0;
     return valid;
@@ -19729,6 +19829,91 @@ static uint32_t check_lower_local_body(const CheckProgram* program, uint32_t b)
     return source;
 }
 
+// A deferred lowering's writer's calls' columns and its ABI's (CheckLowerShared.deferred), with room for `calls` calls and
+// `arguments` arguments: those it has, or new ones from its columns' arena (CheckLowerWriter.columns) with twice the room
+// at least, of which a part's cleanups take more. Both start empty in every part (the ABI's) or body (the calls'), so
+// nothing is copied, and the old ones stay in the arena unused. False where the arena has no room.
+static bool check_lower_fit_calls(CheckLowerWriter* writer, uint64_t calls, uint64_t arguments)
+{
+    CheckLowerAbi* abi = writer->abi;
+    Arena* columns = writer->columns;
+    bool valid = columns != NULL && calls <= UINT32_MAX && arguments <= UINT32_MAX;
+    if (valid && calls > abi->capacity)
+    {
+        const uint64_t doubled = 2 * (uint64_t)abi->capacity;
+        const uint64_t grown = calls > doubled ? calls : doubled < UINT32_MAX ? doubled : UINT32_MAX;
+#define BUSTER_CHECK_LOWER_GROW(field, type) field = valid ? BUSTER_ARENA_PUSH_ARRAY(columns, type, grown) : 0; valid &= field != 0
+        BUSTER_CHECK_LOWER_GROW(abi->results, TypeId);
+        BUSTER_CHECK_LOWER_GROW(abi->counts, uint32_t);
+        BUSTER_CHECK_LOWER_GROW(abi->named, uint32_t);
+        BUSTER_CHECK_LOWER_GROW(abi->first, uint32_t);
+        BUSTER_CHECK_LOWER_GROW(abi->variadic, uint8_t);
+        BUSTER_CHECK_LOWER_GROW(writer->call_targets, SymbolId);
+        BUSTER_CHECK_LOWER_GROW(writer->call_first, uint32_t);
+        BUSTER_CHECK_LOWER_GROW(writer->call_counts, uint32_t);
+        BUSTER_CHECK_LOWER_GROW(writer->call_variadic, uint8_t);
+        BUSTER_CHECK_LOWER_GROW(writer->call_result_objects, uint32_t);
+#undef BUSTER_CHECK_LOWER_GROW
+        abi->capacity = valid ? (uint32_t)grown : abi->capacity;
+    }
+    if (valid && arguments > abi->argument_capacity)
+    {
+        const uint64_t doubled = 2 * (uint64_t)abi->argument_capacity;
+        const uint64_t grown = arguments > doubled ? arguments : doubled < UINT32_MAX ? doubled : UINT32_MAX;
+#define BUSTER_CHECK_LOWER_GROW(field, type) field = valid ? BUSTER_ARENA_PUSH_ARRAY(columns, type, grown) : 0; valid &= field != 0
+        BUSTER_CHECK_LOWER_GROW(abi->arguments, TypeId);
+        BUSTER_CHECK_LOWER_GROW(abi->placed, uint32_t);
+        BUSTER_CHECK_LOWER_GROW(abi->placed_registers, uint8_t);
+        BUSTER_CHECK_LOWER_GROW(writer->argument_classes, uint8_t);
+        BUSTER_CHECK_LOWER_GROW(writer->argument_sizes, uint32_t);
+#undef BUSTER_CHECK_LOWER_GROW
+        abi->argument_capacity = valid ? (uint32_t)grown : abi->argument_capacity;
+    }
+    return valid;
+}
+
+// A deferred lowering's part (CheckLowerShared.deferred), before its bodies: the jump tables of every body up to its end
+// that aren't decided yet, in the bodies' order, which the writer reads from then on (a part lowered before the ones
+// ahead of it, as the windows lower an inline callee first, decides theirs too, so that the tables and their labels are
+// numbered as check_lower_switch_tables numbers them, in source order), and the calls' room with the part's cleanups'.
+// The cleanups' pass over the part's controls is scalar: only a unit with cleanups takes it, as the preparation's did.
+// False where an arena has no room.
+static __attribute__((noinline)) bool check_lower_deferred_part(CheckLowerWriter* writer, const CheckLowerShared* shared, const CheckLowerPart* part)
+{
+    const CheckProgram* program = shared->program;
+    CheckProgramLowered* lowered = shared->lowered;
+    CheckLowerDeferred* tables = shared->deferred_tables;
+    bool valid = true;
+    if (part->end > tables->bodies)
+    {
+        CheckLowerSwitchTrees none = { 0 };
+        valid = tables->capacity == 0 || check_lower_switch_range(lowered, tables->capacity, &none, program, tables->bodies, part->end, &tables->switch_at, tables->cases,
+                                                                  tables->sorted, tables->output, tables->scratch);
+        tables->bodies = part->end;
+    }
+    writer->tables = lowered->tables;
+    writer->table_count = lowered->table_count;
+    uint64_t cleanup_calls = 0;
+    for (uint32_t b = part->first; b < part->end && program->input->cleanup_count != 0; b += 1)
+    {
+        cleanup_calls += check_lower_cleanup_calls(program, program->bodies[b].first, program->bodies[b].first + program->bodies[b].count);
+    }
+    return valid && check_lower_fit_calls(writer, (uint64_t)shared->abi_capacity + cleanup_calls, (uint64_t)shared->argument_capacity + cleanup_calls);
+}
+
+// A deferred lowering's tables, none decided, for a run of the bodies again from the arenas as they were before their
+// first (check_program_emit_alone): the decided tables' entries and labels were pushed after them.
+static void check_lower_deferred_reset(const CheckLowerShared* shared)
+{
+    if (shared->deferred_tables != NULL)
+    {
+        shared->deferred_tables->bodies = 0;
+        shared->deferred_tables->switch_at = 0;
+        shared->lowered->table_count = 0;
+        shared->lowered->case_symbol_count = 0;
+    }
+}
+
 static inline __attribute__((always_inline)) void check_lower_part_body(CheckLowerWriter* writer, const CheckLowerShared* shared, CheckLowerPart* part,
                                                                        bool sources, Arena* output, Arena* scratch)
 {
@@ -19743,6 +19928,10 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     status->token = BUSTER_CHECK_NONE;
     status->backend_node = 0;
     status->reason = NULL;
+    if (shared->deferred && !check_lower_deferred_part(writer, shared, part))
+    {
+        check_lower_resource(writer, "lowering a part's jump tables and calls");
+    }
     // The part's label symbols follow the ones the writer's parts before it kept, in its room for the program's.
     status->label_symbols = writer->label_symbol_room != 0 ? writer->label_symbol_room + writer->label_symbol_used : 0;
     status->label_symbol_count = 0;
@@ -20814,7 +21003,7 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
     CheckLowerAbi abi;
     CheckProgramLowered status;
     CheckLowerPart part = { .first = 0, .end = program->body_count };
-    bool valid = check_lower_prepare(&shared, lowered, program, BUSTER_SCALAR_PATH(scalar), sources, false, output, scratch);
+    bool valid = check_lower_prepare(&shared, lowered, program, BUSTER_SCALAR_PATH(scalar), sources, false, false, output, scratch);
     // #1048's node templates where the caller asks for them on any path (check_program_lower_templates).
     shared.templates = shared.templates || ((templates & BUSTER_CHECK_LOWER_TEMPLATES) != 0 && shared.templates_allowed);
     shared.template_check = (templates & BUSTER_CHECK_LOWER_TEMPLATES_CHECKED) != 0;

@@ -2258,6 +2258,7 @@ static void check_units_lane_functions(const CheckUnitsRun* run, CheckUnitsLane*
         .tier0_inline_shapes = command->tier0_inline_shapes,
         .window_tokens = command->window_tokens,
         .poison_windows = command->poison_arenas,
+        .deferred_lowering = command->deferred_lowering,
         .tier1_schedule = command->tier1_schedule,
         .tier1_passes = command->tier1_passes,
         .tier1_refusals = command->tier1_refusals != NULL ? errors : NULL,

@@ -10742,6 +10742,8 @@ struct CheckDriverCommand
     bool tier0_inline_shapes;
     // --emit-window=N: each unit's one-lane emission by windows of about N tokens (#2536, CheckProgramLanes.window_tokens).
     uint32_t window_tokens;
+    // --deferred-lowering: a lowering that reads none of the controls' totals (#2536, CheckProgramLanes.deferred_lowering).
+    bool deferred_lowering;
     // --tier1-schedule=post|pre (#172): BUSTER_CHECK_TIER1_SCHEDULE_*.
     uint8_t tier1_schedule;
     // --tier1-passes='s turned passes (#139): BUSTER_CHECK_TIER1_PASS_*.
@@ -13596,6 +13598,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             provisional_selection = true;
         }
+        else if (match.exact == C_OPTION_DEFERRED_LOWERING)
+        {
+            lanes->deferred_lowering = true;
+        }
         else if (match.exact == C_OPTION_POISON_ARENAS)
         {
             poison_arenas = true;
@@ -13876,6 +13882,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier0_no_hold = lanes->tier0_no_hold,
         .tier0_inline_shapes = lanes->tier0_inline_shapes,
         .window_tokens = lanes->window_tokens,
+        .deferred_lowering = lanes->deferred_lowering,
         .tier1_schedule = lanes->tier1_schedule,
         .tier1_passes = lanes->tier1_passes,
         .tier1_report = &lanes->tier1_report,
