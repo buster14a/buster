@@ -180,7 +180,8 @@ static const char node_census_test_atomic[] =
 // constant and not; a pointer's equality with a null pointer constant; sizeof and _Alignof of a type name and an
 // expression; the comma; and stores of a null pointer constant and of a pointer to a pointer of another pointee.
 // The machine's own front (step 1b) runs over the fixture too, after the walk acted at a chunk and, in the --scalar run,
-// before it: its every record must be the walk's node, and it must make each taken line's expressions but those of the
+// before it, where the reader's walk is the coded one (a build with the vector paths; in one without, it must make
+// nothing): its every record must be the walk's node, and it must make each taken line's expressions but those of the
 // lines that say `// front: left` (sizeof and _Alignof, which the front leaves to the walk). For the front alone, with
 // no expectation of the machine: a static braced initializer (its elements' value context), an automatic array's and a
 // record's with a nested list (their lists' values dropped where nothing takes them, none left waiting), an enumerator's
@@ -367,19 +368,22 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, char** 
     fflush(stdout);
     valid = valid && shadow.records_out != NULL && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0 &&
             shadow.record_count < shadow.record_capacity;
+    // The front runs beside the reader's coded walk, the vector path's: a build without the vector paths reads by the
+    // scalar walk, where the front must make nothing and no line is expected of it.
+    const bool fronts = BUSTER_HOST_VECTOR != 0;
     // C and X as one sweep too: every expression T typed, with C's and X's refusal, tape, labels and calls.
     const bool same = shadow.value_differences == 0 && shadow.entry_differences == 0 && shadow.twin_differences == 0 && shadow.taken_expressions != 0 &&
                       (scalar || shadow.row_nodes != 0) && shadow.fused_differences == 0 && shadow.fused_expressions >= shadow.taken_expressions &&
-                      shadow.front_differences == 0 && shadow.front_records != 0 && shadow.front_checked == shadow.front_records && shadow.front_resets == 0 &&
-                      shadow.front_waiting == 0;
+                      shadow.front_differences == 0 && shadow.front_checked == shadow.front_records && shadow.front_resets == 0 && shadow.front_waiting == 0 &&
+                      (fronts ? shadow.front_units == 1 && shadow.front_unread == 0 && shadow.front_records != 0 : shadow.front_units == 0 && shadow.front_records == 0);
     if (!valid || !same)
     {
         fprintf(stderr, "test-checker: node-shadow%s: %s: values %" PRIu64 ", entries %" PRIu64 ", twin %" PRIu64 ", fused %" PRIu64 " (of %" PRIu64 ") differ; %" PRIu64
                 " expressions taken, %" PRIu64 " row-typed nodes; the front's records %" PRIu64 ", compared %" PRIu64 ", %" PRIu64 " differ, %" PRIu64 " resets, %" PRIu64
-                " values left waiting\n",
+                " values left waiting, in %" PRIu64 " units (%s)\n",
                 scalar ? " --scalar" : "", valid ? "read" : "NOT READ", shadow.value_differences, shadow.entry_differences, shadow.twin_differences, shadow.fused_differences,
                 shadow.fused_expressions, shadow.taken_expressions, shadow.row_nodes, shadow.front_records, shadow.front_checked, shadow.front_differences,
-                shadow.front_resets, shadow.front_waiting);
+                shadow.front_resets, shadow.front_waiting, shadow.front_units, fronts ? "expected in the one" : "expected in none: no vector paths in this build");
     }
     uint32_t line = 1;
     const char* at = text;
@@ -405,7 +409,7 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, char** 
             fronted += shadow.records_out[r].line == line && shadow.records_out[r].fronted;
         }
         // A taken line's expressions are the front's too, each of them, or (`// front: left`) none.
-        const bool made = expected != NODE_MACHINE_TAKEN || (left ? fronted == 0 : fronted == found);
+        const bool made = expected != NODE_MACHINE_TAKEN || (left || !fronts ? fronted == 0 : fronted == found);
         const bool held = expectation == NULL || (expected != NODE_MACHINE_REFUSALS && (expected == NODE_MACHINE_TAKEN ? found != 0 && matched == found : matched != 0) && made);
         if (!held)
         {
@@ -533,13 +537,18 @@ static bool node_front_test_limits(const char* directory, bool boundaries, bool 
     NodeCensus census = { .shadow = &shadow };
     fflush(stdout);
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
-    const bool same = shadow.front_differences == 0 && shadow.front_records != 0 && shadow.front_checked == shadow.front_records && shadow.front_waiting == 0 &&
-                      (shadow.front_resets != 0) == !boundaries;
+    // In a build without the vector paths the reader's walk is the scalar one, and the front must make nothing.
+    const bool fronts = BUSTER_HOST_VECTOR != 0;
+    const bool same = shadow.front_differences == 0 && shadow.front_checked == shadow.front_records && shadow.front_waiting == 0 &&
+                      (fronts ? shadow.front_units == 1 && shadow.front_unread == 0 && shadow.front_records != 0 && (shadow.front_resets != 0) == !boundaries :
+                                shadow.front_units == 0 && shadow.front_records == 0);
     if (!valid || !same)
     {
-        fprintf(stderr, "test-checker: node-front %s%s: %s: records %" PRIu64 ", compared %" PRIu64 ", %" PRIu64 " differ, %" PRIu64 " resets, %" PRIu64 " values left waiting\n",
+        fprintf(stderr, "test-checker: node-front %s%s: %s: records %" PRIu64 ", compared %" PRIu64 ", %" PRIu64 " differ, %" PRIu64 " resets, %" PRIu64
+                " values left waiting, in %" PRIu64 " units (%s)\n",
                 boundaries ? "chunk boundaries" : "full stack", first ? " (before the walk)" : "", valid ? "read" : "NOT READ", shadow.front_records, shadow.front_checked,
-                shadow.front_differences, shadow.front_resets, shadow.front_waiting);
+                shadow.front_differences, shadow.front_resets, shadow.front_waiting, shadow.front_units,
+                fronts ? "expected in the one" : "expected in none: no vector paths in this build");
     }
     free(text);
     unlink(path);

@@ -1864,6 +1864,11 @@ struct NodeShadow
     uint64_t front_differences;
     uint64_t front_resets;
     uint64_t front_waiting;
+    // The units the front ran in, and those read without it though it was asked for: it runs beside the reader's coded
+    // walk, the vector path's, over a whole unit, so a unit the scalar walk read (a build without the vector paths, the
+    // parser's scalar option) or that was read by parts has none.
+    uint64_t front_units;
+    uint64_t front_unread;
     uint64_t front_left[BUSTER_CHECK_EXPRESSION_CODES];
     uint64_t front_left_queries;
     uint64_t walk_ticks[BUSTER_CHECK_EXPRESSION_PARTS];
@@ -2512,6 +2517,14 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
     }
     if (shadow->front != 0)
     {
+        if (shadow->front_unread != 0)
+        {
+            printf("node-shadow: front not run in %" PRIu64 " of %" PRIu64 " units: the reader's coded walk didn't read them whole%s\n", shadow->front_unread,
+                   shadow->front_unread + shadow->front_units, BUSTER_HOST_VECTOR ? "" : " (this build has no vector paths, and reads by the scalar walk)");
+        }
+    }
+    if (shadow->front != 0 && shadow->front_units != 0)
+    {
         uint64_t left = 0;
         for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
         {
@@ -2753,6 +2766,8 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                 node_shadow_time(shadow, &machine, shadow->file_nodes);
                 shadow->file_nodes = 0;
                 const NodeFrontShadow* front = path->input.node_front;
+                shadow->front_units += front != NULL;
+                shadow->front_unread += shadow->front != 0 && front == NULL;
                 if (front != NULL)
                 {
                     shadow->front_ticks += front->ticks;

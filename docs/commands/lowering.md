@@ -545,6 +545,12 @@ takes its entries.
     have an operand past 64 records back, and `front ticks=N`. `--list N`
     lists the first differences and the taken expressions the front missed.
     A difference fails the command.
+  - **Where it runs:** beside the coded walk over a whole unit, which is the
+    reader's vector path. A unit the scalar walk reads (a build without the
+    vector paths, `BUSTER_HOST_ARCH=x86-64`; the parser's scalar option) or
+    that is read by parts has no front, and the report says so: `node-shadow:
+    front not run in N of M units`. `test-checker` then expects it to have
+    made nothing.
   - Every shadow run prints `node-shadow: walk ticks classes=N prepare=N
     actions=N visits=N`, the coded walk's parts in the files' one reading
     (TSC ticks; the batch's flushes are the actions'): with no front option,
