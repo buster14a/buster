@@ -97,6 +97,10 @@ struct NodeFrontShadow
 #define BUSTER_NODE_FRONT_FIELD_CONTEXT 8u
 #define BUSTER_NODE_FRONT_FIELD_DISTANCE 9u
 
+// The front's arrays are one block, each a multiple of 4 KB long and BUSTER_NODE_FRONT_STAGGER bytes more: a record's
+// fields, one in each array at the record's index, would otherwise all lie 4 KB apart, in one set of the first-level
+// cache with more lines than it has ways, as the machine's columns would (BUSTER_NODE_MACHINE_STAGGER).
+#define BUSTER_NODE_FRONT_STAGGER 128u
 typedef struct NodeFront NodeFront;
 struct NodeFront
 {
@@ -118,45 +122,70 @@ struct NodeFront
     // come from; `types` the type its token's query asked for (a return's, the function's), `contexts` the graph's
     // context bits; `wides` a leaf's place among the wide values plus one, or 0.
     uint8_t ops[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t ops_stagger[BUSTER_NODE_FRONT_STAGGER];
     uint8_t forms[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t forms_stagger[BUSTER_NODE_FRONT_STAGGER];
     uint8_t contexts[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t contexts_stagger[BUSTER_NODE_FRONT_STAGGER];
     // Whether a left token took the record's value: the walk's visit may then give its node a context (a constant
     // expression's, an assertion's), which the front doesn't know.
     uint8_t taken_by_left[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t taken_by_left_stagger[BUSTER_NODE_FRONT_STAGGER];
     uint32_t tokens[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t tokens_stagger[BUSTER_NODE_FRONT_STAGGER];
     // Its operands: as records, which the comparison follows, and as the machine would read them, each one's distance back
     // in the postorder in a byte (0 for none, BUSTER_NODE_FRONT_FAR for that or more). `roots`: a full expression's root.
-    uint32_t operands[3][BUSTER_NODE_FRONT_RECORDS];
-    uint8_t distances[3][BUSTER_NODE_FRONT_RECORDS];
+    uint32_t operands[3][BUSTER_NODE_FRONT_RECORDS + BUSTER_NODE_FRONT_STAGGER / sizeof(uint32_t)];
+    uint8_t distances[3][BUSTER_NODE_FRONT_RECORDS + BUSTER_NODE_FRONT_STAGGER];
     uint8_t roots[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t roots_stagger[BUSTER_NODE_FRONT_STAGGER];
     uint32_t ordinals[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t ordinals_stagger[BUSTER_NODE_FRONT_STAGGER];
     // The token of the name a record is, or is the address of (a call's library mark reads its callee's), or
     // BUSTER_CHECK_NONE.
     uint32_t uses[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t uses_stagger[BUSTER_NODE_FRONT_STAGGER];
     uint32_t members[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t members_stagger[BUSTER_NODE_FRONT_STAGGER];
     uint32_t argument_firsts[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t argument_firsts_stagger[BUSTER_NODE_FRONT_STAGGER];
     uint32_t argument_counts[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t argument_counts_stagger[BUSTER_NODE_FRONT_STAGGER];
     TypeId types[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t types_stagger[BUSTER_NODE_FRONT_STAGGER];
     // A leaf's value as a graph leaf's record holds it.
     TypeId leaf_types[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t leaf_types_stagger[BUSTER_NODE_FRONT_STAGGER];
     uint32_t leaf_flags[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t leaf_flags_stagger[BUSTER_NODE_FRONT_STAGGER];
     uint32_t leaf_objects[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t leaf_objects_stagger[BUSTER_NODE_FRONT_STAGGER];
     uint32_t leaf_heads[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t leaf_heads_stagger[BUSTER_NODE_FRONT_STAGGER];
     uint64_t leaf_integers[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t leaf_integers_stagger[BUSTER_NODE_FRONT_STAGGER];
     uint8_t leaf_categories[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t leaf_categories_stagger[BUSTER_NODE_FRONT_STAGGER];
     uint8_t leaf_constants[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t leaf_constants_stagger[BUSTER_NODE_FRONT_STAGGER];
     uint16_t wides[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t wides_stagger[BUSTER_NODE_FRONT_STAGGER];
     // The walk's node of a record, once compared (BUSTER_CHECK_NONE for one that differed).
     uint32_t nodes[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t nodes_stagger[BUSTER_NODE_FRONT_STAGGER];
     // The values not yet taken, each one's record (or BUSTER_NODE_FRONT_UNKNOWN), in groups of one consumer: a group's
     // consumer's token and its first value's place. Two groups next to each other never share a consumer.
     uint32_t stack[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t stack_stagger[BUSTER_NODE_FRONT_STAGGER];
     uint32_t group_consumers[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t group_consumers_stagger[BUSTER_NODE_FRONT_STAGGER];
     uint32_t group_firsts[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t group_firsts_stagger[BUSTER_NODE_FRONT_STAGGER];
     uint32_t group_count;
     // Whether the stack is full and its entries forgotten already (node_front_give).
     bool full;
     uint32_t arguments[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t arguments_stagger[BUSTER_NODE_FRONT_STAGGER];
     CheckValue wide_values[BUSTER_NODE_FRONT_WIDES];
 };
 
