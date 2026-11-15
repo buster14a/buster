@@ -2737,9 +2737,36 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
             const uint32_t unsigned_operand = left_signed ? right : left;
             const uint32_t signed_width = left_signed ? left_width : right_width;
             const uint32_t unsigned_width = left_signed ? right_width : left_width;
-            if (check_common_integer_constant(stream, signed_operand) && unsigned_width != 0)
+            const CheckOp signed_op = graph->ops[signed_operand];
+            const CheckValue signed_value = check_stream_value(stream, signed_operand);
+            const bool evaluated_constant = check_value_evaluated_constant(&signed_value);
+            uint32_t conditional = signed_operand;
+            bool conditional_range = true;
+            if (signed_value.constant_kind == CHECK_CONSTANT_INTEGER && !evaluated_constant)
             {
-                const CheckValue signed_value = check_stream_value(stream, signed_operand);
+                // Only the folded operand's own unary wrapper chain: every child precedes its parent. Selections
+                // and unary + preserve a conditional's range; an explicit cast has its target type's range instead.
+                while (true)
+                {
+                    const CheckOp wrapper = graph->ops[conditional];
+                    const bool unary = wrapper == CHECK_OP_SELECT || wrapper == CHECK_OP_POSITIVE || wrapper == CHECK_OP_CAST;
+                    const uint32_t child = unary ? graph->operand0[conditional] : BUSTER_CHECK_NONE;
+                    if (child >= conditional)
+                    {
+                        break;
+                    }
+                    conditional_range &= wrapper != CHECK_OP_CAST;
+                    conditional = child;
+                }
+            }
+            const bool conditional_source = graph->ops[conditional] == CHECK_OP_CONDITIONAL;
+            // A modifying condition can fold a conditional to one arm without proving its source range. Clang
+            // then checks both arms; the conditional proof below does that too. Other folded operators keep
+            // their existing range rules, and a side-effect-free GNU constant need not be a standard ICE.
+            const bool signed_constant = signed_value.constant_kind == CHECK_CONSTANT_INTEGER &&
+                                         (!conditional_source || evaluated_constant);
+            if (signed_constant && unsigned_width != 0)
+            {
                 const __int128 constant = check_common_integer_value(&signed_value, signed_width, true);
                 constant_suppressed = constant >= 0 && (unsigned __int128)constant <= check_action_mask(unsigned_width);
             }
@@ -2764,11 +2791,10 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
                 }
                 constant_suppressed = constant == 0 && (normalized == CHECK_OP_LESS || normalized == CHECK_OP_GREATER_EQUAL);
             }
-            const CheckOp signed_op = graph->ops[signed_operand];
             constant_suppressed = constant_suppressed || signed_op == CHECK_OP_NOT || (signed_op >= CHECK_OP_LESS && signed_op <= CHECK_OP_NOT_EQUAL) ||
                                   signed_op == CHECK_OP_LOGICAL_AND || signed_op == CHECK_OP_LOGICAL_OR ||
-                                  (signed_op == CHECK_OP_CONDITIONAL && signed_width <= unsigned_width &&
-                                   check_common_conditional_nonnegative(emission, signed_operand));
+                                  (conditional_source && conditional_range && signed_width <= unsigned_width &&
+                                   check_common_conditional_nonnegative(emission, conditional));
         }
         if (integer && !unsigned_operands && left_signed != right_signed && !constant_suppressed && (left_signed ? left_width <= right_width : right_width <= left_width))
         {

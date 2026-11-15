@@ -164,21 +164,30 @@ unused-warning fixtures also check exact scope-completion tokens.
   implicit-int-declaration and attribute-led-call fixtures together. The string
   lists include malformed string subscripts through parentheses and macros,
   repeated and split lists, valid adjacent-string controls and an assumption
-  with a subscript. Their errors retain later diagnostics and existing object
+  with a subscript. A malformed C23 suppress separator discards the remaining
+  items in that list, while earlier items and later separate lists retain their
+  diagnostics and effects. Inner-parenthesis and non-string-argument recovery
+  controls keep the following items. Their errors retain later diagnostics and existing object
   output, and accepted controls must produce an ELF object. Its `attribute-recovery-integration.c`
   combines their recovery paths in two functions, preserving the complete
   diagnostic order and later independent errors. The declaration portion runs
   in C99–C17, the call portion before C23, and the label portion in every
   tested standard. This focused section supports sanitizer and in-process/child
   differential checks without running the unrelated recovery fixtures.
-  `--malformed-calls-only` runs the ordinary balanced single-argument recovery
+  `--malformed-calls-only` runs the ordinary balanced type-first call recovery
   cases in `tests/checker/parse-recovery/malformed-calls.*` (#2406), comparing
   complete GNU89/GNU17/C23 diagnostics and status, both readers, syntax/object
   output, warning policies, `-fno-builtin` and error limits. Mixed ordinary and
   attribute-led macro calls cover multiple rounds and repaired/rejected views;
-  metadata contracts keep each callee source paired with its use flag. Boundary
-  controls exclude later arguments, semicolon crossings, mismatched delimiters,
-  member callees and catalog names. Rejected output is preserved and valid
+  metadata contracts keep each callee source paired with its use flag. The diagnostic
+  view discards the unread first argument and retains later arguments after its
+  first top-level comma, including their lookup and type errors. The invalid callee
+  prevents artificial arity, argument-conversion and noncallable diagnostics while
+  keeping independent argument checks and warnings. Consecutive type-first repairs
+  and nested calls retain their original parse errors through successive rounds;
+  a new parse error after a valid retained argument still uses existing recovery.
+  Boundary controls exclude empty later arguments, semicolon crossings, mismatched
+  delimiters, member callees and catalog names. Rejected output is preserved and valid
   cast/`sizeof` controls must produce an ELF object.
   `--type-sugar-only` runs
   `c_check_type_sugar_driver_test.c` alone, the typedef sugar diagnostics keep
@@ -288,9 +297,15 @@ unused-warning fixtures also check exact scope-completion tokens.
   with `--executable build/compiler` under a two-CPU grant; the shared correctness inventory
   supplies that grant. `tests/driver/sign_compare_conditional.c` covers both operand orientations, every comparison,
   nested/selected arms, casts, side-effecting conditions, GNU controls, a balanced 128-leaf tree and live sibling
-  diagnostics. General arithmetic expression ranges and bitfield ranges remain separate, as does the existing
-  fully folded conditional gap: `((y = 0) ? -1 : 3) < u` still loses Clang's warning because the older constant
-  shortcut accepts its folded result. This change leaves that shortcut and the global evaluation facts intact.
+  diagnostics. A fully folded signed conditional such as `((y = 0) ? -1 : 3) < u` uses its folded result only when
+  evaluating it has no side effects or unevaluable discarded operand; otherwise the two-arm range proof runs.
+  A folded operand's strictly decreasing unary chain exposes a conditional inside a selection, unary `+` or
+  explicit cast. Selections and unary `+` preserve the arm proof; an explicit cast keeps its target type's range.
+  Harmless GNU constant conditions, assignments and commas retain their existing range rules, as do equality
+  with representable unsigned constants and the zero-unsigned relational controls. The fixture checks all six
+  comparisons in both operand orientations, nested and statement-expression conditions, wrappers and quiet controls.
+  General arithmetic and bitfield ranges, assignment/comma result wrappers and folded unsigned-operand shortcuts
+  remain separate; global evaluation facts are unchanged.
   `c_check_noderef_driver_test.c`, in the attribute-effects driver section,
   compares original GNU `noderef` placement, propagation, conversion,
   address-cancellation and unevaluated-expression fixtures with pinned Clang
