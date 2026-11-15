@@ -1,31 +1,43 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 #
-# Parallel native generation for the two longest units (docs/commands/build.md, "Parallel native generation"). In the
-# Release configuration their object targets compile C through O3 to LLVM bitcode, retaining CMake's depfiles and
-# compile database. tools/codegen/split.c partitions that optimized IR in module order; Ninja schedules a single-threaded
-# Clang backend job per part; a relocatable link joins the parts in order and restores the source unit's original public
-# symbols before the ordinary final link. The code is the single object's, function for function, at the same
-# addresses, but where the start's order puts the functions small compiles run first in .text.buster_checker (#1444). No
-# C boundary or private state moves between source units. The Debug configuration compiles them as usual.
+# The units in parts (docs/commands/build.md, "Units in parts"; docs/stage1-build-design.md, #2559). In the Develop
+# configuration, and in Release with BUSTER_RELEASE_PARTS=1, every main.c unit compiles C to LLVM bitcode without any
+# LLVM pass, retaining CMake's depfile and compile database; tools/codegen/presplit.c deals its functions into parts by
+# file; Ninja schedules a job a part, which runs the O3 pipeline and the code generator on its part; a relocatable link
+# joins the parts in order and restores the source unit's public symbols before the ordinary final link. A rebuild
+# repeats only the parts whose bitcode changed. The configurations differ in what a part reads of the others and in
+# their debug information: Release's options have each part's inliner decide as the whole unit's as far as the parts
+# can (BUSTER_RELEASE_SPLIT_OPTIONS, the design's step 5, whose gate they missed); Develop's read less, with line tables
+# and the tests' own functions optnone (steps 1 to 3). In a static build the functions small compiles run go first in
+# .text.buster_checker (#1444, presplit --first and the join's script). No C boundary or private state moves between
+# source units. The Debug configuration compiles every unit whole.
 #
-# The Develop configuration (docs/commands/build.md, "Develop"; docs/stage1-build-design.md) splits every main.c unit
-# before the optimizer instead: the unit compiles C to bitcode without any LLVM pass, tools/codegen/presplit.c deals its
-# functions into parts by file, each part's job runs the O3 pipeline and the code generator on its part, and the same
-# relocatable link joins them. A rebuild repeats only the parts whose bitcode changed. Release's commands are unchanged.
+# Release otherwise generates the two longest units' native code in parallel after the ordinary O3 IR pipeline (#2058;
+# a sanitizer build's too, #2639): their object targets compile C through O3 to bitcode, tools/codegen/split.c
+# partitions that optimized IR in module order, and the same join restores the unit's symbols. The code is the single
+# object's, function for function (in a sanitizer build, instrumented by the whole module's pipeline), but where the
+# start's order puts the functions small compiles run first in .text.buster_checker (#1444, split.c --first). A
+# sanitizer build's Develop compiles every unit whole.
 
-# Code parts per unit, besides the part of its global variables: one per job of build.sh's default, a physical core
-# of the 9700X (8). Fourteen, one per hardware thread, ran in two waves there and took 74.0 s against 73.1 s.
+# split.c's code parts per unit, besides the part of its global variables: one per job of build.sh's default, a
+# physical core of the 9700X (8). Fourteen, one per hardware thread, ran in two waves there and took 74.0 s against
+# 73.1 s.
 set(BUSTER_CODEGEN_PARTITIONS 8)
 
-# The Develop configuration's code parts of each main.c unit, about 50,000 unoptimized instructions each in the
-# checker's unit (the design's rule 8, the one count measured: 48), a share of that in the others by their size on the
-# 9700X (#2559's record): the backend's two thirds, the front end's a third, the rest 8 each.
-set(BUSTER_DEVELOP_PARTITIONS main_unit_checker=48 main_unit_backend=32 main_unit_frontend=16)
-set(BUSTER_DEVELOP_DEFAULT_PARTITIONS 8)
-# presplit's options, the design's (docs/stage1-build-design.md, "The splitter's rules"): bodies of up to 100
+# The code parts of each main.c unit in parts, besides the part of its global variables: about 50,000 unoptimized
+# instructions each in the checker's unit (the design's rule 8, the one count measured: 48), a share of that in the
+# others by their size on the 9700X (#2559's record): the backend's two thirds, the front end's a third, the rest 8.
+set(BUSTER_PARTITIONS main_unit_checker=48 main_unit_backend=32 main_unit_frontend=16)
+set(BUSTER_DEFAULT_PARTITIONS 8)
+# presplit's options, the design's (docs/stage1-build-design.md, "The splitter's rules"): bodies of up to LIMIT
 # unoptimized instructions read where they are called, chunks at one name in 24, single callers' trees up to 150,000
-# instructions, each file's functions over a run of parts sized at half the unit's mean, the tests' functions optnone.
+# instructions, each file's functions over a run of parts sized at half the unit's mean. Release reads bodies of up to
+# 200 instructions as SROA leaves them, with the whole unit's constant arguments, argument promotion, inlining of
+# static functions and benchmarks' kernels (BUSTER_RELEASE_PARTS=1, step 5's options); Develop up to 100, for a shorter
+# edit, with the tests' functions optnone.
+set(BUSTER_RELEASE_SPLIT_OPTIONS --import 200 --simplified-size --constant-arguments --promote-arguments --copy-limit 40
+    --anchor 24 --cohere 150000 --spread 2 --keep-statics --benchmark-bodies)
 set(BUSTER_DEVELOP_SPLIT_OPTIONS --import 100 --anchor 24 --cohere 150000 --spread 2 --tests-optnone)
 
 # The directories buster_codegen_system_libraries looks in for a library: the linker's default search path on the
@@ -120,7 +132,7 @@ function(buster_codegen_tools available missing)
         set(llvm_libs "")
         foreach(mode link-shared link-static)
             if(llvm_libs STREQUAL "")
-                execute_process(COMMAND "${found_CONFIG}" "--${mode}" --libs core bitreader bitwriter analysis passes transformutils
+                execute_process(COMMAND "${found_CONFIG}" "--${mode}" --libs core bitreader bitwriter analysis passes transformutils x86
                     OUTPUT_VARIABLE libraries RESULT_VARIABLE libraries_status ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE TIMEOUT 30)
                 execute_process(COMMAND "${found_CONFIG}" "--${mode}" --system-libs
                     OUTPUT_VARIABLE system RESULT_VARIABLE system_status ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE TIMEOUT 30)
@@ -171,19 +183,26 @@ function(buster_codegen_tools available missing)
 endfunction()
 
 # The splitters, built once for every configuration with the LLVM they read, at configure-time flags llvm-config gives:
-# split (Release's, after the optimizer) and presplit (Develop's, before it), which share split_bitcode.cpp; and comdat,
-# which the join runs and which reads ELF alone.
+# split (a sanitizer build's Release, after the optimizer) and presplit (the units in parts, before it), which share
+# split_bitcode.cpp; and comdat and unreferenced, which the join runs and which read ELF alone.
 function(buster_codegen_splitter)
     set(directory "${CMAKE_BINARY_DIR}/codegen-tools")
     set(splitter "${directory}/split")
     set(presplitter "${directory}/presplit")
     set(comdat "${directory}/comdat")
+    set(unreferenced "${directory}/unreferenced")
     get_filename_component(tools "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../tools/codegen" ABSOLUTE)
     add_custom_command(OUTPUT "${comdat}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${directory}"
         COMMAND "${CMAKE_C_COMPILER}" -O2 -Wall -Wextra -Werror "${tools}/comdat.c" -o "${comdat}"
         DEPENDS "${tools}/comdat.c"
         COMMENT "Building the joins' comdat restorer"
+        VERBATIM)
+    add_custom_command(OUTPUT "${unreferenced}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${directory}"
+        COMMAND "${CMAKE_C_COMPILER}" -O2 -Wall -Wextra -Werror "${tools}/unreferenced.c" -o "${unreferenced}"
+        DEPENDS "${tools}/unreferenced.c"
+        COMMENT "Building the joins' unreferenced-section finder"
         VERBATIM)
     set(link "${BUSTER_CODEGEN_LLVM_ldflags}" "${BUSTER_CODEGEN_LLVM_libs}" "${BUSTER_CODEGEN_LLVM_system_libs}")
     add_custom_command(OUTPUT "${directory}/split_bitcode.o"
@@ -204,33 +223,47 @@ function(buster_codegen_splitter)
             COMMAND_EXPAND_LISTS
             VERBATIM)
     endforeach()
-    add_custom_target(buster_codegen_splitter DEPENDS "${splitter}" "${presplitter}" "${comdat}")
+    add_custom_target(buster_codegen_splitter DEPENDS "${splitter}" "${presplitter}" "${comdat}" "${unreferenced}")
     set(BUSTER_CODEGEN_SPLIT "${splitter}" PARENT_SCOPE)
     set(BUSTER_CODEGEN_PRESPLIT "${presplitter}" PARENT_SCOPE)
     set(BUSTER_CODEGEN_COMDAT "${comdat}" PARENT_SCOPE)
+    set(BUSTER_CODEGEN_UNREFERENCED "${unreferenced}" PARENT_SCOPE)
 endfunction()
 
+# Whether unit `name` is split after the optimizer (split.c), into `output`: the two longest units of Release, but in a
+# tree whose Release units are in parts (buster_split_parts, which CMakeLists.txt sets).
 function(buster_codegen_split_unit name output)
-    if(buster_parallel_codegen AND name MATCHES "^main_unit_(checker|backend)$")
+    if(buster_split_parts AND name MATCHES "^main_unit_(checker|backend)$")
         set(${output} TRUE PARENT_SCOPE)
     else()
         set(${output} FALSE PARENT_SCOPE)
     endif()
 endfunction()
 
-# Develop's code parts of unit `name`, into `output`: 0 for a unit Develop compiles whole (the units of their own), or
-# when the Develop configuration isn't built in parts (buster_develop_parts, which CMakeLists.txt sets).
-function(buster_develop_partitions name output)
+# The code parts of unit `name` in parts (presplit.c), into `output`: 0 for a unit that compiles whole (the units of
+# their own), or when the build has no units in parts (buster_unit_parts, which CMakeLists.txt sets: none in a
+# sanitizer build, or one without the splitter's tools).
+function(buster_unit_partitions name output)
     set(parts 0)
-    if(buster_develop_parts AND name MATCHES "^main(_unit_[a-z0-9_]+)?$")
-        set(parts ${BUSTER_DEVELOP_DEFAULT_PARTITIONS})
-        foreach(entry IN LISTS BUSTER_DEVELOP_PARTITIONS)
+    if(buster_unit_parts AND name MATCHES "^main(_unit_[a-z0-9_]+)?$")
+        set(parts ${BUSTER_DEFAULT_PARTITIONS})
+        foreach(entry IN LISTS BUSTER_PARTITIONS)
             if(entry MATCHES "^${name}=([0-9]+)$")
                 set(parts ${CMAKE_MATCH_1})
             endif()
         endforeach()
     endif()
     set(${output} ${parts} PARENT_SCOPE)
+endfunction()
+
+# The configurations whose main.c units are in parts, as a generator expression's condition, into `output`: Develop,
+# and Release with BUSTER_RELEASE_PARTS=1 (buster_release_parts, which CMakeLists.txt sets).
+function(buster_parts_configurations output)
+    if(buster_release_parts)
+        set(${output} "$<CONFIG:Develop,Release>" PARENT_SCOPE)
+    else()
+        set(${output} "$<CONFIG:Develop>" PARENT_SCOPE)
+    endif()
 endfunction()
 
 # Whether the final link merges the objects' identical constants and strings (buster_linker_merges, from
@@ -244,17 +277,18 @@ function(buster_codegen_merges output)
     endif()
 endfunction()
 
-# The unit's object for the link: in Release, the joined native parts of a split unit; in Develop, those of a unit split
-# before the optimizer.
+# The unit's object for the link: in Develop (and Release in parts), the joined parts of a unit in parts; in Release,
+# those of a unit split after the optimizer; else its object.
 function(buster_native_object output name)
     buster_codegen_split_unit("${name}" split)
-    buster_develop_partitions("${name}" develop)
+    buster_unit_partitions("${name}" parts)
+    buster_parts_configurations(in_parts)
     set(object "$<TARGET_OBJECTS:buster_${name}>")
-    if(NOT develop EQUAL 0)
-        set(object "$<IF:$<CONFIG:Develop>,${CMAKE_BINARY_DIR}/Develop/develop/${name}/native.o,${object}>")
-    endif()
     if(split)
         set(object "$<IF:$<CONFIG:Release>,${CMAKE_BINARY_DIR}/Release/codegen/${name}/native.o,${object}>")
+    endif()
+    if(NOT parts EQUAL 0)
+        set(object "$<IF:${in_parts},${CMAKE_BINARY_DIR}/$<CONFIG>/parts/${name}/native.o,${object}>")
     endif()
     set(${output} "${object}" PARENT_SCOPE)
 endfunction()
@@ -352,43 +386,78 @@ function(buster_codegen_unit name)
         VERBATIM)
 endfunction()
 
-# Develop's split of unit `name` before the optimizer (tools/codegen/presplit.c), its parts' jobs and their join, into
-# Develop/develop/NAME/: the unit's Develop object is its bitcode before any LLVM pass, with line tables. A part's job
-# runs the unit's -march, Develop's debug information and the O3 pipeline and code generator on its part; it depends on
-# its bitcode alone, which the split rewrites only when it changed (Ninja's restat).
-function(buster_develop_unit name)
+# Unit `name` in parts, in Develop and with BUSTER_RELEASE_PARTS=1 in Release (buster_parts_configurations): its object
+# target compiles C to bitcode without any LLVM pass, which tools/codegen/presplit.c splits into CONFIG/parts/NAME/
+# with the configuration's options; a part's job runs the unit's -march, the configuration's debug information and the
+# O3 pipeline and code generator on its part, and depends on its bitcode alone, which the split rewrites only when it
+# changed (Ninja's restat); the join is split.c's. Release in parts without debug information (BUSTER_DEBUG_INFO=0)
+# compiles the unit with line tables, which name each function's file for the plan, and presplit writes the parts
+# without them (--strip-debug).
+function(buster_parts_unit name)
     set(scripts "${CMAKE_CURRENT_FUNCTION_LIST_DIR}")
     buster_codegen_merges(merges)
+    # As in buster_codegen_unit: the commands name every input they read, so that they wait for those alone.
     set(explicit "")
     if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.27)
         set(explicit DEPENDS_EXPLICIT_ONLY)
     endif()
-    buster_develop_partitions("${name}" partitions)
-    set(directory "${CMAKE_BINARY_DIR}/$<CONFIG>/develop/${name}")
+    buster_parts_configurations(in_parts)
+    set(release_options ${BUSTER_RELEASE_SPLIT_OPTIONS})
+    if("${buster_debug}" STREQUAL "" AND buster_release_parts)
+        target_compile_options(buster_${name} PRIVATE "$<$<CONFIG:Release>:-gline-tables-only>")
+        list(APPEND release_options --strip-debug)
+    endif()
+    target_compile_options(buster_${name} PRIVATE "$<${in_parts}:SHELL:-Xclang -disable-llvm-passes>" "$<${in_parts}:-emit-llvm>")
+    buster_unit_partitions("${name}" partitions)
+    set(directory "${CMAKE_BINARY_DIR}/$<CONFIG>/parts/${name}")
     set(parts "")
     foreach(part RANGE ${partitions})
         list(APPEND parts "${directory}/part${part}.bc")
     endforeach()
     set(exports "${directory}/exports.txt")
     set(locals "${directory}/locals.txt")
+    set(sections "${directory}/sections.txt")
     set(stamp "${directory}/split.stamp")
+    # The start's order (#1444, BusterStartOrder.cmake), as buster_codegen_unit's: in a static build, presplit gives the
+    # unit's functions small compiles run that .text.buster_checker holds sections the join puts first in it, in the
+    # list's order (presplit --first, sections.txt).
+    set(first "")
+    set(first_options "")
+    if(buster_split_order)
+        set(first "${CMAKE_BINARY_DIR}/start-order/${name}.txt")
+        buster_start_order_unit("${start_order_list}" "${name}" "${first}" own)
+        if(own EQUAL 0)
+            set(first "")
+        else()
+            set(first_options --first "${first}")
+        endif()
+    endif()
+    set(develop_options ${BUSTER_DEVELOP_SPLIT_OPTIONS} ${first_options})
+    list(APPEND release_options ${first_options})
     add_custom_command(OUTPUT "${stamp}"
-        BYPRODUCTS ${parts} "${exports}" "${locals}"
+        BYPRODUCTS ${parts} "${exports}" "${locals}" "${sections}"
         COMMAND "${CMAKE_COMMAND}" "-DINPUT=$<TARGET_OBJECTS:buster_${name}>" "-DDIRECTORY=${directory}"
             "-DSPLIT=${BUSTER_CODEGEN_PRESPLIT}" "-DNM=${BUSTER_CODEGEN_NM}" "-DPARTITIONS=${partitions}"
-            "-DOPTIONS=${BUSTER_DEVELOP_SPLIT_OPTIONS}" -P "${scripts}/BusterCodegenSplit.cmake"
+            "-DOPTIONS=$<IF:$<CONFIG:Develop>,${develop_options},${release_options}>"
+            -P "${scripts}/BusterCodegenSplit.cmake"
         DEPENDS "$<TARGET_OBJECTS:buster_${name}>" "${BUSTER_CODEGEN_PRESPLIT}" "${BUSTER_CODEGEN_NM}"
-            "${scripts}/BusterCodegenSplit.cmake"
+            "${scripts}/BusterCodegenSplit.cmake" ${first}
         COMMENT "Partitioning ${name}'s IR before the optimizer"
         ${explicit}
         VERBATIM)
-    add_custom_target(buster_${name}_develop_split DEPENDS "${stamp}")
+    # The target attaches the split to the build, which then knows the parts' rule; the parts' own commands depend on
+    # their bitcode alone.
+    add_custom_target(buster_${name}_parts_split DEPENDS "${stamp}")
+    set(debug "$<IF:$<CONFIG:Develop>,${BUSTER_DEVELOP_CONFIGURATION_DEBUG},${buster_debug}>")
+    # Line tables' code generator option (#2739, BusterSettings.cmake): Develop's parts, and Release's where its debug
+    # information is line tables alone; Release's parts without debug information (--strip-debug) have none to track.
+    set(line_tables "$<IF:$<CONFIG:Develop>,${BUSTER_LINE_TABLES_CODEGEN},${buster_release_line_tables}>")
     set(objects "")
     foreach(part RANGE ${partitions})
         set(object "${directory}/part${part}.o")
         add_custom_command(OUTPUT "${object}"
-            COMMAND "${CMAKE_C_COMPILER}" -x ir ${buster_host_flags} ${BUSTER_DEVELOP_CONFIGURATION_DEBUG} ${BUSTER_LINE_TABLES_CODEGEN}
-                -fno-stack-protector ${buster_optimization} -Wall -Werror -Wno-unused-command-line-argument -c "${directory}/part${part}.bc" -o "${object}"
+            COMMAND "${CMAKE_C_COMPILER}" -x ir ${buster_host_flags} "${debug}" "${line_tables}" -fno-stack-protector
+                ${buster_optimization} -Wall -Werror -Wno-unused-command-line-argument -c "${directory}/part${part}.bc" -o "${object}"
             DEPENDS "${directory}/part${part}.bc"
             COMMENT "Optimizing and generating ${name}'s part ${part}"
             COMMAND_EXPAND_LISTS
@@ -396,14 +465,17 @@ function(buster_develop_unit name)
             VERBATIM)
         list(APPEND objects "${object}")
     endforeach()
+    # The join drops what no part's live code refers to (unreferenced.c): a local function presplit's alias kept that
+    # every part inlined or folded away, as the whole unit's optimizer drops it.
     set(native "${directory}/native.o")
     add_custom_command(OUTPUT "${native}"
         COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${native}" "-DEXPORTS=${exports}" "-DLOCALS=${locals}" "-DOBJECTS=${objects}"
             "-DLLD=${BUSTER_CODEGEN_LLD}" "-DOBJCOPY=${BUSTER_CODEGEN_OBJCOPY}" "-DNM=${BUSTER_CODEGEN_NM}"
             "-DREADELF=${BUSTER_CODEGEN_READELF}" "-DCOMDAT=${BUSTER_CODEGEN_COMDAT}" "-DMERGES=${merges}"
-            -P "${scripts}/BusterCodegenMerge.cmake"
-        DEPENDS ${objects} "${exports}" "${locals}" "${BUSTER_CODEGEN_LLD}" "${BUSTER_CODEGEN_OBJCOPY}" "${BUSTER_CODEGEN_NM}"
-            "${BUSTER_CODEGEN_READELF}" "${BUSTER_CODEGEN_COMDAT}" "${scripts}/BusterCodegenMerge.cmake"
+            "-DSECTIONS=${sections}" "-DUNREFERENCED=${BUSTER_CODEGEN_UNREFERENCED}" -P "${scripts}/BusterCodegenMerge.cmake"
+        DEPENDS ${objects} "${exports}" "${locals}" "${sections}" "${BUSTER_CODEGEN_LLD}" "${BUSTER_CODEGEN_OBJCOPY}"
+            "${BUSTER_CODEGEN_NM}" "${BUSTER_CODEGEN_READELF}" "${BUSTER_CODEGEN_COMDAT}" "${BUSTER_CODEGEN_UNREFERENCED}"
+            "${scripts}/BusterCodegenMerge.cmake"
         COMMENT "Combining ${name}'s parts"
         ${explicit}
         VERBATIM)

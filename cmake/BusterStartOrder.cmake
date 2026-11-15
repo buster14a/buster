@@ -11,7 +11,7 @@
 # section, which every unit compiled with -ffunction-sections has (.text.NAME, or .text.unlikely.NAME for a cold one,
 # .text.hot.NAME for a hot one): one unit's copy of a static helper moves, the other units' copies don't, as a symbol
 # ordering file, which names symbols, would move all of them. The object is the unit's own (*/UNIT.c.o) or its parallel
-# parts' join (*/UNIT/native.o). The checker's own code (.text.buster_checker, main.c: one section of each unit, which
+# parts' join (*/UNIT/native.o), whose sections may name a function by its alias (.text.NAME.buster_split). The checker's own code (.text.buster_checker, main.c: one section of each unit, which
 # starts on a page) follows, every unit's together, and then .text. A shifted link's padding (build.sh shifts) goes right
 # before SHIFT_SOURCE's first function here (.text.buster_shift_padding), so that its placements move that unit's code
 # here too, and again first in .text (.text.buster_shift_padding_text, first in SYMBOLS), so that they move every unit's
@@ -21,7 +21,7 @@
 # and the C library's (which the static link places after every object): lld puts their sections first in .text. The
 # script can't reorder the functions inside a checker section: where a unit's native code is generated in parallel parts
 # (BusterCodegen.cmake), in every static build, whatever its linker, buster_start_order_unit below writes the names the
-# split (tools/codegen/split.c --first) puts first in that section. Each file is written only when its text changes, so
+# split (tools/codegen/presplit.c or split.c, --first) puts first in that section. Each file is written only when its text changes, so
 # that an unchanged list relinks nothing.
 
 function(buster_start_order_write path text)
@@ -52,7 +52,10 @@ function(buster_start_order_files list script symbols shift_source)
                 set(padded TRUE)
             endif()
             set(wanted ".text.${name} .text.unlikely.${name} .text.hot.${name}")
-            string(APPEND sections "        */${stem}.c.o(${wanted})\n        */${stem}/native.o(${wanted})\n")
+            # In a unit's parts, a local function another part calls has its alias's name alone where its own
+            # part's optimizer folded the two (presplit.c's NAME.buster_split): 368 of the list's 511 were.
+            set(joined "${wanted} .text.${name}.buster_split .text.unlikely.${name}.buster_split .text.hot.${name}.buster_split")
+            string(APPEND sections "        */${stem}.c.o(${wanted})\n        */${stem}/native.o(${joined})\n")
             math(EXPR functions "${functions} + 1")
         elseif(line MATCHES "^- ([A-Za-z_.][A-Za-z0-9_.@]*)$")
             string(APPEND names "${CMAKE_MATCH_1}\n")
