@@ -1828,8 +1828,8 @@ By callgrind (#1189's `gap.c`, #1217's inputs, Lua's hash seed fixed) at main
 | Variant | speedtest1 | Lua's five scripts |
 | --- | ---: | ---: |
 | main | 2,590.34 M | 4,732.8 M |
-| body hints, back to any earlier range | 2,583.23 M | 4,712.1 M |
-| body hints, back to another value's range | 2,578.59 M | 4,712.1 M |
+| body hints, back to any earlier range, the waiting unchanged | 2,583.23 M | 4,712.1 M |
+| body hints, back to another value's range, waiting in its own value's slot only | 2,578.59 M | 4,712.1 M |
 | slot stamps alone | 2,587.92 M | 4,731.7 M |
 | both (this) | 2,576.17 M (−0.55%) | 4,711.0 M (−0.46%) |
 
