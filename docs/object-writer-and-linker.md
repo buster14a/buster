@@ -5223,6 +5223,21 @@ spin's 133,355; the native build's `mwaitx` took 33.2 s there and 0.83 s. The
 watchdog didn't fire in either run. A group with no more lanes than CPUs waits
 as before, in `mwaitx` or in the spin.
 
+**A lane short of a CPU sleeps at once too (#2545).** A CPU that another
+process computes on is the same shortage, which the affinity mask doesn't
+show: with one of seven CPUs busy, every sync of the driver's seven-lane link
+of SQLite's shell waited out the whole 1 ms budget, and the 2 ms link took
+63. A wait that runs out its budget reads `/proc/loadavg`'s runnable count
+(`lane_cpus_short`, a few microseconds after the millisecond spent): if the
+machine has more runnable threads than the process's CPUs, the thread's next
+8 waits past the spins sleep at once, then one tries `mwaitx` again, twice as
+many after each try that runs the budget out as well (up to 1,024), and back to
+8 after one that doesn't. With every lane on a CPU, a long serial stretch
+runs the budget out too but finds no more runnable threads than CPUs, so its
+next syncs still wait in `mwaitx`. The driver's mixed link takes the lanes its
+objects pay for (`foreign_driver_lanes`), as `link-foreign`'s does, where it
+took every lane of the session.
+
 `benchmark-lanes` ends with the same measurement for its largest group: lane 0
 works alone for the wait, then every lane works for 1 ms. Medians of three
 runs, against full speed, with the wake as in the table above:

@@ -83,7 +83,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --operand-diagnostics-only | --label-attributes-only |
-  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only] [--in-process] [--clang-server PATH]
+  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; with
@@ -110,8 +110,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   run's, and one whose process-start inputs (`BUSTER_HUGE_PAGES`,
   `BUSTER_TEST_HOST_BUSY`, the lanes' test hooks, the transparent huge pages
   setting) differ from the test's own at its start. `--differential` also
-  runs each such command as a child and fails on a difference in status or
-  output, but `--time-stages` and `--lane-cpus` runs, whose numeric report
+  runs each such command as a child and fails on a difference in a complete server reply's status or
+  output. A request with no complete reply uses the child's result without a differential comparison (#2421).
+  `--run-modes-only` checks unavailable, truncated and timed-out replies with a deterministic protocol peer,
+  successful and rejected real Clang runs, invalid protocol statuses (#2740), and complete replies that genuinely differ.
+  `--time-stages` and `--lane-cpus` runs, whose numeric report
   lines and lane order differ between any two runs, compare their other lines
   in any order. The run reports the counts and the warning sweep's time, and
   a `run costs` line: the served runs' time, the requests past the server's
