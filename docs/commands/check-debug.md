@@ -11,8 +11,8 @@ requirements. [Command index](README.md).
   the token whose lowering wrote it (`CheckProgramLowered.entry_tokens`) make
   `check_program_emit`'s raw rows, the driver maps their tokens to presumed
   lines as the diagnostics place them, bounded per function by its
-  declaration's and closing brace's places, and keeps a row per change of line
-  in the function's file, and the body's start; each pass a vector path with
+  declaration's and closing brace's places, and keeps a row per change of file
+  or line, and the body's start; each pass a vector path with
   an exact twin (`--scalar`). The lowering and its loop over tasks are
   compiled twice, without the tokens (`check_program_lower`,
   `check_lower_drain`) and with them (`check_program_lower_sources`,
@@ -74,8 +74,18 @@ by one lane and eight (the same bytes), with `-g` and without (the same code):
 `llvm-dwarfdump --verify` passes, the program prints `T1I 25`, and gdb, stopped
 in a noinline function the innermost callee calls, shows that callee's frame at
 its call's line, its caller's at its call of the callee and `main`'s at its own.
-The instances' origins are abstract instances (no code): gdb 18 drops an
-instance whose origin is the out-of-line copy, whose `DW_AT_low_pc` it inherits.
+At each of the six stops every value gdb shows for the callees' parameters is
+the program's (the inner one's where it is live, the outer one's at all six),
+both shown at the first. gdb's `break` by the inner callee's name takes each of
+its copies (5 in the executable) and stops first in `main`'s code. A `-c -g`
+object of it has no code or symbol of the two dead callees, the same code as
+without `-g`, and linked, the same frames, values and breakpoints (2). The
+instances' origins are abstract instances (no code): gdb 18 drops an instance
+whose origin is the out-of-line copy, whose `DW_AT_low_pc` it inherits. Its
+header fixture (`check_debug_tier1_header_test`) expands a header's two static
+callees, the inner into the outer there and both into the main file's
+functions: gdb shows each frame at its line in its own file, in an executable
+by both paths and in a linked `-c -g` object.
 
 The bounded variant set covers default, scalar, pre/post scheduling,
 frame-pointer and no-rematerialization native builds, and a `-c -g` object

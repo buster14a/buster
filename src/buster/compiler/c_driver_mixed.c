@@ -164,7 +164,9 @@ static bool check_driver_mixed_link(const CheckDriverCommand* command, const Che
     {
         WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
         run.most = check_units_slots(lanes->budget, lanes->lanes, &lease);
-        run.driver.lanes = run.most;
+        // The lanes its objects pay for (foreign_driver_lanes), at most the lease's, as link-foreign's own: every lane
+        // costs its syncs, and a lane short of a CPU about a millisecond each (#2545).
+        run.driver.lanes = 0;
         run.arguments_end = foreign_driver_now();
         // Enter the nested flow on EVERY session lane, including those outside the lease. Its inner rounds narrow
         // to the lease; the others stay parked. A narrowed outer group would let the session settle widen past it.

@@ -2209,6 +2209,144 @@ The tests:
   - With the scratch register's save left out, 144 of their runs fail; with a
     wrong rotate count, 576.
 
+## The other units' rows (#2780)
+
+With #1840's families, `main_unit_frontend.c` and `main_unit_backend.c` have no
+machine rows at `--tier1 -march=znver5`. The compiler's other units still had
+74, nine kinds of instruction, none of which the IR had an operation for. They
+now decode, by two new kinds and by operations and folds of existing ones:
+
+| Unit | Rows on main `1935a91f` | Rows now |
+| --- | ---: | ---: |
+| `main_unit_checker.c` | 29 | 0 |
+| `main_unit_check_builtins.c` | 9 | 0 |
+| `main_unit_dynamic.c` | 9 | 0 |
+| `main_unit_executable.c` | 9 | 0 |
+| `main_unit_link.c` | 7 | 0 |
+| `main_unit_assembler.c` | 6 | 0 |
+| `main_unit_types.c` | 5 | 0 |
+
+**Operations of existing kinds:**
+
+- `lane_unary`'s operation 3 is each lane's absolute value, the most negative
+  lane itself: `vpabsb` to `vpabsq`, clang's `__builtin_elementwise_abs` of
+  integers (`_mm512_abs_epi32`).
+- `quadword_op`'s operations 2 and 3 are each quadword's product of a's and b's
+  low doublewords, unsigned and signed, all 64 bits: `vpmuludq` and `vpmuldq`
+  (`_mm512_mul_epu32`, the hashes of `check_builtins` and `cbuiltin_fold`).
+
+**`pairwise`** (`BUSTER_IR_INTRINSIC_PAIRWISE`), binary, a and b of the
+result's type:
+
+```text
+%4 = intrinsic.v4i32 %1, %2 pairwise 0
+```
+
+- **Flags** (`BUSTER_IR_PAIRWISE_*`):
+  - 0: each doubleword the sum of the products of a's and b's two signed words
+    in it, wrapping (`vpmaddwd`, `_mm_madd_epi16`);
+  - 1: each word the sum of the products of a's two unsigned bytes and b's two
+    signed bytes in it, saturated to a signed word (`vpmaddubsw`);
+  - 2 to 5: each 16-byte lane a's signed lanes in it, then b's, narrowed to half
+    their size with saturation: `vpacksswb`, `vpackuswb`, `vpackssdw` and
+    `vpackusdw` (`_mm_packus_epi32`).
+- These are `import_archive_size`'s and the assembler's digit sums.
+
+**`dot`** (`BUSTER_IR_INTRINSIC_DOT`), ternary, its third operand in the extra
+array:
+
+```text
+%8 = intrinsic.v16i32 %acc, %b, %c dot 0
+```
+
+- **Each doubleword** is a's, the accumulator's, plus the products of b's and
+  the third operand's lanes in it: b's 4 unsigned bytes times the third's 4
+  signed bytes (0, `vpdpbusd`; 1, saturated to a signed doubleword,
+  `vpdpbusds`), or 2 signed words each (2, `vpdpwssd`; 3, `vpdpwssds`).
+  Without saturation the sum wraps.
+- **Numbering:** as a ternary kind it takes 31, the old `aes`; `aes` to
+  `quadword_op` move up by one (32 to 41), and `pairwise` is 42.
+- **Tier 1** (`BUSTER_TIER1_VECTOR_DOT`): the destination takes the accumulator
+  first unless it holds it. An operand the destination holds is saved in the
+  vector class's scratch register first, as a funnel shift's tied half is.
+- This is `inflate_adler32_vector`'s weighted sum.
+
+**Blends by a vector's signs:** `pblendvb`, `blendvps` and `blendvpd` of 16 and
+32 bytes decode as the IR's `vselect` of b where the sign vector's lanes compare
+less than zero, a's elsewhere, at the form's lanes. Tier 1 selects that select
+back as one `vpblendvb`, `vblendvps` or `vblendvpd` where the comparison is the
+select's alone and its other operand a zero vector
+(`BUSTER_TIER1_VECTOR_BLENDV`), rather than `vpmovb2m` and a masked blend. C's
+own selects of a sign take the same rule. These are
+`builtin_intrinsic_lookup_batch`'s.
+
+**SSE carriers** (#1280's 4- and 8-byte vectors, an `f32` or `f64`):
+
+- **A truncation into a carrier** (`_mm_cvtepi32_epi8`'s convertvector into 4
+  bytes, `vpmovdb xmm/m32`): a whole vector whose truncated lanes fill the
+  carrier is the IR's `truncate` into a 16-byte vector, then `lane_extract` of
+  its lane 0 at the carrier's type.
+- **A permute of carriers** (the same intrinsic's shuffle of two 4-byte vectors,
+  `vpermt2b xmm`): `permute2`'s tables may be carriers, each widened first.
+  `widen` takes an `f32` or `f64` source: its 4 or 8 bytes are the vector's low
+  ones and zeros follow, as every row reads a carrier. Tier 1 selects it as the
+  carrier's zero-extending move (`vinsertps $0x0e`, `vmovq`).
+- **A truncating store of 8 lanes into 8 bytes** (`vpmovqb [m64]{k}` of a zmm,
+  `vpmovdb` of a ymm, `vpmovwb` of an xmm;
+  `_mm512_mask_cvtepi64_storeu_epi8` in `check_literal_table_batch`):
+  - unmasked, the store of the truncation's lane 0 as an `f64`;
+  - masked, the truncation's masked store of the 16-byte vector's bytes under
+    the mask of 8 lanes zero-extended (`bitcast`, `zext`, `bitcast`).
+  - Tier 1's truncating store fold looks through that widening to the narrow
+    mask's register, of which `vpmov* [p]{k}` reads 8 bits: one instruction
+    again.
+
+**The target** needs the forms' features and AVX512F and VL, as the other kinds
+do: BW for the multiply-adds, packs and byte absolute values, VNNI for the dot
+products, DQ for the doubleword and quadword blends' comparisons. Below
+AVX-512 the rows stay machine rows.
+
+**Zen 5:** every form these decode to, and Tier 1's blends and dot products
+back, already has its 9700X row: `test-x86-zen5`'s table has its 2,005 cases
+complete, and `measure-x86-zen5 --missing` finds none to measure.
+
+**Tests:**
+
+- **`test-ir`:**
+  - both verifiers admit `pairwise` at flags 0 to 5 and `dot` at 0 to 3, of
+    their type, at every width;
+  - the model is checked against the instructions' definitions written out
+    (`ir_test_pairwise_oracle`) on extreme lanes that saturate, and against C's
+    absolute values and the products of doublewords;
+  - `widen` of an `f32` or `f64` is admitted at part 0 alone, and the model's
+    bytes are the carrier's, then zeros.
+- **`test-ir-parse`:** `tests/ir/pairwise.ir`; `lane-unary.ir`,
+  `quadword-op.ir` and `carriers.ir` gain the new operations.
+- **`test-ir-optimize`:** SCCP folds both kinds of constant vectors.
+- **`test-ir-simd`:** the producer's rows decode at exactly their features:
+  - 12 absolute values and 6 products;
+  - 30 multiply-adds, packs and dot products;
+  - 6 blends;
+  - 18 truncations into carriers, 24 permutes of carriers and 9 truncating
+    stores of 8 lanes.
+
+  Each is refused without each feature it needs and under changes.
+- **`test-tier1-masks`:** every one runs through both lowering paths, the
+  interpreter at every stage and Tier 1 natively:
+  - **dot products:** a hand-written fixture whose accumulators live on takes
+    every move path (the fixtures' `vnni` switch runs it where the host has
+    AVX512-VNNI);
+  - **blends:** both paths' code is one blend per statement, with no sign-mask
+    move;
+  - **truncating stores of 8 lanes:** each masked statement is one `vpmov*
+    [p]{k}`, with no masked byte store.
+
+**Performance:** on the 9700X, `--tier1 -c main.c` takes 7.3 M fewer
+instructions (−0.037%; wall −0.25%, cycles −0.11%, against main's −0.02% and
++0.07% against itself), as the rows take Tier 1's ordinary IR paths, and Tier
+0's `-c` is unchanged (+0.001% instructions). The record is buster-performance's
+[`other-units-rows-2780-2026-11-15`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/other-units-rows-2780-2026-11-15).
+
 ## Masks to vectors and back (#1840)
 
 The masks' conversions to vectors and back need no new operation:

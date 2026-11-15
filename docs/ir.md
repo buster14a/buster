@@ -416,11 +416,19 @@ of its own. Both addresses cross `inttoptr` once; then, from offset 0, each piec
 is the widest integer that fits what remains (i64 while 8 bytes remain, then at
 most one each of i32, i16 and i8), loaded from the source and stored to the
 destination at the same offset, through an `ADDRESS` with no index (offset 0
-uses the pointer itself). 256 bytes take 32 load/store pairs, 23 take five. The
-typed contract makes the two ranges the same or apart, so loading each piece
-before storing it reads the source's bytes either way; a partial overlap would
-need every load first. The pieces' alignment is unknown (`alignment_log2` 0),
-as a typed `LOAD`'s is.
+uses the pointer itself). 256 bytes take 32 load/store pairs, 23 take five. A
+copy of more than 32 bytes whose source isn't a local (Tier 0's
+`tier0_copy_local_source`: the address the entry before it pushed isn't a
+`LOCAL_ADDRESS` or a member's offset from one) takes 16-byte pieces instead,
+`v4i32` loads and stores, the last ending at the end, as Tier 0 copies such a
+source (#2693): on the 9700X a cold source's copy is bound by its loads, and
+8-byte pieces took up to 1.8 times 16-byte ones' cycles. A local's copy keeps
+its integers, which SROA and promotion take, and which a struct its fields'
+8-byte stores just built forwards to. The typed contract makes the two ranges
+the same or apart, so loading each piece before storing it reads the source's
+bytes either way, overlapping pieces too; a partial overlap would need every load
+first. The pieces' alignment is unknown (`alignment_log2` 0), as a typed `LOAD`'s
+is.
 
 #136's `ALLOCA`, `STACK_SAVE` and `STACK_RESTORE` lower to the dynamic-stack
 operations below. #148's `FRAME_ADDRESS` (`__builtin_frame_address(0)`, and
@@ -1325,7 +1333,9 @@ the first written in pieces of every width and copied into the second, whose
 24th byte the copy must not reach, then the second copied over itself, the
 slots' sizes, alignments and flags checked; and `COPY` of every size from 1 to
 256 between two globals and from one onto itself, whose bytes must be exactly
-the copy's, with one load and one store per piece. A copy whose pieces were one
+the copy's, with one load and one store per piece (16-byte pieces past 32 bytes,
+a global not being a local; the command's interpreter keeps a `v4i32`'s bytes per
+instruction). A copy whose pieces were one
 size too wide, and an object's slot rounded down to 8 bytes, each fail the
 command (checked by mutation when this was added).
 
