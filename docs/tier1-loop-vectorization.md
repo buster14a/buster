@@ -121,22 +121,44 @@ function without a phi on a back edge in block order walks no blocks.
 
 **Finding the loops.** The pass builds no CFG and no dominator tree: one
 iterative depth-first walk over the blocks' terminators marks the reachable
-blocks, counts each block's reachable predecessors and collects each back
-edge's header once. The admitted shape needs nothing more: a header (not the
-entry) with exactly two reachable predecessors, one of its branch's targets
-starting a chain of blocks each reached from the previous one alone and ending
-in a `br` to the next, back to the header, and the other predecessor ending in a
-`br` to it. That loop is natural, reducible and innermost by construction: the
-only way into the chain is from the header, and no chain block, having one
-predecessor, can head a loop. On sqlite3.c the CFG and the dominators were 84%
-of the pass's time (890 of 2,602 functions have a candidate phi); the walk made
-the measured kernels' objects byte for byte the same. The report's `loops`
-count is every back edge's header, outer loops included (they refuse as
-`shape`).
+blocks, counts each block's reachable predecessors and collects each back edge's
+header once. The admitted shape needs nothing more: a header (not the entry)
+with exactly two reachable predecessors, one of its branch's targets starting a
+chain of blocks each reached from the previous one alone and ending in a `br` to
+the next, back to the header, and the other predecessor ending in a `br` to it.
+That loop is natural, reducible and innermost by construction: the only way into
+the chain is from the header, and no chain block, having one predecessor, can
+head a loop. On sqlite3.c the CFG and the dominators were 84% of the pass's time
+by in-process cycle counters in a local build (890 of 2,602 functions have a
+candidate phi); with the walk, the measured kernels' objects are byte for byte
+the same. The report's `loops` count is every back edge's header, outer loops
+included (they refuse as `shape`).
 
 ### Results
 
-**9700X RESULTS PENDING.**
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/46134556e/docs/measurements/tier1-loop-vectorizer-2743-2026-11-14)), on the 25 kernels of #2743's record and
+its harness, as linked / at each build's best of four placements:
+
+| Geometric mean of time ratios | znver5: 19 loops | the 12 vectorized | x86-64: 19 loops | the 5 vectorized |
+| --- | ---: | ---: | ---: | ---: |
+| Tier 1 / clang -O2 | 16.75 / 16.41 | 19.32 / 19.24 | 3.44 / 3.39 | 6.50 / 5.92 |
+| Tier 1 + vectorize / clang -O2 | 3.44 / 3.23 | 1.53 / 1.47 | 2.31 / 2.31 | 1.36 / 1.38 |
+| Tier 1 / Tier 1 + vectorize | 4.86 / 5.09 | 12.60 / 13.12 | 1.49 / 1.47 | 4.78 / 4.30 |
+
+The six controls stay at 1.09 (znver5) and 1.08 (x86-64), and nothing the pass
+refuses changes: without the option the objects are main's, and both paths give
+one object. At znver5 the element-wise loops reach clang (`add_i32` 0.99,
+`scale_u8` 0.82, `blend_u8` 0.86, `fill_u32` 1.04 times its time); the
+reductions stay 1.65 to 2.82 times behind, clang's loops keeping four
+accumulators where the vector loop has one chain (#2755's unroller) and using
+`vpmaddwd` for `dot_i16`. At x86-64 only `add_i32`, `saxpy_f32`, `fill_u32`,
+`copy_u8` and `matmul_f32`'s inner loop are taken: masks, reductions and lane
+conversions are EVEX forms in Tier 1. The refusals that remain have issues:
+`max_i32` (#2805), the contracted `fma` and `sitofp` (#2806), the masked
+remainder (#2807), and strided accesses and narrow-into-wide counts (#2808).
+Compiling sqlite3.c with the option cost 2.30% more user cycles at znver5 and
+1.51% at x86-64 in the first build, which built a CFG and dominators for each
+candidate function; the rerun with the terminator walk is in the record.
 
 ## What the measurements rank
 
