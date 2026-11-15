@@ -32,14 +32,18 @@ requirements. [Command index](README.md).
   own, with whether the helpers and the runtime functions' preparation over
   each are the same (`selection-census-builtins`), and its initializers'
   plans, compound literals and asm statements against the controls'
-  (`selection-census-statements`, step 2.2c.3's),
-  `--provisional-selection` numbering -c's code by that pass's selection, its
-  extra symbols placeholders the object leaves out, its builtins, initializers'
-  plans and asm statements that pass's, the same bytes (step 2.2b's test
+  (`selection-census-statements`, step 2.2c.3's), and its left-out ranges
+  against the writer's, with whether the lowering's locals over each are the
+  same (`selection-census-ranges`, step 2.2c.4's),
+  `--provisional-selection` numbering -c's code by that pass's selection, made
+  before the bodies' loop and filled in after it, its extra symbols
+  placeholders the object leaves out, its builtins, initializers' plans, asm
+  statements and left-out ranges that pass's, the same bytes (step 2.2b's test
   option, which reports on stderr whether it served and its extra symbols;
   executables, `--lower-all`, a unit whose candidates keep an extra body, plan
-  other helpers or list other statements, and one whose target groups' states
-  the candidates' references change take the exact selection), `--deferred-lowering` lowering by rooms that read
+  other helpers, list other statements or place other locals, and one whose
+  target groups' states the candidates' references change take the exact
+  selection), `--deferred-lowering` lowering by rooms that read
   none of the controls' totals and deciding each part's jump tables with its
   lowering, on one lane without `--tier1`, the same bytes (step 2.2c.3's test
   option: [the design](../all-core-path.md#step-2-the-selection-after-the-windows)),

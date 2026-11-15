@@ -242,8 +242,9 @@ struct CheckProgramOptions
     // a walk from every expression root of the body and by scans of the graph's VALUE nodes (check_program_census_walk and
     // _scan), into CheckProgram's census_walk, census_scan and census_arms.
     bool selection_census;
-    // The candidates' pass alone (#2536's step 2.2b, --provisional-selection): CheckProgram.census_pass, for a provisional
-    // selection the emission numbers its symbols by (check_driver_provisional), without the other censuses.
+    // The candidates' pass alone (#2536's step 2.2b, --provisional-selection): CheckProgram.census_pass, for a
+    // provisional selection the emission numbers its symbols by (check_driver_provisional_select), without the other
+    // censuses.
     bool candidates;
     // The generated code's instruction set (x86_target.c's X86Target, the preprocessor's from -march and the -m flags):
     // which vector types the lowering takes, how wide a vector register the convention passes them in, and which
@@ -731,10 +732,11 @@ struct CheckProgram
     uint32_t census_pass_initializer_count;
     uint32_t* census_pass_asms;
     uint32_t census_pass_asm_count;
-    // The lists the lowering's pools and asm plan take in the controls' place, where they aren't null (#2536's step 2.2c.3,
-    // part 3, a provisional selection's: check_driver_provisional): the plans whose INITIALIZE controls the bodies would
-    // have (check_lower_init_pools) and the asm statements whose ASM controls they would have, in token order
-    // (check_program_asm_plan, check_program_asm_sequence). The compound literals' plans are compound_initializers'.
+    // The lists the lowering's pools and asm plan take in the controls' place, where they aren't null (#2536's step
+    // 2.2c.3, part 3, a provisional selection's: check_driver_provisional_check): the plans whose INITIALIZE controls
+    // the bodies would have (check_lower_init_pools) and the asm statements whose ASM controls they would have, in
+    // token order (check_program_asm_plan, check_program_asm_sequence). The compound literals' plans are
+    // compound_initializers'.
     const uint32_t* initialize_list;
     uint32_t initialize_list_count;
     const uint32_t* asm_list;
@@ -743,6 +745,10 @@ struct CheckProgram
     // before the loop takes (--provisional-selection, #2536's step 2.2c.2), differs from the one over the bodies' own,
     // which check_program_finish makes again: a window's lowering would have taken the first.
     bool target_states_differ;
+    // The candidates' pass's left-out ranges (check_program_constant_arms), census_pass_arms of them, sorted and
+    // joined, as the writer's dropped_ranges, kept with the pass: the ranges a selection made before the loop and its
+    // lowering's locals take (--provisional-selection, #2536's step 2.2c.4, part 1).
+    uint64_t* census_pass_ranges;
 };
 
 #define BUSTER_CHECK_PROGRAM_TARGET_VERSIONS UINT32_MAX
@@ -6203,6 +6209,15 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
                                                                 reference_items, reference_sort, options.scalar, output, scratch));
         program->census_pass.ticks = scanned ? __rdtsc() - pass_start : 0;
         program->census_pass_arms = arm_count;
+        // Kept for a selection before the loop (check_driver_provisional_select) and the census's comparison with the
+        // writer's.
+        uint64_t* ranges = valid && arm_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, arm_count) : NULL;
+        valid = valid && (arm_count == 0 || ranges != NULL);
+        if (ranges != NULL)
+        {
+            memcpy(ranges, arms, (uint64_t)arm_count * sizeof(uint64_t));
+        }
+        program->census_pass_ranges = ranges;
         arena_pop_to(scratch, mark);
     }
     *run = (CheckProgramRun){
@@ -6567,37 +6582,52 @@ static bool check_program_finish(CheckProgramRun* run)
     return valid;
 }
 
-static bool check_program(CheckProgram* program, const Parser* parser, const CheckInput* input, CheckStream* stream,
-                          const TypeTable* types, CheckProgramOptions options, Arena* output, Arena* scratch)
+// check_program's parts before its loop (#2536's step 2.2c.4, part 1): its setup and its pass (check_program_begin),
+// then, with the candidates (--provisional-selection), the tail's part over their needed marks. A caller may make a
+// selection before the loop (check_driver_provisional_select), then run the loop (check_program_loop) and the tail
+// (check_program_finish), as check_program does.
+static void check_program_start(CheckProgramRun* run, CheckProgram* program, const Parser* parser, const CheckInput* input, CheckStream* stream,
+                                const TypeTable* types, CheckProgramOptions options, Arena* output, Arena* scratch)
 {
-    // The loop a body at a time, as the windows will run it a window's bodies at a time.
-    CheckProgramRun run;
-    check_program_begin(&run, program, parser, input, stream, types, options, output, scratch);
-    // With the candidates (--provisional-selection, #2536's step 2.2c.2), the tail's part over the needed marks first,
-    // over the candidates' references, which hold the exact ones: as the windows will need it before the loop. The
-    // selection makes its symbols and the weakrefs' states again from its own references, so the objects are the same;
-    // the target groups' states, which the selection takes from the program, check_program_finish makes again
+    check_program_begin(run, program, parser, input, stream, types, options, output, scratch);
+    // With the candidates (#2536's step 2.2c.2), the tail's part over the needed marks first, over the candidates'
+    // references, which hold the exact ones: as the windows will need it before the loop. The selection makes its
+    // symbols and the weakrefs' states again from its own references, so the objects are the same; the target groups'
+    // states, which the selection takes from the program, check_program_finish makes again
     // (check_program_target_states).
-    if (options.candidates && run.valid && program->status == CHECK_PROGRAM_OK && program->census_pass.first != NULL)
+    if (options.candidates && run->valid && program->status == CHECK_PROGRAM_OK && program->census_pass.first != NULL)
     {
         uint64_t total = 0;
-        for (uint32_t b = 0; b < run.body_count; b += 1)
+        for (uint32_t b = 0; b < run->body_count; b += 1)
         {
             total += program->census_pass.counts[b];
         }
         for (uint64_t r = 0; r < total; r += 1)
         {
-            run.needed[program->census_pass.references[r]] = 1;
+            run->needed[program->census_pass.references[r]] = 1;
         }
-        run.target_events.census = &program->census_pass;
-        run.symbols_valid = check_program_symbols(&run, run.needed, true);
-        run.target_events.census = NULL;
-        run.symbols = true;
+        run->target_events.census = &program->census_pass;
+        run->symbols_valid = check_program_symbols(run, run->needed, true);
+        run->target_events.census = NULL;
+        run->symbols = true;
     }
-    for (uint32_t b = 0; b < run.body_count; b += 1)
+}
+
+// check_program's loop over every body, a body at a time, as the windows will run it a window's bodies at a time.
+static void check_program_loop(CheckProgramRun* run)
+{
+    for (uint32_t b = 0; b < run->body_count; b += 1)
     {
-        check_program_bodies(&run, b + 1);
+        check_program_bodies(run, b + 1);
     }
+}
+
+static bool check_program(CheckProgram* program, const Parser* parser, const CheckInput* input, CheckStream* stream,
+                          const TypeTable* types, CheckProgramOptions options, Arena* output, Arena* scratch)
+{
+    CheckProgramRun run;
+    check_program_start(&run, program, parser, input, stream, types, options, output, scratch);
+    check_program_loop(&run);
     return check_program_finish(&run);
 }
 

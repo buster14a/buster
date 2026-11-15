@@ -1179,8 +1179,25 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
                                           "    S8 local = (S8){ \"d\", 1 };\n"
                                           "    return (int)(gaps[1].length + local.length);\n"
                                           "}\n";
-    static const char* const sources[] = { program, overloads, plain, arms, unevaluated, static_compound };
-    static const char* const expected[][8] = {
+    // A constant switch's dead case that declares a local (#2536's step 2.2c.4, part 1): the writer leaves the case out and
+    // the pass keeps it, so that a lowering over the pass's ranges would place the local the writer's leave out.
+    static const char switch_local[] = "int g(char* p);\n"
+                                       "int f(int x)\n"
+                                       "{\n"
+                                       "    switch (0)\n"
+                                       "    {\n"
+                                       "    case 1:\n"
+                                       "    {\n"
+                                       "        char unreached[256];\n"
+                                       "        return g(unreached);\n"
+                                       "    }\n"
+                                       "    default:\n"
+                                       "        break;\n"
+                                       "    }\n"
+                                       "    return x;\n"
+                                       "}\n";
+    static const char* const sources[] = { program, overloads, plain, arms, unevaluated, static_compound, switch_local };
+    static const char* const expected[][9] = {
         {
             "selection-census\tbodies\t5\tdropped\t1\tselected-bodies\t3\t",
             "\twalk\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t2\textra-symbols\t2\t",
@@ -1190,6 +1207,7 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
             "\nselection-census-ticks\treferences\t",
             "\nselection-census-builtins\texact\t1\tcandidates\t1\textra\t0\tmissing\t0\thelpers\t0\tcandidate-helpers\t0\thelpers-same\t1\truntime-same\t1\n",
             "\nselection-census-statements\tinitializers\t2\tcandidates\t2\tsame\t1\tcompounds\t0\tcandidates\t0\tsame\t1\tasms\t0\tcandidates\t0\tsame\t1\n",
+            "\nselection-census-ranges\twriter\t2\tpass\t2\tsame\t1\tlocals-same\t1\n",
         },
         {
             "selection-census\tbodies\t3\tdropped\t0\tselected-bodies\t2\t",
@@ -1200,6 +1218,7 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
             "\nselection-census-ticks\treferences\t",
             "\nselection-census-builtins\texact\t0\tcandidates\t0\textra\t0\tmissing\t0\thelpers\t0\tcandidate-helpers\t0\thelpers-same\t1\truntime-same\t1\n",
             "\nselection-census-statements\tinitializers\t0\tcandidates\t0\tsame\t1\tcompounds\t0\tcandidates\t0\tsame\t1\tasms\t0\tcandidates\t0\tsame\t1\n",
+            "\nselection-census-ranges\twriter\t0\tpass\t0\tsame\t1\tlocals-same\t1\n",
         },
         {
             "selection-census\tbodies\t1\tdropped\t0\tselected-bodies\t1\t",
@@ -1210,6 +1229,7 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
             "\nselection-census-ticks\treferences\t",
             "\nselection-census-builtins\texact\t0\tcandidates\t0\textra\t0\tmissing\t0\thelpers\t0\tcandidate-helpers\t0\thelpers-same\t1\truntime-same\t1\n",
             "\nselection-census-statements\tinitializers\t0\tcandidates\t0\tsame\t1\tcompounds\t0\tcandidates\t0\tsame\t1\tasms\t0\tcandidates\t0\tsame\t1\n",
+            "\nselection-census-ranges\twriter\t0\tpass\t0\tsame\t1\tlocals-same\t1\n",
         },
         {
             "selection-census\tbodies\t5\tdropped\t1\tselected-bodies\t3\t",
@@ -1220,6 +1240,7 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
             "\nselection-census-ticks\treferences\t",
             "\nselection-census-builtins\texact\t0\tcandidates\t0\textra\t0\tmissing\t0\thelpers\t0\tcandidate-helpers\t0\thelpers-same\t1\truntime-same\t1\n",
             "\nselection-census-statements\tinitializers\t1\tcandidates\t1\tsame\t1\tcompounds\t0\tcandidates\t0\tsame\t1\tasms\t0\tcandidates\t0\tsame\t1\n",
+            "\nselection-census-ranges\twriter\t5\tpass\t2\tsame\t0\tlocals-same\t1\n",
         },
         {
             "selection-census\tbodies\t1\tdropped\t0\tselected-bodies\t1\t",
@@ -1230,6 +1251,7 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
             "\nselection-census-ticks\treferences\t",
             "\nselection-census-builtins\texact\t0\tcandidates\t1\textra\t1\tmissing\t0\thelpers\t0\tcandidate-helpers\t1\thelpers-same\t0\truntime-same\t0\n",
             "\nselection-census-statements\tinitializers\t0\tcandidates\t0\tsame\t1\tcompounds\t0\tcandidates\t0\tsame\t1\tasms\t0\tcandidates\t0\tsame\t1\n",
+            "\nselection-census-ranges\twriter\t0\tpass\t0\tsame\t1\tlocals-same\t1\n",
         },
         {
             "selection-census\tbodies\t1\tdropped\t0\tselected-bodies\t1\t",
@@ -1240,9 +1262,22 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
             "\nselection-census-ticks\treferences\t",
             "\nselection-census-builtins\texact\t0\tcandidates\t0\textra\t0\tmissing\t0\thelpers\t0\tcandidate-helpers\t0\thelpers-same\t1\truntime-same\t1\n",
             "\nselection-census-statements\tinitializers\t1\tcandidates\t1\tsame\t1\tcompounds\t1\tcandidates\t3\tsame\t0\tasms\t0\tcandidates\t0\tsame\t1\n",
+            "\nselection-census-ranges\twriter\t0\tpass\t0\tsame\t1\tlocals-same\t1\n",
+        },
+        {
+            "selection-census\tbodies\t1\tdropped\t1\tselected-bodies\t1\t",
+            "\twalk\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t0\textra-symbols\t1\t",
+            "\tscan\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t0\textra-symbols\t1\t",
+            "\tarms\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\textra-bodies\t0\textra-symbols\t0\t",
+            "\tpass\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t0\textra-symbols\t1\n",
+            "\nselection-census-ticks\treferences\t",
+            "\nselection-census-builtins\texact\t0\tcandidates\t0\textra\t0\tmissing\t0\thelpers\t0\tcandidate-helpers\t0\thelpers-same\t1\truntime-same\t1\n",
+            "\nselection-census-statements\tinitializers\t0\tcandidates\t0\tsame\t1\tcompounds\t0\tcandidates\t0\tsame\t1\tasms\t0\tcandidates\t0\tsame\t1\n",
+            "\nselection-census-ranges\twriter\t3\tpass\t0\tsame\t0\tlocals-same\t0\n",
         },
     };
-    static const char* const names[] = { "dead calls", "overloads", "one function", "constant arms", "an unevaluated builtin", "a static initializer's compound literals" };
+    static const char* const names[] = { "dead calls", "overloads", "one function", "constant arms", "an unevaluated builtin", "a static initializer's compound literals",
+                                          "a constant switch's local" };
     char source[256];
     char object[256];
     char reference[256];
@@ -1341,11 +1376,28 @@ static void check_test_driver_provisional_selection(CheckTest* test, const char*
                                    "    __asm__(\"movl %1, %0\" : \"=r\"(y) : \"r\"(x));\n"
                                    "    return y;\n"
                                    "}\n";
+    // A constant switch's dead case that declares a local (#2536's step 2.2c.4, part 1), which the lowering over the pass's
+    // ranges would place: its frame would differ.
+    static const char switch_local[] = "int g(char* p);\n"
+                                       "int f(int x)\n"
+                                       "{\n"
+                                       "    switch (0)\n"
+                                       "    {\n"
+                                       "    case 1:\n"
+                                       "    {\n"
+                                       "        char unreached[256];\n"
+                                       "        return g(unreached);\n"
+                                       "    }\n"
+                                       "    default:\n"
+                                       "        break;\n"
+                                       "    }\n"
+                                       "    return x;\n"
+                                       "}\n";
     static const char target[] = "int g(int x) { return x; }\n"
                                  "__attribute__((used, target(\"default\"))) int h(int x) { return x + 1; }\n"
                                  "int caller(int x) { return h(x); }\n";
-    static const char* const sources[] = { externs, statics, statics, body, plain, unevaluated, evaluated, target, static_compound, assembly };
-    static const bool debug[] = { false, false, true, false, false, false, false, false, false, false };
+    static const char* const sources[] = { externs, statics, statics, body, plain, unevaluated, evaluated, target, static_compound, assembly, switch_local };
+    static const bool debug[] = { false, false, true, false, false, false, false, false, false, false, false };
     static const char* const expected[] = {
         "provisional-selection\tused\t1\textra-symbols\t2\n",
         "provisional-selection\tused\t1\textra-symbols\t1\n",
@@ -1357,9 +1409,11 @@ static void check_test_driver_provisional_selection(CheckTest* test, const char*
         "provisional-selection\tused\t0\textra-symbols\t0\n",
         "provisional-selection\tused\t0\textra-symbols\t0\n",
         "provisional-selection\tused\t1\textra-symbols\t0\n",
+        "provisional-selection\tused\t0\textra-symbols\t0\n",
     };
     static const char* const names[] = { "extern and literal extras", "static extras", "static extras by -g", "an extra body", "no extras", "an unevaluated helper",
-                                          "a helper reached twice", "a target group", "a static initializer's compound literals", "an asm statement" };
+                                          "a helper reached twice", "a target group", "a static initializer's compound literals", "an asm statement",
+                                          "a constant switch's local" };
     char source[256];
     char object[256];
     char reference[256];

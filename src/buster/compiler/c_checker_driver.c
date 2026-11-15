@@ -9346,10 +9346,10 @@ static uint32_t check_units_group_unkept(const Link* link);
 
 // Whether `link`'s symbol `s` is a local `.L` label defined in code, which -c's object leaves out as an assembler's
 // temporary (#1845). The helpers' own functions (`.Lbuster_asm_N`, `.Lbuster_builtin_*`), which clang's code has no
-// counterpart of, keep their symbols: the tools that read -c's objects find the helpers' calls by them.
-// Whether link symbol `s` is a placeholder of the provisional selection's (#2536's step 2.2b, check_driver_provisional): a
-// local without an atom named BUSTER_CHECK_PLACEHOLDER_NAME, for an object the exact selection leaves out, which no code
-// or data refers to.
+// counterpart of, keep their symbols: the tools that read -c's objects find the helpers' calls by them. Whether link
+// symbol `s` is a placeholder of the provisional selection's (#2536's step 2.2b, check_driver_provisional_check): a
+// local without an atom named BUSTER_CHECK_PLACEHOLDER_NAME, for an object the exact selection leaves out, which no
+// code or data refers to.
 static bool check_driver_placeholder(const Link* link, uint32_t s)
 {
     const NameId name = link->symbols.name[s];
@@ -9614,20 +9614,18 @@ static bool check_driver_statement_lists(const CheckProgram* program, const Chec
 }
 
 // The provisional selection (#2536's step 2.2b, --provisional-selection): the selection over the candidates' references
-// (CheckProgram.census_pass), which numbers the symbols that a window's lowering takes before every body's own references
-// are known, against the exact selection `selected`. It serves where both keep the same bodies in the same order and each
-// symbol of the exact one is the provisional one's of the same object, in the same order: then its program is in
-// *provisional, each extra symbol (one whose object the exact selection leaves out) taking object 0, which the emission
-// makes a placeholder that the object leaves out (check_program_emit's symbols, check_driver_object_build), and their
-// count is in *extra. Its builtins are the candidates' pass's (CheckProgram.census_pass_builtins, #2536's step 2.2c.3, part
-// 2), which a window's lowering takes before the bodies' own are known: it serves only where the helpers and the runtime
-// functions' preparation over them are the exact selection's (check_driver_same_builtin_plans), as the epilogue will
-// check them, and where no target group's state over the candidates' references differs from its own
-// (CheckProgram.target_states_differ). Its pools and asm plan take the pass's initializers' plans and asm statements
-// (check_driver_statement_lists, #2536's step 2.2c.3, part 3), and it serves only where those are the controls'. False
-// otherwise: -c takes the exact selection.
-static bool check_driver_provisional(CheckProgramSelection* provisional, const CheckProgram* program, const CheckDataPrepared* data,
-                                     const CheckProgramSelection* selected, bool scalar, uint32_t* extra, Arena* output, Arena* scratch)
+// (CheckProgram.census_pass), which numbers the symbols that a window's lowering takes before every body's own
+// references are known. It is made before check_program's loop (#2536's step 2.2c.4, part 1), after its setup and the
+// tail's part over the candidates' marks (check_program_start), as a window's lowering will need it. Its builtins are
+// the candidates' pass's (CheckProgram.census_pass_builtins, #2536's step 2.2c.3, part 2). Where it reads what the loop
+// makes, it takes a bound: a block-scope static is emitted unless one of the pass's left-out ranges holds it
+// (CheckProgram.census_pass_ranges, among the writer's) and every statement expression's region counts as reached, so
+// that its statics are a superset of the exact selection's. Its lowering's locals take the pass's ranges too. Its
+// bodies' places in the loop's columns and its regions' bodies, which it copies before the loop writes them,
+// check_driver_provisional_refresh fills in after the loop, and check_driver_provisional_check decides whether it
+// serves. Whether it was made, in *provisional.
+static bool check_driver_provisional_select(CheckProgramSelection* provisional, const CheckProgram* program, const CheckDataPrepared* data, bool scalar,
+                                            Arena* output, Arena* scratch)
 {
     const CheckProgramCensus* census = &program->census_pass;
     const uint64_t scratch_mark = scratch->length;
@@ -9646,9 +9644,122 @@ static bool check_driver_provisional(CheckProgramSelection* provisional, const C
     candidates.reference_count = total;
     candidates.builtin_nodes = program->census_pass_builtins;
     candidates.builtin_count = program->census_pass_builtin_count;
-    bool usable = census->first != NULL && (copies != NULL || program->body_count == 0) &&
-                  check_program_select_mode(provisional, &candidates, data, C_LOWERING_REACHABLE, scalar, false, output, scratch) &&
-                  provisional->program.body_count == selected->program.body_count && provisional->program.object_count == selected->program.object_count &&
+    candidates.dropped_ranges = program->census_pass_ranges;
+    candidates.dropped_range_count = program->census_pass_arms;
+    candidates.region_reached = NULL;
+    const bool made = census->first != NULL && (copies != NULL || program->body_count == 0) &&
+                      check_program_select_mode(provisional, &candidates, data, C_LOWERING_REACHABLE, scalar, false, output, scratch);
+    arena_pop_to(scratch, scratch_mark);
+    return made;
+}
+
+// A provisional selection's records after check_program's loop and tail (#2536's step 2.2c.4, part 1): each of `over`'s
+// bodies' places in the loop's columns, as check_program_select_mode copies them from `program`'s body (all of
+// CheckProgramBody but its references, which are the candidates'); the regions, each one's body renumbered as the
+// selection's; and the totals and columns of the loop and the tail that a body's lowering reads. Its left-out ranges
+// stay the pass's, which check_driver_provisional_check compares. Its bodies are `program`'s in order, a target_clones
+// copy after its body (check_program_select_mode), so one cursor finds each one's. Whether each was found.
+static bool check_driver_provisional_refresh(CheckProgram* over, const CheckProgram* program, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    uint32_t* map = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->body_count + 1);
+    bool valid = map != NULL;
+    if (valid)
+    {
+        memset(map, 0xff, ((uint64_t)program->body_count + 1) * sizeof(uint32_t));
+    }
+    uint32_t source = 0;
+    for (uint32_t b = 0; valid && b < over->body_count; b += 1)
+    {
+        const uint32_t opening = over->bodies[b].opening;
+        while (source < program->body_count && program->bodies[source].opening != opening)
+        {
+            source += 1;
+        }
+        valid = source < program->body_count;
+        if (valid)
+        {
+            CheckProgramBody body = program->bodies[source];
+            body.reference_first = over->bodies[b].reference_first;
+            body.reference_count = over->bodies[b].reference_count;
+            over->bodies[b] = body;
+            map[source] = map[source] == BUSTER_CHECK_NONE ? b : map[source];
+        }
+    }
+    for (uint32_t r = 0; valid && r < program->region_count; r += 1)
+    {
+        const uint32_t body = program->regions[r].body;
+        over->regions[r] = program->regions[r];
+        over->regions[r].body = body < program->body_count ? map[body] : BUSTER_CHECK_NONE;
+    }
+    if (valid)
+    {
+        over->controls = program->controls;
+        over->control_count = program->control_count;
+        over->label_positions = program->label_positions;
+        over->label_position_count = program->label_position_count;
+        over->exit_count = program->exit_count;
+        over->chain_stop_count = program->chain_stop_count;
+        over->switch_count = program->switch_count;
+        over->lifetime_event_count = program->lifetime_event_count;
+        over->region_reached = program->region_reached;
+    }
+    arena_pop_to(scratch, mark);
+    return valid;
+}
+
+// Whether the lowering's locals over the pass's left-out ranges (CheckProgram.census_pass_ranges), which a provisional
+// selection takes (check_driver_provisional_select), are those over the writer's (CheckProgram.dropped_ranges): no
+// local's declaration (check_lower_local_declaration's) lies in a range of either that no range of the other holds.
+// Both are sorted and apart, so a cursor over the other finds whether it holds each range; only the tokens of a range
+// it doesn't are read, none where the two are the same.
+static bool check_driver_provisional_locals(const CheckProgram* program)
+{
+    const CheckInput* input = program->input;
+    CheckProgram undropped = *program;
+    undropped.dropped_range_count = 0;
+    const uint64_t* lists[2] = { program->census_pass_ranges, program->dropped_ranges };
+    const uint32_t counts[2] = { program->census_pass_arms, program->dropped_range_count };
+    bool same = true;
+    for (uint32_t side = 0; side < 2; side += 1)
+    {
+        const uint64_t* ranges = lists[side];
+        const uint64_t* other = lists[1 - side];
+        const uint32_t other_count = counts[1 - side];
+        uint32_t o = 0;
+        for (uint32_t i = 0; same && i < counts[side]; i += 1)
+        {
+            const uint32_t low = (uint32_t)(ranges[i] >> 32);
+            const uint32_t high = (uint32_t)ranges[i];
+            while (o < other_count && (uint32_t)other[o] < low)
+            {
+                o += 1;
+            }
+            const bool held = o < other_count && (uint32_t)(other[o] >> 32) <= low && high <= (uint32_t)other[o];
+            for (uint32_t token = low; same && !held && token <= high && token < input->token_count; token += 1)
+            {
+                same = !check_lower_local_declaration(&undropped, token);
+            }
+        }
+    }
+    return same;
+}
+
+// Whether the provisional selection made before the loop (check_driver_provisional_select), its records filled in after
+// it (check_driver_provisional_refresh), serves -c in place of the exact selection `selected` (#2536's steps 2.2b and
+// 2.2c.4, part 1): where both keep the same bodies in the same order and each symbol of the exact one is the
+// provisional one's of the same object, in the same order. Then each extra symbol (one whose object the exact selection
+// leaves out) takes object 0, which the emission makes a placeholder that the object leaves out (check_program_emit's
+// symbols, check_driver_object_build), and their count is in *extra. It serves only where the helpers and the runtime
+// functions' preparation over its builtins are the exact selection's (check_driver_same_builtin_plans), where no target
+// group's state over the candidates' references differs from its own (CheckProgram.target_states_differ), where its
+// pools and asm plan, over the pass's initializers' plans and asm statements, are the controls'
+// (check_driver_statement_lists, #2536's step 2.2c.3, part 3), and where its lowering's locals are the writer's
+// (check_driver_provisional_locals). False otherwise: -c takes the exact selection.
+static bool check_driver_provisional_check(CheckProgramSelection* provisional, const CheckProgram* program, const CheckProgramSelection* selected, uint32_t* extra,
+                                           Arena* output, Arena* scratch)
+{
+    bool usable = provisional->program.body_count == selected->program.body_count && provisional->program.object_count == selected->program.object_count &&
                   provisional->program.symbol_count >= selected->program.symbol_count;
     for (uint32_t b = 0; usable && b < provisional->program.body_count; b += 1)
     {
@@ -9679,6 +9790,7 @@ static bool check_driver_provisional(CheckProgramSelection* provisional, const C
              check_driver_statement_lists(program, &selected->program, &provisional->program, &same_initializers, &same_compounds, &same_asms, statement_counts, output,
                                           scratch) &&
              same_initializers && same_compounds && same_asms;
+    usable = usable && check_driver_provisional_locals(program);
     uint32_t* objects = usable ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)provisional->program.symbol_count + 1) : NULL;
     usable = usable && objects != NULL;
     *extra = 0;
@@ -9693,7 +9805,6 @@ static bool check_driver_provisional(CheckProgramSelection* provisional, const C
     {
         provisional->program.symbol_objects = objects;
     }
-    arena_pop_to(scratch, scratch_mark);
     return usable;
 }
 
@@ -9782,6 +9893,13 @@ static void check_driver_selection_census(const CheckProgram* program, const Che
             counts[0], counts[1], (int)(listed && same_initializers), counts[2], counts[3], (int)(listed && same_compounds), counts[4], counts[5],
             (int)(listed && same_asms));
     arena_pop_to(output, output_mark);
+    // The left-out ranges (#2536's step 2.2c.4, part 1), a line of its own: the writer's and the pass's, whether they are
+    // the same, and whether the lowering's locals over them are (check_driver_provisional_locals).
+    const bool same_ranges = program->dropped_range_count == program->census_pass_arms &&
+                             (program->dropped_range_count == 0 ||
+                              memcmp(program->dropped_ranges, program->census_pass_ranges, (uint64_t)program->dropped_range_count * sizeof(uint64_t)) == 0);
+    fprintf(stderr, "selection-census-ranges\twriter\t%u\tpass\t%u\tsame\t%d\tlocals-same\t%d\n", program->dropped_range_count, program->census_pass_arms,
+            (int)same_ranges, (int)check_driver_provisional_locals(program));
 }
 
 // The checked program's code and data, as -c writes them: its object at `output_path`, or with `kept` (one of several
@@ -10916,8 +11034,8 @@ struct CheckDriverCommand
     // --selection-census (#2536's step 2.1): the candidates' references beside the exact ones, and their selection where
     // they differ, reported on stderr (check_driver_selection_census).
     bool selection_census;
-    // --provisional-selection (#2536's step 2.2b): -c's code numbered by the candidates' selection, its extra symbols left
-    // out of the object (check_driver_provisional).
+    // --provisional-selection (#2536's step 2.2b): -c's code numbered by the candidates' selection, its extra symbols
+    // left out of the object (check_driver_provisional_check).
     bool provisional_selection;
     // --shared-parts, #777's test option: a unit's emission that shares its functions' parts on the units' board pauses
     // after each part it takes itself, so that the lanes without units take some, and the command reports how many
@@ -12619,8 +12737,24 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         diagnostic_input.visibility_error = false;
                         program_input = &diagnostic_input;
                     }
-                    const bool program_checked = program_diagnostics &&
-                        check_program(&program, checking, program_input, &stream, &types, program_options, output_arena, scratch);
+                    // --provisional-selection's selection, made before the program's loop (#2536's step 2.2c.4, part 1,
+                    // check_driver_provisional_select) where -c's object may take it, and its records filled in after
+                    // the loop and the tail.
+                    CheckProgramSelection provisional;
+                    bool provisional_made = false;
+                    bool program_checked = false;
+                    if (program_diagnostics)
+                    {
+                        const bool early = command->provisional_selection && result == 0 && emit_object && kept == NULL && !prefix_only && !lower_all &&
+                                           !dump_static && program_options.prepared_data != NULL;
+                        CheckProgramRun run;
+                        check_program_start(&run, &program, checking, program_input, &stream, &types, program_options, output_arena, scratch);
+                        provisional_made = early && run.symbols && run.symbols_valid && program.status == CHECK_PROGRAM_OK &&
+                                           check_driver_provisional_select(&provisional, &program, &data, scalar, output_arena, scratch);
+                        check_program_loop(&run);
+                        program_checked = check_program_finish(&run);
+                        provisional_made = provisional_made && program_checked && check_driver_provisional_refresh(&provisional.program, &program, scratch);
+                    }
                     // A control error's constraints, where check_program finds one: every one, as the diagnosis of a rejected unit
                     // gives them (#1447), among the unit's errors, which the reports below publish, so that the unit's warnings
                     // leave out what clang's do after them (check_driver_rejected_warnings).
@@ -12892,14 +13026,13 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             result = check_driver_target_features(&selected.program, checking, recovered, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
                             result = check_driver_aliases(&selected.program, checking, pp, scalar, scratch) ? result : 1;
                         }
-                        // --provisional-selection (#2536's step 2.2b): the code numbered by the candidates' selection, where it
-                        // serves (check_driver_provisional), without --lower-all, a dump or another unit to link with; the exact
-                        // selection's data either way. Its use and its extra symbols are reported on stderr.
-                        CheckProgramSelection provisional;
+                        // --provisional-selection (#2536's step 2.2b): the code numbered by the candidates' selection,
+                        // made before the loop, where it serves (check_driver_provisional_check), without --lower-all,
+                        // a dump or another unit to link with; the exact selection's data either way. Its use and its
+                        // extra symbols are reported on stderr.
                         uint32_t extra = 0;
-                        const bool provisional_used = selection && result == 0 && command->provisional_selection && program.census_pass.first != NULL &&
-                                                      kept == NULL && !lower_all && !dump_static &&
-                                                      check_driver_provisional(&provisional, &program, &data, &selected, scalar, &extra, output_arena, scratch);
+                        const bool provisional_used = selection && result == 0 && provisional_made &&
+                                                      check_driver_provisional_check(&provisional, &program, &selected, &extra, output_arena, scratch);
                         if (selection && result == 0 && command->provisional_selection)
                         {
                             fprintf(stderr, "provisional-selection\tused\t%d\textra-symbols\t%u\n", (int)provisional_used, extra);
