@@ -2712,6 +2712,20 @@ static void check_program_emit_alone(CheckEmitRun* run)
     }
 }
 
+// Whether a part stopped before every body's code exists. The dead pass follows each reached body's references; a body
+// the part never wrote has none (#2822, #2792). Lowering that failed leaves the code half's failure marks at the end
+// without having compiled, so the stage is asked too.
+static bool check_program_emit_incomplete(const CheckEmitRun* run)
+{
+    bool incomplete = false;
+    for (uint32_t p = 0; !incomplete && p < run->part_count; p += 1)
+    {
+        const CheckEmitPart* part = run->parts + p;
+        incomplete = part->lower.stage != CHECK_LOWER_STAGE_NONE || part->tier0_failed != part->lower.end || part->code_failed != part->lower.end;
+    }
+    return incomplete;
+}
+
 // The last pass (#2541 step 2): the held candidates' code (check_tier1_inline_held) where the emitted code still refers to
 // them, on the calling thread with lane 0's state, once the lanes are done: the dead set by the code made so far
 // (check_tier1_inline_dead), each held body it leaves alive let go on and its code made, in body order, until no held body
@@ -3642,6 +3656,15 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         // A body a failure before it left unreached has no outcome, never success.
         memset(run.tier1_outcomes, 0, (uint64_t)count * sizeof(CheckTier1Outcome));
     }
+    if (run.codes != 0)
+    {
+        // The same for its code: a later body the part stopped before was never written (#2822, #2792).
+        memset(run.codes, 0, (uint64_t)count * sizeof(EmittedCode));
+    }
+    if (run.bodies != 0)
+    {
+        memset(run.bodies, 0, (uint64_t)count * sizeof(CheckEmitBody));
+    }
     // The unit's inline callees (#1282, #1398), unless --tier1-no-inline and --tier0-no-inline keep every call: Tier 1's
     // with --tier1, and Tier 0's for the bodies it compiles. A unit without them runs one epoch.
     CheckTier1Inline tier1_inline = { 0 };
@@ -3852,8 +3875,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     // Also return the leases when an active-lane allocation failed before dispatch. A returned lease is a no-op.
     valid = check_program_emit_return(leases, lease_count) && valid;
-    // The held candidates that the emitted code still refers to (#2541 step 2), from their summaries.
-    if (valid && count != 0 && tier1_inline.holding)
+    // The held candidates that the emitted code still refers to (#2541 step 2), from their summaries. A part that
+    // already failed left later bodies unwritten; the refusal is reported below, and the dead pass is not run on them
+    // (#2822, #2792).
+    if (valid && count != 0 && tier1_inline.holding && !check_program_emit_incomplete(&run))
     {
         check_program_emit_last(&run, &tier1_inline, &result->lowered.helpers, result->lowered.asms.naked);
     }
