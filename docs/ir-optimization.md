@@ -648,7 +648,8 @@ an issue of its own:
 - **Scalar floating folding** under #1450's floating-environment contract:
   #2720.
 - **Inlining callees with control flow, its classes and budgets:** #2541 and its
-  claimed steps. Its unit refusal of a variadic or unprototyped call: #2721.
+  steps. A variadic or unprototyped call is the call's decision, not the unit's
+  error (#2721).
 
 ## Algorithm sources and provenance
 

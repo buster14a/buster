@@ -276,9 +276,8 @@ identities. An expanded callee's instructions are an instance's (#2541 step 3,
 `IrDebugInline`): their origins follow the function's own entries, their rows
 are the callee's lines (in its file), and each instance is a
 `DW_TAG_inlined_subroutine` nested where it was expanded, whose frame a debugger
-shows, with its callee's parameters' values where the proof places their
-arguments' (`BUSTER_IR_DEBUG_BIND_INSTANCE`) and its other locals without a
-location. A dead function (`-c` only) is its abstract instance alone, so `-g`
+shows, with its callee's parameters' and locals' values where the proof places
+them (`BUSTER_IR_DEBUG_BIND_INSTANCE`, read at the instance's origins). A dead function (`-c` only) is its abstract instance alone, so `-g`
 changes no code. The unwind tables use their independent frame events as before.
 
 Value locations require concrete machine proof. Whole retained objects use a

@@ -57,13 +57,23 @@ definitions and variadic definitions remain calls, and so do calls with ABI
 records (#131's `IrCall.abi`: a call that passes or returns an aggregate by
 value, or passes one the convention ignores) other than those #1282 inlines:
 records of the call's own that match its callee's, argument by argument, with no
-hidden pointer and no ignored argument. A row call (#141) is no call site. Unknown flag bits are errors. Every known direct call's variadic
-status, and every other one's result type and fixed parameter types/count, must
-agree with its table entry, even when expansion is disabled. A call with ABI
+hidden pointer and no ignored argument. A row call (#141) is no call site. Unknown flag bits are errors.
+
+A known direct call whose signature isn't its callee's stays a call
+(`IR_INLINE_SIGNATURE`, #2721): the call's variadic status, result type and
+parameter types and count are compared with its table entry's when the call is
+decided, and a mismatch keeps that call alone, not the unit, so the caller's
+other calls are still candidates. An unprototyped call is variadic and its
+callee isn't: it is taken where its arguments are exactly the callee's
+parameters, by count and type, as a prototyped call's would be, and kept
+otherwise (an argument past the parameters, or a promoted `float`). A variadic
+call lists every argument's type, past the callee's parameters; a variadic
+callee's calls stay calls by its flag (`IR_INLINE_VARIADIC`). A call with ABI
 records has the convention's shape instead, which only its records give: its
 callee takes a hidden pointer as parameter 0, or returns its result's bytes'
 address to a void call, so its result and parameters' IR types aren't its
-callee's. The existing verifier checks actual argument types and counts.
+callee's, and its variadic status alone is compared. The existing verifier
+checks actual argument types and counts.
 
 The table is a shared symbol namespace, so cloned `IR_SYMBOL_ADDR` operations
 retain their symbol IDs. No symbol renumbering, ABI change or linker binding
@@ -209,14 +219,25 @@ copied instruction takes its callee origin there, and the instance (the
 callee's symbol, its origins, the call's origin and the instance holding that
 call) and the callee's own instances, re-based and nested in it, follow the
 caller's. A caller's slots take no callee local. Where both sidecars have
-bindings, the callee's parameters are the caller's last locals
-(`IrDebugInline.local`, `local_count`, flagged `BUSTER_IR_DEBUG_BIND_INSTANCE`,
-#2541), each with one initial binding to its argument's value where the callee
-never assigns it nor takes its address (`ir_inline_parameter_unassigned`), and
-the callee's own instances' locals follow, re-based; `ir_verify` checks that the
-instances' locals are the function's last, in order, flagged, and that their
-bindings follow the function's others. `test-ir-inline` checks an unassigned
-parameter's binding and an assigned one's absence.
+bindings, every local of the callee is the caller's (`IrDebugInline.local`,
+`local_count`, #2541): the callee's local j is the caller's `local + j`, its own
+locals flagged `BUSTER_IR_DEBUG_BIND_INSTANCE` with their callee's form
+(`ENTRY` or `REGIONS`), then its own instances' locals, re-based. The bindings
+and regions of the locals of a form follow the caller's in the callee's order,
+their entries moved into the instance's origins as its instructions' were
+(`IrDebugInline.block_end` is the callee's first block's end there), their
+values and anchors their copies (a parameter's initial binding is its
+argument's value; an assignment whose value has no copy has no value), and a
+region's block the one its callee block became (a general expansion's each its
+own, a straight line's the block it joined). A local of no form (escaped,
+volatile, not a scalar) keeps no binding, as it has none in its own function's
+proof. `ir_verify` checks that the instances' locals are the function's last,
+in order, flagged; that their bindings follow the function's others, by
+instance and each as the function's own are ordered; and that an assignment or
+region is within its instance's origins, an `ENTRY` local's assignment before
+its first block's end. `test-ir-inline` checks an unassigned parameter's
+binding, an assigned one's assignment at the instance's origin, a formless
+one's absence, and those two bounds' failures.
 
 The four byte columns and three operand columns retain their shared IR
 meanings. Constant/address rows from each expanded body are appended with
@@ -243,7 +264,8 @@ The result also retains an audit CSR indexed by original function:
 `decisions`. Call-node IDs belong to the original bodies. A missing callee
 is `UINT32_MAX`; ineligible calls generally retain unknown cost
 `UINT32_MAX`. Decisions are authoritative and distinguish disabled,
-indirect, unknown symbol, external, noinline, variadic, recursive, ABI records
+indirect, unknown symbol, external, noinline, variadic, another signature
+than the callee's (`IR_INLINE_SIGNATURE`), recursive, ABI records
 (`IR_INLINE_ABI`), unsupported body, cost threshold and growth budget cases.
 `components` and `recursive` describe the original graph. Counts report
 input/output instructions and selected original call sites.
@@ -341,9 +363,14 @@ pointer and takes the first's result, and to a stub, which takes the second's.
 Each destination must follow the renumbering, the records must stay the
 caller's and the callees', and the unit must run as it did. Dropping the
 destination's remap, either table's copy, or the rule that keeps these calls
-apart from the signature check (which refused the whole unit as a type error)
+apart from the signature check (which kept the call as another signature)
 each fails the test. A variadic call of the registers callee, which isn't
-variadic, is refused at the call, as a call of another variadic status always is. Separate transitive-closure tests check 64 call graphs,
+variadic, stays a call by its signature, and the caller's other calls are taken
+as before. The decision tests add four calls whose signatures aren't their
+callees' prototypes' (#2721): an unprototyped call of the callee's own
+argument, which is taken; a variadic callee's call with an argument past its
+parameter; an unprototyped call with one; and a call through a declaration of
+another type, each kept, its caller as it was, by both twins. Separate transitive-closure tests check 64 call graphs,
 while guarded pages cover
 empty and partial unsigned cost batches through 65 entries. Disabled mode,
 exact thresholds, growth budgets (32,769 calls whose constant rows would

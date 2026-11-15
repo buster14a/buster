@@ -1477,6 +1477,7 @@ static int run_check_debug_tests(int argc, char** argv)
             check_debug_tier1_values_test(&tally, directory, &arena);
             check_debug_tier1_inline_test(&tally, directory, &arena);
             check_debug_tier1_header_test(&tally, directory, &arena);
+            check_debug_tier1_loop_test(&tally, directory, &arena);
             check_debug_test_library_main(&tally, directory, &arena);
             check_unwind_test_driver(&tally, directory, &arena);
         }

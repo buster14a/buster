@@ -76,7 +76,9 @@ in a noinline function the innermost callee calls, shows that callee's frame at
 its call's line, its caller's at its call of the callee and `main`'s at its own.
 At each of the six stops every value gdb shows for the callees' parameters is
 the program's (the inner one's where it is live, the outer one's at all six),
-both shown at the first. gdb's `break` by the inner callee's name takes each of
+both shown at the first, and so is every value `info locals` shows for the
+inner callee's own local in its frame (`y`, its parameter's square), shown at
+least once. gdb's `break` by the inner callee's name takes each of
 its copies (5 in the executable) and stops first in `main`'s code. A `-c -g`
 object of it has no code or symbol of the two dead callees, the same code as
 without `-g`, and linked, the same frames, values and breakpoints (2). The
@@ -85,7 +87,12 @@ whose origin is the out-of-line copy, whose `DW_AT_low_pc` it inherits. Its
 header fixture (`check_debug_tier1_header_test`) expands a header's two static
 callees, the inner into the outer there and both into the main file's
 functions: gdb shows each frame at its line in its own file, in an executable
-by both paths and in a linked `-c -g` object.
+by both paths and in a linked `-c -g` object. Its expanded-loop fixture
+(`check_debug_tier1_loop_test`) expands a static callee with a loop into
+`main` twice: at each of the five stops in the noinline function the loop
+calls, the callee's counter (a local of the regions form) is the program's or
+`<optimized out>`, shown at least once, by both paths and in a linked `-c -g`
+object; its DWARF verifies and is the same bytes by both paths.
 
 The bounded variant set covers default, scalar, pre/post scheduling,
 frame-pointer and no-rematerialization native builds, and a `-c -g` object

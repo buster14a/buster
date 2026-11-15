@@ -26,7 +26,8 @@
 // a candidate), vector and scalar: the same decisions and the same caller, whose expansion must promote.
 //
 // A refusal both versions give alike (IR_ERROR_UNSUPPORTED: vectors for GVN and LICM, labels and the dynamic stack for
-// some; and the inliner's IR_ERROR_TYPE for a unit with an unprototyped call of one of its functions) is counted, not failed; any other error, a disagreement, or a result that doesn't promote fails the command, and
+// some) is counted, not failed; any other error, a disagreement, or a result that doesn't promote fails the command (the
+// inliner's unit of a variadic or unprototyped call too: its signature is the call's decision, #2721), and
 // each failure prints a line naming the file, function, pass and errors. The totals line counts, per pass, the functions
 // it ran on, those it changed, those both versions refused, and its total effect. This is a test outside the compile
 // path, with no vector path of its own; it needs no hardware counter and runs on baseline hosts too.
@@ -106,11 +107,7 @@ static bool ir_source_passes_equal(const IrFunction* a, const IrFunction* b)
 static bool ir_source_passes_record(IrSourcePassTotals* totals, IrSourcePass pass, const char* file, const uint8_t* function, IrCheck vector, IrCheck scalar, bool same, bool promotes,
                                     bool changed, uint64_t effect)
 {
-    // The inliner refuses a unit whose direct call's signature isn't its callee's (IR_ERROR_TYPE: an unprototyped
-    // call is variadic, its callee not), as the driver's expansion then keeps the calls: both versions alike, at the same
-    // node, is agreement too.
-    const bool alike = vector.error == scalar.error && vector.instruction == scalar.instruction && vector.detail == scalar.detail;
-    const bool refused = (vector.error == IR_ERROR_UNSUPPORTED && scalar.error == IR_ERROR_UNSUPPORTED) || (pass == IR_SOURCE_PASS_INLINE && vector.error == IR_ERROR_TYPE && alike);
+    const bool refused = vector.error == IR_ERROR_UNSUPPORTED && scalar.error == IR_ERROR_UNSUPPORTED;
     const bool succeeded = vector.error == IR_OK && scalar.error == IR_OK;
     const bool failed = !refused && !(succeeded && same && promotes);
     totals->ran[pass] += 1;
@@ -560,8 +557,7 @@ struct IrSourcePassCorpus
 };
 
 // One run of `pass` by one version over the corpus; the output put back after each function. Returns its reading, with
-// the functions it refused (an inliner unit both versions refuse alike is the run's input, not a failure: the
-// preparation keeps only the units that both versions take).
+// the functions it refused (the preparation keeps only the inliner units that both versions take).
 static Tier0BenchmarkReading ir_source_passes_run(IrSourcePass pass, bool scalar, const IrSourcePassCorpus* corpus, Arena* output, Arena* scratch, Tier0BenchmarkCounters counters)
 {
     uint32_t failures = 0;
@@ -714,7 +710,7 @@ static void ir_source_passes_corpus_units(IrSourcePassCorpus* corpus, const IrSo
                 .symbol_count = symbol_count,
                 .only = position + 1,
             };
-            // Kept where both versions take it: a refusal alike (an unprototyped call) is no unit's time.
+            // Kept where both versions take it: a refusal is no unit's time.
             const uint64_t mark = output->length;
             IrInlineOptions options = ir_inline_options();
             options.control_flow = true;

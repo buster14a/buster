@@ -5,6 +5,13 @@
 // retain typed-entry coordinates; only exact current IR block maps and final record permutations bound their PCs.
 // Phi entry facts come from the complete emitted-code checker, never from an allocator interval alone.
 
+// The coordinate space of local `local`'s regions (#2541): 0 for the function's own, 1 + the instance whose callee's local
+// it is for an expanded callee's.
+static uint32_t check_tier1_debug_region_space(const CheckTier1DebugValues* proof, uint32_t local)
+{
+    return proof->local_instances != NULL && local < proof->local_total && proof->local_instances[local] != BUSTER_IR_NONE ? proof->local_instances[local] + 1 : 0;
+}
+
 static bool check_tier1_debug_value_regions(CheckTier1DebugValues* proof, const Tier1EmitResult* emitted,
                                           const uint32_t* places, const uint32_t* record_order, uint8_t* cuts,
                                           bool vector, Arena* scratch)
@@ -25,6 +32,9 @@ static bool check_tier1_debug_value_regions(CheckTier1DebugValues* proof, const 
     uint32_t* fresh_at = valid && needed ? ir_allocate(scratch, (uint64_t)blocks + 1, 4, &valid) : NULL;
     uint32_t* source_end = valid && regions != 0 ? ir_allocate(scratch, (uint64_t)blocks + 1, 4, &valid) : NULL;
     uint8_t* ambiguous = valid && regions != 0 ? ir_allocate(scratch, (uint64_t)blocks + 1, 1, &valid) : NULL;
+    // Per region, whether its block is ambiguous among its coordinate space's regions (`ambiguous` by block, a space at
+    // a time: the function's own entries', or one instance's, #2541).
+    uint8_t* region_ambiguous = valid && regions != 0 ? ir_allocate(scratch, regions, 1, &valid) : NULL;
     uint32_t* after = valid && needed ? ir_allocate(scratch, (uint64_t)count + 1, 4, &valid) : NULL;
     uint32_t* before = valid && needed ? ir_allocate(scratch, (uint64_t)count + 1, 4, &valid) : NULL;
     uint32_t* fill = valid && needed ? ir_allocate(scratch, (uint64_t)count + 1, 4, &valid) : NULL;
@@ -62,14 +72,38 @@ static bool check_tier1_debug_value_regions(CheckTier1DebugValues* proof, const 
     {
         memset(source_end, 0xff, ((uint64_t)blocks + 1) * 4);
         memset(ambiguous, 0, (uint64_t)blocks + 1);
-        for (uint32_t k = 0; k < regions; k += 1)
+        // The regions are in their locals' order, and a space's locals are together: each space's run of regions marks
+        // its blocks, reads them back and clears them.
+        for (uint32_t first = 0; first < regions;)
         {
-            const IrDebugRegion region = debug->regions[k];
-            if (region.block < blocks)
+            const uint32_t space = check_tier1_debug_region_space(proof, debug->regions[first].local);
+            uint32_t end = first + 1;
+            while (end < regions && check_tier1_debug_region_space(proof, debug->regions[end].local) == space)
             {
-                ambiguous[region.block] |= source_end[region.block] != BUSTER_IR_NONE && source_end[region.block] != region.block_end;
-                source_end[region.block] = region.block_end;
+                end += 1;
             }
+            for (uint32_t k = first; k < end; k += 1)
+            {
+                const IrDebugRegion region = debug->regions[k];
+                if (region.block < blocks)
+                {
+                    ambiguous[region.block] |= source_end[region.block] != BUSTER_IR_NONE && source_end[region.block] != region.block_end;
+                    source_end[region.block] = region.block_end;
+                }
+            }
+            for (uint32_t k = first; k < end; k += 1)
+            {
+                region_ambiguous[k] = debug->regions[k].block < blocks ? ambiguous[debug->regions[k].block] : 1;
+            }
+            for (uint32_t k = first; k < end; k += 1)
+            {
+                if (debug->regions[k].block < blocks)
+                {
+                    source_end[debug->regions[k].block] = BUSTER_IR_NONE;
+                    ambiguous[debug->regions[k].block] = 0;
+                }
+            }
+            first = end;
         }
     }
     const uint32_t added = needed && emitted->general && valid ? emitted->cfg_input.block_count - blocks : 0;
@@ -211,7 +245,7 @@ static bool check_tier1_debug_value_regions(CheckTier1DebugValues* proof, const 
     // those source regions; contradictory original block ends also conservatively leave their shared block empty.
     // Within one original block, all later assignments bound an earlier window. Their RHSs may complete out of
     // source order, including across a lifetime gap, so the immediate next assignment alone is insufficient.
-    for (uint32_t local = 0; valid && regions != 0 && local < proof->function->local_count; local += 1)
+    for (uint32_t local = 0; valid && regions != 0 && local < proof->local_total; local += 1)
     {
         uint32_t binding = proof->binding_first[local + 1];
         uint32_t cutoff = count;
@@ -245,7 +279,7 @@ static bool check_tier1_debug_value_regions(CheckTier1DebugValues* proof, const 
                 const uint32_t completion = next.anchor < nodes && node_blocks[next.anchor] == region.block ? proof->completion[next.anchor] : BUSTER_IR_NONE;
                 cutoff = completion == BUSTER_IR_NONE ? 0 : completion < cutoff ? completion : cutoff;
             }
-            if (region.block < blocks && ambiguous[region.block] == 0 && region.kind != IR_DEBUG_BIND_UNAVAILABLE)
+            if (region.block < blocks && region_ambiguous[k] == 0 && region.kind != IR_DEBUG_BIND_UNAVAILABLE)
             {
                 const uint32_t begin = after[old_first[region.block]];
                 const uint32_t end = before[old_end[region.block]] < cutoff ? before[old_end[region.block]] : cutoff;
