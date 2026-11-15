@@ -254,8 +254,12 @@ compile as without the option, each unit's report added to the command's.
 optimization, emission and the final scheduler permutation (#1114). Its DWARF
 has surviving statement rows and call-site rows, qualified source types,
 parameters, locals and lexical scopes. Optimization may remove statements or
-move their instructions; generated records and inline callee instances do not
-acquire invented source identities. The unwind tables use their independent
+move their instructions; generated records do not acquire invented source
+identities. An expanded callee's instructions are an instance's (#2541 step 3,
+`IrDebugInline`): their origins follow the function's own entries, their rows
+are the callee's lines, and each instance whose call is in the function's file
+is a `DW_TAG_inlined_subroutine` nested where it was expanded, whose frame a
+debugger shows; its callee's locals have no locations. The unwind tables use their independent
 frame events as before.
 
 Value locations require concrete machine proof. Whole retained objects use a

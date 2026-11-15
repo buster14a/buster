@@ -4019,19 +4019,41 @@ static uint64_t oracle_server_deadline(const OracleServer* server, uint32_t time
     return oracle_now() + (uint64_t)seconds * 1000000000;
 }
 
-// Sends all `size` bytes of `data` on the server's socket: false if it can't, the server having ended.
-static bool oracle_server_send(int socket, const void* data, size_t size)
+// Sends all `size` bytes of `data` by the request's absolute deadline. A server that stops reading must not hold the
+// client inside a blocking send: only poll waits, and partial writes and interrupted waits keep the same deadline.
+static bool oracle_server_send(int socket, const void* data, size_t size, uint64_t deadline)
 {
     const char* at = data;
     bool complete = true;
     while (complete && size != 0)
     {
-        const ssize_t sent = send(socket, at, size, MSG_NOSIGNAL);
-        complete = sent > 0 || (sent < 0 && errno == EINTR);
+        const uint64_t now = deadline != UINT64_MAX ? oracle_now() : 0;
+        if (deadline != UINT64_MAX && now >= deadline)
+        {
+            complete = false;
+            break;
+        }
+        const ssize_t sent = send(socket, at, size, MSG_NOSIGNAL | MSG_DONTWAIT);
         if (sent > 0)
         {
             at += sent;
             size -= (size_t)sent;
+        }
+        else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            const uint64_t before_wait = deadline != UINT64_MAX ? oracle_now() : 0;
+            const uint64_t milliseconds = deadline != UINT64_MAX && before_wait < deadline ? (deadline - before_wait + 999999) / 1000000 : 0;
+            struct pollfd item = {
+                .fd = socket,
+                .events = POLLOUT,
+            };
+            const int timeout = deadline == UINT64_MAX ? -1 : milliseconds < INT_MAX ? (int)milliseconds : INT_MAX;
+            const int ready = poll(&item, 1, timeout);
+            complete = (ready > 0 && (item.revents & POLLOUT) != 0 && (item.revents & (POLLERR | POLLHUP | POLLNVAL)) == 0) || (ready < 0 && errno == EINTR);
+        }
+        else
+        {
+            complete = sent < 0 && errno == EINTR;
         }
     }
     return complete;
@@ -4064,11 +4086,11 @@ static bool oracle_server_receive(int socket, void* data, size_t size, uint64_t 
 }
 
 // One of the protocol's strings: its length, then its bytes.
-static bool oracle_server_send_text(int socket, const char* text)
+static bool oracle_server_send_text(int socket, const char* text, uint64_t deadline)
 {
     const size_t length = strlen(text);
     const uint32_t prefix = (uint32_t)length;
-    return length <= UINT32_MAX && oracle_server_send(socket, &prefix, sizeof(prefix)) && oracle_server_send(socket, text, length);
+    return length <= UINT32_MAX && oracle_server_send(socket, &prefix, sizeof(prefix), deadline) && oracle_server_send(socket, text, length, deadline);
 }
 
 // Ends the process's server: its socket closed and its process killed and waited for. A forked child's copy of its
@@ -4140,7 +4162,7 @@ static bool oracle_server_start(OracleServer* server)
         uint32_t length = 0;
         const int socket = server->socket;
         const uint64_t deadline = oracle_server_deadline(server, 0);
-        const bool answered = socket >= 0 && oracle_server_send(socket, header, sizeof(header)) && oracle_server_receive(socket, &status, sizeof(status), deadline) &&
+        const bool answered = socket >= 0 && oracle_server_send(socket, header, sizeof(header), deadline) && oracle_server_receive(socket, &status, sizeof(status), deadline) &&
                               oracle_server_receive(socket, &length, sizeof(length), deadline) && status == 0 && length != 0 && length < sizeof(server->version) &&
                               oracle_server_receive(socket, server->version, length, deadline);
         server->version[answered ? length : 0] = 0;
@@ -4156,10 +4178,10 @@ static bool oracle_server_start(OracleServer* server)
 // path, with exactly `environment`, its standard input `input` (an absolute path, or null: /dev/null), and the streams
 // in `streams` (1: standard output, 2: standard error, 3: both) captured into *output and *errors (malloc's, each with a
 // NUL after its bytes, or null where not captured; the caller frees them), within `timeout` seconds from its sending (0:
-// the server's limit, oracle_server_deadline). The run's exit status (the low 8 bits a clang process's would have), or
+// the server's limit, oracle_server_deadline). The run's exit status (0 through 255, as a clang process's would have), or
 // -1 if the server couldn't take it: it couldn't start, or it ended without a reply (a crash in clang ends it), or didn't
-// reply in time (OracleServer.stalled); it is then stopped (killed, where it is still running the request), and the
-// next request starts another.
+// reply in time (OracleServer.stalled), or its status was outside the protocol's exit-status range (#2740); it is then
+// stopped (killed, where it is still running the request), and the next request starts another.
 static int oracle_server_run(OracleServer* server, char* const* arguments, char* const* environment, const char* directory, const char* input, uint32_t streams,
                              uint32_t timeout, char** output, uint64_t* output_length, char** errors, uint64_t* errors_length)
 {
@@ -4181,18 +4203,18 @@ static int oracle_server_run(OracleServer* server, char* const* arguments, char*
     const uint32_t header[3] = { count, streams | (input != 0 ? 4u : 0u), variables };
     const bool started = oracle_server_start(server);
     const uint64_t deadline = oracle_server_deadline(server, timeout);
-    bool sent = started && oracle_server_send(server->socket, header, sizeof(header)) && oracle_server_send_text(server->socket, directory);
-    sent = sent && (input == 0 || oracle_server_send_text(server->socket, input));
+    bool sent = started && oracle_server_send(server->socket, header, sizeof(header), deadline) && oracle_server_send_text(server->socket, directory, deadline);
+    sent = sent && (input == 0 || oracle_server_send_text(server->socket, input, deadline));
     for (uint32_t i = 0; sent && i < count; i += 1)
     {
-        sent = oracle_server_send_text(server->socket, arguments[i]);
+        sent = oracle_server_send_text(server->socket, arguments[i], deadline);
     }
     for (uint32_t i = 0; sent && i < variables; i += 1)
     {
-        sent = oracle_server_send_text(server->socket, environment[i]);
+        sent = oracle_server_send_text(server->socket, environment[i], deadline);
     }
     int32_t status = -1;
-    bool received = sent && oracle_server_receive(server->socket, &status, sizeof(status), deadline);
+    bool received = sent && oracle_server_receive(server->socket, &status, sizeof(status), deadline) && status >= 0 && status <= UINT8_MAX;
     char** const texts[2] = { output, errors };
     uint64_t* const lengths[2] = { output_length, errors_length };
     for (uint32_t c = 0; c < 2; c += 1)
@@ -4217,12 +4239,12 @@ static int oracle_server_run(OracleServer* server, char* const* arguments, char*
         *output_length = 0;
         *errors_length = 0;
     }
-    server->stalled = sent && !received && oracle_now() >= deadline;
+    server->stalled = started && !received && oracle_now() >= deadline;
     if (started && !received)
     {
         oracle_server_stop(server);
     }
-    return received ? status & 0xff : -1;
+    return received ? status : -1;
 }
 
 // What a process's served runs did, in shared memory so that a test's forked parts add to them: runs whose result was
@@ -4545,7 +4567,8 @@ static __attribute__((unused)) bool oracle_serve_takes(char* const* arguments, c
 // `timeout` seconds (0: the server's limit, oracle_server_deadline), the streams in `streams` (oracle_server_run's: 1
 // standard output, 2 errors, 3 both, each other discarded) into *output and *errors (oracle_server_run's; the caller
 // frees them). Its exit status, or -1 if the server couldn't take it or didn't answer in time, when the caller runs it
-// as a child. Counted as served or not served, unless `both` (--differential), when oracle_serve_compare counts it.
+// as a child. Counted as served or not served, unless `both` (--differential) has an answer for oracle_serve_compare;
+// a missing answer is still counted as not served.
 static __attribute__((unused)) int oracle_serve_command(char* const* arguments, char* const* environment, const char* input, uint32_t streams, uint32_t timeout, bool both,
                                                          char** output, uint64_t* output_length, char** errors, uint64_t* errors_length)
 {
@@ -4563,7 +4586,7 @@ static __attribute__((unused)) int oracle_serve_command(char* const* arguments, 
     {
         oracle_serve_count(begun, status);
     }
-    if (!both)
+    if (!both || status < 0)
     {
         oracle_count(status >= 0 ? &counts->served : &counts->unserved);
     }
@@ -4652,7 +4675,7 @@ static __attribute__((unused)) int oracle_serve_child(const char* purpose, char*
     char* texts[2] = { 0, 0 };
     uint64_t lengths[2] = { 0, 0 };
     const int status = child ? oracle_command_child(arguments, environment, streams, &texts[0], &lengths[0], &texts[1], &lengths[1]) : served_status << 8;
-    if (takes && both)
+    if (takes && both && served_status >= 0)
     {
         const char* const results[2] = { texts[0], texts[1] };
         const char* const answers[2] = { served[0], served[1] };
@@ -4731,7 +4754,13 @@ static bool oracle_run_start(OracleRun* run)
     run->served = serves && oracle_run_serve(run);
     if (run->comparing)
     {
-        oracle_run_serve(run);
+        // A request the server could not answer falls back to the ordinary run even in differential mode (#2421).
+        // Only a complete answer can disagree with that run; a nonzero compiler exit remains a complete answer.
+        run->comparing = oracle_run_serve(run);
+        if (!run->comparing)
+        {
+            oracle_count(&oracle_serving.counts->unserved);
+        }
     }
     if (serves && !run->served)
     {

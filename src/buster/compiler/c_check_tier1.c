@@ -806,6 +806,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .source_records = debug.source_records,
             .source_origins = debug.source_origins,
             .source_count = debug.source_count,
+            .source_inlines = debug.inlines,
+            .source_inline_count = debug.inline_count,
             .frames = emitted.frame_event_count != 0 ? frames : 0,
             .frame_count = emitted.frame_event_count,
             .frame_status = EMITTED_FRAME_DESCRIBED,

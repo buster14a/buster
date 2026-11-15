@@ -966,6 +966,36 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         // The edges along which a long double phi (#141) takes a value, which tier1_emit_cfg_x87_phis copies: placed as
         // edges with moves.
         uint8_t* edge_copies = prepared->x87_count != 0 ? ir_allocate(output, (uint64_t)edges + 1, 1, &ok) : 0;
+        // The fixed registers' sequences (#2767): each node whose rule takes general registers it may write over values
+        // (tier1_select_fixed_registers, which tier1_emit_cfg_fixed saves values around), at its definition phase, those of
+        // them the values may take, the value it reads there and leaves (tier1_select_fixed_reader: a shift's count), and
+        // the operand and own value its records would move out of them (tier1_select_fixed_operand, _result). A range live
+        // across one avoids them, but its reader's, and so do those two.
+        // Room for every node with fixed registers (emitted->fixed_count, its asm bodies' too), filled in one pass, which
+        // a function without one, most, doesn't take.
+        const uint32_t fixed_nodes = emitted->fixed_count;
+        uint32_t* sequences = fixed_nodes != 0 ? ir_allocate(output, fixed_nodes, 4, &ok) : 0;
+        uint32_t* sequence_registers = fixed_nodes != 0 ? ir_allocate(output, fixed_nodes, 4, &ok) : 0;
+        uint32_t* sequence_readers = fixed_nodes != 0 ? ir_allocate(output, fixed_nodes, 4, &ok) : 0;
+        uint32_t* sequence_operands = fixed_nodes != 0 ? ir_allocate(output, fixed_nodes, 4, &ok) : 0;
+        uint32_t* sequence_results = fixed_nodes != 0 ? ir_allocate(output, fixed_nodes, 4, &ok) : 0;
+        uint32_t sequence_count = 0;
+        for (uint32_t node = 0; ok && sequence_results != 0 && node < count; node += 1)
+        {
+            const bool selected = !plan->covered[node] && function->op[node] != IR_PHI && !tier1_select_entry_parameter(function, node);
+            const uint32_t written = selected ? tier1_select_fixed_registers(plan->patterns[node].rule) & registers : 0;
+            if (written != 0)
+            {
+                const uint32_t reader = tier1_select_fixed_reader(&plan->patterns[node]);
+                const uint32_t operand = tier1_select_fixed_operand(&plan->patterns[node]);
+                sequences[sequence_count] = base + 2 * node + 1;
+                sequence_registers[sequence_count] = written;
+                sequence_readers[sequence_count] = reader < count ? node_values[reader] : BUSTER_TIER1_CFG_NONE;
+                sequence_operands[sequence_count] = operand < count ? node_values[operand] : BUSTER_TIER1_CFG_NONE;
+                sequence_results[sequence_count] = tier1_select_fixed_result(&plan->patterns[node]) ? node_values[node] : BUSTER_TIER1_CFG_NONE;
+                sequence_count += 1;
+            }
+        }
         error = ok ? error : TIER1_EMIT_MEMORY;
         for (uint32_t b = added; error == TIER1_EMIT_OK && edge_copies != 0 && b < blocks; b += 1)
         {
@@ -1003,6 +1033,12 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             .phi_operand_offsets = phi_operand_offsets,
             .phi_operands = phi_operands,
             .ties = ties,
+            .sequences = sequences,
+            .sequence_registers = sequence_registers,
+            .sequence_readers = sequence_readers,
+            .sequence_operands = sequence_operands,
+            .sequence_results = sequence_results,
+            .sequence_count = sequence_count,
             .block_count = blocks,
             .edge_count = edges,
             .value_count = value_count,
@@ -1116,12 +1152,13 @@ static Tier1EmitError tier1_emit_cfg_saves(const Tier1SelectPlan* plan, Arena* s
     {
         const uint32_t class = cfg->intervals.classes[i];
         const uint32_t own = emitted->cfg_input.definitions[cfg->intervals.values[i]];
+        const uint32_t owner = emitted->value_nodes[cfg->intervals.values[i]];
         for (uint32_t f = allocation->fragment_offsets[i]; f < allocation->fragment_offsets[i + 1]; f += 1)
         {
             const uint32_t reg = allocation->registers[f];
             const bool in_register = allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER;
             // A register found saved isn't searched again: its column is left out.
-            general_saved |= class == BUSTER_TIER1_ALLOCATE_GPR && tier1_emit_fragment_saved(allocation, f, own, columns & ~general_saved, emitted->callee_registers, &saves) ? 1u << reg : 0;
+            general_saved |= class == BUSTER_TIER1_ALLOCATE_GPR && tier1_emit_fragment_saved(allocation, f, own, owner, columns & ~general_saved, emitted->callee_registers, &saves) ? 1u << reg : 0;
             for (uint32_t list = 0; class != BUSTER_TIER1_ALLOCATE_GPR && list < 4; list += 1)
             {
                 const uint32_t* positions = list == 0 ? calls : list == 1 ? rows : list == 2 ? bodies : masked;
@@ -1589,15 +1626,17 @@ static Tier1EmitError tier1_emit_cfg_aggregate_zmm(Tier1EmitResult* emitted, uin
 
 // A node whose rule takes x86's fixed registers (tier1_select_fixed: a division or a shift by a register, a division by a
 // constant's reciprocal), with any other value live past it in those registers, by its interval at the node's definition
-// phase, saved around it in its call-save row (tier1_emit_cfg_problem gives it one; tier1_emit_fixed).
-static Tier1EmitError tier1_emit_cfg_fixed(Tier1EmitResult* emitted, const Tier1EmitTransitions* transitions, uint32_t node, uint32_t use, const Tier1SelectHoles* holes, Tier1EmitBuffer* buffer)
+// phase, saved around it in its call-save row (tier1_emit_cfg_problem gives it one; tier1_emit_fixed). But the rule's
+// reader (tier1_select_fixed_reader, #2767): a shift's count in rcx, which the shift reads there and leaves.
+static Tier1EmitError tier1_emit_cfg_fixed(const Tier1SelectPlan* plan, Tier1EmitResult* emitted, const Tier1EmitTransitions* transitions, uint32_t node, uint32_t use, const Tier1SelectHoles* holes, Tier1EmitBuffer* buffer)
 {
     const uint32_t fixed = tier1_select_fixed_registers(holes->rule);
+    const uint32_t reader = tier1_select_fixed_reader(&plan->patterns[node]);
     uint32_t saved = 0;
     for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
     {
         const uint32_t owner = transitions->owners[reg];
-        const bool live = ((fixed >> reg) & 1) != 0 && owner != BUSTER_IR_NONE && owner != node && transitions->registers[owner] == reg &&
+        const bool live = ((fixed >> reg) & 1) != 0 && owner != BUSTER_IR_NONE && owner != node && owner != reader && transitions->registers[owner] == reg &&
                           tier1_cfg_interval_at(&emitted->cfg, emitted->node_values[owner], use + 1) != BUSTER_TIER1_CFG_NONE;
         saved |= live && reg != holes->destination ? 1u << reg : 0;
     }
@@ -4117,7 +4156,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             }
             else if (error == TIER1_EMIT_OK && selected && tier1_select_fixed_registers(plan->patterns[node].rule) != 0)
             {
-                error = tier1_emit_cfg_fixed(emitted, &transitions, node, use, &holes, &buffer);
+                error = tier1_emit_cfg_fixed(plan, emitted, &transitions, node, use, &holes, &buffer);
                 tier1_emit_fixed_rows(&saves, tier1_select_fixed_registers(plan->patterns[node].rule));
             }
             else if (error == TIER1_EMIT_OK && selected && dropped[node] != 0)

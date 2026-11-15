@@ -357,10 +357,95 @@ static void check_debug_values_test_parameters(CheckDebugTestTally* tally, const
                             "prototype-parameter objects are byte-identical by both paths", source);
 }
 
+// The unit's roots (check_debug_value_roots, #2531): its DWARF describes what its definitions reach, as clang's does. A
+// prototype, an extern declaration, a typedef, a tag and an enumeration that nothing defined in the unit names stay out
+// of it; a typedef a definition names stays, and so does one that typedef's declaration names in turn. Each of Buster's
+// paths and clang.
+static void check_debug_values_test_roots(CheckDebugTestTally* tally, const char* directory, Arena* arena)
+{
+    static const char text[] =
+        "typedef unsigned long unused_size;\n"
+        "struct unused_struct { int a; long b; };\n"
+        "typedef struct unused_struct unused_alias;\n"
+        "enum unused_enum { unused_first, unused_second };\n"
+        "extern int unused_extern;\n"
+        "int unused_prototype(const char *, double);\n"
+        "struct used_struct { int x; };\n"
+        "typedef long base_count;\n"
+        "typedef base_count used_count;\n"
+        "extern int used_extern;\n"
+        "int called(const char *);\n"
+        "static int file_static = 3;\n"
+        "int defined_global = 7;\n"
+        "used_count debug_roots(struct used_struct *p)\n"
+        "{\n"
+        "    return p->x + used_extern + called(\"a\") + file_static + defined_global;\n"
+        "}\n";
+    static const char* const forbidden[] = {
+        "\"unused_size\"",
+        "\"unused_struct\"",
+        "\"unused_alias\"",
+        "\"unused_enum\"",
+        "\"unused_first\"",
+        "\"unused_extern\"",
+        "\"unused_prototype\"",
+        "\"used_extern\"",
+        "\"called\"",
+    };
+    static const char* const required[] = {
+        "\"used_struct\"",
+        "\"used_count\"",
+        "\"base_count\"",
+        "\"file_static\"",
+        "\"defined_global\"",
+        "\"debug_roots\"",
+    };
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/dbg_roots.c", directory);
+    const bool written = foreign_test_write(source, text, sizeof(text) - 1);
+    check_debug_test_expect(tally, written, "write the roots fixture", source);
+    String8 files[2] = { 0 };
+    for (uint32_t v = 0; written && v < 3; v += 1)
+    {
+        char object[PATH_MAX];
+        char report[PATH_MAX + 24];
+        char errors[PATH_MAX + 24];
+        snprintf(object, sizeof(object), "%s/dbg_roots_%u.o", directory, v);
+        snprintf(report, sizeof(report), "%s.info", object);
+        snprintf(errors, sizeof(errors), "%s.err", object);
+        char* compile[] = { (char*)(v == 2 ? "clang" : "/proc/self/exe"), (char*)"-c", (char*)"-g", (char*)"-o", object, source,
+                            v == 1 ? (char*)"--scalar" : 0, 0 };
+        const bool compiled = object_test_run(compile, "/dev/null", errors) == 0;
+        check_debug_test_expect(tally, compiled, "Buster's paths and clang compile the roots fixture", errors);
+        char* dump[] = { (char*)"llvm-dwarfdump", (char*)"--debug-info", object, 0 };
+        const bool dumped = compiled && object_test_run(dump, report, errors) == 0;
+        const String8 info = dumped ? foreign_test_read(arena, report) : (String8){ 0 };
+        check_debug_test_expect(tally, info.pointer != NULL, "read the roots fixture's DWARF", report);
+        for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(forbidden); n += 1)
+        {
+            check_debug_test_expect(tally, info.pointer != NULL && strstr(info.pointer, forbidden[n]) == NULL,
+                                    "what no definition of the unit names stays out of its DWARF, as clang's", forbidden[n]);
+        }
+        for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(required); n += 1)
+        {
+            check_debug_test_expect(tally, info.pointer != NULL && strstr(info.pointer, required[n]) != NULL,
+                                    "the unit's definitions, defined objects and the types and typedefs they name remain in its DWARF", required[n]);
+        }
+        if (v < 2 && compiled)
+        {
+            files[v] = foreign_test_read(arena, object);
+        }
+    }
+    check_debug_test_expect(tally, files[0].pointer != NULL && files[1].pointer != NULL && files[0].length == files[1].length &&
+                                  memcmp(files[0].pointer, files[1].pointer, files[0].length) == 0,
+                            "the roots fixture's objects are byte-identical by both paths", source);
+}
+
 static void check_debug_values_test(CheckDebugTestTally* tally, const char* directory, Arena* arena)
 {
     check_debug_values_test_ranges(tally);
     check_debug_values_test_parameters(tally, directory, arena);
+    check_debug_values_test_roots(tally, directory, arena);
     char source[PATH_MAX];
     char other[PATH_MAX];
     char outputs[3][PATH_MAX];

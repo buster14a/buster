@@ -425,6 +425,12 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
         const String8 type = check_semantic_auto_type_spelling(parser, pp, input, types, spell, report->type, BUSTER_CHECK_NONE, scratch);
         result = type.length == 0 ? NULL : check_warning_text(scratch, "restrict requires a pointer or reference (%.*s is invalid)", (int)type.length, type.pointer);
     }
+    else if (report->message == CHECK_INPUT_AUTO_TYPE_INITIALIZER && report->type != 0 && name.length != 0)
+    {
+        const String8 type = check_semantic_auto_type_spelling(parser, pp, input, types, spell, report->type, token, scratch);
+        result = type.length == 0 ? NULL : check_warning_text(scratch, "declaration of variable '%.*s' with deduced type %.*s requires an initializer",
+                                                              (int)name.length, name.pointer, (int)type.length, type.pointer);
+    }
     else if ((report->message == CHECK_INPUT_REDECLARATION || report->message == CHECK_INPUT_CONFLICTING_TYPES) && token < count && name.length != 0)
     {
         const uint32_t previous = report->subject - 1;

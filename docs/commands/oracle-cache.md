@@ -13,7 +13,8 @@ requirements. [Command index](README.md).
   tool again, and `check` runs every one and fails on a kept result that
   differs. A test given `--clang-server` sends its clang runs to
   `tools/clang-server` instead, which keeps none ([Served runs](#served-runs)).
-  `oracle_cache_test.c` holds its tests (`./build/compiler test-oracle-cache`);
+  `oracle_cache_test.c` and its private `oracle_server_test.c` hold its tests
+  (`./build/compiler test-oracle-cache`);
   [The oracle cache](#the-oracle-cache) describes both.
 ## The oracle cache
 
@@ -506,10 +507,24 @@ ends it) stops it, and the next request starts another, at most four times in
 a process.
 Every request has a time limit, and so does the server's first answer: the
 run's own, or the server's (`BUSTER_ORACLE_SERVER_SECONDS`, 60 s;
-`OracleServer.seconds` overrides it, as the test does). A server that gives no
+`OracleServer.seconds` overrides it, as the test does). The same absolute
+deadline bounds sending the request and receiving its reply. Sends are
+nonblocking and wait for socket room only until that deadline; partial writes
+and interrupted waits never restart it. A server that stops reading a large
+argument or environment therefore times out, is stopped and reaped, and counts
+as a stalled, unanswered request (#2761). A server that gives no
 answer in time is stopped (killed) and the run runs as a child, so a stalled
 server costs its limit rather than hanging until the command's own (#2263,
 whose shard ran three commands to the 600 s limit).
+The reply's signed 32-bit status must be a process exit code, 0 through 255.
+An out-of-range status fails the request and stops the server; it is not
+truncated to eight bits, which could turn a malformed status into success (#2740).
+
+The private transport tests force small socket buffers, partial writes and
+repeated signals. They cover an expired deadline on a writable socket, a
+closed peer, blocked arguments and environments, ordinary-child fallback and
+restart after a failed transmission. An independent parent watchdog bounds
+the tests even if a regression restores an unbounded send.
 
 A served run keeps the cache's contract by not entering it: the server's
 process isn't traced, so its result can't be an entry, whose every dependency a
@@ -532,6 +547,10 @@ and printed (`oracle_serve_compare`) and fails the test
 and runs that fit but that the server couldn't take, which ran as children;
 then the server's answers and their time, in total and per answer, and the
 requests that ran past their limit, each also printed as it happens).
+A lost, truncated or timed-out reply has no compiler result to compare. In
+differential mode too, that request is counted as unserved and the ordinary
+run supplies its result; the next complete reply is compared normally (#2421).
+Nonzero compiler exits are complete replies and still participate in comparison.
 
 A test that starts its clang itself, outside the cache (`test-preprocessor`'s
 fuzz batch, `preprocessor_fuzz_clang_process`), sends those runs to the same

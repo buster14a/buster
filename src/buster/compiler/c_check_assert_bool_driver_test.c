@@ -39,6 +39,79 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
     static const CheckDriverAssertFile failed[] =
     {
         {
+            .path = "tests/driver/assert_bool_nested.c",
+            .fixture =
+            {
+                .name = "failed assertions retain nested boolean conversions in order",
+                // The separate constant-logical-operand warning family is outside this recovery path.
+                .options = { "-Wno-constant-logical-operand" },
+                .warnings = 23,
+                .errors = 15,
+                .notes = 2,
+            },
+        },
+        {
+            .path = "tests/driver/assert_bool_nested.c",
+            .fixture =
+            {
+                .name = "failed nested assertion conversions retain C23 and enabled signed shifts",
+                .options = { "-Wno-constant-logical-operand", "-Wint-in-bool-context" },
+                .warnings = 24,
+                .errors = 15,
+                .notes = 2,
+                .c23 = true,
+            },
+        },
+        {
+            .path = "tests/driver/assert_bool_nested.c",
+            .fixture =
+            {
+                .name = "failed nested assertion warnings precede the error limit",
+                .options = { "-Wno-constant-logical-operand", "-ferror-limit=1" },
+                .warnings = 3,
+                .errors = 2,
+            },
+        },
+        {
+            .path = "tests/driver/assert_bool_nested.c",
+            .fixture =
+            {
+                .name = "failed nested assertion warnings precede fatal errors",
+                .options = { "-Wno-constant-logical-operand", "-Wfatal-errors" },
+                .warnings = 1,
+                .errors = 1,
+            },
+        },
+        {
+            .path = "tests/driver/assert_bool_nested_controls.c",
+            .fixture =
+            {
+                .name = "failed assertion traversal respects explicit casts and unevaluated operands",
+                .errors = 7,
+                .notes = 3,
+            },
+        },
+        {
+            .path = "tests/driver/assert_bool_nested_deep.c",
+            .fixture =
+            {
+                .name = "failed assertion traversal grows its frontier and follows builtin arguments",
+                .warnings = 4,
+                .errors = 3,
+                .notes = 1,
+            },
+        },
+        {
+            .path = "tests/driver/assert_bool_nested_policy.c",
+            .fixture =
+            {
+                .name = "failed nested assertion warnings keep pragma and macro policy",
+                .warnings = 3,
+                .errors = 3,
+                .notes = 1,
+            },
+        },
+        {
             .path = "tests/driver/assert_bool_failed.c",
             .fixture =
             {

@@ -4069,11 +4069,25 @@ static void oracle_test_served_children(OracleTest* test, const char* server, co
     oracle_test_expect(test, both && alike && oracle_serving.counts->compared == 2 && oracle_serving.counts->differences == 1 && neither == 0 &&
                                  !oracle_serve_end("oracle test"),
                        "served children: --differential's runs both ways, the child's result the run's, a difference failing the test");
+
+    // A server that loses a request has no result for comparison. Differential mode keeps the child's complete
+    // result and counts the request as unserved; the next answered request is compared normally (#2421).
+    oracle_serve(server, test->helper, true);
+    status = prepared ? oracle_serve_child(purpose, cat, crashing, 3, &output, &output_length, &errors, &errors_length) : -1;
+    bool recovered = oracle_test_child_result(status, output, output_length, errors, errors_length, 0, "served bytes\n", "");
+    recovered = recovered && oracle_serving.counts->compared == 0 && oracle_serving.counts->differences == 0 && oracle_serving.counts->unserved == 1;
+    status = prepared ? oracle_serve_child(purpose, cat, without, 3, &output, &output_length, &errors, &errors_length) : -1;
+    recovered = oracle_test_child_result(status, output, output_length, errors, errors_length, 0, "served bytes\n", "") && recovered;
+    oracle_test_expect(test, recovered && oracle_serving.counts->compared == 1 && oracle_serving.counts->differences == 0 && oracle_serving.server.starts == 2 &&
+                                 oracle_serve_end("oracle test"),
+                       "served children: differential mode falls back after a lost reply and compares the next answer");
     unsetenv("ORACLE_TEST_CHILD");
     free(without);
     free(crashing);
     free(lying);
 }
+
+#include "oracle_server_test.c"
 
 // Served runs (oracle_serve, oracle_cache.c's --- Served runs ---), with a server of the test's own (oracle_test_server)
 // standing for the test's program, whose `cat` of a run's input is the run: served with the cache off; in use mode an
@@ -4113,6 +4127,7 @@ static void oracle_test_served(OracleTest* test)
     const bool ready = built && lying != 0 && crashing != 0 && stalling != 0 && overriding != 0 && oracle_test_write(input, "served bytes\n", 13) &&
                        oracle_test_write(other, "other bytes\n", 12);
     oracle_test_expect(test, ready, "served: the test's server built");
+    oracle_test_server_transport(test, server, input, ready);
     char* cat[] = { test->helper, "cat", 0 };
     OracleRun run;
     uint32_t files = 0;
@@ -4165,6 +4180,18 @@ static void oracle_test_served(OracleTest* test)
     oracle_run_release(&run);
     oracle_test_expect(test, alike && ran && oracle_serving.counts->compared == 2 && oracle_serving.counts->differences == 1 && !oracle_serve_end("oracle test"),
                        "served: --differential runs each both ways, the child's result the run's, and a difference fails");
+
+    oracle_serve(server, test->helper, true);
+    ran = ready && oracle_test_serve(&off, cat, input, crashing, 0, &run) && !run.served && !run.comparing && !run.answered &&
+          oracle_test_served_text(&run, "served bytes\n");
+    oracle_run_release(&run);
+    const bool recovered = ran && oracle_serving.counts->compared == 0 && oracle_serving.counts->differences == 0 && oracle_serving.counts->unserved == 1;
+    ran = ready && oracle_test_serve(&off, cat, input, 0, 0, &run) && !run.served && run.comparing && run.answered &&
+          oracle_test_served_text(&run, "served bytes\n");
+    oracle_run_release(&run);
+    oracle_test_expect(test, recovered && ran && oracle_serving.counts->compared == 1 && oracle_serving.counts->differences == 0 &&
+                                 oracle_serving.server.starts == 2 && oracle_serve_end("oracle test"),
+                       "served: differential mode falls back after a lost reply and compares the next answer");
 
     // A server that ends in a run: the run as a child, the next served by another.
     oracle_serve(server, test->helper, false);

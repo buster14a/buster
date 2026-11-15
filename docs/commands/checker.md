@@ -83,7 +83,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --operand-diagnostics-only | --label-attributes-only |
-  --attribute-recovery-only] [--in-process] [--clang-server PATH]
+  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; with
@@ -110,8 +110,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   run's, and one whose process-start inputs (`BUSTER_HUGE_PAGES`,
   `BUSTER_TEST_HOST_BUSY`, the lanes' test hooks, the transparent huge pages
   setting) differ from the test's own at its start. `--differential` also
-  runs each such command as a child and fails on a difference in status or
-  output, but `--time-stages` and `--lane-cpus` runs, whose numeric report
+  runs each such command as a child and fails on a difference in a complete server reply's status or
+  output. A request with no complete reply uses the child's result without a differential comparison (#2421).
+  `--run-modes-only` checks unavailable, truncated and timed-out replies with a deterministic protocol peer,
+  successful and rejected real Clang runs, invalid protocol statuses (#2740), and complete replies that genuinely differ.
+  `--time-stages` and `--lane-cpus` runs, whose numeric report
   lines and lane order differ between any two runs, compare their other lines
   in any order. The run reports the counts and the warning sweep's time, and
   a `run costs` line: the served runs' time, the requests past the server's
@@ -130,9 +133,15 @@ unused-warning fixtures also check exact scope-completion tokens.
   typedef and qualifier spelling, and valid scalar/record/atomic-lvalue controls. The
   atomic conditional controls also compile, link and execute selections of integer,
   floating, pointer and aligned values through Clang and all three Buster routes.
+  `--assert-bool-only` runs `c_check_assert_bool_driver_test.c` alone, including
+  the original `tests/driver/assert_bool_*.c` sources for root and nested
+  boolean-conversion warnings in failed static assertions (#2409). It compares
+  complete diagnostics and exit status under warning promotion/suppression,
+  error limits, source policy, C17/C23, both reader choices and lane requests,
+  and verifies existing object-output preservation for rejected input.
   `--semantic-recovery-only` runs
   `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,
-  `c_check_attribute_call_recovery_driver_test.c`,
+  `c_check_attribute_call_recovery_driver_test.c`, `c_check_malformed_call_driver_test.c`,
   `c_check_type_attribute_recovery_driver_test.c`, `c_check_attribute_declaration_driver_test.c`,
   `c_check_structural_recovery_driver_test.c` and `c_check_repaired_view_driver_test.c` alone, the whole output and status
   of semantic error recovery's fixtures against clang's on the vector, scalar
@@ -151,13 +160,26 @@ unused-warning fixtures also check exact scope-completion tokens.
   require an ELF object that links and runs. Invalid inputs preserve existing
   output or create none. Prefix/reparse contract checks also retain the complete
   meaning metadata and a separate mutable table for each reparse (#2748).
-  `--attribute-recovery-only` runs the mixed-label, implicit-int-declaration and
-  attribute-led-call fixtures together. Its `attribute-recovery-integration.c`
+  `--attribute-recovery-only` runs the balanced string-list, mixed-label,
+  implicit-int-declaration and attribute-led-call fixtures together. The string
+  lists include malformed string subscripts through parentheses and macros,
+  repeated and split lists, valid adjacent-string controls and an assumption
+  with a subscript. Their errors retain later diagnostics and existing object
+  output, and accepted controls must produce an ELF object. Its `attribute-recovery-integration.c`
   combines their recovery paths in two functions, preserving the complete
   diagnostic order and later independent errors. The declaration portion runs
   in C99–C17, the call portion before C23, and the label portion in every
   tested standard. This focused section supports sanitizer and in-process/child
   differential checks without running the unrelated recovery fixtures.
+  `--malformed-calls-only` runs the ordinary balanced single-argument recovery
+  cases in `tests/checker/parse-recovery/malformed-calls.*` (#2406), comparing
+  complete GNU89/GNU17/C23 diagnostics and status, both readers, syntax/object
+  output, warning policies, `-fno-builtin` and error limits. Mixed ordinary and
+  attribute-led macro calls cover multiple rounds and repaired/rejected views;
+  metadata contracts keep each callee source paired with its use flag. Boundary
+  controls exclude later arguments, semicolon crossings, mismatched delimiters,
+  member callees and catalog names. Rejected output is preserved and valid
+  cast/`sizeof` controls must produce an ELF object.
   `--type-sugar-only` runs
   `c_check_type_sugar_driver_test.c` alone, the typedef sugar diagnostics keep
   through typedef chains, members and qualified arrays, and const assignment's
@@ -254,12 +276,21 @@ unused-warning fixtures also check exact scope-completion tokens.
   fixtures compare independent counts, severity and complete diagnostic lines with Clang through default,
   scalar and deferred reader routes, including warning flags and source diagnostic pragmas.
   `-Wsign-compare` retains the original unsignedness of both operands before narrow integer promotion (#1391).
-  An `unsigned char` or `unsigned short` promoted to `int` cannot become negative; signed casts, arithmetic
+  An `unsigned char` or `unsigned short` promoted to `int` cannot become negative. An ordinary conditional's
+  result is also nonnegative when both arms are nonnegative integer constant expressions, unsigned values, boolean results or
+  nested such conditionals (`check_common_conditional_nonnegative`). An integer constant expression's condition
+  selects only its taken arm; a folded assignment or statement expression alone does not. The bounded walk
+  borrows only the emission worklist's unused node slots and preserves every live warning frame; exhausted
+  space or work budget keeps the warning. Explicit signed casts, GNU shared-middle conditionals, arithmetic
   results and genuine signed operands keep their existing diagnostics. `c_check_sign_compare_driver_test.c`
   compares independent counts, severity and complete Clang diagnostic lines through default/scalar compilation
   and a deferred route that requires two admitted reader lanes. Run `test-checker-driver --sign-compare-only`
   with `--executable build/compiler` under a two-CPU grant; the shared correctness inventory
-  supplies that grant. This is a type-local fix; general expression ranges and bitfield ranges remain separate.
+  supplies that grant. `tests/driver/sign_compare_conditional.c` covers both operand orientations, every comparison,
+  nested/selected arms, casts, side-effecting conditions, GNU controls, a balanced 128-leaf tree and live sibling
+  diagnostics. General arithmetic expression ranges and bitfield ranges remain separate, as does the existing
+  fully folded conditional gap: `((y = 0) ? -1 : 3) < u` still loses Clang's warning because the older constant
+  shortcut accepts its folded result. This change leaves that shortcut and the global evaluation facts intact.
   `c_check_noderef_driver_test.c`, in the attribute-effects driver section,
   compares original GNU `noderef` placement, propagation, conversion,
   address-cancellation and unevaluated-expression fixtures with pinned Clang
@@ -894,6 +925,16 @@ requested lanes, syntax checks, object emission or preservation, and
 default/`-Werror`/`-w` policies compare complete diagnostics with Clang.
 These lane options exercise the existing scheduling requests; they do not by
 themselves establish that a particular body is admitted to deferred checking.
+
+`c_check_auto_qualifier_driver_test.c` uses that same harness for the original
+`tests/driver/auto-qualifiers/` sources (#1844): the rejected combination of
+atomic and restrict specifiers on `__auto_type` diagnoses each declarator,
+then drops restrict and continues atomic deduction. Specifier order, GNU
+spellings, macro locations, comma groups, missing initializers, recovered types,
+later errors and accepted neighboring declarations are checked in GNU17 and
+C23, including preservation of output after a rejected unit. A C23 constexpr
+comma group guards the continuation flags. The source names and expected
+diagnostic counts come from the runtime `cases.txt` catalog.
 
 `c_check_format_bitint_driver_test.c` adds 25 original fixtures to
 `test-checker-driver` through the shared default-warning harness. Independent

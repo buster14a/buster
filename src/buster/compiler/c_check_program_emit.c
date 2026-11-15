@@ -349,6 +349,12 @@ static __attribute__((noinline)) bool check_program_emit_reserve_rows(CheckProgr
     rows->sizes = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
     rows->bodies = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
     rows->values = fits ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugBody, (uint64_t)count + 1) : 0;
+    // A body the merge doesn't reach (past the encoded ones) has no values, spans or instances rather than the arena's
+    // old bytes.
+    if (rows->values != 0)
+    {
+        memset(rows->values, 0, ((uint64_t)count + 1) * sizeof(CheckDebugBody));
+    }
     return rows->offsets != 0 && rows->tokens != 0 && rows->first != 0 && rows->counts != 0 && rows->sizes != 0 && rows->bodies != 0 && rows->values != 0;
 }
 
@@ -575,6 +581,9 @@ struct CheckTier1Inline
     uint8_t* released;
     bool holding;
     bool scalar;
+    // Whether the run writes -g's source rows: summaries then carry their source identities, which their expansions
+    // keep as instances (IrDebugInline, #2541 step 3).
+    bool sources;
     uint32_t body_count;
 };
 
@@ -1036,6 +1045,10 @@ static _Thread_local CheckTier0InlineLane check_program_thread_inline;
 // workers takes 1.6% fewer user cycles by them than by one window as long as the unit, and one worker as many, from 2,048
 // tokens on; below that a window's own cost shows at one worker (docs/all-core-path.md's "Step 1's result").
 #define BUSTER_CHECK_EMIT_WINDOW_TOKENS 2048
+
+// The name of a provisional selection's placeholder symbol (#2536's step 2.2b, check_driver_provisional), a local `.L`
+// one, which no object keeps.
+#define BUSTER_CHECK_PLACEHOLDER_NAME ".Lbuster_placeholder"
 // The byte --poison-arenas writes over a popped window (CheckProgramLanes.poison_windows).
 #define BUSTER_CHECK_EMIT_WINDOW_POISON 0xa5
 // The calling thread's window (#2536's step 1, check_program_emit_windows): a window's typed streams and Tier 0 code,
@@ -1056,6 +1069,9 @@ struct CheckEmitBody
     uint64_t length;
     CheckDebugValueSpan* debug_spans;
     uint32_t debug_span_count;
+    // Its code's expanded callees' instances (#2541 step 3, check_program_emit_inline_tokens).
+    CheckDebugInline* debug_inlines;
+    uint32_t debug_inline_count;
     CheckDebugLocation* debug_locations;
     uint32_t* debug_location_first;
     uint32_t debug_location_count;
@@ -1536,6 +1552,75 @@ static CheckProgramStatus check_program_emit_locations(CheckEmitBody* body, cons
 // false for a failure, which it records in the body as source order's emission reports it: no room; a record
 // x86_validate rejects (with `verify`); or a sizing or an encoding its records shouldn't have, or a frame other than its
 // unwind table's, at its declaration.
+// Under -g, the tokens of body `b`'s source origins where its code has expanded callees' instances
+// (EmittedCode.source_inlines, #2541 step 3), by origin: its own entries' tokens, then each instance's entries' as its
+// callee's entries' (`*rows`, so that the instance's rows are its callee's lines) and as its outermost call's (`*spans`,
+// where the function's scopes and locations place its code); and the instances for the DWARF producer
+// (CheckEmitBody.debug_inlines, reserved with the body's other -g columns). An instance's parent precedes it, so its
+// call's tokens are known by then. False where the scratch has no room.
+static bool check_program_emit_inline_tokens(const CheckEmitRun* run, const EmittedCode* code, uint32_t b, Arena* scratch, const uint32_t** rows, const uint32_t** spans,
+                                             CheckEmitBody* body)
+{
+    const CheckProgram* program = run->program;
+    const uint32_t own = run->lowered->functions[b].count;
+    const uint32_t* tokens = run->lowered->entry_tokens[b];
+    const uint32_t declaration = program->bodies[b].declaration;
+    uint64_t limit = own;
+    for (uint32_t k = 0; k < code->source_inline_count; k += 1)
+    {
+        const uint64_t end = (uint64_t)code->source_inlines[k].first + code->source_inlines[k].count;
+        limit = end > limit ? end : limit;
+    }
+    uint32_t* row = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, limit + 1);
+    uint32_t* span = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, limit + 1);
+    CheckDebugInline* inlines = body->debug_inlines;
+    const bool valid = row != NULL && span != NULL && inlines != NULL;
+    if (valid)
+    {
+        for (uint64_t o = 0; o < limit; o += 1)
+        {
+            row[o] = o < own ? tokens[o] : declaration;
+            span[o] = row[o];
+        }
+        const CheckTier1Inline* inlining = run->tier1_inline;
+        for (uint32_t k = 0; k < code->source_inline_count; k += 1)
+        {
+            const EmittedInline instance = code->source_inlines[k];
+            const uint32_t candidate = inlining != NULL && instance.symbol < inlining->symbol_count ? inlining->candidates[instance.symbol] : 0;
+            const uint32_t callee = candidate != 0 ? candidate - 1 : BUSTER_CHECK_NONE;
+            const uint32_t callee_count = callee != BUSTER_CHECK_NONE ? run->lowered->functions[callee].count : 0;
+            const uint32_t* callee_tokens = callee != BUSTER_CHECK_NONE ? run->lowered->entry_tokens[callee] : NULL;
+            const uint32_t call_row = instance.call < limit ? row[instance.call] : declaration;
+            const uint32_t call_span = instance.call < limit ? span[instance.call] : declaration;
+            for (uint32_t j = 0; j < instance.count; j += 1)
+            {
+                row[instance.first + j] = j < callee_count ? callee_tokens[j] : call_row;
+                span[instance.first + j] = call_span;
+            }
+            inlines[k] = (CheckDebugInline){
+                .body = callee,
+                .parent = instance.parent,
+                .call_token = call_row,
+            };
+        }
+        *rows = row;
+        *spans = span;
+        body->debug_inline_count = code->source_inline_count;
+    }
+    return valid;
+}
+
+// The innermost instance of `code`'s whose entries include source origin `origin`, plus one, or 0 for the body's own.
+static uint32_t check_program_emit_inline_of(const EmittedCode* code, uint32_t origin)
+{
+    uint32_t found = 0;
+    for (uint32_t k = 0; origin != BUSTER_EMISSION_NO_ORIGIN && k < code->source_inline_count; k += 1)
+    {
+        found = origin - code->source_inlines[k].first < code->source_inlines[k].count ? k + 1 : found;
+    }
+    return found;
+}
+
 static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint32_t b)
 {
     const CheckProgram* program = run->program;
@@ -1560,6 +1645,8 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     const uint32_t locals = run->lowered->functions[b].local_count;
     body->debug_locations = run->sources && code->local_range_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDebugLocation, code->local_range_count) : NULL;
     body->debug_location_first = run->sources && code->local_range_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)locals + 1) : NULL;
+    // Its expanded callees' instances (#2541 step 3), which the merge copies, before the work mark the code pops to.
+    body->debug_inlines = run->sources && code->source_inline_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDebugInline, code->source_inline_count) : NULL;
     const uint64_t work_mark = scratch->length;
     uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)code->count + 1);
     // patchable_function_entry's NOPs (#1447): room for them after the code, which check_program_emit_patchable moves past
@@ -1601,13 +1688,17 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
         if (valid && run->sources)
         {
             // The rows' own failure: no room (a lane's, which the emission retries on one lane) or the protocol's refusal.
-            valid = check_program_emit_body_rows(body, program, run->parser, run->lowered->entry_tokens[b], code, b, offsets, (uint32_t)length, run->scalar, scratch);
+            const uint32_t* row_tokens = run->lowered->entry_tokens[b];
+            const uint32_t* tokens = row_tokens;
+            valid = code->source_inline_count == 0 || check_program_emit_inline_tokens(run, code, b, scratch, &row_tokens, &tokens, body);
+            body->status = valid ? body->status : CHECK_PROGRAM_RESOURCE;
+            body->reason = valid ? body->reason : "no room for the source metadata's expanded callees";
+            valid = valid && check_program_emit_body_rows(body, program, run->parser, row_tokens, code, b, offsets, (uint32_t)length, run->scalar, scratch);
             failure = valid ? failure : body->status;
             if (valid)
             {
                 CheckDebugValueSpan* spans = body->debug_spans;
                 const Tier0Function* function = run->lowered->functions + b;
-                const uint32_t* tokens = run->lowered->entry_tokens[b];
                 for (uint32_t e = 0; valid && e < code->source_count; e += 1)
                 {
                     // Tail-call entries include frame teardown. Omit that whole entry, rather than extend a home
@@ -1618,7 +1709,12 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
                     const bool known = code->source_origins == NULL || code->source_origins[e] != BUSTER_EMISSION_NO_ORIGIN;
                     if (!tail && known && begin < end)
                     {
-                        spans[body->debug_span_count++] = (CheckDebugValueSpan){ .begin = begin, .end = end, .token = check_debug_origin_token(code->source_origins, tokens, e, program->bodies[b].declaration) };
+                        spans[body->debug_span_count++] = (CheckDebugValueSpan){
+                            .begin = begin,
+                            .end = end,
+                            .token = check_debug_origin_token(code->source_origins, tokens, e, program->bodies[b].declaration),
+                            .inline_instance = code->source_origins != NULL ? check_program_emit_inline_of(code, code->source_origins[e]) : 0,
+                        };
                     }
                 }
                 if (valid)
@@ -3563,6 +3659,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         // templates refer to names.
         tier1_inline.holding = tier1_inlines && tier1_inline.held != NULL && binding == NULL && !kept && rows == NULL && program->patchable_count == 0 &&
                                program->input->asm_count == 0 && !lanes->tier1_no_hold;
+        tier1_inline.sources = run.sources;
     }
     if (tier1 && run.tier1_outcomes != 0 && !check_tier1_ready)
     {
@@ -4207,7 +4304,14 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     encoded = valid && run.late_code_failed < encoded ? run.late_code_failed : encoded;
     if (valid && rows != NULL)
     {
-        valid = check_program_emit_reserve_rows(rows, result->lowered.entries, count, output);
+        // Room for every body's rows: a body's typed entries, but for Tier 1's expanded callees' (#2541 step 3), whose
+        // source events are its callees' entries too.
+        uint64_t row_total = 0;
+        for (uint32_t b = 0; b < encoded; b += 1)
+        {
+            row_total += run.bodies[b].row_count;
+        }
+        valid = check_program_emit_reserve_rows(rows, row_total > result->lowered.entries ? row_total : result->lowered.entries, count, output);
         rows->link = &result->link;
         for (uint32_t b = 0; valid && b < encoded; b += 1)
         {
@@ -4228,7 +4332,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const uint32_t location_count = body->debug_location_count;
             CheckDebugLocation* locations = location_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugLocation, location_count) : NULL;
             uint32_t* location_first = location_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)locals + 1) : NULL;
-            valid = bindings != NULL && homes != NULL && classes != NULL && spans != NULL && (location_count == 0 || (locations != NULL && location_first != NULL));
+            CheckDebugInline* inlines = body->debug_inline_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugInline, body->debug_inline_count) : NULL;
+            valid = bindings != NULL && homes != NULL && classes != NULL && spans != NULL && (location_count == 0 || (locations != NULL && location_first != NULL)) &&
+                    (body->debug_inline_count == 0 || inlines != NULL);
             if (valid)
             {
                 if (locals != 0)
@@ -4248,6 +4354,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 {
                     memcpy(spans, body->debug_spans, (uint64_t)body->debug_span_count * sizeof(*spans));
                 }
+                if (body->debug_inline_count != 0)
+                {
+                    memcpy(inlines, body->debug_inlines, (uint64_t)body->debug_inline_count * sizeof(*inlines));
+                }
                 if (location_count != 0)
                 {
                     memcpy(locations, body->debug_locations, (uint64_t)location_count * sizeof(*locations));
@@ -4263,6 +4373,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     .local_count = locals,
                     .span_count = body->debug_span_count,
                     .location_count = location_count,
+                    .inlines = inlines,
+                    .inline_count = body->debug_inline_count,
                 };
             }
             if (body->row_count != 0)
@@ -4639,6 +4751,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const bool record = parser->tree.roles[object - 1] == PARSE_ROLE_CLOSE_CALL;
             const int length = snprintf(spelling, sizeof(spelling), record ? ".Lbuster_cfstring_%u" : ".Lbuster_string_%u", parse_origin(parser, object - 1) + 1);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
+        }
+        else if (object == 0)
+        {
+            // A provisional selection's placeholder (#2536's step 2.2b, check_driver_provisional): the symbol of an object
+            // that only the candidates keep, which nothing refers to and the object leaves out.
+            name = link_add_name(&result->link, (const uint8_t*)BUSTER_CHECK_PLACEHOLDER_NAME, (uint32_t)(sizeof(BUSTER_CHECK_PLACEHOLDER_NAME) - 1));
+            flags = BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_NOTYPE;
         }
         else if (object != 0 && object - 1 < parser->tokens.count && parser->tree.roles[object - 1] == PARSE_ROLE_LABEL)
         {

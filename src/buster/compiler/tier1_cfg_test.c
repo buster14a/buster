@@ -18,6 +18,7 @@
 #define BUSTER_TIER1_CFG_TEST_USES 1024
 #define BUSTER_TIER1_CFG_TEST_PHIS 128
 #define BUSTER_TIER1_CFG_TEST_FIXED 32
+#define BUSTER_TIER1_CFG_TEST_SEQUENCES 64
 #define BUSTER_TIER1_CFG_TEST_ARENA (256ull << 20)
 
 typedef struct Tier1CfgTestBuilder Tier1CfgTestBuilder;
@@ -54,6 +55,15 @@ struct Tier1CfgTestBuilder
     uint32_t fixed_instruction[BUSTER_TIER1_CFG_TEST_FIXED];
     uint8_t fixed_class[BUSTER_TIER1_CFG_TEST_FIXED];
     uint32_t fixed_register[BUSTER_TIER1_CFG_TEST_FIXED];
+    // Fixed registers' sequences (#2767), at instructions' definition phases in layout order, their general registers and
+    // their readers (a value, or BUSTER_TIER1_CFG_NONE).
+    uint32_t sequence_count;
+    uint32_t sequence_block[BUSTER_TIER1_CFG_TEST_SEQUENCES];
+    uint32_t sequence_instruction[BUSTER_TIER1_CFG_TEST_SEQUENCES];
+    uint32_t sequence_registers[BUSTER_TIER1_CFG_TEST_SEQUENCES];
+    uint32_t sequence_reader[BUSTER_TIER1_CFG_TEST_SEQUENCES];
+    uint32_t sequence_operand[BUSTER_TIER1_CFG_TEST_SEQUENCES];
+    uint32_t sequence_result[BUSTER_TIER1_CFG_TEST_SEQUENCES];
     uint32_t registers[BUSTER_TIER1_ALLOCATE_CLASSES];
     uint8_t scratch[BUSTER_TIER1_ALLOCATE_CLASSES];
 };
@@ -74,6 +84,17 @@ struct Tier1CfgTestTally
     // Block entries where a recomputed value's register reads nothing before its recipe takes over, which its edges
     // then leave unfilled (tier1_cfg_entry_unread, #1217).
     uint64_t unread_entries;
+    // Of those, the intervals tier1_cfg_carried_unread proved, which carry the value to blocks that take it as their recipe
+    // (#2734), and the mutants that mark one it refused: a block it carries the value to reads its register, which the
+    // entry state leaves empty.
+    uint64_t carried_entries;
+    uint64_t carried_mutants;
+    uint64_t carried_killed;
+    uint64_t carried_refused;
+    // #2767: general ranges that avoid a fixed sequence's registers, and ranges of a sequence's reader across it, which
+    // don't avoid that sequence's.
+    uint64_t avoiding_ranges;
+    uint64_t reading_ranges;
     // The opmask class's share: moves of masks, spilled masks, and moves of masks at splits (around calls).
     uint64_t mask_moves;
     uint64_t mask_spills;
@@ -236,7 +257,12 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
     uint32_t* fixed_registers = arena_push_array(arena, builder->fixed_count + 1, sizeof(uint32_t), 4);
     uint8_t* fixed_classes = arena_push(arena, builder->fixed_count + 1, 1);
     uint8_t* slot_widths = builder->share_slots ? arena_push(arena, builder->value_count + 1, 1) : 0;
-    const bool built = (!builder->share_slots || slot_widths != 0) && block_starts != 0 && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && classes != 0 && allowed != 0 && definitions != 0 && remat != 0 && use_offsets != 0 && use_positions != 0 && use_required != 0 && phi_offsets != 0 && phi_values != 0 && phi_operand_offsets != 0 && phi_operands != 0 && fixed_starts != 0 && fixed_ends != 0 && fixed_registers != 0 && fixed_classes != 0;
+    uint32_t* sequences = arena_push_array(arena, builder->sequence_count + 1, sizeof(uint32_t), 4);
+    uint32_t* sequence_registers = arena_push_array(arena, builder->sequence_count + 1, sizeof(uint32_t), 4);
+    uint32_t* sequence_readers = arena_push_array(arena, builder->sequence_count + 1, sizeof(uint32_t), 4);
+    uint32_t* sequence_operands = arena_push_array(arena, builder->sequence_count + 1, sizeof(uint32_t), 4);
+    uint32_t* sequence_results = arena_push_array(arena, builder->sequence_count + 1, sizeof(uint32_t), 4);
+    const bool built = (!builder->share_slots || slot_widths != 0) && sequences != 0 && sequence_registers != 0 && sequence_readers != 0 && sequence_operands != 0 && sequence_results != 0 && block_starts != 0 && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && classes != 0 && allowed != 0 && definitions != 0 && remat != 0 && use_offsets != 0 && use_positions != 0 && use_required != 0 && phi_offsets != 0 && phi_values != 0 && phi_operand_offsets != 0 && phi_operands != 0 && fixed_starts != 0 && fixed_ends != 0 && fixed_registers != 0 && fixed_classes != 0;
     if (built)
     {
         block_starts[0] = 0;
@@ -326,6 +352,14 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
             fixed_classes[r] = builder->fixed_class[r];
             fixed_registers[r] = builder->fixed_register[r];
         }
+        for (uint32_t k = 0; k < builder->sequence_count; k += 1)
+        {
+            sequences[k] = block_starts[builder->sequence_block[k]] + 2 * builder->sequence_instruction[k] + 1;
+            sequence_registers[k] = builder->sequence_registers[k];
+            sequence_readers[k] = builder->sequence_reader[k];
+            sequence_operands[k] = builder->sequence_operand[k];
+            sequence_results[k] = builder->sequence_result[k];
+        }
         *input = (Tier1CfgInput){
             .block_starts = block_starts,
             .successor_offsets = successor_offsets,
@@ -344,6 +378,12 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
             .phi_values = phi_values,
             .phi_operand_offsets = phi_operand_offsets,
             .phi_operands = phi_operands,
+            .sequences = builder->sequence_count != 0 ? sequences : 0,
+            .sequence_registers = builder->sequence_count != 0 ? sequence_registers : 0,
+            .sequence_readers = builder->sequence_count != 0 ? sequence_readers : 0,
+            .sequence_operands = builder->sequence_count != 0 ? sequence_operands : 0,
+            .sequence_results = builder->sequence_count != 0 ? sequence_results : 0,
+            .sequence_count = builder->sequence_count,
             .block_count = blocks,
             .edge_count = builder->edge_count,
             .value_count = builder->value_count,
@@ -370,6 +410,76 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
         };
     }
     return built;
+}
+
+// The registers each range avoids (#2767), recomputed apart from tier1_cfg_crossed: each general range's, those of every
+// sequence strictly inside it whose reader its value isn't, gathered by value with each sequence's operand's and result's,
+// then joined along every phi and its operands until nothing changes; each general range must avoid exactly its value's,
+// and every other range nothing.
+// Without sequences the allocator must have no such column.
+static bool tier1_cfg_test_avoided(Tier1CfgTestTally* tally, const Tier1CfgInput* input, const Tier1CfgAllocation* result, Arena* scratch)
+{
+    const Tier1AllocationInput* intervals = &result->intervals;
+    bool valid = input->sequence_count == 0 ? intervals->avoided_registers == 0 : intervals->avoided_registers != 0;
+    const uint64_t saved = scratch->length;
+    uint32_t* masks = valid && input->sequence_count != 0 ? arena_push_array(scratch, (uint64_t)input->value_count + 1, sizeof(uint32_t), 4) : 0;
+    valid = valid && (input->sequence_count == 0 || masks != 0);
+    if (masks != 0)
+    {
+        memset(masks, 0, ((uint64_t)input->value_count + 1) * sizeof(uint32_t));
+        for (uint32_t i = 0; i < intervals->count; i += 1)
+        {
+            for (uint32_t k = 0; intervals->classes[i] == BUSTER_TIER1_ALLOCATE_GPR && k < input->sequence_count; k += 1)
+            {
+                const uint32_t p = input->sequences[k];
+                const bool inside = intervals->starts[i] < p && p < intervals->ends[i];
+                const bool read = input->sequence_readers != 0 && input->sequence_readers[k] == intervals->values[i];
+                masks[intervals->values[i]] |= inside && !read ? input->sequence_registers[k] : 0;
+                tally->reading_ranges += inside && read;
+            }
+        }
+        for (uint32_t k = 0; k < input->sequence_count; k += 1)
+        {
+            const uint32_t operand = input->sequence_operands != 0 ? input->sequence_operands[k] : BUSTER_TIER1_CFG_NONE;
+            const uint32_t result = input->sequence_results != 0 ? input->sequence_results[k] : BUSTER_TIER1_CFG_NONE;
+            if (operand != BUSTER_TIER1_CFG_NONE)
+            {
+                masks[operand] |= input->sequence_registers[k];
+            }
+            if (result != BUSTER_TIER1_CFG_NONE)
+            {
+                masks[result] |= input->sequence_registers[k];
+            }
+        }
+        bool changed = true;
+        while (changed)
+        {
+            changed = false;
+            for (uint32_t k = 0; k < input->phi_count; k += 1)
+            {
+                const uint32_t phi = input->phi_values[k];
+                for (uint32_t o = input->phi_operand_offsets[k]; o < input->phi_operand_offsets[k + 1]; o += 1)
+                {
+                    const uint32_t operand = input->phi_operands[o];
+                    const uint32_t joined = operand != BUSTER_TIER1_CFG_NONE ? masks[phi] | masks[operand] : masks[phi];
+                    changed |= joined != masks[phi] || (operand != BUSTER_TIER1_CFG_NONE && joined != masks[operand]);
+                    masks[phi] = joined;
+                    if (operand != BUSTER_TIER1_CFG_NONE)
+                    {
+                        masks[operand] = joined;
+                    }
+                }
+            }
+        }
+        for (uint32_t i = 0; valid && i < intervals->count; i += 1)
+        {
+            const uint32_t expected = intervals->classes[i] == BUSTER_TIER1_ALLOCATE_GPR ? masks[intervals->values[i]] : 0;
+            valid = intervals->avoided_registers[i] == expected;
+            tally->avoiding_ranges += expected != 0;
+        }
+    }
+    arena_pop_to(scratch, saved);
+    return valid;
 }
 
 // The allocation's certificate (#939): published from the input and the allocation, checked by tier1_certificate_check
@@ -829,6 +939,7 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
             tier1_cfg_test_expect(tally, verified, "the CFG checker accepts the allocation");
             tier1_cfg_test_expect(tally, tier1_cfg_test_lookup(input, &result), "block intervals match the binary search");
             tier1_cfg_test_expect(tally, tier1_cfg_test_certify(tally, input, &result, output, scratch, true), "the certificate checker proves the allocation");
+            tier1_cfg_test_expect(tally, tier1_cfg_test_avoided(tally, input, &result, scratch), "each range avoids its phi web's fixed sequences' registers, but its own readings'");
             if (result.intervals.count <= 600)
             {
                 tier1_cfg_test_expect(tally, tier1_cfg_test_unshared_verify(input, &result, scratch), "the interval verifier accepts the allocation");
@@ -859,6 +970,10 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                     const bool found = fragment != BUSTER_TIER1_CFG_NONE && tier1_cfg_entry_location(&result, v, entry, &location, &kind);
                     tally->unread_entries += found && kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && result.allocation.kinds[fragment] == BUSTER_TIER1_ALLOCATE_REGISTER;
                 }
+            }
+            for (uint32_t i = 0; path == 0 && result.unread_entries != 0 && i < result.intervals.count; i += 1)
+            {
+                tally->carried_entries += result.unread_entries[i] != 0;
             }
             tier1_cfg_test_expect(tally, (result.temp_slots & temp_slots) == temp_slots, "the case uses its temporary slots");
             tier1_cfg_test_expect(tally, result.move_count - result.edge_move_offsets[input->edge_count] >= split_moves, "the case moves values at its splits");
@@ -930,6 +1045,34 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                             tally->slot_killed += rejected;
                             tried += 1;
                         }
+                    }
+                }
+                // #2734: an interval of the carried proof's shape that it refused, marked as proven: a recomputed value's one
+                // register fragment, unused, over whole blocks. A block it carries the value to reads the register, which
+                // control now enters without.
+                tried = 0;
+                for (uint32_t i = 0; result.unread_entries != 0 && result.intervals.rematerializable != 0 && tried < 4 && i < result.intervals.count; i += 1)
+                {
+                    const uint32_t f = allocation->fragment_offsets[i];
+                    const uint32_t first = tier1_cfg_block_of(input, result.intervals.starts[i]);
+                    const uint32_t last = tier1_cfg_block_of(input, result.intervals.ends[i] - 1);
+                    const bool shaped = result.unread_entries[i] == 0 && result.intervals.rematerializable[i] != 0 && allocation->fragment_offsets[i + 1] - f == 1 &&
+                                        allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && result.intervals.use_offsets[i] == result.intervals.use_offsets[i + 1] &&
+                                        input->definitions[result.intervals.values[i]] != result.intervals.starts[i] && input->block_starts[first] == result.intervals.starts[i] &&
+                                        input->block_starts[last + 1] == result.intervals.ends[i];
+                    bool operand = false;
+                    for (uint32_t o = 0; shaped && o < input->phi_operand_offsets[input->phi_count]; o += 1)
+                    {
+                        operand = operand || input->phi_operands[o] == result.intervals.values[i];
+                    }
+                    if (shaped && !operand)
+                    {
+                        result.unread_entries[i] = 1;
+                        const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->carried_refused);
+                        result.unread_entries[i] = 0;
+                        tally->carried_mutants += 1;
+                        tally->carried_killed += rejected;
+                        tried += 1;
                     }
                 }
                 // Order: a move run before one that reads what it writes, where that location is written once on the
@@ -1355,6 +1498,37 @@ static bool tier1_cfg_test_generate(Tier1CfgTestBuilder* builder, uint64_t seed,
     for (uint32_t v = 0; v < builder->value_count; v += 1)
     {
         builder->slot_width[v] = v % 7 == 6 ? 4 : 8;
+    }
+    // Half the cases have fixed registers' sequences (#2767), from a generator of their own, so that the programs stay
+    // those of earlier runs: at one instruction in six, of one to three general registers, a third of them with a reader,
+    // a third with an operand and a third with a result that avoid them (any general value: what avoids is the input's).
+    uint64_t sequenced = seed ^ UINT64_C(0x2767276727672767);
+    builder->sequence_count = 0;
+    for (uint32_t b = 0; valid && seed % 2 == 0 && b < builder->block_count; b += 1)
+    {
+        for (uint32_t i = 0; i < builder->instructions[b] && builder->sequence_count < BUSTER_TIER1_CFG_TEST_SEQUENCES; i += 1)
+        {
+            // The class's lowest register after skipping up to two, and half the time another one drawn at random.
+            const uint32_t registers = builder->registers[BUSTER_TIER1_ALLOCATE_GPR];
+            uint32_t pick = registers;
+            for (uint32_t skip = (uint32_t)(tier1_cfg_test_random(&sequenced) % 3); skip > 0 && (pick & (pick - 1)) != 0; skip -= 1)
+            {
+                pick &= pick - 1;
+            }
+            pick &= (uint32_t)-(int32_t)pick;
+            const uint32_t other = (uint32_t)(tier1_cfg_test_random(&sequenced) % 16);
+            pick |= tier1_cfg_test_random(&sequenced) % 2 == 0 && ((registers >> other) & 1) != 0 ? 1u << other : 0;
+            const uint32_t reader = (uint32_t)(tier1_cfg_test_random(&sequenced) % builder->value_count);
+            builder->sequence_block[builder->sequence_count] = b;
+            builder->sequence_instruction[builder->sequence_count] = i;
+            builder->sequence_registers[builder->sequence_count] = pick;
+            builder->sequence_reader[builder->sequence_count] = tier1_cfg_test_random(&sequenced) % 3 == 0 && builder->classes[reader] == BUSTER_TIER1_ALLOCATE_GPR ? reader : BUSTER_TIER1_CFG_NONE;
+            const uint32_t operand = (uint32_t)(tier1_cfg_test_random(&sequenced) % builder->value_count);
+            const uint32_t result = (uint32_t)(tier1_cfg_test_random(&sequenced) % builder->value_count);
+            builder->sequence_operand[builder->sequence_count] = tier1_cfg_test_random(&sequenced) % 3 == 0 && builder->classes[operand] == BUSTER_TIER1_ALLOCATE_GPR ? operand : BUSTER_TIER1_CFG_NONE;
+            builder->sequence_result[builder->sequence_count] = tier1_cfg_test_random(&sequenced) % 3 == 0 && builder->classes[result] == BUSTER_TIER1_ALLOCATE_GPR ? result : BUSTER_TIER1_CFG_NONE;
+            builder->sequence_count += tier1_cfg_test_random(&sequenced) % 6 == 0 && pick != 0;
+        }
     }
     return valid;
 }
@@ -2411,6 +2585,9 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         tier1_cfg_test_expect(&tally, tally.mask_moves != 0 && tally.mask_spills != 0 && tally.mask_split_moves != 0, "the opmask class moves, spills and splits masks");
         tier1_cfg_test_expect(&tally, count < 100 || tally.undefined_operands != 0, "the cases reach undefined phi operands");
         tier1_cfg_test_expect(&tally, count < 500 || tally.unread_entries != 0, "the cases reach block entries whose recomputed value's register reads nothing");
+        tier1_cfg_test_expect(&tally, count < 500 || (tally.avoiding_ranges != 0 && tally.reading_ranges != 0), "the cases reach ranges that avoid fixed sequences' registers and readers across their sequences");
+        tier1_cfg_test_expect(&tally, tally.carried_killed == tally.carried_mutants && (count < 500 || (tally.carried_entries != 0 && tally.carried_mutants != 0)),
+                              "the cases reach entries the carried proof takes and ones it refuses, and every refused one marked fails the checker");
         // #939: every allocation's certificate proved, and the oracle reached some of them.
         tier1_cfg_test_expect(&tally, tally.certificates == tally.allocations && tally.oracle_certificates != 0, "every allocation's certificate is proved, the oracle's share among them");
         // A mutant that moves a value wrongly must fail the certificate too: every order, definition and split
@@ -2418,14 +2595,15 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         // names of equal contents in one register at a block's start, a mask in k0 for a fragment nothing reads), and
         // the certificate never refuses what the verifier accepts.
         tier1_cfg_test_expect(&tally, tally.order_refused == tally.order_mutants && tally.definition_refused == tally.definition_mutants && tally.destination_refused == tally.destination_mutants, "every order, definition and split destination mutant fails the certificate");
-        tier1_cfg_test_expect(&tally, tally.certificate_only == 0 && tally.verifier_only == (tally.interference_mutants - tally.interference_refused) + (tally.k0_mutants - tally.k0_refused) + (tally.slot_mutants - tally.slot_refused), "the certificate refuses no mutant the verifier accepts");
+        tier1_cfg_test_expect(&tally, tally.certificate_only == 0 && tally.verifier_only == (tally.interference_mutants - tally.interference_refused) + (tally.k0_mutants - tally.k0_refused) + (tally.slot_mutants - tally.slot_refused) + (tally.carried_mutants - tally.carried_refused), "the certificate refuses no mutant the verifier accepts");
         // #2538: the one-call order reaches a taken preference, a refused one, a constraint that frees the definitions and a
         // case with fixed ranges.
         tier1_cfg_test_expect(&tally, count < 500 || (tally.two_taken != 0 && tally.two_refused != 0 && tally.two_freed != 0 && tally.two_fixed != 0), "two problems reach every outcome");
         // A malformed shape must fail both, before either reads through it (#1142's review).
         tier1_cfg_test_expect(&tally, tally.shape_mutants != 0 && tally.shape_killed == tally.shape_mutants && tally.shape_refused == tally.shape_mutants, "every malformed shape fails both checkers");
-        printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0, %" PRIu64 " of %" PRIu64 " shared slot; %" PRIu64 " values in a phi web's slot, %" PRIu64 " entries left to their recipes (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, tally.slot_killed, tally.slot_mutants, tally.shared_slots, tally.unread_entries, seed, count);
+        printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0, %" PRIu64 " of %" PRIu64 " shared slot; %" PRIu64 " values in a phi web's slot, %" PRIu64 " entries left to their recipes, %" PRIu64 " carried, %" PRIu64 " of %" PRIu64 " carried mutants rejected (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, tally.slot_killed, tally.slot_mutants, tally.shared_slots, tally.unread_entries, tally.carried_entries, tally.carried_killed, tally.carried_mutants, seed, count);
         printf("test-tier1-cfg: certificates: %" PRIu64 " proved (%" PRIu64 " by the oracle too), %" PRIu64 " facts, %" PRIu64 " edits, %" PRIu64 " operands, %" PRIu64 " renames; mutants refused: %" PRIu64 " interference, %" PRIu64 " order, %" PRIu64 " definition, %" PRIu64 " split destination, %" PRIu64 " k0, %" PRIu64 " shared slot, %" PRIu64 " of %" PRIu64 " shape; %" PRIu64 " refused by the certificate alone, %" PRIu64 " by the verifier alone\n", tally.certificates, tally.oracle_certificates, tally.certificate_facts, tally.certificate_edits, tally.certificate_operands, tally.certificate_renames, tally.interference_refused, tally.order_refused, tally.definition_refused, tally.destination_refused, tally.k0_refused, tally.slot_refused, tally.shape_refused, tally.shape_mutants, tally.certificate_only, tally.verifier_only);
+        printf("test-tier1-cfg: fixed sequences (#2767): %" PRIu64 " ranges avoid their registers, %" PRIu64 " readers' ranges across their own\n", tally.avoiding_ranges, tally.reading_ranges);
         printf("test-tier1-cfg: two problems in one call and in two: %" PRIu64 " cases, %" PRIu64 " preferred allocations taken, %" PRIu64 " refused, %" PRIu64 " freed of their definitions' registers; %" PRIu64 " with fixed ranges refused another column\n", tally.two_cases, tally.two_taken, tally.two_refused, tally.two_freed, tally.two_fixed);
         result = tally.failures == 0 ? 0 : 1;
         arena_release(&work);

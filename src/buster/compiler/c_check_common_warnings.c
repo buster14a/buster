@@ -1473,7 +1473,7 @@ static void check_common_conversion_warning(const Parser* parser, Preprocessor* 
                                             TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
                                             TypeId target, bool evaluated, const uint32_t* parents, uint32_t at_once, Arena* scratch);
 static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                                         TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
+                                         const TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
                                          TypeId target, const uint32_t* parents, uint32_t at_once, uint8_t leaves, Arena* scratch);
 static void check_common_int_in_bool(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                      uint32_t node, const uint32_t* parents, uint32_t at_once, Arena* scratch);
@@ -2630,6 +2630,69 @@ static bool check_common_out_of_range(CheckCommonEmission* emission, uint32_t no
     return decided;
 }
 
+// An ordinary conditional has a nonnegative result when both possible arms do. Its usual arithmetic conversions
+// preserve each arm's nonnegative value whenever its result is signed; an unsigned result needs no further proof.
+// Follow only conditionals and the existing nonnegative leaves, not arithmetic or explicit signed casts. GNU's
+// shared middle operand is clang's promoted opaque value, so its original unsigned/boolean range is not a proof.
+static bool check_common_conditional_nonnegative(const CheckCommonEmission* emission, uint32_t node)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    const CheckStream* stream = emission->stream;
+    const uint32_t count = graph->count < stream->count ? graph->count : stream->count;
+    // Borrow only the emission worklist's unused node slots. This walk invokes no emitter, changes no live frame
+    // or work_count, and its local top never escapes. A full tail or repeated-DAG work budget leaves the warning.
+    uint32_t* const nodes = emission->work_nodes;
+    const uint32_t first = emission->work_count;
+    const uint32_t capacity = emission->work_capacity;
+    uint32_t top = first;
+    uint32_t remaining = node < count ? node + 1 : 0;
+    bool nonnegative = node < count && graph->ops[node] == CHECK_OP_CONDITIONAL;
+    while (nonnegative && node < count && remaining != 0)
+    {
+        remaining -= 1;
+        const CheckOp op = graph->ops[node];
+        uint32_t width = 0;
+        bool is_signed = false;
+        const bool integer = check_common_integer(emission->types, check_stream_type(stream, node), &width, &is_signed);
+        const bool boolean = op == CHECK_OP_NOT || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR ||
+                             (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL);
+        const bool constant = integer && check_common_integer_constant(stream, node);
+        const CheckValue value = constant ? check_stream_value(stream, node) : (CheckValue){ 0 };
+        const bool source_constant = constant && (value.flags & BUSTER_CHECK_ICE) != 0;
+        const bool leaf = integer && (!is_signed || boolean || (source_constant && check_common_integer_value(&value, width, true) >= 0));
+        if (leaf)
+        {
+            node = top != first ? nodes[--top] : BUSTER_CHECK_NONE;
+        }
+        else if (integer && op == CHECK_OP_CONDITIONAL && graph->operand0[node] < node &&
+                 graph->operand1[node] < node && graph->operand2[node] < node && graph->operand1[node] != graph->operand0[node])
+        {
+            const CheckValue condition = check_stream_value(stream, graph->operand0[node]);
+            bool truth = false;
+            // A folded assignment or statement-expression result is not source constant-condition evidence.
+            const bool known = (condition.flags & BUSTER_CHECK_ICE) != 0 && check_action_truth(emission->types, &condition, &truth);
+            if (known)
+            {
+                node = truth ? graph->operand1[node] : graph->operand2[node];
+            }
+            else if (nodes != NULL && top < capacity)
+            {
+                nodes[top++] = graph->operand2[node];
+                node = graph->operand1[node];
+            }
+            else
+            {
+                nonnegative = false;
+            }
+        }
+        else
+        {
+            nonnegative = false;
+        }
+    }
+    return nonnegative && node == BUSTER_CHECK_NONE && top == first;
+}
+
 // The sign-mismatch visit one scan frame runs after its subtree: these warnings follow every other
 // warning the expression produces.
 static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
@@ -2703,7 +2766,9 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
             }
             const CheckOp signed_op = graph->ops[signed_operand];
             constant_suppressed = constant_suppressed || signed_op == CHECK_OP_NOT || (signed_op >= CHECK_OP_LESS && signed_op <= CHECK_OP_NOT_EQUAL) ||
-                                  signed_op == CHECK_OP_LOGICAL_AND || signed_op == CHECK_OP_LOGICAL_OR;
+                                  signed_op == CHECK_OP_LOGICAL_AND || signed_op == CHECK_OP_LOGICAL_OR ||
+                                  (signed_op == CHECK_OP_CONDITIONAL && signed_width <= unsigned_width &&
+                                   check_common_conditional_nonnegative(emission, signed_operand));
         }
         if (integer && !unsigned_operands && left_signed != right_signed && !constant_suppressed && (left_signed ? left_width <= right_width : right_width <= left_width))
         {
@@ -6069,7 +6134,7 @@ static bool check_common_conversion_target(const TypeTable* types, TypeId target
 }
 
 static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                                            TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
+                                            const TypeTable* types, CheckWarningSpelling* spell, uint32_t source, const CheckValue* value,
                                             TypeId target, const uint32_t* parents, uint32_t at_once, uint8_t leaves, Arena* scratch)
 {
     __int128 converted = 0;
@@ -6182,6 +6247,113 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
                 const uint32_t publication = at_once != BUSTER_CHECK_NONE ? at_once : check_common_full_expression_end(parser, graph, parents, source);
                 check_common_report_evaluated(parser, pp, input, graph->tokens[source], publication, PP_DIAGNOSTIC_DEFERRED,
                                             CHECK_WARNING_ID_LITERAL_CONVERSION, false, message, NULL, 0, scratch);
+            }
+        }
+    }
+}
+
+// A failed assertion's retained truth operand (#2409). Static selections and implicit conversions preserve the
+// expression clang checks; an explicit cast does not. The ordinary leaf emitters own wording, locations and policy.
+static void check_common_failed_assert_bool(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                           const TypeTable* types, CheckWarningSpelling* spell, uint32_t node, uint32_t completion, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    for (uint32_t steps = 0; node < graph->count && steps < graph->count &&
+         (graph->ops[node] == CHECK_OP_SELECT || graph->ops[node] == CHECK_OP_CONVERT); steps += 1)
+    {
+        node = graph->operand0[node];
+    }
+    if (node < graph->count)
+    {
+        check_common_int_in_bool(parser, pp, input, stream, types, node, NULL, completion, scratch);
+        const CheckValue value = check_stream_value(stream, node);
+        if (value.constant_kind == CHECK_CONSTANT_FLOATING)
+        {
+            check_common_conversion_leaf(parser, pp, input, stream, types, spell, node, &value, BUSTER_TYPE_BOOL, NULL,
+                                         completion, BUSTER_CHECK_LEAVES_FLOATING, scratch);
+        }
+    }
+}
+
+// Rejected assertions do not enter the ordinary warning walk. Visit their retained source tree with a bounded
+// frontier: conditional conditions warn as their expressions finish (source postorder), then the assertion and
+// logical operands warn in the completed expression's order. This is only boolean-conversion recovery; it neither
+// reconstructs erased selection/query operands nor publishes unrelated expression warning families.
+static void check_common_failed_assertion(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                          const TypeTable* types, CheckWarningSpelling* spell, uint32_t root, uint32_t completion, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t graph_count = graph->count;
+    uint64_t local[16];
+    uint64_t* work = local;
+    uint32_t capacity = BUSTER_ARRAY_LENGTH(local);
+    for (uint32_t phase = 0; phase < 2 && !pp->fatal; phase += 1)
+    {
+        uint32_t count = 1;
+        work[0] = root;
+        if (phase != 0)
+        {
+            check_common_failed_assert_bool(parser, pp, input, stream, types, spell, root, completion, scratch);
+        }
+        while (count != 0 && !pp->fatal)
+        {
+            const uint64_t item = work[--count];
+            const uint32_t node = (uint32_t)item;
+            if (node >= graph_count || (phase != 0 && check_common_query_suppressed(graph, node)))
+            {
+                continue;
+            }
+            const CheckOp op = graph->ops[node];
+            if ((item >> 32) != 0)
+            {
+                check_common_failed_assert_bool(parser, pp, input, stream, types, spell, graph->operand0[node], completion, scratch);
+                continue;
+            }
+            if (phase != 0)
+            {
+                const uint32_t truths = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR ? 2u :
+                                        op == CHECK_OP_NOT || op == CHECK_OP_CONDITION ? 1u : 0u;
+                for (uint32_t i = 0; i < truths && !pp->fatal; i += 1)
+                {
+                    check_common_failed_assert_bool(parser, pp, input, stream, types, spell,
+                                                    i == 0 ? graph->operand0[node] : graph->operand1[node], completion, scratch);
+                }
+            }
+            const uint32_t arity = check_graph_arity(op, graph->types[node]);
+            const bool arguments = check_graph_has_arguments(op) && graph->argument_offsets != NULL && graph->argument_counts != NULL;
+            const uint32_t argument_count = arguments ? graph->argument_counts[node] : 0;
+            const uint32_t children = arity + argument_count;
+            // GNU's omitted-middle form converts its opaque saved value, not the written condition expression.
+            const bool finish = phase == 0 && op == CHECK_OP_CONDITIONAL && graph->operand0[node] != graph->operand1[node];
+            const bool forward = phase == 0 || op == CHECK_OP_CONDITIONAL;
+            const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+            for (uint32_t i = 0; i < children + (uint32_t)finish && !pp->fatal; i += 1)
+            {
+                const bool done = finish && i == 0;
+                const uint32_t index = done ? 0 : forward ? children - 1 - (i - (uint32_t)finish) : i;
+                const uint32_t child = done ? node : index < arity ? operands[index] :
+                                       graph->argument_nodes[graph->argument_offsets[node] + index - arity];
+                // A GNU omitted-middle conditional shares its condition and true arm. Other operand slots can hold
+                // semantic payloads, so only arity's real edges (and actual argument slices) are traversed.
+                const bool repeated = !done && index < arity && ((index != 0 && child == operands[0]) || (index == 2 && child == operands[1]));
+                if ((!done && child >= node) || repeated)
+                {
+                    continue;
+                }
+                if (count == capacity)
+                {
+                    const uint32_t next = capacity < graph_count / 2 ? capacity * 2 : graph_count;
+                    uint64_t* grown = next > capacity ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, next) : NULL;
+                    if (grown == NULL)
+                    {
+                        check_common_exhausted(pp);
+                        continue;
+                    }
+                    memcpy(grown, work, (uint64_t)count * sizeof(*work));
+                    work = grown;
+                    capacity = next;
+                }
+                work[count++] = (uint64_t)done << 32 | child;
             }
         }
     }
@@ -12326,6 +12498,68 @@ static void check_common_type_safety(const Parser* parser, Preprocessor* pp, con
             }
         }
     }
+}
+
+// A failed initializer still built its source expression. Emit its comma operands' warnings before the rejected-view
+// recovery drops the declaration, using the same graph, evaluation facts and warning policy as the normal walk.
+static void check_common_rejected_initializer_commas(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                                      TypeTable* types, const uint8_t* roots, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint64_t mark = scratch->length;
+    const CheckCommonEnabled enabled = { 0 };
+    CheckCommonFacts facts = { 0 };
+    CheckWarningSpelling spell = { 0 };
+    CheckCommonIgnored ignored = { 0 };
+    CheckCommonCandidates candidates = { .count = graph->count };
+    const bool indexed = BUSTER_SCALAR_PATH(parser->options.scalar) || check_common_candidates_build(graph, scratch, false, &candidates);
+    uint8_t* marked = graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    bool ready = indexed && marked != NULL && check_common_facts(input, stream, types, parser, NULL, &enabled, NULL, &candidates, scratch, &facts) &&
+                 check_common_ignored_prepare(&ignored, parser, pp, input, types, scratch);
+    if (ready)
+    {
+        memcpy(marked, roots, graph->count);
+        for (uint32_t node = graph->count; node-- > 0;)
+        {
+            const uint32_t parent = facts.parents[node];
+            marked[node] |= parent < graph->count && marked[parent] != 0;
+        }
+        CheckCommonEmission emission = {
+            .parser = parser, .pp = pp, .input = input, .stream = stream, .types = types, .spell = &spell,
+            .parents = facts.parents, .evaluated = facts.evaluated, .ignored = &ignored, .scratch = scratch,
+            .at_once = BUSTER_CHECK_NONE,
+        };
+        for (uint32_t node = 0; node < graph->count && !pp->fatal; node += 1)
+        {
+            if (marked[node] && facts.evaluated[node] && graph->ops[node] == CHECK_OP_COMMA)
+            {
+                uint32_t root = node;
+                while (root < graph->count && !roots[root] && facts.parents[root] < graph->count)
+                {
+                    root = facts.parents[root];
+                }
+                const uint32_t initializer = root < graph->count ? facts.parents[root] : BUSTER_CHECK_NONE;
+                const PPDiagnosticRecord* previous = pp->diagnostic_last;
+                check_common_comma_marker(&emission, node);
+                if (pp->diagnostic_last != previous && pp->diagnostic_last->position % PP_DIAGNOSTIC_PHASE_COUNT == PP_DIAGNOSTIC_RUNTIME &&
+                    initializer < graph->count && graph->ops[initializer] == CHECK_OP_INITIALIZE && graph->source_positions != NULL)
+                {
+                    const uint32_t completion = graph->source_positions[initializer];
+                    const uint64_t position = (uint64_t)check_common_publication_source(parser, pp, completion) * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_RUNTIME;
+                    if (pp->diagnostic_last->position < position)
+                    {
+                        pp->diagnostic_last->position = position;
+                    }
+                }
+            }
+        }
+    }
+    else
+    {
+        check_common_exhausted(pp);
+    }
+    arena_pop_to(scratch, mark);
+    check_common_contexts = (CheckCommonContexts){ 0 };
 }
 
 // `flushed`: the tokens of the bodies clang ends after the unit's first error (check_common_flush), or null in a unit

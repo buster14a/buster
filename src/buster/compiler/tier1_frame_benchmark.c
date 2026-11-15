@@ -127,14 +127,7 @@ static __attribute__((noinline, aligned(64))) Tier1FrameError tier1_frame_benchm
             } break;
             case TIER1_FRAME_BENCHMARK_COLOR:
             {
-                if (scalar)
-                {
-                    tier1_frame_color_scalar(prepared);
-                }
-                else
-                {
-                    tier1_frame_color_vector(prepared);
-                }
+                tier1_frame_color(prepared);
                 __asm__ volatile("" : : "r"(prepared->color) : "memory");
             } break;
             case TIER1_FRAME_BENCHMARK_LAYOUT:
@@ -280,7 +273,7 @@ int run_tier1_frame_benchmark(int argc, char** argv)
             }
             if (passed)
             {
-                tier1_frame_color_vector(&prepared);
+                tier1_frame_color(&prepared);
                 printf("tier1-frame shape=%s objects=%u indexed=%u seed=%" PRIu64 " slots=%u object_bytes=%u stack_adjust=%u input_bytes=%" PRIu64
                     " scratch_bytes=%" PRIu64 " output_bytes=%" PRIu64 " plan_bytes=%zu\n", shapes[shape], count, request.slots.indices != 0, seed,
                     frames[1].slot_count, frames[1].object_bytes, frames[1].stack_adjust_bytes, (uint64_t)count * (request.slots.indices != 0 ? 20 : 16),

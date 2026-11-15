@@ -922,6 +922,22 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
             ir_typed_lanes(sink, value, operation->lane);
         }
     }
+    else if (operation->masked_memory == 6)
+    {
+        // A scatter (#1840) of the fourth operand, the stored vector, at the base, the first, by the index, the third,
+        // under the second, the mask: its stored vector and mask in two slots of the extra array, its scale's log2 its
+        // alignment's place.
+        const uint32_t address = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, operands[0], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        const uint32_t slot = (uint32_t)sink->sizes.extra_count;
+        if (sink->output != 0)
+        {
+            sink->output->extra[slot] = operands[3];
+            sink->output->extra[slot + 1] = operands[1];
+        }
+        sink->sizes.extra_count += 2;
+        value = ir_typed_emit(sink, IR_SCATTER, IR_VOID, address, operands[2], ir_intrinsic_ternary_c(0, slot), operation->immediate);
+        ir_typed_lanes(sink, value, operation->lane);
+    }
     else if (operation->masked_memory == 4)
     {
         // A gather (#1840) at the base, the second operand, by the index, the third, under the fourth, the mask, whose
@@ -1116,7 +1132,9 @@ static bool ir_typed_unmasked(const Tier0Function* input, const IrSimdTypedOpera
     // merged operand's.
     // A gather's, its passthrough's; a truncating store's, its source's (#1840).
     // A truncation's under a mask, its source's (#1840: a partial one's are fewer than its result's).
-    const uint32_t lanes = operation->convert == BUSTER_IR_INTRINSIC_TRUNCATE + 1u && operation->merge_mask ? operation->operand_bytes[0] >> (operation->immediate & 3) :
+    // A scatter's (#1840): none, its mask no operand at the stream's end, whose last is its stored vector.
+    const uint32_t lanes = operation->masked_memory == 6                                                    ? 0 :
+                           operation->convert == BUSTER_IR_INTRINSIC_TRUNCATE + 1u && operation->merge_mask ? operation->operand_bytes[0] >> (operation->immediate & 3) :
                            operation->compare_mask || operation->bitshuffle || operation->masked_memory == 4 ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) :
                            operation->masked_memory == 5                                                    ? operation->operand_bytes[1] >> (operation->immediate & 3) :
                            operation->merge_mask || operation->masked_memory != 0                          ? 8u * operation->operand_bytes[1] / ir_simd_lane_bits(operation->lane) :
@@ -1140,6 +1158,12 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_intrinsic(IrTyped
         value = ir_typed_emit(sink, IR_TRUNC, type, value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
     }
     return value;
+}
+
+// A scalar fused multiply-add's row (#1840, ir_simd_typed_fma) as IR_FMA of the operands its record places.
+static __attribute__((always_inline)) inline uint32_t ir_typed_fma(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands)
+{
+    return ir_typed_emit(sink, IR_FMA, type, operands[operation->fma_operands[0]], operands[operation->fma_operands[1]], operands[operation->fma_operands[2]], 0);
 }
 
 static __attribute__((always_inline)) inline uint32_t ir_typed_splat(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, uint32_t scalar)
@@ -1447,6 +1471,58 @@ static bool ir_typed_hoistable(const Tier0Function* input, uint32_t entry)
 // are listed once, counted by an open-addressed table of the symbols, sized to twice the takes, and numbered in entry
 // order, which the emission reads with a cursor as it does the tables'. Scalar past the compare: it visits the takes
 // alone, a few in a hundred of a function's entries. False where the arena is short.
+// Whether a take's address is only a call's argument (#2618): the first entry that pops it, within its block, is a call
+// taking it as an argument, not as an indirect call's target. The take's own lea puts the address in the argument's
+// register; a hoisted address would be a move there, no fewer instructions, for a register held from its definition on
+// (sqlite3Select's sqlite3ExprListDeleteGeneric, passed to sqlite3ParserAddCleanup on rare paths, was computed on each
+// call). The walk follows the stack's depth over the entries that push and pop without leaving the block, and stops at
+// anything else; a long argument list past a few dozen entries keeps the take hoistable. Scalar: a few entries per take.
+static bool ir_typed_argument(const Tier0Function* input, const IrTypedPlan* plan, uint32_t entry)
+{
+    uint32_t depth = 1;
+    bool argument = false;
+    bool walking = true;
+    for (uint32_t j = entry + 1; walking && j < input->count && j < entry + 48; j += 1)
+    {
+        const uint8_t kind = input->kinds[j];
+        const bool leader = plan->block_firsts[plan->entry_blocks[j]] == j;
+        const bool push = kind == BUSTER_TYPED_CONST || kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_GLOBAL ||
+                          kind == BUSTER_TYPED_GLOBAL_ADDRESS || kind == BUSTER_TYPED_FRAME_ADDRESS;
+        const bool unary = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_NEG || kind == BUSTER_TYPED_NOT || kind == BUSTER_TYPED_CONVERT ||
+                           kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_STORE_GLOBAL;
+        const bool popping = kind == BUSTER_TYPED_SET_LOCAL || kind == BUSTER_TYPED_SET_GLOBAL || kind == BUSTER_TYPED_DISCARD;
+        const bool binary = kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET || (kind >= BUSTER_TYPED_ADD && kind <= BUSTER_TYPED_GE);
+        if (leader)
+        {
+            walking = false;
+        }
+        else if (push)
+        {
+            depth += 1;
+        }
+        else if (unary)
+        {
+            walking = depth > 1;
+        }
+        else if (popping)
+        {
+            walking = depth > 1;
+            depth -= 1;
+        }
+        else if (binary)
+        {
+            walking = depth > 2;
+            depth -= kind == BUSTER_TYPED_SET ? 2 : 1;
+        }
+        else
+        {
+            argument = kind == BUSTER_TYPED_CALL && depth <= input->call_argument_counts[input->values[j]];
+            walking = false;
+        }
+    }
+    return argument;
+}
+
 static bool ir_typed_plan_hoisted(const Tier0Function* input, IrTypedPlan* plan, Arena* scratch)
 {
     const uint32_t* tables = input->table_addresses;
@@ -1468,7 +1544,7 @@ static bool ir_typed_plan_hoisted(const Tier0Function* input, IrTypedPlan* plan,
         {
             table += 1;
         }
-        if (input->kinds[i] == BUSTER_TYPED_GLOBAL_ADDRESS && ir_typed_hoistable(input, i) && !(table < table_count && tables[table] == i))
+        if (input->kinds[i] == BUSTER_TYPED_GLOBAL_ADDRESS && ir_typed_hoistable(input, i) && !(table < table_count && tables[table] == i) && !ir_typed_argument(input, plan, i))
         {
             taken[addresses] = i;
             addresses += 1;
@@ -3285,6 +3361,14 @@ static __attribute__((unused)) IrCheck ir_lower_typed_target(const Tier0Function
 static __attribute__((unused)) IrCheck ir_lower_typed_target_scalar(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch, IrFunction* result)
 {
     return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, target_features, false, false);
+}
+
+// ir_lower_typed_target's replay with source identity columns, by the vector path or its scalar twin: #2541 step 3's
+// summaries under -g, whose expansions carry their callee's origins (IrDebugInline).
+static __attribute__((unused)) IrCheck ir_lower_typed_target_sources(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch,
+                                                                     IrFunction* result, bool scalar)
+{
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, !scalar && BUSTER_HOST_VECTOR != 0, target_features, false, true);
 }
 
 // The C driver's --tier1 (#1624): ir_lower_typed_target, but a vector wider than the target moves whole is taken, for
