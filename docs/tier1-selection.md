@@ -292,7 +292,13 @@ patterns are:
   past the chain, at the comparison's width and the other, into its own
   register, the chosen value's or a compared one's; the memory comparisons'
   guarded holes as a select's; and the memory plans and the final-root store
-  fixture with selects, with and without an index.
+  fixture with selects, with and without an index. Against main `1935a91f`
+  ([the record](https://github.com/buster14a/buster-performance/tree/bfe90b562a7c5f828d5ec425d55371ebe1c73740/docs/measurements/tier1-select-compare-2676-2026-11-15)):
+  #1382's clamp runs 2.9% fewer cycles on the 9700X, clang -O2's instructions,
+  and its sum of a select 6.9% fewer; the conditional sum's loop 11 to 13%
+  fewer where its placement doesn't bound it. speedtest1 runs 0.48% fewer
+  instructions and Lua's scripts 0.11% fewer; `sqlite3.c`'s Tier 1 functions
+  are 0.53% smaller, with 947 fewer `setcc`s, and compile in the same time.
 - Labels and indirect jumps (#789): GNU C's labels as values and computed gotos,
   and the jump tables C's switches lower to. A label's address is its symbol's
   (`TIER1_RULE_SYMBOL_ADDRESS`). A `br_indirect` is a `jmp` through its target's
