@@ -487,10 +487,8 @@ static const char* check_vector_baseline_convert(const X86Target* target, CheckV
 // rest), between floats and doubles (VCVTPS2PD, VCVTPD2PS), from half-precision elements to floats (VCVTPH2PS) and from
 // floats to them (VCVTPS2PH at the current rounding, its imm8 4), and from bf16 elements to floats, whose bits are the
 // floats' high halves (VPMOVZXWD, then VPSLLD by 16); between floating elements of one format, none.
-static const char* check_vector_convert_row(const TypeTable* types, const X86Target* target, TypeId source, uint32_t operand_bytes, TypeId result, Tier0Operation* row)
+static const char* check_vector_convert_shape_row(const X86Target* target, CheckVectorShape in, uint32_t operand_bytes, CheckVectorShape out, Tier0Operation* row)
 {
-    const CheckVectorShape in = check_vector_builtin_shape(types, source);
-    const CheckVectorShape out = check_vector_builtin_shape(types, result);
     const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
     const char* reason = NULL;
     uint64_t needed = 0;
@@ -629,6 +627,11 @@ static const char* check_vector_convert_row(const TypeTable* types, const X86Tar
         reason = "vector conversions of 8-bit elements to 16-bit ones without AVX-512BW";
     }
     return reason;
+}
+
+static const char* check_vector_convert_row(const TypeTable* types, const X86Target* target, TypeId source, uint32_t operand_bytes, TypeId result, Tier0Operation* row)
+{
+    return check_vector_convert_shape_row(target, check_vector_builtin_shape(types, source), operand_bytes, check_vector_builtin_shape(types, result), row);
 }
 
 // The row of __builtin_elementwise_sqrt or _fma of float or double scalars (`class`, F32 or F64), of `arguments`

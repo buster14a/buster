@@ -450,6 +450,9 @@ change to fixture data alone) is a separate extension (#2032's discussion).
 
 ## The vector row
 
+The [hosted host-path coverage map](hosted-coverage.md) connects the rows to
+representative inventory tests and records what their evidence does not cover.
+
 Hosted `native` rows ran the vector path at random: 62 of 105 sampled jobs did
 (59%; 41% in the busiest hours). The others drew a Zen 3 EPYC 7763, or an EPYC
 9V74 VM with AVX-512 masked, and ran scalar, so a defect only the vector path

@@ -7013,6 +7013,12 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
         {
             options->dump_macros = true;
         }
+        else if (match.exact == C_OPTION_KEEP_COMMENTS || match.exact == C_OPTION_KEEP_MACRO_COMMENTS ||
+                 match.exact == C_OPTION_DD || match.exact == C_OPTION_DI || match.exact == C_OPTION_DN)
+        {
+            fprintf(stderr, "error: unsupported option '%s' (preprocessing output mode is not implemented)\n", argument);
+            result = false;
+        }
         else if (match.exact == C_OPTION_H)
         {
             options->show_includes = true;
