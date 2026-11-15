@@ -10,5 +10,8 @@ b0:
   %7 = intrinsic.v8i32 %2 lane_unary 6
   %8 = intrinsic.v16i32 %3 lane_unary 10
   %9 = intrinsic.v4i32 %1 lane_unary 11
-  %10 = ret.void %8
+  %10 = intrinsic.v4i32 %1 lane_unary 12
+  %11 = intrinsic.v8i32 %2 lane_unary 14
+  %12 = intrinsic.v16i32 %3 lane_unary 15
+  %13 = ret.void %8
 }

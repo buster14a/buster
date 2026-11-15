@@ -23,5 +23,8 @@ requirements. [Command index](README.md).
   `--version exited with status N`), while a present perf's wrong
   samples still fail. `benchmark-debug` measures validation through address
   finalization. [The debug guide](../../docs/debug.md) records the contract and a function's body's row
-  (`DebugFunction.prologue_end`); `streaming.c` makes a unit per 256 functions
+  (`DebugFunction.prologue_end`); a unit's rows may name files of their own
+  (`DebugUnit.row_files`, #2541: an expanded callee's from another file), which
+  the line program follows by `DW_LNS_set_file` by both paths, test-debug's
+  twins covering a change at every place of a vector group; `streaming.c` makes a unit per 256 functions
   as they compile.

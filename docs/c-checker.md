@@ -2986,7 +2986,8 @@ What the lowering covers past scalars (#145's programs):
   values are captured before later operands run, including a wide condition
   whose original object an arm overwrites; the omitted middle operand is
   evaluated once. Scalar arms splat at their element type. Non-boolean logical
-  operations and selections are bounded to 1,024 elements. Scalar-condition
+  operations and selections take any number of elements, on register-width
+  pieces (#2216). Scalar-condition
   `?:` keeps the usual short-circuit behavior. Clang rejects `&&` and `||` of
   boolean vectors, and whole-vector `++` and `--` of either vector kind; the
   checker rejects them too. Compound assignments and increments of an element
@@ -3479,8 +3480,32 @@ What the lowering covers past scalars (#145's programs):
     bits (5 past 32 bits) and xors the integer products of every pair of
     classes into its sum's class (`check_lower_sequence_clmul`), so that each
     class's carries stay in the other classes' positions. These expansions, ordered floating sums
-    and floating reduction trees are bounded to 1,024 elements and preserve
-    the ordinary rows' element-type and target-feature refusals.
+    and floating reduction trees take any number of elements (#2216: their
+    entries grow with the elements, or with the pieces for the trees) and
+    preserve the ordinary rows' element-type and target-feature refusals.
+    A `_BitInt` past 128 bits, whose value is its limbs' frame object's
+    address, takes the integer elementwise builtins limb by limb
+    (`check_lower_limb_elements_emit`, #2410): its arguments' addresses go
+    into temporaries and a deferred task (`CHECK_LOWER_LIMB_ELEMENTS`) runs
+    each builtin's recipe on U64 limbs without branches, as LLVM computes its
+    intrinsic on the iN, the result's top limb extended from the width. max
+    and min select by the limbs' compare's mask; abs is `(a ^ s) + (s & 1)`
+    with its carry, s the sign's limb; add_sat and sub_sat select the bound
+    (all ones, zeros, or the largest value xor a's sign) by the wrapped
+    result's overflow (an unsigned compare, or the top limbs' sign);
+    popcount, clzg and ctzg are the scalar builtins' limb counts
+    (`check_lower_limb_bits_popcount`, `check_lower_limb_bits_zeros`), a
+    fallback selected where the value is zero, and bitreverse is
+    `__builtin_bitreverseg`'s recipe. fshl and fshr reduce the count's bits,
+    unsigned, modulo the width, then shift through the limb shifts by less
+    than the width, `(a << s) | ((b >> 1) >> (w - 1 - s))`; clang's own code
+    refuses a variable count at a width no power of two (LLVM's remainder of
+    it is a library call that x86-64 has none of), where this one's equals
+    the constant's. pdep and pext go a mask limb at a time, each taking
+    `popcount(m_i)` bits at the sum of the counts before it, by BMI2's 64-bit
+    row or Hacker's Delight's expansion; clmul xors the 64-bit products of
+    limb pairs (PCLMULQDQ's two halves, or the 128-bit expansion's product),
+    quadratic in the limbs, and is refused by name past 4,096 bits.
   - boolean elementwise builtins use packed bit operations at scalar and
     register-sized widths: max and saturating add are OR; min, pdep, pext
     and clmul are AND; saturating subtract is `a & ~b`; popcount and
@@ -3526,8 +3551,8 @@ What the lowering covers past scalars (#145's programs):
   AVX-512 VBMI2), and gathers and scatters of 8- and 16-bit elements, which no
   instruction gathers or scatters (clang's code takes each element in turn); a shuffle by a vector
   of indices; bit reversal without GFNI (or, of bytes, AVX512-BMM); funnel
-  shifts of 8-bit elements outside 16-byte vectors or without XOP; the integer elementwise functions of
-  scalars wider than 128 bits (`_BitInt` past 128 bits, #2410); nontemporal builtins of scalars and at underaligned addresses; bit
+  shifts of 8-bit elements outside 16-byte vectors or without XOP; carry-less products of `_BitInt`s
+  past 4,096 bits (#2410); nontemporal builtins of scalars and at underaligned addresses; bit
   casts of other types; and the rows whose extensions the target hasn't
   (BITALG, VPOPCNTDQ, VBMI2, DQ, GFNI, BMI2) are refused by name. Shuffles of
   8-bit elements without VBMI's VPERMT2B, and of 16-bit ones without BW's

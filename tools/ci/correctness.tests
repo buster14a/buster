@@ -932,6 +932,8 @@ test "$("$BUSTER_COMPILER" test-ir-source --print fetched tests/ir-source/atomic
 "$BUSTER_COMPILER" test-ir-gvn
 "$BUSTER_COMPILER" test-ir-licm
 "$BUSTER_COMPILER" test-ir-sroa
+# #2743: the loop vectorizer's fixtures by both paths at 16, 32 and 64 bytes against the interpreter, and its mutants.
+"$BUSTER_COMPILER" test-ir-vectorize
 "$BUSTER_COMPILER" test-ir-inline
 == Test dataflow bitsets
 "$BUSTER_COMPILER" test-dataflow
@@ -957,7 +959,8 @@ clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags
 == Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
 # #2554: the subject compiles at Tier 1 with no fallback, by both host paths, and runs against Clang's oracle; objdump
 # checks that the truth values became branches, constants are stores' immediates, no shift by zero is left, each
-# computed goto has its own indirect jump and (#2745) no object a vector's value writes whole is zeroed first.
+# computed goto has its own indirect jump, (#2676) each select of a comparison is a cmov of its flags, with no setcc, and
+# (#2745) no object a vector's value writes whole is zeroed first.
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns
 ./build/test-driver-tier1-patterns "$BUSTER_COMPILER" "$(command -v clang)"
