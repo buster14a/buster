@@ -5477,8 +5477,50 @@ static uint32_t check_program_constant_arms(CheckControlWriter* writer, const ui
     return joined;
 }
 
-static bool check_program(CheckProgram* program, const Parser* parser, const CheckInput* input, CheckStream* stream,
-                          const TypeTable* types, CheckProgramOptions options, Arena* output, Arena* scratch)
+// The state check_program keeps between its parts (#2536's step 2.2c.1): its setup's columns, the writer, the loop's
+// place and the tail's inputs, so that its bodies' loop can run a range of bodies at a time.
+typedef struct CheckProgramRun CheckProgramRun;
+struct CheckProgramRun
+{
+    CheckProgram* program;
+    const Parser* parser;
+    const CheckInput* input;
+    CheckStream* stream;
+    const TypeTable* types;
+    CheckProgramOptions options;
+    Arena* output;
+    Arena* scratch;
+    Arena controls;
+    CheckControlWriter writer;
+    CheckProgramTargetEvents target_events;
+    const uint8_t* return_facts;
+    uint32_t* openings;
+    uint32_t* seen;
+    uint32_t* nodes;
+    uint32_t* stack;
+    uint64_t* reference_items;
+    uint64_t* reference_sort;
+    uint8_t* needed;
+    uint32_t* token_first;
+    uint32_t* node_next;
+    uint32_t* plan_first;
+    uint64_t* planned;
+    uint32_t* plan_next;
+    uint64_t* dropped_ranges;
+    CheckControl* entries;
+    uint64_t mark;
+    uint64_t temporary;
+    uint32_t count;
+    uint32_t body_count;
+    uint32_t next_body;
+    uint32_t reference_count;
+    bool valid;
+};
+
+// check_program's first part (#2536's step 2.2c.1): the program's setup, its columns and the writer, and the candidates'
+// pass, kept in `run` for the bodies' loop (check_program_bodies) and the tail (check_program_finish). Whether all went.
+static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, const Parser* parser, const CheckInput* input, CheckStream* stream,
+                                const TypeTable* types, CheckProgramOptions options, Arena* output, Arena* scratch)
 {
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
@@ -5895,20 +5937,78 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         program->census_pass_arms = arm_count;
         arena_pop_to(scratch, mark);
     }
-    uint32_t reference_count = 0;
-    for (uint32_t b = 0; valid && b < body_count && program->status == CHECK_PROGRAM_OK; b += 1)
+    *run = (CheckProgramRun){
+        .program = program,
+        .parser = parser,
+        .input = input,
+        .stream = stream,
+        .types = types,
+        .options = options,
+        .output = output,
+        .scratch = scratch,
+        .controls = controls,
+        .writer = writer,
+        .target_events = target_events,
+        .return_facts = return_facts,
+        .openings = openings,
+        .seen = seen,
+        .nodes = nodes,
+        .stack = stack,
+        .reference_items = reference_items,
+        .reference_sort = reference_sort,
+        .needed = needed,
+        .token_first = token_first,
+        .node_next = node_next,
+        .plan_first = plan_first,
+        .planned = planned,
+        .plan_next = plan_next,
+        .dropped_ranges = dropped_ranges,
+        .entries = entries,
+        .mark = mark,
+        .temporary = temporary,
+        .count = count,
+        .body_count = body_count,
+        .valid = valid,
+    };
+    return valid;
+}
+
+// check_program's loop (#2536's step 2.2c.1): the bodies from the run's next to `end`, each's controls, return flow,
+// chains and references, in token order, as the loop over them all would make them.
+static void check_program_bodies(CheckProgramRun* run, uint32_t end)
+{
+    CheckProgram* program = run->program;
+    const Parser* parser = run->parser;
+    const CheckInput* input = run->input;
+    const CheckProgramOptions* options = &run->options;
+    Arena* output = run->output;
+    Arena* scratch = run->scratch;
+    const uint8_t* return_facts = run->return_facts;
+    const uint32_t* openings = run->openings;
+    uint32_t* seen = run->seen;
+    uint32_t* nodes = run->nodes;
+    uint32_t* stack = run->stack;
+    uint64_t* reference_items = run->reference_items;
+    uint64_t* reference_sort = run->reference_sort;
+    uint8_t* needed = run->needed;
+    CheckControl* entries = run->entries;
+    const bool valid = run->valid;
+    const uint32_t last = end < run->body_count ? end : run->body_count;
+    CheckControlWriter* writer = &run->writer;
+    uint32_t reference_count = run->reference_count;
+    for (uint32_t b = run->next_body; valid && b < last && program->status == CHECK_PROGRAM_OK; b += 1)
     {
         const uint32_t token = openings[b];
         const uint32_t declaration = check_sparse_get(input->body_declarations, token);
-        const uint32_t start = writer.count;
-        const uint32_t label_first = writer.label_position_count;
-        const uint32_t exit_start = writer.exit_count;
-        check_control_build(&writer, token);
+        const uint32_t start = writer->count;
+        const uint32_t label_first = writer->label_position_count;
+        const uint32_t exit_start = writer->exit_count;
+        check_control_build(writer, token);
         // Its source labels' places, from their numbers, before check_program_return_flow takes the writer's labels.
-        for (uint32_t l = label_first; l < writer.label_position_count; l += 1)
+        for (uint32_t l = label_first; l < writer->label_position_count; l += 1)
         {
-            const uint32_t label = writer.label_positions[l];
-            writer.label_positions[l] = label < writer.label_count ? writer.labels[label] : BUSTER_CHECK_NONE;
+            const uint32_t label = writer->label_positions[l];
+            writer->label_positions[l] = label < writer->label_count ? writer->labels[label] : BUSTER_CHECK_NONE;
         }
         CheckProgramBody* body = &program->bodies[program->body_count++];
         *body = (CheckProgramBody)
@@ -5917,26 +6017,26 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             .opening = token,
             .object = input->objects[declaration],
             .first = start,
-            .count = writer.count - start,
-            .entry_count = writer.entry_count,
+            .count = writer->count - start,
+            .entry_count = writer->entry_count,
             .reference_first = reference_count,
             .label_first = label_first,
-            .label_count = writer.label_position_count - label_first,
-            .cleanup_first = writer.cleanup_first,
-            .cleanup_count = writer.cleanup_count,
+            .label_count = writer->label_position_count - label_first,
+            .cleanup_first = writer->cleanup_first,
+            .cleanup_count = writer->cleanup_count,
         };
-        if (options.identifiers != 0)
+        if (options->identifiers != 0)
         {
             const uint32_t name = parser->tokens.names[declaration];
-            body->is_main = intern_length(options.identifiers, name) == 4 && memcmp(intern_bytes(options.identifiers, name), "main", 4) == 0;
+            body->is_main = intern_length(options->identifiers, name) == 4 && memcmp(intern_bytes(options->identifiers, name), "main", 4) == 0;
         }
-        check_program_return_flow(&writer, body, return_facts, options.return_warnings, options.noreturn_warnings);
-        program->exit_count = writer.exit_count;
-        if (writer.exit_count != exit_start && program->status == CHECK_PROGRAM_OK)
+        check_program_return_flow(writer, body, return_facts, options->return_warnings, options->noreturn_warnings);
+        program->exit_count = writer->exit_count;
+        if (writer->exit_count != exit_start && program->status == CHECK_PROGRAM_OK)
         {
-            check_program_chains(&writer, body, exit_start, scratch);
+            check_program_chains(writer, body, exit_start, scratch);
         }
-        const uint64_t references_start = options.selection_census ? __rdtsc() : 0;
+        const uint64_t references_start = options->selection_census ? __rdtsc() : 0;
         body->reference_count = check_program_references(program, entries + start, body->entry_count, program->body_count, seen, nodes, stack, reference_items, needed);
         if (body->reference_count > UINT32_MAX - reference_count)
         {
@@ -5951,7 +6051,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             }
             // The existing bounded radix kernel sorts high 32-bit keys. Reuse its scalar/vector twins, keeping
             // this body's canonical object IDs compact instead of rescanning the entire translation unit.
-            uint64_t* sorted = c_bindings_sort(reference_items, reference_sort, body->reference_count, !BUSTER_SCALAR_PATH(options.scalar), varying);
+            uint64_t* sorted = c_bindings_sort(reference_items, reference_sort, body->reference_count, !BUSTER_SCALAR_PATH(options->scalar), varying);
             uint32_t* output_references = body->reference_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, body->reference_count) : 0;
             if (body->reference_count != 0 && output_references == 0)
             {
@@ -5969,10 +6069,47 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 }
             }
             reference_count += body->reference_count;
-            program->census_references_ticks += options.selection_census ? __rdtsc() - references_start : 0;
+            program->census_references_ticks += options->selection_census ? __rdtsc() - references_start : 0;
         }
     }
-    valid = valid && program->status == CHECK_PROGRAM_OK;
+    run->reference_count = reference_count;
+    run->next_body = last > run->next_body ? last : run->next_body;
+}
+
+// check_program's tail (#2536's step 2.2c.1): after the bodies' loop, the builtins, the censuses, the controls' copy, the
+// static objects, aliases and symbols, the targets' checks, and the failure's or the success's last word. Whether the
+// program is valid.
+static bool check_program_finish(CheckProgramRun* run)
+{
+    CheckProgram* program = run->program;
+    const Parser* parser = run->parser;
+    const CheckInput* input = run->input;
+    CheckStream* stream = run->stream;
+    CheckProgramOptions options = run->options;
+    Arena* output = run->output;
+    Arena* scratch = run->scratch;
+    Arena controls = run->controls;
+    CheckProgramTargetEvents target_events = run->target_events;
+    const uint32_t* openings = run->openings;
+    uint32_t* seen = run->seen;
+    uint32_t* nodes = run->nodes;
+    uint32_t* stack = run->stack;
+    uint64_t* reference_items = run->reference_items;
+    uint64_t* reference_sort = run->reference_sort;
+    uint8_t* needed = run->needed;
+    uint32_t* token_first = run->token_first;
+    uint32_t* node_next = run->node_next;
+    uint32_t* plan_first = run->plan_first;
+    uint64_t* planned = run->planned;
+    uint32_t* plan_next = run->plan_next;
+    uint64_t* dropped_ranges = run->dropped_ranges;
+    CheckControl* entries = run->entries;
+    const uint64_t mark = run->mark;
+    const uint64_t temporary = run->temporary;
+    const uint32_t count = run->count;
+    const uint32_t reference_count = run->reference_count;
+    const CheckControlWriter writer = run->writer;
+    bool valid = run->valid && program->status == CHECK_PROGRAM_OK;
     program->builtin_count = valid ? check_program_builtins(&input->graph, nodes, NULL, BUSTER_SCALAR_PATH(options.scalar)) : 0;
     program->builtin_nodes = valid && program->builtin_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->builtin_count) : 0;
     valid = valid && (program->builtin_count == 0 || program->builtin_nodes != 0);
@@ -6143,6 +6280,19 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     arena_pop_to(scratch, temporary);
     arena_release(&controls);
     return valid;
+}
+
+static bool check_program(CheckProgram* program, const Parser* parser, const CheckInput* input, CheckStream* stream,
+                          const TypeTable* types, CheckProgramOptions options, Arena* output, Arena* scratch)
+{
+    // The loop a body at a time, as the windows will run it a window's bodies at a time.
+    CheckProgramRun run;
+    check_program_begin(&run, program, parser, input, stream, types, options, output, scratch);
+    for (uint32_t b = 0; b < run.body_count; b += 1)
+    {
+        check_program_bodies(&run, b + 1);
+    }
+    return check_program_finish(&run);
 }
 
 #include "c_check_program_symbol_pragma.c"

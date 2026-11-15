@@ -861,10 +861,10 @@ must move with the loop or work without it:
 
 | sub-step | what is built | gate |
 | --- | --- | --- |
-| 2.2c.1 The program in parts | `check_program` as its setup with the pass, its loop over a range of bodies, and its tail; the loop on its own scratch and into a column of references sized before it. The driver still calls the three in a row. | Every object and diagnostic the same bytes; the compile not slower. |
+| 2.2c.1 The program in parts | `check_program` as its setup with the pass, its loop over a range of bodies, and its tail, in a row, the loop a body at a time. | Every object and diagnostic the same bytes; the compile not slower. |
 | 2.2c.2 The tail before the windows | Under `--provisional-selection`, the tail over the candidates' marks before the windows, the selection over the candidates, and the tail again over the exact marks after; the weakrefs' states compared. | The provisional objects the exact selection's bytes on every corpus; no state differs. |
 | 2.2c.3 The lowering's preparation by windows | The calls' room bounded by the input's cleanups and the program's exits; each window's switch tables decided with its lowering, the merge numbering them in the functions' order as it does. | Every object the same bytes at W of 1, 2,048 and ∞. |
-| 2.2c.4 The loop in the windows | The `-c` path: the setup, the tail over the candidates and their selection, then each window's bodies' loop before its lowering (the inline callees' first), then the tail and the exact selection, the warnings after in today's order; `W = ∞` again on an extra body, a missing reference or a differing state. | 2.2c's gate. |
+| 2.2c.4 The loop in the windows | The `-c` path: the setup, the tail over the candidates and their selection, then each window's bodies' loop before its lowering (the inline callees' first), on a scratch of its own and into a column of references sized before it, then the tail and the exact selection, the warnings after in today's order; `W = ∞` again on an extra body, a missing reference or a differing state. | 2.2c's gate. |
 
 **Across the three designs**, by what each next step gives eight workers on
 `sqlite3.c` (the model's expected case, cumulative): the node machine's step
