@@ -7,8 +7,8 @@
 // expression the tasks lowered is read again from the finished graph, stream and parser's tree, by the tests the machine
 // would make before it takes it. Include after c_check_lower_inventory.c.
 //
-//   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--fused] [--interleave N] [--facts | --facts-packed] [--facts-window N]
-//                                       [--passes N] [--repeat N]] [preprocessor options] file...
+//   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--fused] [--interleave N] [--facts | --facts-lean | --facts-loads]
+//                                       [--facts-packed] [--facts-window N] [--passes N] [--repeat N]] [preprocessor options] file...
 //
 // A full expression is a tree of the tasks' pops under one root: a pop that a statement's control pushed (an expression
 // statement's, a condition's, a return's, a switch's, an initializer's) or a nested control (a statement expression's).
@@ -1928,6 +1928,7 @@ struct NodeShadow
     bool facts;
     bool facts_packed;
     uint32_t facts_window;
+    uint32_t facts_mode;
     uint64_t facts_records;
     uint64_t facts_literals;
     uint64_t facts_identifiers;
@@ -1941,6 +1942,12 @@ struct NodeShadow
     uint64_t facts_differences;
     uint64_t facts_list_differences;
     uint64_t facts_listed;
+    uint64_t facts_short_lookups;
+    uint64_t facts_conversions;
+    uint64_t facts_conversions_derived;
+    uint64_t facts_discards;
+    uint64_t facts_discards_derived;
+    uint64_t facts_loads;
     uint64_t facts_failures;
     uint64_t facts_rows;
     uint64_t facts_lines;
@@ -2543,12 +2550,24 @@ static void node_shadow_facts(NodeShadow* shadow, NodeCensusScratch* s)
     }
     else
     {
+        // The checked pass. The loads' kernel takes the lean one's answer for whether a lookup's operand is fit, so the lean
+        // kernel is checked first for it and the loads' own records after.
+        const uint32_t mode = shadow->facts_mode;
+        const uint32_t checked = mode == BUSTER_NODE_FACTS_LOADS ? BUSTER_NODE_FACTS_LEAN : mode;
+        // The members' slots are a memo, filled by an access's rule the first time: a first pass over the unit fills them,
+        // as declarations would have, so that the checked pass and the timed ones find the same words and the short
+        // paths take what they take in every pass.
+        for (uint32_t window = 0; window < windows; window += 1)
+        {
+            node_facts_given(facts, window, BUSTER_NODE_FACTS_POISON_NONE);
+            node_facts_window(facts, window, checked, false);
+        }
         for (uint32_t window = 0; window < windows; window += 1)
         {
             const uint32_t first = facts->windows[window];
             const uint32_t count = facts->windows[window + 1] - first;
-            node_facts_given(facts, window, true);
-            node_facts_window(facts, window, false);
+            node_facts_given(facts, window, BUSTER_NODE_FACTS_POISON_RECORDS);
+            node_facts_window(facts, window, checked, false);
             shadow->facts_list_differences += !node_facts_lists_same(facts, window);
             for (uint32_t i = 0; i < count; i += 1)
             {
@@ -2558,25 +2577,63 @@ static void node_shadow_facts(NodeShadow* shadow, NodeCensusScratch* s)
                 {
                     const CheckOp op = (CheckOp)facts->ops[w];
                     const bool leaf = kind == BUSTER_NODE_FACTS_IDENTIFIER;
-                    const bool taken = facts->records[i].taken == 1;
-                    const bool same = node_facts_same(facts, first, i);
+                    const bool brief = facts->records[i].taken == BUSTER_NODE_FACTS_SHORT;
+                    const bool taken = brief || facts->records[i].taken == BUSTER_NODE_FACTS_RULED;
+                    const bool same = node_facts_same(facts, first, i, checked);
                     shadow->facts_taken_leaves += taken && leaf;
                     shadow->facts_taken_lookups += taken && !leaf;
+                    shadow->facts_short_lookups += brief && !leaf;
                     shadow->facts_left_identifiers += !taken && leaf;
                     shadow->facts_left_lookups[leaf ? 0 : node_facts_lookup(op)] += !taken && !leaf;
                     shadow->facts_differences += !same;
+                    facts->fits[w] = brief && !leaf;
                     if (!same && shadow->facts_listed < node_census_list)
                     {
                         shadow->facts_listed += 1;
-                        printf("node-facts: difference file=%s line=%u op=%s taken=%s type=%u/%u flags=%#x/%#x standing=%#x/%#x object=%u/%u payload=%" PRIu64 "/%" PRIu64
+                        printf("node-facts: difference file=%s line=%u op=%s taken=%u type=%u/%u flags=%#x/%#x standing=%#x/%#x object=%u/%u payload=%" PRIu64 "/%" PRIu64
                                " converted=%u,%u/%u,%u conversion-flags=%#x,%#x/%#x,%#x member-offset=%" PRIu64 "/%" PRIu64 "\n",
                                s->file, node_census_line(s->pp, program->parser, program->input->graph.tokens[facts->nodes[w]]),
-                               lower_inventory_op_names[op] != NULL ? lower_inventory_op_names[op] : "?", taken ? "yes" : "no", facts->records[i].type, facts->expected_types[w],
+                               lower_inventory_op_names[op] != NULL ? lower_inventory_op_names[op] : "?", facts->records[i].taken, facts->records[i].type, facts->expected_types[w],
                                facts->records[i].flags, facts->expected_flags[w], facts->records[i].standing, facts->expected_standings[w], facts->records[i].object, facts->expected_objects[w],
                                facts->records[i].payload, facts->expected_payloads[w], facts->records[i].converted[0], facts->records[i].converted[1],
                                facts->expected_converted[2 * (uint64_t)w], facts->expected_converted[2 * (uint64_t)w + 1], facts->records[i].conversion_flags[0],
                                facts->records[i].conversion_flags[1], facts->expected_conversion_flags[2 * (uint64_t)w],
                                facts->expected_conversion_flags[2 * (uint64_t)w + 1], facts->records[i].member_offset, facts->expected_member_offsets[w]);
+                    }
+                    // What the lean kernel left to C: the lookup's conversions' entries must be its rule's on these records.
+                    if (checked == BUSTER_NODE_FACTS_LEAN && !leaf && taken)
+                    {
+                        shadow->facts_conversions += 1;
+                        shadow->facts_conversions_derived += node_facts_derived(facts, first, i, false);
+                    }
+                }
+                else if (kind == BUSTER_NODE_FACTS_DISCARD)
+                {
+                    // And a discard it didn't make: T's record must be the discard's rule on its operand's record.
+                    shadow->facts_discards += 1;
+                    shadow->facts_discards_derived += node_facts_derived(facts, first, i, true);
+                }
+            }
+            if (mode == BUSTER_NODE_FACTS_LOADS)
+            {
+                node_facts_given(facts, window, BUSTER_NODE_FACTS_POISON_LOADS);
+                node_facts_window(facts, window, BUSTER_NODE_FACTS_LOADS, false);
+                for (uint32_t i = 0; i < count; i += 1)
+                {
+                    const uint32_t w = first + i;
+                    const uint8_t kind = facts->kinds[w];
+                    if (kind == BUSTER_NODE_FACTS_IDENTIFIER || kind == BUSTER_NODE_FACTS_LOOKUP)
+                    {
+                        const bool same = node_facts_same(facts, first, i, BUSTER_NODE_FACTS_LOADS);
+                        shadow->facts_differences += !same;
+                        shadow->facts_loads += kind == BUSTER_NODE_FACTS_LOOKUP && facts->records[i].taken == BUSTER_NODE_FACTS_SHORT;
+                        if (!same && shadow->facts_listed < node_census_list)
+                        {
+                            shadow->facts_listed += 1;
+                            printf("node-facts: loads difference file=%s line=%u taken=%u type=%u/%u word=%#x/%#x member-offset=%" PRIu64 "/%" PRIu64 "\n", s->file,
+                                   node_census_line(s->pp, program->parser, program->input->graph.tokens[facts->nodes[w]]), facts->records[i].taken, facts->records[i].type,
+                                   facts->expected_types[w], facts->records[i].word, facts->expected_words[w], facts->records[i].member_offset, facts->expected_member_offsets[w]);
+                        }
                     }
                 }
             }
@@ -2594,8 +2651,8 @@ static void node_shadow_facts(NodeShadow* shadow, NodeCensusScratch* s)
             const uint64_t t0 = __rdtsc();
             for (uint32_t window = 0; window < windows; window += 1)
             {
-                node_facts_given(facts, window, false);
-                node_facts_window(facts, window, false);
+                node_facts_given(facts, window, BUSTER_NODE_FACTS_POISON_NONE);
+                node_facts_window(facts, window, mode, false);
             }
             const uint64_t t1 = __rdtsc();
             const uint64_t m1 = node_shadow_read(mispredicts);
@@ -2617,7 +2674,7 @@ static void node_shadow_facts(NodeShadow* shadow, NodeCensusScratch* s)
             const uint64_t t0 = __rdtsc();
             for (uint32_t window = 0; window < windows; window += 1)
             {
-                node_facts_given(facts, window, false);
+                node_facts_given(facts, window, BUSTER_NODE_FACTS_POISON_NONE);
             }
             const uint64_t t1 = __rdtsc();
             const uint64_t m1 = node_shadow_read(mispredicts);
@@ -2637,15 +2694,15 @@ static void node_shadow_facts(NodeShadow* shadow, NodeCensusScratch* s)
             uint64_t ticks[4] = { 0, 0, 0, 0 };
             for (uint32_t window = 0; window < windows; window += 1)
             {
-                node_facts_given(facts, window, false);
+                node_facts_given(facts, window, BUSTER_NODE_FACTS_POISON_NONE);
                 facts->leaf_ticks = 0;
                 facts->lookup_ticks = 0;
-                node_facts_window(facts, window, true);
+                node_facts_window(facts, window, mode, true);
                 ticks[0] += facts->leaf_ticks;
                 ticks[1] += facts->lookup_ticks;
                 facts->leaf_ticks = 0;
                 facts->lookup_ticks = 0;
-                node_facts_window(facts, window, true);
+                node_facts_window(facts, window, mode, true);
                 ticks[2] += facts->leaf_ticks;
                 ticks[3] += facts->lookup_ticks;
             }
@@ -2721,15 +2778,31 @@ static void node_shadow_facts_report(const NodeShadow* shadow)
     {
         given += shadow->facts_given[op];
     }
+    // A lean kernel makes no discard: its lookups are the others.
+    static const char* const variants[BUSTER_NODE_FACTS_MODES] = { "whole", "lean", "loads" };
+    const bool lean = shadow->facts_mode != BUSTER_NODE_FACTS_WHOLE;
+    const uint64_t made = lookups - (lean ? shadow->facts_lookups[BUSTER_NODE_FACTS_LOOKUPS - 1] : 0);
     const uint64_t taken = shadow->facts_taken_leaves + shadow->facts_taken_lookups;
-    printf("node-facts: records=%" PRIu64 " identifiers=%" PRIu64 " (enumerators=%" PRIu64 " functions=%" PRIu64 " static-objects=%" PRIu64 " automatic-objects=%" PRIu64
-           ") literals=%" PRIu64 " lookups=%" PRIu64 " given=%" PRIu64 "\n",
-           shadow->facts_records, shadow->facts_identifiers, shadow->facts_named[0], shadow->facts_named[1], shadow->facts_named[2], shadow->facts_named[3],
-           shadow->facts_literals, lookups, given);
+    printf("node-facts: variant=%s records=%" PRIu64 " identifiers=%" PRIu64 " (enumerators=%" PRIu64 " functions=%" PRIu64 " static-objects=%" PRIu64
+           " automatic-objects=%" PRIu64 ") literals=%" PRIu64 " lookups=%" PRIu64 " given=%" PRIu64 "\n",
+           variants[shadow->facts_mode < BUSTER_NODE_FACTS_MODES ? shadow->facts_mode : 0], shadow->facts_records, shadow->facts_identifiers, shadow->facts_named[0],
+           shadow->facts_named[1], shadow->facts_named[2], shadow->facts_named[3], shadow->facts_literals, made, given + (lookups - made));
     printf("node-facts: taken identifiers=%" PRIu64 " (%.2f%%) lookups=%" PRIu64 " (%.2f%%) differences=%" PRIu64 " list-differences=%" PRIu64 " failures=%" PRIu64 "\n",
            shadow->facts_taken_leaves, node_census_share(shadow->facts_taken_leaves, shadow->facts_identifiers), shadow->facts_taken_lookups,
-           node_census_share(shadow->facts_taken_lookups, lookups), shadow->facts_differences, shadow->facts_list_differences, shadow->facts_failures);
-    for (uint32_t lookup = 0; lookup < BUSTER_NODE_FACTS_LOOKUPS; lookup += 1)
+           node_census_share(shadow->facts_taken_lookups, made), shadow->facts_differences, shadow->facts_list_differences, shadow->facts_failures);
+    printf("node-facts: lookups by a short path=%" PRIu64 " (%.2f%%) by their rule=%" PRIu64 "\n", shadow->facts_short_lookups,
+           node_census_share(shadow->facts_short_lookups, made), shadow->facts_taken_lookups - shadow->facts_short_lookups);
+    if (lean)
+    {
+        printf("node-facts: left out, and what the rule makes of each from the kernel's records: conversions=%" PRIu64 " derived=%" PRIu64 "; discards=%" PRIu64
+               " derived=%" PRIu64 "\n",
+               shadow->facts_conversions, shadow->facts_conversions_derived, shadow->facts_discards, shadow->facts_discards_derived);
+    }
+    if (shadow->facts_mode == BUSTER_NODE_FACTS_LOADS)
+    {
+        printf("node-facts: loads: lookups by their load alone=%" PRIu64 " (%.2f%%)\n", shadow->facts_loads, node_census_share(shadow->facts_loads, made));
+    }
+    for (uint32_t lookup = 0; lookup < BUSTER_NODE_FACTS_LOOKUPS - (lean ? 1u : 0u); lookup += 1)
     {
         printf("node-facts: lookup=%s records=%" PRIu64 " left=%" PRIu64 " (%.2f%%)\n", node_facts_lookup_names[lookup], shadow->facts_lookups[lookup],
                shadow->facts_left_lookups[lookup], node_census_share(shadow->facts_left_lookups[lookup], shadow->facts_lookups[lookup]));
@@ -3032,7 +3105,7 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
             }
             if (room && shadow->facts)
             {
-                room = node_facts_begin(&facts, &machine, nodes, shadow->facts_window, shadow->facts_packed, &scratch);
+                room = node_facts_begin(&facts, &machine, nodes, shadow->facts_window, shadow->facts_packed, shadow->facts_mode != BUSTER_NODE_FACTS_WHOLE, &scratch);
                 s.facts = room ? &facts : NULL;
             }
         }
@@ -3225,6 +3298,11 @@ static int run_node_census(int count, char** arguments)
             shadow.facts = true;
             shadow.facts_packed = true;
         }
+        else if (strcmp(arguments[i], "--facts-lean") == 0 || strcmp(arguments[i], "--facts-loads") == 0)
+        {
+            shadow.facts = true;
+            shadow.facts_mode = strcmp(arguments[i], "--facts-lean") == 0 ? BUSTER_NODE_FACTS_LEAN : BUSTER_NODE_FACTS_LOADS;
+        }
         else if (strcmp(arguments[i], "--facts-window") == 0)
         {
             uint64_t number = 0;
@@ -3301,12 +3379,13 @@ static int run_node_census(int count, char** arguments)
     }
     else
     {
-        fprintf(stderr, "usage: compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--facts | --facts-packed] [--facts-window N] [--passes N] [--repeat N]] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--facts | --facts-lean | --facts-loads] [--facts-packed] [--facts-window N] [--passes N] [--repeat N]] [preprocessor options] file...\n");
     }
     free(files);
     free(options);
     const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0 || shadow.fused_differences != 0 ||
                                           shadow.facts_differences != 0 || shadow.facts_list_differences != 0 || shadow.facts_failures != 0 ||
+                                          shadow.facts_conversions != shadow.facts_conversions_derived ||
                                           shadow.front_differences != 0);
     return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
 }
