@@ -197,12 +197,12 @@ static uint32_t check_tier1_passes_on(const CheckTier1Lane* lane)
 // The lane's arenas, reserved at its first body and emptied for each, and the forms `target` allows, built again only
 // for a target other than the last one's, with the vector operations it selects (ir_vectorize_target.c). The optional
 // passes' arenas (#866's solver's, step 7, and SROA's, LICM's and the loop vectorizer's from --tier1-passes=, steps 8,
-// 9 and 10) are reserved only where `optional` asks for them (bit k for step
-// BUSTER_CHECK_TIER1_STEPS_ALWAYS + k), so that --tier1 alone maps no address space it never uses. Returns false if one
-// can't be reserved.
+// 9 and 10) are reserved only where `optional` asks for them (bit k for step BUSTER_CHECK_TIER1_STEPS_ALWAYS + k), so
+// that --tier1 alone maps no address space it never uses; one a body reserved for itself (check_tier1_lane_reserve)
+// stays for the lane's later bodies. Returns false if one can't be reserved.
 static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* target, uint8_t optional)
 {
-    if (!lane->reserved || lane->optional_reserved != optional)
+    if (!lane->reserved || (lane->optional_reserved & optional) != optional)
     {
         for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_STEPS; k += 1)
         {
@@ -243,6 +243,20 @@ static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* targ
         lane->targeted = true;
     }
     return valid;
+}
+
+// Optional step BUSTER_CHECK_TIER1_STEPS_ALWAYS + k's arena, reserved where a body first needs it: #2781's passes run
+// only in a function that has vector or mask values, which the lane's options don't say. Returns false if it can't be
+// reserved.
+static bool check_tier1_lane_reserve(CheckTier1Lane* lane, uint32_t k)
+{
+    Arena* arena = &lane->steps[BUSTER_CHECK_TIER1_STEPS_ALWAYS + k];
+    if (arena->base == 0)
+    {
+        *arena = arena_reserve(UINT64_C(1) << 34);
+        lane->optional_reserved |= arena->base != 0 ? (uint8_t)(1u << k) : 0;
+    }
+    return arena->base != 0;
 }
 
 // Tier 1's code's frame as the emission takes it (#1056): its frame emitter's own events (tier1_frame_emit, at the
@@ -303,6 +317,8 @@ struct CheckTier1PassesInput
     const IrFunction* function;
     bool verified;
     const IrFunction* unexpanded;
+    // Whether #866's solver took it whole (--tier1-gvn): #2781's, on vector and mask values alone, then doesn't run.
+    bool numbered;
     // A candidate's summary (c_check_tier1_inline.c), which callers expand and then run these passes on again: the
     // unroller skips it, so that an expanded loop is unrolled once, in its caller, and the summary's size (which the
     // callers' expansion decisions read) is the loop's own.
@@ -320,8 +336,11 @@ struct CheckTier1Passes
     uint32_t pre_moved;
     // The operand sink's expressions (#2592).
     uint32_t sunk;
-    // --tier1-passes=+licm's moved values (#139).
+    // --tier1-passes=+licm's moved values (#139), or #2781's: the vector and mask values and the operands moved with them.
     uint32_t licm_moved;
+    // The instructions #2781's solver's output has fewer than its input: the merged vector and mask values and what
+    // was dead.
+    uint32_t gvn_removed;
     // --tier1-passes=+vectorize's counts (#2743, BUSTER_CHECK_TIER1_VECTORIZE_COUNTS).
     uint32_t vectorize[BUSTER_CHECK_TIER1_VECTORIZE_COUNTS];
     // --tier1-passes=+unroll's loops (#2755).
@@ -392,13 +411,46 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     Arena* scratch = &lane->scratch;
     CheckTier1Outcome outcome = check_tier1_step(CHECK_TIER1_COMPILED, CHECK_TIER1_CAUSE_IR, 0, BUSTER_IR_NONE, 0, NULL);
     CheckTier1Stage stage = outcome.stage;
-    IrFunction promoted = { 0 };
+    const uint32_t on = check_tier1_passes_on(lane);
+    // #2781: a function that has vector or mask values runs the solver and LICM on those values alone, where the
+    // options don't run the pass on every value. What vector code shares is a few long-lived constants and tables,
+    // built again at each use otherwise; the general registers' values, whose longer ranges the allocator spills
+    // (#2719), stay as they are. One scan of the types and operations decides, so that a function without such values
+    // pays that scan alone.
+    const bool vectors = (on & BUSTER_CHECK_TIER1_PASS_VECTORS) != 0 && ir_function_has_simd_path(input->function, !scalar);
+    // The solver's, in steps[7], before promotion as --tier1-gvn's is. A function it refuses or finds past its limits
+    // goes on as it was; any other error is the function's.
+    IrGvnResult shared = { 0 };
+    bool numbered = false;
+    if (vectors && !input->numbered)
     {
-        const IrFunction* unssa = input->function;
+        IrGvnOptions options = ir_gvn_options();
+        options.scalar = scalar;
+        options.vectors = true;
+        if (!check_tier1_lane_reserve(lane, 0))
+        {
+            outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, NULL);
+        }
+        else
+        {
+            const IrCheck check = ir_optimize_gvn(input->function, &lane->steps[7], scratch, options, &shared);
+            const IrError error = check.error == IR_ERROR_UNSUPPORTED || check.error == IR_ERROR_LIMIT ? IR_OK : check.error;
+            outcome = check_tier1_step(CHECK_TIER1_VALUE_NUMBERING, CHECK_TIER1_CAUSE_IR, error, check.instruction, check.detail, NULL);
+            outcome.dominance_checked = check.dominance_checked;
+            outcome.operation = check.instruction < input->function->instruction_count ? input->function->op[check.instruction] : IR_OP_COUNT;
+            numbered = check.error == IR_OK;
+        }
+        stage = outcome.stage;
+    }
+    IrFunction promoted = { 0 };
+    if (stage == CHECK_TIER1_COMPILED)
+    {
+        // The solver's result is verified whole as it is made.
+        const IrFunction* unssa = numbered ? &shared.function : input->function;
         const uint64_t mark = promotion->length;
-        IrCheck check = input->verified ? ssa_ir_promote_verified_input(unssa, !scalar, promotion, scratch, &promoted) :
-                        scalar          ? ssa_ir_promote_scalar(unssa, promotion, scratch, &promoted) :
-                                          ssa_ir_promote(unssa, promotion, scratch, &promoted);
+        IrCheck check = numbered || input->verified ? ssa_ir_promote_verified_input(unssa, !scalar, promotion, scratch, &promoted) :
+                        scalar                      ? ssa_ir_promote_scalar(unssa, promotion, scratch, &promoted) :
+                                                      ssa_ir_promote(unssa, promotion, scratch, &promoted);
         // An expansion promotion refuses or finds past its limits keeps the function's calls: the lowering is promoted
         // instead, so that inlining is never a refusal. Any other error is the expansion's.
         passes->unexpanded = input->unexpanded != NULL && (check.error == IR_ERROR_UNSUPPORTED || check.error == IR_ERROR_LIMIT);
@@ -406,8 +458,10 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         {
             arena_pop_to(promotion, mark);
             unssa = input->unexpanded;
+            numbered = false;
             check = ssa_ir_promote_verified_input(unssa, !scalar, promotion, scratch, &promoted);
         }
+        passes->gvn_removed = numbered ? shared.removed : 0;
         outcome = check_tier1_step(CHECK_TIER1_PROMOTION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
         outcome.operation = check.instruction < unssa->instruction_count ? unssa->op[check.instruction] : IR_OP_COUNT;
@@ -470,22 +524,32 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         stage = outcome.stage;
         wide.function = stage == CHECK_TIER1_COMPILED ? converted.function : wide.function;
     }
-    // --tier1-passes=+licm (#139's measurement): loop-invariant motion, in steps[9], before the optimizer, whose dead-code
-    // removal, CFG cleanup and final verification then take its result. A function it refuses (IR_ERROR_UNSUPPORTED:
-    // vectors, and the constructs ir_optimize_licm.c names) goes on as it was; any other error is the function's.
-    const uint32_t on = check_tier1_passes_on(lane);
-    if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_LICM) != 0)
+    // Loop-invariant motion, in steps[9], before the optimizer, whose dead-code removal, CFG cleanup and final
+    // verification then take its result: every value's with --tier1-passes=+licm (#139's measurement), or #2781's, the
+    // vector and mask values' and their operands', in a function that has such values. A function it refuses
+    // (IR_ERROR_UNSUPPORTED: the constructs ir_optimize_licm.c names) goes on as it was; any other error is the
+    // function's.
+    const bool everywhere = (on & BUSTER_CHECK_TIER1_PASS_LICM) != 0;
+    if (stage == CHECK_TIER1_COMPILED && (everywhere || vectors))
     {
         IrLicmOptions options = ir_licm_options();
         options.scalar = scalar;
+        options.vectors = !everywhere;
         IrLicmResult moved = { 0 };
-        const IrCheck check = ir_optimize_licm(&wide.function, &lane->steps[9], scratch, options, &moved);
-        const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;
-        outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, error, check.instruction, check.detail, NULL);
-        outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
+        if (!everywhere && !check_tier1_lane_reserve(lane, 2))
+        {
+            outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, NULL);
+        }
+        else
+        {
+            const IrCheck check = ir_optimize_licm(&wide.function, &lane->steps[9], scratch, options, &moved);
+            const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;
+            outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, error, check.instruction, check.detail, NULL);
+            outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
+            wide.function = outcome.stage == CHECK_TIER1_COMPILED && check.error == IR_OK ? moved.function : wide.function;
+            passes->licm_moved = check.error == IR_OK ? moved.moved : 0;
+        }
         stage = outcome.stage;
-        wide.function = stage == CHECK_TIER1_COMPILED && check.error == IR_OK ? moved.function : wide.function;
-        passes->licm_moved = check.error == IR_OK ? moved.moved : 0;
     }
     // --tier1-passes=+vectorize (#2743's measurement): the loop vectorizer, in steps[10], after LICM and before the
     // optimizer, whose SCCP, dead-code removal, CFG cleanup and final verification take its result (its scalar loops
@@ -710,6 +774,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .function = unssa,
             .verified = gvn_applied || lowered_verified,
             .unexpanded = !gvn_applied && inlined_calls != 0 ? &original : NULL,
+            .numbered = gvn_applied,
         };
         outcome = check_tier1_passes(lane, &input, target, scalar, certify, fault, &lane->steps[1], &lane->steps[2], &lane->steps[3], &revision, &passes);
         stage = outcome.stage;
@@ -883,7 +948,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .merged_blocks = passes.optimized.merged_blocks,
             .licm_moved = passes.licm_moved,
             .sroa_split = sroa_split,
-            .gvn_removed = gvn_applied ? gvn_result.removed : 0,
+            .gvn_removed = gvn_applied ? gvn_result.removed : passes.gvn_removed,
             .unroll_copies = passes.unroll_copies,
             .unroll_reductions = passes.unroll_reductions,
             .unroll_added = passes.unroll_added,

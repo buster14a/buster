@@ -470,14 +470,15 @@ The record is buster-performance's [`ssa-passes-139-2026-11-14`](https://github.
 ### The pipeline and the order
 
 `--tier1`'s order is: lowering; the unit's inlining from summaries (#2541);
-SROA (`+sroa`); #866's solver (`+gvn`); promotion; the wide integers'
-halves and the wide vectors' pieces; truth simplification; threading;
-if-conversion; LICM (`+licm`); the unroller (`+unroll`, #2755); and the
-optimizer, which runs SCCP, dead-code
-removal, CFG cleanup and its merges, layout and identities, then the final
-verification that selection reads. `--tier1-passes=` turns each pass on or
-off ([the Tier 1 guide](tier1.md)). By default SCCP, dead-code removal, CFG
-cleanup, the merges and the inlining run; LICM, SROA, the unroller and the
+SROA (`+sroa`); #866's solver (`+gvn`) or its vector/mask-only form
+(`vectors`); promotion; the wide integers' halves and the wide vectors'
+pieces; truth simplification; threading; if-conversion; LICM (`+licm`) or its
+vector/mask-only form; the unroller (`+unroll`, #2755); and the optimizer,
+which runs SCCP, dead-code removal, CFG cleanup and its merges, layout and
+identities, then the final verification that selection reads.
+`--tier1-passes=` turns each pass on or off ([the Tier 1 guide](tier1.md)). By
+default SCCP, dead-code removal, CFG cleanup, the merges, the inlining and the
+vector/mask-only passes run; unrestricted LICM, SROA, the unroller and the
 solver don't, and none repeats. The measurements below decided this.
 
 ### Agreement of the twins

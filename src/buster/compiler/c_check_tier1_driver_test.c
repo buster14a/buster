@@ -2125,6 +2125,57 @@ static void check_test_driver_tier1_passes(CheckTest* test, const char* clang, c
     snprintf(object_b, sizeof(object_b), "%s/tier1-passes-two-b.o", directory);
     unlink(object_a);
     unlink(object_b);
+    // #2781's vector/mask-only passes are on by default: this function's loop builds the same vector constant twice, as
+    // the lexer's byte-class tables are built at each use. The solver runs before promotion, where a local's reads are
+    // loads, which it never merges (two `a + a` stay apart even with +gvn): equal constants are what it shares here. It
+    // merges the two, and LICM moves what is left out of the loop. -vectors's report must show neither pass ran.
+    static const char vector_passes_source[] =
+        "#include <stdio.h>\n"
+        "typedef int Tier1Vector __attribute__((vector_size(16)));\n"
+        "__attribute__((noinline)) int tier1_vector_passes(Tier1Vector a, int n)\n"
+        "{\n"
+        "    Tier1Vector total = { 0, 0, 0, 0 };\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        const Tier1Vector low = { 1, 3, 5, 7 };\n"
+        "        const Tier1Vector high = { 1, 3, 5, 7 };\n"
+        "        total += (a & low) + (a ^ high);\n"
+        "    }\n"
+        "    return total[0] + total[1] + total[2] + total[3];\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    Tier1Vector a = { 1, 2, 3, 4 };\n"
+        "    printf(\"%d\\n\", tier1_vector_passes(a, 7));\n"
+        "    return 0;\n"
+        "}\n";
+    const bool vector_written = parse_test_write(source, vector_passes_source, sizeof(vector_passes_source) - 1);
+    char* vector_clang_text = NULL;
+    const bool vector_referenced = vector_written && check_test_driver_spawn(clang_arguments, &vector_clang_text) == 0;
+    free(vector_clang_text);
+    char vector_expected[256] = { 0 };
+    const bool vector_ran = vector_referenced && check_test_driver_capture(reference, vector_expected, sizeof(vector_expected)) && vector_expected[0] != 0;
+    check_test_expect(test, vector_ran, "clang's build of the vector-passes fixture runs");
+    char output[512];
+    for (uint32_t path = 0; vector_ran && path < 2; path += 1)
+    {
+        snprintf(output, sizeof(output), "%s/tier1-vector-passes-%u", directory, path);
+        CheckTestTier1Passes plain_vectors;
+        CheckTestTier1Passes without_vectors;
+        const bool default_built = check_test_tier1_passes_build(executable, source, output, NULL, path != 0, &plain_vectors);
+        char actual[256] = { 0 };
+        const bool default_same = default_built && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, vector_expected) == 0;
+        check_test_expect(test, default_same, "the vector-passes fixture's default build prints clang's output");
+        check_test_expect(test, default_built && plain_vectors.licm_moved != 0 && plain_vectors.gvn_removed != 0,
+                          "the default vector policy hoists and numbers vector values");
+        const bool without_built = check_test_tier1_passes_build(executable, source, output, "--tier1-passes=-vectors", path != 0, &without_vectors);
+        memset(actual, 0, sizeof(actual));
+        const bool without_same = without_built && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, vector_expected) == 0;
+        check_test_expect(test, without_same, "the vector-passes fixture's -vectors build prints clang's output");
+        check_test_expect(test, without_built && without_vectors.licm_moved == 0 && without_vectors.gvn_removed == 0,
+                          "--tier1-passes=-vectors disables the restricted LICM and value numbering");
+        unlink(output);
+    }
     unlink(first);
     unlink(second);
     unlink(source);

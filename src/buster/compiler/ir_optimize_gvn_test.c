@@ -850,6 +850,66 @@ static void ir_gvn_test_simd(IrOptimizeTest* test)
     arena_release(&scratch);
 }
 
+// IrGvnOptions.vectors (#2781): equal vector operations merge, but the equal scalar operations that feed their splats
+// stay distinct, although their congruence can still prove the vector users congruent. Both host paths agree.
+static void ir_gvn_test_vectors(IrOptimizeTest* test)
+{
+    static const char text[] = "function (i32) -> m16 {\n"
+                               "b0:\n"
+                               "  %0 = param.i32 0\n"
+                               "  %1 = add.i32 %0, %0\n"
+                               "  %2 = add.i32 %0, %0\n"
+                               "  %3 = intrinsic.v4i32 %1 splat\n"
+                               "  %4 = intrinsic.v4i32 %2 splat\n"
+                               "  %5 = add.v4i32 %3, %4\n"
+                               "  %6 = add.v4i32 %3, %4\n"
+                               "  %7 = vcmp.m16 %5, %6 eq lanes=i8\n"
+                               "  %8 = ret.void %7\n"
+                               "}\n";
+    Arena input = arena_reserve(UINT64_C(16) << 20);
+    Arena vector = arena_reserve(UINT64_C(16) << 20);
+    Arena scalar = arena_reserve(UINT64_C(16) << 20);
+    Arena scratch = arena_reserve(UINT64_C(16) << 20);
+    IrFunction f = { 0 };
+    const bool ready = input.base != NULL && vector.base != NULL && scalar.base != NULL && scratch.base != NULL;
+    const IrParseResult parsed = ready ? ir_parse((String8){ .pointer = (char*)text, .length = sizeof(text) - 1 }, &input, &scratch, &f) : (IrParseResult){ .error = IR_PARSE_END };
+    const bool fixture = parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK;
+    ir_optimize_test_expect(test, fixture, "GVN's vector-only policy fixture parses");
+    IrGvnResult results[2][2] = { 0 };
+    for (uint32_t policy = 0; fixture && policy < 2; policy += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            IrGvnOptions options = ir_gvn_options();
+            options.scalar = path != 0;
+            options.vectors = policy != 0;
+            Arena* output = path != 0 ? &scalar : &vector;
+            const IrCheck check = ir_optimize_gvn(&f, output, &scratch, options, &results[policy][path]);
+            const uint32_t expected = policy != 0 ? 2 : 3;
+            ir_optimize_test_expect(test, check.error == IR_OK && results[policy][path].removed == expected,
+                                    policy != 0 ? "GVN's vector-only policy merges the equal splat and vector addition" : "GVN unrestricted merges the scalar, splat and vector duplicates");
+            if (check.error == IR_OK)
+            {
+                uint32_t scalar_adds = 0;
+                uint32_t vector_adds = 0;
+                for (uint32_t i = 0; i < results[policy][path].function.instruction_count; i += 1)
+                {
+                    scalar_adds += results[policy][path].function.op[i] == IR_ADD && results[policy][path].function.type[i] == IR_I32;
+                    vector_adds += results[policy][path].function.op[i] == IR_ADD && results[policy][path].function.type[i] == IR_V4I32;
+                }
+                ir_optimize_test_expect(test, policy == 0 || (scalar_adds == 2 && vector_adds == 1), "GVN's vector-only policy keeps both scalar additions");
+                ir_optimize_test_simd_semantics(test, &f, &results[policy][path].function, &scratch);
+            }
+        }
+        ir_optimize_test_expect(test, results[policy][0].function.instruction_count != 0 && results[policy][1].function.instruction_count != 0 &&
+                                    ir_optimize_test_equal(&results[policy][0].function, &results[policy][1].function), "GVN's vector-only policy's host paths agree");
+    }
+    arena_release(&input);
+    arena_release(&vector);
+    arena_release(&scalar);
+    arena_release(&scratch);
+}
+
 // The width changes (#1840) on values SCCP can't fold, a parameter's splat: GVN merges an insert, an extract and a widen
 // equal to another, keeps the insert and the extract of another part (the intrinsic's flags) apart, by both paths, and the
 // interpreter's mask is unchanged.
@@ -942,6 +1002,7 @@ static __attribute__((unused)) int run_ir_gvn_tests(int argc, char** argv)
         ir_gvn_test_partitions(&test);
         ir_gvn_test_ir(&test);
         ir_gvn_test_simd(&test);
+        ir_gvn_test_vectors(&test);
         ir_gvn_test_widths(&test);
         printf("ir-gvn: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;

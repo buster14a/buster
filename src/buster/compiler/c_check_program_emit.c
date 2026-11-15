@@ -492,7 +492,8 @@ struct CheckEmitGrowth
 // lane's first body and emptied for each, and the forms the lane's last target allows (X86_FORM_COUNT entries). Every
 // lane reserves the first BUSTER_CHECK_TIER1_STEPS_ALWAYS steps; the others are the optional passes' outputs, reserved
 // only where an option runs the pass: step 7 #866's solver's (--tier1-gvn), 8 SROA's, 9 LICM's, 10 the loop vectorizer's
-// and 11 the unroller's (--tier1-passes=).
+// and 11 the unroller's (--tier1-passes=). #2781's passes on vector and mask values take steps 7 and 9 too, reserved at
+// the lane's first function that has such values (check_tier1_lane_reserve), so that a unit without any maps neither.
 #define BUSTER_CHECK_TIER1_STEPS 12
 #define BUSTER_CHECK_TIER1_STEPS_ALWAYS 7
 // --tier1-schedule's variants (#172): none, each block's records after allocation (c_check_tier1_schedule.c), or each
@@ -504,7 +505,8 @@ struct CheckEmitGrowth
 // the default pipeline, which runs SCCP, dead-code removal, CFG cleanup and its merges, and neither LICM nor SROA on every
 // function. SCCP's, dead-code removal's, CFG cleanup's and the merges' bits are ir_optimize.c's BUSTER_IR_OPTIMIZE_SCCP,
 // DCE, CFG and MERGE. #866's solver and the inlining keep their own options (--tier1-gvn, --tier1-no-inline), which the
-// option's list sets too.
+// option's list sets too. VECTORS (#2781, on by default) is the solver and LICM on vector and mask values alone, in
+// the functions that have such values and where the option doesn't run the pass on every value.
 #define BUSTER_CHECK_TIER1_PASS_SCCP 1u
 #define BUSTER_CHECK_TIER1_PASS_DCE 2u
 #define BUSTER_CHECK_TIER1_PASS_CFG 4u
@@ -515,7 +517,8 @@ struct CheckEmitGrowth
 #define BUSTER_CHECK_TIER1_PASS_VECTORIZE 64u
 // #2755's loop unroller (ir_optimize_unroll.c), off by default.
 #define BUSTER_CHECK_TIER1_PASS_UNROLL 128u
-#define BUSTER_CHECK_TIER1_PASSES_DEFAULT (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE)
+#define BUSTER_CHECK_TIER1_PASS_VECTORS 256u
+#define BUSTER_CHECK_TIER1_PASSES_DEFAULT (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_VECTORS)
 #define BUSTER_CHECK_TIER1_PASSES_ALL \
     (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_VECTORIZE | BUSTER_CHECK_TIER1_PASS_UNROLL)
 // The loop vectorizer's counts (--tier1-report), IrVectorizeResult's: the innermost loops examined, those vectorized,
@@ -548,7 +551,7 @@ struct CheckTier1Lane
     uint8_t schedule;
     // --tier1-passes='s turned passes (BUSTER_CHECK_TIER1_PASS_*, #139), which the emission sets for each body: its own
     // pipeline and the summaries it builds for the unit's callers (c_check_tier1_inline.c) run the same passes.
-    uint8_t passes;
+    uint16_t passes;
 };
 
 // A body's CheckTier1Inline.held byte (#2541 step 2): one the unit stage may hold back, and one whose code waits for the
@@ -640,7 +643,8 @@ struct CheckTier1Counts
     uint32_t sunk;
     // What #139's passes did to it (--tier1-passes=): the optimizer's folded constants, the instructions and blocks its
     // output has fewer than its input (SCCP, dead-code removal, CFG cleanup and its merges together) and the blocks merged
-    // into their predecessors, LICM's moved values, SROA's split slots and #866's solver's removed instructions.
+    // into their predecessors, LICM's moved values, SROA's split slots and #866's solver's removed instructions. LICM's
+    // and the solver's are #2781's on vector and mask values where those ran instead.
     uint32_t folded;
     uint32_t removed_instructions;
     uint32_t removed_blocks;
@@ -962,7 +966,7 @@ struct CheckProgramLanes
     // --tier1-schedule's variant (BUSTER_CHECK_TIER1_SCHEDULE_*, #172's measurement): none by default.
     uint8_t tier1_schedule;
     // --tier1-passes='s turned passes (BUSTER_CHECK_TIER1_PASS_*, #139's measurement): 0, the default pipeline, by default.
-    uint8_t tier1_passes;
+    uint16_t tier1_passes;
     CheckTier1Report tier1_report;
     FILE* tier1_refusals;
     FILE* tier1_function_sizes;

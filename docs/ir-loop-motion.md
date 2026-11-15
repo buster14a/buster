@@ -14,6 +14,17 @@ is the loop header. It does not synthesize preheaders or change CFG edges.
 Nested loops are processed from smallest to largest. An instruction moved
 out of an inner loop may subsequently move through the outer preheader.
 
+`IrLicmOptions.vectors` (#2781) restricts that motion to vector- and mask-typed
+values and the movable operands they need. Tier 1 enables it by default for a
+function that has such values, unless `+licm` requests unrestricted motion. A
+loop with no safe vector or mask value is skipped. The other loops use a forward
+availability walk and backward operand-closure walk over their own blocks rather
+than scanning the whole function for each loop. `IrLicmOptions.whole` retains the
+original whole-function algorithm with the same filter as an exact test oracle.
+If nothing moves, the result borrows the input function and writes no output.
+`test-ir-licm` compares both walks and host paths on SIMD, width-change,
+permute2 and nested-loop fixtures, checks their interpreted behavior, and checks
+that scalar-only loops are skipped without an output rewrite.
 Candidate operations are total, pure computations: integer wrapping
 arithmetic and bit operations, comparisons, selects, exact conversions,
 floating sign negation, constants, parameters and address calculations.

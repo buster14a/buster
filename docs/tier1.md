@@ -171,14 +171,17 @@ measurements of what each one gains. LIST is a comma-separated list of items
 applied in turn, each `+` or `-` and then a pass's name: `sccp`, `dce`, `cfg`
 (the jump threading), `merge` (CFG cleanup's merges, below), `licm`, `sroa`
 (on every function, with #1282's options, before the solver and promotion),
+`vectors` (#2781's value numbering and LICM on vector and mask values alone),
 `vectorize` (#2743's loop vectorizer, [its guide](tier1-loop-vectorization.md)),
 `unroll` (#2755's [loop unrolling](tier1-loop-unrolling.md)), `gvn` (as
 `--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or
-`all`. The default is SCCP, dead-code removal, CFG cleanup, its merges and
-the inlining. LICM runs after if-conversion, before the optimizer, which
-cleans up after it, then the loop vectorizer, then the unroller. A function
-that LICM, SROA or the loop vectorizer refuses goes on as it was, and so does
-one past the unroller's loop analysis.
+`all`. The default is SCCP, dead-code removal, CFG cleanup, its merges, the
+inlining and `vectors`. The restricted value numbering runs before promotion;
+LICM runs after if-conversion, before the optimizer, which cleans up after it,
+then the loop vectorizer, then the unroller. Explicit `+gvn` or `+licm` runs
+that pass on every value instead of its restricted counterpart. A function that
+value numbering, LICM, SROA or the loop vectorizer refuses goes on as it was,
+and so does one past the unroller's loop analysis.
 The summaries the unit's inlining builds run the same passes but the
 unroller, which their callers run on what they expand (a summary's size is
 the loop's own, and an expanded loop is unrolled once); a candidate whose

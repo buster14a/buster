@@ -795,6 +795,7 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
     arena_pop_to(&lane->steps[4], 0);
     arena_pop_to(&lane->steps[5], 0);
     arena_pop_to(&lane->steps[6], 0);
+    arena_pop_to(&lane->steps[7], 0);
     arena_pop_to(&lane->steps[9], 0);
     arena_pop_to(&lane->steps[10], 0);
     arena_pop_to(&lane->steps[11], 0);

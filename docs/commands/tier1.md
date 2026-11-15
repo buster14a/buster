@@ -180,6 +180,23 @@ requirements. [Command index](README.md).
   dispatch on every run.
 
 
+## Vector-only value numbering and LICM (#2781)
+
+The C driver's default Tier 1 pipeline includes `--tier1-passes=vectors`.
+Functions with vector or mask values run the congruence solver on those values
+before promotion and loop-invariant motion on them after if-conversion. Their
+scalar values are not substituted or hoisted merely because the pass is
+enabled. Before promotion a local's reads are loads, which value numbering
+never merges, so what the solver shares is equal vector constants (byte-class
+tables, splats of constants) and the expressions over them; two `a + a` of a
+local `a` stay apart, as they do with `+gvn`. `--tier1-passes=-vectors` restores the previous default pipeline;
+explicit `+gvn` or `+licm` selects the corresponding unrestricted pass.
+The report's `gvn_removed` and `licm_moved` include the restricted passes'
+counts. Inline summaries use the same policy and retire the optional step
+arenas after each summary. The IR guides describe the exact scalar/SIMD twins
+and the per-loop LICM walk; the driver regression checks both host paths,
+native output, and the counters with the policy on and off.
+
 ## Integer truth round trips (#1218)
 
 The C driver's Tier 1 path runs `ir_truth_simplify` after wide-integer splitting
