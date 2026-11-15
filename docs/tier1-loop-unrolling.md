@@ -21,7 +21,11 @@ to pass and becomes a jump, copy k's induction is the main induction plus k
 steps (folded into its addresses' displacements), and an exact integer
 reduction is split into accumulators that the main loop's exit combines. Every
 step that looks at many instructions has a vector path and an exact scalar
-twin, and the two give identical functions. On the 9700X, RESULTS.
+twin, and the two give identical functions. On the 9700X at `-march=x86-64`,
+#2743's 19 vectorizable loops run 1.41 times as fast, clang's whole unrolling
+component, and its six controls 1.05 times, at each of four placements, with no
+kernel slower anywhere. The pass is off by default (`--tier1-passes=+unroll`)
+until the owner decides on this record.
 
 ## What it unrolls
 
@@ -249,7 +253,91 @@ vectorized parts are the ones that run over every instruction of a function
 
 ## Measurements
 
-MEASUREMENTS
+The record is buster-performance's
+[`tier1-unroll-2755-2026-11-15`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-unroll-2755-2026-11-15):
+its scripts, every raw line, the counters, the tables, the hosts and holds. It
+reuses #2743's kernels, harness and method; Tier 1 at main `1935a91f` (the base)
+and at this branch's `7ad1353e` with `+unroll`, Release, on the 9700X under its
+lock, each run on CPU 2. Each lock hold timed a pair of builds at one
+placement, alternating kernel by kernel.
+
+### #2743's kernels at -march=x86-64
+
+Every build gives every kernel the same digest, and the head's default object is
+the base's byte for byte. Geometric means of time ratios (larger is slower):
+
+| Ratio | 19 vectorized, placement 0 | 19 vectorized, best placement of each | 6 controls, placement 0 | 6 controls, best placement of each |
+| --- | ---: | ---: | ---: | ---: |
+| Tier 1 / Tier 1 `+unroll` | 1.41 | 1.36 | 1.05 | 1.05 |
+| clang -O2, no vectorizer or unroller / clang -O2, no vectorizer | 1.41 | 1.45 | 1.05 | 1.05 |
+| Tier 1 `+unroll` / clang -O2, no vectorizer | 1.12 | 1.15 | 1.03 | 1.03 |
+| Tier 1 / clang -O2, no vectorizer or unroller | 1.12 | 1.08 | 1.03 | 1.03 |
+| Tier 1 `+unroll` / clang -O2 | 2.45 | 2.41 | 1.03 | 1.03 |
+
+At the four placements, Tier 1 / Tier 1 `+unroll` is 1.41, 1.41, 1.40 and 1.39
+over the 19 loops and 1.05 at each over the controls; their cycles per element
+give 1.42, 1.41, 1.41 and 1.39. The unroller recovers clang's whole unrolling
+component, the issue's 1.41, and leaves Tier 1 exactly as far from clang
+without its vectorizer as it was from clang without either (1.12). No kernel
+runs slower at any placement: the least ratio is 0.999 (`find_u8`, which isn't
+unrolled), and every unrolled kernel gains at least 1.6% (`i32_to_f32`).
+
+| Kernel | Tier 1 | `+unroll` | clang no vectorizer or unroller | clang no vectorizer | gain |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| sum_i32 | 0.191 | 0.095 | 0.186 | 0.102 | 2.02 |
+| sum_u8 | 0.181 | 0.091 | 0.183 | 0.091 | 2.00 |
+| copy_u8 | 0.181 | 0.091 | 0.183 | 0.093 | 1.99 |
+| fill_u32 | 0.184 | 0.094 | 0.191 | 0.094 | 1.96 |
+| max_i32 | 0.209 | 0.131 | 0.540 | 0.151 | 1.60 |
+| scale_u8 | 0.247 | 0.162 | 0.226 | 0.118 | 1.52 |
+| dot_i16 | 0.293 | 0.209 | 0.294 | 0.222 | 1.40 |
+| add_i32 | 0.194 | 0.140 | 0.192 | 0.142 | 1.39 |
+| count_eq_u8 | 0.250 | 0.181 | 0.210 | 0.181 | 1.38 |
+| cond_sum_i32 | 0.334 | 0.252 | 0.306 | 0.242 | 1.32 |
+| histogram_u8 (control) | 0.226 | 0.178 | 0.190 | 0.151 | 1.27 |
+| rgb_to_gray | 0.759 | 0.743 | 0.536 | 0.478 | 1.02 |
+
+ns per element at placement 0; the record has every kernel at every placement,
+with cycles and instructions. The integer reductions gain most where two
+accumulators break the add chain (`sum_i32` runs faster than clang's unrolled
+code, whose reassociated tree keeps a longer chain); `rgb_to_gray` (a large
+body, two copies) and `popcount_u64` (a software population count at x86-64,
+four) gain least. Tier 1's remaining distance from clang without its vectorizer
+is the back end's, as it was before unrolling: `matmul_f32`, `rgb_to_gray`,
+`aos_sum`, `scale_u8`, `popcount_u64`, `i32_to_f32` and `clamp_i32`.
+
+The base's placement outliers, which #2743's record couldn't explain, are gone:
+`matmul_f32` took 0.731 ns at placement 0 and 0.372 to 0.385 elsewhere,
+`saxpy_f32` 0.364 at placement 16, `clamp_i32` 0.725 at 32 and 48 and
+`blend_u8` 0.542 at 32; with `+unroll` each varies by at most 6% over the four
+placements. Those were one-iteration-per-cycle loops of a few instructions,
+where a taken branch's placement decides; a main loop of eight copies isn't.
+
+The kernels' text grows from 1,935 to 7,497 bytes (clang without its
+vectorizer: 1,957 to 4,461 with its unroller).
+
+### Real programs
+
+Under callgrind (deterministic instruction counts, Lua's hash seed fixed),
+`+unroll` against the default pipeline at the same head: speedtest1 −0.17%
+(`balance_nonroot` −10.9%), Lua's five scripts −0.00%, +0.73%, +0.67%,
+−0.06% and +0.06% (arithmetic, calls, closures, strings, tables). Lua's costs
+are its one-to-three-iteration loops, which pay the first test and MP's on
+every entry: `luaD_precall`'s missing-argument loop (+3.8 M of 125.9 M in
+`calls.lua`), `luaD_poscall`, `luaH_resize`. The guard was cut down for them
+(above); a loop whose trip count is usually below the factor gains nothing from
+the main loop, and the pass can't know that.
+
+### Compile cost and code growth
+
+Locally (a cloud container's `--tier1-report` and object sizes, the head):
+`sqlite3.c`'s 2,748 natural loops give 53 unrolled; the largest refusals are
+other exits (834), calls (635), outer loops (526), predicates (302) and
+preheaders (222); its text grows 0.77%. The compiler's own `main.c` unrolls 297
+of 2,448 loops, and its text grows 3.20%. The 9700X's compile-time record
+(`measure-compile --variant --tier1-passes=+unroll` of both inputs, and the base's
+and the head's default objects compared byte for byte) is in the record when it
+finishes.
 
 ## What is left
 
