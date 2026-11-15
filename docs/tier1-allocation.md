@@ -1843,6 +1843,21 @@ By callgrind (#1189's `gap.c`, #1217's inputs, Lua's hash seed fixed) at main
   stores instead of 11,179 (11,756 loads instead of 11,712). `lvm.c` compiles
   as before; `lstrlib.c` has 472 edge moves instead of 485.
 
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/adeb8b4a5/docs/measurements/tier1-body-hints-2784-2026-11-15),
+#2768's method), main `b5099aa7` against the change: Lua's five scripts run
+0.37% fewer user cycles over 33 link orders (95% interval −0.64% to −0.10%,
+slower at 11) for 0.46% fewer instructions at each. speedtest1 runs 0.41% more
+(−0.03% to +0.85%, slower at 7 of 8 shifts) for 0.56% fewer instructions. The
+slot stamps alone cost it 0.66% (+0.32% to +0.99%) for 0.10% fewer
+instructions, and the body hints alone 0.45% (−0.17% to +1.07%) for 0.47%
+fewer. Sampled by function, the stamps' cycles move by up to 15% either way in
+functions whose code they leave as it is (`pcache1FetchStage2`,
+`releaseMemArray`, `memsys5Size`): the shifts move the whole unit but keep the
+distances between its functions, which a change of size moves for every
+function after it, and the run can't separate that layout from the change's
+own effect. `sqlite3.c`'s `--tier1 -c` takes 0.18% more cycles, `lvm.c`'s
+0.08% fewer.
+
 A loop whose chain ends in a range with no hint of its own keeps its body's
 places to chance: `tests/driver/tier1_patterns.c`'s `patterns_gsub`, whose
 latch, holding its join's ranges, is laid out between the body and the header,
