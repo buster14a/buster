@@ -24,7 +24,14 @@ sweeps over batches of expressions keeps their code warm but loses more on
 `sqlite3.c` than it gains: a sweep's branches are predicted from the sweep
 before it on the same expression ([below](#sweeps-by-batches-what-the-predictor-loses)),
 and a profile-guided layout gains it 0.6%
-([below](#the-sweeps-code-what-a-profile-guided-build-finds)). No compile takes it. Its gains are estimates that
+([below](#the-sweeps-code-what-a-profile-guided-build-finds)). C and X as one
+sweep, exact, takes `sqlite3.c`'s three sweeps from 174 cycles a taken node to
+164 ([below](#c-and-x-as-one-sweep)). Where the machine runs is worth more than
+its sweeps' design: with other code between two expressions' runs the three
+sweeps add 273 cycles a node, with 256 expressions a run 187
+([below](#where-the-machine-runs-other-code-between-its-runs)). An expression's
+shape as a memo and lanes inside an expression don't pay
+([below](#a-memo-of-shapes-and-lanes-what-didnt-pay)). No compile takes it. Its gains are estimates that
 its first two steps exist to confirm or refute; a prototype of its three sweeps
 has been run over the compile's real nodes
 ([below](#what-a-prototype-of-the-sweeps-measured)). It is
@@ -477,6 +484,11 @@ T and C stay one node at a time, and this is why:
   twin on the 9700X; `parse_tree_columns` is scalar for the same reason.
 - **The budget leaves little to win.** T and C cost 48 cycles a node in the
   prototype below, with hashed tables, of the 1,600 a node costs now.
+- **Measured on the machine itself**
+  ([below](#a-memo-of-shapes-and-lanes-what-didnt-pay)): an expression's
+  records, grouped by level and class, fill 9% of 16 lanes, and 64
+  expressions' 45%; T's per-record prologue by lanes saves 17 instructions a
+  node and no cycle.
 
 What makes the ordered part cheap is that its loads are of records written a
 few nodes ago. If T becomes the limit, the lever is several statements'
@@ -1928,6 +1940,191 @@ wasted classifications would be 1.1% of its records. The census shapes the
 design but doesn't measure it: what a fused T's code size and its predictions
 cost is the prototype's measurement, behind the shadow's `--verify`. The record is
 [`node-machine-fusion-census-2524-2026-11-15`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-fusion-census-2524-2026-11-15).
+
+### C and X as one sweep
+
+The census above is of a T that classifies as it types. The part of that fusion
+with nothing to settle later is C with X: a record's row waits only for its
+context and target, which C gives it on its way down, so one sweep can classify
+a record and write its row at once. `node_machine_lower`
+(`c_check_node_machine_lower.c`, [the guide](commands/lowering.md#the-shadow-step-1))
+is that sweep:
+
+- **Down from the root, as C goes.** Each evaluated record is classified by C's
+  own functions, its operands get their contexts and targets, and its row is
+  written before the sweep steps to the record before it.
+- **The tape from its end.** The records come in reverse postorder, so the
+  entries are written back from the columns' ends: within a record, the segment
+  after its row first, then its conversion's entries, then its own, each row
+  from its last entry. The tape starts at `NodeMachine.entry_first`.
+- **What X numbers by the order it writes in** is numbered after the loop, for
+  the expressions that have any (`node_machine_lower_number`): the labels by C's
+  ranks, the calls' rows by X's rule over the calls in X's order, a postfix
+  update's temporaries in X's order.
+- **A refusal is the two sweeps':** where a row refuses, C's own sweep says
+  whether a template refuses first.
+
+C and X are its exact twin. `--fused` runs it after them on every expression T
+typed and compares its refusal, its tape, its labels' entries and its calls'
+records: no difference on `sqlite3.c` (51,338 expressions), Lua (10,828) and
+musl (22,998), with `-g` too. Four deliberate breaks each show: the calls' rows
+left in the sweep's order (291 of `sqlite3.c`'s expressions differ), the labels'
+numbers (73), a member's load written before its offset (11,343), and the
+temporaries' order (2 of a fixture's 3 expressions with several postfix updates
+through addresses; `sqlite3.c` has none with two, so `test-checker`'s fixture
+has them).
+
+Cycles and instructions a taken node in the tight loop, against main
+`1b6461b7`, medians of three rounds (two for musl):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| main's three sweeps | 173.8, 594.8 | 146.0, 683.9 | 130.7, 645.1 |
+| T and the one sweep | 164.2, 600.5 | 141.1, 689.5 | 130.2, 651.0 |
+| | −5.5% | −3.4% | −0.4% |
+
+- **It runs C's and X's instructions, not fewer.** After T's 89 cycles, C and X
+  take 86 for 259 instructions and the one sweep 74 for 264. What it saves is
+  X's own walk of the records, the most front-end bound of the three
+  ([above](#ts-loop-without-its-rules-and-what-a-first-run-costs)): X's 88
+  instructions took 39 cycles.
+- **It holds with other code between the machine's runs**
+  ([below](#where-the-machine-runs-other-code-between-its-runs)): 6 to 8% on
+  `sqlite3.c`, 3 to 5% on Lua, and on musl 3% with one expression a run and
+  under 1% by bodies.
+- **musl's units are short** (16 taken expressions, 5 nodes each): the one
+  sweep's setup and its numbering after the loop are a larger share there.
+
+`node_machine_run` still runs C and X; the one sweep is the shadow's until step
+2 takes one of them. With it the sweeps cost 164 on `sqlite3.c`, T 89 of them
+and the one sweep 74.
+
+### Where the machine runs: other code between its runs
+
+The gate's figure is the shadow's tight loop: one expression's sweeps right
+after another's, their code and their branches' history never leaving the
+caches and the predictor. In a compile the reader's code runs between two of
+the machine's runs. `--interleave N` times that position: a file's taken
+expressions by chunks of N (a body's for 0), the census's own walk of each of a
+chunk's expressions (`node_census_expression`: its tests over the same nodes,
+904 to 909 instructions and 227 to 232 cycles a node on `sqlite3.c`), then the
+sweeps of each. A set less the walk alone is what the sweeps add there, the
+walk's own slowdown included; the sweeps' own time is their TSC ticks inside
+the set.
+
+Cycles a taken node, medians of three rounds:
+
+| `sqlite3.c`: a run takes | three sweeps, less the walk | T and the one sweep, less the walk | three sweeps' own | the one sweep's own |
+| --- | ---: | ---: | ---: | ---: |
+| (the tight loop, no walk) | 174.9 | 163.3 | | |
+| 1 expression | 273.4 | 255.9 | 207.1 | 190.9 |
+| 16 | 243.5 | 225.3 | 196.1 | 182.9 |
+| a body's (19 on average) | 216.5 | 199.3 | 189.6 | 176.7 |
+| 256 | 186.7 | 172.9 | 181.7 | 170.9 |
+
+| Lua: a run takes | three sweeps, less the walk | T and the one sweep, less the walk | three sweeps' own | the one sweep's own |
+| --- | ---: | ---: | ---: | ---: |
+| (the tight loop, no walk) | 145.9 | 141.0 | | |
+| 1 expression | 206.5 | 197.8 | 169.9 | 162.0 |
+| 16 | 167.5 | 161.0 | 154.9 | 149.7 |
+| a body's | 168.6 | 163.2 | 155.4 | 150.6 |
+| 256 | 150.7 | 145.9 | 149.0 | 144.7 |
+
+musl's three sweeps add 188.7 with one expression a run and 144.7 by bodies,
+130.2 in the tight loop.
+
+- **One expression a run costs the sweeps 18% of their own time** on
+  `sqlite3.c` (207.1 against 174.9), **and the code between them twice as many
+  cycles** (273.4 less 207.1 is 66 a node, on the walk's 229): each puts the
+  other's code and branches out of the caches and the predictor. The pair's
+  extra is 56% over the tight loop there, 42% on Lua and 45% on musl.
+- **By 256 expressions a run little is left of it:** 7% on `sqlite3.c`, 3% on
+  Lua.
+- **A body's expressions are worth chunks of 64** on `sqlite3.c`, whose bodies
+  hold 19 taken expressions on average, the long ones most of them; on Lua,
+  chunks of 16.
+
+What it decides:
+
+- **Step 2's range holds a body's expressions, or a statement list's, never
+  one.** Run after each expression, the sweeps would add `sqlite3.c` 273 cycles
+  a node where the gate's figure says 175. Step 3 has it by what it is.
+- **The gate is read where the machine will run:** `--interleave 0` is the
+  closest position the shadow has to step 2's.
+- **A sweep's design is worth less than its position:** with one expression a
+  run the one sweep saves 17 cycles a node; a body's expressions a run save 57.
+
+**The shadow's own sets showed it too.** It took a file's sets in turn inside
+each pass (T, T and C, all three) and kept each set's least. The sets this round
+added joined the turn, so a file's T then ran after the walk's sets: on Lua, 300
+expressions a file, T read 79 cycles a node after its own pass, 82 after the
+three sweeps' and 89 after the walk's, on the same code; `sqlite3.c`, one file,
+read the same. The shadow now runs each set's passes one after another, and a
+set's figure no longer moves with the sets timed beside it. Main's own figures
+drop 1.1% on Lua and musl by it, none on `sqlite3.c`.
+
+### A memo of shapes, and lanes: what didn't pay
+
+Two more designs, each built as an exact prototype behind the shadow and
+measured on the 9700X, not merged; their patches are in the record.
+
+**An expression's shape as a memo.** A taken expression's entries are a function
+of its shape: each record's operator and operands' places, its cast's type or
+its member's name, a leaf's type, flags, category, constant and object's kind,
+the leaves' objects only up to renaming (which leaves name the same object,
+which the same symbol), and the root's context, target and initialized object.
+A unit's later expression of the same key takes the first one's tape with its
+own objects and symbols in place.
+
+- **It is exact:** every hit was instantiated and compared with the sweeps'
+  tape, labels and calls on the same expression, with no difference on the
+  three corpora.
+- **A third of the nodes hit:** 55% of `sqlite3.c`'s taken expressions and 39%
+  of their nodes, 39% and 31% of Lua's, 23% and 16% of musl's. They are the
+  short ones: 86 to 90% of the expressions of 1 to 3 records, 14% of those of 9
+  to 16.
+- **The key reads what T reads of every record:** 41 cycles and 134 instructions
+  a node on `sqlite3.c`, 7 more for the lookup, paid by the misses on top of
+  their sweeps.
+- **It is slower:** 222 cycles a node on `sqlite3.c` against the three sweeps'
+  180 in the same build, 207 with the one sweep for the misses. A hit run right
+  after its own first run still costs 55 a node, where the sweeps' second run
+  costs 118.
+- **No looser key helps enough:** without the leaves' integers, which an exact
+  memo could parametrize, 44% of `sqlite3.c`'s nodes; without casts' types and
+  members' names too, 49%. The leaves' types are the rest (68% without them),
+  and they decide the entries' classes.
+
+**Lanes.** The shadow's census groups a batch's records by level (a leaf's 0,
+any other's one past its operands' greatest) and class: a group is what one
+vector step could take.
+
+| batch of | `sqlite3.c`: records a group, of 16 lanes | Lua |
+| --- | ---: | ---: |
+| 1 expression | 1.46, 9.1% | 1.58, 9.9% |
+| 8 | 3.14, 18.6% | 3.28, 19.3% |
+| 64 | 9.77, 45.4% | 10.08, 46.3% |
+| 512 | 45.9, 82.5% | 30.8, 74.7% |
+| a body's | 6.62, 33.9% | 4.61, 25.6% |
+
+- **An expression has 5.7 records, at most one or two of a kind and level.**
+  Leaves, 46% of the records, fill 96% of their lanes at 64 expressions;
+  members 59%, discards 44%, the rest 10 to 34%. musl's units hold 107 records.
+- **T's per-record prologue by lanes is exact and saves no cycle.** An
+  expression's nodes are one range of the reader's columns, so one 16-lane step
+  reads every record's operator, its first two operands' records and what
+  refuses the expression before a record is typed; the leaves and the other
+  records are then two loops over the masks' bits. On `sqlite3.c` T runs 332.2
+  instructions a node for 349.5, and 92.9 cycles for 92.2. T isn't held by the
+  instructions of its bookkeeping.
+- **Lanes over batches sorted by level and class weren't built.** They would
+  fill half their lanes at 64 expressions, with each record's operands
+  elsewhere in the batch (a gather, at what 16 loads cost), on sweeps by
+  batches, which lose the predictor's handoff
+  ([above](#sweeps-by-batches-what-the-predictor-loses)).
+
+The record of this section and the two before it is
+[`node-machine-step1-designs-2524-2026-11-15`](https://github.com/buster14a/buster-performance/tree/0c8faee435d3b64a7ed293375db3ff6d548efe63/docs/measurements/node-machine-step1-designs-2524-2026-11-15).
 
 ## Expected gains
 
