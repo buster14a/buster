@@ -5589,17 +5589,15 @@ static void tier0_extend(Tier0Writer* writer, uint32_t class, uint32_t reg)
 // aggregate is often built by 8-byte stores, and a 16-byte load spanning two of them can't forward (#1375). A larger
 // one moves 16 bytes at a time through an XMM register, in one of two shapes (#2693), which tier0_copy's `halves`
 // chooses by where the source's bytes likely come from:
-// - a source just written by 8-byte stores (a local's own fields, a call's arguments on the stack): each 16 bytes
-//   loaded as two 8-byte halves (movsd, movhps) and stored whole (movups), so that no load spans two of the stores;
-// - any other: a 16-byte load and store (movups) per 16 bytes, half the loads, which bound a cold source's copy.
-// On the 9700X, against 16-byte loads, halves copy a 64- to 256-byte struct just built by 8-byte stores in 0.26 to 0.63
-// times the cycles, but a cold source in 1.0 to 1.70 times; 8-byte pieces are slower than halves in both
-// (buster-performance's copy-shapes-2693-2026-11-14).
+// - a local (tier0_copy_local_source), which its fields' 8-byte stores often built just before: each 16 bytes loaded
+//   as two 8-byte halves (movsd, movhps) and stored whole (movups), so that no load spans two of the stores;
+// - any other source, and a call's aggregate arguments, which a 16-byte copy stored: a 16-byte load and store (movups)
+//   per 16 bytes, half the loads, which bound the copy of a cold source or of one a 16-byte copy wrote.
+// On the 9700X, against 16-byte loads, halves copy a 64- to 256-byte struct just built by 8-byte stores in 0.26 to
+// 0.63 times the cycles, a cold one in 1.0 to 1.70 times, and one a 16-byte copy just wrote in 1.44 to 1.65 times;
+// 8-byte pieces are no faster than halves for the struct just built or the cold one (buster-performance's
+// copy-shapes-2693-2026-11-14).
 #define BUSTER_TIER0_COPY_NARROW_BYTES 32
-// Whether a copy of a call's stack arguments, which the caller has just stored, loads 8-byte halves: a musttail call's
-// move of its outgoing arguments to the incoming area (tier0_tail_finish) and a callee's copy of an aggregate parameter
-// from its incoming slots into its home.
-#define BUSTER_TIER0_COPY_STACK_HALVES true
 
 // The widest piece a copy of `size` bytes uses: 8 for a small aggregate, 16 for a larger one.
 static uint32_t tier0_copy_width(uint32_t size)
@@ -6433,7 +6431,7 @@ static void tier0_emit_tail_jump(const Tier0Function* function, const Tier0Frame
         // from rsp past the frame otherwise (Tier0Frame.incoming).
         const uint8_t base = frame->pointer ? X86_REGISTER_RBP : X86_REGISTER_RSP;
         const int32_t incoming = frame->pointer ? 16 : frame->incoming;
-        tier0_copy(writer, base, incoming, X86_REGISTER_RSP, 0, bytes, X86_REGISTER_RAX, 15, BUSTER_TIER0_COPY_STACK_HALVES);
+        tier0_copy(writer, base, incoming, X86_REGISTER_RSP, 0, bytes, X86_REGISTER_RAX, 15, false);
     }
     tier0_emit_teardown(frame, false, writer);
     if (function->call_targets[call] == 0)
@@ -9598,7 +9596,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tie
     count += moves - cycles;
     count += function->call_variadic[call] ? 1 : 0;
     const uint32_t stack_bytes = function->calls[call].stack_bytes;
-    count += !tail ? tier0_count_call_record(function, entries, i, references) : (stack_bytes != 0 ? tier0_copy_records(stack_bytes, BUSTER_TIER0_COPY_STACK_HALVES) : 0) + tier0_tail_finish(function, entries, call);
+    count += !tail ? tier0_count_call_record(function, entries, i, references) : (stack_bytes != 0 ? tier0_copy_records(stack_bytes, false) : 0) + tier0_tail_finish(function, entries, call);
     // A result object: its address in rdi for a hidden pointer, or a store per part of the result's registers, which
     // take the result's move's place.
     const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[call] : 0;
@@ -9938,7 +9936,7 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
             }
             if (tier0_aggregate_whole(location) && !tier0_parameter_in_place(function, p))
             {
-                tier0_copy(writer, homes[p].reg, homes[p].displacement, base, incoming, function->local_sizes[p], X86_REGISTER_RAX, 15, BUSTER_TIER0_COPY_STACK_HALVES);
+                tier0_copy(writer, homes[p].reg, homes[p].displacement, base, incoming, function->local_sizes[p], X86_REGISTER_RAX, 15, false);
             }
         }
     }
@@ -10016,7 +10014,7 @@ static uint32_t tier0_count_prologue(const Tier0Function* function, const Tier0F
             {
                 count += parts[k].reg == BUSTER_TIER0_PART_STACK ? 2 : 1;
             }
-            count += tier0_aggregate_whole(location) && !tier0_parameter_in_place(function, p) ? tier0_copy_records(function->local_sizes[p], BUSTER_TIER0_COPY_STACK_HALVES) : 0;
+            count += tier0_aggregate_whole(location) && !tier0_parameter_in_place(function, p) ? tier0_copy_records(function->local_sizes[p], false) : 0;
         }
     }
     return count;
@@ -10790,7 +10788,7 @@ static uint32_t tier0_count_deep(const Tier0Function* function, const Tier0Entri
         count += object != 0 ? tier0_result_object_records(function->calls[call].result) : 0;
         count += function->call_variadic[call] ? 1 : 0;
         uint32_t references = tail && !indirect ? 1 : 0;
-        count += !tail ? tier0_count_call_record(function, entries, i, &references) : (stack_bytes != 0 ? tier0_copy_records(stack_bytes, BUSTER_TIER0_COPY_STACK_HALVES) : 0) + tier0_tail_finish(function, entries, call);
+        count += !tail ? tier0_count_call_record(function, entries, i, &references) : (stack_bytes != 0 ? tier0_copy_records(stack_bytes, false) : 0) + tier0_tail_finish(function, entries, call);
         count += !stored && tier0_stack(function->classes[i]) != 0 ? 1 : 0;
         count += 2 * tier0_saved_masks(entries, i);
         uint32_t integer_arguments = 0;

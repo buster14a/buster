@@ -1437,10 +1437,13 @@ parallel move, without emitting it; the scalar path runs the emitter to count, w
 - Division and shifts by a register at depths where rax, rdx or rcx hold other values (through two fixed frame slots).
 - Copies, through their stacks' first free register (an XMM one past 32 bytes, a general one up to 32), which
   selection counts as reached, so that no local takes it as its home:
-  - past 32 bytes, per 16 bytes, two 8-byte loads into the XMM register's halves (`movsd`, `movhps`) and one store of
-    it (`movups`), the last 16 ending at the end (#2693): no load is wider than the 8-byte stores that often just built
-    the source, which a wider load can't forward from (#1375), and the stores are half as many as 8-byte pieces', which
-    bound a cold source's copy;
+  - past 32 bytes, 16 at a time, the last 16 ending at the end, each stored whole (`movups`) and loaded by the source
+    (#2693): where the source's address is a local's, the entry before the copy (`LOCAL_ADDRESS`, or a member's
+    `LOCAL_ADDRESS`, `CONST`, `PTR_ADD`), as two 8-byte loads into the XMM register's halves (`movsd`, `movhps`), since
+    the lowering builds locals by their fields' 8-byte stores, often just before, which a 16-byte load can't forward
+    from (#1375); from any other source, and for a call's aggregate arguments, by one 16-byte load (`movups`), half the
+    loads, which bound the copy of a cold source or of one a 16-byte copy wrote (the 9700X's measurements are at
+    `BUSTER_TIER0_COPY_NARROW_BYTES`);
   - from 8 to 32 bytes, a load and a store of the general register's 8 bytes per 8, the last 8 ending at the end;
   - below, two of a general register's 4, 2 or 1 bytes, the second ending at the end (one when that is all).
 
