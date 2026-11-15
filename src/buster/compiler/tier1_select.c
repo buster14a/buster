@@ -4243,7 +4243,10 @@ static uint32_t tier1_select_parts_of(const uint8_t* registers, bool high, bool 
     // copy keeps them as padding.
     const bool vector_first = first && (registers[0] & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
     const uint32_t whole = !one && !slot && vector_first && !second && size >= 16 ? (size >= 64 ? 64 : size >= 32 ? 32 : 16) : 0;
-    // GetByteVectorType's two doubles carry a 17--23-byte record's first 16 bytes; stack copies retain its C size.
+    // GetByteVectorType's two doubles carry a 17--23-byte record's first 16 bytes; stack copies retain its C size. A
+    // larger record of a size no vector register has (#2113) carries its <size / 8 x double> in a YMM or ZMM register
+    // wider than it, which Tier 0 loads and stores in pieces (tier0_payload_load): Tier 1 leaves its functions to Tier 0
+    // (no part matches here), as it does a PAYLOAD stack slot (tier1_select_record_supported's flags), until #2798.
     bool valid = size != 0 && (size <= 16 || (whole != 0 && (whole == size || (whole == 16 && size < 24)))) && shape;
     uint32_t count = 0;
     for (uint32_t k = 0; valid && k < (one ? 1u : 2u); k += 1)
