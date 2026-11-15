@@ -202,14 +202,30 @@ aggregate or a memory class (`long double`, the 128-bit integers, the
 half-precision ones, vectors). The node templates fold it in the constant's
 slot (`BUSTER_CHECK_LOWER_TEMPLATE_FOLDED`, and leave a folded constant popped
 alone to the tasks, which fold it there), and the node machine in its row
-(`node_machine_fold_conversion`). A conditional's or a logical operator's
-value converted after the label that joins its arms keeps its CONVERT.
+(`node_machine_fold_conversion`).
+
+A conditional's or a logical operator's value converted by its consumer meets
+its arms at a label, where no conversion folds, since a jump there brings the
+other arm's value. Where an arm is a constant (a conditional's arm by
+`check_lower_integer_constant`, a logical operator's 0 or 1) and the conversion
+is one that folds (`check_lower_conditional_sinks`), the conversion goes into
+the arms instead (`check_lower_conditional_target`): its task, under the node's
+EXPRESSION, comes off the stack; a conditional pushes it under each arm's own
+conversion, tagged with the arm's node, so that a constant arm folds both (`c ?
+-1 : 2u` to `unsigned long` is -1 to `unsigned`, then to `unsigned long`); a
+logical operator writes its 0 or 1 in the target's class and converts its second
+operand's truth before the jump to the join. The join's JUMP_VALUE takes the
+target's class, and the other arm takes the CONVERT the join had. A known
+condition's single arm does the same; GNU's `x ?: y`, whose condition is its
+arm, keeps the join's. The node machine leaves such a node to the tasks
+(`node_machine_sinks`), as it writes a record's conversion once, after its row.
+
 `tests/checker/constant-conversions` holds the regressions, which run natively
 against clang (`c_check_constant_conversion_test.c`): the issue's four functions,
 whose Tier 0 code has no `movslq` or `cvtsi2s` of a constant; every kind of
-conversion that folds, after which no integer CONST precedes a CONVERT on either
-lowering, and the node templates' entries are the tasks'; and the conversions
-that don't fold.
+conversion that folds, conditionals' and logical operators' arms among them,
+after which no integer CONST precedes a CONVERT on either lowering, and the node
+templates' entries are the tasks'; and the conversions that don't fold.
 
 ## Node machine census (#2524)
 

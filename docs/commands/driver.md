@@ -50,7 +50,7 @@ requirements. [Command index](README.md).
   made on its lane, none held for the last pass (the same objects): [the Tier 1
   guide](../../docs/tier1.md)'s "The C driver's `--tier1`" and "Inlining", and [Tier 1 failure
   outcomes](../../docs/tier1-outcomes.md)); `-O` flags set only preprocessor
-  optimization macros, not the tier; Tier 0 is the default, and inlines the same calls: `--tier0-no-inline` keeps them, #1398's control, [the Tier 0 guide](tier0.md#inlining-always_inline-functions-1398)), `--emit-window=N` taking one lane's emission in windows of about N tokens, each window's lowering and code before the next one's, in memory the next one reuses (#2536's step 1; 2,048 by default, 0 one window as long as the unit: [function lanes](function-lanes.md#windows-2536)), `--id-order N` handing the unit's identifiers their
+  optimization macros, not the tier; Tier 0 is the default, and inlines the same calls: `--tier0-no-inline` keeps them, #1398's control, and `--tier0-no-hold` makes each callee's code on its lane, none held for the last pass that leaves the dead ones out (the same objects), [the Tier 0 guide](tier0.md#inlining-always_inline-functions-1398)), `--emit-window=N` taking one lane's emission in windows of about N tokens, each window's lowering and code before the next one's, in memory the next one reuses (#2536's step 1; 2,048 by default, 0 one window as long as the unit: [function lanes](function-lanes.md#windows-2536)), `--id-order N` handing the unit's identifiers their
   ids in another order, on which nothing it writes may depend (#153's test
   option, `check_driver_id_order`, for each unit of a multi-file command too), and `-g` attaching DWARF of its functions'
   source lines (`c_check_debug.c`, #395), to the executable and with `-c` to the
@@ -79,8 +79,10 @@ requirements. [Command index](README.md).
   "Patchable function entries"). Either
   output's functions compile on lanes (#151, `check_program_emit_lanes`, the
   [lanes guide](../../docs/function-lanes.md)): by default as many as the bodies'
-  tokens pay for, up to one per core of the CPUs the process may run on, and
-  with `--lanes N` N of them, at most one per CPU; the output is one lane's,
+  tokens pay for, up to one per core of the CPUs the process may run on (under
+  a finite `RLIMIT_AS`, at most one and one more per 512 MiB the limit leaves
+  past what the process maps as it starts, #1118, `check_driver_address_lanes`),
+  and with `--lanes N` N of them, at most one per CPU; the output is one lane's,
   byte for byte. Those lanes are the command's session's (#905,
   `lane_session_run`, `check_driver_run`): started once, after the options and
   before any source is read, as many as the command may take (one per core of

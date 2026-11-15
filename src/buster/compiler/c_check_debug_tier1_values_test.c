@@ -706,22 +706,35 @@ static const char check_debug_tier1_inline_source[] =
     "    return total != 25;\n"
     "}\n";
 
-// Each of the six stops' backtrace (#2541: the expanded callees' parameters' values, check_debug_tier1_inline_values).
+// Each of the six stops' backtrace (#2541: the expanded callees' parameters' values, check_debug_tier1_inline_values)
+// and the inner callee's locals in its frame (check_debug_tier1_inline_locals).
 static const char check_debug_tier1_inline_script[] =
     "set pagination off\n"
     "break t1i_mark\n"
     "run\n"
     "bt\n"
+    "up-silently\n"
+    "info locals\n"
     "continue\n"
     "bt\n"
+    "up-silently\n"
+    "info locals\n"
     "continue\n"
     "bt\n"
+    "up-silently\n"
+    "info locals\n"
     "continue\n"
     "bt\n"
+    "up-silently\n"
+    "info locals\n"
     "continue\n"
     "bt\n"
+    "up-silently\n"
+    "info locals\n"
     "continue\n"
     "bt\n"
+    "up-silently\n"
+    "info locals\n"
     "printf \"GDB-T1I-DONE\\n\"\n"
     "kill\n";
 
@@ -753,6 +766,39 @@ static bool check_debug_tier1_inline_values(const char* transcript)
         }
     }
     return valid && shown[0] && shown[1];
+}
+
+// Whether `transcript`'s `count` lines "name = value" of an expanded callee's local (#2541: its own, not a parameter) are
+// the program's: line s shows `expected[s]` or <optimized out>, never another value, and at least one shows a value.
+static bool check_debug_tier1_inline_local(const char* transcript, const char* name, const uint32_t* expected, uint32_t count)
+{
+    char key[32];
+    snprintf(key, sizeof(key), "\n%s = ", name);
+    bool valid = transcript != NULL;
+    bool shown = false;
+    const char* cursor = transcript;
+    for (uint32_t s = 0; valid && s < count; s += 1)
+    {
+        cursor = strstr(cursor, key);
+        valid = cursor != NULL;
+        if (valid)
+        {
+            cursor += strlen(key);
+            const bool absent = strncmp(cursor, "<optimized out>\n", strlen("<optimized out>\n")) == 0;
+            char* end = NULL;
+            const unsigned long value = absent ? 0 : strtoul(cursor, &end, 10);
+            valid = absent || (end != NULL && end != cursor && *end == '\n' && value == expected[s]);
+            shown |= !absent;
+        }
+    }
+    return valid && shown;
+}
+
+// The inner callee's local y in its frame at the six stops: x * x, its x s / 2 + s % 2 at stop s.
+static bool check_debug_tier1_inline_locals(const char* transcript)
+{
+    static const uint32_t squares[] = { 0, 1, 1, 4, 4, 9 };
+    return check_debug_tier1_inline_local(transcript, "y", squares, BUSTER_ARRAY_LENGTH(squares));
 }
 
 // A breakpoint by the inner callee's name: gdb takes each of its expanded copies (their instances' abstract origin is its
@@ -887,6 +933,7 @@ static void check_debug_tier1_inline_test(CheckDebugTestTally* tally, const char
                                       check_debug_tier1_inline_frame(transcript.pointer, 3, "main", 22),
                                 "gdb's backtrace in main's code shows the expanded callees' frames at their calls' lines", report);
         check_debug_test_expect(tally, done && check_debug_tier1_inline_values(transcript.pointer), "gdb shows the expanded callees' parameters' values, each the program's", report);
+        check_debug_test_expect(tally, done && check_debug_tier1_inline_locals(transcript.pointer), "gdb shows an expanded callee's local's values, each the program's", report);
         // The executable keeps both callees' code (its binding resolves every symbol): the inner one's out-of-line code,
         // its two copies in the outer's and the two in main's.
         check_debug_tier1_inline_break(tally, program, directory, 5, arena);
@@ -937,6 +984,7 @@ static void check_debug_tier1_inline_test(CheckDebugTestTally* tally, const char
                                   check_debug_tier1_inline_frame(transcript.pointer, 3, "main", 22),
                             "gdb's backtrace shows the dead callees' expanded frames", report);
     check_debug_test_expect(tally, done && check_debug_tier1_inline_values(transcript.pointer), "gdb shows the dead callees' parameters' values, each the program's", report);
+    check_debug_test_expect(tally, done && check_debug_tier1_inline_locals(transcript.pointer), "gdb shows a dead callee's local's values, each the program's", report);
     check_debug_tier1_inline_break(tally, linked, directory, 2, arena);
 }
 
@@ -1061,5 +1109,124 @@ static void check_debug_tier1_header_test(CheckDebugTestTally* tally, const char
     if (joined)
     {
         check_debug_tier1_header_read(tally, linked, script, directory, arena);
+    }
+}
+
+// #2541: an expanded callee's locals of the regions form, a loop's. gdb, stopped in the noinline function the loop calls,
+// shows the callee's counter in its frame as the program has it at each stop, or <optimized out>, by both paths and in
+// a linked -c -g object, whose callee every call expanded is dead.
+static const char check_debug_tier1_loop_source[] =
+    "#line 1 \"dbg_t1l.c\"\n"
+    "int printf(const char *, ...);\n"
+    "volatile int t1l_sink;\n"
+    "__attribute__((noinline)) void t1l_mark(int v)\n"
+    "{\n"
+    "    t1l_sink = v;\n"
+    "}\n"
+    "static int t1l_sum(int n)\n"
+    "{\n"
+    "    int total = 0;\n"
+    "    for (int i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        total += i;\n"
+    "        t1l_mark(total);\n"
+    "    }\n"
+    "    return total;\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    int all = t1l_sum(3) + t1l_sum(2);\n"
+    "    printf(\"T1L %d\\n\", all);\n"
+    "    return all != 4;\n"
+    "}\n";
+
+static const char check_debug_tier1_loop_script[] =
+    "set pagination off\n"
+    "break t1l_mark\n"
+    "run\n"
+    "up-silently\n"
+    "info locals\n"
+    "continue\n"
+    "up-silently\n"
+    "info locals\n"
+    "continue\n"
+    "up-silently\n"
+    "info locals\n"
+    "continue\n"
+    "up-silently\n"
+    "info locals\n"
+    "continue\n"
+    "up-silently\n"
+    "info locals\n"
+    "printf \"GDB-T1L-DONE\\n\"\n"
+    "kill\n";
+
+// gdb's locals of the expanded loop's frame in `program`: its counter i at the five stops, two calls' loops'.
+static void check_debug_tier1_loop_read(CheckDebugTestTally* tally, const char* program, const char* script, const char* directory, Arena* arena)
+{
+    static const uint32_t counters[] = { 0, 1, 2, 0, 1 };
+    char report[PATH_MAX + 24];
+    char errors[PATH_MAX + 24];
+    snprintf(report, sizeof(report), "%s.t1l-gdb", program);
+    snprintf(errors, sizeof(errors), "%s.t1l-errors", program);
+    char* gdb[] = { (char*)"gdb", (char*)"-nx", (char*)"-batch", (char*)"-directory", (char*)directory, (char*)"-x", (char*)script, (char*)program, NULL };
+    const bool inspected = object_test_run(gdb, report, errors) == 0;
+    const String8 transcript = inspected ? foreign_test_read(arena, report) : (String8){ 0 };
+    const bool done = transcript.pointer != NULL && strstr(transcript.pointer, "GDB-T1L-DONE\n") != NULL;
+    check_debug_test_expect(tally, done && check_debug_tier1_inline_local(transcript.pointer, "i", counters, BUSTER_ARRAY_LENGTH(counters)),
+                            "gdb shows an expanded callee's loop counter's values, each the program's", report);
+}
+
+static void check_debug_tier1_loop_test(CheckDebugTestTally* tally, const char* directory, Arena* arena)
+{
+    char source[PATH_MAX];
+    char script[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/dbg_t1l.c", directory);
+    snprintf(script, sizeof(script), "%s/dbg_t1l.gdb", directory);
+    const bool written = foreign_test_write(source, check_debug_tier1_loop_source, sizeof(check_debug_tier1_loop_source) - 1) &&
+                         foreign_test_write(script, check_debug_tier1_loop_script, sizeof(check_debug_tier1_loop_script) - 1);
+    check_debug_test_expect(tally, written, "write the Tier 1 expanded-loop fixture and its debugger script", directory);
+    static const CheckDebugTier1ValuesVariant variants[] = {
+        { .name = "default" },
+        { .name = "scalar", .scalar = true },
+    };
+    String8 baseline = { 0 };
+    for (uint32_t v = 0; written && v < BUSTER_ARRAY_LENGTH(variants); v += 1)
+    {
+        char program[PATH_MAX];
+        snprintf(program, sizeof(program), "%s/dbg_t1l_%s", directory, variants[v].name);
+        const bool built = check_debug_tier1_values_compile(tally, source, NULL, program, variants + v, "1", true, false, arena);
+        const String8 debug = built ? foreign_test_read(arena, program) : (String8){ 0 };
+        check_debug_test_expect(tally, v == 0 || (baseline.pointer != NULL && debug.pointer != NULL && baseline.length == debug.length &&
+                                                  memcmp(baseline.pointer, debug.pointer, debug.length) == 0),
+                                "the expanded loop's DWARF is byte-identical by both paths", program);
+        baseline = v == 0 ? debug : baseline;
+        char report[PATH_MAX + 24];
+        char errors[PATH_MAX + 24];
+        snprintf(report, sizeof(report), "%s.t1l-verify", program);
+        snprintf(errors, sizeof(errors), "%s.t1l-errors", program);
+        char* verify[] = { (char*)"llvm-dwarfdump", (char*)"--verify", program, NULL };
+        const bool verified = built && object_test_run(verify, report, errors) == 0;
+        const String8 verification = verified ? foreign_test_read(arena, report) : (String8){ 0 };
+        check_debug_test_expect(tally, verification.pointer != NULL && strstr(verification.pointer, "No errors.") != NULL,
+                                "the expanded loop's DWARF passes llvm-dwarfdump --verify", report);
+        if (built)
+        {
+            check_debug_tier1_loop_read(tally, program, script, directory, arena);
+        }
+    }
+    char object[PATH_MAX];
+    char linked[PATH_MAX];
+    char errors[PATH_MAX + 24];
+    snprintf(object, sizeof(object), "%s/dbg_t1l.o", directory);
+    snprintf(linked, sizeof(linked), "%s/dbg_t1l_linked", directory);
+    snprintf(errors, sizeof(errors), "%s.err", linked);
+    const bool compiled = written && check_debug_tier1_values_compile(tally, source, NULL, object, variants, "1", true, true, arena);
+    char* link[] = { (char*)"cc", (char*)"-o", linked, object, NULL };
+    const bool joined = compiled && object_test_run(link, "/dev/null", errors) == 0;
+    check_debug_test_expect(tally, joined, "the expanded-loop object links", errors);
+    if (joined)
+    {
+        check_debug_tier1_loop_read(tally, linked, script, directory, arena);
     }
 }

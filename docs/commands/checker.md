@@ -87,7 +87,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
-  `check_test_driver_named_ucns`; with
+  `check_test_driver_named_ucns`; a generated unit of about 180,000 tokens as
+  a process of its own under an `RLIMIT_AS` of 768 MiB past the executable's
+  image, about 1 GiB for Release, which it must compile, and of 32 MiB past
+  it, where it must fail with a fatal error that names the limit and no error
+  at a line of the unit, #1118, `check_test_driver_address_limit`; with
   `--lazy-system-headers`, only the checks that pass the driver
   `-flazy-system-headers`, including the real system-header lazy-policy
   fixtures and eager/lazy object comparisons, since the others run the same either way, and
@@ -254,7 +258,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes; and
   #1376's clears (`c_check_program_clear_test.c`): each path's shape (memset past 128 bytes, no loop, no clear before
-  a whole object's copy, compound literals in place, a volatile object's stores) and native runs on a dirtied stack.
+  a whole object's copy, compound literals in place, a volatile object's stores) and native runs on a dirtied stack;
+  #2745's: no store of zeros before a vector's value of the object's size (a struct's, a union's by either member, a
+  nested struct's, a compound literal's, the vector object's own, at 16, 32 and 64 bytes), the clears that stay (a
+  volatile object or member, a wider object or union member, a union whose designator moves on, a long double's), and
+  their native runs.
   The same group covers #1549's hidden-result call initializers: copy, temporary and discarded-address elimination,
   nested and indirect calls, only members and elements, alignment, volatile and self-reference fallbacks, assignments,
   reentry, and which labels keep the copy, at both scan paths' lengths; and #1375's named results

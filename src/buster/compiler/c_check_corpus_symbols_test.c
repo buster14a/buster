@@ -5,7 +5,9 @@
 // the command runs it, against clang -O0 -c: a const scalar that clang reads as a constant (folded), a dead ?: arm in a
 // branch's condition (unselected) and a local always_inline function that clang inlines at its call (inlined) must each
 // be explained, and the callees, data and block-scope statics that only a constant if's dead arm reaches must make no
-// difference at all, as -c leaves the arm out as clang does (#1108). Asm-labelled objects use their emitted names.
+// difference at all, as -c leaves the arm out as clang does (#1108). Asm-labelled objects use their emitted names. The
+// inlined ones have two returns, which Tier 0's splice keeps as calls (#1398's step 5), so their objects keep them; one
+// that it splices at every call is left out as clang leaves it (#1398 step 3), and makes no difference.
 // Two prototype-only function labels (the inlined and the unselected function's) are deliberately unexplained: the
 // current matcher reads the definition's attributes, so name-first pruning must preserve those differences too; the
 // dead arms' prototype-labelled callees (reason.alias.dropped, reason.owner.alias) are emitted by neither side. With clang alone given `-Dwide=renamed`,
@@ -21,7 +23,8 @@ static __attribute__((noinline)) void check_test_corpus_symbol_reasons(CheckTest
         "int dropped(int n){long x=n;int r;if(sizeof(x)==sizeof(int))r=narrow(n);else if(sizeof(x)==sizeof(long))r=wide(n);else r=widest(n);return r;}\n"
         "static const int limit=5;int folded(int n){return n<limit;}\n"
         "static int unselected_call(void){return 1;}int unselected(int n){if(sizeof(n)==4?n:unselected_call())return 1;return 0;}\n"
-        "static inline __attribute__((always_inline)) int inlined_call(int n){return n*3;}int inlined(int n){return inlined_call(n)+1;}\n"
+        "static inline __attribute__((always_inline)) int inlined_call(int n){if(n<0)return 0;return n*3;}int inlined(int n){return inlined_call(n)+1;}\n"
+        "static inline __attribute__((always_inline)) int spliced_call(int n){return n*5;}int spliced(int n){return spliced_call(n)+2;}\n"
         // Match the emitted asm labels, including after Clang alone renames the C identifiers. Nearby names stay distinct.
         "static int asm_dropped(int n)__asm__(\"reason.alias.dropped\");static int asm_dropped(int n){return n+8;}"
         "int asm_dead_if(int n){if(0)return asm_dropped(n);return n;}\n"
@@ -34,7 +37,7 @@ static __attribute__((noinline)) void check_test_corpus_symbol_reasons(CheckTest
         "int asm_conditional_data(int n){if(sizeof(n)==4?n:asm_unselected_data)return 1;return 0;}\n"
         "static const int asm_limit __asm__(\"reason.alias.folded\")=9;int asm_folded(int n){return n<asm_limit;}\n"
         "static inline int asm_inline(int n)__asm__(\"reason.alias.inlined\");"
-        "static inline __attribute__((always_inline)) int asm_inline(int n){return n+9;}int asm_inlined(int n){return asm_inline(n);}\n"
+        "static inline __attribute__((always_inline)) int asm_inline(int n){if(n<0)return 1;return n+9;}int asm_inlined(int n){return asm_inline(n);}\n"
         "static int local_owner(int n)__asm__(\"reason.owner.alias\");"
         "static int local_owner(int n){static int table[2]={3,7};return table[n&1];}"
         "int dead_local_owner(int n){if(0)return local_owner(n);return n;}\n"

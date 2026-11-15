@@ -2,16 +2,18 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #1376: an automatic object's zeros past BUSTER_CHECK_LOWER_FILL_UNROLLED bytes are one call of memset, as clang -O0's
-// code clears them, rather than a loop of 8-byte stores; a volatile object keeps its stores; an aggregate's copy that
-// writes the object whole needs no clear before it; and a compound literal of the object's size initializes the object
-// in place, without its own object's clear and copy. #1549 also lets an unaliased whole-object call initializer use
-// the declared object as its hidden result. Include after c_check_program_copy_test.c. Clang is the result oracle.
+// code clears them, rather than a loop of 8-byte stores; a volatile object keeps its stores; an aggregate's copy or a
+// vector's value (#2745) that writes the object whole needs no clear before it; and a compound literal of the object's
+// size initializes the object in place, without its own object's clear and copy. #1549 also lets an unaliased
+// whole-object call initializer use the declared object as its hidden result. Include after c_check_program_copy_test.c.
+// Clang is the result oracle.
 
 // What a unit's lowering makes of its functions, by each path: whether it calls memset (`clears`) and memmove (`moves`),
 // its largest function's typed entries and object bytes, its inline copies, the addresses it discards as soon as it
-// makes them (an in-place call's dead lea before #1549's follow-up), how many jumps go back (a loop's), how many
-// calls pass their function's own hidden pointer on (#2684, BUSTER_TIER0_RESULT_HIDDEN), how many calls of memmove its
-// functions make, and how many give Tier 1's copy of a forwarded result memmove (Tier0Function.hidden_copy).
+// makes them (an in-place call's dead lea before #1549's follow-up), how many jumps go back (a loop's), its stores of
+// a zero constant (`zero_stores`: a clear's pieces, check_lower_fill's CONST 0 then SET), how many calls pass their
+// function's own hidden pointer on (#2684, BUSTER_TIER0_RESULT_HIDDEN), how many calls of memmove its functions make,
+// and how many give Tier 1's copy of a forwarded result memmove (Tier0Function.hidden_copy).
 typedef struct CheckTestClearShape CheckTestClearShape;
 struct CheckTestClearShape
 {
@@ -24,6 +26,7 @@ struct CheckTestClearShape
     uint32_t forwarded;
     uint32_t move_calls;
     uint32_t hidden_copies;
+    uint32_t zero_stores;
     uint64_t object_bytes;
 };
 
@@ -78,6 +81,7 @@ static bool check_test_program_clear_lower(const char* source, bool scalar, Chec
             shape->backward += branch && function->values[i] <= i;
             shape->copies += kind == BUSTER_TYPED_COPY;
             shape->dead_addresses += kind == BUSTER_TYPED_DISCARD && i != 0 && function->kinds[i - 1] == BUSTER_TYPED_LOCAL_ADDRESS;
+            shape->zero_stores += kind == BUSTER_TYPED_SET && i != 0 && function->kinds[i - 1] == BUSTER_TYPED_CONST && function->values[i - 1] == 0;
         }
         for (uint32_t c = 0; function->call_result_objects != NULL && c < function->call_count; c += 1)
         {
@@ -124,6 +128,21 @@ static void check_test_program_clear_shape(CheckTest* test, const char* source, 
     check_test_expect(test, shapes[0].clears == shapes[1].clears && shapes[0].moves == shapes[1].moves && shapes[0].entries == shapes[1].entries &&
                                 shapes[0].backward == shapes[1].backward && shapes[0].copies == shapes[1].copies && shapes[0].object_bytes == shapes[1].object_bytes,
                       description);
+}
+
+// A unit's stores of a zero constant by each path, which must be `zeros`: an object's clear before a first part that
+// writes it whole is none (#2745).
+static void check_test_program_clear_zeros(CheckTest* test, const char* source, const char* name, uint32_t zeros)
+{
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        CheckTestClearShape shape = { 0 };
+        char description[256];
+        const bool lowered = check_test_program_clear_lower(source, path == 0, &shape);
+        snprintf(description, sizeof(description), "%s: the %s path stores a zero %u times (got %u)", name, path == 0 ? "scalar" : "vector", zeros,
+                 shape.zero_stores);
+        check_test_expect(test, lowered && shape.zero_stores == zeros, description);
+    }
 }
 
 // The result initialization must remove both the copy and its temporary, while the excluded paths retain them.
@@ -324,6 +343,42 @@ static void check_test_program_clears(CheckTest* test, const char* clang)
                                          "int f(int n){volatile struct S s=(struct S){.flags=n};return read(&s,n);}",
                                    "initializer-literal-volatile-object", true, false, true, UINT32_MAX);
 
+    // A first part that is a vector's value of the object's size writes it whole too (#2745): a struct's, a union's (by
+    // any member), a nested struct's, a compound literal's and a vector object's own, of 16, 32 and 64 bytes, take no
+    // clear first. A volatile object or one with a volatile member, an object wider than the vector or a union whose
+    // other member is, and a union whose designator moves to another member after the vector's (clang drops the
+    // vector's value, so the rest is zeros) keep their clears, a store of 8 bytes for each 8 of them; so does an object
+    // whose first part is a scalar, long double's, whose store writes 10 of its 16 bytes.
+    static const char vectors[] = "typedef long long V __attribute__((vector_size(64)));typedef int V32 __attribute__((vector_size(32)));"
+                                  "typedef float V16 __attribute__((vector_size(16)));typedef struct{V v;}S;typedef union{V v;unsigned long long q[8];}U;";
+    static const struct
+    {
+        const char* name;
+        const char* body;
+        uint32_t zeros;
+    } whole[] = {
+        { "initializer-vector-literal", "void f(S*o,const V*p){*o=(S){.v=*p};}", 0 },
+        { "initializer-vector-declaration", "void f(S*o,const V*p){S r={*p};*o=r;}", 0 },
+        { "initializer-vector-union", "void f(U*o,const V*p){U r={.v=*p};*o=r;}", 0 },
+        { "initializer-vector-union-later-member", "typedef union{unsigned char c[64];V v;}R;void f(R*o,const V*p){R r={.v=*p};*o=r;}", 0 },
+        { "initializer-vector-nested", "typedef struct{S s;}O;void f(O*o,const V*p){O r={{*p}};*o=r;}", 0 },
+        { "initializer-vector-32", "typedef struct{V32 v;}T;void f(T*o,const V32*p){T r={*p};*o=r;}", 0 },
+        { "initializer-vector-16-literal", "typedef struct{V16 v;}T;void f(T*o,const V16*p){*o=(T){*p};}", 0 },
+        { "initializer-vector-object", "int read(const V*);int f(const V*p){V r=*p;return read(&r);}", 0 },
+        { "initializer-vector-volatile", "void f(S*o,const V*p){volatile S r={*p};*o=r;}", 8 },
+        { "initializer-vector-volatile-member", "typedef struct{volatile V v;}T;void f(T*o,const V*p){T r={*p};*o=r;}", 8 },
+        { "initializer-vector-wider", "typedef struct{V16 v;int tail;}T;void f(T*o,const V16*p){T r={*p};*o=r;}", 4 },
+        { "initializer-vector-narrower-member", "typedef union{V16 v;unsigned char c[32];}T;void f(T*o,const V16*p){T r={.v=*p};*o=r;}", 4 },
+        { "initializer-vector-union-override", "void f(U*o,const V*p){U r={.v=*p,.q[1]=5};*o=r;}", 8 },
+        { "initializer-long-double-scalar", "typedef struct{long double x;}T;void f(T*o,const long double*p){T r={*p};*o=r;}", 2 },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(whole); i += 1)
+    {
+        char source[512];
+        snprintf(source, sizeof(source), "%s%s", vectors, whole[i].body);
+        check_test_program_clear_zeros(test, source, whole[i].name, whole[i].zeros);
+    }
+
     // The fixtures' objects are cleared on a stack a call left dirty, so that a clear left out shows.
     static const char dirty[] = "__attribute__((noinline)) static void dirty(int n){volatile unsigned char d[16384];"
                                 "for(int i=0;i<16384;i++)d[i]=(unsigned char)(n+i*7+1);}";
@@ -383,6 +438,35 @@ static void check_test_program_clears(CheckTest* test, const char* clang)
              "dirty(n);bad|=constant(n)<<6;dirty(n);bad|=volatiles(n)<<7;return bad?123456+bad:n;}",
              dirty);
     check_test_program_source(test, source, "initializer-copies-and-literals-on-dirty-stack", clang);
+    // #2745's objects run as clang's code: the vector's bytes read back through the object, a union's other member and
+    // the bytes past a narrower vector, and the clears kept, on a dirty stack.
+    snprintf(source, sizeof(source),
+             "%s"
+             "typedef long long V __attribute__((vector_size(64)));typedef int V32 __attribute__((vector_size(32)));"
+             "typedef float V16 __attribute__((vector_size(16)));typedef struct{V v;}S;typedef union{V v;unsigned long long q[8];}U;"
+             "typedef union{unsigned char c[64];V v;}R;typedef struct{S s;}O;typedef struct{V32 v;}S32;typedef struct{V16 v;}S16;"
+             "typedef struct{V16 v;int tail;}T;typedef union{V16 v;unsigned char c[32];}N;"
+             "static unsigned long mix(const volatile void*p,int bytes){const volatile unsigned char*b=p;unsigned long t=0;"
+             "for(int i=0;i<bytes;i++)t=t*131+b[i];return t;}"
+             "__attribute__((noinline)) static unsigned long lit(const V*p){S o;o=(S){.v=*p};return mix(&o,64);}"
+             "__attribute__((noinline)) static unsigned long decl(const V*p){S r={*p};return mix(&r,64);}"
+             "__attribute__((noinline)) static unsigned long uni(const V*p){U r={.v=*p};return r.q[3]*7+r.q[7];}"
+             "__attribute__((noinline)) static unsigned long later(const V*p){R r={.v=*p};return mix(r.c,64);}"
+             "__attribute__((noinline)) static unsigned long nested(const V*p){O r={{*p}};return mix(&r,64);}"
+             "__attribute__((noinline)) static unsigned long s32(const V32*p){S32 r={*p};return mix(&r,32);}"
+             "__attribute__((noinline)) static unsigned long s16(const V16*p){S16 r=(S16){*p};return mix(&r,16);}"
+             "__attribute__((noinline)) static unsigned long object(const V*p){V r=*p;return mix(&r,64);}"
+             "__attribute__((noinline)) static unsigned long over(const V*p){U r={.v=*p,.q[1]=5};return mix(&r,64);}"
+             "__attribute__((noinline)) static unsigned long vol(const V*p){volatile S r={*p};return mix(&r,64);}"
+             "__attribute__((noinline)) static unsigned long tail(const V16*p){T r={*p};return mix(&r.v,16)*3+(unsigned)r.tail;}"
+             "__attribute__((noinline)) static unsigned long narrow(const V16*p){N r={.v=*p};return mix(r.c,32);}"
+             "int tested(int n){V a;V32 b;V16 c;for(int i=0;i<8;i++){a[i]=0x0101010101010101LL*(n+i+3)+i;b[i]=n*0x01020304+i*9;}"
+             "for(int i=0;i<4;i++)c[i]=(float)(n+i)*1.5f+0.25f;unsigned long t=0;"
+             "dirty(n);t=t*3+lit(&a);dirty(n);t=t*3+decl(&a);dirty(n);t=t*3+uni(&a);dirty(n);t=t*3+later(&a);dirty(n);t=t*3+nested(&a);"
+             "dirty(n);t=t*3+s32(&b);dirty(n);t=t*3+s16(&c);dirty(n);t=t*3+object(&a);dirty(n);t=t*3+over(&a);dirty(n);t=t*3+vol(&a);"
+             "dirty(n);t=t*3+tail(&c);dirty(n);t=t*3+narrow(&c);return (int)(t%%1000003);}",
+             dirty);
+    check_test_program_source(test, source, "initializer-vectors-on-dirty-stack", clang);
     check_test_program_source(test,
         "struct S{long a[40];int flags;};static int calls;"
         "static struct S make(int n){struct S s;for(int i=0;i<40;i++)s.a[i]=n+i;s.flags=n;calls=calls*3+1;return s;}"

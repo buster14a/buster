@@ -8,7 +8,7 @@ requirements. [Command index](README.md).
 
 - The shared IR optimizers provide SCCP, dead-code/CFG cleanup, value numbering
   and conservative loop-invariant motion, private-field replacement and bounded
-  translation-unit inlining. `test-ir-optimize`, `test-ir-gvn`, `test-ir-licm`,
+  translation-unit inlining, and #2755's loop unroller (below). `test-ir-optimize`, `test-ir-gvn`, `test-ir-licm`,
   `test-ir-sroa` and `test-ir-inline` verify transformations against independent
   semantic fixtures and the upstream SSA promoter (`test-ir-inline`'s #1282
   fixtures: SIMD callees' rows, vector constants and slots, and by-value vectors
@@ -83,6 +83,26 @@ optimizer clients retain their existing order. The ordinary and retained-analysi
 entry points both verify the resulting SSA and remapped CFG. See the
 [Tier 1 command guide](tier1.md#block-placement-and-critical-edge-fall-through-1218)
 for its ordering policy, regression coverage and measurement boundaries.
+
+## Loop unrolling (#2755)
+
+`ir_optimize_unroll.c` is the unroller `--tier1-passes=+unroll` runs after
+LICM and the loop vectorizer: a main loop of up to eight copies of each admitted counted innermost
+loop's body, guarded by a bound the preheader computes, before the original
+loop as its remainder. [The design](../../docs/tier1-loop-unrolling.md) has its
+rules, budgets, refusals and the 9700X's record.
+
+`./build/compiler test-ir-unroll [--seed N] [--shapes N]` builds loops in the
+IR's text form (a builder that names values), runs each by both twins and
+requires the same function, outcomes and counts; an unrolled one verifies with
+dominance, passes Tier 1's optimizer and executes as the original did (return,
+status and stores) on the shared executor, on parameters around zero and the
+main loop's size and at each type's signed and unsigned limits. Every loop
+form, predicate, operand order, branch sense, reduction kind and width, then
+`--shapes` random ones (400 by default), each refusal, the budgets and every
+short output arena are covered. `test-ir-optimize` runs its text pair
+(`tests/ir/optimize/unroll-loops-*.ir`), and `test-ir-source --passes` its twins
+on c-testsuite's subset, the frozen `sqlite3.c` and musl.
 
 ## Vectors assembled in memory (#1344)
 

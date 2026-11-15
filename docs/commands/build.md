@@ -104,7 +104,13 @@ date. Release is for the product and every timing, Develop for edits and tests
   The policy applies before CMake enables C, including its compiler probes,
   for `build.sh`, direct CMake and presets. Cached or `-D` overrides of
   `CMAKE_C_FLAGS*` and `CMAKE_EXE_LINKER_FLAGS*` are also cleared; select the
-  flags through the `BUSTER_*` settings below.
+  flags through the `BUSTER_*` settings below. Its checker's and backend's
+  units generate their native code in parallel parts after the optimizer
+  ([Parallel native generation](#parallel-native-generation)). With
+  `BUSTER_RELEASE_PARTS=1` its `main.c` units are optimized in parts instead,
+  as Develop's, for a short edit: a tree of its own, whose code measured
+  outside the 9700X job's floor of the whole units' ([Release in
+  parts](#release-in-parts), #2559).
 - **Debug** is the same flags with `-O0 -g` in place of the debug information
   and optimization: the same language and aliasing contracts, host ISA,
   sanitizers and definitions, with every variable readable in a debugger.
@@ -112,8 +118,9 @@ date. Release is for the product and every timing, Develop for edits and tests
   slower. The bake and the canary check run on it as on Release.
 - **Develop** is Release's flags and optimization with DWARF 4 line tables
   (`-gdwarf-4 -gline-tables-only`, whatever `BUSTER_DEBUG_INFO` says) in place
-  of `-g`, its `main.c` units optimized in parts, the tests' own functions
-  unoptimized and the benchmark units left out ([Develop](#develop), #2559):
+  of `-g`, its `main.c` units optimized in parts ([Units in
+  parts](#units-in-parts)), the tests' own functions unoptimized and the
+  benchmark units left out ([Develop](#develop), #2559):
   the edit loop's configuration. Its executable runs the compile path about 1%
   to 2% slower than Release's, writes the same outputs, and has lines, not
   variables, for a debugger. The bake and the canary check run on it too.
@@ -129,7 +136,8 @@ option](#line-tables-variable-locations). With
 `BUSTER_DEBUG_INFO=0` the Release executable is the old `build.sh`'s byte for
 byte (the CI configuration, checked at `x86-64`); with `-g`, its allocated
 sections are, and only `.debug_str` and `.debug_line_str` (source paths) and
-the build ID, a hash over the whole file, differ.
+the build ID, a hash over the whole file, differ. Release in parts
+(`BUSTER_RELEASE_PARTS=1`) is another executable.
 
 ### Line tables' variable locations
 
@@ -246,6 +254,7 @@ a preset's tree with `cmake --fresh --preset NAME`, or build it with
 | `BUSTER_PGO_TRAIN` | none | with `BUSTER_PGO=1`, a bash script that trains the profile in place of those compiles |
 | `BUSTER_TOOLCHAIN` | `ci` | `build.sh`'s alone: `ci` builds with CI's clang, CMake and Ninja ([The toolchain](#the-toolchain)), staged once where `PATH` hasn't them; `path` with `PATH`'s as found |
 | `BUSTER_PARALLEL_CODEGEN` | `auto` | CHECKER's and BACKEND's Release native code (a sanitizer build's too), and Develop's `main.c` units, in parallel parts (below): `auto` where the tools are, `1` requires them, `0` never |
+| `BUSTER_RELEASE_PARTS` | `0` | `1` builds Release's `main.c` units in parts before the optimizer, as Develop's, for a short edit with Release's optimization: a `-parts` tree, outside the 9700X job's floor ([Release in parts](#release-in-parts)) |
 
 An empty value is the default, but for `BUSTER_DEBUG_INFO` and `BUSTER_LINKER`,
 which reject it; the incompatible combinations fail as they always have
@@ -300,9 +309,11 @@ In `build/cmake/VARIANT/` (a preset's tree is the same):
 - `call-graph-ir` and `check-call-graph`: `call-graph/NAME.ll`, the units' IR,
   one capture for both configurations, and the check by `CONFIG/compiler`.
 - `shifts`, with `BUSTER_SHIFTS`: `CONFIG/shifts/compiler-SHIFT`.
-- In Develop: `Develop/develop/UNIT/`, each `main.c` unit's parts (`partN.bc`,
-  `partN.o`) and their join (`native.o`), and `Develop/develop/absent.o`, the
-  stand-ins for the benchmark units it leaves out.
+- In Develop (and Release in parts): `CONFIG/parts/UNIT/`, each `main.c`
+  unit's parts (`partN.bc`, `partN.o`) and their join (`native.o`); in Release
+  otherwise, `Release/codegen/UNIT/`, the two longest units' native parts; and
+  `Develop/develop/absent.o`, the stand-ins for the benchmark units Develop
+  leaves out.
 
 The executable is linked at a fixed address (`-no-pie`), from the same code: as
 a PIE, its pointer tables' 366,684 relative relocations made every start take 8
@@ -711,6 +722,228 @@ calls. The inventory needs CI's tools and frozen inputs ([CI](../ci.md)) and
 every core, so it runs alone. `./build.sh test --config Debug -- -L build`
 runs the first label in Debug.
 
+## Units in parts
+
+A clean build waits for its longest unit, and an edit for one clang process: a
+unit's front end and `-O3` pipeline, serial, whatever the edit (the checker's
+unit's took 56.6 s on the 9700X). So Develop, and Release with
+`BUSTER_RELEASE_PARTS=1`, compile each `main.c` unit only up to LLVM's
+optimizer and optimize it in parts, at once, so that a clean build spreads the
+work over the jobs and an edit repeats only the parts it changed (#2559; [A
+faster stage 1 build](../stage1-build-design.md) is the design, with the
+measurements that sized it). Release otherwise optimizes its units whole and
+generates the two longest units' native code in parts ([Parallel native
+generation](#parallel-native-generation)).
+
+```text
+UNIT.c --clang, no LLVM pass--> UNIT bitcode --presplit--> part0.bc ... partN.bc, the data part
+partK.bc --clang -x ir -O3--> partK.o      (a job a part, rerun only when its bitcode changed)
+part*.o --join--> native.o --link--> CONFIG/compiler.link --bake--> CONFIG/compiler
+```
+
+1. The unit compiles with the configuration's flags and `-Xclang
+   -disable-llvm-passes -emit-llvm`, keeping its depfile and its compile
+   database record.
+2. `tools/codegen/presplit.c` (`Partitioning UNIT's IR before the optimizer`)
+   deals its functions into parts (`BUSTER_PARTITIONS` in
+   `cmake/BusterCodegen.cmake`: 48 for the checker's unit, 32 for the
+   backend's, 16 for the front end's, 8 for each other one) and a part of the
+   unit's shared global variables, and writes a part only when its bytes
+   changed. It parses the module once and forks a child per part, as many at
+   once as the CPUs it may use and the available memory allow.
+3. A job a part (`Optimizing and generating UNIT's part K`) runs clang's `-O3`
+   pipeline and code generator on it, with the unit's `-march` and the
+   configuration's debug information.
+4. `cmake/BusterCodegenMerge.cmake` (`Combining UNIT's parts`) joins them in
+   order with a relocatable link and makes local again everything the unit
+   didn't export, before the ordinary final link. It fails when any of the
+   unit's local names (the split's `locals.txt`) is still undefined. The link
+   discards what no live code refers to (`codegen-tools/unreferenced`,
+   `tools/codegen/unreferenced.c`): a local function another part names keeps
+   its alias, and so its body in its own part, even where every part inlined
+   it or folded its calls away, which the whole unit's optimizer drops. The
+   tool follows the parts' relocations from every allocated section but the
+   local functions' and the data the code generator named for one object
+   (`.rodata.NAME`, a function's jump tables), and the link discards the
+   sections it doesn't reach, with their unwind entries and their debug
+   information's addresses (0, as `--gc-sections` leaves): 170 sections,
+   115 KB, in the checker's unit (`tier1_select_cover_munch`, 65 KB, whose
+   one call folds away after inlining).
+
+Each unit's parts start once its own split is done: with CMake 3.27 and later
+these commands take `DEPENDS_EXPLICIT_ONLY`, without which CMake makes a
+command the link uses wait for every unit's object. The Debug configuration
+compiles every unit whole.
+
+The splitter's rules, each for a measured reason (the file's first comment has
+them in full; `--report` prints a plan's parts, files and largest functions):
+
+- **A function's part comes from its file and the names around it**, not from
+  a count of what came before. Each file's functions, in source order, are cut
+  at the functions whose name's hash is 0 modulo 24, and dealt over a run of
+  parts of the file's own by their place in the file, as many parts as the file
+  holds of half a part's mean size. An appended function changes one part; an
+  edit that moves a file's lines changes that file's parts.
+- **A static function that one function alone calls goes with its caller**,
+  where the caller can inline it, so that it still can: not into an `optnone`
+  caller.
+- **A part reads the bodies it may inline**: those small enough that its code
+  calls and another part defines, every `always_inline` one, and the C library
+  headers' inline ones (`putchar`, `bsearch`, which the optimizer also makes
+  calls to), `available_externally` and without their line numbers. Without
+  them the compiler was 29% slower.
+- **A part reads the constants it refers to**, and the constants those name (a
+  table's strings, for `strlen` to fold), and a static variable more than one
+  part uses lives once, in the data part. A local function another part calls
+  keeps its local name where it is defined, and a hidden alias,
+  `NAME.buster_split`, names it for the others.
+- **Nothing in a part names the rest of the unit**: string literals and
+  numbered statics are named by their contents, inline assembly loses its
+  `!srcloc`, and struct types lose their names (`struct.anon.N`).
+- **A function whose inline assembly has text stays in part 0**, with the
+  module's own assembly, and no other part reads its body: its text can define
+  a label another function's names.
+- **The same input gives the same parts**, whatever the jobs: a rebuilt
+  executable is the one a clean build of the same sources makes.
+
+**Release's parts decide as the whole unit's optimizer does, as far as the
+parts can** (step 5 of the design, its gate the 9700X job's whole measure;
+[Release in parts](#release-in-parts) below). Its options
+(`BUSTER_RELEASE_SPLIT_OPTIONS`) add:
+
+- **The whole module's constant arguments** (`--constant-arguments`): a
+  child process runs SROA and interprocedural constant propagation on the
+  whole unit, and a static function's argument that every call passes as the
+  same constant becomes that constant in the function, before the split. A
+  part's own propagation doesn't see every call of a function other parts
+  call: without it the parts' `mode_register_is_valid` was 70 to 90 costlier
+  to the inliner than the whole unit's and stayed outlined in
+  `instruction_is_valid`. Running the whole simplification before the split
+  instead, and again in each part, reshaped code the whole unit's pipeline
+  shapes once (`benchmark-environments` ran 2.7% slower).
+- **The whole unit's argument promotion** (`--promote-arguments`): the same
+  child inlines the `always_inline` bodies and runs argument promotion, and
+  each static function whose parameters that rewrites gets the same in the
+  unit before the split: its `always_inline` callees inlined, SROA, and
+  LLVM's argument promotion over the module, which rewrites those functions
+  and the calls to them (296 in the checker's unit). A part promotes a
+  function only when it sees its every call: the parts kept
+  `check_action_operand_value`'s 96-byte operand, which the whole unit
+  passes in two vector registers, in memory, where its loads waited on the
+  caller's narrower stores (`benchmark-check-units` ran 0.72% slower, the
+  checker on musl's source 1.85%). A local copy in each part that calls such
+  a function let the parts promote it too, but left 20 copies of that one
+  outlined, each its callers' own, and the checker's and the backend's
+  sources ran up to 12% more instruction cache misses.
+- **A part reads bodies by what SROA leaves of them** (`--simplified-size`):
+  up to 200 instructions, and up to 2.5 times that for vector code, as LLVM's
+  inliner raises its threshold for it (`asm_word_registers_vector`, 721
+  unoptimized instructions, inlines into the register cache).
+- **The whole unit's last-call inlining** (`--keep-statics`): a static
+  function that is only ever called goes to the parts that read it as a local
+  copy, not through its alias (an alias is a use, which stops the inliner
+  inlining the last call to a static function); a body that calls a static
+  function called once isn't read elsewhere; and a part's copy of a static
+  function that the whole module calls more often gets a phantom caller, an
+  `available_externally` and `optnone` function the optimizer drops after the
+  inliner, so that the part doesn't inline it as the last call where the whole
+  unit doesn't (`arena_reserve_small` into `scratch_begin` made that too big to
+  inline into the assembler's layout and emission).
+- **Copies in two parts or more only where they pay** (`--copy-limit 40`):
+  a function the whole module calls once, an `always_inline` one, or one of
+  up to 40 instructions as SROA leaves it with the `always_inline` bodies it
+  calls; a larger one goes `available_externally`, through its alias. Each
+  part's inliner leaves its own copy outlined where it doesn't inline it: the
+  checker's unit held `arena_commit` 46 times and `arena_reserve_policy` 33,
+  1.2 MB more code than the whole unit, and its sources ran 15% to 27% more
+  instruction cache misses than the whole build's. An `always_inline`
+  function's copies inline at every call and go: limited, they kept the
+  owner's body, through its alias, dead (99 bodies, 342 KB of the checker's
+  unit: `tier1_select_candidates` 57 KB, `tier1_allocate_body` 30 KB).
+  Weighed without the `always_inline` body it calls, `tier1_allocate_impl`
+  measured 7 and stayed outlined, 22 KB, in three parts. The checker's
+  unit, 11.35 MB of code whole, was 12.50 MB in parts without the limit,
+  12.09 MB with it, and is 11.49 MB with these and the join's discards
+  (above).
+- **A benchmark's own file reads the bodies it calls**, whatever their size
+  (`--benchmark-bodies`): a benchmark measures its kernel inlined into its
+  loop, as the whole unit compiles it.
+
+**Debug information.** Develop's units have DWARF 4 line tables, which record
+no file's checksum. Release's `-g` is DWARF 5's, which records each file's
+MD5 in every part that mentions the file, so that an edit of a file
+recompiles every part that has code from it. Without debug information
+(`BUSTER_DEBUG_INFO=0`), a unit of Release in parts compiles with line tables
+for the plan, and the parts are written without them (`--strip-debug`).
+
+`BUSTER_PARALLEL_CODEGEN` is `auto` by default: the build splits the units
+wherever its flags allow and the tools are there, and otherwise says why in the
+configure step's `parallel native generation` line and compiles the units
+whole (its `units in parts` line says which, and whether Release's are). `1`
+requires the parts, failing the configuration without them; `0` never uses
+them. Fuzzing, PGO, an explicit host runtime, `BUSTER_BUILD_DEFINES` and lexer
+variants keep the single compile; a sanitizer build's Develop compiles every
+unit whole, and `BUSTER_RELEASE_PARTS=1` refuses all of these. The tools, beside the
+configured Clang or on `PATH`, at its version: `llvm-config` with LLVM's C API
+headers and library (the splitters are built in the tree, at
+`codegen-tools/presplit` and `codegen-tools/split`, with the flags it gives),
+`clang++`, `llvm-nm`, `llvm-objcopy`, `llvm-readobj` and `ld.lld`. LLVM's
+libraries link shared where `llvm-config` finds them, else static, as the
+official release's archives do in CI, hosted and on the 9700X. A system
+library `llvm-config` names by a path the host lacks links by its name
+instead: the release names Ubuntu's `/usr/lib/x86_64-linux-gnu/libzstd.a`, and
+the 9700X, an Arch host, links `-lzstd`; a host with zstd's runtime library
+alone, no development file (`libzstd.so` or `.a`), as a session's container can
+be, links the runtime file by its path, `libzstd.so.1` (#2628: without it, CI's
+toolchain there turned the parts off). The final link still uses any supported
+`BUSTER_LINKER`.
+
+An unrelated edit reuses every part's object. A change to a unit compiles its
+bitcode and splits it again, but parts whose bytes didn't change keep their
+timestamps, so Ninja repeats only the changed parts' jobs. Failed splitting,
+compilation or symbol restoration stops the graph before a replacement
+executable can be published. Diagnostics produced only when compiling inline
+assembly remain fatal under `-Werror`, but report the inline assembly without
+the original C file and line.
+
+`build-regression --parallel-codegen-only` exercises the join's helpers on two
+translation units with identically named private functions, data and TLS,
+distinct hidden public entries, and shared strong and weak external references
+(the fixture splits them after the optimizer, as Release does). It checks
+runtime isolation across threads, the source compilation database, unchanged
+and source-only edits, one-part private data edits, missing pieces,
+deterministic regeneration, late assembly warnings and failed-stage recovery,
+and the join's discards on two parts as presplit leaves them. It also checks
+the mapping of `llvm-config`'s system libraries (`cmake -P`): hosted runners
+have the release's paths, so only the 9700X's build maps one. The full build
+regression also builds the compiler with `BUSTER_RELEASE_PARTS=1` once, checks
+that Release split the checker's unit into its 48 parts and placed the start's
+functions first, and runs its baking checks; Develop's checks are
+[below](#develop).
+
+### Release in parts
+
+`BUSTER_RELEASE_PARTS=1` builds Release's `main.c` units in parts with the
+options above, in a tree of its own (`build/cmake/VARIANT-parts`), for an edit
+loop with Release's optimization: on the 9700X, by the host's clang with eight
+jobs, an edit of `c_check_input.c` rebuilt in 33.1 s against 63.6 s with `-g`
+and in 18.2 s against 50.6 s without, and a clean build took 68.1 s against
+73.7 s (53.4 s against 57.3 s). It isn't the default, and no timing or
+benchmark uses it: the 9700X job's whole measure, every benchmark over its
+placements, put 11 of its 69 benchmarks outside their floors of the whole
+units' on 2026-11-15 ([the
+record](https://github.com/buster14a/buster-performance/tree/e9ad4b3e8/docs/measurements/release-in-parts-renewed-2559-2026-11-14)).
+Four of them run more instructions (`benchmark-tier1-code-certificate` +1.39%
+user cycles, +0.70% instructions; `sqlite-c-tier1`, `ir-source`, `sqlite-c`)
+and `ir-lowering` +1.00% runs as many in other code: what the whole unit's
+inliner decides only after inlining, a part can't see (a call site that is
+cold in the part and not in the whole unit loses the last-call bonus, a
+cost of 525 against the whole unit's 520 at a threshold of 525, a caller that
+dies only once inlined, a body too large to read that a loop's call site
+inlines). The other six are layout and noise. Its outputs were the whole
+units' for all 69 commands, and an undone edit rebuilds the clean build's
+executable.
+
 ## Parallel native generation
 
 A clean build waits for its longest unit: on the 9700X, `main_unit_checker.c`
@@ -718,7 +951,9 @@ took 99.6 s of a 100.3 s build at `fa6254e0`, with the other units done long
 before. More than half of a unit's compile is native code generation after the
 O3 IR pipeline: 57.3 of 112.5 s for the checker and 37.9 of 75.5 s for the
 backend (`-ftime-trace`, locally), single-threaded in one Clang process. So the
-Release configuration generates those two units' native code in parallel parts:
+Release configuration, unless its units are in parts (`BUSTER_RELEASE_PARTS=1`,
+above), generates those two units' native code in parallel parts (#2058), and
+a sanitizer build's Release does too ([below](#in-sanitizer-builds)):
 
 1. The unit compiles C through the ordinary O3 pipeline to LLVM bitcode
    (`-emit-llvm` in Release alone), keeping its depfile and its compilation
@@ -728,22 +963,12 @@ Release configuration generates those two units' native code in parallel parts:
    instruction count) as cheap as the alignment rule below allows, and a ninth
    with the unit's global variables: one per job of `build.sh`'s default, a
    physical core (fourteen, one per hardware thread of the 9700X, ran in two
-   waves there: 74.0 s for a clean build against 73.1 s). It parses the module
-   once and forks a child per part, as many at once as the CPUs it may use and
-   the available memory allow: each child copies most of the module's pages
-   (fifteen children of the checker came to about 14.8 GB, four to 4.7 GB).
+   waves there: 74.0 s for a clean build against 73.1 s).
 3. A Clang backend job per part (`Generating UNIT's native part N`) compiles
-   it with the unit's `-march`, debug information and O3 code generation, the
-   IR optimizer disabled.
-4. `cmake/BusterCodegenMerge.cmake` (`Combining UNIT's native parts`) joins
-   them in order with a relocatable link and makes local again everything the
-   unit didn't export, before the ordinary final link. It fails when any of the
-   unit's local names (the split's `locals.txt`) is still undefined.
-
-Each unit's parts start once its own split is done: with CMake 3.27 and later
-these commands take `DEPENDS_EXPLICIT_ONLY`, without which CMake makes a
-command the link uses wait for every unit's object (the backend's parts waited
-for the checker's bitcode, 14.5 s, then competed with its parts).
+   it with the unit's `-march`, debug information (a sanitizer build's flags
+   among them, its `-fPIE`) and O3 code generation, the IR optimizer disabled.
+4. The join is the units in parts' (above), without its discards: these parts
+   hold what the whole unit's optimizer kept.
 
 The executable's code is the single object's: every function at the same
 address with the same instructions, but where the start's order puts the
@@ -786,68 +1011,28 @@ and a `-fsyntax-only` of the checker's unit within ±0.33% of each other, as
 noise. The [record](https://github.com/buster14a/buster-performance/tree/dc6be30185f2c22b8944f24a02c092760b96cf7a/docs/measurements/build-parallel-native-2026-11-10)
 has the runs, scripts and the comparison of the two executables' code.
 
-`BUSTER_PARALLEL_CODEGEN` is `auto` by default: the build uses the parts
-wherever its flags allow and the tools are there, and otherwise says why in the
-configure step's `parallel native generation` line and compiles the units
-whole. `1` requires the parts, failing the configuration without them; `0`
-never uses them. Fuzzing, PGO, an explicit host runtime,
-`BUSTER_BUILD_DEFINES` and lexer variants keep the single compile; sanitizer
-builds take the parts ([below](#in-sanitizer-builds)). The tools,
-beside the configured Clang or on `PATH`, at its version: `llvm-config` with
-LLVM's C API headers and library (the splitter is built in the tree, at
-`codegen-tools/split`, and Develop's at `codegen-tools/presplit`, with the
-flags it gives), `clang++`, `llvm-nm`,
-`llvm-objcopy`, `llvm-readobj` and `ld.lld`. LLVM's libraries link shared
-where `llvm-config` finds them, else static, as the official release's
-archives do in CI, hosted and on the 9700X. A system library `llvm-config`
-names by a path the host lacks links by its name instead: the release names
-Ubuntu's `/usr/lib/x86_64-linux-gnu/libzstd.a`, and the 9700X, an Arch host,
-links `-lzstd`; a host with zstd's runtime library alone, no development file
-(`libzstd.so` or `.a`), as a session's container can be, links the runtime file
-by its path, `libzstd.so.1` (#2628: without it, CI's toolchain there turned
-the parts off). The Debug configuration compiles
-the units as before; the final link still uses any supported `BUSTER_LINKER`.
-
 An unrelated edit reuses both units' native objects. A change to a split unit
 compiles its bitcode and splits it again, but parts whose bytes didn't change
 keep their timestamps, so Ninja repeats only the changed parts' code generation
 (a mutable global's initializer changes the data part alone); a comment-only
-edit that leaves the optimized IR unchanged generates nothing. Failed
-splitting, native compilation or symbol restoration stops the graph before a
-replacement executable can be published. Diagnostics produced only when
-compiling inline assembly remain fatal under `-Werror`, but report the inline
-assembly without the original C file and line.
-
-`build-regression --parallel-codegen-only` exercises the production helpers on two
-translation units with identically named private functions, data and TLS, distinct
-hidden public entries, and shared strong and weak external references. It checks
-runtime isolation across threads, the source compilation database, unchanged and
-source-only edits, one-part private data edits, missing pieces, deterministic
-regeneration, late assembly warnings and failed-stage recovery. It also checks
-the mapping of `llvm-config`'s system libraries (`cmake -P`): hosted runners
-have the release's paths, so only the 9700X's build maps one. The full build
-regression also builds the real opt-in compiler once and runs its baking checks.
+edit that leaves the optimized IR unchanged generates nothing.
 
 The parts are made after the optimizer, so a unit's `-O3` pipeline is still one
-serial job. The Develop configuration ([below](#develop)) moves the split in
-front of the optimizer, in a configuration of its own; Release keeps this one.
-Release split before the optimizer as Develop is, the design's step 5, failed
-its gate on the 9700X: `benchmark-assembler` ran 9.6% slower, and 4.6% after
-five changes to the splitter, where its clean build took 77.6 s against 86.4 s
-and an edit of `c_check_input.c` 32.5 s against 75.1 s ([A faster stage 1
-build](../stage1-build-design.md#step-5-measured), #2559).
+serial job. Release in parts (`BUSTER_RELEASE_PARTS=1`, [above](#release-in-parts))
+moves the split in front of the optimizer, as Develop's; by default Release
+keeps this one, as the design's step 5 failed its gate on the 9700X twice
+([A faster stage 1 build](../stage1-build-design.md#step-5-renewed), #2559).
+
 
 ### In sanitizer builds
 
-A sanitizer build (`BUSTER_SANITIZER=address|undefined|thread|memory`) generates
-the two units' native code in parts too (#2639): its checker unit's single
-compile was the whole build's wall time, and its CI rows build it once per
-candidate. The sanitizers instrument the module inside the unit's own
-optimization pipeline, before the split, and MemorySanitizer's cleanup passes
-run there too, so the parts generate the single compile's instrumented, optimized
-module, with the unit's optimization level and the sanitizer's flags (its
-`-fPIE` among them). What a sanitizer adds to the module goes with the part
-that emits it:
+A sanitizer build (`BUSTER_SANITIZER=address|undefined|thread|memory`) splits
+its Release units the same way, after the optimizer, which instruments them
+(#2639): its checker unit's single compile was the whole build's wall time, and
+its CI rows build it once per candidate. Splitting before the optimizer would
+instrument the parts apart, after inlining across them was lost.
+
+What a sanitizer adds to the module goes with the part that emits it:
 
 - **The module constructors.** `llvm.used` and the constructor and destructor
   arrays keep their entries in the part that emits the function they name, so
@@ -958,61 +1143,21 @@ bound by its work on 4 CPUs, gains little.
 
 The edit loop's configuration, and `./build.sh`'s default since 2026-11-13 (#2559;
 [A faster stage 1 build](../stage1-build-design.md) is its design, with the
-measurements that sized it); time and benchmark Release, never Develop. A Release edit waits for one
-clang process, a unit's front end and `-O3` pipeline, whatever the edit: the
-checker's unit's took 56.6 s on the 9700X. Develop stops each `main.c` unit's
-compile before LLVM's optimizer and optimizes it in parts, at once, so that an
-edit repeats only the parts it changed:
+measurements that sized it); time and benchmark Release, never Develop. Its
+`main.c` units are in parts ([Units in parts](#units-in-parts)), with options
+for the shortest edit rather than Release in parts' code:
 
-```text
-UNIT.c --clang, no LLVM pass--> UNIT bitcode --presplit--> part0.bc ... partN.bc, the data part
-partK.bc --clang -x ir -O3--> partK.o      (a job a part, rerun only when its bitcode changed)
-part*.o --join, as Release's parts--> native.o --link--> Develop/compiler.link --bake--> Develop/compiler
-```
-
-1. The unit compiles with Develop's flags and `-Xclang -disable-llvm-passes
-   -emit-llvm`, keeping its depfile and its compile database record.
-2. `tools/codegen/presplit.c` (`Partitioning UNIT's IR before the optimizer`)
-   deals its functions into parts (`BUSTER_DEVELOP_PARTITIONS` in
-   `cmake/BusterCodegen.cmake`: 48 for the checker's unit, 32 for the
-   backend's, 16 for the front end's, 8 for each other one) and writes a part
-   only when its bytes changed, as `split.c` does.
-3. A job a part (`Optimizing and generating UNIT's part K`) runs clang's `-O3`
-   pipeline and code generator on it, with the unit's `-march` and Develop's
-   debug information.
-4. `cmake/BusterCodegenMerge.cmake` joins them as it joins Release's parts.
-
-The splitter's rules, each for a measured reason (the file's first comment has
-them in full; `--report` prints a plan's parts, files and largest functions):
-
-- **A function's part comes from its file and the names around it**, not from
-  a count of what came before. Each file's functions, in source order, are cut
-  at the functions whose name's hash is 0 modulo 24, and dealt over a run of
-  parts of the file's own by their place in the file, as many parts as the file
-  holds of half a part's mean size. An appended function changes one part; an
-  edit that moves a file's lines changes that file's parts.
-- **A static function that one function alone calls goes with its caller**,
-  where the caller can inline it, so that it still can: not into an `optnone`
-  caller.
-- **A part reads the bodies it may inline**: those of at most 100 unoptimized
-  instructions that its code calls and another part defines, and every
-  `always_inline` one, `available_externally` and without their line numbers.
-  Without them the compiler was 29% slower; with them, 1% to 2%.
-- **A part reads the constants it refers to**, as Release's parts do, and a
-  static variable more than one part uses lives once, in the data part.
-- **Nothing in a part names the rest of the unit**: string literals and
-  numbered statics are named by their contents, inline assembly loses its
-  `!srcloc`, struct types lose their names (`struct.anon.N`), and DWARF 4
-  records no file's checksum.
-- **A function whose inline assembly has text stays in part 0**, with the
-  module's own assembly, and no other part reads its body: its text can define
-  a label another function's names.
+- **A part reads fewer bodies**: those of at most 100 unoptimized instructions
+  (`--import 100`), without Release in parts' constant arguments, argument
+  promotion, last-call copies or benchmarks' bodies, for less optimizer work a
+  part.
 - **The tests' own functions are `optnone` and `noinline`** (`--tests-optnone`),
   as #681's pragma has the checker's: a function whose file's name has `_test_`,
   `_test.`, `_tests.`, `test_` or `fuzz` in it. No source changes, and no
   optimizer time on the tests; their commands run a few percent slower.
-- **The same input gives the same parts**, whatever the jobs: a rebuilt
-  executable is the one a clean build of the same sources makes.
+- **DWARF 4 line tables** (`-gdwarf-4 -gline-tables-only`, whatever
+  `BUSTER_DEBUG_INFO` says), which record no file's checksum, so that an edit
+  of a file recompiles only the parts its edit changed.
 
 **The benchmark units are built on demand**: Develop's executable leaves out
 the 28 `*_benchmark.c` units that `BUSTER_DEVELOP_ON_DEMAND`
@@ -1075,18 +1220,17 @@ Release on `-c sqlite3.c` and 3.2% on the checker's unit; the splitter's
 fixes from #2559's step 5 at `--import 300` closed it (cycles within 0.1
 points of Release's), but cost 13% on a clean build and 13% to 15% on an
 edit, and at `--import 100` they gained nothing. Develop keeps the edit loop's
-side of that trade, `--import 100`, until the owner says otherwise; its debug
-information has functions and lines, not variables, so `perf` and backtraces
-work and a debugger's `print` doesn't (Debug is for that). Release and Debug are
-untouched: their commands are the same, and so are their executables, byte for
-byte.
+side of that trade, `--import 100`, until the owner says otherwise (Release in
+parts reads bodies by another measure and with more rules, [above](#units-in-parts));
+its debug information has functions and lines, not variables, so `perf` and
+backtraces work and a debugger's `print` doesn't (Debug is for that).
 
-**When it compiles whole.** Develop's units are split where Release's parallel
-native generation is allowed and its tools are there (`BUSTER_PARALLEL_CODEGEN`,
-above: the configure step's `Develop configuration: TRUE, in parts: ...` line
-says which). Otherwise, and in
-sanitizer, fuzzing, `BUSTER_BUILD_DEFINES` and lexer-variant trees, they compile
-whole with Develop's flags; a `BUSTER_PGO` tree has Release alone.
+**When it compiles whole.** Develop's units are split where the units in parts
+are allowed and their tools are there (`BUSTER_PARALLEL_CODEGEN`, above: the
+configure step's `Develop configuration: TRUE, units in parts: ...` line says
+which). Otherwise, and in sanitizer, fuzzing, `BUSTER_BUILD_DEFINES` and
+lexer-variant trees, they compile whole with Develop's flags; a `BUSTER_PGO`
+tree has Release alone.
 
 **Checks.** `build-regression --develop-only` (and the full regression, in the
 Build workflow) builds Develop beside Release, checks that Release's executable
@@ -1138,8 +1282,8 @@ go first, together, in a section of their own before `.text`
 (one section of each unit, which starts on a page, `main.c`'s pragmas, #502),
 which held 18 of the empty file's windows and 60 of `hello.c`'s; the script
 puts every unit's together, between `.text.buster_start` and `.text`, and
-can't reorder the functions inside one: Release's parallel split puts the
-list's functions of that section first in it.
+can't reorder the functions inside one: the units in parts, and a sanitizer
+build's parallel split, put the list's functions of that section first in it.
 
 - **The list:** `cmake/BusterStartOrder.txt`, `UNIT NAME` for a local
   function of one of `main.c`'s units and `- NAME` for any other: a global
@@ -1155,24 +1299,40 @@ list's functions of that section first in it.
   script (`cmake/BusterStartOrder.cmake` writes `start-order.ld` into the
   tree at configuration) names each function by its unit's object, the unit's
   own (`*/UNIT.c.o`) or its parallel parts' join (`*/UNIT/native.o`), and its
-  section (`.text.NAME`, `.text.unlikely.NAME`, `.text.hot.NAME`). The
+  section (`.text.NAME`, `.text.unlikely.NAME`, `.text.hot.NAME`). In the
+  join of a unit in parts a local function another part calls can have its
+  alias's name alone,
+  where its own part's optimizer folded the two (`.text.NAME.buster_split`),
+  which the script names too: naming the first alone, it left 368 of the
+  list's 511 functions in `.text` (the start's section 197 KB, against the
+  whole build's 787 KB). `build-regression`'s compiler in parts checks that
+  every listed function whose section its unit's join holds is in
+  `.text.buster_start`. The
   others go by name in a symbol ordering file (`start-order.symbols`), which
   puts their sections first in `.text`, right after; `start-order` leaves out
   any whose name a unit's static shares, which the name would move too.
 - **Inside the checker's section:** in every static build, whatever its
   linker, so that switching `BUSTER_LINKER` relinks alone,
-  `BusterStartOrder.cmake` writes at configuration each Release split unit's
-  names, its own lines' and the `- NAME` ones in the list's order, to
-  `start-order/UNIT.txt` in the tree. The split (`tools/codegen/split.c
-  --first`) puts each function they name that the unit defines in a named
-  section, `.text.buster_checker`, before that section's first unlisted
-  function, in the list's order, before it plans the parts; every other
-  function keeps its order, and every function its instructions. A list that
+  `BusterStartOrder.cmake` writes at configuration the names of each unit in
+  parts and of each split unit (Release's two longest), its own lines' and
+  the `- NAME` ones in the list's order, to `start-order/UNIT.txt` in the
+  tree. The units in parts are dealt by file, not in the module's order:
+  `presplit --first` gives each function they name that the unit defines in
+  a named section, `.text.buster_checker`, a section of its own
+  (`.text.buster_checker.buster_first.N`, N its line) and part 0's other
+  functions of it `.text.buster_checker.buster_rest`, and the join's
+  relocatable link puts part 0's section, which `main.c`'s assembly starts on
+  a page, those in the list's order, part 0's rest and the other parts' into
+  one `.text.buster_checker` again (`sections.txt`,
+  `BusterCodegenMerge.cmake`). Every function keeps its part and its
+  instructions; a unit whose listed functions are all in `.text` moves none.
+  Release's split after the optimizer (`tools/codegen/split.c --first`) puts them
+  before that section's first unlisted function, in the list's order, before
+  it plans the parts; every other function keeps its order, and a list that
   moves nothing fails the split, as a stale one would. The checker's unit
-  puts 269 functions, 1.95 MB of its 5.4 MB, there. Develop's parts
-  (`presplit`, dealt by file) and Release's single compiles
-  (`BUSTER_BUILD_DEFINES`, `BUSTER_PGO`, so `BUSTER_CHECKER_OFFSET`'s builds
-  too) keep the section in source order.
+  puts 269 functions, 1.95 MB of its 5.4 MB, there. Release's single
+  compiles (`BUSTER_BUILD_DEFINES`, `BUSTER_PGO`, so `BUSTER_CHECKER_OFFSET`'s
+  builds too) keep the section in source order.
 - **Shifts:** a shifted link's padding (`.text.buster_shift_padding`, above)
   goes in `.text.buster_start` right before the shift source's first
   function when it has one there (`main.c` and the checker's and the front

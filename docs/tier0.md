@@ -608,7 +608,12 @@ builtins on vectors, as on structs, call libatomic's generic functions.
   in xmm0 to xmm3 without AVX, 64 in ymm0 and ymm1 with AVX but not AVX-512F; part k at byte 16k or 32k of the object,
   each register loaded and stored whole (`tier0_vector_result_parts`, which `tier0_aggregate_result_valid` takes only
   in that order, from xmm0, without `HIGH`, the object's bytes the parts'). Arguments of those types are passed in
-  memory, on the stack whole.
+  memory, on the stack whole. A record SSE, SSEUP of a size no vector register has (a union of a 16-byte vector and a
+  longer array, #2113) passes and returns clang's `<size / 8 x double>`, its payload (`abi_vector_payload_bytes`): of
+  24, 40, 48 or 56 bytes, in a register wider than it, `tier0_payload_load` loads it without reading past the record
+  (a broadcast of its last 8 or 16 bytes, then inserts of the lanes before them) and `tier0_payload_store` stores it
+  without writing past it (the low 16 or 32 bytes, then extracts, which lose the register's value); a `PAYLOAD` stack
+  slot's copy takes the payload alone (`tier0_whole_bytes`, `tier0_whole_slot`).
 - **A function says whether it has vectors** (`Tier0Function.vectors`: VECTOR values or `X86` entries), which gives it
   the copies of selection, measuring and the deferred entries' emitter that look for their entries
   (`tier0_memory_function`), as `x87` and `int128` do, and the vectors' slots where an entry is of class VECTOR

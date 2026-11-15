@@ -6,8 +6,9 @@
 // harness compares both lowerings and native output with Clang, and checks these fixtures' entries and code by name
 // (check_test_constant_conversion_lowered). The programs are tests/checker/constant-conversions.
 
-// Whether entry `e` of `function` is an integer CONST that a CONVERT follows: the pair the fold leaves no more of where
-// no label joins another value between them.
+// Whether entry `e` of `function` is an integer CONST that a CONVERT follows: the pair the fold leaves none of, a
+// conditional's or a logical operator's constant arm's too, whose CONVERT, after the label that joined the arms, went
+// into them (check_lower_conditional_target).
 static bool check_test_constant_conversion_pair(const Tier0Function* function, uint32_t e)
 {
     return e + 1 < function->count && function->kinds[e] == BUSTER_TYPED_CONST && function->classes[e] >= BUSTER_TYPED_CLASS_I8 &&
@@ -81,8 +82,9 @@ static bool check_test_constant_conversion_kept(const Tier0Function* function, u
 
 // Both lowerings' functions of #2678's fixtures, by the fixture's name (`lowered` the harness's two lowerings of one
 // checked program), and its node templates' (check_program_lower_templates), which must write the tasks' entries.
-// "constant-conversions" folds every integer constant's conversion: no integer CONST a CONVERT follows, F32's and F64's
-// CONSTs where the source writes integers, and _Bool's U8 1; "constant-conversion-code" is the issue's four functions'
+// "constant-conversions" folds every integer constant's conversion, a conditional's and a logical operator's arms'
+// among them: no integer CONST a CONVERT follows, F32's and F64's CONSTs where the source writes integers, and _Bool's
+// U8 1; "constant-conversion-code" is the issue's four functions'
 // code (check_test_constant_conversion_code); "constant-conversion-controls" keeps the conversions that round: 16777217
 // and 4294967295 to float, 2^53 + 1 and 2^64 - 1 to double.
 static void check_test_constant_conversion_lowered(CheckTest* test, const char* name, const CheckProgramLowered lowered[2], const CheckProgram* program, Arena* output,

@@ -1949,7 +1949,21 @@ struct CheckTestTier1Passes
     uint64_t licm_moved;
     uint64_t sroa_split;
     uint64_t gvn_removed;
+    // --tier1-passes=+unroll's unrolled loops (#2755), from the report's tier1-unroll line, 0 where it has none.
+    uint64_t unrolled;
 };
+
+// The report's tier1-unroll line's field `name`, or 0 where there is no such line (no loop seen).
+static uint64_t check_test_tier1_unroll_field(const char* text, const char* name)
+{
+    const char* line = text != NULL ? strstr(text, "tier1-unroll\tloops=") : NULL;
+    char key[64];
+    snprintf(key, sizeof(key), "\t%s=", name);
+    const char* end = line != NULL ? strchr(line, '\n') : NULL;
+    const char* field = line != NULL ? strstr(line, key) : NULL;
+    const bool found = field != NULL && (end == NULL || field < end);
+    return found ? strtoull(field + strlen(key), NULL, 10) : 0;
+}
 
 // The fixture compiled into `output` by --tier1 with `passes` (as "--tier1-passes=-sccp", or NULL for the default) and
 // --verify, by the scalar path where `scalar` asks: whether it compiled with every function Tier 1's and reported each
@@ -1979,6 +1993,7 @@ static bool check_test_tier1_passes_build(const char* executable, const char* so
                           check_test_tier1_field(text, "removed_blocks", &counters->removed_blocks) && check_test_tier1_field(text, "merged_blocks", &counters->merged_blocks) &&
                           check_test_tier1_field(text, "licm_moved", &counters->licm_moved) &&
                           check_test_tier1_field(text, "sroa_split", &counters->sroa_split) && check_test_tier1_field(text, "gvn_removed", &counters->gvn_removed);
+    counters->unrolled = check_test_tier1_unroll_field(text, "unrolled");
     const bool taken = check_test_tier1_taken(text, &every, 1);
     if (status != 0 && text != NULL)
     {
@@ -2009,7 +2024,7 @@ static void check_test_driver_tier1_passes(CheckTest* test, const char* clang, c
     check_test_expect(test, ran, "clang's build of the passes fixture runs");
     static const char* const variants[] = {
         "--tier1-passes=-sccp", "--tier1-passes=-dce", "--tier1-passes=-cfg", "--tier1-passes=+licm", "--tier1-passes=+sroa",
-        "--tier1-passes=+gvn", "--tier1-passes=-inline", "--tier1-passes=+all", "--tier1-passes=-all", "--tier1-passes=-merge",
+        "--tier1-passes=+gvn", "--tier1-passes=-inline", "--tier1-passes=+all", "--tier1-passes=-all", "--tier1-passes=-merge", "--tier1-passes=+unroll",
     };
     for (uint32_t path = 0; ran && path < 2; path += 1)
     {
@@ -2022,8 +2037,8 @@ static void check_test_driver_tier1_passes(CheckTest* test, const char* clang, c
                           "the passes fixture's default --tier1 build prints clang's build's output, every function Tier 1's");
         // By default every pass of the pipeline but LICM, SROA and the solver does something.
         check_test_expect(test, plain_built && plain.inlined != 0 && plain.folded != 0 && plain.removed_instructions != 0 && plain.removed_blocks != 0 &&
-                                    plain.merged_blocks != 0 && plain.licm_moved == 0 && plain.sroa_split == 0 && plain.gvn_removed == 0,
-                          "the default pipeline inlines, folds, removes and merges, and runs neither LICM, SROA nor the solver");
+                                    plain.merged_blocks != 0 && plain.licm_moved == 0 && plain.sroa_split == 0 && plain.gvn_removed == 0 && plain.unrolled == 0,
+                          "the default pipeline inlines, folds, removes and merges, and runs neither LICM, SROA, the solver nor the unroller");
         printf("  Tier 1's passes, %s path: inlined %" PRIu64 ", folded %" PRIu64 ", removed %" PRIu64 " instructions and %" PRIu64 " blocks (%" PRIu64 " merged) by default\n",
                path == 0 ? "vector" : "scalar", plain.inlined, plain.folded, plain.removed_instructions, plain.removed_blocks, plain.merged_blocks);
         for (uint32_t v = 0; plain_built && v < BUSTER_ARRAY_LENGTH(variants); v += 1)
@@ -2040,17 +2055,19 @@ static void check_test_driver_tier1_passes(CheckTest* test, const char* clang, c
                                  v == 5   ? with.gvn_removed != 0 :
                                  v == 6   ? with.inlined == 0 :
                                  v == 7   ? with.inlined != 0 && with.folded != 0 && with.merged_blocks != 0 && with.licm_moved != 0 && with.sroa_split != 0 &&
-                                            with.gvn_removed != 0 :
+                                            with.gvn_removed != 0 && with.unrolled != 0 :
                                  v == 8   ? with.inlined == 0 && with.folded == 0 && with.removed_instructions < plain.removed_instructions && with.merged_blocks == 0 &&
-                                            with.licm_moved == 0 && with.sroa_split == 0 && with.gvn_removed == 0 :
-                                            with.merged_blocks == 0 && with.removed_blocks < plain.removed_blocks;
+                                            with.licm_moved == 0 && with.sroa_split == 0 && with.gvn_removed == 0 && with.unrolled == 0 :
+                                 v == 9   ? with.merged_blocks == 0 && with.removed_blocks < plain.removed_blocks :
+                                            with.unrolled != 0;
             check_test_expect(test, same, variants[v]);
             check_test_expect(test, built && reached, variants[v]);
             if (!(built && reached))
             {
-                printf("  %s, %s path: inlined %" PRIu64 " folded %" PRIu64 " removed %" PRIu64 "/%" PRIu64 " merged %" PRIu64 " licm %" PRIu64 " sroa %" PRIu64 " gvn %" PRIu64 "\n",
+                printf("  %s, %s path: inlined %" PRIu64 " folded %" PRIu64 " removed %" PRIu64 "/%" PRIu64 " merged %" PRIu64 " licm %" PRIu64 " sroa %" PRIu64 " gvn %" PRIu64
+                       " unrolled %" PRIu64 "\n",
                        variants[v], path == 0 ? "vector" : "scalar", with.inlined, with.folded, with.removed_instructions, with.removed_blocks, with.merged_blocks,
-                       with.licm_moved, with.sroa_split, with.gvn_removed);
+                       with.licm_moved, with.sroa_split, with.gvn_removed, with.unrolled);
             }
         }
         unlink(output);
@@ -4870,7 +4887,8 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
     // AES rounds: 24; its masked loads and stores: 16; its one-lane moves: 13; its reductions: 9; its lanes' population
     // counts, leading zero counts and conflicts: 7; its byte shuffles by an immediate: 6, AVX2's VEX rows alone; #2780's
     // multiply-adds and packs: 4), so the bound counts the unit's 45 rows as of the conversions, as it counts the compares.
-    // The floor of 3 rows keeps the unit a machine rows' test as more of them decode.
+    // Since #1398's step 3 the object leaves out the 58 wrappers that every call expanded, whose own copies held 2 of the
+    // 4: the unit's functions keep 2. The floor of 1 row keeps the unit a machine rows' test as more of them decode.
     const uint64_t compares = 11;
     const uint64_t rows = 45;
     char header[512];
@@ -4890,7 +4908,7 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
         snprintf(message, sizeof(message),
                  "the machine rows' unit takes at most a move into or out of place for every two rows and compares (path %u, rematerialize %u: %llu rows, %llu moves)", run & 1,
                  (run & 2) == 0 ? 1u : 0u, (unsigned long long)build.machine_rows, (unsigned long long)build.row_moves);
-        check_test_expect(test, compiled && build.machine_rows >= 3 && build.machine_rows <= rows && 2 * build.row_moves <= rows + compares, message);
+        check_test_expect(test, compiled && build.machine_rows >= 1 && build.machine_rows <= rows && 2 * build.row_moves <= rows + compares, message);
         unlink(object);
     }
     unlink(unit);
@@ -5793,15 +5811,16 @@ static void check_test_driver_tier1_vector_copies(CheckTest* test, const char* c
         check_test_expect(test, ran, message);
         for (uint32_t path = 0; ran && path < 2; path += 1)
         {
-            // Build 0 is the target's; build 1 is x86-64-v4's, whose copies were vectors before #2750: its frame bounds the
-            // target's.
-            uint64_t frames[2] = { UINT64_MAX, 0 };
+            // Build 0 is the target's executable, which runs; build 1 is the target's -c object, and build 2 x86-64-v4's,
+            // whose copies were vectors before #2750: its frame bounds the target's. Both are objects, which leave out the
+            // wrappers that every call expanded (#1398 step 3), where an executable keeps every function.
+            uint64_t frames[3] = { 0, UINT64_MAX, 0 };
             bool clean = true;
             char program[512];
             snprintf(program, sizeof(program), "%s/tier1-vector-copies-%u-%u", directory, t, path);
-            for (uint32_t build = 0; build < 2; build += 1)
+            for (uint32_t build = 0; build < 3; build += 1)
             {
-                char* arguments[12] = { (char*)executable, "--tier1", "--tier1-report", "--verify", build == 0 ? march : "-march=x86-64-v4" };
+                char* arguments[12] = { (char*)executable, "--tier1", "--tier1-report", "--verify", build != 2 ? march : "-march=x86-64-v4" };
                 uint32_t count = 5;
                 if (wide)
                 {
@@ -5827,9 +5846,9 @@ static void check_test_driver_tier1_vector_copies(CheckTest* test, const char* c
                         check_test_tier1_field(text, "fallbacks", &fallbacks) && fallbacks == 0 && clean;
                 free(text);
             }
-            snprintf(message, sizeof(message), "the wrappers' vectors leave no more frame at %s than at x86-64-v4: %llu bytes against %llu (%s path)", targets[t], (unsigned long long)frames[0],
-                     (unsigned long long)frames[1], path != 0 ? "scalar" : "vector");
-            check_test_expect(test, clean && frames[0] <= frames[1], message);
+            snprintf(message, sizeof(message), "the wrappers' vectors leave no more frame at %s than at x86-64-v4: %llu bytes against %llu (%s path)", targets[t], (unsigned long long)frames[1],
+                     (unsigned long long)frames[2], path != 0 ? "scalar" : "vector");
+            check_test_expect(test, clean && frames[1] <= frames[2], message);
             char actual[256] = { 0 };
             snprintf(message, sizeof(message), "the vector copies' fixture by --tier1 runs as clang -O0's build does (%s, %s path)", targets[t], path != 0 ? "scalar" : "vector");
             check_test_expect(test, clean && (!host || (check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0)), message);

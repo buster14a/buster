@@ -192,13 +192,15 @@ _Static_assert(sizeof(AbiVaList) == 24, "the psABI's va_list element is 24 bytes
 // How a classified type is passed (AbiTable.pass), from its classes and what it is:
 //   - LOW_INTEGER ... HIGH_SSE: the register class of each eightbyte passed in a register (none for a MEMORY or
 //     IGNORE type). A high eightbyte without a low one (the low one is padding) passes the high one alone.
-//   - VECTOR: SSE then SSEUP: one vector register holds the ABI payload (XMM, or a YMM or ZMM register when WIDE).
-//     A 17--23-byte record carries its first 16 bytes, while its object and stack copies keep the full C size.
-//   - WIDE: a VECTOR of 32 or 64 bytes. LLVM passes it in a YMM or ZMM register only in a call that isn't variadic, and
-//     on the stack otherwise: named, after clang has counted a vector register for it; unnamed, MEMORY, uncounted.
-//     (clang classifies a WIDE union of a 16-byte member and a long array SSE, SSEUP as an unnamed argument too, counts
-//     a vector register for it and puts it on the stack all the same, while its va_arg reads it from the save area:
-//     there is no convention there to follow but GCC's, memory.)
+//   - VECTOR: SSE then SSEUP: one vector register holds the value's payload (XMM, or a YMM or ZMM register when WIDE:
+//     abi_vector_payload_bytes and abi_vector_register_bytes). A record of a size no vector register has carries its
+//     first bytes alone, as clang's <size / 8 x double> (#2113), while its object and byval copies keep the C size.
+//   - WIDE: a VECTOR whose payload is past 16 bytes, in a YMM or a ZMM register. LLVM passes it in that register only in
+//     a call that isn't variadic, and on the stack otherwise, as it does any VECTOR value it has no register left for (a
+//     slot of the register's width, aligned to it: PAYLOAD): named, after clang has counted a vector register for it;
+//     unnamed, MEMORY, uncounted. (clang classifies a WIDE union of a 16-byte member and a long array SSE, SSEUP as an
+//     unnamed argument too, counts a vector register for it and puts it on the stack all the same, while its va_arg
+//     reads it from the save area: there is no convention there to follow but GCC's, memory.)
 //   - MEMORY: on the stack as an argument (MEMORY, X87 and COMPLEX_X87). As a result: through a hidden pointer if
 //     AGGREGATE, otherwise in st0 (X87), st0 and st1 (COMPLEX_X87) or as UNCOUNTED says.
 //   - UNCOUNTED: MEMORY by its class, but a scalar clang passes as its value, in a register LLVM gives it (VALUE says
@@ -219,8 +221,7 @@ _Static_assert(sizeof(AbiVaList) == 24, "the psABI's va_list element is 24 bytes
 //     wider than 16 bytes and than the target's vector registers, or one LLVM breaks into its elements, and an integer
 //     of more than 128 bits); a type holding a LARGER one that clang lays out otherwise than the C type, or whose LLVM
 //     size the module doesn't keep (abi_copy_bytes); one whose INTEGER high eightbyte clang reads as an i128 from
-//     offset 8, under an SSE or NO_CLASS low one (abi_finish); and an aggregate SSE, SSEUP of a size no vector register
-//     has past 23 bytes, which clang passes as <size / 8 x double> (abi_finish_passing).
+//     offset 8, under an SSE or NO_CLASS low one (abi_finish).
 //   - CLASSIFIED: the type's row and these bits are in the table.
 //   - VALUE (bits 16 to 18): an UNCOUNTED value's kind: a general register (GENERAL), two (PAIR), a vector register
 //     (VECTOR), x87's, always on the stack (X87), or two halves, each in a general register while one is left and
@@ -308,7 +309,10 @@ _Static_assert(sizeof(AbiReturn) == 8, "a result is 8 bytes");
 // flags: SIGN or ZERO (the caller extends the value to 32 bits), HIGH (the parts are the value's high eightbyte alone:
 // its low one is padding) and LOW (the part is the low eightbyte alone of a value larger than 8 bytes, whose high one is
 // NO_CLASS, in the 8-byte slot of a STACK location: an eightbyte at a time where clang's count has a general register
-// that LLVM hasn't, rather than a copy of the whole value, which takes a slot of its size).
+// that LLVM hasn't, rather than a copy of the whole value, which takes a slot of its size), and PAYLOAD (a STACK
+// location of a VECTOR value that LLVM puts on the stack as its vector, of a record whose C size runs past its payload,
+// abi_vector_payload_bytes: the slot, its vector register's width and aligned to it, holds the payload alone, the C
+// type's bytes past it lost as they are in the register, #2113).
 #define BUSTER_ABI_LOCATION_IGNORE 0
 #define BUSTER_ABI_LOCATION_REGISTERS 1
 #define BUSTER_ABI_LOCATION_STACK 2
@@ -318,6 +322,7 @@ _Static_assert(sizeof(AbiReturn) == 8, "a result is 8 bytes");
 #define BUSTER_ABI_FLAG_HIGH 0x04
 #define BUSTER_ABI_FLAG_DEMOTED 0x08
 #define BUSTER_ABI_FLAG_LOW 0x10
+#define BUSTER_ABI_FLAG_PAYLOAD 0x20
 
 typedef struct AbiLocation AbiLocation;
 struct AbiLocation
@@ -473,6 +478,24 @@ static __attribute__((unused)) void abi_assign(const AbiTable* abi, AbiSignature
 static __attribute__((unused)) void abi_assign_scalar(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls);
 // va_arg's plan for a classified type, after the default argument promotions.
 static __attribute__((unused)) AbiVaArg abi_va_arg(const AbiTable* abi, const TypeTable* table, TypeId type);
+
+// The bytes of a VECTOR value of `size` bytes that its vector register carries, its payload (#2113): a vector's all (16,
+// 32 or 64); and of a record SSE, SSEUP of a size no vector register has, clang's GetByteVectorType's <size / 8 x
+// double>: two doubles from 17 to 23 bytes, and past them its size rounded down to 8 (24, 32, 40, 48 or 56 bytes), the
+// rest of the record lost. A result's part_bytes is its payload.
+static __attribute__((unused)) uint32_t abi_vector_payload_bytes(uint64_t size)
+{
+    const uint64_t doubles = size & ~(uint64_t)(BUSTER_ABI_SLOT_BYTES - 1);
+    return (uint32_t)(size <= BUSTER_ABI_REGISTER_BYTES ? size : doubles == BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_REGISTER_BYTES : doubles);
+}
+
+// The width of the vector register that carries a payload of `payload` bytes: LLVM widens <N x double> to the next
+// power of two, so 24 bytes take a YMM register and 40 to 56 a ZMM one, as 32 and 64 do (an XMM register's 16 for 16 or
+// less).
+static __attribute__((unused)) uint32_t abi_vector_register_bytes(uint32_t payload)
+{
+    return payload <= BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_REGISTER_BYTES : payload <= 2 * BUSTER_ABI_REGISTER_BYTES ? 2 * BUSTER_ABI_REGISTER_BYTES : 4 * BUSTER_ABI_REGISTER_BYTES;
+}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Classes
@@ -1982,10 +2005,9 @@ static AbiReturn abi_result(const AbiTable* abi, const TypeTable* table, uint32_
     {
         result.kind = BUSTER_ABI_RESULT_REGISTERS;
         result.registers[0] = BUSTER_ABI_REGISTER_VECTOR;
-        // GetByteVectorType truncates a 17--23-byte record to two doubles. Its object and byval stack copy still
-        // keep the C size; only the register payload is 16 bytes (#2113).
-        const bool short_record = abi_is_aggregate(table, index) && size > BUSTER_ABI_REGISTER_BYTES && size < BUSTER_ABI_REGISTER_BYTES + BUSTER_ABI_SLOT_BYTES;
-        result.part_bytes = (uint8_t)(short_record ? BUSTER_ABI_REGISTER_BYTES : size);
+        // Its payload: a record of a size no vector register has returns GetByteVectorType's <size / 8 x double>, the
+        // bytes past them lost (#2113).
+        result.part_bytes = (uint8_t)abi_vector_payload_bytes(size);
     }
     else
     {
@@ -2415,13 +2437,12 @@ static void abi_finish_passing(AbiTable* abi, const TypeTable* table, uint32_t i
         pass |= high == BUSTER_ABI_INTEGER || pair ? BUSTER_ABI_PASS_HIGH_INTEGER : 0;
         pass |= (high == BUSTER_ABI_SSE || high == BUSTER_ABI_X87UP) && !pair ? BUSTER_ABI_PASS_HIGH_SSE : 0;
         pass |= high == BUSTER_ABI_SSEUP ? BUSTER_ABI_PASS_VECTOR : 0;
-        const bool short_record = aggregate && size > BUSTER_ABI_REGISTER_BYTES && size < BUSTER_ABI_REGISTER_BYTES + BUSTER_ABI_SLOT_BYTES;
-        pass |= high == BUSTER_ABI_SSEUP && size > BUSTER_ABI_REGISTER_BYTES && !short_record ? BUSTER_ABI_PASS_WIDE : 0;
         // An aggregate SSE, SSEUP of a size no vector register has (a union of a 16-byte vector and a longer array,
         // packed or aligned below its size, of 17 to 63 bytes): clang's GetByteVectorType gives it <size / 8 x double>,
-        // which LLVM passes in the register of the next power of two, with only those doubles' bytes. A 17--23-byte
-        // record takes an XMM register, even as an unnamed argument; larger irregular widths remain refused.
-        pass |= high == BUSTER_ABI_SSEUP && aggregate && size != 16 && size != 32 && size != 64 && !short_record ? BUSTER_ABI_PASS_UNSUPPORTED : 0;
+        // which LLVM passes in the register of the next power of two, with only those doubles' bytes (#2113,
+        // abi_vector_payload_bytes): 17 to 23 bytes in an XMM register, even as an unnamed argument, and past them in a
+        // YMM or a ZMM one, WIDE.
+        pass |= high == BUSTER_ABI_SSEUP && abi_vector_payload_bytes(size) > BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_PASS_WIDE : 0;
         pass |= pair ? BUSTER_ABI_PASS_PAIR : 0;
         pass |= i128 && !pair && high == BUSTER_ABI_INTEGER ? BUSTER_ABI_PASS_UNSUPPORTED : 0;
         pass |= low == BUSTER_ABI_INTEGER && high == BUSTER_ABI_NO_CLASS ? abi_extension(table, index) : 0;
@@ -3711,13 +3732,27 @@ static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uin
                 location.registers[1] = abi_integer_arguments[integers + 1];
                 integers += 2;
             }
-            else
+            else if ((pass & BUSTER_ABI_PASS_PAIR) != 0)
             {
                 // A PAIR LLVM puts on the stack as an i128, aligned to 16 whatever the record's alignment.
-                const uint32_t pair_log2 = (pass & BUSTER_ABI_PASS_PAIR) != 0 && alignment_log2 < 4 ? 4 : alignment_log2;
-                const uint32_t slot_log2 = wide_on_stack ? (uint32_t)__builtin_ctz(bytes) : pair_log2;
+                const uint32_t pair_log2 = alignment_log2 < 4 ? 4 : alignment_log2;
                 location.kind = BUSTER_ABI_LOCATION_STACK;
-                location.stack_offset = abi_stack_place(&stack, &call.stack_alignment_log2, bytes, slot_log2);
+                location.stack_offset = abi_stack_place(&stack, &call.stack_alignment_log2, bytes, pair_log2);
+            }
+            else
+            {
+                // A vector LLVM puts on the stack as its value (CCAssignToStack): a slot of its register's width, aligned
+                // to it, which holds its payload alone (#2113: a record's <size / 8 x double>, its result's part_bytes;
+                // a vector's all, which a vector of _BitInt(128)s returned in memory has no result's part_bytes for),
+                // PAYLOAD where the C type's bytes run past it.
+                const AbiReturn returned = abi->results[index];
+                const bool held = returned.kind == BUSTER_ABI_RESULT_REGISTERS && returned.registers[0] == BUSTER_ABI_REGISTER_VECTOR &&
+                                  returned.registers[1] == BUSTER_ABI_REGISTER_NONE && returned.part_bytes >= BUSTER_ABI_REGISTER_BYTES;
+                const uint32_t payload = held ? returned.part_bytes : bytes;
+                const uint32_t width = abi_vector_register_bytes(payload);
+                location.kind = BUSTER_ABI_LOCATION_STACK;
+                location.flags |= payload < bytes ? BUSTER_ABI_FLAG_PAYLOAD : 0;
+                location.stack_offset = abi_stack_place(&stack, &call.stack_alignment_log2, width, (uint32_t)__builtin_ctz(width));
             }
         }
         else

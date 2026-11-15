@@ -1,8 +1,8 @@
 # Tier 0 inlining of always_inline functions (#1398): design
 
-Status: plan steps 1 and 2 are implemented, with argument and result forwarding
-(step 4) in the form "Implementation" describes; dropping callees (step 3) and
-more callee shapes (step 5) are not. The issue's claims and this document's
+Status: plan steps 1 to 3 are implemented, with argument and result forwarding
+(step 4) in the form "Implementation" describes; more callee shapes (step 5)
+are not. The issue's claims and this document's
 revisions are on [#1398](https://github.com/buster14a/buster/issues/1398). The
 names of existing code below are main's at `8a29955f`. The command and its
 files are in [the Tier 0 guide](commands/tier0.md#inlining-always_inline-functions-1398).
@@ -659,9 +659,53 @@ and a body with a planned naked function isn't one. `test-checker-driver`'s
 lanes fixture builds such a graph by 4 lanes, three times, and by 1 lane, and
 compares the objects.
 
-**Callees aren't dropped yet** (plan step 3): each callee's code stays in the
-object, which on `main.c` makes it 12% larger (34.5 MB against 30.7 MB). Clang
--O0 emits none of them.
+**Callees nothing refers to are left out** (plan step 3), by Tier 1's dead
+functions' machinery (#2541 step 2) rather than the scan at the merge that
+"Dropping callees" above designs, so that a dead callee costs no Tier 0 code
+either. Without `--tier1`, the inline table (`check_tier1_inline_table`) has
+Tier 0's callees as its candidates, with Tier 1's columns: whether something
+roots a callee (an attribute, a section, static data, an alias), whether its
+code is held back, and whether it is dead. In `-c`'s object, a callee nothing
+roots whose stream the splice takes makes no code on its lane
+(`check_tier0_inline_held`). Once the lanes are done, the emission's last pass
+(`check_program_emit_last`) makes the code of each held callee that emitted code
+still refers to, until none is left: a call a caller kept (a cycle's, past the
+depth bound, a target its caller lacks) or an address. The merge leaves the
+others out (`check_tier1_inline_dead`): no atom, symbol, frame or jump table.
+`--tier0-no-hold` makes every callee's code on its lane, and the objects are
+the same, as they are by any lane count and by windows (the driver fixture).
+What isn't done as designed:
+
+- **Not under `-g`**, `-fpatchable-function-entry` or in an executable, as
+  Tier 1's dead functions aren't: `-g`'s entries have no form for a function
+  without code yet, and an executable's binding resolves every program symbol.
+  In a unit with asm the callees' code is made, since the templates name
+  symbols, and the dead ones are still left out.
+- **`--lower-all` drops them too**, as Tier 1's dead candidates are: it still
+  lowers every callee, and their entries are compiled in their callers' code.
+- **A target attribute no longer roots a candidate**, in either tier. #2541
+  step 2 kept every candidate with one, as a multiversioned function's; but a
+  function of several versions is `CheckProgram.body_targets`' own case
+  (`BUSTER_CHECK_PROGRAM_TARGET_VERSIONS`), and every `<immintrin.h>` wrapper
+  has a target attribute, so none would have been left out. LLVM's GlobalDCE
+  drops a dead internal function whatever its target. Under `--tier1` the
+  wrappers whose calls it expanded everywhere are now left out too.
+
+**A spliced callee's runtime calls take their final symbols in every part.** A
+call of a runtime function (`__divti3`, `memcpy` for a large copy) has a
+provisional symbol in its lowering, which the merge renumbers only in the parts
+that made such a call, and in every part under `--tier1`'s inlining (#2541 step
+2). The default windows (#2536) lower each Tier 0 callee as a part of its own,
+so a caller whose part made no runtime call kept the callee's provisional
+symbol: `-c` failed ("code output capacity exhausted"), an executable's link
+was refused, and where the id named another symbol the call went there. Every
+part is renumbered now where either tier inlines; the driver fixture's
+`__int128` division is the regression.
+
+The callees that stay are those whose call Tier 0 keeps where clang inlines it:
+a cycle's members (clang unrolls a cycle once) and the shapes the splice
+refuses (step 5: two returns, a result in memory). On the driver fixture the
+object defines 5 local functions where it defined 37; clang -O0's defines 3.
 
 ### First measurements
 
@@ -699,4 +743,37 @@ in ms (medians, or the 1-lane run of `benchmark-files`):
 The scalar lexer, which calls no intrinsics, doesn't move: the control. The
 qualification's stage-2 smoke took 114 s inlined against 220 s without, and its
 `test-lexer` 45 s against 111 s (the latter beside other work). The 9700X's
-numbers, under the lock, are still to be taken, as above.
+numbers follow.
+
+### On the 9700X
+
+buster-performance's
+[`tier0-inline-1398-2026-11-15`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-inline-1398-2026-11-15)
+has the record, by main `2ebfe68a` and step 3's head `5c26a3b3`, Release at
+`znver5` without `-g`, each timed run under the lock on CPU 2. The issue's
+kernels, 100,000 calls over 4,096 elements, the median pass in ms (every build
+printed the same checksums):
+
+| kernel | Tier 0 | `--tier0-no-inline` | `--tier1` | clang -O0 | clang -O2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `_mm256_add_ps` sum | 315.1 | 873.4 | 17.1 | 188.0 | 17.6 |
+| `_mm256_adds_epu8` | 13.5 | 124.7 | 2.6 | 17.6 | 2.3 |
+| `_mm512_cmpeq_epi32_mask` count | 20.2 | 79.7 | 9.3 | 18.9 | 6.3 |
+| `_mm256_fmadd_ps` | 336.8 | 905.6 | 33.9 | 198.7 | 33.7 |
+
+Tier 0 is 0.77 and 1.07 times clang -O0 on the store and the count, and 1.7
+times on the two accumulators, whose values go through frame slots (#780). The
+compiler self-built at Tier 0, on the same CPU, in ms:
+
+| benchmark | Tier 0, inlined | `--tier0-no-inline` | clang Release |
+| --- | ---: | ---: | ---: |
+| `benchmark-lexer src`, `c_tokenize` | 546.4 | 1,349.8 | 8.9 |
+| `benchmark-lexer src`, `c_tokenize_scalar` | 286.1 | 301.8 | 93.1 |
+| `benchmark-refinement src`, `refine_tokens_fused` | 567.9 | 1,628.3 | 16.7 |
+| `benchmark-files` on `main.c`, 1 lane | 1,124.3 | 2,573.9 | 33.1 |
+
+Its 43 units compile in 18.2 s with inlining and 17.2 s without. Step 3 left
+`main.c`'s (complete driver) `-c` and `sqlite3.c`'s within main against
+itself (-0.23% to +0.09% user cycles over three `ab` rounds), and its object
+without 163 dead callees: 1,411 local functions to 1,248 (clang -O0: 1,237),
+`.text` 7.1% smaller.

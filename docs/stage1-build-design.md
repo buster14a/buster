@@ -7,8 +7,11 @@ compiler wanted) and the **clean build** (a fresh clone, CI, a branch switch).
 
 **Status:** steps 1 to 4 below are implemented as the Develop configuration
 (`./build.sh --config Develop`; [the build guide's "Develop"](commands/build.md#develop),
-#2559). Step 5, Release in parts, was measured against its gate and failed
-it, so Release stays whole ([Step 5, measured](#step-5-measured)).
+#2559). Step 5, Release in parts, failed its gate on 2026-11-13
+([Step 5, measured](#step-5-measured)) and, with the splitter taken further,
+again on 2026-11-15, by less ([Step 5, renewed](#step-5-renewed)): Release
+stays whole, and `BUSTER_RELEASE_PARTS=1` builds it in parts, at the owner's
+choice, for an edit loop with Release's optimization.
 
 Every time below was measured on the Ryzen 7 9700X under its lock, at main
 `c5f0efb2` with the host's clang 23.1.1 and the build's eight jobs, unless the
@@ -707,8 +710,9 @@ expected edits of the first, third and fourth files are 10.1 s, 10.0 s and
    - Without this step Release's clean build stays bound by the checker's
      unit's chain: 83 s by the host's clang, 69 s by CI's once CI's toolchain
      can build the parts.
-   - *Measured:* outside the floor ([below](#step-5-measured)); Release stays
-     whole.
+   - *Measured:* outside the floor twice ([below](#step-5-measured),
+     [renewed](#step-5-renewed)); Release stays whole, and the parts are an
+     option of its (`BUSTER_RELEASE_PARTS=1`).
 
 Not steps of this design, and why: one unit self-built (lever 6) waits for
 the tiers' code, which is others' work; the sources' split (lever 4) is a
@@ -775,9 +779,120 @@ them) and compared with the whole build as the 9700X job builds it
   has the changes as patches; the tables' constants also bear on Develop,
   whose parts read the same tables.
 
-So, by the rule above, Release stays whole and the design is Develop alone.
+So, by the rule above, Release stayed whole and the design was Develop alone.
 A later attempt starts from the record's improved splitter and the
 assembler's remaining calls.
+
+### Step 5, renewed
+
+On 2026-11-14, at the owner's direction, the splitter was taken further until
+the parts' optimizer decides as the whole unit's does (#2624), and Release
+was built in parts again at main `ca1ede6a`
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/release-in-parts-renewed-2559-2026-11-14)).
+Each cause was found by comparing the whole unit's inlining remarks with its
+parts' (clang's `-Rpass=inline`, every `main.c` unit), then the 9700X's
+instructions by function:
+
+- **A copy had fewer uses than the whole unit's function.** The record's
+  local copies of static functions gave a part's inliner the last-call bonus
+  where the whole unit sees more calls: `arena_reserve_small` went into
+  `scratch_begin` (cost 60 in the whole unit, 1,350 in the parts) and
+  `arena_reserve` (5 against 970), which then stayed outlined in the
+  assembler's layout, emission and benchmark. A phantom caller now stands for
+  the other parts' calls: `available_externally`, `optnone`, kept by
+  `llvm.compiler.used` until the optimizer drops it after the inliner. It
+  passes its own parameters (with poison ones, a part specialized a copy on
+  its own constants and folded a call away) and ignores the result.
+- **Kept bodies.** A body is kept from other parts only when it calls a static
+  function the whole module calls once (`type_derive`'s many callers had kept
+  `type_pointer`, eight instructions, out of every part but its own), and a
+  body too large to read stays kept from a benchmark's reading too
+  (`foreign_gc_link`).
+- **What a part reads.** The C library headers' inline bodies go to every part
+  (`printf("\n")` becomes `putchar('\n')`, whose body was missing), and a
+  body's size to the limit is what SROA leaves of it, scaled down by LLVM's
+  vector bonus (`arena_release`, inlined at 79 sites, was one instruction over
+  the old limit; `asm_word_registers_vector`, 721 unoptimized instructions,
+  inlines at a threshold of 1,574).
+- **An alias hides callers from constant propagation.** A static function
+  other parts call has an alias, a use that makes its arguments unknown to
+  IPSCCP. The whole unit folded the encoder mode's flags that
+  `instruction_is_valid` passes `mode_register_is_valid`, whose cost to the
+  inliner was then 195 against the parts' 265 to 290; the parts kept it
+  outlined and `benchmark-assembler` ran 6.3% more instructions. Running the
+  `-O3` pipeline's simplification before the inliner on the whole unit before
+  the split fixed it (`benchmark-assembler` 2.75% fewer instructions than the
+  whole build's), but the parts' pipelines then simplified the module a
+  second time, which reshaped other code (`benchmark-environments` 2.65% more
+  cycles, outside its floor). So a child process runs SROA and IPSCCP on its
+  copy of the whole unit, and the arguments every call passes as the same
+  constant are written into their functions, which are otherwise as clang
+  wrote them (`--constant-arguments`, 310 in the checker's unit).
+- **A part promotes the arguments only of a function it sees every call
+  of.** The whole unit passes `check_action_operand_value`'s 96-byte operand
+  in two vector registers; the parts, which call it through its alias,
+  passed its address, and its wide loads waited on the caller's narrower
+  stores: `benchmark-check-units` ran 0.72% more cycles and the checker on
+  musl's source 1.85%, outside their floors, with as many instructions. So
+  the same child inlines the `always_inline` bodies and runs argument
+  promotion, and the functions whose parameters that rewrites get the same
+  in the unit before the split, which LLVM's argument promotion then
+  rewrites with their calls (`--promote-arguments`, 296 in the checker's
+  unit). A local copy of each in every part that called it (20 of that one)
+  had let the parts promote them too, but the copies stayed outlined, and the
+  checker's and the backend's sources ran up to 12% more instruction cache
+  misses.
+- **The parts kept code the whole unit drops.** With copies in two parts or
+  more only of a function of up to 40 instructions (`--copy-limit 40`), the
+  checker's unit still had 0.74 MB more code than the whole unit's 11.35 MB,
+  and none of it ran: the `always_inline` bodies the limit no longer copied
+  (99, 342 KB) kept their owner's copy, which their alias names, after every
+  part inlined them; `tier1_allocate_impl`, a call to the 30 KB
+  `always_inline` `tier1_allocate_body`, measured 7 and was copied, outlined,
+  into three parts; and a local function whose calls every part inlined or
+  folded away stayed for its alias (`tier1_select_cover_munch`, 65 KB). So
+  an `always_inline` function is copied whatever its size, the limit weighs
+  a function with the `always_inline` bodies it calls, and the join discards
+  the sections no live code refers to (`tools/codegen/unreferenced.c`: 170
+  sections, 115 KB): 11.49 MB.
+
+The 9700X job's whole measure, on 2026-11-15, against main with #2733's
+placements (the units whole) and with CI's toolchain
+([the record](https://github.com/buster14a/buster-performance/tree/e9ad4b3e8/docs/measurements/release-in-parts-renewed-2559-2026-11-14)):
+
+- **The build gained as before:** with `-g` a clean build took 68.1 s against
+  73.7 s (503 s of CPU against 436 s) and an edit of `c_check_input.c` 33.1 s
+  against 63.6 s (47 parts); without debug information 53.4 s against 57.3 s
+  and 18.2 s against 50.6 s (one part). An undone edit rebuilt the clean
+  build's executable, and the 69 outputs were the whole build's bytes.
+- **The compiler, by the gate, didn't:** 11 of the 69 benchmarks ran more user
+  cycles outside their floors (12 at the round's start), and 8 fewer
+  (`benchmark-debug` -5.65%, `benchmark-lexer` -3.95%). Four run more
+  instructions: `benchmark-tier1-code-certificate` +1.39% (+0.70%
+  instructions), `sqlite-c-tier1` +0.77% (+0.48%), `ir-source` +0.55%
+  (+0.34%) and `sqlite-c` +0.51% (+0.17%); `ir-lowering` +1.00% runs as many
+  in other code. The other six are layout (`environments` +1.31%: the same
+  loop 32 bytes later in its cache lines, which the placements, multiples of
+  64, never test), a 1 ms process's own counters (`parser-pragma` +4.81%;
+  `perf stat` counts the same cycles) and noise (+0.05% to +0.72%).
+- **Why, and what more would take:** what the whole unit's inliner decides only
+  after inlining a part can't see. In the checker's unit, 425 (callee, caller)
+  pairs the whole unit inlines no part does, most of them `always_inline`
+  intrinsics inlined in another order. Of the rest, 23 are last calls to a
+  static function (a call site cold in its part and not in the whole unit loses the
+  bonus; `tier1_cfg_edge_stage` costs 525 in its part against the whole unit's
+  520 at a threshold of 525; a caller that dies only after inlining), 15 are
+  call sites in loops, whose threshold LLVM raises to 525, with bodies too
+  large to read. The whole unit's inferred attributes on the parts' imports
+  moved one pair; reading bodies of up to 450 instructions recovered 15 (and
+  `ir_gvn_compare`, `ir-source`'s) for 16% more bitcode. Closing the rest
+  takes the whole unit's pipeline, the time the parts exist to save.
+
+So, by the rule above, Release stays whole. At the owner's choice,
+`BUSTER_RELEASE_PARTS=1` builds it in parts, in a tree of its own, for an
+edit loop with Release's optimization ([the build
+guide](commands/build.md#release-in-parts)); timings and benchmarks use the
+default.
 
 ### Risks
 

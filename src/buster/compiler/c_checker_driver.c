@@ -936,6 +936,14 @@ static void check_driver_diagnose(const Parser* parser, Preprocessor* pp, uint32
     }
 }
 
+// A stage that ran out of the compiler's own memory (#1118): a fatal error without a place, as clang reports running out
+// of memory, since no token of the source caused it, naming what ran out; check_driver_unit's note after it names the
+// limit that refused the memory, where one did.
+static void check_driver_resource(Preprocessor* pp, const char* message)
+{
+    pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "%s", message);
+}
+
 typedef struct CheckDriverDiagnostic CheckDriverDiagnostic;
 struct CheckDriverDiagnostic
 {
@@ -8846,7 +8854,14 @@ static bool check_driver_dump_static(const CheckInput* input, const CheckStream*
     {
         const char* message = data.status == CHECK_DATA_INPUT_RESOURCE ? "static-data output capacity exhausted" :
                               data.status == CHECK_DATA_INPUT_INVALID ? "invalid static-data input" : "static-data emission for this object is not yet supported";
-        check_driver_diagnose(parser, pp, data.token, message);
+        if (data.status == CHECK_DATA_INPUT_RESOURCE)
+        {
+            check_driver_resource(pp, message);
+        }
+        else
+        {
+            check_driver_diagnose(parser, pp, data.token, message);
+        }
     }
     else
     {
@@ -8882,7 +8897,7 @@ static bool check_driver_target_features(CheckProgram* program, const Parser* pa
     const bool valid = check_program_target_features(program, &pp->options, predefines, scalar, output, scratch, &errors, &count);
     if (!valid)
     {
-        check_driver_diagnose(parser, pp, UINT32_MAX, "checker program capacity exhausted");
+        check_driver_resource(pp, "checker program capacity exhausted");
     }
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
@@ -9236,7 +9251,7 @@ static bool check_driver_aliases(const CheckProgram* program, const Parser* pars
     }
     if (!valid)
     {
-        check_driver_diagnose(parser, pp, UINT32_MAX, "checker program capacity exhausted");
+        check_driver_resource(pp, "checker program capacity exhausted");
     }
     arena_pop_to(scratch, mark);
     return valid && errors == 0 && conflict == BUSTER_CHECK_NONE;
@@ -9284,7 +9299,15 @@ static void check_driver_emission_failed(const Parser* parser, Preprocessor* pp,
     {
         snprintf(message, sizeof(message), "internal compiler error: the checked program could not be emitted");
     }
-    if (code->redefined.lines == 0)
+    // A capacity of the compiler's storage is no token's (#1118), but Tier 0's per-function limits are the function's
+    // (#622: check_lower_resource's reasons).
+    const bool storage = code->status == CHECK_PROGRAM_RESOURCE && code->tier1_failure.category == CHECK_TIER1_UNATTEMPTED &&
+                         (code->reason == NULL || strncmp(code->reason, "Tier 0 per-function", strlen("Tier 0 per-function")) != 0);
+    if (code->redefined.lines == 0 && storage)
+    {
+        check_driver_resource(pp, message);
+    }
+    else if (code->redefined.lines == 0)
     {
         check_driver_diagnose(parser, pp, code->token, message);
     }
@@ -10517,6 +10540,37 @@ static uint32_t check_driver_cpus(void)
     return cpus == 0 ? 1 : cpus < BUSTER_CHECK_EMIT_MAX_LANES ? cpus : BUSTER_CHECK_EMIT_MAX_LANES;
 }
 
+// The address space a lane past the first takes under a finite RLIMIT_AS (#1118): its arenas grow in slots of their own
+// (arena_reserve_growing) as far as its work reaches, and its emission maps its writer's columns whole, each with room for
+// any of the unit's bodies, so each lane maps tens of megabytes of a unit that one lane compiles in less: a 500 KB unit of
+// 2,000 functions compiled in 700 MiB on one lane, 800 on two and 1 GiB on four.
+#define BUSTER_CHECK_DRIVER_LANE_ADDRESS_BYTES (512ull << 20)
+
+// The command's default lanes, `cpus`, under a finite RLIMIT_AS at most one and one more for each
+// BUSTER_CHECK_DRIVER_LANE_ADDRESS_BYTES the limit leaves past what the process maps as it starts (/proc/self/statm's
+// first field, the total the limit bounds), so that a unit that fits the limit on one lane isn't refused for the lanes its
+// host's cores would pay for. Lanes cost time alone: a command that names its lanes (--lanes) takes them all the same.
+static uint32_t check_driver_address_lanes(uint32_t cpus)
+{
+    struct rlimit space;
+    uint32_t result = cpus;
+    if (getrlimit(RLIMIT_AS, &space) == 0 && space.rlim_cur != RLIM_INFINITY)
+    {
+        char text[64] = { 0 };
+        const int file = open("/proc/self/statm", O_RDONLY | O_CLOEXEC);
+        const ssize_t length = file >= 0 ? read(file, text, sizeof(text) - 1) : -1;
+        if (file >= 0)
+        {
+            close(file);
+        }
+        const uint64_t mapped = length > 0 ? strtoull(text, NULL, 10) * BUSTER_ARENA_PAGE_BYTES : 0;
+        const uint64_t room = (uint64_t)space.rlim_cur > mapped ? (uint64_t)space.rlim_cur - mapped : 0;
+        const uint64_t afforded = 1 + room / BUSTER_CHECK_DRIVER_LANE_ADDRESS_BYTES;
+        result = afforded < cpus ? (uint32_t)afforded : cpus;
+    }
+    return result;
+}
+
 static const char* check_driver_object_name(Arena* arena, const char* source)
 {
     const char* slash = strrchr(source, '/');
@@ -10680,8 +10734,10 @@ struct CheckDriverCommand
     bool tier1_no_lifetimes;
     bool tier1_no_inline;
     bool tier1_no_hold;
-    // --tier0-no-inline keeps Tier 0's calls of always_inline functions (#1398).
+    // --tier0-no-inline keeps Tier 0's calls of always_inline functions (#1398); --tier0-no-hold makes each callee's code
+    // on its lane, none in the last pass (#1398 step 3).
     bool tier0_no_inline;
+    bool tier0_no_hold;
     // --emit-window=N: each unit's one-lane emission by windows of about N tokens (#2536, CheckProgramLanes.window_tokens).
     uint32_t window_tokens;
     // --tier1-schedule=post|pre (#172): BUSTER_CHECK_TIER1_SCHEDULE_*.
@@ -10715,16 +10771,16 @@ struct CheckDriverDeferred
 };
 
 // --tier1-passes='s list (#139's measurement): comma-separated items, each + or - and then a pass's name (sccp, dce, cfg,
-// merge, licm, sroa, vectorize, gvn or inline) or all, applied in turn to the passes the earlier options left on: the default
-// pipeline's (SCCP, dead-code removal, CFG cleanup, its merges and the inlining), with --tier1-gvn's and --tier1-no-inline's changes where they
-// came first. `toggled` holds the BUSTER_CHECK_TIER1_PASS_* bits that differ from the default; `gvn` and `no_inline` are
+// merge, licm, sroa, vectorize, unroll, gvn or inline) or all, applied in turn to the passes the earlier options left on:
+// the default pipeline's (SCCP, dead-code removal, CFG cleanup, its merges and the inlining), with --tier1-gvn's and
+// --tier1-no-inline's changes where they came first. `toggled` holds the BUSTER_CHECK_TIER1_PASS_* bits that differ from the default; `gvn` and `no_inline` are
 // the two passes with options of their own. Returns false, and leaves all three as they were, for an empty list or item,
 // an item without its sign, or an unknown name.
 #define BUSTER_CHECK_DRIVER_PASS_GVN 256u
 #define BUSTER_CHECK_DRIVER_PASS_INLINE 512u
 static bool check_driver_tier1_passes(const char* list, uint8_t* toggled, bool* gvn, bool* no_inline)
 {
-    static const char* const names[] = { "sccp", "dce", "cfg", "merge", "licm", "sroa", "vectorize", "gvn", "inline", "all" };
+    static const char* const names[] = { "sccp", "dce", "cfg", "merge", "licm", "sroa", "vectorize", "unroll", "gvn", "inline", "all" };
     static const uint32_t bits[] = {
         BUSTER_CHECK_TIER1_PASS_SCCP,
         BUSTER_CHECK_TIER1_PASS_DCE,
@@ -10733,6 +10789,7 @@ static bool check_driver_tier1_passes(const char* list, uint8_t* toggled, bool* 
         BUSTER_CHECK_TIER1_PASS_LICM,
         BUSTER_CHECK_TIER1_PASS_SROA,
         BUSTER_CHECK_TIER1_PASS_VECTORIZE,
+        BUSTER_CHECK_TIER1_PASS_UNROLL,
         BUSTER_CHECK_DRIVER_PASS_GVN,
         BUSTER_CHECK_DRIVER_PASS_INLINE,
         BUSTER_CHECK_TIER1_PASSES_ALL | BUSTER_CHECK_DRIVER_PASS_GVN | BUSTER_CHECK_DRIVER_PASS_INLINE,
@@ -12258,7 +12315,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                                    constraint->failure.message == CHECK_PROGRAM_MESSAGE_DUPLICATE_DEFAULT,
                             };
                         }
-                        if (!listed && ((control_diagnosed && control.status != CHECK_PROGRAM_OK) || control.status == CHECK_PROGRAM_RESOURCE))
+                        if (control.status == CHECK_PROGRAM_RESOURCE)
+                        {
+                            fprintf(errors, "fatal error: checker program capacity exhausted\n");
+                            driver_fatal = true;
+                        }
+                        else if (!listed && control_diagnosed && control.status != CHECK_PROGRAM_OK)
                         {
                             additional[additional_count++] = (CheckDriverDiagnostic){ control.token,
                                 check_semantic_control(pp, &types, control.status, &control.failure, scratch), control.position,
@@ -12358,7 +12420,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                                    constraint->failure.message == CHECK_PROGRAM_MESSAGE_DUPLICATE_DEFAULT,
                             };
                         }
-                        if (!listed)
+                        if (program.status == CHECK_PROGRAM_RESOURCE)
+                        {
+                            fprintf(errors, "fatal error: checker program capacity exhausted\n");
+                            driver_fatal = true;
+                        }
+                        else if (!listed)
                         {
                             additional[additional_count++] = (CheckDriverDiagnostic){ program.token, check_semantic_control(pp, &types, program.status, &program.failure, output_arena),
                                                                                      program.token };
@@ -12761,6 +12828,19 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         fprintf(errors, "note: the system refused to commit %llu bytes of memory (%s); a capacity error above may be that refusal\n",
                 (unsigned long long)failure.bytes, strerror(failure.error != 0 ? failure.error : ENOMEM));
     }
+    // And under a finite RLIMIT_AS (#1118), an arena's mapping or growth refused since the unit started, or a push past an
+    // arena's share of the limit: the limit, which the stage's capacity error doesn't name.
+    const bool changed = failure.bytes != failure_before.bytes || failure.error != failure_before.error || failure.commit != failure_before.commit;
+    char limit[96] = "";
+    if (result != 0 && !failure.commit && failure.error == ENOMEM && changed && !memory_reported)
+    {
+        arena_limit_text(limit, sizeof(limit));
+    }
+    if (limit[0] != 0)
+    {
+        fprintf(errors, "note: the compiler's memory ran out%s, which refused %llu bytes more; the error above is that limit's, not the source's\n", limit,
+                (unsigned long long)failure.bytes);
+    }
     if (fatal != NULL)
     {
         *fatal = pp->fatal || driver_fatal;
@@ -13149,7 +13229,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         memset(lanes, 0, sizeof(*lanes));
     }
     check_driver_lanes_taken = true;
-    lanes->lanes = check_driver_cpus();
+    lanes->lanes = check_driver_address_lanes(check_driver_cpus());
     // One lane's emission by windows (#2536's step 1, check_program_emit_windows): the owner's default since 2026-11-14;
     // --emit-window=0 is one window as long as the unit.
     lanes->window_tokens = BUSTER_CHECK_EMIT_WINDOW_TOKENS;
@@ -13411,6 +13491,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             lanes->tier0_no_inline = true;
         }
+        else if (match.exact == C_OPTION_TIER0_NO_HOLD)
+        {
+            lanes->tier0_no_hold = true;
+        }
         else if (match.exact == C_OPTION_TIER1_GVN)
         {
             lanes->tier1_gvn = true;
@@ -13428,7 +13512,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             tier1_passes_seen = true;
             if (!known)
             {
-                fprintf(stderr, "error: --tier1-passes= takes a comma-separated list of +NAME and -NAME, NAME being sccp, dce, cfg, merge, licm, sroa, vectorize, gvn, inline or all\n");
+                fprintf(stderr, "error: --tier1-passes= takes a comma-separated list of +NAME and -NAME, NAME being sccp, dce, cfg, merge, licm, sroa, vectorize, unroll, gvn, inline or all\n");
             }
             invalid_tier1_passes |= !known;
         }
@@ -13782,6 +13866,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier1_no_inline = lanes->tier1_no_inline,
         .tier1_no_hold = lanes->tier1_no_hold,
         .tier0_no_inline = lanes->tier0_no_inline,
+        .tier0_no_hold = lanes->tier0_no_hold,
         .window_tokens = lanes->window_tokens,
         .tier1_schedule = lanes->tier1_schedule,
         .tier1_passes = lanes->tier1_passes,
@@ -13797,7 +13882,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!reserved)
     {
-        fprintf(stderr, "fatal error: can't reserve checker memory (%" PRIu64 " bytes requested per arena)\n", reservation_bytes);
+        char limit[96];
+        arena_limit_text(limit, sizeof(limit));
+        fprintf(stderr, "fatal error: can't reserve checker memory (%" PRIu64 " bytes requested per arena)%s\n", reservation_bytes, limit);
     }
     else if (!arguments_ready || (!parsed && arena_failure.bytes != 0))
     {
