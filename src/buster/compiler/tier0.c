@@ -5596,7 +5596,7 @@ static void tier0_extend(Tier0Writer* writer, uint32_t class, uint32_t reg)
 // On the 9700X, against 16-byte loads, halves copy a 64- to 256-byte struct just built by 8-byte stores in 0.26 to
 // 0.63 times the cycles, a cold one in 1.0 to 1.70 times, and one a 16-byte copy just wrote in 1.44 to 1.65 times;
 // 8-byte pieces are no faster than halves for the struct just built or the cold one (buster-performance's
-// copy-shapes-2693-2026-11-14).
+// copy-shapes-2693-2026-11-15).
 #define BUSTER_TIER0_COPY_NARROW_BYTES 32
 
 // The widest piece a copy of `size` bytes uses: 8 for a small aggregate, 16 for a larger one.
