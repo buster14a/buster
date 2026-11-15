@@ -366,6 +366,10 @@ struct PPOptions
     // #1038's stages 2 and 4), timed and checked against the walk's graph. benchmark-checker-bindings sets it with
     // expression_timing.
     bool expression_numbering;
+    // The node machine's front in the shadow (c_check_node_machine_front.c, #2524): its records made beside the coded
+    // walk's nodes and compared with them (CheckInput.node_front). 1: after the walk acted at a chunk; 2: before it, where
+    // the machine would run. Off in every compile; measure-node-machine --shadow sets it for --front.
+    uint8_t node_front;
     // Keep where the expansions that can start a line start in the output (PPExpansionStart), which -E's line markers
     // need to place them: the printer can't print markers for a run without them.
     bool expansion_starts;

@@ -1789,6 +1789,8 @@ struct NodeShadowRecord
 {
     uint32_t line;
     NodeMachineRefusal refusal;
+    // A taken expression's, where the front ran (`front`): whether the front made its every record.
+    bool fronted;
 };
 
 typedef struct NodeShadow NodeShadow;
@@ -1851,6 +1853,37 @@ struct NodeShadow
     bool fused;
     uint64_t fused_expressions;
     uint64_t fused_differences;
+    // --front, --front-first: the machine's front in the reader (c_check_node_machine_front.c, PPOptions.node_front 1 and
+    // 2), its records compared there with the walk's nodes: the files' reports summed (NodeFrontShadow's), the walk's own
+    // parts' ticks beside the front's, and the taken expressions whose every node agreed, with their evaluated nodes.
+    uint8_t front;
+    uint64_t front_ticks;
+    uint64_t front_tokens;
+    uint64_t front_records;
+    uint64_t front_checked;
+    uint64_t front_differences;
+    uint64_t front_resets;
+    uint64_t front_waiting;
+    uint64_t front_left[BUSTER_CHECK_EXPRESSION_CODES];
+    uint64_t front_left_queries;
+    uint64_t walk_ticks[BUSTER_CHECK_EXPRESSION_PARTS];
+    uint64_t front_expressions;
+    uint64_t front_nodes;
+    // The front's records' operands by their distance back in the postorder (NodeFrontShadow's), and of the taken
+    // expressions the front made, those with an operand further back than BUSTER_NODE_FRONT_NEAR, with their nodes.
+    uint64_t front_operands;
+    uint64_t front_operands_near;
+    uint64_t front_operands_byte;
+    uint64_t front_operands_far;
+    uint64_t front_root_operands;
+    uint64_t front_root_operands_past;
+    uint64_t front_arguments;
+    uint64_t front_arguments_past;
+    uint64_t front_past_expressions;
+    uint64_t front_past_nodes;
+    // --list N: the taken expressions the front didn't make, listed up to N.
+    uint32_t front_missed_listed;
+    uint32_t front_listed;
     // --interleave N: the interleaved sets' chunk (0: a body's expressions), the current file's scratch for the census's
     // walk in the timing passes, the walks' tests (so that the walks aren't dead code), and the sweeps' own TSC ticks in
     // an interleaved set: the last pass's, and each file's least over the passes, summed.
@@ -2175,9 +2208,11 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
     shadow->expressions += 1;
     shadow->nodes += nodes;
     shadow->records += walked;
-    if (shadow->records_out != NULL && shadow->record_count < shadow->record_capacity)
+    NodeShadowRecord* out = shadow->records_out != NULL && shadow->record_count < shadow->record_capacity ? shadow->records_out + shadow->record_count : NULL;
+    if (out != NULL)
     {
-        shadow->records_out[shadow->record_count++] = (NodeShadowRecord){
+        shadow->record_count += 1;
+        *out = (NodeShadowRecord){
             .line = node_census_line(s->pp, program->parser, program->input->graph.tokens[root]),
             .refusal = refusal,
         };
@@ -2202,6 +2237,31 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
         shadow->taken_expressions += 1;
         shadow->taken_nodes += nodes;
         shadow->taken_records += machine->count;
+        const NodeFrontShadow* front = program->input->node_front;
+        if (front != NULL)
+        {
+            // The front made the expression where each of its nodes' records agreed with the walk's.
+            bool made = root < front->node_capacity && (front->nodes[root >> 6] >> (root & 63) & 1) != 0;
+            bool past = made && (front->past[root >> 6] >> (root & 63) & 1) != 0;
+            for (uint32_t node = first; made && node + 1 < first + records; node += 1)
+            {
+                made = (front->nodes[node >> 6] >> (node & 63) & 1) != 0;
+                past = past || (front->past[node >> 6] >> (node & 63) & 1) != 0;
+            }
+            shadow->front_expressions += made;
+            shadow->front_nodes += made ? nodes : 0;
+            shadow->front_past_expressions += made && past;
+            shadow->front_past_nodes += made && past ? nodes : 0;
+            if (out != NULL)
+            {
+                out->fronted = made;
+            }
+            if (!made && shadow->front_missed_listed < node_census_list)
+            {
+                shadow->front_missed_listed += 1;
+                printf("node-shadow: front missed file=%s line=%u nodes=%u\n", s->file, node_census_line(s->pp, program->parser, program->input->graph.tokens[root]), nodes);
+            }
+        }
         shadow->entries += machine->entry_count;
         shadow->calls += machine->call_count;
         for (uint32_t c = 0; c < machine->call_count; c += 1)
@@ -2450,6 +2510,43 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
     {
         printf("node-shadow: fused expressions=%" PRIu64 " differences=%" PRIu64 "\n", shadow->fused_expressions, shadow->fused_differences);
     }
+    if (shadow->front != 0)
+    {
+        uint64_t left = 0;
+        for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
+        {
+            left += shadow->front_left[code];
+        }
+        printf("node-shadow: front %s tokens=%" PRIu64 " left=%" PRIu64 " records=%" PRIu64 " compared=%" PRIu64 " differences=%" PRIu64 " resets=%" PRIu64
+               " waiting-at-the-end=%" PRIu64 "\n",
+               shadow->front == 2 ? "before-the-walk" : "after-the-walk", shadow->front_tokens, left, shadow->front_records, shadow->front_checked, shadow->front_differences,
+               shadow->front_resets, shadow->front_waiting);
+        for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
+        {
+            if (shadow->front_left[code] != 0)
+            {
+                printf("node-shadow: front left class=%s tokens=%" PRIu64 "\n", check_input_expression_code_names[code] != NULL ? check_input_expression_code_names[code] : "?",
+                       shadow->front_left[code]);
+            }
+        }
+        printf("node-shadow: front left sizeof-and-alignof tokens=%" PRIu64 "\n", shadow->front_left_queries);
+        printf("node-shadow: front taken-expressions=%" PRIu64 " (%.2f%%) evaluated-nodes=%" PRIu64 " (%.2f%%)\n", shadow->front_expressions,
+               node_census_share(shadow->front_expressions, shadow->taken_expressions), shadow->front_nodes, node_census_share(shadow->front_nodes, shadow->taken_nodes));
+        printf("node-shadow: front operands=%" PRIu64 " within-%u=%" PRIu64 " (%.3f%%) in-a-byte=%" PRIu64 " further=%" PRIu64 " arguments=%" PRIu64 " (past %u: %" PRIu64
+               ") roots'=%" PRIu64 " (past %u: %" PRIu64 ")\n",
+               shadow->front_operands, BUSTER_NODE_FRONT_NEAR, shadow->front_operands_near, node_census_share(shadow->front_operands_near, shadow->front_operands),
+               shadow->front_operands_byte, shadow->front_operands_far, shadow->front_arguments, BUSTER_NODE_FRONT_NEAR, shadow->front_arguments_past,
+               shadow->front_root_operands, BUSTER_NODE_FRONT_NEAR, shadow->front_root_operands_past);
+        printf("node-shadow: front taken-expressions with an operand past %u records back=%" PRIu64 " (%.3f%%) evaluated-nodes=%" PRIu64 " (%.3f%%)\n", BUSTER_NODE_FRONT_NEAR,
+               shadow->front_past_expressions, node_census_share(shadow->front_past_expressions, shadow->taken_expressions), shadow->front_past_nodes,
+               node_census_share(shadow->front_past_nodes, shadow->taken_nodes));
+        printf("node-shadow: front ticks=%" PRIu64 "\n", shadow->front_ticks);
+    }
+    // The reader's coded walk in the files' one reading, by its parts (TSC ticks): beside the front's where it ran, and
+    // alone where it didn't, the walk as it is.
+    printf("node-shadow: walk ticks classes=%" PRIu64 " prepare=%" PRIu64 " actions=%" PRIu64 " visits=%" PRIu64 "\n",
+           shadow->walk_ticks[BUSTER_CHECK_EXPRESSION_PART_CLASSES], shadow->walk_ticks[BUSTER_CHECK_EXPRESSION_PART_PREPARE],
+           shadow->walk_ticks[BUSTER_CHECK_EXPRESSION_PART_ACTIONS], shadow->walk_ticks[BUSTER_CHECK_EXPRESSION_PART_VISITS]);
     static const char* const sweep_names[BUSTER_NODE_SHADOW_SWEEPS] = { "T", "T+C", "T+C+X", "T+CX", "walk", "walk;T+C+X", "walk;T+CX" };
     const bool timed[BUSTER_NODE_SHADOW_SWEEPS] = { true, true, true, shadow->fused, shadow->interleave, shadow->interleave, shadow->interleave && shadow->fused };
     for (uint32_t k = 0; shadow->timed_nodes != 0 && k < BUSTER_NODE_SHADOW_SWEEPS; k += 1)
@@ -2539,7 +2636,9 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t 
 static bool node_census_file(NodeCensus* census, const char* file, char** options, uint32_t option_count)
 {
     static LowerSource source;
+    lower_source_node_front = census->shadow != NULL ? census->shadow->front : 0;
     const bool valid = lower_source_open(&source, file, options, option_count);
+    lower_source_node_front = 0;
     const bool prepared = source.prepared;
     CheckCorpusPath* path = &source.path;
     CheckProgramSelection selected = source.selected;
@@ -2653,6 +2752,42 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                 shadow->scratch = &s;
                 node_shadow_time(shadow, &machine, shadow->file_nodes);
                 shadow->file_nodes = 0;
+                const NodeFrontShadow* front = path->input.node_front;
+                if (front != NULL)
+                {
+                    shadow->front_ticks += front->ticks;
+                    shadow->front_tokens += front->tokens;
+                    shadow->front_records += front->records;
+                    shadow->front_checked += front->checked;
+                    shadow->front_resets += front->resets;
+                    shadow->front_waiting += front->waiting;
+                    shadow->front_operands += front->operands;
+                    shadow->front_operands_near += front->operands_near;
+                    shadow->front_operands_byte += front->operands_byte;
+                    shadow->front_operands_far += front->operands_far;
+                    shadow->front_root_operands += front->root_operands;
+                    shadow->front_root_operands_past += front->root_operands_past;
+                    shadow->front_arguments += front->arguments;
+                    shadow->front_arguments_past += front->arguments_past;
+                    static const char* const fields[] = { "?", "node", "operator", "operand", "leaf", "member", "arguments", "type", "context", "distance" };
+                    for (uint32_t d = 0; d < front->differences && d < BUSTER_NODE_FRONT_LISTED && shadow->front_listed < node_census_list; d += 1)
+                    {
+                        const uint32_t token = front->difference_tokens[d];
+                        shadow->front_listed += 1;
+                        printf("node-shadow: front difference file=%s line=%u token=%u field=%s\n", file, node_census_line(&source.pp, &source.parser, token), token,
+                               fields[front->difference_fields[d] < BUSTER_ARRAY_LENGTH(fields) ? front->difference_fields[d] : 0]);
+                    }
+                    shadow->front_differences += front->differences;
+                    for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
+                    {
+                        shadow->front_left[code] += front->left[code];
+                    }
+                    shadow->front_left_queries += front->left_queries;
+                }
+                for (uint32_t part = 0; part < BUSTER_CHECK_EXPRESSION_PARTS; part += 1)
+                {
+                    shadow->walk_ticks[part] += path->input.expression_part_ticks[part];
+                }
             }
             census->files += 1;
         }
@@ -2752,6 +2887,10 @@ static int run_node_census(int count, char** arguments)
         {
             shadow.fused = true;
         }
+        else if (strcmp(arguments[i], "--front") == 0 || strcmp(arguments[i], "--front-first") == 0)
+        {
+            shadow.front = strcmp(arguments[i], "--front") == 0 ? 1 : 2;
+        }
         else if (strcmp(arguments[i], "--interleave") == 0)
         {
             uint64_t number = 0;
@@ -2810,7 +2949,8 @@ static int run_node_census(int count, char** arguments)
     }
     free(files);
     free(options);
-    const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0 || shadow.fused_differences != 0);
+    const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0 || shadow.fused_differences != 0 ||
+                                          shadow.front_differences != 0);
     return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
 }
 
