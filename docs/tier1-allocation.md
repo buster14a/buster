@@ -1864,6 +1864,22 @@ has the switches that reproduce them):
   live-out range's successor had cost the producer +1.08 M; most blocks give
   none.
 
+At main `ae3778a2`, which merged #2773 after these variants, the change does
+the same: Lua's five scripts run 4,662.4 M instructions instead of 4,732.8 M
+(−1.49%) and speedtest1 2,563.32 M instead of 2,590.34 M (−1.04%).
+
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/dc331fbfbf9fded8e3d691d6f17243d31d0858a9/docs/measurements/tier1-continuations-2774-2026-11-14),
+#2592's method), the variants' base against the change: speedtest1 runs 0.74%
+fewer user cycles over 8 layouts (95% interval −1.28% to −0.20%, slower at
+none) for 0.88% fewer instructions. Lua's five scripts run +0.05% (−0.24% to
++0.34%) over 33 link orders for 1.49% fewer instructions: `calls` −0.93% and
+`closures` −1.26%, `strings` +1.08% and `arithmetic` +1.98%. `arithmetic`'s
+cycles move with the link order from −1.4% to +8.1%, and `strings`, whose
+instructions don't change, leaves more dispatch slots empty at the front end;
+Zen 5 eliminates the fewer register moves at rename. Against main `ae3778a2`,
+`sqlite3.c`'s `--tier1 -c` takes 0.19% more cycles for 0.27% more
+instructions, and `lvm.c`'s 0.23% fewer cycles.
+
 `tier1_allocate_hints_test.c`'s traces check a definition that evicts a value
 continuing in its slot though another is lighter, and one that doesn't without
 a continuation, with one that opened in a register, or with a use left; and a
