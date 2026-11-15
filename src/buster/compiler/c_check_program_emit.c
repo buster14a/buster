@@ -491,9 +491,9 @@ struct CheckEmitGrowth
 // output and the steps' scratch, reserved at the
 // lane's first body and emptied for each, and the forms the lane's last target allows (X86_FORM_COUNT entries). Every
 // lane reserves the first BUSTER_CHECK_TIER1_STEPS_ALWAYS steps; the others are the optional passes' outputs, reserved
-// only where an option runs the pass: step 7 #866's solver's (--tier1-gvn), 8 SROA's, 9 LICM's and 10 the loop
-// vectorizer's (--tier1-passes=).
-#define BUSTER_CHECK_TIER1_STEPS 11
+// only where an option runs the pass: step 7 #866's solver's (--tier1-gvn), 8 SROA's, 9 LICM's, 10 the loop vectorizer's
+// and 11 the unroller's (--tier1-passes=).
+#define BUSTER_CHECK_TIER1_STEPS 12
 #define BUSTER_CHECK_TIER1_STEPS_ALWAYS 7
 // --tier1-schedule's variants (#172): none, each block's records after allocation (c_check_tier1_schedule.c), or each
 // block's IR instructions before selection and allocation (tier1_schedule_ir.c).
@@ -513,12 +513,17 @@ struct CheckEmitGrowth
 #define BUSTER_CHECK_TIER1_PASS_MERGE 32u
 // The loop vectorizer (#2743, ir_vectorize_loops.c), a measurement option.
 #define BUSTER_CHECK_TIER1_PASS_VECTORIZE 64u
+// #2755's loop unroller (ir_optimize_unroll.c), off by default.
+#define BUSTER_CHECK_TIER1_PASS_UNROLL 128u
 #define BUSTER_CHECK_TIER1_PASSES_DEFAULT (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE)
-#define BUSTER_CHECK_TIER1_PASSES_ALL (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_VECTORIZE)
+#define BUSTER_CHECK_TIER1_PASSES_ALL \
+    (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_VECTORIZE | BUSTER_CHECK_TIER1_PASS_UNROLL)
 // The loop vectorizer's counts (--tier1-report), IrVectorizeResult's: the innermost loops examined, those vectorized,
 // by their widest vector (16, 32 and 64 bytes), their reductions and run-time overlap tests, then the refused loops by
 // IrVectorizeRefusal.
 #define BUSTER_CHECK_TIER1_VECTORIZE_COUNTS 15
+// The unroller's outcomes, IrUnrollRefusal's (the unrolled loops', then each refusal's), which --tier1-report prints.
+#define BUSTER_CHECK_TIER1_UNROLL_OUTCOMES 15
 
 typedef struct CheckTier1Lane CheckTier1Lane;
 struct CheckTier1Lane
@@ -643,6 +648,12 @@ struct CheckTier1Counts
     uint32_t licm_moved;
     uint32_t sroa_split;
     uint32_t gvn_removed;
+    // --tier1-passes=+unroll's (#2755): each loop's outcome, the copies the unrolled ones hold, the reductions they split
+    // and the instructions they added.
+    uint16_t unroll_outcomes[BUSTER_CHECK_TIER1_UNROLL_OUTCOMES];
+    uint32_t unroll_copies;
+    uint32_t unroll_reductions;
+    uint32_t unroll_added;
     // The loop vectorizer's (BUSTER_CHECK_TIER1_VECTORIZE_COUNTS).
     uint32_t vectorize[BUSTER_CHECK_TIER1_VECTORIZE_COUNTS];
 };
@@ -690,6 +701,10 @@ struct CheckTier1Report
     uint64_t licm_moved;
     uint64_t sroa_split;
     uint64_t gvn_removed;
+    uint64_t unroll_outcomes[BUSTER_CHECK_TIER1_UNROLL_OUTCOMES];
+    uint64_t unroll_copies;
+    uint64_t unroll_reductions;
+    uint64_t unroll_added;
     uint64_t vectorize[BUSTER_CHECK_TIER1_VECTORIZE_COUNTS];
     // The functions the inlining left without code (#2541 step 2, CheckProgramCode.dead_functions).
     uint64_t dead_functions;
@@ -5729,6 +5744,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->tier1_report.licm_moved += compiled ? counts->licm_moved : 0;
         lanes->tier1_report.sroa_split += compiled ? counts->sroa_split : 0;
         lanes->tier1_report.gvn_removed += compiled ? counts->gvn_removed : 0;
+        for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_UNROLL_OUTCOMES; k += 1)
+        {
+            lanes->tier1_report.unroll_outcomes[k] += compiled ? counts->unroll_outcomes[k] : 0;
+        }
+        lanes->tier1_report.unroll_copies += compiled ? counts->unroll_copies : 0;
+        lanes->tier1_report.unroll_reductions += compiled ? counts->unroll_reductions : 0;
+        lanes->tier1_report.unroll_added += compiled ? counts->unroll_added : 0;
         for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_VECTORIZE_COUNTS; k += 1)
         {
             lanes->tier1_report.vectorize[k] += compiled ? counts->vectorize[k] : 0;

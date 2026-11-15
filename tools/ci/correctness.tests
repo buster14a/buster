@@ -951,6 +951,7 @@ test "$("$BUSTER_COMPILER" test-ir-source --print fetched tests/ir-source/atomic
 "$BUSTER_COMPILER" test-ir-optimize
 "$BUSTER_COMPILER" test-ir-gvn
 "$BUSTER_COMPILER" test-ir-licm
+"$BUSTER_COMPILER" test-ir-unroll
 "$BUSTER_COMPILER" test-ir-sroa
 # #2743: the loop vectorizer's fixtures by both paths at 16, 32 and 64 bytes against the interpreter, and its mutants.
 "$BUSTER_COMPILER" test-ir-vectorize
