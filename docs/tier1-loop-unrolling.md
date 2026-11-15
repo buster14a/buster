@@ -238,6 +238,14 @@ vectorized parts are the ones that run over every instruction of a function
 - **`test-checker-driver`'s passes fixture** builds with `+unroll`, both paths,
   `--verify`, and prints clang's output; `+all` unrolls too and the default
   doesn't.
+- **Programs.** `test-c-testsuite --tier1` with `+unroll` (through
+  `--compiler`, a wrapper that adds it) passes all 220 programs, Tier 1
+  compiling their 430 functions; `measure-tier1-programs --variant
+  --tier1-passes=+unroll` gives speedtest1's verification hash and every Lua
+  script's output as clang -O0's; #2743's 25 kernels give every build's
+  digest. The baseline host build (`BUSTER_HOST_ARCH=x86-64`, the scalar
+  paths) passes `test-ir-unroll`, and so does an AddressSanitizer build, which
+  also compiles the kernels and `sqlite3.c` with `+unroll` without a report.
 
 ## Measurements
 
