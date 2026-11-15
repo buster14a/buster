@@ -1080,7 +1080,9 @@ nothing moved is a memory access. `--verify` checks the order with the
 preallocation schedule's reference (`tier1_schedule_ir_verify`).
 
 The phi must be `a`'s own: `a` is that phi, a value computed from it by such
-operations, or a join of its values. A Lua handler that may skip a word joins
+operations, or a join of its values (and, since #2782, a join of such joins, or
+a value the phi itself joins: "A handler a goto enters" below). A Lua handler
+that may skip a word joins
 `pc`'s paths before its fetch. A list walk shows why the rule is needed:
 `pp = &p->next; p = p->next` makes two values from `p`, and the load is `p`'s
 own next value, which wants `p`'s register. Moving `pp`'s increment past the load
@@ -1779,6 +1781,98 @@ each part of the rule fails its trace. `tests/driver/tier1_patterns.c`'s
 `patterns_spilled` is a handler shaped like `OP_GETTABUP`: on main its join
 reloads two of the loop's values into registers others hold, and its indirect
 jump follows their reloads, where now every handler's follows its table's load.
+
+### A handler a goto enters (#2782, #2592)
+
+#2766, #2767 and #2768 left `luaV_execute` one site that moved values through
+`r11`: the generic `for` loop. `OP_TFORCALL` is entered by the dispatch and by
+`OP_TFORPREP`'s `pc += Bx; i = *(pc++); goto l_tforcall`. `OP_TFORLOOP`
+(`l_tforloop`, after `OP_TFORCALL`'s own `i = *(pc++)`) then jumps back to the
+dispatch.
+
+- **The phis' registers.** `OP_TFORCALL`'s block has phis, for `pc` and `i`.
+  Their hint was their operand's register at the exit of the chosen
+  predecessor (#2553), the predecessor laid out before the block:
+  `OP_TFORPREP`'s, not the dispatch's, which is laid out after. The handler
+  then ran in `OP_TFORPREP`'s registers. `OP_TFORLOOP`'s jump rotated `pc`, `i`
+  and `trap` back through `r11` on every iteration (with #2768's waiting
+  ranges), and `OP_TFORPREP`'s edge rotated them once per loop.
+- **The fetches.** #2592's operand sink didn't move either fetch's `pc + 1`
+  past its load, because neither `pc` was of the target phi's family:
+  - `l_tforloop`'s `pc` joins `OP_TFORCALL`'s `pc + 1` with the dispatch's
+    `pc`;
+  - `OP_TFORCALL`'s own `pc` joins the dispatch's `pc` with `OP_TFORPREP`'s
+    jump;
+  - the dispatch's join has more incoming values than the 32 the rule
+    reads.
+
+Two changes:
+
+- **The dispatch's convention for the phis.** In `tier1_cfg_phi_exits`, a block
+  that an earlier block and a later multiway branch (three or more successors)
+  both enter gives each phi the register its operand along the branch has at
+  the branch's first successor's entry. That is the register every handler
+  takes it in (the `siblings` convention), so the dispatch's edge moves nothing
+  and the `goto`'s edge moves once per loop. The block's other values keep
+  their hints: giving them the convention too spilled `trap` around
+  `OP_TFORCALL`'s call, three stack stores and three loads per iteration.
+- **The sink's family** (`tier1_sink_ir_family`). `a` is now also of the
+  target phi's family in three more cases:
+  - it comes from a join of joins of the phi's values (`OP_TFORLOOP`'s
+    `vmfetch`);
+  - the phi joins `a`'s origin along another edge than the root's (`l_tforloop`
+    and `OP_TFORCALL`'s `pc`);
+  - the phi and `a`'s phi share a source that joins at least three values, a
+    dispatch's join (`OP_TFORCALL`'s fetch).
+
+  Two loops' phis sharing an initial value share no register, so a shared
+  source must be such a join. With any phi as the source, the rule moved code
+  for no gain.
+
+`OP_TFORCALL`'s and `OP_TFORLOOP`'s fetches now add in place. `luaV_execute`'s
+jump after `OP_TFORLOOP` moves nothing.
+
+**By callgrind** (#1189's `gap.c`, #1217's inputs, Lua's hash seed fixed):
+
+| | main `6415e30` | this | main with #2773 | that and this |
+| --- | ---: | ---: | ---: | ---: |
+| `luaV_execute`'s instructions | 2,214.90 M | 2,214.44 M | 2,195.67 M | 2,195.27 M |
+| its moves through `r11` | 1.48 M | 1.48 M | 132,002 | 4 |
+| speedtest1 | 2,610.83 M | 2,610.12 M | 2,590.34 M | 2,589.57 M |
+
+- **On main.** `OP_TFORCALL` ran no rotation without #2773; its 1.48 M are
+  `OP_GETTABUP`'s, which #2773 removes. The change saves `luaV_execute` 0.46 M
+  register moves there.
+- **Lua's totals** move by `luaH_getshortstr`'s count, whose code is the same in
+  every build: −5.40 M on main and +1.71 M with #2773. Its hash chains follow
+  the addresses Lua hashes pointer keys by, which move with the binary, so the
+  totals include that effect.
+- **By function.** Without it, no Lua function runs more instructions.
+  speedtest1 runs 0.71 M and 0.76 M fewer: `resolveP2Values` −0.43 M,
+  `cellSizePtrTableLeaf` −0.14 M, `sqlite3_str_vappendf` −0.10 M to −0.15 M.
+- **The 4 left** are one swap's two moves, run twice: `OP_CLOSE` puts
+  `luaF_close`'s constant arguments 0 and 1 in each other's registers. Such
+  swaps just before a call are #2823; across Lua they are 5.80 M moves through
+  `r11` at 283 sites, almost all outside `luaV_execute`.
+
+**On the 9700X** (#2553's method; main against this, without #2773, whose 132,002
+moves Zen 5 eliminates at rename, too few to time): Lua's five scripts over 33
+link orders take −0.09% cycles (−0.32% to +0.15%), speedtest1 over 8 layouts
+−0.17% (−0.52% to +0.19%). Both are flat, as 0.46 M moves and 0.71 M
+instructions are. `--tier1 --lanes 1 -c` of `sqlite3.c` takes +0.02% cycles and
++0.07% instructions, `lvm.c` −0.08% cycles. The record is buster-performance's
+`docs/measurements/tier1-dispatch-entry-2782-2026-11-15`.
+
+**Tests.**
+
+- **`test-tier1-cfg`'s dispatch-entry fixture.** A dispatch branches to three
+  handlers. One computes a value from `pc` while `pc` lives on, then jumps to
+  another, whose phi joins it with `pc`. The phi must start in `pc`'s register
+  at the first handler's entry, on both paths.
+- **`test-ir-optimize`'s sink fixtures:**
+  - `rejoin`, `nested` and `shared` move one expression each;
+  - `loop` (the same shape around a loop's two-value header) moves none.
+- **Mutations.** Each rule turned off fails its fixture.
 
 ### Loop bodies before their headers, and slots already current (#2784)
 
