@@ -1639,6 +1639,8 @@ static void check_input_expression_numbering(CheckInputReader* reader, uint32_t 
     }
 }
 
+#include "c_check_node_machine_front.c"
+
 // The coded walk: the postorder a chunk at a time, compacted to the tokens the walk acts at, each acted at by its class.
 // A DROP's action is nothing but its children's chains joined, which no parent reads (its first value is NONE, as the
 // reader's setup wrote it), so the compaction leaves its tokens out. A unit with expressions past its limit or deferred
@@ -1676,6 +1678,43 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
         batch->leaves = 0;
         check_graph_classes(batch->classes);
     }
+    // The node machine's front in the shadow (PPOptions.node_front, #2524): over the whole unit's coded walk, its state on
+    // the scratch and its report, with a bit a node the graph has room for, in the output's arena.
+    const uint8_t fronted = coded && begin == 0 && stop == count ? reader->pp->options.node_front : 0;
+    NodeFront* front = fronted != 0 ? arena_push_array(reader->scratch, 1, sizeof(NodeFront), 64) : NULL;
+    if (front != NULL)
+    {
+        const uint32_t words = reader->output->graph.capacity / 64 + 1;
+        NodeFrontShadow* shadow = arena_push_array(reader->arena, 1, sizeof(NodeFrontShadow), _Alignof(NodeFrontShadow));
+        uint64_t* bits = arena_push_array(reader->arena, words, sizeof(uint64_t), _Alignof(uint64_t));
+        uint8_t* contexts = arena_push_array(reader->arena, (uint64_t)words * 64, sizeof(uint8_t), 1);
+        uint64_t* past = arena_push_array(reader->arena, words, sizeof(uint64_t), _Alignof(uint64_t));
+        if (shadow != NULL && bits != NULL && contexts != NULL && past != NULL)
+        {
+            memset(shadow, 0, sizeof(*shadow));
+            memset(bits, 0, (uint64_t)words * sizeof(uint64_t));
+            memset(contexts, 0, (uint64_t)words * 64);
+            memset(past, 0, (uint64_t)words * sizeof(uint64_t));
+            shadow->nodes = bits;
+            shadow->contexts = contexts;
+            shadow->past = past;
+            shadow->node_capacity = words * 64;
+            front->shadow = shadow;
+            front->count = 0;
+            front->pending = 0;
+            front->stack_count = 0;
+            front->group_count = 0;
+            front->full = false;
+            front->ordinal = 0;
+            front->argument_count = 0;
+            front->wide_count = 0;
+            reader->output->node_front = shadow;
+        }
+        else
+        {
+            front = NULL;
+        }
+    }
     // The parts' ticks (CheckInput.expression_part_ticks): three TSC reads a chunk, and two a visit of a coded unit's,
     // which are the actions' less their visits'. And the tokens of each class the actions reached, in four histograms
     // that a chunk's run of one class doesn't make a chain of: those the classes' actions acted at are the rest of the
@@ -1697,6 +1736,13 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
             check_input_expression_literals(reader, tokens, classes, acting, &literals, false);
         }
         const uint64_t ready = __rdtsc();
+        uint64_t fronting = 0;
+        if (front != NULL && fronted == 2)
+        {
+            // Before the walk acts at the chunk, where the machine would run; its ticks are its own, not the actions'.
+            node_front_chunk(front, reader, tokens, classes, acting, &identifiers, &literals);
+            fronting = __rdtsc() - ready;
+        }
         uint32_t identifier = 0;
         uint32_t literal = 0;
         uint32_t i = 0;
@@ -1726,7 +1772,19 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
         }
         const uint64_t done = __rdtsc();
         prepared += ready - start;
-        acted += done - ready;
+        acted += done - ready - fronting;
+        if (front != NULL)
+        {
+            // The comparison reads the graph: the batch's nodes go to it first, as the actions' time.
+            const uint64_t flushing = __rdtsc();
+            check_input_expression_flush(reader, batch, false);
+            acted += __rdtsc() - flushing;
+            if (fronted == 1)
+            {
+                node_front_chunk(front, reader, tokens, classes, acting, &identifiers, &literals);
+            }
+            node_front_compare(front, reader);
+        }
     }
     // The last batch's nodes, written as the actions' (and its time theirs).
     if (batch != NULL)
@@ -1734,6 +1792,10 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
         const uint64_t start = __rdtsc();
         check_input_expression_flush(reader, batch, false);
         acted += __rdtsc() - start;
+    }
+    if (front != NULL)
+    {
+        node_front_finish(front, reader, base);
     }
     // A coded unit's visits lie within its chunks' actions; another's actions are all visits.
     visited = coded ? (visited < acted ? visited : acted) : acted;

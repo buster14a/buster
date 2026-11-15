@@ -179,6 +179,15 @@ static const char node_census_test_atomic[] =
 // void, an integer, bool and a pointer, constants among them; a static object's members and its array's subscripts,
 // constant and not; a pointer's equality with a null pointer constant; sizeof and _Alignof of a type name and an
 // expression; the comma; and stores of a null pointer constant and of a pointer to a pointer of another pointee.
+// The machine's own front (step 1b) runs over the fixture too, after the walk acted at a chunk and, in the --scalar run,
+// before it, where the reader's walk is the coded one (a build with the vector paths; in one without, it must make
+// nothing): its every record must be the walk's node, and it must make each taken line's expressions but those of the
+// lines that say `// front: left` (sizeof and _Alignof, which the front leaves to the walk). For the front alone, with
+// no expectation of the machine: a static braced initializer (its elements' value context), an automatic array's and a
+// record's with a nested list (their lists' values dropped where nothing takes them, none left waiting), an enumerator's
+// value, a library function called by its name and through its
+// address (the call's library mark), and a switch (its condition's operator, and a case label's constant, whose context
+// the walk's visit gives: unknown to the front).
 static const char node_shadow_test_text[] =
     "struct S { long m; long n; int a[4]; unsigned char c; int (*cb)(int); };\n"
     "struct __jmp_buf_tag { long b[8]; };\n"
@@ -194,6 +203,8 @@ static const char node_shadow_test_text[] =
     "int ldf(long double);\n"
     "int ap(int (*)(int), int);\n"
     "int getcontext(void*);\n"
+    "unsigned long strlen(const char*);\n"
+    "enum E { E0, E1 = 5 };\n"
     "long h(struct S* p, struct S s, int a, int b, unsigned u, char c, double d, float e, int* q, const int* r, int (*fp)(int, double),\n"
     "       int (*sj)(struct __jmp_buf_tag*))\n"
     "{\n"
@@ -213,7 +224,7 @@ static const char node_shadow_test_text[] =
     "    *q = q[1] + p->a[2] + *r; // machine: taken\n"
     "    q = &g; // machine: taken\n"
     "    q = q + a; // machine: taken\n"
-    "    y = (long)sizeof(*p) + (long)q; // machine: taken\n"
+    "    y = (long)sizeof(*p) + (long)q; // front: left // machine: taken\n"
     "    x = (a < b) == (u >= 3u); // machine: taken\n"
     "    x = (a % 7) | ((b & 1) ^ c); // machine: taken\n"
     "    z = z / 3 + (z >> 1) - (unsigned long)y; // machine: taken\n"
@@ -303,12 +314,22 @@ static const char node_shadow_test_text[] =
     "    x = 0 != p; // machine: taken\n"
     "    if (r == 0) // machine: taken\n"
     "        x = 3; // machine: taken\n"
-    "    y = sizeof(struct S) + sizeof(int) + _Alignof(double) + sizeof g + sizeof ga; // machine: taken\n"
+    "    y = sizeof(struct S) + sizeof(int) + _Alignof(double) + sizeof g + sizeof ga; // front: left // machine: taken\n"
     "    x = (f(a), b); // machine: taken\n"
     "    y = (f(a), q[0]); // machine: taken\n"
     "    r = q; // machine: taken\n"
     "    w(0, q); // machine: taken\n"
     "    p->cb = 0; // machine: taken\n"
+    "    static const int st[3] = { 1, 2, 3 };\n"
+    "    int au[2] = { a, b };\n"
+    "    struct S ls = { a, b, { 1, 2, a, b }, 0, 0 };\n"
+    "    x = E1 + st[1] + au[0] + (int)ls.m;\n"
+    "    x = (int)strlen(\"ef\") + (int)(&strlen)(\"gh\");\n"
+    "    switch (a)\n"
+    "    {\n"
+    "        case 1: x = 1; break;\n"
+    "        default: break;\n"
+    "    }\n"
     "    return y + x + (long)z; // machine: taken\n"
     "}\n";
 
@@ -338,6 +359,7 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, char** 
         .verify = !scalar,
         .fused = true,
         .interleave = true,
+        .front = scalar ? 2 : 1,
         .chunk = 3,
         .passes = 1,
         .repeat = 1,
@@ -346,15 +368,22 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, char** 
     fflush(stdout);
     valid = valid && shadow.records_out != NULL && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0 &&
             shadow.record_count < shadow.record_capacity;
+    // The front runs beside the reader's coded walk, the vector path's: a build without the vector paths reads by the
+    // scalar walk, where the front must make nothing and no line is expected of it.
+    const bool fronts = BUSTER_HOST_VECTOR != 0;
     // C and X as one sweep too: every expression T typed, with C's and X's refusal, tape, labels and calls.
     const bool same = shadow.value_differences == 0 && shadow.entry_differences == 0 && shadow.twin_differences == 0 && shadow.taken_expressions != 0 &&
-                      (scalar || shadow.row_nodes != 0) && shadow.fused_differences == 0 && shadow.fused_expressions >= shadow.taken_expressions;
+                      (scalar || shadow.row_nodes != 0) && shadow.fused_differences == 0 && shadow.fused_expressions >= shadow.taken_expressions &&
+                      shadow.front_differences == 0 && shadow.front_checked == shadow.front_records && shadow.front_resets == 0 && shadow.front_waiting == 0 &&
+                      (fronts ? shadow.front_units == 1 && shadow.front_unread == 0 && shadow.front_records != 0 : shadow.front_units == 0 && shadow.front_records == 0);
     if (!valid || !same)
     {
         fprintf(stderr, "test-checker: node-shadow%s: %s: values %" PRIu64 ", entries %" PRIu64 ", twin %" PRIu64 ", fused %" PRIu64 " (of %" PRIu64 ") differ; %" PRIu64
-                " expressions taken, %" PRIu64 " row-typed nodes\n",
+                " expressions taken, %" PRIu64 " row-typed nodes; the front's records %" PRIu64 ", compared %" PRIu64 ", %" PRIu64 " differ, %" PRIu64 " resets, %" PRIu64
+                " values left waiting, in %" PRIu64 " units (%s)\n",
                 scalar ? " --scalar" : "", valid ? "read" : "NOT READ", shadow.value_differences, shadow.entry_differences, shadow.twin_differences, shadow.fused_differences,
-                shadow.fused_expressions, shadow.taken_expressions, shadow.row_nodes);
+                shadow.fused_expressions, shadow.taken_expressions, shadow.row_nodes, shadow.front_records, shadow.front_checked, shadow.front_differences,
+                shadow.front_resets, shadow.front_waiting, shadow.front_units, fronts ? "expected in the one" : "expected in none: no vector paths in this build");
     }
     uint32_t line = 1;
     const char* at = text;
@@ -363,23 +392,29 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, char** 
         const char* end = strchr(at, '\n');
         end = end != NULL ? end : at + strlen(at);
         const char* expectation = NULL;
+        bool left = false;
         for (const char* c = at; c + 2 < end && expectation == NULL; c += 1)
         {
+            left = left || strncmp(c, "// front: left", 14) == 0;
             expectation = strncmp(c, "// machine: ", 12) == 0 ? c + 12 : NULL;
         }
         const uint32_t expected = expectation != NULL ? node_shadow_test_named(expectation, (uint32_t)(end - expectation)) : NODE_MACHINE_REFUSALS;
         uint32_t found = 0;
         uint32_t matched = 0;
+        uint32_t fronted = 0;
         for (uint32_t r = 0; r < shadow.record_count; r += 1)
         {
             found += shadow.records_out[r].line == line;
             matched += shadow.records_out[r].line == line && shadow.records_out[r].refusal == expected;
+            fronted += shadow.records_out[r].line == line && shadow.records_out[r].fronted;
         }
-        const bool held = expectation == NULL || (expected != NODE_MACHINE_REFUSALS && (expected == NODE_MACHINE_TAKEN ? found != 0 && matched == found : matched != 0));
+        // A taken line's expressions are the front's too, each of them, or (`// front: left`) none.
+        const bool made = expected != NODE_MACHINE_TAKEN || (left || !fronts ? fronted == 0 : fronted == found);
+        const bool held = expectation == NULL || (expected != NODE_MACHINE_REFUSALS && (expected == NODE_MACHINE_TAKEN ? found != 0 && matched == found : matched != 0) && made);
         if (!held)
         {
-            fprintf(stderr, "test-checker: node-shadow%s: line %u: expected %.*s, found %u expressions, %u as expected\n", scalar ? " --scalar" : "", line,
-                    (int)(expectation != NULL ? end - expectation : 0), expectation != NULL ? expectation : "", found, matched);
+            fprintf(stderr, "test-checker: node-shadow%s: line %u: expected %.*s, found %u expressions, %u as expected, %u the front's%s\n", scalar ? " --scalar" : "", line,
+                    (int)(expectation != NULL ? end - expectation : 0), expectation != NULL ? expectation : "", found, matched, fronted, left ? " (expected none)" : "");
         }
         valid = valid && held;
         line += 1;
@@ -458,6 +493,68 @@ static bool node_census_test_fixture(const char* directory, const char* name, co
     return valid;
 }
 
+// The front at its limits, on generated text read with `options`, the front run after the walk acted at a chunk or
+// (`first`) before it. `boundaries`: a body of statements whose tokens are 29 a round, so that the chunks' ends (1,024
+// postorder positions each) fall at every place within a call of a library function by its name and through its address:
+// a callee's record waits for its call in the next chunk, kept with its use. Else (`!boundaries`) more values waiting than
+// the front's stack holds: an automatic array's initializer of some 4,150 elements with ten calls about its 4,096th
+// value, one of them astride the stack's last entry, which must make every waiting value unknown (a reset) and leave the
+// call to the walk. Whether every record was the walk's node, none was left waiting, and the stack was reset as expected.
+static bool node_front_test_limits(const char* directory, bool boundaries, bool first, char** options, uint32_t option_count)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/limits.c", directory);
+    const uint32_t capacity = 1u << 18;
+    char* text = malloc(capacity);
+    uint32_t length = 0;
+    bool valid = text != NULL;
+    if (valid && boundaries)
+    {
+        length += (uint32_t)snprintf(text + length, capacity - length, "unsigned long strlen(const char*);\nint lb(int a)\n{\n    int x = a;\n");
+        for (uint32_t round = 0; round < 1100 && length + 128 < capacity; round += 1)
+        {
+            length += (uint32_t)snprintf(text + length, capacity - length, "    x += (int)(&strlen)(\"ab\"); x += (int)strlen(\"cd\"); x++; x++;\n");
+        }
+        length += (uint32_t)snprintf(text + length, capacity - length, "    return x;\n}\n");
+    }
+    else if (valid)
+    {
+        length += (uint32_t)snprintf(text + length, capacity - length, "int f2(int, int);\nint lc(int a, int b)\n{\n    int big[4200] = {\n");
+        for (uint32_t element = 0; element < 4150 && length + 64 < capacity; element += 1)
+        {
+            const bool call = element >= 4089 && element < 4099;
+            length += (uint32_t)snprintf(text + length, capacity - length, call ? "f2(a, b),\n" : (element & 31) == 31 ? "1,\n" : "1, ");
+        }
+        length += (uint32_t)snprintf(text + length, capacity - length, "1 };\n    return big[0];\n}\n");
+    }
+    valid = valid && length + 256 < capacity && parse_test_write(path, text, length);
+    NodeShadow shadow = {
+        .scalar = true,
+        .front = first ? 2 : 1,
+        .passes = 1,
+        .repeat = 1,
+    };
+    NodeCensus census = { .shadow = &shadow };
+    fflush(stdout);
+    valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
+    // In a build without the vector paths the reader's walk is the scalar one, and the front must make nothing.
+    const bool fronts = BUSTER_HOST_VECTOR != 0;
+    const bool same = shadow.front_differences == 0 && shadow.front_checked == shadow.front_records && shadow.front_waiting == 0 &&
+                      (fronts ? shadow.front_units == 1 && shadow.front_unread == 0 && shadow.front_records != 0 && (shadow.front_resets != 0) == !boundaries :
+                                shadow.front_units == 0 && shadow.front_records == 0);
+    if (!valid || !same)
+    {
+        fprintf(stderr, "test-checker: node-front %s%s: %s: records %" PRIu64 ", compared %" PRIu64 ", %" PRIu64 " differ, %" PRIu64 " resets, %" PRIu64
+                " values left waiting, in %" PRIu64 " units (%s)\n",
+                boundaries ? "chunk boundaries" : "full stack", first ? " (before the walk)" : "", valid ? "read" : "NOT READ", shadow.front_records, shadow.front_checked,
+                shadow.front_differences, shadow.front_resets, shadow.front_waiting, shadow.front_units,
+                fronts ? "expected in the one" : "expected in none: no vector paths in this build");
+    }
+    free(text);
+    unlink(path);
+    return valid && same;
+}
+
 static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
 {
     char directory[] = "/tmp/buster-node-census-XXXXXX";
@@ -499,6 +596,13 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     char* unsigned_char[] = { "-nostdinc", "-Wall", "-Wextra", "-Wshift-sign-overflow", "-Wassign-enum", "-funsigned-char" };
     check_test_expect(test, ready && node_shadow_test_fixture(directory, false, unsigned_char, BUSTER_ARRAY_LENGTH(unsigned_char)),
                       "node-shadow -funsigned-char: the machine converts plain char constants as the unit's char is signed");
+    // The machine's own front at its limits (step 1b): a chunk's end at every place within a call, and a full stack.
+    check_test_expect(test, ready && node_front_test_limits(directory, true, false, loud, BUSTER_ARRAY_LENGTH(loud)),
+                      "node-front: a callee waiting across a chunk's end keeps its use, a library call's mark the walk's");
+    check_test_expect(test, ready && node_front_test_limits(directory, true, true, loud, BUSTER_ARRAY_LENGTH(loud)),
+                      "node-front before the walk: a callee waiting across a chunk's end keeps its use");
+    check_test_expect(test, ready && node_front_test_limits(directory, false, false, loud, BUSTER_ARRAY_LENGTH(loud)),
+                      "node-front: a full stack makes every waiting value unknown and leaves the call astride its end to the walk");
     // Every warning has the census's class (node_census_warning_classes): one added since fails here until it has one.
     uint32_t unclassified = 0;
     for (uint32_t id = 0; id < CHECK_WARNING_ID_COUNT; id += 1)

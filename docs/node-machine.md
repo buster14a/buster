@@ -2126,6 +2126,174 @@ vector step could take.
 The record of this section and the two before it is
 [`node-machine-step1-designs-2524-2026-11-15`](https://github.com/buster14a/buster-performance/tree/0c8faee435d3b64a7ed293375db3ff6d548efe63/docs/measurements/node-machine-step1-designs-2524-2026-11-15).
 
+## Step 1b: the machine's own front
+
+Step 1's sweeps read their inputs from the graph the reader's coded walk
+writes (`c_check_expression_input.c`, #1038): the machine was timed on
+records another stage made. Step 2 removes that stage for a taken expression,
+so the machine must make its records itself. `--front` and `--front-first`
+([the guide](commands/lowering.md#the-shadow-step-1)) run that in the shadow:
+a front of the machine's own, beside the walk, which is its oracle. No compile
+takes it. [The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-own-front-2524-2026-11-15)
+has the runs.
+
+### What the walk costs, by its parts
+
+`-c sqlite3.c --lanes 1` on the 9700X (CPU 2, seven runs, main at `b9ebe041`,
+TSC ticks at 3,792.9 MHz):
+
+| the coded walk | ms |
+| --- | ---: |
+| the chunks' acting tokens and classes | 0.40 |
+| the chunks' identifiers' and literals' entries (`prepare`) | 2.32 |
+| the classes' actions | 9.03 |
+| of which the batch's flushes into the graph | 2.62 |
+| the visits the actions leave to the scalar path | 0.21 |
+| **all** | **11.97** |
+
+That is the 99 cycles a body token of "Expected gains" (the graph's
+construction). The flushes write 322,432 nodes in 2,413 batches, 74% of the
+nodes in batches of over 256. A machine that took the walk's batch for its
+records would skip the flushes alone, 22 of the 99: the walk's chains of
+values through the token columns, which the batch is numbered from, are most
+of its actions.
+
+### The front
+
+`c_check_node_machine_front.c` reads what the walk's actions read (a chunk's
+acting tokens and classes, its identifiers' and literals' entries) and makes
+records, not nodes: an operator, a token, operands as earlier records, a
+leaf's value, a member, a call's arguments and library mark, the requested
+type and the context.
+
+- **A stack of values, in groups.** A value's consumer is its token's parent.
+  The values not yet taken wait on a stack in groups that share a consumer,
+  and a token's operands are the top group's where the token is its consumer.
+  A token that only passes values on (a list, a separator, a group's closing,
+  a braced initializer's `=`) hands its group to its parent in one store,
+  however many values it holds: walking each value up its chain of separators
+  is quadratic in a table's length, and musl has tables of thousands.
+- **Left tokens.** A token the front has no case for (the walk's own visits,
+  `sizeof` and `_Alignof`, a literal whose decoding reports) is left to the
+  walk: its value is unknown, and so are a record that would take it and the
+  context of what it took. An expression with a left token is not the
+  front's.
+- **Its limits.** 4,096 records and as many waiting values. A static table's
+  thousands of elements wait for the list's end: a full stack makes every
+  waiting value unknown, once. Between chunks only the waiting values'
+  records are kept, since the tree puts a control's closing token after its
+  body and a condition's value waits through it.
+- **The comparison.** Each record against the walk's node at the same token,
+  field by field; contexts at the walk's end, where the lists have given
+  theirs; no value may be left waiting when a unit ends.
+
+### Every record the walk's node
+
+| | acting tokens | left | records | differ | machine-taken expressions the front makes whole | their evaluated nodes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 466,925 | 7,069 | 315,966 | 0 | 50,276 of 51,042 (98.50%) | 250,549 (97.76%) |
+| Lua | 282,317 | 3,944 | 90,801 | 0 | 10,165 of 10,433 (97.43%) | 55,400 (96.14%) |
+| musl | 2,828,420 | 304,173 | 618,853 | 0 | 20,961 of 21,561 (97.22%) | 103,895 (94.76%) |
+
+With `-g` and with the front run before the walk the records are the same.
+`sqlite3.c`'s left tokens are the scalar path's 2,697, 1,356 binary
+operators, 971 prefix ones (945 of them `sizeof` and `_Alignof`), 914
+terminators and 580 calls. Most of the taken expressions the front misses
+that `--list` shows are an operator or a call above a `sizeof` (`memset(p, 0,
+sizeof(*p))`); the others have a character constant with an escape. musl's
+left tokens are mostly its file scope's.
+
+**Mutation checks.** Thirty-three single changes to the front (an operator, an
+operand's order, each leaf field, a member, an argument, a type, a context, a
+distance, each column a chunk boundary keeps, the full stack's two paths, a
+group's hand-over) each show as differences or as values left waiting in
+`test-checker`'s fixtures. Five of them show in none of the three corpora:
+the fixture's omitted conditional, the generated body whose chunk ends fall
+at every place within a call, and the initializer with more values than the
+stack holds are what catch them.
+
+### What it costs
+
+The shadow's one reading of each corpus (CPU 2, medians of seven runs, musl's
+of three; ms):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| the walk as it is: tokens and classes | 0.43 | 0.19 | 1.55 |
+| its entries (`prepare`) | 2.36 | 0.71 | 4.43 |
+| its actions, with the flushes | 8.83 | 3.17 | 26.27 |
+| its visits | 0.22 | 0.19 | 5.19 |
+| the walk, all | 11.85 | 4.26 | 37.48 |
+| the front, after the walk acted at a chunk | 4.17 | 1.72 | 15.22 |
+| the front, before it | 4.97 | 1.84 | 16.62 |
+| the walk's actions where the front ran first | 8.02 | 3.07 | 25.72 |
+
+- **The front is 55% of what it would replace** (the actions and the visits)
+  where it runs first and takes the caches' first touches: 4.97 ms of 9.05 on
+  `sqlite3.c`, 53% on musl. With the tokens, classes and entries, which it
+  reads too, the machine's reading is 7.76 ms against the walk's 11.85: 65%,
+  so 65 cycles a body token where the walk is 99.
+- **Its columns' stagger was 30% of its time.** The front's arrays are one
+  block, and each was a multiple of 4 KB long: a record's twenty-odd fields
+  lay 4 KB apart, in one set of the first-level cache. With 128 bytes more an
+  array (as `BUSTER_NODE_MACHINE_STAGGER`) the front before the walk went
+  from 7.11 to 4.97 ms and after it from 6.67 to 4.17; its function's cycles
+  from 34.6 M to 23.4 M at 54.4 M and 57.2 M instructions.
+- **Counters in registers didn't pay.** The stack's and the records' counts
+  as locals, with each token's parent read for the whole chunk first, retired
+  68 M instructions where 57 M did, at the same time or worse (5.03 ms with
+  the stagger, 7.53 without): the function holds more live values than
+  registers, so a local is a stack slot.
+- **What is left is diffuse:** 122 instructions and 50 cycles an acting
+  token, 0.5 mispredicted branches, no line above a tenth. A record is twenty
+  stores and a leaf twenty-seven; a leaner record comes with T reading the
+  front's records, which fixes what a record must hold.
+
+`-c sqlite3.c` itself is unchanged: 123.37 and 122.80 ms from fresh copies of
+main's and the branch's executables (-0.46%, the copies' spread -1.12% to
++0.03%), the same peak.
+
+### Operands as distances
+
+[#2850](https://github.com/buster14a/buster/issues/2850)'s layout asks of the
+front an operand as a byte, its distance back in the postorder, so that 64
+records' operand facts are a permute over two blocks. The front has both
+records when it makes one, and keeps the distance beside the index (255 for
+that or more); the comparison checks it against the front's own records
+between the walk's two nodes.
+
+| | operands | within 64 records | in the byte | further | calls' arguments past 64 | taken expressions with one past 64 | roots' operands past 64 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 165,576 | 165,574 | 2 | 0 | 0 of 32,581 | 2 (0.004%) | 1,623 of 56,681 |
+| Lua | 52,751 | 52,746 | 5 | 0 | 0 of 10,425 | 3 (0.029%) | 251 of 13,184 |
+| musl | 314,578 | 314,573 | 5 | 0 | 12 of 51,040 | 4 (0.019%) | 809 of 57,888 |
+
+An operator's operand is all but never out of a block's reach. A root's is
+(a condition's, a discard's, a return's conversion): 1.4% to 2.9% of them are
+a body away, because the tree puts a control's closing token after its body.
+The front could make such a root where its value is given, since it knows the
+consumer's class there, at the price of an order that is no longer the walk's;
+it doesn't.
+
+### What it says of step 2
+
+"Expected gains" took the machine at 55 cycles a body token for a taken
+expression (90 in its conservative case). Measured, it is 65 for its own
+reading and 75 for T and the one sweep in the tight loop, 91 with a body's
+expressions a run: 140 to 156. With the front's coverage (97.76% of the nodes
+of the taken expressions, which hold 96% of all) the same sum gives step 2
+1.23 to 1.25 times on `-c sqlite3.c`: above its gate of 1.2, under the 1.3
+expected. Ten cycles a body token of the machine move it by a hundredth, a
+point of coverage by a third of that. What would move it:
+
+- **The front's instructions:** 122 an acting token for a stack walk.
+- **T on the front's records.** T reads the graph today, through its own
+  accessors; on the front's records it reads what was just written.
+- **`sizeof` and `_Alignof`,** which the front leaves: 1.5% of `sqlite3.c`'s
+  taken expressions and most of musl's missing 5% of nodes.
+- **Where the sweeps run:** 164 cycles a node in the tight loop, 199 a body's
+  expressions a run.
+
 ## Expected gains
 
 On `-c sqlite3.c`, of 681.5 M cycles a compile (user and kernel):

@@ -616,6 +616,9 @@ struct LowerSource
     bool prepared;
 };
 
+// PPOptions.node_front for the sources lower_source_open opens (measure-node-machine --shadow --front, #2524); 0 for none.
+static uint8_t lower_source_node_front;
+
 // Opens `file`, read with `options`, into `source`, with the backend's tables built: whether its options could be read
 // (source->prepared says whether it reached its selected program).
 static bool lower_source_open(LowerSource* source, const char* file, char** options, uint32_t option_count)
@@ -637,6 +640,7 @@ static bool lower_source_open(LowerSource* source, const char* file, char** opti
     }
     valid = valid && pp_parse_options((int)option_count + 1, own, &pp_options, &source->option_arena, &input, &output_file, &markers) && output_file == 0 && input != 0;
     pp_options.semantic_pragmas = true;
+    pp_options.node_front = lower_source_node_front;
     source->path = (CheckCorpusPath){ 0 };
     source->data = (CheckDataPrepared){ 0 };
     source->program = (CheckProgram){ 0 };
