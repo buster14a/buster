@@ -1209,13 +1209,12 @@ static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* lo
         ir_unroll_put(emit, preheader_end, IR_CBR, IR_VOID, first_test, entry_block, header);
         // MP: with start < n, the `factor` iterations all return exactly when n - start, a true difference, exceeds K';
         // then n - K' doesn't wrap, and the main loop's test is next < n - K'.
+        // The test last, right before its branch, which selection then fuses with it.
         at = offsets[entry_block];
         const uint32_t offset_constant = at;
         ir_unroll_put_constant(emit, at++, type, loop->offset);
         const uint32_t difference = at;
         ir_unroll_put(emit, at++, IR_SUB, type, bound, start, BUSTER_IR_NONE);
-        const uint32_t enough = at;
-        ir_unroll_put(emit, at++, IR_ICMP, IR_I1, difference, offset_constant, IR_UGT);
         const uint32_t main_bound = at;
         ir_unroll_put(emit, at++, IR_SUB, type, bound, offset_constant, BUSTER_IR_NONE);
         for (uint32_t j = 0; j < phis; j += 1)
@@ -1226,6 +1225,8 @@ static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* lo
                 ir_unroll_put_constant(emit, at++, f->type[phi_first + j], work->identities[phi_first + j]);
             }
         }
+        const uint32_t enough = at;
+        ir_unroll_put(emit, at++, IR_ICMP, IR_I1, difference, offset_constant, IR_UGT);
         ir_unroll_put(emit, at, IR_CBR, IR_VOID, enough, main_block, exit_block);
         for (uint32_t b = 0; b < f->block_count; b += 1)
         {
