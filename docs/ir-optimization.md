@@ -101,10 +101,12 @@ Two cost rules keep a branch or move a select:
 - **A recurrence through the condition stays a branch.** The head's condition
   may read, within 16 rows, a phi that one of the join's phis flows into, as a
   running maximum's does. Its select would put the comparison on the loop's
-  carried chain: on the 9700X, `cmp; setg; test; cmovne` is four cycles per
+  carried chain: on the 9700X, `cmp; setg; test; cmovne` was four cycles per
   element against a predicted branch's one, and #1382's running max ran 3.8
-  times main's cycles. LLVM's x86 cmov conversion turns such a `cmov` back into
-  a branch after selection, and clang -O2 keeps branches there.
+  times main's cycles. Tier 1's select of a comparison is `cmp; cmovg` since
+  #2676, a chain of two cycles by their latencies, still twice the branch's.
+  LLVM's x86 cmov conversion turns such a `cmov` back into a branch after
+  selection, and clang -O2 keeps branches there.
 - **An accumulation's select sinks below its operation.** An in-place phi may
   take `s op x` on one edge and `s` on the other: an addition, a subtraction
   from `s`, an or or a xor of integers, which nothing else reads. The

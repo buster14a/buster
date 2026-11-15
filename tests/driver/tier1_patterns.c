@@ -10,9 +10,12 @@
 // - a computed goto's dispatch: an indirect jump at each handler's end, no jump to the shared one;
 // - #2592's fetch, `i = *pc++` at each handler's end: the load before the increment, which adds in pc's register, so
 //   that no move precedes the handlers' indirect jumps (the function's first fetch, of its parameter, may still move);
-// - and #2768's handler that calls in one arm, as Lua's OP_GETTABUP does: the loop's values it spills around the call
+// - #2768's handler that calls in one arm, as Lua's OP_GETTABUP does: the loop's values it spills around the call
 //   wait in their slots for their next use, so that the join after the call reloads none of them into a register the
-//   loop keeps another value in, and every handler's indirect jump follows its table's load at once.
+//   loop keeps another value in, and every handler's indirect jump follows its table's load at once;
+// - and #2676's selects of comparisons (a maximum, a clamp, a loop's conditional sum, a comparison of a load with an
+//   immediate and with a register, a doubleword's comparison choosing quadwords, an unsigned one): a cmov of the
+//   comparison's flags for each, no setcc.
 
 #if defined(BUSTER_TIER1_PATTERNS_SUBJECT)
 
@@ -236,6 +239,49 @@ spilled_halt:
     return base[BUSTER_PATTERNS_A(i)];
 }
 
+__attribute__((noinline)) long patterns_max(long a, long b)
+{
+    return a > b ? a : b;
+}
+
+__attribute__((noinline)) int patterns_clamp(int x)
+{
+    return x < 0 ? 0 : x > 255 ? 255 : x;
+}
+
+__attribute__((noinline)) long patterns_sum(const int* a, int n)
+{
+    long s = 0;
+    for (int i = 0; i < n; i += 1)
+    {
+        if (a[i] > 128)
+        {
+            s += a[i];
+        }
+    }
+    return s;
+}
+
+__attribute__((noinline)) int patterns_loaded(const int* p, int x, int y)
+{
+    return *p == 7 ? x : y;
+}
+
+__attribute__((noinline)) int patterns_loaded_other(const int* p, int q, int x, int y)
+{
+    return *p < q ? x : y;
+}
+
+__attribute__((noinline)) long patterns_mixed(int a, int b, long x, long y)
+{
+    return a < b ? x : y;
+}
+
+__attribute__((noinline)) unsigned patterns_unsigned(unsigned a, unsigned b, unsigned x)
+{
+    return a >= b ? x : 0;
+}
+
 #elif defined(BUSTER_TIER1_PATTERNS_ORACLE)
 
 #include <limits.h>
@@ -263,6 +309,13 @@ int patterns_field(const unsigned int* code, const int* table);
 char* patterns_scale(char* p, unsigned long n);
 long patterns_dispatch(const unsigned char* code, long* stack);
 long patterns_fetch(const unsigned int* pc, long* stack);
+long patterns_max(long a, long b);
+int patterns_clamp(int x);
+long patterns_sum(const int* a, int n);
+int patterns_loaded(const int* p, int x, int y);
+int patterns_loaded_other(const int* p, int q, int x, int y);
+long patterns_mixed(int a, int b, long x, long y);
+unsigned patterns_unsigned(unsigned a, unsigned b, unsigned x);
 struct patterns_state
 {
     long* base;
@@ -423,8 +476,28 @@ int main(void)
                     condition = a < b && b < c && c < d;
                     valid = patterns_chain(a, b, c, d) == (condition ? yes : (long)((unsigned long)d + 11)) && patterns_taken == taken + condition && valid;
                 }
+                // #2676's selects, on the inputs and their truncations.
+                const int x = (int)a;
+                const int y = (int)b;
+                const int z = (int)c;
+                valid = patterns_mixed(x, y, b, c) == (x < y ? b : c) && valid;
+                valid = patterns_unsigned((unsigned)x, (unsigned)y, (unsigned)z) == ((unsigned)x >= (unsigned)y ? (unsigned)z : 0u) && valid;
+                valid = patterns_loaded_other(&x, y, z, (int)c ^ 5) == (x < y ? z : ((int)c ^ 5)) && valid;
+                valid = patterns_max(a, b) == (a > b ? a : b) && valid;
             }
         }
+    }
+    for (int x = -300; x <= 300; x += 1)
+    {
+        valid = patterns_clamp(x) == (x < 0 ? 0 : x > 255 ? 255 : x) && valid;
+        valid = patterns_loaded(&x, x * 3, x - 1) == (x == 7 ? x * 3 : x - 1) && valid;
+    }
+    const int summed[] = { 0, 128, 129, 255, -129, 300, 7, 129 };
+    long sum = 0;
+    for (int n = 0; n <= 8; n += 1)
+    {
+        valid = patterns_sum(summed, n) == sum && valid;
+        sum += n < 8 && summed[n] > 128 ? summed[n] : 0;
     }
     const long values[] = { 4, 9, -3, 9, 12 };
     for (long n = -1; n <= 5; n += 1)
@@ -539,6 +612,7 @@ typedef enum PatternsKind
     PATTERNS_DISPATCH,
     PATTERNS_FETCH,
     PATTERNS_SPILLED,
+    PATTERNS_SELECT,
 } PatternsKind;
 
 typedef struct PatternsFunction PatternsFunction;
@@ -560,6 +634,13 @@ static const PatternsFunction patterns_functions[] = {
     { "patterns_dispatch", PATTERNS_DISPATCH },
     { "patterns_fetch", PATTERNS_FETCH },
     { "patterns_spilled", PATTERNS_SPILLED },
+    { "patterns_max", PATTERNS_SELECT },
+    { "patterns_clamp", PATTERNS_SELECT },
+    { "patterns_sum", PATTERNS_SELECT },
+    { "patterns_loaded", PATTERNS_SELECT },
+    { "patterns_loaded_other", PATTERNS_SELECT },
+    { "patterns_mixed", PATTERNS_SELECT },
+    { "patterns_unsigned", PATTERNS_SELECT },
 };
 
 #define BUSTER_PATTERNS_COUNT (sizeof(patterns_functions) / sizeof(patterns_functions[0]))
@@ -592,6 +673,7 @@ static bool patterns_memory(const char* operand)
 static bool patterns_shape(const PatternsFunction* function, const PatternsBody* body)
 {
     unsigned sets = 0;
+    unsigned moves = 0;
     unsigned shifts = 0;
     unsigned immediates = 0;
     unsigned registers = 0;
@@ -612,6 +694,7 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
         const char* comma = strrchr(operands, ',');
         const char* destination = comma != NULL ? comma + 1 : operands;
         sets += strncmp(operation, "set", 3) == 0;
+        moves += strncmp(operation, "cmov", 4) == 0;
         shifts += (strncmp(operation, "shl", 3) == 0 || strncmp(operation, "shr", 3) == 0 || strncmp(operation, "sar", 3) == 0) && strncmp(operands, "$0x0,", 5) == 0;
         const bool move = strncmp(operation, "mov", 3) == 0 && strncmp(operation, "movz", 4) != 0 && strncmp(operation, "movs", 4) != 0;
         immediates += move && operands[0] == '$' && patterns_memory(destination);
@@ -655,11 +738,14 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     case PATTERNS_SPILLED:
         valid = valid && indirect >= 4 && loaded + 1 >= indirect;
         break;
+    case PATTERNS_SELECT:
+        valid = valid && sets == 0 && moves >= 1;
+        break;
     }
     if (!valid)
     {
-        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u loaded-jumps=%u\n",
-                function->name, body->definitions, sets, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, loaded);
+        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u cmov=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u loaded-jumps=%u\n",
+                function->name, body->definitions, sets, moves, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, loaded);
     }
     return valid;
 }

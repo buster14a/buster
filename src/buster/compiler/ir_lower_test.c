@@ -82,6 +82,8 @@ struct IrLowerTestFrame
 {
     const IrFunction* function;
     uint64_t* values;
+    // A 16-byte vector value's bytes (#2693: a COPY's 16-byte pieces), 16 per instruction.
+    uint8_t* vectors;
     uint64_t* slots;
     uint64_t arguments[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
     // The function's own copies of its aggregate parameters' bytes (IrPassed.size), which those parameters point to.
@@ -101,8 +103,9 @@ static bool ir_lower_test_frame(IrLowerTestFrame* frame, const IrFunction* funct
     frame->destination = destination;
     frame->instruction = function->block_offsets[0];
     frame->values = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)function->instruction_count + 1);
+    frame->vectors = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, 16 * ((uint64_t)function->instruction_count + 1));
     frame->slots = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)function->slot_count + 1);
-    bool ok = frame->values != 0 && frame->slots != 0 && (count == function->parameter_count || (function->variadic && count > function->parameter_count)) &&
+    bool ok = frame->values != 0 && frame->vectors != 0 && frame->slots != 0 && (count == function->parameter_count || (function->variadic && count > function->parameter_count)) &&
               count <= BUSTER_TIER0_MAX_CALL_ARGUMENTS;
     if (ok)
     {
@@ -444,16 +447,18 @@ static uint64_t ir_lower_test_interpret(const IrFunction* functions, uint32_t fu
             {
                 const uint8_t memory_type = op == IR_LOAD ? type : function->type[b];
                 const uint32_t bytes = (ir_type_bits[memory_type] + 7) / 8;
-                ok = bytes <= 8 && ir_lower_test_memory(frames, depth, globals, data->size, av, bytes);
+                // A 16-byte vector's bytes are the instruction's own (IrLowerTestFrame.vectors): a COPY's pieces.
+                const bool vector = ir_vector_type(memory_type) && bytes == 16;
+                ok = (bytes <= 8 || vector) && ir_lower_test_memory(frames, depth, globals, data->size, av, bytes);
                 if (ok)
                 {
                     if (op == IR_LOAD)
                     {
-                        memcpy(&value, (const void*)(uintptr_t)av, bytes);
+                        memcpy(vector ? (void*)&frame->vectors[16 * (uint64_t)i] : (void*)&value, (const void*)(uintptr_t)av, bytes);
                     }
                     else
                     {
-                        memcpy((void*)(uintptr_t)av, &bv, bytes);
+                        memcpy((void*)(uintptr_t)av, vector ? (const void*)&frame->vectors[16 * (uint64_t)b] : (const void*)&bv, bytes);
                     }
                 }
                 break;
@@ -2955,7 +2960,8 @@ static void ir_lower_test_objects(IrLowerTestTally* tally)
 
 // COPY of every size from 1 to BUSTER_TIER0_MAX_COPY_BYTES between two globals, and from one global onto itself, by
 // both paths: the destination's first `size` bytes must be the source's, its other bytes and the source unchanged, with
-// one load and one store per piece of the widest integer that fits what remains.
+// one load and one store per piece: up to BUSTER_TIER0_COPY_NARROW_BYTES, of the widest integer that fits what remains;
+// past it, since a global isn't a local (#2693), of 16 bytes, the last ending at the end.
 #define BUSTER_IR_LOWER_TEST_COPY_SPAN (BUSTER_TIER0_MAX_COPY_BYTES + 8)
 
 static void ir_lower_test_copies(IrLowerTestTally* tally)
@@ -3032,7 +3038,7 @@ static void ir_lower_test_copies(IrLowerTestTally* tally)
                     loads += function.op[i] == IR_LOAD;
                     stores += function.op[i] == IR_STORE;
                 }
-                const uint32_t pieces = size / 8 + (uint32_t)__builtin_popcount(size % 8);
+                const uint32_t pieces = size > BUSTER_TIER0_COPY_NARROW_BYTES ? (size + 15) / 16 : size / 8 + (uint32_t)__builtin_popcount(size % 8);
                 ok = ir_lower_test_expect(tally, loads == pieces && stores == pieces, "a copy is one load and store per widest piece", size, same);
                 // The globals as the copy must leave them.
                 memcpy(expected, initial, sizeof(expected));

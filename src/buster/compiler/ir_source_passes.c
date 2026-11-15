@@ -42,6 +42,7 @@ typedef enum IrSourcePass
     IR_SOURCE_PASS_MEMORY,
     IR_SOURCE_PASS_TIER1_MEMORY,
     IR_SOURCE_PASS_LICM,
+    IR_SOURCE_PASS_VECTORIZE,
     IR_SOURCE_PASS_INLINE,
     IR_SOURCE_PASS_COUNT,
 } IrSourcePass;
@@ -58,6 +59,7 @@ static const char* const ir_source_pass_names[IR_SOURCE_PASS_COUNT] = {
     "memory",
     "tier1-memory",
     "licm",
+    "vectorize",
     "inline",
 };
 
@@ -217,6 +219,28 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
         const IrCheck scalar_check = ir_optimize_licm(promoted, twin, scratch, options, &scalar);
         const bool same = vector_check.error == IR_OK && scalar_check.error == IR_OK && vector.moved == scalar.moved && ir_source_passes_equal(&vector.function, &scalar.function);
         ir_source_passes_record(totals, IR_SOURCE_PASS_LICM, file, name, vector_check, scalar_check, same, true, vector.moved != 0, vector.moved);
+        arena_pop_to(output, output_mark);
+        arena_pop_to(twin, twin_mark);
+    }
+    // The loop vectorizer (#2743), at every operation the IR has, on the promoted function as Tier 1's optimizer leaves it
+    // (the promoted form's exit tests are still truth values' chains, which the pipeline simplifies before the pass).
+    {
+        IrVectorizeTarget target = { 0 };
+        ir_vectorize_target_ir(&target);
+        IrVectorizeOptions options = { .target = &target };
+        IrOptimizeOptions cleanup = ir_optimize_options();
+        cleanup.passes = ir_source_pass_optimizer[IR_SOURCE_PASS_TIER1 - IR_SOURCE_PASS_SCCP];
+        IrOptimizeResult cleaned = { 0 };
+        const IrCheck cleanup_check = ir_optimize(promoted, output, scratch, cleanup, &cleaned);
+        const IrFunction* input = cleanup_check.error == IR_OK ? &cleaned.function : promoted;
+        IrVectorizeResult vector = { 0 };
+        IrVectorizeResult scalar = { 0 };
+        const IrCheck vector_check = ir_vectorize_loops(input, &options, output, scratch, &vector);
+        options.scalar = true;
+        const IrCheck scalar_check = ir_vectorize_loops(input, &options, twin, scratch, &scalar);
+        const bool same = vector_check.error == IR_OK && scalar_check.error == IR_OK && vector.changed == scalar.changed && vector.vectorized == scalar.vectorized &&
+                          vector.loops == scalar.loops && memcmp(vector.refused, scalar.refused, sizeof(vector.refused)) == 0 && ir_source_passes_equal(&vector.function, &scalar.function);
+        ir_source_passes_record(totals, IR_SOURCE_PASS_VECTORIZE, file, name, vector_check, scalar_check, same, true, vector.changed, vector.vectorized);
         arena_pop_to(output, output_mark);
         arena_pop_to(twin, twin_mark);
     }
@@ -550,6 +574,15 @@ static Tier0BenchmarkReading ir_source_passes_run(IrSourcePass pass, bool scalar
             options.scalar = scalar;
             IrLicmResult result = { 0 };
             check = ir_optimize_licm(&corpus->promoted[f], output, scratch, options, &result);
+        }
+        else if (pass == IR_SOURCE_PASS_VECTORIZE)
+        {
+            IrVectorizeTarget target = { 0 };
+            ir_vectorize_target_ir(&target);
+            // Timed on the promoted form: the benchmark's inputs are prepared outside the time, and this one cleans none.
+            const IrVectorizeOptions options = { .target = &target, .scalar = scalar };
+            IrVectorizeResult result = { 0 };
+            check = ir_vectorize_loops(&corpus->promoted[f], &options, output, scratch, &result);
         }
         else if (pass == IR_SOURCE_PASS_INLINE)
         {

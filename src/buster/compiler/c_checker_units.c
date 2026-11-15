@@ -2410,6 +2410,10 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             __atomic_fetch_add(&report->licm_moved, unit_report->licm_moved, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->sroa_split, unit_report->sroa_split, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->gvn_removed, unit_report->gvn_removed, __ATOMIC_RELAXED);
+            for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_VECTORIZE_COUNTS; k += 1)
+            {
+                __atomic_fetch_add(&report->vectorize[k], unit_report->vectorize[k], __ATOMIC_RELAXED);
+            }
         }
         check_program_lanes_settle(&lane->functions);
         Arena* arenas[] = { &lane->output, &lane->scratch, &lane->arena, &lane->functions.arenas[0].scratch };

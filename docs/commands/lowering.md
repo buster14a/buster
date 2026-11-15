@@ -185,6 +185,32 @@ divisors, the sign bit's, a `_BitInt`'s, divisors with effects or that aren't
 constants, and element sizes of 3, 12 and a variable-length array's. Source
 `_BitInt` values retain ordinary lowering in this optimization.
 
+An integer constant's own conversion folds into its CONST (#2678,
+`check_lower_fold_conversion`), so that Tier 0 takes it as an immediate where
+it moved it to a register and converted it every time the code ran (`mov $1;
+movslq; add`, `mov $1; cvtsi2sd`). The conversion is the one
+`check_lower_expression` or `check_lower_operand` pushes under the operand's
+EXPRESSION task, whose `value` is the operand's node plus one; the constant's
+expansion records its CONST's end and node (`CheckLowerWriter.constant_end`
+and `constant_node`), and a label placed since takes the end away, since a
+jump there joins another value. `check_lower_constant_conversion` is the rule
+the three writers share: an integer class takes the value modulo its width,
+`_Bool` whether it is nonzero, and `float` and `double` the value only where
+it is exact, so that a conversion that rounds keeps its run-time rounding and
+inexact flag; nothing folds to or from a `_BitInt`, a complex value, an
+aggregate or a memory class (`long double`, the 128-bit integers, the
+half-precision ones, vectors). The node templates fold it in the constant's
+slot (`BUSTER_CHECK_LOWER_TEMPLATE_FOLDED`, and leave a folded constant popped
+alone to the tasks, which fold it there), and the node machine in its row
+(`node_machine_fold_conversion`). A conditional's or a logical operator's
+value converted after the label that joins its arms keeps its CONVERT.
+`tests/checker/constant-conversions` holds the regressions, which run natively
+against clang (`c_check_constant_conversion_test.c`): the issue's four functions,
+whose Tier 0 code has no `movslq` or `cvtsi2s` of a constant; every kind of
+conversion that folds, after which no integer CONST precedes a CONVERT on either
+lowering, and the node templates' entries are the tasks'; and the conversions
+that don't fold.
+
 ## Node machine census (#2524)
 
 `./build/compiler measure-node-machine [--list N] [preprocessor options] file...`

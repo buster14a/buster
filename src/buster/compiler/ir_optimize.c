@@ -24,7 +24,7 @@
 // CFG cleanup's merges (#139, ir_optimize_merges): a block whose single predecessor has it as its single successor joins
 // it. The C driver's Tier 1 requests it; the shared optimizer's default keeps each block, as its other clients expect.
 #define BUSTER_IR_OPTIMIZE_MERGE 32u
-#define BUSTER_IR_OPTIMIZE_MEMORY 64u
+#define BUSTER_IR_OPTIMIZE_MEMORY 128u
 #define BUSTER_IR_OPTIMIZE_PASSES (BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_LAYOUT | BUSTER_IR_OPTIMIZE_IDENTITY | BUSTER_IR_OPTIMIZE_MERGE | BUSTER_IR_OPTIMIZE_MEMORY)
 #define BUSTER_IR_OPTIMIZE_AUTO 0u
 #define BUSTER_IR_OPTIMIZE_VECTOR 1u
