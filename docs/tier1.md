@@ -477,13 +477,21 @@ The AES rounds are its `aes` (#1840, its "AES rounds"), `BUSTER_TIER1_VECTOR_AES
 The bit shuffles into a mask are its `bitshuffle` (#1840, its "Bit shuffles into
 a mask"), `BUSTER_TIER1_VECTOR_BITSHUFFLE`: `vpshufbitqmb`, under the writemask
 where a mask's AND takes it.
-The multishifts and sums of absolute differences are its `quadword_op` (#1840,
-its "Quadword operations"), `BUSTER_TIER1_VECTOR_QUADWORD_OP`:
-`vpmultishiftqb` or `vpsadbw`.
+The multishifts, sums of absolute differences and products of doublewords are
+its `quadword_op` (#1840, #2780, its "Quadword operations"),
+`BUSTER_TIER1_VECTOR_QUADWORD_OP`: `vpmultishiftqb`, `vpsadbw`, `vpmuludq` or
+`vpmuldq`.
 The funnel shifts and rotates are its `funnel` (#1840, its "Funnel shifts and
 rotates"), `BUSTER_TIER1_VECTOR_FUNNEL`: a rotate by an immediate where its
 halves are one value and its counts a constant, else `vpshldv` or `vpshrdv`
 into the tied half's register.
+The multiply-adds and packs are its `pairwise` and the dot products its `dot`
+(#2780, its "The other units' rows"), `BUSTER_TIER1_VECTOR_PAIRWISE`: `vpmaddwd`,
+`vpmaddubsw` or a pack, and `BUSTER_TIER1_VECTOR_DOT`: `vpdpbusd` to `vpdpwssds`
+into the accumulator's register, which the destination takes first.
+A select of a vector's lanes less than zero is one `vpblendvb`, `vblendvps` or
+`vblendvpd` where the comparison is its alone (#2780,
+`BUSTER_TIER1_VECTOR_BLENDV`).
 
 ### Inlining (#1282, #2541)
 
