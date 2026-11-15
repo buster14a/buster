@@ -60,7 +60,9 @@
 // A group with more lanes than the CPUs the process may run on shares them (lane_group_shares_cpus), and there a lane
 // that would wait in mwaitx sleeps at once instead: a wait in mwaitx, or the spin that takes its place in a build without
 // it, keeps the lane's CPU for up to BUSTER_LANE_WAIT_NANOSECONDS, and the lanes that haven't arrived need those CPUs
-// before they can arrive, so that every sync would cost a timeslice.
+// before they can arrive, so that every sync would cost a timeslice. Another process computing on one of the CPUs is the
+// same shortage, which the affinity mask doesn't show: a lane whose wait ran out the mwaitx budget while the machine had
+// more runnable threads than the process's CPUs sleeps at once for its next waits as well (BUSTER_LANE_STARVED_WAITS).
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -1216,6 +1218,11 @@ struct ThreadContext
     uint64_t wait_ticks;
     uint64_t wait_origin_ticks;
     uint64_t wait_origin_nanoseconds;
+    // lane_wait's measure of a CPU short (#2545): how many more of its waits past the spins sleep at once, as a group that
+    // shares CPUs does, since a wait ran out its whole mwaitx budget; and how many the next such wait sets, 0 for
+    // BUSTER_LANE_STARVED_WAITS, doubling while each wait that tries mwaitx again runs it out too.
+    uint32_t wait_starved;
+    uint32_t wait_backoff;
 };
 
 // main.c's units share one context, the driver's unit's, since a command's code runs in more than one of them (main.c:
@@ -1365,6 +1372,15 @@ static void scratch_empty(void)
 // (docs/object-writer-and-linker.md, "Lanes"). Past 1 ms the lane sleeps, since the waits that slow it down do so
 // whichever way it waits, and on the futex its core can go into its deepest idle state, at 0.07 W.
 #define BUSTER_LANE_WAIT_NANOSECONDS 1000000ull
+// A wait that runs out that budget while the machine has more runnable threads than the process's CPUs
+// (lane_cpus_short) is a CPU short, as when another process computes on one of the CPUs the group's lanes run on
+// (#2545): the lane that hasn't arrived waits for a CPU the waiting lanes hold in mwaitx, and every sync costs the
+// budget; a link of 2 ms took 63. The thread's next waits past the spins sleep at once, as a group that shares CPUs does
+// (lane_group_shares_cpus), then one tries mwaitx again: this many at first, twice as many after each such try that
+// runs it out as well, up to BUSTER_LANE_STARVED_WAITS_MOST. A wait that ends within the budget starts over from the
+// first count.
+#define BUSTER_LANE_STARVED_WAITS 8u
+#define BUSTER_LANE_STARVED_WAITS_MOST 1024u
 // The same in TSC ticks at the 9700X's 3.79 GHz, which a thread waits until it has measured its own TSC's rate: the
 // TSC runs at a rate of each CPU's own, so that another CPU's 1 ms is another number of ticks.
 #define BUSTER_LANE_MWAITX_TICKS 3800000ull
@@ -1617,6 +1633,27 @@ static uint32_t lane_sleep(uint32_t* word, uint32_t value)
     return current & ~1u;
 }
 
+static uint32_t lane_cpu_count(void);
+
+// Whether the machine has more runnable threads than the CPUs the process may run on: /proc/loadavg's fourth field,
+// the scheduling entities running or ready to run now, this thread and the other waiting lanes among them, against
+// lane_cpu_count. A wait that ran out its mwaitx budget asks (#2545), a few microseconds after a millisecond spent:
+// with every lane on a CPU, a long stretch of serial work runs the budget out too, and a lane that then slept at once
+// would only pay the futex's wake at the syncs that follow.
+static bool lane_cpus_short(void)
+{
+    char text[128];
+    const int file = open("/proc/loadavg", O_RDONLY | O_CLOEXEC);
+    const ssize_t length = file >= 0 ? read(file, text, sizeof(text)) : -1;
+    if (file >= 0)
+    {
+        close(file);
+    }
+    const uint64_t runnable = length > 0 ? arena_loadavg_runnable(text, (uint64_t)length) : 0;
+    const bool result = runnable > lane_cpu_count();
+    return result;
+}
+
 // Waits while *word, but for its bit 0, is `value`, and returns its new value without bit 0. Spins first, then waits in
 // mwaitx; then sleeps (lane_sleep). A lane of a group that shares CPUs (LaneGroup.shares_cpus) leaves the waiting to
 // lane_sleep: a wait in mwaitx, or the spin that takes its place in a build without it, keeps the lane's CPU for up to
@@ -1632,8 +1669,10 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
     }
     const LaneGroup* group = thread_context.lane.group;
     const bool shares_cpus = group != 0 && __atomic_load_n(&group->shares_cpus, __ATOMIC_RELAXED);
+    const bool starved = thread_context.wait_starved != 0;
+    thread_context.wait_starved -= starved && (current & ~1u) == value;
     // A wait that ended while spinning, as at most syncs, doesn't read the clock (rdtsc is 27 µops on Zen 5).
-    if (!shares_cpus && (current & ~1u) == value)
+    if (!shares_cpus && !starved && (current & ~1u) == value)
     {
         const uint64_t begin = __rdtsc();
         const uint64_t budget = lane_wait_ticks(begin);
@@ -1659,6 +1698,11 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
 #endif
             waited = __rdtsc() - begin;
         }
+        // Ran out the budget: a CPU short (BUSTER_LANE_STARVED_WAITS).
+        const bool short_of_cpu = (current & ~1u) == value && lane_cpus_short();
+        const uint32_t backoff = thread_context.wait_backoff != 0 ? thread_context.wait_backoff : BUSTER_LANE_STARVED_WAITS;
+        thread_context.wait_starved = short_of_cpu ? backoff : 0;
+        thread_context.wait_backoff = !short_of_cpu ? 0 : backoff < BUSTER_LANE_STARVED_WAITS_MOST ? 2 * backoff : backoff;
     }
     return (current & ~1u) == value ? lane_sleep(word, value) : current & ~1u;
 }
