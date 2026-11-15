@@ -2379,8 +2379,9 @@ static void check_test_program_initializer_facts(CheckTest* test)
         }
         const CheckInput input = { .token_count = COUNT, .declaration_bits = flags };
         const CheckInitializers initializers = { .plans = plans, .count = COUNT, .declaration_tokens = declarations };
-        const CheckProgram program = { .types = &types.table, .input = &input, .initializers = &initializers,
-                                       .controls = controls, .control_count = COUNT };
+        CheckProgramBody bodies[3] = { { .first = 0, .count = COUNT } };
+        CheckProgram program = { .types = &types.table, .input = &input, .initializers = &initializers,
+                                 .controls = controls, .control_count = COUNT, .bodies = bodies, .body_count = 1 };
         scratch.capacity = 256;
         CheckLowerInitializers pools = { 0 };
         bool pooled = check_lower_init_pools(&pools, &program, facts, types.table.types.count, &output, &scratch) && pools.count == COUNT;
@@ -2391,6 +2392,18 @@ static void check_test_program_initializer_facts(CheckTest* test)
         }
         check_test_expect(test, pooled && scratch.length == 0,
                           "many dense record pools need only plan-sized scratch, never a type-sized traversal per initializer");
+        bodies[0] = (CheckProgramBody){ .first = 0, .count = 10 };
+        bodies[1] = (CheckProgramBody){ .first = 20, .count = 12 };
+        bodies[2] = bodies[0]; // A target-clone copy shares its source body's controls.
+        program.body_count = 3;
+        pools = (CheckLowerInitializers){ 0 };
+        pooled = check_lower_init_pools(&pools, &program, facts, types.table.types.count, &output, &scratch) && pools.count == 22;
+        for (uint32_t i = 0; pooled && i < COUNT; i += 1)
+        {
+            pooled = pools.first[i + 1] - pools.first[i] == (i < 10 || i >= 20);
+        }
+        check_test_expect(test, pooled && scratch.length == 0,
+                          "initializer pools follow selected body controls, including shared clone controls");
         scratch.capacity = 65536;
     }
     arena_release(&scratch);
