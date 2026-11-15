@@ -117,7 +117,22 @@ time for a refusing kind (`ir_vectorize_forbidden`); both have exact scalar
 twins. The classification, which reads each row's operands' classes in order,
 and the emission are the ordered part, shared by both paths, so the two give the
 same function (and object) by construction; the tests compare them anyway. A
-function without a phi on a back edge in block order builds no CFG.
+function without a phi on a back edge in block order walks no blocks.
+
+**Finding the loops.** The pass builds no CFG and no dominator tree: one
+iterative depth-first walk over the blocks' terminators marks the reachable
+blocks, counts each block's reachable predecessors and collects each back
+edge's header once. The admitted shape needs nothing more: a header (not the
+entry) with exactly two reachable predecessors, one of its branch's targets
+starting a chain of blocks each reached from the previous one alone and ending
+in a `br` to the next, back to the header, and the other predecessor ending in a
+`br` to it. That loop is natural, reducible and innermost by construction: the
+only way into the chain is from the header, and no chain block, having one
+predecessor, can head a loop. On sqlite3.c the CFG and the dominators were 84%
+of the pass's time (890 of 2,602 functions have a candidate phi); the walk made
+the measured kernels' objects byte for byte the same. The report's `loops`
+count is every back edge's header, outer loops included (they refuse as
+`shape`).
 
 ### Results
 
@@ -246,7 +261,8 @@ its redundant conversion chains before cleanup. The pass consumes the cleaned
 SSA, not C syntax. Natural loops, latches, parents and membership come from
 [dominators](dominators.md); irreducible loops and loops without a suitable
 outside predecessor are refused, as they are for
-[LICM](ir-loop-motion.md). The pass runs after if-conversion and LICM and before
+[LICM](ir-loop-motion.md). (The first implementation found that only its chain
+shape needs neither: see "Finding the loops" above.) The pass runs after if-conversion and LICM and before
 `ir_optimize_verified`, so ordinary cleanup sees both the vector and fallback
 forms. `--tier1-passes=+vectorize` first exposes it as a measurement option;
 making it a default is a later step with its own before/after evidence.

@@ -183,7 +183,7 @@ as with the solver, a candidate compiles from its own pipeline.
 `removed_instructions` and `removed_blocks` (the optimizer's output against
 its input, merges included), `merged_blocks`, `licm_moved`, `sroa_split`
 (slots) and `gvn_removed`; with `vectorize`, a `tier1-vectorize` line gives the
-innermost loops examined, those vectorized by their widest vector (`bytes16`,
+loops examined (each back edge's header once, outer loops included), those vectorized by their widest vector (`bytes16`,
 `bytes32`, `bytes64`), their reductions and run-time overlap tests (`guards`),
 and the refused loops by reason (`refused.shape` to `refused.width`).
 

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Loop vectorization of countable innermost loops (#2743, docs/tier1-loop-vectorization.md). Include after ir.c,
-// dominators.c and ir_optimize.c. ir_vectorize_loops(function, options, output, scratch, result) returns an IrCheck and,
+// Loop vectorization of countable innermost loops (#2743, docs/tier1-loop-vectorization.md). Include after ir.c and
+// ir_optimize.c. ir_vectorize_loops(function, options, output, scratch, result) returns an IrCheck and,
 // where it vectorized a loop, a fresh structurally verified function in result->function; elsewhere result->changed is
 // false and result->function is the input itself.
 //
@@ -135,8 +135,9 @@ struct IrVectorizeResult
 {
     IrFunction function;
     bool changed;
-    // Innermost loops examined, those vectorized, by their widest vector (16, 32 and 64 bytes), their reductions and
-    // their run-time overlap tests, and the refused ones by reason.
+    // Loops examined (each back edge's header in a depth-first walk once, outer loops included: they refuse as their
+    // shape), those vectorized, by their widest vector (16, 32 and 64 bytes), their reductions and their run-time
+    // overlap tests, and the refused ones by reason.
     uint32_t loops;
     uint32_t vectorized;
     uint32_t widths[BUSTER_IR_VECTORIZE_WIDTHS];
@@ -178,6 +179,7 @@ struct IrVectorizeLoop
     uint32_t latch;
     // The loop's rows in order: the header's non-phi rows, then each chain block's (IrVectorizeWork.rows).
     uint32_t row_count;
+    uint32_t header_rows;
     uint32_t induction;
     uint32_t start;
     uint32_t bound;
@@ -217,8 +219,18 @@ struct IrVectorizeWork
     const IrFunction* function;
     const IrVectorizeTarget* target;
     uint32_t mutation;
-    IrCfg cfg;
-    Dominators loops;
+    // The function's blocks from their terminators alone (ir_vectorize_graph): whether each is reachable from the entry,
+    // its reachable predecessors' count (at most 3) and its first and last, and the headers of the depth-first walk's
+    // back edges, each once: the loops examined.
+    uint8_t* reached;
+    uint8_t* predecessor_count;
+    uint32_t* predecessor_first;
+    uint32_t* predecessor_last;
+    uint32_t* headers;
+    uint32_t header_count;
+    // The loop being planned's blocks and rows, marked with its ordinal plus one (no reset: each loop's mark differs).
+    uint32_t* block_marks;
+    uint32_t* row_marks;
     // Per instruction: its admission kind, the loop pass's class, needed bit, coefficient (an index's multiplier or a
     // pointer's bytes per iteration), lanes' bytes' log2 and whether floating, its clones' values (in VB or G, the
     // guards' pointer clone with the induction at its start, and its splat), and the extension's two constants.
@@ -242,7 +254,6 @@ struct IrVectorizeWork
     uint64_t chain_capacity;
     uint32_t* touched;
     uint32_t touched_count;
-    uint8_t* innermost;
     IrVectorizeResult statistics;
 };
 
@@ -516,10 +527,24 @@ static bool ir_vectorize_same(const IrFunction* f, uint32_t x, uint32_t y, uint3
     return result;
 }
 
-// A loop's block in the work's CFG: whether `block` is in loop `loop`.
+// Whether `value` is a row of loop `loop` (its ordinal), as ir_vectorize_shape marked its blocks' rows.
 static bool ir_vectorize_inside(const IrVectorizeWork* work, uint32_t loop, uint32_t value)
 {
-    const bool result = value < work->function->instruction_count && dominators_loop_contains(&work->loops, loop, work->cfg.instruction_blocks[value]);
+    const bool result = value < work->function->instruction_count && work->row_marks[value] == loop + 1;
+    return result;
+}
+
+// Whether `block` is a block of loop `loop`.
+static bool ir_vectorize_block_inside(const IrVectorizeWork* work, uint32_t loop, uint32_t block)
+{
+    const bool result = block < work->function->block_count && work->block_marks[block] == loop + 1;
+    return result;
+}
+
+// Whether row `value` is in block `block`.
+static bool ir_vectorize_in_block(const IrFunction* f, uint32_t block, uint32_t value)
+{
+    const bool result = value >= f->block_offsets[block] && value < f->block_offsets[(uint64_t)block + 1];
     return result;
 }
 
@@ -575,80 +600,189 @@ static bool ir_vectorize_in_g(const IrVectorizeWork* work, uint32_t loop, uint32
     return result;
 }
 
-// The loop's blocks: the header, then the chain from its in-loop successor back to it. Fills plan's blocks and rows
-// and returns whether the shape is the admitted one.
+// The loop's blocks: the header, then the chain from one of its branch's targets back to it, each block of it reached
+// from the previous one alone and ending in a `br` to the next. Such a loop is a natural loop whose header dominates it,
+// reducible and innermost by its shape: no chain block can head another loop, having one predecessor. The header's
+// reachable predecessors must be the chain's last block (the latch) and one other, the preheader, which ends in a
+// `br` to it. Marks the loop's blocks and rows, fills the plan's blocks and rows, and returns whether the shape is the
+// admitted one.
 static bool ir_vectorize_shape(IrVectorizeWork* work, uint32_t loop, IrVectorizeLoop* plan)
 {
     const IrFunction* f = work->function;
-    const IrCfg* cfg = &work->cfg;
-    const uint32_t header = work->loops.loop_header[loop];
+    const uint32_t header = work->headers[loop];
+    const uint32_t mark = loop + 1;
+    const uint32_t terminator = f->block_offsets[(uint64_t)header + 1] - 1;
     plan->header = header;
     plan->preheader = BUSTER_IR_NONE;
     plan->latch = BUSTER_IR_NONE;
     plan->exit = BUSTER_IR_NONE;
-    uint32_t outside = 0;
-    uint32_t inside = 0;
-    for (uint32_t edge = cfg->predecessor_offsets[header]; edge < cfg->predecessor_offsets[(uint64_t)header + 1]; edge += 1)
+    // The entry has no preheader: its predecessors would all be the loop's.
+    bool valid = header != 0 && f->op[terminator] == IR_CBR && f->b[terminator] != f->c[terminator] && work->predecessor_count[header] == 2;
+    // Which of the branch's targets starts the chain back to the header.
+    uint32_t first = BUSTER_IR_NONE;
+    for (uint32_t side = 0; valid && side < 2; side += 1)
     {
-        const uint32_t predecessor = cfg->predecessors[edge];
-        const bool in = dominators_loop_contains(&work->loops, loop, predecessor);
-        outside += in ? 0 : 1;
-        inside += in ? 1 : 0;
-        plan->preheader = in ? plan->preheader : predecessor;
-        plan->latch = in ? predecessor : plan->latch;
+        const uint32_t target = side == 0 ? f->b[terminator] : f->c[terminator];
+        uint32_t previous = header;
+        uint32_t block = target;
+        uint32_t steps = 0;
+        bool chain = true;
+        while (chain && block != header && steps < f->block_count)
+        {
+            const uint32_t end = f->block_offsets[(uint64_t)block + 1] - 1;
+            chain = block != 0 && work->reached[block] != 0 && work->predecessor_count[block] == 1 && work->predecessor_first[block] == previous && f->op[end] == IR_BR;
+            previous = block;
+            block = chain ? f->a[end] : block;
+            steps += 1;
+        }
+        const bool closes = chain && block == header;
+        valid = !(closes && first != BUSTER_IR_NONE);
+        first = closes ? target : first;
+        plan->latch = closes ? previous : plan->latch;
+        plan->exit = closes ? (side == 0 ? f->c[terminator] : f->b[terminator]) : plan->exit;
     }
-    bool valid = work->loops.loop_irreducible[loop] == 0 && work->innermost[loop] != 0 && outside == 1 && inside == 1 && work->loops.rpo_index[plan->preheader] != BUSTER_DOMINATOR_NONE &&
-                 cfg->successor_offsets[(uint64_t)plan->preheader + 1] - cfg->successor_offsets[plan->preheader] == 1 && f->op[f->block_offsets[(uint64_t)plan->preheader + 1] - 1] == IR_BR;
-    const uint32_t terminator = f->block_offsets[(uint64_t)header + 1] - 1;
-    valid = valid && f->op[terminator] == IR_CBR;
-    uint32_t next = BUSTER_IR_NONE;
+    valid = valid && first != BUSTER_IR_NONE;
     if (valid)
     {
-        const bool first = dominators_loop_contains(&work->loops, loop, f->b[terminator]);
-        const bool second = dominators_loop_contains(&work->loops, loop, f->c[terminator]);
-        valid = first != second;
-        next = first ? f->b[terminator] : f->c[terminator];
-        plan->exit = first ? f->c[terminator] : f->b[terminator];
+        const uint32_t a = work->predecessor_first[header];
+        const uint32_t b = work->predecessor_last[header];
+        plan->preheader = a == plan->latch ? b : a;
+        valid = (a == plan->latch) != (b == plan->latch) && f->op[f->block_offsets[(uint64_t)plan->preheader + 1] - 1] == IR_BR;
     }
     uint32_t count = 0;
-    for (uint32_t i = f->block_offsets[header]; valid && i < terminator; i += 1)
+    if (valid)
     {
-        if (f->op[i] != IR_PHI)
+        work->block_marks[header] = mark;
+        for (uint32_t i = f->block_offsets[header]; i <= terminator; i += 1)
         {
-            work->rows[count] = i;
-            count += 1;
+            work->row_marks[i] = mark;
+            if (f->op[i] != IR_PHI && i < terminator)
+            {
+                work->rows[count] = i;
+                count += 1;
+            }
         }
     }
-    uint32_t visited = 1;
-    uint32_t previous = header;
-    while (valid && next != header)
+    plan->header_rows = count;
+    for (uint32_t block = first; valid && block != header;)
     {
-        const uint32_t block = next;
         const uint32_t end = f->block_offsets[(uint64_t)block + 1] - 1;
-        // Its one reachable predecessor is the previous block (an unreachable stub may branch to it too).
-        uint32_t predecessors = 0;
-        uint32_t reached = BUSTER_IR_NONE;
-        for (uint32_t edge = cfg->predecessor_offsets[block]; edge < cfg->predecessor_offsets[(uint64_t)block + 1]; edge += 1)
+        work->block_marks[block] = mark;
+        for (uint32_t i = f->block_offsets[block]; i <= end; i += 1)
         {
-            const bool reachable = work->loops.rpo_index[cfg->predecessors[edge]] != BUSTER_DOMINATOR_NONE;
-            predecessors += reachable ? 1 : 0;
-            reached = reachable ? cfg->predecessors[edge] : reached;
-        }
-        valid = dominators_loop_contains(&work->loops, loop, block) && predecessors == 1 && reached == previous && f->op[end] == IR_BR && visited < work->loops.loop_size[loop];
-        for (uint32_t i = f->block_offsets[block]; valid && i < end; i += 1)
-        {
+            work->row_marks[i] = mark;
             // A chain block's phi has its predecessor's value alone: a copy.
-            valid = f->op[i] != IR_PHI || f->b[i] == 1;
-            work->rows[count] = i;
-            count += 1;
+            valid = valid && (f->op[i] != IR_PHI || f->b[i] == 1);
+            if (i < end)
+            {
+                work->rows[count] = i;
+                count += 1;
+            }
         }
-        previous = block;
-        next = valid ? f->a[end] : header;
-        visited += 1;
+        block = f->a[end];
     }
-    valid = valid && visited == work->loops.loop_size[loop] && previous == plan->latch;
     plan->row_count = valid ? count : 0;
     return valid;
+}
+
+// The index-th successor of `block` by its terminator, or BUSTER_IR_NONE past the last: a branch's target, a
+// conditional branch's two, a switch's default and cases. A return, `unreachable` and an indirect branch (a function
+// with labels is never planned) have none.
+static uint32_t ir_vectorize_successor(const IrFunction* f, uint32_t block, uint32_t index)
+{
+    const uint32_t end = f->block_offsets[(uint64_t)block + 1] - 1;
+    const uint32_t op = f->op[end];
+    uint32_t result = BUSTER_IR_NONE;
+    if (op == IR_BR)
+    {
+        result = index == 0 ? f->a[end] : BUSTER_IR_NONE;
+    }
+    else if (op == IR_CBR)
+    {
+        result = index == 0 ? f->b[end] : index == 1 ? f->c[end] : BUSTER_IR_NONE;
+    }
+    else if (op == IR_SWITCH)
+    {
+        result = index == 0 ? f->extra[f->b[end]] : index <= f->c[end] ? f->extra[f->b[end] + index * 2] : BUSTER_IR_NONE;
+    }
+    return result;
+}
+
+// The depth-first walk's first visit of `block`, whose ancestors are the active blocks: it becomes active, and each of
+// its distinct successors counts it as a reachable predecessor (an edge repeated from one block once) and is a loop's
+// header, once, where it is active (an ancestor's, or its own, back edge).
+static void ir_vectorize_visit(IrVectorizeWork* work, uint32_t block, uint8_t* active, uint8_t* header, uint32_t* source)
+{
+    const IrFunction* f = work->function;
+    work->reached[block] = 1;
+    active[block] = 1;
+    for (uint32_t k = 0; ir_vectorize_successor(f, block, k) != BUSTER_IR_NONE; k += 1)
+    {
+        const uint32_t next = ir_vectorize_successor(f, block, k);
+        if (next < f->block_count && source[next] != block)
+        {
+            source[next] = block;
+            work->predecessor_first[next] = work->predecessor_count[next] == 0 ? block : work->predecessor_first[next];
+            work->predecessor_last[next] = block;
+            work->predecessor_count[next] += work->predecessor_count[next] < 3 ? 1 : 0;
+            if (active[next] != 0 && header[next] == 0)
+            {
+                header[next] = 1;
+                work->headers[work->header_count] = next;
+                work->header_count += 1;
+            }
+        }
+    }
+}
+
+// The blocks' graph from their terminators: one iterative depth-first walk from the entry marks the reachable blocks,
+// counts each block's reachable predecessors with its first and last, and collects each back edge's header once (an
+// edge to a block on the walk's stack). A block's edges are all read at its first visit, when the stack holds its
+// ancestors, as they would be one by one. No instruction is verified and no dominator tree is built: the loops the pass
+// takes need neither (ir_vectorize_shape). Returns false where scratch has no room.
+static bool ir_vectorize_graph(IrVectorizeWork* work, Arena* scratch)
+{
+    const IrFunction* f = work->function;
+    const uint64_t blocks = f->block_count;
+    bool ok = true;
+    work->reached = ir_allocate(scratch, blocks, 1, &ok);
+    work->predecessor_count = ir_allocate(scratch, blocks, 1, &ok);
+    work->predecessor_first = ir_allocate(scratch, blocks, 4, &ok);
+    work->predecessor_last = ir_allocate(scratch, blocks, 4, &ok);
+    work->headers = ir_allocate(scratch, blocks, 4, &ok);
+    work->block_marks = ir_allocate(scratch, blocks, 4, &ok);
+    uint8_t* active = ir_allocate(scratch, blocks, 1, &ok);
+    uint8_t* header = ir_allocate(scratch, blocks, 1, &ok);
+    uint32_t* source = ir_allocate(scratch, blocks, 4, &ok);
+    uint32_t* stack = ir_allocate(scratch, blocks, 4, &ok);
+    uint32_t* cursor = ir_allocate(scratch, blocks, 4, &ok);
+    if (ok)
+    {
+        memset(source, 0xff, blocks * 4);
+        uint32_t depth = 1;
+        stack[0] = 0;
+        cursor[0] = 0;
+        ir_vectorize_visit(work, 0, active, header, source);
+        while (depth != 0)
+        {
+            const uint32_t block = stack[depth - 1];
+            const uint32_t next = ir_vectorize_successor(f, block, cursor[depth - 1]);
+            cursor[depth - 1] += 1;
+            if (next == BUSTER_IR_NONE)
+            {
+                active[block] = 0;
+                depth -= 1;
+            }
+            else if (next < blocks && work->reached[next] == 0)
+            {
+                stack[depth] = next;
+                cursor[depth] = 0;
+                depth += 1;
+                ir_vectorize_visit(work, next, active, header, source);
+            }
+        }
+    }
+    return ok;
 }
 
 // A branch's condition past the lowering's truth chains, `icmp ne (zext c), 0`, which truth simplification removes in
@@ -668,21 +802,21 @@ static uint32_t ir_vectorize_truth(const IrFunction* f, uint32_t value)
 }
 
 // Whether `value` is a header phi, or a header row adding a constant to one (the exit test's `i + 1 < n`): its phi.
-static uint32_t ir_vectorize_tested(const IrFunction* f, const IrVectorizeLoop* plan, const IrCfg* cfg, uint32_t value, uint64_t* offset)
+static uint32_t ir_vectorize_tested(const IrFunction* f, const IrVectorizeLoop* plan, uint32_t value, uint64_t* offset)
 {
     uint32_t result = BUSTER_IR_NONE;
     uint64_t k = 0;
     *offset = 0;
-    if (value < f->instruction_count && cfg->instruction_blocks[value] == plan->header && f->op[value] == IR_PHI)
+    if (value < f->instruction_count && ir_vectorize_in_block(f, plan->header, value) && f->op[value] == IR_PHI)
     {
         result = value;
     }
-    else if (value < f->instruction_count && cfg->instruction_blocks[value] == plan->header && f->op[value] == IR_ADD)
+    else if (value < f->instruction_count && ir_vectorize_in_block(f, plan->header, value) && f->op[value] == IR_ADD)
     {
         const uint32_t a = f->a[value];
         const uint32_t b = f->b[value];
-        const bool left = f->op[a] == IR_PHI && cfg->instruction_blocks[a] == plan->header && ir_vectorize_constant(f, b, &k);
-        const bool right = !left && f->op[b] == IR_PHI && cfg->instruction_blocks[b] == plan->header && ir_vectorize_constant(f, a, &k);
+        const bool left = f->op[a] == IR_PHI && ir_vectorize_in_block(f, plan->header, a) && ir_vectorize_constant(f, b, &k);
+        const bool right = !left && f->op[b] == IR_PHI && ir_vectorize_in_block(f, plan->header, b) && ir_vectorize_constant(f, a, &k);
         result = left ? a : right ? b : BUSTER_IR_NONE;
         *offset = k;
     }
@@ -697,8 +831,8 @@ static bool ir_vectorize_induction(IrVectorizeWork* work, uint32_t loop, IrVecto
     const IrFunction* f = work->function;
     const uint32_t terminator = f->block_offsets[(uint64_t)plan->header + 1] - 1;
     const uint32_t compare = ir_vectorize_truth(f, f->a[terminator]);
-    bool valid = compare < f->instruction_count && f->op[compare] == IR_ICMP && work->cfg.instruction_blocks[compare] == plan->header;
-    const bool into = valid && dominators_loop_contains(&work->loops, loop, f->b[terminator]);
+    bool valid = compare < f->instruction_count && f->op[compare] == IR_ICMP && ir_vectorize_in_block(f, plan->header, compare);
+    const bool into = valid && ir_vectorize_block_inside(work, loop, f->b[terminator]);
     uint32_t predicate = valid ? f->c[compare] : IR_PREDICATE_COUNT;
     uint32_t left = valid ? f->a[compare] : BUSTER_IR_NONE;
     uint32_t right = valid ? f->b[compare] : BUSTER_IR_NONE;
@@ -706,7 +840,7 @@ static bool ir_vectorize_induction(IrVectorizeWork* work, uint32_t loop, IrVecto
     static const uint8_t swapped[IR_PREDICATE_COUNT] = { IR_EQ, IR_NE, IR_GT, IR_GE, IR_LT, IR_LE, IR_UGT, IR_UGE, IR_ULT, IR_ULE };
     static const uint8_t negated[IR_PREDICATE_COUNT] = { IR_NE, IR_EQ, IR_GE, IR_GT, IR_LE, IR_LT, IR_UGE, IR_UGT, IR_ULE, IR_ULT };
     uint64_t offset = 0;
-    if (valid && ir_vectorize_tested(f, plan, &work->cfg, left, &offset) == BUSTER_IR_NONE && ir_vectorize_tested(f, plan, &work->cfg, right, &offset) != BUSTER_IR_NONE)
+    if (valid && ir_vectorize_tested(f, plan, left, &offset) == BUSTER_IR_NONE && ir_vectorize_tested(f, plan, right, &offset) != BUSTER_IR_NONE)
     {
         const uint32_t t = left;
         left = right;
@@ -714,7 +848,7 @@ static bool ir_vectorize_induction(IrVectorizeWork* work, uint32_t loop, IrVecto
         predicate = swapped[predicate];
     }
     predicate = valid && !into ? negated[predicate] : predicate;
-    const uint32_t tested = valid ? ir_vectorize_tested(f, plan, &work->cfg, left, &offset) : BUSTER_IR_NONE;
+    const uint32_t tested = valid ? ir_vectorize_tested(f, plan, left, &offset) : BUSTER_IR_NONE;
     plan->offset_row = tested != left ? left : BUSTER_IR_NONE;
     plan->offset = offset;
     left = tested;
@@ -1096,7 +1230,7 @@ static uint32_t ir_vectorize_rows(IrVectorizeWork* work, uint32_t loop, IrVector
         refusal = work->classes[i] == IR_VECTORIZE_CLASS_REDUCTION && work->classes[back] != IR_VECTORIZE_CLASS_UPDATE ? IR_VECTORIZE_REFUSE_USE : refusal;
     }
     // The header's other needed rows: only the exit test.
-    for (uint32_t k = 0; refusal == IR_VECTORIZE_REFUSALS && k < plan->row_count && work->cfg.instruction_blocks[work->rows[k]] == plan->header; k += 1)
+    for (uint32_t k = 0; refusal == IR_VECTORIZE_REFUSALS && k < plan->header_rows; k += 1)
     {
         const uint32_t i = work->rows[k];
         refusal = work->needed[i] != 0 && i != plan->compare && i != plan->offset_row && work->classes[i] != IR_VECTORIZE_CLASS_UNIFORM ? IR_VECTORIZE_REFUSE_INDUCTION : refusal;
@@ -1352,7 +1486,7 @@ static uint32_t ir_vectorize_plan(IrVectorizeWork* work, uint32_t loop, IrVector
         const uint32_t first = f->block_offsets[block];
         const uint32_t end = f->block_offsets[(uint64_t)block + 1];
         refusal = ir_vectorize_forbidden(work->kinds, first, end, scalar) ? IR_VECTORIZE_REFUSE_OPERATION : refusal;
-        const uint32_t next = f->op[end - 1] == IR_BR ? f->a[end - 1] : dominators_loop_contains(&work->loops, loop, f->b[end - 1]) ? f->b[end - 1] : f->c[end - 1];
+        const uint32_t next = f->op[end - 1] == IR_BR ? f->a[end - 1] : ir_vectorize_block_inside(work, loop, f->b[end - 1]) ? f->b[end - 1] : f->c[end - 1];
         block = next == plan->header ? BUSTER_IR_NONE : next;
     }
     refusal = refusal == IR_VECTORIZE_REFUSALS && !ir_vectorize_induction(work, loop, plan) ? IR_VECTORIZE_REFUSE_INDUCTION : refusal;
@@ -1842,12 +1976,12 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
     }
 }
 
-// Plans every innermost loop and emits the accepted ones: once counting, once writing. Both replays decide alike.
+// Plans every loop header the walk found and emits the accepted loops: once counting, once writing. Both replays
+// decide alike.
 static void ir_vectorize_replay(IrVectorizeWork* work, IrVectorizeBuild* build, bool scalar)
 {
-    for (uint32_t loop = 0; loop < work->loops.loop_count; loop += 1)
+    for (uint32_t loop = 0; loop < work->header_count; loop += 1)
     {
-        if (work->innermost[loop] != 0 && work->loops.rpo_index[work->loops.loop_header[loop]] != BUSTER_DOMINATOR_NONE)
         {
             IrVectorizeLoop plan = { 0 };
             const uint32_t refusal = ir_vectorize_plan(work, loop, &plan, scalar);
@@ -1876,7 +2010,7 @@ static void ir_vectorize_replay(IrVectorizeWork* work, IrVectorizeBuild* build, 
 }
 
 // Whether a phi takes a value along an edge from a block numbered at or past its own: a candidate back edge. A
-// function without one has no loop the lowering numbered in order, and builds no CFG.
+// function without one has no loop the lowering numbered in order, and walks no blocks.
 static bool ir_vectorize_candidate(const IrFunction* f)
 {
     bool found = false;
@@ -1943,24 +2077,7 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
     const bool candidate = check.error == IR_OK && function->label_count == 0 && function->block_count != 0 && ir_vectorize_candidate(function);
     if (candidate)
     {
-        check.error = ir_build_cfg(function, scratch, output, &work.cfg);
-    }
-    if (candidate && check.error == IR_OK)
-    {
-        const DominatorCfg cfg = {
-            .block_count = work.cfg.block_count,
-            .edge_count = work.cfg.edge_count,
-            .entry = 0,
-            .successor_offsets = work.cfg.successor_offsets,
-            .successors = work.cfg.successors,
-            .predecessor_offsets = work.cfg.predecessor_offsets,
-            .predecessors = work.cfg.predecessors,
-        };
-        DominatorOptions dom = dominators_options();
-        dom.outputs = BUSTER_DOMINATOR_LOOPS;
-        dom.path = path ? DOMINATOR_SCALAR : DOMINATOR_AUTO;
-        const DominatorStatus status = dominators_analyze(scratch, output, &cfg, dom, &work.loops);
-        check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_DOMINANCE;
+        check.error = ir_vectorize_graph(&work, scratch) ? IR_OK : IR_ERROR_MEMORY;
     }
     const uint64_t n = function->instruction_count;
     if (candidate && check.error == IR_OK)
@@ -1985,7 +2102,7 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
         work.chain_expanded = ir_allocate(scratch, work.chain_capacity, 1, &ok);
         // Each value is touched at most a few times per loop: its class, its splat and its needed bit.
         work.touched = ir_allocate(scratch, n * 4 + 8, 4, &ok);
-        work.innermost = ir_allocate(scratch, (uint64_t)work.loops.loop_count + 1, 1, &ok);
+        work.row_marks = ir_allocate(scratch, n, 4, &ok);
         check.error = ok ? IR_OK : IR_ERROR_MEMORY;
     }
     if (candidate && check.error == IR_OK)
@@ -2002,18 +2119,6 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
         else
         {
             ir_vectorize_kinds_vector(function, work.kinds);
-        }
-        for (uint32_t loop = 0; loop < work.loops.loop_count; loop += 1)
-        {
-            work.innermost[loop] = 1;
-        }
-        for (uint32_t loop = 0; loop < work.loops.loop_count; loop += 1)
-        {
-            const uint32_t parent = work.loops.loop_parent[loop];
-            if (parent < work.loops.loop_count)
-            {
-                work.innermost[parent] = 0;
-            }
         }
         IrVectorizeBuild counting = { .counting = true, .rows = function->instruction_count, .blocks = function->block_count, .extras = function->extra_count, .constants = function->constant_count };
         ir_vectorize_replay(&work, &counting, path);
