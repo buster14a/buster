@@ -6,8 +6,9 @@
 // split.c's bitcode output (split_write_bitcode). Clang's -emit-llvm keeps the module's use-list order, and code
 // generation follows it (a block's predecessors, a value's users): a partition written without it compiles to different
 // instructions. LLVM's C API writes bitcode without it, so this call takes the choice as an argument. split.c's parts
-// also erase the aliases they don't emit (split_erase_alias), and its start order moves a function within the module's
-// list (split_move_function), which LLVM's C API can't.
+// also erase the aliases they don't emit (split_erase_alias) and delete the other parts' bodies a block at a time
+// (split_delete_blocks), and its start order moves a function within the module's list (split_move_function), which
+// LLVM's C API can't.
 //
 // presplit.c's parts (split_clone_part, split_write_part): a module's clone with chosen definitions alone, and its
 // bitcode without the use-list order, which the optimizer that follows each part doesn't need (the part's object then
@@ -64,6 +65,22 @@ extern "C" bool split_erase_alias(LLVMValueRef alias)
         value->eraseFromParent();
     }
     return unused;
+}
+
+// split.c's parts (split_delete_body): `function`'s blocks go, as llvm::Function::deleteBody drops them, every
+// instruction's operands first and then the blocks, without replacing each instruction's uses one at a time. The rest of
+// the definition (its linkage, metadata and personality) is split.c's to change.
+extern "C" void split_delete_blocks(LLVMValueRef function)
+{
+    llvm::Function* value = llvm::cast<llvm::Function>(llvm::unwrap(function));
+    for (llvm::BasicBlock& block : *value)
+    {
+        block.dropAllReferences();
+    }
+    while (!value->empty())
+    {
+        value->begin()->eraseFromParent();
+    }
 }
 
 // split.c's start order (split_order_first): `function` goes right before `before` in their module's list of functions,
