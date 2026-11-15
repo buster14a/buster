@@ -171,17 +171,19 @@ measurements of what each one gains. LIST is a comma-separated list of items
 applied in turn, each `+` or `-` and then a pass's name: `sccp`, `dce`, `cfg`
 (the jump threading), `merge` (CFG cleanup's merges, below), `licm`, `sroa`
 (on every function, with #1282's options, before the solver and promotion),
-`vectors` (#2781's value numbering and LICM on vector and mask values alone),
-`vectorize` (#2743's loop vectorizer, [its guide](tier1-loop-vectorization.md)),
-`unroll` (#2755's [loop unrolling](tier1-loop-unrolling.md)), `gvn` (as
-`--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or
-`all`. The default is SCCP, dead-code removal, CFG cleanup, its merges, the
-inlining and `vectors`. The restricted value numbering runs before promotion;
-LICM runs after if-conversion, before the optimizer, which cleans up after it,
-then the loop vectorizer, then the unroller. Explicit `+gvn` or `+licm` runs
-that pass on every value instead of its restricted counterpart. A function that
-value numbering, LICM, SROA or the loop vectorizer refuses goes on as it was,
-and so does one past the unroller's loop analysis.
+`memory` (value numbering with memory in the optimizer, #2718: [its
+guide](ir-memory-value-numbering.md)), `vectors` (#2781's value numbering and
+LICM on vector and mask values alone), `vectorize` (#2743's loop vectorizer,
+[its guide](tier1-loop-vectorization.md)), `unroll` (#2755's [loop
+unrolling](tier1-loop-unrolling.md)), `gvn` (as `--tier1-gvn`), `inline`
+(`-inline` as `--tier1-no-inline`), or `all`. The default is SCCP, dead-code
+removal, CFG cleanup, its merges, the inlining and `vectors`. The restricted
+value numbering runs before promotion; LICM runs after if-conversion, before
+the optimizer, which cleans up after it, then the loop vectorizer, then the
+unroller. Explicit `+gvn` or `+licm` runs that pass on every value instead of
+its restricted counterpart. A function that value numbering, LICM, SROA or the
+loop vectorizer refuses goes on as it was, and so does one past the unroller's
+loop analysis.
 The summaries the unit's inlining builds run the same passes but the
 unroller, which their callers run on what they expand (a summary's size is
 the loop's own, and an expanded loop is unrolled once); a candidate whose
@@ -191,16 +193,17 @@ SROA, as with the solver, a candidate compiles from its own pipeline.
 `--tier1-report` gives each pass's counts: `folded` constants,
 `removed_instructions` and `removed_blocks` (the optimizer's output against
 its input, merges included), `merged_blocks`, `licm_moved`, `sroa_split`
-(slots) and `gvn_removed`; with `vectorize`, a `tier1-vectorize` line gives the
-loops examined (each back edge's header once, outer loops included), those vectorized by their widest vector (`bytes16`,
-`bytes32`, `bytes64`), their reductions and run-time overlap tests (`guards`),
-and the refused loops by reason (`refused.shape` to `refused.width`). With
-`+unroll`, a `tier1-unroll` line follows wherever a loop was seen: the natural
-loops (`loops`), how many were `unrolled`, each refusal's count by its name
-(`outer`, `irreducible`, `preheader`, `latch`, `exit`, `call`, `control`,
-`stack`, `test`, `predicate`, `bound`, `induction`, `size`, `growth`), and the
-main loops' `copies`, the `reductions` they split and the instructions they
-`added`.
+(slots), `gvn_removed` and `loads_forwarded` (value numbering with memory's);
+with `vectorize`, a `tier1-vectorize` line gives the loops examined (each back
+edge's header once, outer loops included), those vectorized by their widest
+vector (`bytes16`, `bytes32`, `bytes64`), their reductions and run-time overlap
+tests (`guards`), and the refused loops by reason (`refused.shape` to
+`refused.width`). With `+unroll`, a `tier1-unroll` line follows wherever a
+loop was seen: the natural loops (`loops`), how many were `unrolled`, each
+refusal's count by its name (`outer`, `irreducible`, `preheader`, `latch`,
+`exit`, `call`, `control`, `stack`, `test`, `predicate`, `bound`, `induction`,
+`size`, `growth`), and the main loops' `copies`, the `reductions` they split
+and the instructions they `added`.
 
 CFG cleanup's merges join a block to its predecessor when that predecessor is
 its only one and it is the predecessor's only executable successor. The block

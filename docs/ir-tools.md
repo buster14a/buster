@@ -205,6 +205,12 @@ The pairs, and what each records:
   16-byte slot that splits gives its markers to its first field and compacts
   away; an address-taken slot, which the pass refuses, keeps its markers and
   takes the freed number. It compares as `sroa-private-fields` does.
+- `memory-forwarding`, `memory-clobbers`, `memory-private`, `memory-blocks`,
+  `memory-addresses` and `memory-volatile` (value numbering with memory with
+  dead-code removal, #2718: [its guide](ir-memory-value-numbering.md)'s
+  "Tests" lists what each forwards and keeps): one block's loads of a loaded
+  or stored value, the writes that stop it, private slots, a diamond's and a
+  loop's blocks, the addresses' arithmetic, and a volatile slot's loads.
 
 The text form carries no unused sparse rows: the passes keep the original
 constant, slot, address and call-type indices (only new folded constants append,

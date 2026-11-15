@@ -1208,7 +1208,8 @@ static bool interpreter_typed_function_valid(const Tier0Function* function)
         const uint32_t flags = function->local_flags != 0 ? function->local_flags[l] : 0;
         const uint32_t size = function->local_sizes != 0 ? function->local_sizes[l] : 0;
         const uint32_t role = flags & BUSTER_TYPED_LOCAL_ADDRESS_ONLY;
-        result = (flags & ~(BUSTER_TYPED_LOCAL_ADDRESS_TAKEN | BUSTER_TYPED_LOCAL_ADDRESS_ONLY)) == 0;
+        result = (flags & ~(BUSTER_TYPED_LOCAL_ADDRESS_TAKEN | BUSTER_TYPED_LOCAL_ADDRESS_ONLY | BUSTER_TYPED_LOCAL_VOLATILE)) == 0 &&
+                 ((flags & BUSTER_TYPED_LOCAL_VOLATILE) == 0 || (flags & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0);
         if (role != 0)
         {
             result = result && (role & (role - 1)) == 0 && l >= function->parameter_count && class == BUSTER_TYPED_CLASS_U64 && size == 0 &&

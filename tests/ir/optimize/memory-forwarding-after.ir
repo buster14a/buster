@@ -1,0 +1,24 @@
+function (i64, i64) -> i64 {
+  slot $0 size=32 align=8 type=void flags=0x00
+  slot $1 size=16 align=8 type=void flags=0x00
+b0:
+  %0 = param.i64 0
+  %1 = param.i64 1
+  %2 = stack_addr.ptr $0
+  %3 = stack_addr.ptr $1
+  %4 = call.void @1(%2, %3) fixed=(ptr, ptr) variadic=0
+  %5 = store.void %2, %0 align=8
+  %6 = address.ptr %2 offset=8
+  %7 = store.void %6, %1 align=8
+  %8 = add.i64 %0, %0
+  %9 = add.i64 %8, %1
+  %10 = call.i64 @2() fixed=() variadic=0
+  %11 = load.i64 %2 align=8
+  %12 = store.void %3, %10 align=8
+  %13 = load.i64 %6 align=8
+  %14 = add.i64 %9, %11
+  %15 = add.i64 %14, %11
+  %16 = add.i64 %15, %13
+  %17 = add.i64 %16, %13
+  %18 = ret.void %17
+}

@@ -20040,7 +20040,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 const uint32_t local = check_lower_temporary(writer, (uint8_t)info);
                 if ((type_qualifiers(declared_type) & BUSTER_TYPE_VOLATILE) != 0 && local < writer->local_count)
                 {
-                    writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+                    writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN | BUSTER_TYPED_LOCAL_VOLATILE;
                 }
                 if (named)
                 {
@@ -20078,7 +20078,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 if (!promoted && ((type_qualifiers(declared_type) & BUSTER_TYPE_VOLATILE) != 0 ||
                                   type_kind(types, type_strip_aligned(types, declared_type)) == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
                 {
-                    writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+                    writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN | BUSTER_TYPED_LOCAL_VOLATILE;
                 }
                 if (named)
                 {
@@ -20117,7 +20117,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                                                       check_lower_temporary(writer, class);
                 if ((type_qualifiers(declared_type) & BUSTER_TYPE_VOLATILE) != 0 && local < writer->local_count)
                 {
-                    writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+                    writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN | BUSTER_TYPED_LOCAL_VOLATILE;
                 }
                 writer->local_map[input->objects[parameter]] = local;
                 check_lower_emit(writer, BUSTER_TYPED_LOCAL, check_lower_class(writer, incoming_type), incoming);
@@ -20197,7 +20197,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                     const uint32_t local = check_lower_temporary(writer, (uint8_t)info);
                     if ((type_qualifiers(local_type) & BUSTER_TYPE_VOLATILE) != 0 && local < writer->local_count)
                     {
-                        writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+                        writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN | BUSTER_TYPED_LOCAL_VOLATILE;
                     }
                     writer->local_map[declared_object] = local;
                 }
@@ -20266,7 +20266,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                     }
                     if (((type_qualifiers(local_type) & BUSTER_TYPE_VOLATILE) != 0 || kind == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
                     {
-                        writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+                        writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN | BUSTER_TYPED_LOCAL_VOLATILE;
                     }
                     writer->local_map[declared_object] = local;
                 }

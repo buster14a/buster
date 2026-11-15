@@ -502,11 +502,13 @@ struct CheckEmitGrowth
 #define BUSTER_CHECK_TIER1_SCHEDULE_POST 1
 #define BUSTER_CHECK_TIER1_SCHEDULE_PRE 2
 // --tier1-passes= (#139): the passes of Tier 1's pipeline whose default the option turns over, a bit each, so that 0 is
-// the default pipeline, which runs SCCP, dead-code removal, CFG cleanup and its merges, and neither LICM nor SROA on every
-// function. SCCP's, dead-code removal's, CFG cleanup's and the merges' bits are ir_optimize.c's BUSTER_IR_OPTIMIZE_SCCP,
-// DCE, CFG and MERGE. #866's solver and the inlining keep their own options (--tier1-gvn, --tier1-no-inline), which the
-// option's list sets too. VECTORS (#2781, on by default) is the solver and LICM on vector and mask values alone, in
-// the functions that have such values and where the option doesn't run the pass on every value.
+// the default pipeline, which runs SCCP, dead-code removal, CFG cleanup and its merges, and neither LICM, SROA nor value
+// numbering with memory (#2718: the 9700X measured no run time it gains for its compile time) on every function. SCCP's,
+// dead-code removal's, CFG cleanup's and the merges' bits are ir_optimize.c's BUSTER_IR_OPTIMIZE_SCCP, DCE, CFG and MERGE;
+// value numbering with memory's maps to its BUSTER_IR_OPTIMIZE_MEMORY. #866's solver and the inlining keep their own
+// options (--tier1-gvn, --tier1-no-inline), which the option's list sets too. VECTORS (#2781, on by default) is the
+// solver and LICM on vector and mask values alone, in the functions that have such values and where the option doesn't
+// run the pass on every value.
 #define BUSTER_CHECK_TIER1_PASS_SCCP 1u
 #define BUSTER_CHECK_TIER1_PASS_DCE 2u
 #define BUSTER_CHECK_TIER1_PASS_CFG 4u
@@ -518,9 +520,13 @@ struct CheckEmitGrowth
 // #2755's loop unroller (ir_optimize_unroll.c), off by default.
 #define BUSTER_CHECK_TIER1_PASS_UNROLL 128u
 #define BUSTER_CHECK_TIER1_PASS_VECTORS 256u
+// Value numbering with memory (#2718, ir_optimize_memory.c), off by default; past the driver's own bits
+// (c_checker_driver.c's BUSTER_CHECK_DRIVER_PASS_GVN and INLINE).
+#define BUSTER_CHECK_TIER1_PASS_MEMORY 2048u
 #define BUSTER_CHECK_TIER1_PASSES_DEFAULT (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_VECTORS)
-#define BUSTER_CHECK_TIER1_PASSES_ALL \
-    (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_VECTORIZE | BUSTER_CHECK_TIER1_PASS_UNROLL)
+#define BUSTER_CHECK_TIER1_PASSES_ALL                                                                                                                                  \
+    (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_VECTORIZE | BUSTER_CHECK_TIER1_PASS_UNROLL | \
+     BUSTER_CHECK_TIER1_PASS_MEMORY)
 // The loop vectorizer's counts (--tier1-report), IrVectorizeResult's: the innermost loops examined, those vectorized,
 // by their widest vector (16, 32 and 64 bytes), their reductions and run-time overlap tests, then the refused loops by
 // IrVectorizeRefusal.
@@ -652,6 +658,8 @@ struct CheckTier1Counts
     uint32_t licm_moved;
     uint32_t sroa_split;
     uint32_t gvn_removed;
+    // The loads value numbering with memory forwarded (#2718).
+    uint32_t loads_forwarded;
     // --tier1-passes=+unroll's (#2755): each loop's outcome, the copies the unrolled ones hold, the reductions they split
     // and the instructions they added.
     uint16_t unroll_outcomes[BUSTER_CHECK_TIER1_UNROLL_OUTCOMES];
@@ -705,6 +713,7 @@ struct CheckTier1Report
     uint64_t licm_moved;
     uint64_t sroa_split;
     uint64_t gvn_removed;
+    uint64_t loads_forwarded;
     uint64_t unroll_outcomes[BUSTER_CHECK_TIER1_UNROLL_OUTCOMES];
     uint64_t unroll_copies;
     uint64_t unroll_reductions;
@@ -5774,6 +5783,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->tier1_report.licm_moved += compiled ? counts->licm_moved : 0;
         lanes->tier1_report.sroa_split += compiled ? counts->sroa_split : 0;
         lanes->tier1_report.gvn_removed += compiled ? counts->gvn_removed : 0;
+        lanes->tier1_report.loads_forwarded += compiled ? counts->loads_forwarded : 0;
         for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_UNROLL_OUTCOMES; k += 1)
         {
             lanes->tier1_report.unroll_outcomes[k] += compiled ? counts->unroll_outcomes[k] : 0;

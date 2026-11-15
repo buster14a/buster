@@ -141,8 +141,10 @@ passes by its vector and its scalar version:
   complete-refinement oracle's function, and its scalar available-expression
   twin must accept the function and remove no more instructions;
 - the optimizer on the promoted form, with SCCP alone, dead-code removal
-  alone, CFG cleanup alone and with its merges, the three together, and
-  Tier 1's set (the three with the merges, layout and identities);
+  alone, CFG cleanup alone and with its merges, the three together, Tier 1's
+  set (the three with the merges, layout and identities), value numbering
+  with memory alone (`memory`, #2718) and Tier 1's set with it
+  (`tier1-memory`), which must also forward the same loads;
 - LICM on the promoted form;
 - the loop vectorizer (#2743), at every operation the IR has
   (`ir_vectorize_target_ir`), on the promoted form after Tier 1's optimizer

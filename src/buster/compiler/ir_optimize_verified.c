@@ -201,6 +201,10 @@ static __attribute__((unused, aligned(64))) IrCheck ir_optimize_verified(const I
         {
             check.error = IR_ERROR_MEMORY;
         }
+        if (check.error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_MEMORY) != 0 && !ir_optimize_memory(&work, scratch, BUSTER_SCALAR_PATH(verify_scalar), &work.statistics.forwarded_loads))
+        {
+            check.error = IR_ERROR_MEMORY;
+        }
         if (check.error == IR_OK)
         {
             ir_optimize_dce(&work, options);
