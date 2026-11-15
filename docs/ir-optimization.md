@@ -126,7 +126,10 @@ last, `ir_truth_simplify_values` takes the truth values the selects make: a
 select of truth values tested against zero becomes an i1 operation in that
 test's row. So `select c, (zext x), 0` tested nonzero is `and c, x` (`c && x`),
 and `select c, 1, (zext y)` is `or c, y` (`c || y`); `select c, (zext x),
-(zext y)` stays an i1 select. Tier 1 computes an i1 `and` and `or` as their
+(zext y)` stays an i1 select. The same columns then fold `trunc (zext/sext x)`
+into one cast of `x` (`ir_if_convert_fold_casts`, #2846). A `_Bool` result of
+`&&` or `||` is `trunc i8` of `zext i32` of that i1, two arm rows where the
+integer result is one, and the outer region would otherwise stay a branch. Tier 1 computes an i1 `and` and `or` as their
 32-bit operations (#2677), as clang does. A truth value used as an integer
 rather than tested, `select c, (zext x), 0` itself, is Tier 1's `and` of the
 condition and the value too, or #2676's `cmp` and `cmovCC` where the condition

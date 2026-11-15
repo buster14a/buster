@@ -6,7 +6,8 @@
 // object check proves the C lowering/promotion/if-conversion/selection chain reaches cmov for pure max/clamp and
 // conditional arithmetic, while the guarding branches of potentially faulting loads and division remain. #1382's
 // kernels follow: a nested clamp, `&&` and `||` values (no select of a tested truth value since #2677: their and and
-// or, or #2676's cmp and cmovCC of a comparison only the select reads, which needs no setcc), and loops whose arms
+// or, or #2676's cmp and cmovCC of a comparison only the select reads, which needs no setcc), including a `_Bool`
+// `&&` of an `||` (#2846), and loops whose arms
 // reload the element the head compared
 // (a conditional sum and a select of it or its negation), whose only conditional branch is the loop's. A running max,
 // whose condition reads the maximum its select would carry, and a reload after a call keep their branches.
@@ -28,6 +29,7 @@ static const char check_test_tier1_if_convert_header[] =
     "long if_nested(long x);\n"
     "_Bool if_and(int a, int b);\n"
     "int if_andor(int a, int b, int c);\n"
+    "_Bool if_andor_bool(int a, int b, int c);\n"
     "long if_condsum(const int* a, int n);\n"
     "long if_abssum(const int* a, int n);\n"
     "int if_runmax(const int* a, int n);\n"
@@ -50,6 +52,7 @@ static const char check_test_tier1_if_convert_source[] =
     "long if_nested(long x) { return x < 0 ? 0 : x > 255 ? 255 : x; }\n"
     "_Bool if_and(int a, int b) { return a < 128 && b < 128; }\n"
     "int if_andor(int a, int b, int c) { return (a < b) && (b < c || c == 0); }\n"
+    "_Bool if_andor_bool(int a, int b, int c) { return (a < b) && (b < c || c == 0); }\n"
     "long if_condsum(const int* a, int n) { long s = 0; for (int i = 0; i < n; i++) if (a[i] > 128) s += a[i]; return s; }\n"
     "long if_abssum(const int* a, int n) { long s = 0; for (int i = 0; i < n; i++) s += a[i] > 128 ? a[i] : -a[i]; return s; }\n"
     "int if_runmax(const int* a, int n) { int m = 0; for (int i = 0; i < n; i++) m = a[i] > m ? a[i] : m; return m; }\n"
@@ -90,7 +93,7 @@ static const char check_test_tier1_if_convert_other[] =
     "    for (long x = -300; x < 600; x += 7) h = h * 31 + (unsigned long)if_nested(x);\n"
     "    h = h * 31 + (unsigned long)if_nested(edges[0]) + (unsigned long)if_nested(edges[8]);\n"
     "    for (int a = 120; a < 136; a += 1) for (int b = 120; b < 136; b += 1) h = h * 31 + (unsigned)if_and(a, b);\n"
-    "    for (int a = -2; a < 3; a += 1) for (int b = -2; b < 3; b += 1) for (int c = -2; c < 3; c += 1) h = h * 31 + (unsigned)if_andor(a, b, c);\n"
+    "    for (int a = -2; a < 3; a += 1) for (int b = -2; b < 3; b += 1) for (int c = -2; c < 3; c += 1) h = h * 31 + (unsigned)if_andor(a, b, c) + (unsigned)if_andor_bool(a, b, c);\n"
     "    int elements[64];\n"
     "    for (unsigned i = 0; i < 64; i += 1) { state = state * 6364136223846793005UL + 1; elements[i] = (int)((state >> 33) % 300) - 20; }\n"
     "    for (int n = 0; n <= 64; n += 1) h = h * 31 + (unsigned long)if_condsum(elements, n) + (unsigned long)if_abssum(elements, n) * 7 + (unsigned)if_runmax(elements, n);\n"
@@ -170,6 +173,11 @@ static void check_test_driver_tier1_if_convert(CheckTest* test, const char* clan
         },
         {
             .name = "if_andor",
+            .truth = true,
+            .branches = 0,
+        },
+        {
+            .name = "if_andor_bool",
             .truth = true,
             .branches = 0,
         },
