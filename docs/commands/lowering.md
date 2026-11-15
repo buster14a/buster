@@ -476,7 +476,10 @@ callee), the operators the code and template refusals stopped at, the
 differences (values, entries, twin), the labels compared, T's nodes by row or
 rule and by the action, by operator, the argument memo's entries filled and the
 arguments the rule took instead (over every expression T typed, beside the taken
-calls' arguments), and the times.
+calls' arguments), the fused sweep's census (`node-shadow: fusion`: what a T that
+classified each record's operands at its own visit would settle later; [the
+design](../node-machine.md#a-fused-sweep-what-it-would-settle-later)), and the
+times.
 `--list N` prints the first N differences by file and line. The command exits 1
 on a difference. `test-checker` runs its fixture (`node_shadow_test_text`, one
 construct a line, each taken or refused by a named reason), with `--verify`

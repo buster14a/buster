@@ -500,6 +500,8 @@ struct NodeCensusScratch
     // The current expression's temporaries' locals, by their number on the tape, and how many it has met.
     uint32_t* temporary_locals;
     uint32_t temporary_count;
+    // The current expression's records' consumers, for the fused sweep's census (node_shadow_fusion).
+    uint32_t* consumers;
 };
 
 static double node_census_share(uint64_t part, uint64_t whole)
@@ -1808,6 +1810,21 @@ struct NodeShadow
     // lowering's by its number from the expression's first and by its entry (node_shadow_same_label).
     uint64_t labeled_expressions;
     uint64_t labels;
+    // The fused sweep's census (node_shadow_fusion): the taken expressions' records evaluated and not; of these, those
+    // whose consumer isn't evaluated either; the evaluated records whose context their consumer's own context gives (a
+    // SELECT's operand, a comma's second operand), and of those, the ones not evaluated as plain values; the evaluated
+    // calls, and those below another; the records followed by a segment or an update's first row; the update plans; and
+    // the expressions with anything such a sweep settles after the records' visits.
+    uint64_t fusion_evaluated;
+    uint64_t fusion_unevaluated;
+    uint64_t fusion_wasted;
+    uint64_t fusion_inherited;
+    uint64_t fusion_inherited_other;
+    uint64_t fusion_calls;
+    uint64_t fusion_nested_calls;
+    uint64_t fusion_hooked;
+    uint64_t fusion_updates;
+    uint64_t fusion_settled_expressions;
     // T's nodes by row and by action, and the row-typed nodes the action types otherwise (--verify).
     uint64_t row_nodes;
     uint64_t action_nodes;
@@ -1985,6 +2002,69 @@ static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* ma
     return same && t == machine->entry_count;
 }
 
+// The fused sweep's census (docs/node-machine.md, "A fused sweep: what it would settle later"): for a taken expression,
+// what a T that classified each record's operands, as C does, at the record's own visit, up the postorder, would leave to
+// a later step. A record's consumer decides its context and target, but where they are the consumer's own context (a
+// SELECT's operand and a comma's second operand, check_lower_template_classify's), which its consumer's consumer gives
+// later; a record its consumer doesn't evaluate costs that visit nothing, but one whose consumer isn't evaluated either
+// was classified for nothing; and a call's depth among the evaluated calls, which numbers its row, is its ancestors'.
+static void node_shadow_fusion(NodeShadow* shadow, NodeCensusScratch* s, const NodeMachine* machine)
+{
+    const uint32_t count = machine->count;
+    uint32_t* consumers = s->consumers;
+    for (uint32_t r = 0; r < count; r += 1)
+    {
+        consumers[r] = UINT32_MAX;
+    }
+    for (uint32_t r = 0; r < count; r += 1)
+    {
+        const CheckOp op = node_machine_record_op(machine, r);
+        const uint32_t operands[3] = {
+            node_machine_record_left(machine, r),
+            node_machine_record_right(machine, r),
+            op == CHECK_OP_CONDITIONAL ? node_machine_record_third(machine, r) : UINT32_MAX,
+        };
+        for (uint32_t k = 0; k < 3; k += 1)
+        {
+            if (operands[k] < r)
+            {
+                consumers[operands[k]] = r;
+            }
+        }
+        for (uint32_t i = 0; op == CHECK_OP_CALL && i < node_machine_record_argument_count(machine, r); i += 1)
+        {
+            const uint32_t argument = node_machine_record_argument(machine, r, i);
+            if (argument < r)
+            {
+                consumers[argument] = r;
+            }
+        }
+    }
+    uint64_t settled = 0;
+    for (uint32_t r = 0; r < count; r += 1)
+    {
+        const uint8_t state = node_machine_record_state(machine, r);
+        const bool evaluated = (state & BUSTER_NODE_MACHINE_EVALUATED) != 0;
+        const uint32_t consumer = consumers[r];
+        const bool consumer_evaluated = consumer < count && (node_machine_record_state(machine, consumer) & BUSTER_NODE_MACHINE_EVALUATED) != 0;
+        const CheckOp consumer_op = consumer < count ? node_machine_record_op(machine, consumer) : CHECK_OP_COUNT;
+        const bool inherited = evaluated && (consumer_op == CHECK_OP_SELECT || (consumer_op == CHECK_OP_COMMA && r == node_machine_record_right(machine, consumer)));
+        const bool wasted = !evaluated && consumer < count && !consumer_evaluated;
+        const bool nested = evaluated && node_machine_record_op(machine, r) == CHECK_OP_CALL && node_machine_record_call_depth(machine, r) != 0;
+        shadow->fusion_evaluated += evaluated;
+        shadow->fusion_unevaluated += !evaluated;
+        shadow->fusion_wasted += wasted;
+        shadow->fusion_inherited += inherited;
+        shadow->fusion_inherited_other += inherited && node_machine_record_context(machine, r) != 0;
+        shadow->fusion_calls += evaluated && node_machine_record_op(machine, r) == CHECK_OP_CALL;
+        shadow->fusion_nested_calls += nested;
+        shadow->fusion_hooked += evaluated && state > BUSTER_NODE_MACHINE_EVALUATED;
+        settled += inherited || wasted || nested;
+    }
+    shadow->fusion_updates += machine->update_count;
+    shadow->fusion_settled_expressions += settled != 0;
+}
+
 // The shadow of the census's taken expression whose root pop is `p` of the body's `pops`, of root kind `context`, whose
 // walk reached `walked` nodes, `nodes` of them evaluated.
 static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, const CheckLowerOwnerPop* pops, uint32_t p, NodeCensusRoot context, uint32_t walked,
@@ -2056,6 +2136,7 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
         shadow->entry_differences += !entries;
         shadow->labeled_expressions += machine->label_count != 0;
         shadow->labels += machine->label_count;
+        node_shadow_fusion(shadow, s, machine);
         shadow->row_nodes += machine->row_nodes - row_nodes;
         shadow->action_nodes += machine->action_nodes - action_nodes;
         shadow->twin_differences += machine->twin_differences - twins;
@@ -2191,6 +2272,12 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
            shadow->value_differences, shadow->entry_differences, shadow->twin_differences, shadow->row_nodes, shadow->action_nodes,
            shadow->verify ? ", verified" : "");
     printf("node-shadow: labels=%" PRIu64 " in taken expressions=%" PRIu64 "\n", shadow->labels, shadow->labeled_expressions);
+    printf("node-shadow: fusion evaluated=%" PRIu64 " unevaluated=%" PRIu64 " (under an unevaluated consumer %" PRIu64 ") inherited-context=%" PRIu64 " (not a value %" PRIu64
+           ") calls=%" PRIu64 " (below a call %" PRIu64 ") segments-or-splits=%" PRIu64 " updates=%" PRIu64 " labeled-expressions=%" PRIu64
+           " expressions-settled-later=%" PRIu64 " of %" PRIu64 "\n",
+           shadow->fusion_evaluated, shadow->fusion_unevaluated, shadow->fusion_wasted, shadow->fusion_inherited, shadow->fusion_inherited_other, shadow->fusion_calls,
+           shadow->fusion_nested_calls, shadow->fusion_hooked, shadow->fusion_updates, shadow->labeled_expressions, shadow->fusion_settled_expressions,
+           shadow->taken_expressions);
     printf("node-shadow: argument-memo filled=%" PRIu64 " by-rule=%" PRIu64 " (taken calls' arguments %" PRIu64 ")\n", shadow->memo_fills, shadow->memo_rules,
            shadow->arguments);
     for (uint32_t r = 1; r < NODE_MACHINE_REFUSALS; r += 1)
@@ -2355,10 +2442,11 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
             s.local_objects = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, locals);
             s.local_stamps = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, locals);
             s.temporary_locals = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, BUSTER_NODE_MACHINE_MOST);
+            s.consumers = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, BUSTER_NODE_MACHINE_MOST);
             shadow->timed_capacity = (uint32_t)(owners.count < UINT32_MAX ? owners.count : UINT32_MAX);
             shadow->timed = BUSTER_ARENA_PUSH_ARRAY(&scratch, NodeShadowExpression, (uint64_t)shadow->timed_capacity + 1);
             shadow->timed_count = 0;
-            room = s.object_locals != NULL && s.object_stamps != NULL && s.local_objects != NULL && s.local_stamps != NULL && s.temporary_locals != NULL &&
+            room = s.object_locals != NULL && s.object_stamps != NULL && s.local_objects != NULL && s.local_stamps != NULL && s.temporary_locals != NULL && s.consumers != NULL &&
                    shadow->timed != NULL &&
                    node_machine_begin(&machine, &selected.program, shadow->scalar, shadow->verify, &scratch);
             if (room)

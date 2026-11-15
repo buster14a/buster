@@ -1890,6 +1890,45 @@ headroom on the gate's file; Lua and musl gain from it, as they did from
 batching ([above](#sweeps-by-batches-what-the-predictor-loses)). The record is
 [`node-machine-layout-2524-2026-11-15`](https://github.com/buster14a/buster-performance/tree/8c00e4f5572a3e29e12c96b32c05ba23c4a2993d/docs/measurements/node-machine-layout-2524-2026-11-15).
 
+### A fused sweep: what it would settle later
+
+Neither batching nor a layout leaves headroom on `sqlite3.c`: what stands
+between the sweeps and the gate is instructions, about 585 a taken node where
+120 cycles at today's rate are about 440. About 170 of the 585 are C re-reading
+the records T has just written, and C costs least right after T on the same
+expression ([above](#sweeps-by-batches-what-the-predictor-loses)). A
+[recovered design exploration](https://github.com/buster14a/buster/issues/2524#issuecomment-6892875893)
+fuses C into T: as T types a record, it classifies the record's operands, as C
+does, since the record's operator decides their contexts and targets. What T's
+visit can't know waits for a later step:
+
+- a context that is the consumer's own (a `SELECT`'s operand and a comma's second
+  operand), which its consumer's consumer gives;
+- a record classified at its consumer's visit whose consumer turns out
+  unevaluated (under a folded constant, `sizeof`, a decided condition);
+- a call's depth among the evaluated calls, which numbers its row and is its
+  ancestors'.
+
+The shadow's census (`node-shadow: fusion`, `node_shadow_fusion`) counts them
+over the taken expressions, at main `d356f725`:
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| evaluated records | 257,263 | 57,779 | 110,119 |
+| inherited contexts | 340 (0.13%) | 242 (0.42%) | 194 (0.18%) |
+| of them not a value | 0 | 0 | 0 |
+| unevaluated records | 34,829 | 16,384 | 20,708 |
+| of them under an unevaluated consumer | 2,893 (1.1% of the evaluated) | 5,780 (10.0%) | 3,057 (2.8%) |
+| evaluated calls, below another call | 13,351, 325 | 4,049, 176 | 5,357, 318 |
+| expressions with any of them | 1,554 of 51,135 (3.0%) | 1,281 of 10,444 (12.3%) | 1,550 of 21,604 (7.2%) |
+
+An inherited context was a plain value every time, as T's visit would assume
+it. A fused T would settle later 3.0% of `sqlite3.c`'s expressions, and its
+wasted classifications would be 1.1% of its records. The census shapes the
+design but doesn't measure it: what a fused T's code size and its predictions
+cost is the prototype's measurement, behind the shadow's `--verify`. The record is
+[`node-machine-fusion-census-2524-2026-11-15`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-fusion-census-2524-2026-11-15).
+
 ## Expected gains
 
 On `-c sqlite3.c`, of 681.5 M cycles a compile (user and kernel):
