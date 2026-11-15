@@ -122,12 +122,15 @@ A converted head whose single-predecessor chain climbs to a conditional branch
 may now be an outer region's arm (a nested `?:`, `||` inside `&&`). In that
 case the pass runs again, for at most four rounds. Between rounds and after the
 last, `ir_truth_simplify_values` takes the truth values the selects make: a
-select of truth values tested against zero becomes an i1 select in that test's
-row. So `select c, (zext x), 0` tested nonzero is `select c, x, c` (`c && x`),
-and `select c, 1, (zext y)` is `select c, c, y` (`c || y`). Tier 1 selects i1
-selects as it does wider ones. Its integer rules take no i1 `and`/`or`, so the
-truth values stay selects (#1382's follow-up). The earlier truth pass, before
-threading, keeps its comparison rules alone.
+select of truth values tested against zero becomes an i1 operation in that
+test's row. So `select c, (zext x), 0` tested nonzero is `and c, x` (`c && x`),
+and `select c, 1, (zext y)` is `or c, y` (`c || y`); `select c, (zext x),
+(zext y)` stays an i1 select. Tier 1 computes an i1 `and` and `or` as their
+32-bit operations (#2677), as clang does. A truth value used as an integer
+rather than tested, `select c, (zext x), 0` itself, is Tier 1's `and` of the
+condition and the value too, or #2676's `cmp` and `cmovCC` where the condition
+is a comparison only the select reads ([the selection guide](tier1-selection.md)). The
+earlier truth pass, before threading, keeps its comparison rules alone.
 
 The admissible values are `i1`, `i8`, `i16`, `i32`, `i64` and pointers, matching
 the scalar select consumer. Each arm moves at most four non-constant rows, and
@@ -186,9 +189,24 @@ Each converted kernel's 25 to 42 M branch misses fell to a few thousand. #2674's
 first commit had put the running max's comparison on its loop's carried chain
 (342.1 Mcycles, 3.78 times main), which the recurrence rule removed. The sums'
 remaining gap is clang's unrolling and the `setcc; test` that each `cmov`
-waits for ([#2676](https://github.com/buster14a/buster/issues/2676)). The
-truth values are i1 selects, where clang uses `and`/`or`
-([#2677](https://github.com/buster14a/buster/issues/2677)).
+waits for ([#2676](https://github.com/buster14a/buster/issues/2676)).
+
+The truth values were i1 selects then, where clang uses `and`/`or`. Since #2677
+they are Tier 1's 32-bit `and` and `or`. Measured on the 9700X with the same
+harness, 11 rounds, main `2ebfe68a` against #2796's `d42ea94b`, the driver's loop
+being 300.6 Mcycles there
+([record](https://github.com/buster14a/buster-performance/tree/35fa71ec1346673a404f56ae7e158e099016cdfe/docs/measurements/tier1-narrow-bitwise-2677-2026-11-14)):
+
+| kernel | main | `d42ea94b` | clang -O2 -fno-vectorize |
+| --- | ---: | ---: | ---: |
+| `a < 128 && b < 128` | 320.0 | 318.7 | 334.1 |
+| `(a < b) && (b < c \|\| c == 0)` | 383.9 | 363.1 | 365.5 |
+| the same returning `int` | 374.1 | 362.9 | 381.7 |
+
+sqlite3.c's `--tier1` object has 230 fewer `cmov`s (910) and 1,296 fewer bytes
+of text. The compile takes 0.16% to 0.31% more user cycles. #2676, merged after
+these runs, takes the `int` kernel's outer `&&`, whose comparison only its select
+reads: `cmp` and `cmovge` instead of `setl` and `and`.
 
 The pass costs about 1.2% of sqlite3.c's `--tier1 -c` user cycles. That is
 2,163.6 against 2,138.4 Mcycles over 11 runs, with 0.63% more instructions. Its

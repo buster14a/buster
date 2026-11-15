@@ -5,7 +5,9 @@
 // the semantic fixtures against Clang on both scalar paths and with rematerialization on/off. A separate decoded
 // object check proves the C lowering/promotion/if-conversion/selection chain reaches cmov for pure max/clamp and
 // conditional arithmetic, while the guarding branches of potentially faulting loads and division remain. #1382's
-// kernels follow: a nested clamp, `&&` and `||` values, and loops whose arms reload the element the head compared
+// kernels follow: a nested clamp, `&&` and `||` values (no select of a tested truth value since #2677: their and and
+// or, or #2676's cmp and cmovCC of a comparison only the select reads, which needs no setcc), and loops whose arms
+// reload the element the head compared
 // (a conditional sum and a select of it or its negation), whose only conditional branch is the loop's. A running max,
 // whose condition reads the maximum its select would carry, and a reload after a call keep their branches.
 
@@ -102,6 +104,9 @@ struct CheckTestIfConvertShape
 {
     const char* name;
     uint32_t selects;
+    // A truth value's (#2677): no cmov whose flags a test wrote (`test; cmovne`, the select of a tested truth value),
+    // whatever and, or and fused selects of comparisons (#2676's cmp and cmovCC) compute it.
+    bool truth;
     uint32_t branches;
 };
 
@@ -125,7 +130,8 @@ static void check_test_driver_tier1_if_convert(CheckTest* test, const char* clan
     uint32_t* types = calloc(CHECK_TEST_IF_CONVERT_RECORDS, sizeof(uint32_t));
     const bool ready = written && records != NULL && offsets != NULL && types != NULL && x86_disassembler_initialize();
     check_test_expect(test, ready, "if-conversion native code-shape fixture prepares");
-    // Each function's least cmov count and its conditional branches: none, the loop's alone, or a kept one (any).
+    // Each function's least cmov count, or a truth value's lack of a tested select, and its conditional branches: none,
+    // the loop's alone, or a kept one (any).
     static const CheckTestIfConvertShape shapes[] = {
         {
             .name = "if_max",
@@ -159,12 +165,12 @@ static void check_test_driver_tier1_if_convert(CheckTest* test, const char* clan
         },
         {
             .name = "if_and",
-            .selects = 1,
+            .truth = true,
             .branches = 0,
         },
         {
             .name = "if_andor",
-            .selects = 2,
+            .truth = true,
             .branches = 0,
         },
         {
@@ -220,18 +226,27 @@ static void check_test_driver_tier1_if_convert(CheckTest* test, const char* clan
             uint32_t relocations = 0;
             const uint32_t count = check_test_tier1_function(object, shapes[function].name, records, CHECK_TEST_IF_CONVERT_RECORDS, offsets, types, &relocations);
             uint32_t selects = 0;
+            uint32_t tested = 0;
             uint32_t branches = 0;
+            // The operation that last wrote the flags, which a cmov reads.
+            uint32_t flags = X86_OPERATION_NONE;
             for (uint32_t i = 0; i < count; i += 1)
             {
                 const uint32_t form = records[i].instruction.form & BUSTER_X86_FORM_NUMBER;
-                selects += x86_effects(form)->operation == X86_OPERATION_CMOVCC;
-                branches += (x86_effects(form)->kinds >> 4) == BUSTER_X86_CONTROL_BRANCH;
+                const X86Effects* effects = x86_effects(form);
+                selects += effects->operation == X86_OPERATION_CMOVCC;
+                tested += effects->operation == X86_OPERATION_CMOVCC && flags == X86_OPERATION_TEST;
+                branches += (effects->kinds >> 4) == BUSTER_X86_CONTROL_BRANCH;
+                flags = effects->flags_written != 0 ? effects->operation : flags;
             }
             const bool guarded = shapes[function].branches == UINT32_MAX;
+            const bool truth = shapes[function].truth;
+            const bool selected = truth ? tested == 0 : selects >= shapes[function].selects;
             char message[256];
             snprintf(message, sizeof(message), "if-conversion %s has %s (path %u)", shapes[function].name,
-                     guarded ? "a guarding conditional branch" : shapes[function].branches == 0 ? "cmov and no conditional branch" : "cmov and only its loop's conditional branch", path);
-            check_test_expect(test, count != 0 && selects >= shapes[function].selects && (guarded ? branches != 0 : branches == shapes[function].branches), message);
+                     guarded ? "a guarding conditional branch" : truth ? "no select of a tested truth value and no conditional branch" :
+                     shapes[function].branches == 0 ? "cmov and no conditional branch" : "cmov and only its loop's conditional branch", path);
+            check_test_expect(test, count != 0 && selected && (guarded ? branches != 0 : branches == shapes[function].branches), message);
         }
         unlink(object);
     }

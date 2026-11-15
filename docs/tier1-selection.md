@@ -557,6 +557,21 @@ arguments and parameters to Tier 1 as `i32` (#141, the [IR guide](ir.md)'s
 "Typed-stream lowering"). `i1` memory and signed-extension forms are also
 declined explicitly.
 
+The exception is `and`, `or` and `xor` of `i1`, `i8` and `i16` values (#2677),
+which are their 32-bit operations. Zero-extended operands give a zero-extended
+result (both of an `or`'s or `xor`'s, either of an `and`'s), and an `i1`'s 0 or
+1 another 0 or 1. A constant on either side is the immediate, since the IR keeps
+a constant within its type. A load never folds as the memory operand, because no
+32-bit form reads a byte or a word: the bottom-up grammar gives these operations
+an ALU operation of their own (`BUSTER_TIER1_BURS_NARROW`) with the register and
+immediate patterns alone. A select whose condition is a canonical `i1`, between
+a value known to be 0 or 1 and the constant 0, is the condition's `and` with that
+value, and one between the constant 1 and such a value its `or`: clang's
+integers for `c && x` and `c || y`, where a select is a `test` and a `cmov`.
+Where the condition is a comparison that only the select reads, #2676's `cmp`
+and `cmovCC` (above) folds it instead and wins munch's rank: it needs no
+`setcc` for the condition, one record fewer than the `and`.
+
 ### Proven upper bits (#1219)
 
 Selection keeps two semantic range bounds per integer value: the number of

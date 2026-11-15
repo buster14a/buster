@@ -3883,7 +3883,8 @@ static void tier1_select_known_bits(const IrFunction* function, const IrDominanc
 // I32 ALU operations and ordinary 32-bit loads clear the upper half; I32 parameters, calls and rows do not promise it.
 // A requested signed-load representation instead preserves the sign in all 64 bits and in eight-byte spill storage.
 // A zero-count shift, multiplication/division by one and a truncation can coalesce without a 32-bit write, so they
-// need their operand's proof. COPY, BITCAST, ZEXT, SELECT and PHI propagate only proven storage properties.
+// need their operand's proof. COPY, BITCAST, ZEXT, SELECT and PHI propagate only proven storage properties, and a narrow
+// AND, OR and XOR (#2677) its operands': both of them, or one of an AND's.
 // Any other producer is left noncanonical: a copy of it is noncanonical too
 // and a zero extension of it keeps its MOVZX, which is the safe answer for a rule this selector doesn't know yet.
 // The passes are bounded; an unresolved phi chain stays noncanonical, also safely. The narrow fixtures' whole-register
@@ -3964,6 +3965,15 @@ static inline __attribute__((always_inline)) void tier1_select_canonical(const I
                 else if (op == IR_SELECT)
                 {
                     value = function->b[node] < count && function->c[node] < count && (canonical[function->b[node]] & BUSTER_TIER1_STORAGE_ZERO) != 0 && (canonical[function->c[node]] & BUSTER_TIER1_STORAGE_ZERO) != 0;
+                }
+                else if ((op == IR_AND || op == IR_OR || op == IR_XOR) && function->type[node] != IR_I32)
+                {
+                    // A narrow and, or or xor (#2677) is its 32-bit operation: zero past its width where both operands
+                    // are, or an and's one. Its 32-bit write clears the upper half.
+                    const uint32_t b = function->b[node];
+                    const bool left = a < count && (canonical[a] & BUSTER_TIER1_STORAGE_ZERO) != 0;
+                    const bool right = b < count && (canonical[b] & BUSTER_TIER1_STORAGE_ZERO) != 0;
+                    value = op == IR_AND ? left || right : left && right;
                 }
                 else if (op == IR_PHI)
                 {
@@ -5515,6 +5525,10 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         .sign_result = sign_result,
     };
     const bool integer = type == IR_I32 || type == IR_I64;
+    // A narrow value's and, or and xor (#2677): their 32-bit operations, as each narrow value's storage is (tier1_select_width).
+    // Zero-extended operands give a zero-extended result (tier1_select_canonical), and an I1's 0 or 1 another 0 or 1; a
+    // constant operand is within its type (ir_constant_fits), so its immediate is too.
+    const bool narrow_bitwise = (op == IR_AND || op == IR_OR || op == IR_XOR) && (type == IR_I1 || type == IR_I8 || type == IR_I16);
     // A mask's operations (#179): the stored mask's width for a store, the result's for the others; and a floating
     // value's (#141), the same way.
     const uint32_t mask_width = tier1_select_mask_width(op == IR_STORE && b < function->instruction_count ? function->type[b] : type);
@@ -6738,7 +6752,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.intrinsic_cost = 2;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if ((op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND || op == IR_OR || op == IR_XOR) && integer)
+    else if (((op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND || op == IR_OR || op == IR_XOR) && integer) || narrow_bitwise)
     {
         base.rule = TIER1_RULE_REGISTER;
         base.values[0] = a;
@@ -6826,8 +6840,9 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         }
         // The load the memory operand takes: the right operand's, or for a commutative operation the left's where the
         // right isn't a load. Trying the left after a right load that can't fold cost the scalar twin's plan 2.5% on its
-        // shapes, its inlined code's registers and frame laid out otherwise, for a case code generators rarely make.
-        const uint32_t load = function->op[b] == IR_LOAD ? b : tier1_select_commutative((X86Operation)base.operation) ? a : BUSTER_IR_NONE;
+        // shapes, its inlined code's registers and frame laid out otherwise, for a case code generators rarely make. A
+        // narrow operation has none: no 32-bit form reads a byte or a word (the grammar's memory patterns leave it too).
+        const uint32_t load = narrow_bitwise ? BUSTER_IR_NONE : function->op[b] == IR_LOAD ? b : tier1_select_commutative((X86Operation)base.operation) ? a : BUSTER_IR_NONE;
         if (tier1_select_load_folds(forest, node, load))
         {
             Tier1SelectPattern folded = base;
@@ -7066,6 +7081,28 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     }
     else if (op == IR_SELECT && width != 0)
     {
+        // A truth value's select of a 0-or-1 value and 0, or of 1 and a 0-or-1 value (#2677): the condition's and, or or,
+        // with that value, as clang computes `c && x` and `c || y` as integers. The condition's register holds its 0 or 1
+        // in all 64 bits (an I1's canonical storage), and the value's known bits say it is 0 or 1, so the operation at the
+        // select's width is its value, its bits past an I32's too where its storage facts claim them (both arms').
+        // First, so that munch's tie with the select (no fold where the constant is shared) takes it.
+        uint64_t constant = 2;
+        const bool truth = function->type[a] == IR_I1 && forest->canonical != 0 && (forest->canonical[a] & BUSTER_TIER1_STORAGE_ZERO) != 0 && forest->known_bits != 0;
+        const bool conjunction = truth && tier1_select_constant(function, c, &constant) && constant == 0 && b < function->instruction_count &&
+                                 (forest->known_bits[b] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) <= 1;
+        const bool disjunction = truth && !conjunction && tier1_select_constant(function, b, &constant) && constant == 1 && c < function->instruction_count &&
+                                 (forest->known_bits[c] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK) <= 1;
+        if (conjunction || disjunction)
+        {
+            Tier1SelectPattern logic = base;
+            logic.rule = TIER1_RULE_REGISTER;
+            logic.operation = (uint8_t)(conjunction ? X86_OPERATION_AND : X86_OPERATION_OR);
+            logic.values[0] = a;
+            logic.values[1] = conjunction ? b : c;
+            logic.intrinsic_cost = 2;
+            tier1_select_fold(forest, node, conjunction ? c : b, &logic);
+            tier1_select_add_candidate(forest, node, &candidates, logic);
+        }
         base.rule = TIER1_RULE_SELECT;
         base.values[0] = a;
         base.values[1] = b;

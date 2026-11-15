@@ -226,7 +226,7 @@ the head, and they must be total or proven loads; the rest stay in an
 unreachable stub and must be droppable. A join with other predecessors keeps
 its phis and takes new selects in the head. Up to four rounds take nested
 regions (a nested `?:`, `&&` and `||` values), with `ir_truth_simplify_values`
-turning the truth values' selects into i1 selects between them. A condition
+turning the truth values' selects into i1 `and`s and `or`s of them (#2677). A condition
 that reads the value the join carries round a loop (a running max) keeps its
 branch, and an accumulation's select sinks below its addition
 (`s + (c ? x : 0)`). Each arm moves
@@ -245,12 +245,14 @@ a running maximum kept as a branch (and converted with a constant bound), and
 the loop's conditional sum sunk below its addition.
 The reload fixtures reuse a reload, speculate it behind a store or a fence, and
 refuse it behind a call, as a volatile access or at another offset. The truth
-fixtures reduce `&&` and `||` to i1 selects and refuse a dead division.
+fixtures reduce `&&` and `||` to an i1 `and` and `or` and refuse a dead division.
 `test-checker-driver` adds C-source semantic comparison against Clang, with
 both scalar paths and rematerialization settings. Its decoded object checks
 require `cmov` without conditional branches for max, the clamps (sequential
-and nested), conditional arithmetic and the `&&`/`||` values, and `cmov` with
-only the loop's branch for the conditional sum and the `?:` sum. They also
+and nested) and conditional arithmetic, no select of a tested truth value (no
+`cmov` whose flags a `test` wrote) and no conditional branch for the `&&`/`||`
+values (#2677; their `cmov`s are #2676's fused selects of comparisons), and
+`cmov` with only the loop's branch for the conditional sum and the `?:` sum. They also
 require the branches to remain for loads, division, variable shifts, calls, a
 reload after a call and the running max.
 

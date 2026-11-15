@@ -36,6 +36,7 @@ typedef enum Tier1NarrowKind
     TIER1_NARROW_WORD,
     TIER1_NARROW_DWORD,
     TIER1_NARROW_BSWAP,
+    TIER1_NARROW_BITWISE,
 } Tier1NarrowKind;
 
 typedef struct Tier1NarrowFixture Tier1NarrowFixture;
@@ -160,6 +161,40 @@ static bool tier1_narrow_fixture(Tier1EmitTest* test, Tier1NarrowFixture* fixtur
             value = tier1_narrow_node(fixture, IR_LSHR, IR_I64, value, shift);
             value = tier1_narrow_node(fixture, IR_TRUNC, IR_I16, value, BUSTER_IR_NONE);
         }
+        else if (fixture->kind == TIER1_NARROW_BITWISE && fixture->narrow == IR_I1)
+        {
+            // Truth values combined by #2677's 32-bit and, or and xor, a constant on the left: (p != 0) & ((p & 0x100) != 0),
+            // its complement as xor with true, or the second, xor the first.
+            const uint32_t zero = tier1_narrow_constant(fixture, IR_I64, 0);
+            const uint32_t bit = tier1_narrow_constant(fixture, IR_I64, 0x100);
+            const uint32_t first = tier1_narrow_node(fixture, IR_ICMP, IR_I1, input, zero);
+            function->c[first] = IR_NE;
+            const uint32_t masked = tier1_narrow_node(fixture, IR_AND, IR_I64, input, bit);
+            const uint32_t second = tier1_narrow_node(fixture, IR_ICMP, IR_I1, masked, zero);
+            function->c[second] = IR_NE;
+            const uint32_t both = tier1_narrow_node(fixture, IR_AND, IR_I1, first, second);
+            const uint32_t truth = tier1_narrow_constant(fixture, IR_I1, 1);
+            const uint32_t complement = tier1_narrow_node(fixture, IR_XOR, IR_I1, truth, both);
+            const uint32_t either = tier1_narrow_node(fixture, IR_OR, IR_I1, complement, second);
+            value = tier1_narrow_node(fixture, IR_XOR, IR_I1, either, first);
+        }
+        else if (fixture->kind == TIER1_NARROW_BITWISE)
+        {
+            // A byte's or word's and, or and xor (#2677): of registers, an immediate on either side (all ones, the type's
+            // bits alone), and a load that a 32-bit memory operand would read past at the guard page, so it stays a load.
+            const uint32_t truncated = tier1_narrow_node(fixture, IR_TRUNC, fixture->narrow, input, BUSTER_IR_NONE);
+            const uint32_t loaded = tier1_narrow_node(fixture, IR_LOAD, fixture->narrow, 0, BUSTER_IR_NONE);
+            const uint32_t both = tier1_narrow_node(fixture, IR_AND, fixture->narrow, truncated, loaded);
+            const uint32_t shift = tier1_narrow_constant(fixture, IR_I64, 5);
+            const uint32_t shifted = tier1_narrow_node(fixture, IR_LSHR, IR_I64, input, shift);
+            const uint32_t other = tier1_narrow_node(fixture, IR_TRUNC, fixture->narrow, shifted, BUSTER_IR_NONE);
+            const uint32_t either = tier1_narrow_node(fixture, IR_OR, fixture->narrow, both, other);
+            const uint32_t pattern = tier1_narrow_constant(fixture, fixture->narrow, fixture->narrow == IR_I8 ? 0xa5 : 0xa55a);
+            const uint32_t mixed = tier1_narrow_node(fixture, IR_XOR, fixture->narrow, either, pattern);
+            const uint32_t ones = tier1_narrow_constant(fixture, fixture->narrow, UINT64_MAX);
+            const uint32_t kept = tier1_narrow_node(fixture, IR_AND, fixture->narrow, ones, mixed);
+            value = tier1_narrow_node(fixture, IR_XOR, fixture->narrow, ones, kept);
+        }
         else if (fixture->kind == TIER1_NARROW_PRESSURE || fixture->kind == TIER1_NARROW_CONSTANT_PRESSURE)
         {
             uint32_t terms[BUSTER_TIER1_NARROW_TERMS];
@@ -281,6 +316,7 @@ static bool tier1_narrow_expected(const Tier1NarrowFixture* fixture, Tier1Narrow
             case IR_ADD: value = left + right; break;
             case IR_AND: value = left & right; break;
             case IR_OR: value = left | right; break;
+            case IR_XOR: value = left ^ right; break;
             case IR_SHL:
                 ready = right < tier1_narrow_bits(function->type[node]);
                 value = ready ? left << right : 0;
@@ -604,8 +640,9 @@ static void tier1_narrow_failures(Tier1EmitTest* test)
         arena_pop_to(&test->output, 0);
         arena_pop_to(&test->input, 0);
     }
-    // Narrow arithmetic, compares, shifts, call arguments and I1 conversions; narrow parameters (0 and 1), returns (2 and
-    // 3) and call results (8) are taken (tier1_call_test.c runs the parameters and results, and these tests the returns).
+    // Narrow arithmetic but and, or and xor (#2677's, TIER1_NARROW_BITWISE), compares, shifts, call arguments and I1
+    // conversions; narrow parameters (0 and 1), returns (2 and 3) and call results (8) are taken (tier1_call_test.c runs
+    // the parameters and results, and these tests the returns).
     static const uint32_t failures[] = { 4, 5, 6, 7, 9, 10 };
     for (uint32_t index = 0; index < sizeof(failures) / sizeof(failures[0]); index += 1)
     {
@@ -805,6 +842,19 @@ static void tier1_narrow_cases(Tier1EmitTest* test)
         .result_type = IR_I64,
     };
     tier1_narrow_compile(test, &bswap);
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t destination = 0; destination < 2; destination += 1)
+        {
+            Tier1NarrowFixture bitwise = {
+                .kind = TIER1_NARROW_BITWISE,
+                .narrow = width == 0 ? IR_I1 : width == 1 ? IR_I8 : IR_I16,
+                .input_type = IR_I64,
+                .result_type = destination ? IR_I64 : IR_I32,
+            };
+            tier1_narrow_compile(test, &bitwise);
+        }
+    }
     tier1_narrow_failures(test);
 }
 

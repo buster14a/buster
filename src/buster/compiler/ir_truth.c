@@ -19,11 +19,12 @@
 //
 // ir_truth_simplify_values, which if-conversion runs on its rounds' own columns (#1382), also takes the truth values
 // it makes: a select of truth values tested against zero, and a test of an extended i1 value that is no comparison.
-// The test itself becomes, in its row and type, an i1 select or a copy: `select c, (ext x), 0` tested nonzero is
-// `select c, x, c` (c && x), `select c, 1, (ext y)` is `select c, c, y` (c || y), `select c, (ext x), (ext y)` is
+// The test itself becomes, in its row and type, an i1 and, or, select or copy: `select c, (ext x), 0` tested nonzero is
+// `and c, x` (c && x), `select c, 1, (ext y)` is `or c, y` (c || y), `select c, (ext x), (ext y)` is
 // `select c, x, y`, and `select c, 1, 0` is c (tested equal to zero, `select c, 0, 1` is c too); `(ext v)` tested
-// nonzero is v. A form that would need c's or a value's complement stays. Tier 1 selects i1 selects as it does wider
-// ones, while its integer rules take no i1 and/or (#1382's follow-up). The operation changes, and nothing else does.
+// nonzero is v. A form that would need c's or a value's complement stays. Tier 1 computes an i1 and or or as its 32-bit
+// operation (#2677), as clang's `&&` and `||` values are, where an i1 select is a test and a cmov. The operation and its
+// operands change, and nothing else does.
 
 #ifndef BUSTER_IR_TRUTH_C
 #define BUSTER_IR_TRUTH_C
@@ -140,11 +141,11 @@ static bool ir_truth_rewrite_value(IrFunction* function, uint32_t root)
             const uint32_t ky = ir_truth_kind(function, function->c[value], &y);
             const uint32_t shape = kx << 2 | ky;
             const bool nonzero = predicate == IR_NE;
-            op = nonzero && (shape == (3u << 2 | 1u) || shape == (2u << 2 | 3u) || shape == (3u << 2 | 3u)) ? IR_SELECT :
+            op = nonzero && shape == (3u << 2 | 1u) ? IR_AND : nonzero && shape == (2u << 2 | 3u) ? IR_OR : nonzero && shape == (3u << 2 | 3u) ? IR_SELECT :
                  (nonzero && shape == (2u << 2 | 1u)) || (!nonzero && shape == (1u << 2 | 2u)) ? IR_COPY : IR_OP_COUNT;
             a = condition;
-            b = op != IR_SELECT ? BUSTER_IR_NONE : kx == 3 ? x : condition;
-            c = op != IR_SELECT ? BUSTER_IR_NONE : ky == 3 ? y : condition;
+            b = op == IR_AND || op == IR_SELECT ? x : op == IR_OR ? y : BUSTER_IR_NONE;
+            c = op == IR_SELECT ? y : BUSTER_IR_NONE;
         }
         else if (value < function->instruction_count && value != root && function->op[value] != IR_ICMP && function->type[value] == IR_I1 && predicate == IR_NE)
         {
