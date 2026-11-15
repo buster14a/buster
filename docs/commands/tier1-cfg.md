@@ -53,7 +53,9 @@ solver; two phi scans replace the fifth `passed` matrix.
 remote occurrences and uses, self-phis, undefined operands, sibling edges,
 spills, rematerialization and fixed clobbers in all three register classes.
 Small fixtures run the allocator, independent verifier, certificate and
-mutation checks. Wide joins of 8, 65, 513 and 8,193 predecessors must prepare
+mutation checks. The dispatch-entry fixture (#2782) checks that a handler a
+`goto` and a dispatch's multiway branch both enter starts its phi in the
+dispatch's register for the phi's operand. Wide joins of 8, 65, 513 and 8,193 predecessors must prepare
 within 8 MiB of scratch with zero or one global value, and every local operand
 must keep exactly its home-tail interval. These are capacity and semantic
 checks, not timing or RSS measurements.

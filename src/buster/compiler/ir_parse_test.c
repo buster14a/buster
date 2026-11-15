@@ -717,6 +717,7 @@ static int run_ir_parse_tests(int argc, char** argv)
                 "tests/ir/carriers.ir",
                 "tests/ir/bitshuffle.ir",
                 "tests/ir/quadword-op.ir",
+                "tests/ir/pairwise.ir",
                 "tests/ir/funnel.ir",
                 "tests/ir/fround.ir",
             };

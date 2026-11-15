@@ -498,7 +498,8 @@ static __attribute__((unused)) IrError tier1_schedule_ir_function(IrFunction* f,
 // operation of general integers or pointers (tier1_sink_ir_operations, tier1_sink_ir_types): constants, copies,
 // conversions, address arithmetic and the integer operations that can't trap. An expression moves where:
 // - its operands from outside it are one value `a` and constants, and `a` is of the phi's family (tier1_sink_ir_family):
-//   the phi, a value computed from it, or a join of its values, which takes the phi's register;
+//   the phi, a value computed from it, a join of its values or a join of such joins, or a value the phi itself joins
+//   along another edge, which takes the phi's register;
 // - some instruction of its segment after the root reads `a`: the last of them, its anchor (counting the readers of
 //   the set's readers, which selection folds into their consumers), is none of the set and no truth value;
 // - nothing reads the root before the anchor, nor any other of its instructions but the one of them that it is an
@@ -526,6 +527,8 @@ static __attribute__((unused)) IrError tier1_schedule_ir_function(IrFunction* f,
 
 #define BUSTER_TIER1_SINK_NODES 8u
 #define BUSTER_TIER1_SINK_WINDOW 32u
+// The fewest values a shared source joins, a dispatch's join (tier1_sink_ir_family).
+#define BUSTER_TIER1_SINK_JOINS 3u
 // The longest chain of operations tier1_sink_ir_origin walks up from a value to the one it comes from.
 #define BUSTER_TIER1_SINK_FOLLOW 8u
 
@@ -744,16 +747,55 @@ static uint32_t tier1_sink_ir_origin(const IrFunction* f, uint32_t v)
     return value;
 }
 
-// Whether `a` is of `phi`'s family: it comes from the phi (tier1_sink_ir_origin), or from a phi one of whose first
-// BUSTER_TIER1_SINK_WINDOW incoming values does, as a dispatch's handler's join of pc's paths.
-static bool tier1_sink_ir_family(const IrFunction* f, uint32_t a, uint32_t phi)
+// Whether phi `join` has, among its first BUSTER_TIER1_SINK_WINDOW incoming values, one that comes from `origin`
+// (tier1_sink_ir_origin).
+static bool tier1_sink_ir_joins(const IrFunction* f, uint32_t join, uint32_t origin)
+{
+    const uint32_t incoming = f->op[join] == IR_PHI ? (f->b[join] < BUSTER_TIER1_SINK_WINDOW ? f->b[join] : BUSTER_TIER1_SINK_WINDOW) : 0;
+    bool joins = false;
+    for (uint32_t p = 0; !joins && p < incoming; p += 1)
+    {
+        joins = tier1_sink_ir_origin(f, f->extra[f->a[join] + p * 2 + 1]) == origin;
+    }
+    return joins;
+}
+
+// Whether `a` is of `phi`'s family, whose next value is `root`, by where each comes from (tier1_sink_ir_origin):
+// - `a` comes from the phi;
+// - or from a phi that joins the phi's values, as a dispatch's handler's join of pc's paths does, or that joins such a
+//   join, as a handler's pc after a jump of its own does (#2592: Lua's OP_TFORLOOP after OP_TFORCALL's fetch);
+// - or the phi joins, along another edge than the root's, the value `a` comes from;
+// - or the phi joins, along another edge, a join of at least BUSTER_TIER1_SINK_JOINS values that `a`'s phi joins too, a
+//   dispatch's: Lua's `l_tforloop` joins OP_TFORCALL's `pc + 1` with the dispatch's pc, which OP_TFORCALL's own pc joins
+//   with OP_TFORPREP's jump (#2782). Two loops' phis sharing an initial value share no register: with any phi as the
+//   source, luaH_getshortstr ran 10 M more instructions on Lua's scripts.
+// The phi's register is then `a`'s.
+static bool tier1_sink_ir_family(const IrFunction* f, uint32_t a, uint32_t phi, uint32_t root)
 {
     const uint32_t origin = tier1_sink_ir_origin(f, a);
-    bool family = origin == phi;
-    const uint32_t incoming = !family && f->op[origin] == IR_PHI ? (f->b[origin] < BUSTER_TIER1_SINK_WINDOW ? f->b[origin] : BUSTER_TIER1_SINK_WINDOW) : 0;
-    for (uint32_t p = 0; !family && p < incoming; p += 1)
+    // Where the values `a`'s phi joins come from, where `a` comes from a phi.
+    uint32_t sources[BUSTER_TIER1_SINK_WINDOW];
+    const uint32_t count = f->op[origin] == IR_PHI ? (f->b[origin] < BUSTER_TIER1_SINK_WINDOW ? f->b[origin] : BUSTER_TIER1_SINK_WINDOW) : 0;
+    for (uint32_t p = 0; p < count; p += 1)
     {
-        family = tier1_sink_ir_origin(f, f->extra[f->a[origin] + p * 2 + 1]) == phi;
+        sources[p] = tier1_sink_ir_origin(f, f->extra[f->a[origin] + p * 2 + 1]);
+    }
+    bool family = origin == phi;
+    for (uint32_t p = 0; !family && p < count; p += 1)
+    {
+        family = sources[p] == phi || (sources[p] != origin && f->op[sources[p]] == IR_PHI && tier1_sink_ir_joins(f, sources[p], phi));
+    }
+    const uint32_t targets = !family ? (f->b[phi] < BUSTER_TIER1_SINK_WINDOW ? f->b[phi] : BUSTER_TIER1_SINK_WINDOW) : 0;
+    for (uint32_t q = 0; !family && q < targets; q += 1)
+    {
+        const uint32_t value = f->extra[f->a[phi] + q * 2 + 1];
+        const uint32_t shared = value != root ? tier1_sink_ir_origin(f, value) : BUSTER_IR_NONE;
+        family = shared != BUSTER_IR_NONE && shared == origin;
+        const bool dispatch = shared != BUSTER_IR_NONE && f->op[shared] == IR_PHI && f->b[shared] >= BUSTER_TIER1_SINK_JOINS;
+        for (uint32_t p = 0; !family && dispatch && p < count; p += 1)
+        {
+            family = sources[p] == shared;
+        }
     }
     return family;
 }
@@ -800,7 +842,7 @@ static void tier1_sink_ir_candidate(const IrFunction* f, Tier1SinkIrWork* w, uin
     // `a` is of the phi's family (tier1_sink_ir_family): the register the expression's result wants is the phi's, which
     // `a` holds. Where another value wants `a`'s register more, as a list's `p = p->next` beside `pp = &p->next` does,
     // the expression keeps its place.
-    valid = valid && leaf != BUSTER_IR_NONE && tier1_sink_ir_family(f, leaf, phi);
+    valid = valid && leaf != BUSTER_IR_NONE && tier1_sink_ir_family(f, leaf, phi, root);
     // `a`'s readers after the root, and the readers of those of the set, as selection folds them into their consumers:
     // the last of them is the anchor.
     uint32_t members[BUSTER_TIER1_SINK_NODES];

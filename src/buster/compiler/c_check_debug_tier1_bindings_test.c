@@ -22,7 +22,7 @@ static void check_debug_tier1_values_binding_case(CheckDebugTestTally* tally, co
         uint32_t actual[128];
         memset(actual, 0xff, sizeof(actual));
         const uint64_t cells = (uint64_t)function->local_count * emitted->code.count;
-        bool valid = cells <= BUSTER_ARRAY_LENGTH(actual) && check_tier1_debug_values(function, ir, emitted, order, path != 0, &scratch, &proof);
+        bool valid = cells <= BUSTER_ARRAY_LENGTH(actual) && check_tier1_debug_values(function, ir, emitted, order, NULL, path != 0, &scratch, &proof);
         const uint64_t count = valid ? check_tier1_debug_value_ranges(&proof, entries, safe, emitted->body_record, epilogue, path != 0, NULL) : 0;
         valid = valid && count <= BUSTER_ARRAY_LENGTH(locations);
         valid = valid && check_tier1_debug_value_ranges(&proof, entries, safe, emitted->body_record, epilogue, path != 0, locations) == count;
@@ -136,7 +136,7 @@ static void check_debug_tier1_values_fresh(CheckDebugTestTally* tally)
         _Alignas(64) uint8_t storage[32768] = { 0 };
         Arena scratch = { .base = storage, .capacity = sizeof(storage) };
         CheckTier1DebugValues proof = { 0 };
-        bool valid = check_tier1_debug_values(&function, &ir, &emitted, NULL, path != 0, &scratch, &proof);
+        bool valid = check_tier1_debug_values(&function, &ir, &emitted, NULL, NULL, path != 0, &scratch, &proof);
         check_debug_test_expect(tally, valid, "the dynamic backedge trace constructs the real bounded region and machine proof", "fresh phi and repeated definition identities");
         if (valid)
         {

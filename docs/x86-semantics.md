@@ -626,7 +626,7 @@ Mutations of the tables, each built and run once, are caught. Among them:
 - **Atomics:** lock cmpxchg and lock xadd.
 - **SSE and SSE2:**
   - the moves: movss and movsd, movaps, movups, movapd, movupd, movdqa and
-    movdqu, movd and movq;
+    movdqu, movd and movq, and movhps's load (Tier 0's copies, #2693);
   - scalar arithmetic: add, sub, mul, div, min, max and sqrt, in ss and sd;
   - ucomiss, ucomisd, comiss, comisd, cmpss and cmpsd;
   - the conversions: cvtsi2ss and cvtsi2sd, cvttss2si and cvttsd2si,

@@ -208,7 +208,15 @@ callee's origins move past the caller's (`IrDebugInfo.origin_count`), each
 copied instruction takes its callee origin there, and the instance (the
 callee's symbol, its origins, the call's origin and the instance holding that
 call) and the callee's own instances, re-based and nested in it, follow the
-caller's. A caller's slots take no callee local.
+caller's. A caller's slots take no callee local. Where both sidecars have
+bindings, the callee's parameters are the caller's last locals
+(`IrDebugInline.local`, `local_count`, flagged `BUSTER_IR_DEBUG_BIND_INSTANCE`,
+#2541), each with one initial binding to its argument's value where the callee
+never assigns it nor takes its address (`ir_inline_parameter_unassigned`), and
+the callee's own instances' locals follow, re-based; `ir_verify` checks that the
+instances' locals are the function's last, in order, flagged, and that their
+bindings follow the function's others. `test-ir-inline` checks an unassigned
+parameter's binding and an assigned one's absence.
 
 The four byte columns and three operand columns retain their shared IR
 meanings. Constant/address rows from each expanded body are appended with
