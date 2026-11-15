@@ -83,7 +83,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --operand-diagnostics-only | --label-attributes-only |
-  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --run-modes-only] [--in-process] [--clang-server PATH]
+  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --record-extensions-only | --auto-qualifiers-only |
+  --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; with
@@ -139,6 +140,13 @@ unused-warning fixtures also check exact scope-completion tokens.
   complete diagnostics and exit status under warning promotion/suppression,
   error limits, source policy, C17/C23, both reader choices and lane requests,
   and verifies existing object-output preservation for rejected input.
+  `--record-extensions-only` runs the existing GNU empty-record checks plus the runtime
+  `tests/driver/record-extensions/` catalogue for zero-size-record C++ compatibility and
+  zero-length-array warnings (#2409). Complete GNU17/C23 diagnostics cover explicit and
+  inferred bounds, nested dimensions, typedef and compound-literal reuse, folded/VLA
+  controls, direct and nested flexible members, macros, source pragmas and system headers.
+  The shared harness checks suppression/promotion, scalar/default readers, one/three
+  requested lanes, syntax/object modes, rejected-output preservation and accepted object twins.
   `--semantic-recovery-only` runs
   `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,
   `c_check_attribute_call_recovery_driver_test.c`, `c_check_malformed_call_driver_test.c`,
@@ -941,6 +949,12 @@ later errors and accepted neighboring declarations are checked in GNU17 and
 C23, including preservation of output after a rejected unit. A C23 constexpr
 comma group guards the continuation flags. The source names and expected
 diagnostic counts come from the runtime `cases.txt` catalog.
+The same catalog checks `_Atomic __auto_type` pointer initializers: exact
+placeholder and source-type spellings, nested and qualified pointers, typedefs,
+macro notes, comma declarators, recovered invalid uses, later errors and warning
+order. `test-checker-driver --auto-qualifiers-only` runs these sources alone.
+Their requested lane settings include the existing source-order fallback for
+invalid-binding recovery.
 
 `c_check_format_bitint_driver_test.c` adds 25 original fixtures to
 `test-checker-driver` through the shared default-warning harness. Independent

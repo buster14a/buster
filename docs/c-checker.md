@@ -7276,8 +7276,15 @@ variable's initializer at its name, after its attributes' warnings, as clang's `
 scope's is an error). `-Wgnu-empty-struct` (#2409, off by default, `-pedantic`'s and `-Wgnu`'s) warns of a
 struct's or union's definition without named members at its keyword, as clang's `ActOnFields` does when it
 completes the record: "empty struct is a GNU extension", or "struct without named members is a GNU extension" where
-its members are unnamed bit-fields alone (an anonymous member counts as named). Left: clang's off-by-default
-`-Wc++-compat` "empty struct has size 0 in C, size 1 in C++" and `-Wzero-length-array` aren't given. Command-line
+its members are unnamed bit-fields alone (an anonymous member counts as named).
+`-Wc++-compat` also diagnoses completed zero-size records, before the GNU warning at the same keyword. It includes
+named zero-size members and wrappers around flexible-array records, but excludes a record's own flexible-array
+member. The wording distinguishes an empty record from one with fields and one named member from several.
+`-Wzero-length-array` diagnoses zero bounds with integer-constant-expression form, including overflow folding, while their declarator types are built, from
+the inner dimension out, and an unknown bound inferred as zero at its initializer. Typedef reuse and an array
+copied from a compound literal retain the original diagnostic without duplicating it. Other GNU-folded zero
+bounds, such as const-variable reads and comma expressions, keep their folding warning alone. Both new warnings are ignored by default; `-Wgnu` and `-pedantic`
+also enable the zero-length-array warning. Command-line
 options, `#pragma clang diagnostic` groups, `-w`, system
 headers and `-Werror` promotion apply through the shared sparse policy (`c_check_warning_policy.c`); the
 driver's `check_driver_warning_events_at` orders them by completion and attaches their notes. `test-checker-driver`
@@ -8668,11 +8675,18 @@ unqualified placeholder even with const or volatile, as Clang does, and keeps
 the name's macro expansion notes. A missing initializer reports its qualified
 placeholder type after the restrict error, even at the same name. This recovery
 does not permit object emission.
-Refused by name: `_Atomic` and `restrict` through a declarator
-(`_Atomic __auto_type *p`, whose initializer clang finds incompatible),
-`restrict` of a value that is no pointer to an object (clang's `restrict int`,
-which the placeholder can't be told from), and other type-changing attributes
-besides the handled vector, mode and address-space attributes. An incompatible
+An `_Atomic __auto_type` pointee through one or more pointer declarators instead
+reports Clang's incompatible-initializer error at each variable's name. Its
+placeholder keeps the written pointer and qualifier levels, and the initializer
+keeps its unconverted type, typedef spelling, array or function type and lvalue
+qualifiers. The rejected declaration remains bound with quiet uses; its initializer
+is removed from conversion and emission, and later declarators and independent
+errors still run. Invalid-binding recovery requires the existing source-order
+fallback when a deferred lane encounters it.
+Refused by name: other `_Atomic` and `restrict` declarators, `restrict` of a
+value that is no pointer to an object (clang's `restrict int`, which the
+placeholder can't be told from), and other type-changing attributes besides
+the handled vector, mode and address-space attributes. An incompatible
 address-space pointee initializer is rejected by the assignment check, whose
 message names the deduced type rather than clang's undeduced placeholder. An
 `_Atomic` placeholder initialized by an atomic value reports the incompatible
@@ -8701,12 +8715,16 @@ is clang's (`c_checker_driver_gnu_test.c`).
 The original `tests/driver/auto-qualifiers/` runtime sources compare complete
 Clang diagnostics for the combined atomic/restrict specifiers in every order,
 GNU restrict spellings, macros, comma groups and later independent errors.
+Atomic pointer initializers also cover nested pointers, pointer qualifiers,
+unconverted source types and typedefs, mixed valid/invalid comma declarators,
+quiet uses of invalid bindings and expression warnings after the recovered error.
 Missing initializers retain both errors, and `typeof` assertions check the
 recovered atomic types. Accepted neighboring atomic and restricted-pointer
 declarations check that deduction and emission remain valid; C23 constexpr
 and inferred-auto comma groups guard the continuation flags. The shared driver
 harness covers GNU17 and C23, both kernels, one/three requested lanes, syntax
 and object routes, and default, `-Werror` and `-w` policies.
+`test-checker-driver --auto-qualifiers-only` runs this catalog alone.
 
 The original runtime sources in `tests/driver/auto-address/` run through the
 address-space driver's existing diagnostic harness in GNU17 and C23 modes.

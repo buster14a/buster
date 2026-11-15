@@ -55,7 +55,9 @@ and once it has no unit left, before it helps on the board), and a unit alone
 always runs.
 `--units-memory=BYTES`, a test option, sets that budget and reports how many
 units waited, the most lanes that held memory at once and how many lanes kept
-their pages for the exit. Each lane releases
+their pages for the exit. BYTES is an unsigned decimal word from 1 through
+`UINT64_MAX`; malformed or overflowing values are refused by the
+[numeric driver option contract](driver.md#numeric-driver-options). Each lane releases
 what its units shared, into its pool and then the pool itself, on the lane as
 soon as it takes no more units, before it helps the others' functions (#777);
 without a link, in a command whose process exits after the lanes (main's,

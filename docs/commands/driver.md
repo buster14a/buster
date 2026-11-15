@@ -292,6 +292,28 @@ errors. The behavioral references are LLVM revision
 and `CompilerInvocation.cpp`'s `addDiagnosticArgs`; no upstream implementation
 or fixture is imported.
 
+## Numeric driver options
+
+The driver reads `--lanes`, `--worker-budget`, `--emit-window`,
+`--units-memory` and `--id-order` as nonempty unsigned decimal words (#2786).
+Leading zeroes are allowed. Signs, whitespace, base prefixes, trailing text
+and overflowing values are refused before a source or output is opened; an
+invalid occurrence still fails when another occurrence supplies a valid value.
+
+| Option | Accepted range | Spellings |
+| --- | --- | --- |
+| `--lanes` | 1 through 64 | `--lanes N`, `--lanes=N` |
+| `--worker-budget` | 1 through 64 | `--worker-budget N`, `--worker-budget=N` |
+| `--emit-window` | 0 through 4,294,967,295 | `--emit-window=N` |
+| `--units-memory` | 1 through 18,446,744,073,709,551,615 | `--units-memory=N` |
+| `--id-order` | 0 through 18,446,744,073,709,551,615 | `--id-order N`, `--id-order=N` |
+
+`test-check-lanes --numeric-options-only` runs the real driver through each
+spelling on default and scalar paths, checks range boundaries and malformed
+words, requires rejected commands to preserve an existing output, and compares
+every accepted command's object with the ordinary command's bytes.
+`--executable PATH` applies these same cases to a separate compiler binary.
+
 ## Response files
 
 Source commands expand `@file` before information probes and selection of
