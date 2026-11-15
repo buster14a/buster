@@ -7132,12 +7132,29 @@ static void pp_expand_object(Preprocessor* pp, PPMacroId id, PPToken name, uint3
     pp->history_current = saved_history;
 }
 
-// A numeric constant spelled in the scratch space.
+// `value` in decimal, then `suffix` (0 for none), into the scratch space: the location of its first byte, with its
+// length in `*length`. A direct conversion, from the last digit back, with no format string to read (#2668).
+static uint32_t pp_scratch_decimal(Preprocessor* pp, uint64_t value, uint8_t suffix, uint32_t* length)
+{
+    uint8_t digits[24];
+    uint32_t begin = sizeof(digits) - (suffix != 0);
+    digits[sizeof(digits) - 1] = suffix;
+    uint64_t rest = value;
+    do
+    {
+        begin -= 1;
+        digits[begin] = (uint8_t)('0' + rest % 10);
+        rest /= 10;
+    } while (rest != 0);
+    *length = (uint32_t)sizeof(digits) - begin;
+    return pp_scratch_clean(pp, &digits[begin], *length);
+}
+
+// A numeric constant spelled in the scratch space; 0 and 1, which every `defined` gives, use their ready-made spellings.
 static PPToken pp_number_token(Preprocessor* pp, uint64_t value, uint8_t flags)
 {
-    char digits[24];
-    const uint32_t length = (uint32_t)snprintf(digits, sizeof(digits), "%lu", (unsigned long)value);
-    const uint32_t location = value == 0 ? pp->zero_location : value == 1 ? pp->one_location : pp_scratch_clean(pp, (const uint8_t*)digits, length);
+    uint32_t length = 1;
+    const uint32_t location = value == 0 ? pp->zero_location : value == 1 ? pp->one_location : pp_scratch_decimal(pp, value, 0, &length);
     return (PPToken){ .kind = C_TOKEN_NUMERIC_CONSTANT, .flags = (uint8_t)(flags | BUSTER_PP_FROM_MACRO), .value = location + length, .location = location,
                       .origin = pp->history_current };
 }
@@ -7146,12 +7163,11 @@ static PPToken pp_number_token(Preprocessor* pp, uint64_t value, uint8_t flags)
 // spell it (EvaluateFeatureLikeBuiltinMacro); __has_include's is never past 1.
 static PPToken pp_feature_token(Preprocessor* pp, uint64_t value, uint8_t flags)
 {
-    PPToken result = pp_number_token(pp, value, flags);
+    PPToken result = pp_number_token(pp, value > 1 ? 0 : value, flags);
     if (value > 1)
     {
-        char digits[24];
-        const uint32_t length = (uint32_t)snprintf(digits, sizeof(digits), "%luL", (unsigned long)value);
-        result.location = pp_scratch_clean(pp, (const uint8_t*)digits, length);
+        uint32_t length = 0;
+        result.location = pp_scratch_decimal(pp, value, 'L', &length);
         result.value = result.location + length;
     }
     return result;

@@ -108,7 +108,15 @@ struct CheckDebugValues
     // By token: CHECK_DEBUG_ROOT where the token is in one of the unit's roots, CHECK_DEBUG_USED at a file-scope typedef's
     // name that one names (check_debug_value_roots).
     uint8_t* marks;
+    // By token, the last token of its statement's subtree. The parser's column where it kept one; otherwise derived for a
+    // body's tokens when the body's first lexical block needs them (check_debug_body_ends, #2544), with `ends_ready`
+    // marking those bodies for the second pass and `ends_children`, `ends_queue` its scratch.
     const uint32_t* ends;
+    uint32_t* derived_ends;
+    uint32_t* ends_children;
+    uint32_t* ends_queue;
+    uint8_t* ends_ready;
+    bool ends_failed;
     DebugWriter info;
     DebugWriter ranges;
     DebugWriter locations;
@@ -1000,6 +1008,45 @@ static void check_debug_value_roots(CheckDebugValues* values, uint32_t* starts, 
     }
 }
 
+// The statement ends of one body's tokens, `opening` to `closing`, its closing brace their root (#2544). The whole
+// unit's derivation (check_program_statement_ends) walked every file-scope token as well, which -g's blocks never read.
+// The same bounded leaf queue, over the body alone: a body's statements are its own tokens' subtrees.
+static bool check_debug_body_ends(CheckDebugValues* values, uint32_t opening, uint32_t closing)
+{
+    const uint32_t* parents = values->parser->tree.parents;
+    uint32_t* ends = values->derived_ends;
+    uint32_t* children = values->ends_children;
+    uint32_t* queue = values->ends_queue;
+    memset(&children[opening], 0, ((uint64_t)closing - opening + 1) * sizeof(uint32_t));
+    for (uint32_t token = opening; token <= closing; token += 1)
+    {
+        ends[token] = token;
+        const uint32_t parent = parents[token];
+        const bool inner = parent >= opening && parent <= closing && parent != token;
+        children[inner ? parent : token] += inner;
+    }
+    uint32_t length = 0;
+    for (uint32_t token = opening; token <= closing; token += 1)
+    {
+        queue[length] = token;
+        length += children[token] == 0;
+    }
+    for (uint32_t at = 0; at < length; at += 1)
+    {
+        const uint32_t token = queue[at];
+        const uint32_t parent = parents[token];
+        if (parent >= opening && parent <= closing && parent != token)
+        {
+            ends[parent] = ends[token] > ends[parent] ? ends[token] : ends[parent];
+            children[parent] -= 1;
+            queue[length] = parent;
+            length += children[parent] == 0;
+        }
+    }
+    const bool result = length == closing - opening + 1;
+    return result;
+}
+
 static void check_debug_values_write(CheckDebugValues* values)
 {
     const CheckProgram* program = values->program;
@@ -1092,10 +1139,16 @@ static void check_debug_values_write(CheckDebugValues* values)
         {
             const uint32_t role = parser->tree.roles[token];
             const bool block = role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_OPEN_FOR || role == PARSE_ROLE_OPEN_CONDITION;
+            if (block && values->ends == NULL)
+            {
+                values->ends_ready[b] = values->ends_ready[b] != 0 || check_debug_body_ends(values, body.opening, closing);
+                values->ends_failed = values->ends_failed || values->ends_ready[b] == 0;
+            }
             if (block)
             {
                 const uint32_t parent = parser->tree.parents[token];
-                const uint32_t end = parent < input->token_count ? values->ends[parent] : input->token_count;
+                const uint32_t* ends = values->ends != NULL ? values->ends : values->derived_ends;
+                const uint32_t end = parent < input->token_count ? ends[parent] : input->token_count;
                 debug_uleb(&values->info, CHECK_DEBUG_BLOCK);
                 check_debug_value_field(values, DEBUG_SECTION_RNGLISTS, values->ranges.size);
                 check_debug_value_range(values, b, token, end, NULL, 0);
@@ -1173,12 +1226,17 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
     values.expanded = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1);
     values.inline_open = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)most_inlines + 1);
     values.inline_order = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)most_inlines + 1);
-    // The driver uses tree_only parsing: the checker's derived traversal was scratch-owned and is gone now.
-    // Reuse the bounded statement-end derivation without changing the already checked program's status.
-    CheckProgram traversal = *program;
-    values.ends = parser->ends != NULL ? parser->ends : check_program_statement_ends(&traversal, parser, scratch);
+    // The driver uses tree_only parsing: the checker's derived traversal was scratch-owned and is gone now. The blocks'
+    // statement ends are derived by body where a block needs them (check_debug_body_ends, #2544), not for the whole unit.
+    values.ends = parser->ends;
+    const bool derive = values.ends == NULL;
+    values.derived_ends = derive ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1) : NULL;
+    values.ends_children = derive ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1) : NULL;
+    values.ends_queue = derive ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1) : NULL;
+    values.ends_ready = derive ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1) : NULL;
+    const bool ends_valid = !derive || (values.derived_ends != NULL && values.ends_children != NULL && values.ends_queue != NULL && values.ends_ready != NULL);
     bool valid = values.type_offsets != NULL && values.types != NULL && values.enum_definitions != NULL && values.enum_owners != NULL && values.local_ids != NULL &&
-                 values.scopes != NULL && values.marks != NULL && values.ends != NULL && values.function_offsets != NULL && values.expanded != NULL &&
+                 values.scopes != NULL && values.marks != NULL && ends_valid && values.function_offsets != NULL && values.expanded != NULL &&
                  values.inline_open != NULL && values.inline_order != NULL;
     if (valid)
     {
@@ -1188,6 +1246,10 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
         check_debug_value_roots(&values, values.local_ids, values.scopes);
         memset(values.local_ids, 0xff, ((uint64_t)tokens + 1) * sizeof(uint32_t));
         memset(values.expanded, 0, (uint64_t)program->body_count + 1);
+        if (derive)
+        {
+            memset(values.ends_ready, 0, (uint64_t)program->body_count + 1);
+        }
         for (uint32_t b = 0; b < program->body_count; b += 1)
         {
             for (uint32_t k = 0; k < rows->values[b].inline_count; k += 1)
@@ -1276,7 +1338,7 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
             }
         }
         check_debug_values_write(&values);
-        valid = values.info.size < BUSTER_DEBUG_DWARF32_LIMIT && values.ranges.size < BUSTER_DEBUG_DWARF32_LIMIT && values.locations.size < BUSTER_DEBUG_DWARF32_LIMIT;
+        valid = !values.ends_failed && values.info.size < BUSTER_DEBUG_DWARF32_LIMIT && values.ranges.size < BUSTER_DEBUG_DWARF32_LIMIT && values.locations.size < BUSTER_DEBUG_DWARF32_LIMIT;
     }
     const uint64_t info_size = values.info.size;
     const uint64_t range_size = values.ranges.size;

@@ -720,8 +720,8 @@ of its own:
   lowering and 157 of Tier 0.
 - **The exact selection in the epilogue**, from the references the windows'
   loop finds, as today's from the program's.
-- **The remap** where the two differ: the merge maps the candidates'
-  numbering to the selection's, and leaves out what only the candidates kept.
+- **The remap** where the two differ: the code keeps the candidates'
+  numbering, and the object leaves out what only the candidates kept.
 
 **The census (2.1).** `--selection-census`, a test option, reports beside each
 unit's exact references three supersets that a pass before the windows could
@@ -790,16 +790,18 @@ So the step's design, by the census:
   references come from what no VALUE node names, has no scan, and keeps
   `W = ∞`. The selection over its references numbers the symbols
   provisionally, and the windows lower the bodies it keeps.
-- **The remap is one monotone compaction** where the two selections keep the
-  same bodies, as they do on every corpus: the exact selection's objects are
-  a subset of the candidates', in the same order, so an object's symbol is
-  its provisional one less the candidates' objects before it that the exact
-  selection leaves out, a prefix count over one mark an object, and every
-  symbol the lowering numbers after the objects (helpers, initializers,
-  runtime functions, jump tables, labels) moves down by all of them. The
-  merge maps every reference's symbol through it, as it maps the runtime
-  functions' and the jump tables' provisional symbols today
-  (`check_lower_finish` and the emission's merge).
+- **The remap is the object writer's**, where the two selections keep the
+  same bodies, as they do on every corpus (2.2b): the exact selection's
+  objects are a subset of the candidates', in the same order, so the code
+  keeps the provisional numbers, and each extra symbol (one whose object the
+  exact selection leaves out) is a placeholder, a local `.L` symbol without
+  an atom (`BUSTER_CHECK_PLACEHOLDER_NAME`) that the object leaves out as it
+  leaves out the lowering's temporaries. The data are the exact selection's,
+  so no extra datum has an atom, and nothing refers to a placeholder. The
+  object writer numbers the symbols it keeps and their relocations in order,
+  which compacts the rest: the object is the exact selection's, byte for
+  byte, every symbol the lowering numbers after the objects (helpers,
+  initializers, runtime functions, jump tables, labels) included.
 - **An extra body**, one the candidates keep and the exact selection
   doesn't, is not a compaction: the helpers and the runtime functions are
   numbered in the order the bodies first use them, so the extra body's first
@@ -819,7 +821,7 @@ So the step's design, by the census:
 | --- | --- | --- |
 | 2.1 The census | `--selection-census`: the walk's, the scan's and the pruned scan's candidates beside the exact references; their selections where they differ; no change to an object. | Done ([its record](https://github.com/buster14a/buster-performance/tree/ce52234167f8871f4236fb71ee3d75a7a03ffa88/docs/measurements/all-core-step2-census-2536-2026-11-14)). The pruned scan is a superset on every corpus and keeps no extra body; its cost is the next sub-step's to cut. |
 | 2.2a The pass before the windows | `check_program_constant_arms` and the pruned scan from the bodies' openings, before `check_program`'s loop; `--selection-census` reports it as its fourth census, "pass"; no change to an object. | Done ([its record](https://github.com/buster14a/buster-performance/tree/28fb041ee3b9c9d0ca9471653a5108287706999b/docs/measurements/all-core-step2a-pass-2536-2026-11-14)): its candidates are the pruned scan's by the writer's arms on every corpus; on the 9700X it costs 0.57 times the references pass on `sqlite3.c` (1.92 ms of a 123.3 ms compile) and 0.61 on `main.c`, its finding 0.45 ms of that. Half the references pass is 2.2c's to reach: the leaves gathered 16 at a time, and one scan of the ops for both the pruned operands and the conditions. |
-| 2.2b The provisional numbering | The lowering takes the pass's selection; the exact one follows; where they differ by objects alone, the merge remaps every symbol; `W = ∞` again on an extra body or a missing reference. `check_program` is still whole, so every corpus checks the remap. | Objects the same bytes at W of 1, 2,048 and ∞, with the pass's selection forced different. One worker not slower by more than the pass. |
+| 2.2b The provisional numbering | `--provisional-selection`: -c's code numbered by the pass's selection, its extra symbols placeholders the object leaves out; the exact selection where an extra body (or `--lower-all`, a dump, a unit linked with others) asks for it. `check_program` is still whole, so every corpus checks the remap. | Done ([its record](https://github.com/buster14a/buster-performance/tree/3b0224375a80b4bc88ab444f98838146eba21de2/docs/measurements/all-core-step2b-provisional-2536-2026-11-14)): on all 1,592 units of the corpora (`sqlite3.c`, `main.c`, Lua, c-testsuite, musl) the provisional selection serves, with 5 extra symbols on `sqlite3.c`, 78 on `main.c`, 17 in c-testsuite and 27 in musl, and every object is the exact selection's bytes, by windows of 1, 2,048 and ∞, on 8 lanes, by the scalar path and with `-g`. On the 9700X the option costs `sqlite3.c` 2.4 ms (2.0%) and `main.c` 18.6 ms (2.7%): the pass and a second selection, which the windows pay once the exact selection moves after them. |
 | 2.2c The program's loop in the windows | `check_program` split into its unit-wide part and its per-body loop, which runs in each window before its lowering; the diagnostics the loop feeds after their window, in today's order. | Objects and diagnostics the same bytes at W of 1, 2,048 and ∞. One worker not slower by more than the pass before the windows, which costs at most half the references pass. The lowering reads its controls a window after they were written; its stream stays cold until 2.3, so this sub-step's own gain is small and its gate is the step's after 2.3. |
 | 2.3 The graph's run and the warnings by windows | `check_graph_run`'s range entry (#1050 keeps its internals), `check_input_warning_graph` and the common warnings for a window's nodes, their diagnostics in today's order. | The step's gate: `check-expressions` to `lower` at most 1.3 times; under 1,000 pages faulted. |
 

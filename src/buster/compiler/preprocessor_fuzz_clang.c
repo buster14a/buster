@@ -309,7 +309,7 @@ static PreprocessorFuzzProcess preprocessor_fuzz_clang_process(Arena* arena, cha
         valid = within && preprocessor_fuzz_clang_copy(arena, served[0], served_lengths[0], output_limit, &result.output) &&
                 preprocessor_fuzz_clang_copy(arena, served[1], served_lengths[1], diagnostic_limit, &result.diagnostic);
     }
-    if (takes && both)
+    if (takes && both && served_status >= 0)
     {
         const char* const texts[2] = { result.output.pointer, result.diagnostic.pointer };
         const uint64_t lengths[2] = { valid ? result.output.length : 0, valid ? result.diagnostic.length : 0 };

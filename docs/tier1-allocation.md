@@ -265,7 +265,10 @@ recipe keep a register from a value without one that starts, or reloads at a
 required use, where its value hint names that register: where no use requires
 the recipe there, it leaves the register as an eviction does, recomputed at its
 next required use ("Recipes give way to hinted values" below). If its
-value was last in its slot and has no recipe, it stays there. A CFG's edges
+value was last in its slot and has no recipe, it stays there. So does a range
+with uses that continues its value from the slot, until its next required use,
+unless its value's first register is free at its start ("Ranges that wait in
+their slots" below). A CFG's edges
 move a value without a register where a successor wants it in one. The
 intervals starting at one position claim the registers they are hinted to,
 first come in input order, before any takes one; an interval whose hint is
@@ -1680,6 +1683,104 @@ CPU 2; 1,762 runs, none failed). Lua's five scripts run −0.44% instructions an
 33 orders. speedtest1 runs −0.53% instructions in the same time: +0.09% cycles,
 −0.66% to +0.83%. Statically, speedtest1's edge moves go from 35,590 to 36,035,
 where values move out of the registers their webs avoid; Lua's don't change.
+
+### Ranges that wait in their slots (#2768)
+
+A range a value enters a block with takes its place at the anchor's exit
+(#2553). Where the value is in its slot there, the range took a register at the
+block's start all the same, the lowest free one, and the edges into the block
+reloaded the value into it. The blocks the value then reaches take that
+register from the anchor's exit in turn, so the register picked at the start
+decided where the value meets its other paths.
+
+Lua's `OP_GETTABUP` calls `luaH_getshortstr` in one arm of `luaV_fastget` and
+spills `pc` around it. At the join of the two arms, `rbx`, where the dispatch
+keeps `pc`, still held `upval`, which the other arm's `luaV_finishget` reads, so
+`pc`'s range took `r13`, the lowest free callee-saved register and the one the
+dispatch takes `i` in. The fetch then loaded `i` into `rbx`, added 4 to `pc` in
+`r13`, and swapped the two through `r11` before the indirect jump: 0.74 M times
+on Lua's five scripts, and 1.48 M of the moves through `r11` left after #2592.
+
+- **Waiting.** A range hinted to its own value, which a block's entry ranges and
+  a split's pieces are and a phi's definition isn't, whose value was in its slot
+  where its hint says, waits there until its next required use, as an unused
+  one rests. A use that isn't required reads the slot.
+- **The first register.** The scan with required uses notes each value's first
+  register. Where it is free at the range's start, the range takes it there;
+  where it isn't, the range waits. A reload of a value whose hint names its slot
+  takes that register where it is free, rather than the lowest free one.
+
+`pc` now waits in its slot past the join, and the hot edge into the fetch
+reloads it into `rbx`, which `upval` has left by then. The fetch adds 4 to `pc`
+in `rbx` and swaps nothing through `r11`. `cl`, which the dispatch keeps in its
+slot, now keeps `r13` through the handler, so `i` takes `trap`'s `rbp`, which
+the scan evicts as the value with the fewest uses, and moves to `r13` at the
+jump, where `trap` is reloaded. The handler's path through the call runs 29
+instructions from the call's return to the indirect jump instead of 33.
+
+Taking a free register at the start where the first one is busy is what keeps
+a value spilled before a loop in a register around it: waiting there too, at a
+loop's header, reloaded `nCol` on every iteration of `sqlite3ColumnIndex`'s
+outer loop (+5.82 M). A phi's range is no continuation of its value: one that
+waited needed a slot of its own, and where slot sharing can't join it to its
+operands' (`sqlite3VdbeExec`'s opcode loop, whose join has 95 of them), every
+edge copied slot to slot through `r11` (+11.7 M). By callgrind (#1189's
+`gap.c`, #1217's inputs, Lua's hash seed fixed) at main `5f3c7d48`:
+
+| Variant | speedtest1 | Lua's five scripts |
+| --- | ---: | ---: |
+| main | 2,657.78 M | 4,879.4 M |
+| the first register for reloads alone | 2,656.99 M | 4,879.5 M |
+| waiting alone, every range | 2,661.32 M | 4,852.6 M |
+| both, every range | 2,657.79 M | 4,851.6 M |
+| both, but where the first register is free | 2,652.65 M | 4,851.5 M |
+| the same, for a range of its own value only (this) | 2,633.68 M (−0.91%) | 4,851.7 M (−0.57%) |
+| this without the free first register | 2,638.79 M | 4,851.9 M |
+
+- **By function.** `luaV_execute` runs 2,287.4 M instructions instead of
+  2,311.8 M, with 339.6 M register moves instead of 344.9 M and 16.4 M through
+  `r11` instead of 17.7 M; `rehash` runs −2.37 M, `str_gsub` −0.46 M and
+  `str_format` −0.36 M, and no Lua function more. speedtest1's
+  `balance_nonroot` runs −8.23 M, `sqlite3VdbeExec` −6.08 M and
+  `sqlite3_str_vappendf` −1.22 M; its losses are `sqlite3WhereEnd` +0.42 M and
+  `speedtest1_run` +0.14 M, where the reloads and the values they displace
+  moved.
+- **Statically** (`--tier1-report`), speedtest1's unit has 397,490 records
+  instead of 403,045, 30,715 edge moves instead of 39,235, and 11,225 spill
+  stores and 11,466 spill loads instead of 12,645 and 13,915; its call saves
+  rise from 19,436 stores and 24,766 loads to 19,545 and 24,902. `lvm.c` has
+  9,840 records instead of 9,994 and 992 edge moves instead of 1,196.
+
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/e1a21c966bf6728ef5f50326d60dd7419c932cc1/docs/measurements/tier1-waiting-ranges-2768-2026-11-14),
+#2592's method), main `5f3c7d48` against the change: speedtest1 runs 0.39% fewer
+user cycles over 8 layouts (95% interval −0.77% to −0.01%, slower at 2 of
+them) for 0.93% fewer instructions, and Lua's five scripts −0.04% (−0.52% to
++0.44%) over 33 link orders for 0.56% fewer instructions at each: Zen 5
+eliminates register moves at rename, and `arithmetic` and `closures` move with
+the link order by up to 10% either way. `sqlite3.c`'s `--tier1 -c` takes 0.21%
+more cycles for 0.29% more instructions, and `lvm.c`'s the same cycles: the
+scan's checks and its reloads at uses cost about what the fewer records and
+edge moves save later.
+
+With #2766 ("Recipes no block reads, settled phi places, and the fixed rules'
+scratch" above), which merged first, by the same callgrind method ([the
+record's section 4](https://github.com/buster14a/buster-performance/tree/296a5e536c79297214c215dbb9402d88b86094fc/docs/measurements/tier1-waiting-ranges-2768-2026-11-14)),
+its head `c3c9fb69` against it merged with this change: Lua's five scripts run
+4,756.0 M instructions instead of 4,778.2 M (−0.46%), `luaV_execute` 2,206.3 M
+instead of 2,225.5 M with 3.6 M moves through `r11` instead of 5.0 M (#2767's
+divisor in `rax` is 3.49 M of them), and speedtest1 2,603.53 M instead of
+2,626.65 M (−0.88%). No Lua function runs more, and speedtest1's only loss over
+0.1 M is `sqlite3WhereEnd` (+0.42 M).
+
+Every Lua build printed clang -O0's output and every speedtest1 gave its
+verification hash. `tier1_allocate_hints_test.c`'s traces check a range that
+waits and reloads into its value's first register, one that takes that
+register at its start where it is free, a range hinted to another value and
+one required at its start, which take a free register there; a build without
+each part of the rule fails its trace. `tests/driver/tier1_patterns.c`'s
+`patterns_spilled` is a handler shaped like `OP_GETTABUP`: on main its join
+reloads two of the loop's values into registers others hold, and its indirect
+jump follows their reloads, where now every handler's follows its table's load.
 
 ### A handler a goto enters (#2782, #2592)
 
