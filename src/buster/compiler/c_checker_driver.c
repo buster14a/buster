@@ -10754,6 +10754,8 @@ struct CheckDriverCommand
     // (CheckProgramOptions.helper_forms).
     CheckHelperReport* helper_report;
     uint32_t helper_forms;
+    // --deferred-lowering: a lowering that reads none of the controls' totals (#2536, CheckProgramLanes.deferred_lowering).
+    bool deferred_lowering;
 };
 
 typedef struct CheckUnitsKept CheckUnitsKept;
@@ -10773,8 +10775,8 @@ struct CheckDriverDeferred
 };
 
 // --tier1-passes='s list (#139's measurement): comma-separated items, each + or - and then a pass's name (sccp, dce, cfg,
-// merge, licm, sroa, vectorize, unroll, vectors, gvn or inline) or all, applied in turn to the passes the earlier options
-// left on: the default pipeline's (SCCP, dead-code removal, CFG cleanup, its merges, the inlining and vectors), with
+// merge, licm, sroa, memory, vectorize, unroll, vectors, gvn or inline) or all, applied in turn to the passes the earlier
+// options left on: the default pipeline's (SCCP, dead-code removal, CFG cleanup, its merges, the inlining and vectors), with
 // --tier1-gvn's and --tier1-no-inline's changes where they came first. `toggled` holds the BUSTER_CHECK_TIER1_PASS_* bits that differ from the default; `gvn` and `no_inline` are
 // the two passes with options of their own. Returns false, and leaves all three as they were, for an empty list or item,
 // an item without its sign, or an unknown name.
@@ -10782,7 +10784,7 @@ struct CheckDriverDeferred
 #define BUSTER_CHECK_DRIVER_PASS_INLINE 1024u
 static bool check_driver_tier1_passes(const char* list, uint16_t* toggled, bool* gvn, bool* no_inline)
 {
-    static const char* const names[] = { "sccp", "dce", "cfg", "merge", "licm", "sroa", "vectorize", "unroll", "vectors", "gvn", "inline", "all" };
+    static const char* const names[] = { "sccp", "dce", "cfg", "merge", "licm", "sroa", "memory", "vectorize", "unroll", "vectors", "gvn", "inline", "all" };
     static const uint32_t bits[] = {
         BUSTER_CHECK_TIER1_PASS_SCCP,
         BUSTER_CHECK_TIER1_PASS_DCE,
@@ -10790,6 +10792,7 @@ static bool check_driver_tier1_passes(const char* list, uint16_t* toggled, bool*
         BUSTER_CHECK_TIER1_PASS_MERGE,
         BUSTER_CHECK_TIER1_PASS_LICM,
         BUSTER_CHECK_TIER1_PASS_SROA,
+        BUSTER_CHECK_TIER1_PASS_MEMORY,
         BUSTER_CHECK_TIER1_PASS_VECTORIZE,
         BUSTER_CHECK_TIER1_PASS_UNROLL,
         BUSTER_CHECK_TIER1_PASS_VECTORS,
@@ -11608,7 +11611,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         pp->options.collect_diagnostics = true;
         pp_driver_verbose(options, path);
         ready = pp_run_input(pp, path);
-        if (!ready && pp->errors != 0 && !pp->diagnostic_collection_failed && !pp->history_failed)
+        // A fatal before the main file is entered (a --predefines file that can't be read, #2828) has no unit
+        // to recover. Clearing it and diagnosing an empty unit would read a file record that was never loaded.
+        const bool entered = pp->main_file != BUSTER_PP_NONE;
+        if (!ready && entered && pp->errors != 0 && !pp->diagnostic_collection_failed && !pp->history_failed)
         {
             // Only the produced source prefix is parsed after a real preprocessing fatal. Nonfatal errors
             // leave the whole stream. Either remains a rejected unit, independent of publication's cutoff.
@@ -13596,6 +13602,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             provisional_selection = true;
         }
+        else if (match.exact == C_OPTION_DEFERRED_LOWERING)
+        {
+            lanes->deferred_lowering = true;
+        }
         else if (match.exact == C_OPTION_POISON_ARENAS)
         {
             poison_arenas = true;
@@ -13883,6 +13893,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier1_function_sizes = lanes->tier1_function_sizes,
         .helper_report = helper_report ? &lanes->helper_report : NULL,
         .helper_forms = lanes->helper_forms,
+        .deferred_lowering = lanes->deferred_lowering,
     };
     if (worker_budget.dry_run)
     {

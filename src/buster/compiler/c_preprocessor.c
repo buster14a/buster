@@ -1683,6 +1683,9 @@ struct Preprocessor
     // An #include reached the depth limit: a file included before (PPFileData.included) isn't entered again
     // (pp_enter_file).
     bool include_limit_reached;
+    // The main file's index, or BUSTER_PP_NONE until pp_run_main enters it. A failed prelude (a --predefines file
+    // that can't be read, #2828) leaves it unset: 0 would name the first file record, which that failure may have
+    // made without data.
     uint32_t main_file;
     // -H's lines, from the main file's run on (pp_show_include): not the prelude's -include files, nor a quiet run's.
     bool showing_includes;

@@ -564,10 +564,72 @@ static void check_tier1_test_naked(CheckLanesTestTally* tally, const char* direc
     }
 }
 
+// The error file `path` contains `needle`.
+static bool check_tier1_test_errors_have(const char* path, const char* needle)
+{
+    FILE* file = fopen(path, "r");
+    char buffer[2048];
+    const size_t length = file != NULL ? fread(buffer, 1, sizeof(buffer) - 1, file) : 0;
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    buffer[length] = 0;
+    return needle != NULL && strstr(buffer, needle) != NULL;
+}
+
+// A refused function beside a static helper must be reported, not crash the dead pass (#2822, #2792).
+static void check_tier1_test_refused_reach(CheckLanesTestTally* tally, const char* directory, const char* executable)
+{
+    char source[PATH_MAX];
+    char object[PATH_MAX];
+    char errors[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/tier1-refused-reach.c", directory);
+    snprintf(object, sizeof(object), "%s/tier1-refused-reach.o", directory);
+    snprintf(errors, sizeof(errors), "%s/tier1-refused-reach.errors", directory);
+    static const char* const sources[] = {
+        "static void fill(int* a,int n){for(int i=0;i<4;i++)a[i]=n+i;}\n"
+        "int other(int* p){__builtin_nontemporal_store(1,p);return 0;}\n"
+        "int tested(int* p,int n){fill(p,n);return p[1];}\n",
+        "static void fill(int* a,int n){for(int i=0;i<4;i++)a[i]=n+i;}\n"
+        "int tested(int* p,int n){fill(p,n);__builtin_nontemporal_store(1,p);return p[1];}\n",
+        "static void fill(int* a,int n){for(int i=0;i<4;i++)a[i]=n+i;}\n"
+        "int tested(int* p,int n){fill(p,n);return p[1];}\n",
+    };
+    static const char* const expects[] = {
+        "nontemporal builtins of scalars",
+        "nontemporal builtins of scalars",
+        NULL,
+    };
+    static const int statuses[] = { 1, 1, 0 };
+    for (uint32_t c = 0; c < 3; c += 1)
+    {
+        const bool written = parse_test_write(source, sources[c], strlen(sources[c]));
+        char* arguments[] = { (char*)executable, "--tier1", "-march=x86-64", "-c", source, "-o", object, NULL };
+        const int status = written ? check_lanes_test_run(arguments, errors) : -1;
+        const bool text = expects[c] == NULL || check_tier1_test_errors_have(errors, expects[c]);
+        check_lanes_test_expect(tally, written && status == statuses[c] && text, "a refused function beside a static helper is reported", expects[c]);
+    }
+    const char strict_source[] =
+        "struct Big { unsigned char b[600]; };\n"
+        "static int check(const unsigned char* b, unsigned n, unsigned s) { int f = 0; for (unsigned i = 0; i < n; i++) f += b[i] != (unsigned char)(s + 13 * i); return f; }\n"
+        "int refused(long a, struct Big v, long tail) { return check(v.b, sizeof v, 24) + (tail != 257); }\n"
+        "int kept(int n, ...) { unsigned char b[4] = { 1, 2, 3, 4 }; return check(b, 4, n); }\n";
+    const bool strict_written = parse_test_write(source, strict_source, sizeof(strict_source) - 1);
+    char* strict[] = { (char*)executable, "--tier1", "--tier1-strict", "-std=gnu23", "-march=x86-64", "-c", source, "-o", object, NULL };
+    const int strict_status = strict_written ? check_lanes_test_run(strict, errors) : -1;
+    check_lanes_test_expect(tally, strict_written && strict_status == 1 && check_tier1_test_errors_have(errors, "strict Tier 1 qualification failed"),
+                            "strict Tier 1 reports a refused function instead of crashing", NULL);
+    unlink(source);
+    unlink(object);
+    unlink(errors);
+}
+
 static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* directory, const char* executable)
 {
     const bool ready = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize() && unwind_initialize() && x86_zen5_initialize();
     check_lanes_test_expect(tally, ready, "initialize Tier 1 outcome regression tables", NULL);
+    check_tier1_test_refused_reach(tally, directory, executable);
     check_tier1_test_classification(tally);
     check_tier1_test_call_kinds(tally);
     check_tier1_test_code_benchmark(tally);

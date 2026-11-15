@@ -154,7 +154,8 @@ Substitution rebuilds private operand columns and each variable side-table
 slice before compaction. This matters because valid input slices can overlap
 and have different metadata roles. Constants, address/slot metadata and call
 types retain their indices. Congruence is deliberately ordered: commutative
-operand canonicalization, memory value numbering and algebraic identities
+operand canonicalization, memory value numbering (the optimizer's pass of
+[its own guide](ir-memory-value-numbering.md), #2718) and algebraic identities
 are not part of this implementation.
 
 `test-ir-gvn [--seed N]` is `run_ir_gvn_tests(argc, argv)`, with the command in

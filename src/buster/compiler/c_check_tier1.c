@@ -383,11 +383,11 @@ static CheckTier1Outcome check_tier1_sink_optimize(CheckTier1Lane* lane, IrFunct
     }
     if (stage == CHECK_TIER1_COMPILED)
     {
-        // SCCP, dead-code removal, CFG cleanup and its merges as --tier1-passes= leaves them; the rewrite and its
-        // verification run whatever they are.
+        // SCCP, dead-code removal, CFG cleanup and its merges and value numbering with memory (#2718) as --tier1-passes=
+        // leaves them; the rewrite and its verification run whatever they are.
         IrOptimizeOptions options = ir_optimize_options();
         options.passes = (on & (BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_MERGE)) | BUSTER_IR_OPTIMIZE_LAYOUT |
-                        BUSTER_IR_OPTIMIZE_IDENTITY;
+                        BUSTER_IR_OPTIMIZE_IDENTITY | ((on & BUSTER_CHECK_TIER1_PASS_MEMORY) != 0 ? BUSTER_IR_OPTIMIZE_MEMORY : 0);
         options.scalar = scalar;
         const IrCheck check = ir_optimize_verified(function, output, analyses, scratch, options, revision, &passes->optimized, &passes->analysis);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
@@ -949,6 +949,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .licm_moved = passes.licm_moved,
             .sroa_split = sroa_split,
             .gvn_removed = gvn_applied ? gvn_result.removed : passes.gvn_removed,
+            .loads_forwarded = passes.optimized.forwarded_loads,
             .unroll_copies = passes.unroll_copies,
             .unroll_reductions = passes.unroll_reductions,
             .unroll_added = passes.unroll_added,
@@ -1127,12 +1128,13 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
                     "\tdropped_definitions=%" PRIu64 "\tedge_moves=%" PRIu64 "\tspill_slots=%" PRIu64 "\tframe_bytes=%" PRIu64 "\topen_frames=%" PRIu64
                     "\treturn_tails=%" PRIu64 "\tred_zones=%" PRIu64 "\tcode_certified=%" PRIu64 "\tcode_uncertified=%" PRIu64 "\tmachine_rows=%" PRIu64 "\trow_moves=%" PRIu64 "\tinlined=%" PRIu64
                     "\tschedule_blocks=%" PRIu64 "\tschedule_moved=%" PRIu64 "\tsunk=%" PRIu64 "\tfolded=%" PRIu64 "\tremoved_instructions=%" PRIu64
-                    "\tremoved_blocks=%" PRIu64 "\tmerged_blocks=%" PRIu64 "\tlicm_moved=%" PRIu64 "\tsroa_split=%" PRIu64 "\tgvn_removed=%" PRIu64 "\tdead=%" PRIu64 "\n",
+                    "\tremoved_blocks=%" PRIu64 "\tmerged_blocks=%" PRIu64 "\tlicm_moved=%" PRIu64 "\tsroa_split=%" PRIu64 "\tgvn_removed=%" PRIu64 "\tloads_forwarded=%" PRIu64
+                    "\tdead=%" PRIu64 "\n",
             report->records, report->spill_stores, report->spill_loads, report->call_stores, report->call_loads, report->rematerializations,
             report->dropped_definitions, report->edge_moves, report->spill_slots, report->frame_bytes, report->open_frames, report->return_tails, report->red_zones,
             report->code_certified, report->code_uncertified, report->machine_rows, report->row_moves, report->inlined_calls, report->schedule_blocks,
             report->schedule_moved, report->sunk, report->folded, report->removed_instructions, report->removed_blocks, report->merged_blocks, report->licm_moved,
-            report->sroa_split, report->gvn_removed, report->dead_functions);
+            report->sroa_split, report->gvn_removed, report->loads_forwarded, report->dead_functions);
     // The loop vectorizer's (--tier1-passes=+vectorize, #2743): a line of its own, so that the line above keeps its
     // fields.
     static const char* const refusals[IR_VECTORIZE_REFUSALS] = { "shape", "induction", "phi", "operation", "address", "use", "dependence", "width" };

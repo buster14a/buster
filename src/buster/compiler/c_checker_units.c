@@ -2265,6 +2265,7 @@ static void check_units_lane_functions(const CheckUnitsRun* run, CheckUnitsLane*
         .helper_reporting = command->helper_report != NULL,
         .units_lane = lane,
         .helper_forms = command->helper_forms,
+        .deferred_lowering = command->deferred_lowering,
     };
     lane->functions.arenas[0].scratch = columns;
 }

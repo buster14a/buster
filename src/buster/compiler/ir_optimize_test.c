@@ -1815,6 +1815,8 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
 // #175's text-form pass fixtures, defined after the per-pass implementations in ir_optimize_text_test.c.
 static void ir_optimize_text_tests(IrOptimizeTest* test);
 static int ir_optimize_text_print_fixtures(void);
+// #2718's generated programs, defined in ir_optimize_memory_test.c, which ir_optimize_text_test.c includes for its parser.
+static void ir_optimize_memory_tests(IrOptimizeTest* test);
 
 #include "ir_optimize_simd_test.c"
 #include "ir_optimize_layout_test.c"
@@ -1864,6 +1866,7 @@ static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
         ir_thread_tests(&test);
         tier1_sink_ir_tests(&test);
         ir_optimize_text_tests(&test);
+        ir_optimize_memory_tests(&test);
         printf("ir-optimize: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;
     }

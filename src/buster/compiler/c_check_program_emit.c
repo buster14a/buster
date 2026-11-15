@@ -502,11 +502,13 @@ struct CheckEmitGrowth
 #define BUSTER_CHECK_TIER1_SCHEDULE_POST 1
 #define BUSTER_CHECK_TIER1_SCHEDULE_PRE 2
 // --tier1-passes= (#139): the passes of Tier 1's pipeline whose default the option turns over, a bit each, so that 0 is
-// the default pipeline, which runs SCCP, dead-code removal, CFG cleanup and its merges, and neither LICM nor SROA on every
-// function. SCCP's, dead-code removal's, CFG cleanup's and the merges' bits are ir_optimize.c's BUSTER_IR_OPTIMIZE_SCCP,
-// DCE, CFG and MERGE. #866's solver and the inlining keep their own options (--tier1-gvn, --tier1-no-inline), which the
-// option's list sets too. VECTORS (#2781, on by default) is the solver and LICM on vector and mask values alone, in
-// the functions that have such values and where the option doesn't run the pass on every value.
+// the default pipeline, which runs SCCP, dead-code removal, CFG cleanup and its merges, and neither LICM, SROA nor value
+// numbering with memory (#2718: the 9700X measured no run time it gains for its compile time) on every function. SCCP's,
+// dead-code removal's, CFG cleanup's and the merges' bits are ir_optimize.c's BUSTER_IR_OPTIMIZE_SCCP, DCE, CFG and MERGE;
+// value numbering with memory's maps to its BUSTER_IR_OPTIMIZE_MEMORY. #866's solver and the inlining keep their own
+// options (--tier1-gvn, --tier1-no-inline), which the option's list sets too. VECTORS (#2781, on by default) is the
+// solver and LICM on vector and mask values alone, in the functions that have such values and where the option doesn't
+// run the pass on every value.
 #define BUSTER_CHECK_TIER1_PASS_SCCP 1u
 #define BUSTER_CHECK_TIER1_PASS_DCE 2u
 #define BUSTER_CHECK_TIER1_PASS_CFG 4u
@@ -518,9 +520,13 @@ struct CheckEmitGrowth
 // #2755's loop unroller (ir_optimize_unroll.c), off by default.
 #define BUSTER_CHECK_TIER1_PASS_UNROLL 128u
 #define BUSTER_CHECK_TIER1_PASS_VECTORS 256u
+// Value numbering with memory (#2718, ir_optimize_memory.c), off by default; past the driver's own bits
+// (c_checker_driver.c's BUSTER_CHECK_DRIVER_PASS_GVN and INLINE).
+#define BUSTER_CHECK_TIER1_PASS_MEMORY 2048u
 #define BUSTER_CHECK_TIER1_PASSES_DEFAULT (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_VECTORS)
-#define BUSTER_CHECK_TIER1_PASSES_ALL \
-    (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_VECTORIZE | BUSTER_CHECK_TIER1_PASS_UNROLL)
+#define BUSTER_CHECK_TIER1_PASSES_ALL                                                                                                                                  \
+    (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_VECTORIZE | BUSTER_CHECK_TIER1_PASS_UNROLL | \
+     BUSTER_CHECK_TIER1_PASS_MEMORY)
 // The loop vectorizer's counts (--tier1-report), IrVectorizeResult's: the innermost loops examined, those vectorized,
 // by their widest vector (16, 32 and 64 bytes), their reductions and run-time overlap tests, then the refused loops by
 // IrVectorizeRefusal.
@@ -652,6 +658,8 @@ struct CheckTier1Counts
     uint32_t licm_moved;
     uint32_t sroa_split;
     uint32_t gvn_removed;
+    // The loads value numbering with memory forwarded (#2718).
+    uint32_t loads_forwarded;
     // --tier1-passes=+unroll's (#2755): each loop's outcome, the copies the unrolled ones hold, the reductions they split
     // and the instructions they added.
     uint16_t unroll_outcomes[BUSTER_CHECK_TIER1_UNROLL_OUTCOMES];
@@ -705,6 +713,7 @@ struct CheckTier1Report
     uint64_t licm_moved;
     uint64_t sroa_split;
     uint64_t gvn_removed;
+    uint64_t loads_forwarded;
     uint64_t unroll_outcomes[BUSTER_CHECK_TIER1_UNROLL_OUTCOMES];
     uint64_t unroll_copies;
     uint64_t unroll_reductions;
@@ -985,6 +994,11 @@ struct CheckProgramLanes
     // driver keeps in .bss so that a compile touches only those it uses (#652).
     uint32_t arenas_used;
     CheckProgramLaneArenas arenas[BUSTER_CHECK_EMIT_MAX_LANES];
+    // --deferred-lowering (a test option, #2536's step 2.2c.3): a lowering that reads none of the controls' totals
+    // (CheckLowerShared.deferred), on one lane, without --tier1: the objects are the same. A test's first room for its
+    // writer's calls and arguments, which each part's fit grows (CheckLowerShared.deferred_call_room): 0 for the bound.
+    bool deferred_lowering;
+    uint32_t deferred_call_room;
 };
 
 // Whether --tier1's tables are built (check_program_emit_timed), once per process.
@@ -1939,10 +1953,17 @@ typedef enum CheckEmitHalf
 static bool check_tier0_inline_body(CheckEmitRun* run, CheckEmitLane* lane, uint32_t b, Arena* arena, Tier0Inlined* result);
 static bool check_tier0_inline_held(const CheckEmitRun* run, uint32_t b);
 
-// A part's lowering (check_lower_part) on lane `lane`.
+static void check_program_emit_part_refused(CheckEmitPart* part);
+
+// A part's lowering (check_lower_part) on lane `lane`: a deferred lowering's tables and calls' room first
+// (check_lower_deferred_part), or the part's failure as a writer's without room.
 static void check_program_emit_lower_half(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part)
 {
-    if (run->sources)
+    if (run->shared->deferred && !check_lower_deferred_part(&lane->writer, run->shared, &part->lower))
+    {
+        check_program_emit_part_refused(part);
+    }
+    else if (run->sources)
     {
         check_lower_part_sources(&lane->writer, run->shared, &part->lower, lane->streams, lane->scratch);
     }
@@ -2756,6 +2777,7 @@ static void check_program_emit_alone(CheckEmitRun* run)
 {
     CheckEmitLane* lane = run->lane_states;
     CheckEmitPart* part = run->parts;
+    check_lower_deferred_reset(run->shared);
     part->lower.first = 0;
     part->lower.end = run->body_count;
     run->part_count = 1;
@@ -2772,6 +2794,20 @@ static void check_program_emit_alone(CheckEmitRun* run)
     {
         check_program_emit_part_refused(part);
     }
+}
+
+// Whether a part stopped before every body's code exists. The dead pass follows each reached body's references; a body
+// the part never wrote has none (#2822, #2792). Lowering that failed leaves the code half's failure marks at the end
+// without having compiled, so the stage is asked too.
+static bool check_program_emit_incomplete(const CheckEmitRun* run)
+{
+    bool incomplete = false;
+    for (uint32_t p = 0; !incomplete && p < run->part_count; p += 1)
+    {
+        const CheckEmitPart* part = run->parts + p;
+        incomplete = part->lower.stage != CHECK_LOWER_STAGE_NONE || part->tier0_failed != part->lower.end || part->code_failed != part->lower.end;
+    }
+    return incomplete;
 }
 
 // The last pass (#2541 step 2): the held candidates' code (check_tier1_inline_held) where the emitted code still refers to
@@ -3730,10 +3766,16 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     check_clock_mark(stage_clock, CHECK_STAGE_BACKEND_SETUP);
     CheckLowerShared shared;
     const bool lowering = valid;
+    // --deferred-lowering's (CheckProgramLanes.deferred_lowering): on one lane, whose writer alone reads the tables a part
+    // decides, without --tier1's lifetimes and sparse switches.
+    const bool deferred = lanes != NULL && lanes->deferred_lowering && !lanes->tier1 && program->lifetime_first == NULL && program->control_capacity >= program->control_count &&
+                          program->chain_stop_capacity >= program->chain_stop_count;
     if (valid)
     {
         const uint64_t prepare_start = stage_clock != NULL ? __rdtsc() : 0;
-        valid = check_lower_prepare(&shared, &result->lowered, program, BUSTER_SCALAR_PATH(scalar), rows != NULL, lanes != NULL && lanes->tier1, output, scratch);
+        valid = check_lower_prepare(&shared, &result->lowered, program, BUSTER_SCALAR_PATH(scalar), rows != NULL, lanes != NULL && lanes->tier1, deferred, output,
+                                    scratch);
+        shared.deferred_call_room = deferred ? lanes->deferred_call_room : 0;
         check_clock_lower(stage_clock, CHECK_CLOCK_LOWER_PREPARE, stage_clock != NULL ? __rdtsc() - prepare_start : 0);
     }
     check_clock_mark(stage_clock, CHECK_STAGE_LOWER);
@@ -3742,7 +3784,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // libgcc's functions are linked into the image. The runtime's functions have their provisional symbols while the
     // bodies compile (check_lower_runtime), each its own, and the jump tables theirs after them
     // (CheckLowerShared.provisional_tables), the unit's own: direct.
-    const uint32_t access_count = valid ? shared.provisional_tables + result->lowered.table_count : 0;
+    const uint32_t access_count = valid ? shared.provisional_tables + (deferred ? shared.deferred_tables->capacity : result->lowered.table_count) : 0;
     uint8_t* access = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, access_count) : 0;
     uint8_t* defined = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1) : 0;
     valid = valid && access != 0 && defined != 0;
@@ -3761,7 +3803,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // can't, and then needs no address space past the caller's arenas.
     check_program_lanes_use(lanes, 1);
     Arena* reserved = lanes != NULL ? &lanes->arenas[0].scratch : &check_program_thread_columns;
-    const uint64_t column_bytes = valid && count != 0 ? check_lower_writer_bytes(&shared, rows != NULL) : 0;
+    // A deferred lowering's writer grows its calls' columns there (check_lower_fit_calls): room as a lane's has.
+    const uint64_t written_bytes = valid && count != 0 ? check_lower_writer_bytes(&shared, rows != NULL) : 0;
+    const uint64_t column_bytes = deferred && written_bytes != 0 && written_bytes < (UINT64_C(1) << 36) ? UINT64_C(1) << 36 : written_bytes;
     if (column_bytes > reserved->capacity)
     {
         arena_release(reserved);
@@ -3812,6 +3856,15 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         // A body a failure before it left unreached has no outcome, never success.
         memset(run.tier1_outcomes, 0, (uint64_t)count * sizeof(CheckTier1Outcome));
     }
+    if (run.codes != 0)
+    {
+        // The same for its code: a later body the part stopped before was never written (#2822, #2792).
+        memset(run.codes, 0, (uint64_t)count * sizeof(EmittedCode));
+    }
+    if (run.bodies != 0)
+    {
+        memset(run.bodies, 0, (uint64_t)count * sizeof(CheckEmitBody));
+    }
     // The unit's inline callees (#1282, #1398), unless --tier1-no-inline and --tier0-no-inline keep every call: Tier 1's
     // with --tier1, and Tier 0's for the bodies it compiles. A unit without them runs one epoch.
     CheckTier1Inline tier1_inline = { 0 };
@@ -3855,7 +3908,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // lanes takes no units: an emission that starts while every lane still takes units runs alone, its bodies one part.
     CheckEmitBoard* board = lanes != NULL && lanes->board != NULL && lanes->board_lane < lanes->board->lanes ? lanes->board : NULL;
     const bool sharing = board == NULL || __atomic_load_n(&board->taking, __ATOMIC_ACQUIRE) < board->lanes;
-    const uint32_t most = lanes != NULL && lanes->lanes > 1 && sharing ? (lanes->lanes < BUSTER_CHECK_EMIT_MAX_LANES ? lanes->lanes : BUSTER_CHECK_EMIT_MAX_LANES) : 1;
+    const uint32_t most = lanes != NULL && lanes->lanes > 1 && sharing && !deferred ? (lanes->lanes < BUSTER_CHECK_EMIT_MAX_LANES ? lanes->lanes : BUSTER_CHECK_EMIT_MAX_LANES) : 1;
     const uint64_t paid = lanes != NULL && lanes->every_lane ? UINT64_MAX : 1 + (total > 2 * largest ? total - 2 * largest : 0) / BUSTER_CHECK_EMIT_LANE_TOKENS;
     const uint32_t bodies = count != 0 ? count : 1;
     uint32_t active = most < bodies ? most : bodies;
@@ -4024,8 +4077,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     // Also return the leases when an active-lane allocation failed before dispatch. A returned lease is a no-op.
     valid = check_program_emit_return(leases, lease_count) && valid;
-    // The held candidates that the emitted code still refers to (#2541 step 2), from their summaries.
-    if (valid && count != 0 && tier1_inline.holding)
+    // The held candidates that the emitted code still refers to (#2541 step 2), from their summaries. A part that
+    // already failed left later bodies unwritten; the refusal is reported below, and the dead pass is not run on them
+    // (#2822, #2792).
+    if (valid && count != 0 && tier1_inline.holding && !check_program_emit_incomplete(&run))
     {
         check_program_emit_last(&run, &tier1_inline, &result->lowered.helpers, result->lowered.asms.naked);
     }
@@ -5774,6 +5829,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->tier1_report.licm_moved += compiled ? counts->licm_moved : 0;
         lanes->tier1_report.sroa_split += compiled ? counts->sroa_split : 0;
         lanes->tier1_report.gvn_removed += compiled ? counts->gvn_removed : 0;
+        lanes->tier1_report.loads_forwarded += compiled ? counts->loads_forwarded : 0;
         for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_UNROLL_OUTCOMES; k += 1)
         {
             lanes->tier1_report.unroll_outcomes[k] += compiled ? counts->unroll_outcomes[k] : 0;

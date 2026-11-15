@@ -1,0 +1,16 @@
+function (i64, i64) -> i64 {
+  slot $0 size=8 align=8 type=i64 flags=0x03
+  slot $1 size=8 align=8 type=i64 flags=0x01
+b0:
+  %0 = param.i64 0
+  %1 = param.i64 1
+  %2 = stack_addr.ptr $0
+  %3 = stack_addr.ptr $1
+  %4 = store.void %2, %0 align=8
+  %5 = load.i64 %2 align=8
+  %6 = store.void %3, %1 align=8
+  %7 = load.i64 %2 align=8
+  %8 = add.i64 %5, %1
+  %9 = add.i64 %8, %7
+  %10 = ret.void %9
+}

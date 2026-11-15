@@ -15,9 +15,9 @@
 //   give the same function, and against the scalar available-expression twin, which must accept the function and remove
 //   no more instructions than the partition (it doesn't see cyclic congruences): the semantic comparison, as the solver's
 //   guide has it. The numbering's result must promote.
-// - The optimizer on P with SCCP alone, dead-code removal alone, CFG cleanup alone and with its merges, the three, and
-//   the three with the merges and Tier 1's layout and identities (c_check_tier1.c's set), forced vector and forced
-//   scalar: the same function.
+// - The optimizer on P with SCCP alone, dead-code removal alone, CFG cleanup alone and with its merges, the three, the
+//   three with the merges and Tier 1's layout and identities (c_check_tier1.c's set), value numbering with memory alone
+//   (#2718) and Tier 1's set with it, forced vector and forced scalar: the same function and the same forwarded loads.
 // - LICM on P, vector and scalar: the same function, or the same refusal.
 // - #2755's unroller on P optimized with Tier 1's set and its truth values simplified, vector and scalar: the same
 //   function, outcomes and counts.
@@ -42,6 +42,8 @@ typedef enum IrSourcePass
     IR_SOURCE_PASS_MERGE,
     IR_SOURCE_PASS_OPTIMIZER,
     IR_SOURCE_PASS_TIER1,
+    IR_SOURCE_PASS_MEMORY,
+    IR_SOURCE_PASS_TIER1_MEMORY,
     IR_SOURCE_PASS_LICM,
     IR_SOURCE_PASS_VECTORIZE,
     IR_SOURCE_PASS_UNROLL,
@@ -58,13 +60,16 @@ static const char* const ir_source_pass_names[IR_SOURCE_PASS_COUNT] = {
     "merge",
     "optimizer",
     "tier1",
+    "memory",
+    "tier1-memory",
     "licm",
     "vectorize",
     "unroll",
     "inline",
 };
 
-// The optimizer's pass bits of each of its rows (IR_SOURCE_PASS_SCCP to IR_SOURCE_PASS_TIER1).
+// The optimizer's pass bits of each of its rows (IR_SOURCE_PASS_SCCP to IR_SOURCE_PASS_TIER1_MEMORY): value numbering
+// with memory (#2718) alone and in Tier 1's set the last two.
 static const uint32_t ir_source_pass_optimizer[] = {
     BUSTER_IR_OPTIMIZE_SCCP,
     BUSTER_IR_OPTIMIZE_DCE,
@@ -72,8 +77,11 @@ static const uint32_t ir_source_pass_optimizer[] = {
     BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_MERGE,
     BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG,
     BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_MERGE | BUSTER_IR_OPTIMIZE_LAYOUT | BUSTER_IR_OPTIMIZE_IDENTITY,
+    BUSTER_IR_OPTIMIZE_MEMORY,
+    BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_MERGE | BUSTER_IR_OPTIMIZE_LAYOUT | BUSTER_IR_OPTIMIZE_IDENTITY |
+        BUSTER_IR_OPTIMIZE_MEMORY,
 };
-_Static_assert(BUSTER_ARRAY_LENGTH(ir_source_pass_optimizer) == IR_SOURCE_PASS_TIER1 - IR_SOURCE_PASS_SCCP + 1, "a mask for each optimizer row");
+_Static_assert(BUSTER_ARRAY_LENGTH(ir_source_pass_optimizer) == IR_SOURCE_PASS_TIER1_MEMORY - IR_SOURCE_PASS_SCCP + 1, "a mask for each optimizer row");
 
 typedef struct IrSourcePassTotals IrSourcePassTotals;
 struct IrSourcePassTotals
@@ -191,10 +199,13 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
         const IrCheck scalar_check = ir_optimize(promoted, twin, scratch, options, &scalar);
         const bool same = vector_check.error == IR_OK && scalar_check.error == IR_OK && vector.folded == scalar.folded &&
                           vector.removed_instructions == scalar.removed_instructions && vector.removed_blocks == scalar.removed_blocks &&
-                          vector.merged_blocks == scalar.merged_blocks && ir_source_passes_equal(&vector.function, &scalar.function);
-        const bool changed = vector.folded != 0 || vector.removed_instructions != 0 || vector.removed_blocks != 0;
-        // The merges' row counts its merged blocks; the others their removed instructions.
-        const uint64_t effect = IR_SOURCE_PASS_SCCP + row == IR_SOURCE_PASS_MERGE ? vector.merged_blocks : vector.removed_instructions;
+                          vector.merged_blocks == scalar.merged_blocks && vector.forwarded_loads == scalar.forwarded_loads &&
+                          ir_source_passes_equal(&vector.function, &scalar.function);
+        const bool changed = vector.folded != 0 || vector.removed_instructions != 0 || vector.removed_blocks != 0 || vector.forwarded_loads != 0;
+        // The merges' row counts its merged blocks, value numbering with memory's its forwarded loads; the others their
+        // removed instructions.
+        const IrSourcePass pass = (IrSourcePass)(IR_SOURCE_PASS_SCCP + row);
+        const uint64_t effect = pass == IR_SOURCE_PASS_MERGE ? vector.merged_blocks : pass >= IR_SOURCE_PASS_MEMORY ? vector.forwarded_loads : vector.removed_instructions;
         ir_source_passes_record(totals, (IrSourcePass)(IR_SOURCE_PASS_SCCP + row), file, name, vector_check, scalar_check, same, true, changed, effect);
         arena_pop_to(output, output_mark);
         arena_pop_to(twin, twin_mark);
@@ -870,7 +881,7 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
     }
     else
     {
-        fprintf(stderr, "usage: compiler benchmark-ir-source --passes [--only sroa|gvn|sccp|dce|cfg|merge|optimizer|tier1|licm|inline] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler benchmark-ir-source --passes [--only sroa|gvn|sccp|dce|cfg|merge|optimizer|tier1|licm|inline|memory|tier1-memory] [preprocessor options] file...\n");
     }
     arena_release(&scratch);
     arena_release(&output);
