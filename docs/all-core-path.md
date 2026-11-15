@@ -825,6 +825,31 @@ So the step's design, by the census:
 | 2.2c The program's loop in the windows | `check_program` split into its unit-wide part and its per-body loop, which runs in each window before its lowering; the diagnostics the loop feeds after their window, in today's order. | Objects and diagnostics the same bytes at W of 1, 2,048 and ∞. One worker not slower by more than the pass before the windows, which costs at most half the references pass. The lowering reads its controls a window after they were written; its stream stays cold until 2.3, so this sub-step's own gain is small and its gate is the step's after 2.3. |
 | 2.3 The graph's run and the warnings by windows | `check_graph_run`'s range entry (#1050 keeps its internals), `check_input_warning_graph` and the common warnings for a window's nodes, their diagnostics in today's order. | The step's gate: `check-expressions` to `lower` at most 1.3 times; under 1,000 pages faulted. |
 
+**What 2.2c's loop takes with it**, as its first part read the code. The
+per-body loop's results reach further than the references, and each reader
+must move with the loop or work without it:
+
+- **The selection** reads whether a block-scope static's declaration is in
+  emitted code (`check_program_token_emitted`: the writer's left-out ranges,
+  and the statement expressions the references reach). Before the windows
+  there are only the pass's constant `if`s, which leave out less: the
+  candidates' selection takes such a static as emitted, a superset still.
+- **The tail after the loop** takes every body's references: their objects'
+  marks number the symbols (`check_program_alias_number`) and decide each
+  weakref's state, weak where nothing but the weakref needs its target. Run
+  before the windows over the candidates' marks, a target that only a
+  candidate needs makes the weakref's symbol an ordinary one: a difference of
+  state, not of an extra symbol, which the epilogue must find, as it finds an
+  extra body, and compile again by `W = ∞`.
+- **The lowering's preparation** reads every control: `check_lower_prepare`
+  sizes the calls' room by every body's cleanup controls and exits, and
+  `check_lower_switch_tables` decides every switch's table and numbers the
+  tables' provisional symbols in the bodies' order. Both need a bound the
+  input gives, or a window's own share.
+- **The inline callees** are lowered before the first window
+  (`check_program_emit_windows`' early parts), so their bodies' loop must
+  run before the windows, ahead of the bodies before them in token order.
+
 **Across the three designs**, by what each next step gives eight workers on
 `sqlite3.c` (the model's expected case, cumulative): the node machine's step
 2, 395 MB/s; this design's steps 1 and 2 beside it, 439; the machine's step 3,
