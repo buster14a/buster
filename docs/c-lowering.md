@@ -1705,7 +1705,9 @@ none of its subset's programs makes a name twice in clang's objects.
   `-c` now leaves out as clang does (#1108). Since #1398's step 3 leaves out
   the callees Tier 0 spliced at every call, 8 remain on 2026-11-14: 5 folded
   and 3 inlined, the vector lexer's `scan_lines`, `write_chunk` and
-  `tokenize_chunks`, whose shapes the splice refuses (step 5).
+  `tokenize_chunks`, whose shapes the splice keeps as calls by default. Step 5's
+  `--tier0-inline-shapes` splices them, leaving the 5 folded ones
+  ([Tier 0 inlining](tier0-inlining.md), #2841).
 
 On corpora, clang -O0 decides three things in its code otherwise than the
 selection. The harness explains a difference with one of them only from the

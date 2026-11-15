@@ -1,8 +1,11 @@
 # Tier 0 inlining of always_inline functions (#1398): design
 
 Status: plan steps 1 to 3 are implemented, with argument and result forwarding
-(step 4) in the form "Implementation" describes; more callee shapes (step 5)
-are not. The issue's claims and this document's
+(step 4) in the form "Implementation" describes. Of step 5, callees with several
+returns and with results in memory are spliced under `--tier0-inline-shapes`,
+which is off by default: on the 9700X they cost the self-built lexer
+("Several returns and results in memory", #2841). A by-value aggregate argument
+past 256 bytes still keeps its call. The issue's claims and this document's
 revisions are on [#1398](https://github.com/buster14a/buster/issues/1398). The
 names of existing code below are main's at `8a29955f`. The command and its
 files are in [the Tier 0 guide](commands/tier0.md#inlining-always_inline-functions-1398).
@@ -214,7 +217,7 @@ the call's result is bound as the call's row says:
 | `VOID` | nothing |
 | a value of a class | nothing: the `RETURN`'s operand is on the stack, where the `CALL` would have pushed its result |
 | an aggregate in registers (`result_size > 0`, the `RETURN`'s operand its bytes' address, U64), at a call whose `call_result_objects[c]` is `1 + R` | of a vector local class's size: `LOAD` of it, `SET_LOCAL R`; else `SET_LOCAL t`, `LOCAL_ADDRESS R`, `LOCAL t`, `COPY result_size` |
-| an aggregate in memory (`AbiReturn` `MEMORY`, a hidden pointer) | not a callee: it keeps its call (first version) |
+| an aggregate in memory (`AbiReturn` `MEMORY`, a hidden pointer) | not a callee: it keeps its call (first version); with `--tier0-inline-shapes`, the call's object takes the hidden pointer (step 5, "Implementation") |
 
 A vector result of 16, 32 or 64 bytes uses the register placement in the
 call row: a wide vector can be split across XMM or YMM registers when the
@@ -704,8 +707,49 @@ part is renumbered now where either tier inlines; the driver fixture's
 
 The callees that stay are those whose call Tier 0 keeps where clang inlines it:
 a cycle's members (clang unrolls a cycle once) and the shapes the splice
-refuses (step 5: two returns, a result in memory). On the driver fixture the
-object defines 5 local functions where it defined 37; clang -O0's defines 3.
+refuses. Those are, by default, several returns and a result in memory (step 5's
+shapes, below); and always labels or a jump table (a dense `switch`), `ALLOCA` (a
+variable-length array), a by-value aggregate argument past 256 bytes, and the
+others "Eligibility" lists. On step 3's driver fixture the object defined 5 local
+functions where it defined 37; clang -O0's defines 3.
+
+**Several returns and results in memory (step 5, `--tier0-inline-shapes`).**
+
+- *A `RETURN` before the callee's last entry* is copied as a `JUMP` to the
+  copy's end, or with a value as a `JUMP_VALUE`, whose value the end finds where
+  the last `RETURN`'s operand falls through to it, as an arm of `?:` leaves its
+  own (`tier0.c`'s `JUMP_VALUE`: the target's depth is the next entry's plus
+  one). The vector path makes them by masked moves of a `RETURN` lane's kind and
+  value before the meanings' `vpermb`; the scalar twin by a select.
+- *A result through a hidden pointer:* the callee's parameter 0 takes the
+  address of the call's result object (`LOCAL_ADDRESS`, `SET_LOCAL`, after the
+  last argument's binding), argument k binds parameter k + 1, the callee writes
+  the result there (its named result builds there, #1375), and the `U64` its
+  `RETURN`s give back is `DISCARD`ed at the copy's end. The object must have its
+  address taken, as a call's hidden-pointer object has. Such a callee's
+  arguments aren't forwarded: it reads parameter 0 where it writes the result.
+- *Why it is off by default.* With it, `main.c`'s vector lexer's
+  `tokenize_chunks` (11 returns), `scan_lines` and `write_chunk` (structs in
+  memory), the last three callees step 3 left, are spliced. The object then
+  defines what clang -O0's does but for our own helpers, and `--symbols` has no
+  `inlined` difference left. It doesn't pay, though, on the 9700X (buster-performance's
+  [`tier0-inline-1398-step5-2026-11-15`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-inline-1398-step5-2026-11-15)):
+  - The compiler self-built at Tier 0 lexes slower: `c_tokenize` 548.0 to
+    559.0 ms, 78.58 to 79.95 instructions per byte; `benchmark-files` 1,094 to
+    1,105 ms.
+  - All of it comes from the results in memory. As functions of their own,
+    `write_chunk`'s and `scan_lines`' loops keep their cursors in callee-saved
+    registers. Spliced into `tokenize_chunks` (32,148 instructions), they lose
+    those registers to the caller's most-referenced locals ("Homes" in
+    [Tier 0](tier0.md), #2841), and each use in the per-vector loop is a frame
+    load or store. Several returns alone (`tokenize_chunks` into its nine
+    variants) leave the instruction count as it was.
+  - `main.c`'s `.text` grows from 1.69 MB to 4.05 MB (clang -O0's: 1.60 MB),
+    each variant with its own 290 KB copy of `tokenize_chunks`. Its `-c` takes
+    0.6 to 0.8% more cycles; `sqlite3.c`'s doesn't move.
+
+  #2841 is the gate: homes that weigh a reference by its loop depth, then the
+  shapes by default if the lexer is no slower.
 
 ### First measurements
 

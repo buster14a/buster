@@ -949,9 +949,12 @@ struct CheckProgramLanes
     // the objects are the same, which the comparison checks.
     bool tier1_no_hold;
     // --tier0-no-inline keeps Tier 0's (#1398's comparison, c_check_tier0_inline.c); --tier0-no-hold makes each callee's
-    // code on its lane, none in the last pass (#1398 step 3, check_tier0_inline_held): the objects are the same.
+    // code on its lane, none in the last pass (#1398 step 3, check_tier0_inline_held): the objects are the same;
+    // --tier0-inline-shapes splices callees with several returns or a result in memory too (#1398 step 5, off by default:
+    // docs/tier0-inlining.md, "Several returns and results in memory").
     bool tier0_no_inline;
     bool tier0_no_hold;
+    bool tier0_inline_shapes;
     // --emit-window=N (#2536's step 1, docs/all-core-path.md): one lane's emission takes its bodies in windows of about
     // N tokens, each window's lowering and code before the next window's, in memory the next window reuses
     // (check_program_emit_windows); the driver's default is BUSTER_CHECK_EMIT_WINDOW_TOKENS. 0, a caller's without the
@@ -1225,6 +1228,9 @@ struct CheckEmitRun
     // where neither inlines.
     const CheckTier1Inline* tier0_inline;
     const CheckTier1Inline* inline_table;
+    // Whether Tier 0's splice takes callees with several returns or a result in memory (--tier0-inline-shapes, #1398 step
+    // 5): the input's `shapes` (tier0_inline_callee_valid).
+    bool tier0_inline_shapes;
     // The driver's --time-stages clock (c_check_clock.c), which the calling thread's laps charge per function when it
     // compiles the bodies alone (check_program_emit_alone): null on the lanes, whose run its caller's mark charges.
     CheckClock* stage_clock;
@@ -3816,6 +3822,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         run.inline_table = &tier1_inline;
         run.tier1_inline = tier1_inlines ? &tier1_inline : NULL;
         run.tier0_inline = tier0_inlines ? &tier1_inline : NULL;
+        run.tier0_inline_shapes = tier0_inlines && lanes != NULL && lanes->tier0_inline_shapes;
         // The candidates' code held back for the last pass (#2541 step 2), where a dead one may lose its code: in -c's
         // object alone, whose symbols nothing refers to are left out (an executable's binding resolves every program
         // symbol, a direct one's or, with `kept`, that of a link of several units); not with -fpatchable-function-entry
