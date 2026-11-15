@@ -958,8 +958,8 @@ clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags
 ./build/test-driver-tier1-truth "$BUSTER_COMPILER" "$(command -v clang)"
 == Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
 # #2554: the subject compiles at Tier 1 with no fallback, by both host paths, and runs against Clang's oracle; objdump
-# checks that the truth values became branches, constants are stores' immediates, no shift by zero is left and each
-# computed goto has its own indirect jump.
+# checks that the truth values became branches, constants are stores' immediates, no shift by zero is left, each
+# computed goto has its own indirect jump and (#2676) each select of a comparison is a cmov of its flags, with no setcc.
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns
 ./build/test-driver-tier1-patterns "$BUSTER_COMPILER" "$(command -v clang)"
