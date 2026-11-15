@@ -7,8 +7,21 @@
 // paired, including repeated macro expansions and the calls outside a prefix. Other runtime sources guard the scope.
 static void check_test_malformed_call_views(CheckTest* test)
 {
-    for (uint32_t c = 14; c <= 20; c += 1)
+    static const uint32_t cases[] =
     {
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        28,
+        29,
+        30,
+    };
+    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(cases); fixture += 1)
+    {
+        const uint32_t c = cases[fixture];
         static InternTable identifiers;
         static Preprocessor pp;
         static Parser parser;
@@ -62,7 +75,7 @@ static void check_test_malformed_call_views(CheckTest* test)
             else
             {
                 check_test_expect(test, !parsed && status != CHECK_PREFIX_RESOURCE && status != CHECK_PREFIX_INVALID && resumed.parser.invalid_call_count == 0,
-                                  "malformed calls: semicolons, mismatched delimiters, builtin/catalog names, members and later arguments keep existing recovery");
+                                  "malformed calls: semicolons, mismatched delimiters, builtin/catalog names, members and empty arguments keep existing recovery");
             }
             parse_release(&parser);
             arena_pop_to(&scratch, 0);

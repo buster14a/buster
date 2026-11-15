@@ -3568,6 +3568,7 @@ static void check_codegen_system_libraries(void)
 // Copies keep the source edits, malformed IR and export-manifest failures inside the disposable fixture tree.
 static void check_split_first(void);
 static void check_join_unreferenced(void);
+static void check_split_padded_starts(void);
 
 static void check_parallel_codegen(void)
 {
@@ -3818,6 +3819,7 @@ static void check_parallel_codegen(void)
     free(log.data);
     check_split_first();
     check_join_unreferenced();
+    check_split_padded_starts();
     if (chdir(root) != 0)
     {
         fail("can't return to %s", root);
@@ -4105,6 +4107,107 @@ static void check_parallel_codegen_start_order(const char* executable, const cha
     }
 }
 
+// The part a plan starts each part at, from the split's --report lines ("split: part P: functions [I, J), ..."), into
+// `starts` (at most 8 parts); how many it printed.
+static uint32_t split_report_starts(const char* report, uint32_t* starts)
+{
+    uint32_t count = 0;
+    for (const char* line = strstr(report, "split: part "); line != 0 && count < 8; line = strstr(line + 1, "split: part "))
+    {
+        unsigned part = 0;
+        unsigned first = 0;
+        if (sscanf(line, "split: part %u: functions [%u,", &part, &first) == 2 && part == count)
+        {
+            starts[count] = first;
+            count += 1;
+        }
+    }
+    return count;
+}
+
+// A sanitizer build's plan (#2639, tools/codegen/split.c --padded-starts and --codegen-costs), run in the parallel-codegen
+// fixture's directory with the splitter it built. Three heavy functions, then a 64-byte-aligned one and a fourth heavy
+// one, in two parts: Release's plan starts the second part at the aligned function, since a part starts at a function
+// of the greatest alignment it holds, and leaves three heavy functions in the first; --padded-starts starts it at the
+// third heavy one, before the aligned function, and the relocatable link of the parts pads its start so that the aligned
+// function stays aligned. --codegen-costs plans too.
+static void check_split_padded_starts(void)
+{
+    char source[16384] = "";
+    const char* const heavy[] = { "pad_x", "pad_y", "pad_z", "pad_wide", "pad_u" };
+    for (uint32_t f = 0; f < 5; f += 1)
+    {
+        size_t at = strlen(source);
+        if (f == 3)
+        {
+            snprintf(source + at, sizeof(source) - at, "__attribute__((noinline, aligned(64))) int pad_wide(const int* p) { return p[0] + 1; }\n");
+        }
+        else
+        {
+            at += (size_t)snprintf(source + at, sizeof(source) - at, "__attribute__((noinline)) int %s(const int* p) { return 0", heavy[f]);
+            for (uint32_t term = 0; term < 150; term += 1)
+            {
+                at += (size_t)snprintf(source + at, sizeof(source) - at, " ^ p[%u] * %u", term, 2 * term + 3);
+            }
+            snprintf(source + at, sizeof(source) - at, ";\n}\n");
+        }
+    }
+    const size_t at = strlen(source);
+    snprintf(source + at, sizeof(source) - at, "int pad_entry(const int* p) { return pad_x(p) + pad_y(p) + pad_z(p) + pad_wide(p) + pad_u(p); }\n");
+    write_file("padded.c", source, 0644);
+    // Unvectorized, so that the heavy functions' instructions are many.
+    char* compile[] = { "clang", "-O2", "-fno-vectorize", "-fno-slp-vectorize", "-emit-llvm", "-c", "padded.c", "-o", "padded.bc", 0 };
+    char* parts[] = { "mkdir", "-p", "release-parts", "padded-parts", "costs-parts", 0 };
+    char* release[] = { "out/codegen-tools/split", "padded.bc", "2", "release-parts", "--report", 0 };
+    char* padded[] = { "out/codegen-tools/split", "padded.bc", "2", "padded-parts", "--report", "--padded-starts", 0 };
+    char* costs[] = { "out/codegen-tools/split", "padded.bc", "2", "costs-parts", "--report", "--codegen-costs", "--padded-starts", 0 };
+    char* generate0[] = { "clang", "-c", "-x", "ir", "padded-parts/part0.bc", "-o", "padded-parts/part0.o", 0 };
+    char* generate1[] = { "clang", "-c", "-x", "ir", "padded-parts/part1.bc", "-o", "padded-parts/part1.o", 0 };
+    char* join[] = { "ld", "-r", "padded-parts/part0.o", "padded-parts/part1.o", "-o", "padded-parts/joined.o", 0 };
+    char* symbols[] = { "readelf", "-sW", "padded-parts/joined.o", 0 };
+    Text log = capture(compile);
+    free(log.data);
+    log = capture(parts);
+    free(log.data);
+    uint32_t release_starts[8];
+    uint32_t padded_starts[8];
+    uint32_t costs_starts[8];
+    log = capture(release);
+    const uint32_t release_count = split_report_starts(log.data, release_starts);
+    free(log.data);
+    log = capture(padded);
+    const uint32_t padded_count = split_report_starts(log.data, padded_starts);
+    free(log.data);
+    log = capture(costs);
+    const uint32_t costs_count = split_report_starts(log.data, costs_starts);
+    free(log.data);
+    // The module's functions in order: pad_x 0, pad_y 1, pad_z 2, pad_wide 3, pad_u 4, pad_entry 5.
+    if (release_count != 2 || release_starts[1] != 3)
+    {
+        fail("Release's plan didn't start the second part at the aligned function pad_wide (3): %u parts, %u", release_count, release_count == 2 ? release_starts[1] : 0);
+    }
+    if (padded_count != 2 || padded_starts[1] != 2 || costs_count != 2 || costs_starts[1] != 2)
+    {
+        fail("the padded plans didn't start the second part at pad_z (2), before pad_wide: %u", padded_count == 2 ? padded_starts[1] : 0);
+    }
+    log = capture(generate0);
+    free(log.data);
+    log = capture(generate1);
+    free(log.data);
+    log = capture(join);
+    free(log.data);
+    // readelf -sW: Num: Value Size Type Bind Vis Ndx Name.
+    Text listing = capture(symbols);
+    char line[512];
+    unsigned long long value = 1;
+    if (!line_holding(listing.data, " pad_wide", line, sizeof(line)) || sscanf(line, "%*s %llx", &value) != 1 || value % 64 != 0)
+    {
+        fail("the joined parts of the padded plan left pad_wide unaligned (%llx): %s", value, listing.data);
+    }
+    free(listing.data);
+    pass("a sanitizer build's plan starts a part before an aligned function, which the relocatable link keeps aligned");
+}
+
 // The parts of a sanitizer build's units (#2639), on the fixture's two units: AddressSanitizer's joined objects keep
 // their module constructor's comdat group, which llvm-objcopy clears and the join restores (tools/codegen/comdat.c),
 // so that the executable has one constructor for every unit, as single compiles give it; MemorySanitizer's keep their
@@ -4141,6 +4244,24 @@ static void check_parallel_codegen_sanitizers(void)
             fail("the %s fixture's units weren't generated in parts: %s", sanitizers[i], log.data);
         }
         free(log.data);
+        // A sanitizer build's parts are planned for its longest part (BusterCodegen.cmake), Release's not.
+        char rules[PATH_MAX];
+        snprintf(rules, sizeof(rules), "%s/CMakeFiles/impl-Release.ninja", tree);
+        Text graph = read_file(rules);
+        if (strstr(graph.data, "--codegen-costs;--padded-starts") == 0)
+        {
+            fail("the %s fixture's split doesn't plan with --codegen-costs and --padded-starts", sanitizers[i]);
+        }
+        free(graph.data);
+        if (i == 0)
+        {
+            graph = read_file("out/CMakeFiles/impl-Release.ninja");
+            if (strstr(graph.data, "--padded-starts") != 0)
+            {
+                fail("the fixture's Release split plans as a sanitizer build's");
+            }
+            free(graph.data);
+        }
         log = capture(execute);
         free(log.data);
         char line[512];

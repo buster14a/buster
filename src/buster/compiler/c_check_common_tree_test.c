@@ -7,8 +7,10 @@
 // column ending at a PROT_NONE page. The cached roots agree with that definition even on broken graphs, their masks'
 // tails are zero, and cached/uncached scans give the same roots while the scalar scan still gives every node.
 // check_common_emission_subtree_start against each token's subtree's first token, on
-// random trees whose subtrees are runs of tokens, with parents as deep as their children now and then. Included by
-// c_checker_driver_test.c, after c_check_common_selection_test.c, whose guarded columns it takes.
+// random trees whose subtrees are runs of tokens, with parents as deep as their children now and then. The reach walk's
+// per-body lists of statement expressions (check_common_body_regions, #1360) against their definition and its scan, and
+// check_common_literal_blocked against check_common_literal_contexts' marks. Included
+// by c_checker_driver_test.c, after c_check_common_selection_test.c, whose guarded columns it takes.
 
 static uint32_t check_test_tree_random(uint64_t* state)
 {
@@ -341,8 +343,185 @@ static void check_test_driver_common_subtree_starts(CheckTest* test)
     check_test_expect(test, same, "common subtree starts: every token of random trees of runs, by the search from the root back");
 }
 
+// check_common_body_regions against its definition, each body's regions in region order, and each body's
+// check_common_body_reached with the lists against its scan of all the unit's regions (#1360): random programs of up to
+// 40 bodies, whose entries are evaluations, labels, returns, ends, jumps and now and then an indirect jump, and whose
+// statement expressions belong to random bodies, some to none (a body index past the last), with entries of their own
+// past the body's and now and then past its end. Then each scratch allocation failed in turn, and the arena's capacity
+// one byte short: false, and the scratch arena as it was.
+static void check_test_driver_body_regions(CheckTest* test)
+{
+    static const CheckControlKind kinds[] =
+    {
+        CHECK_CONTROL_EVALUATE, CHECK_CONTROL_EVALUATE, CHECK_CONTROL_LABEL, CHECK_CONTROL_RETURN, CHECK_CONTROL_END, CHECK_CONTROL_JUMP,
+        CHECK_CONTROL_JUMP, CHECK_CONTROL_EVALUATE,
+    };
+    const CheckCommonResources saved = check_common_resources;
+    check_common_resources = (CheckCommonResources){ .fail_at = UINT32_MAX };
+    Arena scratch = arena_reserve(UINT64_C(1) << 24);
+    uint64_t state = UINT64_C(1360);
+    bool same = scratch.base != NULL;
+    uint32_t listed = 0;
+    for (uint32_t round = 0; same && round < 400; round += 1)
+    {
+        const uint32_t body_count = round % 5 == 0 ? 0 : 1 + check_test_tree_random(&state) % 40;
+        const uint32_t region_count = round % 7 == 1 ? 0 : check_test_tree_random(&state) % 120;
+        CheckProgramBody* bodies = calloc((uint64_t)body_count + 1, sizeof(CheckProgramBody));
+        CheckProgramRegion* regions = calloc((uint64_t)region_count + 1, sizeof(CheckProgramRegion));
+        CheckControl* controls = calloc((uint64_t)body_count * 64 + 1, sizeof(CheckControl));
+        uint8_t* seen = malloc(64);
+        uint8_t* scanned = malloc(64);
+        uint32_t* queue = malloc(64 * sizeof(uint32_t));
+        same = bodies != NULL && regions != NULL && controls != NULL && seen != NULL && scanned != NULL && queue != NULL;
+        uint32_t first = 0;
+        for (uint32_t b = 0; same && b < body_count; b += 1)
+        {
+            const uint32_t count = 1 + check_test_tree_random(&state) % 64;
+            const uint32_t entry_count = check_test_tree_random(&state) % 3 == 0 ? count : 1 + check_test_tree_random(&state) % count;
+            bodies[b] = (CheckProgramBody){ .first = first, .count = count, .entry_count = entry_count };
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const uint32_t r = check_test_tree_random(&state);
+                const CheckControlKind kind = r % 97 == 0 ? CHECK_CONTROL_JUMP_INDIRECT : kinds[r % BUSTER_ARRAY_LENGTH(kinds)];
+                controls[first + i] = (CheckControl){ .kind = kind, .target = (r >> 8) % (count + 2), .node = BUSTER_CHECK_NONE };
+            }
+            first += count;
+        }
+        for (uint32_t r = 0; same && r < region_count; r += 1)
+        {
+            const uint32_t random = check_test_tree_random(&state);
+            const uint32_t body = (random & 15) == 0 ? body_count + (random >> 4) % 3 : body_count != 0 ? (random >> 4) % body_count : 0;
+            const uint32_t count = body < body_count ? bodies[body].count : 64;
+            const uint32_t entry_count = body < body_count ? bodies[body].entry_count : 0;
+            const uint32_t extra = count - entry_count;
+            const uint32_t place = (random >> 20) % 9 == 0 ? count + (random >> 24) % 3 : entry_count + (extra != 0 ? (random >> 12) % extra : 0);
+            regions[r] = (CheckProgramRegion){ .body = body, .first = place };
+        }
+        const CheckInput input = { .region_count = region_count };
+        const CheckProgram program =
+        {
+            .input = &input,
+            .controls = controls,
+            .bodies = bodies,
+            .body_count = body_count,
+            .regions = regions,
+            .region_count = region_count,
+        };
+        const uint64_t length = scratch.length;
+        CheckCommonBodyRegions lists = { 0 };
+        same = same && check_common_body_regions(&program, &lists, &scratch) && (lists.order == NULL) == (region_count == 0) &&
+               (lists.offsets == NULL) == (region_count == 0);
+        // Each body's list: its regions, in order; and every region of a body in one.
+        uint32_t total = 0;
+        for (uint32_t b = 0; same && lists.order != NULL && b < body_count; b += 1)
+        {
+            uint32_t k = lists.offsets[b];
+            for (uint32_t r = 0; same && r < region_count; r += 1)
+            {
+                if (regions[r].body == b)
+                {
+                    same = k < lists.offsets[b + 1] && lists.order[k] == r;
+                    k += 1;
+                }
+            }
+            same = same && k == lists.offsets[b + 1];
+            total += lists.offsets[b + 1] - lists.offsets[b];
+        }
+        same = same && (lists.order == NULL || (lists.offsets[0] == 0 && total == lists.offsets[body_count]));
+        for (uint32_t b = 0; same && b < body_count; b += 1)
+        {
+            check_common_body_reached(&program, bodies + b, lists, seen, queue);
+            check_common_body_reached(&program, bodies + b, (CheckCommonBodyRegions){ 0 }, scanned, queue);
+            same = memcmp(seen, scanned, bodies[b].count) == 0;
+            listed += lists.order != NULL && bodies[b].entry_count < bodies[b].count && lists.offsets[b + 1] != lists.offsets[b];
+        }
+        arena_pop_to(&scratch, length);
+        // Each allocation failed in turn, then too little room: false, nothing kept.
+        for (uint32_t failure = 0; same && region_count != 0 && failure < 3; failure += 1)
+        {
+            check_common_resources = (CheckCommonResources){ .fail_at = failure < 2 ? failure : UINT32_MAX };
+            Arena small = scratch;
+            small.capacity = failure < 2 ? scratch.capacity : scratch.length + ((uint64_t)body_count + 2) * sizeof(uint32_t) + 3;
+            CheckCommonBodyRegions none = { 0 };
+            same = !check_common_body_regions(&program, &none, &small) && none.order == NULL && none.offsets == NULL;
+            check_common_resources = (CheckCommonResources){ .fail_at = UINT32_MAX };
+        }
+        free(bodies);
+        free(regions);
+        free(controls);
+        free(seen);
+        free(scanned);
+        free(queue);
+    }
+    arena_release(&scratch);
+    check_common_resources = saved;
+    check_test_expect(test, same && listed > 500, "common body regions: each body's statement expressions listed, and its reach with them as with the scan");
+}
+
+// check_common_literal_blocked against check_common_literal_contexts' marks (#1360): on random tree graphs
+// (check_test_tree_generate) whose nodes without arguments are now and then a sizeof, an alignof or a variable length
+// array's bound or extent, with every root eligible (no node suppressed, no selection), a node is blocked exactly where
+// the pass leaves it without a literal context.
+static void check_test_driver_literal_blocked(CheckTest* test)
+{
+    static const uint32_t sizes[] = { 1, 2, 3, 16, 17, 64, 65, 257, 1000, 5000 };
+    static const CheckOp queries[] = { CHECK_OP_SIZEOF, CHECK_OP_ALIGNOF, CHECK_OP_VLA_BOUND, CHECK_OP_VLA_EXTENT };
+    uint64_t state = UINT64_C(13600);
+    Arena scratch = arena_reserve(UINT64_C(1) << 24);
+    bool same = scratch.base != NULL;
+    uint32_t blocked = 0;
+    uint32_t reached = 0;
+    for (uint32_t round = 0; same && round < 6 * BUSTER_ARRAY_LENGTH(sizes); round += 1)
+    {
+        const uint32_t count = sizes[round % BUSTER_ARRAY_LENGTH(sizes)];
+        const uint32_t argument_room = count * 4 + 1;
+        CheckTestTreeGraph input;
+        same = check_test_tree_graph(&input, count, argument_room);
+        uint32_t* open = malloc(((uint64_t)count + 1) * sizeof(uint32_t));
+        uint32_t* parents = malloc(((uint64_t)count + 1) * sizeof(uint32_t));
+        uint32_t* tokens = malloc(((uint64_t)count + 1) * sizeof(uint32_t));
+        uint8_t* marks = malloc((uint64_t)count + 1);
+        same = same && open != NULL && parents != NULL && tokens != NULL && marks != NULL;
+        if (same)
+        {
+            check_test_tree_generate(&input.graph, argument_room, open, &state);
+            for (uint32_t node = 0; node < count; node += 1)
+            {
+                const uint32_t r = check_test_tree_random(&state);
+                // (One node in 32, so that most chains to a root hold no query and some hold one or more.)
+                const bool plain = !check_graph_has_arguments(input.graph.ops[node]) && (r & 31) == 0;
+                input.graph.ops[node] = plain ? queries[(r >> 2) % BUSTER_ARRAY_LENGTH(queries)] : input.graph.ops[node];
+                // (No token: no selection is a static one.)
+                tokens[node] = BUSTER_CHECK_NONE;
+            }
+            input.graph.tokens = tokens;
+            same = check_test_tree_parents(&input.graph, parents);
+            Parser parser = { 0 };
+            const uint64_t length = scratch.length;
+            same = same && check_common_literal_contexts(&input.graph, &parser, parents, marks, &scratch) && scratch.length == length;
+            for (uint32_t node = 0; same && node < count; node += 1)
+            {
+                const bool marked = (marks[node] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0;
+                same = check_common_literal_blocked(&input.graph, parents, node) == !marked;
+                blocked += !marked;
+                reached += marked && parents[node] != BUSTER_CHECK_NONE;
+            }
+        }
+        free(open);
+        free(parents);
+        free(tokens);
+        free(marks);
+        check_test_tree_release(&input);
+    }
+    arena_release(&scratch);
+    check_test_expect(test, same && blocked > 500 && reached > 500,
+                      "common literal contexts: a node is blocked exactly where no literal context reaches it, on random trees with queries");
+}
+
 static void check_test_driver_common_trees(CheckTest* test)
 {
     check_test_driver_common_parents(test);
     check_test_driver_common_subtree_starts(test);
+    check_test_driver_body_regions(test);
+    check_test_driver_literal_blocked(test);
 }

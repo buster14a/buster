@@ -10,7 +10,7 @@
 static bool check_warning_pedantic(uint32_t id)
 {
     return id == CHECK_WARNING_ID_GNU_CONSTANT || id == CHECK_WARNING_ID_NONSTANDARD_ESCAPE || id == CHECK_WARNING_ID_DELIMITED_ESCAPE ||
-           id == CHECK_WARNING_ID_GNU_UNION_CAST || id == CHECK_WARNING_ID_NONSCALAR_SAME_CAST || id == CHECK_WARNING_ID_GNU_ARRAY_RANGE || id == CHECK_WARNING_ID_C23_ATTRIBUTES || id == CHECK_WARNING_ID_GNU_EMPTY_STRUCT;
+           id == CHECK_WARNING_ID_GNU_UNION_CAST || id == CHECK_WARNING_ID_NONSCALAR_SAME_CAST || id == CHECK_WARNING_ID_GNU_ARRAY_RANGE || id == CHECK_WARNING_ID_C23_ATTRIBUTES || id == CHECK_WARNING_ID_GNU_EMPTY_STRUCT || id == CHECK_WARNING_ID_ZERO_LENGTH_ARRAY;
 }
 
 static bool check_warning_extension(uint32_t id)
@@ -28,7 +28,7 @@ static bool check_warning_option(uint32_t id, String8 option)
     const CheckWarningDescription* description = id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions + id : NULL;
     bool matches = description != NULL && (check_diagnostic_option(option, description->option) || check_diagnostic_option(option, description->parent));
     matches |= check_diagnostic_option(option, "-Weverything");
-    if (id == CHECK_WARNING_ID_GNU_CONSTANT || id == CHECK_WARNING_ID_GNU_UNION_CAST)
+    if (id == CHECK_WARNING_ID_GNU_CONSTANT || id == CHECK_WARNING_ID_GNU_UNION_CAST || id == CHECK_WARNING_ID_ZERO_LENGTH_ARRAY)
     {
         matches |= check_diagnostic_option(option, "-Wpedantic");
     }

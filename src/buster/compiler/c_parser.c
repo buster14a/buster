@@ -788,11 +788,13 @@ struct ParseDiagnostic
     bool declaration_type;
     // A balanced malformed type-name tail is removed without inserting a declaration terminator.
     bool resume_delete;
-    // A rejected call retains only its callee and parentheses for lookup in the diagnostic view. The original
-    // parse error stays; the callee's source is marked invalid before expression checking (#2406).
+    // A rejected call retains its callee and parentheses for lookup in the diagnostic view, and any later arguments
+    // after the unread first one. The original parse error stays; the callee is invalid before expression checking.
     bool resume_call;
     // The callee can precede the diagnostic, where the first argument is a type instead of an expression.
     uint32_t resume_callee;
+    // The first later argument to retain through the closing parenthesis, or zero for an empty lookup-only call.
+    uint32_t resume_call_arguments;
     // An ordinary call uses its callee's value; an attribute-led call only classifies the name before rejecting it.
     bool resume_call_value;
     // A K&R parameter declaration's missing semicolon skips its malformed tail through the next semicolon, or up

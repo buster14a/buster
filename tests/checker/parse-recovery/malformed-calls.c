@@ -170,4 +170,79 @@ void check(void)
     known(int, unread((int[2]){1, 2}), never_read[0]);
     after_multiargument;
 }
+#elif BUSTER_CASE == 21
+int known(int, int);
+int noncallable;
+void check(void)
+{
+    known(int, 1, 2);
+    noncallable(int, 3);
+    after_valid_arguments;
+}
+#elif BUSTER_CASE == 22
+void check(void)
+{
+    retained_callee(int, missing_operand);
+    retained_callee(1, 2);
+    after_argument_lookup;
+}
+#elif BUSTER_CASE == 23
+int old(int, int) __attribute__((deprecated("retired")));
+int hidden(int, int) __attribute__((unavailable("private")));
+void check(void)
+{
+    old(int, missing_old);
+    hidden(int, missing_hidden);
+    after_argument_attributes;
+}
+#elif BUSTER_CASE == 24
+int known(int, int, int);
+void check(void)
+{
+    known(int, double, 3);
+    after_argument_rounds;
+}
+#elif BUSTER_CASE == 25
+int known(int, int);
+int take(int, int);
+struct Pair { int member; } pair;
+void check(void)
+{
+    known(int, take(int, pair.missing));
+    after_nested_arguments;
+}
+#elif BUSTER_CASE == 26
+#define BAD_ARGUMENTS(name) name(int unread((int[2]){1, 2})[skipped_name], ((int*)1) + 1.0)
+int known(int, int);
+void check(void)
+{
+    BAD_ARGUMENTS(known);
+    BAD_ARGUMENTS(known);
+    after_macro_arguments;
+}
+#elif BUSTER_CASE == 27
+int known(int, int, int);
+void check(void)
+{
+    known(int, (void)missing_operand, 1 / 0);
+    after_argument_warning;
+}
+#elif BUSTER_CASE == 28
+int known(int, int);
+void check(void)
+{
+    known(int,);
+}
+#elif BUSTER_CASE == 29
+int known(int, int, int);
+void check(void)
+{
+    known(int, 1,);
+}
+#elif BUSTER_CASE == 30
+int known(int, int, int);
+void check(void)
+{
+    known(int, 1,, missing_operand);
+}
 #endif

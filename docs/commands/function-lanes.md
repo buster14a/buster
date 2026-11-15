@@ -38,7 +38,7 @@ before any part's code (`CheckEmitGrowth`, #673). Elsewhere
 (`CheckProgramLanes.flow` null) the emission's lanes are a `lane_run`.
 
 `./build/compiler test-check-lanes [--executable PATH] [--seed N]
-[--programs N] [--id-order N] [--keep]` emits generated programs of up to 600
+[--programs N] [--id-order N] [--numeric-options-only] [--keep]` emits generated programs of up to 600
 functions (of libgcc's functions in random first-use orders, computed gotos
 through static tables of labels' addresses, switches, structs by value, long
 doubles, variadic calls) and failing programs on one lane and on 2, 3 and 8 lanes, on
@@ -116,6 +116,14 @@ guardian that took no token; the driver by the default policy on programs of
 (which ask for more than one lane but don't); and in this process, on a session
 of 4 lanes, a growth to 4 lanes and with `--worker-budget 2` to 2, every
 supplied token back as the command returns.
+The numeric driver checks (#2786) also run in this suite, or alone with
+`--numeric-options-only`: every spelling's valid range, unsigned overflow,
+negative wraparound, signs and whitespace, and invalid options before or after
+a valid repeated option. They read `tests/driver/numeric_options.cases` at
+runtime and invoke the real driver on `tests/driver/numeric_options.c`, require rejected commands to preserve an
+existing output and accepted commands to emit the same object on default and
+scalar paths. See [numeric driver options](driver.md#numeric-driver-options).
+
 `./build/compiler benchmark-check-lanes
 [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...`
 times a file's emission on each lane count (every lane forced) and by the

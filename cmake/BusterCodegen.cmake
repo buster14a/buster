@@ -328,6 +328,11 @@ function(buster_codegen_unit name)
             set(options --first "${first}")
         endif()
     endif()
+    # A sanitizer build's parts are planned for its longest part (#2639), which its critical path waits for: by the code
+    # generator's measured costs, each part starting at any function. Release's keep the single module's addresses.
+    if(DEFINED buster_sanitizer AND NOT buster_sanitizer STREQUAL "none")
+        list(APPEND options --codegen-costs --padded-starts)
+    endif()
     add_custom_command(OUTPUT "${stamp}"
         BYPRODUCTS ${parts} "${exports}" "${locals}"
         COMMAND "${CMAKE_COMMAND}" "-DINPUT=$<TARGET_OBJECTS:buster_${name}>" "-DDIRECTORY=${directory}"

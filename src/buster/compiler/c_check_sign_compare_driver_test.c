@@ -43,7 +43,7 @@ static void check_test_driver_sign_compare(CheckTest* test, const char* clang, c
         { "wider signed type represents unsigned int", "int f(unsigned b,long m){return b<m;}\n", 0, NULL },
         { "wide signed and unsigned remain different", "int f(unsigned long b,long m){return b<m;}\n", 1, NULL },
         { "both narrow operands promote to signed int", "int f(signed char b,unsigned short m){return b<m;}\n", 0, NULL },
-        { "ordinary conditional result ranges", NULL, 18, NULL },
+        { "ordinary conditional result ranges", NULL, 43, NULL },
     };
     const int file = open("tests/driver/sign_compare_conditional.c", O_RDONLY | O_CLOEXEC);
     char* conditional_source = NULL;
@@ -77,14 +77,14 @@ static void check_test_driver_sign_compare(CheckTest* test, const char* clang, c
             const uint32_t errors = policy == 1 ? cases[c].warnings : 0;
             const uint32_t warnings = policy == 0 ? cases[c].warnings : 0;
             const int expected_status = errors != 0 ? 1 : 0;
-            char reference[4096] = { 0 };
+            char reference[8192] = { 0 };
             bool reference_fits = false;
             for (uint32_t route = 0; written && route < 4; route += 1)
             {
                 char* arguments[24] = { (char*)(route == 0 ? clang : executable != NULL ? executable : "/proc/self/exe"),
                                         "-std=gnu17", "-c", "-fno-caret-diagnostics", "-fno-color-diagnostics",
-                                        "-Wall", "-Wextra", "-Wsign-compare", source, "-o", object };
-                uint32_t used = 11;
+                                        "-ferror-limit=0", "-Wall", "-Wextra", "-Wsign-compare", source, "-o", object };
+                uint32_t used = 12;
                 if (cases[c].option != NULL)
                 {
                     arguments[used++] = (char*)cases[c].option;
@@ -110,7 +110,7 @@ static void check_test_driver_sign_compare(CheckTest* test, const char* clang, c
                 unlink(object);
                 char* text = NULL;
                 const int status = check_test_driver_spawn(arguments, &text);
-                char lines[4096] = { 0 };
+                char lines[8192] = { 0 };
                 const bool fit = check_test_driver_common_output(text != NULL ? text : "", lines, sizeof(lines));
                 const CheckDriverDiagnosticCounts counts = check_test_driver_diagnostic_counts(text);
                 if (route == 0)

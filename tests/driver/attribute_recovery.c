@@ -92,6 +92,34 @@ label: __attribute__((suppress("first"[0]))) value++;
     [[clang::suppress(("fourth" "fifth"))]] *pointer = 1;
     __attribute__((assume(pointer[0] == value))) ;
     return value;
+#elif BUSTER_CASE == 36
+    [[clang::suppress("first" value), gnu::unused]] value++;
+#elif BUSTER_CASE == 37
+    [[clang::suppress("first"[0]), clang::suppress((1))]] value++;
+#elif BUSTER_CASE == 38
+    [[clang::suppress("first" value), missing_attribute]] value++;
+#elif BUSTER_CASE == 39
+    [[clang::suppress("retained"), clang::suppress("first" value)]] value++;
+#elif BUSTER_CASE == 40
+    [[clang::suppress("first" value), clang::suppress((1))]] [[clang::suppress((1))]] value++;
+#elif BUSTER_CASE == 41
+    [[clang::suppress(("first"[0])), gnu::unused]] value++;
+#elif BUSTER_CASE == 42
+    [[clang::suppress("first",), gnu::unused]] value++;
+#elif BUSTER_CASE == 43
+    [[clang::suppress("first" value), gnu::deprecated("discarded")]] int retained = 1;
+    value += retained;
+#elif BUSTER_CASE == 44
+    [[gnu::deprecated("retained"), clang::suppress("first" value)]] int retained = 1;
+    value += retained;
+#elif BUSTER_CASE == 45
+#define BUSTER_SUPPRESS_NAME clang::suppress
+    [[BUSTER_SUPPRESS_NAME("first"[value]), BUSTER_SUPPRESS_NAME((1))]] value++;
+#elif BUSTER_CASE == 46
+    [[clang::suppress("first" value), gnu::unused]] label: value++;
+#elif BUSTER_CASE == 47
+    [[clang::suppress("first"[undeclared_index]), gnu::aligned(1, 2)]] int retained = 0;
+    (void)retained;
 #endif
 #if BUSTER_CASE != 9 && BUSTER_CASE != 35
     return undeclared_after;

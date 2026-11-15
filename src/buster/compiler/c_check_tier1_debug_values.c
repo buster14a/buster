@@ -107,6 +107,11 @@ struct CheckTier1DebugValues
     uint32_t* locals;
     uint32_t local_count;
     uint32_t* local_index;
+    // Per record, the innermost expanded callee's instance whose code it is (IrDebugInline, by its raw origin; NONE for
+    // the function's own code), and per local the instance whose parameter it is (#2541, BUSTER_IR_DEBUG_BIND_INSTANCE,
+    // NONE for the function's own). Null without instances.
+    const uint32_t* record_instances;
+    uint32_t* local_instances;
     uint32_t* events;
     uint32_t event_count;
     uint32_t* kill_first;
@@ -388,18 +393,22 @@ static bool check_tier1_debug_value_meet(const CheckTier1DebugValues* proof, con
 #include "c_check_tier1_debug_regions.c"
 
 static bool check_tier1_debug_values(const Tier0Function* function, const IrFunction* ir, const Tier1EmitResult* emitted,
-                                    const uint32_t* record_order, bool vector, Arena* scratch, CheckTier1DebugValues* result)
+                                    const uint32_t* record_order, const uint32_t* instances, bool vector, Arena* scratch, CheckTier1DebugValues* result)
 {
     const IrDebugInfo* debug = ir->debug;
     const uint32_t nodes = ir->instruction_count;
     const uint32_t parameters = function->parameter_count;
-    const uint32_t locals = function->local_count;
+    // The function's own locals, then its expanded callees' parameters' (#2541, BUSTER_IR_DEBUG_BIND_INSTANCE), whose one
+    // binding each is an initial one (check_tier1_debug checks the sidecar's count against the function's; a sidecar
+    // without instances may leave it 0).
+    const uint32_t own = function->local_count;
+    const uint32_t locals = debug->local_count > own ? debug->local_count : own;
     const uint32_t count = emitted->code.count;
     const uint32_t bindings = debug->binding_count;
     const uint32_t regions = debug->region_count;
     CheckTier1DebugValues proof = { .function = function, .ir = ir, .value_count = nodes + parameters };
     bool valid = parameters <= UINT32_MAX - nodes && debug->binding_flags != NULL && (bindings == 0 || debug->bindings != NULL) &&
-                 bindings <= (uint64_t)function->count + parameters && debug->first_block_end <= function->count &&
+                 bindings <= (uint64_t)function->count + parameters + (locals - own) && debug->first_block_end <= function->count &&
                  regions <= function->count && (regions == 0 || debug->regions != NULL) &&
                  (count == 0 || (emitted->origins != NULL && emitted->code.records != NULL)) &&
                  (emitted->code.branch_count == 0 || (emitted->code.branches != NULL && emitted->code.targets != NULL));
@@ -415,6 +424,8 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
     proof.regions = valid ? ir_allocate(scratch, (uint64_t)regions + 1, sizeof(CheckTier1DebugSpan), &valid) : NULL;
     proof.locals = valid ? ir_allocate(scratch, (uint64_t)locals + 1, 4, &valid) : NULL;
     proof.local_index = valid ? ir_allocate(scratch, (uint64_t)locals + 1, 4, &valid) : NULL;
+    proof.local_instances = valid && locals > own ? ir_allocate(scratch, (uint64_t)locals + 1, 4, &valid) : NULL;
+    proof.record_instances = instances;
     proof.events = valid ? ir_allocate(scratch, (uint64_t)bindings + 1, 4, &valid) : NULL;
     uint32_t* next = valid ? ir_allocate(scratch, (uint64_t)locals + 1, 4, &valid) : NULL;
     uint32_t seed[32];
@@ -428,6 +439,18 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
         memset(proof.region_first, 0, ((uint64_t)locals + 1) * 4);
         memset(proof.regions, 0, ((uint64_t)regions + 1) * sizeof(CheckTier1DebugSpan));
         memset(proof.local_index, 0xff, ((uint64_t)locals + 1) * 4);
+        if (proof.local_instances != NULL)
+        {
+            memset(proof.local_instances, 0xff, ((uint64_t)locals + 1) * 4);
+            for (uint32_t k = 0; k < debug->inline_count; k += 1)
+            {
+                const IrDebugInline instance = debug->inlines[k];
+                for (uint32_t p = 0; instance.local < locals && p < instance.local_count && p < locals - instance.local; p += 1)
+                {
+                    proof.local_instances[instance.local + p] = k;
+                }
+            }
+        }
         for (uint32_t v = 0; v < proof.value_count; v += 1)
         {
             const uint32_t type = v < nodes ? ir->type[v] : ir_typed_types[function->local_classes[v - nodes]];
@@ -438,13 +461,27 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
     for (uint32_t b = 0; valid && b < bindings; b += 1)
     {
         const IrDebugBinding binding = debug->bindings[b];
+        const bool instance = binding.local < locals && debug->binding_flags[binding.local] == BUSTER_IR_DEBUG_BIND_INSTANCE;
         valid = binding.local < locals && binding.kind >= IR_DEBUG_BIND_VALUE && binding.kind <= IR_DEBUG_BIND_UNAVAILABLE &&
-                (binding.entry == BUSTER_IR_NONE ? binding.local < parameters : binding.entry < function->count) &&
+                (binding.entry == BUSTER_IR_NONE ? binding.local < parameters || instance : !instance && binding.entry < function->count) &&
                 (binding.value == BUSTER_IR_NONE || binding.value < nodes) && (binding.anchor == BUSTER_IR_NONE || binding.anchor < nodes);
-        if (valid)
+        if (valid && instance)
         {
+            // An expanded callee's parameter: its argument's value (of the binding's type) or literal, no class of the
+            // function's own to read.
             proof.binding_first[binding.local + 1] += 1;
-            if (debug->binding_flags[binding.local] != 0)
+            valid = binding.local >= own && binding.bytes != 0 && binding.bytes <= 8 && binding.bytes == check_tier1_debug_value_width(binding.type) &&
+                    (binding.kind != IR_DEBUG_BIND_VALUE || (binding.value < nodes && ir->type[binding.value] == binding.type));
+            if (valid && binding.kind == IR_DEBUG_BIND_VALUE)
+            {
+                proof.needed[binding.value] = 1;
+            }
+        }
+        else if (valid)
+        {
+            valid = binding.local < own;
+            proof.binding_first[binding.local + 1] += 1;
+            if (valid && debug->binding_flags[binding.local] != 0)
             {
                 const bool entry = debug->binding_flags[binding.local] == BUSTER_IR_DEBUG_BIND_ENTRY;
                 valid = binding.bytes != 0 && binding.bytes <= 8 && binding.bytes == tier0_class_bytes(function->local_classes[binding.local]) &&
@@ -491,11 +528,11 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
     for (uint32_t local = 0; valid && local < locals; local += 1)
     {
         const uint32_t flags = debug->binding_flags[local];
-        valid = flags == 0 || flags == BUSTER_IR_DEBUG_BIND_ENTRY || flags == BUSTER_IR_DEBUG_BIND_REGIONS;
+        valid = local < own ? flags == 0 || flags == BUSTER_IR_DEBUG_BIND_ENTRY || flags == BUSTER_IR_DEBUG_BIND_REGIONS : flags == BUSTER_IR_DEBUG_BIND_INSTANCE;
         proof.binding_first[local + 1] += proof.binding_first[local];
         proof.region_first[local + 1] += proof.region_first[local];
         next[local] = proof.binding_first[local];
-        if ((flags == BUSTER_IR_DEBUG_BIND_ENTRY && proof.binding_first[local] != proof.binding_first[local + 1]) ||
+        if (((flags == BUSTER_IR_DEBUG_BIND_ENTRY || flags == BUSTER_IR_DEBUG_BIND_INSTANCE) && proof.binding_first[local] != proof.binding_first[local + 1]) ||
             (flags == BUSTER_IR_DEBUG_BIND_REGIONS && proof.region_first[local] != proof.region_first[local + 1]))
         {
             proof.local_index[local] = proof.local_count;
@@ -1101,6 +1138,37 @@ static void check_tier1_debug_value_winners(const CheckTier1DebugValues* proof, 
 // origin is visible here; its next RHS completion additionally kills the old binding even if scheduling moves an
 // older source origin after that completion. Assignment instructions themselves and unknown local scopes are gaps.
 // An initial parameter is already a source value at entry, including before the first source statement.
+// The parameters of instance `instance` and of the instances it is nested in (#2541), each a local to evaluate again: a
+// record entered or left their code. NONE for none.
+static void check_tier1_debug_instance_changed(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live, uint32_t instance)
+{
+    const IrDebugInfo* debug = proof->ir->debug;
+    uint32_t k = instance;
+    for (uint32_t depth = 0; k < debug->inline_count && depth <= debug->inline_count; depth += 1)
+    {
+        const IrDebugInline nested = debug->inlines[k];
+        for (uint32_t p = 0; p < nested.local_count && nested.local + p < debug->local_count; p += 1)
+        {
+            check_tier1_debug_local_changed(live, proof->local_index[nested.local + p]);
+        }
+        k = nested.parent;
+    }
+}
+
+// Whether a record of instance `instance`'s code (NONE for none) is in the code of the instance local `local` is a
+// parameter of: that instance's own, or one nested in it.
+static bool check_tier1_debug_instance_inside(const CheckTier1DebugValues* proof, uint32_t local, uint32_t instance)
+{
+    const IrDebugInfo* debug = proof->ir->debug;
+    const uint32_t owner = proof->local_instances != NULL ? proof->local_instances[local] : BUSTER_IR_NONE;
+    uint32_t k = instance;
+    for (uint32_t depth = 0; k < debug->inline_count && k != owner && depth <= debug->inline_count; depth += 1)
+    {
+        k = debug->inlines[k].parent;
+    }
+    return owner != BUSTER_IR_NONE && k == owner;
+}
+
 static uint64_t check_tier1_debug_value_ranges(const CheckTier1DebugValues* proof, const uint32_t* entries, const uint8_t* safe,
                                              uint32_t body, uint32_t epilogue, bool vector, EmittedLocalRange* output)
 {
@@ -1126,6 +1194,9 @@ static uint64_t check_tier1_debug_value_ranges(const CheckTier1DebugValues* proo
     uint32_t assigning = BUSTER_IR_NONE;
     uint32_t previous_entry = BUSTER_IR_NONE;
     bool previous_source = false;
+    // The instance whose source code the record before was (NONE for none): where it changes, the parameters of the
+    // instances it leaves and enters are visible or not anew (#2541).
+    uint32_t previous_instance = BUSTER_IR_NONE;
     for (uint32_t block = 0; block < proof->block_count; block += 1)
     {
         while (live.known_count != 0)
@@ -1177,6 +1248,13 @@ static uint64_t check_tier1_debug_value_ranges(const CheckTier1DebugValues* proo
             {
                 check_tier1_debug_local_changed(&live, proof->kills[at]);
             }
+            const uint32_t instance = source && proof->record_instances != NULL ? proof->record_instances[r] : BUSTER_IR_NONE;
+            if (instance != previous_instance)
+            {
+                check_tier1_debug_instance_changed(proof, &live, previous_instance);
+                check_tier1_debug_instance_changed(proof, &live, instance);
+                previous_instance = instance;
+            }
             const bool call = proof->transfers[r].control == BUSTER_X86_CONTROL_CALL;
             if (call)
             {
@@ -1217,7 +1295,21 @@ static uint64_t check_tier1_debug_value_ranges(const CheckTier1DebugValues* proo
                 uint32_t selected = BUSTER_IR_NONE;
                 uint32_t value = BUSTER_IR_NONE;
                 uint32_t chosen = BUSTER_IR_NONE;
-                if (debug->binding_flags[local] == BUSTER_IR_DEBUG_BIND_REGIONS)
+                if (debug->binding_flags[local] == BUSTER_IR_DEBUG_BIND_INSTANCE)
+                {
+                    // An expanded callee's parameter (#2541): its one binding's value in its instance's code, and in the
+                    // code of the instances nested in it.
+                    const uint32_t first = proof->binding_first[local];
+                    const bool inside = check_tier1_debug_instance_inside(proof, local, instance);
+                    selected = inside && first < proof->binding_first[local + 1] ? proof->binding_order[first] : BUSTER_IR_NONE;
+                    if (selected != BUSTER_IR_NONE)
+                    {
+                        const IrDebugBinding binding = debug->bindings[selected];
+                        value = binding.kind == IR_DEBUG_BIND_VALUE ? binding.value : BUSTER_IR_NONE;
+                        chosen = value < values ? proof->winner[value] : binding.kind == IR_DEBUG_BIND_CONSTANT ? carriers + selected : BUSTER_IR_NONE;
+                    }
+                }
+                else if (debug->binding_flags[local] == BUSTER_IR_DEBUG_BIND_REGIONS)
                 {
                     const uint32_t region = source ? check_tier1_debug_value_region(proof, local, r, entry) : BUSTER_IR_NONE;
                     if (region != BUSTER_IR_NONE)
