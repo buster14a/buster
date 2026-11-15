@@ -1162,8 +1162,16 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
                                "    }\n"
                                "    return r;\n"
                                "}\n";
-    static const char* const sources[] = { program, overloads, plain, arms };
-    static const char* const expected[][6] = {
+    // A builtin that only an unevaluated operand reaches (#2536's step 2.2c.3, part 2), which the candidates' pass lists and
+    // the bodies don't, with a helper the bodies' plan hasn't and the errno function its runtime preparation needs.
+    static const char unevaluated[] = "int main(int argc, char** argv)\n"
+                                      "{\n"
+                                      "    (void)argv;\n"
+                                      "    _Static_assert(_Generic(__builtin_sqrt((double)argc), double: 1, default: 0), \"unevaluated\");\n"
+                                      "    return argc;\n"
+                                      "}\n";
+    static const char* const sources[] = { program, overloads, plain, arms, unevaluated };
+    static const char* const expected[][7] = {
         {
             "selection-census\tbodies\t5\tdropped\t1\tselected-bodies\t3\t",
             "\twalk\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t2\textra-symbols\t2\t",
@@ -1171,6 +1179,7 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
             "\tarms\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t1\textra-symbols\t1\t",
             "\tpass\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t1\textra-symbols\t1\n",
             "\nselection-census-ticks\treferences\t",
+            "\nselection-census-builtins\texact\t1\tcandidates\t1\textra\t0\tmissing\t0\thelpers\t0\tcandidate-helpers\t0\thelpers-same\t1\truntime-same\t1\n",
         },
         {
             "selection-census\tbodies\t3\tdropped\t0\tselected-bodies\t2\t",
@@ -1179,6 +1188,7 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
             "\tarms\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tnone\textra-bodies\t0\textra-symbols\t0\t",
             "\tpass\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tnone\textra-bodies\t0\textra-symbols\t0\n",
             "\nselection-census-ticks\treferences\t",
+            "\nselection-census-builtins\texact\t0\tcandidates\t0\textra\t0\tmissing\t0\thelpers\t0\tcandidate-helpers\t0\thelpers-same\t1\truntime-same\t1\n",
         },
         {
             "selection-census\tbodies\t1\tdropped\t0\tselected-bodies\t1\t",
@@ -1187,6 +1197,7 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
             "\tarms\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\textra-bodies\t0\textra-symbols\t0\t",
             "\tpass\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\textra-bodies\t0\textra-symbols\t0\n",
             "\nselection-census-ticks\treferences\t",
+            "\nselection-census-builtins\texact\t0\tcandidates\t0\textra\t0\tmissing\t0\thelpers\t0\tcandidate-helpers\t0\thelpers-same\t1\truntime-same\t1\n",
         },
         {
             "selection-census\tbodies\t5\tdropped\t1\tselected-bodies\t3\t",
@@ -1195,9 +1206,19 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
             "\tarms\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\textra-bodies\t0\textra-symbols\t0\t",
             "\tpass\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t1\textra-symbols\t1\n",
             "\nselection-census-ticks\treferences\t",
+            "\nselection-census-builtins\texact\t0\tcandidates\t0\textra\t0\tmissing\t0\thelpers\t0\tcandidate-helpers\t0\thelpers-same\t1\truntime-same\t1\n",
+        },
+        {
+            "selection-census\tbodies\t1\tdropped\t0\tselected-bodies\t1\t",
+            "\twalk\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\t",
+            "\tscan\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\t",
+            "\tarms\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\textra-bodies\t0\textra-symbols\t0\t",
+            "\tpass\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\textra-bodies\t0\textra-symbols\t0\n",
+            "\nselection-census-ticks\treferences\t",
+            "\nselection-census-builtins\texact\t0\tcandidates\t1\textra\t1\tmissing\t0\thelpers\t0\tcandidate-helpers\t1\thelpers-same\t0\truntime-same\t0\n",
         },
     };
-    static const char* const names[] = { "dead calls", "overloads", "one function", "constant arms" };
+    static const char* const names[] = { "dead calls", "overloads", "one function", "constant arms", "an unevaluated builtin" };
     char source[256];
     char object[256];
     char reference[256];
@@ -1265,16 +1286,39 @@ static void check_test_driver_provisional_selection(CheckTest* test, const char*
                                "static int operand(void) { return 3; }\n"
                                "int main(void) { return _Generic(1, long: association, default: operand)(); }\n";
     static const char plain[] = "int main(void) { return 0; }\n";
-    static const char* const sources[] = { externs, statics, statics, body, plain };
-    static const bool debug[] = { false, false, true, false, false };
+    // The candidates' builtins (#2536's step 2.2c.3, part 2): a helper that only an unevaluated operand reaches, which the
+    // candidates' pass takes and the bodies don't, so that their helpers differ; the same helper reached by a call too,
+    // whose plan is the bodies'; and a target("default") group, whose state the tail before the loop took over the
+    // candidates' references (#2536's step 2.2c.2), which the emission refused before check_program_target_states.
+    static const char unevaluated[] = "int main(int argc, char** argv)\n"
+                                      "{\n"
+                                      "    (void)argv;\n"
+                                      "    _Static_assert(_Generic(__builtin_sqrt((double)argc), double: 1, default: 0), \"unevaluated\");\n"
+                                      "    return argc;\n"
+                                      "}\n";
+    static const char evaluated[] = "int main(int argc, char** argv)\n"
+                                    "{\n"
+                                    "    (void)argv;\n"
+                                    "    _Static_assert(_Generic(__builtin_sqrt((double)argc), double: 1, default: 0), \"unevaluated\");\n"
+                                    "    return (int)__builtin_sqrt((double)argc);\n"
+                                    "}\n";
+    static const char target[] = "int g(int x) { return x; }\n"
+                                 "__attribute__((used, target(\"default\"))) int h(int x) { return x + 1; }\n"
+                                 "int caller(int x) { return h(x); }\n";
+    static const char* const sources[] = { externs, statics, statics, body, plain, unevaluated, evaluated, target };
+    static const bool debug[] = { false, false, true, false, false, false, false, false };
     static const char* const expected[] = {
         "provisional-selection\tused\t1\textra-symbols\t2\n",
         "provisional-selection\tused\t1\textra-symbols\t1\n",
         "provisional-selection\tused\t1\textra-symbols\t1\n",
         "provisional-selection\tused\t0\textra-symbols\t0\n",
         "provisional-selection\tused\t1\textra-symbols\t0\n",
+        "provisional-selection\tused\t0\textra-symbols\t0\n",
+        "provisional-selection\tused\t1\textra-symbols\t0\n",
+        "provisional-selection\tused\t0\textra-symbols\t0\n",
     };
-    static const char* const names[] = { "extern and literal extras", "static extras", "static extras by -g", "an extra body", "no extras" };
+    static const char* const names[] = { "extern and literal extras", "static extras", "static extras by -g", "an extra body", "no extras", "an unevaluated helper",
+                                          "a helper reached twice", "a target group" };
     char source[256];
     char object[256];
     char reference[256];

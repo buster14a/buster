@@ -719,6 +719,15 @@ struct CheckProgram
     // Last, as every field this change adds to a structure, so that no other field's offset moves.
     uint32_t control_capacity;
     uint32_t chain_stop_capacity;
+    // The builtin nodes the candidates' pass reaches (#2536's step 2.2c.3, part 2: check_program_census_builtins), in node
+    // order: a superset of the bodies' own (CheckProgram.builtin_nodes) that needs no body's controls; null without the
+    // pass.
+    uint32_t* census_pass_builtins;
+    uint32_t census_pass_builtin_count;
+    // Whether a target group's state (CheckProgramTargetGroup.resolved) over the candidates' references, which the tail
+    // before the loop takes (--provisional-selection, #2536's step 2.2c.2), differs from the one over the bodies' own,
+    // which check_program_finish makes again: a window's lowering would have taken the first.
+    bool target_states_differ;
 };
 
 #define BUSTER_CHECK_PROGRAM_TARGET_VERSIONS UINT32_MAX
@@ -933,6 +942,9 @@ struct CheckProgramTargetEvents
     uint64_t* label_keys;
     uint32_t label_count;
     uint32_t label_capacity;
+    // The bodies' references the target groups read (check_program_target_referenced) when the tail runs before the loop
+    // has written CheckProgram.references (#2536's step 2.2c.2): the candidates' (CheckProgram.census_pass); null after.
+    const CheckProgramCensus* census;
 };
 
 // clang's cpu_specific and cpu_dispatch multiversioning (#1447), defined in c_check_program_cpu_dispatch.c.
@@ -949,6 +961,7 @@ static SymbolId check_program_target_body_symbol(const CheckProgram* program, ui
 // Multiversioning by target strings (#1838), defined in c_check_program_target_versions.c.
 static bool check_program_target_groups(CheckProgram* program, const CheckProgramTargetEvents* events, const uint32_t* initializer_references,
                                         uint32_t initializer_reference_count, Arena* output);
+static void check_program_target_states(CheckProgram* program, const uint32_t* initializer_references, uint32_t initializer_reference_count);
 static void check_program_target_needed(const CheckProgram* program, uint8_t* needed);
 static bool check_program_target_number(CheckProgram* program, Arena* output);
 static bool check_program_target_copies(CheckProgram* program, const PredefinesOptions* predefines, Arena* output);
@@ -5018,6 +5031,76 @@ static inline __attribute__((always_inline)) void check_program_census_leaf(cons
     *b = at;
 }
 
+// The builtin nodes the candidates' pass reaches (#2536's step 2.2c.3, part 2): every builtin node (check_program_builtin_op)
+// whose token one of the bodies holds (a declaration's to its closing brace's: `declarations` and `closings`, body_count
+// of them), but not one of `dead`'s (an operand the references' walk leaves out, check_program_census_prune) or one that
+// a range of `arms` holds (a constant if's dropped arm): the builtins the bodies' references would list
+// (CheckProgram.builtin_nodes) and those the walk reaches no other way, in node order, into
+// CheckProgram.census_pass_builtins from `output`. With AVX-512 the ops of `touched`'s chunks 16 at a time, few of them
+// builtins, each of which takes the scalar test of its body; the rest and the `scalar` path one node at a time. False if
+// there's no room.
+static bool check_program_census_builtins(CheckProgram* program, const uint32_t* declarations, const uint32_t* closings, uint32_t body_count, const uint64_t* dead,
+                                          const uint64_t* arms, uint32_t arm_count, const uint64_t* touched, bool scalar, Arena* output, Arena* scratch)
+{
+    (void)scalar;
+
+    const CheckGraph* graph = &program->input->graph;
+    const uint32_t node_count = graph->count;
+    const uint64_t temporary = scratch->length;
+    uint32_t* found = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1);
+    uint32_t count = 0;
+    uint32_t at = 0;
+    const uint64_t limit = BUSTER_SCALAR_PATH(scalar) || found == NULL ? 0 : node_count & ~UINT32_C(15);
+    uint64_t node = check_program_census_next(touched, 0, limit);
+    for (; node < limit; node = check_program_census_next(touched, node + 16, limit))
+    {
+        const __m512i ops = _mm512_loadu_si512(graph->ops + node);
+        __mmask16 candidates = _mm512_cmpge_epu32_mask(ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_UNARY));
+        candidates &= dead != NULL ? (__mmask16)~(dead[node / 64] >> (node % 64)) : (__mmask16)0xffff;
+        for (uint32_t lanes = candidates; lanes != 0; lanes &= lanes - 1)
+        {
+            const uint32_t n = (uint32_t)node + (uint32_t)__builtin_ctz(lanes);
+            const uint32_t t = graph->tokens[n];
+            while (at + 1 < body_count && declarations[at + 1] <= t)
+            {
+                at += 1;
+            }
+            while (at > 0 && declarations[at] > t)
+            {
+                at -= 1;
+            }
+            const bool inside = at < body_count && declarations[at] <= t && t <= closings[at] && !check_program_census_left_out(arms, arm_count, t);
+            found[count] = n;
+            count += check_program_builtin_op(graph->ops[n]) && inside ? 1 : 0;
+        }
+    }
+    for (node = limit; found != NULL && node < node_count; node += 1)
+    {
+        const uint32_t t = graph->tokens[node];
+        while (at + 1 < body_count && declarations[at + 1] <= t)
+        {
+            at += 1;
+        }
+        while (at > 0 && declarations[at] > t)
+        {
+            at -= 1;
+        }
+        const bool inside = at < body_count && declarations[at] <= t && t <= closings[at] && !check_program_census_left_out(arms, arm_count, t);
+        const bool alive = dead == NULL || !check_program_census_dead(dead, (uint32_t)node);
+        found[count] = (uint32_t)node;
+        count += check_program_builtin_op(graph->ops[node]) && alive && inside ? 1 : 0;
+    }
+    program->census_pass_builtins = found != NULL && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count) : NULL;
+    program->census_pass_builtin_count = program->census_pass_builtins != NULL ? count : 0;
+    const bool valid = found != NULL && (count == 0 || program->census_pass_builtins != NULL);
+    if (program->census_pass_builtins != NULL)
+    {
+        memcpy(program->census_pass_builtins, found, (uint64_t)count * sizeof(uint32_t));
+    }
+    arena_pop_to(scratch, temporary);
+    return valid;
+}
+
 // The scan's census (#2536's step 2.1): each body's candidates' references by one pass over the graph's VALUE nodes
 // rather than a walk: every one of the body's tokens (its declaration's to its closing brace's) that names an object of
 // static storage, as check_program_references' leaves do, whatever control evaluates it or doesn't, and its cleanups'
@@ -5030,7 +5113,7 @@ static inline __attribute__((always_inline)) void check_program_census_leaf(cons
 // `census`, its runs in `output`. With AVX-512 the scans take 16 nodes at a time and, given `touched`
 // (check_program_census_touched), only its chunks; the rest and the `scalar` path one at a time. False if there's no room.
 static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus* census, const Parser* parser, const uint32_t* openings, uint32_t body_count,
-                                      const uint64_t* arms, uint32_t arm_count, bool prune, const uint64_t* touched, uint64_t* reference_items,
+                                      const uint64_t* arms, uint32_t arm_count, bool prune, bool builtins, const uint64_t* touched, uint64_t* reference_items,
                                       uint64_t* reference_sort, bool scalar, Arena* output, Arena* scratch)
 {
     (void)scalar;
@@ -5135,6 +5218,8 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
         }
         dead[node_count / 64] &= ~(UINT64_C(1) << (node_count % 64));
     }
+    // With `builtins`, the builtin nodes the pass reaches too (check_program_census_builtins).
+    valid = valid && (!builtins || check_program_census_builtins(program, declarations, closings, body_count, dead, arms, arm_count, touched, scalar, output, scratch));
     if (valid)
     {
         memset(starts, 0, ((uint64_t)body_count + 1) * sizeof(uint32_t));
@@ -5959,7 +6044,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
         }
         uint64_t* arms = NULL;
         const uint32_t arm_count = valid && scanned ? check_program_constant_arms(&writer, openings, body_count, touched, &arms, options.scalar, scratch) : 0;
-        valid = valid && (!scanned || check_program_census_scan(program, &program->census_pass, parser, openings, body_count, arms, arm_count, true, touched,
+        valid = valid && (!scanned || check_program_census_scan(program, &program->census_pass, parser, openings, body_count, arms, arm_count, true, true, touched,
                                                                 reference_items, reference_sort, options.scalar, output, scratch));
         program->census_pass.ticks = scanned ? __rdtsc() - pass_start : 0;
         program->census_pass_arms = arm_count;
@@ -6213,7 +6298,7 @@ static bool check_program_finish(CheckProgramRun* run)
         program->census_walk.ticks = __rdtsc() - walk_start;
         const uint64_t scan_start = __rdtsc();
         const bool scanned = stream->overload_count == 0 && stream->overload_address_count == 0 && program->cfstring_count == 0;
-        valid = valid && (!scanned || check_program_census_scan(program, &program->census_scan, parser, openings, program->body_count, NULL, 0, false, NULL,
+        valid = valid && (!scanned || check_program_census_scan(program, &program->census_scan, parser, openings, program->body_count, NULL, 0, false, false, NULL,
                                                                 reference_items, reference_sort, options.scalar, output, scratch));
         program->census_scan.ticks = scanned ? __rdtsc() - scan_start : 0;
         // The scan without the writer's dropped arms and conditions, sorted, and the operands the walk leaves out: the
@@ -6234,7 +6319,7 @@ static bool check_program_finish(CheckProgramRun* run)
             arms = c_bindings_sort(arm_keys, arm_keys + arm_count, arm_count, !BUSTER_SCALAR_PATH(options.scalar), varying);
         }
         const uint64_t arms_start = __rdtsc();
-        valid = valid && (!scanned || check_program_census_scan(program, &program->census_arms, parser, openings, program->body_count, arms, arm_count, true, NULL,
+        valid = valid && (!scanned || check_program_census_scan(program, &program->census_arms, parser, openings, program->body_count, arms, arm_count, true, false, NULL,
                                                                 reference_items, reference_sort, options.scalar, output, scratch));
         program->census_arms.ticks = scanned ? __rdtsc() - arms_start : 0;
         CheckProgramCensus* censuses[] = { &program->census_walk, &program->census_scan, &program->census_arms, &program->census_pass };
@@ -6297,7 +6382,12 @@ static bool check_program_finish(CheckProgramRun* run)
             check_program_fail(program, CHECK_PROGRAM_RESOURCE, BUSTER_CHECK_NONE);
         }
     }
-    // The tail's part over the needed marks, unless it ran before the loop over the candidates' (check_program).
+    // The tail's part over the needed marks, unless it ran before the loop over the candidates' (check_program): then the
+    // target groups' states again, over the bodies' own references.
+    if (run->symbols && valid && run->symbols_valid && program->status == CHECK_PROGRAM_OK)
+    {
+        check_program_target_states(program, options.initializer_references, options.initializer_reference_count);
+    }
     valid = run->symbols ? valid && run->symbols_valid : check_program_symbols(run, needed, valid);
     if (valid && program->status == CHECK_PROGRAM_OK && !check_program_x86_diagnostics(program, stream, scratch))
     {
@@ -6330,7 +6420,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     check_program_begin(&run, program, parser, input, stream, types, options, output, scratch);
     // With the candidates (--provisional-selection, #2536's step 2.2c.2), the tail's part over the needed marks first,
     // over the candidates' references, which hold the exact ones: as the windows will need it before the loop. The
-    // selection makes its symbols and the weakrefs' states again from its own references, so the objects are the same.
+    // selection makes its symbols and the weakrefs' states again from its own references, so the objects are the same;
+    // the target groups' states, which the selection takes from the program, check_program_finish makes again
+    // (check_program_target_states).
     if (options.candidates && run.valid && program->status == CHECK_PROGRAM_OK && program->census_pass.first != NULL)
     {
         uint64_t total = 0;
@@ -6342,7 +6434,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         {
             run.needed[program->census_pass.references[r]] = 1;
         }
+        run.target_events.census = &program->census_pass;
         run.symbols_valid = check_program_symbols(&run, run.needed, true);
+        run.target_events.census = NULL;
         run.symbols = true;
     }
     for (uint32_t b = 0; b < run.body_count; b += 1)
