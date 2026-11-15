@@ -339,7 +339,9 @@ shift by zero. In the computed goto, it must find at least four indirect jumps
 and no jump to one. In #2592's fetch, `i = *pc++` at each handler's end, at
 least three indirect jumps must follow the target's load with no register move
 between them, and at least three increments of `pc` must be in place (`add
-$0x4`):
+$0x4`). In #2768's `patterns_spilled`, a handler that calls in one arm as Lua's
+`OP_GETTABUP` does, every indirect jump but the function's first must follow
+the load of its target at once, with no reload of a loop value between them:
 
 ```sh
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns && ./build/test-driver-tier1-patterns build/compiler "$(command -v clang)"

@@ -778,8 +778,14 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
             source = ir_typed_emit(sink, IR_VSELECT, wide, operands[2], operands[0], extended, 0);
             ir_typed_lanes(sink, source, (IrSimdLane)lanes[from]);
         }
-        value = ir_typed_emit(sink, IR_INTRINSIC, type, source, BUSTER_IR_NONE, operation->convert - 1u, 0);
+        // A truncation into an SSE carrier (#2780) is into a 16-byte vector, then its lane 0 at the carrier's type.
+        value = ir_typed_emit(sink, IR_INTRINSIC, operation->carrier_result ? IR_V4I32 : type, source, BUSTER_IR_NONE, operation->convert - 1u, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+        if (operation->carrier_result)
+        {
+            value = ir_typed_emit(sink, IR_INTRINSIC, type, value, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_LANE_EXTRACT, 0);
+            ir_typed_lanes(sink, value, (IrSimdLane)(type == IR_F64 ? 3 : 2));
+        }
         if (operation->merge_mask && !operation->merge_partial && !unmasked)
         {
             value = ir_typed_emit(sink, IR_VSELECT, type, operands[2], value, operands[1], 0);
@@ -916,7 +922,23 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         const uint32_t narrow = ir_typed_emit(sink, IR_INTRINSIC, truncated, operands[1], BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_TRUNCATE, 0);
         ir_typed_lanes(sink, narrow, (IrSimdLane)flags);
         const uint32_t address = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, operands[0], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-        value = ir_typed_emit(sink, unmasked ? IR_STORE : IR_MASKED_STORE, IR_VOID, address, narrow, unmasked ? BUSTER_IR_NONE : operands[2], 0);
+        // 8 lanes into 8 bytes (#2780): unmasked, the store of the truncation's lane 0 as an F64 carrier, its 8 bytes alone;
+        // masked, the mask of 8 lanes zero-extended to the 16-byte vector's byte lanes (an I8's, an I16's), whose upper 8
+        // are clear.
+        uint32_t stored = narrow;
+        uint32_t mask = unmasked ? BUSTER_IR_NONE : operands[2];
+        if (operation->carrier_result && unmasked)
+        {
+            stored = ir_typed_emit(sink, IR_INTRINSIC, IR_F64, narrow, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_LANE_EXTRACT, 0);
+            ir_typed_lanes(sink, stored, (IrSimdLane)3);
+        }
+        else if (operation->carrier_result)
+        {
+            const uint32_t bits = ir_typed_emit(sink, IR_BITCAST, IR_I8, mask, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+            const uint32_t wide = ir_typed_emit(sink, IR_ZEXT, IR_I16, bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+            mask = ir_typed_emit(sink, IR_BITCAST, IR_M16, wide, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        }
+        value = ir_typed_emit(sink, unmasked ? IR_STORE : IR_MASKED_STORE, IR_VOID, address, stored, mask, 0);
         if (!unmasked)
         {
             ir_typed_lanes(sink, value, operation->lane);
@@ -1065,6 +1087,35 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
     {
         // A quadword operation (#1840), its operation in its flags.
         value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_QUADWORD_OP, 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+    }
+    else if (operation->blendv)
+    {
+        // A blend by a vector's signs (#2780): b's lanes where the third operand's compare less than zero, else a's.
+        const uint64_t zero[8] = {0};
+        const uint32_t zeros = ir_typed_vector_constant(sink, type, zero);
+        const uint32_t mask = ir_typed_emit(sink, IR_VCMP, (IrType)ir_lane_mask(type, operation->lane), operands[2], zeros, IR_LT, 0);
+        ir_typed_lanes(sink, mask, operation->lane);
+        value = ir_typed_emit(sink, IR_VSELECT, type, mask, operands[1], operands[0], 0);
+        ir_typed_lanes(sink, value, operation->lane);
+    }
+    else if (operation->pairwise)
+    {
+        // A pairwise operation (#2780), its operation in its flags.
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_PAIRWISE, 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+    }
+    else if (operation->dot)
+    {
+        // A dot product (#2780), its operation in its flags: the accumulator a, b, and the third operand in the extra
+        // array.
+        const uint32_t slot = (uint32_t)sink->sizes.extra_count;
+        if (sink->output != 0)
+        {
+            sink->output->extra[slot] = operands[2];
+        }
+        sink->sizes.extra_count += 1;
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_DOT, slot), 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
     }
     else if (operation->bitshuffle)
@@ -2317,19 +2368,23 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_offset(IrTypedSin
 }
 
 // COPY's `bytes` (at most BUSTER_TIER0_MAX_COPY_BYTES) as a load and a store per piece, each the widest integer that
-// fits what remains: 32 pairs of i64 at most. The typed stream's ranges are the same or apart, so each piece's load
-// before its store reads the source's bytes either way. Their alignment is unknown, as LOAD's is.
-static __attribute__((always_inline)) inline void ir_typed_copy_pointers(IrTypedSink* sink, uint32_t destination, uint32_t source, uint64_t bytes)
+// fits what remains: 32 pairs of i64 at most; or, with `wide`, 16 bytes at a time as a vector's (IR_V4I32), the last
+// 16 ending at the end, and below 16 bytes as integers. The typed stream's ranges are the same or apart, so each piece's
+// load before its store reads the source's bytes either way, overlapping pieces too. Their alignment is unknown, as
+// LOAD's is.
+static __attribute__((always_inline)) inline void ir_typed_copy_pointers(IrTypedSink* sink, uint32_t destination, uint32_t source, uint64_t bytes, bool wide)
 {
     uint64_t offset = 0;
     while (offset < bytes)
     {
         const uint64_t remaining = bytes - offset;
-        const uint32_t piece = remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
-        const IrType type = piece == 8 ? IR_I64 : piece == 4 ? IR_I32 : piece == 2 ? IR_I16 : IR_I8;
-        const uint32_t loaded = ir_typed_emit(sink, IR_LOAD, type, ir_typed_offset(sink, source, offset), BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-        ir_typed_emit(sink, IR_STORE, IR_VOID, ir_typed_offset(sink, destination, offset), loaded, BUSTER_IR_NONE, 0);
-        offset += piece;
+        const bool vector = wide && bytes >= 16;
+        const uint64_t at = vector && remaining < 16 ? bytes - 16 : offset;
+        const uint32_t piece = vector ? 16 : remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
+        const IrType type = piece == 16 ? IR_V4I32 : piece == 8 ? IR_I64 : piece == 4 ? IR_I32 : piece == 2 ? IR_I16 : IR_I8;
+        const uint32_t loaded = ir_typed_emit(sink, IR_LOAD, type, ir_typed_offset(sink, source, at), BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        ir_typed_emit(sink, IR_STORE, IR_VOID, ir_typed_offset(sink, destination, at), loaded, BUSTER_IR_NONE, 0);
+        offset = at + piece;
     }
 }
 
@@ -2348,11 +2403,11 @@ static IrType ir_typed_vector_whole(AbiLocation location, uint64_t size, uint8_t
     return whole && width < 3 && ((allowed >> width) & 1) != 0 ? types[width] : IR_VOID;
 }
 
-static __attribute__((always_inline)) inline void ir_typed_copy(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint64_t bytes)
+static __attribute__((always_inline)) inline void ir_typed_copy(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint64_t bytes, bool wide)
 {
     const uint32_t destination = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, destination_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
     const uint32_t source = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, source_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-    ir_typed_copy_pointers(sink, destination, source, bytes);
+    ir_typed_copy_pointers(sink, destination, source, bytes, wide);
 }
 
 // Whether the function takes or returns an aggregate by value (an object parameter, a result in registers from its bytes

@@ -271,6 +271,34 @@ patterns are:
 - Signed/unsigned integer comparisons, comparisons with zero through the shared
   flags-aware form chooser, comparison/branch fusion, simple selects using
   `cmov`, unconditional branches, returns and `IR_UNREACHABLE` as `ud2`.
+- Selects of integer comparisons (#2676, `TIER1_RULE_SELECT_COMPARE`): a select
+  whose condition is an `icmp` only it reads, in its block, through C's truth
+  values as a branch's, is the comparison's `cmp`, then a `mov` of the value the
+  destination doesn't hold and a `cmov` of the predicate's condition code,
+  inverted where the destination holds the value the comparison chooses.
+  Neither writes the flags, as the `xor` zero idiom would; a zero the select
+  reads is its own node, before it. `int max(int a, int b) { return a > b ? a :
+  b; }` is `cmp %esi,%edi; mov %esi,%eax; cmovg %edi,%eax`, clang -O2's, where it
+  was `xor; cmp; setg; test; mov; cmovne`. The comparison needn't be the node
+  before the select (the if-conversion's selects follow the arms' moved rows and
+  zeros): its operands live to the select instead of its truth value. It takes
+  the comparisons' register, immediate and memory forms. The pattern's four
+  values are the comparison's two and the select's two, so a memory operand has
+  a base alone (the other register or none in values[0], the base in values[1]),
+  and a load at an indexed address stays the register the comparison reads. The
+  BURS grammar's integer select reads its condition: the fused rule from an
+  integer comparison (`COND`), the plain one from a register, each at 3.
+  `test-tier1-select` runs the truth chains' walk with a select root two nodes
+  past the chain, at the comparison's width and the other, into its own
+  register, the chosen value's or a compared one's; the memory comparisons'
+  guarded holes as a select's; and the memory plans and the final-root store
+  fixture with selects, with and without an index. Against main `1935a91f`
+  ([the record](https://github.com/buster14a/buster-performance/tree/bfe90b562a7c5f828d5ec425d55371ebe1c73740/docs/measurements/tier1-select-compare-2676-2026-11-15)):
+  #1382's clamp runs 2.9% fewer cycles on the 9700X, clang -O2's instructions,
+  and its sum of a select 6.9% fewer; the conditional sum's loop 11 to 13%
+  fewer where its placement doesn't bound it. speedtest1 runs 0.48% fewer
+  instructions and Lua's scripts 0.11% fewer; `sqlite3.c`'s Tier 1 functions
+  are 0.53% smaller, with 947 fewer `setcc`s, and compile in the same time.
 - Labels and indirect jumps (#789): GNU C's labels as values and computed gotos,
   and the jump tables C's switches lower to. A label's address is its symbol's
   (`TIER1_RULE_SYMBOL_ADDRESS`). A `br_indirect` is a `jmp` through its target's
@@ -694,8 +722,9 @@ widths without inventing sign facts. Byte/word wrapping and guarded conversion
 fixtures observe the complete 64-bit result, including poisoned ABI inputs,
 negative bypass paths and unsafe unsigned bounds.
 
-Comparisons used by a branch alone do not produce `setcc`. Their comparison and
-conditional jump are consecutive records. A comparison producing a value uses
+Comparisons used by a branch or a select alone do not produce `setcc`. A
+branch's comparison and conditional jump are consecutive records, and a
+select's comparison, `mov` and `cmov` (#2676). A comparison producing a value uses
 canonical 32-bit storage and `setcc`. An independent destination is cleared with
 `xor` before `cmp`/`test`; an aliased input is read by the comparison first, then
 `mov r32, 0` clears the destination while preserving the flags. A floating
@@ -792,8 +821,8 @@ an immediate, a scaled index, a truth value's link) folding into its root's. Its
 eighteen nonterminals are a statement, a register, the constants' classes (an
 immediate, a lea's scale, a power of two, 3, 5 or 9, a shift's count, zero, a
 disp32), a load a consumer folds, a shift a lea scales, addresses without an
-index and with one, an index, and the comparisons a branch or a truth value
-takes, integer and floating, and their zero extensions.
+index and with one, an index, and the comparisons a branch, a select (#2676)
+or a truth value takes, integer and floating, and their zero extensions.
 
 `tier1_select_initialize` compiles the grammar into state tables once, by burg's
 algorithm: a state is each nonterminal's cheapest rule and its cost, normalized

@@ -144,6 +144,10 @@ passes by its vector and its scalar version:
   alone, CFG cleanup alone and with its merges, the three together, and
   Tier 1's set (the three with the merges, layout and identities);
 - LICM on the promoted form;
+- the loop vectorizer (#2743), at every operation the IR has
+  (`ir_vectorize_target_ir`), on the promoted form after Tier 1's optimizer
+  set (whose exit tests are simplified), its refusals and loops alike by both
+  paths;
 - for each caller, the inliner on a unit of the caller and its direct callees
   among the file's functions, as the C driver's expansion builds one, with
   the caller alone rewritten and #2541's general splice on.

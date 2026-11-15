@@ -18,6 +18,8 @@
 #include "ir_truth.c"
 #include "ir_if_convert.c"
 #include "ir_thread.c"
+#include "ir_vectorize_loops.c"
+#include "ir_vectorize_target.c"
 #include "tier1_schedule_ir.c"
 #include "c_check_tier1_schedule.c"
 
@@ -179,6 +181,7 @@ static void check_tier1_lane_release(CheckTier1Lane* lane)
     *lane = (CheckTier1Lane){ 0 };
 }
 
+_Static_assert(BUSTER_CHECK_TIER1_VECTORIZE_COUNTS == 7 + IR_VECTORIZE_REFUSALS, "the report keeps every vectorizer count");
 _Static_assert(BUSTER_CHECK_TIER1_PASS_SCCP == BUSTER_IR_OPTIMIZE_SCCP && BUSTER_CHECK_TIER1_PASS_DCE == BUSTER_IR_OPTIMIZE_DCE &&
                    BUSTER_CHECK_TIER1_PASS_CFG == BUSTER_IR_OPTIMIZE_CFG && BUSTER_CHECK_TIER1_PASS_MERGE == BUSTER_IR_OPTIMIZE_MERGE,
                "--tier1-passes= passes the optimizer's own bits");
@@ -191,8 +194,9 @@ static uint32_t check_tier1_passes_on(const CheckTier1Lane* lane)
 }
 
 // The lane's arenas, reserved at its first body and emptied for each, and the forms `target` allows, built again only
-// for a target other than the last one's. The optional passes' arenas (#866's solver's, step 7, and SROA's and LICM's
-// from --tier1-passes=, steps 8 and 9) are reserved only where `optional` asks for them (bit k for step
+// for a target other than the last one's, with the vector operations it selects (ir_vectorize_target.c). The optional
+// passes' arenas (#866's solver's, step 7, and SROA's, LICM's and the loop vectorizer's from --tier1-passes=, steps 8,
+// 9 and 10) are reserved only where `optional` asks for them (bit k for step
 // BUSTER_CHECK_TIER1_STEPS_ALWAYS + k), so that --tier1 alone maps no address space it never uses. Returns false if one
 // can't be reserved.
 static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* target, uint8_t optional)
@@ -211,14 +215,16 @@ static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* targ
             lane->steps[k] = reserve ? arena_reserve(UINT64_C(1) << 34) : (Arena){ 0 };
         }
         lane->scratch = arena_reserve(UINT64_C(1) << 36);
-        lane->forms = arena_reserve_small(X86_FORM_COUNT, X86_FORM_COUNT);
+        const uint64_t forms = X86_FORM_COUNT + sizeof(IrVectorizeTarget) + 64;
+        lane->forms = arena_reserve_small(forms, forms);
         lane->allowed = BUSTER_ARENA_PUSH_ARRAY(&lane->forms, uint8_t, X86_FORM_COUNT);
+        lane->vectorize = BUSTER_ARENA_PUSH_ARRAY(&lane->forms, IrVectorizeTarget, 1);
         lane->reserved = true;
         lane->optional_reserved = optional;
         // The new forms arena is empty: the target's forms must be built again even for the same target.
         lane->targeted = false;
     }
-    bool valid = lane->scratch.base != 0 && lane->allowed != 0;
+    bool valid = lane->scratch.base != 0 && lane->allowed != 0 && lane->vectorize != 0;
     for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_STEPS; k += 1)
     {
         const bool reserved = k < BUSTER_CHECK_TIER1_STEPS_ALWAYS || ((optional >> (k - BUSTER_CHECK_TIER1_STEPS_ALWAYS)) & 1) != 0;
@@ -231,6 +237,7 @@ static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* targ
     if (valid && !same)
     {
         x86_target_forms(target, lane->allowed);
+        ir_vectorize_target_tier1(lane->allowed, lane->vectorize);
         lane->target = *target;
         lane->targeted = true;
     }
@@ -310,6 +317,8 @@ struct CheckTier1Passes
     uint32_t sunk;
     // --tier1-passes=+licm's moved values (#139).
     uint32_t licm_moved;
+    // --tier1-passes=+vectorize's counts (#2743, BUSTER_CHECK_TIER1_VECTORIZE_COUNTS).
+    uint32_t vectorize[BUSTER_CHECK_TIER1_VECTORIZE_COUNTS];
     bool unexpanded;
 };
 
@@ -421,6 +430,30 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         wide.function = stage == CHECK_TIER1_COMPILED && check.error == IR_OK ? moved.function : wide.function;
         passes->licm_moved = check.error == IR_OK ? moved.moved : 0;
     }
+    // --tier1-passes=+vectorize (#2743's measurement): the loop vectorizer, in steps[10], after LICM and before the
+    // optimizer, whose SCCP, dead-code removal, CFG cleanup and final verification take its result (its scalar loops
+    // and its vector ones alike). A function without a loop it takes goes on as it was, borrowed.
+    if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0)
+    {
+        IrVectorizeResult vectorized = { 0 };
+        const IrVectorizeOptions options = { .target = lane->vectorize, .scalar = scalar };
+        const IrCheck check = ir_vectorize_loops(&wide.function, &options, &lane->steps[10], scratch, &vectorized);
+        outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, NULL);
+        outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
+        stage = outcome.stage;
+        wide.function = stage == CHECK_TIER1_COMPILED && vectorized.changed ? vectorized.function : wide.function;
+        const uint32_t counts[BUSTER_CHECK_TIER1_VECTORIZE_COUNTS] = {
+            vectorized.loops,
+            vectorized.vectorized,
+            vectorized.widths[0],
+            vectorized.widths[1],
+            vectorized.widths[2],
+            vectorized.reductions,
+            vectorized.guards,
+        };
+        memcpy(passes->vectorize, counts, sizeof(counts));
+        memcpy(passes->vectorize + 7, vectorized.refused, sizeof(vectorized.refused));
+    }
     // --tier1-schedule=pre (#172): each block's instructions reordered on the same owned columns, before the optimizer's
     // final verification, which then covers the new order. No room for the pass's scratch is a resource failure.
     if (stage == CHECK_TIER1_COMPILED && lane->schedule == BUSTER_CHECK_TIER1_SCHEDULE_PRE)
@@ -482,10 +515,10 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
 {
     *code = (EmittedCode){ 0 };
     *counts = (CheckTier1Counts){ 0 };
-    // --tier1-passes='s SROA on every body, and LICM, each with an arena of its own.
+    // --tier1-passes='s SROA on every body, LICM and the loop vectorizer, each with an arena of its own.
     const uint32_t on = check_tier1_passes_on(lane);
     const bool sroa = (on & BUSTER_CHECK_TIER1_PASS_SROA) != 0;
-    const uint8_t optional = (uint8_t)((gvn ? 1u : 0) | (sroa ? 2u : 0) | ((on & BUSTER_CHECK_TIER1_PASS_LICM) != 0 ? 4u : 0));
+    const uint8_t optional = (uint8_t)((gvn ? 1u : 0) | (sroa ? 2u : 0) | ((on & BUSTER_CHECK_TIER1_PASS_LICM) != 0 ? 4u : 0) | ((on & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0 ? 8u : 0));
     CheckTier1Outcome outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA,
                                                 check_tier1_lane_prepare(lane, target, optional) ? 0 : BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, fault);
     CheckTier1Stage stage = outcome.stage;
@@ -753,6 +786,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .sroa_split = sroa_split,
             .gvn_removed = gvn_applied ? gvn_result.removed : 0,
         };
+        memcpy(counts->vectorize, passes.vectorize, sizeof(counts->vectorize));
         if (emitted.frame_event_count != 0)
         {
             memcpy(frames, emitted.frame_events, (uint64_t)emitted.frame_event_count * sizeof(EmissionFrameEvent));
@@ -929,4 +963,17 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
             report->code_certified, report->code_uncertified, report->machine_rows, report->row_moves, report->inlined_calls, report->schedule_blocks,
             report->schedule_moved, report->sunk, report->folded, report->removed_instructions, report->removed_blocks, report->merged_blocks, report->licm_moved,
             report->sroa_split, report->gvn_removed, report->dead_functions);
+    // The loop vectorizer's (--tier1-passes=+vectorize, #2743): a line of its own, so that the line above keeps its
+    // fields.
+    static const char* const refusals[IR_VECTORIZE_REFUSALS] = { "shape", "induction", "phi", "operation", "address", "use", "dependence", "width" };
+    if (report->vectorize[0] != 0)
+    {
+        fprintf(stream, "tier1-vectorize\tloops=%" PRIu64 "\tvectorized=%" PRIu64 "\tbytes16=%" PRIu64 "\tbytes32=%" PRIu64 "\tbytes64=%" PRIu64 "\treductions=%" PRIu64 "\tguards=%" PRIu64,
+                report->vectorize[0], report->vectorize[1], report->vectorize[2], report->vectorize[3], report->vectorize[4], report->vectorize[5], report->vectorize[6]);
+        for (uint32_t k = 0; k < IR_VECTORIZE_REFUSALS; k += 1)
+        {
+            fprintf(stream, "\trefused.%s=%" PRIu64, refusals[k], report->vectorize[7 + k]);
+        }
+        fprintf(stream, "\n");
+    }
 }
