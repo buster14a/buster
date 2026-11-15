@@ -106,7 +106,9 @@ and runs their code against an unsigned arithmetic loop and clang.
 
 Beside them are three tables, and optional parts for aggregates and for the symbols' access:
 
-- **Locals,** parameters first, each with a class and flags (`BUSTER_TYPED_LOCAL_ADDRESS_TAKEN`). Two optional columns
+- **Locals,** parameters first, each with a class and flags (`BUSTER_TYPED_LOCAL_ADDRESS_TAKEN`, and with it
+  `BUSTER_TYPED_LOCAL_VOLATILE` for a volatile or `_Atomic` declaration's local, whose accesses all happen: the IR's
+  slot is then `BUSTER_IR_SLOT_VOLATILE`, #2718). Two optional columns
   make some of them **objects** in the frame: arrays, structs and unions.
   - `local_sizes`: an object's size in bytes, 0 for a value's local.
   - `local_alignments`: its alignment's log2, at most 30 (`BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2`, 1 GB); past 4 (16

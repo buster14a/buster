@@ -33,7 +33,7 @@ requirements. [Command index](README.md).
   `benchmark-ir-optimize`
   and `benchmark-ir-optimize-passes` include preparation and rewriting costs.
 - Value numbering with memory (#2718, `ir_optimize_memory.c`, the optimizer's
-  `BUSTER_IR_OPTIMIZE_MEMORY`): `test-ir-optimize` runs its five
+  `BUSTER_IR_OPTIMIZE_MEMORY`): `test-ir-optimize` runs its six
   `tests/ir/optimize/memory-*.ir` pairs and `ir_optimize_memory_test.c`'s 400
   generated programs, whose interpreter's calls rewrite every escaped byte,
   through both twins (exact) and an overflow fixture.

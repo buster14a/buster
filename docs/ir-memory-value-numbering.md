@@ -57,6 +57,14 @@ facts say otherwise:
   variadic frames' slot flags. Only a private slot's own stores and its
   `lifetime` markers write it; it is a class of its own, and every other access
   is of general memory.
+- **Volatile slots.** A volatile or `_Atomic` declaration's local keeps its
+  accesses: the checker's lowering marks it `BUSTER_TYPED_LOCAL_VOLATILE` (with
+  `ADDRESS_TAKEN`), and the IR's lowering makes its slot
+  `BUSTER_IR_SLOT_VOLATILE`, which SROA and promotion refuse. Its plain loads
+  and stores are observable writes here: neither forwarded nor a source. Before
+  #2718 such a local was marked address-taken alone, and the IR had no way to
+  tell `volatile int leaf = x; return leaf;` from any frame object
+  (`test-check-debug`'s GDB read of `leaf` found the load gone).
 - **Writes of general memory.** A call (and a row call and an asm body's), a
   fence, an atomic read/modify/write, a masked, compressing or scattering
   store, `alloca` and `stack_restore`, every observable load or store, a store
@@ -140,9 +148,10 @@ SIMD_PAYS
   store, a slot's marker); private slots (a call between, an escape to a call
   and through a stored address, markers, an indexed store of the same slot);
   blocks (a diamond's clean and written arms, a loop's header, latch and exit);
-  and addresses (an index's family, a constant index, a constant out of
-  `int32_t`'s range, a second index, an `inttoptr` of an `i32`). Both parsers,
-  both twins, the canonical bytes and the shared executor on eighteen inputs.
+  addresses (an index's family, a constant index, a constant out of
+  `int32_t`'s range, a second index, an `inttoptr` of an `i32`); and a volatile
+  slot's loads, kept beside a private slot's forwarded one. Both parsers, both
+  twins, the canonical bytes and the shared executor on eighteen inputs.
 - **Generated programs** (`ir_optimize_memory_test.c`): 400 programs of
   straight blocks, diamonds and bounded loops whose loads and stores of `i32`s
   and `i64`s reach a private slot and two escaped ones at constant and indexed
@@ -158,8 +167,8 @@ SIMD_PAYS
   both versions on every function of c-testsuite's subset, the frozen
   `sqlite3.c` and musl, which must give the same function and forwarded loads.
 - **The driver:** `test-checker-driver`'s `--tier1-passes=` fixture reads an
-  element twice in one sum, and `test-ir-metamorphic`'s Tier 1 row runs the
-  pass.
+  element twice in one sum, `test-ir-metamorphic`'s Tier 1 row runs the pass,
+  and `test-check-debug`'s GDB reads a `volatile` local's value at its return.
 
 ## Measurements
 
