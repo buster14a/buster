@@ -399,16 +399,21 @@ static const CheckInputAttribute* check_program_target_version_attribute(const C
     return check_target_versions_own(check_input_attributes_at(program->input, program->target_versions[v].declaration), CHECK_ATTRIBUTE_TARGET);
 }
 
-// Whether `object` is referenced: by a body (CheckProgram.references) or by an initializer (`initializer_references`).
-static bool check_program_target_referenced(const CheckProgram* program, uint32_t object, const uint32_t* initializer_references, uint32_t initializer_reference_count)
+// Whether `object` is referenced: by a body (CheckProgram.references, or before the loop has written them, `census`'s:
+// the candidates', #2536's step 2.2c.2) or by an initializer (`initializer_references`).
+static bool check_program_target_referenced(const CheckProgram* program, const CheckProgramCensus* census, uint32_t object, const uint32_t* initializer_references,
+                                            uint32_t initializer_reference_count)
 {
     bool found = false;
+    const uint32_t* references = census != NULL ? census->references : program->references;
     for (uint32_t b = 0; !found && b < program->body_count; b += 1)
     {
         const CheckProgramBody* body = program->bodies + b;
-        for (uint32_t r = 0; !found && program->references != NULL && r < body->reference_count; r += 1)
+        const uint32_t first = census != NULL ? census->first[b] : body->reference_first;
+        const uint32_t count = census != NULL ? census->counts[b] : body->reference_count;
+        for (uint32_t r = 0; !found && references != NULL && r < count; r += 1)
         {
-            found = program->references[body->reference_first + r] == object;
+            found = references[first + r] == object;
         }
     }
     for (uint32_t r = 0; !found && initializer_references != NULL && r < initializer_reference_count; r += 1)
@@ -416,6 +421,39 @@ static bool check_program_target_referenced(const CheckProgram* program, uint32_
         found = initializer_references[r] == object;
     }
     return found;
+}
+
+// Whether `group` is resolved: target's where a version is referenced (one of `versions` from its first on, `version_count`
+// of them in all); target_clones' where defined or referenced, but a static one only where referenced, as clang defers it.
+// The bodies' references are `census`'s where it isn't null (check_program_target_referenced).
+static bool check_program_target_resolved(const CheckProgram* program, const CheckProgramTargetGroup* group, const CheckProgramTargetVersion* versions,
+                                          uint32_t version_count, const CheckProgramCensus* census, const uint32_t* initializer_references,
+                                          uint32_t initializer_reference_count)
+{
+    bool referenced = false;
+    for (uint32_t v = group->version_first; v < version_count; v += 1)
+    {
+        referenced |= check_program_target_referenced(program, census, versions[v].object, initializer_references, initializer_reference_count);
+    }
+    referenced |= group->clones != 0 &&
+                  ((check_program_cpu_defined(program, group->clones) && !group->internal) ||
+                   check_program_target_referenced(program, census, group->clones, initializer_references, initializer_reference_count));
+    return referenced;
+}
+
+// The groups' states again (CheckProgramTargetGroup.resolved) over the bodies' own references, once the loop has written
+// them, where the tail before it took the candidates' (#2536's step 2.2c.2): whether one differs, which
+// CheckProgram.target_states_differ keeps.
+static void check_program_target_states(CheckProgram* program, const uint32_t* initializer_references, uint32_t initializer_reference_count)
+{
+    for (uint32_t g = 0; g < program->target_group_count; g += 1)
+    {
+        CheckProgramTargetGroup* group = program->target_groups + g;
+        const bool resolved = check_program_target_resolved(program, group, program->target_versions, program->target_version_count, NULL, initializer_references,
+                                                            initializer_reference_count);
+        program->target_states_differ |= resolved != group->resolved;
+        group->resolved = resolved;
+    }
 }
 
 // The unit's groups (CheckProgram.target_groups) from the declarations with a target or target_clones attribute among the
@@ -507,17 +545,7 @@ static bool check_program_target_groups(CheckProgram* program, const CheckProgra
         program->object_declarations[synthetic] = attributed;
         group.reference = group.clones != 0 ? group.clones : synthetic;
         group.body = group.clones != 0 ? synthetic : 0;
-        // Resolved: target's where a version is referenced; target_clones' where defined or referenced.
-        bool referenced = false;
-        for (uint32_t v = group.version_first; v < version_count; v += 1)
-        {
-            referenced |= check_program_target_referenced(program, versions[v].object, initializer_references, initializer_reference_count);
-        }
-        // (A static one is emitted only where referenced, as clang defers it.)
-        referenced |= group.clones != 0 &&
-                      ((check_program_cpu_defined(program, group.clones) && !group.internal) ||
-                       check_program_target_referenced(program, group.clones, initializer_references, initializer_reference_count));
-        group.resolved = referenced;
+        group.resolved = check_program_target_resolved(program, &group, versions, version_count, events->census, initializer_references, initializer_reference_count);
         // The options' conditions, which the CPU model's symbols follow: one per version (target's), or per item of
         // target_clones' joined text, which has a comma between two.
         uint32_t room = group.version_count;
