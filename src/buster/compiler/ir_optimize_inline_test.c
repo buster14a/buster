@@ -1395,16 +1395,22 @@ static void ir_inline_test_aggregates(IrInlineTest* test, Arena* input, Arena* o
             ir_inline_test_compare_loads(test, &unit, &result, 0, scratch, 128, false);
         }
         // A call with records still says whether its callee is variadic: a variadic call of the registers callee, which
-        // isn't, keeping its two arguments and its records, is the unit's type error at the call, as any other's is.
+        // isn't, keeping its two arguments and its records, stays a call by its signature (#2721), and the caller's
+        // other calls are taken as before.
         caller->calls[1].variadic = true;
-        const uint64_t output_mark = output->length;
-        const uint64_t scratch_mark = scratch->length;
-        IrInlineResult refused = { 0 };
-        uint32_t failed = UINT32_MAX;
-        const IrCheck mismatch = ir_optimize_inline(&unit, output, scratch, ir_inline_options(), &refused, &failed);
-        ir_inline_test_expect(test, ir_verify(caller, scratch, 0).error == IR_OK && mismatch.error == IR_ERROR_TYPE && mismatch.instruction == 6 && mismatch.detail == 2 && failed == 0 &&
-                                        output->length == output_mark && scratch->length == scratch_mark,
-                              "a call with records of another variadic status than its callee's");
+        IrInlineResult kept = { 0 };
+        if (ir_inline_test_run(test, &unit, ir_inline_options(), output, twin, scratch, &kept))
+        {
+            const uint8_t decisions[] = {
+                IR_INLINE_SELECTED,
+                IR_INLINE_SIGNATURE,
+                IR_INLINE_ABI,
+                IR_INLINE_UNKNOWN_SYMBOL,
+                IR_INLINE_SELECTED,
+            };
+            ir_inline_test_expect(test, ir_verify(caller, scratch, 0).error == IR_OK && kept.inlined_calls == 2 && kept.call_count == 5 && memcmp(kept.decisions, decisions, sizeof(decisions)) == 0,
+                                  "a call with records of another variadic status than its callee's stays a call");
+        }
         caller->calls[1].variadic = false;
     }
     arena_pop_to(input, 0);
@@ -1414,23 +1420,28 @@ static void ir_inline_test_aggregates(IrInlineTest* test, Arena* input, Arena* o
 
 static void ir_inline_test_decisions(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
 {
-    for (uint32_t mode = 0; mode < 12; mode += 1)
+    // Modes 12 to 15 are calls whose signatures aren't their callees' prototypes' (#2721): unprototyped with the callee's
+    // own argument (taken), a variadic callee's with an argument past its parameter (its flag's decision), unprototyped
+    // with an argument past the callee's parameter, and through a declaration of another type (each a call kept). None
+    // is the unit's error.
+    for (uint32_t mode = 0; mode < 16; mode += 1)
     {
         for (uint32_t count = 0; count <= 33; count += 1)
         {
             const bool indirect = mode == 10;
             const uint32_t first = indirect ? 2 : 1;
+            const uint32_t arguments = mode == 13 || mode == 14 ? 2 : 1;
             IrFunction functions[2];
             functions[0] = ir_inline_test_function(test, input, (IrSizes){
                                                                     .instruction_count = first + count + 1,
                                                                     .block_count = 1,
-                                                                    .extra_count = count,
+                                                                    .extra_count = count * arguments,
                                                                     .call_count = count,
-                                                                    .call_type_count = count,
+                                                                    .call_type_count = count * arguments,
                                                                     .parameter_count = 1,
                                                                 },
                                                    IR_I64);
-            functions[1] = ir_inline_test_leaf(test, input, IR_I64);
+            functions[1] = ir_inline_test_leaf(test, input, mode == 15 ? IR_I32 : IR_I64);
             functions[0].parameter_types[0] = IR_I64;
             ir_inline_test_node(&functions[0], 0, IR_PARAM, IR_I64, 0, UINT32_MAX, UINT32_MAX);
             if (indirect)
@@ -1439,9 +1450,12 @@ static void ir_inline_test_decisions(IrInlineTest* test, Arena* input, Arena* ou
             }
             for (uint32_t c = 0; c < count; c += 1)
             {
-                functions[0].extra[c] = 0;
-                ir_inline_test_call(&functions[0], first + c, c, mode == 9 ? 90 : 2, c, 1, IR_I64);
-                functions[0].calls[c].variadic = mode == 7;
+                for (uint32_t a = 0; a < arguments; a += 1)
+                {
+                    functions[0].extra[c * arguments + a] = 0;
+                }
+                ir_inline_test_call(&functions[0], first + c, c, mode == 9 ? 90 : 2, c * arguments, arguments, IR_I64);
+                functions[0].calls[c].variadic = mode == 7 || mode == 12 || mode == 13 || mode == 14;
                 if (indirect)
                 {
                     functions[0].op[first + c] = IR_CALL_INDIRECT;
@@ -1494,7 +1508,7 @@ static void ir_inline_test_decisions(IrInlineTest* test, Arena* input, Arena* ou
             };
             const uint8_t flags[] = {
                 0,
-                mode == 5 ? 0 : BUSTER_IR_INLINE_INTERNAL | (mode == 6 ? BUSTER_IR_INLINE_NOINLINE : 0) | (mode == 7 ? BUSTER_IR_INLINE_VARIADIC : 0),
+                mode == 5 ? 0 : BUSTER_IR_INLINE_INTERNAL | (mode == 6 ? BUSTER_IR_INLINE_NOINLINE : 0) | (mode == 7 || mode == 13 ? BUSTER_IR_INLINE_VARIADIC : 0),
             };
             const IrInlineUnit unit = {
                 functions,
@@ -1523,12 +1537,16 @@ static void ir_inline_test_decisions(IrInlineTest* test, Arena* input, Arena* ou
             IrInlineResult result = { 0 };
             if (ir_inline_test_run(test, &unit, options, output, twin, scratch, &result))
             {
-                const uint32_t expected_count = mode == 0 || mode == 11 ? count : (mode == 3 || mode == 4) && count != 0 ? 1
-                                                                                                                         : 0;
-                ir_inline_test_expect(test, result.inlined_calls == expected_count, "disabled, linkage, shape and exact budget admission");
+                const bool taken = mode == 0 || mode == 11 || mode == 12;
+                const uint32_t expected_count = taken ? count : (mode == 3 || mode == 4) && count != 0 ? 1
+                                                                                                    : 0;
+                ir_inline_test_expect(test, result.inlined_calls == expected_count, "disabled, linkage, shape, signature and exact budget admission");
                 for (uint32_t c = 0; c < count; c += 1)
                 {
-                    const uint8_t expected = mode == 0 || mode == 11 ? IR_INLINE_SELECTED : mode == 1 ? IR_INLINE_DISABLED
+                    const uint8_t expected = taken                   ? IR_INLINE_SELECTED
+                                             : mode == 13            ? IR_INLINE_VARIADIC
+                                             : mode == 14 || mode == 15 ? IR_INLINE_SIGNATURE
+                                             : mode == 1             ? IR_INLINE_DISABLED
                                                                           : mode == 2              ? IR_INLINE_COST
                                                                           : mode == 3 || mode == 4 ? c == 0 ? IR_INLINE_SELECTED : IR_INLINE_GROWTH
                                                                           : mode == 5              ? IR_INLINE_EXTERNAL
@@ -1539,7 +1557,14 @@ static void ir_inline_test_decisions(IrInlineTest* test, Arena* input, Arena* ou
                                                                                                    : IR_INLINE_INDIRECT;
                     ir_inline_test_expect(test, result.decisions[c] == expected, "original-order decision reason");
                 }
-                ir_inline_test_compare(test, &unit, &result, 0, scratch, 4);
+                if (mode < 13)
+                {
+                    ir_inline_test_compare(test, &unit, &result, 0, scratch, 4);
+                }
+                else
+                {
+                    ir_inline_test_expect(test, ir_inline_test_same_function(&result.functions[0], &functions[0]), "a caller whose calls aren't its callee's signature's is as it was");
+                }
             }
             arena_pop_to(input, 0);
             arena_pop_to(output, 0);
@@ -1774,6 +1799,21 @@ static void ir_inline_test_empty_and_identity(IrInlineTest* test, Arena* input, 
         arena_pop_to(output, 0);
         arena_pop_to(twin, 0);
     }
+}
+
+// One call's unit, whose only call's decision by signature is `expected` (#2721): the unit taken, the call expanded or
+// kept, the outputs put back.
+static void ir_inline_test_signature(IrInlineTest* test, const IrInlineUnit* unit, Arena* output, Arena* twin, Arena* scratch, uint8_t expected)
+{
+    IrInlineResult result = { 0 };
+    if (ir_inline_test_run(test, unit, ir_inline_options(), output, twin, scratch, &result))
+    {
+        const bool kept = expected != IR_INLINE_SELECTED && ir_inline_test_same_function(&result.functions[0], &unit->functions[0]);
+        ir_inline_test_expect(test, result.call_count == 1 && result.decisions[0] == expected && result.inlined_calls == (expected == IR_INLINE_SELECTED) && (expected == IR_INLINE_SELECTED || kept),
+                              "a call's signature is its decision");
+    }
+    arena_pop_to(output, 0);
+    arena_pop_to(twin, 0);
 }
 
 static void ir_inline_test_failure(IrInlineTest* test, const IrInlineUnit* unit, Arena* output, Arena* scratch, IrInlineOptions options, IrError expected)
@@ -2176,12 +2216,14 @@ static void ir_inline_test_failures(IrInlineTest* test, Arena* input, Arena* out
     functions[1].symbol_count = 129;
     ir_inline_test_failure(test, &unit, output, scratch, defaults, IR_ERROR_METADATA);
     functions[1].symbol_count = 128;
+    // A call's signature against its callee's is its decision, not the unit's error (#2721): an unprototyped call of the
+    // callee's own argument is taken, one through a declaration of another result type kept.
     functions[0].calls[0].variadic = true;
-    ir_inline_test_failure(test, &unit, output, scratch, defaults, IR_ERROR_TYPE);
+    ir_inline_test_signature(test, &unit, output, twin, scratch, IR_INLINE_SELECTED);
     functions[0].calls[0].variadic = false;
     functions[1].result_type = IR_VOID;
     functions[1].a[3] = UINT32_MAX;
-    ir_inline_test_failure(test, &unit, output, scratch, defaults, IR_ERROR_TYPE);
+    ir_inline_test_signature(test, &unit, output, twin, scratch, IR_INLINE_SIGNATURE);
     functions[1].result_type = IR_I64;
     functions[1].a[3] = 2;
     functions[0].extra[0] = 2;

@@ -114,6 +114,9 @@ typedef enum IrInlineDecision
     IR_INLINE_GROWTH,
     // A call that passes or returns an aggregate by value: its ABI records (#131) stay a call's.
     IR_INLINE_ABI,
+    // A direct call whose signature isn't its callee's (#2721): through a declaration of another type, or unprototyped
+    // with arguments other than the callee's parameters (ir_inline_signature). Its caller's other calls are still taken.
+    IR_INLINE_SIGNATURE,
     IR_INLINE_DECISION_COUNT,
 } IrInlineDecision;
 
@@ -336,13 +339,19 @@ static bool ir_inline_site(const IrFunction* function, uint32_t node)
     return op == IR_CALL_INDIRECT || (op == IR_CALL && function->calls[function->b[node]].row == 0 && function->calls[function->b[node]].body == 0);
 }
 
-// A call with ABI records (#131) has the convention's shape, which only its records give (a hidden pointer its callee
-// takes as parameter 0, a void call of a callee whose result is the address of its bytes): its result and parameters'
-// IR types aren't its callee's, though whether it is variadic is, and it stays a call (IR_INLINE_ABI).
+// Whether a direct call is its callee's to expand by signature (#2721): of the callee's variadic status, result type and
+// parameters, count and types; otherwise it stays a call (IR_INLINE_SIGNATURE), its caller's other calls still taken. An
+// unprototyped call is variadic and its callee isn't: it is the callee's where its arguments are exactly the callee's
+// parameters, as with a prototype, and has no ABI records. A call with ABI records (#131) has the convention's shape,
+// which only its records give (a hidden pointer its callee takes as parameter 0, a void call of a callee whose result is
+// the address of its bytes): its result and parameters' IR types aren't its callee's, though whether it is variadic is,
+// and its records decide (IR_INLINE_ABI). A variadic callee's calls stay calls by its flag (IR_INLINE_VARIADIC).
 static bool ir_inline_signature(const IrFunction* caller, uint32_t node, const IrFunction* callee, uint8_t flags)
 {
     const IrCall call = caller->calls[caller->b[node]];
-    bool match = call.variadic == ((flags & BUSTER_IR_INLINE_VARIADIC) != 0) && (call.abi != 0 || (call.result_type == callee->result_type && call.parameter_count == callee->parameter_count));
+    const bool variadic = (flags & BUSTER_IR_INLINE_VARIADIC) != 0;
+    const bool unprototyped = call.variadic && !variadic && call.abi == 0 && call.argument_count == call.parameter_count;
+    bool match = (call.variadic == variadic || unprototyped) && (call.abi != 0 || (call.result_type == callee->result_type && call.parameter_count == callee->parameter_count));
     for (uint32_t p = 0; match && call.abi == 0 && p < call.parameter_count; p += 1)
     {
         match = caller->call_types[call.type_first + p] == callee->parameter_types[p];
@@ -444,23 +453,18 @@ static IrCheck ir_inline_inputs(const IrInlineUnit* unit, Arena* output, Arena* 
             check.error = IR_ERROR_MEMORY;
         }
     }
-    // Every body is verified before a call signature indexes the callee's parameter types.
+    // The sites and their callees. A call's signature against its callee's is its decision (ir_inline_choose, #2721), once
+    // every body is verified, not the unit's error.
     for (uint32_t f = 0; check.error == IR_OK && f < unit->count; f += 1)
     {
-        *failed_function = f;
         const IrFunction* function = &unit->functions[f];
         uint32_t call = result->call_offsets[f];
-        for (uint32_t node = 0; check.error == IR_OK && node < function->instruction_count; node += 1)
+        for (uint32_t node = 0; node < function->instruction_count; node += 1)
         {
             if (ir_inline_site(function, node))
             {
-                const uint32_t callee = function->op[node] == IR_CALL ? ir_inline_symbol(unit, function->a[node]) : BUSTER_IR_NONE;
                 result->call_nodes[call] = node;
-                result->callees[call++] = callee;
-                if (callee != BUSTER_IR_NONE && !ir_inline_signature(function, node, &unit->functions[callee], unit->flags[callee]))
-                {
-                    check = ir_check(IR_ERROR_TYPE, node, callee);
-                }
+                result->callees[call++] = function->op[node] == IR_CALL ? ir_inline_symbol(unit, function->a[node]) : BUSTER_IR_NONE;
             }
         }
     }
@@ -953,6 +957,10 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
         else if ((unit->flags[callee] & BUSTER_IR_INLINE_VARIADIC) != 0)
         {
             decision = IR_INLINE_VARIADIC;
+        }
+        else if (!ir_inline_signature(&unit->functions[function], node, &unit->functions[callee], unit->flags[callee]))
+        {
+            decision = IR_INLINE_SIGNATURE;
         }
         else if (result->recursive[callee])
         {
