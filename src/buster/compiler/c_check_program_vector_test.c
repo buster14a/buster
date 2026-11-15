@@ -187,6 +187,81 @@ static const char check_test_limb_elements_wide[] =
     "B(unsigned _BitInt(1000),unsigned _BitInt(1000),1000,)\n"
     "x=x*31+y;y^=x>>7;}return (int)h;}\n";
 
+// Vectors of more than 1,024 elements (#2216), past the bound their operations had, which clang -O0 compiles: integer
+// reductions, whose whole register-width pieces fold first (int, unsigned char, short and long long elements, the
+// lengths no multiple of a piece's lanes), vector of bool and floating ones (sums and in-order sums of a length no power
+// of two, maximum and minimum of one); conversions, elementwise builtins (rows on pieces, sequences and the C library's
+// calls element by element), logical operators of integer and float vectors, and a shuffle of 1,025 constant indices
+// across both vectors. Each element read is folded, not the padding past them. Seven programs, each within the programs'
+// fixed arenas at the baseline (each element-wise node's room is its elements'), their data written and folded through
+// pointers to their elements, whose nodes take no vector's room; the baseline programs and the vector builtin programs
+// (znver5's rows) run them.
+#define BUSTER_CHECK_TEST_WIDE_LANES \
+    "typedef int V __attribute__((ext_vector_type(1025)));typedef unsigned char C __attribute__((ext_vector_type(1025)));" \
+    "typedef short S __attribute__((ext_vector_type(1040)));typedef long long Q __attribute__((ext_vector_type(1030)));" \
+    "typedef float F __attribute__((ext_vector_type(1025)));typedef float G __attribute__((ext_vector_type(2048)));" \
+    "typedef double D __attribute__((ext_vector_type(1027)));typedef double D5 __attribute__((ext_vector_type(1025)));" \
+    "typedef _Bool M __attribute__((ext_vector_type(1025)));\n" \
+    "#define E(v,k) h=fold(h,&(v),(k)*sizeof((v)[0]));\n" \
+    "#define I4(k) (k)*7%2050,((k)+1)*7%2050,((k)+2)*7%2050,((k)+3)*7%2050\n" \
+    "#define I16(k) I4(k),I4((k)+4),I4((k)+8),I4((k)+12)\n" \
+    "#define I64(k) I16(k),I16((k)+16),I16((k)+32),I16((k)+48)\n" \
+    "#define I256(k) I64(k),I64((k)+64),I64((k)+128),I64((k)+192)\n" \
+    "#define I1024 I256(0),I256(256),I256(512),I256(768)\n" \
+    "static void fill_i(int* a,int* b,unsigned char* c,float* f,float* g,_Bool* m,int n){for(int i=0;i<1025;i++){a[i]=(int)((unsigned)(n+i)*2654435761u)>>(i%5);" \
+    "b[i]=(i*37+n)%101-50;c[i]=(unsigned char)(n*i+3);f[i]=(float)(a[i]%1000)/7.0f;g[i]=(float)b[i]*0.5f;m[i]=((n+i)%3)==0;}}\n" \
+    "static void fill_w(short* s,long long* q,float* w,double* d,int n){for(int i=0;i<1040;i++)s[i]=(short)(n*i-i*i);" \
+    "for(int i=0;i<1030;i++)q[i]=(long long)(n+i)*0x9e3779b97f4a7c15ll;for(int i=0;i<2048;i++)w[i]=(float)((i*13+n)%257)-100.5f;" \
+    "for(int i=0;i<1027;i++)d[i]=(double)(i-n)/3.0;}\n" \
+    "static M pack(const _Bool* m){M v;for(int i=0;i<1025;i++)v[i]=m[i];return v;}\n" \
+    "#define SETUP unsigned h=2166136261u;V a,b;C c;S s;Q q;F f,g;G w;D d;_Bool mb[1025];" \
+    "fill_i((int*)&a,(int*)&b,(unsigned char*)&c,(float*)&f,(float*)&g,mb,n);M m=pack(mb);fill_w((short*)&s,(long long*)&q,(float*)&w,(double*)&d,n);\n"
+
+static const char check_test_wide_reductions[] =
+    BUSTER_CHECK_TEST_WIDE_LANES
+    "int tested(int n){SETUP\n"
+    "int r[]={__builtin_reduce_add(a),__builtin_reduce_mul(b|1),__builtin_reduce_and(a|0x100),__builtin_reduce_or(b),__builtin_reduce_xor(a),"
+    "__builtin_reduce_max(a),__builtin_reduce_min(b),__builtin_reduce_add(c),__builtin_reduce_max(c),__builtin_reduce_min(c),__builtin_reduce_mul(c|1),"
+    "__builtin_reduce_add(s),__builtin_reduce_max(s),__builtin_reduce_min(s),__builtin_reduce_xor(s),__builtin_reduce_or(m),__builtin_reduce_and(m),"
+    "__builtin_reduce_xor(m),__builtin_reduce_add(m)};FOLD(r);\n"
+    "return (int)h;}\n";
+
+static const char check_test_wide_quadwords[] =
+    BUSTER_CHECK_TEST_WIDE_LANES
+    "int tested(int n){SETUP\n"
+    "long long lr[]={__builtin_reduce_add(q),__builtin_reduce_max(q),__builtin_reduce_min(q),__builtin_reduce_mul(q|1),__builtin_reduce_xor(q)};FOLD(lr);"
+    "return (int)h;}\n";
+
+static const char check_test_wide_floating[] =
+    BUSTER_CHECK_TEST_WIDE_LANES
+    "int tested(int n){SETUP\n"
+    "float fr[]={__builtin_reduce_assoc_fadd(f),__builtin_reduce_in_order_fadd(g,1.5f),__builtin_reduce_maximum(w),__builtin_reduce_minimum(w),"
+    "__builtin_reduce_max(w),__builtin_reduce_assoc_fadd(w)};FOLD(fr);\n"
+    "double dr[]={__builtin_reduce_assoc_fadd(d),__builtin_reduce_in_order_fadd(d,0.25)};FOLD(dr);return (int)h;}\n";
+
+static const char check_test_wide_conversions[] =
+    BUSTER_CHECK_TEST_WIDE_LANES
+    "int tested(int n){SETUP\n"
+    "F cf=__builtin_convertvector(a,F);E(cf,1025)C cc=__builtin_convertvector(__builtin_elementwise_abs(f),C);E(cc,1025)"
+    "V cv=__builtin_convertvector(c,V);E(cv,1025)D5 cd=__builtin_convertvector(__builtin_shufflevector(f,f,I1024,1),D5);E(cd,1025)return (int)h;}\n";
+
+static const char check_test_wide_elements[] =
+    BUSTER_CHECK_TEST_WIDE_LANES
+    "int tested(int n){SETUP\n"
+    "V ea=__builtin_elementwise_abs(a);E(ea,1025)V em=__builtin_elementwise_min(a,b);E(em,1025)V es=__builtin_elementwise_add_sat(a,b);E(es,1025)"
+    "V ep=__builtin_elementwise_popcount(a);E(ep,1025)F eq=__builtin_elementwise_sqrt(__builtin_elementwise_abs(f));E(eq,1025)"
+    "F en=__builtin_elementwise_sin(g);E(en,1025)C eb=__builtin_elementwise_sub_sat(c,(C)7);E(eb,1025)return (int)h;}\n";
+
+static const char check_test_wide_logical[] =
+    BUSTER_CHECK_TEST_WIDE_LANES
+    "int tested(int n){SETUP\n"
+    "V la=a&&b;E(la,1025)V lo=a||b;E(lo,1025)V ln=!b;E(ln,1025)V lc=b?a:b;E(lc,1025)V lf=f&&g;E(lf,1025)return (int)h;}\n";
+
+static const char check_test_wide_shuffle[] =
+    BUSTER_CHECK_TEST_WIDE_LANES
+    "int tested(int n){SETUP\n"
+    "V sh=__builtin_shufflevector(a,b,I1024,2049);E(sh,1025)return (int)h;}\n";
+
 // Packed one-bit builtins use the same scalar/byte/vector algebra at tiny, padded and multi-register widths. Check
 // every defined lane, independent guards around a one-byte result, and evaluation of a funnel's unused operands.
 // Floating max, min and abs (#1834): llvm.maxnum, minnum and fabs, as clang's code computes them, of NaN payloads (quiet
@@ -615,12 +690,6 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
             "vector-bf16-arithmetic-past-64-bytes",
             "typedef __bf16 w64 __attribute__((vector_size(128)));void tested(w64*p,w64*q){*p=*p+*q;}",
             "vector arithmetic of bf16 elements without AVX512-BF16",
-            0,
-        },
-        {
-            "vector-logical-resource-bound",
-            "typedef int V __attribute__((ext_vector_type(1025)));void tested(V*p,V*q){*p=*p&&*q;}",
-            "logical operations of vectors of more than 1024 elements",
             0,
         },
         {
@@ -1555,6 +1624,13 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
         { "baseline-floating-extremes", check_test_vector_floating_extremes },
         { "baseline-limb-elements", check_test_limb_elements_narrow },
         { "baseline-limb-elements-wide", check_test_limb_elements_wide },
+        { "baseline-wide-reductions", check_test_wide_reductions },
+        { "baseline-wide-quadwords", check_test_wide_quadwords },
+        { "baseline-wide-floating", check_test_wide_floating },
+        { "baseline-wide-conversions", check_test_wide_conversions },
+        { "baseline-wide-elements", check_test_wide_elements },
+        { "baseline-wide-logical", check_test_wide_logical },
+        { "baseline-wide-shuffle", check_test_wide_shuffle },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.
         { "baseline-avx2",

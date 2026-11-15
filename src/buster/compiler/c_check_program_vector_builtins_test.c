@@ -66,6 +66,13 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
         { "vector-floating-extremes", check_test_vector_floating_extremes },
         { "vector-limb-elements", check_test_limb_elements_narrow },
         { "vector-limb-elements-wide", check_test_limb_elements_wide },
+        { "vector-wide-reductions", check_test_wide_reductions },
+        { "vector-wide-quadwords", check_test_wide_quadwords },
+        { "vector-wide-floating", check_test_wide_floating },
+        { "vector-wide-conversions", check_test_wide_conversions },
+        { "vector-wide-elements", check_test_wide_elements },
+        { "vector-wide-logical", check_test_wide_logical },
+        { "vector-wide-shuffle", check_test_wide_shuffle },
         {
             // Masked memory builtins of vectors no register size holds (#2216): 2-lane vectors of bytes and words and a
             // 3-lane one of dwords, element by element at AVX-512 targets too (check_lower_masked_elements), under every
@@ -978,14 +985,6 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "x86-64", "__float128 tested(__float128 x,int n){return __builtin_elementwise_ldexp(x,n);}", "elementwise builtins of half-precision, bf16 or __float128 values", 0 },
         { "znver5", "float tested(v8hf* p){return (float)__builtin_reduce_maximum(*p);}", "vector reductions of half-precision or bf16 elements", 0 },
         { "znver5", "float tested(v8hf* p){return (float)__builtin_reduce_in_order_fadd(*p,(_Float16)0);}", "vector reductions of half-precision or bf16 elements", 0 },
-        { "znver5", "typedef unsigned V __attribute__((ext_vector_type(1025)));void tested(V*p){*p=__builtin_elementwise_popcount(*p);}",
-          "elementwise vector builtins of more than 1024 elements", 0 },
-        { "znver5", "typedef float V __attribute__((ext_vector_type(1025)));void tested(V*p){*p=__builtin_elementwise_sin(*p);}",
-          "elementwise vector builtins of more than 1024 elements", 0 },
-        { "znver5", "typedef float V __attribute__((ext_vector_type(1025)));float tested(V*p){return __builtin_reduce_assoc_fadd(*p);}",
-          "vector reductions of more than 1024 elements", 0 },
-        { "znver5", "typedef float V __attribute__((ext_vector_type(1025)));float tested(V*p){return __builtin_reduce_in_order_fadd(*p,0.0f);}",
-          "vector reductions of more than 1024 elements", 0 },
         // A floating maximum or minimum of a vector its elements don't fill, which LLVM reduces in an order of its width's.
         { "znver5", "typedef float f7 __attribute__((ext_vector_type(7)));int tested(int n){f7 a={(float)n};float c=__builtin_reduce_minimum(a);return (int)c;}",
           "floating maximum and minimum reductions of vectors their elements don't fill", 2 },

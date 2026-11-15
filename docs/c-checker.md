@@ -2983,7 +2983,8 @@ What the lowering covers past scalars (#145's programs):
   values are captured before later operands run, including a wide condition
   whose original object an arm overwrites; the omitted middle operand is
   evaluated once. Scalar arms splat at their element type. Non-boolean logical
-  operations and selections are bounded to 1,024 elements. Scalar-condition
+  operations and selections take any number of elements, on register-width
+  pieces (#2216). Scalar-condition
   `?:` keeps the usual short-circuit behavior. Clang rejects `&&` and `||` of
   boolean vectors, and whole-vector `++` and `--` of either vector kind; the
   checker rejects them too. Compound assignments and increments of an element
@@ -3476,8 +3477,9 @@ What the lowering covers past scalars (#145's programs):
     bits (5 past 32 bits) and xors the integer products of every pair of
     classes into its sum's class (`check_lower_sequence_clmul`), so that each
     class's carries stay in the other classes' positions. These expansions, ordered floating sums
-    and floating reduction trees are bounded to 1,024 elements and preserve
-    the ordinary rows' element-type and target-feature refusals.
+    and floating reduction trees take any number of elements (#2216: their
+    entries grow with the elements, or with the pieces for the trees) and
+    preserve the ordinary rows' element-type and target-feature refusals.
     A `_BitInt` past 128 bits, whose value is its limbs' frame object's
     address, takes the integer elementwise builtins limb by limb
     (`check_lower_limb_elements_emit`, #2410): its arguments' addresses go

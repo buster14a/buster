@@ -12993,7 +12993,6 @@ static void check_lower_row_constants(CheckLowerWriter* writer, const Tier0Opera
 }
 
 // Shared address/value handoff for ordinary and transport vectors, implemented in c_check_program_transport.c.
-#define BUSTER_CHECK_LOWER_TRANSPORT_LANES 1024u
 static void check_lower_transport_at(CheckLowerWriter* writer, uint32_t local, uint64_t offset);
 static void check_lower_transport_source(CheckLowerWriter* writer, TypeId type, uint32_t local);
 static uint32_t check_lower_transport_result(CheckLowerWriter* writer, TypeId type);
@@ -13024,10 +13023,6 @@ static void check_lower_vector_calls(CheckLowerWriter* writer, uint32_t node, CB
     else if (!vector && class != BUSTER_TYPED_CLASS_F32 && class != BUSTER_TYPED_CLASS_F64 && class != BUSTER_TYPED_CLASS_F80)
     {
         check_lower_unsupported(writer, "elementwise builtins of half-precision, bf16 or __float128 values");
-    }
-    else if (vector && shape.lanes > BUSTER_CHECK_LOWER_TRANSPORT_LANES)
-    {
-        check_lower_unsupported(writer, "elementwise vector builtins of more than 1024 elements");
     }
     else if (vector)
     {
@@ -13088,10 +13083,6 @@ static void check_lower_reduce_in_order(CheckLowerWriter* writer, uint32_t node)
     if (!shape.floating || shape.bfloat || shape.element == 2)
     {
         check_lower_unsupported(writer, "vector reductions of half-precision or bf16 elements");
-    }
-    else if (shape.lanes > BUSTER_CHECK_LOWER_TRANSPORT_LANES)
-    {
-        check_lower_unsupported(writer, "vector reductions of more than 1024 elements");
     }
     else
     {
@@ -13207,10 +13198,6 @@ static void check_lower_vector_lanes(CheckLowerWriter* writer, uint32_t node, CB
     else if (!shape.integer || shape.element == 0)
     {
         check_lower_unsupported(writer, "elementwise vector builtins of elements of this size");
-    }
-    else if (shape.lanes > BUSTER_CHECK_LOWER_TRANSPORT_LANES)
-    {
-        check_lower_unsupported(writer, "elementwise vector builtins of more than 1024 elements");
     }
     else if (builtin != CBUILTIN_ELEMENTWISE_CLMUL && (writer->target.features & BUSTER_X86_FEATURE(BMI2)) == 0)
     {
