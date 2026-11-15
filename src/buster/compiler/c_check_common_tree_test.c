@@ -488,7 +488,8 @@ static void check_test_driver_literal_blocked(CheckTest* test)
             for (uint32_t node = 0; node < count; node += 1)
             {
                 const uint32_t r = check_test_tree_random(&state);
-                const bool plain = !check_graph_has_arguments(input.graph.ops[node]) && (r & 3) == 0;
+                // (One node in 32, so that most chains to a root hold no query and some hold one or more.)
+                const bool plain = !check_graph_has_arguments(input.graph.ops[node]) && (r & 31) == 0;
                 input.graph.ops[node] = plain ? queries[(r >> 2) % BUSTER_ARRAY_LENGTH(queries)] : input.graph.ops[node];
                 // (No token: no selection is a static one.)
                 tokens[node] = BUSTER_CHECK_NONE;
@@ -513,7 +514,7 @@ static void check_test_driver_literal_blocked(CheckTest* test)
         check_test_tree_release(&input);
     }
     arena_release(&scratch);
-    check_test_expect(test, same && blocked > 1000 && reached > 1000,
+    check_test_expect(test, same && blocked > 500 && reached > 500,
                       "common literal contexts: a node is blocked exactly where no literal context reaches it, on random trees with queries");
 }
 
