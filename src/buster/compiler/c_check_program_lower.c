@@ -796,6 +796,12 @@ struct CheckLowerWriter
     uint32_t source;
     uint32_t filled;
     uint32_t settled;
+    // The integer constant an expression task wrote last as one CONST (check_lower_expand's): the entries' count right
+    // after it and its node plus one. Its own conversion (check_lower_convert_operand's, whose task carries the same
+    // node), popped while the count is still this one, folds into that CONST (check_lower_fold_conversion, #2678). A label
+    // placed since (check_lower_place) can join another value there, so it takes the count away; a body starts without one.
+    uint32_t constant_end;
+    uint32_t constant_node;
     uint32_t stack_head;
     uint32_t stack_count;
     bool reachable;
@@ -2403,6 +2409,8 @@ static void check_lower_track(CheckLowerWriter* writer, uint8_t kind, uint8_t cl
 static void check_lower_place(CheckLowerWriter* writer, uint32_t label)
 {
     writer->labels[label] = writer->count;
+    // A jump to the label brings its own value to the next entry: no conversion there folds into the CONST before it.
+    writer->constant_end = BUSTER_CHECK_NONE;
     if (writer->track)
     {
         if (!writer->reachable)
@@ -2704,6 +2712,16 @@ static void check_lower_convert(CheckLowerWriter* writer, TypeId from, TypeId to
     }
 }
 
+// An operand's own conversion, pushed just below its EXPRESSION task: check_lower_convert's, its `value` the operand
+// `node` plus one, which an integer constant's conversion folds by (CheckLowerWriter.constant_node).
+static inline __attribute__((always_inline)) void check_lower_convert_operand(CheckLowerWriter* writer, uint32_t node, TypeId from, TypeId to)
+{
+    if (to != 0 && from != to && !check_lower_conversion_empty(writer, from, to))
+    {
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CONVERSION, .node = from, .type = to, .value = (uint64_t)node + 1 });
+    }
+}
+
 // An operand pushed with its conversion. A pending overload set's leaf (its value's overload head) is refused; a unit
 // without overload sets has none, and its operands don't read their payload rows for it (#1048: on the 9700X that read
 // cost sqlite3.c's statements 0.38 ms, docs/c-lowering.md's "The operands' overload tests").
@@ -2723,7 +2741,7 @@ static void check_lower_expression(CheckLowerWriter* writer, uint32_t node, bool
                              ((store && check_lower_aggregate(writer, check_stream_type(program->stream, node))) || bit_field || op == CHECK_OP_COMMA);
         if (!address && !discard)
         {
-            check_lower_convert(writer, check_stream_type(program->stream, node), target);
+            check_lower_convert_operand(writer, node, check_stream_type(program->stream, node), target);
         }
         check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_EXPRESSION, .node = node, .address = address, .discard = discard });
     }
@@ -2765,7 +2783,7 @@ static void check_lower_operand(CheckLowerWriter* writer, uint32_t node, uint32_
                 const TypeId from = check_stream_type(stream, child);
                 if (from != target && !check_lower_conversion_empty(writer, from, target))
                 {
-                    check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CONVERSION, .node = from, .type = target });
+                    check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CONVERSION, .node = from, .type = target, .value = (uint64_t)child + 1 });
                 }
             }
             if (writer->depth < writer->capacity)
@@ -4241,6 +4259,70 @@ static uint8_t check_lower_power_divisor(uint8_t source, uint64_t bits, uint8_t 
     return answer;
 }
 
+// Whether a conversion folds into the integer constant it converts (#2678): the CONST of class `source` (I8 to U64) and
+// bits `*bits`, as check_lower_constant writes an integer constant's (its type's facts `from_facts`), converted to a type
+// of class `target` (check_lower_value_class's) and facts `to_facts`, becomes one CONST of the conversion's class, `*class`
+// and `*bits` that CONST's, in place of the CONST and the conversion's entries. Tier 0 then fuses it into its consumer as
+// an immediate, as clang -O0 does, where it would move the constant to a register and convert it every time the code runs.
+// - An integer class (I8 to U64; a pointer's U64) takes the value modulo its width, as CONVERT does: masked to its width
+//   and extended from it by its own signedness, as a CONST of its class holds its value.
+// - _Bool's (U8) takes whether the value is nonzero, as its conversion's NE and CONVERT do.
+// - F32 and F64 take the value only where it is exact, as most constants are: a conversion that rounds keeps its CONVERT,
+//   whose rounding is the floating-point environment's at run time, and so does its inexact flag.
+// No other conversion folds: to void, to or from a _BitInt (whose conversions extend from its width), a complex, an
+// aggregate or an address, nor to a memory class (F80, the 128-bit integers, the half-precision ones, a vector's).
+static bool check_lower_constant_conversion(uint8_t source, uint8_t from_facts, uint8_t target, uint8_t to_facts, uint8_t* class, uint64_t* bits)
+{
+    const uint8_t refused = BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_COMPLEX | BUSTER_CHECK_LOWER_TYPE_ADDRESS | BUSTER_CHECK_LOWER_TYPE_BIT_INT;
+    const bool integer = target >= BUSTER_TYPED_CLASS_I8 && target <= BUSTER_TYPED_CLASS_U64;
+    const bool floating = target == BUSTER_TYPED_CLASS_F32 || target == BUSTER_TYPED_CLASS_F64;
+    bool folds = source >= BUSTER_TYPED_CLASS_I8 && source <= BUSTER_TYPED_CLASS_U64 && ((from_facts | to_facts) & refused) == 0 && (integer || floating);
+    // The value the CONST holds: its bits are extended through 64 by its class's signedness (a signed class's is odd).
+    const uint64_t value = *bits;
+    const bool negative = (source & 1) != 0 && (int64_t)value < 0;
+    if (folds && (to_facts & BUSTER_CHECK_LOWER_TYPE_BOOL) != 0)
+    {
+        *class = BUSTER_TYPED_CLASS_U8;
+        *bits = value != 0;
+    }
+    else if (folds && integer)
+    {
+        const uint32_t width = 8u << ((target - 1) / 2);
+        uint64_t converted = value;
+        if (width < 64)
+        {
+            const uint64_t mask = (UINT64_C(1) << width) - 1;
+            converted &= mask;
+            converted |= (target & 1) != 0 && (converted >> (width - 1)) != 0 ? ~mask : 0;
+        }
+        *class = target;
+        *bits = converted;
+    }
+    else if (folds)
+    {
+        // A long double holds every 64-bit integer exactly, so the compare tells whether the narrower format rounds.
+        const long double exact = negative ? (long double)(int64_t)value : (long double)value;
+        uint64_t converted = 0;
+        if (target == BUSTER_TYPED_CLASS_F64)
+        {
+            const double number = (double)exact;
+            folds = (long double)number == exact;
+            memcpy(&converted, &number, sizeof(number));
+        }
+        else
+        {
+            const float number = (float)exact;
+            uint32_t small = 0;
+            folds = (long double)number == exact;
+            memcpy(&small, &number, sizeof(small));
+            converted = small;
+        }
+        *class = folds ? target : *class;
+        *bits = folds ? converted : value;
+    }
+    return folds;
+}
+
 // The entries of a signed division or remainder (`kind` DIV or MOD) by 2^k (`shift` k, 1 to the class's bits less 2) of
 // the value on top, in `class` (I32 or I64), in the order they run, into `kinds` and `values` (all of `class`): 8 for a
 // division and 10 for a remainder, their count. The bias, the dividend's sign through every bit masked to its low k bits,
@@ -4613,6 +4695,38 @@ static void check_lower_vector_operand(CheckLowerWriter* writer, uint32_t node, 
     {
         check_lower_operand(writer, node, operand, false, type);
     }
+}
+
+// An operand's own conversion from `from` to `to` (a CONVERSION task check_lower_convert_operand pushed) right after the
+// integer constant's CONST its EXPRESSION task wrote (CheckLowerWriter.constant_end and constant_node), folded into that
+// CONST where it folds (check_lower_constant_conversion, #2678): whether it did, the CONST then the conversion's class and
+// value, and none of the conversion's entries written. A function that tracks its stack (CheckLowerWriter.track) takes
+// the CONVERT's change of the class on top, as Tier 0's operand classes, each the entry before's, then have it. Out of
+// line, as the tasks' loop's copies test for it: the templates' (check_lower_template_conversion) and the node machine's
+// conversions (node_machine_expand) fold the same constants, the CONST their node's own entry.
+static __attribute__((noinline)) bool check_lower_fold_conversion(CheckLowerWriter* writer, TypeId from, TypeId to)
+{
+    bool folded = false;
+    if (writer->count != 0 && writer->output->status == CHECK_PROGRAM_OK)
+    {
+        const uint32_t last = writer->count - 1;
+        const uint8_t source = check_lower_value_class(writer, from);
+        const uint8_t target = check_lower_value_class(writer, to);
+        uint8_t class = 0;
+        uint64_t bits = writer->values[last];
+        folded = writer->kinds[last] == BUSTER_TYPED_CONST && writer->classes[last] == source &&
+                 check_lower_constant_conversion(source, check_lower_facts(writer, from), target, check_lower_facts(writer, to), &class, &bits);
+        if (folded)
+        {
+            writer->classes[last] = class;
+            writer->values[last] = bits;
+            if (writer->track)
+            {
+                check_lower_track(writer, BUSTER_TYPED_CONVERT, class, 0);
+            }
+        }
+    }
+    return folded;
 }
 
 // A conversion of the value on top of the stack from `from` to `to`, neither of them complex (but to void): a complex
@@ -15198,7 +15312,14 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         }
         else if (!discard)
         {
+            const uint32_t before = writer->count;
             check_lower_constant(writer, value);
+            // An integer constant's one CONST, into which its own conversion folds (check_lower_fold_conversion).
+            if (value->constant_kind == CHECK_CONSTANT_INTEGER && writer->count == before + 1)
+            {
+                writer->constant_end = writer->count;
+                writer->constant_node = node + 1;
+            }
         }
     }
     else if (op == CHECK_OP_VALUE)
@@ -16064,7 +16185,12 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         else if (kind == CHECK_LOWER_CONVERSION)
         {
-            check_lower_conversion_body(writer, node, type, bit_ints);
+            // An integer constant's own conversion, right after its CONST, folds into it where it can (#2678).
+            const bool own = writer->constant_end == writer->count && writer->constant_node == (uint32_t)(value >> 32);
+            if (!own || !check_lower_fold_conversion(writer, node, type))
+            {
+                check_lower_conversion_body(writer, node, type, bit_ints);
+            }
         }
         else if (kind == CHECK_LOWER_LABEL)
         {
@@ -19310,6 +19436,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .x87_constant_capacity = shared->x87_constant_capacity,
         .atomic_room = shared->atomic_capacity + 1,
         .label_symbol_capacity = shared->label_symbol_capacity,
+        .constant_end = BUSTER_CHECK_NONE,
         .class_limit = BUSTER_TYPED_CLASSES,
         .target = program->target,
         .bit_ints = shared->bit_ints,
@@ -19528,6 +19655,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->label_count = body.count + 1;
         writer->stack_count = 0;
         writer->stack_head = 0;
+        writer->constant_end = BUSTER_CHECK_NONE;
         writer->reachable = true;
         writer->objects = false;
         writer->aggregates = false;

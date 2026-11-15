@@ -672,6 +672,12 @@ as the tables' own loops did. There are no generated cases.
 | `transparent` | 8 | the end of `check_test_transparent_calls` (`c_check_transparent_test.c`) |
 | `transparent-types` | 17 | the end of `check_test_transparent_types` (`c_check_transparent_type_test.c`) |
 
+`tests/checker/constant-conversions` (#2678) is in the same format, three
+programs that `check_test_constant_conversions`
+(`c_check_constant_conversion_test.c`) runs natively against clang by
+`check_test_program_source`, whose catalog names select the checks of their
+entries and code ([the lowering guide](lowering.md#node-templates-1048)).
+
 A table's comments are `#` lines of its catalog, above the cases they described.
 The other test files' tables stay C for now: they build their sources when they
 run, pair each case with data of their own, or pick cases by index (#2053 lists
