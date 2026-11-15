@@ -5004,11 +5004,11 @@ static inline __attribute__((always_inline)) void check_program_census_leaf(cons
 // name. A unit with overloads or CFStrings, whose references come from what no VALUE node names, has none: the walk's
 // census stands for it. With `arms` (check_program_census_left_out's ranges), it leaves out their tokens' nodes, and with
 // `prune` the operands the walk leaves out: of sizeof and _Alignof, a constant condition's, a computed call's callee. Into
-// `census`, its runs in `output`; `seen` takes epochs from `epochs`, past the bodies'. AVX-512 tests 16 nodes' slots at a
-// time, the rest and the `scalar` path one at a time. False if there's no room.
+// `census`, its runs in `output`. With AVX-512 the scans take 16 nodes at a time and, given `touched`
+// (check_program_census_touched), only its chunks; the rest and the `scalar` path one at a time. False if there's no room.
 static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus* census, const Parser* parser, const uint32_t* openings, uint32_t body_count,
-                                      const uint64_t* arms, uint32_t arm_count, bool prune, const uint64_t* touched, uint32_t epochs, uint32_t* seen,
-                                      uint64_t* reference_items, uint64_t* reference_sort, bool scalar, Arena* output, Arena* scratch)
+                                      const uint64_t* arms, uint32_t arm_count, bool prune, const uint64_t* touched, uint64_t* reference_items,
+                                      uint64_t* reference_sort, bool scalar, Arena* output, Arena* scratch)
 {
     (void)scalar;
 
@@ -5207,15 +5207,12 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
     uint32_t total = 0;
     for (uint32_t k = 0; valid && k < body_count; k += 1)
     {
-        const uint32_t epoch = epochs + k;
+        // The body's objects, repeated as often as its leaves name them, and its cleanups' functions; sorted, then each
+        // kept once. No object-sized column of marks is read, whose entries are cache misses on a large unit.
         uint32_t found = 0;
         for (uint32_t p = census->first[k]; p < starts[k]; p += 1)
         {
-            const uint32_t object = objects[p];
-            const bool fresh = seen[object] != epoch;
-            seen[object] = epoch;
-            reference_items[found] = (uint64_t)object << 32;
-            found += fresh ? 1 : 0;
+            reference_items[found++] = (uint64_t)objects[p] << 32;
         }
         uint32_t cleanup_first = 0;
         uint32_t cleanup_count = 0;
@@ -5224,14 +5221,12 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
         {
             const uint32_t function = input->cleanups[cleanup_first + r].function;
             const uint32_t object = function < input->token_count ? input->objects[function] : 0;
-            const bool fresh = object != 0 && object < program->object_count && seen[object] != epoch;
-            seen[object < program->object_count ? object : 0] = fresh ? epoch : seen[object < program->object_count ? object : 0];
             reference_items[found] = (uint64_t)object << 32;
-            found += fresh ? 1 : 0;
+            found += object != 0 && object < program->object_count ? 1 : 0;
         }
         // A body's list is short (six on sqlite3.c's average), where an insertion sort takes far less than a radix sort's
         // histograms; a long one takes the radix sort.
-        const uint64_t* sorted = reference_items;
+        uint64_t* sorted = reference_items;
         if (found <= 32)
         {
             for (uint32_t r = 1; r < found; r += 1)
@@ -5255,7 +5250,14 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
             }
             sorted = c_bindings_sort(reference_items, reference_sort, found, !BUSTER_SCALAR_PATH(scalar), varying);
         }
-        valid = check_program_census_store(census, k, sorted, found, &total, output);
+        uint32_t kept = 0;
+        for (uint32_t r = 0; r < found; r += 1)
+        {
+            const bool fresh = kept == 0 || sorted[kept - 1] != sorted[r];
+            sorted[kept] = sorted[r];
+            kept += fresh ? 1 : 0;
+        }
+        valid = check_program_census_store(census, k, sorted, kept, &total, output);
     }
     arena_pop_to(scratch, temporary);
     return valid;
@@ -5862,7 +5864,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         uint64_t* arms = NULL;
         const uint32_t arm_count = valid && scanned ? check_program_constant_arms(&writer, openings, body_count, touched, &arms, options.scalar, scratch) : 0;
         valid = valid && (!scanned || check_program_census_scan(program, &program->census_pass, parser, openings, body_count, arms, arm_count, true, touched,
-                                                                4 * body_count + 4, seen, reference_items, reference_sort, options.scalar, output, scratch));
+                                                                reference_items, reference_sort, options.scalar, output, scratch));
         program->census_pass.ticks = scanned ? __rdtsc() - pass_start : 0;
         program->census_pass_arms = arm_count;
         arena_pop_to(scratch, mark);
@@ -5962,8 +5964,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         const uint64_t scan_start = __rdtsc();
         const bool scanned = stream->overload_count == 0 && stream->overload_address_count == 0 && program->cfstring_count == 0;
         valid = valid && (!scanned || check_program_census_scan(program, &program->census_scan, parser, openings, program->body_count, NULL, 0, false, NULL,
-                                                                2 * program->body_count + 2, seen, reference_items, reference_sort, options.scalar, output,
-                                                                scratch));
+                                                                reference_items, reference_sort, options.scalar, output, scratch));
         program->census_scan.ticks = scanned ? __rdtsc() - scan_start : 0;
         // The scan without the writer's dropped arms and conditions, sorted, and the operands the walk leaves out: the
         // candidates of a pass before the windows that finds every constant if and switch the writer does. Its ticks don't
@@ -5984,8 +5985,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         }
         const uint64_t arms_start = __rdtsc();
         valid = valid && (!scanned || check_program_census_scan(program, &program->census_arms, parser, openings, program->body_count, arms, arm_count, true, NULL,
-                                                                3 * program->body_count + 3, seen, reference_items, reference_sort, options.scalar, output,
-                                                                scratch));
+                                                                reference_items, reference_sort, options.scalar, output, scratch));
         program->census_arms.ticks = scanned ? __rdtsc() - arms_start : 0;
         CheckProgramCensus* censuses[] = { &program->census_walk, &program->census_scan, &program->census_arms, &program->census_pass };
         for (uint32_t c = 0; valid && c < BUSTER_ARRAY_LENGTH(censuses); c += 1)
