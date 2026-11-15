@@ -79,8 +79,10 @@ requirements. [Command index](README.md).
   "Patchable function entries"). Either
   output's functions compile on lanes (#151, `check_program_emit_lanes`, the
   [lanes guide](../../docs/function-lanes.md)): by default as many as the bodies'
-  tokens pay for, up to one per core of the CPUs the process may run on, and
-  with `--lanes N` N of them, at most one per CPU; the output is one lane's,
+  tokens pay for, up to one per core of the CPUs the process may run on (under
+  a finite `RLIMIT_AS`, at most one and one more per 512 MiB the limit leaves
+  past what the process maps as it starts, #1118, `check_driver_address_lanes`),
+  and with `--lanes N` N of them, at most one per CPU; the output is one lane's,
   byte for byte. Those lanes are the command's session's (#905,
   `lane_session_run`, `check_driver_run`): started once, after the options and
   before any source is read, as many as the command may take (one per core of
