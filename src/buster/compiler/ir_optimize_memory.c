@@ -566,7 +566,7 @@ static bool ir_memory_step(const IrMemoryWork* m, IrMemoryAddress* state)
 
 // The accesses' addresses: the steps from each one's address operand (its forwarded value) to its root. A reachable
 // value's operands dominate it and an identity's operand dominates it, so a chain of steps ends. Shared by both versions:
-// a chain is a dependent walk of a few steps, and the 9700X's gathers of a round of eight chains' next steps took 2.7
+// a chain is a dependent walk of a few steps, and on the 9700X the gathers of a round of eight chains' next steps took 3.5
 // times the scalar walk's time (the guide's "SIMD: what pays").
 static void ir_memory_addresses(IrMemoryWork* m)
 {

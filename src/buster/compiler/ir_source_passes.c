@@ -815,7 +815,7 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
     }
     else
     {
-        fprintf(stderr, "usage: compiler benchmark-ir-source --passes [--only sroa|gvn|sccp|dce|cfg|merge|optimizer|tier1|licm|inline] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler benchmark-ir-source --passes [--only sroa|gvn|sccp|dce|cfg|merge|optimizer|tier1|licm|inline|memory|tier1-memory] [preprocessor options] file...\n");
     }
     arena_release(&scratch);
     arena_release(&output);
