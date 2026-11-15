@@ -4852,11 +4852,27 @@ static void check_program_census_touched(const CheckProgram* program, const uint
     touched[chunks / 64] |= UINT64_C(1) << (chunks % 64);
 }
 
-// Whether the 16-node block from node `block` is in a chunk `touched` marks (check_program_census_touched); every block
-// without it.
-static inline bool check_program_census_block(const uint64_t* touched, uint64_t block)
+// The first 16-node block from node `block` on, before `end`, that is in a chunk `touched` marks
+// (check_program_census_touched), else `end`; `block` itself without it, or from `end` on. The search reads the marks'
+// words, a word for 4,096 nodes, so a run of chunks outside the bodies costs a word, not its blocks' iterations.
+static inline uint64_t check_program_census_next(const uint64_t* touched, uint64_t block, uint64_t end)
 {
-    return touched == NULL || ((touched[block / 4096] >> ((block / 64) % 64)) & 1) != 0;
+    uint64_t next = block;
+    if (touched != NULL && block < end)
+    {
+        const uint64_t last = (end - 1) / 4096;
+        uint64_t word = block / 4096;
+        uint64_t bits = touched[word] & (~UINT64_C(0) << ((block / 64) % 64));
+        while (bits == 0 && word < last)
+        {
+            word += 1;
+            bits = touched[word];
+        }
+        const uint64_t chunk = bits != 0 ? (word * 64 + (uint64_t)__builtin_ctzll(bits)) * 64 : end;
+        next = chunk > block ? chunk : block;
+        next = next < end ? next : end;
+    }
+    return next;
 }
 
 // Whether one of `arms`, `arm_count` token ranges as check_program_census_left_out takes them, meets tokens `low` to
@@ -5058,9 +5074,10 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
         // A gather's index is signed: past 2^31 nodes, the scalar loop takes them all.
         const uint32_t scanned = BUSTER_SCALAR_PATH(scalar) || node_count >= (UINT32_C(1) << 31) ? 0 : node_count & ~UINT32_C(15);
         // The last block, `scanned`, scans nothing and takes what is pending.
-        for (uint64_t block = 0; !BUSTER_SCALAR_PATH(scalar) && node_count < (UINT32_C(1) << 31) && block <= scanned; block += 16)
+        for (uint64_t block = check_program_census_next(touched, 0, scanned); !BUSTER_SCALAR_PATH(scalar) && node_count < (UINT32_C(1) << 31) && block <= scanned;
+             block = check_program_census_next(touched, block + 16, scanned))
         {
-            const bool scanning = block < scanned && check_program_census_block(touched, block);
+            const bool scanning = block < scanned;
             const __m512i ops = scanning ? _mm512_loadu_si512(graph->ops + block) : zero;
             const __mmask16 marked =
                 scanning ? _mm512_test_epi32_mask(_mm512_loadu_si512(graph->members + block), _mm512_set1_epi32((int)BUSTER_CHECK_LIBRARY_CALL)) : (__mmask16)0;
@@ -5122,9 +5139,11 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
         const uint32_t count = input->token_count;
         const bool gathered = !BUSTER_SCALAR_PATH(scalar) && graph->dense_leaves == NULL && graph->leaf_count < (UINT32_C(1) << 26) && count >= 4;
         const __m512i zero = _mm512_setzero_si512();
-        for (; gathered && node_count - node >= 16; node += 16)
+        const uint64_t limit = node_count & ~UINT32_C(15);
+        for (node = gathered ? (uint32_t)check_program_census_next(touched, 0, limit) : node; gathered && node < limit;
+             node = (uint32_t)check_program_census_next(touched, (uint64_t)node + 16, limit))
         {
-            const __m512i slots = check_program_census_block(touched, node) ? _mm512_loadu_si512(graph->leaf_slots + node) : _mm512_set1_epi32((int)BUSTER_CHECK_NONE);
+            const __m512i slots = _mm512_loadu_si512(graph->leaf_slots + node);
             const __mmask16 leaves = _mm512_cmpneq_epi32_mask(slots, _mm512_set1_epi32((int)BUSTER_CHECK_NONE));
             // Each record's flags and object, adjacent, as one qword: 8 lanes a gather, then the halves apart.
             const __m512i offsets = _mm512_add_epi32(_mm512_mullo_epi32(slots, _mm512_set1_epi32((int)sizeof(CheckGraphLeaf))),
@@ -5327,9 +5346,10 @@ static uint32_t check_program_constant_arms(CheckControlWriter* writer, const ui
     // A gather's index is signed: past 2^31 nodes, the scalar loop takes them all.
     const uint32_t scanned = BUSTER_SCALAR_PATH(scalar) || node_count >= (UINT32_C(1) << 31) ? 0 : node_count & ~UINT32_C(15);
     // The last block, `scanned`, scans nothing and takes what is pending.
-    for (uint64_t block = 0; !BUSTER_SCALAR_PATH(scalar) && node_count < (UINT32_C(1) << 31) && block <= scanned; block += 16)
+    for (uint64_t block = check_program_census_next(touched, 0, scanned); !BUSTER_SCALAR_PATH(scalar) && node_count < (UINT32_C(1) << 31) && block <= scanned;
+         block = check_program_census_next(touched, block + 16, scanned))
     {
-        const __mmask16 conditions = block < scanned && check_program_census_block(touched, block) ?
+        const __mmask16 conditions = block < scanned ?
                                          _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(graph->ops + block), _mm512_set1_epi32(CHECK_OP_CONDITION)) :
                                          (__mmask16)0;
         _mm512_mask_compressstoreu_epi32(pending + pending_count, conditions, _mm512_add_epi32(_mm512_set1_epi32((int)block), lane));
@@ -5848,16 +5868,22 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         const uint64_t mark = scratch->length;
         const bool scanned = stream->overload_count == 0 && stream->overload_address_count == 0 && program->cfstring_count == 0;
         // The graph's blocks that hold a body's node (check_program_census_touched), which both scans keep to with AVX-512.
+        // Only where the bodies' tokens are at most three quarters of the unit's: the marking reads every node's token,
+        // which a unit of bodies (sqlite3.c's are 98.6% of its nodes) pays without a node to skip.
         const bool blocked = scanned && !BUSTER_SCALAR_PATH(options.scalar) && body_count != 0;
         uint32_t* bounds = blocked ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 2 * (uint64_t)body_count) : NULL;
-        uint64_t* touched = bounds != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count / 4096 + 1) : NULL;
-        valid = valid && (!blocked || touched != NULL);
+        valid = valid && (!blocked || bounds != NULL);
+        uint64_t covered = 0;
         for (uint32_t k = 0; valid && blocked && k < body_count; k += 1)
         {
             bounds[k] = check_sparse_get(input->body_declarations, openings[k]);
             bounds[body_count + k] = parser->tree.parents[openings[k]];
+            covered += bounds[body_count + k] >= bounds[k] ? (uint64_t)bounds[body_count + k] - bounds[k] + 1 : 0;
         }
-        if (valid && blocked)
+        const bool sparse = valid && blocked && covered * 4 <= (uint64_t)input->token_count * 3;
+        uint64_t* touched = sparse ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count / 4096 + 1) : NULL;
+        valid = valid && (!sparse || touched != NULL);
+        if (valid && sparse)
         {
             check_program_census_touched(program, bounds, bounds + body_count, body_count, touched);
         }
