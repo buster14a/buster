@@ -1369,7 +1369,53 @@ static __attribute__((noinline)) void check_lower_transport_convert(CheckLowerWr
         const uint32_t source = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         const uint32_t sources[2] = { source, source };
         const uint32_t object = check_lower_transport_result(writer, to);
-        check_lower_transport_gather(writer, sources, from, to, object, BUSTER_CHECK_NONE, false);
+        CheckVectorShape in = check_vector_builtin_shape(types, from);
+        CheckVectorShape out = check_vector_builtin_shape(types, to);
+        Tier0Operation row;
+        uint32_t piece_lanes = 0;
+        if (in.element != 0 && out.element != 0 && !check_lower_bool_vector(types, from) && !check_lower_bool_vector(types, to))
+        {
+            const uint32_t widest = in.element > out.element ? in.element : out.element;
+            for (uint32_t width = check_lower_transport_width(writer); width >= 16 && piece_lanes == 0; width /= 2)
+            {
+                const uint32_t count = width / widest;
+                in.lanes = out.lanes = count;
+                in.bytes = count * in.element;
+                out.bytes = count * out.element;
+                if (count <= lanes && in.bytes >= 4 && out.bytes >= 4 &&
+                    check_vector_convert_shape_row(&writer->target, in, in.bytes, out, &row) == NULL)
+                {
+                    piece_lanes = count;
+                }
+            }
+        }
+        if (piece_lanes == 0)
+        {
+            check_lower_transport_gather(writer, sources, from, to, object, BUSTER_CHECK_NONE, false);
+        }
+        else
+        {
+            const uint32_t pieces = lanes / piece_lanes;
+            const uint32_t operation = check_lower_operation_index(writer, &row);
+            const TypeId element = check_lower_transport_element(types, to);
+            // Only complete pieces run as vectors. In particular, do not convert padding: floating conversions can
+            // raise exceptions on its indeterminate values, and an ordinary vector need not have room for a full row.
+            for (uint32_t i = lanes; i-- > pieces * piece_lanes && writer->output->status == CHECK_PROGRAM_OK;)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_SET, check_lower_class(writer, element), 0);
+                check_lower_transport_read(writer, source, from, i, element);
+                check_lower_element_address(writer, object, i * out.element);
+            }
+            for (uint32_t p = pieces; p-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+            {
+                check_lower_transport_builtin_store(writer, out.bytes);
+                check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, operation);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, in.bytes);
+                check_lower_transport_at(writer, source, (uint64_t)p * piece_lanes * in.element);
+                check_lower_element_address(writer, object, p * out.bytes);
+            }
+            writer->vectors = true;
+        }
         check_lower_transport_source(writer, from, source);
     }
 }

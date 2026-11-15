@@ -91,6 +91,8 @@
     ENTRY(WINDOWED_LOOP, "--windowed-loop") \
     ENTRY(WORKER_BUDGET, "--worker-budget") \
     ENTRY(WORKER_BUDGET_EQ, "--worker-budget=") \
+    ENTRY(KEEP_COMMENTS, "-C") \
+    ENTRY(KEEP_MACRO_COMMENTS, "-CC") \
     ENTRY(D, "-D") \
     ENTRY(E, "-E") \
     ENTRY(H, "-H") \
@@ -138,7 +140,10 @@
     ENTRY(XLINKER, "-Xlinker") \
     ENTRY(ANSI, "-ansi") \
     ENTRY(C, "-c") \
+    ENTRY(DD, "-dD") \
+    ENTRY(DI, "-dI") \
     ENTRY(DM, "-dM") \
+    ENTRY(DN, "-dN") \
     ENTRY(DUMPFULLVERSION, "-dumpfullversion") \
     ENTRY(DUMPMACHINE, "-dumpmachine") \
     ENTRY(DUMPVERSION, "-dumpversion") \
