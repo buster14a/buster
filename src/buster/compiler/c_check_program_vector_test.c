@@ -623,6 +623,9 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             "v8si u=s+(n+0+(n+1+(n+2+(n+3+(n+4+(n+5+(n+6+(n+7+(n+8+(n+9+(n+10+(n+11+(n+12+(n+13+(n+14+(n+15+(n+16+(n+17+(n)))))))))))))))))));"
             "FOLD(u);return (int)h;}",
         },
+        // A transport vector's bit builtins element by element where the target's piece has no row: popcount of ints
+        // without AVX-512 VPOPCNTDQ (#2216, check_lower_bits_elements), with the rest of the wide elementwise builtins.
+        { "vector-wide-elements", check_test_wide_elements },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)
     {

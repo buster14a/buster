@@ -2264,7 +2264,7 @@ static bool check_lower_integer_elements(const CheckLowerWriter* writer, CBuilti
 // Whether a bit builtin of an integer vector (popcount, bitreverse, clzg, ctzg, fshl and fshr) is computed element by
 // element (check_lower_transport_bit_builtin, #1834): at a target without AVX-512F and AVX-512VL, or where its row is refused
 // for the instructions the target lacks (GFNI's, BITALG's, VPOPCNTDQ's, CD's, VBMI2's), as clang's legalization expands
-// them.
+// them; a transport vector's row is its register-width piece's (check_lower_transport_elementwise's, #2216).
 static bool check_lower_bits_elements(const CheckLowerWriter* writer, CBuiltinId builtin, TypeId result, uint32_t arguments)
 {
     const TypeTable* types = writer->program->types;
@@ -2277,9 +2277,14 @@ static bool check_lower_bits_elements(const CheckLowerWriter* writer, CBuiltinId
     {
         Tier0Operation row;
         CheckVectorConstants constants = { 0 };
+        const uint32_t width = check_lower_transport_width(writer);
+        const uint32_t lanes = check_lower_vector_bytes(types, result) != 0 || shape.bytes / shape.element < width / shape.element ? shape.bytes / shape.element :
+                                                                                                                                width / shape.element;
+        CheckVectorShape piece = shape;
+        piece.bytes = lanes * shape.element < 4 ? 4 : lanes * shape.element;
+        piece.lanes = piece.bytes / piece.element;
         result_elements = (writer->target.features & evex) != evex ||
-                          (check_lower_vector_bytes(types, result) != 0 &&
-                           check_vector_elementwise_shape_row(&writer->target, builtin, shape, arguments, 0, &row, &constants) != NULL);
+                          check_vector_elementwise_shape_row(&writer->target, builtin, piece, arguments, 0, &row, &constants) != NULL;
     }
     return result_elements;
 }
