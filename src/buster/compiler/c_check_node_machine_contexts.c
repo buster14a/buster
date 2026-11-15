@@ -119,6 +119,44 @@ static bool node_machine_testable(const NodeMachine* machine, TypeId type)
            kind != BUSTER_TYPE_KIND_VECTOR && kind != BUSTER_TYPE_KIND_EXT_VECTOR;
 }
 
+// Whether the tasks put conditional or logical operator record `r`'s conversion into its arms
+// (check_lower_conditional_target, #2678): its context a value's and its conversion to its target one that writes entries
+// (node_machine_convert's), of classes that fold (check_lower_conditional_sinks), and `constant` (a logical operator's 0
+// or 1) or one of a conditional's arms `b` and `c` it evaluates (UINT32_MAX for one it doesn't) an integer constant
+// (check_lower_integer_constant). X writes a record's conversion once, after its row, so C leaves such a record to the
+// tasks. Out of line, as only these ask.
+static __attribute__((noinline)) bool node_machine_sinks(const NodeMachine* machine, uint32_t r, uint32_t b, uint32_t c, bool constant)
+{
+    const TypeId from = node_machine_record_type(machine, r);
+    const TypeId to = node_machine_record_target(machine, r);
+    bool sinks = false;
+    if (node_machine_record_context(machine, r) == 0 && to != 0 && from != to)
+    {
+        const uint8_t from_facts = node_machine_record_facts(machine, r);
+        const uint8_t to_facts = node_machine_facts(machine, to);
+        const uint8_t source = node_machine_record_class(machine, r);
+        const uint8_t target = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : node_machine_class(machine, to);
+        // node_machine_convert's (check_lower_conversion_empty's) empty conversion, which no task converts by.
+        const bool empty = source == target && source < BUSTER_TYPED_CLASSES &&
+                           ((from_facts ^ to_facts) & (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0 &&
+                           ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) == 0 &&
+                           (to_facts & (BUSTER_CHECK_LOWER_TYPE_BOOL | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0;
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            const uint32_t arm = k == 0 ? b : c;
+            if (arm != UINT32_MAX)
+            {
+                constant |= check_lower_integer_constant(node_machine_record_class(machine, arm), node_machine_record_facts(machine, arm),
+                                                         node_machine_record_constant_kind(machine, arm), node_machine_record_fault(machine, arm),
+                                                         node_machine_record_flags(machine, arm), node_machine_record_category(machine, arm),
+                                                         node_machine_record_op(machine, arm));
+            }
+        }
+        sinks = !empty && constant && check_lower_conditional_sinks(source, from_facts, target, to_facts);
+    }
+    return sinks;
+}
+
 // C's logical operator or conditional at record `r` (`op`), of value class `class` (check_lower_logical's rules, which
 // check_lower_expand reaches for one that isn't folded, of a scalar class, or a conditional's of void, whose condition is
 // no vector): its template, with its evaluated operands given their targets and its segments after them, or
@@ -144,10 +182,18 @@ static CheckLowerTemplate node_machine_logical(NodeMachine* machine, uint32_t r,
         const bool known = node_machine_record_constant_kind(machine, a) != CHECK_CONSTANT_NONE && (flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
                            node_machine_record_fault(machine, a) == CHECK_FAULT_NONE && node_machine_record_truth(machine, a, &truth);
         const bool effects = (flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) != 0;
-        if (known)
+        // A conditional or a logical operator whose consumer's conversion the tasks put into its arms is theirs
+        // (node_machine_sinks): a conditional's where an arm it evaluates is a constant, a logical operator's unless a known
+        // condition leaves it its second operand's truth.
+        const bool decided = known && !conditional && (op == CHECK_OP_LOGICAL_OR) == truth;
+        const bool sunk = scalar && (conditional ? node_machine_sinks(machine, r, known && !truth ? UINT32_MAX : b, known && truth ? UINT32_MAX : c, false) :
+                                     (!known || decided) && node_machine_sinks(machine, r, UINT32_MAX, UINT32_MAX, true));
+        if (sunk)
+        {
+        }
+        else if (known)
         {
             // The condition, for its effects alone, then the arm or the second operand it leaves the value to, if any.
-            const bool decided = !conditional && (op == CHECK_OP_LOGICAL_OR) == truth;
             const bool second = !conditional && !decided;
             kind = conditional ? CHECK_LOWER_TEMPLATE_PASS : decided ? (CheckLowerTemplate)NODE_MACHINE_TEMPLATE_DECIDED :
                    node_machine_testable(machine, type_b) ? (CheckLowerTemplate)NODE_MACHINE_TEMPLATE_SECOND : CHECK_LOWER_TEMPLATE_NONE;
