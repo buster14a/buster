@@ -335,6 +335,18 @@ does are there.
   every part's code.
 - `--tier0-no-inline` keeps every call: the control, as `--tier1-no-inline` is
   Tier 1's.
+- **Callees nothing refers to are left out** (step 3), by Tier 1's dead
+  functions' columns, last pass and dead set (#2541 step 2,
+  [the Tier 1 guide](../tier1.md)'s "Dead functions"): without `--tier1`, the
+  table's candidates are Tier 0's callees, and in `-c`'s object (not under
+  `-g`, `-fpatchable-function-entry` or in a unit with asm) a callee nothing
+  roots, whose stream the splice takes, makes no code on its lane
+  (`check_tier0_inline_held`); the last pass makes the code of each that emitted
+  code still refers to (a call a caller kept, an address), and the merge leaves
+  the rest out (`check_tier1_inline_dead`). `--tier0-no-hold` makes every
+  callee's code on its lane: the objects are the same. In a unit with asm the
+  callees' code is made and the dead ones still left out; an executable and
+  `-g` keep every callee.
 
 `./build/compiler test-tier0-inline [preprocessor options] [file...]` lowers
 each file as `-c` does and splices every body by both paths, each with its own
@@ -347,7 +359,9 @@ that at least 20 calls were inlined. On the compiler's own `main.c` (`-march=nat
 fixture (`c_check_tier0_inline_driver_test.c`) builds a program of the
 splice's shapes by the vector path, the scalar twin and `--tier0-no-inline`:
 each runs as clang -O0's build does, the two paths' objects are the same bytes,
-and the control's differs.
+and the control's differs; the object leaves out the callees spliced at every
+call and keeps those a call or an address refers to, the same bytes by 1 and 4
+lanes, with `--tier0-no-hold`, and by windows of one token.
 
 ## Backend benchmark
 

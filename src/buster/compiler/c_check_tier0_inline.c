@@ -278,3 +278,24 @@ static bool check_tier0_inline_body(CheckEmitRun* run, CheckEmitLane* lane, uint
     }
     return valid && any;
 }
+
+// Whether callee body `b`'s own code waits for the emission's last pass (#1398 step 3), as Tier 1's held candidates' does
+// (check_tier1_inline_held): without --tier1, with holding (CheckTier1Inline.holding: -c's object, not under -g,
+// -fpatchable-function-entry or in a unit with asm), one the table held (nothing roots it) whose stream the splice takes
+// (tier0_inline_callee_valid), so that its callers should splice every call and leave it dead. The last pass makes the
+// code of each held one that emitted code still refers to (a call a caller kept: a cycle's, past the depth bound or a
+// target its caller lacks; an address), and the merge leaves the others out (check_tier1_inline_dead). It waits
+// (BUSTER_CHECK_TIER1_INLINE_WAITING), which the last pass reads once the lanes are done: this lane alone writes body
+// `b`'s byte.
+static bool check_tier0_inline_held(const CheckEmitRun* run, uint32_t b)
+{
+    const CheckTier1Inline* table = run->tier0_inline;
+    uint32_t body = 0;
+    const bool held = table != NULL && table->holding && table->stage == 0 && b < table->body_count && table->held[b] == BUSTER_CHECK_TIER1_INLINE_HELD &&
+                      table->released[b] == 0 && tier0_inline_callee_valid(&run->lowered->functions[b], &body);
+    if (held)
+    {
+        table->held[b] = BUSTER_CHECK_TIER1_INLINE_WAITING;
+    }
+    return held;
+}
