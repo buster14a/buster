@@ -1245,7 +1245,7 @@ or 64 bytes, the xmm, ymm or zmm one (`tier1_select_vector_forms`):
 | `vconst` of every bit | `ONES` | `vpternlogd x, x, x, 0xff` |
 | `vconst` of one lane in all | `SPLAT` | `mov r11d, imm32` and `vpbroadcastd x, r11d` |
 | a `vconst` whose quadwords are one value, at an EVEX target | `CONSTANT` | the quadword into the scratch general register by the shortest `mov` that holds it and `vpbroadcastq` from it (`tier1_emit_cfg_vector_constant`, #2744's step 1: `_mm512_set1_epi64(63)`) |
-| any other `vconst` | `CONSTANT` | its words into the red zone below rsp (a `mov qword` of a sign-extended imm32, or two `mov dword`) and `vmovdqu32` from there (`tier1_emit_cfg_vector_constant`); its load is wider than each store, so none forwards (#2744) |
+| any other `vconst` | `CONSTANT` | its literal's load, `vmovdqu32` of `[rip + literal]` (`tier1_emit_cfg_vector_constant`, #2744's step 2; "The literal pool" below) |
 | `copy` | `COPY` | `vmovdqa64` (`movaps` for 16 bytes), none where allocation gave both one register |
 | `add`, `sub`, `mul`, `and`, `or`, `xor` | `BINARY` | `vpaddd`, `vpsubd`, `vpmulld`, `vpandq`, `vporq`, `vpxord`: three operands, the destination any register |
 | `not` | `NOT` | `vpternlogd x, a, a, 0x55`, the complement of its third operand |
@@ -1269,8 +1269,7 @@ and `main_unit_backend.c`, compiled by `--tier1 -march=znver5`, the fold takes
 31 of 261 `vpblendm` and 82 of 411 into their operations.
 
 Unmasked, a quadword `and` or `or` is the doublewords' bits, and `x86_semantics.c`
-models those forms. A function with a vector constant keeps its frame out of the
-red zone (`tier1_emit_cfg_frame_flags`). Every function with a vector is the CFG
+models those forms. Every function with a vector is the CFG
 consumer's. Its vector values' slots are their widths, aligned to 16 at most (their
 accesses are unaligned, and a wider alignment would realign the frame), spilled,
 reloaded and moved along edges by `vmovdqu32` and `vmovdqa64` at their widths;
@@ -1278,6 +1277,47 @@ the class's call-save rows and temporary slot take the widest vector's bytes,
 which the saves around a call move (`Tier1EmitPrepared.vector_bytes`). The forms
 need AVX512F, and below 64 bytes AVX512VL, which a target without them refuses at
 emission, as any record's.
+
+### The literal pool (#2744)
+
+A vector constant that no broadcast makes is a literal: read-only bytes its code
+loads rip-relative, in one record that stalls on no store. Until #2744 its words
+went into the red zone as immediates and a load read them back, wider than each
+store, so that none forwarded: on the compiler's own lexer by `--tier1`, 22
+constants were built so per 64-byte chunk of `c_tokenize`.
+
+- **In the function** (`tier1_emit_cfg_literal`): each constant at each width
+  it is loaded at is one literal of the function's (`Tier1EmitResult.literals`,
+  its bytes the constant's first 16, 32 or 64 and zero past them), and its load's
+  reference names it by a provisional target, `BUSTER_TIER1_EMIT_LITERAL` plus
+  its index, past every symbol a function's access column has: the function
+  compiles on a lane and numbers no unit symbol, as the lowering's jump tables
+  don't. The C driver publishes the literals with the code
+  (`EmittedCode.literals`, `BUSTER_EMITTED_LITERAL`).
+- **In the unit** (`check_program_emit_literals`): the emission's merge gives
+  each distinct literal of the live bodies (width and bytes) an entry of the
+  unit's pool, numbered in source order of first use, so that the object is the
+  same at any number of lanes, and renames every literal reference of every
+  body to its entry's symbol, after the runtime functions' and the jump tables'
+  provisional symbols, which no symbol below the tag reaches. Each entry is an
+  atom of its own, aligned to its width so that no load splits a line, in the
+  mergeable section of its width, `.rodata.cst16`, `.rodata.cst32` or
+  `.rodata.cst64` (`SHF_MERGE`, the width the entry size, as GCC's constants
+  are; clang puts its 64-byte ones in `.rodata`), with a local symbol
+  `.Lbuster_literal_N`, which `-c`'s object keeps as clang keeps `.LCPI` labels:
+  a PC-relative relocation into a merged section needs the symbol, not its
+  section's. A linker then merges equal entries across objects.
+- **Checked** by the emitted code's certificate: it replays the load with the
+  literal the emission's index names for the constant at the node's width, and
+  refuses the code unless that literal's width and every byte are the
+  constant's. `test-tier1-emit`'s literal fixture corrupts a literal's bytes, its
+  width, the reference's addend, its target and the index, each refused.
+- **Native tests** (`tier1_emit_place_literals`) place a code's literals in its
+  executable mapping, each in a 64-byte slot, and write the loads' distances.
+
+No vector constant writes below rsp now, so a function with one may keep its
+frame in the red zone. On `c_tokenize` of the 1344 record's 9,076-byte file, the
+counts are in the pull request's record.
 
 ### At targets without AVX-512 (#1281)
 

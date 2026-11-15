@@ -214,6 +214,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
                                                                "incompatible function pointer types" },
     [CHECK_WARNING_ID_RETURN_MISMATCH] = { "-Wreturn-mismatch", "-Wreturn-type", "void function should not return a value" },
     [CHECK_WARNING_ID_ATOMIC_ACCESS] = { "-Watomic-access", NULL, "accessing a member of an atomic structure or union is undefined behavior" },
+    [CHECK_WARNING_ID_CXX_ZERO_SIZE_RECORD] = { "-Wc++-compat", NULL, "empty struct has size 0 in C, size 1 in C++" },
+    [CHECK_WARNING_ID_ZERO_LENGTH_ARRAY] = { "-Wzero-length-array", "-Wgnu", "zero size arrays are an extension" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

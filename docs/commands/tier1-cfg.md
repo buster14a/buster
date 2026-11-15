@@ -32,7 +32,8 @@ requirements. [Command index](README.md).
   placement of a definition and two uses in a small CFG, and runs fixtures and random SSA over random CFGs of the
   three classes with mutants (three generated cases in four share phi webs' slots, and a mutant gives two values whose
   slot fragments overlap one slot), and #2553's two: a join whose dominating critical edge moves nothing, and a phi web
-  around a loop that keeps one slot; `test-tier1-cfg-source` adapts every function `-c`
+  around a loop that keeps one slot; every allocation's continuations (#2774) are checked against a twin that
+  recomputes them from the intervals alone; `test-tier1-cfg-source` adapts every function `-c`
   compiles of real C, lowered and promoted, through a machine model
   (`tier1_cfg_ir.c`) and checks both paths' allocations, and with `--simd`
   allocates #732's SIMD functions as lowered, their masks in the opmask class.
@@ -52,7 +53,9 @@ solver; two phi scans replace the fifth `passed` matrix.
 remote occurrences and uses, self-phis, undefined operands, sibling edges,
 spills, rematerialization and fixed clobbers in all three register classes.
 Small fixtures run the allocator, independent verifier, certificate and
-mutation checks. Wide joins of 8, 65, 513 and 8,193 predecessors must prepare
+mutation checks. The dispatch-entry fixture (#2782) checks that a handler a
+`goto` and a dispatch's multiway branch both enter starts its phi in the
+dispatch's register for the phi's operand. Wide joins of 8, 65, 513 and 8,193 predecessors must prepare
 within 8 MiB of scratch with zero or one global value, and every local operand
 must keep exactly its home-tail interval. These are capacity and semantic
 checks, not timing or RSS measurements.

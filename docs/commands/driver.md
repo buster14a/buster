@@ -50,7 +50,7 @@ requirements. [Command index](README.md).
   made on its lane, none held for the last pass (the same objects): [the Tier 1
   guide](../../docs/tier1.md)'s "The C driver's `--tier1`" and "Inlining", and [Tier 1 failure
   outcomes](../../docs/tier1-outcomes.md)); `-O` flags set only preprocessor
-  optimization macros, not the tier; Tier 0 is the default, and inlines the same calls: `--tier0-no-inline` keeps them, #1398's control, [the Tier 0 guide](tier0.md#inlining-always_inline-functions-1398)), `--emit-window=N` taking one lane's emission in windows of about N tokens, each window's lowering and code before the next one's, in memory the next one reuses (#2536's step 1; 2,048 by default, 0 one window as long as the unit: [function lanes](function-lanes.md#windows-2536)), `--id-order N` handing the unit's identifiers their
+  optimization macros, not the tier; Tier 0 is the default, and inlines the same calls: `--tier0-no-inline` keeps them, #1398's control, and `--tier0-no-hold` makes each callee's code on its lane, none held for the last pass that leaves the dead ones out (the same objects), [the Tier 0 guide](tier0.md#inlining-always_inline-functions-1398)), `--emit-window=N` taking one lane's emission in windows of about N tokens, each window's lowering and code before the next one's, in memory the next one reuses (#2536's step 1; 2,048 by default, 0 one window as long as the unit: [function lanes](function-lanes.md#windows-2536)), `--id-order N` handing the unit's identifiers their
   ids in another order, on which nothing it writes may depend (#153's test
   option, `check_driver_id_order`, for each unit of a multi-file command too), and `-g` attaching DWARF of its functions'
   source lines (`c_check_debug.c`, #395), to the executable and with `-c` to the
@@ -291,6 +291,28 @@ errors. The behavioral references are LLVM revision
 [`Options.td`](https://github.com/llvm/llvm-project/blob/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/clang/include/clang/Options/Options.td)
 and `CompilerInvocation.cpp`'s `addDiagnosticArgs`; no upstream implementation
 or fixture is imported.
+
+## Numeric driver options
+
+The driver reads `--lanes`, `--worker-budget`, `--emit-window`,
+`--units-memory` and `--id-order` as nonempty unsigned decimal words (#2786).
+Leading zeroes are allowed. Signs, whitespace, base prefixes, trailing text
+and overflowing values are refused before a source or output is opened; an
+invalid occurrence still fails when another occurrence supplies a valid value.
+
+| Option | Accepted range | Spellings |
+| --- | --- | --- |
+| `--lanes` | 1 through 64 | `--lanes N`, `--lanes=N` |
+| `--worker-budget` | 1 through 64 | `--worker-budget N`, `--worker-budget=N` |
+| `--emit-window` | 0 through 4,294,967,295 | `--emit-window=N` |
+| `--units-memory` | 1 through 18,446,744,073,709,551,615 | `--units-memory=N` |
+| `--id-order` | 0 through 18,446,744,073,709,551,615 | `--id-order N`, `--id-order=N` |
+
+`test-check-lanes --numeric-options-only` runs the real driver through each
+spelling on default and scalar paths, checks range boundaries and malformed
+words, requires rejected commands to preserve an existing output, and compares
+every accepted command's object with the ordinary command's bytes.
+`--executable PATH` applies these same cases to a separate compiler binary.
 
 ## Response files
 

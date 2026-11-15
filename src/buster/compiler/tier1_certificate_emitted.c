@@ -1411,14 +1411,32 @@ static bool tier1_cert_emitted_kernel(Tier1CertEmittedBuild* build, uint32_t nod
         }
         else if (valid && pattern->rule == TIER1_RULE_VECTOR && pattern->scale == BUSTER_TIER1_VECTOR_CONSTANT)
         {
-            // A vector constant of no simpler kind (#141, #1284): its words stored into the red zone, then the vector loaded
-            // from there (tier1_emit_cfg_vector_constant), which the frame keeps its rows out of.
+            // A vector constant of no simpler kind (#141, #1284): its quadword broadcast from the scratch register, or its
+            // literal's load, rip-relative (#2744, tier1_emit_cfg_vector_constant). The literal is the one the emission's
+            // index names for the constant at the node's width, and its bytes must be the constant's first `width` and
+            // zero past them: the reference names the literal, so the literal's bytes, not its index, are what the load
+            // reads. A literal whose width or bytes differ refuses the code.
+            const bool uniform = tier1_emit_cfg_vector_uniform(function, &holes);
+            const uint32_t index = (uint32_t)holes.immediate;
+            const uint32_t width = holes.width;
+            const uint32_t class = width == 16 ? 0 : width == 32 ? 1 : 2;
+            const uint32_t claimed = !uniform && emitted->literal_of != 0 && index < function->vector_constant_count ? emitted->literal_of[3 * (uint64_t)index + class] : 0;
+            const uint32_t literal = claimed != 0 && claimed - 1 < emitted->literal_count ? claimed - 1 : UINT32_MAX;
+            IrSimdValue expected = { 0 };
+            if (literal != UINT32_MAX && (width == 16 || width == 32 || width == 64))
+            {
+                memcpy(expected.words, function->vector_constants[index].words, width);
+            }
+            valid = uniform || (literal != UINT32_MAX && emitted->literal_widths[literal] == width &&
+                                memcmp(emitted->literals[literal].words, expected.words, sizeof(expected.words)) == 0);
             Tier1EmitBuffer buffer = {
                 .records = kernel->records,
                 .capacity = BUSTER_ARRAY_LENGTH(kernel->records),
             };
-            valid = tier1_emit_cfg_vector_constant(function, &holes, &buffer) == TIER1_EMIT_OK;
+            bool referenced = false;
+            valid = valid && tier1_emit_cfg_vector_constant(function, &holes, literal, &buffer, &kernel->reference, &referenced) == TIER1_EMIT_OK;
             kernel->count = buffer.count;
+            kernel->referenced = valid && referenced ? kernel->reference.instruction : UINT32_MAX;
         }
         else if (valid)
         {
@@ -3324,8 +3342,8 @@ static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectP
     {
         tier1_cert_emitted_range(&build, &range, false, hidden_offset, (int64_t)hidden_offset + 8);
     }
-    // And the red zone below rsp, where the code stages a by-value aggregate's parts and a vector constant's words (#789,
-    // #141), wherever a record reaches below rsp.
+    // And the red zone below rsp, where the code stages a by-value aggregate's parts (#789), wherever a record reaches below
+    // rsp. (A vector constant's words were staged there too until its literal pool, #2744.)
     bool below = false;
     for (uint32_t r = 0; valid && !below && r < records; r += 1)
     {

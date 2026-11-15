@@ -385,7 +385,9 @@ if(buster_pgo)
     foreach(name IN LISTS unit_names)
         list(FIND unit_names "${name}" index)
         list(GET BUSTER_SOURCES ${index} source)
-        set(object "${pgo}/objects/${name}.o")
+        # UNIT.c.o, as the start's code order's script names a unit's object (cmake/BusterStartOrder.cmake), which the
+        # instrumented link takes too.
+        set(object "${pgo}/objects/${name}.c.o")
         add_custom_command(OUTPUT "${object}"
             COMMAND "${CMAKE_C_COMPILER}" -c "${CMAKE_SOURCE_DIR}/${source}" -o "${object}" ${flags} -fprofile-instr-generate
                 ${buster_optimization} ${buster_defines} "-fmacro-prefix-map=${CMAKE_SOURCE_DIR}/=" -MD -MF "${object}.d"

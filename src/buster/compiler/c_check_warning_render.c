@@ -2241,6 +2241,13 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = check_warning_text(scratch, (payload->data & 2u) != 0 ? "%s without named members is a GNU extension" : "empty %s is a GNU extension",
                                         (payload->data & 1u) != 0 ? "union" : "struct");
             break;
+        case CHECK_WARNING_EVENT_CXX_ZERO_SIZE_RECORD:
+            result = check_warning_text(scratch, "%s%s has size 0 in C, %s in C++", (payload->data & 2u) != 0 ? "" : "empty ",
+                                        (payload->data & 1u) != 0 ? "union" : "struct", (payload->data & 4u) != 0 ? "non-zero size" : "size 1");
+            break;
+        case CHECK_WARNING_EVENT_ZERO_LENGTH_ARRAY:
+            result = "zero size arrays are an extension";
+            break;
         case CHECK_WARNING_EVENT_GNU_DESIGNATOR:
             result = payload->data == BUSTER_CHECK_GNU_DESIGNATOR_OLD_STYLE ? "use of GNU old-style field designator extension" :
                      payload->data == BUSTER_CHECK_GNU_DESIGNATOR_RANGE ? "use of GNU array range extension" :
@@ -2922,6 +2929,15 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         // A constant bound's comma in a function body (#2202, check_input_unused_completion): with the body's
                         // queued runtime diagnostics, at its end.
                         pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_DEFERRED, notes, event->note_count, "%s%s", message, suffix);
+                    }
+                    else if (event->kind == CHECK_WARNING_EVENT_ZERO_LENGTH_ARRAY)
+                    {
+                        // A bound spanning several tokens keeps its macro argument's expansion note. Forwarding a
+                        // single token is silent, including an object-like macro that expands to one zero.
+                        const bool arguments = pp->diagnostic_arguments;
+                        pp->diagnostic_arguments |= event->payload.data != 0;
+                        pp_diagnose_output_notes_at(pp, disposition, source, boundary, notes, event->note_count, "%s%s", message, suffix);
+                        pp->diagnostic_arguments = arguments;
                     }
                     else
                     {
