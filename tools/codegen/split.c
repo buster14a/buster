@@ -44,8 +44,8 @@
 // below: a part may start at any function, and the relocatable link then pads the part's start in a text section to
 // the greatest alignment it holds there (at most 48 bytes a part, 63 with an aligned(64) function), so the functions
 // after it move by that much. Their instructions are the same; a function that aligns a block beyond its own alignment
-// can pad it differently (one in the MSan executable, 16 bytes shorter). Without them the plan is Release's, whose
-// addresses are the single module's.
+// can pad it differently (with an earlier cost's plan, one in the MSan executable came out 16 bytes shorter). Without
+// them the plan is Release's, whose addresses are the single module's.
 //
 // --verify runs LLVM's verifier on each part; --report prints each part's functions and estimated cost to stderr.
 // The input is parsed once; the parts are written by one child process each, forked after the plan, as many at once as

@@ -898,6 +898,62 @@ builds' function for function, every function at one offset from where it was
 the same instructions but for the padding between parts and, in the
 fixed-address ASan executable, the moved data's addresses.
 
+
+#### The plan of a sanitizer build's parts
+
+A sanitizer build's critical path is its checker unit's chain: the bitcode
+compile, the split, the longest part and the join. On the 9700X at
+`2ebfe68`, with 8 jobs, MSan's took 101 + 11.4 + 37.3 s, ASan's
+130 + 9.5 + 20.0 s and TSan's 52.5 + 3.6 + 8.2 s, while the builds' work
+would fit in 105, 83 and 36 s. The split plans a sanitizer build's parts for
+the longest one, with two options Release's doesn't take (#2639,
+`BusterCodegen.cmake`):
+
+- **`--codegen-costs`** weighs each function by the code generator's measured
+  cost, `split_codegen_cost`, in place of its instruction count. An
+  instruction's time grows with its function's size: on the 9700X it takes
+  0.011 to 0.015 ms in functions of 300 to 1,000 instructions and 0.031 to
+  0.036 ms in those over 30,000. Each definition adds about 60 instructions'
+  worth, and an optnone function's instructions cost 13% to 22% of the others'.
+  The cost is a function's instructions, their square over 50,000 and 60 (a
+  quarter of its instructions and 60 under optnone). It was fit to every
+  function's code-generation time in the three sanitizers' checker parts
+  (`-ftime-trace`, with each part's other time).
+- **`--padded-starts`** lets a part start at any function. Release's plan
+  starts each part at a function of the greatest alignment it holds, so that
+  the relocatable link adds no padding. The IR's fifteen `aligned(64)`
+  functions (`ir_check_rows` and the optimizer's hot ones) then forced a
+  boundary at the first of them, leaving one part a sixth of the others' work.
+  The link now pads such a part's start to its alignment, at most 63 bytes.
+  The functions after it move by that much, with the same instructions. A
+  function that aligns a block beyond its own alignment can pad it
+  differently: with an earlier plan, one in the MSan executable came out 16
+  bytes shorter.
+
+The split also deletes the other parts' bodies a block at a time
+(`split_delete_blocks`), as `llvm::Function::deleteBody` does, instead of
+replacing each instruction's uses. It writes the same parts with 7% less CPU
+time: 26.3 to 27.2 s against 28.4 to 29.2 s for the MSan checker's split.
+
+**Measured** on the 9700X, clean builds, `--config Release`, 8 jobs, CI's
+toolchain, main `2ebfe68` against the change
+([the record](https://github.com/buster14a/buster-performance/tree/bd14eb6d009aa2a173dc97857cd7aab2008fa58a/docs/measurements/sanitizer-parts-plan-2639-2026-11-14)):
+
+| Build | Main | Change | Longest checker part, main | Change |
+| --- | ---: | ---: | ---: | ---: |
+| native MSan | 151.3, 149.3 s | 143.8, 143.5 s | 37.3, 36.2 s | 30.8, 30.8 s |
+| native ASan | 162.9, 161.7 s | 157.0, 157.5 s | 20.0, 19.8 s | 17.5, 17.7 s |
+| native TSan | 65.3, 65.3 s | 64.4 s | 8.2, 8.2 s | 7.7 s |
+
+Planned by the measured times themselves, the longest parts would take 28.1,
+14.9 and 7.0 s, and the alignment rule costs the change's plans 3.5, 1.5 and
+1.0 s. Two of ASan's 5 s are its bitcode compile, 2 s quicker in those two
+builds with the same command. Each executable has main's functions in main's
+order, with the same sizes. Release's split, with neither option, writes the
+same parts, and its executable is the same bytes as main's. User time stays
+within 1%: the parts hold the same functions, so a hosted runner's build,
+bound by its work on 4 CPUs, gains little.
+
 ## Develop
 
 The edit loop's configuration, and `./build.sh`'s default since 2026-11-13 (#2559;
