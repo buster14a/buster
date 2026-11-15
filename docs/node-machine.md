@@ -2516,3 +2516,6 @@ What this design is not:
   [#151](https://github.com/buster14a/buster/issues/151): bodies on lanes.
 - [#1340](https://github.com/buster14a/buster/issues/1340): the common
   warnings' cost, 122 cycles a body token here.
+- [#2850](https://github.com/buster14a/buster/issues/2850): [the one-core
+  path](one-core-path.md), whose step 1 makes T's identifier leaves and
+  lookups from fact words in this shadow (`--shadow --facts`).
