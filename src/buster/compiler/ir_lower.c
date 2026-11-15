@@ -2509,8 +2509,8 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedS
 
 // The copy of a forwarded call's result (#2684) from the forwarding slot `source` to where the hidden pointer points
 // (`destination`, a ptr): past BUSTER_TIER0_MAX_COPY_BYTES a call of the front end's memmove (Tier0Function.hidden_copy,
-// its arguments the two pointers and the size, its result dropped), as the lowering's copy of a call's object calls it;
-// else the pieces of a typed COPY.
+// its arguments the two pointers and the size, its result the destination, a ptr nothing reads, as the interpreters'
+// memmove binding has it), as the lowering's copy of a call's object calls it; else the pieces of a typed COPY.
 static __attribute__((always_inline)) inline void ir_typed_forward_copy(IrTypedSink* sink, const Tier0Function* input, uint32_t destination, uint32_t source)
 {
     const uint64_t bytes = input->hidden_size;
@@ -2528,7 +2528,7 @@ static __attribute__((always_inline)) inline void ir_typed_forward_copy(IrTypedS
                 .argument_count = 3,
                 .type_first = type_first,
                 .parameter_count = 3,
-                .result_type = IR_VOID,
+                .result_type = IR_PTR,
             };
             output->extra[first] = destination;
             output->extra[first + 1] = source;
@@ -2540,7 +2540,7 @@ static __attribute__((always_inline)) inline void ir_typed_forward_copy(IrTypedS
         sink->sizes.call_count += 1;
         sink->sizes.extra_count += 3;
         sink->sizes.call_type_count += 3;
-        ir_typed_emit(sink, IR_CALL, IR_VOID, input->hidden_copy, descriptor, BUSTER_IR_NONE, 0);
+        ir_typed_emit(sink, IR_CALL, IR_PTR, input->hidden_copy, descriptor, BUSTER_IR_NONE, 0);
     }
     else
     {
