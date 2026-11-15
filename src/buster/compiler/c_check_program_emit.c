@@ -879,6 +879,17 @@ struct CheckProgramLaneArenas
 // with the emission's link and lowering: the atoms' bytes and the functions' columns of the lanes past the first are in
 // their arenas here (check_program_lanes_release), which the next emission with it reuses, as it reuses the first's
 // scratch for lane 0's writer's columns (CheckEmitRun.columns) while it has their room.
+// A caller's bodies' loop, run as the emission lowers (#2536's step 2.2c.4, part 2, --windowed-loop): `run` runs the
+// checked program's loop up to the body that the emission's body `end - 1` comes from (every body, for UINT32_MAX), and
+// fills in the emission's program's records of the bodies it has run (check_driver_loop_run). False where the loop
+// failed, which the emission's parts then refuse.
+typedef struct CheckEmitLoop CheckEmitLoop;
+struct CheckEmitLoop
+{
+    bool (*run)(void* context, uint32_t end);
+    void* context;
+};
+
 typedef struct CheckProgramLanes CheckProgramLanes;
 struct CheckProgramLanes
 {
@@ -999,6 +1010,9 @@ struct CheckProgramLanes
     // writer's calls and arguments, which each part's fit grows (CheckLowerShared.deferred_call_room): 0 for the bound.
     bool deferred_lowering;
     uint32_t deferred_call_room;
+    // A caller's bodies' loop (#2536's step 2.2c.4, part 2): run by each part's lowering on one lane, before it lowers, and
+    // whole before the lanes or a lowering that reads the controls' totals. None (no `run`) without --windowed-loop.
+    CheckEmitLoop loop;
 };
 
 // Whether --tier1's tables are built (check_program_emit_timed), once per process.
@@ -1255,6 +1269,8 @@ struct CheckEmitRun
     bool poison_windows;
     uint64_t squeeze_window;
     bool windowed;
+    // The caller's bodies' loop (CheckProgramLanes.loop), until it has run every body.
+    const CheckEmitLoop* loop;
 };
 
 // The typed class of body `b`'s result, as Tier 1's lowering takes it: its RETURNs' class, or for a function without one
@@ -1959,7 +1975,12 @@ static void check_program_emit_part_refused(CheckEmitPart* part);
 // (check_lower_deferred_part), or the part's failure as a writer's without room.
 static void check_program_emit_lower_half(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part)
 {
-    if (run->shared->deferred && !check_lower_deferred_part(&lane->writer, run->shared, &part->lower))
+    // The caller's loop over the part's bodies first (#2536's step 2.2c.4, part 2), which writes what their lowering reads.
+    if (run->loop != NULL && !run->loop->run(run->loop->context, part->lower.end))
+    {
+        check_program_emit_part_refused(part);
+    }
+    else if (run->shared->deferred && !check_lower_deferred_part(&lane->writer, run->shared, &part->lower))
     {
         check_program_emit_part_refused(part);
     }
@@ -3770,6 +3791,14 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // decides, without --tier1's lifetimes and sparse switches.
     const bool deferred = lanes != NULL && lanes->deferred_lowering && !lanes->tier1 && program->lifetime_first == NULL && program->control_capacity >= program->control_count &&
                           program->chain_stop_capacity >= program->chain_stop_count;
+    // A caller's bodies' loop (#2536's step 2.2c.4, part 2), which a lowering that reads the controls' totals takes whole,
+    // before its preparation; a deferred one's parts run it as they lower.
+    const CheckEmitLoop* loop = lanes != NULL && lanes->loop.run != NULL ? &lanes->loop : NULL;
+    if (valid && loop != NULL && !deferred)
+    {
+        valid = loop->run(loop->context, UINT32_MAX);
+        loop = NULL;
+    }
     if (valid)
     {
         const uint64_t prepare_start = stage_clock != NULL ? __rdtsc() : 0;
@@ -3837,6 +3866,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         .scratch = scratch,
         .bytes = bytes,
         .columns = columns,
+        .loop = loop,
     };
     run.codes = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, EmittedCode, count) : 0;
     run.bodies = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEmitBody, count) : 0;
@@ -3976,6 +4006,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     const uint64_t lanes_begin = timing ? check_program_lanes_now() : 0;
     uint32_t worked = 0;
+    // The lanes take the caller's loop whole before they start, as their parts run at once.
+    if (valid && count != 0 && run.loop != NULL && (active > 1 || growing))
+    {
+        valid = run.loop->run(run.loop->context, UINT32_MAX);
+        run.loop = NULL;
+    }
     if (valid && count != 0)
     {
         // The lanes' run, or the calling thread's alone; lanes that couldn't start, or a part that ran out of room, go

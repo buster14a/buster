@@ -47,6 +47,13 @@ requirements. [Command index](README.md).
   none of the controls' totals and deciding each part's jump tables with its
   lowering, on one lane without `--tier1`, the same bytes (step 2.2c.3's test
   option: [the design](../all-core-path.md#step-2-the-selection-after-the-windows)),
+  `--windowed-loop` lowering -c's provisional selection as the program's
+  loop runs, each window's bodies' loop before its lowering, and writing its
+  object after the tail, the diagnostics and the exact selection where the
+  provisional selection serves and its emission went, the exact selection's
+  emission after the loop otherwise, the same bytes and diagnostics (step
+  2.2c.4's test option, implying `--provisional-selection` and
+  `--deferred-lowering`, which reports on stderr whether its code served),
   `--tier1` compiling each function Tier 1's pipeline
   takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, both tiers'
   code the emission's `EmittedCode`, #1056, their unwind tables alike; with `-g`

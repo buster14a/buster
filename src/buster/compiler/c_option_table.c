@@ -88,6 +88,7 @@
     ENTRY(VERIFY, "--verify") \
     ENTRY(VERSION, "--version") \
     ENTRY(WINDOW_BYTES, "--window-bytes") \
+    ENTRY(WINDOWED_LOOP, "--windowed-loop") \
     ENTRY(WORKER_BUDGET, "--worker-budget") \
     ENTRY(WORKER_BUDGET_EQ, "--worker-budget=") \
     ENTRY(D, "-D") \
