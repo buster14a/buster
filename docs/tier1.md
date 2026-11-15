@@ -171,16 +171,21 @@ measurements of what each one gains. LIST is a comma-separated list of items
 applied in turn, each `+` or `-` and then a pass's name: `sccp`, `dce`, `cfg`
 (the jump threading), `merge` (CFG cleanup's merges, below), `licm`, `sroa`
 (on every function, with #1282's options, before the solver and promotion),
+`vectorize` (#2743's loop vectorizer, [its guide](tier1-loop-vectorization.md)),
 `gvn` (as `--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or
 `all`. The default is SCCP, dead-code removal, CFG cleanup, its merges and
 the inlining. LICM runs after if-conversion, before the optimizer, which
-cleans up after it. A function that LICM or SROA refuses goes on as it was.
+cleans up after it, and the loop vectorizer after LICM. A function that LICM,
+SROA or the loop vectorizer refuses goes on as it was.
 The summaries the unit's inlining builds run the same passes, and with SROA,
 as with the solver, a candidate compiles from its own pipeline.
 `--tier1-report` gives each pass's counts: `folded` constants,
 `removed_instructions` and `removed_blocks` (the optimizer's output against
 its input, merges included), `merged_blocks`, `licm_moved`, `sroa_split`
-(slots) and `gvn_removed`.
+(slots) and `gvn_removed`; with `vectorize`, a `tier1-vectorize` line gives the
+loops examined (each back edge's header once, outer loops included), those vectorized by their widest vector (`bytes16`,
+`bytes32`, `bytes64`), their reductions and run-time overlap tests (`guards`),
+and the refused loops by reason (`refused.shape` to `refused.width`).
 
 CFG cleanup's merges join a block to its predecessor when that predecessor is
 its only one and it is the predecessor's only executable successor. The block
@@ -257,10 +262,12 @@ parameters, locals and lexical scopes. Optimization may remove statements or
 move their instructions; generated records do not acquire invented source
 identities. An expanded callee's instructions are an instance's (#2541 step 3,
 `IrDebugInline`): their origins follow the function's own entries, their rows
-are the callee's lines, and each instance whose call is in the function's file
-is a `DW_TAG_inlined_subroutine` nested where it was expanded, whose frame a
-debugger shows; its callee's locals have no locations. The unwind tables use their independent
-frame events as before.
+are the callee's lines (in its file), and each instance is a
+`DW_TAG_inlined_subroutine` nested where it was expanded, whose frame a debugger
+shows, with its callee's parameters' values where the proof places their
+arguments' (`BUSTER_IR_DEBUG_BIND_INSTANCE`) and its other locals without a
+location. A dead function (`-c` only) is its abstract instance alone, so `-g`
+changes no code. The unwind tables use their independent frame events as before.
 
 Value locations require concrete machine proof. Whole retained objects use a
 verified frame base and their actual physical storage; shared rows need an
@@ -477,13 +484,21 @@ The AES rounds are its `aes` (#1840, its "AES rounds"), `BUSTER_TIER1_VECTOR_AES
 The bit shuffles into a mask are its `bitshuffle` (#1840, its "Bit shuffles into
 a mask"), `BUSTER_TIER1_VECTOR_BITSHUFFLE`: `vpshufbitqmb`, under the writemask
 where a mask's AND takes it.
-The multishifts and sums of absolute differences are its `quadword_op` (#1840,
-its "Quadword operations"), `BUSTER_TIER1_VECTOR_QUADWORD_OP`:
-`vpmultishiftqb` or `vpsadbw`.
+The multishifts, sums of absolute differences and products of doublewords are
+its `quadword_op` (#1840, #2780, its "Quadword operations"),
+`BUSTER_TIER1_VECTOR_QUADWORD_OP`: `vpmultishiftqb`, `vpsadbw`, `vpmuludq` or
+`vpmuldq`.
 The funnel shifts and rotates are its `funnel` (#1840, its "Funnel shifts and
 rotates"), `BUSTER_TIER1_VECTOR_FUNNEL`: a rotate by an immediate where its
 halves are one value and its counts a constant, else `vpshldv` or `vpshrdv`
 into the tied half's register.
+The multiply-adds and packs are its `pairwise` and the dot products its `dot`
+(#2780, its "The other units' rows"), `BUSTER_TIER1_VECTOR_PAIRWISE`: `vpmaddwd`,
+`vpmaddubsw` or a pack, and `BUSTER_TIER1_VECTOR_DOT`: `vpdpbusd` to `vpdpwssds`
+into the accumulator's register, which the destination takes first.
+A select of a vector's lanes less than zero is one `vpblendvb`, `vblendvps` or
+`vblendvpd` where the comparison is its alone (#2780,
+`BUSTER_TIER1_VECTOR_BLENDV`).
 
 ### Inlining (#1282, #2541)
 
@@ -512,7 +527,10 @@ candidates' call graph from their typed streams' direct calls
 (`Tier0Function.call_targets`), whose cycles' members (Tarjan's components, a
 self call too) are no candidates. Each other candidate has a summary, built once
 for the unit by the first lane to need it: its typed stream lowered at its own
-target, its calls of candidates expanded from their summaries (built first),
+target as its own pipeline lowers it, a vector wider than the target moves whole
+taken for the passes' split (a summary lowered without that refused every
+function with one, the compiler's own scalar-host checker's among them, #2541),
+its calls of candidates expanded from their summaries (built first),
 and Tier 1's passes from promotion to the verified optimizer
 (`check_tier1_passes`, below), whose function and analysis stay in that lane's
 arenas of the run until the run ends. A lane claims a summary by a
@@ -571,15 +589,18 @@ refers to once its callers have expanded its calls gets no code, symbol, frame
 or jump table (`check_tier1_inline_dead`), as LLVM's GlobalDCE drops it. A
 candidate is *rooted*, and keeps its code whatever its callers do, where an
 attribute keeps it (used, constructor, destructor, interrupt, target_clones,
-cpu_specific, cpu_dispatch, an alias's, ifunc's or weakref's, section, retain,
-patchable_function_entry, weak, selectany), a section placement, static data's
-initializers (`CheckProgram.initializer_references`) or an alias names it, or
-where it has several versions (target attributes of other strings,
-`BUSTER_CHECK_PROGRAM_TARGET_VERSIONS`). A target attribute alone roots
-nothing since #1398's step 3: LLVM's GlobalDCE drops a dead internal function
-whatever its target, and every `<immintrin.h>` wrapper has one, so an expanded
-wrapper kept its code until then. Without `--tier1` the same columns, last pass
-and dead set serve Tier 0's callees ([the Tier 0 guide](commands/tier0.md#inlining-always_inline-functions-1398)).
+cpu_specific, cpu_dispatch, an alias's, ifunc's or weakref's, retain,
+patchable_function_entry, weak, selectany), static data's initializers
+(`CheckProgram.initializer_references`) or an alias names it, or where it has
+several versions (target attributes of other strings,
+`BUSTER_CHECK_PROGRAM_TARGET_VERSIONS`). A section, an attribute's or a
+pragma's, keeps none: clang's inliner expands such a function as any other and
+drops an internal one nothing calls (#2541; the compiler's own checker is all
+under `#pragma clang section`). Nor does a target attribute alone, since
+#1398's step 3: LLVM's GlobalDCE drops a dead internal function whatever its
+target, and every `<immintrin.h>` wrapper has one, so an expanded wrapper kept
+its code until then. Without `--tier1` the same columns, last pass and dead set
+serve Tier 0's callees ([the Tier 0 guide](commands/tier0.md#inlining-always_inline-functions-1398)).
 The others are alive where a kept body's code refers to them
 (a call no caller expanded, a Tier 0 fallback's, an address taken), followed
 from each body reached. So that a dead function costs no selection,
@@ -595,10 +616,11 @@ summary, until none is left; the merge leaves the rest out. The objects are the
 same with and without holding (`--tier1-no-hold` makes every candidate's code
 on its lane, the comparison's control), and by any lane count. In `-c`'s object alone,
 whose symbols that nothing refers to are left out (a direct executable's
-binding resolves every program symbol, and keeps every function), not under `-g`, whose
-entries have no form for a function without code yet (#2541 step 3), with
+binding resolves every program symbol, and keeps every function), not with
 `-fpatchable-function-entry`, or in a unit with asm, whose templates refer to
-names. A dead function is no function of the object's for
+names. Under `-g` a dead function has no rows, address or `DW_TAG_subprogram`
+of its own, its abstract instance alone (`CheckProgramRows.dead`, #2541), so
+`-g` changes no code. A dead function is no function of the object's for
 `--tier1-report`'s counts and `--tier1-function-sizes`' manifest. `test-ir-inline`
 runs the inliner's SIMD and by-value fixtures, the latter on the IR's
 interpreter before and after inlining, SROA and promotion, #2541's generated

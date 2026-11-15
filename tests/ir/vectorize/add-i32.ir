@@ -1,0 +1,42 @@
+function (i64, i64, i64, i64) -> void {
+b0:
+  %0 = param.i64 0
+  %1 = param.i64 1
+  %2 = param.i64 2
+  %3 = param.i64 3
+  %4 = br.void b1
+b1:
+  %5 = const.i32 0x00000000000000000000000000000000
+  %6 = sext.i64 %5
+  %7 = br.void b2
+b2:
+  %8 = phi.i64 [%6, b1], [%32, b3]
+  %9 = icmp.i1 %8, %3 ult
+  %10 = zext.i32 %9
+  %11 = const.i32 0x00000000000000000000000000000000
+  %12 = icmp.i1 %8, %3 ult
+  %13 = cbr.void %12, b3, b4
+b3:
+  %14 = inttoptr.ptr %0
+  %15 = address.ptr %14 + %8 * 4 offset=0
+  %16 = ptrtoint.i64 %15
+  %17 = inttoptr.ptr %1
+  %18 = address.ptr %17 + %8 * 4 offset=0
+  %19 = ptrtoint.i64 %18
+  %20 = inttoptr.ptr %19
+  %21 = load.i32 %20 align=1
+  %22 = inttoptr.ptr %2
+  %23 = address.ptr %22 + %8 * 4 offset=0
+  %24 = ptrtoint.i64 %23
+  %25 = inttoptr.ptr %24
+  %26 = load.i32 %25 align=1
+  %27 = add.i32 %21, %26
+  %28 = inttoptr.ptr %16
+  %29 = store.void %28, %27 align=1
+  %30 = const.i32 0x00000000000000000000000000000001
+  %31 = sext.i64 %30
+  %32 = add.i64 %8, %31
+  %33 = br.void b2
+b4:
+  %34 = ret.void
+}

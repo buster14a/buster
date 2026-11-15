@@ -63,13 +63,15 @@
 // function its callers copy and its own code goes on from, with its verified analysis, and the calls expanded in it.
 // The analysis's arena is `frozen`, a copy of its builder's analyses arena as it was once the summary was built:
 // ir_verified_current reads the arena's length, and the builder's own goes on growing as it builds more, on its lane,
-// while another lane's code reads the summary. Nothing writes the copy once the summary is published.
+// while another lane's code reads the summary. Nothing writes the copy once the summary is published. `vectors` is
+// whether its source or an expanded callee's has vectors (check_tier1_inline_expand's).
 typedef struct CheckTier1Summary CheckTier1Summary;
 struct CheckTier1Summary
 {
     CheckTier1Passes passes;
     Arena frozen;
     uint32_t inlined;
+    bool vectors;
 };
 
 // The emission's generations of its inlining tables.
@@ -80,12 +82,14 @@ static uint64_t check_tier1_inline_generations = 0;
 // replace theirs at link time (weak or selectany, or a late weak one, `#pragma weak`'s: CheckProgram.weak_late_keys),
 // as clang's IR makes such a definition weak or linkonce, whose calls LLVM's inliner keeps (isInterposable); and
 // BUSTER_CHECK_TIER1_INLINE_ROOTED where an attribute keeps a definition's code whatever its callers expand (used, a
-// constructor's or destructor's, an interrupt handler's, a multiversioned one's, an alias's, ifunc's or weakref's, a
-// section's, retain, patchable_function_entry, naked; and the interposable ones). A target attribute alone is no
-// multiversioning: a function of several versions by target attributes is the table's (CheckProgram.body_targets'
-// BUSTER_CHECK_PROGRAM_TARGET_VERSIONS), and LLVM's GlobalDCE drops a dead internal function whatever its target, as
-// clang -O0 emits none of <immintrin.h>'s wrappers (#1398 step 3). The attributed declarations are found
-// 16 tokens at a time, as the emission's scan of them is (check_input_attributed_next), with its scalar twin.
+// constructor's or destructor's, an interrupt handler's, a multiversioned one's, an alias's, ifunc's or weakref's,
+// retain, patchable_function_entry, naked; and the interposable ones). A section, an attribute's or a pragma's, keeps
+// none: clang's inliner expands such a function as any other and drops an internal one nothing calls, and the compiler's
+// own checker, all of it under `#pragma clang section` (#502), lost the single-site class and its dead functions to it
+// (#2541). Nor does a target attribute alone: a function of several versions by target attributes is the table's
+// (CheckProgram.body_targets' BUSTER_CHECK_PROGRAM_TARGET_VERSIONS), and LLVM's GlobalDCE drops a dead internal function
+// whatever its target, as clang -O0 emits none of <immintrin.h>'s wrappers (#1398 step 3). The attributed declarations
+// are found 16 tokens at a time, as the emission's scan of them is (check_input_attributed_next), with its scalar twin.
 #define BUSTER_CHECK_TIER1_INLINE_INTERPOSABLE 1u
 #define BUSTER_CHECK_TIER1_INLINE_ROOTED 2u
 static void check_tier1_inline_marks(const CheckProgram* program, bool scalar, uint8_t* marks)
@@ -108,7 +112,7 @@ static void check_tier1_inline_marks(const CheckProgram* program, bool scalar, u
                 const bool rooted = interposable || kind == CHECK_ATTRIBUTE_USED || kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR ||
                                     kind == CHECK_ATTRIBUTE_INTERRUPT || kind == CHECK_ATTRIBUTE_TARGET_CLONES ||
                                     kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || kind == CHECK_ATTRIBUTE_CPU_DISPATCH || kind == CHECK_ATTRIBUTE_ALIAS ||
-                                    kind == CHECK_ATTRIBUTE_IFUNC || kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_SECTION || kind == CHECK_ATTRIBUTE_RETAIN ||
+                                    kind == CHECK_ATTRIBUTE_IFUNC || kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_RETAIN ||
                                     kind == CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY || kind == CHECK_ATTRIBUTE_NAKED;
                 marks[object] |= attribute->ignored ? 0 : (interposable ? BUSTER_CHECK_TIER1_INLINE_INTERPOSABLE : 0) | (rooted ? BUSTER_CHECK_TIER1_INLINE_ROOTED : 0);
             }
@@ -179,14 +183,6 @@ static bool check_tier1_inline_table(const CheckProgram* program, const CheckPro
         for (uint32_t k = 0; k < program->initializer_reference_count; k += 1)
         {
             const uint32_t object = program->initializer_references[k];
-            marks[object <= input->token_count ? object : 0] |= BUSTER_CHECK_TIER1_INLINE_ROOTED;
-        }
-        // A section's placement (an attribute's or a pragma's).
-        const CheckInputSections* sections = input->sections;
-        for (uint32_t k = 0; sections != NULL && k < sections->placement_count; k += 1)
-        {
-            const uint32_t token = sections->placements[k].token;
-            const uint32_t object = token < input->token_count ? input->objects[token] : 0;
             marks[object <= input->token_count ? object : 0] |= BUSTER_CHECK_TIER1_INLINE_ROOTED;
         }
         for (uint32_t k = 0; k < program->alias_count; k += 1)
@@ -578,13 +574,15 @@ static bool check_tier1_inline_aggregates(const IrFunction* function, uint32_t n
 // inlines it whatever its size, a single-site one BUSTER_CHECK_TIER1_INLINE_SINGLE_COST, a small one
 // BUSTER_CHECK_TIER1_INLINE_SMALL_COST; the caller alone is rewritten (IrInlineUnit.only). A callee whose signature the
 // call doesn't match (ir_inline_signature, which would refuse the whole unit) stays a call. The unit's columns are in
-// steps[4], before the expansion.
+// steps[4], before the expansion. *vectors is whether the body's source has vectors (Tier0Function.vectors) or an
+// expanded callee's summary's does (CheckTier1Summary.vectors).
 static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inline* inlining, uint32_t caller, const IrFunction* lowered, const X86Target* target, bool scalar,
-                                      IrFunction* result, uint32_t* inlined, bool* verified)
+                                      IrFunction* result, uint32_t* inlined, bool* verified, bool* vectors)
 {
     const CheckProgram* program = inlining->program;
     *inlined = 0;
     *verified = true;
+    *vectors = inlining->lowered->functions[caller].vectors;
     bool changed = false;
     Arena* scratch = &lane->scratch;
     const uint64_t mark = scratch->length;
@@ -690,7 +688,10 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
             *verified = false;
             for (uint32_t call = expanded.call_offsets[position]; call < expanded.call_offsets[position + 1]; call += 1)
             {
-                aggregates = aggregates || (expanded.decisions[call] == IR_INLINE_SELECTED && check_tier1_inline_aggregates(lowered, expanded.call_nodes[call]));
+                const bool selected = expanded.decisions[call] == IR_INLINE_SELECTED;
+                const uint32_t node = expanded.call_nodes[call];
+                aggregates = aggregates || (selected && check_tier1_inline_aggregates(lowered, node));
+                *vectors = *vectors || (selected && inlining->summaries[inlining->candidates[lowered->a[node]] - 1].vectors);
             }
         }
     }
@@ -699,8 +700,11 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
     // The aggregates' slots of a body with vectors, as without inlining, or of an expansion that copied an aggregate argument
     // or result into a slot of its own, which SROA splits. Its other aggregates are as they would be without inlining:
     // splitting them is no expansion's work (on sqlite3.c, 0.05% of the code for a quarter of the expansion's time). Where
-    // SROA fails the body keeps its calls. An expansion SROA doesn't take is verified by promotion.
-    if (aggregates || ir_function_has_vectors_path(&current, !scalar))
+    // SROA fails the body keeps its calls. An expansion SROA doesn't take is verified by promotion. The vectors are its
+    // source's or an expanded callee's (*vectors): a COPY's 16-byte pieces (#2693, ir_typed_copy_pointers) are vectors in
+    // the IR but give SROA nothing of theirs to split, and on sqlite3.c they made it split sqlite3VdbeExec (+141 M
+    // instructions).
+    if (aggregates || (*vectors && ir_function_has_vectors_path(&current, !scalar)))
     {
         IrSroaOptions options = ir_sroa_options();
         options.scalar = scalar;
@@ -748,16 +752,19 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
     IrCheck check = ir_check(output != 0 && analyses != 0 && !function->calls_returns_twice ? IR_OK : IR_ERROR_UNSUPPORTED, BUSTER_IR_NONE, 0);
     if (check.error == IR_OK)
     {
-        // Under -g with its source identities, which its callers' expansions carry as an instance's (#2541 step 3).
-        check = inlining->sources ? ir_lower_typed_target_sources(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered, scalar) :
-                scalar            ? ir_lower_typed_target_scalar(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered) :
-                                    ir_lower_typed_target(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered);
+        // As the function's own pipeline lowers it (check_tier1_compile): a vector wider than the target moves whole is taken,
+        // for check_tier1_passes' split (#1624), else a summary of a function with one is refused and its calls stay calls
+        // (the compiler's own scalar-host build, whose AVX-512 types are wider than x86-64's: #2541). Under -g with its
+        // source identities, which its callers' expansions carry as an instance's (#2541 step 3).
+        check = inlining->sources ? ir_lower_typed_target_pieces_sources(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered, scalar) :
+                                    ir_lower_typed_target_pieces(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered, scalar);
     }
     IrFunction expanded = lowered;
     uint32_t inlined = 0;
     bool verified = true;
-    const bool changed = check.error == IR_OK && check_tier1_inline_expand(lane, inlining, b, &lowered, target, scalar, &expanded, &inlined, &verified);
-    CheckTier1Summary summary = { 0 };
+    bool vectors = function->vectors;
+    const bool changed = check.error == IR_OK && check_tier1_inline_expand(lane, inlining, b, &lowered, target, scalar, &expanded, &inlined, &verified, &vectors);
+    CheckTier1Summary summary = { .vectors = vectors };
     bool built = false;
     if (check.error == IR_OK)
     {
@@ -888,7 +895,8 @@ static bool check_tier1_inline(CheckTier1Lane* lane, uint32_t caller, const IrFu
                 check_tier1_inline_summary(lane, inlining, candidate - 1, scalar, certify);
             }
         }
-        changed = check_tier1_inline_expand(lane, inlining, caller, lowered, target, scalar, result, inlined, verified);
+        bool vectors = false;
+        changed = check_tier1_inline_expand(lane, inlining, caller, lowered, target, scalar, result, inlined, verified, &vectors);
     }
     return changed;
 }
@@ -934,16 +942,16 @@ static uint32_t check_tier1_inline_reach(const CheckTier1Inline* inlining, const
 // none); it keeps it where a kept body's code refers to it (a call no caller expanded, a Tier 0 caller's, an address). The
 // kept bodies are the others, with the asm helpers (`helpers`), and their references are followed from each body they
 // reach (an explicit stack). An asm template's references (a helper's or a naked body's, `naked`) are its names' indices,
-// through `asm_symbols` (of `asm_names`). Not under -g (`sources`), whose entries have no form for a function without code
-// yet (#2541 step 3), nor with -fpatchable-function-entry; the emission asks in -c's object alone. Temporaries in
-// `scratch`; none dead where they don't fit.
+// through `asm_symbols` (of `asm_names`). Not with -fpatchable-function-entry; the emission asks in -c's object alone, and
+// under -g a dead one keeps its abstract instance alone (CheckProgramRows.dead): Tier 0's callees, whose splice leaves
+// no instance, are asked about without -g alone. Temporaries in `scratch`; none dead where they don't fit.
 static uint32_t check_tier1_inline_dead(CheckTier1Inline* inlining, const EmittedCode* codes, const CheckProgramHelpers* helpers, const CheckProgramNaked* naked,
-                                        const SymbolId* asm_symbols, uint32_t asm_names, bool sources, Arena* scratch)
+                                        const SymbolId* asm_symbols, uint32_t asm_names, Arena* scratch)
 {
     const uint32_t count = inlining->body_count;
     const CheckProgram* program = inlining->program;
     const uint64_t mark = scratch->length;
-    uint8_t* reached = inlining->rooted != 0 && !sources && program->patchable_count == 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
+    uint8_t* reached = inlining->rooted != 0 && program->patchable_count == 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
     uint32_t* stack = reached != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t dead = 0;
     if (stack != 0)

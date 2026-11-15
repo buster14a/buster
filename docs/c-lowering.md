@@ -1591,23 +1591,34 @@ vector's elements remain named lowering refusals: clang 23's code is invalid IR 
 doesn't compile. Boolean elementwise `clzg` and `ctzg` also retain a named
 refusal: clang 23.1.4 emits a scalar zero count followed by an invalid
 scalar-to-vector `trunc`, crashing or producing incorrect code depending on
-the vector's width. Element-wise conversions, shuffles, non-boolean builtins,
-reductions and logical operations take at most 1024 elements, bounding their
-expanded entry runs; packed bit operations do not unpack those lanes. Past that
-(`BUSTER_CHECK_LOWER_TRANSPORT_LANES`) they stay refused by name, where clang
-compiles them (#1834's sweep: `ext_vector_type(1025)`): LLVM splits such a
-vector into its legal registers' pieces, while these lowerings expand an entry
-run per element, a function's entries growing with the lanes. Matching clang
-there takes conversions, shuffles and reductions at the registers' width, as
-the operators' pieces are (`check_lower_transport_rows`), not wider bounds;
-#2216 lists them with the other refusals that hold at every target.
+the vector's width. Element-wise conversions, shuffles, builtins, reductions
+and logical operations take vectors of any number of elements (#2216; until
+then, more than 1,024 were refused by name, where clang compiles them, as
+#1834's sweep's `ext_vector_type(1025)` showed). As LLVM splits such a vector
+into its legal registers' pieces, those that have rows run on register-width
+pieces, their entries growing with the pieces: the operators
+(`check_lower_transport_rows`), the elementwise builtins' rows
+(`check_lower_transport_elementwise`), the logical operators' masks, the
+floating reductions' halvings, and an integer reduction, which folds its whole
+pieces into one by the operation's row first (`check_lower_transport_reduce`;
+an integer's fold doesn't depend on the elements' order) and then that piece's
+elements and those past the pieces. The rest run element by element, as clang's
+code does for the C library's calls, in-order sums, deposits and shuffles, and
+where no row takes the operation; a conversion between transport vectors still
+converts element by element, as an element-sized scalar conversion each, where
+clang's code converts pieces (a piece's conversion row is a type's, which a
+piece's shape would need: #2815). A shuffle's indices are read as its elements are
+gathered (`check_lower_transport_index`), so no array of them bounds the
+elements.
 
 `test-checker --program-vectors` runs a program of all of these against clang
 -O0's build of it at x86-64-v4 (`vector-transport-compute`) and at x86-64,
 x86-64-v2 and x86-64-v3 (`baseline-transport-compute`), on both paths; the
 packed boolean builtins have matching `vector-boolean-builtins` and
 `baseline-boolean-builtins` cases covering 1 through 1024 lanes, padding,
-neighboring-byte guards and argument evaluation. The refusals' fixtures name
+neighboring-byte guards and argument evaluation, and the `vector-wide-*` and
+`baseline-wide-*` cases vectors of 1,025 to 2,048 elements' reductions,
+conversions, builtins, logical operators and shuffles. The refusals' fixtures name
 each refusal. The same programs pass by the driver
 with `--scalar`, by default and with `--tier1 --verify` at x86-64, x86-64-v3 and
 x86-64-v4.

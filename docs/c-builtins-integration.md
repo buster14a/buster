@@ -2124,7 +2124,13 @@ as a prototype's parameter. Its code unwinds to the handler as LLVM's
   - `unwind_tier0_frame_tails` reads the frame.
   - `emitted_verify_frames` proves its rows up to the `mov rsp, rcx`. At the
     jump, the handler's stack is one no rule describes, and LLVM's CFI
-    doesn't describe it either.
+    doesn't describe it either. The program's own stores into the save slots
+    (`frame[-7] = x`, through a pointer register, not rsp or rbp) are
+    trusted not to break the rules, as `uw_install_context`'s writes are the
+    builtin's contract. Before #2678 the verifier never followed such an
+    address, whose `int` index Tier 0 moved to a register (`lea (%rax,%rcx,8)`);
+    as an immediate (`add $-56, %rax`, or a `long` index on any commit) it
+    does.
   - Tier 1 falls back to Tier 0 for the function, as for
     `__builtin_unwind_init`'s frame.
 - **Tests.** `test-checker-driver`'s eh_return program writes rax's and

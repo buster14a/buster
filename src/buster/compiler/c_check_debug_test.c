@@ -227,32 +227,48 @@ static void check_debug_test_keep(CheckDebugTestTally* tally)
         const uint64_t room = (uint64_t)count + BUSTER_CHECK_DEBUG_SLACK;
         uint32_t* scalar_offsets = calloc(room, sizeof(uint32_t));
         uint32_t* scalar_lines = calloc(room, sizeof(uint32_t));
+        uint32_t* scalar_keys = calloc(room, sizeof(uint32_t));
         uint32_t* vector_offsets = calloc(room, sizeof(uint32_t));
         uint32_t* vector_lines = calloc(room, sizeof(uint32_t));
-        ready = ready && scalar_offsets != 0 && scalar_lines != 0 && vector_offsets != 0 && vector_lines != 0;
+        uint32_t* vector_keys = calloc(room, sizeof(uint32_t));
+        ready = ready && scalar_offsets != 0 && scalar_lines != 0 && scalar_keys != 0 && vector_offsets != 0 && vector_lines != 0 && vector_keys != 0;
         // The body's start: a row's offset, or none.
         const uint32_t body = count != 0 && check_debug_test_random(tally) % 4 != 0 ? (uint32_t)(check_debug_test_random(tally) % count) * 3 : UINT32_MAX;
         if (ready)
         {
-            const uint32_t scalar = check_debug_keep_scalar(offsets, keys, lines, count, key, body, scalar_offsets, scalar_lines);
-            const uint32_t vector = check_debug_keep(offsets, keys, lines, count, key, body, vector_offsets, vector_lines);
+            const uint32_t scalar = check_debug_keep_scalar(offsets, keys, lines, count, body, scalar_offsets, scalar_lines, scalar_keys);
+            const uint32_t vector = check_debug_keep(offsets, keys, lines, count, body, vector_offsets, vector_lines, vector_keys);
             const bool same = scalar == vector && memcmp(scalar_offsets, vector_offsets, (uint64_t)scalar * sizeof(uint32_t)) == 0 &&
-                              memcmp(scalar_lines, vector_lines, (uint64_t)scalar * sizeof(uint32_t)) == 0;
+                              memcmp(scalar_lines, vector_lines, (uint64_t)scalar * sizeof(uint32_t)) == 0 &&
+                              memcmp(scalar_keys, vector_keys, (uint64_t)scalar * sizeof(uint32_t)) == 0;
             char detail[96];
             snprintf(detail, sizeof(detail), "%u rows, %u kept against %u", count, vector, scalar);
             check_debug_test_expect(tally, same, "the kept rows' vector path keeps the exact path's rows", detail);
-            // The exact path against what keeping means: rows of the file, each line at most INT32_MAX and unlike the one
-            // kept before it, but the body's row.
+            // The exact path against what keeping means: rows in a file, each line at most INT32_MAX and its file or line
+            // unlike the one kept before it, but the body's row; and every row in a file whose line or file changes kept.
             bool meant = true;
             for (uint32_t i = 0; meant && i < scalar; i += 1)
             {
-                meant = scalar_lines[i] <= INT32_MAX && (i == 0 || scalar_lines[i] != scalar_lines[i - 1] || scalar_offsets[i] == body);
+                meant = scalar_keys[i] != BUSTER_CHECK_DEBUG_NO_FILE && scalar_lines[i] <= INT32_MAX &&
+                        (i == 0 || scalar_lines[i] != scalar_lines[i - 1] || scalar_keys[i] != scalar_keys[i - 1] || scalar_offsets[i] == body);
             }
-            check_debug_test_expect(tally, meant, "the kept rows' lines change from row to row", detail);
+            uint32_t changes = 0;
+            uint32_t last_line = UINT32_MAX;
+            uint32_t last_key = BUSTER_CHECK_DEBUG_NO_FILE;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const bool eligible = keys[i] != BUSTER_CHECK_DEBUG_NO_FILE && lines[i] <= INT32_MAX;
+                changes += eligible && (lines[i] != last_line || keys[i] != last_key || offsets[i] == body) ? 1 : 0;
+                last_line = eligible ? lines[i] : last_line;
+                last_key = eligible ? keys[i] : last_key;
+            }
+            check_debug_test_expect(tally, meant && changes == scalar, "the kept rows' file or line changes from row to row", detail);
             kept_total += scalar;
         }
+        free(vector_keys);
         free(vector_lines);
         free(vector_offsets);
+        free(scalar_keys);
         free(scalar_lines);
         free(scalar_offsets);
         for (uint32_t g = 0; g < 3; g += 1)
@@ -386,13 +402,16 @@ struct CheckDebugTestExpected
     uint32_t declaration;
     uint32_t required[12];
     uint32_t forbidden[8];
+    // A row it must have in another file (DebugUnit.row_files: a statement an #include put in its body), or none.
+    const char* other_file;
+    uint32_t other_line;
 };
 
 static const CheckDebugTestExpected check_debug_test_expected[] = {
     { "header_add", "dbg_rows.h", 1, { 3, 4 }, { 2 } },
     { "scale", "dbg_rows.c", 4, { 6, 7, 8 }, { 2, 3, 5 } },
     { "nested", "dbg_rows.c", 20, { 22, 23 }, { 10, 11, 18, 19, 21 } },
-    { "included", "dbg_rows.c", 25, { 27, 29, 30 }, { 1, 28 } },
+    { "included", "dbg_rows.c", 25, { 27, 29, 30 }, { 1, 28 }, "dbg_body.inc", 1 },
     { "moved", "dbg_rows.c", 32, { 34, 500, 501 }, { 35, 36 } },
     { "main", "dbg_rows.c", 39, { 42, 43, 45, 47, 49, 50, 51, 52, 53 }, { 40, 46 } },
     { "renamed", "dbg_renamed.c", 1, { 3, 4 }, { 2 } },
@@ -605,7 +624,9 @@ static bool check_debug_test_same(const CheckDebug* a, const CheckDebug* b)
 {
     bool same = a->unit.function_count == b->unit.function_count && a->unit.row_count == b->unit.row_count && a->unit.file_count == b->unit.file_count &&
                 memcmp(a->unit.offsets, b->unit.offsets, (uint64_t)a->unit.row_count * sizeof(uint32_t)) == 0 &&
-                memcmp(a->unit.lines, b->unit.lines, (uint64_t)a->unit.row_count * sizeof(uint32_t)) == 0;
+                memcmp(a->unit.lines, b->unit.lines, (uint64_t)a->unit.row_count * sizeof(uint32_t)) == 0 &&
+                (a->unit.row_files == 0) == (b->unit.row_files == 0) &&
+                (a->unit.row_files == 0 || memcmp(a->unit.row_files, b->unit.row_files, (uint64_t)a->unit.row_count * sizeof(uint32_t)) == 0);
     for (uint32_t section = 0; same && section < BUSTER_DEBUG_SECTIONS; section += 1)
     {
         same = a->output.sections[section].size == b->output.sections[section].size &&
@@ -626,11 +647,17 @@ static void check_debug_test_expectations(CheckDebugTestTally* tally, const Chec
             const DebugFunction* candidate = &debug->unit.functions[f];
             function = candidate->name.length == strlen(expected->function) && memcmp(candidate->name.pointer, expected->function, candidate->name.length) == 0 ? candidate : function;
         }
+        // A row is in the function's file, or (DebugUnit.row_files) another's, which the detail shows as FILE:LINE.
+        const uint32_t* row_files = debug->unit.row_files;
         char lines[512] = { 0 };
         uint64_t used = 0;
         for (uint32_t r = 0; function != 0 && r < function->row_count && used < sizeof(lines); r += 1)
         {
-            used += (uint64_t)snprintf(lines + used, sizeof(lines) - used, " %u", debug->unit.lines[function->first_row + r]);
+            const uint32_t index = function->first_row + r;
+            const uint32_t row_file = row_files != 0 ? row_files[index] : function->file;
+            const String8 other = row_file != function->file && row_file < debug->unit.file_count ? debug->unit.files[row_file] : (String8){ 0 };
+            used += other.length != 0 ? (uint64_t)snprintf(lines + used, sizeof(lines) - used, " %.*s:%u", (int)other.length, other.pointer, debug->unit.lines[index]) :
+                                        (uint64_t)snprintf(lines + used, sizeof(lines) - used, " %u", debug->unit.lines[index]);
         }
         char detail[640];
         snprintf(detail, sizeof(detail), "%s: rows on lines%s", expected->function, lines);
@@ -644,7 +671,8 @@ static void check_debug_test_expectations(CheckDebugTestTally* tally, const Chec
             bool found = false;
             for (uint32_t r = 0; r < function->row_count; r += 1)
             {
-                found |= debug->unit.lines[function->first_row + r] == expected->required[i];
+                const uint32_t index = function->first_row + r;
+                found |= (row_files == 0 || row_files[index] == function->file) && debug->unit.lines[index] == expected->required[i];
             }
             required = found;
         }
@@ -654,10 +682,23 @@ static void check_debug_test_expectations(CheckDebugTestTally* tally, const Chec
         {
             for (uint32_t r = 0; r < function->row_count; r += 1)
             {
-                forbidden &= debug->unit.lines[function->first_row + r] != expected->forbidden[i];
+                const uint32_t index = function->first_row + r;
+                forbidden &= (row_files != 0 && row_files[index] != function->file) || debug->unit.lines[index] != expected->forbidden[i];
             }
         }
         check_debug_test_expect(tally, forbidden, "a fixture's function has no row on a macro's definition, a brace that starts nothing or a blank line", detail);
+        // Its rows in another file (#2541): each in a file of the unit, and the one expected there.
+        bool elsewhere = function != 0 && expected->other_file == 0;
+        const uint64_t other_name = expected->other_file != 0 ? strlen(expected->other_file) : 0;
+        for (uint32_t r = 0; function != 0 && r < function->row_count; r += 1)
+        {
+            const uint32_t index = function->first_row + r;
+            const uint32_t row_file = row_files != 0 ? row_files[index] : function->file;
+            const String8 named = row_file < debug->unit.file_count ? debug->unit.files[row_file] : (String8){ 0 };
+            elsewhere |= expected->other_file != 0 && row_file != function->file && named.length >= other_name &&
+                         memcmp(named.pointer + named.length - other_name, expected->other_file, other_name) == 0 && debug->unit.lines[index] == expected->other_line;
+        }
+        check_debug_test_expect(tally, elsewhere, "a fixture's function has its rows in another file at their lines there", detail);
     }
 }
 
@@ -780,12 +821,17 @@ static void check_debug_test_sources(CheckDebugTestTally* tally, const char* dir
                     debugs[path_kind] = built;
                     uint32_t* offsets = malloc(((uint64_t)built.unit.row_count + 1) * sizeof(uint32_t));
                     uint32_t* lines = malloc(((uint64_t)built.unit.row_count + 1) * sizeof(uint32_t));
+                    uint32_t* row_files = built.unit.row_files != 0 ? malloc(((uint64_t)built.unit.row_count + 1) * sizeof(uint32_t)) : 0;
                     DebugFunction* functions = malloc(((uint64_t)built.unit.function_count + 1) * sizeof(DebugFunction));
                     String8* files = malloc(((uint64_t)built.unit.file_count + 1) * sizeof(String8));
-                    if (offsets != 0 && lines != 0 && functions != 0 && files != 0)
+                    if (offsets != 0 && lines != 0 && functions != 0 && files != 0 && (built.unit.row_files == 0 || row_files != 0))
                     {
                         memcpy(offsets, built.unit.offsets, (uint64_t)built.unit.row_count * sizeof(uint32_t));
                         memcpy(lines, built.unit.lines, (uint64_t)built.unit.row_count * sizeof(uint32_t));
+                        if (row_files != 0)
+                        {
+                            memcpy(row_files, built.unit.row_files, (uint64_t)built.unit.row_count * sizeof(uint32_t));
+                        }
                         memcpy(functions, built.unit.functions, (uint64_t)built.unit.function_count * sizeof(DebugFunction));
                         for (uint32_t i = 0; i < built.unit.file_count; i += 1)
                         {
@@ -798,6 +844,7 @@ static void check_debug_test_sources(CheckDebugTestTally* tally, const char* dir
                     }
                     debugs[path_kind].unit.offsets = offsets;
                     debugs[path_kind].unit.lines = lines;
+                    debugs[path_kind].unit.row_files = row_files;
                     debugs[path_kind].unit.functions = functions;
                     debugs[path_kind].unit.files = files;
                     for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
@@ -837,6 +884,7 @@ static void check_debug_test_sources(CheckDebugTestTally* tally, const char* dir
             }
             free((void*)debugs[path_kind].unit.offsets);
             free((void*)debugs[path_kind].unit.lines);
+            free((void*)debugs[path_kind].unit.row_files);
             free((void*)debugs[path_kind].unit.functions);
             free((void*)debugs[path_kind].unit.files);
             for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
@@ -1428,6 +1476,7 @@ static int run_check_debug_tests(int argc, char** argv)
             check_debug_values_test(&tally, directory, &arena);
             check_debug_tier1_values_test(&tally, directory, &arena);
             check_debug_tier1_inline_test(&tally, directory, &arena);
+            check_debug_tier1_header_test(&tally, directory, &arena);
             check_debug_test_library_main(&tally, directory, &arena);
             check_unwind_test_driver(&tally, directory, &arena);
         }

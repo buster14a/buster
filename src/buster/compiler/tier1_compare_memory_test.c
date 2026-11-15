@@ -19,6 +19,9 @@ static bool tier1_select_test_memory_predicate(uint32_t predicate, uint32_t widt
     return tier1_select_test_compare(predicate, 8, a, b);
 }
 
+// Each predicate at each access width, against registers and immediates, as a truth value, a branch's and a fused
+// select's (#2676, `branch` 2), whose values are rcx's and r8's, its width a quadword's or a doubleword's by the
+// predicate. The destination is any of the comparison's registers or, for the select, either of its values'.
 static void tier1_select_test_compare_memory_holes(Tier1SelectTest* test)
 {
     uint8_t* mapping = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -30,7 +33,11 @@ static void tier1_select_test_compare_memory_holes(Tier1SelectTest* test)
         X86_REGISTER_RDI,
         X86_REGISTER_RSI,
         X86_REGISTER_RDX,
+        X86_REGISTER_RCX,
+        X86_REGISTER_R8,
     };
+    const uint64_t chosen = UINT64_C(0x1111222233334444);
+    const uint64_t other = UINT64_C(0x5555666677778888);
     for (uint32_t width = 1; guarded && width <= 8; width *= 2)
     {
         const uint64_t sign = UINT64_C(1) << (width * 8 - 1);
@@ -72,11 +79,13 @@ static void tier1_select_test_compare_memory_holes(Tier1SelectTest* test)
                 const int64_t signed_constant = (int64_t)(constant << (64 - width * 8)) >> (64 - width * 8);
                 for (uint32_t d = 0; d < BUSTER_ARRAY_LENGTH(destinations); d += 1)
                 {
-                    for (uint32_t branch = 0; branch < 2; branch += 1)
+                    for (uint32_t branch = 0; branch < 3; branch += 1)
                     {
+                        const bool select = branch == 2;
+                        const uint32_t select_width = (predicate & 1) != 0 ? 4 : 8;
                         const Tier1SelectHoles holes =
                         {
-                            .rule = branch != 0 ? TIER1_RULE_BRANCH_COMPARE : immediate != 0 ? TIER1_RULE_COMPARE_IMMEDIATE : TIER1_RULE_COMPARE,
+                            .rule = select ? TIER1_RULE_SELECT_COMPARE : branch != 0 ? TIER1_RULE_BRANCH_COMPARE : immediate != 0 ? TIER1_RULE_COMPARE_IMMEDIATE : TIER1_RULE_COMPARE,
                             .immediate = constant,
                             .memory =
                             {
@@ -85,9 +94,12 @@ static void tier1_select_test_compare_memory_holes(Tier1SelectTest* test)
                                 .index = X86_REGISTER_RSI,
                                 .mode = BUSTER_X86_MEMORY_BASE_INDEX(0),
                             },
-                            .width = (uint8_t)width,
+                            .width = (uint8_t)(select ? select_width : width),
+                            .source_width = (uint8_t)(select ? width : 0),
                             .destination = destinations[d],
                             .left = X86_REGISTER_RDX,
+                            .third = X86_REGISTER_RCX,
+                            .fourth = X86_REGISTER_R8,
                             .condition = (uint8_t)predicate,
                             .compare_immediate = immediate != 0,
                             .compare_memory = true,
@@ -106,11 +118,21 @@ static void tier1_select_test_compare_memory_holes(Tier1SelectTest* test)
                                                      short_immediate ? (width == 2 ? X86_FORM_CMP_RM16_IMM8 : width == 8 ? X86_FORM_CMP_RM64_IMM8 : X86_FORM_CMP_RM32_IMM8) :
                                                      width == 2 ? X86_FORM_CMP_RM16_IMM16 : width == 8 ? X86_FORM_CMP_RM64_IMM32 : X86_FORM_CMP_RM32_IMM32;
                         tier1_select_test_expect(test, compare_form == wanted_form, "a memory comparison's immediate takes the shortest form its width sign-extends");
-                        X86Instruction records[8];
-                        memcpy(records, selected.records, selected.count * sizeof(*records));
-                        uint32_t count = selected.count;
+                        X86Instruction records[16];
+                        // A select's values first, the wrapper's: rcx's where the comparison holds, r8's where it doesn't.
+                        const uint32_t prefix = select ? 2 : 0;
+                        records[0] = tier1_select_constant_move(8, X86_REGISTER_RCX, chosen);
+                        records[1] = tier1_select_constant_move(8, X86_REGISTER_R8, other);
+                        memcpy(records + prefix, selected.records, selected.count * sizeof(*records));
+                        uint32_t count = prefix + selected.count;
                         bool ready = true;
-                        if (branch != 0)
+                        if (select)
+                        {
+                            tier1_select_test_expect(test, selected.count <= 3, "a fused select is its comparison, a move and a cmov");
+                            records[count++] = tier1_select_move(8, X86_REGISTER_RAX, holes.destination);
+                            records[count++] = (X86Instruction){ .form = X86_FORM_RET };
+                        }
+                        else if (branch != 0)
                         {
                             tier1_select_test_expect(test, selected.count == 3, "memory compare keeps its two branch records");
                             records[count++] = (X86Instruction){ .immediate = 11, .rm = X86_REGISTER_RAX, .form = X86_FORM_MOV_R32_IMM32 };
@@ -128,7 +150,7 @@ static void tier1_select_test_compare_memory_holes(Tier1SelectTest* test)
                             records[count++] = tier1_select_move(8, X86_REGISTER_RAX, holes.destination);
                             records[count++] = (X86Instruction){ .form = X86_FORM_RET };
                         }
-                        if (ready && tier1_select_test_load_code(test, records, count, selected.count, false))
+                        if (ready && tier1_select_test_load_records(test, records, count, prefix, prefix + selected.count, false))
                         {
                             for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(samples); a += 1)
                             {
@@ -137,7 +159,8 @@ static void tier1_select_test_compare_memory_holes(Tier1SelectTest* test)
                                     memcpy(bytes, &samples[a], width);
                                     const bool compared = immediate != 0 ? tier1_select_test_memory_predicate(predicate, width, samples[a], constant) :
                                                                           tier1_select_test_memory_predicate(predicate, width, samples[b], samples[a]);
-                                    const uint64_t expected = branch != 0 ? (compared ? 11 : 22) : compared;
+                                    const uint64_t select_mask = select_width == 4 ? UINT32_MAX : UINT64_MAX;
+                                    const uint64_t expected = select ? (compared ? chosen : other) & select_mask : branch != 0 ? (compared ? 11 : 22) : compared;
                                     const uint64_t actual = tier1_select_test_call(test, (uintptr_t)bytes, 3, samples[b]);
                                     uint64_t after = 0;
                                     memcpy(&after, bytes, width);
@@ -157,13 +180,17 @@ static void tier1_select_test_compare_memory_holes(Tier1SelectTest* test)
 }
 
 // Load at node 4, an optional integer promotion at 5, and an immediate/register comparison at 6. Consumer 0 returns
-// its I1, consumer 1 extends it to I32, and consumer 2 branches to return 11/22. No other instruction accesses memory.
+// its I1, consumer 1 extends it to I32, and consumer 2 branches to return 11/22. Consumers 3 and 4 (#2676) select 11 or
+// 22 by it, after the two constants: 3's address has no index, which the fused select's memory operand takes, and 4's
+// has one, whose load the select's comparison reads from a register. No other instruction accesses memory.
 static void tier1_select_test_compare_memory_plan(Tier1SelectTest* test, uint32_t width, uint32_t result_width, uint8_t extension, uint64_t constant,
                                                 uint32_t predicate, uint32_t consumer, bool immediate, bool reversed, Arena* input, Arena* output, Arena* scratch, uint8_t* bytes)
 {
     const uint8_t type = width == 1 ? IR_I8 : width == 2 ? IR_I16 : width == 4 ? IR_I32 : IR_I64;
     const uint8_t compare_type = result_width == 4 ? IR_I32 : IR_I64;
-    const uint32_t count = consumer == 2 ? 12 : consumer == 1 ? 9 : 8;
+    const bool select = consumer >= 3;
+    const bool indexed = consumer != 3;
+    const uint32_t count = select ? 11 : consumer == 2 ? 12 : consumer == 1 ? 9 : 8;
     const IrSizes sizes =
     {
         .instruction_count = count,
@@ -190,7 +217,7 @@ static void tier1_select_test_compare_memory_plan(Tier1SelectTest* test, uint32_
         tier1_select_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
         tier1_select_test_node(&function, 2, IR_PARAM, compare_type, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
         // Keep the address separately so both base and index must remain effective uses of the final comparison.
-        tier1_select_test_node(&function, 3, IR_ADDRESS, IR_PTR, 0, 1, 0);
+        tier1_select_test_node(&function, 3, IR_ADDRESS, IR_PTR, 0, indexed ? 1 : BUSTER_IR_NONE, 0);
         tier1_select_test_node(&function, 4, IR_LOAD, type, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
         tier1_select_test_node(&function, 5, immediate ? IR_CONST : IR_COPY, compare_type, immediate ? 0 : 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
         uint32_t loaded = 4;
@@ -222,17 +249,25 @@ static void tier1_select_test_compare_memory_plan(Tier1SelectTest* test, uint32_
             tier1_select_test_node(&function, 7, IR_ZEXT, IR_I32, comparison, BUSTER_IR_NONE, BUSTER_IR_NONE);
             tier1_select_test_node(&function, 8, IR_RET, IR_VOID, 7, BUSTER_IR_NONE, BUSTER_IR_NONE);
         }
+        else if (select)
+        {
+            tier1_select_test_node(&function, 7, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 8, IR_CONST, IR_I32, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 9, IR_SELECT, IR_I32, comparison, 7, 8);
+            tier1_select_test_node(&function, 10, IR_RET, IR_VOID, 9, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
         else
         {
             tier1_select_test_node(&function, 7, IR_RET, IR_VOID, comparison, BUSTER_IR_NONE, BUSTER_IR_NONE);
         }
-        const uint32_t root = consumer == 0 ? comparison : 7;
+        const uint32_t root = consumer == 0 ? comparison : select ? 9 : 7;
         const uint64_t mask = UINT64_MAX >> (64 - width * 8);
         const uint64_t sign = UINT64_C(1) << (width * 8 - 1);
         const uint64_t result_mask = result_width == 4 ? UINT32_MAX : UINT64_MAX;
         const uint64_t narrow = constant & mask;
         const uint64_t widened = extension == IR_SEXT ? (narrow ^ sign) - sign : narrow;
         const bool fits = extension == UINT8_MAX || (immediate && !reversed && (widened & result_mask) == (constant & result_mask) && tier1_select_immediate_fits(result_width, constant));
+        // A select's values in rcx and rsi, the index's, whose last reader is the load before them.
         const uint8_t registers[12] =
         {
             X86_REGISTER_RDI,
@@ -242,8 +277,8 @@ static void tier1_select_test_compare_memory_plan(Tier1SelectTest* test, uint32_
             X86_REGISTER_R9,
             X86_REGISTER_R10,
             X86_REGISTER_RAX,
-            X86_REGISTER_RAX,
-            X86_REGISTER_RAX,
+            select ? X86_REGISTER_RCX : X86_REGISTER_RAX,
+            select ? X86_REGISTER_RSI : X86_REGISTER_RAX,
             X86_REGISTER_RAX,
             X86_REGISTER_RAX,
             X86_REGISTER_RAX,
@@ -259,8 +294,8 @@ static void tier1_select_test_compare_memory_plan(Tier1SelectTest* test, uint32_
                 const Tier1SelectPattern* pattern = &plan.patterns[root];
                 char label[160];
                 snprintf(label, sizeof(label), "memory fold width=%u extension=%u constant=%016" PRIx64 " predicate=%u consumer=%u path=%u", width, extension, constant, predicate, consumer, path);
-                tier1_select_test_expect(test, pattern->compare_memory == fits, label);
-                if (fits)
+                tier1_select_test_expect(test, pattern->compare_memory == (fits && !(select && indexed)) && (!select || pattern->rule == TIER1_RULE_SELECT_COMPARE), label);
+                if (fits && !(select && indexed))
                 {
                     const uint32_t begin = plan.effective_use_offsets[root];
                     const uint32_t end = plan.effective_use_offsets[root + 1];
@@ -271,7 +306,8 @@ static void tier1_select_test_compare_memory_plan(Tier1SelectTest* test, uint32_
                         base |= plan.effective_use_values[use] == 0;
                         index |= plan.effective_use_values[use] == 1;
                     }
-                    tier1_select_test_expect(test, pattern->width == width && plan.covered[4] != 0 && base && index,
+                    const uint32_t compared_width = select ? pattern->source_width : pattern->width;
+                    tier1_select_test_expect(test, compared_width == width && (!select || pattern->width == 4) && plan.covered[4] != 0 && base && index == indexed,
                                              "folded comparisons retain the exact memory width and both address operands");
                 }
                 if (tier1_select_test_walk_load(test, &plan, registers, output))
@@ -284,8 +320,9 @@ static void tier1_select_test_compare_memory_plan(Tier1SelectTest* test, uint32_
                         const uint64_t value = extension == IR_SEXT ? (bits ^ sign) - sign : bits;
                         const uint64_t other_value = immediate ? constant : constant + sample;
                         const bool truth = tier1_select_test_compare(predicate, result_width, reversed ? other_value : value, reversed ? value : other_value);
-                        const uint64_t expected = consumer == 2 ? (truth ? 11 : 22) : truth;
-                        const uint64_t actual = tier1_select_test_call(test, (uintptr_t)bytes, 3, other_value);
+                        const uint64_t expected = consumer == 2 || select ? (truth ? 11 : 22) : truth;
+                        // An address without an index is the pointer's alone, 3 past the bytes for the offset's -3.
+                        const uint64_t actual = tier1_select_test_call(test, (uintptr_t)bytes + (indexed ? 0 : 3), 3, other_value);
                         tier1_select_test_expect(test, actual == expected, "selected memory comparisons execute like the original widened operands");
                     }
                 }
@@ -328,7 +365,7 @@ static void tier1_select_test_compare_memory_plans(Tier1SelectTest* test)
                 {
                     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(constants); c += 1)
                     {
-                        for (uint32_t consumer = 0; consumer < 3; consumer += 1)
+                        for (uint32_t consumer = 0; consumer < 5; consumer += 1)
                         {
                             tier1_select_test_compare_memory_plan(test, width, result_width, op, constants[c], predicate, consumer, true, false,
                                                                   &input, &output, &scratch, mapping + 4096 - width);
@@ -336,8 +373,11 @@ static void tier1_select_test_compare_memory_plans(Tier1SelectTest* test)
                     }
                     for (uint32_t reverse = 0; reverse < 2; reverse += 1)
                     {
-                        tier1_select_test_compare_memory_plan(test, width, result_width, op, sign, predicate, 2, false, reverse != 0,
-                                                              &input, &output, &scratch, mapping + 4096 - width);
+                        for (uint32_t consumer = 2; consumer < 5; consumer += 1)
+                        {
+                            tier1_select_test_compare_memory_plan(test, width, result_width, op, sign, predicate, consumer, false, reverse != 0,
+                                                                  &input, &output, &scratch, mapping + 4096 - width);
+                        }
                     }
                 }
             }
@@ -458,19 +498,22 @@ static void tier1_select_test_compare_memory_barriers(Tier1SelectTest* test)
     arena_release(&input);
 }
 
-// A store between the original comparison and its branch/extended truth prevents moving the access to that root.
-// The comparison may fold the load before the store; it must still return true after the object becomes larger.
+// A store between the original comparison and its branch/extended truth, or its fused select's (#2676, `branch` 2),
+// prevents moving the access to that root. The comparison may fold the load before the store; it must still return
+// true after the object becomes larger.
 static void tier1_select_test_compare_memory_final_root(Tier1SelectTest* test)
 {
     Arena input = arena_reserve(1u << 20);
     Arena output = arena_reserve(1u << 20);
     Arena scratch = arena_reserve(1u << 20);
-    for (uint32_t branch = 0; branch < 2; branch += 1)
+    for (uint32_t branch = 0; branch < 3; branch += 1)
     {
+        const bool select = branch == 2;
+        const uint32_t root = select ? 9 : 7;
         const IrSizes sizes =
         {
-            .instruction_count = branch != 0 ? 12 : 9,
-            .block_count = branch != 0 ? 3 : 1,
+            .instruction_count = select ? 11 : branch != 0 ? 12 : 9,
+            .block_count = branch == 1 ? 3 : 1,
             .constant_count = 3,
             .parameter_count = 3,
         };
@@ -480,7 +523,7 @@ static void tier1_select_test_compare_memory_final_root(Tier1SelectTest* test)
         if (created)
         {
             function.result_type = IR_I32;
-            function.block_offsets[1] = branch != 0 ? 8 : 9;
+            function.block_offsets[1] = branch == 1 ? 8 : sizes.instruction_count;
             function.parameter_types[0] = IR_PTR;
             function.parameter_types[1] = IR_I64;
             function.parameter_types[2] = IR_I64;
@@ -494,7 +537,14 @@ static void tier1_select_test_compare_memory_final_root(Tier1SelectTest* test)
             tier1_select_test_node(&function, 4, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
             tier1_select_test_node(&function, 5, IR_ICMP, IR_I1, 3, 4, IR_ULT);
             tier1_select_test_node(&function, 6, IR_STORE, IR_VOID, 0, 2, BUSTER_IR_NONE);
-            if (branch != 0)
+            if (select)
+            {
+                tier1_select_test_node(&function, 7, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 8, IR_CONST, IR_I32, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tier1_select_test_node(&function, 9, IR_SELECT, IR_I32, 5, 7, 8);
+                tier1_select_test_node(&function, 10, IR_RET, IR_VOID, 9, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            else if (branch != 0)
             {
                 function.block_offsets[2] = 10;
                 function.block_offsets[3] = 12;
@@ -509,8 +559,10 @@ static void tier1_select_test_compare_memory_final_root(Tier1SelectTest* test)
                 tier1_select_test_node(&function, 7, IR_ZEXT, IR_I32, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
                 tier1_select_test_node(&function, 8, IR_RET, IR_VOID, 7, BUSTER_IR_NONE, BUSTER_IR_NONE);
             }
+            // A select's values in rcx and rsi, which the unused parameter 1 leaves free.
             const uint8_t registers[12] = { X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RDX, X86_REGISTER_R8, X86_REGISTER_R9, X86_REGISTER_R10,
-                                             X86_REGISTER_RAX, X86_REGISTER_RAX, X86_REGISTER_RAX, X86_REGISTER_RAX, X86_REGISTER_RAX, X86_REGISTER_RAX };
+                                             X86_REGISTER_RAX, select ? X86_REGISTER_RCX : X86_REGISTER_RAX, select ? X86_REGISTER_RSI : X86_REGISTER_RAX,
+                                             X86_REGISTER_RAX, X86_REGISTER_RAX, X86_REGISTER_RAX };
             for (uint32_t path = 0; path < 2; path += 1)
             {
                 Tier1SelectPlan plan;
@@ -519,7 +571,8 @@ static void tier1_select_test_compare_memory_final_root(Tier1SelectTest* test)
                 tier1_select_test_expect(test, selected == TIER1_SELECT_OK, "select a comparison whose consumer follows a store");
                 if (selected == TIER1_SELECT_OK)
                 {
-                    tier1_select_test_expect(test, !plan.patterns[7].compare_memory && (plan.covered[5] == 0 || plan.covered[3] == 0), "the final consumer cannot move an access past an intervening store");
+                    tier1_select_test_expect(test, !plan.patterns[root].compare_memory && (plan.covered[5] == 0 || plan.covered[3] == 0) && (!select || plan.patterns[root].rule == TIER1_RULE_SELECT_COMPARE),
+                                             "the final consumer cannot move an access past an intervening store");
                     if (tier1_select_test_walk_load(test, &plan, registers, &output))
                     {
                         uint64_t memory = 17;

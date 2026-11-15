@@ -1255,6 +1255,8 @@ struct CheckTestTier1Build
     // The functions whose code --verify's certificate proved, and those it left uncertified (#939).
     uint64_t code_certified;
     uint64_t code_uncertified;
+    // The IR instructions #866's congruence solver removed (--tier1-gvn's), 0 without it.
+    uint64_t gvn_removed;
     bool reported;
 };
 
@@ -1314,7 +1316,8 @@ static bool check_test_tier1_build_names(const char* executable, const char* sou
                       check_test_tier1_field(text, "spill_slots", &build->slots) && check_test_tier1_field(text, "frame_bytes", &build->frame) &&
                       check_test_tier1_field(text, "call_stores", &build->call_stores) && check_test_tier1_field(text, "machine_rows", &build->machine_rows) &&
                       check_test_tier1_field(text, "row_moves", &build->row_moves) && check_test_tier1_field(text, "code_certified", &build->code_certified) &&
-                      check_test_tier1_field(text, "code_uncertified", &build->code_uncertified);
+                      check_test_tier1_field(text, "code_uncertified", &build->code_uncertified) &&
+                      check_test_tier1_field(text, "gvn_removed", &build->gvn_removed);
     const bool taken = check_test_tier1_taken(text, names, name_count);
     if (status != 0 && text != NULL)
     {
@@ -1771,9 +1774,11 @@ static void check_test_driver_tier1_schedule(CheckTest* test, const char* clang,
 // --tier1-gvn (#866): the rematerialization fixture compiled with #866's congruence solver before promotion, by each
 // path, against the same fixture compiled without it. Its function is still Tier 1's and its executable still prints
 // clang's build's output, so the solver's merged values reach Tier 1's code without changing what the program does; and
-// its record count must differ from the build without the option, which is what a dropped `tier1_gvn` would show. The
-// option is a measurement one (docs/tier1.md's "The C driver's --tier1" has what it costs), so no direction of that
-// difference is asserted here.
+// the report's count of what the solver removed (gvn_removed) is 0 without the option and not with it, which a dropped
+// `tier1_gvn` would show. The record count was the proxy until #2678 folded the constants' conversions in the lowering:
+// the solver's merges were mostly duplicated conversions of constants, and those left change no record of this fixture
+// (156 records either way, 122 IR instructions removed). The option is a measurement one (docs/tier1.md's "The C
+// driver's --tier1" has what it costs), so no direction of a record difference is asserted here.
 static void check_test_driver_tier1_gvn(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     char source[512];
@@ -1799,11 +1804,12 @@ static void check_test_driver_tier1_gvn(CheckTest* test, const char* clang, cons
         const bool plain_built = check_test_tier1_build(executable, source, "tier1_remat", plain_output, true, path != 0, false, false, NULL, &plain);
         const bool gvn_built = check_test_tier1_build(executable, source, "tier1_remat", gvn_output, true, path != 0, false, true, NULL, &with);
         check_test_expect(test, gvn_built, "--tier1-gvn compiles the fixture, its function Tier 1's");
-        check_test_expect(test, plain_built && gvn_built && plain.records != with.records, "--tier1-gvn changes the fixture's code, so the option reached Tier 1");
+        check_test_expect(test, plain_built && gvn_built && plain.gvn_removed == 0 && with.gvn_removed != 0, "--tier1-gvn runs the solver on the fixture, so the option reached Tier 1");
         char actual[256] = { 0 };
         check_test_expect(test, gvn_built && check_test_driver_capture(gvn_output, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
                           "--tier1-gvn's executable prints clang's build's output");
-        printf("  Tier 1's GVN, %s path: %" PRIu64 " records (%" PRIu64 " without the option)\n", path == 0 ? "vector" : "scalar", with.records, plain.records);
+        printf("  Tier 1's GVN, %s path: %" PRIu64 " records, %" PRIu64 " IR instructions removed (%" PRIu64 " records without the option)\n", path == 0 ? "vector" : "scalar",
+               with.records, with.gvn_removed, plain.records);
         unlink(plain_output);
         unlink(gvn_output);
     }
@@ -1820,6 +1826,7 @@ static void check_test_driver_tier1_gvn(CheckTest* test, const char* clang, cons
                      parse_test_write(second, other, sizeof(other) - 1);
     check_test_expect(test, two, "the gvn two-file fixture writes");
     uint64_t two_records[2] = { 0, 0 };
+    uint64_t two_removed[2] = { 0, 0 };
     for (uint32_t gvn = 0; two && gvn < 2; gvn += 1)
     {
         // The command runs inside `directory`, so a relative --executable must be resolved first.
@@ -1842,8 +1849,9 @@ static void check_test_driver_tier1_gvn(CheckTest* test, const char* clang, cons
         char* arguments[] = { "sh", "-c", script, NULL };
         char* text = NULL;
         const int status = check_test_driver_spawn(arguments, &text);
-        // The report's tier1 lines: one per unit or one summed over them, so every line's records are added.
+        // The report's tier1 lines: one per unit or one summed over them, so every line's records and solver removals are added.
         uint64_t records = 0;
+        uint64_t removed = 0;
         for (const char* line = text; line != NULL && *line != 0;)
         {
             const char* end = strchr(line, '\n');
@@ -1856,14 +1864,17 @@ static void check_test_driver_tier1_gvn(CheckTest* test, const char* clang, cons
                 const size_t kept = length < sizeof(field) - 1 ? length : sizeof(field) - 1;
                 snprintf(field, sizeof(field), "%.*s", (int)kept, line);
                 records += check_test_tier1_field(field, "records", &value) ? value : 0;
+                removed += check_test_tier1_field(field, "gvn_removed", &value) ? value : 0;
             }
             line = end != NULL ? end + 1 : NULL;
         }
         two_records[gvn] = records;
+        two_removed[gvn] = removed;
         check_test_expect(test, status == 0 && records != 0, "--tier1 -c compiles two files in one command");
         free(text);
     }
-    check_test_expect(test, two && two_records[0] != 0 && two_records[0] != two_records[1], "--tier1-gvn reaches the lanes of a command of several files");
+    check_test_expect(test, two && two_records[0] != 0 && two_records[1] != 0 && two_removed[0] == 0 && two_removed[1] != 0,
+                      "--tier1-gvn reaches the lanes of a command of several files");
     char object_a[512];
     char object_b[512];
     snprintf(object_a, sizeof(object_a), "%s/tier1-gvn-two-a.o", directory);
@@ -1877,7 +1888,9 @@ static void check_test_driver_tier1_gvn(CheckTest* test, const char* clang, cons
 }
 
 // The --tier1-passes= fixture (#139): tier1_passes gives each pass of Tier 1's pipeline something to do: a constant
-// compare (SCCP), an unused product (dead-code removal), a branch whose arms only call, leaving an empty block that jumps
+// compare and a product of constants (SCCP: the compare decides its branch and dies with it, so the product is what the
+// report's folded counts, as the constants' conversions were until #2678 folded them in the lowering), an unused product
+// (dead-code removal), a branch whose arms only call, leaving an empty block that jumps
 // to a join without phis (CFG cleanup), a loop-invariant sum (LICM), a struct local (SROA), a repeated sum (#866's
 // solver) and two small static callees (the inlining). It is noinline itself: expanded into main twice (#2541 step 2
 // expands external definitions), its blocks are the merge's whether or not CFG cleanup runs, and the counts no longer
@@ -1913,7 +1926,7 @@ static const char check_test_tier1_passes_source[] =
     "        printf(\"negative\\n\");\n"
     "    }\n"
     "    long repeated = (k + n) * (k + n);\n"
-    "    return total + pair.low + pair.high + repeated;\n"
+    "    return total + pair.low + pair.high + repeated + scale * scale;\n"
     "}\n"
     "int main(int argc, char** argv)\n"
     "{\n"
@@ -4855,11 +4868,10 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
     // 1 (75 and 39 before). #1840's later families decode rows that took no move (its shifts by an int: 39 rows left; its
     // masks' conversions and lane operations: 33; its permutes of two tables: 27; its bitwise functions, compresses and
     // AES rounds: 24; its masked loads and stores: 16; its one-lane moves: 13; its reductions: 9; its lanes' population
-    // counts, leading zero counts and conflicts: 7; its byte shuffles by an immediate: 6, AVX2's VEX rows alone), so the
-    // bound counts the unit's 45 rows as of the conversions, as it
-    // counts the compares. Since #1398's step 3 the object leaves out the 58 wrappers that every call expanded, whose own
-    // copies held 3 of the 6 rows left: the unit's functions keep 3 (AVX2's VEX forms among them). The floor of 2 rows
-    // keeps the unit a machine rows' test as #1840 decodes more of them.
+    // counts, leading zero counts and conflicts: 7; its byte shuffles by an immediate: 6, AVX2's VEX rows alone; #2780's
+    // multiply-adds and packs: 4), so the bound counts the unit's 45 rows as of the conversions, as it counts the compares.
+    // Since #1398's step 3 the object leaves out the 58 wrappers that every call expanded, whose own copies held 2 of the
+    // 4: the unit's functions keep 2. The floor of 1 row keeps the unit a machine rows' test as more of them decode.
     const uint64_t compares = 11;
     const uint64_t rows = 45;
     char header[512];
@@ -4879,7 +4891,7 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
         snprintf(message, sizeof(message),
                  "the machine rows' unit takes at most a move into or out of place for every two rows and compares (path %u, rematerialize %u: %llu rows, %llu moves)", run & 1,
                  (run & 2) == 0 ? 1u : 0u, (unsigned long long)build.machine_rows, (unsigned long long)build.row_moves);
-        check_test_expect(test, compiled && build.machine_rows >= 2 && build.machine_rows <= rows && 2 * build.row_moves <= rows + compares, message);
+        check_test_expect(test, compiled && build.machine_rows >= 1 && build.machine_rows <= rows && 2 * build.row_moves <= rows + compares, message);
         unlink(object);
     }
     unlink(unit);
@@ -5830,6 +5842,163 @@ static void check_test_driver_tier1_vector_copies(CheckTest* test, const char* c
     unlink(unit);
 }
 
+// #2743's loop vectorizer (--tier1-passes=+vectorize): loops over arrays as C programmers write them (element-wise
+// operations of each width, a fill, a copy, sums, a dot product, a conditional sum, a clamp of an int induction, byte
+// arithmetic through 32-bit lanes, population counts, a stencil, float and double operations without contraction, a
+// xor reduction, and a prefix sum the vectorizer must leave), called at lengths around the vectors' boundaries and on
+// overlapping arrays, a digest of every result and array printed. By each path at x86-64, x86-64-v2, x86-64-v3 and
+// x86-64-v4, with --verify's certificates: no fallback, the loops each target vectorizes (its 16- and 32-byte
+// element-wise loops; AVX-512's conversions, compares, selects and reductions too), the same object by both paths, and
+// clang -O0's output.
+static const char check_test_tier1_vectorize_source[] =
+    "#include <stdint.h>\n"
+    "#include <stdio.h>\n"
+    "#include <stddef.h>\n"
+    "__attribute__((noinline)) void add_i32(int32_t* d, const int32_t* a, const int32_t* b, size_t n) { for (size_t i = 0; i < n; i += 1) d[i] = (int32_t)((uint32_t)a[i] + (uint32_t)b[i]); }\n"
+    "__attribute__((noinline)) void copy_u8(uint8_t* d, const uint8_t* s, size_t n) { for (size_t i = 0; i < n; i += 1) d[i] = s[i]; }\n"
+    "__attribute__((noinline)) void fill_u32(uint32_t* d, uint32_t v, size_t n) { for (size_t i = 0; i < n; i += 1) d[i] = v; }\n"
+    "__attribute__((noinline)) int64_t sum_i32(const int32_t* a, size_t n) { int64_t s = 0; for (size_t i = 0; i < n; i += 1) s += a[i]; return s; }\n"
+    "__attribute__((noinline)) uint32_t sum_u8(const uint8_t* a, size_t n) { uint32_t s = 0; for (size_t i = 0; i < n; i += 1) s += a[i]; return s; }\n"
+    "__attribute__((noinline)) uint32_t dot_i16(const int16_t* a, const int16_t* b, size_t n) { uint32_t s = 0; for (size_t i = 0; i < n; i += 1) s += (uint32_t)((int32_t)a[i] * (int32_t)b[i]); return s; }\n"
+    "__attribute__((noinline)) int64_t cond_sum_i32(const int32_t* a, size_t n, int32_t t) { int64_t s = 0; for (size_t i = 0; i < n; i += 1) { if (a[i] > t) { s += a[i]; } } return s; }\n"
+    "__attribute__((noinline)) void clamp_i32(int32_t* d, const int32_t* a, int lo, int hi, int n) { for (int i = 0; i < n; i += 1) { int v = a[i]; d[i] = v < lo ? lo : v > hi ? hi : v; } }\n"
+    "__attribute__((noinline)) void scale_u8(uint8_t* d, const uint8_t* s, unsigned k, size_t n) { for (size_t i = 0; i < n; i += 1) d[i] = (uint8_t)((s[i] * k) >> 8); }\n"
+    "__attribute__((noinline)) uint64_t popcount_u64(const uint64_t* a, size_t n) { uint64_t s = 0; for (size_t i = 0; i < n; i += 1) s += (uint64_t)__builtin_popcountll(a[i]); return s; }\n"
+    "__attribute__((noinline)) void stencil3_u8(uint8_t* d, const uint8_t* s, size_t n) { for (size_t i = 1; i + 1 < n; i += 1) d[i] = (uint8_t)((s[i - 1] + 2 * s[i] + s[i + 1] + 2) >> 2); }\n"
+    "__attribute__((noinline)) void scale_f32(float* d, const float* a, float k, size_t n) { for (size_t i = 0; i < n; i += 1) d[i] = a[i] * k; }\n"
+    "__attribute__((noinline)) void add_f64(double* d, const double* a, const double* b, size_t n) { for (size_t i = 0; i < n; i += 1) d[i] = a[i] + b[i]; }\n"
+    "__attribute__((noinline)) uint32_t xor_u32(const uint32_t* a, size_t n) { uint32_t s = 0x5a5a5a5au; for (size_t i = 0; i < n; i += 1) s ^= a[i]; return s; }\n"
+    "__attribute__((noinline)) void prefix_i32(int32_t* a, size_t n) { for (size_t i = 1; i < n; i += 1) a[i] = (int32_t)((uint32_t)a[i] + (uint32_t)a[i - 1]); }\n"
+    "static int32_t x[600], y[600], z[600];\n"
+    "static uint8_t b8[1200], c8[1200];\n"
+    "static int16_t h[600], g[600];\n"
+    "static uint64_t q[600];\n"
+    "static float f[600], e[600];\n"
+    "static double u[600], v[600], w[600];\n"
+    "static uint64_t state = 0x9e3779b97f4a7c15u;\n"
+    "static uint64_t next(void) { state ^= state << 13; state ^= state >> 7; state ^= state << 17; return state; }\n"
+    "static uint64_t digest = 1469598103934665603u;\n"
+    "static void mix(const void* p, size_t bytes) { const uint8_t* c = p; for (size_t i = 0; i < bytes; i += 1) { digest = (digest ^ c[i]) * 1099511628211u; } }\n"
+    "static void mix64(uint64_t value) { mix(&value, 8); }\n"
+    "int main(void)\n"
+    "{\n"
+    "    static const size_t lengths[] = { 0, 1, 3, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65, 100, 257 };\n"
+    "    for (size_t l = 0; l < sizeof(lengths) / sizeof(lengths[0]); l += 1)\n"
+    "    {\n"
+    "        const size_t n = lengths[l];\n"
+    "        for (size_t i = 0; i < 600; i += 1) { x[i] = (int32_t)next(); y[i] = (int32_t)next(); h[i] = (int16_t)next(); g[i] = (int16_t)next(); q[i] = next(); f[i] = (float)(int32_t)next() / 65536.0f; u[i] = (double)(int64_t)next() / 3.0; v[i] = (double)(int32_t)next(); }\n"
+    "        for (size_t i = 0; i < 1200; i += 1) { b8[i] = (uint8_t)next(); c8[i] = (uint8_t)next(); }\n"
+    "        add_i32(z, x, y, n);\n"
+    "        add_i32(x + 1, x, y, n);\n"
+    "        add_i32(y, y + 3, x, n);\n"
+    "        add_i32(x, x, x, n);\n"
+    "        copy_u8(c8, b8, n);\n"
+    "        copy_u8(b8 + 1, b8, n);\n"
+    "        copy_u8(b8, b8 + 17, n);\n"
+    "        fill_u32((uint32_t*)z + 1, (uint32_t)n * 2654435761u, n);\n"
+    "        mix64((uint64_t)sum_i32(x, n));\n"
+    "        mix64(sum_u8(b8, n));\n"
+    "        mix64(dot_i16(h, g, n));\n"
+    "        mix64((uint64_t)cond_sum_i32(y, n, (int32_t)next() >> 4));\n"
+    "        clamp_i32(z, x, -1000000, 1000000, (int)n);\n"
+    "        clamp_i32(x + 2, x, (int32_t)next() >> 8, 1 << 28, (int)n);\n"
+    "        scale_u8(c8, b8, 77, n);\n"
+    "        scale_u8(b8 + 2, b8, 150, n);\n"
+    "        mix64(popcount_u64(q, n));\n"
+    "        stencil3_u8(c8, b8, n);\n"
+    "        stencil3_u8(b8 + 1, b8, n);\n"
+    "        scale_f32(e, f, 0.75f, n);\n"
+    "        scale_f32(f + 1, f, -3.0f, n);\n"
+    "        add_f64(w, u, v, n);\n"
+    "        add_f64(u + 1, u, v, n);\n"
+    "        mix64(xor_u32((uint32_t*)y, n));\n"
+    "        prefix_i32(y, n);\n"
+    "        mix(x, sizeof(x)); mix(y, sizeof(y)); mix(z, sizeof(z)); mix(b8, sizeof(b8)); mix(c8, sizeof(c8)); mix(e, sizeof(e)); mix(f, sizeof(f)); mix(u, sizeof(u)); mix(w, sizeof(w));\n"
+    "    }\n"
+    "    printf(\"%016llx\\n\", (unsigned long long)digest);\n"
+    "    return 0;\n"
+    "}\n";
+
+// A field of --tier1-report's tier1-vectorize line (c_check_tier1.c's check_tier1_print_report).
+static bool check_test_tier1_vectorize_field(const char* text, const char* name, uint64_t* value)
+{
+    const char* line = text != NULL ? strstr(text, "tier1-vectorize\t") : NULL;
+    char key[64];
+    snprintf(key, sizeof(key), "\t%s=", name);
+    const char* end = line != NULL ? strchr(line, '\n') : NULL;
+    const char* field = line != NULL ? strstr(line, key) : NULL;
+    const bool found = field != NULL && (end == NULL || field < end);
+    *value = found ? strtoull(field + strlen(key), NULL, 10) : 0;
+    return found;
+}
+
+static void check_test_driver_tier1_vectorize(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const targets[4] = { "x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4" };
+    // The loops each target vectorizes: add_i32, copy_u8, fill_u32, scale_f32 and add_f64 at 16 or 32 bytes; at
+    // x86-64-v4 also the sums, the dot product, the conditional sum, the clamp, the bytes' scaling, the stencil and the xor
+    // reduction (its population count is VPOPCNTDQ's, which x86-64-v4 hasn't). main's loops call next(), and the prefix sum
+    // carries a dependence: none of theirs.
+    static const uint64_t vectorized[4] = { 5, 5, 5, 13 };
+    char unit[512];
+    snprintf(unit, sizeof(unit), "%s/tier1-vectorize.c", directory);
+    const bool written = parse_test_write(unit, check_test_tier1_vectorize_source, strlen(check_test_tier1_vectorize_source));
+    check_test_expect(test, written, "the loop vectorizer's fixture is written");
+    char reference[512];
+    snprintf(reference, sizeof(reference), "%s/tier1-vectorize-clang", directory);
+    char* reference_arguments[8] = { (char*)clang, "-O0", "-march=x86-64", "-o", reference, unit, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    char expected[256] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the loop vectorizer's fixture runs");
+    for (uint32_t t = 0; ran && t < BUSTER_ARRAY_LENGTH(targets); t += 1)
+    {
+        X86Target target = { 0 };
+        const bool parsed = x86_target_parse(targets[t], strlen(targets[t]), &target);
+        const bool host = parsed && (x86_target_native().features & target.features) == target.features;
+        char march[64];
+        snprintf(march, sizeof(march), "-march=%s", targets[t]);
+        char objects[2][512];
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char program[512];
+            snprintf(program, sizeof(program), "%s/tier1-vectorize-%u-%u", directory, t, path);
+            snprintf(objects[path], sizeof(objects[path]), "%s/tier1-vectorize-%u-%u.o", directory, t, path);
+            char* arguments[12] = { (char*)executable, "--tier1", "--tier1-passes=+vectorize", "--tier1-report", "--verify", march, "-o", program, unit, path != 0 ? "--scalar" : NULL, NULL };
+            text = NULL;
+            const bool built = check_test_driver_spawn(arguments, &text) == 0;
+            uint64_t internal = UINT64_MAX;
+            uint64_t fallbacks = UINT64_MAX;
+            uint64_t loops = UINT64_MAX;
+            const bool clean = built && check_test_tier1_field(text, "internal_failures", &internal) && internal == 0 && check_test_tier1_field(text, "fallbacks", &fallbacks) && fallbacks == 0 &&
+                               check_test_tier1_vectorize_field(text, "vectorized", &loops);
+            free(text);
+            char message[256];
+            snprintf(message, sizeof(message), "--tier1-passes=+vectorize compiles the fixture without a fallback and vectorizes %llu loops at %s, %llu expected (%s path)", (unsigned long long)loops,
+                     targets[t], (unsigned long long)vectorized[t], path != 0 ? "scalar" : "vector");
+            check_test_expect(test, clean && loops == vectorized[t], message);
+            char actual[256] = { 0 };
+            snprintf(message, sizeof(message), "the loop vectorizer's fixture by --tier1 runs as clang -O0's build does (%s, %s path)", targets[t], path != 0 ? "scalar" : "vector");
+            check_test_expect(test, clean && (!host || (check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0)), message);
+            unlink(program);
+            char* compile[12] = { (char*)executable, "--tier1", "--tier1-passes=+vectorize", march, "-c", "-o", objects[path], unit, path != 0 ? "--scalar" : NULL, NULL };
+            text = NULL;
+            const bool compiled = check_test_driver_spawn(compile, &text) == 0;
+            free(text);
+            check_test_expect(test, compiled, "the loop vectorizer's fixture compiles with -c");
+        }
+        char message[256];
+        snprintf(message, sizeof(message), "the loop vectorizer's fixture's object by the vector path is the scalar path's (%s)", targets[t]);
+        check_test_expect(test, check_test_driver_same_files(objects[0], objects[1]), message);
+        unlink(objects[0]);
+        unlink(objects[1]);
+    }
+    unlink(reference);
+    unlink(unit);
+}
+
 // #1282's inlining: the unit's always_inline functions of internal linkage expanded into their callers by --tier1, the
 // x86 intrinsics' wrappers above all, whose vectors pass and return by value: their byte-wise copies into fresh slots,
 // split by SROA and promoted. A static always_inline helper of a struct by value (copies by integers), and a static
@@ -5994,6 +6163,7 @@ static void check_test_driver_tier1_inline(CheckTest* test, const char* clang, c
     unlink(reference);
     unlink(unit);
     check_test_driver_tier1_vector_copies(test, clang, executable, directory);
+    check_test_driver_tier1_vectorize(test, clang, executable, directory);
 }
 
 // #2541 step 2's classes and dead functions: an external definition (expanded at its calls, its code kept), a weak one
