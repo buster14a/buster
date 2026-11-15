@@ -258,6 +258,15 @@ static bool check_input_statement_attribute_names(CheckInputReader* reader, uint
         {
             result = parser->tokens.names[token] != 0 && check_input_statement_attribute_name(check_input_attribute_name(reader, parser->tokens.names[token]));
             named = true;
+            // Classify the list's names, not the tokens inside an argument. A balanced subscript in suppress's
+            // malformed string argument is not a C23 attribute list (#2332); its own reader diagnoses it later.
+            const uint32_t arguments = token + 1;
+            if (result && arguments < after && parser->tokens.kinds[arguments] == PARSE_KIND_L_PAREN)
+            {
+                const uint32_t close = parser->tree.parents[arguments];
+                result = close > arguments && close < after && parser->tokens.kinds[close] == PARSE_KIND_R_PAREN;
+                token = result ? close : token;
+            }
         }
     }
     return result && named;

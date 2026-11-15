@@ -5060,6 +5060,32 @@ promotion/suppression and the error limit are checked; rejected compilations
 preserve an existing output, while accepted controls replace it with an ELF
 object. A separate control keeps C23's declaration grammar.
 
+Ordinary identifier calls with one malformed type-first argument use the same
+bounded view (#2406). For `known(int); after_error;`, the callee's lookup,
+implicit declaration, deprecation and availability diagnostics precede the
+original "expected expression" at `int`, and the later statement is checked.
+The view keeps the callee's source separately from the parse error's source;
+its parallel callee-use flags distinguish this value use from attribute-only
+classification through resumed, prefix, repaired and rejected views. The
+silent invalid-use report suppresses synthetic arity and noncallable errors
+while independent operands, such as `pair.missing` in `known(int) +
+pair.missing`, remain checked. Arguments with nested parentheses, brackets and
+braces may be skipped, but a top-level comma remains excluded: Clang reads later
+arguments after an invalid first argument, and an empty-call replacement would
+lose their diagnostics. Member callees, catalog-recognized builtin/library
+names (also with `-fno-builtin`), mismatched delimiters and semicolon-crossing
+calls retain the existing recovery.
+
+`test-checker-driver --malformed-calls-only` reads the original runtime source
+and case catalog in `tests/checker/parse-recovery/malformed-calls.*`. It compares
+complete diagnostics and status with Clang in GNU89, GNU17 and C23, including
+warning promotion/suppression, `-fno-builtin` and error limits, through both
+readers and syntax/object output with one/three requested lanes and deferred
+bodies. Mixed ordinary and attribute-led calls run before C23, including repeated
+macro expansions, multiple recovery rounds and rejected/repaired views. Contract
+checks verify paired metadata and the excluded boundaries. Rejected compilations
+preserve existing output; valid cast and `sizeof` calls produce an ELF object.
+
 Phase 2 covers redeclarations that conflict with a declaration of the same
 name: the visible one in `check_input_bind`'s first test, or its entity's
 linked one in the second (`int k = 1; int k = 2;`). Clang marks such a
@@ -8639,14 +8665,16 @@ the name's macro expansion notes. A missing initializer reports its qualified
 placeholder type after the restrict error, even at the same name. This recovery
 does not permit object emission.
 Refused by name: `_Atomic` and `restrict` through a declarator
-(`_Atomic __auto_type *p`, whose initializer clang finds incompatible), `_Atomic` of an
-atomic value (clang's error names the placeholder's type), `restrict` of a value
-that is no pointer to an object (clang's `restrict int`, which the placeholder
-can't be told from), and other type-changing attributes besides the handled
-vector, mode and address-space attributes. An incompatible address-space
-pointee initializer is rejected by the assignment check, whose message names
-the deduced type rather than clang's undeduced placeholder. A redeclaration of
-an atomic entity takes its type, as clang's
+(`_Atomic __auto_type *p`, whose initializer clang finds incompatible),
+`restrict` of a value that is no pointer to an object (clang's `restrict int`,
+which the placeholder can't be told from), and other type-changing attributes
+besides the handled vector, mode and address-space attributes. An incompatible
+address-space pointee initializer is rejected by the assignment check, whose
+message names the deduced type rather than clang's undeduced placeholder. An
+`_Atomic` placeholder initialized by an atomic value reports the incompatible
+initializer with both types, keeps its expression's warnings, and recovers the
+invalid declaration without cascading errors from later uses. A redeclaration
+of an atomic entity takes its type, as clang's
 `mergeTypes` merges it (#1844): a plain placeholder any atomic type
 (`_Atomic int r; __auto_type r = 1;` is an `_Atomic int`, and so is
 `__auto_type *p` after `_Atomic int *p`), and an `_Atomic` one an atomic type
@@ -8916,7 +8944,12 @@ change, it refused such a declaration by name.
   so its name cannot hide a later undeclared-name error; a C23 list keeps its
   declaration. The original `tests/driver/attribute_recovery.c` fixtures compare
   both language modes, readers, warning policy, deferred checking and output
-  preservation. Mixed statement/nonstatement attributes, string subscripts and
+  preservation. GNU statement-attribute classification skips each balanced
+  argument group, so a subscript within a malformed string argument is not
+  mistaken for a C23 attribute list. Its string and delimiter errors are
+  retained without a spurious declaration error at the following expression;
+  nested groups, macros, repeated subscripts, labels, controls and later errors
+  are covered by the same fixtures. Mixed statement/nonstatement attributes and
   unmatched outer lists still have recovery gaps. In C99 through C17, an
   attributed grouped or pointer declarator with no type
   (`__attribute__((unused)) (x)++;`, or `*p = 1;`) now retains its missing-type
@@ -11632,12 +11665,14 @@ thread-local storage or a section (`CheckInputSymbolPragma.alias_target`): the
 selection keeps TARGET's definition as an alias's base, and
 `check_program_define_pragma_aliases` adds a weak symbol of ALIAS's name at
 it, of its type and size, after the aliases' (in the unit of several lanes
-that has TARGET's definition). The rest stay refused by name where clang's
-Sema errors: an ALIAS declared before the pragma and named after it ("reference
-to 'ALIAS' is ambiguous", clang's lookup then finds two declarations), defined
-after it ("redefinition of 'ALIAS'"), declared after it with another kind or
-type, and a TARGET the unit doesn't define ("alias must point to a defined
-variable or function"); and an ALIAS of internal linkage. This is separate
+that has TARGET's definition). Once the clone is visible, references to an
+earlier function or object declaration report clang's ambiguity and candidate
+notes, including when ALIAS was already defined; local shadows and references
+before a later TARGET declaration keep their own lookup. Later object
+redeclarations report clang's redefinition and prior-definition notes. Other
+unmodeled shapes remain refused by name, including declarations with another
+kind or type, a TARGET the unit doesn't define, and an ALIAS of internal linkage.
+This is separate
 from ordinary weak binding. `test-checker-driver`
 (`c_check_symbol_pragma_driver_test.c`) compares the supported shapes'
 symbols and programs with clang's, by both paths.
