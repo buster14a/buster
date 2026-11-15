@@ -155,10 +155,13 @@ unused-warning fixtures also check exact scope-completion tokens.
   `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,
   `c_check_attribute_call_recovery_driver_test.c`, `c_check_malformed_call_driver_test.c`,
   `c_check_type_attribute_recovery_driver_test.c`, `c_check_attribute_declaration_driver_test.c`,
-  `c_check_structural_recovery_driver_test.c` and `c_check_repaired_view_driver_test.c` alone, the whole output and status
+  `c_check_structural_recovery_driver_test.c`, `c_check_repaired_view_driver_test.c`,
+  the weak-alias diagnostics from `c_check_symbol_pragma_driver_test.c` and the initializer-comma
+  catalogue from `c_check_unused_result_driver_test.c`, the whole output and status
   of semantic error recovery's fixtures against clang's on the vector, scalar
   and two-lane deferred paths, and `-c`'s refusal of each: `docs/c-checker.md`'s
-  "Semantic error recovery", #1447. Its runtime `suppress_label_order.c`
+  "Semantic error recovery", #1447. The initializer suite also preserves the separately frozen
+  compound-literal dependency boundary, which does not claim Clang parity. Its runtime `suppress_label_order.c`
   cases compare parser errors before label-subject errors under both language
   modes, warning policies and a one-error limit, with macros, split lists,
   valid controls, later errors and old-output preservation. The adjacent
@@ -191,13 +194,14 @@ unused-warning fixtures also check exact scope-completion tokens.
   complete GNU89/GNU17/C23 diagnostics and status, both readers, syntax/object
   output, warning policies, `-fno-builtin` and error limits. Mixed ordinary and
   attribute-led macro calls cover multiple rounds and repaired/rejected views;
-  metadata contracts keep each callee source paired with its use flag. The diagnostic
-  view discards the unread first argument and retains later arguments after its
-  first top-level comma, including their lookup and type errors. The invalid callee
+  metadata contracts keep each callee source paired with its use flag, sorted and
+  unique even when a later error revisits an outer call after a nested one. The diagnostic
+  view discards the unread type-first argument and retains earlier and later
+  arguments, including their lookup and type errors. The invalid callee
   prevents artificial arity, argument-conversion and noncallable diagnostics while
-  keeping independent argument checks and warnings. Consecutive type-first repairs
-  and nested calls retain their original parse errors through successive rounds;
-  a new parse error after a valid retained argument still uses existing recovery.
+  keeping independent argument checks and warnings. Type-first repairs after valid
+  arguments and nested calls retain their original parse errors through successive
+  rounds, without duplicating earlier arguments' diagnostics.
   Boundary controls exclude empty later arguments, semicolon crossings, mismatched
   delimiters, member callees and catalog names. Rejected output is preserved and valid
   cast/`sizeof` controls must produce an ELF object.

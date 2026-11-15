@@ -178,7 +178,7 @@ static bool check_init_object_retain(CheckInitObjects* objects, const CheckInput
             CheckInitializer constant = { 0 };
             const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
                                        input->declared_types[token], check_sparse_get(input->initializer_begins, token), check_sparse_get(input->initializer_ends, token),
-                                       true, diagnostic_only, true, output, scratch, &constant, &input->graph, NULL, objects);
+                                       true, diagnostic_only, true, output, scratch, &constant, &input->graph, NULL, objects, NULL);
             valid = accepted || constant.status != CHECK_INIT_RESOURCE;
             known = accepted && check_init_object_bytes(types, &constant, bytes, size);
             arena_pop_to(output, output_mark);
@@ -264,29 +264,15 @@ static void check_init_warning_order(CheckInitWarningCollector* collector, uint3
     }
 }
 
-// One declaration's failed initializer, as CheckInitDiagnostic's first is given (#1447, phase 2).
-typedef struct CheckInitFailure CheckInitFailure;
-struct CheckInitFailure
-{
-    CheckInitStatus status;
-    TypeId failed_type;
-    // A diagnostic-only recovered value's type, or zero to use failed_source's real checked value.
-    TypeId recovered_type;
-    uint32_t failed_source;
-    // Its subobject's offset in bits (CheckInitializer.failed_offset).
-    uint64_t failed_offset;
-    uint32_t failed_declaration;
-    uint32_t token;
-    uint32_t completion;
-};
-
 typedef struct CheckInitDiagnostic CheckInitDiagnostic;
 struct CheckInitDiagnostic
 {
-    // Every declaration's failed initializer, in declaration order (#1447, phase 2): clang reports each, where the fields
+    // Every failed initializer element, in declaration and source order: clang reports each, where the fields
     // below keep the first. In `output` when there is more than one, else NULL with failure_count at most 1.
     CheckInitFailure* failures;
     uint32_t failure_count;
+    // An event-collecting caller also retains each rejected braced initializer's value completions; zero means not selected.
+    uint32_t* rejected_roots;
     CheckInitStatus status;
     TypeId failed_type;
     TypeId recovered_type;
@@ -300,6 +286,21 @@ struct CheckInitDiagnostic
     uint32_t warning_count;
     uint32_t warning_token;
 };
+
+static bool check_init_diagnostic_append(CheckInitDiagnostic* result, CheckInitFailure* failures, uint32_t capacity, const CheckInitFailure* failure)
+{
+    const bool room = result->failure_count < capacity;
+    if (room)
+    {
+        failures[result->failure_count++] = *failure;
+    }
+    else
+    {
+        result->status = CHECK_INIT_RESOURCE;
+        result->token = failure->token;
+    }
+    return room;
+}
 
 // Whether a static object's scalar initializer, whose INITIALIZE (`initialize`, to the declared `target`) failed as one of
 // clang's conversions it warns of and still makes (-Wint-conversion's between a pointer and an integer,
@@ -483,11 +484,12 @@ static bool check_init_converted_nonconstant(const CheckInput* input, const Chec
 // diagnostic. Source-produced diagnostic_graph retains exactly such complete earlier expression fragments.
 //
 // True means the diagnostic scan completed, including a semantic error in result. False means resource failure
-// or an unusable input/stream, with the corresponding status. No CheckInitializers or parts are published, and
-// both arenas always return to their entry lengths. The strict publishing API below remains unchanged.
+// or an unusable input/stream, with the corresponding status. No CheckInitializers or parts are published. Scratch
+// always returns to its entry length; success may retain the explicit failure list and event callers' source-root
+// completions in output. Resource/input failure restores output too. The strict publishing API below is unchanged.
 // Optional warning sink storage belongs to the caller and precedes both arena suffixes. It receives distinct
 // original token IDs in source order, including warnings before a later semantic failure. capacity == parser->tokens.count is
-// sufficient for an empty sink. Resource/input failure restores its entry count; arenas always restore fully.
+// sufficient for an empty sink. Resource/input failure restores its entry count and both arena lengths.
 static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, const CheckInput* input, const CheckStream* stream,
                                                  const Parser* parser, TypeTable* types, uint32_t before_token, Arena* output, Arena* scratch,
                                                  CheckInitWarningSink* warnings)
@@ -573,12 +575,32 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
         valid = false;
         result->status = CHECK_INIT_RESOURCE;
     }
-    CheckInitFailure* failures = valid && declaration_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckInitFailure, declaration_count) : NULL;
-    if (valid && declaration_count != 0 && failures == NULL)
+    // At most one conversion report per source token, plus one terminal failure per declaration. The token key
+    // deduplicates GNU range repetitions and compound literals reached through an enclosing initializer as well.
+    const uint64_t failure_room = (uint64_t)cutoff + declaration_count;
+    if (valid && failure_room > UINT32_MAX)
     {
         valid = false;
         result->status = CHECK_INIT_RESOURCE;
     }
+    const uint32_t failure_capacity = valid ? (uint32_t)failure_room : 0;
+    CheckInitFailure* failures = valid && declaration_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckInitFailure, failure_capacity) : NULL;
+    uint8_t* failed_tokens = valid && declaration_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, input->token_count) : NULL;
+    uint32_t* rejected_roots = valid && declaration_count != 0 && stream->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, stream->count) : NULL;
+    if (valid && declaration_count != 0 && (failures == NULL || failed_tokens == NULL || (stream->count != 0 && rejected_roots == NULL)))
+    {
+        valid = false;
+        result->status = CHECK_INIT_RESOURCE;
+    }
+    if (valid && declaration_count != 0)
+    {
+        memset(failed_tokens, 0, input->token_count);
+        if (stream->count != 0)
+        {
+            memset(rejected_roots, 0, (uint64_t)stream->count * sizeof(uint32_t));
+        }
+    }
+    bool recovered_elements = false;
     CheckInitWarningCollector collector = { 0 };
     if (valid && !check_init_warning_collector(&collector, warnings, parser->tokens.count, scratch))
     {
@@ -602,6 +624,9 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
         const bool placed = begin < end && end <= cutoff && end <= check_input_diagnostic_limit(input, begin) && type_is_valid(types, input->declared_types[declaration]);
         bool eligible = placed && (initialize >= stream->count || complete[initialize]);
         bool empty_atomic = false;
+        // A compound literal's initializer is diagnosed independently. Keep the enclosing declaration's existing
+        // first-failure boundary until invalid-literal dependencies can suppress its derivative conversions.
+        bool nested_compound = false;
         for (uint32_t token = begin; eligible && token < end; token += 1)
         {
             const uint32_t node = input->token_nodes[token];
@@ -611,6 +636,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
             // otherwise-empty statement expression below. The literal's declaration is at `(`, outside its own
             // initializer span, so that span remains eligible and independent later declarations still run.
             const bool compound = eligible && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_COMPOUND) != 0;
+            nested_compound |= compound;
             const TypeId literal = compound ? input->declared_types[token] : 0;
             const uint32_t body = compound ? check_sparse_get(input->initializer_begins, token) : BUSTER_CHECK_NONE;
             const bool atomic_literal = body < end && parser->tree.roles[body] == PARSE_ROLE_OPEN_COMPOUND_BODY &&
@@ -631,8 +657,8 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
                 .token = begin,
                 .completion = end,
             };
-            failures[result->failure_count++] = failure;
-            if (begin < result->token)
+            valid = check_init_diagnostic_append(result, failures, failure_capacity, &failure);
+            if (valid && begin < result->token)
             {
                 result->status = failure.status;
                 result->failed_type = failure.failed_type;
@@ -644,7 +670,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
                 result->completion = end;
             }
         }
-        if (placed && !eligible && initialize < stream->count && stream->diagnostics[initialize] == CHECK_DIAG_INCOMPATIBLE &&
+        if (valid && placed && !eligible && initialize < stream->count && stream->diagnostics[initialize] == CHECK_DIAG_INCOMPATIBLE &&
             check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) != 0 && begin < result->token &&
             check_init_converted_nonconstant(input, stream, types, input->declared_types[declaration], initialize))
         {
@@ -653,19 +679,47 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
             result->token = begin;
             result->completion = end;
         }
-        if (placed && !eligible && initialize < stream->count && stream->diagnostics[initialize] == CHECK_DIAG_INCOMPATIBLE &&
+        if (valid && placed && !eligible && initialize < stream->count && stream->diagnostics[initialize] == CHECK_DIAG_INCOMPATIBLE &&
             check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) != 0 &&
             check_init_converted_nonconstant(input, stream, types, input->declared_types[declaration], initialize))
         {
-            failures[result->failure_count++] = (CheckInitFailure){ .status = CHECK_INIT_NON_CONSTANT, .token = begin, .completion = end };
+            const CheckInitFailure failure = { .status = CHECK_INIT_NON_CONSTANT, .token = begin, .completion = end };
+            valid = check_init_diagnostic_append(result, failures, failure_capacity, &failure);
         }
         if (eligible)
         {
             CheckInitializer plan = { 0 };
+            const uint32_t failure_start = result->failure_count;
+            CheckInitFailureSink sink = {
+                .failures = failures,
+                .count = result->failure_count,
+                .capacity = failure_capacity,
+                .declaration = declaration,
+                .completion = end,
+                .seen = failed_tokens,
+                .token_count = input->token_count,
+                .roots = rejected_roots,
+                .root_count = stream->count,
+            };
             check_initializers_noderef(warnings, input, declaration);
             const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
                                                          input->declared_types[declaration], begin, end, check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) != 0,
-                                                         true, true, output, scratch, &plan, &input->graph, warnings != NULL ? &collector : NULL, &objects);
+                                                         true, true, output, scratch, &plan, &input->graph, warnings != NULL ? &collector : NULL, &objects,
+                                                         nested_compound ? NULL : &sink);
+            recovered_elements |= sink.count != result->failure_count;
+            result->failure_count = sink.count;
+            if (sink.count != failure_start && failures[failure_start].token < result->token)
+            {
+                const CheckInitFailure* first = failures + failure_start;
+                result->status = first->status;
+                result->failed_type = first->failed_type;
+                result->recovered_type = first->recovered_type;
+                result->failed_source = first->failed_source;
+                result->failed_offset = first->failed_offset;
+                result->failed_declaration = first->failed_declaration;
+                result->token = first->token;
+                result->completion = first->completion;
+            }
             const bool retained = !accepted || check_init_object_retain(&objects, input, stream, parser, types, declaration, &plan, true, output, scratch);
             if (plan.warning_count != 0)
             {
@@ -689,9 +743,10 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
                 result->token = plan.failed_token;
                 result->completion = end;
             }
-            if (valid && !accepted && plan.status != CHECK_INIT_CHECK_FAILED)
+            const bool conversion_kept = plan.failed_source != 0 && plan.failed_token < input->token_count && failed_tokens[plan.failed_token] != 0;
+            if (valid && !accepted && plan.status != CHECK_INIT_CHECK_FAILED && !conversion_kept)
             {
-                failures[result->failure_count++] = (CheckInitFailure){
+                const CheckInitFailure failure = {
                     .status = plan.status,
                     .failed_type = plan.failed_type,
                     .failed_source = plan.failed_source,
@@ -700,6 +755,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
                     .token = plan.failed_token,
                     .completion = end,
                 };
+                valid = check_init_diagnostic_append(result, failures, failure_capacity, &failure);
             }
             arena_pop_to(output, mark);
         }
@@ -724,8 +780,30 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
         result->status = CHECK_INIT_RESOURCE;
     }
     result->failures = kept;
+    if (valid && recovered_elements && warnings != NULL && warnings->events != NULL)
+    {
+        result->rejected_roots = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, stream->count);
+        if (result->rejected_roots != NULL)
+        {
+            memcpy(result->rejected_roots, rejected_roots, (uint64_t)stream->count * sizeof(uint32_t));
+        }
+        else
+        {
+            valid = false;
+            result->status = CHECK_INIT_RESOURCE;
+        }
+    }
     result->failure_count = valid ? result->failure_count : 0;
     result->recovered_type = valid ? result->recovered_type : 0;
+    if (!valid)
+    {
+        if (output != NULL)
+        {
+            arena_pop_to(output, mark);
+        }
+        result->failures = NULL;
+        result->rejected_roots = NULL;
+    }
     if (scratch != 0)
     {
         arena_pop_to(scratch, temporary);
@@ -847,7 +925,7 @@ static bool check_initializers_run_events(CheckInitializers* result, const Check
             check_initializers_noderef(&warnings, input, token);
             valid = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
                                       input->declared_types[token], check_sparse_get(input->initializer_begins, token), check_sparse_get(input->initializer_ends, token),
-                                      check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) != 0, false, true, output, scratch, plan, &input->graph, &collector, &objects);
+                                      check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) != 0, false, true, output, scratch, plan, &input->graph, &collector, &objects, NULL);
         }
         if (valid && !check_init_object_retain(&objects, input, stream, parser, types, token, plan, false, output, scratch))
         {

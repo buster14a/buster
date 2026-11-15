@@ -9974,12 +9974,15 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     if (temporary && semantic_recovery_only)
     {
+        check_test_driver_warning_catalog(&test, clang, executable != NULL ? executable : "./build/compiler", directory, "checker/initializer-comma");
+        check_test_driver_initializer_compound_boundary(&test, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_semantic_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_statement_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_type_attribute_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_attribute_declarations(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_structural_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_repaired_view(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+        check_test_driver_weak_alias_diagnostics(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
     }
     if (temporary && label_attributes_only)
     {

@@ -12616,7 +12616,7 @@ static void check_common_type_safety(const Parser* parser, Preprocessor* pp, con
 // A failed initializer still built its source expression. Emit its comma operands' warnings before the rejected-view
 // recovery drops the declaration, using the same graph, evaluation facts and warning policy as the normal walk.
 static void check_common_rejected_initializer_commas(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
-                                                      TypeTable* types, const uint8_t* roots, Arena* scratch)
+                                                      TypeTable* types, const uint32_t* roots, Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
     const uint64_t mark = scratch->length;
@@ -12631,7 +12631,10 @@ static void check_common_rejected_initializer_commas(const Parser* parser, Prepr
                  check_common_ignored_prepare(&ignored, parser, pp, input, types, scratch);
     if (ready)
     {
-        memcpy(marked, roots, graph->count);
+        for (uint32_t node = 0; node < graph->count; node += 1)
+        {
+            marked[node] = roots[node] != 0;
+        }
         for (uint32_t node = graph->count; node-- > 0;)
         {
             const uint32_t parent = facts.parents[node];
@@ -12651,13 +12654,12 @@ static void check_common_rejected_initializer_commas(const Parser* parser, Prepr
                 {
                     root = facts.parents[root];
                 }
-                const uint32_t initializer = root < graph->count ? facts.parents[root] : BUSTER_CHECK_NONE;
                 const PPDiagnosticRecord* previous = pp->diagnostic_last;
                 check_common_comma_marker(&emission, node);
                 if (pp->diagnostic_last != previous && pp->diagnostic_last->position % PP_DIAGNOSTIC_PHASE_COUNT == PP_DIAGNOSTIC_RUNTIME &&
-                    initializer < graph->count && graph->ops[initializer] == CHECK_OP_INITIALIZE && graph->source_positions != NULL)
+                    root < graph->count && roots[root] != 0 && roots[root] <= parser->tokens.count)
                 {
-                    const uint32_t completion = graph->source_positions[initializer];
+                    const uint32_t completion = roots[root];
                     const uint64_t position = (uint64_t)check_common_publication_source(parser, pp, completion) * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_RUNTIME;
                     if (pp->diagnostic_last->position < position)
                     {

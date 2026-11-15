@@ -6514,8 +6514,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const char* candidate = object ? check_warning_text(scratch, "candidate found by name lookup is '%.*s'", (int)intern_length(pp->table, name),
                                                                                 intern_bytes(pp->table, name)) : "candidate function";
                             const uint32_t second = object && report->value < count ? parser->tokens.sources[report->value] : (uint32_t)report->value;
+                            const uint32_t first = object && report->detail != 0 ? report->detail - 1 : previous < count ? parser->tokens.sources[previous] : 0;
                             const PPOutputDiagnosticNote notes[2] = {
-                                { .token = previous < count ? parser->tokens.sources[previous] : 0, .message = kind != CHECK_INPUT_WEAK_ALIAS_REDEFINITION ? candidate : "previous definition is here" },
+                                { .token = first, .message = kind != CHECK_INPUT_WEAK_ALIAS_REDEFINITION ? candidate : "previous definition is here" },
                                 { .token = second, .message = candidate },
                             };
                             const bool call = token + 1 < count && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN;
@@ -11405,7 +11406,7 @@ static uint32_t check_driver_skip_end(const Parser* parser, uint32_t token);
 
 // Retain a failed call's name for lookup, without inventing a valid call of its unread arguments (#2406). A complete
 // balanced group is required; semicolons at argument level and mismatched delimiters keep the existing recovery.
-// An ordinary call's later arguments are read even after an invalid first one: retain them after its first comma.
+// An ordinary call's earlier and later arguments are read even after an invalid one: remove only that argument.
 // Builtin/catalog names can validate arguments during lookup and are outside this diagnostic-only repair.
 static void check_driver_invalid_call(const Parser* view, ParseDiagnostic* diagnostic, uint32_t callee, uint32_t begin, bool value,
                                       const CheckDriverTypoEdits* edits)
@@ -11421,6 +11422,8 @@ static void check_driver_invalid_call(const Parser* view, ParseDiagnostic* diagn
     uint32_t depth = 0;
     uint32_t end = callee + 1;
     uint32_t arguments = 0;
+    uint32_t argument_begin = callee + 2;
+    uint32_t conditionals = 0;
     bool balanced = stack != NULL;
     do
     {
@@ -11432,7 +11435,14 @@ static void check_driver_invalid_call(const Parser* view, ParseDiagnostic* diagn
                            view->tokens.kinds[end - 1] == PARSE_KIND_COMMA;
         balanced = balanced && end < count && kind != PARSE_KIND_END && !empty && !(depth == 1 && kind == PARSE_KIND_SEMI) &&
                    (!close || (depth != 0 && stack[depth - 1] == wanted));
-        arguments = balanced && value && depth == 1 && kind == PARSE_KIND_COMMA && arguments == 0 ? end + 1 : arguments;
+        if (balanced && value && depth == 1 && end < diagnostic->token)
+        {
+            // A comma in a conditional's middle expression is not an argument separator, even at group depth one.
+            conditionals += kind == PARSE_KIND_QUESTION;
+            conditionals -= kind == PARSE_KIND_COLON && conditionals != 0;
+            argument_begin = kind == PARSE_KIND_COMMA && conditionals == 0 ? end + 1 : argument_begin;
+        }
+        arguments = balanced && value && depth == 1 && kind == PARSE_KIND_COMMA && end > diagnostic->token && arguments == 0 ? end + 1 : arguments;
         if (balanced && open)
         {
             stack[depth++] = kind;
@@ -11445,7 +11455,7 @@ static void check_driver_invalid_call(const Parser* view, ParseDiagnostic* diagn
     }
     while (balanced && depth != 0);
     // Empty later arguments need their own parse error and keep the existing recovery above.
-    if (balanced && end < count && (value || view->tokens.kinds[end] == PARSE_KIND_SEMI))
+    if (balanced && end < count && (value ? argument_begin == diagnostic->token : view->tokens.kinds[end] == PARSE_KIND_SEMI))
     {
         diagnostic->resumed = true;
         diagnostic->resume_delete = true;
@@ -11458,6 +11468,40 @@ static void check_driver_invalid_call(const Parser* view, ParseDiagnostic* diagn
         diagnostic->publication = value ? 0 : callee + 1;
     }
     arena_pop_to(edits->scratch, mark);
+}
+
+// The immediate enclosing call of a type-first invalid argument. Earlier parsed arguments may contain balanced
+// groups; a grouping expression, subscript, member call or a statement boundary is not an ordinary identifier call.
+// The complete forward scan above verifies the kinds of every delimiter before any recovery is enabled.
+static uint32_t check_driver_invalid_call_callee(const Parser* view, uint32_t token)
+{
+    const uint8_t* kinds = view->tokens.kinds;
+    uint32_t open = token;
+    uint32_t depth = 0;
+    bool seeking = token != 0 && (kinds[token - 1] == PARSE_KIND_L_PAREN || kinds[token - 1] == PARSE_KIND_COMMA);
+    while (seeking && open != 0)
+    {
+        open -= 1;
+        const uint8_t kind = kinds[open];
+        const bool closing = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE;
+        const bool opening = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+        if (closing)
+        {
+            depth += 1;
+        }
+        else if (opening)
+        {
+            seeking = depth != 0;
+            depth -= depth != 0;
+        }
+        else if (depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_END))
+        {
+            seeking = false;
+        }
+    }
+    const bool call = !seeking && open != 0 && kinds[open] == PARSE_KIND_L_PAREN && kinds[open - 1] == PARSE_KIND_IDENTIFIER &&
+                      (open == 1 || (kinds[open - 2] != PARSE_KIND_PERIOD && kinds[open - 2] != PARSE_KIND_ARROW));
+    return call ? open - 1 : BUSTER_CHECK_NONE;
 }
 
 // A parse error just after a name within an expression, before an operand's first token, where the name may be a typo of
@@ -11483,12 +11527,10 @@ static uint32_t check_driver_typo_tail(const Parser* view, const uint32_t* origi
     const uint8_t argument_kind = at < count ? view->tokens.kinds[at] : PARSE_KIND_END;
     const bool type_argument = argument_kind == PARSE_KIND_TYPE || argument_kind == PARSE_KIND_QUALIFIER || argument_kind == PARSE_KIND_ATOMIC ||
                                argument_kind == PARSE_KIND_STRUCT || argument_kind == PARSE_KIND_ENUM || argument_kind == PARSE_KIND_TYPEOF;
-    const bool malformed = diagnostic->message == PARSE_MESSAGE_EXPECTED_EXPRESSION && type_argument && at >= 2 &&
-                           view->tokens.kinds[at - 1] == PARSE_KIND_L_PAREN && view->tokens.kinds[at - 2] == PARSE_KIND_IDENTIFIER &&
-                           (at == 2 || (view->tokens.kinds[at - 3] != PARSE_KIND_PERIOD && view->tokens.kinds[at - 3] != PARSE_KIND_ARROW));
-    if (malformed)
+    const uint32_t malformed = diagnostic->message == PARSE_MESSAGE_EXPECTED_EXPRESSION && type_argument ? check_driver_invalid_call_callee(view, at) : BUSTER_CHECK_NONE;
+    if (malformed < count)
     {
-        check_driver_invalid_call(view, diagnostic, at - 2, at - 2, true, edits);
+        check_driver_invalid_call(view, diagnostic, malformed, malformed, true, edits);
     }
     // The attributes before an implicit int's name, from their first `__attribute__`, after a statement's start.
     const bool call = diagnostic->message == PARSE_MESSAGE_EXPECTED_IDENTIFIER_OR_PAREN && view->language.standard < 2023 && at + 1 < count &&
@@ -12381,7 +12423,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             excess_count = initializers.warning_count;
                         }
                     }
-                    uint8_t* rejected_initializer_roots = NULL;
+                    uint32_t* rejected_initializer_roots = NULL;
                     if (!expression_valid || repairing || initializers.status != CHECK_INIT_OK)
                     {
                         CheckInitDiagnostic earlier = { 0 };
@@ -12397,6 +12439,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         const bool diagnosed = storage && initializers.status != CHECK_INIT_RESOURCE &&
                                                check_initializers_diagnose_warnings(&earlier, &input, &stream, checking, &types, before,
                                                                                      output_arena, scratch, &warnings);
+                        rejected_initializer_roots = diagnosed ? earlier.rejected_roots : NULL;
                         if (!storage || initializers.status == CHECK_INIT_RESOURCE)
                         {
                             earlier.status = CHECK_INIT_RESOURCE;
@@ -12479,10 +12522,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 {
                                     if (rejected_initializer_roots == NULL)
                                     {
-                                        rejected_initializer_roots = BUSTER_ARENA_PUSH_ARRAY(output_arena, uint8_t, input.graph.count);
+                                        rejected_initializer_roots = BUSTER_ARENA_PUSH_ARRAY(output_arena, uint32_t, input.graph.count);
                                         if (rejected_initializer_roots != NULL)
                                         {
-                                            memset(rejected_initializer_roots, 0, input.graph.count);
+                                            memset(rejected_initializer_roots, 0, (uint64_t)input.graph.count * sizeof(uint32_t));
                                         }
                                         else
                                         {
@@ -12491,7 +12534,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                     }
                                     if (rejected_initializer_roots != NULL)
                                     {
-                                        rejected_initializer_roots[failure.failed_source - 1] = 1;
+                                        rejected_initializer_roots[failure.failed_source - 1] = failure.completion;
                                     }
                                 }
                                 // (Its node plus one, CheckDriverDiagnostic.default_source.)
@@ -12589,10 +12632,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             {
                                 if (rejected_initializer_roots == NULL)
                                 {
-                                    rejected_initializer_roots = BUSTER_ARENA_PUSH_ARRAY(output_arena, uint8_t, input.graph.count);
+                                    rejected_initializer_roots = BUSTER_ARENA_PUSH_ARRAY(output_arena, uint32_t, input.graph.count);
                                     if (rejected_initializer_roots != NULL)
                                     {
-                                        memset(rejected_initializer_roots, 0, input.graph.count);
+                                        memset(rejected_initializer_roots, 0, (uint64_t)input.graph.count * sizeof(uint32_t));
                                     }
                                     else
                                     {
@@ -12601,7 +12644,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 }
                                 if (rejected_initializer_roots != NULL)
                                 {
-                                    rejected_initializer_roots[source] = 1;
+                                    rejected_initializer_roots[source] = input.graph.source_positions != NULL ? input.graph.source_positions[node] : 1;
                                 }
                             }
                         }

@@ -161,8 +161,130 @@ static void check_init_test_diagnostic_source(CheckTest* test, const char* sourc
     intern_release(&identifiers);
 }
 
+static void check_init_test_diagnostic_capacity(CheckTest* test)
+{
+    // More than one failed element retains a failure array as well as the rejected roots. A prior declaration
+    // and the accepted first element also publish warnings before either retained allocation can fail.
+    const char* source = "struct Value{int field;};void f(struct Value value){\n"
+                         "int excess[1]={1,2};\n"
+                         "int *values[9]={{{1-1}},value,value,value,value,value,value,value,value};\n}\n";
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const PPOptions preprocessing = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true, .quiet = true };
+    const bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &preprocessing, &identifiers) &&
+                              pp_run_source(&pp, "initializer-capacity.c", (const uint8_t*)source, (uint32_t)strlen(source));
+    check_test_expect(test, preprocessed, "initializer capacity source preprocesses");
+    for (uint32_t path = 0; preprocessed && path < 2; path += 1)
+    {
+        CheckTestTypes types = { 0 };
+        Arena input_arena = arena_reserve(UINT64_C(1) << 22);
+        Arena stream_arena = arena_reserve(UINT64_C(1) << 22);
+        Arena output = arena_reserve(UINT64_C(1) << 20);
+        Arena scratch = arena_reserve(UINT64_C(1) << 22);
+        Arena semantic_arena = arena_reserve(UINT64_C(1) << 20);
+        const ParseOptions parsing = { .scalar = path == 0 };
+        const CheckOptions checking = { .scalar = path == 0 };
+        CheckInput input = { 0 };
+        CheckStream stream = { 0 };
+        bool ready = output.capacity >= 4096 && check_test_types_open(&types) && parse_initialize(&parser, &parsing, preprocessing.language) &&
+                     parse_translation_unit(&parser, &pp) && parser.errors == 0 && parser.fatal == PARSE_MESSAGE_NONE &&
+                     check_input(&input, &parser, &pp, &types.table, &input_arena, &scratch) && input.report_count == 0 &&
+                     check_graph_run(&types.table, &input.graph, &stream_arena, &scratch, &checking, &stream) && stream.report_count == 0;
+        uint8_t* prefix = ready ? BUSTER_ARENA_PUSH_ARRAY(&output, uint8_t, 64) : NULL;
+        uint8_t* scratch_prefix = ready ? BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, 64) : NULL;
+        CheckWarningBuffer events = { .arena = &semantic_arena };
+        const CheckWarningEvent sentinel = {
+            .id = CHECK_WARNING_ID_INTEGER_OVERFLOW,
+            .kind = CHECK_WARNING_EVENT_MESSAGE,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = 0x6217 },
+        };
+        ready = ready && prefix != NULL && scratch_prefix != NULL && check_warning_append(&events, &sentinel, NULL, 0);
+        check_test_expect(test, ready, "initializer capacity source reaches a complete checked graph and separate warning sink");
+        if (ready)
+        {
+            memset(prefix, 0xa5, 64);
+            memset(scratch_prefix, 0x5a, 64);
+            const CheckWarningBuffer events_before = events;
+            const uint64_t semantic_mark = semantic_arena.length;
+            const uint64_t output_capacity = output.capacity;
+            const uint64_t input_mark = input_arena.length;
+            const uint64_t stream_mark = stream_arena.length;
+            const CheckStream stream_before = stream;
+            bool exhausted = false;
+            bool retained = false;
+            bool restored = true;
+            uint64_t first_failure = 0;
+            // Sweep logical capacities instead of relying on the sizes or alignment of private records. This
+            // includes exhaustion after the failure array fits but before the rejected-root array can fit.
+            for (uint64_t capacity = 64; capacity <= 4096; capacity += 16)
+            {
+                output.capacity = capacity;
+                uint32_t warning_tokens[4] = { 0 };
+                CheckInitWarningSink warnings = {
+                    .tokens = warning_tokens,
+                    .capacity = BUSTER_ARRAY_LENGTH(warning_tokens),
+                    .count = 1,
+                    .events = &events,
+                };
+                CheckInitDiagnostic diagnostic = { 0 };
+                const bool diagnosed = check_initializers_diagnose_warnings(&diagnostic, &input, &stream, &parser, &types.table,
+                                                                             BUSTER_CHECK_NONE, &output, &scratch, &warnings);
+                bool intact = scratch.length == 64 && input_arena.length == input_mark && stream_arena.length == stream_mark &&
+                              memcmp(&stream, &stream_before, sizeof(stream)) == 0 && warning_tokens[0] == 0 &&
+                              events_before.events[0].payload.data == 0x6217;
+                for (uint32_t i = 0; i < 64; i += 1)
+                {
+                    intact = intact && prefix[i] == 0xa5 && scratch_prefix[i] == 0x5a;
+                }
+                if (diagnosed)
+                {
+                    retained = true;
+                    intact = intact && diagnostic.status == CHECK_INIT_INVALID && diagnostic.failure_count == 8 &&
+                             diagnostic.failures != NULL && diagnostic.rejected_roots != NULL && output.length > 64 &&
+                             diagnostic.warning_count == 1 && warnings.count == 2 && events.count > events_before.count;
+                }
+                else
+                {
+                    exhausted = true;
+                    intact = intact && diagnostic.status == CHECK_INIT_RESOURCE && diagnostic.failure_count == 0 &&
+                             diagnostic.failures == NULL && diagnostic.rejected_roots == NULL && diagnostic.recovered_type == 0 &&
+                             diagnostic.warning_count == 0 && diagnostic.warning_token == BUSTER_CHECK_NONE && warnings.count == 1 &&
+                             output.length == 64 && semantic_arena.length == semantic_mark &&
+                             memcmp(&events, &events_before, sizeof(events)) == 0;
+                }
+                if (!intact && restored)
+                {
+                    first_failure = capacity;
+                }
+                restored &= intact;
+                arena_pop_to(&output, 64);
+                arena_pop_to(&scratch, 64);
+                arena_pop_to(&semantic_arena, semantic_mark);
+                events = events_before;
+            }
+            output.capacity = output_capacity;
+            char description[224];
+            snprintf(description, sizeof(description), "initializer capacity rollback clears retained pointers/counts and preserves arena/warning prefixes on %s path (first failure %llu)",
+                     path == 0 ? "scalar" : "vector", (unsigned long long)first_failure);
+            check_test_expect(test, exhausted && retained && restored, description);
+        }
+        arena_release(&semantic_arena);
+        arena_release(&scratch);
+        arena_release(&output);
+        arena_release(&stream_arena);
+        arena_release(&input_arena);
+        check_test_types_close(&types);
+        parse_release(&parser);
+    }
+    pp_release(&pp);
+    intern_release(&identifiers);
+}
+
 static void check_init_test_diagnostics(CheckTest* test, const char* clang)
 {
+    check_init_test_diagnostic_capacity(test);
     check_init_test_diagnostic_source(test, "int a[1]={1,2};\nint f(void){return *1;}\n", BUSTER_CHECK_NONE, false, true);
     check_init_test_diagnostic_source(test, "char a[1]=\"long\";\nint f(void){return *1;}\n", BUSTER_CHECK_NONE, false, true);
     check_init_test_diagnostic_source(test, "struct S{int *p;} a={3};\nint f(void){return *1;}\n", 1, false, false);
