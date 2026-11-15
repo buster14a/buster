@@ -2341,6 +2341,12 @@ complete, and `measure-x86-zen5 --missing` finds none to measure.
   - **truncating stores of 8 lanes:** each masked statement is one `vpmov*
     [p]{k}`, with no masked byte store.
 
+**Performance:** on the 9700X, `--tier1 -c main.c` takes 7.3 M fewer
+instructions (−0.037%; wall −0.25%, cycles −0.11%, against main's −0.02% and
++0.07% against itself), as the rows take Tier 1's ordinary IR paths, and Tier
+0's `-c` is unchanged (+0.001% instructions). The record is buster-performance's
+[`other-units-rows-2780-2026-11-15`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/other-units-rows-2780-2026-11-15).
+
 ## Masks to vectors and back (#1840)
 
 The masks' conversions to vectors and back need no new operation:
