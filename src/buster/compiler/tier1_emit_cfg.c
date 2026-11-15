@@ -3690,6 +3690,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     transitions.fragments = ok ? ir_allocate(scratch, (uint64_t)allocation->fragment_count + 1, 4, &ok) : 0;
     transitions.values = ok ? ir_allocate(scratch, (uint64_t)allocation->fragment_count + 1, 4, &ok) : 0;
     transitions.registers = ok ? ir_allocate(scratch, (uint64_t)count + 1, 1, &ok) : 0;
+    transitions.slot_stamps = ok ? ir_allocate(scratch, (uint64_t)count + 1, 4, &ok) : 0;
     uint32_t* spill_ids = ok ? ir_allocate(scratch, (uint64_t)count + 1, 4, &ok) : 0;
     uint32_t* cursors = ok ? ir_allocate(scratch, (uint64_t)input->position_count + 1, 4, &ok) : 0;
     uint32_t* entry_offsets = ok ? ir_allocate(scratch, (uint64_t)blocks + 1, 4, &ok) : 0;
@@ -3724,6 +3725,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         view.spill_ids = spill_ids;
         memset(transitions.offsets, 0, ((uint64_t)input->position_count + 2) * 4);
         memset(transitions.registers, UINT8_MAX, (uint64_t)count + 1);
+        memset(transitions.slot_stamps, 0, ((uint64_t)count + 1) * 4);
         memset(spill_ids, 0xff, ((uint64_t)count + 1) * 4);
         memset(entry_offsets, 0, ((uint64_t)blocks + 1) * 4);
         tier1_cfg_single_predecessor_edges(input, entry_edges);
@@ -3848,6 +3850,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         const uint32_t entry = input->block_starts[b];
         const uint32_t degree = input->predecessor_offsets[b + 1] - input->predecessor_offsets[b];
         const uint32_t only = degree == 1 ? input->predecessors[input->predecessor_offsets[b]] : UINT32_MAX;
+        // A block whose only predecessor is the one before it continues that block's run of slot stamps (tier1_emit_phase).
+        transitions.stamp = b != 0 && only == b - 1 ? transitions.stamp : b + 1;
         // The single incoming edge's moves, where tier1_cfg placed them at this block's start.
         if (only != UINT32_MAX)
         {

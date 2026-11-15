@@ -24,9 +24,10 @@ requirements. [Command index](README.md).
   properties in `tier1_allocate_clobbers_test.c`, and a recipe that gives its
   register to a value its hint names (#2618), one that waits for its read
   (#2618, #2735), a range that waits in its value's slot for its next required
-  use (#2768), and a victim that continues in its slot and a range following an
-  interval evicted where it starts (#2774: `continuation_intervals`, which the
-  random inputs take with required uses too) have their traces in
+  use (#2768) but not where its hint names another value's range (#2784), and a
+  victim that continues in its slot and a range following an interval evicted
+  where it starts (#2774: `continuation_intervals`, which the random inputs take
+  with required uses too) have their traces in
   `tier1_allocate_hints_test.c`, as does a range's alternate (#2734:
   `alternate_intervals`, taken where its interval's value still holds the
   register and it is free), which the random inputs and their reference model

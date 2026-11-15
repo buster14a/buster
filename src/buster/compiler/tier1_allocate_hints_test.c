@@ -404,7 +404,9 @@ static void tier1_allocation_test_unread(Tier1AllocationTestTally* tally, Arena*
 //   first register, though r0 is free too (before, it took r0 at 6, the lowest free register);
 // - c ends at 5 instead: r1 is free at 6, and the range takes it there;
 // - hinted to b, as a phi's range is to its operand, the range takes r0, free at 6, as before;
-// - required at 6, it takes r0 there too.
+// - required at 6, it takes r0 there too;
+// - a range of another value d, hinted to its own value but to the closing of a's first range, as a loop's body before
+//   its header is to its phi's operand (#2784): a's slot is no place of d's, and d takes r0 at 6.
 // The masks keep both production paths on the scan.
 static void tier1_allocation_test_slot_waits(Tier1AllocationTestTally* tally, Arena* arena)
 {
@@ -414,13 +416,21 @@ static void tier1_allocation_test_slot_waits(Tier1AllocationTestTally* tally, Ar
         { 5, 6, 5, 20 },
         { 5, 6, 8, 20 },
         { 5, 6, 8, 20 },
+        { 5, 6, 8, 20 },
     };
-    const uint32_t values[4] = { 1, 0, 2, 0 };
+    const uint32_t values[][4] = {
+        { 1, 0, 2, 0 },
+        { 1, 0, 2, 0 },
+        { 1, 0, 2, 0 },
+        { 1, 0, 2, 0 },
+        { 1, 0, 2, 3 },
+    };
     const uint32_t hint_values[][4] = {
         { 1, 0, 2, 0 },
         { 1, 0, 2, 0 },
         { 1, 0, 2, 1 },
         { 1, 0, 2, 0 },
+        { 1, 0, 2, 3 },
     };
     const uint32_t hint_intervals[4] = { UINT32_MAX, UINT32_MAX, UINT32_MAX, 1 | BUSTER_TIER1_ALLOCATE_HINT_EXIT };
     const uint32_t allowed[4] = { 3, 3, 3, 3 };
@@ -430,17 +440,20 @@ static void tier1_allocation_test_slot_waits(Tier1AllocationTestTally* tally, Ar
         { 0, 2, 3, 5, 6 },
         { 0, 2, 3, 5, 6 },
         { 0, 2, 3, 5, 7 },
+        { 0, 2, 3, 5, 6 },
     };
     const uint32_t use_positions[][7] = {
         { 0, 4, 1, 2, 7, 16 },
         { 0, 4, 1, 2, 4, 16 },
         { 0, 4, 1, 2, 7, 16 },
         { 0, 4, 1, 2, 7, 6, 16 },
+        { 0, 4, 1, 2, 7, 16 },
     };
     const uint8_t required[7] = { 1, 1, 1, 1, 1, 1, 1 };
-    const uint32_t fragments[] = { 6, 5, 5, 5 };
+    const uint32_t fragments[] = { 6, 5, 5, 5, 5 };
     const uint8_t expected_kinds[][6] = {
         { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_SPILL, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_SPILL, BUSTER_TIER1_ALLOCATE_REGISTER },
+        { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_SPILL, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER },
         { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_SPILL, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER },
         { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_SPILL, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER },
         { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_SPILL, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER },
@@ -450,9 +463,11 @@ static void tier1_allocation_test_slot_waits(Tier1AllocationTestTally* tally, Ar
         { 0, 1, UINT8_MAX, 1, 1 },
         { 0, 1, UINT8_MAX, 1, 0 },
         { 0, 1, UINT8_MAX, 1, 0 },
+        { 0, 1, UINT8_MAX, 1, 0 },
     };
     const uint32_t expected_starts[][6] = {
         { 0, 1, 2, 2, 6, 16 },
+        { 0, 1, 2, 2, 6 },
         { 0, 1, 2, 2, 6 },
         { 0, 1, 2, 2, 6 },
         { 0, 1, 2, 2, 6 },
@@ -462,13 +477,14 @@ static void tier1_allocation_test_slot_waits(Tier1AllocationTestTally* tally, Ar
         "a range continuing its value from its slot takes its first register where that is free at its start",
         "a range hinted to another value takes a free register at its start",
         "a range required at its start takes a free register there",
+        "a range hinted to another value's range in that value's slot takes a free register at its start",
     };
     for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(names); fixture += 1)
     {
         const Tier1AllocationInput input = {
             .starts = starts,
             .ends = ends[fixture],
-            .values = values,
+            .values = values[fixture],
             .allowed_registers = allowed,
             .classes = classes,
             .hint_values = hint_values[fixture],
@@ -478,7 +494,7 @@ static void tier1_allocation_test_slot_waits(Tier1AllocationTestTally* tally, Ar
             .use_required = required,
             .use_count = use_offsets[fixture][4],
             .count = 4,
-            .value_count = 3,
+            .value_count = 4,
             .position_count = 20,
             .registers = { 7 },
         };

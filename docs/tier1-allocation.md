@@ -1985,6 +1985,99 @@ the verifier and the occupancy oracle. `test-tier1-cfg` checks every
 allocation's continuations against a twin that recomputes them from the
 intervals alone.
 
+### Loop bodies before their headers, and slots already current (#2784)
+
+With #2768's waiting, Lua's `str_gsub` ran 73.0 M instructions on the five
+scripts instead of 69.9 M. Its loop swapped `r12` and `r13` through `r11` twice
+on its path for a plain character, 0.34 M times each, and at its head reloaded
+two values from their slots and stored them straight back, 0.57 M times each.
+Turning only the waiting off restored the earlier code, but the waiting decided
+none of it directly: it changed which register was free where the loop's body
+chose its phis' places.
+
+The loop's header follows its body in layout. Its phis for `src` and for the
+value passed through with it take their operands' registers at the exit of the
+latch before it, which take them from the join before the body, where the loop
+may end: `src`'s from the matches' path, laid out before that join. The body's
+first block has no anchor, since its predecessors all follow it, and no
+sibling, being their first successor: its ranges of the two phis took their
+values' last registers or the lowest free ones. Before #2768 a third value held
+`r13` at that block's start and the body's places agreed with the header's by
+chance. Waiting left `r13` free there, the two phis' ranges took each other's
+header registers, and each iteration swapped them back.
+
+- **Body hints.** A range laid out before its value's definition that nothing
+  hints takes the definition's hint, followed back along the hint intervals,
+  at most 8 of them as #2553's operand targets are, to the first range of
+  another value that ends before it (an exit) or starts before it (an
+  opening): the register the header's phi takes from its latch
+  (`tier1_cfg_body_hints`). A chain back to the value's own earlier range is
+  left out: it named the value's first opening, where the range's own last
+  register serves as well, and following it cost `balance_nonroot` 4.70 M,
+  `sqlite3_str_vappendf` 1.20 M and `lookupName` 0.52 M.
+- **No waiting in another value's slot.** A range waits in its slot (#2768)
+  only where its hint names a range of its own value: another value's range in
+  memory says nothing of this one's slot.
+- **Slots already current.** An eviction into a value's slot leaves out its
+  store where the slot already holds the value: a transition stored it there
+  or reloaded it from there earlier in the same block, or in the run of blocks
+  before it, each the only predecessor of the next (`tier1_emit_phase`'s slot
+  stamps, in the CFG consumer). An SSA value never changes, and slots are
+  shared only by values never live at once. A range that waits and is evicted
+  again after its reload otherwise stored the value back where it had just read
+  it: `str_gsub`'s pattern and `max_s` at its loop's head.
+
+By callgrind (#1189's `gap.c`, #1217's inputs, Lua's hash seed fixed) at main
+`20cd8e54`:
+
+| Variant | speedtest1 | Lua's five scripts |
+| --- | ---: | ---: |
+| main | 2,590.34 M | 4,732.8 M |
+| body hints, back to any earlier range, the waiting unchanged | 2,583.23 M | 4,712.1 M |
+| body hints, back to another value's range, waiting in its own value's slot only | 2,578.59 M | 4,712.1 M |
+| slot stamps alone | 2,587.92 M | 4,731.7 M |
+| both (this) | 2,576.17 M (−0.55%) | 4,711.0 M (−0.46%) |
+
+- **By function.** `str_gsub` runs 69.4 M, with no move through `r11` and no
+  store back on its loop's paths, and `luaD_precall` 230.8 M instead of
+  249.1 M; `luaV_execute` runs as before (2,195.7 M). speedtest1's
+  `sqlite3VdbeExec` runs −13.00 M and `balance_nonroot` −0.52 M; its one loss
+  over 0.05 M is `wherePathSolver` (+0.07 M).
+- **Statically** (`--tier1-report`), speedtest1's unit has 388,992 records
+  instead of 389,379, 26,618 edge moves instead of 26,717, and 10,932 spill
+  stores instead of 11,179 (11,756 loads instead of 11,712). `lvm.c` compiles
+  as before; `lstrlib.c` has 472 edge moves instead of 485.
+
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/adeb8b4a5/docs/measurements/tier1-body-hints-2784-2026-11-15),
+#2768's method), main `b5099aa7` against the change: Lua's five scripts run
+0.37% fewer user cycles over 33 link orders (95% interval −0.64% to −0.10%,
+slower at 11) for 0.46% fewer instructions at each. speedtest1 runs 0.41% more
+(−0.03% to +0.85%, slower at 7 of 8 shifts) for 0.56% fewer instructions. The
+slot stamps alone cost it 0.66% (+0.32% to +0.99%) for 0.10% fewer
+instructions, and the body hints alone 0.45% (−0.17% to +1.07%) for 0.47%
+fewer. Sampled by function, the stamps' cycles move by up to 15% either way in
+functions whose code they leave as it is (`pcache1FetchStage2`,
+`releaseMemArray`, `memsys5Size`): the shifts move the whole unit but keep the
+distances between its functions, which a change of size moves for every
+function after it, and the run can't separate that layout from the change's
+own effect. `sqlite3.c`'s `--tier1 -c` takes 0.18% more cycles, `lvm.c`'s
+0.08% fewer.
+
+A loop whose chain ends in a range with no hint of its own keeps its body's
+places to chance: `tests/driver/tier1_patterns.c`'s `patterns_gsub`, whose
+latch, holding its join's ranges, is laid out between the body and the header,
+still swaps `n` and `lastmatch` on its path for a character. Hinting a phi's
+range to an operand's exit before it fixes that and gains 7.7 M on Lua, but
+loses 13.3 M in `sqlite3VdbeExec`: #2834.
+
+`tier1_cfg_test.c`'s fixture is `str_gsub`'s loop in small: its character path
+moves nothing, where without the body hints the edge into the body moved the
+header's phi. `tier1_allocate_hints_test.c`'s fifth slot trace is a range of
+its own value hinted to another value's range in that value's slot, which now
+takes a free register at its start. `tests/driver/tier1_patterns.c`'s
+`patterns_gsub` stores nothing back where the instruction before loaded it, as
+main's does once.
+
 ## Rematerialization
 
 `Tier1RematerializationInput` is a borrowed column view of selection facts,

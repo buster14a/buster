@@ -715,11 +715,14 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             //   definition), which was last in its slot, as an unused one rests (#2768), unless its value's first register
             //   is free: whatever register was free at the block's start, which edges then reloaded the value into, held it
             //   to the blocks after, where the value's paths meet in the first one. Lua's OP_GETTABUP reloaded pc into i's
-            //   register after its call, and the fetch swapped the two through r11.
+            //   register after its call, and the fetch swapped the two through r11. Not where its hint names another value's
+            //   range (tier1_cfg_body_hints, #2784): that value's slot says nothing of this one's.
             const uint8_t first = follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT ? tier1_allocation_firsts(&columns, last)[columns.values[interval]] : UINT8_MAX;
             const bool settled = first < 32 && ((tier1_allocation_preferred(&columns, interval, open) >> first) & 1) != 0;
             const bool memory = follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT && !use_event && !required;
-            const bool waits = memory && (recomputed || (!settled && columns.hint_values[interval] == columns.values[interval]));
+            // Without hints (`last` null) there are no hint values to read, and no memory hint.
+            const bool own = memory && columns.hint_values[interval] == columns.values[interval] && (named == UINT32_MAX || columns.values[named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT] == columns.values[interval]);
+            const bool waits = memory && (recomputed || (!settled && own));
             if ((idle && (!recomputed || open == 0 || rests)) || waits)
             {
             }

@@ -16,9 +16,11 @@
 // - #2676's selects of comparisons (a maximum, a clamp, a loop's conditional sum, a comparison of a load with an
 //   immediate and with a register, a doubleword's comparison choosing quadwords, an unsigned one): a cmov of the
 //   comparison's flags for each, no setcc;
-// - and #2745's objects a vector's value initializes whole, as the intrinsics' wrappers are (a struct's, a union's, a
+// - #2745's objects a vector's value initializes whole, as the intrinsics' wrappers are (a struct's, a union's, a
 //   compound literal's): no store of zeros before the vector's, while a volatile object and a union whose designator
-//   moves to another member after the vector's (whose rest clang leaves zeros) keep their eight.
+//   moves to another member after the vector's (whose rest clang leaves zeros) keep their eight;
+// - and #2784's str_gsub loop, whose body precedes its header: no value stored back where the instruction before loaded
+//   it from, as a range that waits in its slot (#2768) and is evicted after its reload did.
 
 #if defined(BUSTER_TIER1_PATTERNS_SUBJECT)
 
@@ -242,6 +244,66 @@ spilled_halt:
     return base[BUSTER_PATTERNS_A(i)];
 }
 
+// #2784: Lua's str_gsub, a loop that replaces a match through a call or copies a plain character and advances the
+// source. Its body precedes its header in layout. The pattern waits in its slot until the call reads it, and its
+// eviction after the reload stored it back into the same slot.
+struct patterns_buffer
+{
+    char* data;
+    unsigned long size;
+    unsigned long capacity;
+};
+const char* patterns_match(void* state, const char* s, const char* p);
+void patterns_add_value(void* state, struct patterns_buffer* b, const char* s, const char* e, int tr);
+void patterns_grow(struct patterns_buffer* b);
+
+__attribute__((noinline)) long patterns_gsub(void* state, struct patterns_buffer* b, const char* src, unsigned long length, const char* p, long max_s, int tr)
+{
+    const char* end = src + length;
+    const char* lastmatch = 0;
+    const int anchor = *p == '^';
+    long n = 0;
+    if (anchor)
+    {
+        p += 1;
+    }
+    while (n < max_s)
+    {
+        const char* e = patterns_match(state, src, p);
+        if (e != 0 && e != lastmatch)
+        {
+            n += 1;
+            patterns_add_value(state, b, src, e, tr);
+            src = lastmatch = e;
+        }
+        else if (src < end)
+        {
+            if (b->size >= b->capacity)
+            {
+                patterns_grow(b);
+            }
+            b->data[b->size++] = *src++;
+        }
+        else
+        {
+            break;
+        }
+        if (anchor)
+        {
+            break;
+        }
+    }
+    while (src < end)
+    {
+        if (b->size >= b->capacity)
+        {
+            patterns_grow(b);
+        }
+        b->data[b->size++] = *src++;
+    }
+    return n;
+}
+
 __attribute__((noinline)) long patterns_max(long a, long b)
 {
     return a > b ? a : b;
@@ -377,6 +439,13 @@ struct patterns_state
     long trap;
 };
 long patterns_spilled(struct patterns_state* s, const unsigned int* pc);
+struct patterns_buffer
+{
+    char* data;
+    unsigned long size;
+    unsigned long capacity;
+};
+long patterns_gsub(void* state, struct patterns_buffer* b, const char* src, unsigned long length, const char* p, long max_s, int tr);
 typedef long long patterns_vector __attribute__((vector_size(64)));
 typedef struct
 {
@@ -516,6 +585,124 @@ static bool spilled_run(bool reference, long* result, long* registers, unsigned 
     return state.base == registers;
 }
 
+// patterns_gsub's callees: a match of a run of the pattern's character, a replacement that appends `<`, the run's length
+// and the replacement's digit, `>`, and a buffer that grows in steps up to its storage. Each counts its calls, twice
+// with a state.
+#define BUSTER_PATTERNS_GSUB_STORAGE 256
+static unsigned long gsub_calls;
+void patterns_grow(struct patterns_buffer* b);
+
+const char* patterns_match(void* state, const char* s, const char* p)
+{
+    gsub_calls += 1 + (state != 0);
+    const char* e = s;
+    while (*p != 0 && *e == *p)
+    {
+        e += 1;
+    }
+    return e != s ? e : 0;
+}
+
+void patterns_add_value(void* state, struct patterns_buffer* b, const char* s, const char* e, int tr)
+{
+    gsub_calls += 1 + (state != 0);
+    const char text[] = { '<', (char)('0' + (e - s)), (char)('0' + tr), '>' };
+    for (unsigned i = 0; i < sizeof(text); i += 1)
+    {
+        if (b->size >= b->capacity)
+        {
+            patterns_grow(b);
+        }
+        b->data[b->size++] = text[i];
+    }
+}
+
+void patterns_grow(struct patterns_buffer* b)
+{
+    gsub_calls += 1;
+    b->capacity = b->capacity * 2 < BUSTER_PATTERNS_GSUB_STORAGE ? b->capacity * 2 : BUSTER_PATTERNS_GSUB_STORAGE;
+}
+
+// patterns_gsub's semantics, for Clang to compile.
+static long gsub_reference(void* state, struct patterns_buffer* b, const char* src, unsigned long length, const char* p, long max_s, int tr)
+{
+    const char* end = src + length;
+    const char* lastmatch = 0;
+    const bool anchor = *p == '^';
+    p += anchor;
+    long n = 0;
+    bool running = true;
+    while (running && n < max_s)
+    {
+        const char* e = patterns_match(state, src, p);
+        if (e != 0 && e != lastmatch)
+        {
+            n += 1;
+            patterns_add_value(state, b, src, e, tr);
+            src = lastmatch = e;
+        }
+        else if (src < end)
+        {
+            if (b->size >= b->capacity)
+            {
+                patterns_grow(b);
+            }
+            b->data[b->size++] = *src++;
+        }
+        else
+        {
+            running = false;
+        }
+        running = running && !anchor;
+    }
+    while (src < end)
+    {
+        if (b->size >= b->capacity)
+        {
+            patterns_grow(b);
+        }
+        b->data[b->size++] = *src++;
+    }
+    return n;
+}
+
+// patterns_gsub against its reference on each source, pattern and limit: the same count, text, buffer and calls.
+static bool gsub_runs(void)
+{
+    static const char* const sources[] = { "", "aab-ab--b", "bbbb", "a-b-a-b-aaa", "--ab" };
+    static const char* const patterns[] = { "a", "^a", "b", "-", "^-", "z" };
+    static const long limits[] = { 0, 1, 2, 100 };
+    bool valid = true;
+    for (unsigned i = 0; i < sizeof(sources) / sizeof(sources[0]); i += 1)
+    {
+        for (unsigned j = 0; j < sizeof(patterns) / sizeof(patterns[0]); j += 1)
+        {
+            for (unsigned k = 0; k < sizeof(limits) / sizeof(limits[0]); k += 1)
+            {
+                char storage[2][BUSTER_PATTERNS_GSUB_STORAGE];
+                struct patterns_buffer buffers[2];
+                long counts[2];
+                unsigned long calls[2];
+                for (unsigned reference = 0; reference < 2; reference += 1)
+                {
+                    memset(storage[reference], 0, sizeof(storage[reference]));
+                    buffers[reference] = (struct patterns_buffer){ .data = storage[reference], .size = 0, .capacity = 4 };
+                    gsub_calls = 0;
+                    void* state = k == 2 ? &buffers[reference] : 0;
+                    const unsigned long length = strlen(sources[i]);
+                    const int tr = (int)(i + j) % 10;
+                    counts[reference] = reference != 0 ? gsub_reference(state, &buffers[reference], sources[i], length, patterns[j], limits[k], tr) :
+                                                         patterns_gsub(state, &buffers[reference], sources[i], length, patterns[j], limits[k], tr);
+                    calls[reference] = gsub_calls;
+                }
+                valid = counts[0] == counts[1] && calls[0] == calls[1] && buffers[0].size == buffers[1].size && buffers[0].capacity == buffers[1].capacity &&
+                        memcmp(storage[0], storage[1], sizeof(storage[0])) == 0 && valid;
+            }
+        }
+    }
+    return valid;
+}
+
 int main(void)
 {
     const long inputs[] = { LONG_MIN, -2, -1, 0, 1, 2, 3, LONG_MAX };
@@ -618,6 +805,7 @@ int main(void)
     }
     // Three lookups, two of which hit, and two misses, one of which asks for the hook: six calls.
     valid = spilled_results[0] == spilled_results[1] && memcmp(spilled_registers[0], spilled_registers[1], sizeof(spilled_registers[0])) == 0 && spilled_counts[0] == spilled_counts[1] && spilled_counts[0] == 6 && spilled_hooks[0] == spilled_hooks[1] && spilled_hooks[0] != 0 && valid;
+    valid = gsub_runs() && valid;
     patterns_vector vector;
     unsigned long long lanes[8];
     for (int l = 0; l < 8; l += 1)
@@ -710,6 +898,7 @@ typedef enum PatternsKind
     PATTERNS_SELECT,
     PATTERNS_WHOLE,
     PATTERNS_CLEARED,
+    PATTERNS_GSUB,
 } PatternsKind;
 
 typedef struct PatternsFunction PatternsFunction;
@@ -744,6 +933,7 @@ static const PatternsFunction patterns_functions[] = {
     { "patterns_whole_member", PATTERNS_WHOLE },
     { "patterns_whole_override", PATTERNS_CLEARED },
     { "patterns_whole_volatile", PATTERNS_CLEARED },
+    { "patterns_gsub", PATTERNS_GSUB },
 };
 
 #define BUSTER_PATTERNS_COUNT (sizeof(patterns_functions) / sizeof(patterns_functions[0]))
@@ -789,6 +979,8 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     unsigned increments = 0;
     // Indirect jumps right after the load of their target, with nothing between them (#2768).
     unsigned loaded = 0;
+    // Stores of a register into the memory the instruction before loaded it from (#2784).
+    unsigned stored_back = 0;
     // Stores of a zero immediate to memory: an object's clear's (#2745).
     unsigned zeros = 0;
     for (unsigned i = 0; i < body->count; i += 1)
@@ -814,6 +1006,13 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
         clean += jump && operands[0] == '*' && !moved;
         const char* loaded_comma = before != NULL ? strrchr(before->operands, ',') : NULL;
         loaded += jump && operands[0] == '*' && loaded_comma != NULL && strcmp(before->operation, "mov") == 0 && patterns_memory(before->operands) && strcmp(loaded_comma + 1, operands + 1) == 0;
+        if (move && comma != NULL && loaded_comma != NULL && strcmp(before->operation, "mov") == 0 && loaded_comma[1] == '%')
+        {
+            // `mov MEMORY,%REGISTER` and then `mov %REGISTER,MEMORY`.
+            char reversed[sizeof(before->operands) + 2];
+            snprintf(reversed, sizeof(reversed), "%s,%.*s", loaded_comma + 1, (int)(loaded_comma - before->operands), before->operands);
+            stored_back += patterns_memory(destination) && strcmp(operands, reversed) == 0;
+        }
         if (jump && operands[0] != '*')
         {
             const unsigned long long target = strtoull(operands, NULL, 16);
@@ -853,11 +1052,14 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     case PATTERNS_CLEARED:
         valid = valid && zeros == 8;
         break;
+    case PATTERNS_GSUB:
+        valid = valid && stored_back == 0;
+        break;
     }
     if (!valid)
     {
-        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u cmov=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u loaded-jumps=%u zero-stores=%u\n",
-                function->name, body->definitions, sets, moves, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, loaded, zeros);
+        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u cmov=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u loaded-jumps=%u zero-stores=%u stored-back=%u\n",
+                function->name, body->definitions, sets, moves, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, loaded, zeros, stored_back);
     }
     return valid;
 }
