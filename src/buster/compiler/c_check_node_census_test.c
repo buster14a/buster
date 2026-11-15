@@ -536,26 +536,29 @@ static const char node_facts_test_text[] =
     "    w();\n"
     "    y = wp->m;\n"
     "    y = wp[1].n;\n"
+    "    y = p[1].n;\n"
     "    y = cp->m + cp->a[1];\n"
     "    return y + x;\n"
     "}\n";
 
-// The facts' fixture written to `directory` and read with `options`, its windows cut at `window` records (0 for the
-// kernel's own cut) and holding several bodies' expressions with `packed`: whether every record the fact words' rules
-// made is T's, the kernel's lists are the twin's, and the leaves, the lookups and those left are the fixture's.
-static bool node_facts_test_fixture(const char* directory, uint32_t window, bool packed, char** options, uint32_t option_count)
+// The facts' fixture written to `directory` and read with `options` by the kernel's variant `mode`, its windows cut at
+// `window` records (0 for the kernel's own cut) and holding several bodies' expressions with `packed`: whether every
+// record the fact words' rules made is T's, the kernel's lists are the twin's, and the leaves, the lookups and those
+// left are the fixture's; and, of a lean kernel, whether every conversion's entry and every discard it left out is its
+// rule's on the kernel's records, and the loads' kernel took by its load what the lean one took by its short path.
+static bool node_facts_test_fixture(const char* directory, uint32_t mode, uint32_t window, bool packed, char** options, uint32_t option_count)
 {
     char path[512];
     snprintf(path, sizeof(path), "%s/facts.c", directory);
     bool valid = parse_test_write(path, node_facts_test_text, strlen(node_facts_test_text));
-    NodeShadow shadow = { .facts = true, .facts_packed = packed, .facts_window = window, .passes = 1, .repeat = 1 };
+    NodeShadow shadow = { .facts = true, .facts_mode = mode, .facts_packed = packed, .facts_window = window, .passes = 1, .repeat = 1 };
     NodeCensus census = { .shadow = &shadow };
     fflush(stdout);
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
     // Its leaves by what they name (enumerators, functions, static and automatic objects), its lookups by operator (`->`,
     // `.`, `*`, a subscript, a call, a discard), and those the rules leave.
-    static const uint64_t named[4] = { 2, 4, 6, 44 };
-    static const uint64_t lookups[BUSTER_NODE_FACTS_LOOKUPS] = { 8, 5, 1, 9, 6, 20 };
+    static const uint64_t named[4] = { 2, 4, 6, 46 };
+    static const uint64_t lookups[BUSTER_NODE_FACTS_LOOKUPS] = { 8, 6, 1, 10, 6, 21 };
     static const uint64_t left[BUSTER_NODE_FACTS_LOOKUPS] = { 1, 1, 0, 0, 0, 0 };
     bool held = shadow.facts_differences == 0 && shadow.facts_list_differences == 0 && shadow.facts_failures == 0 && shadow.value_differences == 0 &&
                 shadow.facts_left_identifiers == 0;
@@ -567,12 +570,22 @@ static bool node_facts_test_fixture(const char* directory, uint32_t window, bool
     {
         held = held && shadow.facts_lookups[lookup] == lookups[lookup] && shadow.facts_left_lookups[lookup] == left[lookup];
     }
+    // The fixture's 21 discards, which a lean kernel doesn't make: each T's record by the discard's rule. Its other 31
+    // lookups less the two left: each one's conversions' entries by its rule. Two more go by their rule in any variant
+    // (a member through an array's pointer, a constant index of an address constant). `p[1].n` is its one taken member
+    // of an operand that is no address constant, at an offset: the record a dot's choices by masks would get wrong.
+    const bool lean = mode != BUSTER_NODE_FACTS_WHOLE;
+    held = held && shadow.facts_discards == (lean ? 21u : 0u) && shadow.facts_discards_derived == shadow.facts_discards &&
+           shadow.facts_conversions == (lean ? 29u : 0u) && shadow.facts_conversions_derived == shadow.facts_conversions &&
+           shadow.facts_taken_lookups - shadow.facts_short_lookups == 2 && (mode != BUSTER_NODE_FACTS_LOADS || shadow.facts_loads == shadow.facts_short_lookups);
     if (!valid || !held)
     {
-        fprintf(stderr, "test-checker: node-facts: window %u%s: %s: %" PRIu64 " records differ, %" PRIu64 " lists differ, %" PRIu64 " leaves left; named %" PRIu64 " %" PRIu64
-                        " %" PRIu64 " %" PRIu64 "; lookups",
-                window, packed ? " packed" : "", valid ? "read" : "NOT READ", shadow.facts_differences, shadow.facts_list_differences, shadow.facts_left_identifiers,
-                shadow.facts_named[0], shadow.facts_named[1], shadow.facts_named[2], shadow.facts_named[3]);
+        fprintf(stderr, "test-checker: node-facts: variant %u window %u%s: %s: %" PRIu64 " records differ, %" PRIu64 " lists differ, %" PRIu64 " leaves left; named %" PRIu64
+                        " %" PRIu64 " %" PRIu64 " %" PRIu64 "; conversions %" PRIu64 " of %" PRIu64 ", discards %" PRIu64 " of %" PRIu64 ", by a short path %" PRIu64
+                        ", by the load %" PRIu64 "; lookups",
+                mode, window, packed ? " packed" : "", valid ? "read" : "NOT READ", shadow.facts_differences, shadow.facts_list_differences, shadow.facts_left_identifiers,
+                shadow.facts_named[0], shadow.facts_named[1], shadow.facts_named[2], shadow.facts_named[3], shadow.facts_conversions_derived, shadow.facts_conversions,
+                shadow.facts_discards_derived, shadow.facts_discards, shadow.facts_short_lookups, shadow.facts_loads);
         for (uint32_t lookup = 0; lookup < BUSTER_NODE_FACTS_LOOKUPS; lookup += 1)
         {
             fprintf(stderr, " %s %" PRIu64 " (left %" PRIu64 ")", node_facts_lookup_names[lookup], shadow.facts_lookups[lookup], shadow.facts_left_lookups[lookup]);
@@ -687,12 +700,20 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     char* unsigned_char[] = { "-nostdinc", "-Wall", "-Wextra", "-Wshift-sign-overflow", "-Wassign-enum", "-funsigned-char" };
     check_test_expect(test, ready && node_shadow_test_fixture(directory, false, BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN, unsigned_char, BUSTER_ARRAY_LENGTH(unsigned_char)),
                       "node-shadow -funsigned-char: the machine converts plain char constants as the unit's char is signed");
-    check_test_expect(test, ready && node_facts_test_fixture(directory, 0, false, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+    check_test_expect(test, ready && node_facts_test_fixture(directory, BUSTER_NODE_FACTS_WHOLE, 0, false, quiet, BUSTER_ARRAY_LENGTH(quiet)),
                       "node-facts: every leaf and lookup the fact words' rules make is T's record, and what they leave is the fixture's");
-    check_test_expect(test, ready && node_facts_test_fixture(directory, 16, false, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+    check_test_expect(test, ready && node_facts_test_fixture(directory, BUSTER_NODE_FACTS_WHOLE, 16, false, quiet, BUSTER_ARRAY_LENGTH(quiet)),
                       "node-facts: the same records where a window is cut every 16 records");
-    check_test_expect(test, ready && node_facts_test_fixture(directory, BUSTER_NODE_FACTS_WINDOW, true, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+    check_test_expect(test, ready && node_facts_test_fixture(directory, BUSTER_NODE_FACTS_WHOLE, BUSTER_NODE_FACTS_WINDOW, true, quiet, BUSTER_ARRAY_LENGTH(quiet)),
                       "node-facts: the same records where a window packs the bodies' expressions to its most");
+    check_test_expect(test, ready && node_facts_test_fixture(directory, BUSTER_NODE_FACTS_LEAN, 0, false, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-facts lean: a record's first half is T's, and the conversions and discards left out are their rules'");
+    check_test_expect(test, ready && node_facts_test_fixture(directory, BUSTER_NODE_FACTS_LEAN, 16, false, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-facts lean: the same where a window is cut every 16 records");
+    check_test_expect(test, ready && node_facts_test_fixture(directory, BUSTER_NODE_FACTS_LOADS, 0, false, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-facts loads: a lookup's type, word and member's offset from its load alone are T's");
+    check_test_expect(test, ready && node_facts_test_fixture(directory, BUSTER_NODE_FACTS_LOADS, BUSTER_NODE_FACTS_WINDOW, true, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-facts loads: the same where a window packs the bodies' expressions to its most");
     // The machine's own front at its limits (step 1b): a chunk's end at every place within a call, and a full stack.
     check_test_expect(test, ready && node_front_test_limits(directory, true, BUSTER_NODE_FRONT_AFTER, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-front: a callee waiting across a chunk's end keeps its use, a library call's mark the walk's");
