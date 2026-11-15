@@ -330,14 +330,27 @@ the main loop, and the pass can't know that.
 
 ### Compile cost and code growth
 
-Locally (a cloud container's `--tier1-report` and object sizes, the head):
-`sqlite3.c`'s 2,748 natural loops give 53 unrolled; the largest refusals are
-other exits (834), calls (635), outer loops (526), predicates (302) and
-preheaders (222); its text grows 0.77%. The compiler's own `main.c` unrolls 297
-of 2,448 loops, and its text grows 3.20%. The 9700X's compile-time record
-(`measure-compile --variant --tier1-passes=+unroll` of both inputs, and the base's
-and the head's default objects compared byte for byte) is in the record when it
-finishes.
+On the 9700X (`measure-compile --runs 11 --variant --tier1-passes=+unroll`, one
+lane, the record's `9700x/compile/`), both inputs' default objects are the base's
+byte for byte, and `+unroll` costs:
+
+| Input | Loops | Unrolled | Default | `+unroll` | Wall | Instructions | Text |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 2,748 | 53 | 636.2 ms | 650.2 ms | +2.20% | +1.95% | +0.77% |
+| the compiler's `main.c` | 2,448 | 297 | 1,270.1 ms | 1,327.9 ms | +4.54% | +4.55% | +3.20% |
+
+The largest refusals on `sqlite3.c` are other exits (834), calls (635), outer
+loops (526), predicates (302) and preheaders (222).
+
+Under callgrind (a baseline-host build, `sqlite3.c`), Tier 1 executes 237.5 M
+more instructions. The pass is 109 M of them: the dominators of the 1,018
+functions with a phi 38 M, its scan and rewrite about 25 M, their CFGs 13 M, and
+zeroing its arrays. The sink and optimizer that follow take 69 M more and the
+back end 44 M more, for the bigger functions. Skipping the CFG and dominators of
+a function with no branch backward in block order (a test with twins) took off
+3–4 M, since 729 of the 1,018 have a loop and carry the analysis' cost, so it
+wasn't kept; reusing a loop analysis another pass made would need its
+invalidation tracked across if-conversion and LICM.
 
 ## What is left
 
