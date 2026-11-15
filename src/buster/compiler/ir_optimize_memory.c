@@ -17,7 +17,9 @@
 // addresses and to make those addresses (no call, return, phi, comparison, stored value or other use reaches it), which
 // only its own stores write. Such a slot's accesses are of the slot's class; every other access is of general memory,
 // which a call, a fence, an atomic or volatile access, a masked, compressing or scattering store, the dynamic stack's
-// allocation and release, and a lifetime marker of a slot that isn't private all write.
+// allocation and release, and a lifetime marker of a slot that isn't private all write. A volatile slot's access (a
+// volatile or _Atomic declaration's local, BUSTER_IR_SLOT_VOLATILE) is such a write itself: it happens, and is no load's
+// value.
 //
 // The decision walks the dominator tree in preorder, with each key's last access, entered by its value and its class's
 // and its family's write counts there, and an undo log that restores the entries and the counts as the walk leaves a
@@ -122,9 +124,11 @@ struct IrMemoryWork
     uint32_t* follow;
     // The slot a reachable value's follow chain starts at, or BUSTER_IR_NONE.
     uint32_t* derived;
-    // A slot's first IR_STACK_ADDR, its addresses' root, and 1 for a private slot.
+    // A slot's first IR_STACK_ADDR, its addresses' root, 1 for a private slot, and 1 for a volatile one (a volatile or
+    // _Atomic declaration's, BUSTER_IR_SLOT_VOLATILE), whose accesses are observable writes.
     uint32_t* slot_first;
     uint32_t* slot_private;
+    uint32_t* slot_volatile;
     // The events (the reachable blocks' accesses, writes and lifetime markers), with each block's first, and the accesses
     // (plain loads and stores) among them, in instruction order; the walk's undo records they need at most.
     uint32_t* events;
@@ -426,15 +430,24 @@ static uint32_t ir_memory_undos(uint32_t kind)
     return kind == BUSTER_IR_MEMORY_STORE ? 3u : 1u;
 }
 
-// The events and accesses, each block's first event, every slot's first IR_STACK_ADDR and the undo bound. Scalar twin.
+// The events and accesses, each block's first event, every slot's first IR_STACK_ADDR and the undo bound; a volatile
+// slot's access becomes a write. Scalar twin.
 static void ir_memory_events_scalar(IrMemoryWork* m)
 {
     const IrFunction* f = m->ir->function;
     for (uint32_t i = 0; i < f->instruction_count; i += 1)
     {
-        const uint32_t info = m->info[i];
-        const uint32_t kind = info & BUSTER_IR_MEMORY_KIND;
+        uint32_t info = m->info[i];
+        uint32_t kind = info & BUSTER_IR_MEMORY_KIND;
         const bool reachable = (info & BUSTER_IR_MEMORY_REACHABLE) != 0;
+        // A volatile slot's access is an observable write.
+        const uint32_t slot = reachable && (kind == BUSTER_IR_MEMORY_LOAD || kind == BUSTER_IR_MEMORY_STORE) ? m->derived[f->a[i]] : BUSTER_IR_NONE;
+        if (slot != BUSTER_IR_NONE && m->slot_volatile[slot] != 0)
+        {
+            kind = BUSTER_IR_MEMORY_WRITE;
+            info = (info & ~BUSTER_IR_MEMORY_KIND) | kind;
+            m->info[i] = info;
+        }
         if (kind == BUSTER_IR_MEMORY_SLOT && m->slot_first[f->a[i]] == BUSTER_IR_NONE)
         {
             m->slot_first[f->a[i]] = i;
@@ -454,8 +467,8 @@ static void ir_memory_events_scalar(IrMemoryWork* m)
 }
 
 #if BUSTER_HOST_VECTOR
-// The vector events: 16 instructions at a time, the events' and the accesses' indices compressed into their lists; the
-// slots' addresses, few, set one by one.
+// The vector events: 16 instructions at a time, a volatile slot's accesses made writes by masks, the events' and the
+// accesses' indices compressed into their lists; the slots' addresses, few, set one by one.
 static void ir_memory_events_vector(IrMemoryWork* m)
 {
     const IrFunction* f = m->ir->function;
@@ -465,9 +478,19 @@ static void ir_memory_events_vector(IrMemoryWork* m)
     {
         const uint32_t count = n - first < 16 ? (uint32_t)(n - first) : 16;
         const __mmask16 valid = (__mmask16)((UINT32_C(1) << count) - 1);
-        const __m512i info = _mm512_maskz_loadu_epi32(valid, m->info + first);
-        const __m512i kind = _mm512_and_si512(info, _mm512_set1_epi32(BUSTER_IR_MEMORY_KIND));
+        __m512i info = _mm512_maskz_loadu_epi32(valid, m->info + first);
+        __m512i kind = _mm512_and_si512(info, _mm512_set1_epi32(BUSTER_IR_MEMORY_KIND));
         const __mmask16 reachable = valid & _mm512_test_epi32_mask(info, _mm512_set1_epi32((int)BUSTER_IR_MEMORY_REACHABLE));
+        // A volatile slot's access is an observable write: its address's slot and that slot's flag, gathered.
+        const __mmask16 plain = reachable & _mm512_cmple_epu32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_STORE)) & _mm512_cmpge_epu32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_LOAD));
+        const __m512i address = _mm512_maskz_loadu_epi32(plain, f->a + first);
+        const __m512i slot = _mm512_mask_i32gather_epi32(_mm512_set1_epi32((int)BUSTER_IR_NONE), plain, address, m->derived, 4);
+        const __mmask16 slotted = plain & _mm512_cmpneq_epi32_mask(slot, _mm512_set1_epi32((int)BUSTER_IR_NONE));
+        const __m512i flagged = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), slotted, slot, m->slot_volatile, 4);
+        const __mmask16 observable = slotted & _mm512_test_epi32_mask(flagged, flagged);
+        kind = _mm512_mask_mov_epi32(kind, observable, _mm512_set1_epi32(BUSTER_IR_MEMORY_WRITE));
+        info = _mm512_mask_or_epi32(info, observable, _mm512_andnot_si512(_mm512_set1_epi32(BUSTER_IR_MEMORY_KIND), info), _mm512_set1_epi32(BUSTER_IR_MEMORY_WRITE));
+        _mm512_mask_storeu_epi32(m->info + first, observable, info);
         const __mmask16 event = reachable & _mm512_cmpge_epu32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_LOAD)) &
                                 _mm512_cmple_epu32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_LIFETIME));
         const __mmask16 access = reachable & _mm512_cmple_epu32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_STORE)) & _mm512_cmpge_epu32_mask(kind, _mm512_set1_epi32(BUSTER_IR_MEMORY_LOAD));
@@ -1043,12 +1066,14 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, bool reques
     uint32_t* access_first = ir_memory_push(scratch, (uint64_t)f->block_count + 1, sizeof(uint32_t), &ok);
     m.slot_first = ir_memory_push(scratch, f->slot_count, sizeof(uint32_t), &ok);
     m.slot_private = ir_memory_push(scratch, f->slot_count, sizeof(uint32_t), &ok);
+    m.slot_volatile = ir_memory_push(scratch, f->slot_count, sizeof(uint32_t), &ok);
     m.dirty = ir_allocate(scratch, f->block_count, sizeof(uint8_t), &ok);
     m.clear = ir_memory_push(scratch, f->block_count, sizeof(uint8_t), &ok);
     for (uint32_t s = 0; ok && s < f->slot_count; s += 1)
     {
         m.slot_first[s] = BUSTER_IR_NONE;
         m.slot_private[s] = (f->slots[s].flags & (BUSTER_IR_SLOT_VOLATILE | BUSTER_IR_SLOT_REGISTER_SAVE_AREA | BUSTER_IR_SLOT_OVERFLOW_AREA)) == 0;
+        m.slot_volatile[s] = (f->slots[s].flags & BUSTER_IR_SLOT_VOLATILE) != 0;
     }
     if (ok)
     {

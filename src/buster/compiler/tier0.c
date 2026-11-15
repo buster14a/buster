@@ -362,6 +362,10 @@ _Static_assert(BUSTER_TIER0_KINDS <= BUSTER_TYPED_KIND_LIMIT, "Tier 0's own kind
 #define BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA 0x04
 #define BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA 0x08
 #define BUSTER_TYPED_LOCAL_ADDRESS_ONLY (BUSTER_TYPED_LOCAL_VA_LIST | BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA | BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA)
+// A volatile or _Atomic declaration's local (#2718), with ADDRESS_TAKEN, which keeps it in the frame: its LOCAL and
+// STORE_LOCAL are its accesses, each of which happens, which a pass neither removes nor takes another's value for. The
+// IR's lowering makes its slot BUSTER_IR_SLOT_VOLATILE; Tier 0 needs nothing more than ADDRESS_TAKEN.
+#define BUSTER_TYPED_LOCAL_VOLATILE 0x10
 
 // A machine operation, a row of Tier0Function.operations, which X86 entries name: `record_count` records (up to
 // BUSTER_TIER0_OPERATION_RECORDS), emitted in order, with `operand_count` operands (operand_classes, the first pushed
@@ -783,7 +787,8 @@ static __attribute__((noinline)) bool tier0_frame_input_valid(const Tier0Functio
     {
         const uint32_t flags = function->local_flags[local];
         const uint32_t role = flags & BUSTER_TYPED_LOCAL_ADDRESS_ONLY;
-        valid = (flags & ~(BUSTER_TYPED_LOCAL_ADDRESS_TAKEN | BUSTER_TYPED_LOCAL_ADDRESS_ONLY)) == 0;
+        valid = (flags & ~(BUSTER_TYPED_LOCAL_ADDRESS_TAKEN | BUSTER_TYPED_LOCAL_ADDRESS_ONLY | BUSTER_TYPED_LOCAL_VOLATILE)) == 0 &&
+                ((flags & BUSTER_TYPED_LOCAL_VOLATILE) == 0 || (flags & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0);
         if (role != 0)
         {
             valid = valid && (role & (role - 1)) == 0 && local >= function->parameter_count && function->local_classes[local] == BUSTER_TYPED_CLASS_U64 &&

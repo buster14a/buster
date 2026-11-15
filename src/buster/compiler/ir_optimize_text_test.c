@@ -52,6 +52,7 @@ static const IrOptimizeTextFixture ir_optimize_text_fixtures[] = {
     { .name = "memory-private", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
     { .name = "memory-blocks", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
     { .name = "memory-addresses", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
+    { .name = "memory-volatile", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
 };
 
 // A fixture's diagnostic names the pair, so that a failure points at the file to read without a printout of the

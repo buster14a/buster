@@ -84,11 +84,13 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             const bool object = local && tier0_is_object(input, s);
             const uint32_t role = local ? input->local_flags[s] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY : 0;
             const bool flags = local && (input->local_flags[s] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0;
+            // A volatile or _Atomic declaration's local (#2718): its accesses happen, so no pass removes or merges them.
+            const bool volatile_local = local && (input->local_flags[s] & BUSTER_TYPED_LOCAL_VOLATILE) != 0;
             IrSlot slot = {
                 .size = object ? input->local_sizes[s] : local ? tier0_class_bytes(class) : s == dispatch_slot ? 8 : plan->spill_bytes,
                 .alignment = object ? 1u << input->local_alignments[s] : local ? 1u << ir_typed_alignment(class) : s == dispatch_slot ? 8 : plan->spill_bytes,
                 .type = local && !object ? ir_typed_types[class] : s == dispatch_slot ? IR_I64 : IR_VOID,
-                .flags = local ? (flags ? BUSTER_IR_SLOT_ADDRESS_TAKEN : 0) : BUSTER_IR_SLOT_TEMPORARY,
+                .flags = local ? (uint8_t)((flags ? BUSTER_IR_SLOT_ADDRESS_TAKEN : 0) | (volatile_local ? BUSTER_IR_SLOT_VOLATILE : 0)) : BUSTER_IR_SLOT_TEMPORARY,
             };
             if (role == BUSTER_TYPED_LOCAL_VA_LIST)
             {
