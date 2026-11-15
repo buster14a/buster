@@ -144,8 +144,8 @@ what it is (`abi_finish`):
 | Bits | Name | Meaning |
 | --- | --- | --- |
 | 0 to 3 | `LOW_INTEGER`, `LOW_SSE`, `HIGH_INTEGER`, `HIGH_SSE` | the register class of each eightbyte passed in a register; a high eightbyte without a low one (padding) passes alone |
-| 4 | `VECTOR` | SSE then SSEUP: one vector register holds the value |
-| 5 | `WIDE` | a `VECTOR` of 32 or 64 bytes |
+| 4 | `VECTOR` | SSE then SSEUP: one vector register holds the value's payload (`abi_vector_payload_bytes`: the value, or a record's `<size / 8 x double>`, see "Where clang's LLVM types decide") |
+| 5 | `WIDE` | a `VECTOR` whose payload is past 16 bytes, in a YMM or a ZMM register (`abi_vector_register_bytes`) |
 | 6 | `MEMORY` | on the stack as an argument: the classes MEMORY, X87 and COMPLEX_X87 |
 | 7 | `UNCOUNTED` | MEMORY by its class, but a scalar clang passes as its value, in a register clang doesn't count, or on the stack once LLVM has none: `nullptr_t` and `_Atomic` scalars |
 | 8 | `IGNORE` | nothing to pass: both classes NO_CLASS (an empty struct, a struct of unnamed bit-fields) |
@@ -153,7 +153,7 @@ what it is (`abi_finish`):
 | 10, 11 | `SIGN`, `ZERO` | clang's `Extend`: the caller extends the value to 32 bits; for a result, what clang's IR asks of the callee, which LLVM's x86-64 code doesn't do (see "Extension") |
 | 12 | `AGGREGATE` | clang's `byval`: in memory as an argument, a copy on the stack (or an integer value: see "Two counts") |
 | 13 | `END_MEMORY` | a type of no size that is MEMORY at offset 16 though not at 0 |
-| 14 | `UNSUPPORTED` | what the module doesn't place as clang and LLVM do, which the code generator refuses: an `UNCOUNTED` value LLVM splits into more parts than a location holds, as no class says (an `_Atomic` vector wider than 16 bytes and than the target's vector registers, or one LLVM breaks into its elements, and an integer of more than 128 bits); a vector SSE, SSEUP by its classes that LLVM breaks up (of bools or of `_BitInt`s narrower than a byte, of long doubles, of two or more `__float128`s, of `_BitInt`s wider than 128 bits), and a record or an array of one such member, which clang passes as it; and one of `_BitInt(128)`s, whose `i64`s LLVM puts in general registers once clang has no vector register for it; a record SSE, SSEUP of a size past 23 bytes that no vector register has, which clang passes as `<size / 8 x double>`; a type holding a `LARGER` one that clang lays out otherwise than the C type, or whose LLVM size the module doesn't keep; and one whose INTEGER high eightbyte clang reads as an `i128` from offset 8, under an SSE or NO_CLASS low one (see "Where clang's LLVM types decide") |
+| 14 | `UNSUPPORTED` | what the module doesn't place as clang and LLVM do, which the code generator refuses: an `UNCOUNTED` value LLVM splits into more parts than a location holds, as no class says (an `_Atomic` vector wider than 16 bytes and than the target's vector registers, or one LLVM breaks into its elements, and an integer of more than 128 bits); a vector SSE, SSEUP by its classes that LLVM breaks up (of bools or of `_BitInt`s narrower than a byte, of long doubles, of two or more `__float128`s, of `_BitInt`s wider than 128 bits), and a record or an array of one such member, which clang passes as it; and one of `_BitInt(128)`s, whose `i64`s LLVM puts in general registers once clang has no vector register for it; a type holding a `LARGER` one that clang lays out otherwise than the C type, or whose LLVM size the module doesn't keep; and one whose INTEGER high eightbyte clang reads as an `i128` from offset 8, under an SSE or NO_CLASS low one (see "Where clang's LLVM types decide") |
 | 15 | `CLASSIFIED` | the row and these bits are in the table |
 | 16 to 18 | `VALUE` | the kind of value a scalar in memory passes as: a general register (`GENERAL`), two (`PAIR`), a vector register (`VECTOR`), x87's (`X87`), which always goes on the stack, so that such a type isn't `UNCOUNTED`, or two halves, each in a general register while one is left and then on the stack (`HALVES`: a `<1 x i128>`, which LLVM splits as it never does an `i128`) |
 | 20 to 25 | `ALIGNMENT` | the log2 of the stack slot's alignment: 3, or the type's own if larger (an aggregate's own, an `_Atomic` one's canonical type's, a scalar's value's natural one) |
@@ -321,9 +321,10 @@ clang's LLVM types decide").
   what a vector register holds of it, or for an x87 register 16 bytes for an
   80-bit value, 10 for one of a vector of long doubles (packed 10 bytes
   apart), and 8 for a double (the third of a `<3 x double>`, after xmm0 and
-  xmm1). For a 17–23-byte record classified SSE, SSEUP, `part_bytes` is 16:
-  only the first 16 bytes travel in xmm0, while its local storage and stack
-  copies keep the C size;
+  xmm1). For a record classified SSE, SSEUP of a size no vector register has,
+  `part_bytes` is its payload (#2113): 16 for 17 to 23 bytes, in xmm0, and
+  past them its size rounded down to 8, in ymm0 to 39 bytes and in zmm0 from
+  40, while its local storage and stack copies keep the C size;
 - **flags:** `SIGN` or `ZERO` (clang's IR has the callee extend to 32 bits,
   which neither its x86-64 code nor GCC's does: a caller extends a narrow
   result itself, as "Extension" says), `HIGH` (the
@@ -342,15 +343,18 @@ clang's LLVM types decide").
   high eightbyte alone, in an 8-byte slot; with `LOW`, its low eightbyte alone,
   in an 8-byte slot, though the value is larger (rule 6, below): the next
   argument's slot starts 8 bytes after it, which a copy of the value would run
-  into.
+  into. With `PAYLOAD`, a record's vector payload alone (rule 5, below), in a
+  slot of its vector register's width.
 - **`SPLIT`:** one part in its register and the other, `NONE` in its place, in
   the 8-byte slot at `stack_offset`, where clang's count runs ahead of LLVM's
   registers (see "Two counts").
 
 The flags are `SIGN` and `ZERO` (the caller extends the value to 32 bits),
-`HIGH` (the parts are the value's high eightbyte alone) and `LOW` (the part is
+`HIGH` (the parts are the value's high eightbyte alone), `LOW` (the part is
 the low eightbyte alone of a value larger than 8 bytes, in a `STACK`
-location's slot).
+location's slot) and `PAYLOAD` (a `STACK` location's slot holds a record's
+`<size / 8 x double>` alone, the C type's bytes past it lost as in a register:
+#2113).
 
 `AbiCall`, 16 bytes: `stack_bytes` (the argument area's size, a multiple of
 8, whose start is rsp at the call), `stack_alignment_log2` (4, or more when an
@@ -748,10 +752,13 @@ argument in order:
    register, or two consecutive general ones; otherwise the whole value on
    the stack, as `CC_X86_64_I128` never splits an `i128`, in a slot aligned to
    16 at least (`AllocateStack(16, Align(16))`). A `WIDE` vector in a variadic
-   call always goes on the stack, in a slot aligned to its size
-   (`CCAssignToStack<32, 32>` and `<64, 64>`), clang having counted a vector
-   register for it all the same (the psABI, and GCC, pass a named one in a
-   register: LLVM's FIXME on `CCIfNotVarArg`).
+   call always goes on the stack, clang having counted a vector register for
+   it all the same (the psABI, and GCC, pass a named one in a register: LLVM's
+   FIXME on `CCIfNotVarArg`). A `VECTOR` value on the stack takes a slot of its
+   vector register's width, aligned to it (`CCAssignToStack<16, 16>`, `<32,
+   32>` and `<64, 64>`), whatever the record's own alignment: a record's
+   `<size / 8 x double>` holds its payload alone there, `PAYLOAD` where the C
+   type's bytes run past it (#2113).
 6. Otherwise an eightbyte at a time, each a value of its own (clang coerces
    such an argument to `{i64, double}` and the like): clang's counts drop;
    the low eightbyte (unless it is padding) and then the high one each take
@@ -1035,22 +1042,37 @@ and has a fixture:
   `double[2]` passes in xmm0 and xmm1.
 - **Records SSE, SSEUP of a size no vector register has.** A union of a
   16-byte vector and a longer array, packed or aligned below its size, is SSE,
-  SSEUP at 17 to 63 bytes but 32 where the target's vectors are as wide.
+  SSEUP at 17 to 63 bytes but 32 where the target's vectors are as wide (the
+  array, past 16 bytes and not one element, adds NO_CLASS: a union up to the
+  target's width, 32 bytes at `-march=x86-64-v3` and 64 at `-v4`).
   `GetByteVectorType` gives it `<size / 8 x double>`, which LLVM widens to the
   register of the next power of two and passes with only those doubles'
-  bytes: 17 to 23 bytes as `<2 x double>` in xmm0, losing the rest; 24 to 31
-  as `<3 x double>` in ymm0 (on the stack in a variadic call, in a 32-byte
-  slot aligned to 32); 33 to 39 in a ymm register and 40 to 63 in a zmm one.
-  The 17–23-byte case is supported (#2113): `VECTOR` without `WIDE` or
-  `SMALLER`, a 16-byte register payload in either tier and a 24-byte stack
-  slot holding the complete C object when vector registers are exhausted.
-  `va_arg` consumes one 16-byte save-area slot or advances 24 bytes in the
-  overflow area. Keeping the C size is necessary: clang's local objects and
-  exhausted `byval` arguments still contain all 17–23 bytes. At x86-64's
-  16-byte target width these records are MEMORY and keep every byte for
-  arguments and results. The larger irregular widths remain refused
-  (`UNSUPPORTED`, still `VECTOR` and `WIDE`), including in calls and `va_arg`;
-  they need wider register payloads and stack rules beyond this bounded case.
+  bytes, its payload (`abi_vector_payload_bytes`, #2113): 17 to 23 bytes as
+  `<2 x double>` in xmm0, losing the rest; 24 to 31 as `<3 x double>` in ymm0;
+  33 to 39 as `<4 x double>` in ymm0 too; and 40 to 63 as `<5 x double>` to
+  `<7 x double>` in zmm0. Its result's `part_bytes` is its payload. Its pass
+  bits are `VECTOR` and, past 16 bytes of payload, `WIDE`. Where LLVM puts the
+  vector on the stack, a named one of a variadic call (`CCIfNotVarArg`) or one
+  that clang's count gave a vector register LLVM no longer has (after
+  `UNCOUNTED` `_Atomic` doubles), it takes a slot of its register's width,
+  aligned to it (16 bytes for `<2 x double>`, 32 for a ymm register's and 64
+  for a zmm one's) and holding the payload alone, `PAYLOAD` where the C type's
+  bytes run past it. A byval copy, once clang's count has no vector register
+  for it, and `va_arg`'s overflow area keep every byte of the C type in a
+  slot of its size rounded up to 8; `va_arg` takes a 17–23-byte one's 16 bytes
+  from one save-area slot, and a `WIDE` one as an unnamed argument goes in
+  memory (see "va_arg", the `WIDE` union). Keeping the C size is
+  necessary: clang's local objects and byval arguments still contain all of
+  its bytes. At x86-64's 16-byte target width these records are MEMORY and
+  keep every byte for arguments and results, as those past the target's width
+  do. Tier 0 loads a payload no register is as wide as, 24, 40, 48 or 56
+  bytes, in pieces that don't read past the record (a broadcast of its last 8
+  or 16 bytes, then inserts of the lanes before them: `tier0_payload_load`)
+  and stores it in pieces that don't write past it (`tier0_payload_store`);
+  Tier 1 leaves the functions that pass or return one, or a `PAYLOAD` slot, to
+  Tier 0 (#2798). `tests/calling-convention/short-sse.c` and `wide-sse.c` cross clang
+  in both directions, and clang's cross-check worlds pass such records of 20
+  to 63 bytes (`abi_test_world_sse_records`).
 - **`i128` storage.** An `i128` at a record's offset 0 makes the record one
   `i128` value (`PAIR`), which LLVM never splits, in a stack slot aligned to
   16 whatever the record's alignment. With a NO_CLASS high eightbyte too, as
@@ -1514,8 +1536,11 @@ long)` (`abi_test_world_directed_compiled`) for a union U of 16 bytes whose high
 eightbyte is padding, an `int` beside an empty struct aligned to 16, which clang
 passes as its low eightbyte alone, an `i64`, there with a general register left
 in its count and none in LLVM's: in one 8-byte stack slot, the last `long`'s
-after it. The rest are random, with up to 21 named arguments and 6 unnamed, a
-fifth of the results `void`:
+after it. clang's worlds, compiled ones too, also have eight packed unions of a
+16-byte vector and 20 to 63 chars (`abi_test_world_sse_records`, #2113), which
+the random records hardly make: records SSE, SSEUP of sizes no vector register
+has up to the run's width, and MEMORY past it. The rest are random, with up to
+21 named arguments and 6 unnamed, a fifth of the results `void`:
 
 - **The C file** has the world's typedefs, written by `c_types_test.c`'s
   oracle, every signature's argument and result bytes (each value a valid

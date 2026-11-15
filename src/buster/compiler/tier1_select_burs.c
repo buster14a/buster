@@ -57,7 +57,8 @@ typedef enum Tier1BursNonterminal
     TIER1_BURS_A0,
     TIER1_BURS_A1,
     TIER1_BURS_INDEX,
-    // An integer comparison a branch or a truth value takes, a floating one, and a truth value's zero extension of each.
+    // An integer comparison a branch, a select (#2676) or a truth value takes, a floating one, and a truth value's zero
+    // extension of each.
     TIER1_BURS_COND,
     TIER1_BURS_FCOND,
     TIER1_BURS_ZCOND,
@@ -82,10 +83,10 @@ typedef enum Tier1BursNonterminal
 #define BUSTER_TIER1_BURS_KIND_S 2u
 #define BUSTER_TIER1_BURS_KIND_O 3u
 #define BUSTER_TIER1_BURS_KINDS 4u
-#define BUSTER_TIER1_BURS_ALUS 8u
+#define BUSTER_TIER1_BURS_ALUS 9u
 
 // The operators. REG is a value the pattern doesn't look into: an operator the grammar doesn't cover, or a child that
-// isn't visible. The ALU operators are an operation's (ADD32 to XOR) times its kinds.
+// isn't visible. The ALU operators are an operation's (ADD32 to NARROW) times its kinds.
 typedef enum Tier1BursOperator
 {
     TIER1_BURS_OP_REG,
@@ -109,6 +110,8 @@ typedef enum Tier1BursOperator
     TIER1_BURS_OP_ZEXT_PLAIN,
     TIER1_BURS_OP_FCMP_ORD,
     TIER1_BURS_OP_CBR_ADJ,
+    // An integer select, which reads its condition (#2676): the select's values are its own root's registers.
+    TIER1_BURS_OP_SELECT,
     TIER1_BURS_OPERATORS,
 } Tier1BursOperator;
 
@@ -123,6 +126,9 @@ typedef enum Tier1BursOperator
 #define BUSTER_TIER1_BURS_AND 5u
 #define BUSTER_TIER1_BURS_OR 6u
 #define BUSTER_TIER1_BURS_XOR 7u
+// An I1's, I8's or I16's and, or or xor (#2677): its 32-bit operation's patterns but a load's, since no 32-bit form reads
+// a byte or a word as its memory operand.
+#define BUSTER_TIER1_BURS_NARROW 8u
 
 // The families a pattern names: a set of operators, an ALU family's restricted to `kinds` (a bit per kind).
 typedef enum Tier1BursFamily
@@ -141,6 +147,8 @@ typedef enum Tier1BursFamily
     TIER1_BURS_FAMILY_COMMUTATIVE,
     TIER1_BURS_FAMILY_IMMEDIATE,
     TIER1_BURS_FAMILY_COMMUTATIVE_PLAIN,
+    // A commutative operation but a multiplication or a narrow one: which takes a load as its memory operand.
+    TIER1_BURS_FAMILY_COMMUTATIVE_MEMORY,
     TIER1_BURS_FAMILY_SHIFT,
     TIER1_BURS_FAMILY_SHL,
     TIER1_BURS_FAMILY_LOAD,
@@ -156,6 +164,7 @@ typedef enum Tier1BursFamily
     TIER1_BURS_FAMILY_ZEXT,
     TIER1_BURS_FAMILY_FCMP_ORD,
     TIER1_BURS_FAMILY_CBR_ADJ,
+    TIER1_BURS_FAMILY_SELECT,
 } Tier1BursFamily;
 
 // What the plan takes as a root's pattern (tier1_burs_pick): the candidate of `kind`, with LEA_ADD's of a register or of
@@ -237,9 +246,10 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
     // A memory form is two records at most, a copy of the other operand or the load into the destination, then the
     // operation (#2602): an addition's comes before the lea of two registers, the load's and the other's, whose cost it ties,
     // since it never writes more records and holds one register fewer. A subtraction's needs the scratch register where
-    // the destination is in the address, and a multiplication's keeps its immediate form's penalty (#1217).
-    { TIER1_BURS_REG, TIER1_BURS_FAMILY_COMMUTATIVE_PLAIN, BUSTER_TIER1_BURS_K(L), { TIER1_BURS_REG, TIER1_BURS_LOADF }, 2, TIER1_BURS_ACTION_KIND, TIER1_RULE_LOAD_OPERAND },
-    { TIER1_BURS_REG, TIER1_BURS_FAMILY_COMMUTATIVE_PLAIN, BUSTER_TIER1_BURS_NOT_L, { TIER1_BURS_LOADF, TIER1_BURS_REG }, 2, TIER1_BURS_ACTION_KIND, TIER1_RULE_LOAD_OPERAND },
+    // the destination is in the address, and a multiplication's keeps its immediate form's penalty (#1217). A narrow
+    // operation has none (#2677).
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_COMMUTATIVE_MEMORY, BUSTER_TIER1_BURS_K(L), { TIER1_BURS_REG, TIER1_BURS_LOADF }, 2, TIER1_BURS_ACTION_KIND, TIER1_RULE_LOAD_OPERAND },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_COMMUTATIVE_MEMORY, BUSTER_TIER1_BURS_NOT_L, { TIER1_BURS_LOADF, TIER1_BURS_REG }, 2, TIER1_BURS_ACTION_KIND, TIER1_RULE_LOAD_OPERAND },
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_SUB, BUSTER_TIER1_BURS_K(L), { TIER1_BURS_REG, TIER1_BURS_LOADF }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_LOAD_OPERAND },
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_MUL, BUSTER_TIER1_BURS_K(L), { TIER1_BURS_REG, TIER1_BURS_LOADF }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_LOAD_OPERAND },
     { TIER1_BURS_REG, TIER1_BURS_FAMILY_MUL, BUSTER_TIER1_BURS_NOT_L, { TIER1_BURS_LOADF, TIER1_BURS_REG }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_LOAD_OPERAND },
@@ -299,6 +309,9 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
     { TIER1_BURS_STMT, TIER1_BURS_FAMILY_CBR_ADJ, 0, { TIER1_BURS_COND, BUSTER_TIER1_BURS_NO_KID }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_BRANCH_COMPARE },
     { TIER1_BURS_STMT, TIER1_BURS_FAMILY_CBR_ADJ, 0, { TIER1_BURS_FCOND, BUSTER_TIER1_BURS_NO_KID }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_FLOAT_BRANCH_COMPARE },
     { TIER1_BURS_STMT, TIER1_BURS_FAMILY_CBR_ADJ, 0, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_BRANCH },
+    // A select of an integer comparison's condition code, cmp and cmovCC (#2676), and one that tests its truth value.
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_SELECT, 0, { TIER1_BURS_COND, BUSTER_TIER1_BURS_NO_KID }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_SELECT_COMPARE },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_SELECT, 0, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_SELECT },
 };
 
 #define BUSTER_TIER1_BURS_PATTERNS (sizeof(tier1_burs_patterns) / sizeof(tier1_burs_patterns[0]))
@@ -397,7 +410,8 @@ static bool tier1_burs_member(uint32_t family, uint32_t kinds, uint32_t op)
     const uint32_t kind = alu ? (op - TIER1_BURS_OP_ALU) % BUSTER_TIER1_BURS_KINDS : UINT32_MAX;
     const bool kinded = alu && (kinds == 0 || ((kinds >> kind) & 1) != 0);
     const bool add = operation == BUSTER_TIER1_BURS_ADD32 || operation == BUSTER_TIER1_BURS_ADD64;
-    const bool commutative = add || operation == BUSTER_TIER1_BURS_MUL || operation == BUSTER_TIER1_BURS_AND || operation == BUSTER_TIER1_BURS_OR || operation == BUSTER_TIER1_BURS_XOR;
+    const bool commutative = add || operation == BUSTER_TIER1_BURS_MUL || operation == BUSTER_TIER1_BURS_AND || operation == BUSTER_TIER1_BURS_OR || operation == BUSTER_TIER1_BURS_XOR ||
+                             operation == BUSTER_TIER1_BURS_NARROW;
     // An addition alone is of kind S: another operation whose right operand shifts is of kind O.
     const bool real = alu && (kind != BUSTER_TIER1_BURS_KIND_S || add);
     bool member = false;
@@ -438,6 +452,9 @@ static bool tier1_burs_member(uint32_t family, uint32_t kinds, uint32_t op)
         break;
     case TIER1_BURS_FAMILY_COMMUTATIVE_PLAIN:
         member = real && kinded && commutative && operation != BUSTER_TIER1_BURS_MUL;
+        break;
+    case TIER1_BURS_FAMILY_COMMUTATIVE_MEMORY:
+        member = real && kinded && commutative && operation != BUSTER_TIER1_BURS_MUL && operation != BUSTER_TIER1_BURS_NARROW;
         break;
     case TIER1_BURS_FAMILY_SHIFT:
         member = op == TIER1_BURS_OP_SHL || op == TIER1_BURS_OP_LSHR || op == TIER1_BURS_OP_ASHR;
@@ -483,6 +500,9 @@ static bool tier1_burs_member(uint32_t family, uint32_t kinds, uint32_t op)
         break;
     case TIER1_BURS_FAMILY_CBR_ADJ:
         member = op == TIER1_BURS_OP_CBR_ADJ;
+        break;
+    case TIER1_BURS_FAMILY_SELECT:
+        member = op == TIER1_BURS_OP_SELECT;
         break;
     default:
         break;
@@ -882,15 +902,17 @@ static uint32_t tier1_burs_classify_node(const Tier1SelectForest* forest, const 
     const uint32_t a = function->a[node];
     const uint32_t b = function->b[node];
     const bool integer = type == IR_I32 || type == IR_I64;
+    const bool narrow_bitwise = (op == IR_AND || op == IR_OR || op == IR_XOR) && (type == IR_I1 || type == IR_I8 || type == IR_I16);
     const uint32_t a_type = a < count ? function->type[a] : IR_VOID;
     uint32_t result = TIER1_BURS_OP_REG;
     if (op == IR_CONST && tier1_select_mask_width(type) == 0 && tier1_select_float_width(type) == 0 && tier1_select_width(type) != 0)
     {
         result = TIER1_BURS_OP_CONST + tier1_burs_constant_bits(tier1_select_width(type), function->constants[a].low);
     }
-    else if ((op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND || op == IR_OR || op == IR_XOR) && integer && b < count)
+    else if ((((op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND || op == IR_OR || op == IR_XOR) && integer) || narrow_bitwise) && b < count)
     {
-        const uint32_t operation = op == IR_ADD ? (type == IR_I64 ? BUSTER_TIER1_BURS_ADD64 : BUSTER_TIER1_BURS_ADD32) :
+        const uint32_t operation = narrow_bitwise ? BUSTER_TIER1_BURS_NARROW :
+                                   op == IR_ADD ? (type == IR_I64 ? BUSTER_TIER1_BURS_ADD64 : BUSTER_TIER1_BURS_ADD32) :
                                    op == IR_SUB ? (type == IR_I64 ? BUSTER_TIER1_BURS_SUB64 : BUSTER_TIER1_BURS_SUB32) :
                                    op == IR_MUL ? BUSTER_TIER1_BURS_MUL : op == IR_AND ? BUSTER_TIER1_BURS_AND : op == IR_OR ? BUSTER_TIER1_BURS_OR : BUSTER_TIER1_BURS_XOR;
         const uint32_t right = function->op[b];
@@ -941,6 +963,10 @@ static uint32_t tier1_burs_classify_node(const Tier1SelectForest* forest, const 
     else if (op == IR_CBR && a + 1 == node)
     {
         result = TIER1_BURS_OP_CBR_ADJ;
+    }
+    else if (op == IR_SELECT && tier1_select_width(type) != 0)
+    {
+        result = TIER1_BURS_OP_SELECT;
     }
     return result;
 }
@@ -1045,6 +1071,7 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
     const uint32_t width8 = (1u << IR_I64) | (1u << IR_PTR);
     const uint32_t memory = (1u << IR_I8) | (1u << IR_I16) | (1u << IR_I32) | (1u << IR_I64) | (1u << IR_PTR);
     const uint32_t integers = (1u << IR_I32) | (1u << IR_I64);
+    const uint32_t narrows = (1u << IR_I1) | (1u << IR_I8) | (1u << IR_I16);
     const uint32_t compared = (1u << IR_I32) | (1u << IR_I64) | (1u << IR_PTR);
     const uint32_t floats = (1u << IR_F32) | (1u << IR_F64);
     for (uint32_t first = 0; first < count; first += 16)
@@ -1085,13 +1112,18 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
             const __m512i bits = _mm512_inserti64x4(_mm512_castsi256_si512(bits_low), bits_high, 1);
             result = _mm512_mask_add_epi32(result, constant, bits, _mm512_set1_epi32(TIER1_BURS_OP_CONST));
         }
-        // ALU operations: the operation (a 64-bit addition or subtraction apart), and the kind of the right operand.
+        // ALU operations: the operation (a 64-bit addition or subtraction apart, and a narrow and, or or xor one of its
+        // own), and the kind of the right operand.
         const __m512i alu = _mm512_mask_i32gather_epi32(byte, active, op, alu_table, 4);
-        const __mmask16 is_alu = _mm512_mask_cmpneq_epi32_mask(integer & b_valid, alu, byte);
+        const __mmask16 bitwise = _mm512_cmpeq_epi32_mask(alu, _mm512_set1_epi32(BUSTER_TIER1_BURS_AND)) | _mm512_cmpeq_epi32_mask(alu, _mm512_set1_epi32(BUSTER_TIER1_BURS_OR)) |
+                                  _mm512_cmpeq_epi32_mask(alu, _mm512_set1_epi32(BUSTER_TIER1_BURS_XOR));
+        const __mmask16 narrow = tier1_burs_types(active, type, narrows) & bitwise;
+        const __mmask16 is_alu = _mm512_mask_cmpneq_epi32_mask((integer | narrow) & b_valid, alu, byte);
         if (is_alu != 0)
         {
             const __mmask16 wide = is_i64 & (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ADD)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_SUB)));
-            const __m512i operation = _mm512_mask_add_epi32(alu, wide, alu, _mm512_set1_epi32(1));
+            __m512i operation = _mm512_mask_add_epi32(alu, wide, alu, _mm512_set1_epi32(1));
+            operation = _mm512_mask_mov_epi32(operation, narrow, _mm512_set1_epi32(BUSTER_TIER1_BURS_NARROW));
             const __mmask16 right_constant = _mm512_cmpeq_epi32_mask(b_op, _mm512_set1_epi32(IR_CONST));
             const __mmask16 right_load = _mm512_cmpeq_epi32_mask(b_op, _mm512_set1_epi32(IR_LOAD));
             const __mmask16 right_shift = _mm512_cmpeq_epi32_mask(b_op, _mm512_set1_epi32(IR_SHL)) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ADD));
@@ -1201,6 +1233,9 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         result = _mm512_mask_mov_epi32(result, ordered, _mm512_set1_epi32(TIER1_BURS_OP_FCMP_ORD));
         const __mmask16 branch = active & adjacent & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CBR));
         result = _mm512_mask_mov_epi32(result, branch, _mm512_set1_epi32(TIER1_BURS_OP_CBR_ADJ));
+        // Integer selects (#2676), of any condition: the kids' pass decides whether it is visible.
+        const __mmask16 select = tier1_burs_types(active, type, width4 | width8) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_SELECT));
+        result = _mm512_mask_mov_epi32(result, select, _mm512_set1_epi32(TIER1_BURS_OP_SELECT));
         _mm512_mask_storeu_epi32(classes + first, active, result);
         // A frame object's address, and an address the vector rule leaves: the scalar classifier's, which reads its slot
         // or its displacement.

@@ -1591,23 +1591,34 @@ vector's elements remain named lowering refusals: clang 23's code is invalid IR 
 doesn't compile. Boolean elementwise `clzg` and `ctzg` also retain a named
 refusal: clang 23.1.4 emits a scalar zero count followed by an invalid
 scalar-to-vector `trunc`, crashing or producing incorrect code depending on
-the vector's width. Element-wise conversions, shuffles, non-boolean builtins,
-reductions and logical operations take at most 1024 elements, bounding their
-expanded entry runs; packed bit operations do not unpack those lanes. Past that
-(`BUSTER_CHECK_LOWER_TRANSPORT_LANES`) they stay refused by name, where clang
-compiles them (#1834's sweep: `ext_vector_type(1025)`): LLVM splits such a
-vector into its legal registers' pieces, while these lowerings expand an entry
-run per element, a function's entries growing with the lanes. Matching clang
-there takes conversions, shuffles and reductions at the registers' width, as
-the operators' pieces are (`check_lower_transport_rows`), not wider bounds;
-#2216 lists them with the other refusals that hold at every target.
+the vector's width. Element-wise conversions, shuffles, builtins, reductions
+and logical operations take vectors of any number of elements (#2216; until
+then, more than 1,024 were refused by name, where clang compiles them, as
+#1834's sweep's `ext_vector_type(1025)` showed). As LLVM splits such a vector
+into its legal registers' pieces, those that have rows run on register-width
+pieces, their entries growing with the pieces: the operators
+(`check_lower_transport_rows`), the elementwise builtins' rows
+(`check_lower_transport_elementwise`), the logical operators' masks, the
+floating reductions' halvings, and an integer reduction, which folds its whole
+pieces into one by the operation's row first (`check_lower_transport_reduce`;
+an integer's fold doesn't depend on the elements' order) and then that piece's
+elements and those past the pieces. The rest run element by element, as clang's
+code does for the C library's calls, in-order sums, deposits and shuffles, and
+where no row takes the operation; a conversion between transport vectors still
+converts element by element, as an element-sized scalar conversion each, where
+clang's code converts pieces (a piece's conversion row is a type's, which a
+piece's shape would need: #2815). A shuffle's indices are read as its elements are
+gathered (`check_lower_transport_index`), so no array of them bounds the
+elements.
 
 `test-checker --program-vectors` runs a program of all of these against clang
 -O0's build of it at x86-64-v4 (`vector-transport-compute`) and at x86-64,
 x86-64-v2 and x86-64-v3 (`baseline-transport-compute`), on both paths; the
 packed boolean builtins have matching `vector-boolean-builtins` and
 `baseline-boolean-builtins` cases covering 1 through 1024 lanes, padding,
-neighboring-byte guards and argument evaluation. The refusals' fixtures name
+neighboring-byte guards and argument evaluation, and the `vector-wide-*` and
+`baseline-wide-*` cases vectors of 1,025 to 2,048 elements' reductions,
+conversions, builtins, logical operators and shuffles. The refusals' fixtures name
 each refusal. The same programs pass by the driver
 with `--scalar`, by default and with `--tier1 --verify` at x86-64, x86-64-v3 and
 x86-64-v4.
@@ -1691,7 +1702,12 @@ none of its subset's programs makes a name twice in clang's objects.
   At `d12fd583` its 12,016 differences are all explained: 7 folded, 11,845
   dropped and 164 inlined. The dropped ones were the other units' commands,
   each behind a `BUSTER_IN_UNIT` branch whose condition is a constant, which
-  `-c` now leaves out as clang does (#1108).
+  `-c` now leaves out as clang does (#1108). Since #1398's step 3 leaves out
+  the callees Tier 0 spliced at every call, 8 remain on 2026-11-14: 5 folded
+  and 3 inlined, the vector lexer's `scan_lines`, `write_chunk` and
+  `tokenize_chunks`, whose shapes the splice keeps as calls by default. Step 5's
+  `--tier0-inline-shapes` splices them, leaving the 5 folded ones
+  ([Tier 0 inlining](tier0-inlining.md), #2841).
 
 On corpora, clang -O0 decides three things in its code otherwise than the
 selection. The harness explains a difference with one of them only from the
@@ -1701,7 +1717,7 @@ checked program, never from a name, and fails on any other:
 | --- | --- | --- |
 | folded | ours only: an object that a selected body reads, a const and not volatile scalar with an initializer | Reads its value as a constant (`CodeGenFunction::tryEmitAsConstant`), so nothing needs the object. musl's `math` constants (`pS0`, `pio2_hi`) and Lua's `HOOKKEY` and `CLIBS`. |
 | unselected | clang only: a definition the selection reaches when it also counts the operands that a constant condition never evaluates (`CheckProgramOptions.unselected_operands`) | Emits a `?:` in a branch's condition as branches without folding a constant condition (`CodeGenFunction::EmitBranchOnBoolExpr`), so the dead arm's calls stay. musl's `isnan` and `signbit` call `__FLOAT_BITS` in the dead arm for a `double`. |
-| inlined | ours only: a local function whose definition has `always_inline` | Inlines it at its calls at -O0 too (its always-inliner) and emits none of a local function it inlined everywhere, as SQLite's `SQLITE_INLINE` `allocateSpace` is. Tier 0 doesn't inline: it calls the function, so the object defines it. |
+| inlined | ours only: a local function whose definition has `always_inline` | Inlines it at its calls at -O0 too (its always-inliner) and emits none of a local function it inlined everywhere, as SQLite's `SQLITE_INLINE` `allocateSpace` is. Tier 0 splices such calls too (#1398) and leaves out a callee it spliced at every call (step 3); the object still defines one whose call it keeps (a cycle's, one the splice refuses: two returns, a result in memory), and every one under `--tier0-no-inline`. |
 
 Until #1108 there was a fourth, dropped: a definition only ours had, which
 clang's model left out because only a constant `if`'s dead arm reached it

@@ -322,22 +322,31 @@ typedef enum IrOp
 // vpshldvq, and a rotate left where a is b: vprold and vprolq); 1 right, its low half shifted right (fshr, vpshrdvw to
 // vpshrdvq, vprord, vprorq).
 #define BUSTER_IR_INTRINSIC_FUNNEL 30u
-// One past the ternary kinds, permute2 to funnel.
-#define BUSTER_IR_INTRINSIC_TERNARY_END 31u
+// dot's doubleword i is a's, the accumulator's, plus the sum of the products of b's and the third operand's lanes in it,
+// all of the result's type (#2780): its flags the operation (BUSTER_IR_DOT_*): b's 4 unsigned bytes times the third's 4
+// signed bytes (0: vpdpbusd, _mm512_dpbusd_epi32; 1, the sum saturated to a signed doubleword: vpdpbusds), or b's 2 signed
+// words times the third's (2: vpdpwssd; 3, saturated: vpdpwssds); without saturation the sum wraps.
+#define BUSTER_IR_INTRINSIC_DOT 31u
+#define BUSTER_IR_DOT_BYTES 0u
+#define BUSTER_IR_DOT_BYTES_SATURATED 1u
+#define BUSTER_IR_DOT_WORDS 2u
+#define BUSTER_IR_DOT_WORDS_SATURATED 3u
+// One past the ternary kinds, permute2 to dot.
+#define BUSTER_IR_INTRINSIC_TERNARY_END 32u
 #define BUSTER_IR_FUNNEL_RIGHT 4u
 // An AES round of each 16-byte lane (#1840), binary: a the state and b the round key, both of the result's type, its
 // flags 0 for a round (vaesenc: ShiftRows, SubBytes and MixColumns of a, then b xor'ed) and 1 for the last one
 // (vaesenclast: without MixColumns), as FIPS 197 and x86's VAES define them.
-#define BUSTER_IR_INTRINSIC_AES 31u
+#define BUSTER_IR_INTRINSIC_AES 32u
 // One lane of a vector (#1840), its flags the lane's bytes' log2 in bits 0 and 1 (0 to 3) and its index in bits 2 to 7,
 // below the vector's lanes: lane_extract's result, an I32 for a lane of 1, 2 or 4 bytes and an I64 for one of 8, is a's
 // lane zero-extended (vmovd, vmovq, vpextrb to vpextrq, after vextracti32x4 for a lane past the low 16 bytes); and
 // lane_insert's is a, of its type, with the lane replaced by b's low bits, b an I32 for a lane of 1, 2 or 4 bytes and an
 // I64 for one of 8 (vpinsrb to vpinsrq). movemask's I32 holds, from bit 0, the sign bit of each of a's lanes, a vector
 // of 16 or 32 bytes, its flags the lanes' bytes' log2 (vpmovmskb's bytes 0, vmovmskps's 2 and vmovmskpd's 3).
-#define BUSTER_IR_INTRINSIC_LANE_EXTRACT 32u
-#define BUSTER_IR_INTRINSIC_LANE_INSERT 33u
-#define BUSTER_IR_INTRINSIC_MOVEMASK 34u
+#define BUSTER_IR_INTRINSIC_LANE_EXTRACT 33u
+#define BUSTER_IR_INTRINSIC_LANE_INSERT 34u
+#define BUSTER_IR_INTRINSIC_MOVEMASK 35u
 // A reduction of a vector's integer lanes (#1840), unary: its result a 16-byte vector (V4I32) each of whose lanes is
 // the operation of all of a's lanes, a a vector of 16, 32 or 64 bytes; its flags the lanes' bytes' log2 in bits 0 and 1
 // (2 or 3: doublewords or quadwords) and the operation in bits 2 to 5 (BUSTER_IR_REDUCE_*): the unsigned (0) and signed
@@ -345,7 +354,7 @@ typedef enum IrOp
 // the and (6), or (7) and xor (8). Clang's __builtin_reduce_* code halves the vector (vextracti64x4, vextracti32x4,
 // then vpshufd 0x4e and, of doublewords, 0xb1), each half combined with the other, which leaves every lane of the last
 // 16 bytes the result; lane_extract's lane 0 then takes it.
-#define BUSTER_IR_INTRINSIC_REDUCE 35u
+#define BUSTER_IR_INTRINSIC_REDUCE 36u
 #define BUSTER_IR_REDUCE_ADD 4u
 #define BUSTER_IR_REDUCE_MUL 5u
 #define BUSTER_IR_REDUCE_AND 6u
@@ -354,35 +363,53 @@ typedef enum IrOp
 #define BUSTER_IR_REDUCE_OPERATIONS 9u
 // A unary operation of each of a vector's integer lanes (#1840), a of the result's type: its flags the lanes' bytes'
 // log2 in bits 0 and 1 and the operation in bits 2 and 3 (BUSTER_IR_LANE_UNARY_*): each lane's set bits (0: vpopcntb to
-// vpopcntq), its leading zeros, the lane's bits for a zero lane (1: vplzcntd, vplzcntq), or its conflicts, bit j set
-// for each lane j below it that equals it (2: vpconflictd, vpconflictq); the last two of doublewords and quadwords.
-#define BUSTER_IR_INTRINSIC_LANE_UNARY 36u
+// vpopcntq), its leading zeros, the lane's bits for a zero lane (1: vplzcntd, vplzcntq), its conflicts, bit j set for
+// each lane j below it that equals it (2: vpconflictd, vpconflictq), the last two of doublewords and quadwords; or its
+// absolute value, the most negative lane itself (3: vpabsb to vpabsq, #2780).
+#define BUSTER_IR_INTRINSIC_LANE_UNARY 37u
 #define BUSTER_IR_LANE_UNARY_POPCOUNT 0u
 #define BUSTER_IR_LANE_UNARY_LZCNT 1u
 #define BUSTER_IR_LANE_UNARY_CONFLICT 2u
+#define BUSTER_IR_LANE_UNARY_ABS 3u
 // A floating operation of two 64-byte vectors' lanes at a rounding of its own, its exceptions suppressed (#1840), a and
 // b of the result's type: its flags the operation in bits 0 and 1 (0 a + b, 1 a - b, 2 a * b, 3 a / b), the lanes in
 // bit 2 (0 floats, 1 doubles) and the rounding in bits 3 and 4 (to nearest, down, up, toward zero: EVEX's and MXCSR's
 // order). Each lane is x86's packed operation's, whatever MXCSR holds, and sets none of its flags: vaddps to vdivpd
 // with embedded rounding ({rn-sae} to {rz-sae}, _mm512_add_round_ps to _mm512_div_round_pd).
-#define BUSTER_IR_INTRINSIC_FROUND 37u
+#define BUSTER_IR_INTRINSIC_FROUND 38u
 // A truncating conversion of a 16-byte vector's lane 0 into an integer, x86's (#1840), unary: its flags' bit 0 the lane
 // a double (else a float) and bit 1 the result an I64 (else an I32), rounded toward zero; a NaN or a value past the result's range
 // gives its smallest value, x86's integer indefinite, where C's fptosi would be undefined (vcvttss2si, vcvttsd2si:
 // _mm_cvttss_si32 to _mm_cvttsd_si64).
-#define BUSTER_IR_INTRINSIC_CVTT 38u
+#define BUSTER_IR_INTRINSIC_CVTT 39u
 // A bit shuffle of a vector's quadwords by its byte indices into a mask of its bytes (#1840), binary, a and b vectors of
 // one type, the result the mask of its bytes' lanes (m16, m32 or m64): bit i the bit of a's quadword i / 8 that b's byte
 // i's low 6 bits name (vpshufbitqmb, _mm512_bitshuffle_epi64_mask; its writemask is an AND of the result).
-#define BUSTER_IR_INTRINSIC_BITSHUFFLE 39u
+#define BUSTER_IR_INTRINSIC_BITSHUFFLE 40u
 // An operation of each quadword's bytes of two vectors of the result's type (#1840), binary: its flags the operation
 // (BUSTER_IR_QUADWORD_*): 0, each byte of the result the 8 bits of b's quadword from the bit a's byte's low 6 bits name,
 // wrapping around it (vpmultishiftqb, _mm512_multishift_epi64_epi8); 1, each quadword the sum of the absolute
-// differences of a's and b's 8 unsigned bytes in it (vpsadbw, _mm512_sad_epu8).
-#define BUSTER_IR_INTRINSIC_QUADWORD_OP 40u
-#define BUSTER_IR_INTRINSIC_COUNT 41u
+// differences of a's and b's 8 unsigned bytes in it (vpsadbw, _mm512_sad_epu8); 2 and 3, each quadword the product of
+// a's and b's low doublewords in it, unsigned (vpmuludq, _mm512_mul_epu32) and signed (vpmuldq, _mm512_mul_epi32), the
+// whole 64 bits of it (#2780).
+#define BUSTER_IR_INTRINSIC_QUADWORD_OP 41u
+// An operation of two vectors' lanes in pairs (#2780), binary, a and b of the result's type: its flags the operation
+// (BUSTER_IR_PAIRWISE_*): each doubleword the sum of the products of a's and b's two signed words in it, wrapping (0:
+// vpmaddwd, _mm512_madd_epi16); each word the sum of the products of a's two unsigned bytes and b's two signed bytes in
+// it, saturated to a signed word (1: vpmaddubsw, _mm512_maddubs_epi16); or each 16-byte lane a's signed lanes in it,
+// then b's, narrowed to half their size with saturation: words to signed bytes (2: vpacksswb), words to unsigned bytes
+// (3: vpackuswb), doublewords to signed words (4: vpackssdw) and doublewords to unsigned words (5: vpackusdw,
+// _mm_packus_epi32).
+#define BUSTER_IR_INTRINSIC_PAIRWISE 42u
+#define BUSTER_IR_INTRINSIC_COUNT 43u
+#define BUSTER_IR_PAIRWISE_MADD_WORDS 0u
+#define BUSTER_IR_PAIRWISE_MADD_BYTES 1u
+#define BUSTER_IR_PAIRWISE_PACK_FIRST 2u
+#define BUSTER_IR_PAIRWISE_OPERATIONS 6u
 #define BUSTER_IR_QUADWORD_MULTISHIFT 0u
 #define BUSTER_IR_QUADWORD_SAD 1u
+#define BUSTER_IR_QUADWORD_MUL_UNSIGNED 2u
+#define BUSTER_IR_QUADWORD_MUL_SIGNED 3u
 #define BUSTER_IR_INTRINSIC_TERNARY BUSTER_IR_INTRINSIC_PERMUTE2
 #define BUSTER_IR_INTRINSIC_KIND 0xffu
 #define BUSTER_IR_INTRINSIC_EXTRA_SHIFT 8u
@@ -550,6 +577,12 @@ typedef enum IrDebugBindingKind
 
 #define BUSTER_IR_DEBUG_BIND_ENTRY 1u
 #define BUSTER_IR_DEBUG_BIND_REGIONS 2u
+// An expanded callee's local (#2541): a local of the function's past its own, of an instance's (IrDebugInline.local),
+// its callee's local of the same index there. With ENTRY or REGIONS, the callee's own form, whose assignments' entries
+// and regions are in the instance's origins (its callee entry e is origin first + e): visible in its instance's code
+// and the code of the instances nested in it, at a record's origin in its instance (an inner instance's code is at its
+// call there). Alone, at most one binding, an initial one, which holds throughout its instance's code.
+#define BUSTER_IR_DEBUG_BIND_INSTANCE 4u
 
 // Source assignments survive even when their value has no reconstruction. `entry` is the original typed completion
 // point; NONE is the initial parameter binding. `value` is a current IR node only for VALUE. `anchor` is an optional
@@ -592,6 +625,10 @@ struct IrDebugRegion
 // is origin first + k), past the function's own (IrDebugInfo.entry_count); its callee is the unit's symbol `symbol`,
 // expanded at the call whose origin is `call` (the function's own entry, or one of the instance `parent`'s, NONE for
 // the function's), so that instances nest as their expansions did. Its callee's own instances follow it, each nested.
+// Its callee's own locals are the function's locals [local, local + local_count), the callee's local j local + j (#2541,
+// BUSTER_IR_DEBUG_BIND_INSTANCE): none where the function's sidecar has no bindings. `block_end` is its callee's first
+// source block's end as an origin of its (first + the callee's IrDebugInfo.first_block_end), the bound of its ENTRY
+// locals' assignments.
 typedef struct IrDebugInline IrDebugInline;
 struct IrDebugInline
 {
@@ -600,6 +637,9 @@ struct IrDebugInline
     uint32_t count;
     uint32_t parent;
     uint32_t call;
+    uint32_t local;
+    uint32_t local_count;
+    uint32_t block_end;
 };
 
 // Optional source identities (#1114), separate from the instruction/slot columns that execution consumes. An origin
@@ -636,6 +676,17 @@ struct IrDebugInfo
 static uint32_t ir_debug_origin_limit(const IrDebugInfo* debug)
 {
     return debug->origin_count > debug->entry_count ? debug->origin_count : debug->entry_count;
+}
+
+// How many locals `debug`'s instances' parameters take (IrDebugInline.local_count).
+static uint64_t ir_debug_instance_locals(const IrDebugInfo* debug)
+{
+    uint64_t count = 0;
+    for (uint32_t k = 0; k < debug->inline_count; k += 1)
+    {
+        count += debug->inlines[k].local_count;
+    }
+    return count;
 }
 
 // The instance of `debug`'s whose own entries include `origin`, or NONE for the function's own entry (or none).
@@ -976,6 +1027,7 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "compress",
     "expand",
     "funnel",
+    "dot",
     "aes",
     "lane_extract",
     "lane_insert",
@@ -986,6 +1038,7 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "cvtt",
     "bitshuffle",
     "quadword_op",
+    "pairwise",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -2028,12 +2081,13 @@ static IrCheck ir_check_shape(const IrFunction* f)
         check.error = IR_ERROR_STRUCTURE;
     }
     const IrDebugInfo* const debug = f->debug;
+    // (An assignment is at most one an entry, its own or an instance's, past one initial binding a local.)
     if (check.error == IR_OK && debug != NULL && (debug->instruction_count != n || debug->slot_count != f->slot_count ||
         (n != 0 && debug->origins == NULL) || (f->slot_count != 0 && debug->locals == NULL) || debug->scalar_count > debug->local_count ||
         (debug->scalar_count != 0 && debug->scalars == NULL) || debug->first_block_end > debug->entry_count ||
-        debug->binding_count > (uint64_t)debug->entry_count + f->parameter_count ||
+        debug->binding_count > (uint64_t)ir_debug_origin_limit(debug) + f->parameter_count + ir_debug_instance_locals(debug) ||
         (debug->binding_count != 0 && (debug->bindings == NULL || debug->binding_flags == NULL)) ||
-        debug->region_count > debug->entry_count || (debug->region_count != 0 && (debug->regions == NULL || debug->binding_flags == NULL))))
+        debug->region_count > ir_debug_origin_limit(debug) || (debug->region_count != 0 && (debug->regions == NULL || debug->binding_flags == NULL))))
     {
         check.error = IR_ERROR_METADATA;
     }
@@ -2045,7 +2099,10 @@ static IrCheck ir_check_shape(const IrFunction* f)
         }
     }
     // The instances (IrDebugInline): in order, each past the function's entries and within the origins, its parent an
-    // earlier instance, its call an entry of its parent's (the function's own for none).
+    // earlier instance, its call an entry of its parent's (the function's own for none), its first block's end within its
+    // entries; their callees' locals the function's last, in the instances' order.
+    const uint64_t instance_total = debug != NULL ? ir_debug_instance_locals(debug) : 0;
+    uint64_t next_local = debug != NULL && instance_total <= debug->local_count ? debug->local_count - instance_total : UINT64_MAX;
     for (uint32_t k = 0; check.error == IR_OK && debug != NULL && k < debug->inline_count; k += 1)
     {
         const IrDebugInline instance = debug->inlines[k];
@@ -2054,7 +2111,15 @@ static IrCheck ir_check_shape(const IrFunction* f)
                             (k == 0 || instance.first >= debug->inlines[k - 1].first + debug->inlines[k - 1].count);
         const bool nested = instance.parent == BUSTER_IR_NONE ? instance.call < debug->entry_count :
                             instance.parent < k && instance.call - debug->inlines[instance.parent].first < debug->inlines[instance.parent].count;
-        if (!placed || !nested)
+        const bool block = instance.block_end - instance.first <= instance.count;
+        // Its callee's locals: the next of the function's last ones, each an instance's.
+        bool locals = instance.local_count == 0 || (instance.local == next_local && debug->binding_flags != NULL);
+        next_local += instance.local_count;
+        for (uint32_t p = 0; locals && p < instance.local_count; p += 1)
+        {
+            locals = (debug->binding_flags[instance.local + p] & BUSTER_IR_DEBUG_BIND_INSTANCE) != 0;
+        }
+        if (!placed || !nested || !block || !locals)
         {
             check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, k);
         }
@@ -2077,20 +2142,51 @@ static IrCheck ir_check_shape(const IrFunction* f)
             check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, s);
         }
     }
+    // Every flag one of the three or none, an instance's local's with INSTANCE, and as many instance locals as the
+    // instances have.
+    uint64_t instance_locals = 0;
     for (uint32_t local = 0; check.error == IR_OK && debug != NULL && debug->binding_flags != NULL && local < debug->local_count; local += 1)
     {
         const uint32_t flags = debug->binding_flags[local];
-        if (flags != 0 && flags != BUSTER_IR_DEBUG_BIND_ENTRY && flags != BUSTER_IR_DEBUG_BIND_REGIONS)
+        const uint32_t form = flags & ~BUSTER_IR_DEBUG_BIND_INSTANCE;
+        instance_locals += (flags & BUSTER_IR_DEBUG_BIND_INSTANCE) != 0;
+        if (form != 0 && form != BUSTER_IR_DEBUG_BIND_ENTRY && form != BUSTER_IR_DEBUG_BIND_REGIONS)
         {
             check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, local);
         }
     }
+    if (check.error == IR_OK && debug != NULL && instance_locals != ir_debug_instance_locals(debug))
+    {
+        check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
+    }
+    // The instance whose callee's locals include a binding's or a region's, by a cursor over the instances, whose locals
+    // are in order, as the instances' bindings and regions are (each local's instance's origins bound its entries).
+    uint32_t owner = 0;
+    uint32_t before_owner = BUSTER_IR_NONE;
     for (uint32_t k = 0; check.error == IR_OK && debug != NULL && k < debug->binding_count; k += 1)
     {
         const IrDebugBinding binding = debug->bindings[k];
         const bool initial = binding.entry == BUSTER_IR_NONE;
-        const bool ordered = k == 0 || (initial ? debug->bindings[k - 1].entry == BUSTER_IR_NONE && debug->bindings[k - 1].local < binding.local :
-                                      debug->bindings[k - 1].entry == BUSTER_IR_NONE || debug->bindings[k - 1].entry < binding.entry);
+        const bool instance = binding.local < debug->local_count && debug->binding_flags != NULL && (debug->binding_flags[binding.local] & BUSTER_IR_DEBUG_BIND_INSTANCE) != 0;
+        while (instance && owner < debug->inline_count && (debug->inlines[owner].local_count == 0 || binding.local - debug->inlines[owner].local >= debug->inlines[owner].local_count))
+        {
+            owner += 1;
+        }
+        const IrDebugInline* place = instance && owner < debug->inline_count ? &debug->inlines[owner] : NULL;
+        // The function's initial bindings by local, then its assignments by entry; then each instance's in the instances'
+        // order, as its callee has them: its locals' initial bindings by local, then their assignments by entry.
+        const uint32_t binding_owner = instance ? owner : BUSTER_IR_NONE;
+        const IrDebugBinding before = k != 0 ? debug->bindings[k - 1] : (IrDebugBinding){ 0 };
+        const bool same = k != 0 && before_owner == binding_owner;
+        const bool ordered = (instance && place != NULL && (k == 0 || before_owner == BUSTER_IR_NONE || before_owner < binding_owner)) ||
+                             (k == 0 && !instance) ||
+                             (same && (initial ? before.entry == BUSTER_IR_NONE && before.local < binding.local : before.entry == BUSTER_IR_NONE || before.entry < binding.entry));
+        before_owner = binding_owner;
+        // An instance's local's assignment is in its instance's own entries, one of the ENTRY form's in its first block;
+        // one of no form has its initial binding alone.
+        const uint32_t form = instance ? debug->binding_flags[binding.local] & ~BUSTER_IR_DEBUG_BIND_INSTANCE : 0;
+        const bool placed = !instance || (place != NULL && (initial || (form != 0 && binding.entry - place->first < place->count &&
+                                                                         (form != BUSTER_IR_DEBUG_BIND_ENTRY || binding.entry < place->block_end))));
         const bool scalar = binding.type == IR_I8 || binding.type == IR_I16 || binding.type == IR_I32 || binding.type == IR_I64 ||
                             binding.type == IR_PTR || binding.type == IR_F32 || binding.type == IR_F64;
         const bool width = scalar && binding.bytes * 8u == ir_type_bits[binding.type];
@@ -2099,18 +2195,28 @@ static IrCheck ir_check_shape(const IrFunction* f)
         const bool kind = value || binding.kind == IR_DEBUG_BIND_CONSTANT || unavailable;
         const bool anchor = binding.anchor == BUSTER_IR_NONE || (binding.anchor < n && f->type[binding.anchor] == binding.type);
         const bool local = binding.local < debug->local_count;
-        const bool entry = initial ? binding.local < f->parameter_count : binding.entry < debug->entry_count;
-        const bool admitted = local && (debug->binding_flags[binding.local] & BUSTER_IR_DEBUG_BIND_ENTRY) != 0;
-        if (!kind || !local || !entry || !ordered || !anchor || (!width && !(unavailable && binding.bytes == 0 && binding.type == IR_VOID)) ||
+        const bool entry = initial ? binding.local < f->parameter_count || instance : instance || binding.entry < debug->entry_count;
+        const bool admitted = local && !instance && (debug->binding_flags[binding.local] & BUSTER_IR_DEBUG_BIND_ENTRY) != 0;
+        if (!kind || !local || !entry || !ordered || !placed || !anchor || (!width && !(unavailable && binding.bytes == 0 && binding.type == IR_VOID)) ||
             (!value && binding.value != BUSTER_IR_NONE) || (admitted && !initial && binding.entry >= debug->first_block_end))
         {
             check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, k);
         }
     }
+    owner = 0;
     for (uint32_t k = 0; check.error == IR_OK && debug != NULL && k < debug->region_count; k += 1)
     {
         const IrDebugRegion region = debug->regions[k];
-        const bool local = region.local < debug->local_count && debug->binding_flags[region.local] == BUSTER_IR_DEBUG_BIND_REGIONS;
+        const bool local = region.local < debug->local_count && (debug->binding_flags[region.local] & ~BUSTER_IR_DEBUG_BIND_INSTANCE) == BUSTER_IR_DEBUG_BIND_REGIONS;
+        const bool instance = local && (debug->binding_flags[region.local] & BUSTER_IR_DEBUG_BIND_INSTANCE) != 0;
+        while (instance && owner < debug->inline_count && (debug->inlines[owner].local_count == 0 || region.local - debug->inlines[owner].local >= debug->inlines[owner].local_count))
+        {
+            owner += 1;
+        }
+        // An instance's local's regions are in its instance's own entries, the function's in its own.
+        const uint32_t space_first = instance ? owner < debug->inline_count ? debug->inlines[owner].first : UINT32_MAX : 0;
+        const uint32_t space_end = instance ? owner < debug->inline_count ? debug->inlines[owner].first + debug->inlines[owner].count : 0 : debug->entry_count;
+        const bool spaced = region.begin >= space_first && region.block_end <= space_end;
         const bool scalar = region.type == IR_I8 || region.type == IR_I16 || region.type == IR_I32 || region.type == IR_I64 ||
                             region.type == IR_PTR || region.type == IR_F32 || region.type == IR_F64;
         const bool width = scalar && region.bytes * 8u == ir_type_bits[region.type];
@@ -2122,7 +2228,7 @@ static IrCheck ir_check_shape(const IrFunction* f)
         const bool next = region.next == BUSTER_IR_NONE || (region.next < debug->binding_count &&
                           debug->bindings[region.next].local == region.local && debug->bindings[region.next].entry != BUSTER_IR_NONE &&
                           debug->bindings[region.next].entry >= region.end && debug->bindings[region.next].entry < region.block_end);
-        if (!local || !width || !kind || !block || !ordered || !next || region.begin >= region.end || region.end > region.block_end || region.block_end > debug->entry_count ||
+        if (!local || !width || !kind || !block || !ordered || !next || !spaced || region.begin >= region.end || region.end > region.block_end ||
             (!value && region.value != BUSTER_IR_NONE))
         {
             check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, k);
@@ -2332,7 +2438,8 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                     {
                         // permute2's flags its lanes' bytes' log2, b of its type; ternlog's any immediate, b of its type;
                         // compress's and expand's their lanes' bytes' log2, b the mask of those lanes; funnel's its lanes'
-                        // bytes' log2 (words to quadwords) and direction, b of its type.
+                        // bytes' log2 (words to quadwords) and direction, b of its type; dot's its operation, 0 to 3, b of its
+                        // type (#2780).
                         const uint32_t kind = ir_intrinsic_kind(c);
                         const bool masked = kind == BUSTER_IR_INTRINSIC_COMPRESS || kind == BUSTER_IR_INTRINSIC_EXPAND;
                         const uint32_t expected_b = masked && part <= 3 ? ir_lane_mask(type, ir_intrinsic_lanes[part]) : type;
@@ -2342,9 +2449,12 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 }
                 else if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_WIDEN)
                 {
+                    // A widen's source may be an SSE carrier too (#2780: an F32 or F64, its 4 or 8 bytes the vector's low
+                    // ones, as a row reads one zero-extended).
                     const uint32_t narrow = c == BUSTER_IR_INTRINSIC_EXTRACT ? type : ta;
                     const uint32_t wide = c == BUSTER_IR_INTRINSIC_EXTRACT ? ta : type;
-                    valid = ir_vector_type(type) && ir_vector_type(ta) && ir_type_bits[narrow] < ir_type_bits[wide] && b == BUSTER_IR_NONE &&
+                    const bool carrier = c == BUSTER_IR_INTRINSIC_WIDEN && (ta == IR_F32 || ta == IR_F64);
+                    valid = ir_vector_type(type) && (ir_vector_type(ta) || carrier) && ir_type_bits[narrow] < ir_type_bits[wide] && b == BUSTER_IR_NONE &&
                             (c == BUSTER_IR_INTRINSIC_EXTRACT ? part < ir_type_bits[wide] / ir_type_bits[narrow] : part == 0);
                 }
                 else if (c == BUSTER_IR_INTRINSIC_INSERT)
@@ -2408,9 +2518,10 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 }
                 else if (c == BUSTER_IR_INTRINSIC_LANE_UNARY)
                 {
-                    // A population count of any lanes; a leading zero count or conflicts of doublewords or quadwords.
-                    valid = b == BUSTER_IR_NONE && ir_vector_type(type) && ta == type && (part >> 2) <= BUSTER_IR_LANE_UNARY_CONFLICT &&
-                            ((part >> 2) == BUSTER_IR_LANE_UNARY_POPCOUNT || (part & 3) >= 2);
+                    // A population count or an absolute value of any lanes; a leading zero count or conflicts of doublewords or
+                    // quadwords.
+                    valid = b == BUSTER_IR_NONE && ir_vector_type(type) && ta == type && (part >> 2) <= BUSTER_IR_LANE_UNARY_ABS &&
+                            ((part >> 2) == BUSTER_IR_LANE_UNARY_POPCOUNT || (part >> 2) == BUSTER_IR_LANE_UNARY_ABS || (part & 3) >= 2);
                 }
                 else if (c == BUSTER_IR_INTRINSIC_CVTT)
                 {
@@ -2441,16 +2552,18 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                         valid = ir_vector_type(type) && ta == type && f->type[b] == (size == 3 ? IR_I64 : IR_I32) && (part >> 2) < ir_type_bits[type] / (8u << size);
                     }
                 }
-                else if (c == BUSTER_IR_INTRINSIC_AES || c == BUSTER_IR_INTRINSIC_QUADWORD_OP)
+                else if (c == BUSTER_IR_INTRINSIC_AES || c == BUSTER_IR_INTRINSIC_QUADWORD_OP || c == BUSTER_IR_INTRINSIC_PAIRWISE)
                 {
-                    // An AES round's flags its round, a quadword operation's its operation: 0 or 1 each.
+                    // An AES round's flags its round, 0 or 1; a quadword operation's its operation, 0 to 3; a pairwise one's
+                    // its operation, 0 to 5 (#2780).
                     if (b >= f->instruction_count || f->type[b] == IR_VOID || f->type[b] >= IR_TYPE_COUNT)
                     {
                         check = ir_check(IR_ERROR_OPERAND, i, 1);
                     }
                     else
                     {
-                        valid = ir_vector_type(type) && ta == type && f->type[b] == type && part <= 1;
+                        valid = ir_vector_type(type) && ta == type && f->type[b] == type &&
+                                part < (c == BUSTER_IR_INTRINSIC_AES ? 2u : c == BUSTER_IR_INTRINSIC_QUADWORD_OP ? BUSTER_IR_QUADWORD_MUL_SIGNED + 1 : BUSTER_IR_PAIRWISE_OPERATIONS);
                     }
                 }
                 else if (c == BUSTER_IR_INTRINSIC_SHIFT)
@@ -4008,7 +4121,7 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                                 c == BUSTER_IR_INTRINSIC_SHIFT || c == BUSTER_IR_INTRINSIC_LANE_OP || ir_intrinsic_ternary(c) || c == BUSTER_IR_INTRINSIC_AES ||
                                 c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_MOVEMASK ||
                                 c == BUSTER_IR_INTRINSIC_REDUCE || c == BUSTER_IR_INTRINSIC_LANE_UNARY || c == BUSTER_IR_INTRINSIC_FROUND ||
-                                c == BUSTER_IR_INTRINSIC_CVTT || c == BUSTER_IR_INTRINSIC_QUADWORD_OP)
+                                c == BUSTER_IR_INTRINSIC_CVTT || c == BUSTER_IR_INTRINSIC_QUADWORD_OP || c == BUSTER_IR_INTRINSIC_PAIRWISE)
                             {
                                 fprintf(output, " %u", (unsigned)f->flags[i]);
                             }

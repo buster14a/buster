@@ -22,17 +22,21 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
     const bool dispatch = plan->indirect != 0;
     const uint32_t dispatch_slot = input->local_count + plan->depth_slot_count;
     const uint32_t dispatch_block = plan->block_count + 1;
+    // A function whose calls pass its own hidden pointer on (#2684, IrTypedPlan.forwarded) has one slot past the dispatch
+    // slot that their results go to, each copied out right after its call.
+    const uint32_t forward_slot = dispatch_slot + dispatch;
     IrTypedSink sink = {
         .output = output,
         .ignored_arguments = plan->ignored_arguments,
+        .forward_slot = forward_slot,
         .sizes = {
             .block_count = (uint64_t)plan->block_count + 1 + dispatch,
-            .slot_count = (uint64_t)dispatch_slot + dispatch,
+            .slot_count = (uint64_t)forward_slot + plan->forwarded,
             .parameter_count = input->parameter_count,
             .label_count = input->label_count,
         },
     };
-    const uint32_t slots = dispatch_slot + dispatch;
+    const uint32_t slots = forward_slot + plan->forwarded;
     // A function that takes or returns an aggregate by value has its own ABI records (IrFunction.parameter_passed):
     // each parameter's location and size (an object's, its bytes'), and its result's. Its result in registers is the
     // address of its bytes, a ptr.
@@ -94,6 +98,11 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             {
                 slot = (IrSlot){ .size = sizeof(AbiVaList), .alignment = 8, .type = IR_VOID, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
             }
+            else if (s == forward_slot)
+            {
+                // The forwarding slot, an object whose address its calls take, as a call's result object is.
+                slot = (IrSlot){ .size = input->hidden_size, .alignment = 1u << input->hidden_alignment, .type = IR_VOID, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
+            }
             else if (role != 0)
             {
                 const bool save = role == BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA;
@@ -130,7 +139,7 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
         }
         else if (object)
         {
-            ir_typed_copy_pointers(&sink, p, parameter, input->local_sizes[p]);
+            ir_typed_copy_pointers(&sink, p, parameter, input->local_sizes[p], false);
         }
         else
         {
@@ -431,7 +440,7 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 break;
             }
             case BUSTER_TYPED_COPY:
-                ir_typed_copy(&sink, stack[depth - 2], stack[depth - 1], value);
+                ir_typed_copy(&sink, stack[depth - 2], stack[depth - 1], value, value > BUSTER_TIER0_COPY_NARROW_BYTES && !tier0_copy_local_source(input, i));
                 depth -= 2;
                 break;
             case BUSTER_TYPED_BRANCH_FALSE:

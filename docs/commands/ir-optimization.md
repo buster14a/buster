@@ -8,7 +8,7 @@ requirements. [Command index](README.md).
 
 - The shared IR optimizers provide SCCP, dead-code/CFG cleanup, value numbering
   and conservative loop-invariant motion, private-field replacement and bounded
-  translation-unit inlining. `test-ir-optimize`, `test-ir-gvn`, `test-ir-licm`,
+  translation-unit inlining, and #2755's loop unroller (below). `test-ir-optimize`, `test-ir-gvn`, `test-ir-licm`,
   `test-ir-sroa` and `test-ir-inline` verify transformations against independent
   semantic fixtures and the upstream SSA promoter (`test-ir-inline`'s #1282
   fixtures: SIMD callees' rows, vector constants and slots, and by-value vectors
@@ -46,6 +46,36 @@ requirements. [Command index](README.md).
   [The optimization guide](../../docs/ir-optimization.md) records supported inputs,
   the pass order and #139's measurements.
 
+## Loop vectorization (#2743)
+
+`test-ir-vectorize [--seed N] [--print NAME]` (`ir_vectorize_loops_test.c`) runs
+the loop vectorizer's text fixtures, `tests/ir/vectorize/*.ir`: element-wise
+operations of every lane width, fills, copies, sums with widening, a dot
+product, the four other integer reductions, an if-converted conditional sum
+with its unreachable stub, an `int` induction's clamp, byte arithmetic through
+32-bit lanes, population counts, a stencil whose exit test is `i + 1 < n`, an
+in-place `y[i] += k * x[i]`, an invariant start and index offset, a uniform load,
+two loops and a nested one; and one fixture per refusal (a prefix sum, a
+histogram, a strided store, the induction as data, a call, a volatile load, a
+division, FNV-1a's recurrence, a float sum, a width no vector holds, more guards
+than the limit, a reduction's partial value read, an early exit, a step of two).
+Each runs by both parser paths and both of the pass's paths at three targets of
+every operation the IR has, at most 64, 32 and 16 bytes wide, which must give
+the same function and counts; a fixture expects how many loops each width
+vectorizes, or its refusal's reason. Each changed result, and its form after
+the ordinary optimizer (whose final verification checks dominance), runs in the
+shared interpreter against the input on one buffer, its pointers placed apart,
+at one address, a byte, an element and a vector apart either way, at lengths
+around the vectors' boundaries (signed bounds negative too): the same bytes,
+value and status. Four mutants (`BUSTER_IR_VECTORIZE_MUTATE_*`: no overlap
+test, an unrounded tail, a wrong reduction identity, lanes of the wrong width)
+must each be rejected on some fixture. `--print NAME` prints a fixture's
+64-byte result. `test-checker-driver`'s inlining unit compiles a C fixture of
+loops by `--tier1 --tier1-passes=+vectorize --verify` at x86-64 to x86-64-v4 by
+both paths, checks the loops each target vectorizes and that both paths give one
+object, and runs it as clang -O0's build does. [The design and its
+status](../tier1-loop-vectorization.md) has the rules and the measurements.
+
 The optional `BUSTER_IR_OPTIMIZE_LAYOUT` pass (#1218) changes the rewrite's
 block visitation order, using `ir_optimize_layout.c`'s fall-through chains.
 Only the C driver's final Tier 1 optimization enables it by default; other
@@ -53,6 +83,38 @@ optimizer clients retain their existing order. The ordinary and retained-analysi
 entry points both verify the resulting SSA and remapped CFG. See the
 [Tier 1 command guide](tier1.md#block-placement-and-critical-edge-fall-through-1218)
 for its ordering policy, regression coverage and measurement boundaries.
+
+## Vector and mask values by default (#2781)
+
+Tier 1's `vectors` pass item is on by default. In a function with vector or mask
+values, it runs value numbering before promotion and LICM after if-conversion,
+restricted to those values; `+gvn` and `+licm` still request the unrestricted
+passes, and `-vectors` disables both restricted forms. The LICM implementation
+walks each eligible loop's own blocks and skips loops with no safe vector or
+mask value. `test-ir-gvn` and `test-ir-licm` cover both host paths, the
+per-loop/whole-function LICM oracle, scalar neutrality and nested loops;
+`test-checker-driver` checks the default and `-vectors` reports and native
+output on a C vector fixture. See [the Tier 1 guide](../../docs/tier1.md).
+
+## Loop unrolling (#2755)
+
+`ir_optimize_unroll.c` is the unroller `--tier1-passes=+unroll` runs after
+LICM and the loop vectorizer: a main loop of up to eight copies of each admitted counted innermost
+loop's body, guarded by a bound the preheader computes, before the original
+loop as its remainder. [The design](../../docs/tier1-loop-unrolling.md) has its
+rules, budgets, refusals and the 9700X's record.
+
+`./build/compiler test-ir-unroll [--seed N] [--shapes N]` builds loops in the
+IR's text form (a builder that names values), runs each by both twins and
+requires the same function, outcomes and counts; an unrolled one verifies with
+dominance, passes Tier 1's optimizer and executes as the original did (return,
+status and stores) on the shared executor, on parameters around zero and the
+main loop's size and at each type's signed and unsigned limits. Every loop
+form, predicate, operand order, branch sense, reduction kind and width, then
+`--shapes` random ones (400 by default), each refusal, the budgets and every
+short output arena are covered. `test-ir-optimize` runs its text pair
+(`tests/ir/optimize/unroll-loops-*.ir`), and `test-ir-source --passes` its twins
+on c-testsuite's subset, the frozen `sqlite3.c` and musl.
 
 ## Vectors assembled in memory (#1344)
 
@@ -164,7 +226,7 @@ the head, and they must be total or proven loads; the rest stay in an
 unreachable stub and must be droppable. A join with other predecessors keeps
 its phis and takes new selects in the head. Up to four rounds take nested
 regions (a nested `?:`, `&&` and `||` values), with `ir_truth_simplify_values`
-turning the truth values' selects into i1 selects between them. A condition
+turning the truth values' selects into i1 `and`s and `or`s of them (#2677). A condition
 that reads the value the join carries round a loop (a running max) keeps its
 branch, and an accumulation's select sinks below its addition
 (`s + (c ? x : 0)`). Each arm moves
@@ -183,12 +245,14 @@ a running maximum kept as a branch (and converted with a constant bound), and
 the loop's conditional sum sunk below its addition.
 The reload fixtures reuse a reload, speculate it behind a store or a fence, and
 refuse it behind a call, as a volatile access or at another offset. The truth
-fixtures reduce `&&` and `||` to i1 selects and refuse a dead division.
+fixtures reduce `&&` and `||` to an i1 `and` and `or` and refuse a dead division.
 `test-checker-driver` adds C-source semantic comparison against Clang, with
 both scalar paths and rematerialization settings. Its decoded object checks
 require `cmov` without conditional branches for max, the clamps (sequential
-and nested), conditional arithmetic and the `&&`/`||` values, and `cmov` with
-only the loop's branch for the conditional sum and the `?:` sum. They also
+and nested) and conditional arithmetic, no select of a tested truth value (no
+`cmov` whose flags a `test` wrote) and no conditional branch for the `&&`/`||`
+values (#2677; their `cmov`s are #2676's fused selects of comparisons), and
+`cmov` with only the loop's branch for the conditional sum and the `?:` sum. They also
 require the branches to remain for loads, division, variable shifts, calls, a
 reload after a call and the running max.
 

@@ -824,14 +824,15 @@ static void ir_optimize_test_simd_lane_ops(IrOptimizeTest* test, Arena* input, A
     }
 }
 
-// The permutes of two tables (#1840), whose third operand is in the extra array: of three constant vectors, folded by
-// both SCCP paths alike and to a constant at each lanes' size and width; and in a loop, an invariant one twice feeding a
+// The permutes of two tables (#1840), whose third operand is in the extra array, and the other kinds folded the same way
+// (ternlog, compress, expand, AES, and #2780's pairwise operations and dot products): of three constant vectors, folded
+// by both SCCP paths alike and to a constant at each lanes' size and width; and in a loop, an invariant one twice feeding a
 // loop-carried one, its result the interpreter's under every set of passes (ir_licm_test_permute2 numbers and hoists it).
 static void ir_optimize_test_simd_permute2(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
 {
     for (uint32_t width = 0; width < 3; width += 1)
     {
-        for (uint32_t flags = 0; flags < 14; flags += 1)
+        for (uint32_t flags = 0; flags < 20; flags += 1)
         {
             const uint64_t mark = input->length;
             const IrSizes sizes = { .instruction_count = 7, .block_count = 1, .vector_constant_count = 4, .extra_count = 1, .constant_count = 1 };
@@ -870,10 +871,14 @@ static void ir_optimize_test_simd_permute2(IrOptimizeTest* test, Arena* input, A
             ir_optimize_test_instruction(&f, 3, IR_VCONST, type, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
             // A permute2 of each lanes' size, and a ternlog of 4 tables (flags 4 to 7: 0x96, 0xe8, 0xca and 0x3c).
             static const uint8_t ternlog_tables[4] = { 0x96, 0xe8, 0xca, 0x3c };
-            // Flags 12 and 13: an AES round and a last round of two constants, a binary kind.
-            const uint32_t kind = flags < 4 ? BUSTER_IR_INTRINSIC_PERMUTE2 : flags < 8 ? BUSTER_IR_INTRINSIC_TERNLOG : flags < 10 ? BUSTER_IR_INTRINSIC_COMPRESS : BUSTER_IR_INTRINSIC_EXPAND;
-            ir_optimize_test_instruction(&f, 4, IR_INTRINSIC, type, 0, 1, flags >= 12 ? BUSTER_IR_INTRINSIC_AES : ir_intrinsic_ternary_c(kind, 0));
-            f.flags[4] = flags < 4 ? (uint8_t)flags : flags < 8 ? ternlog_tables[flags - 4] : flags < 12 ? (uint8_t)(2 + (flags & 1)) : (uint8_t)(flags - 12);
+            // Flags 12 and 13: an AES round and a last round of two constants, a binary kind; 14 and 15 a multiply-add of
+            // words and a pack of doublewords to unsigned words (#2780), binary too; 16 to 19 the dot products, ternary.
+            const uint32_t kind = flags < 4 ? BUSTER_IR_INTRINSIC_PERMUTE2 : flags < 8 ? BUSTER_IR_INTRINSIC_TERNLOG : flags < 10 ? BUSTER_IR_INTRINSIC_COMPRESS :
+                                  flags < 12 ? BUSTER_IR_INTRINSIC_EXPAND : BUSTER_IR_INTRINSIC_DOT;
+            const uint32_t binary = flags < 14 ? BUSTER_IR_INTRINSIC_AES : BUSTER_IR_INTRINSIC_PAIRWISE;
+            ir_optimize_test_instruction(&f, 4, IR_INTRINSIC, type, 0, 1, flags >= 12 && flags < 16 ? binary : ir_intrinsic_ternary_c(kind, 0));
+            f.flags[4] = flags < 4 ? (uint8_t)flags : flags < 8 ? ternlog_tables[flags - 4] : flags < 12 ? (uint8_t)(2 + (flags & 1)) : flags < 14 ? (uint8_t)(flags - 12) :
+                         flags < 16 ? (uint8_t)(flags == 14 ? BUSTER_IR_PAIRWISE_MADD_WORDS : BUSTER_IR_PAIRWISE_PACK_FIRST + 3) : (uint8_t)(flags - 16);
             ir_optimize_test_instruction(&f, 5, IR_VCMP, mask, 4, 2, IR_ULT);
             f.flags[5] = IR_SIMD_LANE_I8;
             ir_optimize_test_instruction(&f, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
@@ -883,7 +888,7 @@ static void ir_optimize_test_simd_permute2(IrOptimizeTest* test, Arena* input, A
             options.path = BUSTER_IR_OPTIMIZE_VECTOR;
             const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
             ir_optimize_test_expect(test, check.error == IR_OK && result.function.instruction_count == 2 && result.function.op[0] == IR_CONST,
-                                    "a constant permute2, ternlog, compress, expand or AES round folds through a comparison");
+                                    "a constant permute2, ternlog, compress, expand, AES round, pairwise operation or dot product folds through a comparison");
             arena_pop_to(vector, 0);
             arena_pop_to(input, mark);
         }

@@ -336,12 +336,11 @@ static uint32_t tier1_emit_cfg_frame_flags(const IrFunction* function, const Tie
         dynamic |= function->op[node] == IR_ALLOCA || (function->op[node] == IR_STACK_SAVE && !frame) || function->op[node] == IR_STACK_RESTORE;
         frame_address |= frame;
     }
-    const bool vector_constants = function->vector_constant_count != 0;
     // A function with its own ABI records (#789) stages an aggregate result's parts below rsp on its way out
-    // (tier1_emit_cfg_aggregate_result), and one with vector constants (#141) builds them there
-    // (tier1_emit_cfg_vector_constant): its frame stays out of the red zone.
+    // (tier1_emit_cfg_aggregate_result): its frame stays out of the red zone. Its vector constants, which #141 built there,
+    // are its literals' loads since #2744 (tier1_emit_cfg_vector_constant), which write nothing.
     return tier1_emit_frame_flags(options, calls) | (function->variadic && save_area ? BUSTER_TIER1_FRAME_VARIADIC : 0) |
-           (function->parameter_passed != 0 || vector_constants ? BUSTER_TIER1_FRAME_NO_RED_ZONE : 0) | (dynamic ? BUSTER_TIER1_FRAME_DYNAMIC_STACK : 0) |
+           (function->parameter_passed != 0 ? BUSTER_TIER1_FRAME_NO_RED_ZONE : 0) | (dynamic ? BUSTER_TIER1_FRAME_DYNAMIC_STACK : 0) |
            (frame_address ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0);
 }
 
@@ -2235,28 +2234,65 @@ static bool tier1_emit_cfg_x87_offset(const IrFunction* function, const Tier1Emi
     return known && tier1_emit_cfg_object(function, emitted, tier1_emit_cfg_x87_object(function, &emitted->prepared, node), offset);
 }
 
-// A vector constant of no simpler kind (#141, BUSTER_TIER1_VECTOR_CONSTANT, whose constant's index is the pattern's
-// `immediate`): its words as immediates into the red zone below rsp, a sign-extended imm32's mov qword or two mov dword
-// each, and the vector loaded from there by vmovdqu32 of its width (vmovdqu at a target without AVX512VL, #1281) into its register, as Tier 0 builds one in its slot
-// (tier0_emit_vector_value). A function with one keeps its frame out of the red zone (tier1_emit_cfg_frame_flags). The
-// emitted code's certificate replays this function for the node's records (tier1_certificate_emitted.c), so both
-// change together.
-static Tier1EmitError tier1_emit_cfg_vector_constant(const IrFunction* function, const Tier1SelectHoles* holes, Tier1EmitBuffer* buffer)
+// Whether a vector constant of no simpler kind (#141, BUSTER_TIER1_VECTOR_CONSTANT, whose constant's index is the
+// pattern's `immediate`) is one whose quadwords are one value at EVEX's level (#2744's step 1; one whose doublewords are is
+// BUSTER_TIER1_VECTOR_SPLAT's, so this is _mm512_set1_epi64(63)'s kind), which tier1_emit_cfg_vector_constant broadcasts
+// from the scratch general register; every other is a literal the function's code loads (step 2).
+static bool tier1_emit_cfg_vector_uniform(const IrFunction* function, const Tier1SelectHoles* holes)
 {
     const uint32_t width = holes->width;
     const uint64_t index = holes->immediate;
-    Tier1EmitError error = index < function->vector_constant_count && (width == 16 || width == 32 || width == 64) ? TIER1_EMIT_OK : TIER1_EMIT_INVALID;
-    const int32_t first = -(int32_t)width;
-    // A constant whose quadwords are one value (#2744's step 1; one whose doublewords are is BUSTER_TIER1_VECTOR_SPLAT's,
-    // so this is _mm512_set1_epi64(63)'s kind): at EVEX's level, the quadword into the scratch general register, by the
-    // shortest mov that holds it (tier1_rematerialize's choice), and vpbroadcastq from it. Two records and no memory,
-    // where the stores below were eight and their load one that no store forwards to: on the compiler's own lexer by
-    // --tier1, 1,188 of the 3,157 constants c_tokenize built in 9,076 bytes.
-    bool uniform = error == TIER1_EMIT_OK && tier1_select_holes_encoding(holes) == BUSTER_TIER1_ENCODING_EVEX;
+    bool uniform = index < function->vector_constant_count && (width == 16 || width == 32 || width == 64) &&
+                   tier1_select_holes_encoding(holes) == BUSTER_TIER1_ENCODING_EVEX;
     for (uint32_t w = 1; uniform && w < width / 8; w += 1)
     {
         uniform = function->vector_constants[index].words[w] == function->vector_constants[index].words[0];
     }
+    return uniform;
+}
+
+// The literal of vector constant `index` at `width` bytes (16, 32 or 64; #2744's step 2, Tier1EmitResult.literals): the
+// one the function's code already loads, or the next, its bytes the constant's first `width` and zero past them. UINT32_MAX
+// where the literals' room (a VCONST node's each) is spent, or where the function's symbols reach the literals' targets
+// (BUSTER_TIER1_EMIT_LITERAL), which a unit of two billion symbols would.
+static uint32_t tier1_emit_cfg_literal(Tier1EmitResult* emitted, const IrFunction* function, uint32_t index, uint32_t width)
+{
+    const uint32_t class = width == 16 ? 0 : width == 32 ? 1 : 2;
+    const bool valid = emitted->literal_of != 0 && index < function->vector_constant_count && (width == 16 || width == 32 || width == 64) &&
+                       emitted->symbol_access_count <= BUSTER_TIER1_EMIT_LITERAL;
+    uint32_t literal = valid ? emitted->literal_of[3 * (uint64_t)index + class] : 0;
+    if (valid && literal == 0 && emitted->literal_count < emitted->literal_capacity)
+    {
+        const uint32_t k = emitted->literal_count;
+        IrSimdValue bytes = { 0 };
+        memcpy(bytes.words, function->vector_constants[index].words, width);
+        emitted->literals[k] = bytes;
+        emitted->literal_widths[k] = (uint8_t)width;
+        emitted->literal_count = k + 1;
+        emitted->literal_of[3 * (uint64_t)index + class] = k + 1;
+        literal = k + 1;
+    }
+    return literal != 0 ? literal - 1 : UINT32_MAX;
+}
+
+// A vector constant of no simpler kind (#141, BUSTER_TIER1_VECTOR_CONSTANT): where its quadwords are one value at EVEX's
+// level (tier1_emit_cfg_vector_uniform), the quadword into the scratch general register by the shortest mov that holds it
+// (tier1_rematerialize's choice) and vpbroadcastq from it, two records and no memory; every other, its literal `literal`
+// (tier1_emit_cfg_literal) loaded rip-relative by vmovdqu32 of its width (vmovdqu at a target without AVX512VL, #1281)
+// into its register, the one record that names it, its reference in `reference` (its index among the records this call
+// appends, `referenced`). Before #2744 that was its words as immediates into the red zone below rsp and a load no store
+// forwarded to, 22 constants per 64-byte chunk of the compiler's own lexer by --tier1: a pool entry's load stalls on no
+// store, and the uniform form takes 1,188 of the 3,157 c_tokenize built in 9,076 bytes. The emitted code's certificate
+// replays this function for the node's records and its reference (tier1_certificate_emitted.c), and checks the literal's
+// bytes against the constant's, so both change together.
+static Tier1EmitError tier1_emit_cfg_vector_constant(const IrFunction* function, const Tier1SelectHoles* holes, uint32_t literal, Tier1EmitBuffer* buffer, LinkReference* reference,
+                                                     bool* referenced)
+{
+    const uint32_t width = holes->width;
+    const uint64_t index = holes->immediate;
+    Tier1EmitError error = index < function->vector_constant_count && (width == 16 || width == 32 || width == 64) ? TIER1_EMIT_OK : TIER1_EMIT_INVALID;
+    const bool uniform = error == TIER1_EMIT_OK && tier1_emit_cfg_vector_uniform(function, holes);
+    *referenced = false;
     if (uniform)
     {
         const uint64_t value = function->vector_constants[index].words[0];
@@ -2271,24 +2307,24 @@ static Tier1EmitError tier1_emit_cfg_vector_constant(const IrFunction* function,
         const uint32_t broadcast = width == 16 ? X86_FORM_VPBROADCASTQ_X_R64 : width == 32 ? X86_FORM_VPBROADCASTQ_Y_R64 : X86_FORM_VPBROADCASTQ_Z_R64;
         error = tier1_emit_append(buffer, move) && tier1_emit_append(buffer, tier1_select_register_record(broadcast, (uint8_t)(holes->destination & 15), BUSTER_TIER1_SELECT_SCRATCH)) ? error : TIER1_EMIT_MEMORY;
     }
-    for (uint32_t w = 0; !uniform && error == TIER1_EMIT_OK && w < width / 8; w += 1)
+    else if (error == TIER1_EMIT_OK)
     {
-        const uint64_t word = function->vector_constants[index].words[w];
-        const bool fits = x86_immediate_encodes(X86_FORM_MOV_RM64_IMM32, (int64_t)word);
-        for (uint32_t half = 0; error == TIER1_EMIT_OK && half < (fits ? 1u : 2u); half += 1)
-        {
-            const X86Instruction record = {
-                .form = fits ? X86_FORM_MOV_RM64_IMM32 : X86_FORM_MOV_RM32_IMM32,
-                .rm = X86_REGISTER_RSP,
-                .mode = BUSTER_X86_MEMORY_BASE,
-                .displacement = first + (int32_t)(8 * w + 4 * half),
-                .immediate = (int32_t)(uint32_t)(word >> (32 * half)),
-            };
-            error = tier1_emit_append(buffer, record) ? error : TIER1_EMIT_MEMORY;
-        }
+        error = literal != UINT32_MAX ? error : TIER1_EMIT_UNSUPPORTED;
+        const X86Instruction load = {
+            .form = (uint16_t)(tier1_select_class_forms(width, tier1_select_holes_encoding(holes))->load | BUSTER_X86_FORM_FIXUP),
+            .reg = (uint8_t)(holes->destination & 15),
+            .mode = BUSTER_X86_MEMORY_RIP,
+        };
+        *reference = (LinkReference){
+            .instruction = buffer->count,
+            .field = X86_FIXUP_DISPLACEMENT,
+            .kind = BUSTER_LINK_FIXUP_PC32,
+            .target = BUSTER_TIER1_EMIT_LITERAL + literal,
+            .addend = 0,
+        };
+        error = error != TIER1_EMIT_OK || tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
+        *referenced = error == TIER1_EMIT_OK;
     }
-    const X86Instruction load = { .form = tier1_select_class_forms(width, tier1_select_holes_encoding(holes))->load, .reg = (uint8_t)(holes->destination & 15), .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = first };
-    error = error != TIER1_EMIT_OK || uniform || tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
     return error;
 }
 
@@ -3398,8 +3434,8 @@ static uint64_t tier1_emit_cfg_record_capacity(const IrFunction* function, bool 
         const bool recorded = call != 0 && call->abi != 0;
         records += recorded ? function->abi_calls[call->abi - 1].call.stack_bytes / 4u + 4u * (uint64_t)call->argument_count + 5u * (BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS) + 16u : 0;
         records += op == IR_RET && function->result_size != 0 ? function->result_size / 4u + 32u : 0;
-        // A vector constant's immediates and its load (#141, tier1_emit_cfg_vector_constant).
-        records += op == IR_VCONST ? 17u : 0;
+        // A vector constant's broadcast or its literal's load (#141, #2744, tier1_emit_cfg_vector_constant).
+        records += op == IR_VCONST ? 2u : 0;
         // A machine row's records, its operands' moves and its result's (#141, tier1_emit_cfg_row).
         records += call != 0 && call->row != 0 ? BUSTER_TIER1_EMIT_ROW_RECORDS : 0;
         // An asm body's records and its saves and restores (#1839, tier1_emit_cfg_asm): of the general registers, of
@@ -3610,12 +3646,16 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     {
         emitted->reference_capacity += cfg->move_sources[m] == BUSTER_TIER1_CFG_REMATERIALIZE && recipes[emitted->value_nodes[cfg->move_values[m]]] == BUSTER_TIER1_REMAT_SYMBOL;
     }
-    // A call's argument past its class's registers that the call recomputes, a symbol's address with a reference (#141).
+    // A call's argument past its class's registers that the call recomputes, a symbol's address with a reference (#141);
+    // and a vector constant's literal's load (#2744), whose literal is one of the function's.
+    uint32_t vector_constants = 0;
     for (uint32_t node = 0; node < count; node += 1)
     {
         const bool call = !plan->covered[node] && tier1_select_function_call(function, node);
         emitted->reference_capacity += call ? tier1_select_call_stack_bytes(function, &function->calls[function->b[node]]) / BUSTER_ABI_SLOT_BYTES + function->calls[function->b[node]].argument_count : 0;
+        vector_constants += function->op[node] == IR_VCONST;
     }
+    emitted->reference_capacity += vector_constants;
     bool ok = error == TIER1_EMIT_OK;
     code->records = ok ? ir_allocate(output, capacity, sizeof(X86Instruction), &ok) : 0;
     code->cost_ids = ok ? ir_allocate(output, capacity, 1, &ok) : 0;
@@ -3623,6 +3663,13 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     code->branches = ok ? ir_allocate(output, branch_capacity, 4, &ok) : 0;
     code->targets = ok ? ir_allocate(output, branch_capacity, 4, &ok) : 0;
     emitted->references = ok && emitted->reference_capacity != 0 ? ir_allocate(output, emitted->reference_capacity, sizeof(LinkReference), &ok) : 0;
+    // The literals (#2744, tier1_emit_cfg_literal): a VCONST node's each at most, and their index by constant and width.
+    const uint64_t literal_index = vector_constants != 0 ? 3 * (uint64_t)function->vector_constant_count : 0;
+    emitted->literal_capacity = vector_constants;
+    emitted->literal_count = 0;
+    emitted->literals = ok && vector_constants != 0 ? ir_allocate(output, vector_constants, sizeof(IrSimdValue), &ok) : 0;
+    emitted->literal_widths = ok && vector_constants != 0 ? ir_allocate(output, vector_constants, 1, &ok) : 0;
+    emitted->literal_of = ok && literal_index != 0 ? ir_allocate(output, literal_index, 4, &ok) : 0;
     emitted->exits = ok ? ir_allocate(output, (uint64_t)returns + 1, 4, &ok) : 0;
     emitted->exit_count = 0;
     // The frame's events (#1056): the prologue's, and each return's epilogue's.
@@ -3643,6 +3690,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     transitions.fragments = ok ? ir_allocate(scratch, (uint64_t)allocation->fragment_count + 1, 4, &ok) : 0;
     transitions.values = ok ? ir_allocate(scratch, (uint64_t)allocation->fragment_count + 1, 4, &ok) : 0;
     transitions.registers = ok ? ir_allocate(scratch, (uint64_t)count + 1, 1, &ok) : 0;
+    transitions.slot_stamps = ok ? ir_allocate(scratch, (uint64_t)count + 1, 4, &ok) : 0;
     uint32_t* spill_ids = ok ? ir_allocate(scratch, (uint64_t)count + 1, 4, &ok) : 0;
     uint32_t* cursors = ok ? ir_allocate(scratch, (uint64_t)input->position_count + 1, 4, &ok) : 0;
     uint32_t* entry_offsets = ok ? ir_allocate(scratch, (uint64_t)blocks + 1, 4, &ok) : 0;
@@ -3677,6 +3725,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         view.spill_ids = spill_ids;
         memset(transitions.offsets, 0, ((uint64_t)input->position_count + 2) * 4);
         memset(transitions.registers, UINT8_MAX, (uint64_t)count + 1);
+        memset(transitions.slot_stamps, 0, ((uint64_t)count + 1) * 4);
         memset(spill_ids, 0xff, ((uint64_t)count + 1) * 4);
         memset(entry_offsets, 0, ((uint64_t)blocks + 1) * 4);
         tier1_cfg_single_predecessor_edges(input, entry_edges);
@@ -3801,6 +3850,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         const uint32_t entry = input->block_starts[b];
         const uint32_t degree = input->predecessor_offsets[b + 1] - input->predecessor_offsets[b];
         const uint32_t only = degree == 1 ? input->predecessors[input->predecessor_offsets[b]] : UINT32_MAX;
+        // A block whose only predecessor is the one before it continues that block's run of slot stamps (tier1_emit_phase).
+        transitions.stamp = b != 0 && only == b - 1 ? transitions.stamp : b + 1;
         // The single incoming edge's moves, where tier1_cfg placed them at this block's start.
         if (only != UINT32_MAX)
         {
@@ -4143,7 +4194,16 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             }
             else if (error == TIER1_EMIT_OK && selected && plan->patterns[node].rule == TIER1_RULE_VECTOR && plan->patterns[node].scale == BUSTER_TIER1_VECTOR_CONSTANT)
             {
-                error = tier1_emit_cfg_vector_constant(function, &holes, &buffer);
+                // A literal's load names it (#2744): its reference, by its index among the code's records.
+                const uint32_t literal = tier1_emit_cfg_vector_uniform(function, &holes) ? UINT32_MAX : tier1_emit_cfg_literal(emitted, function, (uint32_t)holes.immediate, holes.width);
+                LinkReference literal_reference = { 0 };
+                bool referenced = false;
+                error = tier1_emit_cfg_vector_constant(function, &holes, literal, &buffer, &literal_reference, &referenced);
+                error = error != TIER1_EMIT_OK || !referenced || emitted->reference_count < emitted->reference_capacity ? error : TIER1_EMIT_INVALID;
+                if (error == TIER1_EMIT_OK && referenced)
+                {
+                    emitted->references[emitted->reference_count++] = literal_reference;
+                }
                 // Its records are its node's, which the code's certificate regenerates (#1284).
                 tier1_emit_mark(&buffer, tier1_origin(TIER1_ORIGIN_NODE, node), BUSTER_IR_NONE);
             }

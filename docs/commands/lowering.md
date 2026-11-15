@@ -185,6 +185,57 @@ divisors, the sign bit's, a `_BitInt`'s, divisors with effects or that aren't
 constants, and element sizes of 3, 12 and a variable-length array's. Source
 `_BitInt` values retain ordinary lowering in this optimization.
 
+An integer constant's own conversion folds into its CONST (#2678,
+`check_lower_fold_conversion`), so that Tier 0 takes it as an immediate where
+it moved it to a register and converted it every time the code ran (`mov $1;
+movslq; add`, `mov $1; cvtsi2sd`). The conversion is the one
+`check_lower_expression` or `check_lower_operand` pushes under the operand's
+EXPRESSION task, whose `value` is the operand's node plus one; the constant's
+expansion records its CONST's end and node (`CheckLowerWriter.constant_end`
+and `constant_node`), and a label placed since takes the end away, since a
+jump there joins another value. `check_lower_constant_conversion` is the rule
+the three writers share: an integer class takes the value modulo its width,
+`_Bool` whether it is nonzero, and `float` and `double` the value only where
+it is exact, so that a conversion that rounds keeps its run-time rounding and
+inexact flag; nothing folds to or from a `_BitInt`, a complex value, an
+aggregate or a memory class (`long double`, the 128-bit integers, the
+half-precision ones, vectors). The node templates fold it in the constant's
+slot (`BUSTER_CHECK_LOWER_TEMPLATE_FOLDED`, and leave a folded constant popped
+alone to the tasks, which fold it there), and the node machine in its row
+(`node_machine_fold_conversion`).
+
+A conditional's or a logical operator's value converted by its consumer meets
+its arms at a label, where no conversion folds, since a jump there brings the
+other arm's value. Where an arm is a constant (a conditional's arm by
+`check_lower_integer_constant`, a logical operator's 0 or 1) and the conversion
+is one that folds to an integer or `_Bool` (`check_lower_conditional_sinks`),
+the conversion goes into the arms instead (`check_lower_conditional_target`,
+asked out of line by `check_lower_join` only where the task under the node's
+EXPRESSION is that conversion): its task, under the node's
+EXPRESSION, comes off the stack; a conditional pushes it under each arm's own
+conversion, tagged with the arm's node, so that a constant arm folds both (`c ?
+-1 : 2u` to `unsigned long` is -1 to `unsigned`, then to `unsigned long`); a
+logical operator writes its 0 or 1 in the target's class and converts its second
+operand's truth before the jump to the join. The join's JUMP_VALUE takes the
+target's class, and the other arm takes the CONVERT the join had. A known
+condition's single arm does the same; GNU's `x ?: y`, whose condition is its
+arm, keeps the join's. A floating target keeps it too: Tier 1 has no select of
+floating values, so the arms' floating constants would take a branch where the
+join's integer select is a `cmov` (on the 9700X, a `?:` of 3 and 1 summed into
+a `double` on a coin's condition took 223.4 ms for 40.5 with the conversion
+after the join, in `constant-arms-2678-2026-11-15`), and Tier 0 writes each
+arm's floating constant as a `movabs` and a `movq`, no fewer than its constant
+and the join's `cvtsi2sd`. The node machine leaves such a node to the tasks
+(`node_machine_sinks`), as it writes a record's conversion once, after its row.
+
+`tests/checker/constant-conversions` holds the regressions, which run natively
+against clang (`c_check_constant_conversion_test.c`): the issue's four functions,
+whose Tier 0 code has no `movslq` or `cvtsi2s` of a constant; every kind of
+conversion that folds, conditionals' and logical operators' arms among them,
+after which no integer CONST precedes a CONVERT on either lowering, and the node
+templates' entries are the tasks'; and the conversions that don't fold, a
+join's to `double` among them.
+
 ## Node machine census (#2524)
 
 `./build/compiler measure-node-machine [--list N] [preprocessor options] file...`
@@ -258,7 +309,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -266,7 +317,8 @@ takes its entries.
 - **Its files:** `c_check_node_machine.c` is its state, its records'
   accessors, `node_machine_begin` and `node_machine_run`; then one file a
   sweep, T `c_check_node_machine_type.c`, C `c_check_node_machine_contexts.c`
-  and X `c_check_node_machine_expand.c`, which `main.c` includes after it in
+  and X `c_check_node_machine_expand.c`, and C and X as one sweep,
+  `c_check_node_machine_lower.c` (below), which `main.c` includes after it in
   the checker unit, before `baked.c`. C, X and the shadow's comparison read a
   record only through the accessors (`node_machine_record_*`, below), so that
   a new record layout changes the machine's file and T alone.
@@ -390,6 +442,24 @@ takes its entries.
     a null pointer constant is taken and another isn't). The rule fills a miss
     and takes every other argument, and `--verify` checks the call against
     the action either way.
+- **C and X as one sweep** (`node_machine_lower`,
+  `c_check_node_machine_lower.c`; [the design](../node-machine.md#c-and-x-as-one-sweep)):
+  down from the root as C goes, each evaluated record classified by C's own
+  functions and its row written at once, since its context and target are
+  all its row waits for. The records come in reverse postorder, so the tape
+  is written from its columns' ends and starts at `NodeMachine.entry_first`:
+  within a record, the segment after its row first, then its conversion's
+  entries, then its own, each row from its last entry (`node_machine_back_*`,
+  X's rows mirrored). What X numbers by the order it writes in is numbered
+  after the loop, for the expressions that have any
+  (`node_machine_lower_number`): the labels by C's ranks, the calls' rows by
+  X's rule over the calls in X's order, and the temporaries in X's order.
+  Where a row refuses, C's own sweep says whether a template refuses first,
+  so that the refusal is the two sweeps'. C and X are its exact twin:
+  `--fused` runs it after them on every expression T typed and compares its
+  refusal, its tape, its labels' entries and its calls' records with theirs
+  (`node-shadow: fused expressions=N differences=0`), and times T with it as
+  a set of its own (`T+CX`). `node_machine_run` still runs C and X.
 - **The comparison**, for every expression the machine takes: each record's
   value (every field), its operands' conversions, a call's arguments'
   conversions and a member's offset against the stream's, and its tape against
@@ -412,12 +482,26 @@ takes its entries.
   its inputs in the caches, as the reader leaves them in step 2; the
   difference of two runs' figures is that warm cost. `--passes N` (5 by
   default; 0 for none) times each file's
-  taken expressions N times a sweep set, T alone, T and C, and all three,
-  interleaved, and keeps each set's least cycles and instructions (this
-  thread's user-mode counters) and TSC ticks, per evaluated node: on the 9700X
-  only, under its lock, as `taskset -c 2`. Each sweep set starts with the
-  unit's call answers forgotten, so that each pass pays their fills as one
-  compile of the unit does.
+  taken expressions N times a sweep set, T alone, T and C, and all three, one
+  set's N passes after another's, and keeps each set's least cycles and
+  instructions (this thread's user-mode counters) and TSC ticks, per evaluated
+  node: on the 9700X only, under its lock, as `taskset -c 2`. A set's passes
+  are in a row so that its figure doesn't move with the sets timed beside it:
+  taken in turn inside a pass, a Lua file's T read 79 cycles a node after its
+  own pass and 89 after the walk's sets. Each pass starts with the unit's call
+  answers forgotten, so that it pays their fills as one compile of the unit
+  does.
+- `--interleave N` times the sweeps where other code runs between two of the
+  machine's runs, as the reader's does in a compile ([the
+  design](../node-machine.md#where-the-machine-runs-other-code-between-its-runs)).
+  Three more sets take the file's expressions by chunks of N (a body's
+  expressions for 0): the census's own walk of each of a chunk's expressions
+  (`node_census_expression`, other code over the same nodes) alone (`walk`),
+  then that walk and the three sweeps of each (`walk;T+C+X`), and with
+  `--fused` the walk, T and the one sweep (`walk;T+CX`). A set's figure less
+  `walk`'s is what the sweeps add there, the walk's own slowdown included;
+  the line `node-shadow: interleaved` gives the sweeps' own TSC ticks alone,
+  to compare with the same set's ticks in the tight loop.
 
 The report gives the expressions, evaluated nodes and calls taken, each
 refusal's (shape, code, leaf, context, diagnostic, template, row, root,
@@ -425,9 +509,15 @@ callee), the operators the code and template refusals stopped at, the
 differences (values, entries, twin), the labels compared, T's nodes by row or
 rule and by the action, by operator, the argument memo's entries filled and the
 arguments the rule took instead (over every expression T typed, beside the taken
-calls' arguments), and the times.
+calls' arguments), the fused sweep's census (`node-shadow: fusion`: what a T that
+classified each record's operands at its own visit would settle later; [the
+design](../node-machine.md#a-fused-sweep-what-it-would-settle-later)), and the
+times.
 `--list N` prints the first N differences by file and line. The command exits 1
 on a difference. `test-checker` runs its fixture (`node_shadow_test_text`, one
 construct a line, each taken or refused by a named reason), with `--verify`
-and with `--scalar`. [The design](../node-machine.md)'s "Step 1: the shadow"
+and with `--scalar`, each time with `--fused` and `--interleave 3`: the one
+sweep must give C's and X's refusal, tape, labels and calls for every
+expression of the fixture, nested calls, labels under and around calls and
+several postfix updates through addresses in one expression among them. [The design](../node-machine.md)'s "Step 1: the shadow"
 has the results.

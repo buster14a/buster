@@ -695,6 +695,23 @@ static bool check_tier1_debug_home(const Tier0Function* function, const IrFuncti
 #include "c_check_tier1_debug_objects.c"
 #include "c_check_tier1_debug_values.c"
 
+// The instance of `debug`'s (IrDebugInline) whose own entries include origin `origin`, NONE for none: a binary search, the
+// instances' entries being in order and apart (ir_verify's), where ir_debug_instance scans them.
+static uint32_t check_tier1_debug_instance_of(const IrDebugInfo* debug, uint32_t origin)
+{
+    uint32_t first = 0;
+    uint32_t end = debug->inline_count;
+    while (first < end)
+    {
+        const uint32_t middle = first + (end - first) / 2;
+        const bool before = debug->inlines[middle].first <= origin;
+        first = before ? middle + 1 : first;
+        end = before ? end : middle;
+    }
+    const uint32_t found = first != 0 ? first - 1 : BUSTER_IR_NONE;
+    return found != BUSTER_IR_NONE && origin - debug->inlines[found].first < debug->inlines[found].count ? found : BUSTER_IR_NONE;
+}
+
 static bool check_tier1_debug(const Tier0Function* function, const IrFunction* ir, const Tier1EmitResult* emitted, const uint32_t* record_order, uint32_t epilogue,
                              bool vector, Arena* output, Arena* scratch, CheckTier1Debug* result)
 {
@@ -707,7 +724,8 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
     const uint32_t slots = ir->slot_count;
     const uint32_t locals = function->local_count;
     const Tier1Frame* frame = &emitted->frame;
-    bool valid = debug != NULL && debug->instruction_count == nodes && debug->slot_count == slots && debug->entry_count == function->count && debug->local_count == locals &&
+    // (Past the function's own locals, its expanded callees', BUSTER_IR_DEBUG_BIND_INSTANCE: #2541.)
+    bool valid = debug != NULL && debug->instruction_count == nodes && debug->slot_count == slots && debug->entry_count == function->count && debug->local_count >= locals &&
                  (nodes == 0 || debug->origins != NULL) && (slots == 0 || debug->locals != NULL) && (count == 0 || emitted->origins != NULL) &&
                  debug->scalar_count <= locals && (debug->scalar_count == 0 || debug->scalars != NULL) &&
                  body <= epilogue && epilogue <= count && (record_order == NULL || record_order[count] == count) &&
@@ -726,6 +744,9 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
     // outermost call), which every location proof reads.
     uint32_t* entries = valid ? ir_allocate(scratch, (uint64_t)count + 1, 4, &valid) : NULL;
     uint32_t* raw = valid ? ir_allocate(scratch, (uint64_t)count + 1, 4, &valid) : NULL;
+    // And the innermost instance whose code it is (#2541: its callee's locals' visibility, at the raw origin), NONE for the
+    // function's own.
+    uint32_t* instances = valid && debug->inline_count != 0 ? ir_allocate(scratch, (uint64_t)count + 1, 4, &valid) : NULL;
     uint8_t* safe = valid ? ir_allocate(scratch, (uint64_t)count + 1, 1, &valid) : NULL;
     uint8_t* seen = valid && record_order != NULL ? ir_allocate(scratch, (uint64_t)count + 1, 1, &valid) : NULL;
     CheckTier1DebugSpan* spans = valid ? ir_allocate(scratch, (uint64_t)count + 1, sizeof(CheckTier1DebugSpan), &valid) : NULL;
@@ -762,6 +783,10 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
             valid = valid && (entry == BUSTER_EMISSION_NO_ORIGIN || entry < function->count);
             raw[r] = entry != BUSTER_EMISSION_NO_ORIGIN ? origin_entry : BUSTER_EMISSION_NO_ORIGIN;
             entries[r] = entry;
+            if (instances != NULL)
+            {
+                instances[r] = raw[r] != BUSTER_EMISSION_NO_ORIGIN ? check_tier1_debug_instance_of(debug, raw[r]) : BUSTER_IR_NONE;
+            }
             safe[r] = entry != BUSTER_EMISSION_NO_ORIGIN && old >= body && r >= body && r < epilogue && kind != TIER1_ORIGIN_FRAME && kind != TIER1_ORIGIN_ENTRY && control != BUSTER_X86_CONTROL_RETURN;
         }
     }
@@ -834,7 +859,7 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
     CheckTier1DebugParameters parameters = { 0 };
     CheckTier1DebugConstants constants = { 0 };
     CheckTier1DebugValues values = { 0 };
-    valid = valid && (!bindings || check_tier1_debug_values(function, ir, emitted, record_order, vector, scratch, &values));
+    valid = valid && (!bindings || check_tier1_debug_values(function, ir, emitted, record_order, instances, raw, vector, scratch, &values));
     valid = valid && (bindings || check_tier1_debug_parameters(function, debug, emitted, record_order, vector, scratch, &parameters));
     valid = valid && (bindings || check_tier1_debug_constants(debug, scratch, &constants));
     const uint64_t parameter_ranges = valid && !bindings ? check_tier1_debug_parameter_ranges(&parameters, vector, NULL) : 0;
@@ -862,6 +887,8 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
                 .count = instance.count,
                 .parent = instance.parent,
                 .call = instance.call,
+                .local = instance.local,
+                .local_count = instance.local_count,
             };
         }
         candidate.inline_count = debug->inline_count;

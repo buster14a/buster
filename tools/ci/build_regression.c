@@ -1538,6 +1538,7 @@ static void ownership_check_nonstandard(const OwnershipUnits* units, const Owner
         { "src/buster/compiler/c_check_node_machine_type.c", "main_unit_checker.c", false },
         { "src/buster/compiler/c_check_node_machine_contexts.c", "main_unit_checker.c", false },
         { "src/buster/compiler/c_check_node_machine_expand.c", "main_unit_checker.c", false },
+        { "src/buster/compiler/c_check_node_machine_lower.c", "main_unit_checker.c", false },
         { "src/buster/compiler/c_check_clock.c", "main.c main_unit_checker.c", false },
         { "src/buster/compiler/c_check_clock_rss.c", "main.c main_unit_checker.c", false },
         { "src/buster/compiler/worker_budget.c", "main.c main_unit_checker.c", false },
@@ -2435,7 +2436,7 @@ static void check_develop(void)
         fail("the Develop build changed the Release executable");
     }
     char stamp[PATH_MAX];
-    snprintf(stamp, sizeof(stamp), "%s/Develop/develop/main_unit_checker/split.stamp", tree);
+    snprintf(stamp, sizeof(stamp), "%s/Develop/parts/main_unit_checker/split.stamp", tree);
     if (access(stamp, F_OK) != 0)
     {
         fail("Develop compiled main_unit_checker.c whole: its parts need parallel native generation's tools (the configure step names what is missing)");
@@ -3567,6 +3568,8 @@ static void check_codegen_system_libraries(void)
 // Exercise the real CMake split/merge helpers on two independent translation units with colliding private names.
 // Copies keep the source edits, malformed IR and export-manifest failures inside the disposable fixture tree.
 static void check_split_first(void);
+static void check_join_unreferenced(void);
+static void check_split_padded_starts(void);
 
 static void check_parallel_codegen(void)
 {
@@ -3816,6 +3819,8 @@ static void check_parallel_codegen(void)
     }
     free(log.data);
     check_split_first();
+    check_join_unreferenced();
+    check_split_padded_starts();
     if (chdir(root) != 0)
     {
         fail("can't return to %s", root);
@@ -3928,6 +3933,282 @@ static void check_split_first(void)
     pass("the split puts a start list's functions of a named section first in it, in the list's order, and refuses a stale list");
 }
 
+// The join's unreferenced sections (tools/codegen/unreferenced.c, #2559), run in the parallel-codegen fixture's
+// directory with the tool it built, on two parts as presplit leaves them: an aliased function (NAME.buster_split) that
+// no part calls goes, with the static function only it calls and the jump table it alone reads; one another part calls
+// stays, as do the parts' exports and what they call; and an aliased function that only dead code calls goes too.
+static void check_join_unreferenced(void)
+{
+    write_file("unreferenced_a.c",
+               "__attribute__((noinline)) static int lone(int x) { return x * 5; }\n"
+               "__attribute__((noinline)) static int kept(int x) { return x + 2; }\n"
+               "__attribute__((visibility(\"hidden\"))) int dead(int x) __asm__(\"dead.buster_split\");\n"
+               "__attribute__((visibility(\"hidden\"))) int live(int x) __asm__(\"live.buster_split\");\n"
+               "int dead(int x)\n"
+               "{\n"
+               "    switch (x)\n"
+               "    {\n"
+               "    case 0: return lone(x);\n"
+               "    case 1: return lone(x + 3) ^ 9;\n"
+               "    case 2: return x * x + 7;\n"
+               "    case 3: return lone(x) - 11;\n"
+               "    case 4: return x << 3;\n"
+               "    case 5: return lone(x * 7);\n"
+               "    case 6: return 99 - x;\n"
+               "    default: return 0;\n"
+               "    }\n"
+               "}\n"
+               "int unreferenced_entry(int x) { return kept(x) + live(x); }\n",
+               0644);
+    write_file("unreferenced_b.c",
+               "__attribute__((noinline)) static int orphan(int x) { return x - 4; }\n"
+               "__attribute__((visibility(\"hidden\"))) int dead_too(int x) __asm__(\"dead_too.buster_split\");\n"
+               "__attribute__((visibility(\"hidden\"))) int chained(int x) __asm__(\"chained.buster_split\");\n"
+               "__attribute__((visibility(\"hidden\"))) int live(int x) __asm__(\"live.buster_split\");\n"
+               "__attribute__((noinline)) int chained(int x) { return x * 11; }\n"
+               "int dead_too(int x) { return orphan(x) + chained(x); }\n"
+               "int live(int x) { return x ^ 3; }\n",
+               0644);
+    // The fixture's units split after the optimizer, whose join doesn't run the tool: its target builds it.
+    char* tools[] = { "cmake", "--build", "out", "--config", "Release", "--target", "buster_codegen_splitter", 0 };
+    char* compile_a[] = { "clang", "-O2", "-ffunction-sections", "-c", "unreferenced_a.c", "-o", "unreferenced_a.o", 0 };
+    char* compile_b[] = { "clang", "-O2", "-ffunction-sections", "-c", "unreferenced_b.c", "-o", "unreferenced_b.o", 0 };
+    char* find[] = { "out/codegen-tools/unreferenced", "unreferenced.lines", "unreferenced_a.o", "unreferenced_b.o", 0 };
+    char* sections[] = { "readelf", "-SW", "unreferenced_a.o", 0 };
+    Text log = capture(tools);
+    free(log.data);
+    log = capture(compile_a);
+    free(log.data);
+    log = capture(compile_b);
+    free(log.data);
+    log = capture(find);
+    free(log.data);
+    Text lines = read_file("unreferenced.lines");
+    const char* const gone[] = {
+        "\"unreferenced_a.o\"(.text.dead.buster_split)",
+        "\"unreferenced_a.o\"(.text.lone)",
+        "\"unreferenced_b.o\"(.text.dead_too.buster_split)",
+        "\"unreferenced_b.o\"(.text.orphan)",
+        "\"unreferenced_b.o\"(.text.chained.buster_split)",
+    };
+    const char* const kept[] = { "(.text.kept)", "(.text.live.buster_split)", "(.text.unreferenced_entry)" };
+    for (uint32_t i = 0; i < sizeof(gone) / sizeof(gone[0]); i += 1)
+    {
+        if (strstr(lines.data, gone[i]) == 0)
+        {
+            fail("the join's unreferenced sections lack %s: %s", gone[i], lines.data);
+        }
+    }
+    for (uint32_t i = 0; i < sizeof(kept) / sizeof(kept[0]); i += 1)
+    {
+        if (strstr(lines.data, kept[i]) != 0)
+        {
+            fail("the join's unreferenced sections name the live %s: %s", kept[i], lines.data);
+        }
+    }
+    // The dead function's jump table, where the code generator gave it one.
+    Text table = capture(sections);
+    if (strstr(table.data, " .rodata.dead.buster_split ") != 0 && strstr(lines.data, "\"unreferenced_a.o\"(.rodata.dead.buster_split)") == 0)
+    {
+        fail("the join's unreferenced sections keep the dead function's jump table: %s", lines.data);
+    }
+    free(table.data);
+    free(lines.data);
+    pass("the join discards the parts' aliased functions no live code calls, with what only they reach, and keeps the rest");
+}
+
+// Whether `text`, nm's listing, defines a function `name` (or its alias, NAME.buster_split) in [start, end).
+static bool start_order_placed(const char* text, const char* name, unsigned long long start, unsigned long long end)
+{
+    bool placed = false;
+    const size_t length = strlen(name);
+    for (const char* cursor = text; !placed && (cursor = strstr(cursor, name)) != 0; cursor += length)
+    {
+        const bool whole = cursor[length] == '\n' || strncmp(cursor + length, ".buster_split\n", 14) == 0;
+        // "ADDRESS t NAME": the name starts a line's third field.
+        if (whole && cursor >= text + 2 && cursor[-1] == ' ' && (cursor[-2] == 't' || cursor[-2] == 'T'))
+        {
+            const char* line = cursor;
+            while (line != text && line[-1] != '\n')
+            {
+                line -= 1;
+            }
+            const unsigned long long address = strtoull(line, 0, 16);
+            placed = address >= start && address < end;
+        }
+    }
+    return placed;
+}
+
+// The start's code order in the compiler in parts (#1444, BusterStartOrder.cmake): every function the list names
+// whose section its unit's join holds (.text.NAME, or .text.NAME.buster_split where a part's optimizer left it its
+// alias's name alone) is in .text.buster_start. The link script named the first alone, and 368 of the list's 511
+// functions stayed in .text, where the start's faults spread over more of the executable. `tree` is the configuration's
+// directory (TREE/Release).
+static void check_parallel_codegen_start_order(const char* executable, const char* tree)
+{
+    char* headers[] = { "readelf", "-SW", (char*)executable, 0 };
+    Text table = capture(headers);
+    char line[512];
+    unsigned long long start = 0;
+    unsigned long long size = 0;
+    const char* field = line_holding(table.data, " .text.buster_start ", line, sizeof(line)) ? strstr(line, "PROGBITS") : 0;
+    free(table.data);
+    if (field == 0 || sscanf(field, "PROGBITS %llx %*s %llx", &start, &size) != 2)
+    {
+        // A build without the start's order (not static) has nothing to check.
+        return;
+    }
+    char* listing[] = { "nm", (char*)executable, 0 };
+    Text symbols = capture(listing);
+    Text list = read_file("cmake/BusterStartOrder.txt");
+    char unit[128] = "";
+    Text joined = { 0 };
+    uint32_t checked = 0;
+    for (char* row = strtok(list.data, "\n"); row != 0; row = strtok(0, "\n"))
+    {
+        char stem[128];
+        char name[256];
+        if (sscanf(row, "%127[a-z0-9_].c %255s", stem, name) != 2)
+        {
+            continue;
+        }
+        if (strcmp(stem, unit) != 0)
+        {
+            free(joined.data);
+            joined = (Text){ 0 };
+            snprintf(unit, sizeof(unit), "%s", stem);
+            char object[PATH_MAX + 256];
+            snprintf(object, sizeof(object), "%s/parts/%s/native.o", tree, stem);
+            if (access(object, F_OK) == 0)
+            {
+                char* sections[] = { "readelf", "-SW", object, 0 };
+                joined = capture(sections);
+            }
+        }
+        char plain[300];
+        char aliased[320];
+        snprintf(plain, sizeof(plain), " .text.%s ", name);
+        snprintf(aliased, sizeof(aliased), " .text.%s.buster_split ", name);
+        if (joined.data != 0 && (strstr(joined.data, plain) != 0 || strstr(joined.data, aliased) != 0))
+        {
+            if (!start_order_placed(symbols.data, name, start, start + size))
+            {
+                fail("the compiler in parts left %s's %s, which its join holds, out of .text.buster_start", stem, name);
+            }
+            checked += 1;
+        }
+    }
+    free(joined.data);
+    free(list.data);
+    free(symbols.data);
+    if (checked == 0)
+    {
+        fail("the compiler in parts' joins hold none of the start's functions");
+    }
+}
+
+// The part a plan starts each part at, from the split's --report lines ("split: part P: functions [I, J), ..."), into
+// `starts` (at most 8 parts); how many it printed.
+static uint32_t split_report_starts(const char* report, uint32_t* starts)
+{
+    uint32_t count = 0;
+    for (const char* line = strstr(report, "split: part "); line != 0 && count < 8; line = strstr(line + 1, "split: part "))
+    {
+        unsigned part = 0;
+        unsigned first = 0;
+        if (sscanf(line, "split: part %u: functions [%u,", &part, &first) == 2 && part == count)
+        {
+            starts[count] = first;
+            count += 1;
+        }
+    }
+    return count;
+}
+
+// A sanitizer build's plan (#2639, tools/codegen/split.c --padded-starts and --codegen-costs), run in the parallel-codegen
+// fixture's directory with the splitter it built. Three heavy functions, then a 64-byte-aligned one and a fourth heavy
+// one, in two parts: Release's plan starts the second part at the aligned function, since a part starts at a function
+// of the greatest alignment it holds, and leaves three heavy functions in the first; --padded-starts starts it at the
+// third heavy one, before the aligned function, and the relocatable link of the parts pads its start so that the aligned
+// function stays aligned. --codegen-costs plans too.
+static void check_split_padded_starts(void)
+{
+    char source[16384] = "";
+    const char* const heavy[] = { "pad_x", "pad_y", "pad_z", "pad_wide", "pad_u" };
+    for (uint32_t f = 0; f < 5; f += 1)
+    {
+        size_t at = strlen(source);
+        if (f == 3)
+        {
+            snprintf(source + at, sizeof(source) - at, "__attribute__((noinline, aligned(64))) int pad_wide(const int* p) { return p[0] + 1; }\n");
+        }
+        else
+        {
+            at += (size_t)snprintf(source + at, sizeof(source) - at, "__attribute__((noinline)) int %s(const int* p) { return 0", heavy[f]);
+            for (uint32_t term = 0; term < 150; term += 1)
+            {
+                at += (size_t)snprintf(source + at, sizeof(source) - at, " ^ p[%u] * %u", term, 2 * term + 3);
+            }
+            snprintf(source + at, sizeof(source) - at, ";\n}\n");
+        }
+    }
+    const size_t at = strlen(source);
+    snprintf(source + at, sizeof(source) - at, "int pad_entry(const int* p) { return pad_x(p) + pad_y(p) + pad_z(p) + pad_wide(p) + pad_u(p); }\n");
+    write_file("padded.c", source, 0644);
+    // Unvectorized, so that the heavy functions' instructions are many.
+    char* compile[] = { "clang", "-O2", "-fno-vectorize", "-fno-slp-vectorize", "-emit-llvm", "-c", "padded.c", "-o", "padded.bc", 0 };
+    char* parts[] = { "mkdir", "-p", "release-parts", "padded-parts", "costs-parts", 0 };
+    char* release[] = { "out/codegen-tools/split", "padded.bc", "2", "release-parts", "--report", 0 };
+    char* padded[] = { "out/codegen-tools/split", "padded.bc", "2", "padded-parts", "--report", "--padded-starts", 0 };
+    char* costs[] = { "out/codegen-tools/split", "padded.bc", "2", "costs-parts", "--report", "--codegen-costs", "--padded-starts", 0 };
+    char* generate0[] = { "clang", "-c", "-x", "ir", "padded-parts/part0.bc", "-o", "padded-parts/part0.o", 0 };
+    char* generate1[] = { "clang", "-c", "-x", "ir", "padded-parts/part1.bc", "-o", "padded-parts/part1.o", 0 };
+    char* join[] = { "ld", "-r", "padded-parts/part0.o", "padded-parts/part1.o", "-o", "padded-parts/joined.o", 0 };
+    char* symbols[] = { "readelf", "-sW", "padded-parts/joined.o", 0 };
+    Text log = capture(compile);
+    free(log.data);
+    log = capture(parts);
+    free(log.data);
+    uint32_t release_starts[8];
+    uint32_t padded_starts[8];
+    uint32_t costs_starts[8];
+    log = capture(release);
+    const uint32_t release_count = split_report_starts(log.data, release_starts);
+    free(log.data);
+    log = capture(padded);
+    const uint32_t padded_count = split_report_starts(log.data, padded_starts);
+    free(log.data);
+    log = capture(costs);
+    const uint32_t costs_count = split_report_starts(log.data, costs_starts);
+    free(log.data);
+    // The module's functions in order: pad_x 0, pad_y 1, pad_z 2, pad_wide 3, pad_u 4, pad_entry 5.
+    if (release_count != 2 || release_starts[1] != 3)
+    {
+        fail("Release's plan didn't start the second part at the aligned function pad_wide (3): %u parts, %u", release_count, release_count == 2 ? release_starts[1] : 0);
+    }
+    if (padded_count != 2 || padded_starts[1] != 2 || costs_count != 2 || costs_starts[1] != 2)
+    {
+        fail("the padded plans didn't start the second part at pad_z (2), before pad_wide: %u", padded_count == 2 ? padded_starts[1] : 0);
+    }
+    log = capture(generate0);
+    free(log.data);
+    log = capture(generate1);
+    free(log.data);
+    log = capture(join);
+    free(log.data);
+    // readelf -sW: Num: Value Size Type Bind Vis Ndx Name.
+    Text listing = capture(symbols);
+    char line[512];
+    unsigned long long value = 1;
+    if (!line_holding(listing.data, " pad_wide", line, sizeof(line)) || sscanf(line, "%*s %llx", &value) != 1 || value % 64 != 0)
+    {
+        fail("the joined parts of the padded plan left pad_wide unaligned (%llx): %s", value, listing.data);
+    }
+    free(listing.data);
+    pass("a sanitizer build's plan starts a part before an aligned function, which the relocatable link keeps aligned");
+}
+
 // The parts of a sanitizer build's units (#2639), on the fixture's two units: AddressSanitizer's joined objects keep
 // their module constructor's comdat group, which llvm-objcopy clears and the join restores (tools/codegen/comdat.c),
 // so that the executable has one constructor for every unit, as single compiles give it; MemorySanitizer's keep their
@@ -3964,6 +4245,24 @@ static void check_parallel_codegen_sanitizers(void)
             fail("the %s fixture's units weren't generated in parts: %s", sanitizers[i], log.data);
         }
         free(log.data);
+        // A sanitizer build's parts are planned for its longest part (BusterCodegen.cmake), Release's not.
+        char rules[PATH_MAX];
+        snprintf(rules, sizeof(rules), "%s/CMakeFiles/impl-Release.ninja", tree);
+        Text graph = read_file(rules);
+        if (strstr(graph.data, "--codegen-costs;--padded-starts") == 0)
+        {
+            fail("the %s fixture's split doesn't plan with --codegen-costs and --padded-starts", sanitizers[i]);
+        }
+        free(graph.data);
+        if (i == 0)
+        {
+            graph = read_file("out/CMakeFiles/impl-Release.ninja");
+            if (strstr(graph.data, "--padded-starts") != 0)
+            {
+                fail("the fixture's Release split plans as a sanitizer build's");
+            }
+            free(graph.data);
+        }
         log = capture(execute);
         free(log.data);
         char line[512];
@@ -4010,8 +4309,9 @@ static void check_parallel_codegen_sanitizers(void)
 static void check_parallel_codegen_compiler(void)
 {
     const char* const settings[] = {
-        "BUSTER_PARALLEL_CODEGEN=1", "BUSTER_DEBUG_INFO=0", "BUSTER_SANITIZER=none", "BUSTER_FUZZ_AVAILABLE=0",
-        "BUSTER_FUZZ_ENTRY=", "BUSTER_PGO=0", "BUSTER_PGO_TRAIN=", "BUSTER_HOST_RUNTIME=", "BUSTER_BUILD_DEFINES=", 0,
+        "BUSTER_PARALLEL_CODEGEN=1", "BUSTER_RELEASE_PARTS=1", "BUSTER_DEBUG_INFO=0", "BUSTER_SANITIZER=none",
+        "BUSTER_FUZZ_AVAILABLE=0", "BUSTER_FUZZ_ENTRY=", "BUSTER_PGO=0", "BUSTER_PGO_TRAIN=", "BUSTER_HOST_RUNTIME=",
+        "BUSTER_BUILD_DEFINES=", 0,
     };
     BUILD_ENV(settings, "build", "--config", "Release");
     char path[PATH_MAX];
@@ -4020,7 +4320,7 @@ static void check_parallel_codegen_compiler(void)
     snprintf(log, sizeof(log), "%s/parallel-codegen-output.log", work);
     if (run(log, settings, print) != 0)
     {
-        fail("can't find the opt-in compiler");
+        fail("can't find the compiler in parts");
     }
     Text output = read_file(log);
     char* newline = strchr(output.data, '\n');
@@ -4030,6 +4330,22 @@ static void check_parallel_codegen_compiler(void)
     }
     snprintf(path, sizeof(path), "%s", output.data);
     free(output.data);
+    // The executable's tree (TREE/Release/compiler, a -parts tree) split every main.c unit before the optimizer
+    // (BUSTER_RELEASE_PARTS=1, presplit.c, #2559): the checker's unit into 48 code parts, a part's job each, and their
+    // join.
+    char stamp[PATH_MAX];
+    char part[PATH_MAX];
+    char* release = strrchr(path, '/');
+    const int directory = release != 0 ? (int)(release - path) : 0;
+    snprintf(stamp, sizeof(stamp), "%.*s/parts/main_unit_checker/split.stamp", directory, path);
+    snprintf(part, sizeof(part), "%.*s/parts/main_unit_checker/part47.o", directory, path);
+    if (access(stamp, F_OK) != 0 || access(part, F_OK) != 0)
+    {
+        fail("the Release build compiled main_unit_checker.c whole, not in parts: no %s or %s", stamp, part);
+    }
+    char tree[PATH_MAX];
+    snprintf(tree, sizeof(tree), "%.*s", directory, path);
+    check_parallel_codegen_start_order(path, tree);
     char* baked[] = { path, "test-baked-tables", 0 };
     output = capture(baked);
     free(output.data);
@@ -4037,9 +4353,9 @@ static void check_parallel_codegen_compiler(void)
     BUILD_ENV(settings, "build", "--config", "Release");
     if (!same_time(status_of(path), compiler) || !same_file("build/compiler", path))
     {
-        fail("an unchanged opt-in compiler build regenerated or failed to publish its executable");
+        fail("an unchanged build of the compiler in parts regenerated or failed to publish its executable");
     }
-    pass("the full opt-in compiler links native units, passes baking/canary checks and reuses its unchanged executable");
+    pass("the full compiler in parts links its units, puts the start's functions first, passes baking/canary checks and reuses its unchanged executable");
 }
 
 int main(int argc, char** argv)

@@ -33,6 +33,8 @@
 // no selection, allocation or emission either, one the unit stage holds (CheckTier1Inline.held: not rooted, in no cycle,
 // its address taken by no code) whose summary its callers should expand makes no code on its lane
 // (check_tier1_inline_held); the emission's last pass makes the code of each held one some emitted code still refers to.
+// Without --tier1 the table has Tier 0's callees alone as its candidates, which the same columns, the same last pass and
+// the same dead set leave without code where Tier 0 spliced every call (#1398 step 3, check_tier0_inline_held).
 //
 // Determinism: a summary is a function of its body and its callees' summaries, and the decisions are functions of those,
 // so the output doesn't depend on which lane builds what, or on the lanes' count (#153), nor on what is held. Any failure
@@ -61,13 +63,15 @@
 // function its callers copy and its own code goes on from, with its verified analysis, and the calls expanded in it.
 // The analysis's arena is `frozen`, a copy of its builder's analyses arena as it was once the summary was built:
 // ir_verified_current reads the arena's length, and the builder's own goes on growing as it builds more, on its lane,
-// while another lane's code reads the summary. Nothing writes the copy once the summary is published.
+// while another lane's code reads the summary. Nothing writes the copy once the summary is published. `vectors` is
+// whether its source or an expanded callee's has vectors (check_tier1_inline_expand's).
 typedef struct CheckTier1Summary CheckTier1Summary;
 struct CheckTier1Summary
 {
     CheckTier1Passes passes;
     Arena frozen;
     uint32_t inlined;
+    bool vectors;
 };
 
 // The emission's generations of its inlining tables.
@@ -78,9 +82,14 @@ static uint64_t check_tier1_inline_generations = 0;
 // replace theirs at link time (weak or selectany, or a late weak one, `#pragma weak`'s: CheckProgram.weak_late_keys),
 // as clang's IR makes such a definition weak or linkonce, whose calls LLVM's inliner keeps (isInterposable); and
 // BUSTER_CHECK_TIER1_INLINE_ROOTED where an attribute keeps a definition's code whatever its callers expand (used, a
-// constructor's or destructor's, an interrupt handler's, a multiversioned one's, an alias's, ifunc's or weakref's, a
-// section's, retain, patchable_function_entry, naked; and the interposable ones). The attributed declarations are found
-// 16 tokens at a time, as the emission's scan of them is (check_input_attributed_next), with its scalar twin.
+// constructor's or destructor's, an interrupt handler's, a multiversioned one's, an alias's, ifunc's or weakref's,
+// retain, patchable_function_entry, naked; and the interposable ones). A section, an attribute's or a pragma's, keeps
+// none: clang's inliner expands such a function as any other and drops an internal one nothing calls, and the compiler's
+// own checker, all of it under `#pragma clang section` (#502), lost the single-site class and its dead functions to it
+// (#2541). Nor does a target attribute alone: a function of several versions by target attributes is the table's
+// (CheckProgram.body_targets' BUSTER_CHECK_PROGRAM_TARGET_VERSIONS), and LLVM's GlobalDCE drops a dead internal function
+// whatever its target, as clang -O0 emits none of <immintrin.h>'s wrappers (#1398 step 3). The attributed declarations
+// are found 16 tokens at a time, as the emission's scan of them is (check_input_attributed_next), with its scalar twin.
 #define BUSTER_CHECK_TIER1_INLINE_INTERPOSABLE 1u
 #define BUSTER_CHECK_TIER1_INLINE_ROOTED 2u
 static void check_tier1_inline_marks(const CheckProgram* program, bool scalar, uint8_t* marks)
@@ -101,9 +110,9 @@ static void check_tier1_inline_marks(const CheckProgram* program, bool scalar, u
                 const CheckInputAttributeKind kind = attribute->kind;
                 const bool interposable = kind == CHECK_ATTRIBUTE_WEAK || kind == CHECK_ATTRIBUTE_SELECTANY;
                 const bool rooted = interposable || kind == CHECK_ATTRIBUTE_USED || kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR ||
-                                    kind == CHECK_ATTRIBUTE_INTERRUPT || kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES ||
+                                    kind == CHECK_ATTRIBUTE_INTERRUPT || kind == CHECK_ATTRIBUTE_TARGET_CLONES ||
                                     kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || kind == CHECK_ATTRIBUTE_CPU_DISPATCH || kind == CHECK_ATTRIBUTE_ALIAS ||
-                                    kind == CHECK_ATTRIBUTE_IFUNC || kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_SECTION || kind == CHECK_ATTRIBUTE_RETAIN ||
+                                    kind == CHECK_ATTRIBUTE_IFUNC || kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_RETAIN ||
                                     kind == CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY || kind == CHECK_ATTRIBUTE_NAKED;
                 marks[object] |= attribute->ignored ? 0 : (interposable ? BUSTER_CHECK_TIER1_INLINE_INTERPOSABLE : 0) | (rooted ? BUSTER_CHECK_TIER1_INLINE_ROOTED : 0);
             }
@@ -118,7 +127,8 @@ static void check_tier1_inline_marks(const CheckProgram* program, bool scalar, u
 
 // The table of `program`'s inline callees (CheckTier1Inline), in `arena`: none (false, *table untouched) in a unit without
 // a candidate. Tier 0's are the always_inline functions of internal linkage (`bodies`); with `tier1`, Tier 1's are those, the
-// small class's and the external definitions' (`candidates`, `classes`), with the unit stage's state. An external
+// small class's and the external definitions' (`candidates`, `classes`), with the unit stage's state; without it, the
+// candidates are Tier 0's callees, but naked ones, each held (`held`) where nothing roots it (#1398 step 3). An external
 // definition (#2541 step 2) is a candidate as an internal one is, but where another unit's may replace it
 // (check_tier1_inline_marks); it keeps its own code whatever its callers expand. `scalar` takes the attributes'
 // scan's scalar twin.
@@ -143,24 +153,28 @@ static bool check_tier1_inline_table(const CheckProgram* program, const CheckPro
     uint32_t* bodies = always + small != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, symbol_count) : 0;
     uint8_t* ready = bodies != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : 0;
     const bool stage = tier1 && bodies != 0;
-    uint32_t* candidates = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, symbol_count) : 0;
-    uint8_t* classes = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : 0;
+    // The dead functions' columns (#2541 step 2), for either tier's candidates: Tier 0's are its callees (#1398 step 3).
+    const bool callees = bodies != 0;
+    uint32_t* candidates = callees ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, symbol_count) : 0;
+    uint8_t* classes = callees ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : 0;
     uint8_t* cyclic = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : 0;
     uint32_t* states = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1) : 0;
     CheckTier1Summary* summaries = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, CheckTier1Summary, (uint64_t)count + 1) : 0;
     Arena* arenas = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, Arena, 2 * BUSTER_CHECK_EMIT_MAX_LANES) : 0;
     uint32_t* word = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 1) : 0;
-    const bool columns = candidates != 0 && classes != 0 && cyclic != 0 && states != 0 && summaries != 0 && arenas != 0 && word != 0;
+    const bool columns = candidates != 0 && classes != 0 && (!stage || (cyclic != 0 && states != 0 && summaries != 0 && arenas != 0 && word != 0));
     // Per body, whether an internal candidate keeps its code whatever its callers expand (CheckTier1Inline.rooted), and
     // whether the emission gave it none (CheckTier1Inline.dead).
-    uint8_t* rooted = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : 0;
-    uint8_t* dead = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : 0;
+    uint8_t* rooted = callees ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : 0;
+    uint8_t* dead = callees ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : 0;
     uint32_t* sites = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1) : 0;
-    uint8_t* held = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : 0;
-    uint8_t* released = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : 0;
+    uint8_t* held = callees ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : 0;
+    uint8_t* released = callees ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : 0;
     // The objects' marks (check_tier1_inline_marks), while the table is built (popped after it).
     const uint64_t mark = arena->length;
-    uint8_t* marks = stage && rooted != 0 && dead != 0 && sites != 0 && held != 0 && released != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)input->token_count + 1) : 0;
+    uint8_t* marks = callees && rooted != 0 && dead != 0 && (!stage || sites != 0) && held != 0 && released != 0 ?
+                         BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)input->token_count + 1) :
+                         0;
     if (marks != 0)
     {
         memset(marks, 0, (uint64_t)input->token_count + 1);
@@ -171,14 +185,6 @@ static bool check_tier1_inline_table(const CheckProgram* program, const CheckPro
             const uint32_t object = program->initializer_references[k];
             marks[object <= input->token_count ? object : 0] |= BUSTER_CHECK_TIER1_INLINE_ROOTED;
         }
-        // A section's placement (an attribute's or a pragma's).
-        const CheckInputSections* sections = input->sections;
-        for (uint32_t k = 0; sections != NULL && k < sections->placement_count; k += 1)
-        {
-            const uint32_t token = sections->placements[k].token;
-            const uint32_t object = token < input->token_count ? input->objects[token] : 0;
-            marks[object <= input->token_count ? object : 0] |= BUSTER_CHECK_TIER1_INLINE_ROOTED;
-        }
         for (uint32_t k = 0; k < program->alias_count; k += 1)
         {
             const CheckProgramAlias* alias = &program->aliases[k];
@@ -187,23 +193,23 @@ static bool check_tier1_inline_table(const CheckProgram* program, const CheckPro
             marks[alias->base <= input->token_count ? alias->base : 0] |= BUSTER_CHECK_TIER1_INLINE_ROOTED;
         }
     }
-    const bool valid = bodies != 0 && ready != 0 && (!stage || (columns && marks != 0));
+    const bool valid = bodies != 0 && ready != 0 && columns && marks != 0;
     if (valid)
     {
         memset(bodies, 0, (uint64_t)symbol_count * sizeof(uint32_t));
         memset(ready, 0, (uint64_t)count + 1);
+        memset(candidates, 0, (uint64_t)symbol_count * sizeof(uint32_t));
+        memset(classes, 0, (uint64_t)count + 1);
+        memset(rooted, 0, (uint64_t)count + 1);
+        memset(dead, 0, (uint64_t)count + 1);
+        memset(held, 0, (uint64_t)count + 1);
+        memset(released, 0, (uint64_t)count + 1);
         if (stage)
         {
-            memset(candidates, 0, (uint64_t)symbol_count * sizeof(uint32_t));
-            memset(classes, 0, (uint64_t)count + 1);
             memset(cyclic, 0, (uint64_t)count + 1);
             memset(states, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
             memset(arenas, 0, 2 * BUSTER_CHECK_EMIT_MAX_LANES * sizeof(Arena));
-            memset(rooted, 0, (uint64_t)count + 1);
-            memset(dead, 0, (uint64_t)count + 1);
             memset(sites, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-            memset(held, 0, (uint64_t)count + 1);
-            memset(released, 0, (uint64_t)count + 1);
             *word = 0;
         }
         for (uint32_t b = 0; b < count; b += 1)
@@ -221,18 +227,23 @@ static bool check_tier1_inline_table(const CheckProgram* program, const CheckPro
             {
                 bodies[symbol] = b + 1;
             }
-            // A naked function's code is its templates' and it has no body to copy.
+            // A naked function's code is its templates' and it has no body to copy. Without --tier1, the candidates are
+            // Tier 0's callees alone (#1398 step 3): the internal always_inline functions.
             const bool naked = lowered->asms.naked != 0 && lowered->asms.naked[b].planned;
-            const uint8_t class = !(internal || exported) || !named || naked ? BUSTER_CHECK_TIER1_INLINE_CLASS_NONE :
+            const bool offered = stage ? internal || exported : internal;
+            const uint8_t class = !offered || !named || naked ? BUSTER_CHECK_TIER1_INLINE_CLASS_NONE :
                                   bits == BUSTER_CHECK_PROGRAM_INLINE_ALWAYS ? BUSTER_CHECK_TIER1_INLINE_CLASS_ALWAYS :
-                                  bits == 0 ? BUSTER_CHECK_TIER1_INLINE_CLASS_SMALL : BUSTER_CHECK_TIER1_INLINE_CLASS_NONE;
-            if (stage && class != BUSTER_CHECK_TIER1_INLINE_CLASS_NONE)
+                                  stage && bits == 0 ? BUSTER_CHECK_TIER1_INLINE_CLASS_SMALL : BUSTER_CHECK_TIER1_INLINE_CLASS_NONE;
+            if (class != BUSTER_CHECK_TIER1_INLINE_CLASS_NONE)
             {
                 candidates[symbol] = b + 1;
                 classes[b] = class;
-                // An external definition keeps its code, and so does one of several versions (a target attribute's, #180).
-                const bool versioned = program->body_targets != 0 && program->body_targets[b] != 0;
+                // An external definition keeps its code, and so does one of several versions (target attributes', #180).
+                const bool versioned = program->body_targets != 0 && program->body_targets[b] == BUSTER_CHECK_PROGRAM_TARGET_VERSIONS;
                 rooted[b] = !internal || versioned || (marked & BUSTER_CHECK_TIER1_INLINE_ROOTED) != 0;
+                // Tier 0's callees that nothing roots may be held back for the last pass (check_tier0_inline_held); Tier
+                // 1's unit stage decides its own (check_tier1_inline_stage).
+                held[b] = !stage && rooted[b] == 0 ? BUSTER_CHECK_TIER1_INLINE_HELD : 0;
             }
         }
         *table = (CheckTier1Inline){
@@ -263,7 +274,7 @@ static bool check_tier1_inline_table(const CheckProgram* program, const CheckPro
 }
 
 // The table for the bodies' second lowering, on one lane (the emission's run alone): its unit stage and summaries undone,
-// their arenas emptied.
+// their arenas emptied; without --tier1, Tier 0's callees held as the table had them (#1398 step 3), none waiting yet.
 static void check_tier1_inline_renew(CheckTier1Inline* table)
 {
     table->generation = __atomic_add_fetch(&check_tier1_inline_generations, 1, __ATOMIC_RELAXED);
@@ -274,11 +285,18 @@ static void check_tier1_inline_renew(CheckTier1Inline* table)
         memset(table->cyclic, 0, (uint64_t)table->body_count + 1);
         memset(table->sites, 0, ((uint64_t)table->body_count + 1) * sizeof(uint32_t));
         memset(table->held, 0, (uint64_t)table->body_count + 1);
-        memset(table->released, 0, (uint64_t)table->body_count + 1);
         for (uint32_t k = 0; k < 2 * BUSTER_CHECK_EMIT_MAX_LANES; k += 1)
         {
             arena_pop_to(&table->arenas[k], 0);
         }
+    }
+    for (uint32_t b = 0; table->stage == 0 && table->held != 0 && b < table->body_count; b += 1)
+    {
+        table->held[b] = table->held[b] != 0 ? BUSTER_CHECK_TIER1_INLINE_HELD : 0;
+    }
+    if (table->released != 0)
+    {
+        memset(table->released, 0, (uint64_t)table->body_count + 1);
     }
 }
 
@@ -556,13 +574,15 @@ static bool check_tier1_inline_aggregates(const IrFunction* function, uint32_t n
 // inlines it whatever its size, a single-site one BUSTER_CHECK_TIER1_INLINE_SINGLE_COST, a small one
 // BUSTER_CHECK_TIER1_INLINE_SMALL_COST; the caller alone is rewritten (IrInlineUnit.only). A callee whose signature the
 // call doesn't match (ir_inline_signature, which would refuse the whole unit) stays a call. The unit's columns are in
-// steps[4], before the expansion.
+// steps[4], before the expansion. *vectors is whether the body's source has vectors (Tier0Function.vectors) or an
+// expanded callee's summary's does (CheckTier1Summary.vectors).
 static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inline* inlining, uint32_t caller, const IrFunction* lowered, const X86Target* target, bool scalar,
-                                      IrFunction* result, uint32_t* inlined, bool* verified)
+                                      IrFunction* result, uint32_t* inlined, bool* verified, bool* vectors)
 {
     const CheckProgram* program = inlining->program;
     *inlined = 0;
     *verified = true;
+    *vectors = inlining->lowered->functions[caller].vectors;
     bool changed = false;
     Arena* scratch = &lane->scratch;
     const uint64_t mark = scratch->length;
@@ -668,7 +688,10 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
             *verified = false;
             for (uint32_t call = expanded.call_offsets[position]; call < expanded.call_offsets[position + 1]; call += 1)
             {
-                aggregates = aggregates || (expanded.decisions[call] == IR_INLINE_SELECTED && check_tier1_inline_aggregates(lowered, expanded.call_nodes[call]));
+                const bool selected = expanded.decisions[call] == IR_INLINE_SELECTED;
+                const uint32_t node = expanded.call_nodes[call];
+                aggregates = aggregates || (selected && check_tier1_inline_aggregates(lowered, node));
+                *vectors = *vectors || (selected && inlining->summaries[inlining->candidates[lowered->a[node]] - 1].vectors);
             }
         }
     }
@@ -677,8 +700,11 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
     // The aggregates' slots of a body with vectors, as without inlining, or of an expansion that copied an aggregate argument
     // or result into a slot of its own, which SROA splits. Its other aggregates are as they would be without inlining:
     // splitting them is no expansion's work (on sqlite3.c, 0.05% of the code for a quarter of the expansion's time). Where
-    // SROA fails the body keeps its calls. An expansion SROA doesn't take is verified by promotion.
-    if (aggregates || ir_function_has_vectors_path(&current, !scalar))
+    // SROA fails the body keeps its calls. An expansion SROA doesn't take is verified by promotion. The vectors are its
+    // source's or an expanded callee's (*vectors): a COPY's 16-byte pieces (#2693, ir_typed_copy_pointers) are vectors in
+    // the IR but give SROA nothing of theirs to split, and on sqlite3.c they made it split sqlite3VdbeExec (+141 M
+    // instructions).
+    if (aggregates || (*vectors && ir_function_has_vectors_path(&current, !scalar)))
     {
         IrSroaOptions options = ir_sroa_options();
         options.scalar = scalar;
@@ -726,16 +752,19 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
     IrCheck check = ir_check(output != 0 && analyses != 0 && !function->calls_returns_twice ? IR_OK : IR_ERROR_UNSUPPORTED, BUSTER_IR_NONE, 0);
     if (check.error == IR_OK)
     {
-        // Under -g with its source identities, which its callers' expansions carry as an instance's (#2541 step 3).
-        check = inlining->sources ? ir_lower_typed_target_sources(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered, scalar) :
-                scalar            ? ir_lower_typed_target_scalar(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered) :
-                                    ir_lower_typed_target(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered);
+        // As the function's own pipeline lowers it (check_tier1_compile): a vector wider than the target moves whole is taken,
+        // for check_tier1_passes' split (#1624), else a summary of a function with one is refused and its calls stay calls
+        // (the compiler's own scalar-host build, whose AVX-512 types are wider than x86-64's: #2541). Under -g with its
+        // source identities, which its callers' expansions carry as an instance's (#2541 step 3).
+        check = inlining->sources ? ir_lower_typed_target_pieces_sources(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered, scalar) :
+                                    ir_lower_typed_target_pieces(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered, scalar);
     }
     IrFunction expanded = lowered;
     uint32_t inlined = 0;
     bool verified = true;
-    const bool changed = check.error == IR_OK && check_tier1_inline_expand(lane, inlining, b, &lowered, target, scalar, &expanded, &inlined, &verified);
-    CheckTier1Summary summary = { 0 };
+    bool vectors = function->vectors;
+    const bool changed = check.error == IR_OK && check_tier1_inline_expand(lane, inlining, b, &lowered, target, scalar, &expanded, &inlined, &verified, &vectors);
+    CheckTier1Summary summary = { .vectors = vectors };
     bool built = false;
     if (check.error == IR_OK)
     {
@@ -746,6 +775,7 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
             .function = &expanded,
             .verified = verified,
             .unexpanded = changed && inlined != 0 ? &lowered : NULL,
+            .summary = true,
         };
         IrVerifiedRevision revision = { 0 };
         const CheckTier1Outcome outcome = check_tier1_passes(lane, &input, target, scalar, certify, NULL, &lane->steps[2], output, analyses, &revision, &summary.passes);
@@ -765,7 +795,10 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
     arena_pop_to(&lane->steps[4], 0);
     arena_pop_to(&lane->steps[5], 0);
     arena_pop_to(&lane->steps[6], 0);
+    arena_pop_to(&lane->steps[7], 0);
     arena_pop_to(&lane->steps[9], 0);
+    arena_pop_to(&lane->steps[10], 0);
+    arena_pop_to(&lane->steps[11], 0);
     arena_pop_to(scratch, scratch_mark);
     lane_publish(&inlining->states[b], built ? BUSTER_CHECK_TIER1_INLINE_READY : BUSTER_CHECK_TIER1_INLINE_REFUSED);
 }
@@ -866,7 +899,8 @@ static bool check_tier1_inline(CheckTier1Lane* lane, uint32_t caller, const IrFu
                 check_tier1_inline_summary(lane, inlining, candidate - 1, scalar, certify);
             }
         }
-        changed = check_tier1_inline_expand(lane, inlining, caller, lowered, target, scalar, result, inlined, verified);
+        bool vectors = false;
+        changed = check_tier1_inline_expand(lane, inlining, caller, lowered, target, scalar, result, inlined, verified, &vectors);
     }
     return changed;
 }
@@ -907,23 +941,24 @@ static uint32_t check_tier1_inline_reach(const CheckTier1Inline* inlining, const
     return depth;
 }
 
-// The dead functions (#2541 step 2): the internal candidates that no code the emission keeps refers to, once every body's
-// code is made (`codes`, CheckEmitRun.codes), marked in CheckTier1Inline.dead; returns their count. A candidate may lose
+// The dead functions (#2541 step 2; without --tier1, of Tier 0's callees, #1398 step 3): the internal candidates that no
+// code the emission keeps refers to, once every body's code is made (`codes`, CheckEmitRun.codes), marked in
+// CheckTier1Inline.dead; returns their count. A candidate may lose
 // its code where it isn't rooted (CheckTier1Inline.rooted) and has no labels (the lowering numbers them across the unit's
 // functions, Tier0Function.label_count, and the merge defines them in turn: a held body's zeroed code would say it has
 // none); it keeps it where a kept body's code refers to it (a call no caller expanded, a Tier 0 caller's, an address). The
 // kept bodies are the others, with the asm helpers (`helpers`), and their references are followed from each body they
 // reach (an explicit stack). An asm template's references (a helper's or a naked body's, `naked`) are its names' indices,
-// through `asm_symbols` (of `asm_names`). Not under -g (`sources`), whose entries have no form for a function without code
-// yet (#2541 step 3), nor with -fpatchable-function-entry; the emission asks in -c's object alone. Temporaries in
-// `scratch`; none dead where they don't fit.
+// through `asm_symbols` (of `asm_names`). Not with -fpatchable-function-entry; the emission asks in -c's object alone, and
+// under -g a dead one keeps its abstract instance alone (CheckProgramRows.dead): Tier 0's callees, whose splice leaves
+// no instance, are asked about without -g alone. Temporaries in `scratch`; none dead where they don't fit.
 static uint32_t check_tier1_inline_dead(CheckTier1Inline* inlining, const EmittedCode* codes, const CheckProgramHelpers* helpers, const CheckProgramNaked* naked,
-                                        const SymbolId* asm_symbols, uint32_t asm_names, bool sources, Arena* scratch)
+                                        const SymbolId* asm_symbols, uint32_t asm_names, Arena* scratch)
 {
     const uint32_t count = inlining->body_count;
     const CheckProgram* program = inlining->program;
     const uint64_t mark = scratch->length;
-    uint8_t* reached = inlining->stage != 0 && !sources && program->patchable_count == 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
+    uint8_t* reached = inlining->rooted != 0 && program->patchable_count == 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
     uint32_t* stack = reached != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t dead = 0;
     if (stack != 0)

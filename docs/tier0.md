@@ -347,7 +347,20 @@ without aggregates:
 - **Calls' results:** `call_result_objects[c]`, 1 + the local index of the object that receives call c's aggregate
   result, or 0. A result in registers is stored into the object after the call; for one through a hidden pointer, the
   object's address goes in rdi. The call's class is VOID: its result is the object, which the stream reads through
-  `LOCAL_ADDRESS`.
+  `LOCAL_ADDRESS`. Or `BUSTER_TIER0_RESULT_HIDDEN` (`UINT32_MAX`, which no local index plus one reaches; #2684): in a
+  function whose own result goes through a hidden pointer, a call whose result goes through one too and is the
+  function's own (its type, size and ABI, which the front end knows) passes the function's own hidden pointer on,
+  parameter 0's value, in rdi, after its arguments' moves (`tier0_emit_hidden_pointer`, a `mov` from parameter 0's
+  home where an object's takes a `lea`, one record either way), so that its callee writes the result where the
+  function's caller wants it, as clang `-O0` passes its `sret` pointer on for `return f();`. It is no tail call: the
+  frame, the arguments' evaluation and the `RETURN` after it stay. Each such call is a reference of parameter 0
+  (`tier0_hidden_references`, as a tail call that passes the pointer on is), which a function that calls so keeps
+  in a callee-saved register or its slot, never an argument's register.
+- **The forwarded result's bytes:** `hidden_size` and `hidden_alignment`, the bytes of a result through a hidden
+  pointer and their alignment's log2 (at most 2^30), which such a call writes, or 0. Tier 0 needs neither: `ir_lower`'s
+  slot for such a call's result and the interpreter's native calls take them. `hidden_copy` is the symbol of the
+  `memmove` that `ir_lower`'s copy of that slot calls past `BUSTER_TIER0_MAX_COPY_BYTES`, as the front end's copy of a
+  call's object would, or 0; Tier 0 calls nothing through it.
 - **The function's own result:** `result_size`, its bytes when it returns in registers, else 0. Every `RETURN` then
   returns the address of the bytes (U64), from which the epilogue loads the result registers while the frame they may
   be in is still there, and control reaches the function's end only through a `RETURN`. A result through a hidden
@@ -403,13 +416,16 @@ and parameters are the typed stream's, which `tier0_validate` checks, as the com
 whose kind, registers or slot doesn't fit the size (`tier0_parts_valid`), a register outside the convention's or one
 that another part, another argument of the call or another parameter takes, a slot outside its call's stack area or an
 incoming one past int32, a call's stack alignment past 2^30, a result object that isn't an object with room for the
-registers' whole widths, a hidden pointer without an object or where an argument takes rdi, a function whose hidden
+registers' whole widths, a hidden pointer without an object or where an argument takes rdi, a call that passes the
+function's own hidden pointer on but is a tail call, has a result not through a hidden pointer, is in a function whose
+own result isn't through one, or of no `hidden_size` or a `hidden_alignment` past 2^30, a function whose hidden
 result pointer isn't parameter 0 in rdi, and an aggregate result of more than two registers. A function returning an
 aggregate, in registers or through the hidden pointer, must leave rax an address at every `RETURN`, which must be of
 U64, and mustn't reach its end without one. `test-tier0`'s aggregate and parameter errors break each rule (below).
 
 The producer (`c_check_program_lower.c`, [the checker guide](c-checker.md)) gives every call site with an aggregate
-result an object of its own, a function with a hidden result pointer its parameter 0, and an aggregate parameter's
+result an object of its own (but a whole-object initializer's destination, #1549, and a call that passes the function's
+own hidden pointer on, #2684), a function with a hidden result pointer its parameter 0, and an aggregate parameter's
 object its alignment, whatever it is (past 16, its function's frame is realigned, and a call's outgoing area aligned
 past 16 realigns its caller's); `docs/calling-convention.md` has the cross-check of C that this compiler compiles
 against clang's and GCC's.
@@ -592,7 +608,12 @@ builtins on vectors, as on structs, call libatomic's generic functions.
   in xmm0 to xmm3 without AVX, 64 in ymm0 and ymm1 with AVX but not AVX-512F; part k at byte 16k or 32k of the object,
   each register loaded and stored whole (`tier0_vector_result_parts`, which `tier0_aggregate_result_valid` takes only
   in that order, from xmm0, without `HIGH`, the object's bytes the parts'). Arguments of those types are passed in
-  memory, on the stack whole.
+  memory, on the stack whole. A record SSE, SSEUP of a size no vector register has (a union of a 16-byte vector and a
+  longer array, #2113) passes and returns clang's `<size / 8 x double>`, its payload (`abi_vector_payload_bytes`): of
+  24, 40, 48 or 56 bytes, in a register wider than it, `tier0_payload_load` loads it without reading past the record
+  (a broadcast of its last 8 or 16 bytes, then inserts of the lanes before them) and `tier0_payload_store` stores it
+  without writing past it (the low 16 or 32 bytes, then extracts, which lose the register's value); a `PAYLOAD` stack
+  slot's copy takes the payload alone (`tier0_whole_bytes`, `tier0_whole_slot`).
 - **A function says whether it has vectors** (`Tier0Function.vectors`: VECTOR values or `X86` entries), which gives it
   the copies of selection, measuring and the deferred entries' emitter that look for their entries
   (`tier0_memory_function`), as `x87` and `int128` do, and the vectors' slots where an entry is of class VECTOR
@@ -1115,6 +1136,13 @@ is compiled by both paths, encoded by both encoders and run from a driver, and t
 
 What the probe returns must reach the driver, through the hidden pointer too.
 
+Its "forwarded calls" (#2684) make the hidden fixture's function, in each of the five frames, a call that passes the
+function's own hidden pointer on (`BUSTER_TIER0_RESULT_HIDDEN`) and a `RETURN` of parameter 0 after it: both paths
+must load rdi from parameter 0's home right before the call, with no `lea` into it, and the probe, which now runs in
+the function's frame, must find the driver's hidden pointer in rdi and its arguments where their locations say; the
+bytes it writes there must reach the driver, and rax must return the pointer. Then each of the call's rules is broken
+once, which `tier0_validate` and both compile paths refuse as metadata.
+
 ## Preserving frames (#147)
 
 A function that keeps registers for its caller past System V's callee-saved ones (clang's `preserve_most`,
@@ -1435,10 +1463,17 @@ parallel move, without emitting it; the scalar path runs the emitter to count, w
   left are cycles, each of n moves taking n − 1 `xchg`s. With rax first in the depth table and rdi first in the ABI's
   order, a call makes cycles of two alone; a test of the resolver's own covers every length.
 - Division and shifts by a register at depths where rax, rdx or rcx hold other values (through two fixed frame slots).
-- Copies, through their stacks' first free register (an XMM one from 16 bytes, a general one below), which selection
-  counts as reached, so that no local takes it as its home:
-  - from 16 bytes, a load and a store with `movups` per 16, the last 16 ending at the end;
-  - below, two of a general register's 8, 4, 2 or 1 bytes, the second ending at the end (one when that is all).
+- Copies, through their stacks' first free register (an XMM one past 32 bytes, a general one up to 32), which
+  selection counts as reached, so that no local takes it as its home:
+  - past 32 bytes, 16 at a time, the last 16 ending at the end, each stored whole (`movups`) and loaded by the source
+    (#2693): where the source's address is a local's, the entry before the copy (`LOCAL_ADDRESS`, or a member's
+    `LOCAL_ADDRESS`, `CONST`, `PTR_ADD`), as two 8-byte loads into the XMM register's halves (`movsd`, `movhps`), since
+    the lowering builds locals by their fields' 8-byte stores, often just before, which a 16-byte load can't forward
+    from (#1375); from any other source, and for a call's aggregate arguments, by one 16-byte load (`movups`), half the
+    loads, which bound the copy of a cold source or of one a 16-byte copy wrote (the 9700X's measurements are at
+    `BUSTER_TIER0_COPY_NARROW_BYTES`);
+  - from 8 to 32 bytes, a load and a store of the general register's 8 bytes per 8, the last 8 ending at the end;
+  - below, two of a general register's 4, 2 or 1 bytes, the second ending at the end (one when that is all).
 
   Overlapping pieces copy what they would apart, the ranges being the same or apart. `rep movsb` would copy any size
   in a few records, but `x86_semantics.c` has no row for it, and `unwind_tier0.c` refuses a function with an

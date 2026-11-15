@@ -1,12 +1,14 @@
 # Tier 1 loop vectorization for array loops (#2743): design
 
-Status: design only. The measurements are main
-`c471f32f0136bbb21cfe083c9947f86346de2a0a` on the 9700X (Release, CPU 2,
-under the lock), except where the desktop's preliminary Zen 4 result is named.
-The 9700X's x86-64 runs cover four builds at four placements. Its completed
-znver5 short run covers six builds as linked, including both explicit-vector
-builds and clang's scalar comparisons; the other build configurations were
-not run.
+Status: the first implementation is `ir_vectorize_loops.c`, behind
+`--tier1-passes=+vectorize` ("The first implementation" below, with its 9700X
+results); the rest of this document is the design it follows. The ranking
+measurements are main `c471f32f0136bbb21cfe083c9947f86346de2a0a` on the 9700X
+(Release, CPU 2, under the lock), except where the desktop's preliminary Zen 4
+result is named. The 9700X's x86-64 runs cover four builds at four placements.
+Its completed znver5 short run covers six builds as linked, including both
+explicit-vector builds and clang's scalar comparisons; the other build
+configurations were not run.
 The measurement sources, raw lines, counters, placements and tables are in
 [the record](https://github.com/buster14a/buster-performance/tree/21eb224efc366eaa1ca1bb7a1426d95fcdc9fc2b/docs/measurements/tier1-array-loops-2743-2026-11-14)
 (buster-performance#535). The issue is
@@ -33,6 +35,138 @@ the original loop as the scalar fallback. Integer reductions use the existing
 reduction operations; strict floating-point reductions are never reassociated.
 An exact scalar twin is the oracle for every data-parallel analysis and
 rewrite.
+
+## The first implementation
+
+`ir_vectorize_loops(function, options, output, scratch, result)` runs in
+Tier 1's pipeline after if-conversion and LICM, before the optimizer, with
+`--tier1-passes=+vectorize` (and `+all`), and gives `--tier1-report` its
+`tier1-vectorize` line. It takes the IR as the passes before it leave it, not
+the optimizer's cleaned form: the lowering's `sext (const)` chains are
+evaluated as constants, `inttoptr`/`ptrtoint` pairs and copies are seen through,
+rows no root needs are ignored, if-conversion's unreachable stubs stay where they
+are, and the body may be a chain of blocks. Its own verification is therefore
+structural; the optimizer that follows verifies dominance once it has removed
+the stubs, and `test-ir-vectorize` runs that optimizer on every result.
+
+**What it takes.** An innermost, reducible loop with one preheader whose only
+successor is the header; a header of phis, its exit test and dead rows; a body
+that is a chain of blocks back to the header. The induction is an `i32` or
+`i64` phi from an invariant start, `+ 1` on the back edge; the exit test is
+`iv < n` or `iv + k < n` (unsigned or signed, either operand order and either
+branch sense) against an invariant `n`. Every other header phi must be an
+integer reduction: one wrapping `add`, `mul`, `and`, `or` or `xor` of the phi
+and another value, at `i32` or `i64`, whose partial value nothing else reads.
+Each needed row of the body is then, in order:
+
+- **uniform:** no lane depends on the induction. It is cloned once, in the guard
+  block where LICM would speculate it, else in the vector loop. A uniform load
+  is admitted only in a loop without stores; a uniform floating operation never.
+- **an index:** the induction, `sext`/`zext` of an `i32` induction (no wrap where
+  the exit test bounds it), or 64-bit `add`, `sub`, `mul`/`shl` by a constant of
+  an index and a uniform: affine modulo 2^64, as the address is.
+- **a pointer:** an `address` of a uniform base and an index, or of a pointer and
+  a uniform, and their integer conversions, advancing by a constant number of
+  bytes per iteration.
+- **a vector:** a load or store whose pointer advances by its access's bytes;
+  element-wise integer `add` to `ashr` (not divisions) and floating `fadd` to
+  `fdiv`, of vectors and uniforms (splatted); `icmp` into a mask; `select` on
+  one; `zext`/`sext` of a mask (a `vselect` of 1 or -1 and 0); `zext`, `sext` and
+  `trunc` between integer lanes (`extend`, `truncate`); `popcnt` of each lane
+  (`lane_unary`).
+
+Anything else refuses the loop, counted by reason: `shape` (control flow in the
+body, no dedicated preheader, an outer loop), `induction`, `phi` (a recurrence
+that isn't a reduction, a float sum), `operation` (a call, a division, a fence,
+a volatile or atomic access, `fma`, `sitofp`), `address` (a strided or gathered
+access), `use` (the induction as data, a reduction's partial value),
+`dependence` and `width`.
+
+**Dependences.** A load of the store's own address is in place, element by
+element, and needs nothing. Two accesses of one base at other addresses (a
+prefix sum's `a[i]` and `a[i - 1]`) refuse: a run-time test would find them
+overlapping on every call. Every other pair of a store and another access gets
+an exact test in the guard: lane 0's pointers at the start, `d = b - a` and
+`a - b` modulo 2^64 against each range's `vector_n` elements' bytes, so that no
+range's end can wrap; with any test, `vector_n` must also be below 2^56. More
+than eight pairs refuse.
+
+**The rewrite** appends three blocks per loop and leaves every original row in
+place: the guard (G), reached from the preheader instead of the header; the
+vector loop (VB); and its exit (VX), which reduces each accumulator (`reduce`,
+then `lane_extract` of lane 0), combines it with the initial value and enters
+the original header, whose phis take G's start or VX's results. The original
+loop is the remainder and the fallback at every target; the AVX-512 masked
+remainder is not implemented. The vector loop's induction is lane 0's, the
+original's type, stepping by the lanes to `start + vector_n` by the original's
+predicate.
+
+**Widths.** The lanes per iteration are the widest whose vectors are all 16 to
+64 bytes and at which every row's operation is the target's.
+`ir_vectorize_target.c` derives that from Tier 1's own forms and the target's
+allow-list (`tier1_select_lane_form`, the compare and blend tables, the
+conversions', reductions' and lane operations' forms), so the pass never emits a
+row whose emission would send the function to Tier 0. Below AVX-512 that is the
+element-wise operations and splats at 16 bytes (SSE2) or 32 (AVX2); masks,
+conversions between lane widths, reductions and population counts are EVEX's.
+
+**Data-parallel part.** Every row's admission kind is one two-register byte
+lookup of its opcode per 64 rows, with the volatile and atomic flags folded in
+(`ir_vectorize_kinds_vector`), and each loop's blocks are scanned 64 rows at a
+time for a refusing kind (`ir_vectorize_forbidden`); both have exact scalar
+twins. The classification, which reads each row's operands' classes in order,
+and the emission are the ordered part, shared by both paths, so the two give the
+same function (and object) by construction; the tests compare them anyway. A
+function without a phi on a back edge in block order walks no blocks.
+
+**Finding the loops.** The pass builds no CFG and no dominator tree: one
+iterative depth-first walk over the blocks' terminators marks the reachable
+blocks, counts each block's reachable predecessors and collects each back edge's
+header once. The admitted shape needs nothing more: a header (not the entry)
+with exactly two reachable predecessors, one of its branch's targets starting a
+chain of blocks each reached from the previous one alone and ending in a `br` to
+the next, back to the header, and the other predecessor ending in a `br` to it.
+That loop is natural, reducible and innermost by construction: the only way into
+the chain is from the header, and no chain block, having one predecessor, can
+head a loop. On sqlite3.c the CFG and the dominators were 84% of the pass's time
+by in-process cycle counters in a local build (890 of 2,602 functions have a
+candidate phi); with the walk, the measured kernels' objects are byte for byte
+the same. The report's `loops` count is every back edge's header, outer loops
+included (they refuse as `shape`). A function none of whose loops has the
+admitted shape (651 of sqlite3.c's 890 candidates) allocates no per-row arrays
+and computes no kinds, and the candidate test reads each block's leading phis
+alone.
+
+### Results
+
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/46134556e/docs/measurements/tier1-loop-vectorizer-2743-2026-11-14)), on the 25 kernels of #2743's record and
+its harness, as linked / at each build's best of four placements:
+
+| Geometric mean of time ratios | znver5: 19 loops | the 12 vectorized | x86-64: 19 loops | the 5 vectorized |
+| --- | ---: | ---: | ---: | ---: |
+| Tier 1 / clang -O2 | 16.75 / 16.41 | 19.32 / 19.24 | 3.44 / 3.39 | 6.50 / 5.92 |
+| Tier 1 + vectorize / clang -O2 | 3.44 / 3.23 | 1.53 / 1.47 | 2.31 / 2.31 | 1.36 / 1.38 |
+| Tier 1 / Tier 1 + vectorize | 4.86 / 5.09 | 12.60 / 13.12 | 1.49 / 1.47 | 4.78 / 4.30 |
+
+The six controls stay at 1.09 (znver5) and 1.08 (x86-64), and nothing the pass
+refuses changes: without the option the objects are main's, and both paths give
+one object. At znver5 the element-wise loops reach clang (`add_i32` 0.99,
+`scale_u8` 0.82, `blend_u8` 0.86, `fill_u32` 1.04 times its time); the
+reductions stay 1.65 to 2.82 times behind, clang's loops keeping four
+accumulators where the vector loop has one chain (#2755's unroller) and using
+`vpmaddwd` for `dot_i16`. At x86-64 only `add_i32`, `saxpy_f32`, `fill_u32`,
+`copy_u8` and `matmul_f32`'s inner loop are taken: masks, reductions and lane
+conversions are EVEX forms in Tier 1. The refusals that remain have issues:
+`max_i32` (#2805), the contracted `fma` and `sitofp` (#2806), the masked
+remainder (#2807), and strided accesses and narrow-into-wide counts (#2808).
+Compiling sqlite3.c with the option cost 2.30% more user cycles at znver5 and
+1.51% at x86-64 in the first build, which built a CFG and dominators for each
+candidate function; with the terminator walk and no row work in functions
+without an admitted loop, 1.04% and 0.44%. Without unit inlining on both sides
+the pass costs 7.9 M instructions (+0.17%) at either target; the rest is the
+pass running on inlined bodies and, at znver5, Tier 1's later stages on the
+64-byte loop that inlining copies into `sqlite3VdbeExec`, about 61 M
+instructions more than the same loop at 16 bytes (#2831).
 
 ## What the measurements rank
 
@@ -95,8 +229,10 @@ The design consequently ranks the work as follows:
    and arithmetic rows into the vector rows Tier 1 already emits.
 2. **Loop unrolling:** the separate 1.41 and 1.64 components in clang's
    scalar loops. It should be designed and measured on the vector loops after
-   step 1, not hidden inside their legality rules. Filed as the unowned
-   follow-up #2755.
+   step 1, not hidden inside their legality rules. #2755's pass
+   ([loop unrolling](tier1-loop-unrolling.md)) unrolls today's scalar counted
+   loops and takes a vector main loop the same way; it asks this pass to mark
+   its scalar remainders, which it then refuses.
 3. **Back-end residuals in explicit vector loops:** the 1.29 same-source gap
    at znver5, including constants and splats, rematerialized loop bounds,
    unfolded loads, extra moves around masked operations and the clamp/max
@@ -157,7 +293,8 @@ its redundant conversion chains before cleanup. The pass consumes the cleaned
 SSA, not C syntax. Natural loops, latches, parents and membership come from
 [dominators](dominators.md); irreducible loops and loops without a suitable
 outside predecessor are refused, as they are for
-[LICM](ir-loop-motion.md). The pass runs after if-conversion and LICM and before
+[LICM](ir-loop-motion.md). (The first implementation found that only its chain
+shape needs neither: see "Finding the loops" above.) The pass runs after if-conversion and LICM and before
 `ir_optimize_verified`, so ordinary cleanup sees both the vector and fallback
 forms. `--tier1-passes=+vectorize` first exposes it as a measurement option;
 making it a default is a later step with its own before/after evidence.

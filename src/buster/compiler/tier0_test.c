@@ -2656,41 +2656,60 @@ static void tier0_test_frame_alignment(Tier0TestTally* tally, uint64_t seed)
 }
 
 // A small aggregate's copy moves 8 bytes at a time, so that a 16-byte load doesn't span two 8-byte stores (#1375); a
-// larger one keeps 16-byte moves. The record count and forms are what the caller reserves and branch sizing sees.
+// larger one moves 16 at a time and stores each 16 whole (movups at the piece), the last piece ending at the end: loaded
+// whole (movups), or with `halves` as two 8-byte halves (movsd at the piece, movhps 8 past it), so that no load is wider
+// than 8 bytes (#2693). The record count and forms are what the caller reserves and branch sizing sees.
 static void tier0_test_copy_widths(Tier0TestTally* tally)
 {
     static const struct
     {
         uint32_t size;
-        uint32_t records;
+        uint32_t pieces;
         bool wide;
     } cases[] =
     {
-        { 8, 2, false },
-        { 15, 4, false },
-        { 16, 4, false },
-        { 24, 6, false },
-        { 32, 8, false },
-        { 33, 6, true },
-        { 40, 6, true },
-        { 64, 8, true },
-        { 256, 32, true },
+        { 8, 1, false },
+        { 15, 2, false },
+        { 16, 2, false },
+        { 24, 3, false },
+        { 32, 4, false },
+        { 33, 3, true },
+        { 40, 3, true },
+        { 64, 4, true },
+        { 256, 16, true },
     };
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    for (uint32_t i = 0; i < 2 * BUSTER_ARRAY_LENGTH(cases); i += 1)
     {
+        const uint32_t c = i / 2;
+        const bool halves = (i & 1) != 0;
+        const uint32_t per_piece = cases[c].wide && halves ? 3 : 2;
         X86Instruction records[64];
         Tier0Writer writer = { records, 0, 0, 0 };
-        tier0_copy(&writer, X86_REGISTER_RSP, 0, X86_REGISTER_RDI, 0, cases[i].size, X86_REGISTER_RAX, 15);
-        bool ok = writer.count == cases[i].records && tier0_copy_records(cases[i].size) == cases[i].records;
+        tier0_copy(&writer, X86_REGISTER_RSP, 0, X86_REGISTER_RDI, 0, cases[c].size, X86_REGISTER_RAX, 15, halves);
+        bool ok = writer.count == per_piece * cases[c].pieces && tier0_copy_records(cases[c].size, halves) == writer.count;
         for (uint32_t r = 0; ok && r < writer.count; r += 1)
         {
-            const uint32_t form = records[r].form;
-            const bool wide = form == X86_FORM_MOVUPS_X_XM || form == X86_FORM_MOVUPS_XM_X;
-            const bool narrow = form == X86_FORM_MOV_R64_RM64 || form == X86_FORM_MOV_RM64_R64;
-            ok = cases[i].wide ? wide : narrow;
+            const X86Instruction* record = &records[r];
+            if (cases[c].wide)
+            {
+                // Piece k's records start at per_piece * k; it starts at 16k, or the last at size − 16.
+                const uint32_t piece = r / per_piece;
+                const uint32_t role = r % per_piece;
+                const int32_t at = 16 * (piece + 1) <= cases[c].size ? (int32_t)(16 * piece) : (int32_t)(cases[c].size - 16);
+                static const uint16_t split[3] = { X86_FORM_MOVSD_X_XM64, X86_FORM_MOVHPS_X_M64, X86_FORM_MOVUPS_XM_X };
+                static const uint16_t whole[2] = { X86_FORM_MOVUPS_X_XM, X86_FORM_MOVUPS_XM_X };
+                const bool store = role + 1 == per_piece;
+                const uint16_t form = halves ? split[role] : whole[role];
+                const int32_t displacement = at + (halves && role == 1 ? 8 : 0);
+                ok = record->form == form && record->reg == 15 && record->rm == (store ? X86_REGISTER_RSP : X86_REGISTER_RDI) && record->displacement == displacement;
+            }
+            else
+            {
+                ok = record->form == (r % 2 == 0 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_RM64_R64);
+            }
         }
-        tier0_test_expect(tally, ok, "copies", "a copy of %u bytes: %u records, %s", cases[i].size, writer.count,
-                          cases[i].wide ? "16-byte moves" : "8-byte moves");
+        tier0_test_expect(tally, ok, "copies", "a copy of %u bytes%s: %u records, %s", cases[c].size, halves ? " by halves" : "", writer.count,
+                          !cases[c].wide ? "8-byte moves" : halves ? "16-byte pieces of 8-byte loads" : "16-byte moves");
     }
 }
 
@@ -6753,6 +6772,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_tail_calls(&tally);
                 tier0_test_report("tail calls", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_forwarded_calls(&tally);
+                tier0_test_report("forwarded calls", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }

@@ -271,6 +271,34 @@ patterns are:
 - Signed/unsigned integer comparisons, comparisons with zero through the shared
   flags-aware form chooser, comparison/branch fusion, simple selects using
   `cmov`, unconditional branches, returns and `IR_UNREACHABLE` as `ud2`.
+- Selects of integer comparisons (#2676, `TIER1_RULE_SELECT_COMPARE`): a select
+  whose condition is an `icmp` only it reads, in its block, through C's truth
+  values as a branch's, is the comparison's `cmp`, then a `mov` of the value the
+  destination doesn't hold and a `cmov` of the predicate's condition code,
+  inverted where the destination holds the value the comparison chooses.
+  Neither writes the flags, as the `xor` zero idiom would; a zero the select
+  reads is its own node, before it. `int max(int a, int b) { return a > b ? a :
+  b; }` is `cmp %esi,%edi; mov %esi,%eax; cmovg %edi,%eax`, clang -O2's, where it
+  was `xor; cmp; setg; test; mov; cmovne`. The comparison needn't be the node
+  before the select (the if-conversion's selects follow the arms' moved rows and
+  zeros): its operands live to the select instead of its truth value. It takes
+  the comparisons' register, immediate and memory forms. The pattern's four
+  values are the comparison's two and the select's two, so a memory operand has
+  a base alone (the other register or none in values[0], the base in values[1]),
+  and a load at an indexed address stays the register the comparison reads. The
+  BURS grammar's integer select reads its condition: the fused rule from an
+  integer comparison (`COND`), the plain one from a register, each at 3.
+  `test-tier1-select` runs the truth chains' walk with a select root two nodes
+  past the chain, at the comparison's width and the other, into its own
+  register, the chosen value's or a compared one's; the memory comparisons'
+  guarded holes as a select's; and the memory plans and the final-root store
+  fixture with selects, with and without an index. Against main `1935a91f`
+  ([the record](https://github.com/buster14a/buster-performance/tree/bfe90b562a7c5f828d5ec425d55371ebe1c73740/docs/measurements/tier1-select-compare-2676-2026-11-15)):
+  #1382's clamp runs 2.9% fewer cycles on the 9700X, clang -O2's instructions,
+  and its sum of a select 6.9% fewer; the conditional sum's loop 11 to 13%
+  fewer where its placement doesn't bound it. speedtest1 runs 0.48% fewer
+  instructions and Lua's scripts 0.11% fewer; `sqlite3.c`'s Tier 1 functions
+  are 0.53% smaller, with 947 fewer `setcc`s, and compile in the same time.
 - Labels and indirect jumps (#789): GNU C's labels as values and computed gotos,
   and the jump tables C's switches lower to. A label's address is its symbol's
   (`TIER1_RULE_SYMBOL_ADDRESS`). A `br_indirect` is a `jmp` through its target's
@@ -529,6 +557,21 @@ arguments and parameters to Tier 1 as `i32` (#141, the [IR guide](ir.md)'s
 "Typed-stream lowering"). `i1` memory and signed-extension forms are also
 declined explicitly.
 
+The exception is `and`, `or` and `xor` of `i1`, `i8` and `i16` values (#2677),
+which are their 32-bit operations. Zero-extended operands give a zero-extended
+result (both of an `or`'s or `xor`'s, either of an `and`'s), and an `i1`'s 0 or
+1 another 0 or 1. A constant on either side is the immediate, since the IR keeps
+a constant within its type. A load never folds as the memory operand, because no
+32-bit form reads a byte or a word: the bottom-up grammar gives these operations
+an ALU operation of their own (`BUSTER_TIER1_BURS_NARROW`) with the register and
+immediate patterns alone. A select whose condition is a canonical `i1`, between
+a value known to be 0 or 1 and the constant 0, is the condition's `and` with that
+value, and one between the constant 1 and such a value its `or`: clang's
+integers for `c && x` and `c || y`, where a select is a `test` and a `cmov`.
+Where the condition is a comparison that only the select reads, #2676's `cmp`
+and `cmovCC` (above) folds it instead and wins munch's rank: it needs no
+`setcc` for the condition, one record fewer than the `and`.
+
 ### Proven upper bits (#1219)
 
 Selection keeps two semantic range bounds per integer value: the number of
@@ -682,8 +725,9 @@ widths without inventing sign facts. Byte/word wrapping and guarded conversion
 fixtures observe the complete 64-bit result, including poisoned ABI inputs,
 negative bypass paths and unsafe unsigned bounds.
 
-Comparisons used by a branch alone do not produce `setcc`. Their comparison and
-conditional jump are consecutive records. A comparison producing a value uses
+Comparisons used by a branch or a select alone do not produce `setcc`. A
+branch's comparison and conditional jump are consecutive records, and a
+select's comparison, `mov` and `cmov` (#2676). A comparison producing a value uses
 canonical 32-bit storage and `setcc`. An independent destination is cleared with
 `xor` before `cmp`/`test`; an aliased input is read by the comparison first, then
 `mov r32, 0` clears the destination while preserving the flags. A floating
@@ -780,8 +824,8 @@ an immediate, a scaled index, a truth value's link) folding into its root's. Its
 eighteen nonterminals are a statement, a register, the constants' classes (an
 immediate, a lea's scale, a power of two, 3, 5 or 9, a shift's count, zero, a
 disp32), a load a consumer folds, a shift a lea scales, addresses without an
-index and with one, an index, and the comparisons a branch or a truth value
-takes, integer and floating, and their zero extensions.
+index and with one, an index, and the comparisons a branch, a select (#2676)
+or a truth value takes, integer and floating, and their zero extensions.
 
 `tier1_select_initialize` compiles the grammar into state tables once, by burg's
 algorithm: a state is each nonterminal's cheapest rule and its cost, normalized
@@ -1201,7 +1245,7 @@ or 64 bytes, the xmm, ymm or zmm one (`tier1_select_vector_forms`):
 | `vconst` of every bit | `ONES` | `vpternlogd x, x, x, 0xff` |
 | `vconst` of one lane in all | `SPLAT` | `mov r11d, imm32` and `vpbroadcastd x, r11d` |
 | a `vconst` whose quadwords are one value, at an EVEX target | `CONSTANT` | the quadword into the scratch general register by the shortest `mov` that holds it and `vpbroadcastq` from it (`tier1_emit_cfg_vector_constant`, #2744's step 1: `_mm512_set1_epi64(63)`) |
-| any other `vconst` | `CONSTANT` | its words into the red zone below rsp (a `mov qword` of a sign-extended imm32, or two `mov dword`) and `vmovdqu32` from there (`tier1_emit_cfg_vector_constant`); its load is wider than each store, so none forwards (#2744) |
+| any other `vconst` | `CONSTANT` | its literal's load, `vmovdqu32` of `[rip + literal]` (`tier1_emit_cfg_vector_constant`, #2744's step 2; "The literal pool" below) |
 | `copy` | `COPY` | `vmovdqa64` (`movaps` for 16 bytes), none where allocation gave both one register |
 | `add`, `sub`, `mul`, `and`, `or`, `xor` | `BINARY` | `vpaddd`, `vpsubd`, `vpmulld`, `vpandq`, `vporq`, `vpxord`: three operands, the destination any register |
 | `not` | `NOT` | `vpternlogd x, a, a, 0x55`, the complement of its third operand |
@@ -1225,8 +1269,7 @@ and `main_unit_backend.c`, compiled by `--tier1 -march=znver5`, the fold takes
 31 of 261 `vpblendm` and 82 of 411 into their operations.
 
 Unmasked, a quadword `and` or `or` is the doublewords' bits, and `x86_semantics.c`
-models those forms. A function with a vector constant keeps its frame out of the
-red zone (`tier1_emit_cfg_frame_flags`). Every function with a vector is the CFG
+models those forms. Every function with a vector is the CFG
 consumer's. Its vector values' slots are their widths, aligned to 16 at most (their
 accesses are unaligned, and a wider alignment would realign the frame), spilled,
 reloaded and moved along edges by `vmovdqu32` and `vmovdqa64` at their widths;
@@ -1234,6 +1277,47 @@ the class's call-save rows and temporary slot take the widest vector's bytes,
 which the saves around a call move (`Tier1EmitPrepared.vector_bytes`). The forms
 need AVX512F, and below 64 bytes AVX512VL, which a target without them refuses at
 emission, as any record's.
+
+### The literal pool (#2744)
+
+A vector constant that no broadcast makes is a literal: read-only bytes its code
+loads rip-relative, in one record that stalls on no store. Until #2744 its words
+went into the red zone as immediates and a load read them back, wider than each
+store, so that none forwarded: on the compiler's own lexer by `--tier1`, 22
+constants were built so per 64-byte chunk of `c_tokenize`.
+
+- **In the function** (`tier1_emit_cfg_literal`): each constant at each width
+  it is loaded at is one literal of the function's (`Tier1EmitResult.literals`,
+  its bytes the constant's first 16, 32 or 64 and zero past them), and its load's
+  reference names it by a provisional target, `BUSTER_TIER1_EMIT_LITERAL` plus
+  its index, past every symbol a function's access column has: the function
+  compiles on a lane and numbers no unit symbol, as the lowering's jump tables
+  don't. The C driver publishes the literals with the code
+  (`EmittedCode.literals`, `BUSTER_EMITTED_LITERAL`).
+- **In the unit** (`check_program_emit_literals`): the emission's merge gives
+  each distinct literal of the live bodies (width and bytes) an entry of the
+  unit's pool, numbered in source order of first use, so that the object is the
+  same at any number of lanes, and renames every literal reference of every
+  body to its entry's symbol, after the runtime functions' and the jump tables'
+  provisional symbols, which no symbol below the tag reaches. Each entry is an
+  atom of its own, aligned to its width so that no load splits a line, in the
+  mergeable section of its width, `.rodata.cst16`, `.rodata.cst32` or
+  `.rodata.cst64` (`SHF_MERGE`, the width the entry size, as GCC's constants
+  are; clang puts its 64-byte ones in `.rodata`), with a local symbol
+  `.Lbuster_literal_N`, which `-c`'s object keeps as clang keeps `.LCPI` labels:
+  a PC-relative relocation into a merged section needs the symbol, not its
+  section's. A linker then merges equal entries across objects.
+- **Checked** by the emitted code's certificate: it replays the load with the
+  literal the emission's index names for the constant at the node's width, and
+  refuses the code unless that literal's width and every byte are the
+  constant's. `test-tier1-emit`'s literal fixture corrupts a literal's bytes, its
+  width, the reference's addend, its target and the index, each refused.
+- **Native tests** (`tier1_emit_place_literals`) place a code's literals in its
+  executable mapping, each in a 64-byte slot, and write the loads' distances.
+
+No vector constant writes below rsp now, so a function with one may keep its
+frame in the red zone. On `c_tokenize` of the 1344 record's 9,076-byte file, the
+counts are in the pull request's record.
 
 ### At targets without AVX-512 (#1281)
 

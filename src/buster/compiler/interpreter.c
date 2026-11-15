@@ -70,6 +70,9 @@ struct InterpreterMemory
 // them by the in-order search, as before the prefix; a program's recursions of a few locals per frame stay in it.
 #define BUSTER_INTERPRETER_DISJOINT_PREFIX 1024u
 
+// log2 of the entries of InterpreterRuntime.recent, the memories the latest accesses found by their addresses.
+#define BUSTER_INTERPRETER_RECENT_LOG2 8u
+
 typedef struct InterpreterRuntime InterpreterRuntime;
 struct InterpreterRuntime
 {
@@ -83,8 +86,11 @@ struct InterpreterRuntime
     // down, where a frame's own slots are, rather than from the oldest: the memory it finds is the first that holds the
     // range all the same. A runtime whose memories were set some other way keeps 0 and looks in order.
     uint32_t disjoint_count;
-    // The memory the last access found, a guess interpreter_memory_access checks before it trusts it.
-    uint32_t last_match;
+    // The memories the latest accesses found, each at its address's entry (interpreter_memory_recent): guesses
+    // interpreter_memory_find checks before it trusts one. A program's steps alternate between a frame's locals, which
+    // the search from the newest down finds first, and older memories (a global, the heap), which it finds last; one
+    // hint for the last access sent each of those back to the search (#2758).
+    uint32_t recent[1u << BUSTER_INTERPRETER_RECENT_LOG2];
     bool check_memory;
     bool check_undefined;
     uint64_t stack_serial;
@@ -326,16 +332,24 @@ static bool interpreter_memory_holds(const InterpreterMemory* memory, uint64_t a
     return address >= base && offset <= memory->size && bytes <= memory->size - offset;
 }
 
+// An address's entry in InterpreterRuntime.recent: its 8-byte granule's, hashed, so that a block's granules and a frame's
+// locals spread across the entries.
+static uint32_t interpreter_memory_recent(uint64_t address)
+{
+    return (uint32_t)(((address >> 3) * UINT64_C(0x9e3779b97f4a7c15)) >> (64 - BUSTER_INTERPRETER_RECENT_LOG2));
+}
+
 // The first memory that holds all `bytes` (at least 1) from `address`, or memory_count if none does. One in the
 // disjoint prefix (InterpreterRuntime.disjoint_count) is the first, before any past it, and the only one in it: so
-// first the last access's memory if it is in the prefix, then the prefix from its newest down, then the memories past it
-// from the first.
+// first the memory an earlier access at its address's entry found if it is in the prefix, then the prefix from its
+// newest down, then the memories past it from the first.
 static uint32_t interpreter_memory_find(InterpreterRuntime* runtime, uint64_t address, uint64_t bytes)
 {
     const InterpreterMemory* const memories = runtime->memories;
     const uint32_t count = runtime->memory_count;
     const uint32_t prefix = runtime->disjoint_count;
-    const uint32_t hint = runtime->last_match;
+    const uint32_t entry = interpreter_memory_recent(address);
+    const uint32_t hint = runtime->recent[entry];
     uint32_t found = hint < prefix && interpreter_memory_holds(&memories[hint], address, bytes) ? hint : count;
     for (uint32_t i = prefix; found == count && i > 0; i -= 1)
     {
@@ -345,8 +359,132 @@ static uint32_t interpreter_memory_find(InterpreterRuntime* runtime, uint64_t ad
     {
         found = interpreter_memory_holds(&memories[i], address, bytes) ? i : count;
     }
-    runtime->last_match = found != count ? found : hint;
+    runtime->recent[entry] = found != count ? found : hint;
     return found;
+}
+
+// A scalar's `bytes` (1 to 16) bytes at `address`, as a value's low bytes and the rest 0, by two fixed-size loads that may
+// overlap, or a byte at a time through volatile accesses where `observable` (a volatile object's bytes, each read once, in
+// order). The value is returned, not written through a pointer: a sanitizer's build instruments a fixed-size access
+// inline, where a copy of a variable size is a call into its runtime (MemorySanitizer's copies the origins and, at
+// -fsanitize-memory-track-origins=2, unwinds the stack), and a local whose address a copy takes is poisoned and cleared
+// at every step it is declared in; the interpreters load a scalar at most of their steps (#2758).
+static InterpreterValue interpreter_load_value(uint64_t address, uint64_t bytes, bool observable)
+{
+    const uint8_t* from = (const uint8_t*)(uintptr_t)address;
+    InterpreterValue result = { 0 };
+    if (observable)
+    {
+        const volatile uint8_t* source = from;
+        for (uint64_t byte = 0; byte < bytes; byte += 1)
+        {
+            const uint64_t loaded = source[byte];
+            result.low |= byte < 8 ? loaded << (8 * byte) : 0;
+            result.high |= byte >= 8 ? loaded << (8 * (byte - 8)) : 0;
+        }
+    }
+    else if (bytes > 8)
+    {
+        uint64_t last = 0;
+        memcpy(&result.low, from, 8);
+        memcpy(&last, from + bytes - 8, 8);
+        result.high = last >> (8 * (16 - bytes));
+    }
+    else if (bytes >= 4)
+    {
+        uint32_t first = 0;
+        uint32_t last = 0;
+        memcpy(&first, from, 4);
+        memcpy(&last, from + bytes - 4, 4);
+        result.low = first | (uint64_t)last << (8 * (bytes - 4));
+    }
+    else if (bytes >= 2)
+    {
+        uint16_t first = 0;
+        uint16_t last = 0;
+        memcpy(&first, from, 2);
+        memcpy(&last, from + bytes - 2, 2);
+        result.low = first | (uint64_t)last << (8 * (bytes - 2));
+    }
+    else if (bytes == 1)
+    {
+        result.low = from[0];
+    }
+    return result;
+}
+
+// Stores a scalar value's low `bytes` (1 to 16) bytes at `address`, as interpreter_load_value loads them: by two
+// fixed-size stores that may overlap, or a byte at a time through volatile accesses where `observable`.
+static void interpreter_store_value(uint64_t address, InterpreterValue value, uint64_t bytes, bool observable)
+{
+    uint8_t* to = (uint8_t*)(uintptr_t)address;
+    if (observable)
+    {
+        volatile uint8_t* destination = to;
+        for (uint64_t byte = 0; byte < bytes; byte += 1)
+        {
+            destination[byte] = (uint8_t)(byte < 8 ? value.low >> (8 * byte) : value.high >> (8 * (byte - 8)));
+        }
+    }
+    else if (bytes > 8)
+    {
+        // The last 8 bytes: the low word's past bytes - 8 and the high word's first bytes - 8.
+        const uint64_t first = value.low;
+        const uint64_t last = bytes == 16 ? value.high : value.low >> (8 * (bytes - 8)) | value.high << (8 * (16 - bytes));
+        memcpy(to, &first, 8);
+        memcpy(to + bytes - 8, &last, 8);
+    }
+    else if (bytes >= 4)
+    {
+        const uint32_t first = (uint32_t)value.low;
+        const uint32_t last = (uint32_t)(value.low >> (8 * (bytes - 4)));
+        memcpy(to, &first, 4);
+        memcpy(to + bytes - 4, &last, 4);
+    }
+    else if (bytes >= 2)
+    {
+        const uint16_t first = (uint16_t)value.low;
+        const uint16_t last = (uint16_t)(value.low >> (8 * (bytes - 2)));
+        memcpy(to, &first, 2);
+        memcpy(to + bytes - 2, &last, 2);
+    }
+    else if (bytes == 1)
+    {
+        to[0] = (uint8_t)value.low;
+    }
+}
+
+// Marks `bytes` defined bytes from `defined` as memset(defined, 1, bytes) does, by two fixed-size stores that may overlap
+// up to 16 bytes (every store the interpreters run marks its bytes, interpreter_load_value's reason) and by memset past
+// them.
+static void interpreter_define_bytes(uint8_t* defined, uint64_t bytes)
+{
+    const uint64_t ones = UINT64_C(0x0101010101010101);
+    if (bytes >= 8 && bytes <= 16)
+    {
+        memcpy(defined, &ones, 8);
+        memcpy(defined + bytes - 8, &ones, 8);
+    }
+    else if (bytes >= 4 && bytes < 8)
+    {
+        const uint32_t word = (uint32_t)ones;
+        memcpy(defined, &word, 4);
+        memcpy(defined + bytes - 4, &word, 4);
+    }
+    else if (bytes >= 2 && bytes < 4)
+    {
+        const uint16_t word = (uint16_t)ones;
+        memcpy(defined, &word, 2);
+        memcpy(defined + bytes - 2, &word, 2);
+    }
+    else if (bytes == 1)
+    {
+        defined[0] = 1;
+    }
+    else if (bytes > 16)
+    {
+        memset(defined, 1, bytes);
+    }
 }
 
 static InterpreterStatus interpreter_memory_access(InterpreterRuntime* runtime, uint64_t address, uint64_t bytes, bool write)
@@ -368,19 +506,13 @@ static InterpreterStatus interpreter_memory_access(InterpreterRuntime* runtime, 
             const InterpreterMemory* memory = &runtime->memories[found];
             const uint64_t offset = address - (uint64_t)(uintptr_t)memory->bytes;
             result = write && !memory->writable ? INTERPRETER_MEMORY : INTERPRETER_OK;
-            if (result == INTERPRETER_OK && memory->defined != 0)
+            if (result == INTERPRETER_OK && memory->defined != 0 && write)
             {
-                for (uint64_t b = 0; b < bytes; b += 1)
-                {
-                    if (write)
-                    {
-                        memory->defined[offset + b] = 1;
-                    }
-                    else if (runtime->check_undefined && memory->defined[offset + b] == 0)
-                    {
-                        result = INTERPRETER_UNDEFINED;
-                    }
-                }
+                interpreter_define_bytes(memory->defined + offset, bytes);
+            }
+            for (uint64_t b = 0; result == INTERPRETER_OK && memory->defined != 0 && !write && runtime->check_undefined && b < bytes; b += 1)
+            {
+                result = memory->defined[offset + b] == 0 ? INTERPRETER_UNDEFINED : result;
             }
         }
     }
@@ -1132,7 +1264,7 @@ static bool interpreter_typed_function_valid(const Tier0Function* function)
     for (uint32_t c = 0; result && c < function->call_count; c += 1)
     {
         const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[c] : 0;
-        result = object == 0 || (object - 1 < function->local_count && tier0_is_object(function, object - 1));
+        result = object == 0 || object == BUSTER_TIER0_RESULT_HIDDEN || (object - 1 < function->local_count && tier0_is_object(function, object - 1));
         if (result && (function->calls != 0 || aggregate_arguments || object != 0))
         {
             result = function->calls != 0 && (function->argument_count == 0 || function->argument_locations != 0) && tier0_call_valid(function, c);
@@ -1207,12 +1339,18 @@ static InterpreterStatus interpreter_typed_enter(const Tier0Function* function, 
             }
             else
             {
-                locals[index] = l < count ? interpreter_typed_value(function->local_classes[l], arguments[l]) : (InterpreterValue){ 0 };
-                memset(initialized, 0, sizeof(InterpreterValue));
-                if (l < count)
-                {
-                    memset(initialized, 1, interpreter_typed_bytes(function->local_classes[l]));
-                }
+                // Its cell and the cell's 16 defined bytes, an argument's value's defined and the rest not, as two words
+                // each that depend on the local: every call sets its locals up, and a sanitizer's build makes a memset,
+                // which the compiler makes of constant words, a call into its runtime (#2758).
+                const InterpreterValue initial = l < count ? interpreter_typed_value(function->local_classes[l], arguments[l]) : (InterpreterValue){ 0 };
+                const uint64_t defined_bytes = l < count ? interpreter_typed_bytes(function->local_classes[l]) : 0;
+                const uint64_t ones = UINT64_C(0x0101010101010101);
+                const uint64_t low = defined_bytes >= 8 ? ones : defined_bytes == 0 ? 0 : ones >> (64 - 8 * defined_bytes);
+                const uint64_t high = defined_bytes > 8 ? ones >> (8 * (16 - defined_bytes)) : 0;
+                locals[index].low = initial.low;
+                locals[index].high = initial.high;
+                memcpy(initialized, &low, sizeof(low));
+                memcpy(initialized + sizeof(low), &high, sizeof(high));
             }
             if (!interpreter_memory_add(runtime, bytes + named, size - named, initialized + named, true, owner))
             {
@@ -1297,6 +1435,9 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         depth = 1;
         local_top = function->local_count;
     }
+    // A bit row's operation (#1374, #1385), whose address its readers take: declared for the whole run, as a record
+    // declared at each step is poisoned and cleared at each step in a sanitizer's build (#2758).
+    IrSimdTypedOperation bits = { 0 };
     while (depth != 0 && result->status == INTERPRETER_OK)
     {
         InterpreterTypedFrame* frame = &frames[depth - 1];
@@ -1324,10 +1465,14 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         // intrinsics have no model here, but a bit builtin's row (#1374, ir_simd_typed_bits) and a signed overflow builtin's
         // (#1385, ir_simd_typed_overflow), its intrinsic's value. Indirect jumps use this function's label tokens, without
         // executing code bytes.
-        IrSimdTypedOperation bits = { 0 };
-        const bool bit_row = kind == BUSTER_TYPED_X86 && value < function->operation_count && function->operations[value].result_class == class &&
-                             (ir_simd_typed_bits(function->operations + value, UINT64_MAX, &bits) == IR_SIMD_TYPED_OK ||
-                              ir_simd_typed_overflow(function->operations + value, &bits) == IR_SIMD_TYPED_OK);
+        // The record is cleared and read only at an X86 row's steps.
+        bool bit_row = false;
+        if (kind == BUSTER_TYPED_X86 && value < function->operation_count && function->operations[value].result_class == class)
+        {
+            bits = (IrSimdTypedOperation){ 0 };
+            bit_row = ir_simd_typed_bits(function->operations + value, UINT64_MAX, &bits) == IR_SIMD_TYPED_OK ||
+                      ir_simd_typed_overflow(function->operations + value, &bits) == IR_SIMD_TYPED_OK;
+        }
         if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || (kind == BUSTER_TYPED_X86 && !bit_row) ||
             kind == BUSTER_TYPED_FRAME_ADDRESS || kind == BUSTER_TYPED_TAIL_CALL || (class > BUSTER_TYPED_CLASS_U128 && class != BUSTER_TYPED_CLASS_MASK))
         {
@@ -1481,12 +1626,16 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         }
         else if (kind == BUSTER_TYPED_GLOBAL_ADDRESS)
         {
+            // The symbol's address through a local of the lookup's own: a sanitizer's build poisons at every step a
+            // step's local whose address is taken, as address's would be (#2758).
             const uint64_t symbol = value + (program->symbol_offsets != 0 ? program->symbol_offsets[frame->function] : 0);
-            if (symbol < value || symbol >= UINT32_MAX || !interpreter_typed_symbol_address(program, (SymbolId)symbol, &address))
+            uint64_t found = 0;
+            if (symbol < value || symbol >= UINT32_MAX || !interpreter_typed_symbol_address(program, (SymbolId)symbol, &found))
             {
                 result->status = INTERPRETER_SYMBOL;
                 break;
             }
+            address = found;
         }
         else if (kind == BUSTER_TYPED_GLOBAL || kind == BUSTER_TYPED_STORE_GLOBAL || kind == BUSTER_TYPED_SET_GLOBAL)
         {
@@ -1578,8 +1727,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             }
             if (read)
             {
-                loaded = (InterpreterValue){ 0 };
-                memcpy(&loaded, (const void*)(uintptr_t)address, interpreter_typed_bytes(class));
+                loaded = interpreter_load_value(address, interpreter_typed_bytes(class), false);
             }
             stack[top] = interpreter_typed_value(class, loaded);
             classes[top++] = (uint8_t)class;
@@ -1627,9 +1775,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             classes[top - 1] = (uint8_t)class;
             break;
         case BUSTER_TYPED_LOAD:
-            stack[top - 1] = (InterpreterValue){ 0 };
-            memcpy(&stack[top - 1], (const void*)(uintptr_t)address, interpreter_typed_bytes(class));
-            stack[top - 1] = interpreter_typed_value(class, stack[top - 1]);
+            stack[top - 1] = interpreter_typed_value(class, interpreter_load_value(address, interpreter_typed_bytes(class), false));
             classes[top - 1] = (uint8_t)class;
             break;
         case BUSTER_TYPED_PTR_ADD:
@@ -1648,7 +1794,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             break;
         case BUSTER_TYPED_STORE:
         case BUSTER_TYPED_SET:
-            memcpy((void*)(uintptr_t)address, &stack[top - 1], interpreter_typed_bytes(class));
+            interpreter_store_value(address, stack[top - 1], interpreter_typed_bytes(class), false);
             stack[top - 2] = stack[top - 1];
             classes[top - 2] = (uint8_t)class;
             top -= kind == BUSTER_TYPED_STORE ? 1 : 2;
@@ -1657,7 +1803,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         case BUSTER_TYPED_SET_LOCAL:
         case BUSTER_TYPED_STORE_GLOBAL:
         case BUSTER_TYPED_SET_GLOBAL:
-            memcpy((void*)(uintptr_t)address, &stack[top - 1], interpreter_typed_bytes(class));
+            interpreter_store_value(address, stack[top - 1], interpreter_typed_bytes(class), false);
             top -= kind == BUSTER_TYPED_SET_LOCAL || kind == BUSTER_TYPED_SET_GLOBAL;
             break;
         case BUSTER_TYPED_CALL:
@@ -1684,8 +1830,11 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             const uint32_t call_base = argument_base - indirect;
             const uint64_t address = indirect ? stack[call_base].low : 0;
             const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[value] : 0;
-            const uint64_t destination = object != 0 ? interpreter_typed_local_address(function, locals, frame->local_base, object - 1) : 0;
-            const uint32_t result_size = object != 0 ? function->local_sizes[object - 1] : 0;
+            // A result the call passes the function's own hidden pointer on for (#2684): parameter 0's value, a U64's
+            // cell, and the function's own result's bytes (validated: Tier0Function.hidden_size).
+            const bool forwarded = object == BUSTER_TIER0_RESULT_HIDDEN;
+            const uint64_t destination = forwarded ? locals[frame->local_base].low : object != 0 ? interpreter_typed_local_address(function, locals, frame->local_base, object - 1) : 0;
+            const uint32_t result_size = forwarded ? function->hidden_size : object != 0 ? function->local_sizes[object - 1] : 0;
             if (object != 0 && class != BUSTER_TYPED_CLASS_VOID)
             {
                 result->status = INTERPRETER_INVALID;
@@ -1757,10 +1906,22 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
                 }
                 else
                 {
+                    // The callee's parameters: the named arguments where they are on the stack, or after a hidden result
+                    // pointer, a copy of them behind it in storage the frame releases (no array on the host's stack,
+                    // which a sanitizer's build poisons at every call, #2758).
                     const uint64_t mark = scratch->length;
-                    InterpreterValue parameters[BUSTER_TIER0_MAX_CALL_ARGUMENTS + 1];
-                    parameters[0] = (InterpreterValue){ .low = destination };
-                    memcpy(parameters + hidden, stack + argument_base, (uint64_t)named * sizeof(InterpreterValue));
+                    InterpreterValue* copied = hidden != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, InterpreterValue, (uint64_t)named + 1) : 0;
+                    if (hidden != 0 && copied == 0)
+                    {
+                        result->status = INTERPRETER_RESOURCE;
+                        break;
+                    }
+                    if (copied != 0)
+                    {
+                        copied[0] = (InterpreterValue){ .low = destination };
+                        memcpy(copied + 1, stack + argument_base, (uint64_t)named * sizeof(InterpreterValue));
+                    }
+                    const InterpreterValue* parameters = copied != 0 ? copied : stack + argument_base;
                     const InterpreterTypedIncoming incoming = {
                         .caller = function,
                         .values = stack + argument_base,

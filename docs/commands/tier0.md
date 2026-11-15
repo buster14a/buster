@@ -172,6 +172,12 @@ frame and one with a base), run natively from a driver: the probe must find the
 arguments where their locations say, the driver's slots past them, rsp and the
 callee-saved registers as the driver left them, and what it returns must reach
 the driver; and `tier0_validate` refusing each of the tail calls' rules once.
+Then forwarded calls (#2684, the same file): the hidden fixture's function in the
+five frames with its tail call made a call that passes the function's own hidden
+pointer on (`BUSTER_TIER0_RESULT_HIDDEN`) and a return of it after, rdi loaded
+from parameter 0's home right before the call, the probe finding the driver's
+hidden pointer in rdi and the bytes it writes reaching the driver; and each of
+that call's rules broken once.
 Every function must pass `tier0_validate`, both
 paths must compile it to the same records, branch columns and references, and
 the records must pass `x86_validate` and the branch columns
@@ -333,21 +339,46 @@ does are there.
   for either tier (`check_tier1_inline_table`), and a unit with a callee runs
   #1282's two epochs (`CheckEmitRun.inline_table`): every part's lowering, then
   every part's code.
+- With `--tier0-inline-shapes` (step 5, off by default), a callee may have
+  several returns, each a jump to its copy's end, and a result in memory, the
+  hidden pointer bound to the call's result object (`tier0_inline_site_valid`).
+  On the 9700X the shapes cost the self-built lexer 1.7% more instructions:
+  spliced loops lose their locals' registers to a large caller's
+  ([the design](../tier0-inlining.md)'s "Several returns and results in
+  memory", #2841).
 - `--tier0-no-inline` keeps every call: the control, as `--tier1-no-inline` is
   Tier 1's.
+- **Callees nothing refers to are left out** (step 3), by Tier 1's dead
+  functions' columns, last pass and dead set (#2541 step 2,
+  [the Tier 1 guide](../tier1.md)'s "Dead functions"): without `--tier1`, the
+  table's candidates are Tier 0's callees, and in `-c`'s object (not under
+  `-g`, `-fpatchable-function-entry` or in a unit with asm) a callee nothing
+  roots, whose stream the splice takes, makes no code on its lane
+  (`check_tier0_inline_held`); the last pass makes the code of each that emitted
+  code still refers to (a call a caller kept, an address), and the merge leaves
+  the rest out (`check_tier1_inline_dead`). `--tier0-no-hold` makes every
+  callee's code on its lane: the objects are the same. In a unit with asm the
+  callees' code is made and the dead ones still left out; an executable and
+  `-g` keep every callee.
 
-`./build/compiler test-tier0-inline [preprocessor options] [file...]` lowers
-each file as `-c` does and splices every body by both paths, each with its own
-lane cache: both must splice the same bodies into the same bytes in every
-column, `tier0_validate` must accept each and Tier 0 compile it. Without a file
-it takes the driver fixture below at x86-64-v4 (under a second), and checks
-that at least 20 calls were inlined. On the compiler's own `main.c` (`-march=native -Isrc -fwrapv
+`./build/compiler test-tier0-inline [--tier0-inline-shapes] [preprocessor
+options] [file...]` lowers each file as `-c` does and splices every body by both
+paths, each with its own lane cache: both must splice the same bodies into the
+same bytes in every column, `tier0_validate` must accept each and Tier 0 compile
+it. `--tier0-inline-shapes` splices step 5's shapes too, as `-c`'s option does
+(CI runs the fixture both ways). Without a file it takes the driver fixture
+below at x86-64-v4 (under a second), and checks that at least 20 calls were
+inlined. On the compiler's own `main.c` (`-march=native -Isrc -fwrapv
 -funsigned-char -fno-strict-aliasing`) it splices 830 of 8,509 bodies,
 7,695 calls, in about 8 s on a 4-core cloud host. `test-checker-driver`'s
 fixture (`c_check_tier0_inline_driver_test.c`) builds a program of the
-splice's shapes by the vector path, the scalar twin and `--tier0-no-inline`:
-each runs as clang -O0's build does, the two paths' objects are the same bytes,
-and the control's differs.
+splice's shapes by the vector path, the scalar twin, `--tier0-no-inline` and
+`--tier0-inline-shapes` by both paths: each runs as clang -O0's build does, the
+two paths' objects are the same bytes, and the control's differs; the object
+leaves out the callees spliced at every call (with the shapes, the two returns'
+and the result in memory's too) and keeps those a call or an address refers to,
+the same bytes by 1 and 4 lanes, with `--tier0-no-hold`, and by windows of one
+token.
 
 ## Backend benchmark
 

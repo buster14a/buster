@@ -88,6 +88,11 @@ struct Tier1AllocationInput
     // and it is free there (UINT32_MAX for none): a phi whose block passes it to a phi of its one successor takes the
     // place that phi's first interval took, where it is settled, rather than its operand's (#2734).
     const uint32_t* alternate_intervals;
+    // Optional, with hint_intervals: per interval, an interval of its value starting no later than it, whose opening
+    // register is the value's place where it continues after this interval's end (UINT32_MAX for none): the entry of its
+    // block's successor, or the range that entry takes its opening from (#2774). Where that opening is the value's slot,
+    // the edge stores the value there anyway, so the scan with required uses evicts it first once it has no use left.
+    const uint32_t* continuation_intervals;
     // Optional (#2767): per interval, registers of its allowed ones that it takes only where none of its others is free, and
     // never evicts another value for: a range live across a fixed register's sequence, which writes them, so that its
     // consumer would save the range's value around it. A class with any is the scan's.
@@ -282,7 +287,8 @@ static bool tier1_allocation_clobbered(const Tier1AllocationInput* input, uint32
 // The register a hinted value holds last, or UINT8_MAX: `last` is null without hint_values. With hint_intervals, `last`'s
 // value_count + 1 bytes are followed by each interval's opening register, which the scans and the coloring write as
 // each interval starts, then by each one's closing register, which they write as it ends (#2553); either is
-// BUSTER_TIER1_ALLOCATE_MEMORY_HINT where the interval had no register there. Then come value_count + 1 bytes of each
+// BUSTER_TIER1_ALLOCATE_MEMORY_HINT where the interval had no register there, as one evicted where it starts has none
+// (#2774). Then come value_count + 1 bytes of each
 // value's first register, which the scan with required uses writes (tier1_allocation_firsts, #2768).
 static uint8_t tier1_allocation_value_hint(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval)
 {
@@ -501,11 +507,15 @@ static void tier1_allocation_evict(const Tier1AllocationInput* columns, Tier1All
 {
     const uint32_t first = columns->use_offsets[victim] < columns->use_offsets[victim + 1] ? columns->use_positions[columns->use_offsets[victim]] : UINT32_MAX;
     const bool undone = unread && kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && kinds[victim] == BUSTER_TIER1_ALLOCATE_REGISTER && begins[victim] == columns->starts[victim] && first >= position;
-    if (undone)
+    // An interval evicted where it starts never held the register it took there: its opening, which the ranges that name
+    // it follow, is its slot too (#2774). Lua's first handler gave cl's entry range r13 and evicted it there for i, and the
+    // dispatch's join, which takes that handler's openings, then took r13 for cl, only for i to evict it again.
+    const bool empty = kinds[victim] == BUSTER_TIER1_ALLOCATE_REGISTER && begins[victim] == position && position == columns->starts[victim];
+    if (undone || empty)
     {
         tier1_allocation_note_opening(columns, last, victim, UINT32_MAX);
     }
-    else
+    if (!undone)
     {
         tier1_allocation_finish_piece(pieces, victim, begins[victim], position, kinds[victim], regs[victim]);
         begins[victim] = position;
@@ -554,6 +564,15 @@ static bool tier1_allocation_yields(const Tier1AllocationInput* columns, const u
 {
     const uint32_t holder = r < 32 && ((occupied >> r) & 1) != 0 ? active[r] : UINT32_MAX;
     return holder != UINT32_MAX && tier1_allocation_spill_kind(columns, holder) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && !tier1_allocation_required_at(columns, holder, position);
+}
+
+// Whether `interval`, whose next use from here is `next`, has none left and continues after its end in its value's slot
+// (#2774): its continuation opened without a register, so the edge after it stores the value there anyway, and evicting
+// it here only moves that store.
+static bool tier1_allocation_stored_after(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval, uint32_t next)
+{
+    const uint32_t continued = last != 0 && columns->hint_intervals != 0 && columns->continuation_intervals != 0 ? columns->continuation_intervals[interval] : UINT32_MAX;
+    return continued != UINT32_MAX && next == columns->ends[interval] && last[(uint64_t)columns->value_count + 1 + continued] == BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
 }
 
 // Reload at required uses, with the same next-use eviction rule as the simpler scan. All values needed at the
@@ -696,11 +715,14 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             //   definition), which was last in its slot, as an unused one rests (#2768), unless its value's first register
             //   is free: whatever register was free at the block's start, which edges then reloaded the value into, held it
             //   to the blocks after, where the value's paths meet in the first one. Lua's OP_GETTABUP reloaded pc into i's
-            //   register after its call, and the fetch swapped the two through r11.
+            //   register after its call, and the fetch swapped the two through r11. Not where its hint names another value's
+            //   range (tier1_cfg_body_hints, #2784): that value's slot says nothing of this one's.
             const uint8_t first = follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT ? tier1_allocation_firsts(&columns, last)[columns.values[interval]] : UINT8_MAX;
             const bool settled = first < 32 && ((tier1_allocation_preferred(&columns, interval, open) >> first) & 1) != 0;
             const bool memory = follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT && !use_event && !required;
-            const bool waits = memory && (recomputed || (!settled && columns.hint_values[interval] == columns.values[interval]));
+            // Without hints (`last` null) there are no hint values to read, and no memory hint.
+            const bool own = memory && columns.hint_values[interval] == columns.values[interval] && (named == UINT32_MAX || columns.values[named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT] == columns.values[interval]);
+            const bool waits = memory && (recomputed || (!settled && own));
             if ((idle && (!recomputed || open == 0 || rests)) || waits)
             {
             }
@@ -724,9 +746,13 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             }
             else
             {
-                // The victim: a recomputable value first, then the farthest next use, then the fewest uses.
+                // The victim: one with no use left that continues in its slot first (#2774), whose eviction only moves the store
+                // the edge after it would make; then a recomputable value, then the farthest next use, then the fewest uses.
+                // Lua's fetch after OP_GETTABUP's call evicted trap, whose phi has no uses, for i, and its edge stored cl,
+                // moved i into cl's register and reloaded trap.
                 uint32_t farthest = tier1_allocation_next_use(&columns, interval, position);
                 bool cheapest = recomputed;
+                bool storing = false;
                 uint32_t lightest = weights[columns.values[interval]];
                 for (uint32_t r = 0; r < 32; r += 1)
                 {
@@ -734,14 +760,17 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
                     if (((allowed[interval] >> r) & 1) != 0 && victim != UINT32_MAX && !tier1_allocation_required_at(&columns, victim, position))
                     {
                         const uint32_t next = tier1_allocation_next_use(&columns, victim, position);
+                        const bool stored = tier1_allocation_stored_after(&columns, last, victim, next);
                         const bool cheap = tier1_allocation_spill_kind(&columns, victim) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
                         const uint32_t weight = weights[columns.values[victim]];
-                        const bool better = (cheap && !cheapest) || (cheap == cheapest && (next > farthest || (next == farthest && weight < lightest)));
+                        const bool ranked = (cheap && !cheapest) || (cheap == cheapest && (next > farthest || (next == farthest && weight < lightest)));
+                        const bool better = (stored && !storing) || (stored == storing && ranked);
                         if ((required && chosen == UINT32_MAX) || better)
                         {
                             chosen = r;
                             farthest = next;
                             cheapest = cheap;
+                            storing = stored;
                             lightest = weight;
                         }
                     }
@@ -1457,6 +1486,9 @@ static bool tier1_allocation_hints_valid(const Tier1AllocationInput* input)
         const uint32_t earlier = named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT;
         valid = valid && (named == UINT32_MAX || (earlier < input->count && input->classes != 0 && input->starts != 0 && input->classes[earlier] == input->classes[i] && input->starts[earlier] < input->starts[i] &&
                                                   (!exit || (input->ends != 0 && input->ends[earlier] <= input->starts[i]))));
+        const uint32_t continued = input->continuation_intervals != 0 ? input->continuation_intervals[i] : UINT32_MAX;
+        valid = valid && (continued == UINT32_MAX || (input->hint_intervals != 0 && continued < input->count && input->values != 0 && input->starts != 0 && input->values[continued] == input->values[i] &&
+                                                      input->starts[continued] <= input->starts[i]));
     }
     return valid;
 }

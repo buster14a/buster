@@ -67,6 +67,8 @@
     ENTRY(SELECTION_CENSUS, "--selection-census") \
     ENTRY(SHARED_PARTS, "--shared-parts") \
     ENTRY(TARGET_EQ, "--target=") \
+    ENTRY(TIER0_INLINE_SHAPES, "--tier0-inline-shapes") \
+    ENTRY(TIER0_NO_HOLD, "--tier0-no-hold") \
     ENTRY(TIER0_NO_INLINE, "--tier0-no-inline") \
     ENTRY(TIER1, "--tier1") \
     ENTRY(TIER1_FUNCTION_SIZES, "--tier1-function-sizes") \

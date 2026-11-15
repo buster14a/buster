@@ -126,6 +126,9 @@ struct IrTypedPlan
     uint32_t indirect;
     // Whether a call argument is one the convention ignores (#141, ir_typed_ignored_arguments).
     bool ignored_arguments;
+    // Whether a call passes the function's own hidden pointer on (#2684, BUSTER_TIER0_RESULT_HIDDEN): its result goes to
+    // a slot of its own, after the dispatch slot (IrTypedSink.forward_slot), then where parameter 0 points.
+    bool forwarded;
     // The vectors' widths a whole-vector aggregate parameter's entry copy may take (#1282, ir_typed_vector_whole): bit 0
     // 16 bytes, bit 1 32, bit 2 64; none in a function without vectors, or for a target without AVX-512.
     uint8_t vector_copies;
@@ -261,6 +264,10 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
         {
             const uint32_t bytes = input->classes[i] == BUSTER_TYPED_CLASS_VECTOR ? ir_typed_vector_bytes(input, i) : tier0_class_memory(input->classes[i]) ? 16 : 8;
             plan.spill_bytes = bytes > plan.spill_bytes ? bytes : plan.spill_bytes;
+        }
+        for (uint32_t c = 0; input->call_result_objects != 0 && c < input->call_count; c += 1)
+        {
+            plan.forwarded |= input->call_result_objects[c] == BUSTER_TIER0_RESULT_HIDDEN;
         }
         for (uint32_t i = 0; i <= count && ok; i += 1)
         {
@@ -632,6 +639,8 @@ struct IrTypedSink
     IrSizes sizes;
     // The plan's ignored_arguments: whether a call's arguments' locations need reading (ir_typed_aggregate_call).
     bool ignored_arguments;
+    // The slot a call that passes the function's own hidden pointer on returns into (#2684, IrTypedPlan.forwarded).
+    uint32_t forward_slot;
 };
 
 // Keep constructor updates visible in both replay instantiations: count erases column writes and fill erases null
@@ -778,8 +787,14 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
             source = ir_typed_emit(sink, IR_VSELECT, wide, operands[2], operands[0], extended, 0);
             ir_typed_lanes(sink, source, (IrSimdLane)lanes[from]);
         }
-        value = ir_typed_emit(sink, IR_INTRINSIC, type, source, BUSTER_IR_NONE, operation->convert - 1u, 0);
+        // A truncation into an SSE carrier (#2780) is into a 16-byte vector, then its lane 0 at the carrier's type.
+        value = ir_typed_emit(sink, IR_INTRINSIC, operation->carrier_result ? IR_V4I32 : type, source, BUSTER_IR_NONE, operation->convert - 1u, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+        if (operation->carrier_result)
+        {
+            value = ir_typed_emit(sink, IR_INTRINSIC, type, value, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_LANE_EXTRACT, 0);
+            ir_typed_lanes(sink, value, (IrSimdLane)(type == IR_F64 ? 3 : 2));
+        }
         if (operation->merge_mask && !operation->merge_partial && !unmasked)
         {
             value = ir_typed_emit(sink, IR_VSELECT, type, operands[2], value, operands[1], 0);
@@ -916,7 +931,23 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         const uint32_t narrow = ir_typed_emit(sink, IR_INTRINSIC, truncated, operands[1], BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_TRUNCATE, 0);
         ir_typed_lanes(sink, narrow, (IrSimdLane)flags);
         const uint32_t address = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, operands[0], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-        value = ir_typed_emit(sink, unmasked ? IR_STORE : IR_MASKED_STORE, IR_VOID, address, narrow, unmasked ? BUSTER_IR_NONE : operands[2], 0);
+        // 8 lanes into 8 bytes (#2780): unmasked, the store of the truncation's lane 0 as an F64 carrier, its 8 bytes alone;
+        // masked, the mask of 8 lanes zero-extended to the 16-byte vector's byte lanes (an I8's, an I16's), whose upper 8
+        // are clear.
+        uint32_t stored = narrow;
+        uint32_t mask = unmasked ? BUSTER_IR_NONE : operands[2];
+        if (operation->carrier_result && unmasked)
+        {
+            stored = ir_typed_emit(sink, IR_INTRINSIC, IR_F64, narrow, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_LANE_EXTRACT, 0);
+            ir_typed_lanes(sink, stored, (IrSimdLane)3);
+        }
+        else if (operation->carrier_result)
+        {
+            const uint32_t bits = ir_typed_emit(sink, IR_BITCAST, IR_I8, mask, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+            const uint32_t wide = ir_typed_emit(sink, IR_ZEXT, IR_I16, bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+            mask = ir_typed_emit(sink, IR_BITCAST, IR_M16, wide, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        }
+        value = ir_typed_emit(sink, unmasked ? IR_STORE : IR_MASKED_STORE, IR_VOID, address, stored, mask, 0);
         if (!unmasked)
         {
             ir_typed_lanes(sink, value, operation->lane);
@@ -1065,6 +1096,35 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
     {
         // A quadword operation (#1840), its operation in its flags.
         value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_QUADWORD_OP, 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+    }
+    else if (operation->blendv)
+    {
+        // A blend by a vector's signs (#2780): b's lanes where the third operand's compare less than zero, else a's.
+        const uint64_t zero[8] = {0};
+        const uint32_t zeros = ir_typed_vector_constant(sink, type, zero);
+        const uint32_t mask = ir_typed_emit(sink, IR_VCMP, (IrType)ir_lane_mask(type, operation->lane), operands[2], zeros, IR_LT, 0);
+        ir_typed_lanes(sink, mask, operation->lane);
+        value = ir_typed_emit(sink, IR_VSELECT, type, mask, operands[1], operands[0], 0);
+        ir_typed_lanes(sink, value, operation->lane);
+    }
+    else if (operation->pairwise)
+    {
+        // A pairwise operation (#2780), its operation in its flags.
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_PAIRWISE, 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+    }
+    else if (operation->dot)
+    {
+        // A dot product (#2780), its operation in its flags: the accumulator a, b, and the third operand in the extra
+        // array.
+        const uint32_t slot = (uint32_t)sink->sizes.extra_count;
+        if (sink->output != 0)
+        {
+            sink->output->extra[slot] = operands[2];
+        }
+        sink->sizes.extra_count += 1;
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_DOT, slot), 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
     }
     else if (operation->bitshuffle)
@@ -2317,19 +2377,23 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_offset(IrTypedSin
 }
 
 // COPY's `bytes` (at most BUSTER_TIER0_MAX_COPY_BYTES) as a load and a store per piece, each the widest integer that
-// fits what remains: 32 pairs of i64 at most. The typed stream's ranges are the same or apart, so each piece's load
-// before its store reads the source's bytes either way. Their alignment is unknown, as LOAD's is.
-static __attribute__((always_inline)) inline void ir_typed_copy_pointers(IrTypedSink* sink, uint32_t destination, uint32_t source, uint64_t bytes)
+// fits what remains: 32 pairs of i64 at most; or, with `wide`, 16 bytes at a time as a vector's (IR_V4I32), the last
+// 16 ending at the end, and below 16 bytes as integers. The typed stream's ranges are the same or apart, so each piece's
+// load before its store reads the source's bytes either way, overlapping pieces too. Their alignment is unknown, as
+// LOAD's is.
+static __attribute__((always_inline)) inline void ir_typed_copy_pointers(IrTypedSink* sink, uint32_t destination, uint32_t source, uint64_t bytes, bool wide)
 {
     uint64_t offset = 0;
     while (offset < bytes)
     {
         const uint64_t remaining = bytes - offset;
-        const uint32_t piece = remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
-        const IrType type = piece == 8 ? IR_I64 : piece == 4 ? IR_I32 : piece == 2 ? IR_I16 : IR_I8;
-        const uint32_t loaded = ir_typed_emit(sink, IR_LOAD, type, ir_typed_offset(sink, source, offset), BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-        ir_typed_emit(sink, IR_STORE, IR_VOID, ir_typed_offset(sink, destination, offset), loaded, BUSTER_IR_NONE, 0);
-        offset += piece;
+        const bool vector = wide && bytes >= 16;
+        const uint64_t at = vector && remaining < 16 ? bytes - 16 : offset;
+        const uint32_t piece = vector ? 16 : remaining >= 8 ? 8 : remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
+        const IrType type = piece == 16 ? IR_V4I32 : piece == 8 ? IR_I64 : piece == 4 ? IR_I32 : piece == 2 ? IR_I16 : IR_I8;
+        const uint32_t loaded = ir_typed_emit(sink, IR_LOAD, type, ir_typed_offset(sink, source, at), BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        ir_typed_emit(sink, IR_STORE, IR_VOID, ir_typed_offset(sink, destination, at), loaded, BUSTER_IR_NONE, 0);
+        offset = at + piece;
     }
 }
 
@@ -2348,11 +2412,11 @@ static IrType ir_typed_vector_whole(AbiLocation location, uint64_t size, uint8_t
     return whole && width < 3 && ((allowed >> width) & 1) != 0 ? types[width] : IR_VOID;
 }
 
-static __attribute__((always_inline)) inline void ir_typed_copy(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint64_t bytes)
+static __attribute__((always_inline)) inline void ir_typed_copy(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint64_t bytes, bool wide)
 {
     const uint32_t destination = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, destination_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
     const uint32_t source = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, source_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-    ir_typed_copy_pointers(sink, destination, source, bytes);
+    ir_typed_copy_pointers(sink, destination, source, bytes, wide);
 }
 
 // Whether the function takes or returns an aggregate by value (an object parameter, a result in registers from its bytes
@@ -2498,11 +2562,58 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedS
     return ir_typed_emit(sink, IR_CALL, IR_VOID, 0, descriptor, BUSTER_IR_NONE, 0);
 }
 
+// The copy of a forwarded call's result (#2684) from the forwarding slot `source` to where the hidden pointer points
+// (`destination`, a ptr): past BUSTER_TIER0_MAX_COPY_BYTES a call of the front end's memmove (Tier0Function.hidden_copy,
+// its arguments the two pointers and the size, its result the destination, a ptr nothing reads, as the interpreters'
+// memmove binding has it), as the lowering's copy of a call's object calls it; else the pieces of a typed COPY of a
+// local source, 8 bytes at a time (#2693): the callee's stores built the slot's bytes just before it, as they build a
+// call object's.
+static __attribute__((always_inline)) inline void ir_typed_forward_copy(IrTypedSink* sink, const Tier0Function* input, uint32_t destination, uint32_t source)
+{
+    const uint64_t bytes = input->hidden_size;
+    if (bytes > BUSTER_TIER0_MAX_COPY_BYTES && input->hidden_copy != 0)
+    {
+        const uint32_t descriptor = (uint32_t)sink->sizes.call_count;
+        const uint32_t first = (uint32_t)sink->sizes.extra_count;
+        const uint32_t type_first = (uint32_t)sink->sizes.call_type_count;
+        const uint32_t size = ir_typed_constant(sink, IR_I64, bytes);
+        if (sink->output != 0)
+        {
+            IrFunction* output = sink->output;
+            output->calls[descriptor] = (IrCall){
+                .argument_first = first,
+                .argument_count = 3,
+                .type_first = type_first,
+                .parameter_count = 3,
+                .result_type = IR_PTR,
+            };
+            output->extra[first] = destination;
+            output->extra[first + 1] = source;
+            output->extra[first + 2] = size;
+            output->call_types[type_first] = IR_PTR;
+            output->call_types[type_first + 1] = IR_PTR;
+            output->call_types[type_first + 2] = IR_I64;
+        }
+        sink->sizes.call_count += 1;
+        sink->sizes.extra_count += 3;
+        sink->sizes.call_type_count += 3;
+        ir_typed_emit(sink, IR_CALL, IR_PTR, input->hidden_copy, descriptor, BUSTER_IR_NONE, 0);
+    }
+    else
+    {
+        ir_typed_copy_pointers(sink, destination, source, bytes, false);
+    }
+}
+
 // Call `call` of the calls table: a direct one of its target's symbol, or with `callee` a pointer value (not
 // BUSTER_IR_NONE) an indirect one through it. An aggregate argument (its address on the stack) is a ptr, converted in
 // place in `arguments` (the stack's, which the call pops), and a call that passes or returns an aggregate has its ABI
 // records: each argument's location and size, the call's totals and result, and its result object's slot address as the
-// destination (c) of an aggregate result, its bytes the object's.
+// destination (c) of an aggregate result, its bytes the object's. A call that passes the function's own hidden pointer
+// on (#2684, BUSTER_TIER0_RESULT_HIDDEN) returns into the function's forwarding slot (IrTypedSink.forward_slot), of the
+// function's result's bytes (Tier0Function.hidden_size), which are then copied where parameter 0 points, as the lowering's
+// copy of a result object would (ir_typed_forward_copy): Tier 1 takes a call's destination as a frame object's address
+// alone (tier1_select_call_abi), so its code keeps the copy that Tier 0's and the interpreter's leave out.
 static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink* sink, const Tier0Function* input, uint32_t call, IrType result_type, uint32_t* arguments, uint32_t callee)
 {
     const uint32_t descriptor = (uint32_t)sink->sizes.call_count;
@@ -2513,6 +2624,8 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink*
     const uint32_t abi = aggregate ? (uint32_t)sink->sizes.abi_call_count : BUSTER_IR_NONE;
     const uint32_t passed = (uint32_t)sink->sizes.passed_count;
     const uint32_t object = input->call_result_objects != 0 ? input->call_result_objects[call] : 0;
+    const bool forwarded = object == BUSTER_TIER0_RESULT_HIDDEN;
+    const uint32_t into = forwarded ? sink->forward_slot : object != 0 ? object - 1 : BUSTER_IR_NONE;
     // An aggregate's argument is its address; a narrow one is extended to 32 bits by its class (ir_typed_narrow).
     for (uint32_t a = 0; a < count; a += 1)
     {
@@ -2558,7 +2671,7 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink*
             output->abi_calls[abi] = (IrAbiCall){
                 .call = input->calls[call],
                 .passed = passed,
-                .result_size = object != 0 ? input->local_sizes[object - 1] : 0,
+                .result_size = forwarded ? input->hidden_size : object != 0 ? input->local_sizes[object - 1] : 0,
             };
         }
     }
@@ -2567,9 +2680,17 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink*
     sink->sizes.call_type_count += count;
     sink->sizes.abi_call_count += aggregate;
     sink->sizes.passed_count += aggregate ? count : 0;
-    // The result object's slot address is its local's preheader instruction.
-    return ir_typed_emit(sink, callee == BUSTER_IR_NONE ? IR_CALL : IR_CALL_INDIRECT, result_type, callee == BUSTER_IR_NONE ? input->call_targets[call] : callee, descriptor,
-                         object != 0 ? object - 1 : BUSTER_IR_NONE, 0);
+    // The result object's slot address is its local's preheader instruction, as the forwarding slot's is.
+    const uint32_t result = ir_typed_emit(sink, callee == BUSTER_IR_NONE ? IR_CALL : IR_CALL_INDIRECT, result_type, callee == BUSTER_IR_NONE ? input->call_targets[call] : callee,
+                                          descriptor, into, 0);
+    if (forwarded)
+    {
+        // Parameter 0, the hidden pointer, is a U64 local's value: its slot's.
+        const uint32_t hidden = ir_typed_emit(sink, IR_LOAD, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE, ir_typed_alignment(BUSTER_TYPED_CLASS_U64));
+        const uint32_t destination = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, hidden, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        ir_typed_forward_copy(sink, input, destination, into);
+    }
+    return result;
 }
 
 // A br_indirect's labels (#785), into extra: jump table t's for `owner` 1 + t, or with 0 those of no table; the count. A
@@ -3125,6 +3246,11 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         {
             check.error = IR_ERROR_STRUCTURE;
             check.instruction = typed.node;
+        }
+        else if (input->hidden_copy >= symbol_count)
+        {
+            // The memmove of a forwarded result's copy (#2684, ir_typed_forward_copy), a call's symbol as any other's.
+            check.error = IR_ERROR_OPERAND;
         }
     }
     IrSimdTypedOperation* operations = 0;

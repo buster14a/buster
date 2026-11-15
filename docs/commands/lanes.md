@@ -28,7 +28,11 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
   and, in children of an unsanitized build, 2 TiB of tables, which must commit
   uncharged where commit charge isn't bounded, and commits refused under a
   small `RLIMIT_DATA`, which mustn't switch the thread to compact reservations
-  (#1521, `docs/arena-memory.md`);
+  (#1521, `docs/arena-memory.md`), and, under an `RLIMIT_AS` of 256 MiB past
+  the child's mapping, a 64 GiB reservation that grows in its own slot past its
+  share, its base fixed, through a copy that grew it first, refused past the
+  limit as a reservation without changing, and its slot freed by its release
+  (#1118);
 - `lane_range` and `lane_range_by_cost` for every count from 0 to 1,000, with
   seven cost patterns: the parts must cover the items in lane order, and each
   item must go to the lane whose share of the total cost holds its midpoint;

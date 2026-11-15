@@ -2,8 +2,9 @@
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 #
 # Split one source module into PARTITIONS code parts and the part of its global variables, recording its public
-# definitions before the split hides local ones another part refers to: SPLIT is tools/codegen/split.c (Release's fully
-# optimized module, in module order) or tools/codegen/presplit.c (Develop's, before the optimizer), with OPTIONS.
+# definitions before the split hides local ones another part refers to: SPLIT is tools/codegen/split.c (a sanitizer
+# build's Release's fully optimized module, in module order) or tools/codegen/presplit.c (Release's and Develop's,
+# before the optimizer), with OPTIONS.
 # Unchanged parts and exports retain their mtimes so Ninja can reuse their native objects. Changed files are renamed
 # into place, and the stamp is written last. An interrupted split cannot publish a successful collection.
 
@@ -55,5 +56,9 @@ foreach(part RANGE ${PARTITIONS})
 endforeach()
 buster_codegen_publish("${partial}/exports.txt" "${DIRECTORY}/exports.txt")
 buster_codegen_publish("${partial}/locals.txt" "${DIRECTORY}/locals.txt")
+# presplit's sections the start's order gave its functions (presplit --first, BusterCodegenMerge.cmake's SECTIONS).
+if(EXISTS "${partial}/sections.txt")
+    buster_codegen_publish("${partial}/sections.txt" "${DIRECTORY}/sections.txt")
+endif()
 file(REMOVE_RECURSE "${partial}")
 file(TOUCH "${DIRECTORY}/split.stamp")

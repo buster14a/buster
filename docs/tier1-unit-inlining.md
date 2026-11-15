@@ -968,7 +968,8 @@ functions"). Where it departs from the design above:
   refers to, and the merge leaves the rest out. The objects are the same with
   and without holding (`--tier1-no-hold`) and by any lane count. Only in `-c`'s
   objects: an executable's binding, direct or of a link of several units,
-  resolves every program symbol; not under `-g` (step 3) or in a unit with asm.
+  resolves every program symbol; not in a unit with asm (and under `-g` since
+  "The rest, measured").
 - **Every callee, every call.** A caller copies all its callees' summaries (step
   1 stopped at 64), and leaves out a callee one of whose calls doesn't match its
   signature: the inliner checks each call and refused `sqlite3VdbeExec`'s
@@ -1046,11 +1047,10 @@ larger hashing and interning functions with several callers
   callee calls, shows the callee at its call's line, its caller at its call of
   the callee and `main`; `-g` changes no code (an executable's sections are the
   same bytes, and sqlite3.c's `--tier1 -g -c` passes `llvm-dwarfdump --verify`
-  with 17,095 instances of 1,349 callees). Not
-  yet: an instance's callee locals (unavailable, as before), a call site in
-  another file than the function's, and gdb's breakpoints by a callee's name,
-  which take its out-of-line copy only (`break file:line` takes every
-  instance). On the way: the rows' room was the typed entries plus two a body,
+  with 17,095 instances of 1,349 callees). What it left (an instance's callee's
+  locals, a call site in another file than the function's, gdb's breakpoints
+  by a callee's name) is "The rest, measured". On the way: the rows' room was
+  the typed entries plus two a body,
   which a body's source events can pass (an instance's entries are its
   callee's); it is now the rows the bodies have.
 - **Callees in cycles into callers outside them: measured, not adopted.** A
@@ -1071,6 +1071,109 @@ larger hashing and interning functions with several callers
   (`IrInlineOptions.add_sites`) and the gathers past them, the same columns by
   both and by the scalar twin (`test-ir-inline` runs each unit both ways). It
   is under 0.1% of a compile either way, which no end-to-end run can see.
+
+### The rest, measured
+
+What step 3 left, and step 2's returns gate at its edge
+([#2541](https://github.com/buster14a/buster/issues/2541)'s last part):
+
+- **Dead functions under `-g`.** Holding was off under `-g`, whose entries had
+  no form for a function without code, so `-g` kept the code of the candidates
+  every call expanded and changed a `-c` object's `.text` (sqlite3.c's by
+  `--tier1 -g -c`: 1,832,120 bytes against 1,521,400 without `-g`). A dead body
+  now has no rows, `.debug_addr` entry or `DW_TAG_subprogram` of its own
+  (`CheckProgramRows.dead`; the debug unit's functions are the bodies with
+  code), its abstract instance alone, and `-g` changes no code: sqlite3.c's
+  object is 1,521,400 bytes of `.text` either way.
+- **Rows in other files and calls there.** A function's rows were kept in its
+  own file alone, so an expanded callee from a header, or from another `.c` of a
+  unity build, had none of its lines, and an instance whose call was in another
+  file was left out. The kept rows are now any file's, each with its file
+  (`DebugUnit.row_files`, which the line program sets by `DW_LNS_set_file`, by
+  both paths), and each instance has its call's `DW_AT_call_file`.
+- **gdb's `break` by an expanded callee's name** takes each copy since step 3's
+  abstract instances (5 locations on the fixture's executable, 2 on its `-c -g`
+  object, whose callees are dead), by gdb 15.1 and 18.1.
+- **An expanded callee's parameters.** Each described expansion gives its
+  caller its callee's parameters as locals past its own (`IrDebugInline.local`,
+  `BUSTER_IR_DEBUG_BIND_INSTANCE`), each bound by an initial binding to its
+  argument's value where the callee never assigns it nor takes its address;
+  every pass carries the binding as it carries the others. The value proof
+  selects it at the records of its instance's code and of the instances nested
+  in it, so its location is wherever the machine proof places the argument's
+  value there; the instance's `DW_TAG_formal_parameter` has that location list.
+  The callee's other locals are its abstract instance's, without a location.
+  On sqlite3.c, 21,441 instances' parameters have locations.
+- **The compiler's own calls.** Two causes kept calls that the classes take:
+  a summary was lowered without the wide-vector pieces the function's own
+  pipeline takes (#1624), so a function with a vector wider than its target
+  had no summary (210 of the compiler's checker unit's at the scalar host,
+  whose AVX-512 types are wider than x86-64's); and a section, an attribute's
+  or a pragma's, rooted an internal candidate, which clang's inliner doesn't
+  (the compiler's checker is all under `#pragma clang section`, #502). The
+  compiler built by `--tier1` compiling speedtest1.c makes 2,706,170 calls
+  against 2,962,978 (callgrind, on the session's container). On the 9700X,
+  against main `64da385e`, the compiler built by `--tier1` compiling the frozen
+  sqlite3.c (one lane, CPU 2, three runs):
+
+  | The compiler built by `--tier1` of | returns, M | cycles, M | its own `.text`, MB | its build, user s |
+  | --- | ---: | ---: | ---: | ---: |
+  | main | 59.41 | 5,013 | 49.93 | 45.5 |
+  | head | **52.53** (-11.6%) | 4,840 (-3.5%) | 45.54 (-8.8%) | 48.8 (+7.3%) |
+
+  Step 2's gate, at most 60 M returns, is met with 7.5 M to spare (main's build
+  is at 59.4 M, the edge step 2 recorded), and its `--tier1` workload takes
+  10,997 M cycles against 11,192 M (-1.7%). The gate programs' objects are the
+  same bytes (sqlite3.c's, speedtest1.c's and Lua's 34 units), and `--tier1 -c
+  sqlite3.c` takes 3,419 M cycles against 3,425 M.
+- **The cost under `-g`.** `--tier1 -g -c sqlite3.c` takes 7,556 M cycles
+  against main's 7,347 M (+2.8%, instructions +0.8%), for an object whose code
+  is the plain compile's (1,557,640 bytes of `.text` against main's 1,873,912
+  under `-g`).
+
+The record is buster-performance's `tier1-unit-inlining-rest-2541-2026-11-15`.
+
+### Callees' locals and variadic calls, measured
+
+Two pieces after "The rest", in #2839 (`872e9749`, `56391f0e`):
+
+- **A call's signature is its decision, not the unit's error (#2721).** A unit
+  with one variadic call (whose `IrCall` lists every argument past the
+  callee's parameters) or one unprototyped call (variadic, its callee not) was
+  refused whole, so its caller expanded nothing: on the frozen sqlite3.c, 234
+  of the inliner's 2,050 units (`test-ir-source --passes`). Such a call is now
+  kept alone (`IR_INLINE_SIGNATURE`, or `IR_INLINE_VARIADIC` by its callee's
+  flag), and an unprototyped call whose arguments are exactly its callee's
+  parameters is expanded: no unit is refused, and 808 callers change against
+  678.
+- **An expanded callee's locals under `-g` (#2541).** Every local of the callee
+  is the caller's past its own, of its callee's form, its assignments and
+  regions at the instance's origins; the value proof reads it at a record's
+  origin in its instance, re-evaluating it where that origin crosses one of
+  its assignments or regions, and each instance has a `DW_TAG_variable` per
+  local with a proven location. On sqlite3.c by `--tier1 -g -c`, 4,734 inlined
+  variables have locations (none before) and 21,949 inlined parameters (21,559:
+  an assigned parameter's assignments are carried now), with the same `.text`
+  as without `-g`. gdb shows an expanded loop's counter as the loop's own
+  function shows it out of line.
+
+On the 9700X against main `377e5a85`:
+
+| | main | head |
+| --- | ---: | ---: |
+| speedtest1, user cycles (8 placements) | 735.4 M | 734.9 M (-0.07, -0.37 to +0.23) |
+| its object's `.text` | 1,566,955 | 1,572,992 (+0.39%) |
+| Lua's five scripts (4 orders; the same executables) | 991.5 M | 993.8 M |
+| `--tier1 -c sqlite3.c`, user cycles | 3,407 M | 3,394 M |
+| the same under `-g` | 7,519 M | 7,688 M (+2.2%) |
+| the compiler built by `--tier1`, its default workload | 5,165 M | 4,916 M |
+
+The calls #2721 expands don't change speedtest1's time; Lua's code doesn't
+change. `-g` costs 2.2% more for the callees' locals. The compiler built by
+`--tier1` executes as many instructions (20,616 M against 20,615 M), so its
+cycles are its layout's. The objects are the same by one lane and eight (72 of
+72), and `test-check-debug` passes on gdb 18.1. The record is
+buster-performance's `tier1-callee-locals-2541-2721-2026-11-15`.
 
 ### Expected gains
 
@@ -1132,10 +1235,12 @@ prototype's, which leaves the 128-bit calls.
   back half, on a pipeline that already takes 3.45 times Tier 0's time. It is
   worth less the slower that pipeline is; #2538's design owns that.
 - **Debugging.** Since step 3 an expanded callee has a frame in a backtrace
-  (its instance's `DW_TAG_inlined_subroutine`) and its lines; its locals still
-  have no locations. `-g` users who need them have `--tier1-no-inline`; `-O1`
-  and above selecting Tier 1 would need those locations or an `-Og` that does
-  not inline.
+  (its instance's `DW_TAG_inlined_subroutine`) and its lines, and since
+  "Callees' locals and variadic calls, measured" its parameters' and locals'
+  values wherever the proof places them, as it places a function's own. What
+  the proof leaves unplaced (a value in a register a call clobbers, a local of
+  no form) is unplaced in an instance too; `-g` users who need more have
+  `--tier1-no-inline` only where the function's own frame would show it.
 - **Code size.** `-Os` and `-Oz`, if they ever select Tier 1, want the
   shrinking and single-site classes alone.
 - **Recursion's stack.** Expanding into a recursive function grows its frame

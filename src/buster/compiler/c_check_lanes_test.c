@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 
 //
-// test-check-lanes [--executable PATH] [--seed N] [--programs N] [--id-order N] [--keep]: the functions' lanes (#151, and
+// test-check-lanes [--executable PATH] [--seed N] [--programs N] [--id-order N] [--numeric-options-only] [--keep]: the functions' lanes (#151, and
 // #153's item for them), check_program_emit_lanes. Every output must be one lane's, whatever the lanes, whichever finishes
 // first and whatever ids the identifiers get.
 //
@@ -1503,6 +1503,133 @@ static void check_lanes_test_rule(CheckLanesTestTally* tally, const char* direct
 static int check_lanes_test_run(char* const* arguments, const char* errors)
 {
     return object_test_run(arguments, "/dev/null", errors);
+}
+
+// #2786: real driver commands, including values libc converts to different valid unsigned counts. Invalid options
+// must fail before replacing an old output; valid boundaries must emit the ordinary object's exact bytes.
+static void check_lanes_test_numeric_options(CheckLanesTestTally* tally, const char* executable, const char* directory)
+{
+    enum
+    {
+        COUNTS = 1,
+        WINDOW = 2,
+        MEMORY = 4,
+        ORDER = 8,
+    };
+    static const struct
+    {
+        const char* name;
+        uint32_t kind;
+        bool separate;
+    } options[] =
+    {
+        { "--lanes", COUNTS, false },
+        { "--lanes", COUNTS, true },
+        { "--worker-budget", COUNTS, false },
+        { "--worker-budget", COUNTS, true },
+        { "--emit-window", WINDOW, false },
+        { "--units-memory", MEMORY, false },
+        { "--id-order", ORDER, false },
+        { "--id-order", ORDER, true },
+    };
+    static const char sentinel[] = "numeric option output must survive\n";
+    char reference[PATH_MAX];
+    char preserved[PATH_MAX];
+    char object[PATH_MAX];
+    char errors[PATH_MAX];
+    snprintf(reference, sizeof(reference), "%s/numeric-reference.o", directory);
+    snprintf(preserved, sizeof(preserved), "%s/numeric-preserved", directory);
+    snprintf(object, sizeof(object), "%s/numeric-option.o", directory);
+    snprintf(errors, sizeof(errors), "%s/numeric-option.errors", directory);
+    char* ordinary[] = { (char*)executable, "--lanes=1", "--worker-budget=1", "-c", "tests/driver/numeric_options.c", "-o", reference, NULL };
+    FILE* cases = fopen("tests/driver/numeric_options.cases", "r");
+    const bool ready = cases != NULL && parse_test_write(preserved, sentinel, sizeof(sentinel) - 1) && check_lanes_test_run(ordinary, errors) == 0;
+    check_lanes_test_expect(tally, ready, "numeric option source emits its reference object", errors);
+    char line[256];
+    uint32_t case_count = 0;
+    while (ready && fgets(line, sizeof(line), cases) != NULL)
+    {
+        size_t length = strlen(line);
+        const bool whole = length != 0 && (line[length - 1] == '\n' || feof(cases));
+        if (length != 0 && line[length - 1] == '\n')
+        {
+            line[--length] = 0;
+        }
+        if (length != 0 && line[length - 1] == '\r')
+        {
+            line[--length] = 0;
+        }
+        if (line[0] == '#' || length == 0)
+        {
+            continue;
+        }
+        // A hexadecimal acceptance mask, a tab, and one or two quoted values separated by a tab. Bytes inside the
+        // quotes are literal, including whitespace. Two values repeat the same option in that order.
+        const uint32_t accepted_kinds = line[0] >= '0' && line[0] <= '9' ? (uint32_t)(line[0] - '0') :
+                                        line[0] >= 'a' && line[0] <= 'f' ? (uint32_t)(line[0] - 'a' + 10) : UINT32_MAX;
+        char* values[2] = { length >= 4 && line[1] == '\t' && line[2] == '"' ? line + 3 : NULL, NULL };
+        char* first_end = values[0] != NULL ? strchr(values[0], '"') : NULL;
+        bool valid = whole && accepted_kinds <= 15 && first_end != NULL;
+        if (valid && first_end[1] != 0)
+        {
+            valid = first_end[1] == '\t' && first_end[2] == '"';
+            values[1] = valid ? first_end + 3 : NULL;
+            char* second_end = valid ? strchr(values[1], '"') : NULL;
+            valid = second_end != NULL && second_end[1] == 0;
+            if (valid)
+            {
+                *second_end = 0;
+            }
+        }
+        if (first_end != NULL)
+        {
+            *first_end = 0;
+        }
+        check_lanes_test_expect(tally, valid, "read a complete numeric option case", "tests/driver/numeric_options.cases");
+        case_count += valid;
+        for (uint32_t scalar = 0; valid && scalar < 2; scalar += 1)
+        {
+            for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(options); o += 1)
+            {
+                const bool repeated = values[1] != NULL;
+                const bool accepted = (accepted_kinds & options[o].kind) != 0;
+                char joined[2][128];
+                char* arguments[16] = { (char*)executable, "--lanes=1", "--worker-budget=1", "-c", "tests/driver/numeric_options.c", "-o", object };
+                uint32_t count = 7;
+                if (scalar != 0)
+                {
+                    arguments[count++] = "--scalar";
+                }
+                for (uint32_t v = 0; v < (repeated ? 2u : 1u); v += 1)
+                {
+                    if (options[o].separate)
+                    {
+                        arguments[count++] = (char*)options[o].name;
+                        arguments[count++] = (char*)values[v];
+                    }
+                    else
+                    {
+                        snprintf(joined[v], sizeof(joined[v]), "%s=%s", options[o].name, values[v]);
+                        arguments[count++] = joined[v];
+                    }
+                }
+                arguments[count] = NULL;
+                const bool written = parse_test_write(object, sentinel, sizeof(sentinel) - 1);
+                const int status = written ? check_lanes_test_run(arguments, errors) : -1;
+                const bool same = written && check_test_driver_same_files(object, accepted ? reference : preserved);
+                char detail[256];
+                snprintf(detail, sizeof(detail), "%s%s\"%s\"%s%s, %s path, status %d", options[o].name, options[o].separate ? " " : "=", values[0],
+                         repeated ? " then " : "", repeated ? values[1] : "", scalar != 0 ? "scalar" : "default", status);
+                check_lanes_test_expect(tally, status == (accepted ? 0 : 1) && same,
+                                        accepted ? "a valid numeric option emits the reference object" : "an invalid numeric option fails and preserves old output", detail);
+            }
+        }
+    }
+    check_lanes_test_expect(tally, cases != NULL && !ferror(cases) && case_count != 0, "numeric option catalog is present, readable and nonempty", NULL);
+    if (cases != NULL)
+    {
+        fclose(cases);
+    }
 }
 
 // Runs `arguments` as check_lanes_test_run does, in a child limited to the processes it has (RLIMIT_NPROC, which doesn't
@@ -3238,6 +3365,7 @@ static int run_check_lanes_tests(int argc, char** argv)
     uint32_t programs = 6;
     bool tier1_outcomes_only = false;
     bool refused_reach_only = false;
+    bool numeric_options_only = false;
     uint64_t id_order = 153;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
@@ -3269,6 +3397,10 @@ static int run_check_lanes_tests(int argc, char** argv)
         {
             refused_reach_only = true;
         }
+        else if (strcmp(argv[i], "--numeric-options-only") == 0)
+        {
+            numeric_options_only = true;
+        }
         else if (strcmp(argv[i], "--keep") == 0)
         {
             keep = true;
@@ -3278,7 +3410,8 @@ static int run_check_lanes_tests(int argc, char** argv)
             options = false;
         }
     }
-    check_lanes_test_expect(&tally, options, "options: [--executable PATH] [--seed N] [--programs N] [--id-order N] [--tier1-outcomes] [--refused-reach-only] [--keep]", 0);
+    options = options && (uint32_t)tier1_outcomes_only + (uint32_t)numeric_options_only + (uint32_t)refused_reach_only <= 1;
+    check_lanes_test_expect(&tally, options, "options: [--executable PATH] [--seed N] [--programs N] [--id-order N] [--tier1-outcomes | --numeric-options-only | --refused-reach-only] [--keep]", 0);
     char resolved[PATH_MAX];
     const ssize_t resolved_length = strcmp(executable, "/proc/self/exe") == 0 ? readlink(executable, resolved, sizeof(resolved) - 1) : -1;
     if (resolved_length > 0)
@@ -3297,8 +3430,15 @@ static int run_check_lanes_tests(int argc, char** argv)
     }
     else if (made)
     {
-        check_tier1_outcome_tests(&tally, directory, executable);
+        if (!numeric_options_only)
+        {
+            check_tier1_outcome_tests(&tally, directory, executable);
+        }
         if (!tier1_outcomes_only)
+        {
+            check_lanes_test_numeric_options(&tally, executable, directory);
+        }
+        if (!tier1_outcomes_only && !numeric_options_only)
         {
             check_lanes_test_backend_startup(&tally, directory);
             check_lanes_test_expect(&tally, worker_budget_test(), "external worker ownership protocol", NULL);

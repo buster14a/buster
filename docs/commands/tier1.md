@@ -23,8 +23,10 @@ requirements. [Command index](README.md).
   a test reference, alongside the exact allocation-output comparisons. Bounded
   direct scalar calls preserve live caller registers and publish symbolic CALL
   references. Byte/word memory and integer conversions
-  use canonical 32-bit storage; terminal chains retain explicit traps or empty
-  self-loops. Integer comparisons fold single-use loads at their original
+  use canonical 32-bit storage, as do the `i1`, `i8` and `i16` `and`, `or` and
+  `xor` (#2677), whose whole registers `test-tier1-emit` probes natively, with a
+  byte's or word's load at a guard page that a 32-bit memory operand would cross;
+  terminal chains retain explicit traps or empty self-loops. Integer comparisons fold single-use loads at their original
   access width when the final consumer's memory-order proof permits it
   (#1218), including exact immediate comparisons through zero/sign extension;
   a word's, doubleword's or quadword's constant within a signed byte takes the
@@ -179,6 +181,23 @@ requirements. [Command index](README.md).
   pull request's base built in a worktree; `correctness.tests` checks its
   dispatch on every run.
 
+
+## Vector-only value numbering and LICM (#2781)
+
+The C driver's default Tier 1 pipeline includes `--tier1-passes=vectors`.
+Functions with vector or mask values run the congruence solver on those values
+before promotion and loop-invariant motion on them after if-conversion. Their
+scalar values are not substituted or hoisted merely because the pass is
+enabled. Before promotion a local's reads are loads, which value numbering
+never merges, so what the solver shares is equal vector constants (byte-class
+tables, splats of constants) and the expressions over them; two `a + a` of a
+local `a` stay apart, as they do with `+gvn`. `--tier1-passes=-vectors` restores the previous default pipeline;
+explicit `+gvn` or `+licm` selects the corresponding unrestricted pass.
+The report's `gvn_removed` and `licm_moved` include the restricted passes'
+counts. Inline summaries use the same policy and retire the optional step
+arenas after each summary. The IR guides describe the exact scalar/SIMD twins
+and the per-loop LICM walk; the driver regression checks both host paths,
+native output, and the counters with the policy on and off.
 
 ## Integer truth round trips (#1218)
 
@@ -339,7 +358,13 @@ least three indirect jumps must follow the target's load with no register move
 between them, and at least three increments of `pc` must be in place (`add
 $0x4`). In #2768's `patterns_spilled`, a handler that calls in one arm as Lua's
 `OP_GETTABUP` does, every indirect jump but the function's first must follow
-the load of its target at once, with no reload of a loop value between them:
+the load of its target at once, with no reload of a loop value between them.
+In #2745's objects that a 64-byte vector's value initializes whole (a struct's,
+a union's, a compound literal's, and a union's other member read back), no
+store of a zero immediate may be left; a volatile object and a union whose
+designator moves to another member after the vector's keep their eight. In
+#2784's `patterns_gsub`, Lua's `str_gsub` loop, no register may be stored back
+into the memory the instruction before loaded it from:
 
 ```sh
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns && ./build/test-driver-tier1-patterns build/compiler "$(command -v clang)"

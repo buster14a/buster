@@ -694,6 +694,9 @@ static void check_test_program_body_columns(CheckTest* test, const char* source,
 }
 
 static void check_test_program_source(CheckTest* test, const char* source, const char* name, const char* clang);
+static bool check_test_program_function(const Tier0Function* a, const Tier0Function* b);
+static void check_test_constant_conversion_lowered(CheckTest* test, const char* name, const CheckProgramLowered lowered[2], const CheckProgram* program, Arena* output,
+                                                   Arena* scratch);
 
 // The bodies fixture's columns, and those of a unit of many small bodies, each with a switch, its own labels of one name,
 // a goto back, and an empty body and a label alone among them; then the bodies fixture compiled and run against clang.
@@ -2169,6 +2172,11 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                 }
                 check_test_expect(test, same, "experimental node templates retain the exact power-of-two task stream");
             }
+            // #2678's fixtures: their constants' conversions folded, on both lowerings and by the node templates.
+            if (strcmp(name, "constant-conversions") == 0 || strcmp(name, "constant-conversion-code") == 0 || strcmp(name, "constant-conversion-controls") == 0)
+            {
+                check_test_constant_conversion_lowered(test, name, lower, &program, &output, &scratch);
+            }
             for (uint32_t p = 0; p < 2; p += 1)
             {
                 check_test_expect(test, expected_pools < 0 || lower[p].initializers.count == (uint32_t)expected_pools,
@@ -2392,12 +2400,14 @@ static void check_test_program_initializer_facts(CheckTest* test)
 
 static void check_test_program_clears(CheckTest* test, const char* clang);
 static void check_test_program_named_results(CheckTest* test, const char* clang);
+static void check_test_program_forwarded_results(CheckTest* test, const char* clang);
 
 static void check_test_program_initializers(CheckTest* test, const char* clang)
 {
     check_test_program_initializer_facts(test);
     check_test_program_clears(test, clang);
     check_test_program_named_results(test, clang);
+    check_test_program_forwarded_results(test, clang);
     check_test_program_source(test,
         "struct P{int x,y,z;};int tested(int n){int calls=0;"
         "struct P p={x:++calls,.x=n,y:5,6};"
@@ -3096,6 +3106,7 @@ static void check_test_program_sparse_switches(CheckTest* test)
 #include "c_check_program_copy_test.c"
 #include "c_check_program_clear_test.c"
 #include "c_check_program_named_result_test.c"
+#include "c_check_program_forward_test.c"
 #include "c_check_program_folds_test.c"
 #include "c_check_program_fence_test.c"
 #include "c_check_program_atomic_access_test.c"
@@ -3516,6 +3527,7 @@ static void check_test_program_return_library(CheckTest* test)
 #include "c_check_program_batch_test.c"
 #include "c_check_literal_table_test.c"
 #include "c_check_power_divmod_test.c"
+#include "c_check_constant_conversion_test.c"
 
 static void check_test_program_many_arguments(CheckTest* test, const char* clang)
 {
@@ -3959,6 +3971,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_atomic_rmws(test, clang);
         check_test_program_batch(test);
         check_test_power_divmod(test, clang);
+        check_test_constant_conversions(test, clang);
         check_test_program_many_arguments(test, clang);
         check_test_program_many_aggregate_returns(test, clang);
         check_test_program_source(test,
@@ -6215,10 +6228,21 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             check_test_program_boundary_target(test, "union __attribute__((packed)) U{float v __attribute__((vector_size(16)));char c[22];};"
                                                      "union U make(int n){union U u={0};u.c[0]=(char)n;return u;}int tested(int n){return make(n).c[0];}",
                                                "odd-vector-union-result", true, true, 1, 1, NULL, &v3);
-            // At 24 bytes the <3 x double> coercion still needs an unsupported wider register payload (#2113).
+            // At 24 to 31 bytes clang returns <3 x double> in ymm0, Tier 0's payload of 24 bytes (#2113).
             check_test_program_boundary_target(test, "union __attribute__((packed)) U{float v __attribute__((vector_size(16)));char c[24];};"
                                                      "union U make(int n){union U u={0};u.c[0]=(char)n;return u;}int tested(int n){return make(n).c[0];}",
-                                               "odd-vector-union-result-24", true, false, 1, 1, "structs and unions returned in these registers", &v3);
+                                               "odd-vector-union-result-24", true, true, 1, 1, NULL, &v3);
+        }
+        // And at x86-64-v4 from 33 bytes in a ymm or a zmm register: <4 x double> at 39 bytes, <5 x double> at 47.
+        X86Target v4 = { 0 };
+        if (x86_target_parse("x86-64-v4", 9, &v4))
+        {
+            check_test_program_boundary_target(test, "union __attribute__((packed)) U{float v __attribute__((vector_size(16)));char c[39];};"
+                                                     "union U make(int n){union U u={0};u.c[0]=(char)n;return u;}int tested(int n){return make(n).c[0];}",
+                                               "odd-vector-union-result-39", true, true, 1, 1, NULL, &v4);
+            check_test_program_boundary_target(test, "union __attribute__((packed)) U{float v __attribute__((vector_size(16)));char c[47];};"
+                                                     "union U make(int n){union U u={0};u.c[0]=(char)n;return u;}int tested(int n){return make(n).c[0];}",
+                                               "odd-vector-union-result-47", true, true, 1, 1, NULL, &v4);
         }
         check_test_program_boundary(test, "struct W{unsigned __int128 x:100;};int tested(int n){struct W w;w.x=n;return w.x>1;}", "int128-bit-field-past-8-bytes", true,
                                     false, 0, 0);

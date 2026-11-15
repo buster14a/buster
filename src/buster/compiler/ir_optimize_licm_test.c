@@ -147,6 +147,15 @@ static void ir_licm_test_compare(IrOptimizeTest* test, const IrFunction* f, Aren
         const IrCheck fc = ir_optimize_licm(f, scalar, scratch, options, &fallback);
         ir_optimize_test_expect(test, fc.error == IR_OK && ir_optimize_test_equal(&a.function, &fallback.function), "LICM forced worklist completion is exact");
     }
+    // The scalar fixtures have no vector or mask value: the restricted policy skips every loop's instruction walk and
+    // returns their input without writing a replacement.
+    const uint64_t mark = vector->length;
+    IrLicmOptions restricted_options = ir_licm_options();
+    restricted_options.vectors = true;
+    IrLicmResult restricted = { 0 };
+    const IrCheck rc = ir_optimize_licm(f, vector, scratch, restricted_options, &restricted);
+    ir_optimize_test_expect(test, rc.error == IR_OK && restricted.moved == 0 && restricted.visits == 0 && vector->length == mark &&
+                                ir_optimize_test_equal(f, &restricted.function), "LICM's vector-only policy skips loops without vector values and writes nothing");
     arena_pop_to(scalar, sm);
     arena_pop_to(vector, vm);
 }
@@ -368,6 +377,92 @@ static void ir_licm_test_progress(IrOptimizeTest* test)
     arena_release(&input);
 }
 
+// IrLicmOptions.vectors' per-loop walk against its whole-function oracle (#2781), on both host paths. Every result
+// must be the same rewritten function, not merely the same motion count, and preserve the interpreter's SIMD behavior.
+static void ir_licm_test_vectors_compare(IrOptimizeTest* test, const IrFunction* f, Arena* vector, Arena* scalar, Arena* scratch, uint32_t expected_moved)
+{
+    IrLicmResult results[2][2] = { 0 };
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        for (uint32_t whole = 0; whole < 2; whole += 1)
+        {
+            IrLicmOptions options = ir_licm_options();
+            options.scalar = path != 0;
+            options.vectors = true;
+            options.whole = whole != 0;
+            Arena* output = path != 0 ? scalar : vector;
+            const IrCheck check = ir_optimize_licm(f, output, scratch, options, &results[path][whole]);
+            ir_optimize_test_expect(test, check.error == IR_OK && results[path][whole].moved == expected_moved, "LICM's vector-only walk moves exactly the vector values and their operands");
+            if (check.error == IR_OK)
+            {
+                ir_optimize_test_simd_semantics(test, f, &results[path][whole].function, scratch);
+            }
+        }
+    }
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        for (uint32_t whole = 0; whole < 2; whole += 1)
+        {
+            ir_optimize_test_expect(test, results[path][whole].function.instruction_count != 0 && results[0][0].function.instruction_count != 0 &&
+                                        ir_optimize_test_equal(&results[0][0].function, &results[path][whole].function), "LICM's per-loop and whole-function vector walks agree exactly");
+        }
+    }
+}
+
+// A vector operation of an inner loop can move to its preheader and then the outer loop's. The scalar operations beside
+// it stay where they are under IrLicmOptions.vectors; the final rewrite counts the vector's one destination change.
+static void ir_licm_test_vector_nested(IrOptimizeTest* test)
+{
+    static const char text[] = "function (i32) -> m16 {\n"
+                               "b0:\n"
+                               "  %0 = param.i32 0\n"
+                               "  %1 = const.i32 0x0\n"
+                               "  %2 = const.i32 0x1\n"
+                               "  %3 = const.i32 0x2\n"
+                               "  %4 = intrinsic.v4i32 %0 splat\n"
+                               "  %5 = br.void b1\n"
+                               "b1:\n"
+                               "  %6 = phi.i32 [%1, b0], [%18, b5]\n"
+                               "  %7 = icmp.i1 %6, %3 lt\n"
+                               "  %8 = cbr.void %7, b2, b6\n"
+                               "b2:\n"
+                               "  %9 = br.void b3\n"
+                               "b3:\n"
+                               "  %10 = phi.i32 [%1, b2], [%16, b4]\n"
+                               "  %11 = icmp.i1 %10, %3 lt\n"
+                               "  %12 = cbr.void %11, b4, b5\n"
+                               "b4:\n"
+                               "  %13 = mul.i32 %0, %3\n"
+                               "  %14 = add.v4i32 %4, %4\n"
+                               "  %15 = add.i32 %13, %2\n"
+                               "  %16 = add.i32 %10, %2\n"
+                               "  %17 = br.void b3\n"
+                               "b5:\n"
+                               "  %18 = add.i32 %6, %2\n"
+                               "  %19 = br.void b1\n"
+                               "b6:\n"
+                               "  %20 = vcmp.m16 %4, %4 eq lanes=i8\n"
+                               "  %21 = ret.void %20\n"
+                               "}\n";
+    Arena input = arena_reserve(UINT64_C(16) << 20);
+    Arena vector = arena_reserve(UINT64_C(16) << 20);
+    Arena scalar = arena_reserve(UINT64_C(16) << 20);
+    Arena scratch = arena_reserve(UINT64_C(16) << 20);
+    IrFunction f = { 0 };
+    const bool ready = input.base != NULL && vector.base != NULL && scalar.base != NULL && scratch.base != NULL;
+    const IrParseResult parsed = ready ? ir_parse((String8){ .pointer = (char*)text, .length = sizeof(text) - 1 }, &input, &scratch, &f) : (IrParseResult){ .error = IR_PARSE_END };
+    const bool fixture = parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK;
+    ir_optimize_test_expect(test, fixture, "LICM's nested vector-only fixture parses");
+    if (fixture)
+    {
+        ir_licm_test_vectors_compare(test, &f, &vector, &scalar, &scratch, 1);
+    }
+    arena_release(&input);
+    arena_release(&vector);
+    arena_release(&scalar);
+    arena_release(&scratch);
+}
+
 static void ir_licm_test_simd(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(UINT64_C(16) << 20);
@@ -444,6 +539,8 @@ static void ir_licm_test_simd(IrOptimizeTest* test)
         }
         ir_optimize_test_expect(test, results[0].function.instruction_count != 0 && results[1].function.instruction_count != 0 &&
                                 ir_optimize_test_equal(&results[0].function, &results[1].function), "LICM SIMD sweeps and worklist produce identical remapped rows");
+        // The restricted policy moves the same five vector values; the scalar addition depends on the loop's phi and stays.
+        ir_licm_test_vectors_compare(test, &f, &vector, &scalar, &scratch, 5);
         f.op[0] = IR_UNDEF;
         f.a[0] = BUSTER_IR_NONE;
         for (uint32_t path = 0; path < 2; path += 1)
@@ -526,6 +623,7 @@ static void ir_licm_test_widths(IrOptimizeTest* test)
     }
     ir_optimize_test_expect(test, results[0].function.instruction_count != 0 && results[1].function.instruction_count != 0 &&
                             ir_optimize_test_equal(&results[0].function, &results[1].function), "LICM's paths hoist the width changes alike");
+    ir_licm_test_vectors_compare(test, &f, &vector, &scalar, &scratch, 2);
     arena_release(&input);
     arena_release(&vector);
     arena_release(&scalar);
@@ -593,6 +691,8 @@ static void ir_licm_test_permute2(IrOptimizeTest* test)
     }
     ir_optimize_test_expect(test, results[0].function.instruction_count != 0 && results[1].function.instruction_count != 0 &&
                             ir_optimize_test_equal(&results[0].function, &results[1].function), "GVN and LICM's paths treat permute2 alike");
+    // Without GVN the two equal permute2s remain separate values, so the vector policy moves both and their sum.
+    ir_licm_test_vectors_compare(test, &f, &vector, &scalar, &scratch, 3);
     arena_release(&input);
     arena_release(&vector);
     arena_release(&scalar);
@@ -624,6 +724,7 @@ static __attribute__((unused)) int run_ir_licm_tests(int argc, char** argv)
         ir_licm_test_ir(&test);
         ir_licm_test_progress(&test);
         ir_licm_test_simd(&test);
+        ir_licm_test_vector_nested(&test);
         ir_licm_test_widths(&test);
         ir_licm_test_permute2(&test);
         printf("ir-licm: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);

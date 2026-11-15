@@ -144,17 +144,21 @@ passes by its vector and its scalar version:
   alone, CFG cleanup alone and with its merges, the three together, and
   Tier 1's set (the three with the merges, layout and identities);
 - LICM on the promoted form;
+- the loop vectorizer (#2743), at every operation the IR has
+  (`ir_vectorize_target_ir`), on the promoted form after Tier 1's optimizer
+  set (whose exit tests are simplified), its refusals and loops alike by both
+  paths;
 - for each caller, the inliner on a unit of the caller and its direct callees
   among the file's functions, as the C driver's expansion builds one, with
   the caller alone rewritten and #2541's general splice on.
 
 Both versions must give the same function, counts and decisions. SROA's,
 the solver's and the inliner's results must also promote. A refusal both
-versions give alike is counted, not failed: `IR_ERROR_UNSUPPORTED`, and the
-inliner's `IR_ERROR_TYPE` for a caller with an unprototyped or variadic call
-of one of the unit's functions, whose `IrCall` lists every argument. Any other
+versions give alike is counted, not failed: `IR_ERROR_UNSUPPORTED`. Any other
 error or difference fails the command, with a line naming the file,
-function and pass. The correctness list runs it on c-testsuite's subset, the
+function and pass; the inliner's unit of a caller with an unprototyped or
+variadic call is no refusal (its signature is that call's decision, #2721:
+c-testsuite's subset and `sqlite3.c` had 7 and 219 such units). The correctness list runs it on c-testsuite's subset, the
 frozen `sqlite3.c` and musl, every pass agreeing on all 5,807 functions.
 
 `./build/compiler benchmark-ir-source --passes [--only PASS] [preprocessor

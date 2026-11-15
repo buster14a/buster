@@ -100,10 +100,12 @@ Two cost rules keep a branch or move a select:
 - **A recurrence through the condition stays a branch.** The head's condition
   may read, within 16 rows, a phi that one of the join's phis flows into, as a
   running maximum's does. Its select would put the comparison on the loop's
-  carried chain: on the 9700X, `cmp; setg; test; cmovne` is four cycles per
+  carried chain: on the 9700X, `cmp; setg; test; cmovne` was four cycles per
   element against a predicted branch's one, and #1382's running max ran 3.8
-  times main's cycles. LLVM's x86 cmov conversion turns such a `cmov` back into
-  a branch after selection, and clang -O2 keeps branches there.
+  times main's cycles. Tier 1's select of a comparison is `cmp; cmovg` since
+  #2676, a chain of two cycles by their latencies, still twice the branch's.
+  LLVM's x86 cmov conversion turns such a `cmov` back into a branch after
+  selection, and clang -O2 keeps branches there.
 - **An accumulation's select sinks below its operation.** An in-place phi may
   take `s op x` on one edge and `s` on the other: an addition, a subtraction
   from `s`, an or or a xor of integers, which nothing else reads. The
@@ -120,12 +122,15 @@ A converted head whose single-predecessor chain climbs to a conditional branch
 may now be an outer region's arm (a nested `?:`, `||` inside `&&`). In that
 case the pass runs again, for at most four rounds. Between rounds and after the
 last, `ir_truth_simplify_values` takes the truth values the selects make: a
-select of truth values tested against zero becomes an i1 select in that test's
-row. So `select c, (zext x), 0` tested nonzero is `select c, x, c` (`c && x`),
-and `select c, 1, (zext y)` is `select c, c, y` (`c || y`). Tier 1 selects i1
-selects as it does wider ones. Its integer rules take no i1 `and`/`or`, so the
-truth values stay selects (#1382's follow-up). The earlier truth pass, before
-threading, keeps its comparison rules alone.
+select of truth values tested against zero becomes an i1 operation in that
+test's row. So `select c, (zext x), 0` tested nonzero is `and c, x` (`c && x`),
+and `select c, 1, (zext y)` is `or c, y` (`c || y`); `select c, (zext x),
+(zext y)` stays an i1 select. Tier 1 computes an i1 `and` and `or` as their
+32-bit operations (#2677), as clang does. A truth value used as an integer
+rather than tested, `select c, (zext x), 0` itself, is Tier 1's `and` of the
+condition and the value too, or #2676's `cmp` and `cmovCC` where the condition
+is a comparison only the select reads ([the selection guide](tier1-selection.md)). The
+earlier truth pass, before threading, keeps its comparison rules alone.
 
 The admissible values are `i1`, `i8`, `i16`, `i32`, `i64` and pointers, matching
 the scalar select consumer. Each arm moves at most four non-constant rows, and
@@ -184,9 +189,24 @@ Each converted kernel's 25 to 42 M branch misses fell to a few thousand. #2674's
 first commit had put the running max's comparison on its loop's carried chain
 (342.1 Mcycles, 3.78 times main), which the recurrence rule removed. The sums'
 remaining gap is clang's unrolling and the `setcc; test` that each `cmov`
-waits for ([#2676](https://github.com/buster14a/buster/issues/2676)). The
-truth values are i1 selects, where clang uses `and`/`or`
-([#2677](https://github.com/buster14a/buster/issues/2677)).
+waits for ([#2676](https://github.com/buster14a/buster/issues/2676)).
+
+The truth values were i1 selects then, where clang uses `and`/`or`. Since #2677
+they are Tier 1's 32-bit `and` and `or`. Measured on the 9700X with the same
+harness, 11 rounds, main `2ebfe68a` against #2796's `d42ea94b`, the driver's loop
+being 300.6 Mcycles there
+([record](https://github.com/buster14a/buster-performance/tree/35fa71ec1346673a404f56ae7e158e099016cdfe/docs/measurements/tier1-narrow-bitwise-2677-2026-11-14)):
+
+| kernel | main | `d42ea94b` | clang -O2 -fno-vectorize |
+| --- | ---: | ---: | ---: |
+| `a < 128 && b < 128` | 320.0 | 318.7 | 334.1 |
+| `(a < b) && (b < c \|\| c == 0)` | 383.9 | 363.1 | 365.5 |
+| the same returning `int` | 374.1 | 362.9 | 381.7 |
+
+sqlite3.c's `--tier1` object has 230 fewer `cmov`s (910) and 1,296 fewer bytes
+of text. The compile takes 0.16% to 0.31% more user cycles. #2676, merged after
+these runs, takes the `int` kernel's outer `&&`, whose comparison only its select
+reads: `cmp` and `cmovge` instead of `setl` and `and`.
 
 The pass costs about 1.2% of sqlite3.c's `--tier1 -c` user cycles. That is
 2,163.6 against 2,138.4 Mcycles over 11 runs, with 0.63% more instructions. Its
@@ -426,8 +446,8 @@ revision validation must be recorded separately.
 the first tests of this issue written in the IR's text form, and
 `tests/ir/optimize/*.ir` are those fixtures: hand-written before/after pairs for
 SCCP alone, DCE alone, CFG cleanup alone, the combined set the C driver's
-`--tier1` runs, value numbering, loop-invariant motion and private-field
-replacement. `test-ir-optimize` parses each pair with both parser paths, runs
+`--tier1` runs, value numbering, loop-invariant motion, private-field
+replacement and loop unrolling (#2755). `test-ir-optimize` parses each pair with both parser paths, runs
 the pass with both optimizer twins, requires the vector result's canonical
 print to be the after file's bytes, reparses it to the after file's function,
 and executes both sides on eighteen inputs through the same independent
@@ -457,6 +477,9 @@ The passes, and the guides that record each one:
 - **[Inlining](ir-inlining.md):** #2541's summaries and general splice.
 - **[Loop vectorization](tier1-loop-vectorization.md):** #2743's measured
   design, not yet an implemented pass.
+- **[Loop unrolling](tier1-loop-unrolling.md):** #2755's counted innermost
+  loops, a main loop of copies before the original as its remainder, off by
+  default (`+unroll`).
 
 Each implemented pass has before/after fixtures, built in C and in the text form (#175), with
 both twins and an independent executor. #139's last items close as follows.
@@ -465,14 +488,16 @@ The record is buster-performance's [`ssa-passes-139-2026-11-14`](https://github.
 ### The pipeline and the order
 
 `--tier1`'s order is: lowering; the unit's inlining from summaries (#2541);
-SROA (`+sroa`); #866's solver (`+gvn`); promotion; the wide integers'
-halves and the wide vectors' pieces; truth simplification; threading;
-if-conversion; LICM (`+licm`); and the optimizer, which runs SCCP, dead-code
-removal, CFG cleanup and its merges, layout and identities, then the final
-verification that selection reads. `--tier1-passes=` turns each pass on or
-off ([the Tier 1 guide](tier1.md)). By default SCCP, dead-code removal, CFG
-cleanup, the merges and the inlining run; LICM, SROA and the solver don't,
-and none repeats. The measurements below decided this.
+SROA (`+sroa`); #866's solver (`+gvn`) or its vector/mask-only form
+(`vectors`); promotion; the wide integers' halves and the wide vectors'
+pieces; truth simplification; threading; if-conversion; LICM (`+licm`) or its
+vector/mask-only form; the unroller (`+unroll`, #2755); and the optimizer,
+which runs SCCP, dead-code removal, CFG cleanup and its merges, layout and
+identities, then the final verification that selection reads.
+`--tier1-passes=` turns each pass on or off ([the Tier 1 guide](tier1.md)). By
+default SCCP, dead-code removal, CFG cleanup, the merges, the inlining and the
+vector/mask-only passes run; unrestricted LICM, SROA, the unroller and the
+solver don't, and none repeats. The measurements below decided this.
 
 ### Agreement of the twins
 
@@ -642,7 +667,8 @@ an issue of its own:
 - **Scalar floating folding** under #1450's floating-environment contract:
   #2720.
 - **Inlining callees with control flow, its classes and budgets:** #2541 and its
-  claimed steps. Its unit refusal of a variadic or unprototyped call: #2721.
+  steps. A variadic or unprototyped call is the call's decision, not the unit's
+  error (#2721).
 
 ## Algorithm sources and provenance
 

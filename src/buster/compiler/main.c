@@ -705,6 +705,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_node_machine_type.c"
 #include "buster/compiler/c_check_node_machine_contexts.c"
 #include "buster/compiler/c_check_node_machine_expand.c"
+#include "buster/compiler/c_check_node_machine_lower.c"
 #endif
 // bake-tables (#590): the backend's tables written into this executable's own file, built, by build.sh, from this
 // unit, whose Tier 0 and unwind copies the C driver above uses (baked.h).
@@ -909,6 +910,11 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_licm_test.c"
 #endif
+// #2755: Tier 1's loop unroller, --tier1-passes=+unroll.
+#include "buster/compiler/ir_optimize_unroll.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+#include "buster/compiler/ir_optimize_unroll_test.c"
+#endif
 #include "buster/compiler/ir_optimize_sroa.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_sroa_test.c"
@@ -920,6 +926,11 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_optimize_text_test.c"
 #else
 #include "buster/compiler/ir_optimize_verified.c"
+#endif
+// #2743: the loop vectorizer of countable innermost loops (Tier 1's --tier1-passes=+vectorize) and its fixtures.
+#include "buster/compiler/ir_vectorize_loops.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+#include "buster/compiler/ir_vectorize_loops_test.c"
 #endif
 // #866's GVN variants on real source's lowered IR are part of #131's IR benchmark, which needs GVN's definitions.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
@@ -2348,6 +2359,14 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-licm") == 0)
     {
         result = run_ir_licm_tests(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-vectorize") == 0)
+    {
+        result = run_ir_vectorize_tests(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-unroll") == 0)
+    {
+        result = run_ir_unroll_tests(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-sroa") == 0)
     {

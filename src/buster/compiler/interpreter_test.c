@@ -663,7 +663,7 @@ static void interpreter_test_atomic_cas(InterpreterTestTally* tally, Arena* scra
 
 // The memories' disjoint prefix (InterpreterRuntime.disjoint_count, #1229) never changes which memory an access finds,
 // the first that holds it: a memory that overlaps one in the prefix stays past it, and the prefix's one, found first,
-// decides; a last-match hint that a removal left pointing at another memory isn't taken; the prefix stops growing at
+// decides; a recent match that a removal left pointing at another memory isn't taken; the prefix stops growing at
 // BUSTER_INTERPRETER_DISJOINT_PREFIX memories, past which the lookup still finds each; and a removal keeps from the
 // prefix exactly the memories it kept from it.
 static void interpreter_test_lookup(InterpreterTestTally* tally)
@@ -692,11 +692,12 @@ static void interpreter_test_lookup(InterpreterTestTally* tally)
     interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_second, 4, true) == INTERPRETER_OK, "lookup: the prefix's newest memory");
     interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_first + 4, 4, true) == INTERPRETER_MEMORY,
                             "lookup: the first memory that holds a range decides, not a later overlapping one");
-    interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_third, 8, true) == INTERPRETER_OK && runtime.last_match == 3,
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_third, 8, true) == INTERPRETER_OK && runtime.recent[interpreter_memory_recent(at_third)] == 3,
                             "lookup: a memory past the prefix, found in order, is the hint");
     // With second removed, index 3, the hint, is the view of first's bytes 8 to 12, past the prefix: first, still
-    // before it, decides.
+    // before it, decides. The hint is the one at first's bytes 8 to 12's own entry.
     interpreter_memory_remove(&runtime, second);
+    runtime.recent[interpreter_memory_recent(at_first + 8)] = 3;
     interpreter_test_expect(tally, runtime.memory_count == 4 && runtime.disjoint_count == 1, "lookup: a removal keeps the prefix's memories it kept");
     interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_first + 8, 4, true) == INTERPRETER_MEMORY,
                             "lookup: a hint past the prefix isn't taken over an earlier memory that holds the range");
@@ -1744,6 +1745,60 @@ static void interpreter_test_text_native(InterpreterTestTally* tally, Arena* scr
 #include "interpreter_object_test.c"
 #include "interpreter_wide_test.c"
 
+// The scalar transfers interpreter.c's loads, stores and locals take (#2758): interpreter_load_value and
+// interpreter_store_value against memcpy of the value's low bytes, plain and volatile, at every size from 1 to 16 and
+// every offset in a line, the store's neighbouring bytes left alone, and interpreter_define_bytes against memset.
+static void interpreter_test_scalar_bytes(InterpreterTestTally* tally)
+{
+    uint8_t memory[64];
+    uint8_t expected[64];
+    uint64_t state = UINT64_C(0x9e3779b97f4a7c15);
+    for (uint32_t b = 0; b < sizeof(memory); b += 1)
+    {
+        state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+        memory[b] = (uint8_t)(state >> 56);
+    }
+    bool loads = true;
+    bool stores = true;
+    bool defines = true;
+    for (uint32_t bytes = 1; bytes <= 16; bytes += 1)
+    {
+        for (uint32_t offset = 0; offset < 32; offset += 1)
+        {
+            for (uint32_t observable = 0; observable < 2; observable += 1)
+            {
+                InterpreterValue reference = { 0 };
+                memcpy(&reference, memory + offset, bytes);
+                const InterpreterValue loaded = interpreter_load_value((uintptr_t)(memory + offset), bytes, observable != 0);
+                loads = loads && loaded.low == reference.low && loaded.high == reference.high;
+                state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                const InterpreterValue stored = {
+                    .low = state,
+                    .high = state * UINT64_C(0xff51afd7ed558ccd),
+                };
+                memcpy(expected, memory, sizeof(memory));
+                memcpy(expected + offset, &stored, bytes);
+                interpreter_store_value((uintptr_t)(memory + offset), stored, bytes, observable != 0);
+                stores = stores && memcmp(memory, expected, sizeof(memory)) == 0;
+            }
+        }
+    }
+    for (uint32_t bytes = 0; bytes <= 40; bytes += 1)
+    {
+        for (uint32_t offset = 0; offset < 16; offset += 1)
+        {
+            uint8_t defined[64] = { 0 };
+            uint8_t reference[64] = { 0 };
+            memset(reference + offset, 1, bytes);
+            interpreter_define_bytes(defined + offset, bytes);
+            defines = defines && memcmp(defined, reference, sizeof(defined)) == 0;
+        }
+    }
+    interpreter_test_expect(tally, loads, "scalar loads take a value's low bytes, plain and volatile");
+    interpreter_test_expect(tally, stores, "scalar stores write a value's low bytes alone, plain and volatile");
+    interpreter_test_expect(tally, defines, "defined bytes are marked as memset marks them");
+}
+
 static int run_interpreter_tests(int argc, char** argv)
 {
     uint64_t seed = 176;
@@ -1785,6 +1840,7 @@ static int run_interpreter_tests(int argc, char** argv)
         interpreter_test_conversions(&tally, &scratch);
         interpreter_test_recursion(&tally, &scratch);
         interpreter_test_memory(&tally, &scratch);
+        interpreter_test_scalar_bytes(&tally);
         interpreter_test_atomic_rmw(&tally, &scratch);
         interpreter_test_atomic_cas(&tally, &scratch);
         interpreter_test_lookup(&tally);

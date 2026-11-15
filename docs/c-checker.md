@@ -2464,10 +2464,13 @@ What the lowering covers past scalars (#145's programs):
   median increases 0.79% with overlapping ranges. The report preserves these
   limits and the full evidence.
 - **Initializers.** A local object's plan is applied in order: the object is
-  cleared first unless its first part writes it whole (zeros, or an
-  aggregate's copy of the object's size, as `T x = *p;` and `T x = f();`, which
-  writes its padding too), then each part's zeros, bytes or value is stored, an
-  aggregate's copied. Zeros of up to 128 bytes are stores of 8 down to 1 bytes;
+  cleared first unless its first part writes it whole (zeros, an aggregate's
+  copy of the object's size, as `T x = *p;` and `T x = f();`, which writes its
+  padding too, or a vector's value of at least the object's size, as the
+  intrinsics' wrappers' `(U512){ .v = x }`, whose store writes every byte of
+  its padding-free type, #2745; a scalar's doesn't count, as `long double`'s
+  store writes 10 of its 16 bytes), then each part's zeros, bytes or value is
+  stored, an aggregate's copied. Zeros of up to 128 bytes are stores of 8 down to 1 bytes;
   past 128 bytes (`BUSTER_CHECK_LOWER_FILL_UNROLLED`) they are one call of the
   target C library's `memset`, as clang `-O0`'s code clears them (#1376), the
   whole object's and each zero part's. Each such call is counted with the
@@ -2541,11 +2544,8 @@ What the lowering covers past scalars (#145's programs):
   code does; a return that keeps its value first (`CHECK_CONTROL_RESULT`), a
   musttail one, a second object, a parameter, a global, a member or a
   dereference keep the copy, as does a body that names a returns-twice
-  function. The object's own call initializer returns into an object of its
-  own (`call_result_objects` names a frame object, not the hidden pointer's
-  target) and is copied in, which costs the same copy that #1549's
-  destination and the return's would; passing the hidden pointer down to it,
-  and to `return f(...);`, is #2684. Its debug location is the hidden
+  function. The object's own call initializer passes the hidden pointer on
+  (#2684, below). Its debug location is the hidden
   pointer's, dereferenced (`CheckDebugBinding.indirect`, as a VLA's is), by
   both tiers. Register returns keep their path. On the 9700X
   ([record](https://github.com/buster14a/buster-performance/tree/e8c1b78f2c67b5917f7ef19d999aa61372d4e795/docs/measurements/named-results-1375-2026-11-13)),
@@ -2555,6 +2555,31 @@ What the lowering covers past scalars (#145's programs):
   return takes 382.6 → 247.0 and 251.0 → 203.9 (clang `-O0`: 200.4). `-c`'s
   instructions on sqlite3.c and the compiler's `main.c` move by 0.024% at
   most, in either tier.
+  A call whose result is the function's own, through the hidden pointer, passes
+  that pointer on (#2684), as clang `-O0` passes its `sret` pointer on: the
+  value of a plain `return f(...);` (through its conversions to the result's
+  type and the selections around it, `_Generic`'s, `__builtin_choose_expr`'s
+  and `__extension__`'s, as a musttail return looks through them) and the named
+  result's whole-object call initializer. `check_lower_call_forwards` takes a
+  source call (none that `check_program_call_computed` computes inline) of the
+  function's own unqualified type, size and hidden-pointer ABI, whose canonical
+  alignment the caller's storage has; the call's destination is then
+  `BUSTER_CHECK_LOWER_HIDDEN`, its result object `BUSTER_TIER0_RESULT_HIDDEN`
+  ([Tier 0](tier0.md)), and it leaves no address and needs no object and no
+  copy: its callee writes the result where the function's caller wants it.
+  The caller's storage is unaliased during the call, and only the named result
+  names it, so no argument reaches it, but an initializer that names its own
+  object (`check_lower_init_names_destination`), which keeps the call's object.
+  `check_lower_forwards` keeps the copy for a whole body that keeps a return's
+  value before its cleanups (a `CHECK_CONTROL_RESULT`) or names a returns-twice
+  function (`check_lower_init_reentry`), from the body's controls 16 kinds at a
+  time on the vector path (`check_lower_control_kinds`, shared with the named
+  result's search) with a scalar twin. The function's `hidden_size` and
+  `hidden_alignment` give the bytes such a call writes: Tier 1's IR returns
+  them into a slot of its own and copies them there ([the IR](ir.md)), as it
+  did, past 256 bytes by the `memmove` the lowering registers for it
+  (`hidden_copy`, which no Tier 0 entry calls); Tier 0 and the interpreter copy
+  nothing.
   Above 128 bytes of explicit constant payload, dense nonvolatile byte-aligned numeric
   plans use a readonly byte image and one call to the target C library's
   `memcpy` (#598). The call returns the destination and discards it, which is the
@@ -2983,7 +3008,8 @@ What the lowering covers past scalars (#145's programs):
   values are captured before later operands run, including a wide condition
   whose original object an arm overwrites; the omitted middle operand is
   evaluated once. Scalar arms splat at their element type. Non-boolean logical
-  operations and selections are bounded to 1,024 elements. Scalar-condition
+  operations and selections take any number of elements, on register-width
+  pieces (#2216). Scalar-condition
   `?:` keeps the usual short-circuit behavior. Clang rejects `&&` and `||` of
   boolean vectors, and whole-vector `++` and `--` of either vector kind; the
   checker rejects them too. Compound assignments and increments of an element
@@ -3476,8 +3502,32 @@ What the lowering covers past scalars (#145's programs):
     bits (5 past 32 bits) and xors the integer products of every pair of
     classes into its sum's class (`check_lower_sequence_clmul`), so that each
     class's carries stay in the other classes' positions. These expansions, ordered floating sums
-    and floating reduction trees are bounded to 1,024 elements and preserve
-    the ordinary rows' element-type and target-feature refusals.
+    and floating reduction trees take any number of elements (#2216: their
+    entries grow with the elements, or with the pieces for the trees) and
+    preserve the ordinary rows' element-type and target-feature refusals.
+    A `_BitInt` past 128 bits, whose value is its limbs' frame object's
+    address, takes the integer elementwise builtins limb by limb
+    (`check_lower_limb_elements_emit`, #2410): its arguments' addresses go
+    into temporaries and a deferred task (`CHECK_LOWER_LIMB_ELEMENTS`) runs
+    each builtin's recipe on U64 limbs without branches, as LLVM computes its
+    intrinsic on the iN, the result's top limb extended from the width. max
+    and min select by the limbs' compare's mask; abs is `(a ^ s) + (s & 1)`
+    with its carry, s the sign's limb; add_sat and sub_sat select the bound
+    (all ones, zeros, or the largest value xor a's sign) by the wrapped
+    result's overflow (an unsigned compare, or the top limbs' sign);
+    popcount, clzg and ctzg are the scalar builtins' limb counts
+    (`check_lower_limb_bits_popcount`, `check_lower_limb_bits_zeros`), a
+    fallback selected where the value is zero, and bitreverse is
+    `__builtin_bitreverseg`'s recipe. fshl and fshr reduce the count's bits,
+    unsigned, modulo the width, then shift through the limb shifts by less
+    than the width, `(a << s) | ((b >> 1) >> (w - 1 - s))`; clang's own code
+    refuses a variable count at a width no power of two (LLVM's remainder of
+    it is a library call that x86-64 has none of), where this one's equals
+    the constant's. pdep and pext go a mask limb at a time, each taking
+    `popcount(m_i)` bits at the sum of the counts before it, by BMI2's 64-bit
+    row or Hacker's Delight's expansion; clmul xors the 64-bit products of
+    limb pairs (PCLMULQDQ's two halves, or the 128-bit expansion's product),
+    quadratic in the limbs, and is refused by name past 4,096 bits.
   - boolean elementwise builtins use packed bit operations at scalar and
     register-sized widths: max and saturating add are OR; min, pdep, pext
     and clmul are AND; saturating subtract is `a & ~b`; popcount and
@@ -3523,8 +3573,8 @@ What the lowering covers past scalars (#145's programs):
   AVX-512 VBMI2), and gathers and scatters of 8- and 16-bit elements, which no
   instruction gathers or scatters (clang's code takes each element in turn); a shuffle by a vector
   of indices; bit reversal without GFNI (or, of bytes, AVX512-BMM); funnel
-  shifts of 8-bit elements outside 16-byte vectors or without XOP; the integer elementwise functions of
-  scalars wider than 128 bits (`_BitInt` past 128 bits, #2410); nontemporal builtins of scalars and at underaligned addresses; bit
+  shifts of 8-bit elements outside 16-byte vectors or without XOP; carry-less products of `_BitInt`s
+  past 4,096 bits (#2410); nontemporal builtins of scalars and at underaligned addresses; bit
   casts of other types; and the rows whose extensions the target hasn't
   (BITALG, VPOPCNTDQ, VBMI2, DQ, GFNI, BMI2) are refused by name. Shuffles of
   8-bit elements without VBMI's VPERMT2B, and of 16-bit ones without BW's
@@ -7251,8 +7301,15 @@ variable's initializer at its name, after its attributes' warnings, as clang's `
 scope's is an error). `-Wgnu-empty-struct` (#2409, off by default, `-pedantic`'s and `-Wgnu`'s) warns of a
 struct's or union's definition without named members at its keyword, as clang's `ActOnFields` does when it
 completes the record: "empty struct is a GNU extension", or "struct without named members is a GNU extension" where
-its members are unnamed bit-fields alone (an anonymous member counts as named). Left: clang's off-by-default
-`-Wc++-compat` "empty struct has size 0 in C, size 1 in C++" and `-Wzero-length-array` aren't given. Command-line
+its members are unnamed bit-fields alone (an anonymous member counts as named).
+`-Wc++-compat` also diagnoses completed zero-size records, before the GNU warning at the same keyword. It includes
+named zero-size members and wrappers around flexible-array records, but excludes a record's own flexible-array
+member. The wording distinguishes an empty record from one with fields and one named member from several.
+`-Wzero-length-array` diagnoses zero bounds with integer-constant-expression form, including overflow folding, while their declarator types are built, from
+the inner dimension out, and an unknown bound inferred as zero at its initializer. Typedef reuse and an array
+copied from a compound literal retain the original diagnostic without duplicating it. Other GNU-folded zero
+bounds, such as const-variable reads and comma expressions, keep their folding warning alone. Both new warnings are ignored by default; `-Wgnu` and `-pedantic`
+also enable the zero-length-array warning. Command-line
 options, `#pragma clang diagnostic` groups, `-w`, system
 headers and `-Werror` promotion apply through the shared sparse policy (`c_check_warning_policy.c`); the
 driver's `check_driver_warning_events_at` orders them by completion and attaches their notes. `test-checker-driver`
@@ -8643,11 +8700,18 @@ unqualified placeholder even with const or volatile, as Clang does, and keeps
 the name's macro expansion notes. A missing initializer reports its qualified
 placeholder type after the restrict error, even at the same name. This recovery
 does not permit object emission.
-Refused by name: `_Atomic` and `restrict` through a declarator
-(`_Atomic __auto_type *p`, whose initializer clang finds incompatible),
-`restrict` of a value that is no pointer to an object (clang's `restrict int`,
-which the placeholder can't be told from), and other type-changing attributes
-besides the handled vector, mode and address-space attributes. An incompatible
+An `_Atomic __auto_type` pointee through one or more pointer declarators instead
+reports Clang's incompatible-initializer error at each variable's name. Its
+placeholder keeps the written pointer and qualifier levels, and the initializer
+keeps its unconverted type, typedef spelling, array or function type and lvalue
+qualifiers. The rejected declaration remains bound with quiet uses; its initializer
+is removed from conversion and emission, and later declarators and independent
+errors still run. Invalid-binding recovery requires the existing source-order
+fallback when a deferred lane encounters it.
+Refused by name: other `_Atomic` and `restrict` declarators, `restrict` of a
+value that is no pointer to an object (clang's `restrict int`, which the
+placeholder can't be told from), and other type-changing attributes besides
+the handled vector, mode and address-space attributes. An incompatible
 address-space pointee initializer is rejected by the assignment check, whose
 message names the deduced type rather than clang's undeduced placeholder. An
 `_Atomic` placeholder initialized by an atomic value reports the incompatible
@@ -8676,12 +8740,16 @@ is clang's (`c_checker_driver_gnu_test.c`).
 The original `tests/driver/auto-qualifiers/` runtime sources compare complete
 Clang diagnostics for the combined atomic/restrict specifiers in every order,
 GNU restrict spellings, macros, comma groups and later independent errors.
+Atomic pointer initializers also cover nested pointers, pointer qualifiers,
+unconverted source types and typedefs, mixed valid/invalid comma declarators,
+quiet uses of invalid bindings and expression warnings after the recovered error.
 Missing initializers retain both errors, and `typeof` assertions check the
 recovered atomic types. Accepted neighboring atomic and restricted-pointer
 declarations check that deduction and emission remain valid; C23 constexpr
 and inferred-auto comma groups guard the continuation flags. The shared driver
 harness covers GNU17 and C23, both kernels, one/three requested lanes, syntax
 and object routes, and default, `-Werror` and `-w` policies.
+`test-checker-driver --auto-qualifiers-only` runs this catalog alone.
 
 The original runtime sources in `tests/driver/auto-address/` run through the
 address-space driver's existing diagnostic harness in GNU17 and C23 modes.
@@ -8920,8 +8988,11 @@ change, it refused such a declaration by name.
   clang's locations and order, and later independent declarations are checked.
   An empty parenthesized argument has only its string-literal error. A malformed
   GNU outer tail discards the following complete semicolon-bounded declaration,
-  so its name cannot hide a later undeclared-name error; a C23 list keeps its
-  declaration. The original `tests/driver/attribute_recovery.c` fixtures compare
+  so its name cannot hide a later undeclared-name error. A malformed C23 separator
+  drops the unread items through that list's closing brackets, preserving earlier
+  attributes, later separate lists and the declaration itself. It does not drop
+  later items after an inner-parenthesis recovery or a non-string argument error.
+  The original `tests/driver/attribute_recovery.c` fixtures compare
   both language modes, readers, warning policy, deferred checking and output
   preservation. GNU statement-attribute classification skips each balanced
   argument group, so a subscript within a malformed string argument is not

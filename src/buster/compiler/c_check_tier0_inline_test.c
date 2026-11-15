@@ -4,14 +4,15 @@
 // test-tier0-inline (#1398): Tier 0's splice (tier0_inline.c) and its use in the emission (c_check_tier0_inline.c) on
 // real C, the vector path against its scalar twin. Include after tier0_source_benchmark.c and c_checker_driver_test.c.
 //
-//   build/compiler test-tier0-inline [preprocessor options] [file...]
+//   build/compiler test-tier0-inline [--tier0-inline-shapes] [preprocessor options] [file...]
 //
 // Each file is prepared as -c prepares it (check_source_prepare), its reachable definitions lowered by check_program_emit,
 // and the unit's inline callees' table built as the emission builds it (check_tier1_inline_table). Then every body goes
 // through check_tier0_inline_body twice, by the vector path and by the scalar twin, each with its own lane cache: both
 // must splice the same bodies, and every column of each G must be the same bytes, its starts too; tier0_validate accepts
 // each (the splice's own check) and Tier 0 compiles it. Without a file, it takes the driver fixture
-// (check_test_tier0_inline_source) at x86-64-v4. The driver fixture (test-checker-driver) runs the programs.
+// (check_test_tier0_inline_source) at x86-64-v4. --tier0-inline-shapes splices callees with several returns or a result
+// in memory too, as -c's option does (#1398 step 5). The driver fixture (test-checker-driver) runs the programs.
 
 typedef struct Tier0InlineTestTally Tier0InlineTestTally;
 struct Tier0InlineTestTally
@@ -73,7 +74,7 @@ static bool tier0_inline_test_same(const Tier0Function* a, const Tier0Function* 
 }
 
 // One file's bodies by both paths (the file's comment): false where it couldn't be prepared or emitted.
-static bool tier0_inline_test_file(Tier0InlineTestTally* tally, const char* file, char** options, uint32_t option_count)
+static bool tier0_inline_test_file(Tier0InlineTestTally* tally, const char* file, char** options, uint32_t option_count, bool shapes)
 {
     CheckSource prepared;
     const bool chosen = check_source_prepare(&prepared, file, options, option_count, (CheckSourceRequest){ .select = true, .emits = true });
@@ -104,7 +105,14 @@ static bool tier0_inline_test_file(Tier0InlineTestTally* tally, const char* file
         bool spliced[2];
         for (uint32_t path = 0; path < 2; path += 1)
         {
-            CheckEmitRun run = { .program = program, .lowered = &code.lowered, .scalar = path != 0, .tier0_inline = &table, .inline_table = &table };
+            CheckEmitRun run = {
+                .program = program,
+                .lowered = &code.lowered,
+                .scalar = path != 0,
+                .tier0_inline = &table,
+                .inline_table = &table,
+                .tier0_inline_shapes = shapes,
+            };
             CheckEmitLane lane = { .tier0_inline = &caches[path] };
             spliced[path] = check_tier0_inline_body(&run, &lane, b, &work, &inlined[path]);
         }
@@ -138,7 +146,7 @@ static bool tier0_inline_test_file(Tier0InlineTestTally* tally, const char* file
     }
     tally->sites += sites;
     const bool valid = emitted && accessed;
-    printf("test-tier0-inline: file=%s bodies=%u callees=%s sites=%" PRIu64 "\n", file, count, callees ? "yes" : "no", sites);
+    printf("test-tier0-inline: file=%s bodies=%u callees=%s shapes=%s sites=%" PRIu64 "\n", file, count, callees ? "yes" : "no", shapes ? "yes" : "no", sites);
     if (!valid)
     {
         fprintf(stderr, "test-tier0-inline: %s: couldn't be prepared and lowered (%s)\n", file, code.reason != NULL ? code.reason : "a refusal or a resource");
@@ -160,12 +168,17 @@ static int run_tier0_inline_tests(int count, char** arguments)
     char** files = calloc((size_t)count + 1, sizeof(char*));
     uint32_t option_count = 0;
     uint32_t file_count = 0;
+    bool shapes = false;
     bool valid = options != 0 && files != 0;
     for (int i = 0; valid && i < count; i += 1)
     {
         if (arguments[i][0] != '-')
         {
             files[file_count++] = arguments[i];
+        }
+        else if (strcmp(arguments[i], "--tier0-inline-shapes") == 0)
+        {
+            shapes = true;
         }
         else
         {
@@ -195,7 +208,7 @@ static int run_tier0_inline_tests(int count, char** arguments)
     Tier0InlineTestTally tally = { 0 };
     for (uint32_t f = 0; valid && f < file_count; f += 1)
     {
-        valid = tier0_inline_test_file(&tally, files[f], options, option_count);
+        valid = tier0_inline_test_file(&tally, files[f], options, option_count, shapes);
     }
     if (own)
     {
@@ -209,7 +222,7 @@ static int run_tier0_inline_tests(int count, char** arguments)
            tally.bodies, tally.spliced, tally.sites, tally.entries_before, tally.entries_after, tally.checks, tally.failures);
     if (!valid)
     {
-        fprintf(stderr, "usage: compiler test-tier0-inline [preprocessor options] [file...]\n");
+        fprintf(stderr, "usage: compiler test-tier0-inline [--tier0-inline-shapes] [preprocessor options] [file...]\n");
     }
     free(files);
     free(options);

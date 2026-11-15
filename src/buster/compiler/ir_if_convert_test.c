@@ -413,8 +413,8 @@ static bool ir_if_convert_test_reload(Arena* arena, IrFunction* f, uint32_t vari
 }
 
 // The C lowering's `&&` (variant 0) and `||` (1) value: the arm holds a comparison twice with its zero extensions and
-// a dead shift, of which the phi needs two rows. The join tests the phi against zero, which becomes an i1 select of the
-// two comparisons. Variant 2's dead division by a parameter could fault, so its arm stays.
+// a dead shift, of which the phi needs two rows. The join tests the phi against zero, which becomes an i1 and (or or) of
+// the two comparisons (#2677). Variant 2's dead division by a parameter could fault, so its arm stays.
 static bool ir_if_convert_test_truth(Arena* arena, IrFunction* f, uint32_t variant)
 {
     const IrSizes sizes = {
@@ -734,16 +734,20 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
                 ir_if_convert_test_compare(test, &f, &vector, &scalar, &optimized, &scratch, expected, expected);
                 IrIfConvertResult v = { 0 };
                 const IrCheck vc = ir_if_convert(&f, &vector, &scratch, false, &v);
-                // The test of the phi is now an i1 select of the head's comparison and the arm's, in the head.
+                // The test of the phi is now an i1 and (`&&`) or or (`||`) of the head's comparison and the arm's, in the
+                // head, and no i1 select is left.
+                const uint32_t logic = variant == 1 ? IR_OR : IR_AND;
                 uint32_t truth = BUSTER_IR_NONE;
+                uint32_t selects = 0;
                 for (uint32_t i = 0; vc.error == IR_OK && i < v.function.instruction_count; i += 1)
                 {
-                    truth = v.function.op[i] == IR_SELECT && v.function.type[i] == IR_I1 ? i : truth;
+                    truth = v.function.op[i] == logic && v.function.type[i] == IR_I1 ? i : truth;
+                    selects += v.function.op[i] == IR_SELECT && v.function.type[i] == IR_I1;
                 }
-                const bool shaped = truth != BUSTER_IR_NONE && v.function.op[v.function.a[truth]] == IR_ICMP && v.function.op[v.function.b[truth]] == IR_ICMP &&
-                                    v.function.op[v.function.c[truth]] == IR_ICMP && (variant == 0 ? v.function.c[truth] == v.function.a[truth] : v.function.b[truth] == v.function.a[truth]);
+                const bool shaped = truth != BUSTER_IR_NONE && selects == 0 && v.function.op[v.function.a[truth]] == IR_ICMP && v.function.op[v.function.b[truth]] == IR_ICMP &&
+                                    v.function.a[truth] != v.function.b[truth] && v.function.c[truth] == BUSTER_IR_NONE;
                 ir_optimize_test_expect(test, vc.error == IR_OK && (variant == 2 ? truth == BUSTER_IR_NONE && v.reused == 0 : shaped && v.reused == 2),
-                                        "if-conversion leaves dead rows, reuses repeated ones and tests the truth value as an i1 select");
+                                        "if-conversion leaves dead rows, reuses repeated ones and tests the truth value as an i1 and or or");
                 arena_pop_to(&vector, 0);
             }
             arena_pop_to(&input, 0);
