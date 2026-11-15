@@ -40,6 +40,55 @@ struct CheckProgramSelection
     CheckProgramStatus status;
 };
 
+// What two selections of one unit share (#2536's step 2.2c.4, part 3): the parts of check_program_select_mode that read no
+// references, which the first selection that takes them makes and the next one reads. That is the provisional selection
+// before the loop and the exact one after it, of the same static data:
+// - the static objects' root flags and inline rules (`roots` and `inline_rules`, declared_count + 1 of each), but a
+//   block-scope static's roots, which count only where code that clang emits declares it (check_program_token_emitted,
+//   which reads the loop's left-out ranges): those declarations' tokens, groups and roots (`static_count` of them), each
+//   selection's to add;
+// - each body's eager answer (check_program_body_eager), 0 where none is made yet, else 1 more than the answer.
+// The caller makes the columns (check_program_select_shared_make), in an arena that outlives both selections.
+typedef struct CheckProgramSelectShared CheckProgramSelectShared;
+struct CheckProgramSelectShared
+{
+    uint32_t* roots;
+    uint8_t* inline_rules;
+    uint32_t* static_tokens;
+    uint32_t* static_groups;
+    uint32_t* static_roots;
+    uint8_t* eager;
+    uint32_t declared_count;
+    uint32_t declaration_count;
+    uint32_t body_count;
+    uint32_t static_count;
+    bool ready;
+};
+
+// A CheckProgramSelectShared's columns for `data` and `body_count` bodies, in `arena`, none made yet. Whether there was
+// room.
+static bool check_program_select_shared_make(CheckProgramSelectShared* shared, const CheckDataPrepared* data, uint32_t body_count, Arena* arena)
+{
+    *shared = (CheckProgramSelectShared){
+        .roots = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)data->declared_count + 1),
+        .inline_rules = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)data->declared_count + 1),
+        .static_tokens = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)data->declaration_count + 1),
+        .static_groups = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)data->declaration_count + 1),
+        .static_roots = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)data->declaration_count + 1),
+        .eager = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)body_count + 1),
+        .declared_count = data->declared_count,
+        .declaration_count = data->declaration_count,
+        .body_count = body_count,
+    };
+    const bool made = shared->roots != NULL && shared->inline_rules != NULL && shared->static_tokens != NULL && shared->static_groups != NULL &&
+                      shared->static_roots != NULL && shared->eager != NULL;
+    if (made)
+    {
+        memset(shared->eager, 0, (uint64_t)body_count + 1);
+    }
+    return made;
+}
+
 // The roots a declaration's `attributes` make its definition: used (but not retain, which keeps the section of a
 // definition that is emitted without making it one: clang 23 emits no unreferenced static with retain alone, #147),
 // x86's interrupt (whose handler adds an implicit used, #147), constructor, destructor and cpu_specific (#1447).
@@ -828,8 +877,8 @@ static bool check_program_weak_bindings(CheckProgram* program, const CheckDataPr
     return valid;
 }
 
-static bool check_program_select_mode(CheckProgramSelection* result, const CheckProgram* full, const CheckDataPrepared* data, CLoweringMode mode,
-                                      bool scalar, bool keep_sectioned, Arena* output, Arena* scratch)
+static bool check_program_select_shared(CheckProgramSelection* result, const CheckProgram* full, const CheckDataPrepared* data, CLoweringMode mode,
+                                        bool scalar, bool keep_sectioned, CheckProgramSelectShared* shared, Arena* output, Arena* scratch)
 {
     (void)scalar;
 
@@ -903,8 +952,22 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
         // The static declarations, which check_data_prepare found (#592): of all the tokens that declare, the only ones whose
         // attributes and spellings make an object a root or an inline-only function. Both they and the declared objects
         // are in object order, so each declaration's object is found by stepping through the objects.
+        // A shared selection's roots and inline rules where an earlier selection made them (CheckProgramSelectShared), or
+        // this one's from the declarations; a block-scope static's roots apart, listed to add below.
+        const bool sharing = shared != NULL && shared->declared_count == data->declared_count && shared->declaration_count == data->declaration_count;
+        const bool reuse = sharing && shared->ready;
+        uint32_t* static_tokens = sharing ? shared->static_tokens : BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)data->declaration_count + 1);
+        uint32_t* static_groups = sharing ? shared->static_groups : BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)data->declaration_count + 1);
+        uint32_t* static_roots = sharing ? shared->static_roots : BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)data->declaration_count + 1);
+        uint32_t static_count = reuse ? shared->static_count : 0;
+        valid = static_tokens != NULL && static_groups != NULL && static_roots != NULL;
+        if (valid && reuse)
+        {
+            memcpy(roots, shared->roots, ((uint64_t)data->declared_count + 1) * sizeof(uint32_t));
+            memcpy(inline_rules, shared->inline_rules, (uint64_t)data->declared_count + 1);
+        }
         uint32_t group = 0;
-        for (uint32_t d = 0; d < data->declaration_count; d += 1)
+        for (uint32_t d = 0; valid && !reuse && d < data->declaration_count; d += 1)
 
         {
             const uint32_t token = (uint32_t)data->declaration_keys[d];
@@ -916,11 +979,15 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             const bool function = input->declaration_kinds[token] == C_BINDING_FUNCTION;
             bool gnu_inline = false;
             // A block-scope static that no emitted code declares is no root, `used` as it may be: clang emits it only
-            // where it emits its declaration's statement (#1108).
-            const bool dropped = !function && check_input_linkage(input->declaration_bits, token) == 0 && check_sparse_get(input->declaration_bodies, token) != BUSTER_CHECK_NONE &&
-                                 !check_program_token_emitted(full, token);
+            // where it emits its declaration's statement (#1108). Its roots are listed, and added below where it is.
+            const bool block_static = !function && check_input_linkage(input->declaration_bits, token) == 0 &&
+                                      check_sparse_get(input->declaration_bodies, token) != BUSTER_CHECK_NONE;
             const uint32_t attribute_roots = check_program_attribute_roots(check_input_attributes_at(input, token), function, &gnu_inline);
-            roots[group] |= dropped ? 0 : attribute_roots;
+            roots[group] |= block_static ? 0 : attribute_roots;
+            static_tokens[static_count] = token;
+            static_groups[static_count] = group;
+            static_roots[static_count] = attribute_roots;
+            static_count += block_static && attribute_roots != 0 ? 1 : 0;
             inline_rules[group] |= gnu_inline ? 2 : 0;
             const uint8_t spelling = function && input->function_flags != 0 ? input->function_flags[token] : 0;
             // Any plain inline declaration gives GNU inline's body external linkage, even if the definition itself
@@ -933,6 +1000,18 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                     inline_rules[group] &= (uint8_t)~1u;
                 }
             }
+        }
+        if (valid && !reuse && sharing)
+        {
+            memcpy(shared->roots, roots, ((uint64_t)data->declared_count + 1) * sizeof(uint32_t));
+            memcpy(shared->inline_rules, inline_rules, (uint64_t)data->declared_count + 1);
+            shared->static_count = static_count;
+            shared->ready = true;
+        }
+        // The block-scope statics' roots, where code that clang emits declares them.
+        for (uint32_t i = 0; valid && i < static_count; i += 1)
+        {
+            roots[static_groups[i]] |= check_program_token_emitted(full, static_tokens[i]) ? static_roots[i] : 0;
         }
         for (uint32_t body = 0; body < full->body_count; body += 1)
         {
@@ -1284,7 +1363,13 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                 }
                 if (candidate.program.body_eager != 0)
                 {
-                    candidate.program.body_eager[bodies] = check_program_body_eager(full, data, source);
+                    // (Each body's answer once, where two selections share it.)
+                    const bool known = shared != NULL && body < shared->body_count && shared->eager[body] != 0;
+                    candidate.program.body_eager[bodies] = known ? shared->eager[body] - 1 : check_program_body_eager(full, data, source);
+                    if (shared != NULL && body < shared->body_count)
+                    {
+                        shared->eager[body] = (uint8_t)(candidate.program.body_eager[bodies] + 1);
+                    }
                 }
                 candidate.program.bodies[bodies] = *source;
                 candidate.program.bodies[bodies].reference_first = references;
@@ -1415,6 +1500,13 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
     }
     arena_pop_to(scratch, temporary);
     return valid;
+}
+
+// check_program_select_shared alone: a selection that shares nothing with another.
+static bool check_program_select_mode(CheckProgramSelection* result, const CheckProgram* full, const CheckDataPrepared* data, CLoweringMode mode,
+                                      bool scalar, bool keep_sectioned, Arena* output, Arena* scratch)
+{
+    return check_program_select_shared(result, full, data, mode, scalar, keep_sectioned, NULL, output, scratch);
 }
 
 // The definitions reachable from the unit's roots: what -c and the direct path lower.
