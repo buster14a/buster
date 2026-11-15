@@ -6,11 +6,12 @@
 // of its body, entered and continued only while that many whole iterations remain, before the original loop, which
 // stays as it was as the remainder of fewer than `factor` iterations and as the whole loop where the main one can't run:
 //
-//   P:  ...; bound = n - K' (or the type's least value where that wraps); cbr (start < bound), MH, MX
+//   P:  ...; cbr (start < n), MP, H                  a loop of no iteration goes straight to the original
+//   MP: cbr (n - start >u K'), MH, MX                 n - start is the true difference; then bound = n - K' can't wrap
 //   MH: the header's phis' main copies; copy 1 of the body, ..., copy `factor`;
 //       next = i + factor * step; cbr (next < bound), MH, MX
 //   MX: the main loop's values (a split reduction's accumulators combined); br H
-//   H:  the original loop, its phis entered from MX in place of P
+//   H:  the original loop, its phis entered from P as before and from MX
 //
 // K' is (factor - 1) * step + c, less one for a non-strict test, where the test reads the induction phi plus c >= 0 (0
 // for the phi itself, the step for its increment): every one of the `factor` iterations then passes the original test,
@@ -600,17 +601,23 @@ static uint32_t ir_unroll_incoming(const IrFunction* f, uint32_t phi, uint32_t p
     return value;
 }
 
-// The instructions a loop's preheader gains before its new branch: the bound (its constant made again where it is one),
-// the guard and each split reduction's identity.
+// The instructions a loop's preheader gains before its new branch: the bound's constant made again where it is one, and
+// the first test, start < n.
 static uint32_t ir_unroll_preheader_size(const IrUnrollLoop* loop)
 {
-    return (loop->predicate == IR_LT ? 6u : 5u) + 1u + loop->reductions + (loop->bound_constant ? 1u : 0u);
+    return 1u + (loop->bound_constant ? 1u : 0u);
 }
 
-// The constants a loop's rewrite adds: the bound's, the identities, the copies' induction offsets and the main step.
+// MP's instructions: K', n - start and its test, the main bound n - K', each split reduction's identity, and its branch.
+static uint32_t ir_unroll_main_entry_size(const IrUnrollLoop* loop)
+{
+    return 4u + loop->reductions + 1u;
+}
+
+// The constants a loop's rewrite adds: the bound's, K', the identities, the copies' induction offsets and the main step.
 static uint32_t ir_unroll_constant_count(const IrUnrollLoop* loop)
 {
-    return (loop->predicate == IR_LT ? 3u : 2u) + loop->reductions + loop->factor + (loop->bound_constant ? 1u : 0u);
+    return 1u + loop->reductions + loop->factor + (loop->bound_constant ? 1u : 0u);
 }
 
 // Loop `loop`'s recognition: its outcome, and on IR_UNROLL_UNROLLED its plan in *plan and its blocks appended to the
@@ -924,7 +931,7 @@ static IrUnrollRefusal ir_unroll_loop(IrUnrollWork* work, uint32_t loop, bool in
         }
         // P's bound, guard and identities; the copies; the header copies' induction; copy `factor`'s test; MX.
         const uint32_t phis = result.phi_end - f->block_offsets[header];
-        const uint64_t preheader = ir_unroll_preheader_size(&result);
+        const uint64_t preheader = (uint64_t)ir_unroll_preheader_size(&result) + ir_unroll_main_entry_size(&result);
         const uint64_t copies = (uint64_t)result.factor * (instructions - phis) + result.main_phis + 2u * (result.factor - 1u) + 3u;
         const uint64_t exit = (uint64_t)result.main_phis + result.combines + 1u;
         const uint64_t added = preheader + copies + exit;
@@ -1097,15 +1104,20 @@ static uint64_t ir_unroll_extra_words(const IrFunction* f, uint32_t first, uint3
     return words;
 }
 
-// The block of copy `copy` (0-based) of the loop's block at list index `t`, and MX.
+// A loop's new blocks: MP (its first), the block of copy `copy` (0-based) of the loop's block at list index `t`, and MX.
+static uint32_t ir_unroll_entry_block(const IrUnrollLoop* loop)
+{
+    return loop->first_block;
+}
+
 static uint32_t ir_unroll_copy_block(const IrUnrollLoop* loop, uint32_t copy, uint32_t t)
 {
-    return loop->first_block + copy * loop->block_count + t;
+    return loop->first_block + 1u + copy * loop->block_count + t;
 }
 
 static uint32_t ir_unroll_exit_block(const IrUnrollLoop* loop)
 {
-    return loop->first_block + (uint32_t)loop->factor * loop->block_count;
+    return loop->first_block + 1u + (uint32_t)loop->factor * loop->block_count;
 }
 
 // The instructions a new block of `loop` holds: copy `copy`'s block `t`, or MX for copy `factor`.
@@ -1146,6 +1158,7 @@ static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* lo
     IrFunction* view = emit->view;
     const uint64_t mark = scratch->length;
     const uint32_t header = loop->header;
+    const uint32_t entry_block = ir_unroll_entry_block(loop);
     const uint32_t main_block = ir_unroll_copy_block(loop, 0, 0);
     const uint32_t exit_block = ir_unroll_exit_block(loop);
     const uint32_t main_latch = ir_unroll_copy_block(loop, loop->factor - 1u, work->positions[loop->latch]);
@@ -1176,10 +1189,10 @@ static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* lo
             }
         }
         const uint32_t induction = main_phis[loop->induction - phi_first];
-        // The preheader's additions: the bound, the guard, the reductions' identities, and its branch.
+        // The preheader's additions: the bound (made again where it is a constant) and the first test, start < n, which a
+        // loop of no iteration fails at once, to the original loop.
         const uint32_t preheader_end = offsets[(uint64_t)loop->preheader + 1] - 1u;
         uint32_t at = preheader_end - ir_unroll_preheader_size(loop);
-        const uint64_t least = loop->predicate == IR_LT ? (ir_unroll_mask(type) >> 1) + 1u : 0u;
         uint32_t bound = BUSTER_IR_NONE;
         if (loop->bound_constant)
         {
@@ -1190,25 +1203,21 @@ static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* lo
         {
             bound = values[loop->bound];
         }
+        const uint32_t start = values[loop->start];
+        const uint32_t first_test = at;
+        ir_unroll_put(emit, at++, IR_ICMP, IR_I1, start, bound, loop->predicate);
+        ir_unroll_put(emit, preheader_end, IR_CBR, IR_VOID, first_test, entry_block, header);
+        // MP: with start < n, the `factor` iterations all return exactly when n - start, a true difference, exceeds K';
+        // then n - K' doesn't wrap, and the main loop's test is next < n - K'.
+        at = offsets[entry_block];
         const uint32_t offset_constant = at;
         ir_unroll_put_constant(emit, at++, type, loop->offset);
-        uint32_t low_constant = offset_constant;
-        if (loop->predicate == IR_LT)
-        {
-            low_constant = at;
-            ir_unroll_put_constant(emit, at++, type, least + loop->offset);
-        }
-        // bound - offset, or the least value where that wraps: no induction value is less.
-        const uint32_t low = at;
-        ir_unroll_put(emit, at++, IR_ICMP, IR_I1, bound, low_constant, loop->predicate);
         const uint32_t difference = at;
-        ir_unroll_put(emit, at++, IR_SUB, type, bound, offset_constant, BUSTER_IR_NONE);
-        const uint32_t least_constant = at;
-        ir_unroll_put_constant(emit, at++, type, least);
+        ir_unroll_put(emit, at++, IR_SUB, type, bound, start, BUSTER_IR_NONE);
+        const uint32_t enough = at;
+        ir_unroll_put(emit, at++, IR_ICMP, IR_I1, difference, offset_constant, IR_UGT);
         const uint32_t main_bound = at;
-        ir_unroll_put(emit, at++, IR_SELECT, type, low, least_constant, difference);
-        const uint32_t guard = at;
-        ir_unroll_put(emit, at++, IR_ICMP, IR_I1, values[loop->start], main_bound, loop->predicate);
+        ir_unroll_put(emit, at++, IR_SUB, type, bound, offset_constant, BUSTER_IR_NONE);
         for (uint32_t j = 0; j < phis; j += 1)
         {
             if (work->roles[phi_first + j] == BUSTER_IR_UNROLL_REDUCTION)
@@ -1217,7 +1226,7 @@ static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* lo
                 ir_unroll_put_constant(emit, at++, f->type[phi_first + j], work->identities[phi_first + j]);
             }
         }
-        ir_unroll_put(emit, preheader_end, IR_CBR, IR_VOID, guard, main_block, exit_block);
+        ir_unroll_put(emit, at, IR_CBR, IR_VOID, enough, main_block, exit_block);
         for (uint32_t b = 0; b < f->block_count; b += 1)
         {
             blocks_map[b] = BUSTER_IR_NONE;
@@ -1351,8 +1360,8 @@ static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* lo
                 {
                     const uint32_t initial = a == 0 ? entry : identities[j];
                     const uint32_t last = accumulators[(uint64_t)j * accumulators_per_phi + a];
-                    ir_unroll_put_phi(emit, main_phis[j] + a, phi_type, loop->preheader, initial, main_latch, last);
-                    ir_unroll_put_phi(emit, exit_phis[j] + a, phi_type, loop->preheader, initial, main_latch, last);
+                    ir_unroll_put_phi(emit, main_phis[j] + a, phi_type, entry_block, initial, main_latch, last);
+                    ir_unroll_put_phi(emit, exit_phis[j] + a, phi_type, entry_block, initial, main_latch, last);
                 }
                 for (uint32_t a = 1; a < accumulators_per_phi; a += 1)
                 {
@@ -1375,19 +1384,21 @@ static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* lo
             else
             {
                 const uint32_t last = role == BUSTER_IR_UNROLL_INDUCTION ? increment : map[ir_unroll_incoming(f, phi, loop->latch)];
-                ir_unroll_put_phi(emit, main_phis[j], phi_type, loop->preheader, entry, main_latch, last);
-                ir_unroll_put_phi(emit, exit_phis[j], phi_type, loop->preheader, entry, main_latch, last);
+                ir_unroll_put_phi(emit, main_phis[j], phi_type, entry_block, entry, main_latch, last);
+                ir_unroll_put_phi(emit, exit_phis[j], phi_type, entry_block, entry, main_latch, last);
             }
-            // The header's phi enters from MX in P's place.
+            // The header's phi again, in a slice of its own: its pairs as they were, P's among them, and MX's.
             const uint32_t out = values[phi];
-            for (uint32_t p = 0; p < view->b[out]; p += 1)
+            const uint32_t pairs = view->b[out];
+            const uint32_t old_first = view->a[out];
+            view->a[out] = emit->extra;
+            for (uint32_t p = 0; p < pairs * 2u; p += 1)
             {
-                if (view->extra[view->a[out] + p * 2] == loop->preheader)
-                {
-                    view->extra[view->a[out] + p * 2] = exit_block;
-                    view->extra[view->a[out] + p * 2 + 1] = combined;
-                }
+                view->extra[emit->extra++] = view->extra[old_first + p];
             }
+            view->extra[emit->extra++] = exit_block;
+            view->extra[emit->extra++] = combined;
+            view->b[out] = pairs + 1u;
         }
         ir_unroll_put(emit, exit_at, IR_BR, IR_VOID, header, BUSTER_IR_NONE, BUSTER_IR_NONE);
         // Another loop's copies read this loop's values as the original's.
@@ -1423,7 +1434,7 @@ static IrError ir_unroll_rewrite(IrUnrollWork* work, Arena* output, Arena* scrat
     {
         IrUnrollLoop* loop = &work->accepted[k];
         loop->first_block = (uint32_t)(blocks + new_blocks);
-        new_blocks += (uint64_t)loop->factor * loop->block_count + 1u;
+        new_blocks += (uint64_t)loop->factor * loop->block_count + 2u;
         constants += ir_unroll_constant_count(loop);
         addresses += (uint64_t)(loop->factor - 1u) * loop->addresses;
         inserts[loop->preheader] = ir_unroll_preheader_size(loop);
@@ -1449,7 +1460,15 @@ static IrError ir_unroll_rewrite(IrUnrollWork* work, Arena* output, Arena* scrat
             const uint32_t block = work->lists[loop->list + t];
             loop_extra += ir_unroll_extra_words(f, t == 0 ? loop->phi_end : f->block_offsets[block], f->block_offsets[(uint64_t)block + 1]);
         }
-        extras += loop_extra * loop->factor + (uint64_t)loop->main_phis * 8u;
+        // The main phis and MX's, two pairs each, and the header's phis again with MX's pair.
+        uint64_t header_words = 0;
+        for (uint32_t i = f->block_offsets[loop->header]; i < loop->phi_end; i += 1)
+        {
+            header_words += ((uint64_t)f->b[i] + 1u) * 2u;
+        }
+        extras += loop_extra * loop->factor + (uint64_t)loop->main_phis * 8u + header_words;
+        offsets[ir_unroll_entry_block(loop)] = (uint32_t)total;
+        total += ir_unroll_main_entry_size(loop);
         for (uint32_t copy = 0; copy <= loop->factor; copy += 1)
         {
             for (uint32_t t = 0; t < (copy < loop->factor ? loop->block_count : 1u); t += 1)
