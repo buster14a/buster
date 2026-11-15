@@ -66,7 +66,6 @@ static const uint8_t ir_memory_kinds[BUSTER_IR_OP_TABLE] = {
     [IR_STACK_ADDR] = BUSTER_IR_MEMORY_SLOT,
 };
 
-
 // An instruction's info word: its kind, its type, whether SCCP knows it as an i64 constant, and whether its block is
 // reachable.
 #define BUSTER_IR_MEMORY_KIND 0xffu
@@ -585,7 +584,7 @@ static uint32_t ir_memory_type(const IrFunction* f, uint32_t i)
     return f->op[i] == IR_STORE ? f->type[f->b[i]] : f->type[i];
 }
 
-// The accesses' family hashes (hashes_from_families false) or key hashes (true, from their families). Scalar twin.
+// The accesses' family hashes (`keys` false) or key hashes (true, from their families). Scalar twin.
 static void ir_memory_hash_scalar(IrMemoryWork* m, bool keys)
 {
     const IrFunction* f = m->ir->function;
@@ -892,7 +891,8 @@ static void ir_memory_count(IrMemoryUndo* undo, uint32_t* undo_count, uint32_t* 
     *counter = value;
 }
 
-// The decision: the dominator tree in preorder, each block's instructions in order. A write adds to general memory's
+// The decision: the dominator tree in preorder, each block's events in order (`access_first[b]` the first of block b's
+// accesses among them). A write adds to general memory's
 // count, a marker to its slot's class's (or general memory's), a store to its class's and its family's and enters its
 // key's last access; a load takes its key's last access's value where its epoch is the current one of its class's kind
 // and no write of its class came since but its own family's stores, which don't meet its bytes unless another key of
