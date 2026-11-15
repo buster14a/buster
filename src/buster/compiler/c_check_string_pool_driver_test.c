@@ -11,9 +11,10 @@
 static void check_test_driver_selected_initializer_pool(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     char source[] = "tests/driver/selected_initializer_pool.c";
-    char reference[256], object[256];
+    char reference[256], object[256], executable_path[256];
     snprintf(reference, sizeof(reference), "%s/selected-init-pool-clang.o", directory);
     snprintf(object, sizeof(object), "%s/selected-init-pool.o", directory);
+    snprintf(executable_path, sizeof(executable_path), "%s/selected-init-pool", directory);
     char* text = NULL;
     char* reference_arguments[] = { (char*)clang, "-std=gnu17", "-O0", "-c", "-o", reference, source, NULL };
     const int reference_status = check_test_driver_spawn(reference_arguments, &text);
@@ -87,7 +88,27 @@ static void check_test_driver_selected_initializer_pool(CheckTest* test, const c
         snprintf(description, sizeof(description), "selected initializer pools match object selection (%s, %s)",
                  scalar ? "scalar" : "vector", all ? "all bodies" : "selected bodies");
         check_test_expect(test, bytes, description);
+        char* link_arguments[] = { (char*)clang, object, "tests/driver/selected_initializer_pool_main.c", "-o", executable_path, NULL };
+        text = NULL;
+        const int linked = status == 0 ? check_test_driver_spawn(link_arguments, &text) : 1;
+        if (linked != 0 && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        free(text);
+        char* run_arguments[] = { executable_path, NULL };
+        text = NULL;
+        const int ran = linked == 0 ? check_test_driver_spawn(run_arguments, &text) : 1;
+        if (ran != 0 && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        free(text);
+        snprintf(description, sizeof(description), "retained initializer executes correctly (%s, %s)",
+                 scalar ? "scalar" : "vector", all ? "all bodies" : "selected bodies");
+        check_test_expect(test, ran == 0, description);
         arena_release(&arena);
+        unlink(executable_path);
         unlink(object);
     }
     arena_release(&reference_arena);
