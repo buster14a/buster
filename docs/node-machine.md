@@ -22,8 +22,9 @@ repeated run of an expression costs 124
 ([below](#ts-loop-without-its-rules-and-what-a-first-run-costs)). Running the
 sweeps over batches of expressions keeps their code warm but loses more on
 `sqlite3.c` than it gains: a sweep's branches are predicted from the sweep
-before it on the same expression ([below](#sweeps-by-batches-what-the-predictor-loses)).
-No compile takes it. Its gains are estimates that
+before it on the same expression ([below](#sweeps-by-batches-what-the-predictor-loses)),
+and a profile-guided layout gains it 0.6%
+([below](#the-sweeps-code-what-a-profile-guided-build-finds)). No compile takes it. Its gains are estimates that
 its first two steps exist to confirm or refute; a prototype of its three sweeps
 has been run over the compile's real nodes
 ([below](#what-a-prototype-of-the-sweeps-measured)). It is
@@ -1862,6 +1863,32 @@ What it leaves:
   trades one for the other.
 - **The corpora differ.** `sqlite3.c`'s C keeps more from T's history than
   Lua's and musl's does; a lever measured on one of them alone can mislead.
+
+### The sweeps' code: what a profile-guided build finds
+
+The sweeps' hot code is larger than the 32 KB instruction cache: at main
+`e62535f`, 99% of their cycles on `sqlite3.c` fall on 605 64-byte lines (38.7
+KB), and their instruction-cache and op-cache misses fall across the same lines,
+not on a few in conflict. T's rules (`node_machine_rule`, 26.4 KB) touch 292 of
+their lines, 90% of their cycles on 137; T's loop, C and X touch 60, 85 and 61.
+
+A profile-guided build (`BUSTER_PGO=1`, trained on the shadow of `sqlite3.c`
+alone) bounds what a layout gives, in cycles a taken node, medians of three
+rounds (two for musl), each within 1.4 of its median:
+
+| | main | profile-guided |
+| --- | ---: | ---: |
+| `sqlite3.c` | 175.3 | 174.3 |
+| Lua | 143.7 | 137.4 |
+| musl | 128.5 | 120.8 |
+
+On `sqlite3.c`, the file it was trained on, it gains 0.6%: it inlines the three
+sweeps into the shadow's timing loop and grows T's rules to 106.8 KB, so the hot
+code gets larger (99% of the cycles on 669 lines) and the misses don't fall.
+`minsize` on T's rules shrinks them only to 23.4 KB. So a layout has no measured
+headroom on the gate's file; Lua and musl gain from it, as they did from
+batching ([above](#sweeps-by-batches-what-the-predictor-loses)). The record is
+[`node-machine-layout-2524-2026-11-15`](https://github.com/buster14a/buster-performance/tree/8c00e4f5572a3e29e12c96b32c05ba23c4a2993d/docs/measurements/node-machine-layout-2524-2026-11-15).
 
 ## Expected gains
 
