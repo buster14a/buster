@@ -187,5 +187,8 @@ one left set.
   is popped, by both paths, with `-g`'s rows and unwind tables and without: each
   one part's object or failure, a part a body at one token; and by windows of
   64 in 2 KB (`CheckProgramLanes.squeeze_window`), which go again as one part.
+  It emits each again with the lowering that reads none of the controls' totals
+  (`CheckProgramLanes.deferred_lowering`, #2536's step 2.2c.3), by those
+  windows and by one as long as the unit: the same object or failure.
   `test-checker-driver`'s Tier 0 inlining fixtures build by `--emit-window=1`
   (and the lanes' fixture by 64 too): the objects of one part.

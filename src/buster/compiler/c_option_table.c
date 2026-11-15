@@ -44,6 +44,7 @@
     ENTRY(CLANG_FEATURES, "--clang-features") \
     ENTRY(COVERAGE, "--coverage") \
     ENTRY(DEFERRED_BODIES, "--deferred-bodies") \
+    ENTRY(DEFERRED_LOWERING, "--deferred-lowering") \
     ENTRY(DUMP_STATIC, "--dump-static") \
     ENTRY(DUMP_TYPED, "--dump-typed") \
     ENTRY(EMBED_DIR_EQ, "--embed-dir=") \

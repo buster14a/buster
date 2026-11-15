@@ -994,6 +994,11 @@ struct CheckProgramLanes
     // driver keeps in .bss so that a compile touches only those it uses (#652).
     uint32_t arenas_used;
     CheckProgramLaneArenas arenas[BUSTER_CHECK_EMIT_MAX_LANES];
+    // --deferred-lowering (a test option, #2536's step 2.2c.3): a lowering that reads none of the controls' totals
+    // (CheckLowerShared.deferred), on one lane, without --tier1: the objects are the same. A test's first room for its
+    // writer's calls and arguments, which each part's fit grows (CheckLowerShared.deferred_call_room): 0 for the bound.
+    bool deferred_lowering;
+    uint32_t deferred_call_room;
 };
 
 // Whether --tier1's tables are built (check_program_emit_timed), once per process.
@@ -1948,10 +1953,17 @@ typedef enum CheckEmitHalf
 static bool check_tier0_inline_body(CheckEmitRun* run, CheckEmitLane* lane, uint32_t b, Arena* arena, Tier0Inlined* result);
 static bool check_tier0_inline_held(const CheckEmitRun* run, uint32_t b);
 
-// A part's lowering (check_lower_part) on lane `lane`.
+static void check_program_emit_part_refused(CheckEmitPart* part);
+
+// A part's lowering (check_lower_part) on lane `lane`: a deferred lowering's tables and calls' room first
+// (check_lower_deferred_part), or the part's failure as a writer's without room.
 static void check_program_emit_lower_half(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part)
 {
-    if (run->sources)
+    if (run->shared->deferred && !check_lower_deferred_part(&lane->writer, run->shared, &part->lower))
+    {
+        check_program_emit_part_refused(part);
+    }
+    else if (run->sources)
     {
         check_lower_part_sources(&lane->writer, run->shared, &part->lower, lane->streams, lane->scratch);
     }
@@ -2765,6 +2777,7 @@ static void check_program_emit_alone(CheckEmitRun* run)
 {
     CheckEmitLane* lane = run->lane_states;
     CheckEmitPart* part = run->parts;
+    check_lower_deferred_reset(run->shared);
     part->lower.first = 0;
     part->lower.end = run->body_count;
     run->part_count = 1;
@@ -3739,10 +3752,16 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     check_clock_mark(stage_clock, CHECK_STAGE_BACKEND_SETUP);
     CheckLowerShared shared;
     const bool lowering = valid;
+    // --deferred-lowering's (CheckProgramLanes.deferred_lowering): on one lane, whose writer alone reads the tables a part
+    // decides, without --tier1's lifetimes and sparse switches.
+    const bool deferred = lanes != NULL && lanes->deferred_lowering && !lanes->tier1 && program->lifetime_first == NULL && program->control_capacity >= program->control_count &&
+                          program->chain_stop_capacity >= program->chain_stop_count;
     if (valid)
     {
         const uint64_t prepare_start = stage_clock != NULL ? __rdtsc() : 0;
-        valid = check_lower_prepare(&shared, &result->lowered, program, BUSTER_SCALAR_PATH(scalar), rows != NULL, lanes != NULL && lanes->tier1, output, scratch);
+        valid = check_lower_prepare(&shared, &result->lowered, program, BUSTER_SCALAR_PATH(scalar), rows != NULL, lanes != NULL && lanes->tier1, deferred, output,
+                                    scratch);
+        shared.deferred_call_room = deferred ? lanes->deferred_call_room : 0;
         check_clock_lower(stage_clock, CHECK_CLOCK_LOWER_PREPARE, stage_clock != NULL ? __rdtsc() - prepare_start : 0);
     }
     check_clock_mark(stage_clock, CHECK_STAGE_LOWER);
@@ -3751,7 +3770,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // libgcc's functions are linked into the image. The runtime's functions have their provisional symbols while the
     // bodies compile (check_lower_runtime), each its own, and the jump tables theirs after them
     // (CheckLowerShared.provisional_tables), the unit's own: direct.
-    const uint32_t access_count = valid ? shared.provisional_tables + result->lowered.table_count : 0;
+    const uint32_t access_count = valid ? shared.provisional_tables + (deferred ? shared.deferred_tables->capacity : result->lowered.table_count) : 0;
     uint8_t* access = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, access_count) : 0;
     uint8_t* defined = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1) : 0;
     valid = valid && access != 0 && defined != 0;
@@ -3770,7 +3789,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // can't, and then needs no address space past the caller's arenas.
     check_program_lanes_use(lanes, 1);
     Arena* reserved = lanes != NULL ? &lanes->arenas[0].scratch : &check_program_thread_columns;
-    const uint64_t column_bytes = valid && count != 0 ? check_lower_writer_bytes(&shared, rows != NULL) : 0;
+    // A deferred lowering's writer grows its calls' columns there (check_lower_fit_calls): room as a lane's has.
+    const uint64_t written_bytes = valid && count != 0 ? check_lower_writer_bytes(&shared, rows != NULL) : 0;
+    const uint64_t column_bytes = deferred && written_bytes != 0 && written_bytes < (UINT64_C(1) << 36) ? UINT64_C(1) << 36 : written_bytes;
     if (column_bytes > reserved->capacity)
     {
         arena_release(reserved);
@@ -3864,7 +3885,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // lanes takes no units: an emission that starts while every lane still takes units runs alone, its bodies one part.
     CheckEmitBoard* board = lanes != NULL && lanes->board != NULL && lanes->board_lane < lanes->board->lanes ? lanes->board : NULL;
     const bool sharing = board == NULL || __atomic_load_n(&board->taking, __ATOMIC_ACQUIRE) < board->lanes;
-    const uint32_t most = lanes != NULL && lanes->lanes > 1 && sharing ? (lanes->lanes < BUSTER_CHECK_EMIT_MAX_LANES ? lanes->lanes : BUSTER_CHECK_EMIT_MAX_LANES) : 1;
+    const uint32_t most = lanes != NULL && lanes->lanes > 1 && sharing && !deferred ? (lanes->lanes < BUSTER_CHECK_EMIT_MAX_LANES ? lanes->lanes : BUSTER_CHECK_EMIT_MAX_LANES) : 1;
     const uint64_t paid = lanes != NULL && lanes->every_lane ? UINT64_MAX : 1 + (total > 2 * largest ? total - 2 * largest : 0) / BUSTER_CHECK_EMIT_LANE_TOKENS;
     const uint32_t bodies = count != 0 ? count : 1;
     uint32_t active = most < bodies ? most : bodies;

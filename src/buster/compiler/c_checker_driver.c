@@ -10754,6 +10754,8 @@ struct CheckDriverCommand
     // (CheckProgramOptions.helper_forms).
     CheckHelperReport* helper_report;
     uint32_t helper_forms;
+    // --deferred-lowering: a lowering that reads none of the controls' totals (#2536, CheckProgramLanes.deferred_lowering).
+    bool deferred_lowering;
 };
 
 typedef struct CheckUnitsKept CheckUnitsKept;
@@ -13597,6 +13599,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             provisional_selection = true;
         }
+        else if (match.exact == C_OPTION_DEFERRED_LOWERING)
+        {
+            lanes->deferred_lowering = true;
+        }
         else if (match.exact == C_OPTION_POISON_ARENAS)
         {
             poison_arenas = true;
@@ -13884,6 +13890,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier1_function_sizes = lanes->tier1_function_sizes,
         .helper_report = helper_report ? &lanes->helper_report : NULL,
         .helper_forms = lanes->helper_forms,
+        .deferred_lowering = lanes->deferred_lowering,
     };
     if (worker_budget.dry_run)
     {

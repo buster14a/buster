@@ -17,7 +17,9 @@
 //   same object (object_build of the emission's link and the static data), byte for byte, as one lane's, with the lanes
 //   and parts the emission says it ran, run again on one lane only when its lanes didn't start; and on one lane by
 //   windows of 1, 64 and 2,048 tokens (#2536, CheckProgramLanes.window_tokens), each one window's object or failure,
-//   and by windows of 64 short of room (CheckProgramLanes.squeeze_window), which go again as one part.
+//   and by windows of 64 short of room (CheckProgramLanes.squeeze_window), which go again as one part; and those with
+//   the lowering that reads none of the controls' totals (CheckProgramLanes.deferred_lowering), with one window too,
+//   by windows of 1 and 64 from one call's room, which each part grows (CheckProgramLanes.deferred_call_room).
 // - The ids' order (#153): each generated and failing program compiled again by the same path with its identifiers' ids
 //   in another order (check_driver_id_order, the driver's --id-order, from --id-order N on, 153 by default), whose table
 //   must have every name of the first compile, most of them at other ids, then emitted on one lane and on 8, with -g's
@@ -640,44 +642,56 @@ static uint32_t check_lanes_test_unit(CheckLanesTestTally* tally, CheckLanesTest
         }
         // One lane's windows (#2536, CheckProgramLanes.window_tokens): of one token, every body a part, of 64 and of
         // 2,048, each window poisoned as it is popped: each one window's object or failure, on one lane, never again;
-        // of one token, a part a body.
-        static const uint32_t windows[] = { 1, 64, 2048 };
+        // of one token, a part a body. And the lowering that reads none of the controls' totals
+        // (CheckProgramLanes.deferred_lowering, #2536's step 2.2c.3), its tables decided a part at a time, in those
+        // windows and in one as long as the unit: the same object or failure.
+        static const uint32_t windows[] = { 1, 64, 2048, 1, 64, 2048, 0 };
         for (uint32_t w = 0; w < BUSTER_ARRAY_LENGTH(windows); w += 1)
         {
+            const bool deferred = w >= 3;
+            const uint32_t tokens = windows[w];
+            // (The deferred lowering by windows of 1 and 64 starts its writer's calls' room at one call, which each part
+            // grows: CheckProgramLanes.deferred_call_room.)
             CheckProgramLanes lanes = {
                 .lanes = 1,
-                .window_tokens = windows[w],
+                .window_tokens = tokens,
                 .poison_windows = true,
+                .deferred_lowering = deferred,
+                .deferred_call_room = deferred && tokens != 0 && tokens <= 64 ? 1 : 0,
             };
             CheckLanesTestEmission windowed = check_lanes_test_emit(unit, parser, pp, identifiers, &lanes, scalar, rows, unwind);
             const uint32_t bodies = unit->selected.program.body_count;
-            snprintf(detail, sizeof(detail), "%s, %s path, windows of %u tokens%s: status %u/%u, token %u/%u, %llu/%llu bytes, %u parts", what,
-                     scalar ? "scalar" : "vector", windows[w], rows ? ", -g and unwind tables" : "", (uint32_t)one.status, (uint32_t)windowed.status, one.token,
-                     windowed.token, (unsigned long long)one.size, (unsigned long long)windowed.size, windowed.parts);
+            snprintf(detail, sizeof(detail), "%s, %s path, windows of %u tokens%s%s: status %u/%u, token %u/%u, %llu/%llu bytes, %u parts", what,
+                     scalar ? "scalar" : "vector", tokens, deferred ? ", deferred lowering" : "", rows ? ", -g and unwind tables" : "", (uint32_t)one.status,
+                     (uint32_t)windowed.status, one.token, windowed.token, (unsigned long long)one.size, (unsigned long long)windowed.size, windowed.parts);
             check_lanes_test_expect(tally, check_lanes_test_same(&one, &windowed), "one lane's windows make one window's", detail);
-            check_lanes_test_expect(tally, windowed.active <= 1 && windowed.again == CHECK_PROGRAM_AGAIN_NONE && (windows[w] != 1 || !one.emitted || windowed.parts == bodies),
+            check_lanes_test_expect(tally, windowed.active <= 1 && windowed.again == CHECK_PROGRAM_AGAIN_NONE && (tokens != 1 || !one.emitted || windowed.parts == bodies),
                                     "windows run on one lane, a part a body at one token", detail);
             free(windowed.object);
             compared += 1;
         }
         // Windows short of room (CheckProgramLanes.squeeze_window: 2 KB, less than a part of 64 tokens takes): the
-        // bodies go again as one part, one window's object or failure.
-        CheckProgramLanes squeezed_lanes = {
-            .lanes = 1,
-            .window_tokens = 64,
-            .poison_windows = true,
-            .squeeze_window = 2048,
-        };
-        CheckLanesTestEmission squeezed = check_lanes_test_emit(unit, parser, pp, identifiers, &squeezed_lanes, scalar, rows, unwind);
-        const uint32_t squeezed_bodies = unit->selected.program.body_count;
-        snprintf(detail, sizeof(detail), "%s, %s path, windows of 64 tokens in 2 KB%s: status %u/%u, token %u/%u, %llu/%llu bytes, again %u", what,
-                 scalar ? "scalar" : "vector", rows ? ", -g and unwind tables" : "", (uint32_t)one.status, (uint32_t)squeezed.status, one.token, squeezed.token,
-                 (unsigned long long)one.size, (unsigned long long)squeezed.size, (uint32_t)squeezed.again);
-        check_lanes_test_expect(tally, check_lanes_test_same(&one, &squeezed), "windows short of room make one window's", detail);
-        check_lanes_test_expect(tally, squeezed.active <= 1 && (!one.emitted || squeezed_bodies < 40 || squeezed.again != CHECK_PROGRAM_AGAIN_NONE),
-                                "windows short of room go again as one part", detail);
-        free(squeezed.object);
-        compared += 1;
+        // bodies go again as one part, one window's object or failure; the deferred lowering's tables decided again.
+        for (uint32_t d = 0; d < 2; d += 1)
+        {
+            CheckProgramLanes squeezed_lanes = {
+                .lanes = 1,
+                .window_tokens = 64,
+                .poison_windows = true,
+                .squeeze_window = 2048,
+                .deferred_lowering = d == 1,
+            };
+            CheckLanesTestEmission squeezed = check_lanes_test_emit(unit, parser, pp, identifiers, &squeezed_lanes, scalar, rows, unwind);
+            const uint32_t squeezed_bodies = unit->selected.program.body_count;
+            snprintf(detail, sizeof(detail), "%s, %s path, windows of 64 tokens in 2 KB%s%s: status %u/%u, token %u/%u, %llu/%llu bytes, again %u", what,
+                     scalar ? "scalar" : "vector", d == 1 ? ", deferred lowering" : "", rows ? ", -g and unwind tables" : "", (uint32_t)one.status,
+                     (uint32_t)squeezed.status, one.token, squeezed.token, (unsigned long long)one.size, (unsigned long long)squeezed.size, (uint32_t)squeezed.again);
+            check_lanes_test_expect(tally, check_lanes_test_same(&one, &squeezed), "windows short of room make one window's", detail);
+            check_lanes_test_expect(tally, squeezed.active <= 1 && (!one.emitted || squeezed_bodies < 40 || squeezed.again != CHECK_PROGRAM_AGAIN_NONE),
+                                    "windows short of room go again as one part", detail);
+            free(squeezed.object);
+            compared += 1;
+        }
         free(one.object);
     }
     return compared;

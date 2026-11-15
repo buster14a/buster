@@ -714,6 +714,11 @@ struct CheckProgram
     uint32_t* lifetime_next;
     // The lifetime events the lowering makes of the controls at most: one per local of each LIFETIME control's block.
     uint32_t lifetime_event_count;
+    // The rooms the setup reserves for the controls and the chains' stops (check_program_begin), which bound their counts
+    // before the loop has written them: a lowering that reads no control total takes them (CheckLowerShared.deferred).
+    // Last, as every field this change adds to a structure, so that no other field's offset moves.
+    uint32_t control_capacity;
+    uint32_t chain_stop_capacity;
 };
 
 #define BUSTER_CHECK_PROGRAM_TARGET_VERSIONS UINT32_MAX
@@ -5993,6 +5998,10 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
         .body_count = body_count,
         .valid = valid,
     };
+    // The rooms the loop writes in, for a lowering that reads no control total (CheckProgram.control_capacity), from the
+    // run's writer, after the setup's passes.
+    program->control_capacity = run->writer.capacity;
+    program->chain_stop_capacity = run->writer.exit_capacity;
     return valid;
 }
 
