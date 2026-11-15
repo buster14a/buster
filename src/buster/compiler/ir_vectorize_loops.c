@@ -604,13 +604,12 @@ static bool ir_vectorize_in_g(const IrVectorizeWork* work, uint32_t loop, uint32
 // from the previous one alone and ending in a `br` to the next. Such a loop is a natural loop whose header dominates it,
 // reducible and innermost by its shape: no chain block can head another loop, having one predecessor. The header's
 // reachable predecessors must be the chain's last block (the latch) and one other, the preheader, which ends in a
-// `br` to it. Marks the loop's blocks and rows, fills the plan's blocks and rows, and returns whether the shape is the
-// admitted one.
-static bool ir_vectorize_shape(IrVectorizeWork* work, uint32_t loop, IrVectorizeLoop* plan)
+// `br` to it. Fills the plan's blocks and returns the chain's first block, or BUSTER_IR_NONE where the blocks aren't
+// the admitted shape. Reads the blocks alone: a function none of whose loops has it needs no row of the pass's.
+static uint32_t ir_vectorize_chain(const IrVectorizeWork* work, uint32_t loop, IrVectorizeLoop* plan)
 {
     const IrFunction* f = work->function;
     const uint32_t header = work->headers[loop];
-    const uint32_t mark = loop + 1;
     const uint32_t terminator = f->block_offsets[(uint64_t)header + 1] - 1;
     plan->header = header;
     plan->preheader = BUSTER_IR_NONE;
@@ -649,6 +648,19 @@ static bool ir_vectorize_shape(IrVectorizeWork* work, uint32_t loop, IrVectorize
         plan->preheader = a == plan->latch ? b : a;
         valid = (a == plan->latch) != (b == plan->latch) && f->op[f->block_offsets[(uint64_t)plan->preheader + 1] - 1] == IR_BR;
     }
+    return valid ? first : BUSTER_IR_NONE;
+}
+
+// The loop's shape (ir_vectorize_chain), then its blocks' and rows' marks and the plan's rows: the header's non-phi
+// rows, then each chain block's, whose phis must be copies. Returns whether the shape is the admitted one.
+static bool ir_vectorize_shape(IrVectorizeWork* work, uint32_t loop, IrVectorizeLoop* plan)
+{
+    const IrFunction* f = work->function;
+    const uint32_t first = ir_vectorize_chain(work, loop, plan);
+    const uint32_t header = plan->header;
+    const uint32_t mark = loop + 1;
+    const uint32_t terminator = f->block_offsets[(uint64_t)header + 1] - 1;
+    bool valid = first != BUSTER_IR_NONE;
     uint32_t count = 0;
     if (valid)
     {
@@ -716,9 +728,9 @@ static void ir_vectorize_visit(IrVectorizeWork* work, uint32_t block, uint8_t* a
     const IrFunction* f = work->function;
     work->reached[block] = 1;
     active[block] = 1;
-    for (uint32_t k = 0; ir_vectorize_successor(f, block, k) != BUSTER_IR_NONE; k += 1)
+    uint32_t next = ir_vectorize_successor(f, block, 0);
+    for (uint32_t k = 1; next != BUSTER_IR_NONE; k += 1)
     {
-        const uint32_t next = ir_vectorize_successor(f, block, k);
         if (next < f->block_count && source[next] != block)
         {
             source[next] = block;
@@ -732,6 +744,7 @@ static void ir_vectorize_visit(IrVectorizeWork* work, uint32_t block, uint8_t* a
                 work->header_count += 1;
             }
         }
+        next = ir_vectorize_successor(f, block, k);
     }
 }
 
@@ -2009,19 +2022,16 @@ static void ir_vectorize_replay(IrVectorizeWork* work, IrVectorizeBuild* build, 
     }
 }
 
-// Whether a phi takes a value along an edge from a block numbered at or past its own: a candidate back edge. A
-// function without one has no loop the lowering numbered in order, and walks no blocks.
+// Whether a phi takes a value along an edge from a block numbered at or past its own: a candidate back edge. Phis lead
+// their blocks, so each block's leading rows alone are read. A function without one has no loop the lowering numbered
+// in order, and walks no blocks.
 static bool ir_vectorize_candidate(const IrFunction* f)
 {
     bool found = false;
-    uint32_t block = 0;
-    for (uint32_t i = 0; !found && i < f->instruction_count; i += 1)
+    for (uint32_t block = 1; !found && block < f->block_count; block += 1)
     {
-        while (block + 1 < f->block_count && f->block_offsets[block + 1] <= i)
-        {
-            block += 1;
-        }
-        if (f->op[i] == IR_PHI)
+        const uint32_t end = f->block_offsets[(uint64_t)block + 1];
+        for (uint32_t i = f->block_offsets[block]; !found && i < end && f->op[i] == IR_PHI; i += 1)
         {
             for (uint32_t k = 0; k < f->b[i]; k += 1)
             {
@@ -2080,7 +2090,17 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
         check.error = ir_vectorize_graph(&work, scratch) ? IR_OK : IR_ERROR_MEMORY;
     }
     const uint64_t n = function->instruction_count;
-    if (candidate && check.error == IR_OK)
+    // Most loops the walk finds aren't the admitted shape (an outer loop, control flow in the body): a function none of
+    // whose loops is skips the rows' arrays and kinds, and counts its loops refused as their shape, as planning would.
+    bool shaped = false;
+    for (uint32_t loop = 0; candidate && check.error == IR_OK && !shaped && loop < work.header_count; loop += 1)
+    {
+        IrVectorizeLoop probe = { 0 };
+        shaped = ir_vectorize_chain(&work, loop, &probe) != BUSTER_IR_NONE;
+    }
+    work.statistics.loops = candidate && check.error == IR_OK && !shaped ? work.header_count : 0;
+    work.statistics.refused[IR_VECTORIZE_REFUSE_SHAPE] = work.statistics.loops;
+    if (shaped)
     {
         bool ok = true;
         work.kinds = ir_allocate(scratch, n, 1, &ok);
@@ -2105,7 +2125,7 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
         work.row_marks = ir_allocate(scratch, n, 4, &ok);
         check.error = ok ? IR_OK : IR_ERROR_MEMORY;
     }
-    if (candidate && check.error == IR_OK)
+    if (shaped && check.error == IR_OK)
     {
         memset(work.values, 0xff, n * 4);
         memset(work.starts, 0xff, n * 4);

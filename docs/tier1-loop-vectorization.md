@@ -132,7 +132,10 @@ head a loop. On sqlite3.c the CFG and the dominators were 84% of the pass's time
 by in-process cycle counters in a local build (890 of 2,602 functions have a
 candidate phi); with the walk, the measured kernels' objects are byte for byte
 the same. The report's `loops` count is every back edge's header, outer loops
-included (they refuse as `shape`).
+included (they refuse as `shape`). A function none of whose loops has the
+admitted shape (651 of sqlite3.c's 890 candidates) allocates no per-row arrays
+and computes no kinds, and the candidate test reads each block's leading phis
+alone.
 
 ### Results
 
