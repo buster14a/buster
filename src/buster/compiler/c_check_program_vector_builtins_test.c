@@ -64,6 +64,8 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
 {
     static const char* const programs[][2] = {
         { "vector-floating-extremes", check_test_vector_floating_extremes },
+        { "vector-limb-elements", check_test_limb_elements_narrow },
+        { "vector-limb-elements-wide", check_test_limb_elements_wide },
         {
             // Masked memory builtins of vectors no register size holds (#2216): 2-lane vectors of bytes and words and a
             // 3-lane one of dwords, element by element at AVX-512 targets too (check_lower_masked_elements), under every
@@ -954,11 +956,12 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "znver5", "struct s{float a;};unsigned tested(struct s v){return __builtin_bit_cast(unsigned,v);}",
           "bit-cast builtins of types other than integers, pointers, floats, doubles, half-precision types, their complex types and vectors", 0 },
         { "znver5", "int tested(int n){v4ss a={n},i={3,2,1,0};v4ss c=__builtin_shufflevector(a,i);return c[0];}", "vector shuffles by a vector of indices", 3 },
-        // The integer elementwise builtins of scalars (#2410): those of integers wider than 128 bits. pdep's, pext's and
-        // clmul's without BMI2 or PCLMUL, or of integers of 65 to 128 bits, are expanded (check_lower_sequence_deposit,
-        // check_lower_sequence_clmul).
-        { "znver5", "_BitInt(129) tested(_BitInt(129) n){return __builtin_elementwise_add_sat(n,n);}", "elementwise builtins of scalars", 0 },
-        { "znver5", "_BitInt(129) tested(_BitInt(129) n){return __builtin_elementwise_pdep(n,n);}", "elementwise builtins of scalars of more than 128 bits", 0 },
+        // The integer elementwise builtins of scalars (#2410): a carry-less product of _BitInts past 4096 bits, whose limbs'
+        // products are quadratic in them (check_lower_limb_clmul). The others of _BitInts past 128 bits go limb by limb
+        // (check_lower_limb_elements_emit), and pdep's, pext's and clmul's without BMI2 or PCLMUL, or of integers of 65 to
+        // 128 bits, are expanded (check_lower_sequence_deposit, check_lower_sequence_clmul).
+        { "znver5", "unsigned _BitInt(4097) tested(unsigned _BitInt(4097) n){return __builtin_elementwise_clmul(n,n);}",
+          "carry-less products of _BitInts past 4096 bits", 0 },
         { "znver5", "void tested(v8hf* p){*p=__builtin_elementwise_floor(*p);}", "elementwise vector builtins of half-precision or bf16 elements", 0 },
         { "znver5", "void tested(v8bf* p){*p=__builtin_elementwise_sin(*p);}", "elementwise vector builtins of half-precision or bf16 elements", 0 },
         { "znver5", "void tested(v8hf* p,v8hf* q){*p=__builtin_elementwise_maximum(*p,*q);}", "elementwise vector builtins of half-precision or bf16 elements", 0 },

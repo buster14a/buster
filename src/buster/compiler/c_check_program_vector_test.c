@@ -150,6 +150,43 @@ static const char check_test_vector_logical[] =
     "#endif\n"
     "return (int)h;}\n";
 
+// The integer elementwise builtins of _BitInts past 128 bits (#2410, check_lower_limb_elements_emit), limb by limb: of
+// each signedness, widths of whole limbs and of a part of one, 129 to 1000 bits; operands of random limbs, zero, all
+// ones, the most negative value and equal ones; saturations both ways, counts with and without fallbacks, deposits
+// and extractions by random masks and masks of no bits, carry-less products (at four widths: the baseline's expansions
+// of them are quadratic in the limbs), and funnel shifts by counts of 0, past the width and negative (their bits
+// unsigned modulo the width), by variables at widths of powers of two (clang's code refuses them elsewhere). Two
+// programs, the narrow widths' and the wide ones', as one would pass the programs' fixed room for one function at the
+// baseline. The baseline programs (the expansions, BMI2's rows at x86-64-v3) and the vector builtin programs (znver5's,
+// PCLMULQDQ's too) run them.
+#define BUSTER_CHECK_TEST_LIMB_ELEMENTS \
+    "#define B(T,U,w,...) {U u=0,v=0;for(int j=0;j<(w+63)/64;j++){u=(u<<64)|(U)(x*(j+1));v=(v<<64)|(U)(y^(x>>j));}" \
+    "T a=(T)u,b=(T)v,c=(T)((U)(x*0x9e3779b97f4a7c15ull)*(U)y),z=0;if(i==1)a=0;if(i==2)b=(T)-1;if(i==3)a=(T)((U)1<<(w-1));if(i==4)b=a;" \
+    "T q_[]={__builtin_elementwise_add_sat(a,b),__builtin_elementwise_add_sat(c,a),__builtin_elementwise_sub_sat(a,b),__builtin_elementwise_sub_sat(b,c)," \
+    "__builtin_elementwise_max(a,b),__builtin_elementwise_min(a,c),__builtin_elementwise_popcount(a),__builtin_elementwise_bitreverse(a)," \
+    "__builtin_elementwise_clzg(a,b),__builtin_elementwise_ctzg(z,c),__builtin_elementwise_ctzg(b,c),__builtin_elementwise_clzg((T)(c|1))," \
+    "__builtin_elementwise_ctzg((T)(b|(T)((U)1<<(w-1)))),__builtin_elementwise_pdep(a,b),__builtin_elementwise_pdep(c,b),__builtin_elementwise_pext(a,b)," \
+    "__builtin_elementwise_pext(a,c),__builtin_elementwise_pdep(a,z)," \
+    "__builtin_elementwise_fshl(a,b,(T)(w*3/7)),__builtin_elementwise_fshr(a,b,(T)(w/3)),__builtin_elementwise_fshl(a,b,(T)0)," \
+    "__builtin_elementwise_fshr(c,a,(T)(w+5)),__builtin_elementwise_fshr(b,a,(T)-1),__builtin_elementwise_fshl(b,c,(T)-(w*2+3))__VA_ARGS__};FOLD(q_);}\n" \
+    "#define ABS ,__builtin_elementwise_abs(a),__builtin_elementwise_abs((__typeof__(a))(0-(__typeof__(u))a)),__builtin_elementwise_abs(b)\n" \
+    "#define VAR ,__builtin_elementwise_fshl(a,b,c),__builtin_elementwise_fshr(a,c,b)\n" \
+    "#define CL ,__builtin_elementwise_clmul(a,b),__builtin_elementwise_clmul(c,c)\n"
+
+static const char check_test_limb_elements_narrow[] =
+    BUSTER_CHECK_TEST_LIMB_ELEMENTS
+    "int tested(int n){unsigned h=2166136261u;unsigned long long x=(unsigned long long)n*0x9e3779b97f4a7c15ull,y=x*0x2545f4914f6cdd1dull;\n"
+    "for(int i=0;i<5;i++){B(_BitInt(129),unsigned _BitInt(129),129,ABS CL)B(unsigned _BitInt(192),unsigned _BitInt(192),192,)"
+    "B(_BitInt(200),unsigned _BitInt(200),200,ABS)B(unsigned _BitInt(200),unsigned _BitInt(200),200,CL)B(_BitInt(256),unsigned _BitInt(256),256,ABS VAR CL)\n"
+    "x=x*31+y;y^=x>>7;}return (int)h;}\n";
+
+static const char check_test_limb_elements_wide[] =
+    BUSTER_CHECK_TEST_LIMB_ELEMENTS
+    "int tested(int n){unsigned h=2166136261u;unsigned long long x=(unsigned long long)n*0x9e3779b97f4a7c15ull,y=x*0x2545f4914f6cdd1dull;\n"
+    "for(int i=0;i<5;i++){B(unsigned _BitInt(512),unsigned _BitInt(512),512,VAR)B(_BitInt(321),unsigned _BitInt(321),321,ABS CL)"
+    "B(unsigned _BitInt(1000),unsigned _BitInt(1000),1000,)\n"
+    "x=x*31+y;y^=x>>7;}return (int)h;}\n";
+
 // Packed one-bit builtins use the same scalar/byte/vector algebra at tiny, padded and multi-register widths. Check
 // every defined lane, independent guards around a one-byte result, and evaluation of a funnel's unused operands.
 // Floating max, min and abs (#1834): llvm.maxnum, minnum and fabs, as clang's code computes them, of NaN payloads (quiet
@@ -1516,6 +1553,8 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "x=x*31+y;y^=x>>7;}return (int)h;}\n"
         },
         { "baseline-floating-extremes", check_test_vector_floating_extremes },
+        { "baseline-limb-elements", check_test_limb_elements_narrow },
+        { "baseline-limb-elements-wide", check_test_limb_elements_wide },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.
         { "baseline-avx2",
