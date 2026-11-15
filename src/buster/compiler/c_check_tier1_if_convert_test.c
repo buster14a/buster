@@ -5,8 +5,9 @@
 // the semantic fixtures against Clang on both scalar paths and with rematerialization on/off. A separate decoded
 // object check proves the C lowering/promotion/if-conversion/selection chain reaches cmov for pure max/clamp and
 // conditional arithmetic, while the guarding branches of potentially faulting loads and division remain. #1382's
-// kernels follow: a nested clamp, `&&` and `||` values (and and or of their comparisons' truth values since #2677, no
-// cmov), and loops whose arms reload the element the head compared
+// kernels follow: a nested clamp, `&&` and `||` values (and and or of their comparisons' truth values since #2677; an
+// int's `&&` of a comparison is #2676's cmp and cmovCC, which needs no setcc), and loops whose arms reload the element
+// the head compared
 // (a conditional sum and a select of it or its negation), whose only conditional branch is the loop's. A running max,
 // whose condition reads the maximum its select would carry, and a reload after a call keep their branches.
 
@@ -103,7 +104,8 @@ struct CheckTestIfConvertShape
 {
     const char* name;
     uint32_t selects;
-    // A truth value's least and and or records (#2677), where it has no cmov.
+    // A truth value's least and and or records (#2677); its cmov count is then exact: #2676's fused selects of a
+    // comparison and nothing else.
     uint32_t logic;
     uint32_t branches;
 };
@@ -128,8 +130,8 @@ static void check_test_driver_tier1_if_convert(CheckTest* test, const char* clan
     uint32_t* types = calloc(CHECK_TEST_IF_CONVERT_RECORDS, sizeof(uint32_t));
     const bool ready = written && records != NULL && offsets != NULL && types != NULL && x86_disassembler_initialize();
     check_test_expect(test, ready, "if-conversion native code-shape fixture prepares");
-    // Each function's least cmov count, or its truth values' and and or records and no cmov, and its conditional
-    // branches: none, the loop's alone, or a kept one (any).
+    // Each function's least cmov count, or its truth values' least and and or records and exact cmov count, and its
+    // conditional branches: none, the loop's alone, or a kept one (any).
     static const CheckTestIfConvertShape shapes[] = {
         {
             .name = "if_max",
@@ -168,7 +170,8 @@ static void check_test_driver_tier1_if_convert(CheckTest* test, const char* clan
         },
         {
             .name = "if_andor",
-            .logic = 2,
+            .selects = 1,
+            .logic = 1,
             .branches = 0,
         },
         {
@@ -236,10 +239,10 @@ static void check_test_driver_tier1_if_convert(CheckTest* test, const char* clan
             }
             const bool guarded = shapes[function].branches == UINT32_MAX;
             const bool truth = shapes[function].logic != 0;
-            const bool selected = truth ? selects == 0 && logic >= shapes[function].logic : selects >= shapes[function].selects;
+            const bool selected = truth ? selects == shapes[function].selects && logic >= shapes[function].logic : selects >= shapes[function].selects;
             char message[256];
             snprintf(message, sizeof(message), "if-conversion %s has %s (path %u)", shapes[function].name,
-                     guarded ? "a guarding conditional branch" : truth ? "and/or, no cmov and no conditional branch" :
+                     guarded ? "a guarding conditional branch" : truth ? "and/or, its fused cmovs alone and no conditional branch" :
                      shapes[function].branches == 0 ? "cmov and no conditional branch" : "cmov and only its loop's conditional branch", path);
             check_test_expect(test, count != 0 && selected && (guarded ? branches != 0 : branches == shapes[function].branches), message);
         }

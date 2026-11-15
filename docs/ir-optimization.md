@@ -128,7 +128,8 @@ and `select c, 1, (zext y)` is `or c, y` (`c || y`); `select c, (zext x),
 (zext y)` stays an i1 select. Tier 1 computes an i1 `and` and `or` as their
 32-bit operations (#2677), as clang does. A truth value used as an integer
 rather than tested, `select c, (zext x), 0` itself, is Tier 1's `and` of the
-condition and the value too ([the selection guide](tier1-selection.md)). The
+condition and the value too, or #2676's `cmp` and `cmovCC` where the condition
+is a comparison only the select reads ([the selection guide](tier1-selection.md)). The
 earlier truth pass, before threading, keeps its comparison rules alone.
 
 The admissible values are `i1`, `i8`, `i16`, `i32`, `i64` and pointers, matching
@@ -203,7 +204,9 @@ being 300.6 Mcycles there
 | the same returning `int` | 374.1 | 362.9 | 381.7 |
 
 sqlite3.c's `--tier1` object has 230 fewer `cmov`s (910) and 1,296 fewer bytes
-of text. The compile takes 0.16% to 0.31% more user cycles.
+of text. The compile takes 0.16% to 0.31% more user cycles. #2676, merged after
+these runs, takes the `int` kernel's outer `&&`, whose comparison only its select
+reads: `cmp` and `cmovge` instead of `setl` and `and`.
 
 The pass costs about 1.2% of sqlite3.c's `--tier1 -c` user cycles. That is
 2,163.6 against 2,138.4 Mcycles over 11 runs, with 0.63% more instructions. Its

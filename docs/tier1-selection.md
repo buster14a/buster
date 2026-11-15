@@ -568,6 +568,9 @@ immediate patterns alone. A select whose condition is a canonical `i1`, between
 a value known to be 0 or 1 and the constant 0, is the condition's `and` with that
 value, and one between the constant 1 and such a value its `or`: clang's
 integers for `c && x` and `c || y`, where a select is a `test` and a `cmov`.
+Where the condition is a comparison that only the select reads, #2676's `cmp`
+and `cmovCC` (above) folds it instead and wins munch's rank: it needs no
+`setcc` for the condition, one record fewer than the `and`.
 
 ### Proven upper bits (#1219)
 

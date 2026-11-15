@@ -217,8 +217,9 @@ fixtures reduce `&&` and `||` to an i1 `and` and `or` and refuse a dead division
 `test-checker-driver` adds C-source semantic comparison against Clang, with
 both scalar paths and rematerialization settings. Its decoded object checks
 require `cmov` without conditional branches for max, the clamps (sequential
-and nested) and conditional arithmetic, `and`/`or` without `cmov` or
-conditional branches for the `&&`/`||` values (#2677), and `cmov` with
+and nested) and conditional arithmetic, `and`/`or` without conditional
+branches for the `&&`/`||` values (#2677: the `_Bool` one without `cmov`, the
+`int` one's `&&` exactly one, #2676's fused select), and `cmov` with
 only the loop's branch for the conditional sum and the `?:` sum. They also
 require the branches to remain for loads, division, variable shifts, calls, a
 reload after a call and the running max.
