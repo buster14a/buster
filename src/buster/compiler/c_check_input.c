@@ -1215,6 +1215,9 @@ struct CheckInput
     uint32_t expression_numbering_nodes;
     uint32_t expression_numbering_checked;
     uint32_t expression_numbering_mismatches;
+    // Under PPOptions.node_front alone, the node machine's front's report (c_check_node_machine_front.c, #2524): null in
+    // every other run.
+    struct NodeFrontShadow* node_front;
     // Explicit sizeof operand folds and their input tokens; regression tests bound the preparation work (#822).
     uint32_t sizeof_queries;
     uint64_t sizeof_query_tokens;

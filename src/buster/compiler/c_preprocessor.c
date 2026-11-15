@@ -366,6 +366,10 @@ struct PPOptions
     // #1038's stages 2 and 4), timed and checked against the walk's graph. benchmark-checker-bindings sets it with
     // expression_timing.
     bool expression_numbering;
+    // The node machine's front in the shadow (c_check_node_machine_front.c, #2524): its records made beside the coded
+    // walk's nodes and compared with them (CheckInput.node_front). 1: after the walk acted at a chunk; 2: before it, where
+    // the machine would run. Off in every compile; measure-node-machine --shadow sets it for --front.
+    uint8_t node_front;
     // Keep where the expansions that can start a line start in the output (PPExpansionStart), which -E's line markers
     // need to place them: the printer can't print markers for a run without them.
     bool expansion_starts;
@@ -632,9 +636,9 @@ struct PPFileData
     // as it goes (__LINE__, diagnostics), so each file's lines are counted about once.
     uint32_t line_cursor;
     uint32_t line_cursor_line;
-    // For a file prepared a window at a time (pp_prepare_windows), the line ends before each page of its bytes
+    // The line ends before each page of its bytes, made during windowed preparation or on an out-of-order query
     // (BUSTER_PP_LINE_PAGE_BYTES): entry p counts those in bytes [0, p * BUSTER_PP_LINE_PAGE_BYTES), a "\r\n" at its '\n'.
-    // pp_line_of counts from a page's start with it, from the cursor only on the same page. Null for the others.
+    // pp_line_of counts from a page's start with it, from the cursor only on the same page. Null until made.
     uint32_t* line_pages;
     // Built on the first diagnostic in this file, then shared by all of its inclusions.
     uint32_t* diagnostic_lines;
@@ -3776,6 +3780,25 @@ static uint32_t pp_page_line(const PPFileData* data, uint32_t offset)
     return data->line_pages[page] + 1 + pp_count_lines(data, page * BUSTER_PP_LINE_PAGE_BYTES, offset);
 }
 
+// On the first backward lookup of a whole-prepared file, index its page boundaries. The ordered preprocessing walk
+// needs no index; later warning walks can otherwise count the same prefix once per candidate. Failure leaves the
+// cursor fallback intact. Each count excludes a CR followed by LF even when the pair straddles a page boundary.
+static void pp_index_line_pages(Preprocessor* pp, PPFileData* data)
+{
+    const uint32_t count = data->length / BUSTER_PP_LINE_PAGE_BYTES + 1;
+    uint32_t* pages = arena_push_array(&pp->arena, count, sizeof(uint32_t), 4);
+    if (pages != 0)
+    {
+        pages[0] = 0;
+        for (uint32_t page = 1; page < count; page += 1)
+        {
+            const uint32_t end = page * BUSTER_PP_LINE_PAGE_BYTES;
+            pages[page] = pages[page - 1] + pp_count_lines(data, end - BUSTER_PP_LINE_PAGE_BYTES, end);
+        }
+        data->line_pages = pages;
+    }
+}
+
 // The physical line and column of `location` in its range's file: lines counted from the file's cursor (or from its
 // start, for a place before the cursor; or for a file with line pages, from the place's page's start unless the cursor
 // is on that page before it), and the column from the line's start before it, unless `column` is null.
@@ -3809,6 +3832,10 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
         }
         else
         {
+            if (data->line_pages == 0 && data->length >= BUSTER_PP_LINE_PAGE_BYTES && data->line_cursor_line != 0 && offset < data->line_cursor)
+            {
+                pp_index_line_pages(pp, data);
+            }
             const uint32_t page_start = offset / BUSTER_PP_LINE_PAGE_BYTES * BUSTER_PP_LINE_PAGE_BYTES;
             const bool cursor = data->line_cursor_line != 0 && offset >= data->line_cursor && (data->line_pages == 0 || data->line_cursor >= page_start);
             if (!cursor && data->line_pages == 0)

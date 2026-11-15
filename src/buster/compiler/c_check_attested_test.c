@@ -869,6 +869,7 @@ static const CheckAttestedField check_attested_input_fields[] =
     { "expression_numbering_nodes", CHECK_ATTESTED_FIELD_MEASURE },
     { "expression_numbering_checked", CHECK_ATTESTED_FIELD_MEASURE },
     { "expression_numbering_mismatches", CHECK_ATTESTED_FIELD_MEASURE },
+    { "node_front", CHECK_ATTESTED_FIELD_MEASURE },
     { "sizeof_queries", CHECK_ATTESTED_FIELD_MEASURE },
     { "sizeof_query_tokens", CHECK_ATTESTED_FIELD_MEASURE },
     { "diagnostic_limits", CHECK_ATTESTED_FIELD_CONSEQUENCE },

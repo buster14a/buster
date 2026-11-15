@@ -1179,8 +1179,25 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
                                           "    S8 local = (S8){ \"d\", 1 };\n"
                                           "    return (int)(gaps[1].length + local.length);\n"
                                           "}\n";
-    static const char* const sources[] = { program, overloads, plain, arms, unevaluated, static_compound };
-    static const char* const expected[][8] = {
+    // A constant switch's dead case that declares a local (#2536's step 2.2c.4, part 1): the writer leaves the case out and
+    // the pass keeps it, so that a lowering over the pass's ranges would place the local the writer's leave out.
+    static const char switch_local[] = "int g(char* p);\n"
+                                       "int f(int x)\n"
+                                       "{\n"
+                                       "    switch (0)\n"
+                                       "    {\n"
+                                       "    case 1:\n"
+                                       "    {\n"
+                                       "        char unreached[256];\n"
+                                       "        return g(unreached);\n"
+                                       "    }\n"
+                                       "    default:\n"
+                                       "        break;\n"
+                                       "    }\n"
+                                       "    return x;\n"
+                                       "}\n";
+    static const char* const sources[] = { program, overloads, plain, arms, unevaluated, static_compound, switch_local };
+    static const char* const expected[][9] = {
         {
             "selection-census\tbodies\t5\tdropped\t1\tselected-bodies\t3\t",
             "\twalk\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t2\textra-symbols\t2\t",
@@ -1190,6 +1207,7 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
             "\nselection-census-ticks\treferences\t",
             "\nselection-census-builtins\texact\t1\tcandidates\t1\textra\t0\tmissing\t0\thelpers\t0\tcandidate-helpers\t0\thelpers-same\t1\truntime-same\t1\n",
             "\nselection-census-statements\tinitializers\t2\tcandidates\t2\tsame\t1\tcompounds\t0\tcandidates\t0\tsame\t1\tasms\t0\tcandidates\t0\tsame\t1\n",
+            "\nselection-census-ranges\twriter\t2\tpass\t2\tsame\t1\tlocals-same\t1\n",
         },
         {
             "selection-census\tbodies\t3\tdropped\t0\tselected-bodies\t2\t",
@@ -1200,6 +1218,7 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
             "\nselection-census-ticks\treferences\t",
             "\nselection-census-builtins\texact\t0\tcandidates\t0\textra\t0\tmissing\t0\thelpers\t0\tcandidate-helpers\t0\thelpers-same\t1\truntime-same\t1\n",
             "\nselection-census-statements\tinitializers\t0\tcandidates\t0\tsame\t1\tcompounds\t0\tcandidates\t0\tsame\t1\tasms\t0\tcandidates\t0\tsame\t1\n",
+            "\nselection-census-ranges\twriter\t0\tpass\t0\tsame\t1\tlocals-same\t1\n",
         },
         {
             "selection-census\tbodies\t1\tdropped\t0\tselected-bodies\t1\t",
@@ -1210,6 +1229,7 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
             "\nselection-census-ticks\treferences\t",
             "\nselection-census-builtins\texact\t0\tcandidates\t0\textra\t0\tmissing\t0\thelpers\t0\tcandidate-helpers\t0\thelpers-same\t1\truntime-same\t1\n",
             "\nselection-census-statements\tinitializers\t0\tcandidates\t0\tsame\t1\tcompounds\t0\tcandidates\t0\tsame\t1\tasms\t0\tcandidates\t0\tsame\t1\n",
+            "\nselection-census-ranges\twriter\t0\tpass\t0\tsame\t1\tlocals-same\t1\n",
         },
         {
             "selection-census\tbodies\t5\tdropped\t1\tselected-bodies\t3\t",
@@ -1220,6 +1240,7 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
             "\nselection-census-ticks\treferences\t",
             "\nselection-census-builtins\texact\t0\tcandidates\t0\textra\t0\tmissing\t0\thelpers\t0\tcandidate-helpers\t0\thelpers-same\t1\truntime-same\t1\n",
             "\nselection-census-statements\tinitializers\t1\tcandidates\t1\tsame\t1\tcompounds\t0\tcandidates\t0\tsame\t1\tasms\t0\tcandidates\t0\tsame\t1\n",
+            "\nselection-census-ranges\twriter\t5\tpass\t2\tsame\t0\tlocals-same\t1\n",
         },
         {
             "selection-census\tbodies\t1\tdropped\t0\tselected-bodies\t1\t",
@@ -1230,6 +1251,7 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
             "\nselection-census-ticks\treferences\t",
             "\nselection-census-builtins\texact\t0\tcandidates\t1\textra\t1\tmissing\t0\thelpers\t0\tcandidate-helpers\t1\thelpers-same\t0\truntime-same\t0\n",
             "\nselection-census-statements\tinitializers\t0\tcandidates\t0\tsame\t1\tcompounds\t0\tcandidates\t0\tsame\t1\tasms\t0\tcandidates\t0\tsame\t1\n",
+            "\nselection-census-ranges\twriter\t0\tpass\t0\tsame\t1\tlocals-same\t1\n",
         },
         {
             "selection-census\tbodies\t1\tdropped\t0\tselected-bodies\t1\t",
@@ -1240,9 +1262,22 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
             "\nselection-census-ticks\treferences\t",
             "\nselection-census-builtins\texact\t0\tcandidates\t0\textra\t0\tmissing\t0\thelpers\t0\tcandidate-helpers\t0\thelpers-same\t1\truntime-same\t1\n",
             "\nselection-census-statements\tinitializers\t1\tcandidates\t1\tsame\t1\tcompounds\t1\tcandidates\t3\tsame\t0\tasms\t0\tcandidates\t0\tsame\t1\n",
+            "\nselection-census-ranges\twriter\t0\tpass\t0\tsame\t1\tlocals-same\t1\n",
+        },
+        {
+            "selection-census\tbodies\t1\tdropped\t1\tselected-bodies\t1\t",
+            "\twalk\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t0\textra-symbols\t1\t",
+            "\tscan\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t0\textra-symbols\t1\t",
+            "\tarms\tdiffering\t0\tunarmed\t0\tmissing\t0\tselection\tsame-references\textra-bodies\t0\textra-symbols\t0\t",
+            "\tpass\tdiffering\t1\tunarmed\t0\tmissing\t0\tselection\tdifferent\textra-bodies\t0\textra-symbols\t1\n",
+            "\nselection-census-ticks\treferences\t",
+            "\nselection-census-builtins\texact\t0\tcandidates\t0\textra\t0\tmissing\t0\thelpers\t0\tcandidate-helpers\t0\thelpers-same\t1\truntime-same\t1\n",
+            "\nselection-census-statements\tinitializers\t0\tcandidates\t0\tsame\t1\tcompounds\t0\tcandidates\t0\tsame\t1\tasms\t0\tcandidates\t0\tsame\t1\n",
+            "\nselection-census-ranges\twriter\t3\tpass\t0\tsame\t0\tlocals-same\t0\n",
         },
     };
-    static const char* const names[] = { "dead calls", "overloads", "one function", "constant arms", "an unevaluated builtin", "a static initializer's compound literals" };
+    static const char* const names[] = { "dead calls", "overloads", "one function", "constant arms", "an unevaluated builtin", "a static initializer's compound literals",
+                                          "a constant switch's local" };
     char source[256];
     char object[256];
     char reference[256];
@@ -1341,11 +1376,28 @@ static void check_test_driver_provisional_selection(CheckTest* test, const char*
                                    "    __asm__(\"movl %1, %0\" : \"=r\"(y) : \"r\"(x));\n"
                                    "    return y;\n"
                                    "}\n";
+    // A constant switch's dead case that declares a local (#2536's step 2.2c.4, part 1), which the lowering over the pass's
+    // ranges would place: its frame would differ.
+    static const char switch_local[] = "int g(char* p);\n"
+                                       "int f(int x)\n"
+                                       "{\n"
+                                       "    switch (0)\n"
+                                       "    {\n"
+                                       "    case 1:\n"
+                                       "    {\n"
+                                       "        char unreached[256];\n"
+                                       "        return g(unreached);\n"
+                                       "    }\n"
+                                       "    default:\n"
+                                       "        break;\n"
+                                       "    }\n"
+                                       "    return x;\n"
+                                       "}\n";
     static const char target[] = "int g(int x) { return x; }\n"
                                  "__attribute__((used, target(\"default\"))) int h(int x) { return x + 1; }\n"
                                  "int caller(int x) { return h(x); }\n";
-    static const char* const sources[] = { externs, statics, statics, body, plain, unevaluated, evaluated, target, static_compound, assembly };
-    static const bool debug[] = { false, false, true, false, false, false, false, false, false, false };
+    static const char* const sources[] = { externs, statics, statics, body, plain, unevaluated, evaluated, target, static_compound, assembly, switch_local };
+    static const bool debug[] = { false, false, true, false, false, false, false, false, false, false, false };
     static const char* const expected[] = {
         "provisional-selection\tused\t1\textra-symbols\t2\n",
         "provisional-selection\tused\t1\textra-symbols\t1\n",
@@ -1357,9 +1409,11 @@ static void check_test_driver_provisional_selection(CheckTest* test, const char*
         "provisional-selection\tused\t0\textra-symbols\t0\n",
         "provisional-selection\tused\t0\textra-symbols\t0\n",
         "provisional-selection\tused\t1\textra-symbols\t0\n",
+        "provisional-selection\tused\t0\textra-symbols\t0\n",
     };
     static const char* const names[] = { "extern and literal extras", "static extras", "static extras by -g", "an extra body", "no extras", "an unevaluated helper",
-                                          "a helper reached twice", "a target group", "a static initializer's compound literals", "an asm statement" };
+                                          "a helper reached twice", "a target group", "a static initializer's compound literals", "an asm statement",
+                                          "a constant switch's local" };
     char source[256];
     char object[256];
     char reference[256];
@@ -1387,6 +1441,120 @@ static void check_test_driver_provisional_selection(CheckTest* test, const char*
             snprintf(description, sizeof(description), "--provisional-selection on %s%s: its report, and the object without it", names[s],
                      path == 0 ? "" : ", scalar");
             check_test_expect(test, reported && exact_status == 0 && check_test_driver_same_files(object, reference), description);
+        }
+    }
+    unlink(source);
+    unlink(object);
+    unlink(reference);
+}
+
+// `text` without the lines of --provisional-selection's and --windowed-loop's reports, in place.
+static void check_test_driver_drop_reports(char* text)
+{
+    char* write = text;
+    const char* read = text;
+    while (read != NULL && *read != 0)
+    {
+        const char* end = strchr(read, '\n');
+        const size_t length = end != NULL ? (size_t)(end - read) + 1 : strlen(read);
+        const bool report = strncmp(read, "provisional-selection\t", 22) == 0 || strncmp(read, "windowed-loop\t", 14) == 0;
+        if (!report)
+        {
+            memmove(write, read, length);
+            write += length;
+        }
+        read += length;
+    }
+    if (write != NULL)
+    {
+        *write = 0;
+    }
+}
+
+// --windowed-loop (#2536's step 2.2c.4, part 2): the provisional selection's code lowered as the program's loop runs, each
+// window's bodies' loop before its lowering, and the object after the tail, the diagnostics and the exact selection. At
+// W of 1, 2,048 and ∞ (--emit-window=0), each source's exit status, stderr (but the options' reports) and object are the
+// plain -c's, and its report says whether the windowed code served: a unit whose provisional selection doesn't serve (a
+// constant switch's local, #2536's step 2.2c.4, part 1) or whose emission refuses a body takes the exact selection's
+// emission after the loop, and a body's error stops the unit before either.
+static void check_test_driver_windowed_loop(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char plain[] = "int g(int x) { return x * 2; }\n"
+                                "int main(int argc, char** argv) { (void)argv; return g(argc); }\n";
+    static const char naked[] = "__attribute__((naked)) void n(void) { __asm__(\"ret\"); }\n"
+                                "int main(void) { n(); return 0; }\n";
+    static const char switch_local[] = "int g(char* p);\n"
+                                       "int f(int x)\n"
+                                       "{\n"
+                                       "    switch (0)\n"
+                                       "    {\n"
+                                       "    case 1:\n"
+                                       "    {\n"
+                                       "        char unreached[256];\n"
+                                       "        return g(unreached);\n"
+                                       "    }\n"
+                                       "    default:\n"
+                                       "        break;\n"
+                                       "    }\n"
+                                       "    return x;\n"
+                                       "}\n";
+    static const char region[] = "int f(int x) { return ({ static int k; k += x; k; }); }\n";
+    static const char callee[] = "static inline __attribute__((always_inline)) int sq(int x) { return x * x; }\n"
+                                 "int a(int x) { return sq(x) + 1; }\n"
+                                 "int b(int x) { return sq(x) - 1; }\n";
+    static const char error[] = "int a(void) { return 1; }\n"
+                                "int b(void) { break; }\n";
+    static const char refused[] = "float f(float* p) { return __atomic_fetch_add(p, 1.0f, __ATOMIC_SEQ_CST); }\n";
+    static const char* const sources[] = { plain, naked, switch_local, region, callee, error, refused };
+    static const char* const expected[] = {
+        "windowed-loop\tserved\t1\n",
+        "windowed-loop\tserved\t1\n",
+        "windowed-loop\tserved\t0\n",
+        "windowed-loop\tserved\t1\n",
+        "windowed-loop\tserved\t1\n",
+        NULL,
+        "windowed-loop\tserved\t0\n",
+    };
+    static const char* const names[] = {
+        "plain bodies",
+        "a naked function",
+        "a constant switch's local",
+        "a statement expression's static",
+        "an inline callee",
+        "a body's error",
+        "a refused body",
+    };
+    static const char* const windows[] = { "--emit-window=1", "--emit-window=2048", "--emit-window=0" };
+    char source[256];
+    char object[256];
+    char reference[256];
+    snprintf(source, sizeof(source), "%s/windowed_loop.c", directory);
+    snprintf(object, sizeof(object), "%s/windowed_loop.o", directory);
+    snprintf(reference, sizeof(reference), "%s/windowed_loop_reference.o", directory);
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+    {
+        const bool written = parse_test_write(source, sources[s], strlen(sources[s]));
+        check_test_expect(test, written, "the windowed loop's fixture is written");
+        for (uint32_t w = 0; written && w < BUSTER_ARRAY_LENGTH(windows); w += 1)
+        {
+            unlink(object);
+            unlink(reference);
+            char* const windowed[] = { (char*)executable, "--windowed-loop", (char*)windows[w], "-w", "-c", "-o", object, source, NULL };
+            char* const exact[] = { (char*)executable, (char*)windows[w], "-w", "-c", "-o", reference, source, NULL };
+            char* text = NULL;
+            char* exact_text = NULL;
+            const int status = check_test_driver_spawn(windowed, &text);
+            const int exact_status = check_test_driver_spawn(exact, &exact_text);
+            const bool reported = text != NULL && (expected[s] != NULL ? strstr(text, expected[s]) != NULL : strstr(text, "windowed-loop\t") == NULL);
+            check_test_driver_drop_reports(text);
+            const bool same_text = text != NULL && exact_text != NULL && strcmp(text, exact_text) == 0;
+            const bool objects = access(object, F_OK) == 0 || access(reference, F_OK) == 0;
+            const bool same_object = objects ? check_test_driver_same_files(object, reference) : true;
+            free(text);
+            free(exact_text);
+            char description[160];
+            snprintf(description, sizeof(description), "--windowed-loop %s on %s: its report, and the status, stderr and object without it", windows[w], names[s]);
+            check_test_expect(test, reported && status == exact_status && same_text && same_object, description);
         }
     }
     unlink(source);
@@ -10764,6 +10932,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                 check_test_driver_static_label(&test, executable, directory);
                 check_test_driver_selection_census(&test, executable, directory);
                 check_test_driver_provisional_selection(&test, executable, directory);
+                check_test_driver_windowed_loop(&test, executable, directory);
                 check_test_driver_codegen_refusals(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())

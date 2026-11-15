@@ -225,14 +225,19 @@ static bool check_lower_init_pools(CheckLowerInitializers* pools, const CheckPro
     {
         memset(selected, 0, count);
     }
-    // The plans the bodies' INITIALIZE controls name, or a provisional selection's list of them (CheckProgram.initialize_list,
-    // #2536's step 2.2c.3, part 3), which needs no control.
-    for (uint32_t c = 0; valid && count != 0 && program->initialize_list == NULL && c < program->control_count; c += 1)
+    // The selected program retains the full control table, including unselected bodies. Only the selected bodies'
+    // ranges contribute pools and clearing calls. A target_clones copy can visit a range again; selection is a set.
+    // A provisional selection supplies its own initialize_list instead of controls.
+    for (uint32_t b = 0; valid && count != 0 && program->initialize_list == NULL && b < program->body_count; b += 1)
     {
-        const CheckControl* control = program->controls + c;
-        if (control->kind == CHECK_CONTROL_INITIALIZE && control->target < count)
+        const CheckProgramBody* body = program->bodies + b;
+        for (uint32_t c = 0; c < body->count; c += 1)
         {
-            selected[control->target] = 1;
+            const CheckControl* control = program->controls + body->first + c;
+            if (control->kind == CHECK_CONTROL_INITIALIZE && control->target < count)
+            {
+                selected[control->target] = 1;
+            }
         }
     }
     for (uint32_t i = 0; valid && count != 0 && program->initialize_list != NULL && i < program->initialize_list_count; i += 1)

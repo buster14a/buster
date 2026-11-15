@@ -9346,10 +9346,10 @@ static uint32_t check_units_group_unkept(const Link* link);
 
 // Whether `link`'s symbol `s` is a local `.L` label defined in code, which -c's object leaves out as an assembler's
 // temporary (#1845). The helpers' own functions (`.Lbuster_asm_N`, `.Lbuster_builtin_*`), which clang's code has no
-// counterpart of, keep their symbols: the tools that read -c's objects find the helpers' calls by them.
-// Whether link symbol `s` is a placeholder of the provisional selection's (#2536's step 2.2b, check_driver_provisional): a
-// local without an atom named BUSTER_CHECK_PLACEHOLDER_NAME, for an object the exact selection leaves out, which no code
-// or data refers to.
+// counterpart of, keep their symbols: the tools that read -c's objects find the helpers' calls by them. Whether link
+// symbol `s` is a placeholder of the provisional selection's (#2536's step 2.2b, check_driver_provisional_check): a
+// local without an atom named BUSTER_CHECK_PLACEHOLDER_NAME, for an object the exact selection leaves out, which no
+// code or data refers to.
 static bool check_driver_placeholder(const Link* link, uint32_t s)
 {
     const NameId name = link->symbols.name[s];
@@ -9522,30 +9522,64 @@ static bool check_driver_same_builtin_plans(const CheckProgram* exact, const Che
     return same;
 }
 
-// The candidates' pass's statements as a provisional program takes them (#2536's step 2.2c.3, part 3), into `over`: its
-// plans but the compound literals' (CheckProgram.initialize_list), the compound literals' as marks from `output`
-// (compound_initializers) and its asm statements (asm_list). Whether the plans are the INITIALIZE controls' targets over
-// every control, as check_lower_init_pools reads them (*same_initializers), the compound literals' those the references
-// reach (*same_compounds), and each of `selected`'s bodies' asm statements those its ASM controls name in their order
-// (check_program_asm_sequence, *same_asms), against `program`'s; and their counts, the controls' and the lists', in
-// `counts` (initializers, compound literals, asm statements, two each). False where there's no room.
+// The candidates' pass's statements as a provisional program takes them (#2536's step 2.2c.3, part 3), into `over`, as a
+// window's lowering will take them before the loop (#2536's step 2.2c.4, part 2): its plans but the compound literals'
+// (CheckProgram.initialize_list), the compound literals' as marks from `output` (compound_initializers) and its asm
+// statements (asm_list). The compound literals' count in *compound_count. False where there's no room.
+static bool check_driver_statement_assign(const CheckProgram* program, CheckProgram* over, uint32_t* compound_count, Arena* output)
+{
+    const CheckInput* input = program->input;
+    const uint32_t plans = program->initializers != NULL ? program->initializers->count : 0;
+    uint32_t* listed = program->census_pass_initializer_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->census_pass_initializer_count) : NULL;
+    uint8_t* compounds = plans != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, plans) : NULL;
+    const bool valid = (program->census_pass_initializer_count == 0 || listed != NULL) && (plans == 0 || compounds != NULL);
+    uint32_t count = 0;
+    *compound_count = 0;
+    if (valid && plans != 0)
+    {
+        memset(compounds, 0, plans);
+        for (uint32_t i = 0; i < program->census_pass_initializer_count; i += 1)
+        {
+            const uint32_t plan = program->census_pass_initializers[i];
+            const uint32_t token = program->initializers->declaration_tokens[plan];
+            const bool compound = token < input->token_count && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_COMPOUND);
+            compounds[plan] = compound ? 1 : 0;
+            listed[count] = plan;
+            count += compound ? 0 : 1;
+            *compound_count += compound ? 1 : 0;
+        }
+        over->compound_initializers = compounds;
+    }
+    if (valid)
+    {
+        over->initialize_list = listed;
+        over->initialize_list_count = count;
+    }
+    over->asm_list = program->census_pass_asms;
+    over->asm_list_count = program->census_pass_asm_count;
+    return valid;
+}
+
+// The candidates' pass's statements into `over` (check_driver_statement_assign), and whether its plans are the
+// INITIALIZE controls' targets over every control, as check_lower_init_pools reads them (*same_initializers), its compound
+// literals those the references reach (*same_compounds), and each of `selected`'s bodies' asm statements those its ASM
+// controls name in their order (check_program_asm_sequence, *same_asms), against `program`'s; and their counts, the
+// controls' and the lists', in `counts` (initializers, compound literals, asm statements, two each). False where there's
+// no room.
 static bool check_driver_statement_lists(const CheckProgram* program, const CheckProgram* selected, CheckProgram* over, bool* same_initializers, bool* same_compounds,
                                          bool* same_asms, uint32_t* counts, Arena* output, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
     const CheckInput* input = program->input;
     const uint32_t plans = program->initializers != NULL ? program->initializers->count : 0;
-    uint32_t* listed = program->census_pass_initializer_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->census_pass_initializer_count) : NULL;
-    uint8_t* compounds = plans != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, plans) : NULL;
+    memset(counts, 0, 6 * sizeof(uint32_t));
     uint8_t* controlled = plans != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, plans) : NULL;
     uint8_t* candidate = plans != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, plans) : NULL;
-    bool valid = (program->census_pass_initializer_count == 0 || listed != NULL) && (plans == 0 || (compounds != NULL && controlled != NULL && candidate != NULL));
-    memset(counts, 0, 6 * sizeof(uint32_t));
+    bool valid = check_driver_statement_assign(program, over, &counts[3], output) && (plans == 0 || (controlled != NULL && candidate != NULL));
     *same_initializers = valid;
     *same_compounds = valid;
     if (valid && plans != 0)
     {
-        memset(compounds, 0, plans);
         memset(controlled, 0, plans);
         memset(candidate, 0, plans);
         for (uint32_t c = 0; c < program->control_count; c += 1)
@@ -9557,38 +9591,20 @@ static bool check_driver_statement_lists(const CheckProgram* program, const Chec
                 controlled[control->target] = 1;
             }
         }
-        uint32_t count = 0;
-        for (uint32_t i = 0; i < program->census_pass_initializer_count; i += 1)
+        for (uint32_t i = 0; i < over->initialize_list_count; i += 1)
         {
-            const uint32_t plan = program->census_pass_initializers[i];
-            const uint32_t token = program->initializers->declaration_tokens[plan];
-            const bool compound = token < input->token_count && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_COMPOUND);
-            compounds[plan] = compound ? 1 : 0;
-            candidate[plan] = compound ? 0 : 1;
-            listed[count] = plan;
-            count += compound ? 0 : 1;
-            counts[3] += compound ? 1 : 0;
+            candidate[over->initialize_list[i]] = 1;
         }
-        counts[1] = count;
+        counts[1] = over->initialize_list_count;
         for (uint32_t i = 0; i < plans; i += 1)
         {
             const bool reached = program->compound_initializers != NULL && program->compound_initializers[i] != 0;
             counts[2] += reached ? 1 : 0;
             *same_initializers &= controlled[i] == candidate[i];
-            *same_compounds &= reached == (compounds[i] != 0);
+            *same_compounds &= reached == (over->compound_initializers[i] != 0);
         }
-        over->initialize_list = listed;
-        over->initialize_list_count = count;
-        over->compound_initializers = compounds;
-    }
-    else if (valid)
-    {
-        over->initialize_list = listed;
-        over->initialize_list_count = 0;
     }
     // The asm statements: each selected body's, by its controls and by the list (check_program_asm_sequence).
-    over->asm_list = program->census_pass_asms;
-    over->asm_list_count = program->census_pass_asm_count;
     *same_asms = valid;
     if (valid && input->asm_count != 0)
     {
@@ -9614,20 +9630,18 @@ static bool check_driver_statement_lists(const CheckProgram* program, const Chec
 }
 
 // The provisional selection (#2536's step 2.2b, --provisional-selection): the selection over the candidates' references
-// (CheckProgram.census_pass), which numbers the symbols that a window's lowering takes before every body's own references
-// are known, against the exact selection `selected`. It serves where both keep the same bodies in the same order and each
-// symbol of the exact one is the provisional one's of the same object, in the same order: then its program is in
-// *provisional, each extra symbol (one whose object the exact selection leaves out) taking object 0, which the emission
-// makes a placeholder that the object leaves out (check_program_emit's symbols, check_driver_object_build), and their
-// count is in *extra. Its builtins are the candidates' pass's (CheckProgram.census_pass_builtins, #2536's step 2.2c.3, part
-// 2), which a window's lowering takes before the bodies' own are known: it serves only where the helpers and the runtime
-// functions' preparation over them are the exact selection's (check_driver_same_builtin_plans), as the epilogue will
-// check them, and where no target group's state over the candidates' references differs from its own
-// (CheckProgram.target_states_differ). Its pools and asm plan take the pass's initializers' plans and asm statements
-// (check_driver_statement_lists, #2536's step 2.2c.3, part 3), and it serves only where those are the controls'. False
-// otherwise: -c takes the exact selection.
-static bool check_driver_provisional(CheckProgramSelection* provisional, const CheckProgram* program, const CheckDataPrepared* data,
-                                     const CheckProgramSelection* selected, bool scalar, uint32_t* extra, Arena* output, Arena* scratch)
+// (CheckProgram.census_pass), which numbers the symbols that a window's lowering takes before every body's own
+// references are known. It is made before check_program's loop (#2536's step 2.2c.4, part 1), after its setup and the
+// tail's part over the candidates' marks (check_program_start), as a window's lowering will need it. Its builtins are
+// the candidates' pass's (CheckProgram.census_pass_builtins, #2536's step 2.2c.3, part 2). Where it reads what the loop
+// makes, it takes a bound: a block-scope static is emitted unless one of the pass's left-out ranges holds it
+// (CheckProgram.census_pass_ranges, among the writer's) and every statement expression's region counts as reached, so
+// that its statics are a superset of the exact selection's. Its lowering's locals take the pass's ranges too. Its
+// bodies' places in the loop's columns and its regions' bodies, which it copies before the loop writes them,
+// check_driver_provisional_refresh fills in after the loop, and check_driver_provisional_check decides whether it
+// serves. Whether it was made, in *provisional.
+static bool check_driver_provisional_select(CheckProgramSelection* provisional, const CheckProgram* program, const CheckDataPrepared* data, bool scalar,
+                                            Arena* output, Arena* scratch)
 {
     const CheckProgramCensus* census = &program->census_pass;
     const uint64_t scratch_mark = scratch->length;
@@ -9646,9 +9660,228 @@ static bool check_driver_provisional(CheckProgramSelection* provisional, const C
     candidates.reference_count = total;
     candidates.builtin_nodes = program->census_pass_builtins;
     candidates.builtin_count = program->census_pass_builtin_count;
-    bool usable = census->first != NULL && (copies != NULL || program->body_count == 0) &&
-                  check_program_select_mode(provisional, &candidates, data, C_LOWERING_REACHABLE, scalar, false, output, scratch) &&
-                  provisional->program.body_count == selected->program.body_count && provisional->program.object_count == selected->program.object_count &&
+    candidates.dropped_ranges = program->census_pass_ranges;
+    candidates.dropped_range_count = program->census_pass_arms;
+    candidates.region_reached = NULL;
+    const bool made = census->first != NULL && (copies != NULL || program->body_count == 0) &&
+                      check_program_select_mode(provisional, &candidates, data, C_LOWERING_REACHABLE, scalar, false, output, scratch);
+    arena_pop_to(scratch, scratch_mark);
+    return made;
+}
+
+// A provisional selection's records after check_program's loop and tail (#2536's step 2.2c.4, part 1): each of `over`'s
+// bodies' places in the loop's columns, as check_program_select_mode copies them from `program`'s body (all of
+// CheckProgramBody but its references, which are the candidates'); the regions, each one's body renumbered as the
+// selection's; and the totals and columns of the loop and the tail that a body's lowering reads. Its left-out ranges
+// stay the pass's, which check_driver_provisional_check compares. Its bodies are `program`'s in order, a target_clones
+// copy after its body (check_program_select_mode), so one cursor finds each one's. Whether each was found.
+static bool check_driver_provisional_refresh(CheckProgram* over, const CheckProgram* program, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    uint32_t* map = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->body_count + 1);
+    bool valid = map != NULL;
+    if (valid)
+    {
+        memset(map, 0xff, ((uint64_t)program->body_count + 1) * sizeof(uint32_t));
+    }
+    uint32_t source = 0;
+    for (uint32_t b = 0; valid && b < over->body_count; b += 1)
+    {
+        const uint32_t opening = over->bodies[b].opening;
+        while (source < program->body_count && program->bodies[source].opening != opening)
+        {
+            source += 1;
+        }
+        valid = source < program->body_count;
+        if (valid)
+        {
+            CheckProgramBody body = program->bodies[source];
+            body.reference_first = over->bodies[b].reference_first;
+            body.reference_count = over->bodies[b].reference_count;
+            over->bodies[b] = body;
+            map[source] = map[source] == BUSTER_CHECK_NONE ? b : map[source];
+        }
+    }
+    for (uint32_t r = 0; valid && r < program->region_count; r += 1)
+    {
+        const uint32_t body = program->regions[r].body;
+        over->regions[r] = program->regions[r];
+        over->regions[r].body = body < program->body_count ? map[body] : BUSTER_CHECK_NONE;
+    }
+    if (valid)
+    {
+        over->controls = program->controls;
+        over->control_count = program->control_count;
+        over->label_positions = program->label_positions;
+        over->label_position_count = program->label_position_count;
+        over->exit_count = program->exit_count;
+        over->chain_stop_count = program->chain_stop_count;
+        over->switch_count = program->switch_count;
+        over->lifetime_event_count = program->lifetime_event_count;
+        over->region_reached = program->region_reached;
+    }
+    arena_pop_to(scratch, mark);
+    return valid;
+}
+
+// --windowed-loop's run of check_program's loop as the emission lowers (#2536's step 2.2c.4, part 2, CheckEmitLoop): the
+// program's run, the provisional program the emission lowers, each of its bodies' body in the program (`sources`, the
+// order check_program_select_mode keeps, a target_clones copy's its body's), each of the program's bodies' first body in it
+// (`map`, none for a body it leaves out), and how many of its bodies are filled in.
+typedef struct CheckDriverLoop CheckDriverLoop;
+struct CheckDriverLoop
+{
+    CheckProgramRun* run;
+    CheckProgram* over;
+    uint32_t* sources;
+    uint32_t* map;
+    uint32_t filled;
+};
+
+// A CheckDriverLoop for `run` and `over`, its columns in `output`. Whether each of over's bodies is the program's.
+static bool check_driver_loop_prepare(CheckDriverLoop* loop, CheckProgramRun* run, CheckProgram* over, Arena* output)
+{
+    const CheckProgram* program = run->program;
+    *loop = (CheckDriverLoop){
+        .run = run,
+        .over = over,
+        .sources = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)over->body_count + 1),
+        .map = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)program->body_count + 1),
+    };
+    bool valid = loop->sources != NULL && loop->map != NULL;
+    if (valid)
+    {
+        memset(loop->map, 0xff, ((uint64_t)program->body_count + 1) * sizeof(uint32_t));
+    }
+    uint32_t source = 0;
+    for (uint32_t b = 0; valid && b < over->body_count; b += 1)
+    {
+        while (source < program->body_count && program->bodies[source].opening != over->bodies[b].opening)
+        {
+            source += 1;
+        }
+        valid = source < program->body_count;
+        if (valid)
+        {
+            loop->sources[b] = source;
+            loop->map[source] = loop->map[source] == BUSTER_CHECK_NONE ? b : loop->map[source];
+        }
+    }
+    return valid;
+}
+
+// The emission's loop (CheckEmitLoop.run, #2536's step 2.2c.4, part 2): check_program's loop up to the body that the
+// provisional program's body `end - 1` comes from (every body past its bodies), then that program's records of the bodies
+// run since, as check_driver_provisional_refresh fills them in after the tail: each body's (but its references, the
+// candidates'), every region's, and the loop's totals and columns as the loop leaves them, its controls the writer's
+// entries until the tail copies them. Whether the loop has run without a failure.
+static bool check_driver_loop_run(void* context, uint32_t end)
+{
+    CheckDriverLoop* loop = context;
+    CheckProgramRun* run = loop->run;
+    const CheckProgram* program = run->program;
+    CheckProgram* over = loop->over;
+    const uint32_t last = end != 0 && end <= over->body_count ? loop->sources[end - 1] + 1 : run->body_count;
+    check_program_bodies(run, last);
+    const bool valid = run->valid && program->status == CHECK_PROGRAM_OK;
+    while (valid && loop->filled < over->body_count && loop->sources[loop->filled] < run->next_body)
+    {
+        CheckProgramBody body = program->bodies[loop->sources[loop->filled]];
+        body.reference_first = over->bodies[loop->filled].reference_first;
+        body.reference_count = over->bodies[loop->filled].reference_count;
+        over->bodies[loop->filled] = body;
+        loop->filled += 1;
+    }
+    for (uint32_t r = 0; valid && r < program->region_count; r += 1)
+    {
+        const uint32_t body = program->regions[r].body;
+        over->regions[r] = program->regions[r];
+        over->regions[r].body = body < program->body_count ? loop->map[body] : BUSTER_CHECK_NONE;
+    }
+    if (valid)
+    {
+        over->controls = run->entries;
+        over->control_count = run->writer.count;
+        over->label_positions = run->writer.label_positions;
+        over->label_position_count = run->writer.label_position_count;
+        over->exit_count = program->exit_count;
+        over->chain_stop_count = program->chain_stop_count;
+        over->switch_count = run->writer.switch_count;
+        over->region_reached = program->region_reached;
+    }
+    return valid;
+}
+
+// Whether the lowering's locals over the pass's left-out ranges (CheckProgram.census_pass_ranges), which a provisional
+// selection takes (check_driver_provisional_select), are those over the writer's (CheckProgram.dropped_ranges): no
+// local's declaration (check_lower_local_declaration's) lies in a range of either that no range of the other holds.
+// Both are sorted and apart, so a cursor over the other finds whether it holds each range; only the tokens of a range
+// it doesn't are read, none where the two are the same.
+static bool check_driver_provisional_locals(const CheckProgram* program)
+{
+    const CheckInput* input = program->input;
+    CheckProgram undropped = *program;
+    undropped.dropped_range_count = 0;
+    const uint64_t* lists[2] = { program->census_pass_ranges, program->dropped_ranges };
+    const uint32_t counts[2] = { program->census_pass_arms, program->dropped_range_count };
+    bool same = true;
+    for (uint32_t side = 0; side < 2; side += 1)
+    {
+        const uint64_t* ranges = lists[side];
+        const uint64_t* other = lists[1 - side];
+        const uint32_t other_count = counts[1 - side];
+        uint32_t o = 0;
+        for (uint32_t i = 0; same && i < counts[side]; i += 1)
+        {
+            const uint32_t low = (uint32_t)(ranges[i] >> 32);
+            const uint32_t high = (uint32_t)ranges[i];
+            while (o < other_count && (uint32_t)other[o] < low)
+            {
+                o += 1;
+            }
+            const bool held = o < other_count && (uint32_t)(other[o] >> 32) <= low && high <= (uint32_t)other[o];
+            for (uint32_t token = low; same && !held && token <= high && token < input->token_count; token += 1)
+            {
+                same = !check_lower_local_declaration(&undropped, token);
+            }
+        }
+    }
+    return same;
+}
+
+// Whether each naked body of `program` holds asm statements alone (#2536's step 2.2c.4, part 2): its controls are ASM and
+// END ones, so that its plan over the program's asm list (check_program_asm_plan_naked), which a window's lowering takes
+// before the loop, is the one over its controls, whose other statements refuse it.
+static bool check_driver_naked_asm_only(const CheckProgram* program)
+{
+    bool only = true;
+    for (uint32_t b = 0; only && program->object_naked != NULL && b < program->body_count; b += 1)
+    {
+        const CheckProgramBody body = program->bodies[b];
+        for (uint32_t i = 0; only && check_program_asm_naked(program, b) && i < body.count; i += 1)
+        {
+            const CheckControlKind kind = program->controls[body.first + i].kind;
+            only = kind == CHECK_CONTROL_ASM || kind == CHECK_CONTROL_END;
+        }
+    }
+    return only;
+}
+
+// Whether the provisional selection made before the loop (check_driver_provisional_select), its records filled in after
+// it (check_driver_provisional_refresh), serves -c in place of the exact selection `selected` (#2536's steps 2.2b and
+// 2.2c.4, part 1): where both keep the same bodies in the same order and each symbol of the exact one is the
+// provisional one's of the same object, in the same order. Then each extra symbol (one whose object the exact selection
+// leaves out) takes object 0, which the emission makes a placeholder that the object leaves out (check_program_emit's
+// symbols, check_driver_object_build), and their count is in *extra. It serves only where the helpers and the runtime
+// functions' preparation over its builtins are the exact selection's (check_driver_same_builtin_plans), where no target
+// group's state over the candidates' references differs from its own (CheckProgram.target_states_differ), where its
+// pools and asm plan, over the pass's initializers' plans and asm statements, are the controls'
+// (check_driver_statement_lists, #2536's step 2.2c.3, part 3), and where its lowering's locals are the writer's
+// (check_driver_provisional_locals). False otherwise: -c takes the exact selection.
+static bool check_driver_provisional_check(CheckProgramSelection* provisional, const CheckProgram* program, const CheckProgramSelection* selected, uint32_t* extra,
+                                           Arena* output, Arena* scratch)
+{
+    bool usable = provisional->program.body_count == selected->program.body_count && provisional->program.object_count == selected->program.object_count &&
                   provisional->program.symbol_count >= selected->program.symbol_count;
     for (uint32_t b = 0; usable && b < provisional->program.body_count; b += 1)
     {
@@ -9679,6 +9912,7 @@ static bool check_driver_provisional(CheckProgramSelection* provisional, const C
              check_driver_statement_lists(program, &selected->program, &provisional->program, &same_initializers, &same_compounds, &same_asms, statement_counts, output,
                                           scratch) &&
              same_initializers && same_compounds && same_asms;
+    usable = usable && check_driver_provisional_locals(program) && check_driver_naked_asm_only(&selected->program);
     uint32_t* objects = usable ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)provisional->program.symbol_count + 1) : NULL;
     usable = usable && objects != NULL;
     *extra = 0;
@@ -9693,7 +9927,6 @@ static bool check_driver_provisional(CheckProgramSelection* provisional, const C
     {
         provisional->program.symbol_objects = objects;
     }
-    arena_pop_to(scratch, scratch_mark);
     return usable;
 }
 
@@ -9782,6 +10015,13 @@ static void check_driver_selection_census(const CheckProgram* program, const Che
             counts[0], counts[1], (int)(listed && same_initializers), counts[2], counts[3], (int)(listed && same_compounds), counts[4], counts[5],
             (int)(listed && same_asms));
     arena_pop_to(output, output_mark);
+    // The left-out ranges (#2536's step 2.2c.4, part 1), a line of its own: the writer's and the pass's, whether they are
+    // the same, and whether the lowering's locals over them are (check_driver_provisional_locals).
+    const bool same_ranges = program->dropped_range_count == program->census_pass_arms &&
+                             (program->dropped_range_count == 0 ||
+                              memcmp(program->dropped_ranges, program->census_pass_ranges, (uint64_t)program->dropped_range_count * sizeof(uint64_t)) == 0);
+    fprintf(stderr, "selection-census-ranges\twriter\t%u\tpass\t%u\tsame\t%d\tlocals-same\t%d\n", program->dropped_range_count, program->census_pass_arms,
+            (int)same_ranges, (int)check_driver_provisional_locals(program));
 }
 
 // The checked program's code and data, as -c writes them: its object at `output_path`, or with `kept` (one of several
@@ -9790,24 +10030,69 @@ static void check_driver_selection_census(const CheckProgram* program, const Che
 // (c_check_debug.c), relocated against the functions' sections (ObjectOptions.debug); and with `unwind`, its functions'
 // unwind tables (check_program_emit's). With `stage_clock` (--time-stages), its passes' times. The driver's own errors go
 // to `errors`.
-static bool check_driver_object(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
-                                 Preprocessor* pp, TypeTable* types, const char* source_path, const char* output_path,
-                                 bool scalar, bool verify, bool dump_static, bool debug, bool unwind, CheckProgramLanes* lanes, Arena* scratch,
-                                 CheckClock* stage_clock, FILE* errors, CheckUnitsKept* kept, bool foreign, bool* fatal)
+// -c's code (#2536's step 2.2c.4, part 2): the emission's arenas, its code and its rows, which check_driver_object_finish
+// makes the object of, between which a caller may run what --windowed-loop's emission leaves for after it.
+typedef struct CheckDriverCode CheckDriverCode;
+struct CheckDriverCode
 {
-    (void)scalar;
+    Arena output;
+    Arena bytes;
+    uint64_t mark;
+    CheckProgramCode code;
+    CheckProgramRows rows;
+    bool valid;
+};
 
-    Arena output = arena_reserve(UINT64_C(1) << 34);
-    Arena bytes = arena_reserve(UINT64_C(1) << 34);
-    const uint64_t mark = scratch->length;
-    CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
-    CheckDataResult emission = { .status = CHECK_DATA_RESOURCE, .failed_token = BUSTER_CHECK_NONE };
-    CheckProgramRows rows = { 0 };
-    CheckDebug dwarf = { 0 };
+// The code half of check_driver_object (#2536's step 2.2c.4, part 2): the emission of `program`'s code, its static data's
+// room `data_capacity`, into `state`, which reports nothing.
+static void check_driver_object_code(CheckDriverCode* state, const CheckProgram* program, LinkCapacity data_capacity, const Parser* parser, Preprocessor* pp,
+                                     bool scalar, bool verify, bool debug, bool unwind, CheckProgramLanes* lanes, Arena* scratch, CheckClock* stage_clock,
+                                     CheckUnitsKept* kept, bool foreign)
+{
+    *state = (CheckDriverCode){
+        .output = arena_reserve(UINT64_C(1) << 34),
+        .bytes = arena_reserve(UINT64_C(1) << 34),
+        .mark = scratch->length,
+        .code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE },
+    };
     check_clock_mark(stage_clock, CHECK_STAGE_EMIT_SETUP);
-    bool valid = output.base != 0 && bytes.base != 0 &&
-                 check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output, &bytes, scratch, NULL, kept != NULL && !foreign,
-                                          debug ? &rows : NULL, unwind, verify, lanes, stage_clock);
+    state->valid = state->output.base != 0 && state->bytes.base != 0 &&
+                   check_program_emit_timed(&state->code, program, parser, pp->table, data_capacity, BUSTER_SCALAR_PATH(scalar), &state->output, &state->bytes, scratch,
+                                            NULL, kept != NULL && !foreign, debug ? &state->rows : NULL, unwind, verify, lanes, stage_clock);
+}
+
+// The emission's arenas and lanes given back, for code that check_driver_object_finish won't take (#2536's step 2.2c.4,
+// part 2).
+static void check_driver_object_release(CheckDriverCode* state, CheckProgramLanes* lanes, Arena* scratch)
+{
+    arena_pop_to(scratch, state->mark);
+    if (lanes != NULL && lanes->units_lane != NULL)
+    {
+        check_program_lanes_settle(lanes);
+    }
+    else
+    {
+        check_program_lanes_release(lanes);
+    }
+    arena_release(&state->bytes);
+    arena_release(&state->output);
+}
+
+// The rest of check_driver_object after its code (check_driver_object_code, in `state`): the code's report and failure,
+// the static data, the sections, the debug information and the object, or the kept link.
+static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
+                                       Preprocessor* pp, TypeTable* types, const char* source_path, const char* output_path,
+                                       bool scalar, bool dump_static, bool debug, CheckProgramLanes* lanes, Arena* scratch,
+                                       CheckClock* stage_clock, FILE* errors, CheckUnitsKept* kept, bool foreign, bool* fatal)
+{
+    Arena output = state->output;
+    Arena bytes = state->bytes;
+    const uint64_t mark = state->mark;
+    CheckProgramCode code = state->code;
+    CheckProgramRows rows = state->rows;
+    bool valid = state->valid;
+    CheckDataResult emission = { .status = CHECK_DATA_RESOURCE, .failed_token = BUSTER_CHECK_NONE };
+    CheckDebug dwarf = { 0 };
     check_driver_lower_report(&code, stage_clock);
     if (!valid)
     {
@@ -9909,6 +10194,17 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     arena_release(&output);
     check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
     return valid;
+}
+
+static bool check_driver_object(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
+                                 Preprocessor* pp, TypeTable* types, const char* source_path, const char* output_path,
+                                 bool scalar, bool verify, bool dump_static, bool debug, bool unwind, CheckProgramLanes* lanes, Arena* scratch,
+                                 CheckClock* stage_clock, FILE* errors, CheckUnitsKept* kept, bool foreign, bool* fatal)
+{
+    CheckDriverCode state;
+    check_driver_object_code(&state, program, data->capacity, parser, pp, scalar, verify, debug, unwind, lanes, scratch, stage_clock, kept, foreign);
+    return check_driver_object_finish(&state, program, data, parser, pp, types, source_path, output_path, scalar, dump_static, debug, lanes, scratch, stage_clock,
+                                      errors, kept, foreign, fatal);
 }
 
 // executable_write's passes are a lane group's collectives: an executable is written by a group of one lane, or of
@@ -10916,9 +11212,14 @@ struct CheckDriverCommand
     // --selection-census (#2536's step 2.1): the candidates' references beside the exact ones, and their selection where
     // they differ, reported on stderr (check_driver_selection_census).
     bool selection_census;
-    // --provisional-selection (#2536's step 2.2b): -c's code numbered by the candidates' selection, its extra symbols left
-    // out of the object (check_driver_provisional).
+    // --provisional-selection (#2536's step 2.2b): -c's code numbered by the candidates' selection, its extra symbols
+    // left out of the object (check_driver_provisional_check).
     bool provisional_selection;
+    // --windowed-loop (#2536's step 2.2c.4, part 2): -c's provisional selection lowered as check_program's loop runs, the
+    // loop's bodies before each window's lowering (check_driver_loop_run), and the object after the program's tail, its
+    // diagnostics and the exact selection, where the provisional selection serves; implies --provisional-selection and
+    // --deferred-lowering.
+    bool windowed_loop;
     // --shared-parts, #777's test option: a unit's emission that shares its functions' parts on the units' board pauses
     // after each part it takes itself, so that the lanes without units take some, and the command reports how many
     // they took and how many lanes left their memory to the exit, after the units' diagnostics (c_checker_units.c).
@@ -12619,8 +12920,41 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         diagnostic_input.visibility_error = false;
                         program_input = &diagnostic_input;
                     }
-                    const bool program_checked = program_diagnostics &&
-                        check_program(&program, checking, program_input, &stream, &types, program_options, output_arena, scratch);
+                    // --provisional-selection's selection, made before the program's loop (#2536's step 2.2c.4, part 1,
+                    // check_driver_provisional_select) where -c's object may take it, and its records filled in after
+                    // the loop and the tail.
+                    CheckProgramSelection provisional;
+                    bool provisional_made = false;
+                    bool program_checked = false;
+                    // --windowed-loop's code (#2536's step 2.2c.4, part 2): the provisional selection's, lowered as the loop
+                    // runs (check_driver_loop_run), whose object waits for the tail, the diagnostics and the exact selection.
+                    CheckDriverCode windowed_code;
+                    bool windowed = false;
+                    if (program_diagnostics)
+                    {
+                        const bool early = command->provisional_selection && result == 0 && emit_object && kept == NULL && !prefix_only && !lower_all &&
+                                           !dump_static && program_options.prepared_data != NULL;
+                        CheckProgramRun run;
+                        check_program_start(&run, &program, checking, program_input, &stream, &types, program_options, output_arena, scratch);
+                        provisional_made = early && run.symbols && run.symbols_valid && program.status == CHECK_PROGRAM_OK &&
+                                           check_driver_provisional_select(&provisional, &program, &data, scalar, output_arena, scratch);
+                        CheckDriverLoop loop;
+                        uint32_t compound_count = 0;
+                        windowed = provisional_made && command->windowed_loop && lanes != NULL &&
+                                   check_driver_statement_assign(&program, &provisional.program, &compound_count, output_arena) &&
+                                   check_driver_loop_prepare(&loop, &run, &provisional.program, output_arena);
+                        if (windowed)
+                        {
+                            run.keep_scratch = true;
+                            lanes->loop = (CheckEmitLoop){ .run = check_driver_loop_run, .context = &loop };
+                            check_driver_object_code(&windowed_code, &provisional.program, provisional.data.capacity, checking, pp, scalar, verify, source_rows,
+                                                     unwind_tables, lanes, scratch, stage_clock, NULL, command->mixed_inputs);
+                            lanes->loop = (CheckEmitLoop){ 0 };
+                        }
+                        check_program_loop(&run);
+                        program_checked = check_program_finish(&run);
+                        provisional_made = provisional_made && program_checked && check_driver_provisional_refresh(&provisional.program, &program, scratch);
+                    }
                     // A control error's constraints, where check_program finds one: every one, as the diagnosis of a rejected unit
                     // gives them (#1447), among the unit's errors, which the reports below publish, so that the unit's warnings
                     // leave out what clang's do after them (check_driver_rejected_warnings).
@@ -12892,30 +13226,60 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             result = check_driver_target_features(&selected.program, checking, recovered, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
                             result = check_driver_aliases(&selected.program, checking, pp, scalar, scratch) ? result : 1;
                         }
-                        // --provisional-selection (#2536's step 2.2b): the code numbered by the candidates' selection, where it
-                        // serves (check_driver_provisional), without --lower-all, a dump or another unit to link with; the exact
-                        // selection's data either way. Its use and its extra symbols are reported on stderr.
-                        CheckProgramSelection provisional;
+                        // --provisional-selection (#2536's step 2.2b): the code numbered by the candidates' selection,
+                        // made before the loop, where it serves (check_driver_provisional_check), without --lower-all,
+                        // a dump or another unit to link with; the exact selection's data either way. Its use and its
+                        // extra symbols are reported on stderr.
                         uint32_t extra = 0;
-                        const bool provisional_used = selection && result == 0 && command->provisional_selection && program.census_pass.first != NULL &&
-                                                      kept == NULL && !lower_all && !dump_static &&
-                                                      check_driver_provisional(&provisional, &program, &data, &selected, scalar, &extra, output_arena, scratch);
+                        const bool provisional_used = selection && result == 0 && provisional_made &&
+                                                      check_driver_provisional_check(&provisional, &program, &selected, &extra, output_arena, scratch);
                         if (selection && result == 0 && command->provisional_selection)
                         {
                             fprintf(stderr, "provisional-selection\tused\t%d\textra-symbols\t%u\n", (int)provisional_used, extra);
                         }
+                        // --windowed-loop's code serves where the provisional selection does and its emission went; any other
+                        // unit's object is the exact selection's, from its own emission after the loop (W = ∞'s order).
+                        const bool served = windowed && provisional_used && windowed_code.valid;
+                        const bool windowed_tried = windowed;
+                        if (selection && result == 0 && command->windowed_loop)
+                        {
+                            fprintf(stderr, "windowed-loop\tserved\t%d\n", (int)served);
+                        }
+                        if (windowed && !served)
+                        {
+                            check_driver_object_release(&windowed_code, lanes, scratch);
+                            windowed = false;
+                        }
                         if (selection && result == 0)
                         {
                             const char* object_path = output != 0 ? output : check_driver_object_name(arena, path);
-                            result = object_path != 0 && check_driver_object(provisional_used ? &provisional.program : &selected.program, &selected.data, checking, pp,
-                                                                           &types, path, object_path, scalar, verify, dump_static, source_rows, unwind_tables, lanes,
-                                                                           scratch, stage_clock, errors, kept, command->mixed_inputs, &driver_fatal) ? 0 : 1;
+                            if (served)
+                            {
+                                windowed = object_path == 0;
+                                result = object_path != 0 && check_driver_object_finish(&windowed_code, &provisional.program, &selected.data, checking, pp, &types, path,
+                                                                                         object_path, scalar, dump_static, source_rows, lanes, scratch, stage_clock,
+                                                                                         errors, kept, command->mixed_inputs, &driver_fatal) ? 0 : 1;
+                            }
+                            else
+                            {
+                                // (The provisional selection's object where it serves; after --windowed-loop's code didn't, the
+                                // exact selection's, whose refusals are today's.)
+                                const CheckProgram* coded = provisional_used && !windowed_tried ? &provisional.program : &selected.program;
+                                result = object_path != 0 && check_driver_object(coded, &selected.data, checking, pp, &types, path, object_path, scalar, verify,
+                                                                               dump_static, source_rows, unwind_tables, lanes, scratch, stage_clock, errors, kept,
+                                                                               command->mixed_inputs, &driver_fatal) ? 0 : 1;
+                            }
                         }
                         else if (!selection)
                         {
                             check_driver_diagnose(checking, pp, selected.token, "checked definition selection failed");
                             result = 1;
                         }
+                    }
+                    // --windowed-loop's code that no object took: a unit the diagnostics, the exact selection or its checks stopped.
+                    if (windowed)
+                    {
+                        check_driver_object_release(&windowed_code, lanes, scratch);
                     }
                     if (result == 0 && link && kept == NULL && !prefix_only)
                     {
@@ -13410,6 +13774,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool poison_arenas = false;
     bool selection_census = false;
     bool provisional_selection = false;
+    bool windowed_loop = false;
     bool shared_parts = false;
     uint64_t units_memory = 0;
     bool invalid_units_memory = false;
@@ -13821,6 +14186,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             provisional_selection = true;
         }
+        else if (match.exact == C_OPTION_WINDOWED_LOOP)
+        {
+            provisional_selection = true;
+            windowed_loop = true;
+            lanes->deferred_lowering = true;
+        }
         else if (match.exact == C_OPTION_DEFERRED_LOWERING)
         {
             lanes->deferred_lowering = true;
@@ -14081,6 +14452,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .poison_arenas = poison_arenas,
         .selection_census = selection_census,
         .provisional_selection = provisional_selection,
+        .windowed_loop = windowed_loop,
         .shared_parts = shared_parts,
         .units_memory = units_memory,
         .emit_object = emit_object,
