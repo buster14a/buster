@@ -19872,12 +19872,13 @@ static bool check_lower_fit_calls(CheckLowerWriter* writer, uint64_t calls, uint
     return valid;
 }
 
-// A deferred lowering's part (CheckLowerShared.deferred), before its bodies: the jump tables of every body up to its end
+// A deferred lowering's part (CheckLowerShared.deferred), before its lowering (check_program_emit_lower_half, outside
+// the part's loop, which every lowering shares): the jump tables of every body up to its end
 // that aren't decided yet, in the bodies' order, which the writer reads from then on (a part lowered before the ones
 // ahead of it, as the windows lower an inline callee first, decides theirs too, so that the tables and their labels are
 // numbered as check_lower_switch_tables numbers them, in source order), and the calls' room with the part's cleanups'.
 // The cleanups' pass over the part's controls is scalar: only a unit with cleanups takes it, as the preparation's did.
-// False where an arena has no room.
+// False where an arena has no room, which fails the part as a writer without room does.
 static __attribute__((noinline)) bool check_lower_deferred_part(CheckLowerWriter* writer, const CheckLowerShared* shared, const CheckLowerPart* part)
 {
     const CheckProgram* program = shared->program;
@@ -19928,10 +19929,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     status->token = BUSTER_CHECK_NONE;
     status->backend_node = 0;
     status->reason = NULL;
-    if (shared->deferred && !check_lower_deferred_part(writer, shared, part))
-    {
-        check_lower_resource(writer, "lowering a part's jump tables and calls");
-    }
     // The part's label symbols follow the ones the writer's parts before it kept, in its room for the program's.
     status->label_symbols = writer->label_symbol_room != 0 ? writer->label_symbol_room + writer->label_symbol_used : 0;
     status->label_symbol_count = 0;

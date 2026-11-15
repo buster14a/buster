@@ -1944,10 +1944,17 @@ typedef enum CheckEmitHalf
 static bool check_tier0_inline_body(CheckEmitRun* run, CheckEmitLane* lane, uint32_t b, Arena* arena, Tier0Inlined* result);
 static bool check_tier0_inline_held(const CheckEmitRun* run, uint32_t b);
 
-// A part's lowering (check_lower_part) on lane `lane`.
+static void check_program_emit_part_refused(CheckEmitPart* part);
+
+// A part's lowering (check_lower_part) on lane `lane`: a deferred lowering's tables and calls' room first
+// (check_lower_deferred_part), or the part's failure as a writer's without room.
 static void check_program_emit_lower_half(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part)
 {
-    if (run->sources)
+    if (run->shared->deferred && !check_lower_deferred_part(&lane->writer, run->shared, &part->lower))
+    {
+        check_program_emit_part_refused(part);
+    }
+    else if (run->sources)
     {
         check_lower_part_sources(&lane->writer, run->shared, &part->lower, lane->streams, lane->scratch);
     }

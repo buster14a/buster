@@ -5585,8 +5585,6 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     const uint64_t lifetime_room = valid && lifetimes ? check_program_lifetime_blocks(parser, input, lifetime_first, lifetime_next, lifetime_stamps) : 0;
     valid = valid && cleanup_room <= UINT32_MAX && lifetime_room <= UINT32_MAX && cleanup_room + lifetime_room <= UINT32_MAX - ((uint64_t)count * 8 + 16);
     const uint32_t capacity = valid ? (uint32_t)((uint64_t)count * 8 + 16 + cleanup_room + lifetime_room) : 0;
-    program->control_capacity = capacity;
-    program->chain_stop_capacity = exit_capacity;
     // The bodies' labels, the worklist of a body's controls and the unit's controls, with room for 8 a token: each body
     // takes the labels and the worklist again from their start, and the controls follow each other. They are in an arena
     // of their own, which check_program unmaps when it returns (#572). In the scratch, their starts and the columns pushed
@@ -5999,6 +5997,10 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
         .body_count = body_count,
         .valid = valid,
     };
+    // The rooms the loop writes in, for a lowering that reads no control total (CheckProgram.control_capacity), from the
+    // run's writer: stored after the setup's passes, which a store among them made the compiler lay out otherwise.
+    program->control_capacity = run->writer.capacity;
+    program->chain_stop_capacity = run->writer.exit_capacity;
     return valid;
 }
 
