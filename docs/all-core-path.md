@@ -849,6 +849,22 @@ must move with the loop or work without it:
 - **The inline callees** are lowered before the first window
   (`check_program_emit_windows`' early parts), so their bodies' loop must
   run before the windows, ahead of the bodies before them in token order.
+- **The arenas.** The loop pushes its chains' room on the scratch, which the
+  emission pushes and pops in turn; and the bodies' references go to the
+  output, pushed one body after another, which the program reads as one
+  run (`CheckProgram.references`). Between windows, the loop needs a scratch
+  of its own and a column of references sized before it: no body has more
+  references than its nodes and cleanups, so the unit's nodes and cleanups
+  bound them all.
+
+**2.2c's second part, in four sub-steps**, each a PR with a 9700X record:
+
+| sub-step | what is built | gate |
+| --- | --- | --- |
+| 2.2c.1 The program in parts | `check_program` as its setup with the pass, its loop over a range of bodies, and its tail, in a row, the loop a body at a time. | Every object and diagnostic the same bytes; the compile not slower. Done ([its record](https://github.com/buster14a/buster-performance/tree/f9a1d5607088f77228df7100ab0dce22dc2fc9d5/docs/measurements/all-core-step2c1-parts-2536-2026-11-15)): every object, stderr and exit status the same on all 1,592 units; on the 9700X the compile is within the runs' spread, with 0.2 M fewer instructions on `sqlite3.c` and 1.1 M on `main.c`. |
+| 2.2c.2 The tail before the windows | The body records' own fields (declaration, opening, object, whether main) written by the setup, the loop writing the rest; the tail's part over the needed marks (`check_program_symbols`: static objects, roots, groups, aliases, the symbols' numbering, targets, the attributes' and patchable entries' keys) apart from its part over the controls (builtins, the controls' copy, the left-out ranges, lifetimes, x86 diagnostics). Under `--provisional-selection` it runs before the loop, over the candidates' references. The selection numbers its own symbols and makes the weakrefs' states again from its own references, so the tail over the candidates' marks gives the exact objects, with no second run over the exact marks. | The provisional objects the exact selection's bytes on every corpus; every other object the same as before. Done ([its record](https://github.com/buster14a/buster-performance/tree/0d83d6080d09452ef5a8427f3f7a3d2b2689fbe0/docs/measurements/all-core-step2c2-symbols-2536-2026-11-15)): the census and the provisional objects the same on all 1,592 units, every object and diagnostic the same as before, and the compile within the runs' spread on the 9700X. |
+| 2.2c.3 The lowering's preparation by windows | The calls' room bounded by the input's cleanups and the program's exits; each window's switch tables decided with its lowering, the merge numbering them in the functions' order as it does. | Every object the same bytes at W of 1, 2,048 and ∞. |
+| 2.2c.4 The loop in the windows | The `-c` path: the setup, the tail over the candidates and their selection, then each window's bodies' loop before its lowering (the inline callees' first), on a scratch of its own and into a column of references sized before it, then the tail and the exact selection, the warnings after in today's order; `W = ∞` again on an extra body, a missing reference or a differing state. | 2.2c's gate. |
 
 **Across the three designs**, by what each next step gives eight workers on
 `sqlite3.c` (the model's expected case, cumulative): the node machine's step
