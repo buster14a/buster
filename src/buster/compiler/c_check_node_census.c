@@ -2359,9 +2359,11 @@ static void node_shadow_time(NodeShadow* shadow, NodeMachine* machine, uint64_t 
     machine->verify = false;
     uint64_t least[BUSTER_NODE_SHADOW_SWEEPS][4];
     memset(least, 0xff, sizeof(least));
-    for (uint32_t pass = 0; pass < shadow->passes; pass += 1)
+    // A set's passes run one after another, so that its least follows its own code, whichever other sets are timed: with
+    // the sets taken in turn inside a pass, a file's T ran after the walk's sets and read 7 cycles a node more on Lua.
+    for (uint32_t sweeps = 0; sweeps < BUSTER_NODE_SHADOW_SWEEPS; sweeps += 1)
     {
-        for (uint32_t sweeps = 0; sweeps < BUSTER_NODE_SHADOW_SWEEPS; sweeps += 1)
+        for (uint32_t pass = 0; pass < shadow->passes; pass += 1)
         {
             if (enabled[sweeps])
             {
