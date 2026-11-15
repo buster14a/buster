@@ -4161,6 +4161,73 @@ static bool check_program_asm_plan_file(CheckProgramAsms* result, const CheckPro
     return valid;
 }
 
+// The asm statements of the program's bodies, in the order their controls take them: body b's from starts[b] to
+// starts[b + 1] of `statements` (CheckInput.asm_statements' indices) and `tokens` (each one's statement token), from `scratch`.
+// They are the bodies' ASM controls' targets, or where the program has a provisional selection's list of them
+// (CheckProgram.asm_list, #2536's step 2.2c.3, part 3), the listed statements each body's tokens hold, in token order, a
+// target_clones copy's again: the list needs no control. Returns the statements' count, UINT32_MAX where there's no room.
+static uint32_t check_program_asm_sequence(const CheckProgram* program, uint32_t** starts, uint32_t** statements, uint32_t** tokens, Arena* scratch)
+{
+    const CheckInput* input = program->input;
+    const bool listed = program->asm_list != NULL;
+    *starts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->body_count + 1);
+    uint64_t total = 0;
+    bool valid = *starts != NULL;
+    uint32_t cursor = 0;
+    // Two passes, the counts' and the entries', the second where `pass` is 1.
+    for (uint32_t pass = 0; valid && pass < 2; pass += 1)
+    {
+        total = 0;
+        cursor = 0;
+        for (uint32_t b = 0; b < program->body_count; b += 1)
+        {
+            const CheckProgramBody* body = program->bodies + b;
+            (*starts)[b] = (uint32_t)total;
+            if (listed)
+            {
+                const uint32_t opening = body->opening;
+                const uint32_t closing = program->parser->tree.parents[opening];
+                // (A target_clones copy is its body again, right after it: its statements again.)
+                while (cursor != 0 && input->asm_statements[program->asm_list[cursor - 1]].statement >= opening)
+                {
+                    cursor -= 1;
+                }
+                while (cursor < program->asm_list_count && input->asm_statements[program->asm_list[cursor]].statement < opening)
+                {
+                    cursor += 1;
+                }
+                for (; cursor < program->asm_list_count && input->asm_statements[program->asm_list[cursor]].statement <= closing; cursor += 1)
+                {
+                    if (pass == 1)
+                    {
+                        (*statements)[total] = program->asm_list[cursor];
+                        (*tokens)[total] = input->asm_statements[program->asm_list[cursor]].statement;
+                    }
+                    total += 1;
+                }
+            }
+            for (uint32_t i = 0; !listed && i < body->count; i += 1)
+            {
+                const CheckControl control = program->controls[body->first + i];
+                if (control.kind == CHECK_CONTROL_ASM && pass == 1)
+                {
+                    (*statements)[total] = control.target;
+                    (*tokens)[total] = control.token;
+                }
+                total += control.kind == CHECK_CONTROL_ASM;
+            }
+        }
+        (*starts)[program->body_count] = (uint32_t)total;
+        if (pass == 0)
+        {
+            *statements = total != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, total) : NULL;
+            *tokens = total != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, total) : NULL;
+            valid = total < UINT32_MAX && (total == 0 || (*statements != NULL && *tokens != NULL));
+        }
+    }
+    return valid ? (uint32_t)total : UINT32_MAX;
+}
+
 // Plans every asm statement of the program's bodies (CheckProgramAsms), appending a helper for each whose template
 // assembles to instructions to `helpers`, after the builtin ones, with the next symbols, and every naked function's code
 // (whatever its statements); then the names the templates define and refer to. False for an arena without room or an
@@ -4176,16 +4243,13 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
     // The helpers as they came, restored on failure: a later step without room (the names') must not leave the
     // statements' helpers appended to them in the popped output.
     const CheckProgramHelpers helpers_mark = *helpers;
-    // A body's controls: its statements' (entry_count of them), then its statement expressions' (to count). A unit
-    // without asm statements, the usual one, has none to walk for.
-    uint32_t statements = 0;
-    for (uint32_t b = 0; input->asm_count != 0 && b < program->body_count; b += 1)
-    {
-        for (uint32_t i = 0; i < program->bodies[b].count; i += 1)
-        {
-            statements += program->controls[program->bodies[b].first + i].kind == CHECK_CONTROL_ASM;
-        }
-    }
+    // A body's controls: its statements' (entry_count of them), then its statement expressions' (to count), in their
+    // order (check_program_asm_sequence). A unit without asm statements, the usual one, has none to walk for.
+    uint32_t* sequence_starts = NULL;
+    uint32_t* sequence = NULL;
+    uint32_t* sequence_tokens = NULL;
+    const uint32_t sequenced = input->asm_count != 0 ? check_program_asm_sequence(program, &sequence_starts, &sequence, &sequence_tokens, scratch) : 0;
+    const uint32_t statements = sequenced != UINT32_MAX ? sequenced : 0;
     // The naked functions: a pass over the bodies of a unit that declares one, which needs no asm statement to be one.
     uint32_t naked_count = 0;
     for (uint32_t b = 0; program->object_naked != 0 && b < program->body_count; b += 1)
@@ -4193,7 +4257,7 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
         naked_count += check_program_asm_naked(program, b);
     }
     const CheckAsms* asms = program->asms;
-    bool valid = statements == 0 || (asms != 0 && asms->status == CHECK_ASM_OK && input->asm_count != 0);
+    bool valid = sequenced != UINT32_MAX && (statements == 0 || (asms != 0 && asms->status == CHECK_ASM_OK && input->asm_count != 0));
     // The target_clones copies' plans (#2247), past the statements': each copy body's statements' range, from its first.
     uint64_t plan_count = statements != 0 ? input->asm_count : 0;
     bool copied = false;
@@ -4208,11 +4272,10 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
     {
         uint32_t low = UINT32_MAX;
         uint32_t high = 0;
-        for (uint32_t i = 0; program->body_options[b] != 0 && i < program->bodies[b].count; i += 1)
+        for (uint32_t k = sequence_starts[b]; program->body_options[b] != 0 && k < sequence_starts[b + 1]; k += 1)
         {
-            const CheckControl control = program->controls[program->bodies[b].first + i];
-            low = control.kind == CHECK_CONTROL_ASM && control.target < low ? control.target : low;
-            high = control.kind == CHECK_CONTROL_ASM && control.target > high ? control.target : high;
+            low = sequence[k] < low ? sequence[k] : low;
+            high = sequence[k] > high ? sequence[k] : high;
         }
         result->copy_bases[b] = low != UINT32_MAX ? (uint32_t)plan_count : UINT32_MAX;
         result->copy_firsts[b] = low != UINT32_MAX ? low : 0;
@@ -4267,19 +4330,19 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
         uint32_t rows = 0;
         uint32_t bodies = 0;
         // A naked body's statements are its code, which its plan has.
-        for (uint32_t i = 0; valid && (result->naked == 0 || !result->naked[b].planned) && i < program->bodies[b].count; i += 1)
+        for (uint32_t k = sequence_starts[b]; valid && (result->naked == 0 || !result->naked[b].planned) && k < sequence_starts[b + 1]; k += 1)
         {
-            const CheckControl control = program->controls[program->bodies[b].first + i];
-            const uint32_t s = control.target;
+            const uint32_t s = sequence[k];
+            const uint32_t token = sequence_tokens[k];
             // A target_clones copy's statement has a plan of its own (#2247).
-            CheckProgramAsm* plan = control.kind == CHECK_CONTROL_ASM ? check_program_asm_plan_of(result, b, s, input->asm_count) : 0;
-            if (control.kind == CHECK_CONTROL_ASM && (plan == 0 || plan->planned))
+            CheckProgramAsm* plan = check_program_asm_plan_of(result, b, s, input->asm_count);
+            if (plan == 0 || plan->planned)
             {
                 result->status = CHECK_PROGRAM_INVALID;
-                result->token = control.token;
+                result->token = token;
                 valid = false;
             }
-            else if (control.kind == CHECK_CONTROL_ASM)
+            else
             {
                 CheckProgramHelper* helper = added + count;
                 *helper = (CheckProgramHelper){ 0 };
@@ -4295,7 +4358,7 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
                     count += 1;
                 }
                 result->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_RESOURCE;
-                result->token = valid ? BUSTER_CHECK_NONE : control.token;
+                result->token = valid ? BUSTER_CHECK_NONE : token;
                 rows += valid && plan->row != NULL;
                 bodies += valid && plan->inlined;
             }

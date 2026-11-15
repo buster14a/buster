@@ -225,12 +225,21 @@ static bool check_lower_init_pools(CheckLowerInitializers* pools, const CheckPro
     {
         memset(selected, 0, count);
     }
-    for (uint32_t c = 0; valid && count != 0 && c < program->control_count; c += 1)
+    // The plans the bodies' INITIALIZE controls name, or a provisional selection's list of them (CheckProgram.initialize_list,
+    // #2536's step 2.2c.3, part 3), which needs no control.
+    for (uint32_t c = 0; valid && count != 0 && program->initialize_list == NULL && c < program->control_count; c += 1)
     {
         const CheckControl* control = program->controls + c;
         if (control->kind == CHECK_CONTROL_INITIALIZE && control->target < count)
         {
             selected[control->target] = 1;
+        }
+    }
+    for (uint32_t i = 0; valid && count != 0 && program->initialize_list != NULL && i < program->initialize_list_count; i += 1)
+    {
+        if (program->initialize_list[i] < count)
+        {
+            selected[program->initialize_list[i]] = 1;
         }
     }
     uint64_t capacity = 0;
