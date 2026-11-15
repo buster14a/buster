@@ -376,6 +376,10 @@ struct Tier1EmitTransitions
     // Each value's register location, or UINT8_MAX; and each location's value, BUSTER_IR_NONE for none.
     uint8_t* registers;
     uint32_t owners[BUSTER_TIER1_EMIT_LOCATIONS];
+    // The CFG consumer's proof that a value's slot holds it (#2784): each value's stamp of the run of blocks in which a
+    // transition last stored it there or reloaded it from there, and the current run's. Null in the straight-line consumer.
+    uint32_t* slot_stamps;
+    uint32_t stamp;
 };
 
 static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier1Liveness* liveness, const Tier1EmitOptions* options, Arena* output, Tier1EmitPrepared* result)
@@ -779,11 +783,21 @@ static X86Instruction tier1_emit_spill(const Tier1EmitPrepared* prepared, const 
     return record;
 }
 
+// A value's transitions at `position`: its stores, then its reloads and recomputations.
+//
+// With the CFG consumer's slot stamps, a store into a slot that already holds the value is left out (#2784): one a
+// transition stored the value into or reloaded it from earlier in the same run of blocks, each of whose blocks after the
+// first has the one before it as its only predecessor, so that control reaches each position of the run through all
+// those before it. An SSA value never changes, and no other value writes its slot while it lives: slots are shared only
+// by values never live at once (tier1_cfg_share_slots). A range that waits in its slot (#2768) and is evicted again after
+// its reload otherwise stored the value straight back where it had just read it, as Lua's str_gsub did at its loop's
+// head, twice each iteration.
 static Tier1EmitError tier1_emit_phase(const Tier1EmitPrepared* prepared, const Tier1Allocation* allocation, const Tier1Frame* frame, Tier1EmitTransitions* transitions, uint32_t position, Tier1EmitBuffer* buffer, Tier1EmitResult* result)
 {
     Tier1EmitError error = TIER1_EMIT_OK;
     const uint32_t first = transitions->offsets[position];
     const uint32_t end = transitions->offsets[position + 1];
+    uint32_t* const stamps = transitions->slot_stamps;
     // Stores are a separate pass: a reload may use any register whose old value is evicted at this position.
     for (uint32_t e = first; error == TIER1_EMIT_OK && e < end; e += 1)
     {
@@ -791,17 +805,22 @@ static Tier1EmitError tier1_emit_phase(const Tier1EmitPrepared* prepared, const 
         const uint32_t value = transitions->values[f];
         if (allocation->kinds[f - 1] == BUSTER_TIER1_ALLOCATE_REGISTER && allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_SPILL)
         {
+            const bool current = stamps != 0 && stamps[value] == transitions->stamp;
             if (allocation->spill_ids[value] >= frame->count)
             {
                 error = TIER1_EMIT_ALLOCATION;
             }
-            else if (!tier1_emit_append(buffer, tier1_emit_spill(prepared, allocation, frame, value, allocation->registers[f - 1], false)))
+            else if (!current && !tier1_emit_append(buffer, tier1_emit_spill(prepared, allocation, frame, value, allocation->registers[f - 1], false)))
             {
                 error = TIER1_EMIT_MEMORY;
             }
             else
             {
-                result->spill_stores += 1;
+                result->spill_stores += !current;
+            }
+            if (stamps != 0)
+            {
+                stamps[value] = transitions->stamp;
             }
             tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_MOVE, position), value);
         }
@@ -836,6 +855,10 @@ static Tier1EmitError tier1_emit_phase(const Tier1EmitPrepared* prepared, const 
             }
             result->spill_loads += error == TIER1_EMIT_OK;
             transitions->owners[base_location + reg] = value;
+            if (stamps != 0)
+            {
+                stamps[value] = transitions->stamp;
+            }
         }
         tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_MOVE, position), value);
         transitions->registers[value] = kind == BUSTER_TIER1_ALLOCATE_REGISTER ? (uint8_t)(base_location + reg) : UINT8_MAX;

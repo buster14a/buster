@@ -27,8 +27,10 @@
 //    values times blocks. Each range a value enters a block with is hinted to the register the value has at the exit of
 //    the block's anchor (#2553, tier1_cfg_anchors): its immediate dominator, or a latch laid out before it, of which
 //    every such value is live out at once; each phi to its operand's at the exit of a chosen predecessor; and a value
-//    that a phi takes, to the first register of the phi, or of the next phi along, that has one before it. Each value
-//    then stays where control from its definition brings it, and an edge moves what its own source block changed.
+//    that a phi takes, to the first register of the phi, or of the next phi along, that has one before it. A range of a
+//    loop's body laid out before its header, with no anchor, takes the hint of its phi's at the header, back to the first
+//    range of another value before it (tier1_cfg_body_hints, #2784). Each value then stays where control from its
+//    definition brings it, and an edge moves what its own source block changed.
 //    A general range live across a fixed register's sequence (sequences, #2767: a division's rax and rdx, a shift's rcx)
 //    avoids the registers it writes (tier1_cfg_crossed): it takes one only where no other register is free, so that the
 //    sequence's consumer saves no value around it.
@@ -1291,6 +1293,40 @@ static void tier1_cfg_ties(const Tier1CfgInput* input, const uint32_t* offsets, 
     }
 }
 
+// A range laid out before its value's definition that nothing hints (#2784): a loop's body laid out before its header,
+// none of whose predecessors precede it, so that it has no anchor. It takes its value's defining interval's hint,
+// followed back along the hint intervals to the first that another value's range gives before it: the register the
+// header's phi takes from its latch's operand, which the blocks before the body placed. Its value's own last register,
+// which it took otherwise, was whatever another block of the body had left free, and where the two differed each
+// iteration moved the phi into the body's register and its operand back: Lua's str_gsub, whose two phis crossed, swapped
+// them through the scratch register twice on its loop's path for a plain character. A hint back to the value's own
+// earlier range adds nothing to the register it follows anyway; and one to an exit in a slot never makes the range wait
+// in its own (tier1_allocate_scan_uses).
+static void tier1_cfg_body_hints(const Tier1CfgInput* input, const uint32_t* offsets, Tier1CfgPieces* pieces)
+{
+    for (uint32_t v = 0; v < input->value_count; v += 1)
+    {
+        const uint32_t defining = offsets[v] != offsets[v + 1] ? tier1_cfg_piece_at(pieces, offsets[v], offsets[v + 1], input->definitions[v]) : BUSTER_TIER1_CFG_NONE;
+        for (uint32_t i = offsets[v]; defining != BUSTER_TIER1_CFG_NONE && i < defining; i += 1)
+        {
+            uint32_t named = pieces->hint_intervals[i] == BUSTER_TIER1_CFG_NONE && pieces->hints[i] == v ? pieces->hint_intervals[defining] : BUSTER_TIER1_CFG_NONE;
+            bool before = false;
+            for (uint32_t step = 0; named != BUSTER_TIER1_CFG_NONE && !before && step < BUSTER_TIER1_CFG_TARGET_STEPS; step += 1)
+            {
+                const uint32_t earlier = named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT;
+                // An exit's register is noted as its interval ends, an opening's as it starts: either before i starts.
+                before = (named & BUSTER_TIER1_ALLOCATE_HINT_EXIT) != 0 ? pieces->ends[earlier] <= pieces->starts[i] : pieces->starts[earlier] < pieces->starts[i];
+                named = before ? named : pieces->hint_intervals[earlier];
+            }
+            const uint32_t earlier = named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT;
+            if (before && pieces->values[earlier] != v && pieces->classes[earlier] == pieces->classes[i])
+            {
+                pieces->hint_intervals[i] = named;
+            }
+        }
+    }
+}
+
 // Wider values first, so a partial block column keeps the ones whose binary search is deepest (#1399). Descending:
 // narrow values' zero keys sort last, where the install loop's `keys[i] != 0` stops.
 static int tier1_cfg_lookup_order(const void* left, const void* right)
@@ -2414,6 +2450,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                 tier1_cfg_phi_exits(input, chosen, ups, candidate.value_interval_offsets, &pieces);
                 tier1_cfg_operand_targets(input, phi_hints, ups, phis, candidate.value_interval_offsets, &pieces);
                 tier1_cfg_ties(input, candidate.value_interval_offsets, &pieces);
+                tier1_cfg_body_hints(input, candidate.value_interval_offsets, &pieces);
                 candidate.block_starts = input->block_starts;
                 candidate.block_count = input->block_count;
                 candidate.intervals = (Tier1AllocationInput){

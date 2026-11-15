@@ -2092,6 +2092,90 @@ static void tier1_cfg_test_dominance(Tier1CfgTestTally* tally, Arena* output, Ar
     }
 }
 
+// #2784's fixture, Lua's str_gsub loop in small: 0 -> 6, 1 -> 2, 4 -> 2, 2 -> 5, 2 -> 9, 3 -> 4, 5 -> 6, 6 -> 7, 7 -> 3,
+// 7 -> 8, 8 -> 1, 8 -> 9. The header 6 follows its body: p = phi(s, j) at 6 takes j's register at the exit of its latch 5,
+// and 5 j's at the exit of the join 2, its anchor, where the loop may end. j = phi(e, q) at 2 takes e's register at the
+// exit of 1, the matches' path, which reads e, defined in 7, and p, and is 2's nearest predecessor in layout. The
+// characters' path reads p in 3, the first successor of 7, and defines q = p + 1 in 4. p's range at 3, before its
+// definition and without an anchor or a sibling to follow, took p's last register, from 1, where e held the one j then
+// took, and the edge 7 -> 3 moved p from the header's register into it on every iteration. It now takes j's register at
+// 2's exit (tier1_cfg_body_hints), and the characters' path moves nothing.
+static void tier1_cfg_test_body_hints(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
+{
+    static Tier1CfgTestBuilder builder;
+    memset(&builder, 0, sizeof(builder));
+    builder.block_count = 10;
+    const uint32_t instructions[] = { 1, 1, 1, 1, 2, 1, 1, 2, 1, 1 };
+    for (uint32_t b = 0; b < builder.block_count; b += 1)
+    {
+        builder.instructions[b] = instructions[b];
+    }
+    builder.registers[0] = 0x000f;
+    builder.scratch[0] = 11;
+    const uint32_t edges[][2] = {
+        { 0, 6 },
+        { 1, 2 },
+        { 4, 2 },
+        { 2, 5 },
+        { 2, 9 },
+        { 3, 4 },
+        { 5, 6 },
+        { 6, 7 },
+        { 7, 3 },
+        { 7, 8 },
+        { 8, 1 },
+        { 8, 9 },
+    };
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(edges); k += 1)
+    {
+        tier1_cfg_test_edge(&builder, edges[k][0], edges[k][1]);
+    }
+    const uint32_t source = tier1_cfg_test_value(&builder, 0, 0, 0, 0x000f);
+    const uint32_t e = tier1_cfg_test_value(&builder, 7, 1, 0, 0x000f);
+    const uint32_t q = tier1_cfg_test_value(&builder, 4, 1, 0, 0x000f);
+    tier1_cfg_test_definition_use(&builder, source);
+    tier1_cfg_test_definition_use(&builder, e);
+    tier1_cfg_test_definition_use(&builder, q);
+    // Block 2's predecessors are 1 and 4, block 6's 0 and 5, in the edges' order.
+    const uint32_t join_operands[] = {
+        e,
+        q,
+    };
+    const uint32_t j = tier1_cfg_test_phi(&builder, 2, 0, join_operands);
+    const uint32_t header_operands[] = {
+        source,
+        j,
+    };
+    const uint32_t p = tier1_cfg_test_phi(&builder, 6, 0, header_operands);
+    tier1_cfg_test_use(&builder, p, 1, 0, true);
+    tier1_cfg_test_use(&builder, e, 1, 0, true);
+    tier1_cfg_test_use(&builder, p, 3, 0, true);
+    tier1_cfg_test_use(&builder, p, 4, 0, true);
+    tier1_cfg_test_use(&builder, p, 7, 0, true);
+    const uint64_t saved = output->length;
+    Tier1CfgInput input;
+    const bool built = tier1_cfg_test_build(&builder, output, &input);
+    tier1_cfg_test_expect(tally, built, "a loop's body before its header: built");
+    for (uint32_t path = 0; built && path < 2; path += 1)
+    {
+        const uint64_t mark = output->length;
+        Tier1CfgAllocation result = { 0 };
+        const Tier1CfgError error = path == 0 ? tier1_cfg_allocate(&input, output, scratch, &result) : tier1_cfg_allocate_scalar(&input, output, scratch, &result);
+        Tier1CfgCheck check;
+        const bool allocated = error == TIER1_CFG_OK && tier1_cfg_verify(&input, &result, scratch, &check);
+        tier1_cfg_test_expect(tally, allocated, "a loop's body before its header: allocated");
+        const bool quiet = tier1_cfg_test_edge_moves(&input, &result, 7, 3) == 0 && tier1_cfg_test_edge_moves(&input, &result, 4, 2) == 0 && tier1_cfg_test_edge_moves(&input, &result, 2, 5) == 0 &&
+                           tier1_cfg_test_edge_moves(&input, &result, 5, 6) == 0;
+        tier1_cfg_test_expect(tally, allocated && quiet, "a loop's body before its header takes its phi's register: the characters' path moves nothing");
+        arena_pop_to(output, mark);
+    }
+    if (built)
+    {
+        tier1_cfg_test_case(tally, &input, output, scratch, "a loop's body before its header", true, 0, 0, true);
+    }
+    arena_pop_to(output, saved);
+}
+
 static void tier1_cfg_test_fixtures(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
 {
     static Tier1CfgTestBuilder builders[11];
@@ -2548,6 +2632,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
             tier1_cfg_test_fixtures(&tally, &output, &scratch);
             tier1_cfg_test_undefined(&tally, &output, &scratch);
             tier1_cfg_test_dominance(&tally, &output, &scratch);
+            tier1_cfg_test_body_hints(&tally, &output, &scratch);
             tier1_cfg_test_local_phis(&tally, &output, &scratch);
             tier1_cfg_test_phi_storage(&tally, &output, &scratch);
             tier1_cfg_test_current_slots(&tally, &output, &scratch);

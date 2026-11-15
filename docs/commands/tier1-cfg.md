@@ -32,7 +32,8 @@ requirements. [Command index](README.md).
   placement of a definition and two uses in a small CFG, and runs fixtures and random SSA over random CFGs of the
   three classes with mutants (three generated cases in four share phi webs' slots, and a mutant gives two values whose
   slot fragments overlap one slot), and #2553's two: a join whose dominating critical edge moves nothing, and a phi web
-  around a loop that keeps one slot; `test-tier1-cfg-source` adapts every function `-c`
+  around a loop that keeps one slot; and #2784's loop whose body precedes its header, whose path for a character moves
+  nothing; `test-tier1-cfg-source` adapts every function `-c`
   compiles of real C, lowered and promoted, through a machine model
   (`tier1_cfg_ir.c`) and checks both paths' allocations, and with `--simd`
   allocates #732's SIMD functions as lowered, their masks in the opmask class.

@@ -24,7 +24,8 @@ requirements. [Command index](README.md).
   properties in `tier1_allocate_clobbers_test.c`, and a recipe that gives its
 register to a value its hint names (#2618), one that waits for its read
 (#2618, #2735) and a range that waits in its value's slot for its next required
-use (#2768) have their traces in
+use (#2768), but not where its hint names another value's range (#2784), have
+their traces in
 `tier1_allocate_hints_test.c`, as does a range's alternate (#2734:
 `alternate_intervals`, taken where its interval's value still holds the
 register and it is free), which the random inputs and their reference model
