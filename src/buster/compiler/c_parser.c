@@ -788,9 +788,13 @@ struct ParseDiagnostic
     bool declaration_type;
     // A balanced malformed type-name tail is removed without inserting a declaration terminator.
     bool resume_delete;
-    // A rejected GNU-attribute-led call retains only its callee and parentheses for lookup in the diagnostic view.
-    // The original parse error stays; the callee's source is marked invalid before expression checking (#2406).
+    // A rejected call retains only its callee and parentheses for lookup in the diagnostic view. The original
+    // parse error stays; the callee's source is marked invalid before expression checking (#2406).
     bool resume_call;
+    // The callee can precede the diagnostic, where the first argument is a type instead of an expression.
+    uint32_t resume_callee;
+    // An ordinary call uses its callee's value; an attribute-led call only classifies the name before rejecting it.
+    bool resume_call_value;
     // A K&R parameter declaration's missing semicolon skips its malformed tail through the next semicolon, or up
     // to the mandatory body brace. Its recovery view replaces [token, resume_end) with one semicolon; zero means
     // the ordinary insertion before token. This is diagnostic-only metadata, never acceptance of the input.
@@ -2705,6 +2709,8 @@ struct Parser
     // Callees retained only for name lookup by a failed parse's private view (#2406), sorted by preprocessor source index.
     // Their calls are invalid even when the name resolves, so checking must not diagnose their erased arguments.
     const uint32_t* invalid_call_sources;
+    // Beside each source, whether the retained callee is an ordinary value use, including availability warnings.
+    const uint8_t* invalid_call_values;
     uint32_t invalid_call_count;
     // Borrowed through checking and emission, like the tokens' source indices. Resource bytes stay owned by pp.
     const Preprocessor* preprocessor;
