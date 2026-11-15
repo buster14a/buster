@@ -41,8 +41,10 @@
 // A converted head whose only reachable predecessor chain leads up to a conditional branch may now be an arm of an
 // outer region (a nested `?:`, `&&` inside `||`), so the pass runs again, at most four rounds. Between rounds and
 // after the last, truth simplification (ir_truth.c's values variant) turns a select of truth values tested against
-// zero into a select of i1 values, so that a nested truth value stays within the bounds. Address-taken blocks remain
-// untouched.
+// zero into a select of i1 values, so that a nested truth value stays within the bounds. The same owned columns then
+// fold trunc(zext/sext x) into one cast of x (#2846): a _Bool result of &&/|| is trunc i8 of zext i32 of that i1, two
+// arm rows where the integer result is one, and the outer region stays inside the four-row bound. Address-taken
+// blocks remain untouched.
 
 #ifndef BUSTER_IR_IF_CONVERT_C
 #define BUSTER_IR_IF_CONVERT_C
@@ -1224,6 +1226,73 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
     return error;
 }
 
+// trunc(zext/sext x) is one cast of x. A _Bool conversion sunk into a logical value (#2838) is trunc i8 of zext i32 of
+// an i1 and or or; that pair is two arm rows where the integer result's single zext is one, so the outer &&/|| stays a
+// branch (#2846). The owned columns between rounds take the single cast. A chain longer than one extend is left; the
+// next round sees this one. Both host paths find the truncs the same way and rewrite the same rows.
+static bool ir_if_convert_fold_cast(IrFunction* function, uint32_t row)
+{
+    const uint32_t extended = function->a[row];
+    const bool trunc = function->op[row] == IR_TRUNC && function->b[row] == BUSTER_IR_NONE && function->c[row] == BUSTER_IR_NONE && function->flags[row] == 0;
+    const uint32_t extend_op = trunc && extended < function->instruction_count && extended != row ? function->op[extended] : IR_OP_COUNT;
+    const bool extend = (extend_op == IR_ZEXT || extend_op == IR_SEXT) && function->flags[extended] == 0;
+    const uint32_t source = extend ? function->a[extended] : BUSTER_IR_NONE;
+    const bool source_ok = source < function->instruction_count && source != row && source != extended;
+    const uint32_t source_type = source_ok ? function->type[source] : IR_VOID;
+    const uint32_t middle_type = extend ? function->type[extended] : IR_VOID;
+    const uint32_t result_type = function->type[row];
+    const uint32_t source_bits = ir_type_bits[source_type];
+    const uint32_t middle_bits = ir_type_bits[middle_type];
+    const uint32_t result_bits = ir_type_bits[result_type];
+    const bool integers = ir_integer(source_type) && ir_integer(middle_type) && ir_integer(result_type);
+    const bool widths = source_bits != 0 && middle_bits > source_bits && result_bits != 0 && result_bits < middle_bits;
+    const bool identity = result_bits == source_bits && source_type == result_type;
+    uint8_t operation = IR_OP_COUNT;
+    if (trunc && extend && source_ok && integers && widths)
+    {
+        operation = identity ? IR_COPY : result_bits > source_bits ? (uint8_t)extend_op : IR_TRUNC;
+    }
+    if (operation != IR_OP_COUNT)
+    {
+        function->op[row] = operation;
+        function->a[row] = source;
+    }
+    return operation != IR_OP_COUNT;
+}
+
+static void ir_if_convert_fold_casts(IrFunction* function, bool scalar)
+{
+    const uint32_t count = function->instruction_count;
+    const uint8_t* const operations = function->op;
+    for (uint64_t first = 0; first < count; first += BUSTER_IR_IF_CONVERT_BATCH)
+    {
+        const uint32_t lanes = count - first < BUSTER_IR_IF_CONVERT_BATCH ? count - (uint32_t)first : BUSTER_IR_IF_CONVERT_BATCH;
+        uint64_t candidates = 0;
+#if BUSTER_HOST_VECTOR
+        if (!scalar)
+        {
+            const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_IF_CONVERT_BATCH - lanes);
+            const __m512i op = _mm512_maskz_loadu_epi8(valid, operations + first);
+            candidates = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_TRUNC));
+        }
+        else
+#endif
+        {
+            for (uint32_t lane = 0; lane < lanes; lane += 1)
+            {
+                candidates |= (uint64_t)(operations[first + lane] == IR_TRUNC) << lane;
+            }
+        }
+        while (candidates != 0)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctzll(candidates);
+            (void)ir_if_convert_fold_cast(function, (uint32_t)first + lane);
+            candidates &= candidates - 1;
+        }
+    }
+    (void)scalar;
+}
+
 // One round over `function`: its regions found, then rewritten into output. A round without regions borrows it.
 static IrCheck ir_if_convert_round(const IrFunction* function, uint64_t first_candidate, Arena* output, Arena* scratch, bool scalar, IrIfConvertResult* converted, bool* again)
 {
@@ -1313,7 +1382,9 @@ static IrCheck ir_if_convert_round(const IrFunction* function, uint64_t first_ca
         if (check.error == IR_OK)
         {
             // The new selects' truth values tested against zero, as i1 selects (ir_truth.c), on the owned columns.
+            // Then trunc(zext/sext x) becomes one cast of x, so a sunk _Bool conversion is not a second arm row (#2846).
             ir_truth_simplify_values(&rewritten, scalar);
+            ir_if_convert_fold_casts(&rewritten, scalar);
             converted->function = rewritten;
             converted->regions += work.region_count;
             converted->selects += work.select_count;
