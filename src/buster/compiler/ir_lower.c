@@ -2565,7 +2565,9 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedS
 // The copy of a forwarded call's result (#2684) from the forwarding slot `source` to where the hidden pointer points
 // (`destination`, a ptr): past BUSTER_TIER0_MAX_COPY_BYTES a call of the front end's memmove (Tier0Function.hidden_copy,
 // its arguments the two pointers and the size, its result the destination, a ptr nothing reads, as the interpreters'
-// memmove binding has it), as the lowering's copy of a call's object calls it; else the pieces of a typed COPY.
+// memmove binding has it), as the lowering's copy of a call's object calls it; else the pieces of a typed COPY of a
+// local source, 8 bytes at a time (#2693): the callee's stores built the slot's bytes just before it, as they build a
+// call object's.
 static __attribute__((always_inline)) inline void ir_typed_forward_copy(IrTypedSink* sink, const Tier0Function* input, uint32_t destination, uint32_t source)
 {
     const uint64_t bytes = input->hidden_size;
@@ -2599,7 +2601,7 @@ static __attribute__((always_inline)) inline void ir_typed_forward_copy(IrTypedS
     }
     else
     {
-        ir_typed_copy_pointers(sink, destination, source, bytes);
+        ir_typed_copy_pointers(sink, destination, source, bytes, false);
     }
 }
 
