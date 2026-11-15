@@ -4430,11 +4430,15 @@ What the lowering covers past scalars (#145's programs):
   earlier alias or ifunc of the declaration) that is also an alias or ifunc,
   "definition 'f' cannot also be an alias", after which clang's handler drops
   the attribute and the declaration stays a valid definition, as the reader
-  does (the report is a recovered one, #2449: later uses of it are quiet;
-  left: a function's definition with an alias after an alias declaration of
-  it lacks clang's two "redefinition of 'f'" errors around it); and
-  a weakref with external
-  linkage, in a block, without a target or on a typedef. A static variable's
+  does (the report is a recovered one, #2449: later uses of it are quiet).
+  A repeated function definition keeps the declaration and body redefinition
+  reports around its alias/ifunc error, with the earlier definition's notes;
+  parser-position warnings come first, and late-attribute warnings retain
+  their order before or after the declaration conflict. The runtime alias
+  fixture compares full diagnostic streams under both language modes,
+  warning/error-limit policies, both readers and deferred bodies, including
+  preservation of an existing output on rejection. The checker also diagnoses
+  a weakref with external linkage, in a block, without a target or on a typedef. A static variable's
   alias or weakref is no tentative definition, and an alias, ifunc or weakref
   target defines its entity for later redeclarations, functions' and
   variables'. A variable's alias right after a tentative definition (the

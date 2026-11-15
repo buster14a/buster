@@ -13030,6 +13030,10 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                     check_sparse_set(reader->output->sparse_pool, reader->output->initializer_ends, token, BUSTER_CHECK_NONE);
                 }
             }
+            if (dropped && kind == C_BINDING_FUNCTION)
+            {
+                check_input_alias_conflict(reader, token, point, reader->output->recovered_count - 1, false);
+            }
         }
         else
         {
@@ -13151,6 +13155,7 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                 }
                 if (recovered && function_redefinition)
                 {
+                    check_input_alias_conflict(reader, token, point, reader->output->recovered_count - 1, true);
                     check_input_invalid_declare(reader, token);
                     kept_invalid = true;
                 }
