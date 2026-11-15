@@ -1031,7 +1031,11 @@ static __attribute__((noinline, cold)) bool check_wide_fold(const TypeTable* tab
                 } break;
                 case CHECK_OP_BIT_NOT:
                 {
+                    // The complement sets every bit of each limb. The bits past the width are not the value
+                    // (#2811): left set, ~(T)0 of an unsigned _BitInt whose width is not a multiple of 64 is read
+                    // as larger than T, and the conversion warning has no digits for it.
                     check_wide_bitwise(fold.kernels, CHECK_WIDE_NOT, answer, a, a, count);
+                    answer[count - 1] &= top_mask;
                 } break;
                 case CHECK_OP_BIT_AND:
                 {

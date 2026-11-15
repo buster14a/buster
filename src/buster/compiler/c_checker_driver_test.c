@@ -9111,6 +9111,68 @@ static void check_test_driver_float_classify(CheckTest* test, const char* execut
 #include "c_check_run_modes_driver_test.c"
 #include "c_check_oracle_status_driver_test.c"
 
+// A missing --predefines file is a fatal read error (#2828), and ~(T)0 of a wide unsigned _BitInt stays in range
+// (#2811). Both are the driver's own diagnostics, compared without an oracle.
+static void check_test_driver_correctness_edges(CheckTest* test, const char* executable, const char* directory)
+{
+    char source[PATH_MAX];
+    char object[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/edges.c", directory);
+    snprintf(object, sizeof(object), "%s/edges.o", directory);
+    const char* program = executable != NULL ? executable : "checker";
+    const bool exec = executable != NULL;
+    const char ok[] = "int main(void){return 0;}\n";
+    const bool written = parse_test_write(source, ok, sizeof(ok) - 1);
+    char* text = NULL;
+    char* const missing_predefines[] = { (char*)program, "-c", "--predefines", "/nonexistent/buster-predefines.txt", "-o", object, source, NULL };
+    const int predefines_status = written ? check_test_driver_buster_command(missing_predefines, &text, false, exec) : -1;
+    const bool predefines_reported = text != NULL && strstr(text, "fatal error: can't read the predefines file '/nonexistent/buster-predefines.txt':") != NULL &&
+                                     strstr(text, "No such file or directory") != NULL && strstr(text, "1 error generated.") != NULL &&
+                                     strstr(text, "warning:") == NULL;
+    check_test_expect(test, written && predefines_status == 1 && predefines_reported, "a missing --predefines file is a fatal read error");
+    free(text);
+    text = NULL;
+    char* const missing_source[] = { (char*)program, "-c", "-o", object, "/nonexistent/buster-missing.c", NULL };
+    const int source_status = check_test_driver_buster_command(missing_source, &text, false, exec);
+    const bool source_reported = text != NULL && strstr(text, "fatal error: can't read '/nonexistent/buster-missing.c':") != NULL &&
+                                 strstr(text, "No such file or directory") != NULL && strstr(text, "1 error generated.") != NULL;
+    check_test_expect(test, source_status == 1 && source_reported, "a missing source file stays a fatal read error");
+    free(text);
+    text = NULL;
+    const char wide[] =
+        "typedef unsigned _BitInt(129) U129;\n"
+        "typedef unsigned _BitInt(200) U200;\n"
+        "typedef unsigned _BitInt(1000) U1000;\n"
+        "typedef unsigned _BitInt(100) U100;\n"
+        "typedef unsigned _BitInt(256) U256;\n"
+        "typedef _BitInt(129) S129;\n"
+        "U129 f(void){U129 b;b=~(U129)0;return b;}\n"
+        "U129 g(void){return ~(U129)0;}\n"
+        "U100 k(void){U100 b;b=~(U100)0;return b;}\n"
+        "U200 w(void){return ~(U200)0;}\n"
+        "U1000 z(void){return ~(U1000)0;}\n"
+        "U256 m(void){return ~(U256)0;}\n"
+        "S129 s(void){return ~(S129)0;}\n";
+    const bool wide_written = parse_test_write(source, wide, sizeof(wide) - 1);
+    char* const wide_arguments[] = { (char*)program, "-fsyntax-only", "-Werror", source, NULL };
+    const int wide_status = wide_written ? check_test_driver_buster_command(wide_arguments, &text, false, exec) : -1;
+    const bool wide_clean = text != NULL && strstr(text, "warning:") == NULL && strstr(text, "(null)") == NULL && strstr(text, "error:") == NULL;
+    check_test_expect(test, wide_written && wide_status == 0 && wide_clean, "a wide unsigned complement of zero is in range");
+    free(text);
+    text = NULL;
+    char* const narrow_arguments[] = { (char*)program, "-fsyntax-only", source, NULL };
+    // -Werror above rejected nothing. The narrowing return is a real conversion, with digits, and not an error.
+    const char narrow_only[] = "typedef unsigned _BitInt(129) U129;\ntypedef unsigned _BitInt(200) U200;\nU129 narrow(void){return ~(U200)0;}\n";
+    const bool narrow_written = parse_test_write(source, narrow_only, sizeof(narrow_only) - 1);
+    const int narrow_status = narrow_written ? check_test_driver_buster_command(narrow_arguments, &text, false, exec) : -1;
+    const bool narrow_warned = text != NULL && strstr(text, "warning: implicit conversion from") != NULL && strstr(text, "changes value from") != NULL &&
+                               strstr(text, "(null)") == NULL && strstr(text, "error:") == NULL;
+    check_test_expect(test, narrow_written && narrow_status == 0 && narrow_warned, "a wide complement narrowed to a smaller _BitInt warns with its digits");
+    free(text);
+    unlink(source);
+    unlink(object);
+}
+
 static int run_checker_driver_tests(int argc, char** argv)
 {
     // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
@@ -9151,6 +9213,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool fp_contract_only = false;
     // --run-modes-only: persistent-oracle failure and differential-comparison controls (#2421).
     bool run_modes_only = false;
+    // --correctness-edges-only: a missing --predefines file and a wide unsigned complement (#2828, #2811).
+    bool correctness_edges_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -9226,6 +9290,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             run_modes_only = true;
         }
+        else if (strcmp(argv[i], "--correctness-edges-only") == 0)
+        {
+            correctness_edges_only = true;
+        }
         else if (strcmp(argv[i], "--lazy-system-headers") == 0)
         {
             lazy = true;
@@ -9260,7 +9328,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                              (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only +
                              (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only +
                              (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only +
-                             (uint32_t)run_modes_only;
+                             (uint32_t)run_modes_only + (uint32_t)correctness_edges_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -10694,6 +10762,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_run_modes(&test, clang, directory);
         check_test_driver_oracle_status(&test);
+    }
+    if (temporary && (correctness_edges_only || (!focused && !lazy && check_test_driver_takes())))
+    {
+        check_test_driver_correctness_edges(&test, executable, directory);
     }
     if (temporary)
     {

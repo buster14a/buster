@@ -924,7 +924,10 @@ static bool check_tier1_inline_own(CheckTier1Lane* lane, uint32_t b, bool scalar
 static uint32_t check_tier1_inline_reach(const CheckTier1Inline* inlining, const LinkReference* references, uint32_t count, bool names, const SymbolId* asm_symbols,
                                          uint32_t asm_names, uint8_t* reached, uint32_t* stack, uint32_t depth)
 {
-    for (uint32_t i = 0; i < count; i += 1)
+    // A body a failed part never wrote has no reference column. A null column is no references, whatever count
+    // an uninitialized slot still holds (#2822, #2792).
+    const uint32_t limit = references != NULL ? count : 0;
+    for (uint32_t i = 0; i < limit; i += 1)
     {
         const uint32_t raw = references[i].target;
         const SymbolId target = names ? (raw < asm_names ? asm_symbols[raw] : 0) : raw;
