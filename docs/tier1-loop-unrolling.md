@@ -15,8 +15,8 @@ unroller. This pass gives each counted innermost loop a main loop of up to
 eight copies of its body, entered and continued only while that many whole
 iterations remain, and keeps the original loop as it was, as the remainder of
 fewer iterations and as the whole loop wherever the main loop can't run. The
-main loop's bound is computed once in the preheader, with its wrap at the
-induction type's limit ruled out; inside it, each copy's own exit test is known
+main loop's bound is computed once before it, after a two-instruction test that
+sends a loop of no iteration straight to the original; inside it, each copy's own exit test is known
 to pass and becomes a jump, copy k's induction is the main induction plus k
 steps (folded into its addresses' displacements), and an exact integer
 reduction is split into accumulators that the main loop's exit combines. Every
@@ -64,30 +64,36 @@ returns to the header exactly when `i + ks + c P n`. With the induction
 increasing and no wrap, `f` whole iterations from `i` all return exactly when
 the last one does: `i + (f - 1)s + c P n`. So, with K' = (f - 1)s + c for a
 strict test and one less for a non-strict one, the main loop may run its `f`
-copies exactly when `i < n - K'` in the test's signedness. The preheader computes that bound once:
+copies exactly when `i + K' < n` without wrapping, in the test's signedness.
+Two tests decide that, the first one cheap:
 
 ```text
 P:   ...
-     low   = n < (least + K')          ; n - K' would wrap
-     bound = select low, least, n - K'  ; least is 0, or the signed minimum
-     guard = start < bound
-     cbr guard, MH, MX
+     cbr (start < n), MP, H            ; no iteration at all: the original loop, at once
+MP:  diff = n - start                  ; with start < n, the true difference
+     bound = n - K'                    ; can't wrap once diff > K'
+     cbr (diff >u K'), MH, MX
 MH:  the main phis: the header's phis' copies, a split reduction's accumulators
      copy 1 of the body, ..., copy f
      next = i + f*s
      cbr (next < bound), MH, MX
-MX:  phis of what P and the main loop pass on; split reductions combined
+MX:  phis of what MP and the main loop pass on; split reductions combined
      br H
-H:   the original loop, its phis taking MX's values where they took P's
+H:   the original loop, its phis entered from P as before and from MX
 ```
 
-Where the subtraction would wrap, no induction value is below the least value,
-so the guard fails and the original loop runs alone. Every `i + ks` with k < f
-is then below `n` without wrapping, in the test's signedness, which is what the
-copies rely on. The original loop is the remainder (fewer than `f` iterations
-left) and the fallback (the guard fails, or a zero trip count) at once, so there
-is one copy of its legality, as [the vectorizer's design](tier1-loop-vectorization.md)
-asks of its own remainder.
+Given `start < n`, `n - start` is the true difference as an unsigned value, so
+`diff >u K'` is exactly `start + K' < n`, and `n - K'` is then above `start` and
+wraps in neither signedness. A loop of no iteration pays the first test alone,
+two instructions; an earlier version computed a clamped bound with a `select`
+for every entry, and Lua's one-iteration loops paid seven (below). Every
+`i + ks` with k < f is below `n` without wrapping, in the test's signedness,
+which is what the copies rely on; `next` may wrap past the type's limit as the
+original's induction would, and the main test reads it as the original's test
+would. The original loop is the remainder (fewer than `f` iterations left) and
+the fallback (either test fails) at once, so there is one copy of its
+legality, as [the vectorizer's design](tier1-loop-vectorization.md) asks of its
+own remainder.
 
 Within the main loop:
 
@@ -142,7 +148,8 @@ none.
   locally as without unrolling.
 - **Growth.** At most 4,096 instructions added to a function; a loop that
   would pass it is refused (`growth`). Each admitted loop adds about `f` times
-  its instructions, its main and exit phis, and the preheader's seven or eight.
+  its instructions, its main and exit phis, the preheader's one or two and
+  MP's five or more.
 
 `IrUnrollOptions` (`factor`, `budget`, `accumulators`, `growth`) holds them;
 `ir_unroll_options` gives the defaults above, and the tests run others.
@@ -154,6 +161,17 @@ optimizer, whose SCCP, dead-code removal and merges clean the copies up: the
 copies' dead tests and increments go, and their blocks merge into one where the
 body was one. LICM first moves invariant computations into the preheader once,
 not into every copy; the unroller doesn't move anything itself.
+
+The unit's inlining (#2541) builds a summary of each candidate by the same
+passes, and its callers expand the summary and run the passes again. Summaries
+skip the unroller, so an expanded loop is unrolled once, in its caller, and a
+summary's size, which the expansion decisions read, is the loop's own. A
+candidate whose own code comes from its summary takes the unroller there
+instead, on the summary's optimized function (which it doesn't change), and
+then the sink and the optimizer again where a loop unrolled
+(`check_tier1_unroll_own`). The first version compiled such candidates by their
+whole pipeline again, which made `-c` of `sqlite3.c` about 23% slower locally;
+this way the unroller's share is the cost below.
 
 [The loop vectorizer's design](tier1-loop-vectorization.md) puts that pass
 before this one. Its vector main loop is then this pass's input: a counted
@@ -206,8 +224,9 @@ vectorized parts are the ones that run over every instruction of a function
   every short output arena (each fails with nothing left in it or succeeds)
   have their own checks.
 - **Mutations.** An off-by-one in the unsafe direction of the offset, a
-  missing c, a wrong `and` identity, a displacement without its scale and an
-  unclamped bound each fail it. Testing `<=` as `<` passes, as it should: the
+  missing c, a wrong `and` identity, a displacement without its scale, `>=` for
+  MP's `>`, an unsigned first test of a signed loop, and no first test each fail
+  it. Testing `<=` as `<` passes, as it should: the
   main loop then leaves one iteration early, to the remainder.
 - **`test-ir-optimize`** runs `tests/ir/optimize/unroll-loops-*.ir`: a store
   loop and a sum, the reviewed after text byte for byte, both twins and the

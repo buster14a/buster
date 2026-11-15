@@ -179,8 +179,10 @@ cleans up after it, and the unroller after LICM. A function that LICM or SROA
 refuses goes on as it was, and so does one past the unroller's loop analysis.
 The summaries the unit's inlining builds run the same passes but the
 unroller, which their callers run on what they expand (a summary's size is
-the loop's own, and an expanded loop is unrolled once), and with SROA, as
-with the solver and the unroller, a candidate compiles from its own pipeline.
+the loop's own, and an expanded loop is unrolled once); a candidate whose
+code comes from its summary takes the unroller on the summary's optimized
+function, then the sink and the optimizer again where a loop unrolled. With
+SROA, as with the solver, a candidate compiles from its own pipeline.
 `--tier1-report` gives each pass's counts: `folded` constants,
 `removed_instructions` and `removed_blocks` (the optimizer's output against
 its input, merges included), `merged_blocks`, `licm_moved`, `sroa_split`
