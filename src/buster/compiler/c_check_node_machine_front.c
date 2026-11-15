@@ -61,6 +61,11 @@
 // T run at reader time on the full expressions the front makes whole (measure-node-machine --shadow --front-types): the
 // front after the walk, and its results in NodeFrontShadow.types.
 #define BUSTER_NODE_FRONT_TYPES 16u
+// The flat front beside the lean one, its twin (measure-node-machine --shadow --front-flat; c_check_node_machine_flat.c):
+// after the walk acted at a chunk, as the lean front, or with BUSTER_NODE_FRONT_FLAT_FIRST before the walk's actions,
+// where the machine would run. Its records are compared with the lean front's after both made the chunk's.
+#define BUSTER_NODE_FRONT_FLAT 32u
+#define BUSTER_NODE_FRONT_FLAT_FIRST 64u
 // C and X run there after T, on the expressions it takes (measure-node-machine --shadow --front-sweeps, with
 // BUSTER_NODE_FRONT_TYPES): their tapes kept in NodeFrontShadow.types.
 #define BUSTER_NODE_FRONT_SWEEPS 128u
@@ -256,6 +261,31 @@ struct NodeFrontShadow
     uint8_t* contexts;
     // T's results at reader time, or null (BUSTER_NODE_FRONT_TYPES).
     NodeFrontTypes* types;
+    // The flat front (BUSTER_NODE_FRONT_FLAT, c_check_node_machine_flat.c). Its passes' ticks after the compaction, its
+    // own compaction's, and each stage's (BUSTER_NODE_FLAT_STAGE_*); the tokens it visited, the records it made and
+    // the places it left empty, the children its tokens hopped over, the tokens with a child past the rings' reach, and
+    // the tokens it left.
+    uint64_t flat_ticks;
+    uint64_t flat_compact_ticks;
+    uint64_t flat_stage_ticks[8];
+    uint64_t flat_tokens;
+    uint64_t flat_records;
+    uint64_t flat_empties;
+    uint64_t flat_hops;
+    uint64_t flat_beyond;
+    uint64_t flat_left;
+    // Its comparison with the lean front: the records both made, those that differ (a failure), the records only one of
+    // them made, the flat records a chunk made past its ring's room, which nothing compared, and the distances the
+    // flat front's byte doesn't hold where the lean front's does (the empty records between).
+    uint64_t flat_compared;
+    uint64_t flat_differences;
+    uint64_t flat_only;
+    uint64_t flat_lean_only;
+    uint64_t flat_unread;
+    uint64_t flat_far;
+    // The first records that differed: each one's token and field (BUSTER_NODE_FLAT_FIELD_*).
+    uint32_t flat_difference_tokens[BUSTER_NODE_FRONT_LISTED];
+    uint32_t flat_difference_fields[BUSTER_NODE_FRONT_LISTED];
 };
 
 #define BUSTER_NODE_FRONT_CONTEXT_UNKNOWN 0xffu
@@ -385,6 +415,8 @@ struct NodeFront
     uint8_t sizes_stagger[BUSTER_NODE_FRONT_STAGGER];
     // The machine's state at reader time (c_check_node_machine_reader.c), or null.
     struct NodeMachineReader* typer;
+    // The flat front's state (c_check_node_machine_flat.c), or null.
+    struct NodeFlat* flat;
     CheckValue wide_values[BUSTER_NODE_FRONT_WIDES];
 };
 

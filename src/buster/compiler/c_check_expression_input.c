@@ -1667,6 +1667,7 @@ static void check_input_expression_numbering(CheckInputReader* reader, uint32_t 
 }
 
 #include "c_check_node_machine_front.c"
+#include "c_check_node_machine_flat.c"
 
 // The front's hooks in the coded walk (PPOptions.node_front): out of line and called only where the front runs, so that
 // a compile's walk is its own code but for a test of the front a chunk.
@@ -1698,6 +1699,13 @@ static __attribute__((noinline)) uint64_t node_front_prepared(NodeFront* front, 
             node_front_chunk(front, reader, tokens, classes, acting, identifiers, literals);
         }
         fronting = __rdtsc() - ready;
+    }
+    if (front->flat != NULL && (fronted & BUSTER_NODE_FRONT_FLAT_FIRST) != 0)
+    {
+        // The flat front before the walk acts at the chunk: its ticks are its own too.
+        const uint64_t flattening = __rdtsc();
+        node_front_chunk_flat(front->flat, reader, literals);
+        fronting += __rdtsc() - flattening;
     }
     return fronting;
 }
@@ -1732,14 +1740,34 @@ static __attribute__((noinline)) uint64_t node_front_acted(NodeFront* front, uin
         node_machine_reader_chunk(front->typer, front, reader);
     }
 #endif
+    if (front->flat != NULL)
+    {
+        // The flat front, where it runs after the walk, and its records against the lean front's of the same chunk.
+        if ((fronted & BUSTER_NODE_FRONT_FLAT_FIRST) == 0)
+        {
+            node_front_chunk_flat(front->flat, reader, literals);
+        }
+        node_flat_compare(front->flat, front, reader);
+    }
     return flushed;
 }
 
-// The machine's state at reader time for a unit the front reads, where the options ask for T there
-// (BUSTER_NODE_FRONT_TYPES): the checker unit's alone, as the machine is.
-static __attribute__((noinline)) void node_front_typer(NodeFront* front, CheckInputReader* reader, uint8_t fronted)
+// What else the options ask of a unit the front reads, begun: the machine's state at reader time for T there
+// (BUSTER_NODE_FRONT_TYPES), the checker unit's alone, as the machine is; and the flat front's state
+// (BUSTER_NODE_FRONT_FLAT), on the scratch as the front's, touched beforehand where the front's is
+// (BUSTER_NODE_FRONT_WARM).
+static __attribute__((noinline)) void node_front_started(NodeFront* front, CheckInputReader* reader, uint8_t fronted)
 {
     front->typer = NULL;
+    front->flat = (fronted & BUSTER_NODE_FRONT_FLAT) != 0 ? arena_push_array(reader->scratch, 1, sizeof(NodeFlat), 64) : NULL;
+    if (front->flat != NULL)
+    {
+        if ((fronted & BUSTER_NODE_FRONT_WARM) != 0)
+        {
+            memset(front->flat, 0, sizeof(NodeFlat));
+        }
+        node_flat_begin(front->flat, front->shadow);
+    }
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
     if ((fronted & BUSTER_NODE_FRONT_TYPES) != 0)
     {
@@ -1827,7 +1855,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
             front->argument_count = 0;
             front->wide_count = 0;
             reader->output->node_front = shadow;
-            node_front_typer(front, reader, fronted);
+            node_front_started(front, reader, fronted);
         }
         else
         {
