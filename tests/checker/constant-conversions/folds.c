@@ -3,9 +3,9 @@
 // 2^31 unsigned's and 2^63 unsigned long's too); as operands of the arithmetic, the comparisons and pointer arithmetic, a
 // subscript, a call's arguments, returns, initializers, assignments and compound assignments, and in a statement
 // expression's body, whose function tracks its stack. A conditional's or a logical operator's value converted by its
-// consumer converts in each arm instead where an arm is a constant, which then folds: one constant arm or two, to long,
-// unsigned long through the conditional's unsigned type (c ? -1 : 2u), double and _Bool, nested, as an operand, and
-// with a condition known at compile time.
+// consumer converts in each arm instead where an arm is a constant and the target an integer or _Bool, which then folds:
+// one constant arm or two, to long, unsigned long through the conditional's unsigned type (c ? -1 : 2u) and _Bool,
+// nested, as an operand, and with a condition known at compile time.
 typedef unsigned long U;
 
 U add1(U i) { return i + 1; }
@@ -45,14 +45,12 @@ long sel(int c, int x) { return c ? x : 1; }
 long sel2(int c, int x) { return c ? 1 : x; }
 long both(int c) { return c ? 1 : 2; }
 U mix(int c) { return c ? -1 : 2u; }
-double dsel(int c, int x) { return c ? x : 3; }
 _Bool bsel(int c, int x) { return c ? x : 5; }
 long nest(int c, int d, int x) { return c ? (d ? 1 : x) : 2; }
 long addsel(int c, long y) { return y + (c ? 1 : -2); }
 int psel(int* p, int c) { return *(p + (c ? 1 : -1)); }
 long lg(int a, int b) { return a && b; }
 long lo(int a, int b) { return a || !b; }
-double dl(int a, int b) { return (a || b) + 0.5; }
 _Bool bl(int a, int b) { return a && b; }
 static int touched;
 static int touch(void) { touched += 1; return touched; }
@@ -83,9 +81,9 @@ int tested(int n)
     {
         int c = (n >> k) & 1;
         int e = (n >> (k + 1)) & 1;
-        see((U)sel(c, n)); see((U)sel2(c, n)); see((U)both(c)); see(mix(c)); see((U)(long)(dsel(c, n) * 2)); see(bsel(c, n & k));
+        see((U)sel(c, n)); see((U)sel2(c, n)); see((U)both(c)); see(mix(c)); see(bsel(c, n & k));
         see((U)nest(c, e, n)); see((U)addsel(c, l)); see((U)psel(a + 2, c));
-        see((U)lg(c, e)); see((U)lo(c, e)); see((U)(long)(dl(c, e) * 4)); see(bl(c, e));
+        see((U)lg(c, e)); see((U)lo(c, e)); see(bl(c, e));
     }
     touched = 0;
     see((U)decided_or(n)); see((U)decided_and(n)); see((U)known_arm(n)); see((U)touched);

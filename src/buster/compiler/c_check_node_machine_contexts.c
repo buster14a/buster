@@ -121,10 +121,10 @@ static bool node_machine_testable(const NodeMachine* machine, TypeId type)
 
 // Whether the tasks put conditional or logical operator record `r`'s conversion into its arms
 // (check_lower_conditional_target, #2678): its context a value's and its conversion to its target one that writes entries
-// (node_machine_convert's), of classes that fold (check_lower_conditional_sinks), and `constant` (a logical operator's 0
-// or 1) or one of a conditional's arms `b` and `c` it evaluates (UINT32_MAX for one it doesn't) an integer constant
-// (check_lower_integer_constant). X writes a record's conversion once, after its row, so C leaves such a record to the
-// tasks. Out of line, as only these ask.
+// (node_machine_convert's), to an integer or _Bool that folds (check_lower_conditional_sinks), and `constant` (a logical
+// operator's 0 or 1) or one of a conditional's arms `b` and `c` it evaluates (UINT32_MAX for one it doesn't) an integer
+// constant (check_lower_integer_constant). X writes a record's conversion once, after its row, so C leaves such a record
+// to the tasks. Out of line, as only these ask.
 static __attribute__((noinline)) bool node_machine_sinks(const NodeMachine* machine, uint32_t r, uint32_t b, uint32_t c, bool constant)
 {
     const TypeId from = node_machine_record_type(machine, r);

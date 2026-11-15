@@ -208,8 +208,10 @@ A conditional's or a logical operator's value converted by its consumer meets
 its arms at a label, where no conversion folds, since a jump there brings the
 other arm's value. Where an arm is a constant (a conditional's arm by
 `check_lower_integer_constant`, a logical operator's 0 or 1) and the conversion
-is one that folds (`check_lower_conditional_sinks`), the conversion goes into
-the arms instead (`check_lower_conditional_target`): its task, under the node's
+is one that folds to an integer or `_Bool` (`check_lower_conditional_sinks`),
+the conversion goes into the arms instead (`check_lower_conditional_target`,
+asked out of line by `check_lower_join` only where the task under the node's
+EXPRESSION is that conversion): its task, under the node's
 EXPRESSION, comes off the stack; a conditional pushes it under each arm's own
 conversion, tagged with the arm's node, so that a constant arm folds both (`c ?
 -1 : 2u` to `unsigned long` is -1 to `unsigned`, then to `unsigned long`); a
@@ -217,7 +219,13 @@ logical operator writes its 0 or 1 in the target's class and converts its second
 operand's truth before the jump to the join. The join's JUMP_VALUE takes the
 target's class, and the other arm takes the CONVERT the join had. A known
 condition's single arm does the same; GNU's `x ?: y`, whose condition is its
-arm, keeps the join's. The node machine leaves such a node to the tasks
+arm, keeps the join's. A floating target keeps it too: Tier 1 has no select of
+floating values, so the arms' floating constants would take a branch where the
+join's integer select is a `cmov` (on the 9700X, a `?:` of 3 and 1 summed into
+a `double` on a coin's condition took 223.4 ms for 40.5 with the conversion
+after the join, in `constant-arms-2678-2026-11-15`), and Tier 0 writes each
+arm's floating constant as a `movabs` and a `movq`, no fewer than its constant
+and the join's `cvtsi2sd`. The node machine leaves such a node to the tasks
 (`node_machine_sinks`), as it writes a record's conversion once, after its row.
 
 `tests/checker/constant-conversions` holds the regressions, which run natively
@@ -225,7 +233,8 @@ against clang (`c_check_constant_conversion_test.c`): the issue's four functions
 whose Tier 0 code has no `movslq` or `cvtsi2s` of a constant; every kind of
 conversion that folds, conditionals' and logical operators' arms among them,
 after which no integer CONST precedes a CONVERT on either lowering, and the node
-templates' entries are the tasks'; and the conversions that don't fold.
+templates' entries are the tasks'; and the conversions that don't fold, a
+join's to `double` among them.
 
 ## Node machine census (#2524)
 
