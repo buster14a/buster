@@ -61,13 +61,15 @@
 // function its callers copy and its own code goes on from, with its verified analysis, and the calls expanded in it.
 // The analysis's arena is `frozen`, a copy of its builder's analyses arena as it was once the summary was built:
 // ir_verified_current reads the arena's length, and the builder's own goes on growing as it builds more, on its lane,
-// while another lane's code reads the summary. Nothing writes the copy once the summary is published.
+// while another lane's code reads the summary. Nothing writes the copy once the summary is published. `vectors` is
+// whether its source or an expanded callee's has vectors (check_tier1_inline_expand's).
 typedef struct CheckTier1Summary CheckTier1Summary;
 struct CheckTier1Summary
 {
     CheckTier1Passes passes;
     Arena frozen;
     uint32_t inlined;
+    bool vectors;
 };
 
 // The emission's generations of its inlining tables.
@@ -556,13 +558,15 @@ static bool check_tier1_inline_aggregates(const IrFunction* function, uint32_t n
 // inlines it whatever its size, a single-site one BUSTER_CHECK_TIER1_INLINE_SINGLE_COST, a small one
 // BUSTER_CHECK_TIER1_INLINE_SMALL_COST; the caller alone is rewritten (IrInlineUnit.only). A callee whose signature the
 // call doesn't match (ir_inline_signature, which would refuse the whole unit) stays a call. The unit's columns are in
-// steps[4], before the expansion.
+// steps[4], before the expansion. *vectors is whether the body's source has vectors (Tier0Function.vectors) or an
+// expanded callee's summary's does (CheckTier1Summary.vectors).
 static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inline* inlining, uint32_t caller, const IrFunction* lowered, const X86Target* target, bool scalar,
-                                      IrFunction* result, uint32_t* inlined, bool* verified)
+                                      IrFunction* result, uint32_t* inlined, bool* verified, bool* vectors)
 {
     const CheckProgram* program = inlining->program;
     *inlined = 0;
     *verified = true;
+    *vectors = inlining->lowered->functions[caller].vectors;
     bool changed = false;
     Arena* scratch = &lane->scratch;
     const uint64_t mark = scratch->length;
@@ -668,7 +672,10 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
             *verified = false;
             for (uint32_t call = expanded.call_offsets[position]; call < expanded.call_offsets[position + 1]; call += 1)
             {
-                aggregates = aggregates || (expanded.decisions[call] == IR_INLINE_SELECTED && check_tier1_inline_aggregates(lowered, expanded.call_nodes[call]));
+                const bool selected = expanded.decisions[call] == IR_INLINE_SELECTED;
+                const uint32_t node = expanded.call_nodes[call];
+                aggregates = aggregates || (selected && check_tier1_inline_aggregates(lowered, node));
+                *vectors = *vectors || (selected && inlining->summaries[inlining->candidates[lowered->a[node]] - 1].vectors);
             }
         }
     }
@@ -677,8 +684,11 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
     // The aggregates' slots of a body with vectors, as without inlining, or of an expansion that copied an aggregate argument
     // or result into a slot of its own, which SROA splits. Its other aggregates are as they would be without inlining:
     // splitting them is no expansion's work (on sqlite3.c, 0.05% of the code for a quarter of the expansion's time). Where
-    // SROA fails the body keeps its calls. An expansion SROA doesn't take is verified by promotion.
-    if (aggregates || ir_function_has_vectors_path(&current, !scalar))
+    // SROA fails the body keeps its calls. An expansion SROA doesn't take is verified by promotion. The vectors are its
+    // source's or an expanded callee's (*vectors): a COPY's 16-byte pieces (#2693, ir_typed_copy_pointers) are vectors in
+    // the IR but give SROA nothing of theirs to split, and on sqlite3.c they made it split sqlite3VdbeExec (+141 M
+    // instructions).
+    if (aggregates || (*vectors && ir_function_has_vectors_path(&current, !scalar)))
     {
         IrSroaOptions options = ir_sroa_options();
         options.scalar = scalar;
@@ -734,8 +744,9 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
     IrFunction expanded = lowered;
     uint32_t inlined = 0;
     bool verified = true;
-    const bool changed = check.error == IR_OK && check_tier1_inline_expand(lane, inlining, b, &lowered, target, scalar, &expanded, &inlined, &verified);
-    CheckTier1Summary summary = { 0 };
+    bool vectors = function->vectors;
+    const bool changed = check.error == IR_OK && check_tier1_inline_expand(lane, inlining, b, &lowered, target, scalar, &expanded, &inlined, &verified, &vectors);
+    CheckTier1Summary summary = { .vectors = vectors };
     bool built = false;
     if (check.error == IR_OK)
     {
@@ -866,7 +877,8 @@ static bool check_tier1_inline(CheckTier1Lane* lane, uint32_t caller, const IrFu
                 check_tier1_inline_summary(lane, inlining, candidate - 1, scalar, certify);
             }
         }
-        changed = check_tier1_inline_expand(lane, inlining, caller, lowered, target, scalar, result, inlined, verified);
+        bool vectors = false;
+        changed = check_tier1_inline_expand(lane, inlining, caller, lowered, target, scalar, result, inlined, verified, &vectors);
     }
     return changed;
 }
