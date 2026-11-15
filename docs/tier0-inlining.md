@@ -743,4 +743,37 @@ in ms (medians, or the 1-lane run of `benchmark-files`):
 The scalar lexer, which calls no intrinsics, doesn't move: the control. The
 qualification's stage-2 smoke took 114 s inlined against 220 s without, and its
 `test-lexer` 45 s against 111 s (the latter beside other work). The 9700X's
-numbers, under the lock, are still to be taken, as above.
+numbers follow.
+
+### On the 9700X
+
+buster-performance's
+[`tier0-inline-1398-2026-11-15`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-inline-1398-2026-11-15)
+has the record, by main `2ebfe68a` and step 3's head `5c26a3b3`, Release at
+`znver5` without `-g`, each timed run under the lock on CPU 2. The issue's
+kernels, 100,000 calls over 4,096 elements, the median pass in ms (every build
+printed the same checksums):
+
+| kernel | Tier 0 | `--tier0-no-inline` | `--tier1` | clang -O0 | clang -O2 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `_mm256_add_ps` sum | 315.1 | 873.4 | 17.1 | 188.0 | 17.6 |
+| `_mm256_adds_epu8` | 13.5 | 124.7 | 2.6 | 17.6 | 2.3 |
+| `_mm512_cmpeq_epi32_mask` count | 20.2 | 79.7 | 9.3 | 18.9 | 6.3 |
+| `_mm256_fmadd_ps` | 336.8 | 905.6 | 33.9 | 198.7 | 33.7 |
+
+Tier 0 is 0.77 and 1.07 times clang -O0 on the store and the count, and 1.7
+times on the two accumulators, whose values go through frame slots (#780). The
+compiler self-built at Tier 0, on the same CPU, in ms:
+
+| benchmark | Tier 0, inlined | `--tier0-no-inline` | clang Release |
+| --- | ---: | ---: | ---: |
+| `benchmark-lexer src`, `c_tokenize` | 546.4 | 1,349.8 | 8.9 |
+| `benchmark-lexer src`, `c_tokenize_scalar` | 286.1 | 301.8 | 93.1 |
+| `benchmark-refinement src`, `refine_tokens_fused` | 567.9 | 1,628.3 | 16.7 |
+| `benchmark-files` on `main.c`, 1 lane | 1,124.3 | 2,573.9 | 33.1 |
+
+Its 43 units compile in 18.2 s with inlining and 17.2 s without. Step 3 left
+`main.c`'s (complete driver) `-c` and `sqlite3.c`'s within main against
+itself (-0.23% to +0.09% user cycles over three `ab` rounds), and its object
+without 163 dead callees: 1,411 local functions to 1,248 (clang -O0: 1,237),
+`.text` 7.1% smaller.
