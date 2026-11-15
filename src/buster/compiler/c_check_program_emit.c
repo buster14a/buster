@@ -2545,7 +2545,10 @@ static bool check_program_emit_window_keep(CheckEmitRun* run, uint32_t b, Arena*
     }
     const uint32_t* asm_label_names = check_program_emit_window_copy(kept, window, mark, code->asm_label_names, code->asm_label_count, sizeof(uint32_t), &valid);
     const Tier0Home* local_homes = check_program_emit_window_copy(kept, window, mark, code->local_homes, code->local_count, sizeof(Tier0Home), &valid);
-    const EmittedLiteral* literals = check_program_emit_window_copy(kept, window, mark, code->literals, code->literal_count, sizeof(EmittedLiteral), &valid);
+    // Its literals (#2744), which only Tier 1's code has: windows are Tier 0's (CheckEmitRun.window_tokens), so a body's
+    // count is checked before anything else is (a window's every body otherwise pays a call for none).
+    const EmittedLiteral* literals = code->literal_count != 0 ? check_program_emit_window_copy(kept, window, mark, code->literals, code->literal_count, sizeof(EmittedLiteral), &valid) :
+                                                                code->literals;
     if (valid)
     {
         code->references = references;
