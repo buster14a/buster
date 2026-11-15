@@ -621,7 +621,7 @@ with a call astride its last entry.
 
 ### The fact words (#2850's step 1)
 
-`./build/compiler measure-node-machine --shadow --facts [--facts-packed] [--facts-window N] [--passes N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow --facts | --facts-lean | --facts-loads [--facts-packed] [--facts-window N] [--passes N] [--list N] [preprocessor options] file...`
 (`c_check_node_machine_facts.c`) is step 1 of [the one-core
 path](../one-core-path.md): T's identifier leaves and lookups made from fact
 words, with T's records as the oracle. It runs in the shadow's own pass, after
@@ -648,32 +648,59 @@ the pipeline and the shadow's sweeps; no compile takes any of it.
   load of its declaration's line and one store of its record
   (`node_facts_leaves`); then the lookups a class at a time, the lower levels
   first (`node_facts_batch`, and one loop an operator: `node_facts_arrows`,
-  `_dots`, `_subscripts`, `_calls`, `_discards`). Each lookup has a short
-  path (`node_facts_*_fast`) and behind it its rule (`node_facts_slow`), T's
-  own rule's steps on rows and slots; what neither takes is T's record,
-  counted as left. The kernel's record is one 64-byte line
-  (`NodeFactsRecord`), T's fields together.
+  `_dots`, `_dereferences`, `_subscripts`, `_calls`, `_discards`). Each
+  lookup has a short path (`node_facts_*_fast`) and behind it its rule
+  (`node_facts_slow`), T's own rule's steps on rows and slots; what neither
+  takes is T's record, counted as left. A loop lists the lookups its short
+  path didn't take and makes them after it (`node_facts_slow_each`), so that
+  no call is in the loop. A short path's choices are between registers: what
+  a choice may need is loaded whichever way it goes, since clang compiles a
+  choice with a load behind it as a branch. The kernel's record is one
+  64-byte line (`NodeFactsRecord`), T's fields together.
+- **The variants.** `--facts` is the whole kernel: a leaf's and a lookup's
+  record with every field T writes. `--facts-lean` makes what later rules
+  decide on: a leaf is its declaration's line alone, a lookup writes its
+  record's first half (type and word, flags and object, payload, standing) and
+  a member's offset, no conversion's entry is written, and a discard is not
+  made. `--facts-loads` makes of a lookup only what its load gives (its type,
+  that type's word, a member's offset) and tests only what the load tests;
+  its standing, flags, object and payload are given, and so is whether its
+  operand is fit for the short path, which is the lean kernel's own answer.
+  The loads' kernel is a measurement of the load, not a kernel a compile
+  could run alone.
 - **The comparison.** A checked pass gives the kernel T's records of the given
-  nodes and poisoned bytes for the leaves and lookups, then compares every
-  field T writes of a record (`node_facts_same`) and the kernel's lists and
-  classes with a record-at-a-time twin (`node_facts_lists_same`). The timed
+  nodes and poisoned bytes for the leaves and lookups, then compares what the
+  variant makes of each record with T's (`node_facts_same`: every field for
+  the whole kernel) and the kernel's lists and classes with a
+  record-at-a-time twin (`node_facts_lists_same`). What a lean kernel leaves
+  out is made in the checked pass by the record's rule from the kernel's own
+  records (`node_facts_derived`): each taken lookup's two conversions' entries
+  must be T's, or the command fails, and each discard's whole record is
+  counted as its rule's or not. The loads' kernel is checked after the lean
+  one, on records whose given fields are T's and whose loaded fields are
+  poisoned. The timed
   passes follow: `--passes N` of the windows whole, by the cycle, instruction
   and mispredicted-branch counters; as many of the given records put in place
   alone, which is taken off; and as many with the two parts' TSC ticks apart,
   each window run and run again at once.
 
-The report's `node-facts:` lines give the records by kind, the identifiers by
-what they name, the lookups by operator with those left, the given records by
-operator, the differences, the words made (rows, lines, lines made again,
-member slots), the windows, and the times: the kernel's cycles, instructions
+The report's `node-facts:` lines give the variant, the records by kind, the
+identifiers by what they name, the lookups by operator with those left, those
+a short path took and those their rule took, a lean kernel's conversions and
+discards with those derived, the loads' kernel's lookups by their load, the
+given records by operator, the differences, the words made (rows, lines, lines
+made again, member slots), the windows, and the times: the kernel's cycles, instructions
 and mispredicted branches a taken leaf or lookup, and a leaf's and a lookup's
 ticks. `--list N` prints the first N records that differ, with both records.
 The command exits 1 on a difference. On a host without the vector paths the
 listing and the leaves run a record at a time and give the same records.
 
 `test-checker` runs `node_facts_test_text` (each kind of leaf and each lookup,
-taken and left) at three window settings: every record T's, the lists the
-twin's, and the counts of leaves, lookups and lookups left the fixture's. A
+taken and left) by the whole kernel at three window settings and by the lean
+and the loads' kernels at two each: every record T's in what the variant
+makes, the lists the twin's, the counts of leaves, lookups and lookups left
+the fixture's, and every conversion and discard a lean kernel left out its
+rule's. A
 rule changed in T needs its step changed in the facts' rule and short path:
 the fixture and the corpora's comparison say where. [The
 design](../one-core-path.md#step-1-the-fact-words) has the results.

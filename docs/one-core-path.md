@@ -21,7 +21,10 @@ measured the leaves and lookups: every record is T's, a leaf takes about 5
 cycles, and a lookup takes 18 to 63 by its operator, 25 to 46 on average,
 where the gate was 10 and the design's own refutation line 20. T is bound by
 its lookups as its rules are today. What a lookup's record costs is its rule's
-hundred instructions and the record's width, not its loads.
+hundred instructions and the record's width, not its loads. The follow-up
+measured both ends of that: a lookup that makes only its record's first half
+takes 21 to 45 cycles by its operator, and its load alone 12 to 16. The rest
+is the lookup's facts, which the design gives the lanes.
 
 ## The budget
 
@@ -44,7 +47,7 @@ token; the issue has each row's source:
 | step | what | gate | state |
 | --- | --- | --- | --- |
 | 0 | The middle's passes on the real nodes, outside the compiler | every entry the stream's; 20 cycles a taken node or less; 0.2 mispredicted branches a node or fewer | measured: 16.7 and 20.6 cycles, 0.025 and 0.045 mispredicted |
-| 1 | The fact words, in the shadow: T's leaves and lookups from one load each | every record the oracle's; 10 cycles a leaf or lookup or less, a body's expressions a run | measured: exact; 15.8 to 26.5 cycles; a leaf about 5, a lookup 25 to 46 |
+| 1 | The fact words, in the shadow: T's leaves and lookups from one load each | every record the oracle's; 10 cycles a leaf or lookup or less, a body's expressions a run | measured: exact; 15.8 to 26.5 cycles; a leaf about 5, a lookup 25 to 46. Followed up: a lean record 14.1 to 20.8, the loads alone 8.8 to 15.2 |
 | 2 | The machine on these records where it runs (#2524's steps 2 to 4) | the bodies' middle at 38 cycles a node or less in `-c sqlite3.c` | not started |
 | 3 | The front's row, into the window | 35 cycles a token or less | not started |
 | 4 | Tier 0's row | 10 cycles a token or less, the object's bytes unchanged | not started |
@@ -236,7 +239,10 @@ a window.
 - **A compiler's vectorizer.** Clang made the calls' argument loops, of two or
   three arguments, vectors of loaded and inserted lanes, and spilled the loops
   around them. They are marked to stay as written; the first four arguments
-  are read with no branch.
+  are read with no loop. (The source read them with no branch either; the
+  compiled kernel had one on the count, which [the
+  follow-up](#a-short-paths-choices-a-correction-to-step-1) found and
+  removed.)
 
 ### What stays scalar, and why
 
@@ -262,12 +268,186 @@ a window.
   decide on (the design's fact bytes and the type) and leaves the conversions'
   entries to C, as the design's C has them; and the discards, 41% of
   `sqlite3.c`'s lookups, as a context byte on their operand's record, which the
-  design already says they are. Neither is measured here: T's whole record
-  was this step's oracle.
+  design already says they are. T's whole record was this step's oracle;
+  [the follow-up](#step-1s-follow-up-a-lean-record-and-a-lookups-load-alone)
+  measures both.
 - **For the front** (#2524's step 1b): a call's rule reads its arguments from
   the call's side, as a list of distances back, where the structural bytes
   have each argument's place and its consumer's distance; and the classes
   want each lookup's level with its record.
+
+## Step 1's follow-up: a lean record, and a lookup's load alone
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/per-core-step1-lean-2850-2026-11-15).
+`measure-node-machine --shadow --facts-lean` and `--facts-loads`
+([the guide](commands/lowering.md#the-fact-words-2850s-step-1)).
+
+Step 1 made T's whole record of a lookup and found the rule, not the loads,
+its cost. It left two things unmeasured, which this measures on the same
+windows with T still the oracle: a lookup that makes only what later rules
+decide on, and what of a lookup is its load.
+
+### The variants
+
+- **Lean** (`--facts-lean`). A leaf is its declaration's line alone: 32 bytes,
+  one load and one store of half a line. A lookup writes its record's first
+  half (its type with that type's word, its flags and object, its payload and
+  standing) and a member's offset, and no conversion's entry: those are C's,
+  from the operator, its operands' records and their types' rows. A discard is
+  not made. It is a context of its operand, as the design has it, and its
+  record is given.
+- **Loads** (`--facts-loads`). Of a lookup, only what its load gives: its type,
+  that type's word and a member's offset, from its operand's type's row and,
+  for a member, the slot; and only the tests the load itself makes (the row's
+  flags, the type complete at the node, the member found and no bit-field, a
+  call's prototype and count). Its standing, flags, object and payload are
+  given, as lanes over its operands' bytes would give them, and so is whether
+  its operand is fit for the short path: a byte a record, the lean kernel's
+  own answer. No compile could run this kernel alone. It says what the load
+  costs.
+
+What a variant leaves out is checked, not assumed. In the lean kernel's
+checked pass each taken lookup's two conversions' entries are made by its rule
+from the kernel's own records and must be T's, or the command fails; and each
+discard's whole record is made by the discard's rule from its operand's
+record and counted as T's or not. The loads' kernel is checked after the lean
+one, over records whose given fields are T's and whose loaded fields are
+poisoned.
+
+### What it measured
+
+On the 9700X, CPU 2, under the lock: Release builds of main `fdf0de74` with
+this follow-up's sources, medians of three runs, each the least of five
+passes over the unit; a kernel's figures are a pass less the same windows'
+given records put in place alone. Cycles a taken leaf or lookup, and in
+parentheses the same a record of the window: the figure the variants share a
+denominator of, since a lean kernel makes no discard and its taken lookups
+are fewer and dearer than the whole kernel's.
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| records of the windows | 291,021 | 73,998 | 130,291 |
+| identifiers' leaves, all taken | 93,682 | 21,795 | 42,850 |
+| lookups a lean kernel makes, and those it takes | 52,013, 99.92% | 13,289, 99.95% | 17,046, 99.00% |
+| conversions' entries left out, and those their rule derives | 51,973, all | 13,283, all | 16,875, all |
+| discards left out, and those their rule derives | 36,724, 36,524 | 6,503, 6,453 | 10,520, 10,508 |
+| records that differ from T's | 0 | 0 | 0 |
+| **a body a window:** whole | 22.7 (14.2) | 17.6 (9.9) | 15.9 (8.6) |
+| lean | 20.8 (10.4) | 16.0 (7.6) | 14.1 (6.4) |
+| loads | 15.2 (7.6) | 10.8 (5.1) | 8.8 (4.1) |
+| mispredicted branches: whole, lean, loads | 0.25, 0.21, 0.20 | 0.01, 0.01, 0.01 | 0.01, 0.01, 0.01 |
+| **windows packed to 384 records:** whole | 18.9 (11.9) | 14.9 (8.4) | 14.7 (7.9) |
+| lean | 17.4 (8.7) | 13.5 (6.4) | 13.0 (5.9) |
+| loads | 11.8 (5.9) | 8.3 (3.9) | 7.8 (3.6) |
+| mispredicted branches: whole, lean, loads | 0.12, 0.09, 0.09 | 0.01, 0.02, 0.01 | 0.01, 0.01, 0.01 |
+
+By part on `sqlite3.c`, windows packed to 384 records, from profiles of each
+kernel's functions (`perf record`, 481 runs of the unit): cycles each, with
+the instructions and the mispredicted branches in parentheses. A part's
+cycles read to 3 to 7 percent; the loads' dereferences are too few to read.
+
+| part | of them | whole | lean | loads |
+| --- | ---: | ---: | ---: | ---: |
+| the lists, the classes' mask and the batches, a record of the window | 291,021 | 2.4 (10; 0.01) | 1.8 (6; 0.01) | 1.5 (5; 0.01) |
+| a leaf | 93,682 | 3.1 (15) | 2.4 (12) | 2.4 (11) |
+| a discard | 36,724 | 13.4 (53; 0.06) | given | given |
+| `->` | 23,433 | 23.6 (92; 0.13) | 20.9 (79; 0.11) | 15.8 (49; 0.12) |
+| `.` | 7,257 | 31.2 (122; 0.19) | 27.6 (118; 0.12) | 14.4 (56; 0.08) |
+| `*` | 1,188 | 30.1 (105; 0.19) | 25.9 (94; 0.16) | |
+| a subscript | 6,812 | 53.6 (228; 0.24) | 44.6 (189; 0.15) | 14.0 (52; 0.09) |
+| a call | 13,323 | 35.5 (147; 0.20) | 28.0 (130; 0.10) | 11.7 (46; 0.09) |
+
+- **Every record is T's** in what each variant makes, on all three, and what
+  a lean kernel leaves out follows from what it makes: every taken lookup's
+  conversions' entries are its rule's on the kernel's records, and so is
+  every discard but the 200, 50 and 12 the whole kernel leaves to T.
+- **The same lookups go by a short path** in the lean kernel and by their
+  load alone in the loads' kernel: 99.67%, 99.83% and 97.92% of those made.
+  The rest go by their rule (131, 17 and 184) or are left to T.
+- **Lua's and musl's mispredicted branches read as none**, as in step 1:
+  their passes repeat. `sqlite3.c`'s are the ones a compile would see.
+
+### A short path's choices: a correction to step 1
+
+Step 1 said a call's first four arguments are read with no branch. Its source
+read them so; its compiled kernel didn't. Clang compiles a choice that has a
+load behind one side as a branch (a conditional move with a memory operand is
+unfolded into one), and so the choice "this argument's record, or the
+callee's past the count" became a tree of branches on a call's argument
+count; a subscript's "an array or a pointer", "a constant or not" and "an
+lvalue or not" a branch each; and a dot's "an address constant or not"
+another. None is one the predictor learns on `sqlite3.c`. The follow-up loads
+what a choice may need whichever way it goes and chooses between registers,
+by masks. On `sqlite3.c` with the windows packed:
+
+| the lean kernel's | cycles before | after | mispredicted branches before | after |
+| --- | ---: | ---: | ---: | ---: |
+| `->` | 23.5 | 20.9 | 0.15 | 0.11 |
+| `.` | 37.6 | 27.6 | 0.29 | 0.12 |
+| a subscript | 52.2 | 44.6 | 0.46 | 0.15 |
+| a call | 43.4 | 28.0 | 0.54 | 0.10 |
+| the lean kernel, a taken leaf or lookup | 18.9 | 17.4 | 0.20 | 0.09 |
+| the whole kernel, a taken leaf or lookup | 20.9 | 18.9 | 0.21 | 0.12 |
+
+Lua and musl read 0.2 to 0.7 cycles a taken leaf or lookup more: their
+repeated passes had those branches right, and the selects' instructions are
+all they see of the change. Against main, whose kernel is step 1's, the whole
+kernel on `sqlite3.c` went from 26.5 cycles a taken leaf or lookup to 22.7
+with a body a window and from 22.4 to 18.9 with the windows packed. Two
+builds of one kernel differ by up to a cycle on `sqlite3.c` (the record has a
+second build of these sources, on the merge queue's candidate: 16.5 and 10.8
+for the lean and the loads' kernels with the windows packed, where this one
+reads 17.4 and 11.8).
+
+### What it means
+
+- **What a lean record leaves out is a quarter of the whole kernel, most of
+  it the discards.** With the windows packed the whole kernel is 11.9 cycles
+  a record of `sqlite3.c`'s windows and the lean one 8.7. Of the 3.2, the
+  discards no longer made are 2.3: their records, 36,724 at 13 cycles, and
+  their part of the lists and classes. A leaf's second half is 0.2 and the
+  conversions' entries 0.9, between 3 and 9 cycles a lookup by its operator.
+- **A lookup's load alone is 12 to 16 cycles**, 46 to 56 instructions, by its
+  operator: its operand's record, the type's row, a member's slot, four or
+  five tests and one or two stores. With the lists and the classes (1.5
+  cycles a record of the window) the loads' kernel is 11.8 cycles a taken
+  leaf or lookup on `sqlite3.c` with the windows packed and 15.2 with a body
+  a window; 8.3 and 10.8 on Lua; 7.8 and 8.8 on musl. Step 1's gate was 10, a
+  body's expressions a run: the load alone meets it on musl, misses it by 1
+  on Lua and by 5 on `sqlite3.c`, where each body's classes end their loops
+  at a branch the predictor misses (0.20 a taken record, against 0.09 with
+  the windows packed, where `sqlite3.c` misses the gate by 2).
+- **The rest of a lean lookup is its facts**: its standing, flags, object and
+  payload, and whether its operand is fit, scalar code a lookup at a time. On
+  `sqlite3.c` that is 5 of an arrow's 21 cycles, 13 of a dot's 28, 16 of a
+  call's 28 and 31 of a subscript's 45. They are what the design gives the
+  lanes, which made every other operator's facts for 2.6 cycles a node in
+  step 0. A lookup's lanes would read, with its operands' bytes, the bytes
+  its load brings (a slot's flags, what the row says of the type): step 2's
+  to measure.
+- **Against the design's line** ("lookups above 20 cycles each: T is then
+  bound by them"): a lean lookup is above it by every operator, 21 to 45
+  cycles; its load is under it, 12 to 16, and 21 to 28 with its part of the
+  lists and classes.
+- **With step 0**, whose 16.7 and 20.6 cycles a node had the leaves and
+  lookups given: the lean kernel adds 8.7 to 10.4 cycles a record of the
+  window on `sqlite3.c` and 5.9 to 6.4 on musl, 25 to 27 a node, where the
+  whole records make it 29 to 31 and the budget gives a body node 38. The
+  loads alone add 5.9 to 7.6 and 3.6 to 4.1: 23 to 25 a node before the lanes
+  that would make the lookups' facts.
+- **One body for every operator didn't pay.** The lookups made in the list's
+  order by one loop with no class and no dispatch, each operator's choices as
+  masks, read 18.8 cycles a taken leaf or lookup on `sqlite3.c` against the
+  classes' 10.7 with the windows packed, and 20.2 against 15.0 with a body a
+  window (the record's `l3`). Its body is 150 instructions where a class's
+  loop is 46 to 56, with the loop's seventeen values on the stack and a
+  branch clang kept on arrow against dot; and a chain such as `a->b->c` waits
+  in it for each link's store, where the classes make a level's lookups
+  independent.
+- **For step 2:** the class comes with the record (step 1), and so would the
+  byte that says a lookup's operand is fit, which is the lanes' own from the
+  operand's standing and flags. Packed windows are worth 3 to 4 cycles a
+  taken leaf or lookup on `sqlite3.c` to every variant.
 
 ## Related
 
