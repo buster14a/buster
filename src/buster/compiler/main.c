@@ -706,6 +706,8 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_node_machine_contexts.c"
 #include "buster/compiler/c_check_node_machine_expand.c"
 #include "buster/compiler/c_check_node_machine_lower.c"
+// T where it sits (step 2's first measure): the machine's state at reader time and T on the front's expressions there.
+#include "buster/compiler/c_check_node_machine_reader.c"
 #endif
 // bake-tables (#590): the backend's tables written into this executable's own file, built, by build.sh, from this
 // unit, whose Tier 0 and unwind copies the C driver above uses (baked.h).

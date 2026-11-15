@@ -58,10 +58,55 @@
 // front's bytes hold up to 255, and the shadow counts what is past the layout's.
 #define BUSTER_NODE_FRONT_COUNT_MOST 63u
 #define BUSTER_NODE_FRONT_PLACE_MOST 3u
+// T run at reader time on the full expressions the front makes whole (measure-node-machine --shadow --front-types): the
+// front after the walk, and its results in NodeFrontShadow.types.
+#define BUSTER_NODE_FRONT_TYPES 16u
 // A lean leaf's kind, in its record's `leaf_categories`.
 #define BUSTER_NODE_FRONT_LEAF_IDENTIFIER 0u
 #define BUSTER_NODE_FRONT_LEAF_LITERAL 1u
 #define BUSTER_NODE_FRONT_LEAF_STRING 2u
+
+// What T made, at reader time, of the full expressions the front made whole (BUSTER_NODE_FRONT_TYPES;
+// c_check_node_machine_reader.c), in the output's arena: by each expression's root's graph node, for the shadow's
+// comparison with its own T after the pipeline.
+typedef struct NodeFrontTypes NodeFrontTypes;
+struct NodeFrontTypes
+{
+    // By root node: a digest of T's records (node_machine_digest), the expression's first node and its records (0: T
+    // wasn't run on it), and T's refusal (BUSTER_NODE_FRONT_TYPED_REFUSAL) with, after the pipeline, whether the
+    // lowering popped the root (_POPPED) and whether the shadow compared it (_COMPARED).
+    uint64_t* digests;
+    uint32_t* firsts;
+    uint32_t* counts;
+    uint8_t* refusals;
+    uint32_t node_capacity;
+    // The expressions T ran on, their records, the records it typed (a refused expression's up to the one that refused),
+    // those T refused, by refusal, and its ticks: a chunk's expressions a run, which the digests' second run is no part
+    // of.
+    uint64_t expressions;
+    uint64_t records;
+    uint64_t typed;
+    uint64_t refused[16];
+    uint64_t ticks;
+    // The ticks of making the machine's state from the reader's (the types' words, the objects' declarations), and the
+    // types whose words T's own derivations added.
+    uint64_t setup_ticks;
+    uint64_t late_types;
+    // The roots whose expression T wasn't run on: an operand's record out of reach (the lean front's, further than a
+    // byte), or a node the comparison didn't agree on.
+    uint64_t skipped;
+    // What the machine made of the reader's columns in place of the program's (NodeMachine.reader_declarations and
+    // reader_facts, `object_count` of each), and by call node its answers to "a library builtin's semantics of its
+    // own?" (NodeMachine.reader_library): the shadow compares each with the program's after the pipeline.
+    uint32_t* object_declarations;
+    uint8_t* object_facts;
+    uint32_t object_count;
+    uint8_t* library;
+};
+
+#define BUSTER_NODE_FRONT_TYPED_REFUSAL 0x0fu
+#define BUSTER_NODE_FRONT_TYPED_POPPED 0x40u
+#define BUSTER_NODE_FRONT_TYPED_COMPARED 0x80u
 
 // What the shadow reports of the front (CheckInput.node_front), in the output's arena.
 typedef struct NodeFrontShadow NodeFrontShadow;
@@ -119,6 +164,8 @@ struct NodeFrontShadow
     // token (a list gives its values theirs when the walk reaches it), or BUSTER_NODE_FRONT_CONTEXT_UNKNOWN for a record
     // whose value a left token took.
     uint8_t* contexts;
+    // T's results at reader time, or null (BUSTER_NODE_FRONT_TYPES).
+    NodeFrontTypes* types;
 };
 
 #define BUSTER_NODE_FRONT_CONTEXT_UNKNOWN 0xffu
@@ -142,10 +189,11 @@ typedef struct NodeFront NodeFront;
 struct NodeFront
 {
     NodeFrontShadow* shadow;
-    // The records made, the first of the chunk being read (the comparison's), the stack's entries, the calls' arguments
-    // and the wide leaves so far.
+    // The records made, the first the comparison hasn't read (the chunk's first until it has), the chunk's first (after
+    // the comparison too, for T at reader time), the stack's entries, the calls' arguments and the wide leaves so far.
     uint32_t count;
     uint32_t pending;
+    uint32_t made;
     uint32_t stack_count;
     uint32_t argument_count;
     uint32_t wide_count;
@@ -241,8 +289,22 @@ struct NodeFront
     bool lean;
     uint32_t arguments[BUSTER_NODE_FRONT_RECORDS];
     uint8_t arguments_stagger[BUSTER_NODE_FRONT_STAGGER];
+    // The records of each record's subtree, itself among them: a root's operand's are its expression's, one range of the
+    // walk's nodes where the expression is whole, which T at reader time reads (BUSTER_NODE_FRONT_TYPES).
+    uint32_t sizes[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t sizes_stagger[BUSTER_NODE_FRONT_STAGGER];
+    // The machine's state at reader time (c_check_node_machine_reader.c), or null.
+    struct NodeMachineReader* typer;
     CheckValue wide_values[BUSTER_NODE_FRONT_WIDES];
 };
+
+// T at reader time (c_check_node_machine_reader.c): the machine is the checker unit's alone, so the reader's other
+// consumers (the complete driver's) have the front without it.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+static struct NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, NodeFrontShadow* shadow);
+static void node_machine_reader_chunk(struct NodeMachineReader* typer, const NodeFront* front, const CheckInputReader* reader);
+static void node_machine_reader_finish(struct NodeMachineReader* typer);
+#endif
 
 // Whether the walk acts at `token` so as to read its children's values: a token it never acts at, or whose action is
 // nothing, takes none, and a value given to it is no entry.
@@ -410,6 +472,7 @@ static inline __attribute__((always_inline)) uint32_t node_front_add(NodeFront* 
         const uint32_t ordinal = front->ordinal;
         const uint32_t operands[3] = { a, b, c };
         uint32_t count = 0;
+        uint32_t size = 1;
         // From the last operand to the first: a conditional with its middle omitted takes its first value twice, and
         // that value's place is the first.
         for (uint32_t k = 3; k-- != 0;)
@@ -424,9 +487,12 @@ static inline __attribute__((always_inline)) uint32_t node_front_add(NodeFront* 
                 front->ups[operand] = byte;
                 front->places[operand] = (uint8_t)k;
                 count += 1;
+                // An operand taken twice is one subtree.
+                size += k == 0 || operand != a ? front->sizes[operand] : 0;
             }
         }
         front->counts[record] = (uint8_t)count;
+        front->sizes[record] = size;
         front->ups[record] = 0;
         front->places[record] = 0;
         front->ordinals[record] = ordinal;
@@ -559,6 +625,7 @@ static void node_front_keep(NodeFront* front)
             front->ordinals[kept] = front->ordinals[record];
             front->uses[kept] = front->uses[record];
             front->nodes[kept] = front->nodes[record];
+            front->sizes[kept] = front->sizes[record];
             front->ups[kept] = 0;
             front->places[kept] = 0;
             front->stack[i] = kept;
@@ -567,6 +634,7 @@ static void node_front_keep(NodeFront* front)
     }
     front->count = kept;
     front->pending = kept;
+    front->made = kept;
     front->argument_count = 0;
     front->wide_count = 0;
 }
@@ -590,6 +658,7 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
         node_front_forget(front);
         front->count = 0;
         front->pending = 0;
+        front->made = 0;
     }
     uint32_t identifier = 0;
     uint32_t literal = 0;
@@ -812,6 +881,7 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                                 const uint32_t distance = ordinal - front->ordinals[argument];
                                 front->ups[argument] = (uint8_t)(distance < BUSTER_NODE_FRONT_FAR ? distance : BUSTER_NODE_FRONT_FAR);
                                 front->places[argument] = (uint8_t)(k < 255 ? k : 255);
+                                front->sizes[record] += front->sizes[argument];
                             }
                             if (!lean)
                             {
@@ -1254,4 +1324,10 @@ static void node_front_finish(NodeFront* front, const CheckInputReader* reader, 
             shadow->nodes[node >> 6] &= ~(UINT64_C(1) << (node & 63));
         }
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    if (front->typer != NULL)
+    {
+        node_machine_reader_finish(front->typer);
+    }
+#endif
 }

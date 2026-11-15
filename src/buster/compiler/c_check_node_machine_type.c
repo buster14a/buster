@@ -611,6 +611,19 @@ static bool node_machine_plain_kind(uint8_t kind)
     return kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_POINTER;
 }
 
+// type_pointer's answer for node_machine_pointer's miss. At reader time the type may be new, where the graph run would
+// have made it before a machine begun after the pipeline: its word is made now, before a rule reads it
+// (node_machine_settle). Out of line, so that node_machine_pointer stays the load its callers inline.
+static __attribute__((cold, noinline)) TypeId node_machine_pointer_made(NodeMachine* machine, TypeId type)
+{
+    const TypeId pointer = type_pointer(machine->types, type);
+    if (machine->program == NULL)
+    {
+        node_machine_settle(machine);
+    }
+    return pointer;
+}
+
 // The pointer type to type `type`, type_pointer's: the unit's columns' (NodeMachine.pointers and const_pointers), one load
 // once the type's first array, function or address has filled it. A type of qualifiers but none or const alone, or one
 // past the columns, asks type_pointer each time.
@@ -623,7 +636,7 @@ static TypeId node_machine_pointer(NodeMachine* machine, TypeId type)
     TypeId pointer = column ? pointers[index] : 0;
     if (pointer == 0)
     {
-        pointer = type_pointer(machine->types, type);
+        pointer = node_machine_pointer_made(machine, type);
         if (column)
         {
             pointers[index] = pointer;
@@ -1196,21 +1209,19 @@ static bool node_machine_arguments(NodeMachine* machine, uint32_t r, uint32_t no
 static bool node_machine_callee_refused(const NodeMachine* machine, uint32_t r, uint32_t node, uint32_t a)
 {
     const NodeMachineColumns* columns = machine->columns;
-    const CheckProgram* program = machine->program;
     const CheckGraph* graph = machine->graph;
     const TypeTable* types = machine->types;
     const uint32_t member = graph->members != NULL ? graph->members[node] : 0;
     const TypeId function = node_machine_callee_function(machine, a);
-    bool refused = ((member & BUSTER_CHECK_LIBRARY_CALL) != 0 && check_program_call_library(program, node)) || graph->overload_candidate_count != 0 || function == 0 ||
+    bool refused = ((member & BUSTER_CHECK_LIBRARY_CALL) != 0 && node_machine_call_library(machine, r, node)) || graph->overload_candidate_count != 0 || function == 0 ||
                    columns->argument_counts[r] > BUSTER_TIER0_MAX_CALL_ARGUMENTS;
     refused = refused || (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0 ||
               type_function_abi_kind(types, function) != TYPE_FUNCTION_ABI_SYSV || type_function_has_parameter_abis(types, function);
     const uint32_t object = refused ? 0 : node_machine_direct_callee(machine, a);
     if (!refused && object != 0)
     {
-        const uint32_t declaration = program->object_declarations != NULL ? program->object_declarations[object] : BUSTER_CHECK_NONE;
-        const IdentId name = program->parser != NULL && declaration < program->input->token_count ? program->parser->tokens.names[declaration] : 0;
-        refused = program->object_returns_twice != NULL && program->object_returns_twice[object] != 0;
+        const IdentId name = node_machine_object_name(machine, object);
+        refused = node_machine_object_twice(machine, object);
         for (uint32_t k = 0; k < BUSTER_CHECK_LOWER_TWICE_NAMES; k += 1)
         {
             refused |= name != 0 && machine->twice_names[k] == name;
@@ -2175,6 +2186,11 @@ static __attribute__((cold, noinline)) NodeMachineRefusal node_machine_type_acti
     CheckActionResult result;
     memset(&result, 0, sizeof(result));
     node_machine_action(machine, r, op, machine->argument_conversions + (call ? machine->columns->argument_first[r] : 0), &result);
+    if (machine->program == NULL)
+    {
+        // The action may have made a type (node_machine_pointer's note).
+        node_machine_settle(machine);
+    }
     const NodeMachineRefusal refusal = result.diagnostic != CHECK_DIAG_NONE ? NODE_MACHINE_REFUSED_DIAGNOSTIC : NODE_MACHINE_TAKEN;
     node_machine_store(machine, r, op, &result);
     machine->action_nodes += 1;

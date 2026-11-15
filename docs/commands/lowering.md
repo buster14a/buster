@@ -309,7 +309,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -591,6 +591,40 @@ takes its entries.
     actions=N visits=N`, the coded walk's parts in the files' one reading
     (TSC ticks; the batch's flushes are the actions'): with no front option,
     the walk as it is.
+- `--front-types` runs **T where it sits**, at reader time
+  (`c_check_node_machine_reader.c`, `PPOptions.node_front`'s bit 16): after
+  the walk acted at a chunk and the front's records were compared, T types
+  each full expression the front made whole, on the walk's nodes, before the
+  unit's program exists. It runs with the front after the walk, or as
+  `--front-first` and `--front-lean` ask. [The
+  design](../node-machine.md#t-where-it-sits) has what it measured.
+  - **What it reads in place of the program's:** each object's last static
+    declaration, returns_twice and asm label, made from the reader's columns
+    as the program makes its own; a static declaration for a symbol; a library
+    call's "computed inline?" from T's own record of its size; the contexts
+    the front gave its records; and the words of the types made since the
+    machine began (the walk's, and T's own pointer types, each settled where
+    it is made).
+  - **An expression** is a root's operand's subtree and the root; an
+    initialization's is its value alone, whose root the lowering pops.
+  - **The comparison** is after the pipeline. Each expression of the census's
+    taken set that reader time ran on is typed again by the shadow's own T,
+    and the two must agree in their range, their refusal and their records
+    (a digest of every column C, X and the shadow read). The objects' columns
+    and every library call's answer are compared with the program's own.
+  - **The report:** `node-shadow: reader-time T expressions=N records=N
+    typed=N taken=N roots-not-run=N late-types=N ticks=N setup-ticks=N` (its
+    ticks are T's alone, a chunk's expressions a run; the digests are a second
+    run), `reader-time T refused=REASON expressions=N`, `reader-time T
+    lowered=N (x%) never-lowered=N (taken N, context N) compared=N (records N)
+    differences=0 (range 0, refusal 0) taken-expressions-the-front-left=N
+    the-front's-not-run=N` and `reader-time T objects=N differences=0
+    library-calls=N differences=0`. `never-lowered` are the expressions it
+    typed that no lowered body holds: a body the selection dropped, a static
+    object's initializer. `the-front's-not-run` are taken expressions whose
+    nodes the front made without a root for them (an initializer beside a
+    variable-length array's bound). `--list N` lists the first differences. A
+    difference fails the command.
 
 The report gives the expressions, evaluated nodes and calls taken, each
 refusal's (shape, code, leaf, context, diagnostic, template, row, root,
@@ -616,5 +650,12 @@ front's but those of the lines marked `// front: left`. Two generated texts
 take it to its limits, whole and lean (`node_front_test_limits`): a body whose
 chunk ends fall at every place within a library call by its name and through
 its address, and an initializer with more values waiting than the stack holds,
-with a call astride its last entry.
+with a call astride its last entry. T runs at reader time in those runs too
+(`BUSTER_NODE_FRONT_TYPES`): the shadow's records on every expression both
+type (by the rows there against the action alone in the `--scalar` run), the
+objects' columns and the library calls' answers the program's, T run on every
+expression the front made, and the fixture's six callees refused there (four
+of them calls the census refuses before the shadow's T, which no comparison
+reads). The chunk-boundary text ends with the address of an array no
+declaration points to, whose pointer type T makes itself.
 [The design](../node-machine.md)'s "Step 1: the shadow" has the results.

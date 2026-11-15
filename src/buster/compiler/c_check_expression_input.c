@@ -1698,7 +1698,30 @@ static __attribute__((noinline)) uint64_t node_front_acted(NodeFront* front, uin
         node_front_chunk(front, reader, tokens, classes, acting, identifiers, literals);
     }
     node_front_compare(front, reader);
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    if (front->typer != NULL)
+    {
+        // T at reader time, on the chunk's roots whose expressions the comparison has just given their nodes.
+        node_machine_reader_chunk(front->typer, front, reader);
+    }
+#endif
     return flushed;
+}
+
+// The machine's state at reader time for a unit the front reads, where the options ask for T there
+// (BUSTER_NODE_FRONT_TYPES): the checker unit's alone, as the machine is.
+static __attribute__((noinline)) void node_front_typer(NodeFront* front, CheckInputReader* reader, uint8_t fronted)
+{
+    front->typer = NULL;
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    if ((fronted & BUSTER_NODE_FRONT_TYPES) != 0)
+    {
+        front->typer = node_machine_reader_begin(reader, front->shadow);
+    }
+#else
+    (void)reader;
+    (void)fronted;
+#endif
 }
 
 // The coded walk: the postorder a chunk at a time, compacted to the tokens the walk acts at, each acted at by its class.
@@ -1768,6 +1791,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
             front->shadow = shadow;
             front->count = 0;
             front->pending = 0;
+            front->made = 0;
             front->stack_count = 0;
             front->group_count = 0;
             front->full = false;
@@ -1776,6 +1800,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
             front->argument_count = 0;
             front->wide_count = 0;
             reader->output->node_front = shadow;
+            node_front_typer(front, reader, fronted);
         }
         else
         {
