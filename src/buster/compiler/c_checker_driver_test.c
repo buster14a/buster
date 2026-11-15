@@ -672,8 +672,8 @@ static void check_test_driver_reservation_failure(CheckTest* test)
 }
 
 // The address space a process of the executable at `path` maps for its image before it runs: its loadable segments'
-// pages. 0 if it can't be read.
-static uint64_t check_test_driver_image_bytes(const char* path)
+// pages. 0 if it can't be read. Unused where a sanitizer leaves check_test_driver_address_limit out.
+static __attribute__((unused)) uint64_t check_test_driver_image_bytes(const char* path)
 {
     uint64_t result = 0;
     Elf64_Ehdr header;
@@ -696,8 +696,9 @@ static uint64_t check_test_driver_image_bytes(const char* path)
 }
 
 // Runs the executable at arguments[0] under a soft RLIMIT_AS of `limit` bytes, with its standard error into *text (the
-// caller frees it). Returns its exit status, -2 if a signal ended it, or -1 if it couldn't run.
-static int check_test_driver_limited(char* const* arguments, uint64_t limit, char** text)
+// caller frees it). Returns its exit status, -2 if a signal ended it, or -1 if it couldn't run. Unused where a sanitizer
+// leaves check_test_driver_address_limit out.
+static __attribute__((unused)) int check_test_driver_limited(char* const* arguments, uint64_t limit, char** text)
 {
     FILE* captured = tmpfile();
     int status = 0;
