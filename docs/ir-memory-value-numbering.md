@@ -225,11 +225,13 @@ a load that a comparison or an arithmetic instruction had folded becomes a
 register's value, which takes a move or a longer live range. The cycles still
 go down, so the pass forwards from foldable loads too.
 
-**Loads removed.** Callgrind's exact counts of the programs' own code,
-pass on against off (the head before the volatile fix, `894d971`): speedtest1's
-data reads 697.0 M to 652.3 M (-6.42%), Lua's five scripts' 1,029.2 M to
-981.3 M (-4.65%); instructions +1.10% and +1.92%. In speedtest1's unit the pass
-forwards 3,369 loads, and the allocator's reloads go from 13,947 to 14,310.
+**Loads removed.** Callgrind's exact counts of the programs' own code, pass
+on against off, both built by the final code: speedtest1's data reads 691.4 M
+to 647.2 M (-6.39%), Lua's five scripts' 1,022.5 M to 974.1 M (-4.74%);
+instructions +1.02% and +1.88%; text 0.58% and 0.26% smaller. In speedtest1's
+unit the pass forwards 3,367 loads, and the allocator's reloads go from 11,712
+to 12,110. On the corpora, `test-ir-source --passes`'s `memory` row forwards
+47 loads in c-testsuite's subset, 3,136 in `sqlite3.c` and 2,973 in musl.
 
 **Place in `--tier1`.** On by default, in the optimizer after SCCP and the
 identities and before dead-code removal, on the analyses already built.
