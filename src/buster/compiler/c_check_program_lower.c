@@ -859,6 +859,9 @@ struct CheckLowerWriter
     // Whether the body calls another function that returns twice (#1847, Tier0Function.calls_returns_twice), and
     // whether the unit may have one (CheckLowerShared.twice): a call asks then alone.
     bool calls_returns_twice;
+    // The memmove that Tier 1's copy of a forwarded result past BUSTER_TIER0_MAX_COPY_BYTES calls (#2684,
+    // Tier0Function.hidden_copy), or 0.
+    SymbolId hidden_copy;
     bool twice;
     const IdentId* twice_names;
     IdentId twice_tag;
@@ -6953,6 +6956,12 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
         writer->call_counts[call] = count + chained;
         writer->call_variadic[call] = variadic;
         writer->call_result_objects[call] = !object_result ? 0 : object == BUSTER_CHECK_LOWER_HIDDEN ? BUSTER_TIER0_RESULT_HIDDEN : object + 1;
+        // Tier 1 returns a forwarded result into an object of its own and copies it (ir_lower): past the inline copy's
+        // limit by memmove, as the lowering's copy of a call's object was (Tier0Function.hidden_copy).
+        if (object == BUSTER_CHECK_LOWER_HIDDEN && type_size(types, result) > BUSTER_TIER0_MAX_COPY_BYTES)
+        {
+            writer->hidden_copy = check_lower_runtime(writer, CHECK_LOWER_RUNTIME_MEMMOVE);
+        }
         writer->aggregates |= object_result;
         writer->tails |= tail;
         abi->first[abi->count] = abi->argument_count;
@@ -18889,6 +18898,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->unwind_init = false;
         writer->returns_twice = false;
         writer->calls_returns_twice = false;
+        writer->hidden_copy = 0;
         writer->eh_return = false;
         writer->statement = BUSTER_CHECK_NONE;
         writer->vectors = false;
@@ -19429,6 +19439,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         function->unwind_init = writer->unwind_init;
         function->returns_twice = writer->returns_twice;
         function->calls_returns_twice = writer->calls_returns_twice;
+        function->hidden_copy = writer->hidden_copy;
         function->eh_return = writer->eh_return;
         // A preserving convention's registers (#147), which Tier 0's frame keeps but for a tail call's, __builtin_eh_return's
         // or __builtin_setjmp's frame, whose teardowns and saves know nothing of them. An interrupt service routine's are every
@@ -19836,6 +19847,9 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
             const uint64_t runtime = (uint64_t)targets[c] - shared->provisional_runtimes;
             targets[c] = runtime < CHECK_LOWER_RUNTIMES ? lowered->runtime_symbols[runtime] : targets[c];
         }
+        // So does a forwarded result's copy in Tier 1 (#2684, Tier0Function.hidden_copy).
+        const uint64_t copy = (uint64_t)function->hidden_copy - shared->provisional_runtimes;
+        function->hidden_copy = function->hidden_copy != 0 && copy < CHECK_LOWER_RUNTIMES ? lowered->runtime_symbols[copy] : function->hidden_copy;
     }
     // The jump tables' symbols and their labels', now that the runtime's functions are all known: the lowering's own, after
     // theirs. The labels' are numbered in label_symbols, and the tables' in their dispatches' GLOBAL_ADDRESS entries (the

@@ -547,6 +547,8 @@ struct Tier0AsmBody
 //   - hidden_size and hidden_alignment: the bytes of such a result through a hidden pointer and their alignment's log2
 //     (at most BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2), which a call of BUSTER_TIER0_RESULT_HIDDEN writes, or 0. Tier 0
 //     needs neither; ir_lower's frame object for such a call's result and the interpreter's native calls take them.
+//     hidden_copy is the symbol of the memmove that ir_lower's copy of that object calls where it is past
+//     BUSTER_TIER0_MAX_COPY_BYTES, as the front end's copy of a call's object would, or 0; Tier 0 calls nothing through it.
 // The parts of an aggregate in registers come from abi_assign's locations alone: eightbyte k (0 and 8, or the high one
 // alone with BUSTER_ABI_FLAG_HIGH) in registers[k], a general or an XMM register, an XMM one whole (16 bytes) when it is
 // the only part of a 16-byte aggregate. A vector's value is returned the same way, from its object's bytes (result_size
@@ -643,6 +645,7 @@ struct Tier0Function
     uint32_t result_size;
     uint32_t hidden_size;
     uint8_t hidden_alignment;
+    SymbolId hidden_copy;
     const uint8_t* symbol_access;
     uint32_t symbol_count;
     const uint64_t* x87_constants;

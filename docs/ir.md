@@ -387,7 +387,9 @@ address becomes a `ptr`, with its size and location; a call with a result object
 object's size as its `result_size`. A call that passes the function's own hidden
 pointer on (#2684, `BUSTER_TIER0_RESULT_HIDDEN`) returns into the function's one
 forwarding slot, past the dispatch slot, of `hidden_size` bytes aligned to
-`hidden_alignment`, which is then copied where parameter 0 points: Tier 1 takes a
+`hidden_alignment`, which is then copied where parameter 0 points, by a `COPY`'s
+pieces or, past 256 bytes, a call of the front end's `memmove` (`hidden_copy`), as
+the lowering's copy of a call's object was: Tier 1 takes a
 call's destination as a frame object's address alone (`tier1_select_call_abi`), so
 its code keeps the copy that Tier 0's and the interpreter's leave out. An object parameter is a `ptr` whose bytes the
 preheader copies into its object, as `COPY` copies (below); a result in

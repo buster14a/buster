@@ -358,7 +358,9 @@ without aggregates:
   in a callee-saved register or its slot, never an argument's register.
 - **The forwarded result's bytes:** `hidden_size` and `hidden_alignment`, the bytes of a result through a hidden
   pointer and their alignment's log2 (at most 2^30), which such a call writes, or 0. Tier 0 needs neither: `ir_lower`'s
-  slot for such a call's result and the interpreter's native calls take them.
+  slot for such a call's result and the interpreter's native calls take them. `hidden_copy` is the symbol of the
+  `memmove` that `ir_lower`'s copy of that slot calls past `BUSTER_TIER0_MAX_COPY_BYTES`, as the front end's copy of a
+  call's object would, or 0; Tier 0 calls nothing through it.
 - **The function's own result:** `result_size`, its bytes when it returns in registers, else 0. Every `RETURN` then
   returns the address of the bytes (U64), from which the epilogue loads the result registers while the frame they may
   be in is still there, and control reaches the function's end only through a `RETURN`. A result through a hidden
