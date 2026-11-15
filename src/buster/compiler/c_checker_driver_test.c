@@ -1448,6 +1448,120 @@ static void check_test_driver_provisional_selection(CheckTest* test, const char*
     unlink(reference);
 }
 
+// `text` without the lines of --provisional-selection's and --windowed-loop's reports, in place.
+static void check_test_driver_drop_reports(char* text)
+{
+    char* write = text;
+    const char* read = text;
+    while (read != NULL && *read != 0)
+    {
+        const char* end = strchr(read, '\n');
+        const size_t length = end != NULL ? (size_t)(end - read) + 1 : strlen(read);
+        const bool report = strncmp(read, "provisional-selection\t", 22) == 0 || strncmp(read, "windowed-loop\t", 14) == 0;
+        if (!report)
+        {
+            memmove(write, read, length);
+            write += length;
+        }
+        read += length;
+    }
+    if (write != NULL)
+    {
+        *write = 0;
+    }
+}
+
+// --windowed-loop (#2536's step 2.2c.4, part 2): the provisional selection's code lowered as the program's loop runs, each
+// window's bodies' loop before its lowering, and the object after the tail, the diagnostics and the exact selection. At
+// W of 1, 2,048 and ∞ (--emit-window=0), each source's exit status, stderr (but the options' reports) and object are the
+// plain -c's, and its report says whether the windowed code served: a unit whose provisional selection doesn't serve (a
+// constant switch's local, #2536's step 2.2c.4, part 1) or whose emission refuses a body takes the exact selection's
+// emission after the loop, and a body's error stops the unit before either.
+static void check_test_driver_windowed_loop(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char plain[] = "int g(int x) { return x * 2; }\n"
+                                "int main(int argc, char** argv) { (void)argv; return g(argc); }\n";
+    static const char naked[] = "__attribute__((naked)) void n(void) { __asm__(\"ret\"); }\n"
+                                "int main(void) { n(); return 0; }\n";
+    static const char switch_local[] = "int g(char* p);\n"
+                                       "int f(int x)\n"
+                                       "{\n"
+                                       "    switch (0)\n"
+                                       "    {\n"
+                                       "    case 1:\n"
+                                       "    {\n"
+                                       "        char unreached[256];\n"
+                                       "        return g(unreached);\n"
+                                       "    }\n"
+                                       "    default:\n"
+                                       "        break;\n"
+                                       "    }\n"
+                                       "    return x;\n"
+                                       "}\n";
+    static const char region[] = "int f(int x) { return ({ static int k; k += x; k; }); }\n";
+    static const char callee[] = "static inline __attribute__((always_inline)) int sq(int x) { return x * x; }\n"
+                                 "int a(int x) { return sq(x) + 1; }\n"
+                                 "int b(int x) { return sq(x) - 1; }\n";
+    static const char error[] = "int a(void) { return 1; }\n"
+                                "int b(void) { break; }\n";
+    static const char refused[] = "float f(float* p) { return __atomic_fetch_add(p, 1.0f, __ATOMIC_SEQ_CST); }\n";
+    static const char* const sources[] = { plain, naked, switch_local, region, callee, error, refused };
+    static const char* const expected[] = {
+        "windowed-loop\tserved\t1\n",
+        "windowed-loop\tserved\t1\n",
+        "windowed-loop\tserved\t0\n",
+        "windowed-loop\tserved\t1\n",
+        "windowed-loop\tserved\t1\n",
+        NULL,
+        "windowed-loop\tserved\t0\n",
+    };
+    static const char* const names[] = {
+        "plain bodies",
+        "a naked function",
+        "a constant switch's local",
+        "a statement expression's static",
+        "an inline callee",
+        "a body's error",
+        "a refused body",
+    };
+    static const char* const windows[] = { "--emit-window=1", "--emit-window=2048", "--emit-window=0" };
+    char source[256];
+    char object[256];
+    char reference[256];
+    snprintf(source, sizeof(source), "%s/windowed_loop.c", directory);
+    snprintf(object, sizeof(object), "%s/windowed_loop.o", directory);
+    snprintf(reference, sizeof(reference), "%s/windowed_loop_reference.o", directory);
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+    {
+        const bool written = parse_test_write(source, sources[s], strlen(sources[s]));
+        check_test_expect(test, written, "the windowed loop's fixture is written");
+        for (uint32_t w = 0; written && w < BUSTER_ARRAY_LENGTH(windows); w += 1)
+        {
+            unlink(object);
+            unlink(reference);
+            char* const windowed[] = { (char*)executable, "--windowed-loop", (char*)windows[w], "-w", "-c", "-o", object, source, NULL };
+            char* const exact[] = { (char*)executable, (char*)windows[w], "-w", "-c", "-o", reference, source, NULL };
+            char* text = NULL;
+            char* exact_text = NULL;
+            const int status = check_test_driver_spawn(windowed, &text);
+            const int exact_status = check_test_driver_spawn(exact, &exact_text);
+            const bool reported = text != NULL && (expected[s] != NULL ? strstr(text, expected[s]) != NULL : strstr(text, "windowed-loop\t") == NULL);
+            check_test_driver_drop_reports(text);
+            const bool same_text = text != NULL && exact_text != NULL && strcmp(text, exact_text) == 0;
+            const bool objects = access(object, F_OK) == 0 || access(reference, F_OK) == 0;
+            const bool same_object = objects ? check_test_driver_same_files(object, reference) : true;
+            free(text);
+            free(exact_text);
+            char description[160];
+            snprintf(description, sizeof(description), "--windowed-loop %s on %s: its report, and the status, stderr and object without it", windows[w], names[s]);
+            check_test_expect(test, reported && status == exact_status && same_text && same_object, description);
+        }
+    }
+    unlink(source);
+    unlink(object);
+    unlink(reference);
+}
+
 // Builtins clang's Sema takes and its code generation refuses for x86 (#148), which -c refuses by name on both paths:
 // BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding of an element past 4 GiB; an NSString of
 // no literal, which clang's code reads as one
@@ -10818,6 +10932,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                 check_test_driver_static_label(&test, executable, directory);
                 check_test_driver_selection_census(&test, executable, directory);
                 check_test_driver_provisional_selection(&test, executable, directory);
+                check_test_driver_windowed_loop(&test, executable, directory);
                 check_test_driver_codegen_refusals(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())

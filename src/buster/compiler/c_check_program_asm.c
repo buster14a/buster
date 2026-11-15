@@ -3718,7 +3718,8 @@ static const char* check_asm_naked_frame_rows(const AsmResult* unit, Arena* outp
 }
 
 static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckProgram* program, uint32_t b, const CheckAsmCheckedOperand* operands,
-                                         const uint32_t* firsts, const X86MatchIndex* index, bool scalar, Arena* output, Arena* scratch)
+                                         const uint32_t* firsts, const uint32_t* sequence_starts, const uint32_t* sequence, const uint32_t* sequence_tokens,
+                                         const X86MatchIndex* index, bool scalar, Arena* output, Arena* scratch)
 {
     (void)scalar;
 
@@ -3729,14 +3730,26 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
     const uint64_t scratch_mark = scratch->length;
     CheckProgramNaked* naked = result->naked + b;
     *naked = (CheckProgramNaked){ .planned = true };
-    String8* texts = BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)body.count + 1);
-    bool valid = texts != 0;
+    // Its statements: its controls, or with the program's list (CheckProgram.asm_list, a window's lowering's before the loop,
+    // #2536's step 2.2c.4, part 2) its asm statements in order (check_program_asm_sequence), which the epilogue finds are
+    // its controls' and the body's only statements (check_driver_naked_asm_only).
+    const bool listed = program->asm_list != NULL;
+    const uint32_t first = listed && sequence_starts != NULL ? sequence_starts[b] : 0;
+    const uint32_t control_count = !listed ? body.count : sequence_starts != NULL ? sequence_starts[b + 1] - first : 0;
+    CheckControl* view = listed && control_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckControl, control_count) : NULL;
+    for (uint32_t i = 0; view != NULL && i < control_count; i += 1)
+    {
+        view[i] = (CheckControl){ .kind = CHECK_CONTROL_ASM, .target = sequence[first + i], .token = sequence_tokens[first + i] };
+    }
+    const CheckControl* controls = listed ? view : program->controls + body.first;
+    String8* texts = BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)control_count + 1);
+    bool valid = texts != 0 && (!listed || control_count == 0 || view != NULL);
     const char* reason = NULL;
     uint64_t length = 0;
     uint32_t statements = 0;
-    for (uint32_t i = 0; valid && reason == NULL && i < body.count; i += 1)
+    for (uint32_t i = 0; valid && reason == NULL && i < control_count; i += 1)
     {
-        const CheckControl control = program->controls[body.first + i];
+        const CheckControl control = controls[i];
         const uint32_t s = control.target;
         if (control.kind == CHECK_CONTROL_END)
         {
@@ -4321,7 +4334,8 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
     {
         if (check_program_asm_naked(program, b))
         {
-            valid = check_program_asm_plan_naked(result, program, b, statements != 0 ? asms->operands : 0, firsts, index, BUSTER_SCALAR_PATH(scalar), output, scratch);
+            valid = check_program_asm_plan_naked(result, program, b, statements != 0 ? asms->operands : 0, firsts, sequence_starts, sequence, sequence_tokens, index,
+                                                 BUSTER_SCALAR_PATH(scalar), output, scratch);
             result->status = valid ? CHECK_PROGRAM_OK : result->status == CHECK_PROGRAM_OK ? CHECK_PROGRAM_RESOURCE : result->status;
         }
     }

@@ -5771,6 +5771,9 @@ struct CheckProgramRun
     // Whether the tail's part over the needed marks ran before the loop (check_program_symbols), and its answer.
     bool symbols;
     bool symbols_valid;
+    // Whether the tail leaves the setup's columns on the scratch (#2536's step 2.2c.4, part 2): under --windowed-loop the
+    // emission's code, which ran with the loop, is on the scratch above them until its object is written.
+    bool keep_scratch;
 };
 
 // check_program's first part (#2536's step 2.2c.1): the program's setup, its columns and the writer, and the candidates'
@@ -6577,7 +6580,10 @@ static bool check_program_finish(CheckProgramRun* run)
     {
         program->output_bytes = output->length - mark;
     }
-    arena_pop_to(scratch, temporary);
+    if (!run->keep_scratch)
+    {
+        arena_pop_to(scratch, temporary);
+    }
     arena_release(&controls);
     return valid;
 }
