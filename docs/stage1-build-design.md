@@ -9,7 +9,9 @@ compiler wanted) and the **clean build** (a fresh clone, CI, a branch switch).
 (`./build.sh --config Develop`; [the build guide's "Develop"](commands/build.md#develop),
 #2559). Step 5, Release in parts, failed its gate on 2026-11-13
 ([Step 5, measured](#step-5-measured)) and, with the splitter taken further,
-TODO-STATUS ([Step 5, renewed](#step-5-renewed)).
+again on 2026-11-15, by less ([Step 5, renewed](#step-5-renewed)): Release
+stays whole, and `BUSTER_RELEASE_PARTS=1` builds it in parts, at the owner's
+choice, for an edit loop with Release's optimization.
 
 Every time below was measured on the Ryzen 7 9700X under its lock, at main
 `c5f0efb2` with the host's clang 23.1.1 and the build's eight jobs, unless the
@@ -708,8 +710,9 @@ expected edits of the first, third and fourth files are 10.1 s, 10.0 s and
    - Without this step Release's clean build stays bound by the checker's
      unit's chain: 83 s by the host's clang, 69 s by CI's once CI's toolchain
      can build the parts.
-   - *Measured:* outside the floor ([below](#step-5-measured)); Release stays
-     whole.
+   - *Measured:* outside the floor twice ([below](#step-5-measured),
+     [renewed](#step-5-renewed)); Release stays whole, and the parts are an
+     option of its (`BUSTER_RELEASE_PARTS=1`).
 
 Not steps of this design, and why: one unit self-built (lever 6) waits for
 the tiers' code, which is others' work; the sources' split (lever 4) is a
@@ -853,7 +856,43 @@ instructions by function:
   the sections no live code refers to (`tools/codegen/unreferenced.c`: 170
   sections, 115 KB): 11.49 MB.
 
-TODO-MEASURE
+The 9700X job's whole measure, on 2026-11-15, against main with #2733's
+placements (the units whole) and with CI's toolchain
+([the record](https://github.com/buster14a/buster-performance/tree/ce4b38b5d/docs/measurements/release-in-parts-renewed-2559-2026-11-14)):
+
+- **The build gained as before:** with `-g` a clean build took 68.1 s against
+  73.7 s (503 s of CPU against 436 s) and an edit of `c_check_input.c` 33.1 s
+  against 63.6 s (47 parts); without debug information 53.4 s against 57.3 s
+  and 18.2 s against 50.6 s (one part). An undone edit rebuilt the clean
+  build's executable, and the 69 outputs were the whole build's bytes.
+- **The compiler, by the gate, didn't:** 11 of the 69 benchmarks ran more user
+  cycles outside their floors (12 at the round's start), and 8 fewer
+  (`benchmark-debug` -5.65%, `benchmark-lexer` -3.95%). Four run more
+  instructions: `benchmark-tier1-code-certificate` +1.39% (+0.70%
+  instructions), `sqlite-c-tier1` +0.77% (+0.48%), `ir-source` +0.55%
+  (+0.34%) and `sqlite-c` +0.51% (+0.17%); `ir-lowering` +1.00% runs as many
+  in other code. The other six are layout (`environments` +1.31%: the same
+  loop 32 bytes later in its cache lines, which the placements, multiples of
+  64, never test), a 1 ms process's own counters (`parser-pragma` +4.81%;
+  `perf stat` counts the same cycles) and noise (+0.05% to +0.72%).
+- **Why, and what more would take:** what the whole unit's inliner decides only
+  after inlining a part can't see. In the checker's unit, 425 (callee, caller)
+  pairs the whole unit inlines no part does, most of them `always_inline`
+  intrinsics inlined in another order. Of the rest, 23 are last calls to a
+  static function (a call site cold in its part and not in the whole unit loses the
+  bonus; `tier1_cfg_edge_stage` costs 525 in its part against the whole unit's
+  520 at a threshold of 525; a caller that dies only after inlining), 15 are
+  call sites in loops, whose threshold LLVM raises to 525, with bodies too
+  large to read. The whole unit's inferred attributes on the parts' imports
+  moved one pair; reading bodies of up to 450 instructions recovered 15 (and
+  `ir_gvn_compare`, `ir-source`'s) for 16% more bitcode. Closing the rest
+  takes the whole unit's pipeline, the time the parts exist to save.
+
+So, by the rule above, Release stays whole. At the owner's choice,
+`BUSTER_RELEASE_PARTS=1` builds it in parts, in a tree of its own, for an
+edit loop with Release's optimization ([the build
+guide](commands/build.md#release-in-parts)); timings and benchmarks use the
+default.
 
 ### Risks
 

@@ -19,7 +19,7 @@
 # BUSTER_TOOLCHAIN=path builds with PATH's as found.
 #
 # A build configures build/cmake/VARIANT, Ninja Multi-Config's tree for the BUSTER_* environment's host ISA,
-# runtime, sanitizer, fuzzing and debug information, only when the settings, PATH or the toolchain changed since it
+# runtime, sanitizer, fuzzing, debug information and Release in parts (BUSTER_RELEASE_PARTS=1), only when the settings, PATH or the toolchain changed since it
 # last did (a changed clang starts the tree afresh), then has Ninja build what changed: an unchanged build compiles,
 # links and bakes nothing. It builds Develop (Release's optimization in parts, for the edit loop; the owner's default
 # since #2559) unless --config says Release or Debug; Release is the configuration every timing and benchmark measures,
@@ -190,6 +190,7 @@ settings=(
     "-DBUSTER_PGO=${BUSTER_PGO:-0}"
     "-DBUSTER_PGO_TRAIN=$pgo_train"
     "-DBUSTER_PARALLEL_CODEGEN=${BUSTER_PARALLEL_CODEGEN:-auto}"
+    "-DBUSTER_RELEASE_PARTS=${BUSTER_RELEASE_PARTS:-0}"
 )
 
 # The long commands (configuring, building, testing, checking) run in a process group of their own, `child`, which an

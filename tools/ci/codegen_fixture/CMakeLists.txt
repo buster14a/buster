@@ -11,8 +11,8 @@ if(NOT DEFINED BUSTER_CODEGEN_MODULE_DIR)
     get_filename_component(BUSTER_CODEGEN_MODULE_DIR ../../../cmake ABSOLUTE)
 endif()
 set(buster_parallel_codegen ${BUSTER_FIXTURE_SPLIT})
-# split.c's units, as a sanitizer build's Release splits them (BusterCodegen.cmake's buster_codegen_split_unit); every
-# build's Release, sanitizer or not, used to.
+# split.c's units, as Release splits them after the optimizer but where its units are in parts (BUSTER_RELEASE_PARTS,
+# BusterCodegen.cmake's buster_codegen_split_unit).
 set(buster_split_parts ${BUSTER_FIXTURE_SPLIT})
 set(buster_arch x86-64)
 # A sanitizer build's flags (BusterSettings.cmake's), which the parts' code generation takes too: AddressSanitizer's
