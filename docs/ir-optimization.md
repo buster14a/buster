@@ -186,9 +186,22 @@ Each converted kernel's 25 to 42 M branch misses fell to a few thousand. #2674's
 first commit had put the running max's comparison on its loop's carried chain
 (342.1 Mcycles, 3.78 times main), which the recurrence rule removed. The sums'
 remaining gap is clang's unrolling and the `setcc; test` that each `cmov`
-waits for ([#2676](https://github.com/buster14a/buster/issues/2676)). The
-truth values are i1 selects, where clang uses `and`/`or`
-([#2677](https://github.com/buster14a/buster/issues/2677)).
+waits for ([#2676](https://github.com/buster14a/buster/issues/2676)).
+
+The truth values were i1 selects then, where clang uses `and`/`or`. Since #2677
+they are Tier 1's 32-bit `and` and `or`. Measured on the 9700X with the same
+harness, 11 rounds, main `2ebfe68a` against #2796's `d42ea94b`, the driver's loop
+being 300.6 Mcycles there
+([record](https://github.com/buster14a/buster-performance/tree/35fa71ec1346673a404f56ae7e158e099016cdfe/docs/measurements/tier1-narrow-bitwise-2677-2026-11-14)):
+
+| kernel | main | `d42ea94b` | clang -O2 -fno-vectorize |
+| --- | ---: | ---: | ---: |
+| `a < 128 && b < 128` | 320.0 | 318.7 | 334.1 |
+| `(a < b) && (b < c \|\| c == 0)` | 383.9 | 363.1 | 365.5 |
+| the same returning `int` | 374.1 | 362.9 | 381.7 |
+
+sqlite3.c's `--tier1` object has 230 fewer `cmov`s (910) and 1,296 fewer bytes
+of text. The compile takes 0.16% to 0.31% more user cycles.
 
 The pass costs about 1.2% of sqlite3.c's `--tier1 -c` user cycles. That is
 2,163.6 against 2,138.4 Mcycles over 11 runs, with 0.63% more instructions. Its
