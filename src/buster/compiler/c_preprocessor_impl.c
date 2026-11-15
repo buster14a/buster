@@ -14903,9 +14903,12 @@ static bool pp_markers_initialize(const Preprocessor* pp, PPMarkers* markers, Ar
     {
         markers->cursors[r] = BUSTER_PP_NONE;
     }
+    // A scratch range's file is BUSTER_PP_NONE, the same value an unentered main file has (#2828). It is not the
+    // main file: printing it would index the file table by that sentinel.
     for (uint32_t r = 0; markers->root == BUSTER_PP_NONE && r < pp->range_count; r += 1)
     {
-        markers->root = pp->ranges[r].parent == BUSTER_PP_NONE && pp->ranges[r].file == pp->main_file ? r : BUSTER_PP_NONE;
+        const bool main = pp->main_file != BUSTER_PP_NONE && pp->ranges[r].parent == BUSTER_PP_NONE && pp->ranges[r].file == pp->main_file;
+        markers->root = main ? r : BUSTER_PP_NONE;
     }
     return markers->cursors != 0 && markers->text != 0;
 }
@@ -15026,7 +15029,7 @@ static bool pp_print_start(const Preprocessor* pp, PPMarkers* markers)
     markers->length = 0;
     bool line_start = true;
     bool result = true;
-    if (markers->root != BUSTER_PP_NONE)
+    if (markers->root != BUSTER_PP_NONE && pp->ranges[markers->root].file < pp->file_count)
     {
         const PPRange* root = &pp->ranges[markers->root];
         const PPFile* file = &pp->files[root->file];
