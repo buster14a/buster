@@ -9476,13 +9476,63 @@ static const char* check_driver_census_verdict(const CheckProgram* program, cons
     return verdict;
 }
 
+// Whether two helper plans (check_program_helpers) are the same helpers in the same order: what the lowering numbers them by
+// and calls them with, beside their code.
+static bool check_driver_same_helpers(const CheckProgramHelpers* a, const CheckProgramHelpers* b)
+{
+    bool same = a->status == b->status && a->count == b->count;
+    for (uint32_t i = 0; same && a->status == CHECK_PROGRAM_OK && i < a->count; i += 1)
+    {
+        const CheckProgramHelper* x = a->items + i;
+        const CheckProgramHelper* y = b->items + i;
+        same = x->id == y->id && x->bytes == y->bytes && x->parameter_count == y->parameter_count && x->result_type == y->result_type && x->rmw_format == y->rmw_format &&
+               x->rmw == y->rmw && x->math_kind == y->math_kind && x->floating_type == y->floating_type && x->terminates == y->terminates &&
+               x->compiler_barrier == y->compiler_barrier && x->reads_fp_environment == y->reads_fp_environment && x->may_raise_fp_exceptions == y->may_raise_fp_exceptions &&
+               x->may_raise_inexact == y->may_raise_inexact && x->requires_errno_address == y->requires_errno_address &&
+               x->required_alignment == y->required_alignment && x->x86 == y->x86 && x->x86_immediate == y->x86_immediate &&
+               memcmp(x->parameter_types, y->parameter_types, sizeof(x->parameter_types)) == 0;
+    }
+    return same;
+}
+
+// Whether the builtins' plans over `over`'s builtins are those over `exact`'s (#2536's step 2.2c.3, part 2): the helpers
+// (check_program_helpers, the same helpers in the same order) and the runtime functions' preparation
+// (check_lower_runtime_symbols: its queries' checks and the errno function); each plan's helpers in *exact_helpers and
+// *over_helpers. Nothing of them stays in `output` or `scratch`.
+static bool check_driver_same_builtin_plans(const CheckProgram* exact, const CheckProgram* over, uint32_t* exact_helpers, uint32_t* over_helpers, bool* same_runtime,
+                                            Arena* output, Arena* scratch)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    CheckProgramHelpers exact_plan;
+    CheckProgramHelpers over_plan;
+    const bool planned = check_program_helpers(&exact_plan, exact, output, scratch);
+    const bool over_planned = check_program_helpers(&over_plan, over, output, scratch);
+    CheckProgramLowered exact_runtime = { .token = BUSTER_CHECK_NONE };
+    CheckProgramLowered over_runtime = { .token = BUSTER_CHECK_NONE };
+    check_lower_runtime_symbols(&exact_runtime, exact);
+    check_lower_runtime_symbols(&over_runtime, over);
+    *same_runtime = exact_runtime.status == over_runtime.status && exact_runtime.errno_symbol == over_runtime.errno_symbol &&
+                    exact_runtime.errno_pointer_type == over_runtime.errno_pointer_type;
+    *exact_helpers = exact_plan.count;
+    *over_helpers = over_plan.count;
+    const bool same = planned == over_planned && check_driver_same_helpers(&exact_plan, &over_plan);
+    arena_pop_to(output, output_mark);
+    arena_pop_to(scratch, scratch_mark);
+    return same;
+}
+
 // The provisional selection (#2536's step 2.2b, --provisional-selection): the selection over the candidates' references
 // (CheckProgram.census_pass), which numbers the symbols that a window's lowering takes before every body's own references
 // are known, against the exact selection `selected`. It serves where both keep the same bodies in the same order and each
 // symbol of the exact one is the provisional one's of the same object, in the same order: then its program is in
 // *provisional, each extra symbol (one whose object the exact selection leaves out) taking object 0, which the emission
 // makes a placeholder that the object leaves out (check_program_emit's symbols, check_driver_object_build), and their
-// count is in *extra. False otherwise: -c takes the exact selection.
+// count is in *extra. Its builtins are the candidates' pass's (CheckProgram.census_pass_builtins, #2536's step 2.2c.3, part
+// 2), which a window's lowering takes before the bodies' own are known: it serves only where the helpers and the runtime
+// functions' preparation over them are the exact selection's (check_driver_same_builtin_plans), as the epilogue will
+// check them, and where no target group's state over the candidates' references differs from its own
+// (CheckProgram.target_states_differ). False otherwise: -c takes the exact selection.
 static bool check_driver_provisional(CheckProgramSelection* provisional, const CheckProgram* program, const CheckDataPrepared* data,
                                      const CheckProgramSelection* selected, bool scalar, uint32_t* extra, Arena* output, Arena* scratch)
 {
@@ -9501,6 +9551,8 @@ static bool check_driver_provisional(CheckProgramSelection* provisional, const C
     candidates.bodies = copies;
     candidates.references = census->references;
     candidates.reference_count = total;
+    candidates.builtin_nodes = program->census_pass_builtins;
+    candidates.builtin_count = program->census_pass_builtin_count;
     bool usable = census->first != NULL && (copies != NULL || program->body_count == 0) &&
                   check_program_select_mode(provisional, &candidates, data, C_LOWERING_REACHABLE, scalar, false, output, scratch) &&
                   provisional->program.body_count == selected->program.body_count && provisional->program.object_count == selected->program.object_count &&
@@ -9518,6 +9570,12 @@ static bool check_driver_provisional(CheckProgramSelection* provisional, const C
         usable = symbol > last;
         last = symbol;
     }
+    uint32_t exact_helpers = 0;
+    uint32_t provisional_helpers = 0;
+    bool same_runtime = false;
+    usable = usable && !program->target_states_differ &&
+             check_driver_same_builtin_plans(&selected->program, &provisional->program, &exact_helpers, &provisional_helpers, &same_runtime, output, scratch) &&
+             same_runtime;
     uint32_t* objects = usable ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)provisional->program.symbol_count + 1) : NULL;
     usable = usable && objects != NULL;
     *extra = 0;
@@ -9534,6 +9592,50 @@ static bool check_driver_provisional(CheckProgramSelection* provisional, const C
     }
     arena_pop_to(scratch, scratch_mark);
     return usable;
+}
+
+// --selection-census's builtins (#2536's step 2.2c.3, part 2), a line of its own: the exact selection's builtins
+// (CheckProgram.builtin_nodes of its bodies) and those of the candidates' pass in the same bodies
+// (CheckProgram.census_pass_builtins), with the candidates' extra and missing ones, and whether the helpers
+// (check_program_helpers) and the runtime functions' preparation (check_lower_runtime_symbols: its queries' checks and the
+// errno function) over each are the same. Nothing of it stays in `output` or `scratch`.
+static void check_driver_selection_builtins(const CheckProgram* program, const CheckProgramSelection* selected, Arena* output, Arena* scratch)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    const CheckProgram* exact = &selected->program;
+    uint32_t* candidates = program->census_pass_builtin_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, program->census_pass_builtin_count) : NULL;
+    uint32_t count = 0;
+    for (uint32_t i = 0; candidates != NULL && i < program->census_pass_builtin_count; i += 1)
+    {
+        const uint32_t node = program->census_pass_builtins[i];
+        candidates[count] = node;
+        count += check_program_token_body(exact, program->input->graph.tokens[node]) != 0 ? 1 : 0;
+    }
+    uint32_t extra = 0;
+    uint32_t missing = 0;
+    uint32_t e = 0;
+    uint32_t c = 0;
+    while (e < exact->builtin_count || c < count)
+    {
+        const uint32_t x = e < exact->builtin_count ? exact->builtin_nodes[e] : UINT32_MAX;
+        const uint32_t y = c < count ? candidates[c] : UINT32_MAX;
+        missing += x < y ? 1 : 0;
+        extra += y < x ? 1 : 0;
+        e += x <= y ? 1 : 0;
+        c += y <= x ? 1 : 0;
+    }
+    CheckProgram over = *exact;
+    over.builtin_nodes = candidates;
+    over.builtin_count = count;
+    uint32_t exact_helpers = 0;
+    uint32_t candidate_helpers = 0;
+    bool same_runtime = false;
+    const bool same_helpers = check_driver_same_builtin_plans(exact, &over, &exact_helpers, &candidate_helpers, &same_runtime, output, scratch);
+    fprintf(stderr, "selection-census-builtins\texact\t%u\tcandidates\t%u\textra\t%u\tmissing\t%u\thelpers\t%u\tcandidate-helpers\t%u\thelpers-same\t%d\truntime-same\t%d\n",
+            exact->builtin_count, count, extra, missing, exact_helpers, candidate_helpers, (int)same_helpers, (int)same_runtime);
+    arena_pop_to(output, output_mark);
+    arena_pop_to(scratch, scratch_mark);
 }
 
 // --selection-census's report (#2536's step 2.1, check_program_census_walk and _scan), on stderr, in two lines. The
@@ -9563,6 +9665,7 @@ static void check_driver_selection_census(const CheckProgram* program, const Che
     fprintf(stderr, "\nselection-census-ticks\treferences\t%llu\twalk\t%llu\tscan\t%llu\tarms\t%llu\tpass\t%llu\n", (unsigned long long)program->census_references_ticks,
             (unsigned long long)program->census_walk.ticks, (unsigned long long)program->census_scan.ticks, (unsigned long long)program->census_arms.ticks,
             (unsigned long long)program->census_pass.ticks);
+    check_driver_selection_builtins(program, selected, output, scratch);
 }
 
 // The checked program's code and data, as -c writes them: its object at `output_path`, or with `kept` (one of several
