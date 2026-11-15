@@ -265,7 +265,10 @@ recipe keep a register from a value without one that starts, or reloads at a
 required use, where its value hint names that register: where no use requires
 the recipe there, it leaves the register as an eviction does, recomputed at its
 next required use ("Recipes give way to hinted values" below). If its
-value was last in its slot and has no recipe, it stays there. A CFG's edges
+value was last in its slot and has no recipe, it stays there. So does a range
+with uses that continues its value from the slot, until its next required use,
+unless its value's first register is free at its start ("Ranges that wait in
+their slots" below). A CFG's edges
 move a value without a register where a successor wants it in one. The
 intervals starting at one position claim the registers they are hinted to,
 first come in input order, before any takes one; an interval whose hint is
@@ -1077,7 +1080,9 @@ nothing moved is a memory access. `--verify` checks the order with the
 preallocation schedule's reference (`tier1_schedule_ir_verify`).
 
 The phi must be `a`'s own: `a` is that phi, a value computed from it by such
-operations, or a join of its values. A Lua handler that may skip a word joins
+operations, or a join of its values (and, since #2782, a join of such joins, or
+a value the phi itself joins: "A handler a goto enters" below). A Lua handler
+that may skip a word joins
 `pc`'s paths before its fetch. A list walk shows why the rule is needed:
 `pp = &p->next; p = p->next` makes two values from `p`, and the load is `p`'s
 own next value, which wants `p`'s register. Moving `pp`'s increment past the load
@@ -1678,6 +1683,197 @@ CPU 2; 1,762 runs, none failed). Lua's five scripts run −0.44% instructions an
 33 orders. speedtest1 runs −0.53% instructions in the same time: +0.09% cycles,
 −0.66% to +0.83%. Statically, speedtest1's edge moves go from 35,590 to 36,035,
 where values move out of the registers their webs avoid; Lua's don't change.
+
+### Ranges that wait in their slots (#2768)
+
+A range a value enters a block with takes its place at the anchor's exit
+(#2553). Where the value is in its slot there, the range took a register at the
+block's start all the same, the lowest free one, and the edges into the block
+reloaded the value into it. The blocks the value then reaches take that
+register from the anchor's exit in turn, so the register picked at the start
+decided where the value meets its other paths.
+
+Lua's `OP_GETTABUP` calls `luaH_getshortstr` in one arm of `luaV_fastget` and
+spills `pc` around it. At the join of the two arms, `rbx`, where the dispatch
+keeps `pc`, still held `upval`, which the other arm's `luaV_finishget` reads, so
+`pc`'s range took `r13`, the lowest free callee-saved register and the one the
+dispatch takes `i` in. The fetch then loaded `i` into `rbx`, added 4 to `pc` in
+`r13`, and swapped the two through `r11` before the indirect jump: 0.74 M times
+on Lua's five scripts, and 1.48 M of the moves through `r11` left after #2592.
+
+- **Waiting.** A range hinted to its own value, which a block's entry ranges and
+  a split's pieces are and a phi's definition isn't, whose value was in its slot
+  where its hint says, waits there until its next required use, as an unused
+  one rests. A use that isn't required reads the slot.
+- **The first register.** The scan with required uses notes each value's first
+  register. Where it is free at the range's start, the range takes it there;
+  where it isn't, the range waits. A reload of a value whose hint names its slot
+  takes that register where it is free, rather than the lowest free one.
+
+`pc` now waits in its slot past the join, and the hot edge into the fetch
+reloads it into `rbx`, which `upval` has left by then. The fetch adds 4 to `pc`
+in `rbx` and swaps nothing through `r11`. `cl`, which the dispatch keeps in its
+slot, now keeps `r13` through the handler, so `i` takes `trap`'s `rbp`, which
+the scan evicts as the value with the fewest uses, and moves to `r13` at the
+jump, where `trap` is reloaded. The handler's path through the call runs 29
+instructions from the call's return to the indirect jump instead of 33.
+
+Taking a free register at the start where the first one is busy is what keeps
+a value spilled before a loop in a register around it: waiting there too, at a
+loop's header, reloaded `nCol` on every iteration of `sqlite3ColumnIndex`'s
+outer loop (+5.82 M). A phi's range is no continuation of its value: one that
+waited needed a slot of its own, and where slot sharing can't join it to its
+operands' (`sqlite3VdbeExec`'s opcode loop, whose join has 95 of them), every
+edge copied slot to slot through `r11` (+11.7 M). By callgrind (#1189's
+`gap.c`, #1217's inputs, Lua's hash seed fixed) at main `5f3c7d48`:
+
+| Variant | speedtest1 | Lua's five scripts |
+| --- | ---: | ---: |
+| main | 2,657.78 M | 4,879.4 M |
+| the first register for reloads alone | 2,656.99 M | 4,879.5 M |
+| waiting alone, every range | 2,661.32 M | 4,852.6 M |
+| both, every range | 2,657.79 M | 4,851.6 M |
+| both, but where the first register is free | 2,652.65 M | 4,851.5 M |
+| the same, for a range of its own value only (this) | 2,633.68 M (−0.91%) | 4,851.7 M (−0.57%) |
+| this without the free first register | 2,638.79 M | 4,851.9 M |
+
+- **By function.** `luaV_execute` runs 2,287.4 M instructions instead of
+  2,311.8 M, with 339.6 M register moves instead of 344.9 M and 16.4 M through
+  `r11` instead of 17.7 M; `rehash` runs −2.37 M, `str_gsub` −0.46 M and
+  `str_format` −0.36 M, and no Lua function more. speedtest1's
+  `balance_nonroot` runs −8.23 M, `sqlite3VdbeExec` −6.08 M and
+  `sqlite3_str_vappendf` −1.22 M; its losses are `sqlite3WhereEnd` +0.42 M and
+  `speedtest1_run` +0.14 M, where the reloads and the values they displace
+  moved.
+- **Statically** (`--tier1-report`), speedtest1's unit has 397,490 records
+  instead of 403,045, 30,715 edge moves instead of 39,235, and 11,225 spill
+  stores and 11,466 spill loads instead of 12,645 and 13,915; its call saves
+  rise from 19,436 stores and 24,766 loads to 19,545 and 24,902. `lvm.c` has
+  9,840 records instead of 9,994 and 992 edge moves instead of 1,196.
+
+On the 9700X ([the record](https://github.com/buster14a/buster-performance/tree/e1a21c966bf6728ef5f50326d60dd7419c932cc1/docs/measurements/tier1-waiting-ranges-2768-2026-11-14),
+#2592's method), main `5f3c7d48` against the change: speedtest1 runs 0.39% fewer
+user cycles over 8 layouts (95% interval −0.77% to −0.01%, slower at 2 of
+them) for 0.93% fewer instructions, and Lua's five scripts −0.04% (−0.52% to
++0.44%) over 33 link orders for 0.56% fewer instructions at each: Zen 5
+eliminates register moves at rename, and `arithmetic` and `closures` move with
+the link order by up to 10% either way. `sqlite3.c`'s `--tier1 -c` takes 0.21%
+more cycles for 0.29% more instructions, and `lvm.c`'s the same cycles: the
+scan's checks and its reloads at uses cost about what the fewer records and
+edge moves save later.
+
+With #2766 ("Recipes no block reads, settled phi places, and the fixed rules'
+scratch" above), which merged first, by the same callgrind method ([the
+record's section 4](https://github.com/buster14a/buster-performance/tree/296a5e536c79297214c215dbb9402d88b86094fc/docs/measurements/tier1-waiting-ranges-2768-2026-11-14)),
+its head `c3c9fb69` against it merged with this change: Lua's five scripts run
+4,756.0 M instructions instead of 4,778.2 M (−0.46%), `luaV_execute` 2,206.3 M
+instead of 2,225.5 M with 3.6 M moves through `r11` instead of 5.0 M (#2767's
+divisor in `rax` is 3.49 M of them), and speedtest1 2,603.53 M instead of
+2,626.65 M (−0.88%). No Lua function runs more, and speedtest1's only loss over
+0.1 M is `sqlite3WhereEnd` (+0.42 M).
+
+Every Lua build printed clang -O0's output and every speedtest1 gave its
+verification hash. `tier1_allocate_hints_test.c`'s traces check a range that
+waits and reloads into its value's first register, one that takes that
+register at its start where it is free, a range hinted to another value and
+one required at its start, which take a free register there; a build without
+each part of the rule fails its trace. `tests/driver/tier1_patterns.c`'s
+`patterns_spilled` is a handler shaped like `OP_GETTABUP`: on main its join
+reloads two of the loop's values into registers others hold, and its indirect
+jump follows their reloads, where now every handler's follows its table's load.
+
+### A handler a goto enters (#2782, #2592)
+
+#2766, #2767 and #2768 left `luaV_execute` one site that moved values through
+`r11`: the generic `for` loop. `OP_TFORCALL` is entered by the dispatch and by
+`OP_TFORPREP`'s `pc += Bx; i = *(pc++); goto l_tforcall`. `OP_TFORLOOP`
+(`l_tforloop`, after `OP_TFORCALL`'s own `i = *(pc++)`) then jumps back to the
+dispatch.
+
+- **The phis' registers.** `OP_TFORCALL`'s block has phis, for `pc` and `i`.
+  Their hint was their operand's register at the exit of the chosen
+  predecessor (#2553), the predecessor laid out before the block:
+  `OP_TFORPREP`'s, not the dispatch's, which is laid out after. The handler
+  then ran in `OP_TFORPREP`'s registers. `OP_TFORLOOP`'s jump rotated `pc`, `i`
+  and `trap` back through `r11` on every iteration (with #2768's waiting
+  ranges), and `OP_TFORPREP`'s edge rotated them once per loop.
+- **The fetches.** #2592's operand sink didn't move either fetch's `pc + 1`
+  past its load, because neither `pc` was of the target phi's family:
+  - `l_tforloop`'s `pc` joins `OP_TFORCALL`'s `pc + 1` with the dispatch's
+    `pc`;
+  - `OP_TFORCALL`'s own `pc` joins the dispatch's `pc` with `OP_TFORPREP`'s
+    jump;
+  - the dispatch's join has more incoming values than the 32 the rule
+    reads.
+
+Two changes:
+
+- **The dispatch's convention for the phis.** In `tier1_cfg_phi_exits`, a block
+  that an earlier block and a later multiway branch (three or more successors)
+  both enter gives each phi the register its operand along the branch has at
+  the branch's first successor's entry. That is the register every handler
+  takes it in (the `siblings` convention), so the dispatch's edge moves nothing
+  and the `goto`'s edge moves once per loop. The block's other values keep
+  their hints: giving them the convention too spilled `trap` around
+  `OP_TFORCALL`'s call, three stack stores and three loads per iteration.
+- **The sink's family** (`tier1_sink_ir_family`). `a` is now also of the
+  target phi's family in three more cases:
+  - it comes from a join of joins of the phi's values (`OP_TFORLOOP`'s
+    `vmfetch`);
+  - the phi joins `a`'s origin along another edge than the root's (`l_tforloop`
+    and `OP_TFORCALL`'s `pc`);
+  - the phi and `a`'s phi share a source that joins at least three values, a
+    dispatch's join (`OP_TFORCALL`'s fetch).
+
+  Two loops' phis sharing an initial value share no register, so a shared
+  source must be such a join. With any phi as the source, the rule moved code
+  for no gain.
+
+`OP_TFORCALL`'s and `OP_TFORLOOP`'s fetches now add in place. `luaV_execute`'s
+jump after `OP_TFORLOOP` moves nothing.
+
+**By callgrind** (#1189's `gap.c`, #1217's inputs, Lua's hash seed fixed):
+
+| | main `6415e30` | this | main with #2773 | that and this |
+| --- | ---: | ---: | ---: | ---: |
+| `luaV_execute`'s instructions | 2,214.90 M | 2,214.44 M | 2,195.67 M | 2,195.27 M |
+| its moves through `r11` | 1.48 M | 1.48 M | 132,002 | 4 |
+| speedtest1 | 2,610.83 M | 2,610.12 M | 2,590.34 M | 2,589.57 M |
+
+- **On main.** `OP_TFORCALL` ran no rotation without #2773; its 1.48 M are
+  `OP_GETTABUP`'s, which #2773 removes. The change saves `luaV_execute` 0.46 M
+  register moves there.
+- **Lua's totals** move by `luaH_getshortstr`'s count, whose code is the same in
+  every build: −5.40 M on main and +1.71 M with #2773. Its hash chains follow
+  the addresses Lua hashes pointer keys by, which move with the binary, so the
+  totals include that effect.
+- **By function.** Without it, no Lua function runs more instructions.
+  speedtest1 runs 0.71 M and 0.76 M fewer: `resolveP2Values` −0.43 M,
+  `cellSizePtrTableLeaf` −0.14 M, `sqlite3_str_vappendf` −0.10 M to −0.15 M.
+- **The 4 left** are one swap's two moves, run twice: `OP_CLOSE` puts
+  `luaF_close`'s constant arguments 0 and 1 in each other's registers. Such
+  swaps just before a call are #2823; across Lua they are 5.80 M moves through
+  `r11` at 283 sites, almost all outside `luaV_execute`.
+
+**On the 9700X** (#2553's method; main against this, without #2773, whose 132,002
+moves Zen 5 eliminates at rename, too few to time): Lua's five scripts over 33
+link orders take −0.09% cycles (−0.32% to +0.15%), speedtest1 over 8 layouts
+−0.17% (−0.52% to +0.19%). Both are flat, as 0.46 M moves and 0.71 M
+instructions are. `--tier1 --lanes 1 -c` of `sqlite3.c` takes +0.02% cycles and
++0.07% instructions, `lvm.c` −0.08% cycles. The record is buster-performance's
+`docs/measurements/tier1-dispatch-entry-2782-2026-11-15`.
+
+**Tests.**
+
+- **`test-tier1-cfg`'s dispatch-entry fixture.** A dispatch branches to three
+  handlers. One computes a value from `pc` while `pc` lives on, then jumps to
+  another, whose phi joins it with `pc`. The phi must start in `pc`'s register
+  at the first handler's entry, on both paths.
+- **`test-ir-optimize`'s sink fixtures:**
+  - `rejoin`, `nested` and `shared` move one expression each;
+  - `loop` (the same shape around a loop's two-value header) moves none.
+- **Mutations.** Each rule turned off fails its fixture.
+
 
 ## Rematerialization
 

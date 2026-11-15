@@ -156,14 +156,23 @@ Generated instructions have no invented source position. Inlined callee locals
 do not become caller locals. An expanded callee's instructions take origins past
 the function's own entries, an instance's (`IrDebugInline`, #2541 step 3): the
 location proofs read them as the instance's outermost call, the rows as its
-callee's entries (its lines), and `check_debug_values` writes each instance
-whose call is in the function's file as a `DW_TAG_inlined_subroutine` nested in
-the lexical block of its call and in its parent instance, its ranges its code's
-spans. Its abstract origin is the callee's abstract instance (a
-`DW_TAG_subprogram` with `DW_AT_inline`, its parameters and no code, written
-before the out-of-line one), not the out-of-line `DW_TAG_subprogram`: a reader
-takes an attribute an entry lacks from its origin, and gdb 18 (and CI's) takes
-the inherited `DW_AT_low_pc` over the instance's `DW_AT_ranges` and drops it.
+callee's entries (its lines, in the callee's file), and `check_debug_values`
+writes each instance whose call has a place as a `DW_TAG_inlined_subroutine`
+nested in the lexical block of its call and in its parent instance, its ranges
+its code's spans, its `DW_AT_call_file` its call's file. Its abstract origin is
+the callee's abstract instance (a `DW_TAG_subprogram` with `DW_AT_inline`, its
+parameters and automatic locals and no code, written before the out-of-line
+one), not the out-of-line `DW_TAG_subprogram`: a reader takes an attribute an
+entry lacks from its origin, and gdb 18 (and CI's) takes the inherited
+`DW_AT_low_pc` over the instance's `DW_AT_ranges` and drops it. A callee's
+parameters are the caller's locals past its own (#2541,
+`BUSTER_IR_DEBUG_BIND_INSTANCE`), each bound to its argument's value where the
+callee never assigns it: the value proof places it at the records of its
+instance's code, and the instance has a `DW_TAG_formal_parameter` with that
+location list. Its other locals have no location. A function every call of
+which `--tier1` expanded and nothing else keeps (a dead one, `-c` only) has no
+rows, address or `DW_TAG_subprogram` of its own under `-g`, its abstract
+instance alone (`CheckProgramRows.dead`), so `-g` changes no code.
 The emitter's record origins and the post-scheduler's final permutation carry
 the surviving identities to the actual machine records. Source rows therefore
 describe surviving statements, including suspended callers' call sites.
@@ -402,13 +411,16 @@ vector path with an exact twin that `--scalar` takes, into the same bytes:
   its line 16 rows at a time over just the function's runs and lines. A row
   from a file the body includes, or past a `#line` inside it, or with a chain
   of more than 8 links, takes the exact path.
-- **Kept rows**: those in the function's file (a line sequence has one; a
-  row of an included file's code is left out) whose line differs from the
-  kept row before's, and the row where the body starts, whatever its line,
-  which the function marks `prologue_end`. A file is one key per name (a
-  hash table of the files' paths and the `#line`s' names), so that two
-  `#line`s naming one file keep their rows together, and the unit's file
-  table is built by key without comparing names.
+- **Kept rows**: those in a file whose file or line differs from the kept
+  row before's, and the row where the body starts, whatever its line, which
+  the function marks `prologue_end`. A row in another file than the
+  function's (an expanded callee's from a header, or a body's statement an
+  `#include` put there, #2541) keeps its file (`DebugUnit.row_files`), which
+  the line program sets by `DW_LNS_set_file` where it changes, by both paths.
+  A file is one key per name (a hash table of the files' paths and the
+  `#line`s' names), so that two `#line`s naming one file keep their rows
+  together, and the unit's file table is built by key without comparing
+  names.
 
 The lowering and its loop over tasks are each compiled twice from one
 always-inlined body (`check_program_lower_body`, `check_lower_drain_body`):

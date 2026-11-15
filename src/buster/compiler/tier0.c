@@ -5613,11 +5613,18 @@ static void tier0_extend(Tier0Writer* writer, uint32_t class, uint32_t reg)
     }
 }
 
-// A copy of at most this many bytes moves 8 bytes at a time, as Tier 1 does: a small aggregate is often built by 8-byte
-// stores, and a 16-byte load spanning two of them can't forward (#1375). Larger copies keep 16-byte moves: on the
-// 9700X, 8-byte pieces copy a 64-byte struct just built in 0.63 times the cycles, but a cold 128- or 256-byte source in
-// 1.75 to 1.77 times, store-bound (#1375's record, buster-performance's named-results-1375-2026-11-13). A width chosen
-// from what last wrote the source is #2693.
+// A copy of at most this many bytes moves 8 bytes at a time through a general register, as Tier 1 does: a small
+// aggregate is often built by 8-byte stores, and a 16-byte load spanning two of them can't forward (#1375). A larger
+// one moves 16 bytes at a time through an XMM register, in one of two shapes (#2693), which tier0_copy's `halves`
+// chooses by where the source's bytes likely come from:
+// - a local (tier0_copy_local_source), which its fields' 8-byte stores often built just before: each 16 bytes loaded
+//   as two 8-byte halves (movsd, movhps) and stored whole (movups), so that no load spans two of the stores;
+// - any other source, and a call's aggregate arguments, which a 16-byte copy stored: a 16-byte load and store (movups)
+//   per 16 bytes, half the loads, which bound the copy of a cold source or of one a 16-byte copy wrote.
+// On the 9700X, against 16-byte loads, halves copy a 64- to 256-byte struct just built by 8-byte stores in 0.26 to
+// 0.63 times the cycles, a cold one in 1.0 to 1.70 times, and one a 16-byte copy just wrote in 1.44 to 1.65 times;
+// 8-byte pieces are no faster than halves for the struct just built or the cold one (buster-performance's
+// copy-shapes-2693-2026-11-15).
 #define BUSTER_TIER0_COPY_NARROW_BYTES 32
 
 // The widest piece a copy of `size` bytes uses: 8 for a small aggregate, 16 for a larger one.
@@ -5626,11 +5633,12 @@ static uint32_t tier0_copy_width(uint32_t size)
     return size <= BUSTER_TIER0_COPY_NARROW_BYTES ? 8 : 16;
 }
 
-// `size` bytes copied from [from + from_displacement] to [to + to_displacement], the ranges the same or apart: a load
-// and a store per piece through `general`'s 8 bytes or XMM register `xmm`'s 16, the last piece ending at the end; below
-// 8, one or two of a general register's 4, 2 or 1 bytes. Overlapping pieces copy what they would apart. A COPY's
-// records, and a call's aggregates' (tier0_emit_call).
-static void tier0_copy(Tier0Writer* writer, uint8_t to, int32_t to_displacement, uint8_t from, int32_t from_displacement, uint32_t size, uint8_t general, uint8_t xmm)
+// `size` bytes copied from [from + from_displacement] to [to + to_displacement], the ranges the same or apart, a piece
+// at a time, the last piece ending at the end: an 8-byte one as a load and a store of `general`; a 16-byte one through
+// XMM register `xmm`, loaded whole or, with `halves`, as two 8-byte loads into its halves, and stored whole; below 8,
+// one or two of a general register's 4, 2 or 1 bytes. Each piece's loads come before its store, so overlapping pieces
+// copy what they would apart. A COPY's records, and a call's aggregates' (tier0_emit_call).
+static void tier0_copy(Tier0Writer* writer, uint8_t to, int32_t to_displacement, uint8_t from, int32_t from_displacement, uint32_t size, uint8_t general, uint8_t xmm, bool halves)
 {
     const uint32_t width = tier0_copy_width(size);
     if (size >= width)
@@ -5638,11 +5646,18 @@ static void tier0_copy(Tier0Writer* writer, uint8_t to, int32_t to_displacement,
         for (uint32_t offset = 0; offset < size; offset += width)
         {
             const int32_t at = (int32_t)(offset + width <= size ? offset : size - width);
-            const uint32_t load = width == 16 ? X86_FORM_MOVUPS_X_XM : X86_FORM_MOV_R64_RM64;
+            if (width == 16 && halves)
+            {
+                tier0_put(writer, tier0_instruction(X86_FORM_MOVSD_X_XM64, xmm, from, BUSTER_X86_MEMORY_BASE, from_displacement + at, 0));
+                tier0_put(writer, tier0_instruction(X86_FORM_MOVHPS_X_M64, xmm, from, BUSTER_X86_MEMORY_BASE, from_displacement + at + 8, 0));
+            }
+            else
+            {
+                const uint32_t load = width == 16 ? X86_FORM_MOVUPS_X_XM : X86_FORM_MOV_R64_RM64;
+                tier0_put(writer, tier0_instruction(load, width == 16 ? xmm : general, from, BUSTER_X86_MEMORY_BASE, from_displacement + at, 0));
+            }
             const uint32_t store = width == 16 ? X86_FORM_MOVUPS_XM_X : X86_FORM_MOV_RM64_R64;
-            const uint8_t reg = width == 16 ? xmm : general;
-            tier0_put(writer, tier0_instruction(load, reg, from, BUSTER_X86_MEMORY_BASE, from_displacement + at, 0));
-            tier0_put(writer, tier0_instruction(store, reg, to, BUSTER_X86_MEMORY_BASE, to_displacement + at, 0));
+            tier0_put(writer, tier0_instruction(store, width == 16 ? xmm : general, to, BUSTER_X86_MEMORY_BASE, to_displacement + at, 0));
         }
     }
     else
@@ -5660,12 +5675,27 @@ static void tier0_copy(Tier0Writer* writer, uint8_t to, int32_t to_displacement,
     }
 }
 
-// How many records tier0_copy writes for `size` bytes (at least 1): a load and a store per piece; below 8, one or two.
-static uint32_t tier0_copy_records(uint32_t size)
+// How many records tier0_copy writes for `size` bytes (at least 1): a load and a store per piece, and a second load per
+// 16-byte piece with `halves`; below 8, two or four.
+static uint32_t tier0_copy_records(uint32_t size, bool halves)
 {
     const uint32_t width = tier0_copy_width(size);
     const uint32_t piece = size >= 4 ? 4 : size >= 2 ? 2 : 1;
-    return size >= width ? 2 * ((size + width - 1) / width) : size > piece ? 4 : 2;
+    const uint32_t per_piece = width == 16 && halves ? 3 : 2;
+    return size >= width ? per_piece * ((size + width - 1) / width) : size > piece ? 4 : 2;
+}
+
+// Whether COPY entry `i`'s source is a local object's bytes (#2693): its address the entry before it pushed, a
+// LOCAL_ADDRESS, or a member's, LOCAL_ADDRESS, CONST and PTR_ADD (check_lower_offset). The lowering's locals are
+// built by their fields' stores, often just before a copy reads them (an initializer, member assignments, a call's
+// result object), so such a copy loads 8-byte halves. A jump into the entries can bring another source; this only
+// chooses the copy's shape, never its bytes.
+static bool tier0_copy_local_source(const Tier0Function* function, uint32_t i)
+{
+    const uint8_t* kinds = function->kinds;
+    const bool whole = i >= 1 && kinds[i - 1] == BUSTER_TYPED_LOCAL_ADDRESS;
+    const bool member = i >= 3 && kinds[i - 1] == BUSTER_TYPED_PTR_ADD && kinds[i - 2] == BUSTER_TYPED_CONST && kinds[i - 3] == BUSTER_TYPED_LOCAL_ADDRESS;
+    return whole || member;
 }
 
 // The red zone temporary `t`'s place below rsp (BUSTER_TIER0_TEMPORARIES), or an interrupt service routine's in its frame,
@@ -5820,7 +5850,7 @@ static __attribute__((noinline)) uint32_t tier0_place_aggregates(const Tier0Func
             aggregate->count = tier0_aggregate_whole(location) ? 0 : (uint8_t)tier0_location_parts(location, size, aggregate->parts);
             if (tier0_aggregate_whole(location))
             {
-                tier0_copy(writer, X86_REGISTER_RSP, (int32_t)location.stack_offset, source, 0, size, general, xmm);
+                tier0_copy(writer, X86_REGISTER_RSP, (int32_t)location.stack_offset, source, 0, size, general, xmm, false);
             }
             for (uint32_t k = 0; k < aggregate->count; k += 1)
             {
@@ -5828,11 +5858,11 @@ static __attribute__((noinline)) uint32_t tier0_place_aggregates(const Tier0Func
                 aggregate->temporaries[k] = (uint8_t)temporaries;
                 if (part.reg == BUSTER_TIER0_PART_STACK)
                 {
-                    tier0_copy(writer, X86_REGISTER_RSP, (int32_t)location.stack_offset, source, part.offset, part.bytes, general, xmm);
+                    tier0_copy(writer, X86_REGISTER_RSP, (int32_t)location.stack_offset, source, part.offset, part.bytes, general, xmm, false);
                 }
                 else if (part.load == BUSTER_TIER0_PART_TEMPORARY)
                 {
-                    tier0_copy(writer, tier0_temporary_base(writer), tier0_temporary(writer, temporaries), source, part.offset, part.bytes, general, xmm);
+                    tier0_copy(writer, tier0_temporary_base(writer), tier0_temporary(writer, temporaries), source, part.offset, part.bytes, general, xmm, false);
                     temporaries += 1;
                 }
             }
@@ -5850,15 +5880,15 @@ static uint32_t tier0_aggregate_records(AbiLocation location, uint32_t size, uin
     Tier0Part parts[2];
     const bool whole = tier0_aggregate_whole(location);
     const uint32_t part_count = whole ? 0 : tier0_location_parts(location, size, parts);
-    uint32_t count = whole ? tier0_copy_records(size) : 0;
+    uint32_t count = whole ? tier0_copy_records(size, false) : 0;
     *own = BUSTER_TIER0_PART_STACK;
     *own_set = 0;
     for (uint32_t k = 0; k < part_count; k += 1)
     {
         const Tier0Part part = parts[k];
         const bool general = part.reg < 16;
-        count += part.reg == BUSTER_TIER0_PART_STACK ? tier0_copy_records(part.bytes)
-               : part.load == BUSTER_TIER0_PART_TEMPORARY ? tier0_copy_records(part.bytes) + 1 : tier0_part_records(part);
+        count += part.reg == BUSTER_TIER0_PART_STACK ? tier0_copy_records(part.bytes, false)
+               : part.load == BUSTER_TIER0_PART_TEMPORARY ? tier0_copy_records(part.bytes, false) + 1 : tier0_part_records(part);
         *own = general ? part.reg : *own;
         *own_set |= general ? 1u << part.reg : 0;
     }
@@ -6448,7 +6478,7 @@ static void tier0_emit_tail_jump(const Tier0Function* function, const Tier0Frame
         // from rsp past the frame otherwise (Tier0Frame.incoming).
         const uint8_t base = frame->pointer ? X86_REGISTER_RBP : X86_REGISTER_RSP;
         const int32_t incoming = frame->pointer ? 16 : frame->incoming;
-        tier0_copy(writer, base, incoming, X86_REGISTER_RSP, 0, bytes, X86_REGISTER_RAX, 15);
+        tier0_copy(writer, base, incoming, X86_REGISTER_RSP, 0, bytes, X86_REGISTER_RAX, 15, false);
     }
     tier0_emit_teardown(frame, false, writer);
     if (function->call_targets[call] == 0)
@@ -7140,15 +7170,17 @@ static void tier0_emit_shift(const Tier0Entries* entries, const Tier0Frame* fram
 }
 
 // A copy of `value` bytes, from the address at depth − 1 to the one at depth − 2, through its stacks' first free
-// register: from 16 bytes, 16 at a time in an XMM register (movups), the last 16 ending at the end, overlapping the ones
-// before; below 16, two pieces of a general register's 8, 4, 2 or 1 bytes, the second ending at the end (one when
-// that is the whole). The ranges are the same or apart, so overlapping pieces copy what they would apart.
+// register (tier0_copy): past BUSTER_TIER0_COPY_NARROW_BYTES, 16 at a time in an XMM register, the last 16 ending at the
+// end, overlapping the ones before, each loaded as two 8-byte halves where a local is the source
+// (tier0_copy_local_source), else whole; up to it, 8 at a time in a general register, the last 8 ending at the end;
+// below 8, two pieces of a general register's 4, 2 or 1 bytes, the second ending at the end (one when that is the
+// whole). The ranges are the same or apart, so overlapping pieces copy what they would apart.
 static void tier0_emit_copy(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, Tier0Writer* writer)
 {
     const uint32_t size = (uint32_t)function->values[i];
     const uint32_t depth = entries->depths[i];
     tier0_copy(writer, tier0_integer_depths[depth - 2], 0, tier0_integer_depths[depth - 1], 0, size,
-               size <= BUSTER_TIER0_COPY_NARROW_BYTES ? tier0_integer_depths[depth] : 0, entries->floating_depths[i]);
+               size <= BUSTER_TIER0_COPY_NARROW_BYTES ? tier0_integer_depths[depth] : 0, entries->floating_depths[i], tier0_copy_local_source(function, i));
 }
 
 // ALLOCA's records, and STACK_SAVE's, STACK_RESTORE's and FRAME_ADDRESS's (tier0_emit_stack's). A probed ALLOCA's (#177)
@@ -9172,7 +9204,7 @@ static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entri
                 {
                     tier0_spill(writer, frame, X86_REGISTER_RAX, slot, true);
                     tier0_copy(writer, X86_REGISTER_RSP, (int32_t)location.stack_offset, X86_REGISTER_RAX, 0, size,
-                               X86_REGISTER_R10, 0);
+                               X86_REGISTER_R10, 0, false);
                 }
                 else if (!whole && part_count != 0)
                 {
@@ -9183,12 +9215,12 @@ static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entri
                         if (pass == 0 && part.reg == BUSTER_TIER0_PART_STACK)
                         {
                             tier0_copy(writer, X86_REGISTER_RSP, (int32_t)location.stack_offset, X86_REGISTER_RAX, part.offset, part.bytes,
-                                       X86_REGISTER_R10, 0);
+                                       X86_REGISTER_R10, 0, false);
                         }
                         else if (pass == 0 && part.load == BUSTER_TIER0_PART_TEMPORARY)
                         {
                             tier0_copy(writer, tier0_temporary_base(writer), tier0_temporary(writer, temporary), X86_REGISTER_RAX, part.offset, part.bytes,
-                                       X86_REGISTER_R10, 0);
+                                       X86_REGISTER_R10, 0, false);
                         }
                         else if (pass != 0 && part.reg != BUSTER_TIER0_PART_STACK)
                         {
@@ -9609,7 +9641,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tie
     count += moves - cycles;
     count += function->call_variadic[call] ? 1 : 0;
     const uint32_t stack_bytes = function->calls[call].stack_bytes;
-    count += !tail ? tier0_count_call_record(function, entries, i, references) : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + tier0_tail_finish(function, entries, call);
+    count += !tail ? tier0_count_call_record(function, entries, i, references) : (stack_bytes != 0 ? tier0_copy_records(stack_bytes, false) : 0) + tier0_tail_finish(function, entries, call);
     // A result object: its address in rdi for a hidden pointer, or a store per part of the result's registers, which
     // take the result's move's place.
     const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[call] : 0;
@@ -9694,7 +9726,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const
     }
     else if (kind == BUSTER_TYPED_COPY)
     {
-        count = tier0_copy_records((uint32_t)function->values[i]);
+        count = tier0_copy_records((uint32_t)function->values[i], tier0_copy_local_source(function, i));
     }
     else if (tier0_moves_stack(kind))
     {
@@ -9949,7 +9981,7 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
             }
             if (tier0_aggregate_whole(location) && !tier0_parameter_in_place(function, p))
             {
-                tier0_copy(writer, homes[p].reg, homes[p].displacement, base, incoming, function->local_sizes[p], X86_REGISTER_RAX, 15);
+                tier0_copy(writer, homes[p].reg, homes[p].displacement, base, incoming, function->local_sizes[p], X86_REGISTER_RAX, 15, false);
             }
         }
     }
@@ -10027,7 +10059,7 @@ static uint32_t tier0_count_prologue(const Tier0Function* function, const Tier0F
             {
                 count += parts[k].reg == BUSTER_TIER0_PART_STACK ? 2 : 1;
             }
-            count += tier0_aggregate_whole(location) && !tier0_parameter_in_place(function, p) ? tier0_copy_records(function->local_sizes[p]) : 0;
+            count += tier0_aggregate_whole(location) && !tier0_parameter_in_place(function, p) ? tier0_copy_records(function->local_sizes[p], false) : 0;
         }
     }
     return count;
@@ -10055,7 +10087,7 @@ static __attribute__((noinline)) void tier0_load_result(const Tier0Function* fun
     {
         if (parts[k].load == BUSTER_TIER0_PART_TEMPORARY)
         {
-            tier0_copy(writer, tier0_temporary_base(writer), tier0_temporary(writer, k), X86_REGISTER_RAX, parts[k].offset, parts[k].bytes, X86_REGISTER_RCX, 0);
+            tier0_copy(writer, tier0_temporary_base(writer), tier0_temporary(writer, k), X86_REGISTER_RAX, parts[k].offset, parts[k].bytes, X86_REGISTER_RCX, 0, false);
         }
     }
     for (uint32_t pass = 0; pass < 2; pass += 1)
@@ -10079,7 +10111,7 @@ static __attribute__((noinline)) uint32_t tier0_result_records(const Tier0Functi
     uint32_t records = x87 + (tier0_element_x87(function->result) ? 1u : 0u);
     for (uint32_t k = 0; k < count; k += 1)
     {
-        records += tier0_part_records(parts[k]) + (parts[k].load == BUSTER_TIER0_PART_TEMPORARY ? tier0_copy_records(parts[k].bytes) : 0);
+        records += tier0_part_records(parts[k]) + (parts[k].load == BUSTER_TIER0_PART_TEMPORARY ? tier0_copy_records(parts[k].bytes, false) : 0);
     }
     return records;
 }
@@ -10801,7 +10833,7 @@ static uint32_t tier0_count_deep(const Tier0Function* function, const Tier0Entri
         count += object != 0 ? tier0_result_object_records(function->calls[call].result) : 0;
         count += function->call_variadic[call] ? 1 : 0;
         uint32_t references = tail && !indirect ? 1 : 0;
-        count += !tail ? tier0_count_call_record(function, entries, i, &references) : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + tier0_tail_finish(function, entries, call);
+        count += !tail ? tier0_count_call_record(function, entries, i, &references) : (stack_bytes != 0 ? tier0_copy_records(stack_bytes, false) : 0) + tier0_tail_finish(function, entries, call);
         count += !stored && tier0_stack(function->classes[i]) != 0 ? 1 : 0;
         count += 2 * tier0_saved_masks(entries, i);
         uint32_t integer_arguments = 0;

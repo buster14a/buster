@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+# Acceptance mask (hex): 1 lanes/worker-budget, 2 emit-window, 4 units-memory, 8 id-order.
+# A tab separates the mask from one or two quoted values. Inside quotes every byte is literal.
+# A second value repeats the option; an invalid occurrence must not be erased by a valid one.
+0	""
+0	"-1"
+0	"-0"
+0	"-18446744073709551615"
+0	"+1"
+0	" 1"
+0	"	1"
+0	" -1"
+0	"1 "
+0	"1x"
+0	"0x1"
+0	"18446744073709551616"
+0	"9999999999999999999999999999999999999999"
+a	"0"
+f	"1"
+f	"0001"
+f	"64"
+e	"65"
+e	"4294967295"
+c	"4294967296"
+c	"18446744073709551615"
+0	"-18446744073709551615"	"1"
+0	"1"	"-18446744073709551615"

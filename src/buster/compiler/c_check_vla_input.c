@@ -264,7 +264,7 @@ static void check_input_vla_place(CheckInputReader* reader, uint32_t open, uint3
 // (check_input_tag_definition, or a tag frame of its own) before it calls this again for the bound, which goes on with
 // the job. Otherwise *definition is BUSTER_CHECK_NONE and *job 0.
 static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint32_t first, uint32_t end, uint32_t name, bool parameter, bool star,
-                                  CheckConstantInput** job, uint32_t* definition, uint8_t* kind, uint64_t* extent)
+                                  CheckConstantInput** job, uint32_t* definition, uint8_t* kind, uint64_t* extent, bool* zero_length, uint32_t* fold_warning)
 {
     const Parser* parser = reader->parser;
     const uint32_t previous_warning_bound = reader->warning_bound_open;
@@ -272,6 +272,8 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
     bool valid = open < first && first <= end && end < parser->tokens.count;
     *kind = BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
     *extent = 0;
+    *zero_length = false;
+    *fold_warning = BUSTER_CHECK_NONE;
     *definition = BUSTER_CHECK_NONE;
     if (valid && first != end && !star)
     {
@@ -332,12 +334,15 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
             negative = converted && number < 0;
             *kind = BUSTER_TYPE_KIND_ARRAY;
             *extent = (uint64_t)number;
+            *zero_length = valid && number == 0 && check_input_integer_ice(reader, &value);
             if (valid)
             {
                 // A constant bound, which no graph walk reads: its comma operators' left operands' -Wunused-value, which
                 // clang's constant-evaluated bound gives as it builds them, before the fold's warning (#2202).
                 check_input_attribute_unused(reader, first, end, true);
+                const uint32_t warnings = reader->warning_events.count;
                 check_input_constant_bound_warning(reader, first, end, &value, name < parser->tokens.count ? name : open, true);
+                *fold_warning = reader->warning_events.count > warnings && check_input_integer_ice(reader, &value) ? warnings : BUSTER_CHECK_NONE;
             }
         }
         else if (valid && evaluated)

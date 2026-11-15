@@ -3572,14 +3572,21 @@ static bool tier1_select_test_walk_load(Tier1SelectTest* test, const Tier1Select
 }
 
 // A truth value's chain: icmp `predicate` of a and b (with `immediate`, of a and a constant) at `width`, `links` links,
-// the j-th `eq` where bit j of `negations` is set, then the root: a zero extension to I32 that is returned, or with
-// `branch` a branch to blocks returning 11 and 22. The root's pattern must be the comparison's (negated for an odd number
-// of `eq` links) on a and b, the chain covered, and its code must give the chain's truth.
-static void tier1_select_test_truth_walk(Tier1SelectTest* test, uint32_t width, bool immediate, uint32_t links, uint32_t negations, uint32_t predicate, bool branch, Arena* input,
+// the j-th `eq` where bit j of `negations` is set, then the root, by `shape`: a zero extension to I32 that is returned
+// (0), a branch to blocks returning 11 and 22 (1), or (2 to 5, #2676) the constants 11 and 22, which put two nodes
+// between the chain and its root, and a select of them that is returned, of the comparison's width (2 and 4) or the
+// other (3 and 5), in a register of its own (2 and 3), the 11's (4: the cmov inverted) or a's (5). The root's pattern
+// must be the comparison's (negated for an odd number of `eq` links) on a and b, the chain covered, and its code must
+// give the chain's truth.
+static void tier1_select_test_truth_walk(Tier1SelectTest* test, uint32_t width, bool immediate, uint32_t links, uint32_t negations, uint32_t predicate, uint32_t shape, Arena* input,
                                          Arena* output, Arena* scratch, uint64_t* random)
 {
     const uint8_t type = width == 4 ? IR_I32 : IR_I64;
-    const uint32_t root = 3 + 3 * links;
+    const bool branch = shape == 1;
+    const bool select = shape >= 2;
+    const uint8_t select_type = (shape & 1) != 0 ? (width == 4 ? IR_I64 : IR_I32) : type;
+    const uint32_t chain = 3 + 3 * links;
+    const uint32_t root = select ? chain + 2 : chain;
     const uint32_t count = branch ? root + 5 : root + 2;
     const IrSizes sizes =
     {
@@ -3594,7 +3601,7 @@ static void tier1_select_test_truth_walk(Tier1SelectTest* test, uint32_t width, 
     Tier1SelectPlan plans[2];
     if (created)
     {
-        function.result_type = IR_I32;
+        function.result_type = select ? select_type : IR_I32;
         function.parameter_types[0] = type;
         function.parameter_types[1] = type;
         const int64_t constant = (int64_t)(int32_t)tier1_select_test_random(random);
@@ -3622,6 +3629,14 @@ static void tier1_select_test_truth_walk(Tier1SelectTest* test, uint32_t width, 
             tier1_select_test_node(&function, root + 3, IR_CONST, IR_I32, links + 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
             tier1_select_test_node(&function, root + 4, IR_RET, IR_VOID, root + 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
         }
+        else if (select)
+        {
+            function.block_offsets[1] = count;
+            tier1_select_test_node(&function, chain, IR_CONST, select_type, links + 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, chain + 1, IR_CONST, select_type, links + 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, root, IR_SELECT, select_type, chain - 1, chain, chain + 1);
+            tier1_select_test_node(&function, root + 1, IR_RET, IR_VOID, root, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
         else
         {
             function.block_offsets[1] = count;
@@ -3634,21 +3649,32 @@ static void tier1_select_test_truth_walk(Tier1SelectTest* test, uint32_t width, 
         const bool odd = (__builtin_popcount(negations) & 1) != 0;
         const uint8_t condition = odd ? tier1_select_negations[predicate] : (uint8_t)predicate;
         const Tier1SelectPattern* pattern = &plans[0].patterns[root];
-        const uint8_t rule = branch ? TIER1_RULE_BRANCH_COMPARE : immediate ? TIER1_RULE_COMPARE_IMMEDIATE : TIER1_RULE_COMPARE;
+        const uint8_t rule = select ? TIER1_RULE_SELECT_COMPARE : branch ? TIER1_RULE_BRANCH_COMPARE : immediate ? TIER1_RULE_COMPARE_IMMEDIATE : TIER1_RULE_COMPARE;
         bool covered = plans[0].covered[1] == immediate;
-        for (uint32_t node = 2; node < root; node += 1)
+        for (uint32_t node = 2; node < chain; node += 1)
         {
             covered &= plans[0].covered[node] != 0;
         }
+        // A select's values are its own uses past the comparison's, and its width its own, the comparison's apart.
         const uint32_t first = plans[0].effective_use_offsets[root];
         const uint32_t uses = plans[0].effective_use_offsets[root + 1] - first;
-        tier1_select_test_expect(test, pattern->rule == rule && pattern->condition == condition && pattern->width == width && covered && uses == (immediate ? 1u : 2u) &&
+        const uint32_t own = select ? 2u : 0u;
+        const bool widths = select ? pattern->width == tier1_select_width(select_type) && pattern->source_width == width : pattern->width == width;
+        const bool values = !select || (pattern->values[2] == chain && pattern->values[3] == chain + 1 && plans[0].covered[chain] == 0 && plans[0].covered[chain + 1] == 0);
+        tier1_select_test_expect(test, pattern->rule == rule && pattern->condition == condition && widths && values && covered && uses == (immediate ? 1u : 2u) + own &&
                                            plans[0].effective_use_values[first] == 0,
                                  "a truth value's chain is its comparison's, negated for an odd number of eq links");
         uint8_t registers[32];
         memset(registers, X86_REGISTER_RAX, sizeof(registers));
         registers[0] = X86_REGISTER_RDI;
         registers[1] = immediate ? X86_REGISTER_RCX : X86_REGISTER_RSI;
+        if (select)
+        {
+            static const uint8_t destinations[4] = { X86_REGISTER_RAX, X86_REGISTER_RAX, X86_REGISTER_RDX, X86_REGISTER_RDI };
+            registers[chain] = X86_REGISTER_RDX;
+            registers[chain + 1] = X86_REGISTER_R8;
+            registers[root] = destinations[shape - 2];
+        }
         for (uint32_t path = 0; path < 2; path += 1)
         {
             const uint64_t mark = output->length;
@@ -3661,7 +3687,8 @@ static void tier1_select_test_truth_walk(Tier1SelectTest* test, uint32_t width, 
                     const uint64_t a = right + step;
                     const bool truth = tier1_select_test_compare(predicate, width, a, right) != odd;
                     const uint64_t expected = branch ? (truth ? 11 : 22) : tier1_select_test_interpret(&function, a, right, 0);
-                    tier1_select_test_expect(test, tier1_select_test_call(test, a, right, 0) == expected && (branch || expected == truth), "a walked truth value's comparison executes as the chain");
+                    const bool chosen = select ? expected == (truth ? 11u : 22u) : branch || expected == truth;
+                    tier1_select_test_expect(test, tier1_select_test_call(test, a, right, 0) == expected && chosen, "a walked truth value's comparison executes as the chain");
                 }
             }
             arena_pop_to(output, mark);
@@ -5454,9 +5481,9 @@ static void tier1_select_test_walks(Tier1SelectTest* test)
             {
                 for (uint32_t predicate = 0; predicate < IR_PREDICATE_COUNT; predicate += 1)
                 {
-                    for (uint32_t form = 0; form < 4; form += 1)
+                    for (uint32_t form = 0; form < 12; form += 1)
                     {
-                        tier1_select_test_truth_walk(test, width, (form & 1) != 0, links, negations, predicate, (form & 2) != 0, &input, &output, &scratch, &random);
+                        tier1_select_test_truth_walk(test, width, (form & 1) != 0, links, negations, predicate, form >> 1, &input, &output, &scratch, &random);
                     }
                 }
             }

@@ -80,7 +80,25 @@ struct EmittedInline
     uint32_t count;
     uint32_t parent;
     uint32_t call;
+    // Its callee's parameters' locals [local, local + local_count) past the function's own (IrDebugInline's, #2541),
+    // whose ranges are among EmittedCode.local_ranges.
+    uint32_t local;
+    uint32_t local_count;
 };
+
+// A literal of a body's code (#2744): read-only bytes its code loads rip-relative, a vector constant of `width` bytes (16,
+// 32 or 64), its words little-endian, those past the width zero. A reference whose target is BUSTER_EMITTED_LITERAL + k
+// is to the code's literal k while the body compiles on its lane, which numbers no unit symbol: the emission's merge
+// gives each distinct literal of the unit an entry of its pool (.rodata.cst16, .rodata.cst32 or .rodata.cst64, aligned
+// to its width) and its symbol, and renames the references to it (check_program_emit_literals). No symbol of a unit
+// reaches the tag: the merge refuses a unit of as many.
+typedef struct EmittedLiteral EmittedLiteral;
+struct EmittedLiteral
+{
+    uint64_t words[8];
+    uint32_t width;
+};
+#define BUSTER_EMITTED_LITERAL 0x80000000u
 
 typedef struct EmittedCode EmittedCode;
 struct EmittedCode
@@ -92,6 +110,9 @@ struct EmittedCode
     uint32_t branch_count;
     LinkReference* references;
     uint32_t reference_count;
+    // Its literals (EmittedLiteral, #2744): Tier 1's vector constants that its references name; none for Tier 0's.
+    const EmittedLiteral* literals;
+    uint32_t literal_count;
     // First records by label index; UINT32_MAX is an absent label, not an indirect control-flow target.
     uint32_t* label_records;
     uint32_t label_count;
@@ -737,9 +758,14 @@ static bool emitted_indirect(const X86Instruction* record)
 // realignments of the stack and frame registers, loads' effective addresses, calls (which preserve the callee-saved
 // registers and rsp, and leave the others unknown), stores into the frame (which overwrite the slots they reach), and
 // any other write of a register (its value unknown), by x86_semantics.c's resolved effects. A store through a register
-// the verifier doesn't follow is trusted not to reach the save area (the frame's own layout keeps it apart). A form
-// x86_semantics.c doesn't cover writes every register and slot, and marks the state unproven.
-static void emitted_transfer(const X86Instruction* record, EmittedState* state)
+// the verifier doesn't follow is trusted not to reach the save area (the frame's own layout keeps it apart). In an
+// eh_return function (`handlers`: one with an emitted_handed jump, #148) a store through a register it follows but rsp
+// and rbp, a pointer of the program's, is trusted too: writing the save slots that __builtin_eh_return restores the
+// handler's registers from is the builtin's contract (libgcc's uw_install_context writes them), and `frame[-7] = x`
+// reaches them by an address the verifier follows once its index is an immediate (#2678). The compiler's own frame
+// accesses, through rsp and rbp, still overwrite the slots they reach. A form x86_semantics.c doesn't cover writes
+// every register and slot, and marks the state unproven.
+static void emitted_transfer(const X86Instruction* record, EmittedState* state, bool handlers)
 {
     const uint32_t form = record->form & ~BUSTER_X86_FORM_FIXUP;
     const uint32_t rsp = X86_REGISTER_RSP;
@@ -823,7 +849,7 @@ static void emitted_transfer(const X86Instruction* record, EmittedState* state)
         }
         if ((writes & BUSTER_X86_RESOURCE_MEMORY) != 0)
         {
-            if (frame_store)
+            if (frame_store && !(handlers && record->rm != X86_REGISTER_RSP && record->rm != X86_REGISTER_RBP))
             {
                 const uint32_t bytes = effects->width != 0 ? effects->width : 64;
                 emitted_clobber_slots(state, address, bytes);
@@ -1088,6 +1114,12 @@ static EmittedVerdict emitted_verify_frames(const EmittedCode* code, Arena* scra
     EmittedVerdict verdict = emitted_verify_saved_vectors(code);
     const uint32_t count = code->count;
     const uint64_t mark = scratch->length;
+    // An eh_return function's program may write its save slots (emitted_transfer).
+    bool handlers = false;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        handlers |= emitted_handed(code->records, i);
+    }
     // Each record's branch target (UINT32_MAX for none), and the leaders: the blocks' first records, each's state.
     uint32_t* targets = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : 0;
     uint32_t* leaders = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
@@ -1168,7 +1200,7 @@ static EmittedVerdict emitted_verify_frames(const EmittedCode* code, Arena* scra
         {
             const X86Instruction* record = &code->records[i];
             const bool branch = targets[i] != UINT32_MAX;
-            emitted_transfer(record, &state);
+            emitted_transfer(record, &state, handlers);
             uint32_t successors[2];
             EmittedState edges[2];
             uint32_t successor_count = 0;
@@ -1252,7 +1284,7 @@ static EmittedVerdict emitted_verify_frames(const EmittedCode* code, Arena* scra
         }
         if (state.reached)
         {
-            emitted_transfer(&code->records[i], &state);
+            emitted_transfer(&code->records[i], &state, handlers);
             if (targets[i] != UINT32_MAX)
             {
                 // A leader's state is its paths' meet, so the record before it didn't run on all of them.

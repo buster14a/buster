@@ -233,6 +233,25 @@ Phi operands are snapshotted before any phi destination is written. The IR
 front verifies each function once per execution, at its first frame, since its
 IR can't change while it runs (#134: a recursion's every call verified its
 callee twice, 45% of a c-testsuite program's time).
+
+Neither front clears what a call won't read, or keeps a step's locals in memory
+([#2758](https://github.com/buster14a/buster/issues/2758)). An IR frame's values
+and defined bytes start as the arena left them: the verifier proved each
+reachable use dominated by its definition, and a step reads an instruction's `a`
+and `b` only where the operand table has them as values. A frame's slots are
+cleared by one `memset`. Scalar loads, stores and typed locals move by value
+through `interpreter_load_value` and `interpreter_store_value` (two fixed-size
+accesses that may overlap), values as their two words, and a typed local's cell
+and defined bytes as two computed words. Under MemorySanitizer at
+`-fsanitize-memory-track-origins=2`, each copy or clear of a variable size, each
+16-byte copy from memory to memory, and each address-taken local of a step was a
+call into the runtime, which unwound the stack. c-testsuite's `00040.c` (8 queens,
+4.57 billion steps in its four forms), alone under the x86-64 MSan build in a
+4-CPU container, went from 265.5 s to 122.3 s. A registered memory is looked up
+first in `InterpreterRuntime.recent`: the memory that an earlier access at its
+address's hashed entry found, checked before it is trusted. Only then does the
+search run from the newest memory down, which reached a global or the heap last
+when a step alternated between them and a frame's locals.
 Callable program mappings share one symbol namespace: IDs zero and UINT32_MAX
 are reserved, and function, data and native IDs must be distinct. Different IDs
 may intentionally refer to the same address.

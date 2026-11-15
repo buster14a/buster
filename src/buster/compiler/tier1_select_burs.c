@@ -57,7 +57,8 @@ typedef enum Tier1BursNonterminal
     TIER1_BURS_A0,
     TIER1_BURS_A1,
     TIER1_BURS_INDEX,
-    // An integer comparison a branch or a truth value takes, a floating one, and a truth value's zero extension of each.
+    // An integer comparison a branch, a select (#2676) or a truth value takes, a floating one, and a truth value's zero
+    // extension of each.
     TIER1_BURS_COND,
     TIER1_BURS_FCOND,
     TIER1_BURS_ZCOND,
@@ -109,6 +110,8 @@ typedef enum Tier1BursOperator
     TIER1_BURS_OP_ZEXT_PLAIN,
     TIER1_BURS_OP_FCMP_ORD,
     TIER1_BURS_OP_CBR_ADJ,
+    // An integer select, which reads its condition (#2676): the select's values are its own root's registers.
+    TIER1_BURS_OP_SELECT,
     TIER1_BURS_OPERATORS,
 } Tier1BursOperator;
 
@@ -156,6 +159,7 @@ typedef enum Tier1BursFamily
     TIER1_BURS_FAMILY_ZEXT,
     TIER1_BURS_FAMILY_FCMP_ORD,
     TIER1_BURS_FAMILY_CBR_ADJ,
+    TIER1_BURS_FAMILY_SELECT,
 } Tier1BursFamily;
 
 // What the plan takes as a root's pattern (tier1_burs_pick): the candidate of `kind`, with LEA_ADD's of a register or of
@@ -299,6 +303,9 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
     { TIER1_BURS_STMT, TIER1_BURS_FAMILY_CBR_ADJ, 0, { TIER1_BURS_COND, BUSTER_TIER1_BURS_NO_KID }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_BRANCH_COMPARE },
     { TIER1_BURS_STMT, TIER1_BURS_FAMILY_CBR_ADJ, 0, { TIER1_BURS_FCOND, BUSTER_TIER1_BURS_NO_KID }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_FLOAT_BRANCH_COMPARE },
     { TIER1_BURS_STMT, TIER1_BURS_FAMILY_CBR_ADJ, 0, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_BRANCH },
+    // A select of an integer comparison's condition code, cmp and cmovCC (#2676), and one that tests its truth value.
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_SELECT, 0, { TIER1_BURS_COND, BUSTER_TIER1_BURS_NO_KID }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_SELECT_COMPARE },
+    { TIER1_BURS_REG, TIER1_BURS_FAMILY_SELECT, 0, { TIER1_BURS_REG, BUSTER_TIER1_BURS_NO_KID }, 3, TIER1_BURS_ACTION_KIND, TIER1_RULE_SELECT },
 };
 
 #define BUSTER_TIER1_BURS_PATTERNS (sizeof(tier1_burs_patterns) / sizeof(tier1_burs_patterns[0]))
@@ -483,6 +490,9 @@ static bool tier1_burs_member(uint32_t family, uint32_t kinds, uint32_t op)
         break;
     case TIER1_BURS_FAMILY_CBR_ADJ:
         member = op == TIER1_BURS_OP_CBR_ADJ;
+        break;
+    case TIER1_BURS_FAMILY_SELECT:
+        member = op == TIER1_BURS_OP_SELECT;
         break;
     default:
         break;
@@ -942,6 +952,10 @@ static uint32_t tier1_burs_classify_node(const Tier1SelectForest* forest, const 
     {
         result = TIER1_BURS_OP_CBR_ADJ;
     }
+    else if (op == IR_SELECT && tier1_select_width(type) != 0)
+    {
+        result = TIER1_BURS_OP_SELECT;
+    }
     return result;
 }
 
@@ -1201,6 +1215,9 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         result = _mm512_mask_mov_epi32(result, ordered, _mm512_set1_epi32(TIER1_BURS_OP_FCMP_ORD));
         const __mmask16 branch = active & adjacent & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CBR));
         result = _mm512_mask_mov_epi32(result, branch, _mm512_set1_epi32(TIER1_BURS_OP_CBR_ADJ));
+        // Integer selects (#2676), of any condition: the kids' pass decides whether it is visible.
+        const __mmask16 select = tier1_burs_types(active, type, width4 | width8) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_SELECT));
+        result = _mm512_mask_mov_epi32(result, select, _mm512_set1_epi32(TIER1_BURS_OP_SELECT));
         _mm512_mask_storeu_epi32(classes + first, active, result);
         // A frame object's address, and an address the vector rule leaves: the scalar classifier's, which reads its slot
         // or its displacement.

@@ -19,7 +19,12 @@ cycles a taken node on `sqlite3.c`
 choosing a record's case by one `switch` each, 170
 ([below](#cs-and-xs-dispatch-one-case-an-operator-one-a-template)); a warm,
 repeated run of an expression costs 124
-([below](#ts-loop-without-its-rules-and-what-a-first-run-costs)). No compile takes it. Its gains are estimates that
+([below](#ts-loop-without-its-rules-and-what-a-first-run-costs)). Running the
+sweeps over batches of expressions keeps their code warm but loses more on
+`sqlite3.c` than it gains: a sweep's branches are predicted from the sweep
+before it on the same expression ([below](#sweeps-by-batches-what-the-predictor-loses)),
+and a profile-guided layout gains it 0.6%
+([below](#the-sweeps-code-what-a-profile-guided-build-finds)). No compile takes it. Its gains are estimates that
 its first two steps exist to confirm or refute; a prototype of its three sweeps
 has been run over the compile's real nodes
 ([below](#what-a-prototype-of-the-sweeps-measured)). It is
@@ -1780,12 +1785,110 @@ cycles are the expression's own paths through the three sweeps' code, and its
 inputs, coming back into the caches: the operators differ from one expression
 to the next, and the sweeps' code together is larger than the 32 KB
 instruction cache. The gate's 120 is about what a warm run costs now. The lever
-this points to is the sweeps' code staying warm. One way is each sweep run over
-a batch of expressions, a statement list's or a body's, before the next sweep,
-so that C's and X's code isn't refetched after T's at every expression. That
-batching would need wide values, a call's arguments and the updates' plans
-kept per batch, not per expression. It is not built, and whether it keeps
-enough of each sweep's code warm is its first measurement.
+this points to is the sweeps' code staying warm: each sweep run over a batch of
+expressions before the next sweep. The next section measures it.
+
+### Sweeps by batches: what the predictor loses
+
+Each sweep run over a batch of expressions, a statement list's or a body's,
+before the next sweep starts, so that its code stays in the caches across the
+batch. Built and measured, not merged; the code is two patches in
+[the record](https://github.com/buster14a/buster-performance/tree/c2b332bc83caae6572c66947379a5c7686ee74be/docs/measurements/node-machine-batches-2524-2026-11-14).
+
+- **The machine by batches.** An expression's records are a range of the
+  batch's, from a base: T types a batch's expressions one after another in the
+  columns, and C and X take each one afterwards. The wide values and the call
+  arguments continue from the batch's earlier expressions', since C and X read
+  them after T has gone past. T's loop keeps one more value live, the base, and
+  spills: the shadow at batch 1 costs 2 to 5 cycles a node more than main.
+- **The check.** Under `--verify`, every taken expression's result by batches
+  (its refusal, its tape, its labels' entries and its calls' records) is
+  compared with its result alone. Starting T's argument list at every
+  expression made 9,857 of `sqlite3.c`'s expressions differ; the code as
+  measured has none, on `sqlite3.c`, Lua and musl, with and without `-g`.
+
+**All three sweeps by batches.** Cycles a taken node, medians of three rounds
+(each within 2.4 of its median):
+
+| batch | `sqlite3.c` | Lua |
+| ---: | ---: | ---: |
+| main | 169.4 | 146.1 |
+| 1 | 177.6 | 154.3 |
+| 4 | 208.0 | 155.5 |
+| 16 | 195.1 | 145.2 |
+| 256 | 186.5 | 136.4 |
+| 1,024 | 186.7 | 135.8 |
+
+The code does stay warm: at batches of 256, the three sweeps miss the
+instruction cache 11.4 times a node on `sqlite3.c` against 18.5 at batch 1, and
+the op cache 16.5 times against 26.1. But their mispredictions rise from 1.57 to
+2.19 a node, nearly all in C and X (each from about 0.4 to 0.7), and the batch's
+records outgrow the first-level data cache (fills from L2 2.3 to 6.0 a node).
+
+**Which handoff matters.** Batching only some of the sweeps (medians of two
+rounds, batch 256):
+
+| | `sqlite3.c` C | X | all three | Lua all three |
+| --- | ---: | ---: | ---: | ---: |
+| all three by batches | 51.7 | 43.8 | 187.9 | 137.5 |
+| T by batches, then C and X an expression at a time | 51.6 | **31.5** | 175.0 | 136.9 |
+| T and C an expression at a time, then X by batches | **47.2** | 43.8 | 183.3 | 144.8 |
+
+A sweep keeps its cost when it runs right after the sweep before it went over
+the same expression: C right after T costs 47 to 51 a node on `sqlite3.c`, C
+after other expressions' C 51 to 63; X right after C 31 to 37, X after other
+expressions' X 44 to 52. Each sweep's branches follow the expression's
+operators, which the sweep before it has just walked, and the predictor's
+history keeps them. That history, not only the code, is much of what a warm
+second run gets back.
+
+**T by batches, C and X an expression at a time,** the best of the shapes, against
+main, medians of three rounds (two for musl):
+
+| | main | batch 1 | batch 256 | batch 1,024 |
+| --- | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 170.8 | 173.0 | 176.5 | 176.3 |
+| Lua | 146.9 | 149.8 | 137.5 | 136.8 |
+| musl | 131.2 | 136.6 | 125.7 | 125.5 |
+
+Lua and musl gain (6.4% and 4.2% at 256), `sqlite3.c`, the gate's file, loses
+3.3%: C costs it 6.7 cycles a node more without T right before it, where C on
+Lua and musl gains 8.7 and 9.2 from its code staying warm. Weighted by each
+corpus's taken nodes the three come out about even (+0.75 cycles a node), and
+the batch-1 path's own cost stays. So the sweeps stay one expression at a time.
+What it leaves:
+
+- **Keeping the sweeps' handoffs.** A first run's cost is partly the code and
+  partly the branches: a smaller sweep is the code's lever, since batching
+  trades one for the other.
+- **The corpora differ.** `sqlite3.c`'s C keeps more from T's history than
+  Lua's and musl's does; a lever measured on one of them alone can mislead.
+
+### The sweeps' code: what a profile-guided build finds
+
+The sweeps' hot code is larger than the 32 KB instruction cache: at main
+`e62535f`, 99% of their cycles on `sqlite3.c` fall on 605 64-byte lines (38.7
+KB), and their instruction-cache and op-cache misses fall across the same lines,
+not on a few in conflict. T's rules (`node_machine_rule`, 26.4 KB) touch 292 of
+their lines, 90% of their cycles on 137; T's loop, C and X touch 60, 85 and 61.
+
+A profile-guided build (`BUSTER_PGO=1`, trained on the shadow of `sqlite3.c`
+alone) bounds what a layout gives, in cycles a taken node, medians of three
+rounds (two for musl), each within 1.4 of its median:
+
+| | main | profile-guided |
+| --- | ---: | ---: |
+| `sqlite3.c` | 175.3 | 174.3 |
+| Lua | 143.7 | 137.4 |
+| musl | 128.5 | 120.8 |
+
+On `sqlite3.c`, the file it was trained on, it gains 0.6%: it inlines the three
+sweeps into the shadow's timing loop and grows T's rules to 106.8 KB, so the hot
+code gets larger (99% of the cycles on 669 lines) and the misses don't fall.
+`minsize` on T's rules shrinks them only to 23.4 KB. So a layout has no measured
+headroom on the gate's file; Lua and musl gain from it, as they did from
+batching ([above](#sweeps-by-batches-what-the-predictor-loses)). The record is
+[`node-machine-layout-2524-2026-11-15`](https://github.com/buster14a/buster-performance/tree/8c00e4f5572a3e29e12c96b32c05ba23c4a2993d/docs/measurements/node-machine-layout-2524-2026-11-15).
 
 ## Expected gains
 
