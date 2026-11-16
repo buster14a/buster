@@ -6,7 +6,11 @@
 // of what those bytes would have to be, on real functions. It measures no time and changes no compile: the functions are
 // the ones -c lowers (benchmark-backend-source's, tier0_source_benchmark.c), compiled by tier0_compile as it is.
 //
-//   build/compiler measure-tier0-entries [--rows] [--list KIND] [--top N] [preprocessor options] file...
+//   build/compiler measure-tier0-entries [--rows] [--list KIND|all] [--top N] [preprocessor options] file...
+//                                        [--next [preprocessor options] file...]...
+//
+// --next starts another set of files with options of their own, counted into the same census: several corpora as one
+// population, each read as it is compiled.
 //
 // A sample is a group: an entry that makes records (its head) with the entries before it that it absorbs (a fused
 // constant, local, pointer addition or compare, which make none), so that every typed entry is in one group and counts
@@ -27,8 +31,8 @@
 // The inputs (tier0_census_input_names), one byte each: the head's class; the kinds and classes of the three entries
 // before it and which of the four are jump targets; a class of each one's value by magnitude, as 64 bits and as its own
 // class's width (zero, one, minus one, 8 bits, 32 bits, more); a pointer addition's element size as a SIB scale; whether
-// a fused constant fits its consumer (with the element's size, the product); whether a store's local is the one three
-// back; each named local's home (a general or an XMM register, a slot, an object); the two depths; the symbol's
+// a fused constant fits its consumer (with the element's size, the product) and that product's class by magnitude;
+// whether a store's local is the one three back; each named local's home (a general or an XMM register, a slot, an object); the two depths; the symbol's
 // access; whether the entry is the function's last; the function's result; a call's counts of register and stack
 // arguments, its flags, its result and which of its first eight arguments are narrow integers; a copy's bytes; and the
 // frame's kind with the function's rare classes. No input is a value, a displacement, a symbol or a table's row. Three
@@ -88,6 +92,7 @@ typedef enum Tier0CensusInput
     TIER0_CENSUS_SCALE_2,
     TIER0_CENSUS_FITS_1,
     TIER0_CENSUS_FITS_2,
+    TIER0_CENSUS_PRODUCT,
     TIER0_CENSUS_SAME,
     TIER0_CENSUS_HOME,
     TIER0_CENSUS_HOME_1,
@@ -139,6 +144,7 @@ static const char* const tier0_census_input_names[TIER0_CENSUS_INPUTS] = {
     [TIER0_CENSUS_SCALE_2] = "scale-2",
     [TIER0_CENSUS_FITS_1] = "fits-1",
     [TIER0_CENSUS_FITS_2] = "fits-2",
+    [TIER0_CENSUS_PRODUCT] = "product",
     [TIER0_CENSUS_SAME] = "same-local",
     [TIER0_CENSUS_HOME] = "home",
     [TIER0_CENSUS_HOME_1] = "home-1",
@@ -210,6 +216,7 @@ static const uint8_t tier0_census_input_families[TIER0_CENSUS_INPUTS] = {
     [TIER0_CENSUS_SCALE_2] = TIER0_CENSUS_FAMILY_VALUE,
     [TIER0_CENSUS_FITS_1] = TIER0_CENSUS_FAMILY_VALUE,
     [TIER0_CENSUS_FITS_2] = TIER0_CENSUS_FAMILY_VALUE,
+    [TIER0_CENSUS_PRODUCT] = TIER0_CENSUS_FAMILY_VALUE,
     [TIER0_CENSUS_SAME] = TIER0_CENSUS_FAMILY_VALUE,
     [TIER0_CENSUS_HOME] = TIER0_CENSUS_FAMILY_HOME,
     [TIER0_CENSUS_HOME_1] = TIER0_CENSUS_FAMILY_HOME,
@@ -758,21 +765,27 @@ static bool tier0_census_function(Tier0Census* census, const Tier0Function* func
                 inputs[TIER0_CENSUS_SCALE_1] = i >= 1 && kinds[i - 1] == BUSTER_TYPED_PTR_ADD ? tier0_census_scale(values[i - 1]) : 0;
                 inputs[TIER0_CENSUS_SCALE_2] = i >= 2 && kinds[i - 2] == BUSTER_TYPED_PTR_ADD ? tier0_census_scale(values[i - 2]) : 0;
                 // Whether the constant before the head fits it (tier0_constant_fits, the head's key class and its own
-                // element size), 2 where there is none; and whether the constant before a pointer addition one or two
-                // back fits that addition's product.
+                // element size), 2 where there is none; whether the constant before a pointer addition one or two
+                // back fits that addition's product; and the class of the nearest such product's magnitude plus one
+                // (the head's own first), 0 where there is none: `p + 3` and `p + 20` of 8-byte elements have the same
+                // constant's class and the same size, and their products take an 8-bit and a 32-bit immediate.
                 const uint32_t key_class = tier0_key_class(kind, class, i >= 1 ? classes[i - 1] : BUSTER_TYPED_CLASS_VOID);
                 inputs[TIER0_CENSUS_FITS_1] = i >= 1 && kinds[i - 1] == BUSTER_TYPED_CONST ?
                                                   (tier0_constant_fits(kind, key_class, values[i - 1], kind == BUSTER_TYPED_PTR_ADD ? values[i] : 1) ? 1 : 0) : 2;
                 uint8_t product = 2;
+                uint8_t product_class = kind == BUSTER_TYPED_PTR_ADD && i >= 1 && kinds[i - 1] == BUSTER_TYPED_CONST ?
+                                            (uint8_t)(1 + tier0_census_value_class((int64_t)(values[i - 1] * values[i]))) : 0;
                 for (uint32_t back = 1; back <= 2 && back + 1 <= i && product == 2; back += 1)
                 {
                     const uint32_t j = i - back;
                     if (kinds[j] == BUSTER_TYPED_PTR_ADD && kinds[j - 1] == BUSTER_TYPED_CONST)
                     {
                         product = tier0_constant_fits(BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, values[j - 1], values[j]) ? 1 : 0;
+                        product_class = product_class == 0 ? (uint8_t)(1 + tier0_census_value_class((int64_t)(values[j - 1] * values[j]))) : product_class;
                     }
                 }
                 inputs[TIER0_CENSUS_FITS_2] = product;
+                inputs[TIER0_CENSUS_PRODUCT] = product_class;
                 inputs[TIER0_CENSUS_SAME] = i >= 3 && kinds[i - 3] == BUSTER_TYPED_LOCAL && values[i - 3] == values[i] ? 1 : 0;
                 inputs[TIER0_CENSUS_DEPTH] = entries.depths[i];
                 inputs[TIER0_CENSUS_FLOATING_DEPTH] = entries.floating_depths[i];
@@ -1269,6 +1282,9 @@ static void tier0_census_list(const Tier0Census* census, const uint32_t* members
     free(listed);
 }
 
+// --list's kind for every kind.
+#define BUSTER_TIER0_CENSUS_LIST_ALL (BUSTER_TYPED_KINDS + 1)
+
 // The two counts: over the raw inputs, and with the fusion's key offered.
 #define BUSTER_TIER0_CENSUS_COUNTS 2
 static const char* const tier0_census_count_names[BUSTER_TIER0_CENSUS_COUNTS] = { "raw", "fused" };
@@ -1327,7 +1343,7 @@ static void tier0_census_print_shares(const uint64_t* within, uint64_t entries)
 
 // The report: the corpus's totals, a row a kind and a count (with `rows`), each count's totals against #2874's gate,
 // what its keys decide without each family of inputs, and what no key decides; with `list` (a kind, BUSTER_TYPED_KINDS
-// for none) that kind's keys at the raw count's gate key. False without memory.
+// for none, BUSTER_TIER0_CENSUS_LIST_ALL for each) that kind's keys at the raw count's gate key. False without memory.
 static bool tier0_census_report(const Tier0Census* census, bool rows, uint32_t list, uint32_t top, Tier0CensusResult* result)
 {
     const uint64_t count = census->sample_count;
@@ -1422,8 +1438,9 @@ static bool tier0_census_report(const Tier0Census* census, bool rows, uint32_t l
                 printf(" commonest-rows=%u\n", row->gate_rows[BUSTER_TIER0_CENSUS_EXCEPTIONS]);
             }
         }
-        if (member_count != 0 && kind == list)
+        if (member_count != 0 && (kind == list || list == BUSTER_TIER0_CENSUS_LIST_ALL))
         {
+            printf("tier0-census: list kind=%s\n", tier0_census_kind_names[kind]);
             tier0_census_list(census, members, member_count, results[kind * BUSTER_TIER0_CENSUS_COUNTS].gate_sets[BUSTER_TIER0_CENSUS_CONFLICTS], top);
         }
     }
@@ -1509,9 +1526,10 @@ static bool tier0_census_report(const Tier0Census* census, bool rows, uint32_t l
 // ---------------------------------------------------------------------------------------------------------------------
 // The files
 
-// The file's functions, added to the census, or what kept them out of it, printed: whether the options could be read.
-// It is prepared, lowered and emitted as benchmark-backend-source prepares its files (backend_source_file).
-static bool tier0_census_file(Tier0Census* census, const char* file, char** options, uint32_t option_count, Arena* lowered, Arena* scratch)
+// The file's functions, added to the census, or what kept them out of it, printed (not with `quiet`): whether the
+// options could be read. It is prepared, lowered and emitted as benchmark-backend-source prepares its files
+// (backend_source_file).
+static bool tier0_census_file(Tier0Census* census, const char* file, char** options, uint32_t option_count, Arena* lowered, Arena* scratch, bool quiet)
 {
     CheckSource prepared;
     const bool chosen = check_source_prepare(&prepared, file, options, option_count, (CheckSourceRequest){ .select = true, .emits = true });
@@ -1537,7 +1555,11 @@ static bool tier0_census_file(Tier0Census* census, const char* file, char** opti
     census->failures += failed ? 1 : 0;
     census->left_out += valid && !failed && !added ? 1 : 0;
     census->files += added ? 1 : 0;
-    if (valid && !chosen)
+    if (quiet)
+    {
+        // The tests read the census itself.
+    }
+    else if (valid && !chosen)
     {
         check_source_report(stdout, "tier0-census", file, &prepared);
     }
@@ -1564,18 +1586,32 @@ static bool tier0_census_file(Tier0Census* census, const char* file, char** opti
     return valid;
 }
 
-// The census of `files` read with `options`, and its report with what it found in `result` (`quiet`, the tests': no
-// report, the census's samples left for the caller to read): whether the options could be read and the arenas reserved.
-static bool tier0_census_files(Tier0Census* census, char** files, uint32_t file_count, char** options, uint32_t option_count, bool rows, uint32_t list, uint32_t top, bool quiet,
+// A set of files and the options they are read with: the command's arguments between two --next.
+typedef struct Tier0CensusSources Tier0CensusSources;
+struct Tier0CensusSources
+{
+    char** files;
+    uint32_t file_count;
+    char** options;
+    uint32_t option_count;
+};
+
+// The census of the sets' files, each read with its set's options, and its report with what it found in `result`
+// (`quiet`, the tests': no report, the census's samples left for the caller to read): whether the options could be read
+// and the arenas reserved.
+static bool tier0_census_files(Tier0Census* census, const Tier0CensusSources* sources, uint32_t source_count, bool rows, uint32_t list, uint32_t top, bool quiet,
                                Tier0CensusResult* result)
 {
     Arena scratch = arena_reserve(UINT64_C(1) << 32);
     Arena lowered = arena_reserve(UINT64_C(1) << 36);
     bool valid = scratch.base != 0 && lowered.base != 0 && tier0_census_begin(census);
-    for (uint32_t i = 0; valid && i < file_count; i += 1)
+    for (uint32_t s = 0; valid && s < source_count; s += 1)
     {
-        valid = tier0_census_file(census, files[i], options, option_count, &lowered, &scratch);
-        fflush(stdout);
+        for (uint32_t i = 0; valid && i < sources[s].file_count; i += 1)
+        {
+            valid = tier0_census_file(census, sources[s].files[i], sources[s].options, sources[s].option_count, &lowered, &scratch, quiet);
+            fflush(stdout);
+        }
     }
     const bool reported = valid && !quiet && census->entries != 0 && tier0_census_report(census, rows, list, top, result);
     if (valid && !quiet)
@@ -1593,14 +1629,21 @@ static int run_tier0_entries_measure(int count, char** arguments)
 {
     char** options = calloc((size_t)count + 1, sizeof(char*));
     char** files = calloc((size_t)count + 1, sizeof(char*));
+    Tier0CensusSources* sources = calloc((size_t)count + 1, sizeof(Tier0CensusSources));
     uint32_t option_count = 0;
     uint32_t file_count = 0;
+    uint32_t source_count = 0;
     bool rows = false;
     uint32_t list = BUSTER_TYPED_KINDS;
     uint64_t top = 40;
-    bool valid = options != 0 && files != 0;
+    bool valid = options != 0 && files != 0 && sources != 0;
+    if (valid)
+    {
+        sources[0] = (Tier0CensusSources){ .files = files, .options = options };
+    }
     for (int i = 0; valid && i < count; i += 1)
     {
+        Tier0CensusSources* current = &sources[source_count];
         if (strcmp(arguments[i], "--rows") == 0)
         {
             rows = true;
@@ -1612,6 +1655,7 @@ static int run_tier0_entries_measure(int count, char** arguments)
             {
                 list = tier0_census_kind_names[kind] != 0 && strcmp(arguments[i + 1], tier0_census_kind_names[kind]) == 0 ? kind : list;
             }
+            list = valid && strcmp(arguments[i + 1], "all") == 0 ? BUSTER_TIER0_CENSUS_LIST_ALL : list;
             valid = valid && list != BUSTER_TYPED_KINDS;
             i += 1;
         }
@@ -1619,35 +1663,46 @@ static int run_tier0_entries_measure(int count, char** arguments)
         {
             valid = i + 1 < count && check_corpus_number(arguments[++i], &top) && top <= 100000;
         }
+        else if (strcmp(arguments[i], "--next") == 0)
+        {
+            // The set before must have a file: its options are no other set's.
+            valid = current->file_count != 0;
+            source_count += 1;
+            sources[source_count] = (Tier0CensusSources){ .files = files + file_count, .options = options + option_count };
+        }
         else if (arguments[i][0] != '-')
         {
             files[file_count++] = arguments[i];
+            current->file_count += 1;
         }
         else if (strcmp(arguments[i], "--no-default-config") != 0)
         {
             options[option_count++] = arguments[i];
+            current->option_count += 1;
             if (pp_option_takes_value(arguments[i]))
             {
                 valid = i + 1 < count;
                 options[option_count++] = valid ? arguments[++i] : 0;
+                current->option_count += 1;
             }
         }
     }
-    valid = valid && file_count != 0;
+    valid = valid && sources[source_count].file_count != 0;
     Tier0Census census;
     memset(&census, 0, sizeof(census));
     Tier0CensusResult result;
     memset(&result, 0, sizeof(result));
-    const bool ran = valid && tier0_census_files(&census, files, file_count, options, option_count, rows, list, (uint32_t)top, false, &result);
+    const bool ran = valid && tier0_census_files(&census, sources, source_count + 1, rows, list, (uint32_t)top, false, &result);
     if (!valid)
     {
-        fprintf(stderr, "usage: compiler measure-tier0-entries [--rows] [--list KIND] [--top N] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler measure-tier0-entries [--rows] [--list KIND|all] [--top N] [preprocessor options] file... [--next [preprocessor options] file...]...\n");
     }
     const int status = ran && census.failures == 0 && census.refused == 0 && census.entries != 0 ? 0 : 1;
     if (valid)
     {
         tier0_census_end(&census);
     }
+    free(sources);
     free(files);
     free(options);
     return status;

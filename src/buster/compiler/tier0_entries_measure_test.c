@@ -110,7 +110,8 @@ static bool tier0_entries_test_run(char* path, Tier0Census* census, Tier0CensusR
     bool ran = capture != 0 && saved[0] >= 0 && saved[1] >= 0 && null >= 0 && dup2(fileno(capture), STDOUT_FILENO) >= 0 && dup2(null, STDERR_FILENO) >= 0;
     char* options[] = { "-nostdinc" };
     char* files[] = { path };
-    ran = ran && tier0_census_files(census, files, 1, options, 1, true, BUSTER_TYPED_CALL, 8, false, result);
+    const Tier0CensusSources sources = { .files = files, .file_count = 1, .options = options, .option_count = 1 };
+    ran = ran && tier0_census_files(census, &sources, 1, true, BUSTER_TYPED_CALL, 8, false, result);
     fflush(stdout);
     fflush(stderr);
     ran = saved[0] >= 0 && dup2(saved[0], STDOUT_FILENO) >= 0 && ran;
@@ -148,8 +149,8 @@ static __attribute__((noinline)) void check_test_tier0_entries(CheckTest* test)
     memset(&result, 0, sizeof(result));
     char* report = 0;
     const bool ran = length > 0 && length < (int)sizeof(path) && tier0_entries_test_run(path, &census, &result, &report);
-    check_test_expect(test, ran && census.files == 1 && census.failures == 0 && census.left_out == 0 && census.refused == 0 && census.functions == 7,
-                      "tier0 entries: the fixture's seven functions are counted");
+    check_test_expect(test, ran && census.files == 1 && census.failures == 0 && census.left_out == 0 && census.refused == 0 && census.functions == 9,
+                      "tier0 entries: the fixture's nine functions are counted");
     uint64_t entries = 0;
     uint64_t records = 0;
     uint64_t states[TIER0_CENSUS_STATES] = { 0 };
@@ -157,6 +158,8 @@ static __attribute__((noinline)) void check_test_tier0_entries(CheckTest* test)
     uint32_t deferred_kinds = 0;
     bool division = false;
     bool compare = false;
+    uint32_t near_pattern = UINT32_MAX;
+    uint32_t far_pattern = UINT32_MAX;
     for (uint64_t s = 0; ran && s < census.sample_count; s += 1)
     {
         const Tier0CensusSample* sample = &census.samples[s];
@@ -171,6 +174,12 @@ static __attribute__((noinline)) void check_test_tier0_entries(CheckTest* test)
         // constant and its branch (the lowering tests a condition's value against zero).
         compare = compare || (sample->kind == BUSTER_TYPED_BRANCH_FALSE && sample->weight == 3 && sample->inputs[TIER0_CENSUS_KEY_KIND] == BUSTER_TYPED_NE &&
                               sample->inputs[TIER0_CENSUS_VARIANT] == BUSTER_TIER0_VARIANT_BRANCH_FALSE + BUSTER_TIER0_VARIANT_CONST);
+        // `p + 3` and `p + 20` of 8-byte elements: the constants are of one class (2 to 127) and the products, 24 and
+        // 160, of two (the classes of tier0_census_value_class, plus one).
+        const bool addition = sample->kind == BUSTER_TYPED_PTR_ADD && sample->inputs[TIER0_CENSUS_VALUE] == 3 && sample->inputs[TIER0_CENSUS_VALUE_1] == 3 &&
+                              sample->inputs[TIER0_CENSUS_SCALE] == 4;
+        near_pattern = addition && sample->inputs[TIER0_CENSUS_PRODUCT] == 4 ? sample->pattern : near_pattern;
+        far_pattern = addition && sample->inputs[TIER0_CENSUS_PRODUCT] == 6 ? sample->pattern : far_pattern;
     }
     check_test_expect(test, ran && entries == census.entries && census.sample_count == census.heads && entries != 0,
                       "tier0 entries: every typed entry is in one group");
@@ -180,11 +189,13 @@ static __attribute__((noinline)) void check_test_tier0_entries(CheckTest* test)
     check_test_expect(test, ran && deferred_kinds == 3 && states[TIER0_CENSUS_DEFERRED_KIND] == 2, "tier0 entries: the call and the copy are deferred by their kind");
     check_test_expect(test, ran && division && states[TIER0_CENSUS_DEFERRED_DEPTH] == 1, "tier0 entries: the division whose operands aren't in rax's place is deferred by its depth");
     check_test_expect(test, ran && compare && widest == 3, "tier0 entries: a compare with zero and its branch are one group of three entries, the widest");
+    check_test_expect(test, ran && near_pattern != UINT32_MAX && far_pattern != UINT32_MAX && near_pattern != far_pattern,
+                      "tier0 entries: two pointer additions differ by their scaled constants' class alone, and in their patterns");
     check_test_expect(test, ran && result.decided[0] == census.entries && result.decided[1] == census.entries && result.undecided[0] == 0 &&
                                 result.common[0] == census.entries && result.rows[0] != 0,
                       "tier0 entries: a key of the gate's bytes decides every entry of the fixture");
     static const char* const lines[] = {
-        "tier0-census: 7 functions, ",
+        "tier0-census: 9 functions, ",
         "tier0-census: keys=raw: gate: a key of 8 bytes or fewer decides ",
         "tier0-census: keys=fused: gate: a key of 8 bytes or fewer decides ",
         "tier0-census: keys=raw kind=CALL entries=1 ",
@@ -199,15 +210,18 @@ static __attribute__((noinline)) void check_test_tier0_entries(CheckTest* test)
     }
     const char* totals = report != 0 ? strstr(report, "tier0-census: totals ") : 0;
     check_test_expect(test, reported && totals != 0 && strchr(totals, '\n') == report + strlen(report) - 1, "tier0 entries: the report has the gate's lines, the totals last");
-    // The command's own options: an unknown kind to list and no file are refused.
+    // The command's own options: an unknown kind to list, no file and a set without a file are refused; two sets of the
+    // fixture are one census of twice its entries.
     char* unknown[] = { "--list", "NOTHING", path };
     char* none[] = { "--rows" };
+    char* empty[] = { path, "--next", "-nostdinc" };
+    char* twice[] = { "-nostdinc", path, "--next", "-nostdinc", path };
     fflush(stdout);
     fflush(stderr);
     const int saved = dup(STDERR_FILENO);
     const int null = open("/dev/null", O_WRONLY);
     const bool quiet = saved >= 0 && null >= 0 && dup2(null, STDERR_FILENO) >= 0;
-    const int refused = quiet ? run_tier0_entries_measure(3, unknown) + run_tier0_entries_measure(1, none) : 0;
+    const int refused = quiet ? run_tier0_entries_measure(3, unknown) + run_tier0_entries_measure(1, none) + run_tier0_entries_measure(3, empty) : 0;
     fflush(stderr);
     const bool restored = saved >= 0 && dup2(saved, STDERR_FILENO) >= 0;
     if (saved >= 0)
@@ -218,11 +232,27 @@ static __attribute__((noinline)) void check_test_tier0_entries(CheckTest* test)
     {
         close(null);
     }
-    check_test_expect(test, quiet && restored && refused == 2, "tier0 entries: an unknown kind to list and a run without a file are refused");
+    check_test_expect(test, quiet && restored && refused == 3, "tier0 entries: an unknown kind to list, a run without a file and a set without one are refused");
+    const uint64_t once = census.entries;
     free(report);
     if (ran)
     {
         tier0_census_end(&census);
+    }
+    // Two sets of the fixture.
+    char* files_twice[] = { twice[1], twice[4] };
+    char* options_twice[] = { twice[0], twice[3] };
+    const Tier0CensusSources both[] = {
+        { .files = files_twice, .file_count = 1, .options = options_twice, .option_count = 1 },
+        { .files = files_twice + 1, .file_count = 1, .options = options_twice + 1, .option_count = 1 },
+    };
+    Tier0Census doubled;
+    memset(&doubled, 0, sizeof(doubled));
+    const bool again = ran && tier0_census_files(&doubled, both, 2, false, BUSTER_TYPED_KINDS, 8, true, &result);
+    check_test_expect(test, again && doubled.files == 2 && doubled.entries == 2 * once && doubled.functions == 18, "tier0 entries: two sets of files are one census");
+    if (again)
+    {
+        tier0_census_end(&doubled);
     }
 }
 
