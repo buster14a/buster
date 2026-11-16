@@ -26,6 +26,22 @@
 // (node_machine_reader_chunk). Each expression's records are digested (node_machine_digest) and kept by its root's node;
 // after the pipeline the shadow's own T runs on the same expression and the two digests are compared
 // (c_check_node_census.c's node_shadow_typed).
+//
+// C and X run there too where the options ask (--front-sweeps, BUSTER_NODE_FRONT_SWEEPS; "C and X where they sit"), on
+// each expression T took. They read T's records and two things besides:
+//
+// - An object's symbol: whether it has one (a global, or a local the function numbers) and, for a global's entries, the
+//   symbol. It is the selection's numbering, which isn't there yet. An object with a static declaration has itself in
+//   the symbols' place (NodeMachine.object_symbols), so X writes the object where it would write the symbol: the entries
+//   of a global's kinds (BUSTER_TYPED_GLOBAL, _GLOBAL_ADDRESS, _STORE_GLOBAL, _SET_GLOBAL) and a direct call's row are
+//   what a splice patches once the symbols are numbered.
+// - What the root's consumer gives it, which after the pipeline is the lowering's pop's: no context, and a conversion's
+//   target for an initialization alone, its object's type where the value's conversion to it isn't empty
+//   (node_machine_reader_target).
+//
+// Each taken expression's tape is kept (NodeFrontTypes' store), with a digest of its labels and calls; after the pipeline
+// the shadow's own C and X run on the same expression, and the kept tape, patched with the program's symbols, must be
+// theirs entry for entry (c_check_node_census.c's node_shadow_swept).
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_READER_INCLUDED
 #define BUSTER_C_CHECK_NODE_MACHINE_READER_INCLUDED
 
@@ -40,6 +56,8 @@ struct NodeMachineReader
     NodeMachine machine;
     CheckGraph graph;
     NodeFrontTypes* types;
+    // The unit's strings whose objects have their symbols' stand-ins (node_machine_reader_strings).
+    uint32_t strings;
 };
 typedef struct NodeMachineReader NodeMachineReader;
 _Static_assert(NODE_MACHINE_REFUSALS <= 16 && NODE_MACHINE_REFUSALS <= BUSTER_NODE_FRONT_TYPED_REFUSAL + 1, "a refusal is NodeFrontTypes.refusals' low four bits");
@@ -115,12 +133,19 @@ static bool node_machine_reader_call_library(const NodeMachine* machine, uint32_
 // `declarations` and `facts` (the caller's, an entry an object: the unit's token count and one): each static object's
 // last declaration (check_program_static_objects' visit, its returns_twice by check_program_static_object's test) and
 // the objects with an asm label (check_program_labelled_objects' test); and the names that return twice from
-// `identifiers` (check_lower_twice_names').
+// `identifiers` (check_lower_twice_names'). `symbols` (the caller's too) is what stands for the objects' symbols: each
+// object with a static declaration has itself there, the others 0.
 static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* input, const Parser* parser, TypeTable* types, const CheckGraph* graph,
-                                      const InternTable* identifiers, uint32_t* declarations, uint8_t* facts, Arena* arena)
+                                      const InternTable* identifiers, uint32_t* declarations, uint8_t* facts, uint32_t* symbols, Arena* arena)
 {
-    *machine = (NodeMachine){ .input = input, .parser = parser };
     const uint32_t count = input->token_count;
+    *machine = (NodeMachine){
+        .input = input,
+        .parser = parser,
+        .object_symbols = symbols,
+        .declaration_bits = input->declaration_bits,
+        .object_count = count + 1,
+    };
     const uint32_t late = types->types.capacity - types->types.count < BUSTER_NODE_MACHINE_LATE_TYPES ? types->types.capacity - types->types.count : BUSTER_NODE_MACHINE_LATE_TYPES;
     const bool room = node_machine_setup(machine, types, graph, types->types.count + late, false, false, arena);
     machine->reader_declarations = declarations;
@@ -130,6 +155,7 @@ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* in
         machine->reader_objects = count + 1;
         memset(machine->reader_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(machine->reader_facts, 0, (uint64_t)count + 1);
+        memset(symbols, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         for (uint32_t token = 0; token < count; token += 1)
         {
             const uint32_t object = input->declarations[token] == token ? input->objects[token] : 0;
@@ -139,6 +165,7 @@ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* in
                 if (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC))
                 {
                     machine->reader_declarations[object] = token;
+                    symbols[object] = object;
                     const uint32_t bits = attributes != NULL && input->declaration_kinds[token] == C_BINDING_FUNCTION ? check_program_attribute_bits(attributes) : 0;
                     machine->reader_facts[object] |= (bits & BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE) != 0 ? BUSTER_NODE_MACHINE_OBJECT_TWICE : 0;
                 }
@@ -211,9 +238,51 @@ static uint64_t node_machine_digest(const NodeMachine* machine, NodeMachineRefus
     return digest;
 }
 
+// A digest of what C and X made of the machine's current expression beside its tape: its labels' entries, its calls'
+// records in the order X wrote them and by row, and its temporaries. (A call's row's contents are T's records' and its
+// callee's symbol: node_machine_call_target.)
+static uint64_t node_machine_side_digest(const NodeMachine* machine)
+{
+    uint64_t digest = node_machine_mix((uint64_t)machine->label_count << 32 | machine->call_count, machine->temporary_count);
+    for (uint32_t label = 0; label < machine->label_count; label += 1)
+    {
+        digest = node_machine_mix(digest, machine->label_entries[label]);
+    }
+    for (uint32_t call = 0; call < machine->call_count; call += 1)
+    {
+        digest = node_machine_mix(digest, (uint64_t)machine->calls_written[call] << 32 | machine->call_records[call]);
+    }
+    return digest;
+}
+
+// The conversion's target the lowering's task gives the machine's current expression's root where its consumer converts
+// it to `to` (check_lower_expression's, which a pop logs): `to` where the root's type isn't it and the conversion writes
+// entries (check_lower_conversion_empty's test, of the types' words), 0 otherwise.
+static TypeId node_machine_reader_target(const NodeMachine* machine, TypeId to)
+{
+    const TypeId from = node_machine_record_type(machine, machine->count - 1);
+    TypeId target = 0;
+    if (to != 0 && from != to)
+    {
+        const uint32_t from_word = node_machine_word(machine, from);
+        const uint32_t to_word = node_machine_word(machine, to);
+        const uint8_t from_facts = (uint8_t)(from_word >> 8);
+        const uint8_t to_facts = (uint8_t)(to_word >> 8);
+        const uint8_t source = (from_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : (uint8_t)from_word;
+        const uint8_t class = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : (uint8_t)to_word;
+        const bool empty = source == class && source < BUSTER_TYPED_CLASSES &&
+                           ((from_facts ^ to_facts) & (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0 &&
+                           ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) == 0 &&
+                           (to_facts & (BUSTER_CHECK_LOWER_TYPE_BOOL | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0;
+        target = empty ? 0 : to;
+    }
+    return target;
+}
+
 // The machine at reader time for the unit `reader` reads, whose front's report is `shadow`: its state on the reader's
-// scratch, its results in the output's arena (NodeFrontShadow.types); null without room.
-static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, NodeFrontShadow* shadow)
+// scratch, its results in the output's arena (NodeFrontShadow.types); null without room. With `sweeps`, C and X run
+// after T, and their results' columns and the tapes' store are made too.
+static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, NodeFrontShadow* shadow, bool sweeps)
 {
     const uint64_t start = __rdtsc();
     NodeMachineReader* typer = arena_push_array(reader->scratch, 1, sizeof(NodeMachineReader), 64);
@@ -227,15 +296,31 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
     const uint32_t objects = reader->output->token_count + 1;
     uint32_t* declarations = arena_push_array(reader->arena, objects, sizeof(uint32_t), _Alignof(uint32_t));
     uint8_t* facts = arena_push_array(reader->arena, objects, sizeof(uint8_t), 1);
+    uint32_t* symbols = arena_push_array(reader->arena, objects, sizeof(uint32_t), _Alignof(uint32_t));
     bool room = typer != NULL && types != NULL && digests != NULL && firsts != NULL && counts != NULL && refusals != NULL && library != NULL && declarations != NULL &&
-                facts != NULL;
+                facts != NULL && symbols != NULL;
+    // C's and X's results by root node, and the tapes' store: two entries a node, which the corpora's tapes are well
+    // under (1.3 an evaluated node on sqlite3.c).
+    const uint64_t tape_capacity = sweeps ? 2 * (uint64_t)capacity + BUSTER_NODE_MACHINE_TAPE_MOST : 0;
+    uint8_t* sweep_refusals = sweeps ? arena_push_array(reader->arena, capacity, sizeof(uint8_t), 1) : NULL;
+    TypeId* targets = sweeps ? arena_push_array(reader->arena, capacity, sizeof(TypeId), _Alignof(TypeId)) : NULL;
+    uint32_t* root_objects = sweeps ? arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t)) : NULL;
+    uint32_t* tape_firsts = sweeps ? arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t)) : NULL;
+    uint32_t* tape_counts = sweeps ? arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t)) : NULL;
+    uint64_t* side_digests = sweeps ? arena_push_array(reader->arena, capacity, sizeof(uint64_t), _Alignof(uint64_t)) : NULL;
+    uint8_t* tape_kinds = sweeps ? arena_push_array(reader->arena, tape_capacity, sizeof(uint8_t), 1) : NULL;
+    uint8_t* tape_classes = sweeps ? arena_push_array(reader->arena, tape_capacity, sizeof(uint8_t), 1) : NULL;
+    uint64_t* tape_values = sweeps ? arena_push_array(reader->arena, tape_capacity, sizeof(uint64_t), _Alignof(uint64_t)) : NULL;
+    room = room && (!sweeps || (sweep_refusals != NULL && targets != NULL && root_objects != NULL && tape_firsts != NULL && tape_counts != NULL && side_digests != NULL &&
+                                tape_kinds != NULL && tape_classes != NULL && tape_values != NULL));
     if (room)
     {
         typer->graph = reader->output->graph;
         typer->graph.contexts = shadow->contexts;
         typer->types = types;
+        typer->strings = 0;
         room = node_machine_begin_reader(&typer->machine, reader->output, reader->parser, reader->types, &typer->graph, reader->pp->table, declarations, facts,
-                                         reader->scratch);
+                                         symbols, reader->scratch);
     }
     if (room)
     {
@@ -252,6 +337,17 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
         types->object_declarations = declarations;
         types->object_facts = facts;
         types->object_count = objects;
+        types->object_symbols = symbols;
+        types->sweep_refusals = sweep_refusals;
+        types->targets = targets;
+        types->objects = root_objects;
+        types->tape_firsts = tape_firsts;
+        types->tape_counts = tape_counts;
+        types->side_digests = side_digests;
+        types->tape_kinds = tape_kinds;
+        types->tape_classes = tape_classes;
+        types->tape_values = tape_values;
+        types->tape_capacity = tape_capacity;
         types->node_capacity = capacity;
         types->setup_ticks = __rdtsc() - start;
         shadow->types = types;
@@ -259,19 +355,56 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
     return room ? typer : NULL;
 }
 
+// The objects of the strings the walk has made since the last chunk (CheckInput.strings: a string literal's, a function
+// name's), given what stands for their symbols: a string's object is static without a declaration, and the walk makes it
+// where it first meets the string.
+static void node_machine_reader_strings(NodeMachineReader* typer, const CheckInput* input)
+{
+    NodeFrontTypes* types = typer->types;
+    for (uint32_t index = typer->strings; index < input->string_count; index += 1)
+    {
+        const uint32_t object = input->strings[index].object;
+        if (object != 0 && object < types->object_count)
+        {
+            types->object_symbols[object] = object;
+        }
+    }
+    typer->strings = input->string_count;
+}
+
+// What the lowering's task gives a root of the front's that T has just typed (record `record`, the machine's current
+// expression): no context, and a conversion's target and an object for an initialization alone, into `target` and
+// `object`: its INITIALIZE's type, the object's, without its qualifiers, where the value's conversion to it writes
+// entries, and the object its declaration names.
+static inline void node_machine_reader_root(const NodeMachineReader* typer, const NodeFront* front, const CheckInputReader* reader, uint32_t record, TypeId* target,
+                                            uint32_t* object)
+{
+    const bool initialization = front->ops[record] == CHECK_OP_INITIALIZE;
+    const uint32_t node = front->nodes[record];
+    const uint32_t token = front->tokens[record];
+    const uint32_t declaration = initialization && token < reader->parser->tokens.count ? reader->initializer_declarations[token] : BUSTER_CHECK_NONE;
+    // The initializer's plan converts the value to the object's type without its qualifiers (check_action_convert's).
+    *target = initialization && node < typer->graph.count ? node_machine_reader_target(&typer->machine, type_unqualified(typer->graph.types[node])) : 0;
+    *object = declaration < reader->output->token_count ? reader->output->objects[declaration] : 0;
+}
+
 // T on the roots the front made in the chunk it has just read and compared, each with the walk's nodes of its
 // expression: the root's operand's subtree, one range of nodes ending at the operand's where the expression is whole (T
 // refuses the shape otherwise), and the root. An initialization's expression is its value's alone, whose root the
-// lowering pops with the object's type as its target: its INITIALIZE is no record of the machine's. Twice: a first run of
-// T alone, timed, a chunk's expressions a run; and a second for the records' digests, kept by the root's node.
+// lowering pops with the object's type as its target: its INITIALIZE is no record of the machine's. Twice: a first run,
+// timed, a chunk's expressions a run; and a second for the records' digests, kept by the root's node. With the sweeps
+// (NodeFrontTypes.sweep_refusals), C and X follow T on each expression it takes, in both runs: the first times the three
+// together, and the second keeps their refusal, the root's target and object, the tape and the side's digest.
 static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront* front, const CheckInputReader* reader)
 {
     NodeMachine* machine = &typer->machine;
     NodeFrontTypes* types = typer->types;
+    const bool sweeps = types->sweep_refusals != NULL;
     // The graph as it stands after the chunk, and the types made since the last.
     typer->graph = reader->output->graph;
     typer->graph.contexts = front->shadow->contexts;
     node_machine_settle(machine);
+    node_machine_reader_strings(typer, reader->output);
     for (uint32_t pass = 0; pass < 2; pass += 1)
     {
         const uint64_t start = __rdtsc();
@@ -303,6 +436,38 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                         types->records += records;
                         types->typed += machine->count == 0 ? 0 : refusal == NODE_MACHINE_TAKEN ? machine->count : machine->stopped;
                         types->refused[refusal] += 1;
+                    }
+                    if (sweeps && refusal == NODE_MACHINE_TAKEN)
+                    {
+                        TypeId target = 0;
+                        uint32_t object = 0;
+                        node_machine_reader_root(typer, front, reader, record, &target, &object);
+                        NodeMachineRefusal swept = node_machine_contexts(machine, 0, target, object);
+                        swept = swept == NODE_MACHINE_TAKEN ? node_machine_expand(machine, object) : swept;
+                        if (pass != 0)
+                        {
+                            const bool taken = swept == NODE_MACHINE_TAKEN;
+                            const uint32_t entries = taken ? machine->entry_count : 0;
+                            const bool kept = entries <= types->tape_capacity - types->tape_count;
+                            types->refusals[root] |= BUSTER_NODE_FRONT_TYPED_SWEPT;
+                            types->sweep_refusals[root] = (uint8_t)swept;
+                            types->targets[root] = target;
+                            types->objects[root] = object;
+                            types->tape_firsts[root] = (uint32_t)types->tape_count;
+                            types->tape_counts[root] = kept ? entries : UINT32_MAX;
+                            types->side_digests[root] = taken ? node_machine_side_digest(machine) : 0;
+                            if (kept && entries != 0)
+                            {
+                                memcpy(types->tape_kinds + types->tape_count, machine->kinds, entries);
+                                memcpy(types->tape_classes + types->tape_count, machine->classes, entries);
+                                memcpy(types->tape_values + types->tape_count, machine->tape, (uint64_t)entries * sizeof(uint64_t));
+                                types->tape_count += entries;
+                            }
+                            types->swept += 1;
+                            types->swept_refused[swept] += 1;
+                            types->swept_entries += entries;
+                            types->swept_unkept += taken && !kept;
+                        }
                     }
                 }
                 else if (pass != 0)

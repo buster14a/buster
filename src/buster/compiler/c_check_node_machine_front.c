@@ -61,6 +61,9 @@
 // T run at reader time on the full expressions the front makes whole (measure-node-machine --shadow --front-types): the
 // front after the walk, and its results in NodeFrontShadow.types.
 #define BUSTER_NODE_FRONT_TYPES 16u
+// C and X run there after T, on the expressions it takes (measure-node-machine --shadow --front-sweeps, with
+// BUSTER_NODE_FRONT_TYPES): their tapes kept in NodeFrontShadow.types.
+#define BUSTER_NODE_FRONT_SWEEPS 128u
 // A lean leaf's kind, in its record's `leaf_categories`.
 #define BUSTER_NODE_FRONT_LEAF_IDENTIFIER 0u
 #define BUSTER_NODE_FRONT_LEAF_LITERAL 1u
@@ -102,9 +105,37 @@ struct NodeFrontTypes
     uint8_t* object_facts;
     uint32_t object_count;
     uint8_t* library;
+    // What stands for each object's symbol at reader time (NodeMachine.object_symbols there): itself for an object with
+    // a static declaration, 0 for a local. The shadow compares "has a symbol" with the program's.
+    uint32_t* object_symbols;
+    // C and X at reader time (BUSTER_NODE_FRONT_SWEEPS; null otherwise), by root node, for a root T took and they ran on
+    // (BUSTER_NODE_FRONT_TYPED_SWEPT in `refusals`): their refusal; what the root's consumer gives it as the reader
+    // derives it, its conversion's target and, an initialization's, its object (it has no context); its tape's first
+    // entry in the store and its entries (UINT32_MAX for a tape the store had no room for); and a digest of its labels'
+    // entries, its calls' records and its temporaries (node_machine_side_digest).
+    uint8_t* sweep_refusals;
+    TypeId* targets;
+    uint32_t* objects;
+    uint32_t* tape_firsts;
+    uint32_t* tape_counts;
+    uint64_t* side_digests;
+    // The store: the kept tapes' entries one after another, `tape_count` of `tape_capacity`: X's kinds, classes and
+    // values. A global's value is its object there, which stands for its symbol: what a splice would patch.
+    uint8_t* tape_kinds;
+    uint8_t* tape_classes;
+    uint64_t* tape_values;
+    uint64_t tape_count;
+    uint64_t tape_capacity;
+    // The expressions C and X ran on (those T took), by their refusal; their entries; and the tapes the store had no
+    // room for. With them `ticks` is of T, C and X together.
+    uint64_t swept;
+    uint64_t swept_refused[16];
+    uint64_t swept_entries;
+    uint64_t swept_unkept;
 };
 
 #define BUSTER_NODE_FRONT_TYPED_REFUSAL 0x0fu
+#define BUSTER_NODE_FRONT_TYPED_SWEPT 0x10u
 #define BUSTER_NODE_FRONT_TYPED_POPPED 0x40u
 #define BUSTER_NODE_FRONT_TYPED_COMPARED 0x80u
 
@@ -301,7 +332,7 @@ struct NodeFront
 // T at reader time (c_check_node_machine_reader.c): the machine is the checker unit's alone, so the reader's other
 // consumers (the complete driver's) have the front without it.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
-static struct NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, NodeFrontShadow* shadow);
+static struct NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, NodeFrontShadow* shadow, bool sweeps);
 static void node_machine_reader_chunk(struct NodeMachineReader* typer, const NodeFront* front, const CheckInputReader* reader);
 static void node_machine_reader_finish(struct NodeMachineReader* typer);
 #endif

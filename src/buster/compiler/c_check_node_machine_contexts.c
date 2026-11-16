@@ -267,7 +267,6 @@ static bool node_machine_scalar_class(uint8_t class)
 // (`direct`), any other lvalue through its address, a pointer's by its pointee's size (not a variable-length array's).
 static __attribute__((noinline)) bool node_machine_update_plan(const NodeMachine* machine, uint32_t r, NodeMachineUpdate* update)
 {
-    const CheckProgram* program = machine->program;
     const TypeTable* types = machine->types;
     const CheckOp op = node_machine_record_op(machine, r);
     const uint32_t a = node_machine_record_left(machine, r);
@@ -290,12 +289,12 @@ static __attribute__((noinline)) bool node_machine_update_plan(const NodeMachine
     const bool pointer = ((stored_word >> 8) & BUSTER_CHECK_LOWER_TYPE_POINTER) != 0;
     const bool named = shaped && node_machine_record_op(machine, a) == CHECK_OP_VALUE;
     const uint32_t object = named ? node_machine_record_object(machine, a) : 0;
-    const bool known = object != 0 && object < program->object_count;
+    const bool known = object != 0 && object < machine->object_count;
     const bool local = known && node_machine_local(machine, object);
     bool takes = shaped && node_machine_record_category(machine, destination) == CHECK_LVALUE && node_machine_scalar_class(stored_class) &&
                  node_machine_scalar_class(calculated_class) && (((stored_word | calculated_word) >> 8) & excluded) == 0 &&
                  (destination_flags & (BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_VECTOR_ELEMENT)) == 0 &&
-                 (!named || (known && !check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_REGISTER)));
+                 (!named || (known && !check_input_bit(machine->declaration_bits, object - 1, BUSTER_CHECK_BITS_REGISTER)));
     // Operand 1's type, which check_lower_count reads for a shift's count, is of such a class too.
     takes = takes && (increment || pointer || (node_machine_scalar_class((uint8_t)right_word) && ((right_word >> 8) & excluded) == 0));
     takes = takes && check_lower_segment_override(types, stored) == 0;
@@ -316,7 +315,7 @@ static __attribute__((noinline)) bool node_machine_update_plan(const NodeMachine
                                                             1;
     const uint8_t direct_store = postfix ? (local ? BUSTER_TYPED_SET_LOCAL : BUSTER_TYPED_SET_GLOBAL) : (local ? BUSTER_TYPED_STORE_LOCAL : BUSTER_TYPED_STORE_GLOBAL);
     *update = (NodeMachineUpdate){
-        .destination = local ? object : known ? program->object_symbols[object] : 0,
+        .destination = local ? object : known ? machine->object_symbols[object] : 0,
         .constant = constant,
         .stride = stride,
         .stored = stored,
@@ -370,7 +369,6 @@ static __attribute__((noinline)) CheckLowerTemplate node_machine_classify_update
 // every record: docs/node-machine.md, "C's and X's dispatch").
 static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_classify(NodeMachine* machine, uint32_t r, uint32_t object, NodeMachineUse* use)
 {
-    const CheckProgram* program = machine->program;
     const TypeTable* types = machine->types;
     const CheckOp op = node_machine_record_op(machine, r);
     const uint8_t context = node_machine_record_context(machine, r);
@@ -385,7 +383,7 @@ static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_cla
     const CheckCategory category = node_machine_record_category(machine, r);
     const CheckConstantKind constant_kind = node_machine_record_constant_kind(machine, r);
     const uint32_t known_object = node_machine_record_object(machine, r);
-    const bool known = known_object != 0 && known_object < program->object_count;
+    const bool known = known_object != 0 && known_object < machine->object_count;
     const bool scalar_class = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64;
     // What every operator past the leaves and the address's lookups asks first (check_lower_template_classify's order):
     // a value of a scalar class and no aggregate, of which only a cast, a conversion and a unary plus need not be.
@@ -395,8 +393,8 @@ static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_cla
         (op == CHECK_OP_CAST && (node_machine_record_conversion_flags(machine, r, 0) & BUSTER_CHECK_CONVERT_TO_UNION) != 0))
     {
     }
-    else if (op == CHECK_OP_VALUE && known && check_input_bit(program->input->declaration_bits, known_object - 1, BUSTER_CHECK_BITS_COMPOUND) &&
-             !check_input_bit(program->input->declaration_bits, known_object - 1, BUSTER_CHECK_BITS_STATIC))
+    else if (op == CHECK_OP_VALUE && known && check_input_bit(machine->declaration_bits, known_object - 1, BUSTER_CHECK_BITS_COMPOUND) &&
+             !check_input_bit(machine->declaration_bits, known_object - 1, BUSTER_CHECK_BITS_STATIC))
     {
     }
     else if (!address && category == CHECK_LVALUE && (facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) != 0)
@@ -506,7 +504,7 @@ static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_cla
                     const TypeId type = node_machine_record_type(machine, r);
                     const uint32_t target = op == CHECK_OP_INITIALIZE ? object :
                                             a < r && node_machine_record_op(machine, a) == CHECK_OP_VALUE ? node_machine_record_object(machine, a) : 0;
-                    const bool named = target != 0 && target < program->object_count;
+                    const bool named = target != 0 && target < machine->object_count;
                     if (named)
                     {
                         kind = node_machine_local(machine, target) ? CHECK_LOWER_TEMPLATE_STORE_LOCAL : CHECK_LOWER_TEMPLATE_STORE_GLOBAL;

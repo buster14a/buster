@@ -2448,6 +2448,110 @@ On the 9700X (CPU 2, medians of seven readings in turn, musl's of three):
   instructions a node (0.5%) for the tests of where its callee's facts come
   from.
 
+### C and X where they sit
+
+"T where it sits" left the other two sweeps after the pipeline.
+`measure-node-machine --shadow --front-sweeps` runs them at reader time too:
+C and X follow T on each expression it takes there, before the unit's program
+exists. After the pipeline the shadow's own C and X run on the same
+expression, and reader time's tape must be theirs entry for entry. [The
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-reader-sweeps-2524-2026-11-16)
+has the runs.
+
+C and X read T's records and little else:
+
+| what C and X read | after the pipeline | at reader time |
+| --- | --- | --- |
+| whether an object is a local or a global | whether it has a symbol, the selection's numbering | whether it has a static declaration, or is a string's |
+| a global's symbol, in its entries and in a direct call's row | the selection's | the object itself, which a splice patches |
+| a declaration's bits (register, compound, static) | the program's input's | the reader's input's, the same column |
+| the root's context, its conversion's target, its object | the lowering's pop's | none, but an initialization's: its object's type without its qualifiers where the conversion writes entries, and the object |
+
+- **The machine holds the objects' columns itself now**
+  (`NodeMachine.object_symbols`, `declaration_bits`, `object_count`), set
+  where it begins, so C and X read no program in either place. T's test of a
+  direct callee reads the same column, and its test of where the answer comes
+  from is gone.
+- **What a splice patches is told by an entry's kind:** `GLOBAL`,
+  `GLOBAL_ADDRESS`, `STORE_GLOBAL` and `SET_GLOBAL`, and a direct call's row.
+  Locals, labels, calls' rows and temporaries were relative on the tape
+  already.
+- **A string's object is static without a declaration.** Reader time gives the
+  strings' objects their place before each chunk's expressions. Without it
+  1,054 of `sqlite3.c`'s tapes had a local's address where the shadow has a
+  global's: the one thing the first run lacked, with the qualifiers of 14
+  `const` objects' targets.
+
+On the 9700X (CPU 2, medians of seven readings in turn, musl's of three; TSC
+ticks a record T typed):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| expressions C and X ran on at reader time (those T took) | 55,063 | 12,568 | 49,115 |
+| of them taken; refused for a template or a row | 50,393; 4,670 | 10,387; 2,181 | 41,209; 7,906 |
+| compared with the shadow's C and X: expressions, entries, differences | 50,555, 331,155, 0 | 10,544, 65,963, 0 | 22,324, 133,898, 0 |
+| patched in them: globals' entries, direct calls | 2,199, 12,555 | 668, 3,845 | 2,396, 4,871 |
+| T alone at reader time | 69.1 | 85.6 | 138.7 |
+| T, C and X at reader time | 127.7 | 139.9 | 235.9 |
+| C and X in place (the difference) | 58.7 | 54.4 | 97.2 |
+| C and X in the tight loop, its first pass | 44.0 | 39.8 | 42.8 |
+| the three in the tight loop, its first pass | 106.9 | 99.8 | 104.5 |
+
+These are with the whole front before T. After the lean front the three read
+152.8, 160.7 and 264.4, and T alone 93.8, 105.0 and 170.3: the shadow's search
+for a root's operand's record there is in both.
+
+- **Exact.** No expression differs in its root's target or object, its
+  refusal, its tape, its labels or its calls, in any of 34 readings, whole
+  front and lean.
+- **A splice patches little.** In `sqlite3.c`'s compared expressions 2,199
+  entries of 331,155 hold a global, and there are 12,555 direct calls: a
+  quarter of a call an expression. Everything else on a tape was the
+  expression's own already.
+- **Where they sit, the three cost what a body's expressions a run cost.** On
+  `sqlite3.c` they are 1.19 times their tight loop's first pass: about 212
+  cycles a node, where "Where the machine runs" has 216.5 for the three sweeps
+  with a body's expressions a run and 174.9 in the tight loop. C and X pay a
+  third over their tight loop there and T a tenth, so the guess that C and X
+  pay as T does was low for them and right for the sum.
+- **Step 2's sum stands.** It took T and the one sweep at 199 cycles a node, a
+  body's expressions a run, where the three sweeps are 216.5. Reader time ran
+  the three as they are, not the one sweep, and reads them at 212: the sum's
+  upper figure, 91 cycles a body token, holds if the one sweep keeps its
+  twelfth there, and the sum is 1.25 on `sqlite3.c`.
+- **Sparse expressions cost C and X as they cost T:** 1.4 times the tight
+  loop's first pass on Lua for the three, and 2.3 times on musl.
+- **The reader runs them on a declaration's discard too.** Of the 55,063
+  expressions C and X run on at reader time on `sqlite3.c`, 3,941 are ones
+  the lowering never pops (7%); of Lua's 12,568, 1,722 (14%); of musl's
+  49,115, 26,597 (54%). Nearly all of `sqlite3.c`'s and Lua's are a
+  declaration's discard, the walk's cast to void of an initializer's value,
+  which nothing evaluates ("T where it sits"); 20,745 of musl's are in bodies
+  the selection drops. The discards are no roots of the machine's, and the
+  selection before the sweeps matters for musl's headers.
+- **A compile is unchanged** (-0.47% and -0.15% from fresh copies, the same
+  1,363.464 M instructions).
+- **The shadow's own sweeps retire 0.5 to 0.7 fewer instructions a node,**
+  T's test of where a callee's symbol comes from being gone, and read 1.3%
+  more cycles on `sqlite3.c` as built (173.3 to 175.5), 1.7% on Lua, 0.2% on
+  musl.
+- **That is inside what the stack alone does to them.** The machine's
+  structure is a local of the census's function, and the sweeps' frames are
+  below it at a distance the build fixes. With that distance moved at run
+  time over 32 places a page wide, the baseline's three sweeps read from
+  172.8 to 182.4 cycles a node (5.6%) and this build's from 174.5 to 189.1
+  (8.4%); a third and a quarter of the places are the slow ones. Store-to-load
+  interference in the machine's functions is 44% up as built, with its
+  mispredicted branches and its cache misses within 2%. At their best places
+  the two builds are 1.0% apart, all of it X's, whose functions the Release
+  build's parts now place beside T's. A figure of these sweeps is one place
+  of the 32: two builds of the machine compare over the places, or with the
+  structure off the stack.
+- **Faults.** Of 13 faults put into the reader-time path one at a time, the
+  tests show all 13. Two of them needed a fixture line first: a conversion
+  that is empty between two types, and a `for` statement's condition, whose
+  wrapper has a type of its own.
+
 ### What it says of step 2
 
 "Expected gains" took the machine at 55 cycles a body token for a taken
@@ -2458,7 +2562,8 @@ the lean front. With the front's coverage (97.76% of the nodes of the taken
 expressions, which hold 96% of all) the same sum gives step 2 1.25 to 1.27
 times on `-c sqlite3.c` (1.23 to 1.25 with #2857's front): above its gate of
 1.2, under the 1.3 expected. T where it sits costs what the upper figure took,
-so on `sqlite3.c` the sum is at its lower end, 1.25. With #2850's sweeps in
+and C and X where they sit cost what a body's expressions a run cost them, so
+on `sqlite3.c` the sum is at its lower end, 1.25. With #2850's sweeps in
 place of the shadow's, if they carry into the compiler, the reading is most of
 the machine and the sum is 1.34 to 1.35: its step 0 ran them at 17 cycles a
 node with the leaves and the lookups given, and [its step

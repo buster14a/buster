@@ -1939,6 +1939,28 @@ struct NodeShadow
     uint64_t typed_library_calls;
     uint64_t typed_library_differences;
     uint32_t typed_listed;
+    // --front-sweeps: C and X run at reader time after T, on the expressions it took there. The files' reports summed
+    // (NodeFrontTypes'): the expressions they ran on, by their refusal, their entries, and the tapes the store had no room
+    // for. And after the pipeline, for each expression of the census's taken set that T took both times: reader time's
+    // root (its conversion's target and its object against the lowering's pop's), its refusal and, where both took the
+    // expression, its tape, patched with the program's symbols, and its labels, calls and temporaries by their digest,
+    // against the shadow's own C's and X's. `swept_differences` counts the expressions that differ in any, which must be
+    // none. Of the entries compared, `swept_references` are the globals' the patch changed and `swept_call_targets` the
+    // compared expressions' direct calls, whose rows' targets a splice patches too.
+    uint64_t swept_expressions;
+    uint64_t swept_refused[NODE_MACHINE_REFUSALS];
+    uint64_t swept_entries;
+    uint64_t swept_unkept;
+    uint64_t swept_compared;
+    uint64_t swept_compared_entries;
+    uint64_t swept_references;
+    uint64_t swept_call_targets;
+    uint64_t swept_differences;
+    uint64_t swept_root_differences;
+    uint64_t swept_refusal_differences;
+    uint64_t swept_tape_differences;
+    uint64_t swept_side_differences;
+    uint32_t swept_listed;
     // --interleave N: the interleaved sets' chunk (0: a body's expressions), the current file's scratch for the census's
     // walk in the timing passes, the walks' tests (so that the walks aren't dead code), and the sweeps' own TSC ticks in
     // an interleaved set: the last pass's, and each file's least over the passes, summed.
@@ -2347,6 +2369,75 @@ static void node_shadow_typed(NodeShadow* shadow, const NodeCensusScratch* s, No
     }
 }
 
+// Whether an entry of kind `kind` holds a global's symbol: at reader time its object, which stands for it.
+static bool node_shadow_global_kind(uint8_t kind)
+{
+    return kind == BUSTER_TYPED_GLOBAL || kind == BUSTER_TYPED_GLOBAL_ADDRESS || kind == BUSTER_TYPED_STORE_GLOBAL || kind == BUSTER_TYPED_SET_GLOBAL;
+}
+
+// C's and X's results on the machine's current expression (root `root`, their refusal `refusal`, and what its pop gave
+// it: the conversion's target `target` and the object `object`) against reader time's on the same root (`typed`,
+// --front-sweeps): the same target and object, the same refusal and, where both took it, the same tape once reader
+// time's is patched with the program's symbols (a global's entry holds its object there), and the same labels, calls
+// and temporaries by their digest. A root reader time didn't sweep (T refused it there, or didn't run) isn't compared.
+static void node_shadow_swept(NodeShadow* shadow, const NodeCensusScratch* s, const NodeFrontTypes* typed, uint32_t root, NodeMachineRefusal refusal, TypeId target,
+                              uint32_t object)
+{
+    const NodeMachine* machine = s->machine;
+    const CheckProgram* program = s->program;
+    if (typed->sweep_refusals != NULL && root < typed->node_capacity && (typed->refusals[root] & BUSTER_NODE_FRONT_TYPED_SWEPT) != 0)
+    {
+        const NodeMachineRefusal earlier = (NodeMachineRefusal)typed->sweep_refusals[root];
+        const bool rooted = typed->targets[root] == target && typed->objects[root] == object;
+        const bool refused = earlier == refusal;
+        const bool taken = refused && refusal == NODE_MACHINE_TAKEN && typed->tape_counts[root] != UINT32_MAX;
+        const uint32_t entries = taken ? typed->tape_counts[root] : 0;
+        const uint64_t first = typed->tape_firsts[root];
+        bool tape = !taken || entries == machine->entry_count;
+        uint32_t at = UINT32_MAX;
+        uint64_t references = 0;
+        for (uint32_t e = 0; taken && tape && e < entries; e += 1)
+        {
+            const uint8_t kind = typed->tape_kinds[first + e];
+            const uint64_t value = typed->tape_values[first + e];
+            const bool global = node_shadow_global_kind(kind);
+            // The splice's patch: a global's entry holds its object at reader time, and its symbol is the program's.
+            const uint64_t patched = !global ? value : value < program->object_count ? program->object_symbols[value] : 0;
+            tape = kind == machine->kinds[e] && typed->tape_classes[first + e] == machine->classes[e] && patched == machine->tape[e];
+            references += global;
+            at = tape ? at : e;
+        }
+        const bool side = !taken || typed->side_digests[root] == node_machine_side_digest(machine);
+        uint64_t targets = 0;
+        for (uint32_t call = 0; taken && call < machine->call_count; call += 1)
+        {
+            targets += node_machine_call_target(machine, machine->call_records[call]) != 0;
+        }
+        const bool same = rooted && refused && tape && side;
+        shadow->swept_compared += 1;
+        shadow->swept_compared_entries += entries;
+        shadow->swept_references += references;
+        shadow->swept_call_targets += targets;
+        shadow->swept_differences += !same;
+        shadow->swept_root_differences += !rooted;
+        shadow->swept_refusal_differences += rooted && !refused;
+        shadow->swept_tape_differences += rooted && refused && !tape;
+        shadow->swept_side_differences += rooted && refused && tape && !side;
+        if (!same && shadow->swept_listed < node_census_list)
+        {
+            const uint32_t e = at != UINT32_MAX ? at : 0;
+            const bool entry = at != UINT32_MAX && at < machine->entry_count;
+            shadow->swept_listed += 1;
+            printf("node-shadow: reader-time C and X difference file=%s line=%u target=%u (pop %u) object=%u (pop %u) refusal=%s (reader %s) entries=%u (reader %u) "
+                   "entry=%u kind=%u (reader %u) class=%u (reader %u) value=%" PRIu64 " (reader %" PRIu64 ") side=%s\n",
+                   s->file, node_census_line(s->pp, program->parser, program->input->graph.tokens[root]), typed->targets[root], target, typed->objects[root], object,
+                   node_machine_refusal_names[refusal], node_machine_refusal_names[earlier < NODE_MACHINE_REFUSALS ? earlier : NODE_MACHINE_TAKEN], machine->entry_count,
+                   typed->tape_counts[root], at, entry ? machine->kinds[e] : 0, entry ? typed->tape_kinds[first + e] : 0, entry ? machine->classes[e] : 0,
+                   entry ? typed->tape_classes[first + e] : 0, entry ? machine->tape[e] : 0, entry ? typed->tape_values[first + e] : 0, side ? "same" : "DIFFERENT");
+        }
+    }
+}
+
 // The shadow of the census's taken expression whose root pop is `p` of the body's `pops`, of root kind `context`, whose
 // walk reached `walked` nodes, `nodes` of them evaluated.
 static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, const CheckLowerOwnerPop* pops, uint32_t p, NodeCensusRoot context, uint32_t walked,
@@ -2382,8 +2473,13 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
         // The sweeps one at a time, so that T's records are compared with reader time's before C writes its own.
         refusal = node_machine_type(machine, first, root, records);
         node_shadow_typed(shadow, s, typed, first, root, records, refusal);
+        const bool swept = refusal == NODE_MACHINE_TAKEN;
         refusal = refusal == NODE_MACHINE_TAKEN ? node_machine_contexts(machine, root_context, pop->target, object) : refusal;
         refusal = refusal == NODE_MACHINE_TAKEN ? node_machine_expand(machine, object) : refusal;
+        if (swept)
+        {
+            node_shadow_swept(shadow, s, typed, root, refusal, pop->target, object);
+        }
     }
     else if (ran)
     {
@@ -3347,6 +3443,24 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
         printf("node-shadow: reader-time T objects=%" PRIu64 " differences=%" PRIu64 " library-calls=%" PRIu64 " differences=%" PRIu64 "\n", shadow->typed_objects,
                shadow->typed_object_differences, shadow->typed_library_calls, shadow->typed_library_differences);
     }
+    if ((shadow->front & BUSTER_NODE_FRONT_SWEEPS) != 0 && shadow->front_units != 0)
+    {
+        // C and X at reader time: what they ran on and made (the ticks above are then T's, C's and X's together), then how
+        // they compare with the shadow's own after the pipeline.
+        printf("node-shadow: reader-time C and X expressions=%" PRIu64 " taken=%" PRIu64 " entries=%" PRIu64 " tapes-not-kept=%" PRIu64 "\n", shadow->swept_expressions,
+               shadow->swept_refused[NODE_MACHINE_TAKEN], shadow->swept_entries, shadow->swept_unkept);
+        for (uint32_t refusal = NODE_MACHINE_TAKEN + 1; refusal < NODE_MACHINE_REFUSALS; refusal += 1)
+        {
+            if (shadow->swept_refused[refusal] != 0)
+            {
+                printf("node-shadow: reader-time C and X refused=%s expressions=%" PRIu64 "\n", node_machine_refusal_names[refusal], shadow->swept_refused[refusal]);
+            }
+        }
+        printf("node-shadow: reader-time C and X compared=%" PRIu64 " (entries %" PRIu64 ") differences=%" PRIu64 " (root %" PRIu64 ", refusal %" PRIu64 ", tape %" PRIu64
+               ", labels-and-calls %" PRIu64 ") patched: globals'-entries=%" PRIu64 " direct-calls=%" PRIu64 "\n",
+               shadow->swept_compared, shadow->swept_compared_entries, shadow->swept_differences, shadow->swept_root_differences, shadow->swept_refusal_differences,
+               shadow->swept_tape_differences, shadow->swept_side_differences, shadow->swept_references, shadow->swept_call_targets);
+    }
     // The reader's coded walk in the files' one reading, by its parts (TSC ticks): beside the front's where it ran, and
     // alone where it didn't, the walk as it is.
     printf("node-shadow: walk ticks classes=%" PRIu64 " prepare=%" PRIu64 " actions=%" PRIu64 " visits=%" PRIu64 "\n",
@@ -3639,9 +3753,13 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                     shadow->typed_setup_ticks += typed->setup_ticks;
                     shadow->typed_late_types += typed->late_types;
                     shadow->typed_skipped += typed->skipped;
+                    shadow->swept_expressions += typed->swept;
+                    shadow->swept_entries += typed->swept_entries;
+                    shadow->swept_unkept += typed->swept_unkept;
                     for (uint32_t refusal = 0; refusal < NODE_MACHINE_REFUSALS; refusal += 1)
                     {
                         shadow->typed_refused[refusal] += typed->refused[refusal];
+                        shadow->swept_refused[refusal] += typed->swept_refused[refusal];
                     }
                     const CheckProgram* program = &selected.program;
                     for (uint32_t node = 0; node < path->input.graph.count && node < typed->node_capacity; node += 1)
@@ -3824,12 +3942,15 @@ static int run_node_census(int count, char** arguments)
         {
             shadow.front = (uint8_t)((shadow.front & ~BUSTER_NODE_FRONT_ORDER) | (strcmp(arguments[i], "--front") == 0 ? BUSTER_NODE_FRONT_AFTER : BUSTER_NODE_FRONT_BEFORE));
         }
-        else if (strcmp(arguments[i], "--front-lean") == 0 || strcmp(arguments[i], "--front-warm") == 0 || strcmp(arguments[i], "--front-types") == 0)
+        else if (strcmp(arguments[i], "--front-lean") == 0 || strcmp(arguments[i], "--front-warm") == 0 || strcmp(arguments[i], "--front-types") == 0 ||
+                 strcmp(arguments[i], "--front-sweeps") == 0)
         {
-            // The lean front, the front with its arrays touched beforehand, or T at reader time on the front's
-            // expressions: after the walk unless --front-first says before.
-            const uint8_t flag = strcmp(arguments[i], "--front-lean") == 0 ? BUSTER_NODE_FRONT_LEAN : strcmp(arguments[i], "--front-warm") == 0 ? BUSTER_NODE_FRONT_WARM :
-                                                                                                                                                  BUSTER_NODE_FRONT_TYPES;
+            // The lean front, the front with its arrays touched beforehand, T at reader time on the front's expressions,
+            // or T, C and X there: after the walk unless --front-first says before.
+            const uint8_t flag = strcmp(arguments[i], "--front-lean") == 0   ? BUSTER_NODE_FRONT_LEAN :
+                                 strcmp(arguments[i], "--front-warm") == 0   ? BUSTER_NODE_FRONT_WARM :
+                                 strcmp(arguments[i], "--front-types") == 0 ? BUSTER_NODE_FRONT_TYPES :
+                                                                               BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS;
             shadow.front = (uint8_t)(shadow.front | flag | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
         }
         else if (strcmp(arguments[i], "--interleave") == 0)
@@ -3905,7 +4026,7 @@ static int run_node_census(int count, char** arguments)
                                           shadow.facts_differences != 0 || shadow.facts_list_differences != 0 || shadow.facts_failures != 0 ||
                                           shadow.facts_conversions != shadow.facts_conversions_derived || shadow.reads.same_differences != 0 ||
                                           shadow.reads.misplaced != 0 || shadow.front_differences != 0 || shadow.typed_differences != 0 ||
-                                          shadow.typed_object_differences != 0 || shadow.typed_library_differences != 0);
+                                          shadow.typed_object_differences != 0 || shadow.typed_library_differences != 0 || shadow.swept_differences != 0);
     return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
 }
 

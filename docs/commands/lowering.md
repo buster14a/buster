@@ -309,7 +309,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-sweeps] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -633,6 +633,38 @@ takes its entries.
     without a root for them (an initializer beside a variable-length array's
     bound). `--list N` lists the first differences. A difference fails the
     command.
+- `--front-sweeps` runs **C and X where they sit** too
+  (`PPOptions.node_front`'s bit 128, with `--front-types`' bit): after T types
+  an expression at reader time and takes it, C and X run on the same records.
+  [The design](../node-machine.md#c-and-x-where-they-sit) has what it
+  measured.
+  - **What they read beside T's records** is the machine's own:
+    `NodeMachine.object_symbols`, `declaration_bits` and `object_count`. After
+    the pipeline those are the program's symbols and its input's bits. At
+    reader time no symbol is numbered: an object with a static declaration,
+    and a string's object, has itself in its symbol's place, so X writes the
+    object where it writes a symbol.
+  - **The root's consumer** is derived from the front's root: no context, and
+    a conversion's target for an initialization alone, its object's type
+    without its qualifiers where the conversion writes entries, with the
+    object its declaration names.
+  - **The comparison** is after the pipeline, on each expression of the
+    census's taken set that T took both times. Reader time's target and
+    object must be the lowering's pop's, its refusal the shadow's own C's and
+    X's, and its tape theirs entry for entry once a global's entries
+    (`GLOBAL`, `GLOBAL_ADDRESS`, `STORE_GLOBAL`, `SET_GLOBAL`) are patched
+    with the program's symbols. Its labels' entries, its calls' records and
+    its temporaries are compared by a digest.
+  - **The report:** `node-shadow: reader-time C and X expressions=N taken=N
+    entries=N tapes-not-kept=0`, `reader-time C and X refused=REASON
+    expressions=N` and `reader-time C and X compared=N (entries N)
+    differences=0 (root 0, refusal 0, tape 0, labels-and-calls 0) patched:
+    globals'-entries=N direct-calls=N`. With this option `reader-time T`'s
+    `ticks` are of T, C and X together, a chunk's expressions a run.
+    `patched` counts what a splice would patch in the compared expressions:
+    the globals' entries, and the direct calls, whose rows hold the callee's
+    symbol. `--list N` lists the first differences, and a difference fails the
+    command.
 
 The report gives the expressions, evaluated nodes and calls taken, each
 refusal's (shape, code, leaf, context, diagnostic, template, row, root,
@@ -665,7 +697,16 @@ objects' columns and the library calls' answers the program's, T run on every
 expression the front made, and the fixture's six callees refused there (four
 of them calls the census refuses before the shadow's T, which no comparison
 reads). The chunk-boundary text ends with the address of an array no
-declaration points to, whose pointer type T makes itself.
+declaration points to, whose pointer type T makes itself. C and X run at
+reader time too (`BUSTER_NODE_FRONT_SWEEPS`) in the `--scalar` and the
+`-funsigned-char` runs, in a fourth run of the fixture without warnings (where
+the census takes a `for` statement's clauses, whose condition's wrapper has a
+type that is no target of its root's) and in the lean chunk-boundary run:
+every tape kept, each compared expression's target, object, refusal, tape,
+labels and calls the shadow's, and the fixture's globals' entries and direct
+calls patched. Its lines for them are a `const` object's initializer, one that
+converts nothing, one whose conversion is empty, a static local, a global's
+updates, and the strings.
 [The design](../node-machine.md)'s "Step 1: the shadow" has the results.
 
 ### The fact words (#2850's step 1)
