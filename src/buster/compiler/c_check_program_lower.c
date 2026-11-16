@@ -11927,7 +11927,8 @@ static inline __attribute__((always_inline)) void check_lower_logical_arm(CheckL
 // A condition's `&&` and `||` as branches (#2883). As a value, `a && b` is made 0 or 1 at a join (check_lower_logical): its
 // second operand's truth jumps to the join, its first operand's branch to a constant there, and a condition then tests the
 // joined value again. As a statement's condition or a conditional's, each operand is a condition of its own instead,
-// branching to the condition's own targets: no value is made, joined or tested again. A `!` swaps the targets.
+// branching to the condition's own targets: no value is made, joined or tested again. A `!` swaps the targets. A value's
+// `&&` or `||` whose first operand is one takes that operand so too, to its own label (#2891); its value stays a join.
 //
 // Whether `node` is an operator a condition takes as branches rather than as a value: a `!`, `&&` or `||` of an `int`
 // value (none of a vector's) that check_lower_expand would expand by its operands (no constant), an `&&` or `||` whose
@@ -11952,10 +11953,10 @@ static bool check_lower_branch_operator(const CheckProgram* program, uint32_t no
     return result;
 }
 
-// Whether condition `node` (a statement's CONDITION, or a conditional's first operand) takes branches: under its `!`s, it
-// is an `&&` or `||` (check_lower_branch_operator). A condition without one (`if (!p)`) is a value tested as before. Its
-// operators alone first, which is all that most conditions read; then each one's value. Of the program alone, as the node
-// machine's census asks it too.
+// Whether condition `node` (a statement's CONDITION, or a conditional's, an `&&`'s or an `||`'s first operand) takes
+// branches: under its `!`s, it is an `&&` or `||` (check_lower_branch_operator). A condition without one (`if (!p)`) is a
+// value tested as before. Its operators alone first, which is all that most conditions read; then each one's value. Of
+// the program alone, as the node machine's census asks it too.
 static bool check_lower_branch_condition(const CheckProgram* program, uint32_t node)
 {
     const CheckGraph* graph = &program->input->graph;
@@ -12140,10 +12141,12 @@ static inline __attribute__((always_inline)) void check_lower_logical(CheckLower
             check_lower_truth(writer, type_b, false);
             check_lower_operand(writer, node, 1, false, type_b);
         }
-        if (conditional && !reuse && check_lower_branch_condition(program, a))
+        if (!reuse && check_lower_branch_condition(program, a))
         {
-            // A condition with `&&` or `||` under its `!`s: branches to the arms (check_lower_branch, #2883).
-            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BRANCH, .node = a, .value = alternate, .address = false });
+            // A first operand with `&&` or `||` under its `!`s: branches to `alternate` (check_lower_branch), where a
+            // conditional's condition (#2883) and an `&&`'s first operand are false and an `||`'s is true (#2891), as
+            // the branch below; no value of it is made, joined and tested again.
+            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BRANCH, .node = a, .value = alternate, .address = op == CHECK_OP_LOGICAL_OR });
         }
         else
         {
