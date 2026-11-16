@@ -736,10 +736,10 @@ On the 9700X, CPU 2, under the lock.
   failed probes, 2.6, the source's populated mapping 2.2); the object's write
   1.4% (1.7); timer interrupts 1.2% (1.5); the start, exec to the first
   stage, 0.7% (0.8); the rest of the exit 0.5% (0.6). 0.07% is in no row.
-- **By stage** (recorded): check-input 35 M cycles of faults, parse 17.5 M, preprocess
-  7.8 M and 3.8 M of system calls (the source's read and the include
-  search), check-expressions 5.6 M, check-program 3.4 M; the backend's stages
-  about 1 M each or less.
+- **By stage**, in a recorded compile's cycles: check-input 35 M of faults,
+  parse 17.5 M, preprocess 7.8 M and 3.8 M of system calls (the source's
+  read and the include search), check-expressions 5.6 M, check-program
+  3.4 M; the backend's stages about 1 M each or less.
 - **Fresh memory:** 305 MB first touched in 7,074 faults, for a 231 MB peak.
   The driver's scratch (96 MB: the parser's arrays, then the reader's), arena
   (80 MB: the reader's output) and output arena (48 MB: the graph) are 73% of
