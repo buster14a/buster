@@ -2454,9 +2454,10 @@ static void* lane_test_nothing(void* argument)
 // probe in the first, likewise; and a look with its probe in a range a huge page maps already is granted. Then the
 // probe's two questions of a page of the second range that no read touched: the kernel's answer says it is mapped where
 // a huge page maps the range and only there, and a read of it takes fewer ticks than BUSTER_LANE_EXIT_FAULT_TICKS where
-// it is mapped (the least of eight pages' reads, as an interrupt can land in one) and no fewer where the read faults. A
-// kernel without the scan (before 6.7) or without huge pages for a file's pages refuses, which the test passes over:
-// it says which happened, and the ticks its reads took.
+// it is mapped (the least of eight pages' reads, as an interrupt can land in one) and no fewer where the read faults,
+// as the read of the file's last page, past its ranges, always does. A kernel without the scan (before 6.7) or without
+// huge pages for a file's pages refuses, which the test passes over: it says which happened, and the ticks its reads
+// took.
 static uint64_t lane_test_exit_executable(void)
 {
     uint64_t failures = 0;
@@ -2718,18 +2719,22 @@ static uint64_t lane_test_exit_executable(void)
         // Where a huge page maps the range, no read faults; where none does, each read is of a window of its own, and
         // faults.
         const bool probed = !windowed || (answered == huge_second && (huge_second ? ticks < BUSTER_LANE_EXIT_FAULT_TICKS : ticks >= BUSTER_LANE_EXIT_FAULT_TICKS));
-        if (!same || !kept || !mapped || !placed || !last || !probed)
+        // The file's last page, past its two ranges, which no huge page can map and nothing has read: its read faults,
+        // whatever the kernel did with the ranges.
+        const uint64_t fault_ticks = lane_exit_touch((const char*)mapping + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES);
+        const bool faulted = fault_ticks >= BUSTER_LANE_EXIT_FAULT_TICKS;
+        if (!same || !kept || !mapped || !placed || !last || !probed || !faulted)
         {
             failures += 1;
             printf("  exit helper: the looks at a mapped file found %u and %u pages of 4 KB in its ranges, then %u and %u, then %u and %u (asked: %d %d, by huge pages: %llx %llx, "
-                   "the last range granted: %d, an untouched page mapped: %d, its reads' least ticks %llu, bytes the same: %d)\n",
+                   "the last range granted: %d, an untouched page mapped: %d, its reads' least ticks %llu, a faulting read's %llu, bytes the same: %d)\n",
                    found_pages[0][0], found_pages[0][1], found_pages[1][0], found_pages[1][1], found_pages[2][0], found_pages[2][1], asked[0], asked[1],
-                   (unsigned long long)found_huge[1], (unsigned long long)found_huge[2], last, answered, (unsigned long long)ticks, same);
+                   (unsigned long long)found_huge[1], (unsigned long long)found_huge[2], last, answered, (unsigned long long)ticks, (unsigned long long)fault_ticks, same);
         }
-        printf("  exit helper: a file's range of %u pages in %s: %s; an untouched page: %s, read in %llu ticks at first and %llu at least\n", found_pages[0][0],
-               oracle_temporary_directory(),
+        printf("  exit helper: a file's range of %u pages in %s: %s; an untouched page: %s, read in %llu ticks at first and %llu at least; a read that faults: %llu ticks\n",
+               found_pages[0][0], oracle_temporary_directory(),
                !scans ? "the kernel has no PAGEMAP_SCAN" : !hot ? "too few to ask for" : asked[0] ? "collapsed, and mapped by a huge page since" : "the kernel refused to collapse it",
-               answered ? "mapped" : "not mapped", (unsigned long long)first_ticks, (unsigned long long)ticks);
+               answered ? "mapped" : "not mapped", (unsigned long long)first_ticks, (unsigned long long)ticks, (unsigned long long)fault_ticks);
     }
     else
     {
