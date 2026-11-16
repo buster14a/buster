@@ -595,24 +595,27 @@ static void lane_test_stack_base_pages(LaneTestTally* tally)
     arena_stack_base_pages = was_stack;
 }
 
-// Whether [mapping, mapping + bytes) is inside the region of reservations `kind` (arena_regions), where it was mapped.
-// A mapping of a reservation's own can be there too, in the hole a released arena left: lane_test_carved says which.
-static bool lane_test_in_region(uint32_t kind, uintptr_t mapping, uint64_t bytes)
+// Whether [mapping, mapping + bytes) is in the stretch that reservations are taken from together (arena_regions), in
+// its lower half (`down` 1) or its upper one (0). A mapping of a reservation's own can be there too, in the hole a
+// released arena left: lane_test_carved says which.
+static bool lane_test_in_region(uint32_t down, uintptr_t mapping, uint64_t bytes)
 {
-    const uintptr_t region = __atomic_load_n(&arena_regions[kind].base, __ATOMIC_ACQUIRE);
-    return region > BUSTER_ARENA_REGION_REFUSED && mapping >= region && mapping + bytes <= region + BUSTER_ARENA_REGION_BYTES;
+    const uintptr_t middle = __atomic_load_n(&arena_regions.middle, __ATOMIC_ACQUIRE);
+    const bool mapped = middle > BUSTER_ARENA_REGION_REFUSED;
+    return mapped && (down != 0 ? mapping >= middle - BUSTER_ARENA_REGION_BYTES && mapping + bytes <= middle : mapping >= middle && mapping + bytes <= middle + BUSTER_ARENA_REGION_BYTES);
 }
 
-// The bytes carved so far from the region of reservations `kind`.
-static uint64_t lane_test_carved(uint32_t kind)
+// The bytes carved so far from the stretch's lower half (`down` 1) or upper half (0).
+static uint64_t lane_test_carved(uint32_t down)
 {
-    return __atomic_load_n(&arena_regions[kind].carved, __ATOMIC_RELAXED);
+    return __atomic_load_n(&arena_regions.carved[down], __ATOMIC_RELAXED);
 }
 
 // Reservations taken together (#2873: arena_reservation_map). With the limits fixed and the address space unlimited,
-// as a compile's command has them: two arenas reserved one after the other are next to each other in one region, each
-// zero-filled and writable where it pushed, as an arena of its own mapping is; the first's release unmaps it and
-// leaves the second as it was; an arena of base pages and an arena of tables come from the regions of their own
+// as a compile's command has them: two arenas reserved one after the other are next to each other in the stretch's
+// upper half, each zero-filled and writable where it pushed, as an arena of its own mapping is, and advised huge pages
+// past its base pages from its reservation; the first's release unmaps it and leaves the second as it was; an arena
+// of base pages and an arena of tables come from the lower half, each right below the one before, with their
 // mappings' flags; a pool takes a released arena and gives the same one back; commits take an arena's base pages at
 // once and then four times what is committed where the kernel charges none, 64 KB and then twice where it does
 // (arena_commit); and a region with no room left, a thread
@@ -654,6 +657,13 @@ static void lane_test_arena_regions_child(LaneTestTally* tally)
         memset(second_bytes, 0xa5, BUSTER_ARENA_SMALL_BYTES + BUSTER_ARENA_HUGE_PAGE_BYTES);
     }
     lane_test_expect(tally, zero, "a reservation from a region wasn't zero-filled where it pushed");
+    // The region of mappings without flags is advised huge pages whole, so its arena needs no advice of its own: its
+    // pages past its base pages are advised, and those could be mapped by a huge page.
+    bool flagged = false;
+    const bool advised = second_bytes != 0 && second.huge && lane_test_vm_flag((uintptr_t)second.base + BUSTER_ARENA_SMALL_BYTES, "hg", &flagged) && flagged &&
+                         lane_test_huge_capable((uintptr_t)second.base + BUSTER_ARENA_SMALL_BYTES, &flagged) && flagged;
+    const bool base_pages = second_bytes != 0 && !(lane_test_huge_capable((uintptr_t)second.base, &flagged) || !flagged);
+    lane_test_expect(tally, !regions || (advised && base_pages), "a region's arena wasn't advised huge pages past its base pages, or its base pages could be huge");
     // The first's release unmaps its part of the region: the kernel has no page there, and the second keeps its bytes.
     const uint8_t* first_page = first.base;
     arena_release(&first);
@@ -669,14 +679,15 @@ static void lane_test_arena_regions_child(LaneTestTally* tally)
         { .bytes = BUSTER_ARENA_SMALL_BYTES, .small = BUSTER_ARENA_SMALL_BYTES },
     };
     Arena held = arena_reserve_tables(tables, BUSTER_ARRAY_LENGTH(tables));
-    const uint32_t wide_kind = arena_stack_base_pages ? 1 : 0;
-    const uint32_t held_kind = 2 | (arena_stack_base_pages ? 1 : 0);
-    const bool wide_placed = wide.base != 0 && (!regions || lane_test_in_region(wide_kind, (uintptr_t)wide.base - wide.mapping_offset, wide.mapping_bytes));
-    const bool held_placed = held.base != 0 && (!regions || lane_test_in_region(held_kind, (uintptr_t)held.base - held.mapping_offset, held.mapping_bytes));
+    const uint32_t wide_down = arena_stack_base_pages ? 1 : 0;
+    const uintptr_t wide_mapping = (uintptr_t)wide.base - wide.mapping_offset;
+    const uintptr_t held_mapping = (uintptr_t)held.base - held.mapping_offset;
+    const bool wide_placed = wide.base != 0 && (!regions || lane_test_in_region(wide_down, wide_mapping, wide.mapping_bytes));
+    const bool held_placed = held.base != 0 && (!regions || (lane_test_in_region(1, held_mapping, held.mapping_bytes) && (wide_down == 0 || held_mapping + held.mapping_bytes == wide_mapping)));
     bool found = false;
     const bool uncharged = held.base != 0 && lane_test_vm_flag((uintptr_t)tables[0].base, "nr", &found) && found;
     const bool tabled = held.base != 0 && ((uint8_t*)tables[0].base)[0] == 0 && ((uint8_t*)tables[1].base)[BUSTER_ARENA_SMALL_BYTES - 1] == 0;
-    lane_test_expect(tally, wide_placed && held_placed && uncharged && tabled, "an arena of base pages or of tables wasn't in the region of its mapping's flags");
+    lane_test_expect(tally, wide_placed && held_placed && uncharged && tabled, "an arena of base pages or of tables wasn't in the half of its mapping's flags");
     arena_release(&wide);
     arena_release(&held);
     // A pool takes a released arena of a region and gives the same one back.
@@ -735,10 +746,10 @@ static void lane_test_arena_regions_child(LaneTestTally* tally)
     // which carves nothing.
     arena_limits.commit_unbounded = true;
     const uint64_t carved = lane_test_carved(0);
-    __atomic_store_n(&arena_regions[0].carved, BUSTER_ARENA_REGION_BYTES - BUSTER_ARENA_PAGE_BYTES, __ATOMIC_RELAXED);
+    __atomic_store_n(&arena_regions.carved[0], BUSTER_ARENA_REGION_BYTES - BUSTER_ARENA_PAGE_BYTES, __ATOMIC_RELAXED);
     Arena full = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
     const bool full_own = lane_test_carved(0) == BUSTER_ARENA_REGION_BYTES - BUSTER_ARENA_PAGE_BYTES;
-    __atomic_store_n(&arena_regions[0].carved, carved, __ATOMIC_RELAXED);
+    __atomic_store_n(&arena_regions.carved[0], carved, __ATOMIC_RELAXED);
     arena_compact = true;
     Arena compact = arena_reserve(BUSTER_ARENA_SMALL_BYTES);
     arena_compact = false;
