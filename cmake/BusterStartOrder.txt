@@ -12,7 +12,7 @@
 # docs/measurements/kernel-census-musl-2873-2026-11-16), and sqlite3.c's -c, in that order: each command's functions
 # that the ones before it didn't run, in address order, and musl's by how many of its units ran each, most first.
 # Refresh it as that guide says when compiles' code moves.
-# start-order: 1013393 addresses, 0 of them in no function; 1153 local functions of main.c's units (4162 KB) and 279 by name (184 KB)
+# start-order: 1016272 addresses, 0 of them in no function; 1156 local functions of main.c's units (4163 KB) and 279 by name (184 KB)
 main.c tokenize_with_flags
 main.c lane_threads_report
 main.c main_information
@@ -114,6 +114,7 @@ main_unit_checker.c intern_intrinsic_rows
 main_unit_checker.c dependency_publish
 main_unit_frontend.c predefines_x86_architecture
 main.c lane_exit_helper_main
+main.c lane_exit_look
 main_unit_checker.c run_check_command_mode
 main_unit_checker.c check_request_program_options
 main_unit_checker.c check_request_scan_match
@@ -226,7 +227,6 @@ main_unit_checker.c check_common_facts
 - exit
 - getenv
 - strtouq
-- __isoc23_strtoumax
 - ____strtoul_l_internal
 - _itoa_word
 - snprintf
@@ -402,13 +402,9 @@ main_unit_checker.c check_common_facts
 - _dl_debug_initialize
 - _dl_cet_setup_features
 - __libc_early_init
-- __close_nocancel_nostatus
-- next_line
-- read_sysfs_file
-- get_nprocs
-- sysconf
-- __read_nocancel
-main.c lane_exit_look
+main.c arena_limits_fix
+main_unit_frontend.c arena_reservation_map
+main_unit_checker.c arena_reservation_map
 main_unit_frontend.c pp_print_vector
 main_unit_frontend.c run_preprocessor_command_mode
 main_unit_frontend.c intern_lay_out
@@ -557,6 +553,13 @@ main_unit_checker.c check_program_emit_code_half
 main_unit_checker.c check_tier1_lane_release
 main_unit_checker.c check_driver_object_finish
 main_unit_checker.c check_common_body_regions
+- __isoc23_strtoumax
+- __close_nocancel_nostatus
+- next_line
+- read_sysfs_file
+- get_nprocs
+- sysconf
+- __read_nocancel
 - pp_release_output
 - pread64
 - pwrite64
