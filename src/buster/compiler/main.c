@@ -706,6 +706,8 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_node_machine_contexts.c"
 #include "buster/compiler/c_check_node_machine_expand.c"
 #include "buster/compiler/c_check_node_machine_lower.c"
+// T where it sits (step 2's first measure): the machine's state at reader time and T on the front's expressions there.
+#include "buster/compiler/c_check_node_machine_reader.c"
 // #2850's step 1: a leaf's and a lookup's record from one load each, in the shadow (measure-node-machine --shadow --facts).
 #include "buster/compiler/c_check_node_machine_facts.c"
 #endif

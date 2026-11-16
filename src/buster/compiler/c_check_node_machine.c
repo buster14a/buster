@@ -405,7 +405,28 @@ struct NodeMachine
     uint32_t* call_ends;
     // The record T, C or X stopped at, for a refusal's report.
     uint32_t stopped;
+    // At reader time (node_machine_begin_reader; `program` is null then, and T alone runs): what T asks of the program,
+    // made from the reader's columns as the program makes its own from them. Each object's last static declaration's
+    // token (CheckProgram.object_declarations', BUSTER_CHECK_NONE for an object without one), `reader_objects` of them,
+    // and whether a declaration of it has returns_twice (BUSTER_NODE_MACHINE_OBJECT_TWICE, object_returns_twice's) or an
+    // asm label (_LABELLED, object_labelled's); the unit's input and parser; and the room of the types' arrays, which
+    // the types made after the machine began are taken into (node_machine_settle), `late_types` of them. The objects'
+    // two columns are the caller's (node_machine_begin_reader).
+    const CheckInput* input;
+    const Parser* parser;
+    uint32_t* reader_declarations;
+    uint8_t* reader_facts;
+    uint32_t reader_objects;
+    // By call node, where the shadow keeps them (null otherwise): node_machine_reader_call_library's answers, 1 for no
+    // and 2 for yes, which the shadow compares with the program's after the pipeline.
+    uint8_t* reader_library;
+    uint32_t type_capacity;
+    uint64_t late_types;
 };
+
+// NodeMachine.reader_facts' bits.
+#define BUSTER_NODE_MACHINE_OBJECT_TWICE 0x01u
+#define BUSTER_NODE_MACHINE_OBJECT_LABELLED 0x02u
 
 // Forgets the unit's call answers, the types' pointers and the argument memo, as a unit starts without them:
 // node_machine_begin, and the shadow's timing before each pass (c_check_node_census.c's node_shadow_time), so that each
@@ -421,6 +442,8 @@ static void node_machine_forget(NodeMachine* machine)
 // (c_check_node_machine_type.c), and the three sweeps.
 static bool node_machine_tables_initialize(void);
 static uint32_t node_machine_complete_at(const TypeTable* types, const CheckGraph* graph, TypeId type);
+static void node_machine_settle(NodeMachine* machine);
+static bool node_machine_reader_call_library(const NodeMachine* machine, uint32_t r, uint32_t node);
 static uint32_t node_machine_operand(const NodeMachine* machine, uint32_t r, uint32_t k);
 static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first, uint32_t root, uint32_t count);
 static NodeMachineRefusal node_machine_contexts(NodeMachine* machine, uint8_t context, TypeId target, uint32_t object);
@@ -434,22 +457,32 @@ static void* node_machine_column(Arena* arena, uint64_t count, uint64_t bytes, u
     return column != NULL ? column + (uint64_t)line * 64 : NULL;
 }
 
-// The machine's columns for `program`'s unit, from `arena`: whether there was room.
-static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program, bool scalar, bool verify, Arena* arena)
+// A type's word (NodeMachine.type_words) from its class and facts by the lowering's rules.
+static uint32_t node_machine_make_word(const TypeTable* types, uint32_t index, uint8_t class, uint8_t facts)
+{
+    const TypeId type = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
+    const bool valid = type_is_valid(types, type);
+    const bool plain = types->types.kind[index] < BUSTER_TYPE_KIND_WRAPPERS;
+    const uint8_t kind = valid ? check_action_kind(types, type) : BUSTER_TYPE_KIND_NONE;
+    return (uint32_t)class | (uint32_t)facts << 8 | (uint32_t)kind << 16 | (plain ? BUSTER_NODE_MACHINE_WORD_PLAIN : 0) | (valid ? BUSTER_NODE_MACHINE_WORD_VALID : 0);
+}
+
+// The machine's columns for a unit whose types are `types` and whose graph is `graph`, from `arena`, with room for
+// `type_room` types' words (the unit's count, or more at reader time): whether there was room. The machine's `program`,
+// or its reader's fields, are the caller's to set first.
+static bool node_machine_setup(NodeMachine* machine, TypeTable* types, const CheckGraph* graph, uint32_t type_room, bool scalar, bool verify, Arena* arena)
 {
     const uint32_t most = BUSTER_NODE_MACHINE_MOST;
     const uint32_t entries = BUSTER_NODE_MACHINE_TAPE_MOST;
-    *machine = (NodeMachine){
-        .program = program,
-        .types = (TypeTable*)program->types,
-        .graph = &program->input->graph,
-        .type_count = program->types->types.count,
-        .scalar = scalar,
-        .verify = verify,
-    };
-    machine->type_words = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)machine->type_count + 64);
-    machine->type_complete_at = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)machine->type_count + 64);
-    machine->pointers = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, (uint64_t)machine->type_count + 64);
+    machine->types = types;
+    machine->graph = graph;
+    machine->type_count = types->types.count;
+    machine->type_capacity = type_room;
+    machine->scalar = scalar;
+    machine->verify = verify;
+    machine->type_words = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)type_room + 64);
+    machine->type_complete_at = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)type_room + 64);
+    machine->pointers = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, (uint64_t)type_room + 64);
     machine->argument_memo = BUSTER_ARENA_PUSH_ARRAY(arena, NodeMachineMemo, BUSTER_NODE_MACHINE_MEMO_ENTRIES);
     uint8_t* classes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)machine->type_count + 64);
     uint8_t* facts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)machine->type_count + 64);
@@ -474,7 +507,7 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
     machine->stack = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 2 * most);
     machine->consumers = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
     machine->updates = BUSTER_ARENA_PUSH_ARRAY(arena, NodeMachineUpdate, most / 2);
-    machine->const_pointers = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, (uint64_t)machine->type_count + 64);
+    machine->const_pointers = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, (uint64_t)type_room + 64);
     const bool room = machine->type_words != NULL && machine->type_complete_at != NULL && classes != NULL && facts != NULL && machine->columns != NULL &&
                       machine->wides != NULL && machine->kinds != NULL && machine->classes != NULL && machine->tape != NULL && machine->label_entries != NULL &&
                       machine->calls_written != NULL && machine->call_records != NULL && machine->arguments != NULL && machine->argument_conversions != NULL &&
@@ -483,21 +516,32 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
                       machine->argument_memo != NULL && machine->label_ends != NULL && machine->label_met != NULL && machine->call_ends != NULL;
     if (room)
     {
-        node_machine_forget(machine);
-        (void)check_lower_twice_names(program, machine->twice_names, &machine->twice_tag);
-        check_lower_classify_types(program->types, machine->type_count, classes, facts);
+        // The pointers' columns start empty, past the unit's types too (node_machine_forget's are the unit's).
+        memset(machine->pointers, 0, ((uint64_t)type_room + 64) * sizeof(TypeId));
+        memset(machine->const_pointers, 0, ((uint64_t)type_room + 64) * sizeof(TypeId));
+        memset(machine->argument_memo, 0, BUSTER_NODE_MACHINE_MEMO_ENTRIES * sizeof(NodeMachineMemo));
+        check_lower_classify_types(types, machine->type_count, classes, facts);
         for (uint32_t index = 0; index < machine->type_count; index += 1)
         {
             const TypeId type = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
-            const bool valid = type_is_valid(program->types, type);
-            const bool plain = program->types->types.kind[index] < BUSTER_TYPE_KIND_WRAPPERS;
-            const uint8_t kind = valid ? check_action_kind(program->types, type) : BUSTER_TYPE_KIND_NONE;
-            machine->type_words[index] = (uint32_t)classes[index] | (uint32_t)facts[index] << 8 | (uint32_t)kind << 16 |
-                                         (plain ? BUSTER_NODE_MACHINE_WORD_PLAIN : 0) | (valid ? BUSTER_NODE_MACHINE_WORD_VALID : 0);
-            machine->type_complete_at[index] = valid ? node_machine_complete_at(program->types, &program->input->graph, type) : UINT32_MAX;
+            const uint32_t word = node_machine_make_word(types, index, classes[index], facts[index]);
+            machine->type_words[index] = word;
+            machine->type_complete_at[index] = (word & BUSTER_NODE_MACHINE_WORD_VALID) != 0 ? node_machine_complete_at(types, graph, type) : UINT32_MAX;
         }
     }
     return room && node_machine_tables_initialize();
+}
+
+// The machine's columns for `program`'s unit, from `arena`: whether there was room.
+static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program, bool scalar, bool verify, Arena* arena)
+{
+    *machine = (NodeMachine){ .program = program };
+    const bool room = node_machine_setup(machine, (TypeTable*)program->types, &program->input->graph, program->types->types.count, scalar, verify, arena);
+    if (room)
+    {
+        (void)check_lower_twice_names(program, machine->twice_names, &machine->twice_tag);
+    }
+    return room;
 }
 
 // Type `type`'s word (NodeMachine.type_words), or a class of UINT8_MAX and no facts past the table.
@@ -843,15 +887,49 @@ static TypeId node_machine_callee_function(const NodeMachine* machine, uint32_t 
     return type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION ? function : 0;
 }
 
+// Whether `object` has a symbol of its own: the program's, which its selection numbers; at reader time, before any is
+// numbered, whether it has a static declaration, which is what a referenced object's symbol comes from.
+static inline bool node_machine_symbolled(const NodeMachine* machine, uint32_t object)
+{
+    const CheckProgram* program = machine->program;
+    return program != NULL ? object < program->object_count && program->object_symbols[object] != 0 :
+                             object < machine->reader_objects && machine->reader_declarations[object] != BUSTER_CHECK_NONE;
+}
+
+// What T's callee refusal asks of a directly called object (node_machine_callee_refused): its declaration's name, and
+// whether a declaration gives it returns_twice; of the program's columns, or at reader time of the reader's.
+static inline IdentId node_machine_object_name(const NodeMachine* machine, uint32_t object)
+{
+    const CheckProgram* program = machine->program;
+    const uint32_t declaration = program != NULL ? (program->object_declarations != NULL ? program->object_declarations[object] : BUSTER_CHECK_NONE) :
+                                                   machine->reader_declarations[object];
+    const Parser* parser = program != NULL ? program->parser : machine->parser;
+    const uint32_t token_count = program != NULL ? program->input->token_count : machine->input->token_count;
+    return parser != NULL && declaration < token_count ? parser->tokens.names[declaration] : 0;
+}
+
+static inline bool node_machine_object_twice(const NodeMachine* machine, uint32_t object)
+{
+    const CheckProgram* program = machine->program;
+    return program != NULL ? program->object_returns_twice != NULL && program->object_returns_twice[object] != 0 :
+                             (machine->reader_facts[object] & BUSTER_NODE_MACHINE_OBJECT_TWICE) != 0;
+}
+
+// Whether call node `node`, record `r`, has a plain library builtin's semantics of its own (check_program_call_library):
+// the program's answer, or at reader time the same from T's records (node_machine_reader_call_library).
+static inline bool node_machine_call_library(const NodeMachine* machine, uint32_t r, uint32_t node)
+{
+    return machine->program != NULL ? check_program_call_library(machine->program, node) : node_machine_reader_call_library(machine, r, node);
+}
+
 // The object it designates where the lowering calls it directly (check_lower_call_body's `direct`): a function with a
 // symbol of its own, its address a constant without an offset or an effect; 0 for a call through a pointer, whose callee
 // the lowering evaluates.
 static uint32_t node_machine_direct_callee(const NodeMachine* machine, uint32_t a)
 {
-    const CheckProgram* program = machine->program;
     const uint32_t object = node_machine_record_object(machine, a);
     const bool direct = node_machine_record_category(machine, a) != CHECK_LVALUE && node_machine_record_constant_kind(machine, a) == CHECK_CONSTANT_ADDRESS &&
-                        object != 0 && node_machine_record_offset(machine, a) == 0 && object < program->object_count && program->object_symbols[object] != 0 &&
+                        object != 0 && node_machine_record_offset(machine, a) == 0 && node_machine_symbolled(machine, object) &&
                         (node_machine_record_flags(machine, a) & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
     return direct ? object : 0;
 }

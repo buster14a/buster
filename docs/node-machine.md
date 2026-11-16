@@ -2344,6 +2344,104 @@ of three; ms):
   and 0.00%, +0.47% and -0.10% in three comparisons. Step 2's splice is in the
   same loop.
 
+### T where it sits
+
+Step 2 puts the machine in the reader, and every figure above has its sweeps
+run after the pipeline: on the finished graph, with the program's columns.
+`measure-node-machine --shadow --front-types` runs T where step 2 would
+(`c_check_node_machine_reader.c`): right after the walk acted at a chunk, on
+each full expression the front made whole, before the unit's program exists.
+After the pipeline the shadow's own T types the same expression, and the two
+must agree in every column that C, X and the shadow read. [The
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-reader-types-2524-2026-11-15)
+has the runs.
+
+The coded walk runs once the reader has bound the unit's names and made its
+declarations' types, so the unit's types and its tags' history are whole by
+then. What T reads that the graph run or the program makes, and what stands
+for it at reader time:
+
+| what T reads | after the pipeline | at reader time |
+| --- | --- | --- |
+| an object's last static declaration, returns_twice, asm label | the program's columns | the same three, made from the reader's columns the program's way |
+| whether a called object has a symbol | the selection's numbering | whether it has a static declaration |
+| a library call's "computed inline?" | the stream's value of its size | T's own record of the size |
+| a node's context | the graph's | the front's own, which is the walk's at the unit's end |
+| a type's word | every type's, made at once | the unit's, then each later type's as it is made |
+
+On the 9700X (CPU 2, medians of seven readings in turn, musl's of three):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| expressions T ran on at reader time | 56,681 | 13,184 | 57,888 |
+| of them, taken, that the lowering never pops | 3,941 (7.0%) | 1,722 (13.1%) | 26,597 (45.9%) |
+| of those, a declaration's discard | 3,828 | 1,708 | 5,557 |
+| of those, in a body that is never lowered | 22 | 9 | 20,745 |
+| compared with the shadow's T: expressions, differences | 50,555, 0 | 10,545, 0 | 22,363, 0 |
+| T at reader time, TSC ticks a record | 67.5 | 84.3 | 134.5 |
+| the shadow's T, its first pass in the tight loop | 61.8 | 59.8 | 61.7 |
+| its best of seven passes | 54.1 | 43.2 | |
+| acting tokens an expression | 8.2 | 21.4 | 48.9 |
+| the machine's state as the shadow makes it, ms (T's own) | 0.96 (5.54) | 3.39 (2.04) | 35.09 (8.82) |
+
+- **Exact.** No expression differs in its range, its refusal or its records,
+  in any of 248 readings. The objects' columns (5,201, 13,118 and 255,903
+  objects with a static declaration) and the library calls' answers (332, 53
+  and, under musl's `-ffreestanding`, none) are the program's.
+- **Almost nothing was missing.** The types made after the machine begins are
+  1,264, 1,081 and 4,786, nearly all the walk's own (a string literal's array
+  type); T's derivations make a handful, and two expressions of `sqlite3.c`
+  read such a word. A static declaration stands for a symbol everywhere it is
+  asked.
+- **What a reader types for nothing.** Of the expressions T runs on at reader
+  time, 7% on `sqlite3.c`, 13% on Lua and 46% on musl are ones it takes that
+  the lowering never pops. On `sqlite3.c` and Lua nearly all of them are a
+  declaration's discard: at a declaration's `;` the walk casts each
+  initializer's value to void, as it does an expression statement's value,
+  and the front makes that cast a root. Nothing evaluates it (the program
+  takes an initializer's nodes for data, and the initialization's value is a
+  root of its own), so T types each such value once more under the cast. 22
+  and 9 are in bodies the selection drops. On musl 20,745 are, most of them
+  headers' inline functions, and 5,557 are discards. The pipeline reads and
+  types all of those nodes today and lowers none. A machine in the reader
+  must leave a declaration's discard alone, and it runs C and X on a dropped
+  body's expressions too unless the selection comes first. The split was
+  counted after this section's runs, with [the tests where they
+  sit](https://github.com/buster14a/buster/issues/2524#issuecomment-6908043343):
+  this section's first reading had all of them as dropped bodies', which
+  holds for musl alone.
+- **Where it sits, T costs what a body's expressions a run cost.** On
+  `sqlite3.c` it is 9% over the tight loop's first pass and 25% over its
+  best, which is what "Where the machine runs" found for a body a run (199
+  cycles a node against 164). Step 2's sum took the sweeps at 75 to 91 cycles
+  a body token: if C and X pay in place as T does, they are about 94, and the
+  sum gives 1.25 with the lean front.
+- **Sparse expressions cost more.** Lua has an expression every 21 acting
+  tokens and musl one every 49, where `sqlite3.c` has one every 8, and there
+  T at reader time is 1.4 and 2.2 times its tight loop's first pass: a chunk
+  holds a few expressions, and by the next chunk T's code and tables have
+  been pushed out, as the same section measured with other code between runs.
+  This record has no counters for it. Step 2's gate has a line for those
+  corpora (no unit slower by more than 1%), so the machine has to run more
+  than a chunk's expressions at a time there, or be small enough to stay warm.
+- **Its state is a scan a unit as the shadow makes it:** every type's word,
+  the unit's declarations read for the three columns, the caches cleared. It
+  is 26 µs a unit, four times T's own time on musl's 1,336 units. Step 2 would
+  make it as the declarations are read.
+- **What no comparison reads.** The census refuses a library builtin's call
+  and a returns_twice callee before the shadow's T, so T's refusal of them at
+  reader time is compared with nothing: the answers behind it are compared
+  with the program's directly, and the fixture counts the callees refused.
+  Of 19 faults put into the reader-time path one at a time, the tests show 16.
+  The other three show on no input here: T reading the graph's own contexts
+  as they stand after the chunk (the walk has marked a taken expression's
+  nodes by then), a later type's completion position, and the words of a type
+  the action makes.
+- **A compile is unchanged** (+0.07% and -0.18% from fresh copies; 26,000
+  more instructions of 1,363 M). The shadow's own T retires 1.6 to 2.2 more
+  instructions a node (0.5%) for the tests of where its callee's facts come
+  from.
+
 ### What it says of step 2
 
 "Expected gains" took the machine at 55 cycles a body token for a taken
@@ -2353,11 +2451,16 @@ sweep in the tight loop, 91 with a body's expressions a run: 126 to 142 with
 the lean front. With the front's coverage (97.76% of the nodes of the taken
 expressions, which hold 96% of all) the same sum gives step 2 1.25 to 1.27
 times on `-c sqlite3.c` (1.23 to 1.25 with #2857's front): above its gate of
-1.2, under the 1.3 expected. With #2850's sweeps in place of the shadow's (17
-cycles a node, and its step 1's gate of 10 a leaf or lookup), if they carry
-into the compiler, the reading is most of the machine, and the sum is about
-1.35. Ten cycles a body token of the machine move it by a hundredth,
-a point of coverage by a third of that. What would move it:
+1.2, under the 1.3 expected. T where it sits costs what the upper figure took,
+so on `sqlite3.c` the sum is at its lower end, 1.25. With #2850's sweeps in
+place of the shadow's, if they carry into the compiler, the reading is most of
+the machine and the sum is 1.34 to 1.35: its step 0 ran them at 17 cycles a
+node with the leaves and the lookups given, and [its step
+1](https://github.com/buster14a/buster/issues/2850#issuecomment-6900508040)
+measured those at about 5 cycles a leaf and 25 to 40 a lookup, 29 to 33 a node
+in all, over its own line of 20 a lookup. Ten cycles a body token of the
+machine move the sum by a hundredth, a point of coverage by a third of that.
+What would move it:
 
 - **The front's walk:** over a hundred instructions an acting token for a
   stack walk, lean or not. The structure it derives (counts, distances,
@@ -2369,7 +2472,14 @@ a point of coverage by a third of that. What would move it:
 - **`sizeof` and `_Alignof`,** which the front leaves: 1.5% of `sqlite3.c`'s
   taken expressions and most of musl's missing 5% of nodes.
 - **Where the sweeps run:** 164 cycles a node in the tight loop, 199 a body's
-  expressions a run.
+  expressions a run, and at reader time, a chunk's expressions a run, T alone
+  2.2 times its tight loop on musl.
+- **The selection before C and X:** 20,745 of the 57,888 expressions a reader
+  types on musl (36%) are ones it takes in bodies that are never lowered, its
+  headers' inline functions; 22 of `sqlite3.c`'s and 9 of Lua's are.
+- **A declaration's discard:** 9%, 17% and 24% of the roots the front gives T
+  (5,355, 2,275 and 13,991) are an initializer's value cast to void at the
+  declaration's `;`, which nothing evaluates.
 
 ## Expected gains
 

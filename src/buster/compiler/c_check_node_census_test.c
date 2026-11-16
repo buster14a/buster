@@ -203,6 +203,11 @@ static const char node_shadow_test_text[] =
     "int ldf(long double);\n"
     "int ap(int (*)(int), int);\n"
     "int getcontext(void*);\n"
+    "int twice(int) __attribute__((returns_twice));\n"
+    "void* memcpy(void*, const void*, unsigned long);\n"
+    "void* memmove(void*, const void*, unsigned long) __asm__(\"node_shadow_moved\");\n"
+    "int abs(int);\n"
+    "int f(int);\n"
     "unsigned long strlen(const char*);\n"
     "enum E { E0, E1 = 5 };\n"
     "long h(struct S* p, struct S s, int a, int b, unsigned u, char c, double d, float e, int* q, const int* r, int (*fp)(int, double),\n"
@@ -267,6 +272,13 @@ static const char node_shadow_test_text[] =
     "    x = ldf(d); // machine: template\n"
     "    x = sj(0); // machine: callee\n"
     "    x = getcontext(q); // machine: callee\n"
+    "    x = twice(a);\n"
+    "    memcpy(&x, &a, 4);\n"
+    "    memcpy(&x, &a, u); // machine: taken\n"
+    "    memmove(&x, &a, 4); // machine: taken\n"
+    "    x = abs(a);\n"
+    "    w(0, &ga); // machine: taken\n"
+    "    w(0, &gs.a); // machine: taken\n"
     "    x = a && f(b); // machine: taken\n"
     "    x = f(a) || f(b); // machine: taken\n"
     "    x = f(a ? b : c); // machine: taken\n"
@@ -373,18 +385,30 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, uint8_t
     // scalar walk, where the front must make nothing and no line is expected of it.
     const bool fronts = BUSTER_HOST_VECTOR != 0;
     // C and X as one sweep too: every expression T typed, with C's and X's refusal, tape, labels and calls.
+    // T at reader time, where the front asks for it: every expression it ran on that the shadow takes has the shadow's
+    // records, it ran on each the front made, the objects' columns and the library calls' answers it made are the
+    // program's, and it refused the fixture's callees there: `sj`'s call, getcontext's, twice's, the constant memcpy's,
+    // abs's and strlen's (the census refuses four of them before the shadow's T, so no comparison reads those).
+    const bool typed = (front & BUSTER_NODE_FRONT_TYPES) == 0 || !fronts ? shadow.typed_expressions == 0 && shadow.typed_compared == 0 :
+                                                                           shadow.typed_differences == 0 && shadow.typed_compared != 0 && shadow.typed_skipped == 0 &&
+                                                                               shadow.typed_unrun == 0 && shadow.typed_object_differences == 0 &&
+                                                                               shadow.typed_objects != 0 && shadow.typed_library_differences == 0 &&
+                                                                               shadow.typed_library_calls >= 5 && shadow.typed_refused[NODE_MACHINE_REFUSED_CALLEE] == 6;
     const bool same = shadow.value_differences == 0 && shadow.entry_differences == 0 && shadow.twin_differences == 0 && shadow.taken_expressions != 0 &&
                       (scalar || shadow.row_nodes != 0) && shadow.fused_differences == 0 && shadow.fused_expressions >= shadow.taken_expressions &&
                       shadow.front_differences == 0 && shadow.front_checked == shadow.front_records && shadow.front_resets == 0 && shadow.front_waiting == 0 &&
-                      (fronts ? shadow.front_units == 1 && shadow.front_unread == 0 && shadow.front_records != 0 : shadow.front_units == 0 && shadow.front_records == 0);
+                      (fronts ? shadow.front_units == 1 && shadow.front_unread == 0 && shadow.front_records != 0 : shadow.front_units == 0 && shadow.front_records == 0) && typed;
     if (!valid || !same)
     {
         fprintf(stderr, "test-checker: node-shadow%s: %s: values %" PRIu64 ", entries %" PRIu64 ", twin %" PRIu64 ", fused %" PRIu64 " (of %" PRIu64 ") differ; %" PRIu64
                 " expressions taken, %" PRIu64 " row-typed nodes; the front's records %" PRIu64 ", compared %" PRIu64 ", %" PRIu64 " differ, %" PRIu64 " resets, %" PRIu64
-                " values left waiting, in %" PRIu64 " units (%s)\n",
+                " values left waiting, in %" PRIu64 " units (%s); T at reader time ran on %" PRIu64 " expressions, %" PRIu64 " compared, %" PRIu64 " differ, %" PRIu64
+                " roots not run, %" PRIu64 " of the front's expressions not run, %" PRIu64 " callees refused, %" PRIu64 " objects and %" PRIu64 " library calls differ\n",
                 scalar ? " --scalar" : "", valid ? "read" : "NOT READ", shadow.value_differences, shadow.entry_differences, shadow.twin_differences, shadow.fused_differences,
                 shadow.fused_expressions, shadow.taken_expressions, shadow.row_nodes, shadow.front_records, shadow.front_checked, shadow.front_differences,
-                shadow.front_resets, shadow.front_waiting, shadow.front_units, fronts ? "expected in the one" : "expected in none: no vector paths in this build");
+                shadow.front_resets, shadow.front_waiting, shadow.front_units, fronts ? "expected in the one" : "expected in none: no vector paths in this build",
+                shadow.typed_expressions, shadow.typed_compared, shadow.typed_differences, shadow.typed_skipped, shadow.typed_unrun,
+                shadow.typed_refused[NODE_MACHINE_REFUSED_CALLEE], shadow.typed_object_differences, shadow.typed_library_differences);
     }
     uint32_t line = 1;
     const char* at = text;
@@ -774,12 +798,15 @@ static bool node_front_test_limits(const char* directory, bool boundaries, uint8
     bool valid = text != NULL;
     if (valid && boundaries)
     {
-        length += (uint32_t)snprintf(text + length, capacity - length, "unsigned long strlen(const char*);\nint lb(int a)\n{\n    int x = a;\n");
+        length += (uint32_t)snprintf(text + length, capacity - length,
+                                     "unsigned long strlen(const char*);\nvoid sink(void*);\nint late[5];\nint lb(int a)\n{\n    int x = a;\n");
         for (uint32_t round = 0; round < 1100 && length + 128 < capacity; round += 1)
         {
             length += (uint32_t)snprintf(text + length, capacity - length, "    x += (int)(&strlen)(\"ab\"); x += (int)strlen(\"cd\"); x++; x++;\n");
         }
-        length += (uint32_t)snprintf(text + length, capacity - length, "    return x;\n}\n");
+        // The address of an array no declaration points to: T makes its pointer type itself, in a chunk where nothing
+        // else makes a type (BUSTER_NODE_FRONT_TYPES: at reader time its word must be there when T reads it).
+        length += (uint32_t)snprintf(text + length, capacity - length, "    sink(&late);\n    return x;\n}\n");
     }
     else if (valid)
     {
@@ -803,9 +830,12 @@ static bool node_front_test_limits(const char* directory, bool boundaries, uint8
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
     // In a build without the vector paths the reader's walk is the scalar one, and the front must make nothing.
     const bool fronts = BUSTER_HOST_VECTOR != 0;
+    const bool typed = (front & BUSTER_NODE_FRONT_TYPES) == 0 || !fronts ? shadow.typed_expressions == 0 && shadow.typed_compared == 0 :
+                                                                           shadow.typed_differences == 0 && shadow.typed_compared != 0 && shadow.typed_unrun == 0 &&
+                                                                               shadow.typed_object_differences == 0 && shadow.typed_library_differences == 0;
     const bool same = shadow.front_differences == 0 && shadow.front_checked == shadow.front_records && shadow.front_waiting == 0 &&
                       (fronts ? shadow.front_units == 1 && shadow.front_unread == 0 && shadow.front_records != 0 && (shadow.front_resets != 0) == !boundaries :
-                                shadow.front_units == 0 && shadow.front_records == 0);
+                                shadow.front_units == 0 && shadow.front_records == 0) && typed;
     if (!valid || !same)
     {
         fprintf(stderr, "test-checker: node-front %s%s: %s: records %" PRIu64 ", compared %" PRIu64 ", %" PRIu64 " differ, %" PRIu64 " resets, %" PRIu64
@@ -853,13 +883,16 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         unlink(header);
         rmdir(headers);
     }
-    check_test_expect(test, ready && node_shadow_test_fixture(directory, false, BUSTER_NODE_FRONT_AFTER, loud, BUSTER_ARRAY_LENGTH(loud)),
+    // With T at reader time too (BUSTER_NODE_FRONT_TYPES): the shadow's records on every expression both type; by the rows
+    // there against the action alone here in the --scalar run.
+    check_test_expect(test, ready && node_shadow_test_fixture(directory, false, BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_TYPES, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-shadow: the machine takes its codes with the pipeline's values and entries, T's rows the action's, and refuses the rest by reason");
-    check_test_expect(test, ready && node_shadow_test_fixture(directory, true, BUSTER_NODE_FRONT_BEFORE, loud, BUSTER_ARRAY_LENGTH(loud)),
+    check_test_expect(test, ready && node_shadow_test_fixture(directory, true, BUSTER_NODE_FRONT_BEFORE | BUSTER_NODE_FRONT_TYPES, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-shadow --scalar: T by the action alone gives the pipeline's values and entries");
     // Plain char unsigned: T's rules convert a char constant by the unit's signedness, not the bake's.
     char* unsigned_char[] = { "-nostdinc", "-Wall", "-Wextra", "-Wshift-sign-overflow", "-Wassign-enum", "-funsigned-char" };
-    check_test_expect(test, ready && node_shadow_test_fixture(directory, false, BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN, unsigned_char, BUSTER_ARRAY_LENGTH(unsigned_char)),
+    check_test_expect(test, ready && node_shadow_test_fixture(directory, false, BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_TYPES, unsigned_char,
+                                                              BUSTER_ARRAY_LENGTH(unsigned_char)),
                       "node-shadow -funsigned-char: the machine converts plain char constants as the unit's char is signed");
     check_test_expect(test, ready && node_facts_test_fixture(directory, BUSTER_NODE_FACTS_WHOLE, 0, false, quiet, BUSTER_ARRAY_LENGTH(quiet)),
                       "node-facts: every leaf and lookup the fact words' rules make is T's record, and what they leave is the fixture's");
@@ -886,11 +919,12 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_facts_test_operators(directory, BUSTER_NODE_FACTS_LEAN, 16, false, quiet, BUSTER_ARRAY_LENGTH(quiet)),
                       "node-facts operators lean: the same where a window is cut every 16 records");
     // The machine's own front at its limits (step 1b): a chunk's end at every place within a call, and a full stack.
-    check_test_expect(test, ready && node_front_test_limits(directory, true, BUSTER_NODE_FRONT_AFTER, loud, BUSTER_ARRAY_LENGTH(loud)),
+    check_test_expect(test, ready && node_front_test_limits(directory, true, BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_TYPES, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-front: a callee waiting across a chunk's end keeps its use, a library call's mark the walk's");
     check_test_expect(test, ready && node_front_test_limits(directory, true, BUSTER_NODE_FRONT_BEFORE, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-front before the walk: a callee waiting across a chunk's end keeps its use");
-    check_test_expect(test, ready && node_front_test_limits(directory, true, BUSTER_NODE_FRONT_BEFORE | BUSTER_NODE_FRONT_LEAN, loud, BUSTER_ARRAY_LENGTH(loud)),
+    check_test_expect(test, ready && node_front_test_limits(directory, true, BUSTER_NODE_FRONT_BEFORE | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_TYPES, loud,
+                                                            BUSTER_ARRAY_LENGTH(loud)),
                       "node-front, lean: a value waiting across a chunk's end gets its consumer's distance and its place there");
     check_test_expect(test, ready && node_front_test_limits(directory, false, BUSTER_NODE_FRONT_AFTER, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-front: a full stack makes every waiting value unknown and leaves the call astride its end to the walk");
