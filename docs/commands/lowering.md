@@ -919,3 +919,15 @@ kind and class, by field and by reader, the reads the fixture is there for,
 their sources, and the records left are pinned. [The
 design](../one-core-path.md#step-2s-second-piece-what-reads-ts-record) has
 the results.
+
+The census gives a reader records no program does: an operand whose type,
+flags, object or payload was changed alone. So under the sanitizers its
+tests also test the rules and the sweeps on those. The merge queue's
+MemorySanitizer row found one such read: the fact words' pointer rule
+(`node_facts_pointer`) read its second operand's type where its first
+operand wasn't taken and the second had never been read into its place (the
+rule's answer didn't depend on it). That rule's operands and the cast's
+source are zeroed for it. A pull request's checks don't run the sanitizer
+rows: before queueing a change to the census or to a reader, build with
+`BUSTER_HOST_ARCH=x86-64 BUSTER_SANITIZER=memory` (then `address` and
+`thread`) and run the part of `test-checker` that has the census's tests.
