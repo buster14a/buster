@@ -9,3 +9,12 @@ comparison.c	2	2	2	comparison warnings precede failed initializer conversions
 effect.c	0	1	0	effectful comma operand stays quiet after an initializer error
 invalid-source.c	0	1	0	an invalid initializer source has no comma warning
 valid.c	1	0	0	a valid initializer retains one comma warning
+braced.c	5	5	0	every incompatible element in a braced initializer retains its comma warning
+braced-plain.c	0	5	0	multiple incompatible elements need no comma operator to recover
+braced-nested.c	6	6	0	nested braced cursors resume after incompatible elements
+braced-designated.c	6	6	0	designated subobjects diagnose conversions and comma warnings in source order
+braced-mixed.c	8	4	0	valid siblings retain comma warnings around incompatible initializer elements
+braced-valid.c	0	0	0	accepted nested and designated initializers retain complete output
+braced-compound.c	4	4	0	a compound literal diagnoses each incompatible element of its own initializer
+braced-range.c	6	6	0	GNU range repetitions retain one diagnostic per source conversion
+braced-excess.c	7	7	0	recovered incompatible elements suppress trailing excess warnings and keep earlier warnings

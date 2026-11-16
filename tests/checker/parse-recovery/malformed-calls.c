@@ -245,4 +245,135 @@ void check(void)
 {
     known(int, 1,, missing_operand);
 }
+#elif BUSTER_CASE == 31
+int known(int, int);
+void check(void)
+{
+    known(1, int, missing_later);
+    after_later_type;
+}
+#elif BUSTER_CASE == 32
+int known(int, int);
+void check(void)
+{
+    known(missing_earlier, int, missing_later);
+    after_independent_arguments;
+}
+#elif BUSTER_CASE == 33
+int known(int, int);
+struct Pair { int member; } pair;
+void check(void)
+{
+    known((struct Pair){1}.missing, const int, pair.missing);
+    after_member_arguments;
+}
+#elif BUSTER_CASE == 34
+int old_argument(void) __attribute__((deprecated("old argument")));
+int old(int) __attribute__((deprecated("old callee")));
+int hidden(int) __attribute__((unavailable("private")));
+void check(void)
+{
+    old(old_argument(), int, missing_old);
+    hidden(old_argument(), int, missing_hidden);
+    after_annotated_arguments;
+}
+#elif BUSTER_CASE == 35
+int known(int, int, int);
+void check(void)
+{
+    known(1, int, 2, double, missing_later);
+    after_repeated_argument_errors;
+}
+#elif BUSTER_CASE == 36
+int outer(int, int);
+int inner(int);
+void check(void)
+{
+    outer(1, int, inner(2, double, missing_inner), struct Tag, missing_outer);
+    after_nested_argument_errors;
+}
+#elif BUSTER_CASE == 37
+#define BAD_ARGUMENT(name, before, after) name(before, int skipped[unread_name], after)
+int known(int, int);
+void check(void)
+{
+    BAD_ARGUMENT(known, missing_earlier, missing_later);
+    BAD_ARGUMENT(known, 3, missing_again);
+    after_later_argument_macros;
+}
+#elif BUSTER_CASE == 38
+int known(int, int);
+int noncallable;
+struct Pair { int member; } pair;
+void check(void)
+{
+    int value = known(1, int) + pair.missing;
+    noncallable(2, int);
+    (void)value;
+    after_final_argument;
+}
+#elif BUSTER_CASE == 39
+int known(int, int);
+void check(void)
+{
+    known(1 / 0, int, ((int*)1) + 1.0);
+    after_argument_warnings;
+}
+#elif BUSTER_CASE == 40
+int known(int, int);
+void check(void)
+{
+    else;
+    known(missing_earlier, int, missing_later);
+    after_later_argument_repair;
+#elif BUSTER_CASE == 41
+int known(int, int);
+void check(void)
+{
+    known((1, int));
+}
+#elif BUSTER_CASE == 42
+int known(int, int);
+void check(void)
+{
+    known(1,, int);
+}
+#elif BUSTER_CASE == 43
+struct Pair { int (*member)(int, int); } pair;
+void check(void)
+{
+    pair.member(1, int);
+}
+#elif BUSTER_CASE == 44
+int printf(const char*, ...);
+void check(void)
+{
+    printf("%d", int);
+}
+#elif BUSTER_CASE == 45
+int known(int, int);
+void check(void)
+{
+    known(1, int; unread;);
+}
+#elif BUSTER_CASE == 46
+int known(int);
+void check(int condition)
+{
+    known(condition ? 1, int : 2);
+}
+#elif BUSTER_CASE == 47
+int known(int, int);
+void check(int condition)
+{
+    known(condition ? 1, 2 : 3, int, missing_later);
+    after_conditional_argument;
+}
+#elif BUSTER_CASE == 48
+int known(int, int);
+void check(void)
+{
+    known((int (*)(Missing value))0, int, missing_later);
+    after_earlier_parse_diagnostic;
+}
 #endif

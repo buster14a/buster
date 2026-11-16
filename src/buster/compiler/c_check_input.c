@@ -97,6 +97,8 @@ typedef enum CheckInputMessage
     CHECK_INPUT_AUTO_TYPE_ARRAY,
     CHECK_INPUT_AUTO_TYPE_BIT_FIELD,
     CHECK_INPUT_AUTO_TYPE_ATOMIC_INITIALIZER,
+    // A weak alias's ambiguous lookup. The mixed object/function case uses OBJECT_AMBIGUOUS too, with the function
+    // clone's pragma source plus one in detail, since it has no parser declaration token of its own.
     CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS,
     CHECK_INPUT_WEAK_ALIAS_OBJECT_AMBIGUOUS,
     CHECK_INPUT_WEAK_ALIAS_REDEFINITION,
@@ -3505,7 +3507,7 @@ static uint32_t check_input_invalid_call_index(const Parser* parser, uint32_t to
 }
 
 // A failed parse's call-shaped lookup is never an expression to check (#2406). The private view has already erased
-// its unread first argument (all arguments for an attribute-led call); later arguments and the ordinary binding and
+// its unread argument (all arguments for an attribute-led call); earlier/later arguments and the ordinary binding and
 // implicit declaration must survive for independent checks and later statements. Append the
 // existing silent invalid-use report after lookup, so the normal subtree cuts suppress only this call and its parents.
 static void check_input_invalid_calls(CheckInputReader* reader)

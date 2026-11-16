@@ -5089,7 +5089,7 @@ promotion/suppression and the error limit are checked; rejected compilations
 preserve an existing output, while accepted controls replace it with an ELF
 object. A separate control keeps C23's declaration grammar.
 
-Ordinary identifier calls with one malformed type-first argument use the same
+Ordinary identifier calls with a malformed type-first argument use the same
 bounded view (#2406). For `known(int); after_error;`, the callee's lookup,
 implicit declaration, deprecation and availability diagnostics precede the
 original "expected expression" at `int`, and the later statement is checked.
@@ -5099,9 +5099,16 @@ classification through resumed, prefix, repaired and rejected views. The
 silent invalid-use report suppresses synthetic arity and noncallable errors
 while independent operands, such as `pair.missing` in `known(int) +
 pair.missing`, remain checked. Arguments with nested parentheses, brackets and
-braces may be skipped, but a top-level comma remains excluded: Clang reads later
-arguments after an invalid first argument, and an empty-call replacement would
-lose their diagnostics. Member callees, catalog-recognized builtin/library
+braces may be skipped through that argument's next top-level comma. Arguments
+before and after the rejected one retain their original tokens and independent
+diagnostics. A final rejected argument also removes its preceding separator;
+otherwise that separator joins the retained prefix and suffix. This applies
+again when a later argument has a new parse error, including after a nested
+call's recovery. Callee source/use records are sorted together and deduplicated
+after all rounds, independently of the parse errors' token order, so an outer
+callee revisited after a nested one remains searchable. The invalid callee
+suppresses synthetic arity, conversion and noncallable errors.
+Empty arguments, member callees, catalog-recognized builtin/library
 names (also with `-fno-builtin`), mismatched delimiters and semicolon-crossing
 calls retain the existing recovery.
 
@@ -5112,7 +5119,9 @@ warning promotion/suppression, `-fno-builtin` and error limits, through both
 readers and syntax/object output with one/three requested lanes and deferred
 bodies. Mixed ordinary and attribute-led calls run before C23, including repeated
 macro expansions, multiple recovery rounds and rejected/repaired views. Contract
-checks verify paired metadata and the excluded boundaries. Rejected compilations
+checks verify paired metadata, nested callee ordering, repeated-callee
+deduplication and the excluded boundaries. Earlier and later arguments retain
+lookup, member, availability and warning diagnostics exactly once. Rejected compilations
 preserve existing output; valid cast and `sizeof` calls produce an ELF object.
 
 Phase 2 covers redeclarations that conflict with a declaration of the same
@@ -5601,6 +5610,35 @@ declaration and kept the earliest failure; it now also lists each one
 its walk's arenas are rolled back, and the driver gives each with its own
 conversion's words and a static object's second "not a compile-time constant"
 error. Only a unit whose initializers failed takes this path.
+
+For a braced initializer with complete checked source expressions, the diagnostic
+walk retains each incompatible subobject conversion and continues the existing
+subobject cursor (#2441). Nested braces, designators, GNU ranges and accepted
+siblings retain their source identities; repeated range destinations report a
+conversion once. The strict initializer publisher still stops on its first
+failure, and a diagnostic walk discards every partial write plan. Its failure
+buffer and source keys are bounded, and resource failure restores both arenas
+and clears the returned metadata. Successful diagnosis restores scratch and may
+retain only its explicit failure list and warning callers' source-root completions.
+
+Excess-element warnings retain the strict walk's first-failure boundary within
+each initializer. Continuing incompatible conversions must not add a trailing
+excess warning to a rejected list. Earlier valid siblings and independent
+declarations keep their warnings. A valid nested sibling after a rejected one
+can still lack an excess warning that Clang gives; recovering that warning needs
+per-list error state and ordered publication alongside the conversion errors.
+
+The rejected-comma pass uses those completion tokens to publish all of the
+initializer's comma warnings after its conversion errors, including commas in
+accepted siblings. The runtime `checker/initializer-comma` catalog compares
+complete Clang output, warning policy, both readers, lane requests and rejected
+output preservation. A compound literal's own initializer also gets this recovery.
+An enclosing initializer containing a compound literal retains its prior
+first-failure boundary: invalid-literal dependencies are not modeled yet, so it
+can still give one derivative conversion error that Clang suppresses. A separate
+frozen-output boundary fixture prevents extending those derivative errors while
+checking the literal's own recovery. The broader atomic-conditional residual of
+#2441 remains separate.
 
 An array of unknown size whose initializer is no list nor a string of its
 element (`int y[] = 5;`) gets clang's `FK_ArrayNeedsInitList` error at its
@@ -11717,15 +11755,29 @@ selection keeps TARGET's definition as an alias's base, and
 it, of its type and size, after the aliases' (in the unit of several lanes
 that has TARGET's definition). Once the clone is visible, references to an
 earlier function or object declaration report clang's ambiguity and candidate
-notes, including when ALIAS was already defined; local shadows and references
-before a later TARGET declaration keep their own lookup. Later object
+notes, including when ALIAS was already defined. A lookup set with an object
+remains ambiguous when the earlier declaration and clone differ in kind, type,
+thread-local storage or section, or the earlier declaration already has an alias
+attribute or internal linkage. A function clone's candidate note names the
+pragma; an object clone's names TARGET's declaration. References before a later
+TARGET declaration keep their own lookup. Later object
 redeclarations report clang's redefinition and prior-definition notes. Other
-unmodeled shapes remain refused by name, including declarations with another
-kind or type, a TARGET the unit doesn't define, and an ALIAS of internal linkage.
+unmodeled shapes remain refused by name, including later declarations with
+another kind or type, two functions with different parameter types (which can
+form a valid overload set in clang), a TARGET the unit doesn't define, and the
+remaining internal-linkage ALIAS shapes. A mismatched declaration that is never
+referenced keeps its existing clone behavior; references hidden by a local
+shadow do not become ambiguous, but mismatched shapes that cannot carry the
+clone remain refused.
 This is separate
 from ordinary weak binding. `test-checker-driver`
 (`c_check_symbol_pragma_driver_test.c`) compares the supported shapes'
-symbols and programs with clang's, by both paths.
+symbols and programs with clang's, by both paths. Its runtime weak-alias
+catalogue also runs under `--semantic-recovery-only`: complete diagnostics and
+exit status under GNU17/C23, warning suppression/promotion and error limits,
+default/scalar readers and one/three requested deferred lanes. Rejected object
+commands preserve an existing output or create none; accepted controls must
+produce an ELF object.
 
 With `-flazy-system-headers`, an earlier occurrence of the pragma's name in a
 deferred body is conservatively refused because its binding was not checked;

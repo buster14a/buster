@@ -11,3 +11,16 @@ before-target	before-target.c	-	a weak alias clone is not visible before its tar
 local-shadow	local-shadow.c	-	local shadows do not name the weak alias
 defined-alias	defined-alias.c	rejected	a call is ambiguous even when the alias was already defined
 missing-target	missing-target.c	-	a genuinely missing weak alias target still warns
+object-type-existing	object-type-existing.c	rejected	an incompatible object declaration and the clone remain ambiguous
+object-type-later	object-type-later.c	rejected	an incompatible object clone appears only once its target is declared
+function-object-existing	function-object-existing.c	rejected	an earlier function declaration and an object clone are ambiguous
+function-object-later	function-object-later.c	rejected	a call before a later object target keeps its original declaration
+object-function-existing	object-function-existing.c	rejected	a function clone's ambiguity note names the pragma
+object-function-later	object-function-later.c	rejected	a later function clone keeps the pragma as its candidate location
+object-qualifiers	object-qualifiers.c	rejected	pointer and qualified object types do not hide lookup ambiguity
+object-storage	object-storage.c	rejected	thread-local and section differences do not hide lookup ambiguity
+mixed-defined	mixed-defined.c	rejected	a prior mixed-kind definition still participates in ambiguous lookup
+mixed-aliased	mixed-aliased.c	rejected	a prior alias attribute still participates in ambiguous lookup
+mixed-static	mixed-static.c	rejected	an internal object declaration still participates in ambiguous lookup
+mixed-unused	mixed-unused.c	-	unused mixed-kind and incompatible object declarations retain their emitted clones
+mixed-warning-order	mixed-warning-order.c	rejected	mixed lookup errors preserve adjacent warnings and independent errors

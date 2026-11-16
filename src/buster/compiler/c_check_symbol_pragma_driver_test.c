@@ -147,6 +147,8 @@ static void check_test_driver_weak_alias_diagnostics(CheckTest* test, const char
     snprintf(source, sizeof(source), "%s/weak-alias-diagnostic.c", directory);
     snprintf(object, sizeof(object), "%s/weak-alias-diagnostic.o", directory);
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
+    static const char* const policies[] = { "-ferror-limit=0", "-ferror-limit=1", "-w", "-Werror=ignored-attributes" };
+    static const char sentinel[] = "preserve the existing weak alias object\n";
     for (uint32_t f = 0; loaded && f < fixtures.count; f += 1)
     {
         const CheckSourceFixture* fixture = fixtures.cases + f;
@@ -154,48 +156,75 @@ static void check_test_driver_weak_alias_diagnostics(CheckTest* test, const char
         check_test_expect(test, written, "weak alias diagnostic source written");
         for (uint32_t standard = 0; written && standard < BUSTER_ARRAY_LENGTH(standards); standard += 1)
         {
-            char* expected = NULL;
-            char* oracle_arguments[] = { (char*)clang, (char*)standards[standard], "-fsyntax-only", "-fno-caret-diagnostics", source, NULL };
-            const int oracle = check_test_driver_spawn(oracle_arguments, &expected);
-            const bool lines = (oracle == 0 || oracle == 1) && expected != NULL && check_test_diagnostic_lines(expected, expected_lines, sizeof(expected_lines));
-            check_test_expect(test, lines && oracle == (fixture->rejected ? 1 : 0), "weak alias oracle agrees with independent acceptance expectation");
-            for (uint32_t mode = 0; lines && mode < 4; mode += 1)
+            for (uint32_t policy = 0; policy < BUSTER_ARRAY_LENGTH(policies); policy += 1)
             {
-                const bool deferred = mode >= 2;
-                char* actual = NULL;
-                char* arguments[16] = { (char*)executable, (char*)standards[standard], deferred ? "-c" : "-fsyntax-only",
-                                       "-fno-caret-diagnostics", source };
-                uint32_t count = 5;
-                if (mode == 1)
+                char* expected = NULL;
+                char* oracle_arguments[] = { (char*)clang, (char*)standards[standard], "-fsyntax-only", "-fno-caret-diagnostics", source,
+                                            (char*)policies[policy], NULL };
+                const int oracle = check_test_driver_spawn(oracle_arguments, &expected);
+                const bool lines = (oracle == 0 || oracle == 1) && expected != NULL && check_test_diagnostic_lines(expected, expected_lines, sizeof(expected_lines));
+                check_test_expect(test, lines && oracle == (fixture->rejected ? 1 : 0), "weak alias oracle agrees with independent acceptance expectation");
+                for (uint32_t mode = 0; lines && mode < 6; mode += 1)
                 {
-                    arguments[count++] = "--scalar";
+                    const bool emitting = mode >= 2;
+                    const bool deferred = mode >= 4;
+                    char* actual = NULL;
+                    char* arguments[16] = { (char*)executable, (char*)standards[standard], emitting ? "-c" : "-fsyntax-only",
+                                           "-fno-caret-diagnostics", source, (char*)policies[policy] };
+                    uint32_t count = 6;
+                    if (mode == 1 || mode == 3)
+                    {
+                        arguments[count++] = "--scalar";
+                    }
+                    if (emitting)
+                    {
+                        arguments[count++] = "-o";
+                        arguments[count++] = object;
+                    }
+                    if (deferred)
+                    {
+                        arguments[count++] = "--deferred-bodies";
+                        arguments[count++] = "--lanes";
+                        arguments[count++] = mode == 4 ? "1" : "3";
+                    }
+                    arguments[count] = NULL;
+                    unlink(object);
+                    const bool existing = emitting && (mode & 1u) != 0;
+                    bool published = !existing || parse_test_write(object, sentinel, sizeof(sentinel) - 1);
+                    const int status = check_test_driver_spawn(arguments, &actual);
+                    const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, sizeof(actual_lines)) &&
+                                      strcmp(expected_lines, actual_lines) == 0;
+                    if (emitting && (existing || !fixture->rejected))
+                    {
+                        const int descriptor = open(object, O_RDONLY);
+                        char* contents = NULL;
+                        published &= descriptor >= 0 && check_test_driver_read_file(descriptor, &contents) && contents != NULL;
+                        if (descriptor >= 0)
+                        {
+                            close(descriptor);
+                        }
+                        published &= contents != NULL && (fixture->rejected ? strcmp(contents, sentinel) == 0 :
+                                                            strlen(contents) >= 4 && memcmp(contents, "\177ELF", 4) == 0);
+                        free(contents);
+                    }
+                    else if (emitting)
+                    {
+                        published &= access(object, F_OK) != 0;
+                    }
+                    const bool correct = same && status == oracle && published;
+                    char description[512];
+                    snprintf(description, sizeof(description), "%s, %s %s mode %u: status %d (clang %d), complete diagnostic output and publication", fixture->name,
+                             standards[standard], policies[policy], mode, status, oracle);
+                    check_test_expect(test, correct, description);
+                    if (!correct)
+                    {
+                        fprintf(stderr, "%s\nours:\n%s\nclang:\n%s\n", description, actual != NULL ? actual : "(no output)", expected);
+                    }
+                    free(actual);
+                    unlink(object);
                 }
-                if (deferred)
-                {
-                    arguments[count++] = "-o";
-                    arguments[count++] = object;
-                    arguments[count++] = "--deferred-bodies";
-                    arguments[count++] = "--lanes";
-                    arguments[count++] = mode == 2 ? "1" : "3";
-                }
-                arguments[count] = NULL;
-                unlink(object);
-                const int status = check_test_driver_spawn(arguments, &actual);
-                const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, sizeof(actual_lines)) &&
-                                  strcmp(expected_lines, actual_lines) == 0;
-                const bool correct = same && status == oracle && (!fixture->rejected || access(object, F_OK) != 0);
-                char description[512];
-                snprintf(description, sizeof(description), "%s, %s mode %u: status %d (clang %d), complete diagnostic output and publication", fixture->name,
-                         standards[standard], mode, status, oracle);
-                check_test_expect(test, correct, description);
-                if (!correct)
-                {
-                    fprintf(stderr, "%s\nours:\n%s\nclang:\n%s\n", description, actual != NULL ? actual : "(no output)", expected);
-                }
-                free(actual);
-                unlink(object);
+                free(expected);
             }
-            free(expected);
         }
     }
     unlink(source);
@@ -232,6 +261,9 @@ static void check_test_driver_weak_aliases(CheckTest* test, const char* clang, c
         "int t = 1;\n#pragma weak a = t\nint a = 2;\n",
         // A declared after the pragma with another type: "redeclaration of 'a' with a different type".
         "long t = 1;\n#pragma weak a = t\nextern int a;\n",
+        // Unlike an object/function lookup set, different function parameters can form a valid clang overload set.
+        // This still requires overload selection, so it must remain an explicit refusal rather than ambiguity.
+        "long a(int);\nint t(double d) { return d; }\n#pragma weak a = t\nint use(void) { return a(1); }\n",
     };
     char path[512];
     char objects[3][512];

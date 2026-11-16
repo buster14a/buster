@@ -56,6 +56,36 @@ typedef enum CheckInitStatus
     CHECK_INIT_ATOMIC_BRACES,
 } CheckInitStatus;
 
+// Diagnostic-only failures retain source identity and subobject placement after the strict plan is discarded.
+typedef struct CheckInitFailure CheckInitFailure;
+struct CheckInitFailure
+{
+    CheckInitStatus status;
+    TypeId failed_type;
+    TypeId recovered_type;
+    uint32_t failed_source;
+    uint64_t failed_offset;
+    uint32_t failed_declaration;
+    uint32_t token;
+    uint32_t completion;
+};
+
+typedef struct CheckInitFailureSink CheckInitFailureSink;
+struct CheckInitFailureSink
+{
+    CheckInitFailure* failures;
+    uint32_t count;
+    uint32_t capacity;
+    uint32_t declaration;
+    uint32_t completion;
+    // One report per source conversion, including GNU range repetitions and repeated compound-literal walks.
+    uint8_t* seen;
+    uint32_t token_count;
+    // Rejected declarations retain the completion of every source value, including accepted siblings, for commas.
+    uint32_t* roots;
+    uint32_t root_count;
+};
+
 typedef struct CheckInitPart CheckInitPart;
 struct CheckInitPart
 {
@@ -279,6 +309,8 @@ struct CheckInitWalker
     Arena* output;
     Arena* scratch;
     CheckInitializer* result;
+    CheckInitFailureSink* failures;
+    CheckInitFailure first_failure;
 };
 
 // GNU's obsolete `member: value` is a field designator, not an identifier expression or a conditional colon.
@@ -373,13 +405,48 @@ static void check_init_fail(CheckInitWalker* walker, CheckInitStatus status, uin
 // its source `node` kept where it is the first failure and an incompatible conversion, for clang's words of it.
 static void check_init_fail_conversion(CheckInitWalker* walker, CheckDiagnostic diagnostic, uint32_t token, TypeId type, uint32_t node, uint64_t offset)
 {
-    if (walker->result->status == CHECK_INIT_OK && diagnostic == CHECK_DIAG_INCOMPATIBLE)
+    CheckInitFailureSink* failures = walker->failures;
+    const bool recover = failures != NULL && walker->result->status == CHECK_INIT_OK && diagnostic == CHECK_DIAG_INCOMPATIBLE;
+    if (recover)
     {
-        walker->result->failed_type = type;
-        walker->result->failed_source = node + 1;
-        walker->result->failed_offset = offset;
+        const CheckInitFailure failure = {
+            .status = CHECK_INIT_INVALID,
+            .failed_type = type,
+            .failed_source = node + 1,
+            .failed_offset = offset,
+            .failed_declaration = failures->declaration,
+            .token = token,
+            .completion = failures->completion,
+        };
+        if (walker->first_failure.failed_source == 0)
+        {
+            walker->first_failure = failure;
+        }
+        if (token >= failures->token_count || node >= failures->root_count ||
+            (!failures->seen[token] && failures->count == failures->capacity))
+        {
+            check_init_fail(walker, CHECK_INIT_RESOURCE, token);
+        }
+        else
+        {
+            if (!failures->seen[token])
+            {
+                failures->failures[failures->count++] = failure;
+                failures->seen[token] = 1;
+            }
+            failures->roots[node] = failures->completion;
+        }
     }
-    check_init_fail(walker, diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
+    else
+    {
+        if (walker->result->status == CHECK_INIT_OK && diagnostic == CHECK_DIAG_INCOMPATIBLE)
+        {
+            walker->result->failed_type = type;
+            walker->result->failed_source = node + 1;
+            walker->result->failed_offset = offset;
+        }
+        check_init_fail(walker, diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
+    }
 }
 
 static void check_init_semantic_warning(CheckInitWalker* walker, const CheckWarningEvent* event, const CheckWarningNote* notes, uint32_t count)
@@ -508,34 +575,40 @@ static bool check_init_semantic_publish(CheckInitWalker* walker)
 
 static void check_init_warning(CheckInitWalker* walker, uint32_t token, TypeId object_type, bool string)
 {
-    if (walker->result->warning_count == 0)
+    // Conversion recovery visits elements the strict walk never reached (#2441). Keep its excess-warning
+    // frontier: a rejected list must not acquire a trailing excess warning. Later valid nested lists still
+    // need their own error state and interleaved publication before their excess warnings can be recovered.
+    if (walker->first_failure.failed_source == 0)
     {
-        walker->result->warning_token = token;
-    }
-    walker->result->warning_count += 1;
-    const CheckWarningEvent event = {
-        .id = CHECK_WARNING_ID_EXCESS_INITIALIZERS,
-        .kind = CHECK_WARNING_EVENT_MESSAGE,
-        .token = token,
-        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
-        .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-        .completion = walker->warning_completion,
-        .payload = { .first_type = object_type, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
-                     .data = (UINT32_C(1) << CHECK_WARNING_ID_EXCESS_INITIALIZERS) | (string ? CHECK_INIT_EXCESS_STRING : 0) },
-    };
-    check_init_semantic_warning(walker, &event, NULL, 0);
-    CheckInitWarningCollector* warnings = walker->warnings;
-    if (warnings != NULL && token < warnings->token_count && !warnings->seen[token])
-    {
-        CheckInitWarningSink* sink = warnings->sink;
-        if (sink->count == sink->capacity)
+        if (walker->result->warning_count == 0)
         {
-            check_init_fail(walker, CHECK_INIT_RESOURCE, token);
+            walker->result->warning_token = token;
         }
-        else
+        walker->result->warning_count += 1;
+        const CheckWarningEvent event = {
+            .id = CHECK_WARNING_ID_EXCESS_INITIALIZERS,
+            .kind = CHECK_WARNING_EVENT_MESSAGE,
+            .token = token,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = walker->warning_completion,
+            .payload = { .first_type = object_type, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                         .data = (UINT32_C(1) << CHECK_WARNING_ID_EXCESS_INITIALIZERS) | (string ? CHECK_INIT_EXCESS_STRING : 0) },
+        };
+        check_init_semantic_warning(walker, &event, NULL, 0);
+        CheckInitWarningCollector* warnings = walker->warnings;
+        if (warnings != NULL && token < warnings->token_count && !warnings->seen[token])
         {
-            sink->tokens[sink->count++] = token;
-            warnings->seen[token] = 1;
+            CheckInitWarningSink* sink = warnings->sink;
+            if (sink->count == sink->capacity)
+            {
+                check_init_fail(walker, CHECK_INIT_RESOURCE, token);
+            }
+            else
+            {
+                sink->tokens[sink->count++] = token;
+                warnings->seen[token] = 1;
+            }
         }
     }
 }
@@ -3002,7 +3075,7 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
                                    const CheckStream* stream, const CheckInitString* strings, uint32_t string_count, CheckSparseColumn string_ids,
                                    TypeId type, uint32_t begin, uint32_t end, bool static_storage, bool diagnostic_only, bool ignore_excess,
                                    Arena* output, Arena* scratch, CheckInitializer* result, const CheckGraph* graph,
-                                   CheckInitWarningCollector* warnings, const CheckInitObjects* objects)
+                                   CheckInitWarningCollector* warnings, const CheckInitObjects* objects, CheckInitFailureSink* failures)
 {
     *result = (CheckInitializer){
         .type = type,
@@ -3016,6 +3089,9 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
                  (string_count == 0 || (strings != 0 && check_sparse_present(string_ids))) && (stream->count == 0 || (check_stream_has_values(stream) && stream->diagnostics != 0));
     valid = valid && (graph == NULL || (graph->count == stream->count && (graph->count == 0 ||
             (graph->ops != NULL && graph->tokens != NULL && graph->operand0 != NULL && graph->operand1 != NULL && graph->operand2 != NULL))));
+    valid = valid && (failures == NULL || (diagnostic_only && failures->failures != NULL && failures->seen != NULL &&
+                     failures->token_count >= parser->tokens.count && failures->root_count == stream->count &&
+                     (failures->root_count == 0 || failures->roots != NULL)));
     result->status = valid ? CHECK_INIT_OK : CHECK_INIT_INVALID;
     if (valid && type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC && parser->tokens.kinds[begin] == PARSE_KIND_L_BRACE)
     {
@@ -3054,8 +3130,31 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
             .output = output,
             .scratch = scratch,
             .result = result,
+            .failures = failures,
         };
         valid = check_init_walk(&walker, type, begin, end);
+        if (failures != NULL && walker.first_failure.failed_source != 0)
+        {
+            // A failed element consumes its subobject but never contributes a write. Keep valid siblings' source
+            // roots before discarding the entire diagnostic plan; no partial plan reaches object preparation.
+            for (uint32_t part = 0; part < result->count; part += 1)
+            {
+                const CheckInitPart* value = result->parts + part;
+                if (value->kind == CHECK_INIT_VALUE && value->node < failures->root_count)
+                {
+                    failures->roots[value->node] = failures->completion;
+                }
+            }
+            if (valid)
+            {
+                result->status = walker.first_failure.status;
+                result->failed_type = walker.first_failure.failed_type;
+                result->failed_source = walker.first_failure.failed_source;
+                result->failed_offset = walker.first_failure.failed_offset;
+                result->failed_token = walker.first_failure.token;
+            }
+            valid = false;
+        }
         if (!check_init_semantic_publish(&walker))
         {
             valid = false;
@@ -3113,7 +3212,7 @@ static bool check_initializer_plan(TypeTable* types, const Parser* parser, const
                                    Arena* output, Arena* scratch, CheckInitializer* result, const CheckGraph* graph)
 {
     return check_initializer_plan_warnings(types, parser, token_nodes, stream, strings, string_count, string_ids, type, begin, end,
-                                           static_storage, diagnostic_only, ignore_excess, output, scratch, result, graph, NULL, NULL);
+                                           static_storage, diagnostic_only, ignore_excess, output, scratch, result, graph, NULL, NULL, NULL);
 }
 
 static bool check_initializer_run(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,

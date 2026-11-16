@@ -393,7 +393,13 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
         // the clone. Keep these diagnostics recoverable so subsequent declarations remain visible.
         bool diagnosed = false;
         const uint32_t clone = selected > record->token ? selected : record->token;
-        if (!mismatched && defined && alias.previous != BUSTER_CHECK_NONE && (kind == C_BINDING_FUNCTION || kind == C_BINDING_OBJECT))
+        const uint8_t alias_kind = alias.previous != BUSTER_CHECK_NONE ? input->declaration_kinds[alias.previous] : C_BINDING_KINDS;
+        const bool functions = kind == C_BINDING_FUNCTION && alias_kind == C_BINDING_FUNCTION;
+        // An object in the lookup set makes every reference ambiguous, even when its kind or type differs from the
+        // clone's. Two functions with different parameter types can instead form a valid overload set in clang; those
+        // still need overload selection and keep the existing refusal.
+        const bool ambiguous = !mismatched || (!functions && (alias_kind == C_BINDING_FUNCTION || alias_kind == C_BINDING_OBJECT));
+        if (ambiguous && defined && alias.previous != BUSTER_CHECK_NONE && (kind == C_BINDING_FUNCTION || kind == C_BINDING_OBJECT))
         {
             for (uint32_t event = 0; event < bindings->count; event += 1)
             {
@@ -403,11 +409,13 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
                     bindings->point[event] > clone && resolved < input->token_count && input->objects[resolved] == input->objects[alias.previous])
                 {
                     const uint32_t before = input->report_count;
-                    check_input_report(reader, token, kind == C_BINDING_FUNCTION ? CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS : CHECK_INPUT_WEAK_ALIAS_OBJECT_AMBIGUOUS);
+                    check_input_report(reader, token, functions ? CHECK_INPUT_WEAK_ALIAS_AMBIGUOUS : CHECK_INPUT_WEAK_ALIAS_OBJECT_AMBIGUOUS);
                     if (input->report_count > before)
                     {
-                        input->reports[before].note_token = kind == C_BINDING_FUNCTION ? alias.previous : selected;
-                        input->reports[before].value = kind == C_BINDING_FUNCTION ? record->source + 3 : alias.previous;
+                        input->reports[before].note_token = functions ? alias.previous : selected;
+                        input->reports[before].value = functions ? record->source + 3 : alias.previous;
+                        // A function clone's location is the pragma's name, not the target function's declaration.
+                        input->reports[before].detail = !functions && kind == C_BINDING_FUNCTION ? record->source + 4 : 0;
                         diagnosed = check_input_recover_reports(reader, before) || diagnosed;
                     }
                 }

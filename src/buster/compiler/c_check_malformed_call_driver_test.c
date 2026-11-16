@@ -18,6 +18,17 @@ static void check_test_malformed_call_views(CheckTest* test)
         28,
         29,
         30,
+        31,
+        35,
+        36,
+        37,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
     };
     for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(cases); fixture += 1)
     {
@@ -71,6 +82,18 @@ static void check_test_malformed_call_views(CheckTest* test)
                 check_test_expect(test, rechecked && rejected.parser.invalid_call_sources == view->invalid_call_sources &&
                                         rejected.parser.invalid_call_values == view->invalid_call_values && rejected.parser.invalid_call_count == view->invalid_call_count,
                                   "malformed calls: rejected view borrows both invalid-call columns");
+            }
+            else if (c >= 31 && c <= 40)
+            {
+                const Parser* view = &resumed.parser;
+                const uint32_t calls = c == 36 || c == 37 ? 2 : 1;
+                bool metadata = !parsed && status == CHECK_PREFIX_READY && view->invalid_call_count == calls &&
+                                view->invalid_call_sources != NULL && view->invalid_call_values != NULL;
+                for (uint32_t i = 0; metadata && i < calls; i += 1)
+                {
+                    metadata = view->invalid_call_values[i] == 1 && (i == 0 || view->invalid_call_sources[i - 1] < view->invalid_call_sources[i]);
+                }
+                check_test_expect(test, metadata, "malformed calls: earlier arguments and repeated/nested repairs keep unique ordered callee sources and value flags");
             }
             else
             {

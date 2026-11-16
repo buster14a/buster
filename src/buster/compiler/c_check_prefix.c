@@ -507,7 +507,17 @@ static bool check_prefix_resumes(const Parser* view, const ParseDiagnostic* diag
     const uint32_t arguments = diagnostic->resume_call_arguments;
     valid = valid && (arguments == 0 || (diagnostic->resume_call && diagnostic->resume_call_value && arguments > diagnostic->token &&
                                         arguments < diagnostic->resume_end - 1 && view->tokens.kinds[arguments - 1] == PARSE_KIND_COMMA));
+    valid = valid && (!diagnostic->resume_call || !diagnostic->resume_call_value ||
+                      (diagnostic->token >= callee + 2 && (diagnostic->token == callee + 2 || view->tokens.kinds[diagnostic->token - 1] == PARSE_KIND_COMMA)));
     return valid;
+}
+
+// The callee, opening parenthesis and any earlier complete arguments. With a later suffix, its first argument
+// consumes the comma before the rejected argument; without one, remove that comma as well as the rejected argument.
+static uint32_t check_prefix_call_prefix(const ParseDiagnostic* diagnostic)
+{
+    return diagnostic->resume_call_value && diagnostic->token > diagnostic->resume_callee + 2 ?
+           diagnostic->token - diagnostic->resume_callee - (diagnostic->resume_call_arguments == 0) : 2;
 }
 
 // `diagnostic` at the original's tokens, from a view's whose tokens' originals `origin` has (a synthetic `;`'s, the
@@ -772,13 +782,16 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             last = taken ? (diagnostic->resume_end != 0 ? diagnostic->resume_end - 1 : diagnostic->token) : last;
             insert += taken && !diagnostic->resume_delete;
             const uint32_t arguments = diagnostic->resume_call_arguments;
-            retained += taken && diagnostic->resume_call ? arguments != 0 ? 2u + diagnostic->resume_end - arguments : 3u : 0u;
+            retained += taken && diagnostic->resume_call ? check_prefix_call_prefix(diagnostic) +
+                                                          (arguments != 0 ? diagnostic->resume_end - arguments : 1u) : 0u;
             repairs += taken;
             discard += taken && diagnostic->resume_end != 0 ? diagnostic->resume_end - begin : 0;
             // At most one tail is taken in a round (limit above). A tail starting before its error also removes
             // diagnostics already read in that span, such as an unknown parameter type in a later declarator.
-            preserve_begin = taken && diagnostic->resume_begin != 0 ? begin : preserve_begin;
-            preserve_end = taken && diagnostic->resume_begin != 0 ? diagnostic->token : preserve_end;
+            // An ordinary call keeps that prefix; its next parse republishes those diagnostics, without duplicates.
+            const bool preserve = taken && diagnostic->resume_begin != 0 && !(diagnostic->resume_call && diagnostic->resume_call_value);
+            preserve_begin = preserve ? begin : preserve_begin;
+            preserve_end = preserve ? diagnostic->token : preserve_end;
         }
         uint32_t preserved = 0;
         for (uint32_t d = 0; preserve_begin != 0 && d < current->diagnostic_count; d += 1)
@@ -838,10 +851,11 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                         if (diagnostic->resume_call)
                         {
                             const uint32_t arguments = diagnostic->resume_call_arguments != 0 ? diagnostic->resume_call_arguments : diagnostic->resume_end - 1;
-                            const uint32_t retained_call = 2u + diagnostic->resume_end - arguments;
+                            const uint32_t prefix = check_prefix_call_prefix(diagnostic);
+                            const uint32_t retained_call = prefix + diagnostic->resume_end - arguments;
                             for (uint32_t c = 0; c < retained_call; c += 1)
                             {
-                                const uint32_t token = c < 2 ? diagnostic->resume_callee + c : arguments + c - 2;
+                                const uint32_t token = c < prefix ? diagnostic->resume_callee + c : arguments + c - prefix;
                                 view->tokens.kinds[written] = current->tokens.kinds[token];
                                 view->tokens.names[written] = current->tokens.names[token];
                                 view->tokens.sources[written] = current->tokens.sources[token];
@@ -905,41 +919,51 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
         if (resumed->status == CHECK_PREFIX_READY)
         {
             check_prefix_sort_diagnostics(resumed->diagnostics, temporary, total);
-            uint32_t calls = original->invalid_call_count;
+            uint32_t calls = 0;
             for (uint32_t d = 0; d < total; d += 1)
             {
-                calls += resumed->diagnostics[d].resume_call;
+                const ParseDiagnostic* diagnostic = resumed->diagnostics + d;
+                if (diagnostic->resume_call && diagnostic->resume_callee < original_count)
+                {
+                    temporary[calls] = *diagnostic;
+                    temporary[calls].token = original->tokens.sources[diagnostic->resume_callee];
+                    calls += 1;
+                }
             }
-            uint32_t* sources = calls != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, calls) : NULL;
-            uint8_t* values = calls != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, calls) : NULL;
-            resumed->status = calls == 0 || (sources != NULL && values != NULL) ? CHECK_PREFIX_READY : CHECK_PREFIX_RESOURCE;
+            // A later invalid argument can revisit an outer callee after a nested one's error. Diagnostic order no
+            // longer orders their callees. Every retained call was a pending repair; its copied diagnostics above
+            // leave pending's original-token-sized scratch free for the same stable sort, now by callee source.
+            resumed->status = calls <= original_count ? CHECK_PREFIX_READY : CHECK_PREFIX_RESOURCE;
+            if (resumed->status == CHECK_PREFIX_READY)
+            {
+                check_prefix_sort_diagnostics(temporary, pending, calls);
+            }
+            const uint64_t capacity = (uint64_t)original->invalid_call_count + calls;
+            uint32_t* sources = resumed->status == CHECK_PREFIX_READY && capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, capacity) : NULL;
+            uint8_t* values = sources != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, capacity) : NULL;
+            resumed->status = resumed->status == CHECK_PREFIX_READY && (capacity == 0 || (sources != NULL && values != NULL)) ? CHECK_PREFIX_READY : CHECK_PREFIX_RESOURCE;
             if (sources != NULL && values != NULL)
             {
                 const uint32_t inherited = original->invalid_call_count;
                 uint32_t prior = 0;
+                uint32_t next = 0;
                 uint32_t written = 0;
-                for (uint32_t d = 0; d < total; d += 1)
+                while (prior < inherited || next < calls)
                 {
-                    const ParseDiagnostic* diagnostic = resumed->diagnostics + d;
-                    if (diagnostic->resume_call && diagnostic->resume_callee < original_count)
+                    const bool take_prior = prior < inherited && (next == calls || original->invalid_call_sources[prior] <= temporary[next].token);
+                    const uint32_t source = take_prior ? original->invalid_call_sources[prior] : temporary[next].token;
+                    const uint8_t value = take_prior ? (original->invalid_call_values != NULL ? original->invalid_call_values[prior] : 0) : temporary[next].resume_call_value;
+                    if (written != 0 && sources[written - 1] == source)
                     {
-                        const uint32_t source = original->tokens.sources[diagnostic->resume_callee];
-                        // Diagnostics have original token order; merge inherited callee sources in the same order.
-                        while (prior < inherited && original->invalid_call_sources[prior] <= source)
-                        {
-                            sources[written] = original->invalid_call_sources[prior];
-                            values[written++] = original->invalid_call_values != NULL ? original->invalid_call_values[prior] : 0;
-                            prior += 1;
-                        }
-                        sources[written] = source;
-                        values[written++] = diagnostic->resume_call_value;
+                        values[written - 1] |= value;
                     }
-                }
-                while (prior < inherited)
-                {
-                    sources[written] = original->invalid_call_sources[prior];
-                    values[written++] = original->invalid_call_values != NULL ? original->invalid_call_values[prior] : 0;
-                    prior += 1;
+                    else
+                    {
+                        sources[written] = source;
+                        values[written++] = value;
+                    }
+                    prior += take_prior;
+                    next += !take_prior;
                 }
                 Parser* view = (Parser*)current;
                 view->invalid_call_sources = sources;

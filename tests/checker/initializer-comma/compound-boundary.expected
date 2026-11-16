@@ -1,0 +1,3 @@
+tests/checker/initializer-comma/compound-boundary.c:6:24: error: initializing 'int *' with an expression of incompatible type 'struct Source'
+tests/checker/initializer-comma/compound-boundary.c:6:32: error: initializing 'int *' with an expression of incompatible type 'struct Source'
+tests/checker/initializer-comma/compound-boundary.c:7:11: error: initializing 'int *' with an expression of incompatible type 'struct Source'
