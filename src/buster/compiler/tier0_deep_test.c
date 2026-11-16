@@ -503,7 +503,7 @@ static __attribute__((no_sanitize("function"))) void tier0_test_deep(Tier0TestTa
     }
     ready = ready && tier0_test_expect(tally, mprotect(region, BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_DEEP_CASES, PROT_READ | PROT_EXEC) == 0, "deep",
                                        "the code can't be loaded");
-    const pid_t child = ready ? fork() : -1;
+    const pid_t child = ready ? tier0_test_fork() : -1;
     tier0_test_expect(tally, !ready || child >= 0, "deep", "fork failed");
     if (child == 0)
     {

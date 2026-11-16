@@ -1155,6 +1155,15 @@ static __attribute__((noinline)) BUSTER_NO_SANITIZER_INSTRUMENTATION void tier0_
     __asm__ volatile("syscall" : "+a"(call) : "D"(ARCH_SET_FS), "S"(saved) : "rcx", "r11", "memory");
 }
 
+// Forks with nothing buffered, so that the child holds no copy of the test's output to write again at its exit:
+// ThreadSanitizer's _exit flushes stdout and stderr, and every child's wrote the parent's pending lines once more.
+static pid_t tier0_test_fork(void)
+{
+    fflush(stdout);
+    fflush(stderr);
+    return fork();
+}
+
 // Generated code has no Clang function-type prefix before its entry point.
 // Disable only that metadata check at the call boundary; keep all other checks.
 static __attribute__((no_sanitize("function"))) bool tier0_test_run(const Tier0Program* program, const Tier0TestCode* code, const Tier0TestData* data, uint64_t inputs[BUSTER_TIER0_TEST_INPUTS][3],
@@ -1168,10 +1177,7 @@ static __attribute__((no_sanitize("function"))) bool tier0_test_run(const Tier0P
     const uint64_t data_pages = (data_bytes + BUSTER_TIER0_TEST_PAGE - 1) / BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_PAGE + BUSTER_TIER0_TEST_PAGE;
     Tier0TestOutcome* shared = mmap(0, sizeof(Tier0TestOutcome) * BUSTER_TIER0_TEST_INPUTS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     bool result = shared != MAP_FAILED;
-    // The child leaves no copy of buffered output to write again at its exit (a sanitizer's _exit flushes).
-    fflush(stdout);
-    fflush(stderr);
-    const pid_t child = result ? fork() : -1;
+    const pid_t child = result ? tier0_test_fork() : -1;
     if (child == 0)
     {
         // A program runs for milliseconds; code that loops (a frame laid out wrong can overwrite a loop's counter) is
@@ -3109,7 +3115,7 @@ static __attribute__((no_sanitize("function"))) void tier0_test_variadic_calls(T
     }
     loaded = loaded && mprotect(region, pages, PROT_READ | PROT_EXEC) == 0;
     ready = ready && tier0_test_expect(tally, loaded, "variadic calls", "the code can't be loaded");
-    const pid_t child = ready ? fork() : -1;
+    const pid_t child = ready ? tier0_test_fork() : -1;
     if (child == 0)
     {
         alarm(BUSTER_TIER0_TEST_RUN_SECONDS);
@@ -3291,7 +3297,7 @@ static __attribute__((no_sanitize("function"))) void tier0_test_unsigned_floatin
         }
     }
     ready = ready && tier0_test_expect(tally, mprotect(region, 8 * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_EXEC) == 0, "unsigned floating", "the code can't be loaded");
-    const pid_t child = ready ? fork() : -1;
+    const pid_t child = ready ? tier0_test_fork() : -1;
     tier0_test_expect(tally, !ready || child >= 0, "unsigned floating", "fork failed");
     if (child == 0)
     {
@@ -3368,7 +3374,7 @@ static __attribute__((no_sanitize("function"))) void tier0_test_unsigned_floatin
         }
     }
     // The conversions to U64 again, with invalid unmasked: every value is in U64's range, so none may trap.
-    const pid_t unmasked = ready ? fork() : -1;
+    const pid_t unmasked = ready ? tier0_test_fork() : -1;
     tier0_test_expect(tally, !ready || unmasked >= 0, "unsigned floating", "fork failed");
     if (unmasked == 0)
     {
@@ -3679,7 +3685,7 @@ static void tier0_test_unsigned_limits(Tier0TestTally* tally)
     }
     ready = ready && tier0_test_expect(tally, mprotect(region, pages * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_EXEC) == 0, "unsigned floating limits",
                                        "the code can't be loaded");
-    const pid_t child = ready ? fork() : -1;
+    const pid_t child = ready ? tier0_test_fork() : -1;
     tier0_test_expect(tally, !ready || child >= 0, "unsigned floating limits", "fork failed");
     if (child == 0)
     {
@@ -3751,7 +3757,7 @@ static void tier0_test_unsigned_limits(Tier0TestTally* tally)
         }
     }
     // The conversions to U64 again, with invalid unmasked: every value is in U64's range, so none may trap.
-    const pid_t unmasked = ready ? fork() : -1;
+    const pid_t unmasked = ready ? tier0_test_fork() : -1;
     tier0_test_expect(tally, !ready || unmasked >= 0, "unsigned floating limits", "fork failed");
     if (unmasked == 0)
     {
@@ -4330,7 +4336,7 @@ static void tier0_test_segments(Tier0TestTally* tally)
         ready = ready && tier0_test_expect(tally, length > 0, "segments", "case %u: the encoder failed", k);
     }
     ready = ready && tier0_test_expect(tally, mprotect(region, (uint64_t)count * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_EXEC) == 0, "segments", "the code can't be loaded");
-    const pid_t child = ready ? fork() : -1;
+    const pid_t child = ready ? tier0_test_fork() : -1;
     tier0_test_expect(tally, !ready || child >= 0, "segments", "fork failed");
     if (child == 0)
     {
@@ -5174,7 +5180,7 @@ static uint8_t* tier0_test_aggregate_place(uint8_t* data, uint32_t s, uint32_t s
 // function at page `first + r`'s address, called with no arguments. Returns whether the child exited with status 0.
 static __attribute__((no_sanitize("function"))) bool tier0_test_aggregate_run(Tier0TestShared* shared, uint8_t* code, uint32_t first)
 {
-    const pid_t child = fork();
+    const pid_t child = tier0_test_fork();
     if (child == 0)
     {
         alarm(BUSTER_TIER0_TEST_RUN_SECONDS);

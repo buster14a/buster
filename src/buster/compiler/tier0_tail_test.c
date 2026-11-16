@@ -514,7 +514,7 @@ static uint32_t tier0_test_tail_pieces(const Tier0TestPassed* passed, Tier0Part*
 // Returns whether the child exited with status 0.
 static __attribute__((no_sanitize("function"))) bool tier0_test_tail_run(Tier0TestTailShared* shared, uint8_t* code)
 {
-    const pid_t child = fork();
+    const pid_t child = tier0_test_fork();
     if (child == 0)
     {
         alarm(BUSTER_TIER0_TEST_RUN_SECONDS);

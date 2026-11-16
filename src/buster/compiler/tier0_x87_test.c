@@ -973,7 +973,7 @@ struct Tier0TestX87Shared
 typedef void (*Tier0TestX87Run)(const void* code, Tier0TestX87Shared* shared);
 static bool tier0_test_x87_native(const uint8_t* code, uint32_t length, Tier0TestX87Run run, Tier0TestX87Shared* shared)
 {
-    const pid_t child = fork();
+    const pid_t child = tier0_test_fork();
     if (child == 0)
     {
         alarm(BUSTER_TIER0_TEST_RUN_SECONDS);
