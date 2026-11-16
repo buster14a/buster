@@ -1,7 +1,7 @@
 # The one-core path: 73 cycles a token, on records the vector lanes can use (#2850): design
 
-Status: design, with its first two steps and step 2's first piece measured.
-Nothing here is in a compile.
+Status: design, with its first two steps, step 2's first piece and step 5's
+census measured. Nothing here is in a compile.
 [#2850](https://github.com/buster14a/buster/issues/2850) has the design whole:
 the budget, the data design and what would refute it. It is
 [#672](https://github.com/buster14a/buster/issues/672)'s per-core research
@@ -30,7 +30,13 @@ made the rest of T's records from the same words, a loop a class: exact, and
 T whole at 38 cycles an evaluated node on `sqlite3.c` (32 with lean records)
 where the shadow's own T takes 89.6 and the piece's gate was 25. An
 operator's whole record costs 56 cycles made that way, where step 0's lanes
-made its fact bytes for 12.
+made its fact bytes for 12. Step 5's census counted the kernel's 121 cycles a
+token by cause: 82% page faults, 58% the clearing of fresh 2 MB pages alone.
+What a compile would still take from the kernel with every arena reused or
+windowed is 5.8 to 6.4 cycles a token at warm-cache costs and 10.3 to 12.5 at
+the costs the compile pays, and beside it 5.2 to 6.7 more that no arena
+removes (the include search, the executable's own pages, the arenas' calls):
+the budget's 6 for the kernel doesn't hold.
 
 ## The budget
 
@@ -57,7 +63,7 @@ token; the issue has each row's source:
 | 2 | The machine on these records where it runs (#2524's steps 2 to 4) | the bodies' middle at 38 cycles a node or less in `-c sqlite3.c` | first piece measured, in the shadow: T whole from the fact words, exact; 38 cycles an evaluated node with whole records and 32 with lean ones, where its own gate was 25 |
 | 3 | The front's row, into the window | 35 cycles a token or less | not started |
 | 4 | Tier 0's row | 10 cycles a token or less, the object's bytes unchanged | not started |
-| 5 | Fresh memory and the fixed costs | 6 cycles a token or less | not started |
+| 5 | Fresh memory and the fixed costs | 6 cycles a token or less | census measured: the kernel 121 cycles a token; its floor 5.8 to 6.4 at item 3's costs, 10.3 to 12.5 at the compile's, and 5.2 to 6.7 more beside it: the 6 refuted |
 
 ## Step 0: the lanes on the real nodes
 
@@ -685,6 +691,109 @@ packed (the record's "The versions" has each build):
   words' records. What that leaves to measure first is which of T's fields
   C and X read of each operator's record on these windows, beyond the seven
   fact bytes step 0's lanes made.
+
+## Step 5's first piece: a census of the kernel's time and fresh memory
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/kernel-census-2873-2026-11-16)
+(`ea733fbc`), [#2873](https://github.com/buster14a/buster/issues/2873). A
+count on the compile as it is, `-c sqlite3.c` at main `3d0d56ed`; no
+compile changes. The budget gives the kernel and the process's fixed costs 6
+of the 73 cycles a token, from 120 today.
+
+### What it is
+
+- **The kernel's cycles by cause.** 24 compiles recorded on CPU 2 as a whole
+  (`perf record -C 2`): the kernel's cycles with their call chains, every
+  fault with its address and the size of the page it mapped, every mapping's
+  record. A patch the record keeps and buster doesn't merge has
+  `--time-stages` print its laps as CLOCK_MONOTONIC times, which put each
+  sample in its stage. A sample's cause is the innermost way into the kernel
+  on its stack; a sample in a fault's handler is that fault's.
+- **Fresh memory by owner.** Each of the compile's 46 mappings is named by its
+  `strace` stack's source line; the compiles run without address-space
+  randomization, so each fault's address names its owner. gdb names the
+  callers of the large `memset`s, and IBS op samples say which stages load
+  each owner's pages again.
+- **What a fresh page costs**, by how it is taken: a small program
+  (`pagecost.c`), case by case, by its own counters.
+- **The floor**: what would still come from the kernel with every arena
+  reused or bounded by a window (#2536), at those costs and at the compile's.
+
+### What it measured
+
+On the 9700X, CPU 2, under the lock.
+
+- **The kernel takes 86.5 M cycles a compile, 120.8 a token**, counted on the
+  CPU. The process's own counters (`perf stat`, `measure-compile`) see
+  79.8 M: Linux 6.18's `do_exit` stops a task's perf events before
+  `exit_mm`, so no per-task count holds the address space's teardown, with
+  the exit helper or without it. The teardown is 5.1 M of the difference.
+- **By cause**, of the compile's own kernel cycles (each a token at the
+  unrecorded total): page faults 81.9% (98.9), 57.9% the clearing of fresh
+  2 MB pages alone; the teardown 5.6% (6.8); the arenas' own system calls
+  4.7% (5.6: `munmap` 3.3, `madvise` 0.9, `mprotect` 0.8, `mmap` 0.6); the
+  source's read 4.0% (4.8: the include search's 374 opens, 207 of them
+  failed probes, 2.6, the source's populated mapping 2.2); the object's write
+  1.4% (1.7); timer interrupts 1.2% (1.5); the start, exec to the first
+  stage, 0.7% (0.8); the rest of the exit 0.5% (0.6). 0.07% is in no row.
+- **By stage** (recorded): check-input 35 M cycles of faults, parse 17.5 M, preprocess
+  7.8 M and 3.8 M of system calls (the source's read and the include
+  search), check-expressions 5.6 M, check-program 3.4 M; the backend's stages
+  about 1 M each or less.
+- **Fresh memory:** 305 MB first touched in 7,074 faults, for a 231 MB peak.
+  The driver's scratch (96 MB: the parser's arrays, then the reader's), arena
+  (80 MB: the reader's output) and output arena (48 MB: the graph) are 73% of
+  the bytes and 60% of the faults' cycles. The reader's sparse columns are
+  16 MB in base pages, 4,169 faults at 642 K cycles a MB, three times a huge
+  page's; the parser's columns, the file cache's token arenas and the
+  preprocessor's output are 12 to 16 MB each. The owners' faults are the
+  faults counted: 6,907 against the 6,902 an unrecorded compile's counter
+  counts.
+- **Read again:** the parser's columns until Tier 0, the driver's arena and
+  scratch until Tier 0 and the object, the type and intern tables; no sampled
+  load of the reader's sparse columns, the lexer's tokens or the program's
+  controls after the stages that write them.
+- **A fresh page's cost:** a 4 KB page first written 2,252 kernel cycles
+  (576 K a MB), a 2 MB page 461 K (230 K a MB, 95.6% of it clearing); a
+  file's page with fault-around 179, populated 256, mapped alone 2,513; a page
+  written over the last file on tmpfs 1,853. The compile pays two to four
+  times as much for what it maps (703 cycles a page of the source, 10.9 K a
+  fault of the executable's text), where the page cache's structures are cold.
+
+### Against its gate
+
+- **95% of the kernel's cycles in a named row: met**, 99.93%.
+- **The owners' rows sum to the faults counted: met**, within 5 faults.
+- **The floor at or under 6 cycles a token, the start and exit included: met
+  only at the best case.** The source's mapping, the object's write, the
+  tables that outlive a window (the intern and type tables, the fact words,
+  the object's bytes: 3.6 to 5.8 MB, an estimate) with a window's working
+  set, the stack, the start, the exit and its teardown are 5.8 to 6.4 cycles
+  a token at the small program's costs, packed in huge pages, and 10.3 to
+  12.5 at the compile's own costs in base pages.
+
+**Step 5's allocation is refuted** by the issue's own two conditions. Beside
+the floor, 5.2 to 6.7 cycles a token are neither fresh memory nor the start
+and exit: the include search (2.6), the executable's own pages after its
+start (2.5), the arenas' reservations and commits (up to 1.5). And at the
+costs the compile pays, the source's mapping (2.2), the object's write (1.7)
+and the start and exit (1.4) are 5.3 before any table.
+
+### What it means
+
+- **The kernel's row is about 11 cycles a token at the least** on this input,
+  and 15 to 19 at today's costs: the design's 6 is out of reach by arena
+  reuse and windows alone.
+- **What would move the rest is not memory reuse:** the include search's
+  probes and opens (a compile of 157 headers), the executable's touched code
+  (177 faults, each mapping up to 64 KB of cold page cache), the source's
+  mapping (a cold walk of the page cache a 4 KB page at a time) and the
+  object's write.
+- **Today's 121 is mostly the clearing of fresh huge pages**: 305 MB first
+  touched where the floor is a few megabytes. That is #1701's list, and
+  #2536's windows are its answer.
+- **For measuring:** a compile's kernel cycles counted by its own task's
+  counters leave out its teardown on this kernel; the CPU's count holds it.
 
 ## Related
 
