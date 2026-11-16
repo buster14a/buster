@@ -2,7 +2,8 @@
 // number to the trace and returns its value, so that the trace shows which operands ran and in what order; nested three
 // deep and more, mixed `&&`, `||` and `!`; in `if`, `while`, `for` and `do` conditions, a conditional's condition and
 // a statement expression's `if`; operands with side effects of their own (`i++`, assignments, a comma); operands of
-// every scalar type, NaN among the doubles; a first operand the program knows; and a long chain.
+// every scalar type, NaN among the doubles; a first operand the program knows; and a long chain. Then values whose first
+// operand is an `&&` or `||` (#2891): returned, assigned, an expression statement's, under `!`s, with effects of their own.
 typedef unsigned long U;
 
 static U trace;
@@ -128,6 +129,8 @@ static int types(int n, double d, float f, signed char sc, unsigned short us, _B
     {
         r += 16;
     }
+    r += ((td(72, d) && f) || (sc && !us)) * 32;
+    r += (!(ll && tp(73, p)) && (w || ull)) * 64;
     return r;
 }
 
@@ -150,6 +153,8 @@ static int known(int a, int b)
     {
         r += 8;
     }
+    r += ((1 && t(86, a)) || t(87, b)) * 16;
+    r += ((0 || t(88, b)) && t(89, a)) * 32;
     return r;
 }
 
@@ -181,6 +186,27 @@ static int chain(unsigned n)
     return r;
 }
 
+static int value_chain(int a, int b, int c)
+{
+    return t(100, a) && t(101, b) && t(102, c);
+}
+
+static int values(int a, int b, int c)
+{
+    int i = a;
+    int r = value_chain(a, b, c);
+    r = r * 3 + ((t(103, a) || t(104, b)) && !t(105, c));
+    r = r * 3 + (!(t(106, a) && t(107, b)) || (t(108, c) && t(109, !a)));
+    const int x = (!(t(110, a) || !t(111, b)) && t(112, c)) || t(113, b);
+    r = r * 3 + x;
+    (t(114, a) && (i += 5) > 6) || (i += t(115, c) + 1);
+    (void)((t(116, b) || i++ > 2) && (i *= 3));
+    r = r * 3 + ((i++ > 1 && (i += b) != 4 && t(117, c)) || t(118, i & 1));
+    r = r * 3 + (((t(119, a) && t(120, b)) || t(121, c)) && t(122, !b));
+    r = r * 3 + ((t(123, a) || t(124, b) || t(125, c)) + (t(126, b) && t(127, c) && t(128, a)));
+    return r + i * 1000;
+}
+
 int tested(int n)
 {
     U h = 0;
@@ -203,6 +229,7 @@ int tested(int n)
                                (unsigned long long)c, c ? &cell : 0, (double)a + (double)c * 1.0i);
         h = h * 31u + (U)chain((unsigned)(n * 2654435761u) >> k);
         h = h * 31u + (U)chain(k == 0 ? 0x1ffffu : 0);
+        h = h * 31u + (U)values(a, b, c);
         h = h * 31u + trace + (U)calls;
     }
     return (int)((h ^ (h >> 31)) & 0x7fffffff);

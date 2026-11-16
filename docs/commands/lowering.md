@@ -253,22 +253,31 @@ is its value, its truth and the branch, as `check_lower_logical` tests its
 operands, so that the order and the evaluation of the operands are C's.
 `check_lower_branch_operator` takes an operator of an `int` value that the
 expansion would expand (no constant), and an `&&` or `||` whose first operand's
-truth the program doesn't know; a condition without an `&&` or `||` (`if (!p)`),
-GNU's `a ?: b`, and `&&` and `||` used as values, an `&&` that is an `||`'s
-first operand among them, are written as before. The `CONDITION` stays the
-popped root of the statement's expression, which owns the branches; its `&&`,
-`||` and `!` are never popped, and its leaves are popped under it. The node
-machine leaves such a condition, and a conditional whose condition is branches,
-to the tasks.
+truth the program doesn't know; a condition without an `&&` or `||` (`if (!p)`)
+and GNU's `a ?: b` are written as before. The `CONDITION` stays the popped root
+of the statement's expression, which owns the branches; its `&&`, `||` and `!`
+are never popped, and its leaves are popped under it.
+
+An `&&` or `||` used as a value keeps its join: its second operand's truth jumps
+to it, and its first operand's branch goes to the constant there. Where that
+first operand is itself branches (under its `!`s, an `&&` or `||`: `a && b &&
+c`, `(a && b) || c`), `check_lower_logical` pushes the `CHECK_LOWER_BRANCH` task
+for it, as for a conditional's condition, to the value's own constant label:
+where false for an `&&`, where true for an `||` (#2891). No value of the first
+operand is made, joined and tested again; the value's outermost join is the one
+left. The node machine leaves such a condition, a conditional whose condition is
+branches, and an `&&` or `||` whose first operand is, to the tasks.
 
 `tests/checker/branch-conditions` holds the regressions, which run natively
 against clang (`c_check_branch_condition_test.c`): conditions written as
 branches, whose functions have no `JUMP_VALUE` but their conditionals' and no
-jump to a test of a joined value, and values that keep their joins; and the
-operands' order and effects, traced by calls, nested three deep and more, in
-every statement's condition, a conditional's and a statement expression's, of
-every scalar type (NaN among the doubles), a first operand the program knows,
-and chains of 17 operands. The node templates' entries are the tasks' there.
+jump to a test of a joined value, and values (returned, assigned, an expression
+statement's, chains under `!`s) that keep their outermost operator's join alone;
+and the operands' order and effects, traced by calls, nested three deep and
+more, in every statement's condition, a conditional's, a statement expression's
+and values whose first operand is an `&&` or `||`, of every scalar type (NaN
+among the doubles), a first operand the program knows, and chains of 17
+operands. The node templates' entries are the tasks' there.
 
 ## Node machine census (#2524)
 

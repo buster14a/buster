@@ -1,7 +1,8 @@
 // Conditions written as branches (#2883): each function before `joined` has `&&` or `||` only in a statement's or a
 // conditional's condition, under `!`s too, and must have no JUMP_VALUE but its conditionals' joins of their arms and no
 // value tested again where a jump arrives (check_test_branch_condition_lowered); the functions from `joined` on use them
-// as values, which keep their joins.
+// as values, which keep their own joins: an `&&` or `||` that is a value's first operand is branches too (#2891), and no
+// value is tested again there either.
 int both(int a, int b, int c)
 {
     if (a < b && b < c)
@@ -105,6 +106,24 @@ int joined_chain(int a, int b, int c)
     return (a && b) || c;
 }
 
+int chain(int a, int b, int c, int d)
+{
+    return a < b && b < c && c < d;
+}
+
+int chain_mixed(int a, int b, int c, int d)
+{
+    int x = (!(a || b) && c) || d < a;
+    return x * 3;
+}
+
+int chain_statement(int a, int b)
+{
+    int h = 0;
+    (a > 0 && (h = b)) || (h = 2);
+    return h;
+}
+
 int tested(int n)
 {
     int h = 0;
@@ -125,6 +144,7 @@ int tested(int n)
         h = h * 31 + pick(a, b, c);
         h = h * 31 + pick_nested(a & 1, b & 1, c & 1);
         h = h * 31 + joined(a & 1, b & 1) + joined_or(a & 2, c & 1) + joined_chain(a & 1, b & 2, d & 1);
+        h = h * 31 + chain(a, b, c, d) + chain_mixed(a & 1, b & 1, c & 1, d & 1) + chain_statement(a, b);
     }
     return h & 0x7fffffff;
 }

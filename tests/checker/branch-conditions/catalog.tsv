@@ -1,7 +1,7 @@
 buster-fixtures v1 checker-sources
 # check_test_branch_conditions's programs (c_check_branch_condition_test.c; #2883): ID, FILE, FLAGS, NAME, tab-separated.
 # Each runs natively against clang's build of it; its NAME selects the checks of its entries.
-# Conditions whose `&&`, `||` and `!` are written as branches, first in the unit, their entries checked: no join and one test a branch; then the values that keep their joins.
+# Conditions whose `&&`, `||` and `!` are written as branches, first in the unit, their entries checked: no join and one test a branch; then the values, each keeping its outermost operator's join alone (#2891).
 shapes	shapes.c	-	branch-condition-shapes
-# The order and the effects of the operands: calls that trace what they evaluate, nested three deep and more, in every statement's condition, a conditional's and a statement expression's, of every scalar type.
+# The order and the effects of the operands: calls that trace what they evaluate, nested three deep and more, in every statement's condition, a conditional's and a statement expression's, of every scalar type, and in values whose first operand is an `&&` or `||` (#2891).
 order	order.c	-	branch-condition-order

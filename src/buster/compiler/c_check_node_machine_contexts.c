@@ -181,9 +181,9 @@ static bool node_machine_branch_operator(const NodeMachine* machine, uint32_t r,
     return result;
 }
 
-// Whether condition record `r` (a statement's CONDITION, or a conditional's first operand) is branches, the lowering's
-// rule (check_lower_branch_condition) from the records: under its `!`s, an `&&` or `||` (node_machine_branch_operator).
-// The tasks write such a condition, and a conditional of one.
+// Whether condition record `r` (a statement's CONDITION, or a conditional's, an `&&`'s or an `||`'s first operand) is
+// branches, the lowering's rule (check_lower_branch_condition) from the records: under its `!`s, an `&&` or `||`
+// (node_machine_branch_operator). The tasks write such a condition, and a conditional, an `&&` or an `||` of one.
 static bool node_machine_branch_condition(const NodeMachine* machine, uint32_t r)
 {
     uint32_t at = r;
@@ -217,8 +217,9 @@ static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_log
     const TypeId type_a = node_machine_record_converted(machine, r, 0);
     const TypeId type_b = node_machine_record_converted(machine, r, 1);
     const bool scalar = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64 && (node_machine_record_facts(machine, r) & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) == 0;
-    // A conditional whose condition is branches (node_machine_branch_condition, #2883) is the tasks'.
-    const bool shape = a < r && b < r && (!conditional || (c < r && a != b && !node_machine_branch_condition(machine, a)));
+    // A conditional whose condition is branches (node_machine_branch_condition, #2883), and an `&&` or `||` whose first
+    // operand is (#2891), are the tasks'.
+    const bool shape = a < r && b < r && (!conditional || (c < r && a != b)) && !node_machine_branch_condition(machine, a);
     CheckLowerTemplate kind = CHECK_LOWER_TEMPLATE_NONE;
     if (shape && (scalar || (conditional && class == BUSTER_TYPED_CLASS_VOID)))
     {

@@ -889,8 +889,10 @@ its operands. They are the machine's now (#2569):
   the statement's own targets, and a conditional's condition so too, to its arms
   (`check_lower_branch`): no 0 or 1 is made, joined and tested again. The
   `CONDITION` stays the root the census reads; its `&&`, `||` and `!` aren't
-  popped. The machine doesn't write branches yet: C leaves such a `CONDITION`,
-  and a conditional whose condition is one, to the tasks
+  popped. A value's `&&` or `||` whose first operand is such an operator takes
+  that operand as branches too, to the value's own label (#2891). The machine
+  doesn't write branches yet: C leaves such a `CONDITION`, a conditional whose
+  condition is one, and an `&&` or `||` whose first operand is, to the tasks
   (`node_machine_branch_condition`, the lowering's rule read from the records),
   and the shadow counts them as refused by `template`. Writing them is the
   follow-up under #2524: a condition's operand takes a branch context in C, X

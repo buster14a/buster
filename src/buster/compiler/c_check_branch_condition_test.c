@@ -2,16 +2,20 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Independently written expectations for #2883: a statement's or a conditional's condition whose `&&`, `||` and `!` are
-// written as branches to its own targets (check_lower_branch), with no 0 or 1 made, joined and tested again. Included by
+// written as branches to its own targets (check_lower_branch), with no 0 or 1 made, joined and tested again, and for
+// #2891: an `&&` or `||` value's first operand that is one, written so to the value's own label. Included by
 // c_check_program_test.c; its source harness compares both lowerings and native output with Clang, and checks these
 // fixtures' entries by name (check_test_branch_condition_lowered). The programs are tests/checker/branch-conditions.
 
 // The shapes fixture's functions written as branches, its first bodies; the next ones use `&&` and `||` as values.
 #define BUSTER_CHECK_TEST_BRANCH_CONDITIONS 10u
-#define BUSTER_CHECK_TEST_BRANCH_VALUES 3u
+#define BUSTER_CHECK_TEST_BRANCH_VALUES 6u
 
-// Each condition function's joins: its conditionals' joins of their arms (`pick`'s one, `pick_nested`'s two), no other.
-static const uint8_t check_test_branch_condition_joins[BUSTER_CHECK_TEST_BRANCH_CONDITIONS] = { 0, 0, 0, 0, 0, 0, 0, 0, 1, 2 };
+// Each function's joins: a condition function's conditionals' joins of their arms (`pick`'s one, `pick_nested`'s two),
+// a value function's its outermost operator's alone (its first operand's `&&` or `||` none, #2891).
+static const uint8_t check_test_branch_condition_joins[BUSTER_CHECK_TEST_BRANCH_CONDITIONS + BUSTER_CHECK_TEST_BRANCH_VALUES] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1, 1, 1, 1, 1, 1,
+};
 
 // Whether entry `e` of `function` tests a value against zero: an integer CONST 0 that an NE or EQ of I32 takes.
 static bool check_test_branch_condition_test_at(const Tier0Function* function, uint32_t e)
@@ -43,9 +47,10 @@ static void check_test_branch_condition_count(const Tier0Function* function, uin
 // checked program), and its node templates' (check_program_lower_templates), which must write the tasks' entries.
 // "branch-condition-shapes": its first BUSTER_CHECK_TEST_BRANCH_CONDITIONS functions have `&&` and `||` only in
 // conditions, which leave no value tested again at a jump's target and no JUMP_VALUE but their conditionals' joins of
-// their arms (check_test_branch_condition_joins); the next
-// BUSTER_CHECK_TEST_BRANCH_VALUES use them as values (returned, assigned, and an `&&` as an `||`'s first operand), and
-// each keeps a join. "branch-condition-order" has its own checks in its run against clang alone.
+// their arms (check_test_branch_condition_joins); the next BUSTER_CHECK_TEST_BRANCH_VALUES use them as values (returned,
+// assigned and as an expression statement, chains whose first operand is an `&&` or `||` under `!`s), and each keeps
+// its outermost operator's join alone, with no value tested again (#2891). "branch-condition-order" has its own checks
+// in its run against clang alone.
 static void check_test_branch_condition_lowered(CheckTest* test, const char* name, const CheckProgramLowered lowered[2], const CheckProgram* program, Arena* output,
                                                 Arena* scratch)
 {
@@ -66,9 +71,9 @@ static void check_test_branch_condition_lowered(CheckTest* test, const char* nam
             const bool condition = f < BUSTER_CHECK_TEST_BRANCH_CONDITIONS;
             snprintf(description, sizeof(description),
                      condition ? "%s (%s): function %u's conditions are branches: its conditionals' joins alone, no value tested again (%u joins, %u tested again)" :
-                                 "%s (%s): function %u's values keep their joins (%u joins, %u tested again)",
+                                 "%s (%s): function %u's values keep their own joins alone, no value tested again (%u joins, %u tested again)",
                      name, way, f, joins, retested);
-            check_test_expect(test, condition ? joins == check_test_branch_condition_joins[f] && retested == 0 : joins != 0, description);
+            check_test_expect(test, joins == check_test_branch_condition_joins[f] && retested == 0, description);
         }
     }
     CheckProgramLowered templated = { 0 };
