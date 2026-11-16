@@ -1352,9 +1352,26 @@ a window of entries. The windows:
 | a pointer addition before a load | `[base + index * scale]` (scale 1, 2, 4 or 8) or `[base + c * size]` |
 | a pointer addition and a constant or a local before a store | `mov [base + index * scale], imm/home` |
 | a compare before a branch | `cmp …; jcc`, with no `setcc` |
+| a compare, `CONST 0`, `NE` or `EQ`, and a branch | the same `cmp …; jcc` (#2877), the jump's condition the opposite one after `EQ` |
 | `LOCAL x, v, op, SET_LOCAL x` | `op home_x, v`: `inc ecx`, `add edx, ecx` |
 
 A target ends every window: a jump arriving there brings a value the template wouldn't know.
+
+**A condition's window (#2877).** The lowering writes a condition as its value tested against zero: `if (a < b)` is
+`LOCAL a`, `LOCAL b`, `LT`, `CONST 0`, `NE`, `BRANCH_FALSE`. A compare's value is 0 or 1, so the test is the compare
+(after `EQ`, its opposite), and the branch takes the four entries and what the compare fused as one group: `cmp a, b;
+jge`, where the test alone fused with the branch gave `cmp; setl; movzx; test; je`. The window holds where:
+
+- the test's constant is zero, fused into it, and its class is the class of the compare's value;
+- the compare is an integer one of 4 or 8 bytes, its own operands on the stack or a leaf fusion's (a constant, a
+  local, a local and a constant, two locals);
+- no target is on the branch, the test or the `CONST 0`. One on the compare or on the group's first entry leaves it
+  whole: a jump there runs the whole group.
+
+Its templates are the compare's branch templates with the operands' holes two entries further back
+(`BUSTER_TIER0_VARIANT_TESTED_FALSE` and `TESTED_TRUE`). A floating compare has no branch template, so its value is
+made and tested as before; so is a compare tested by another constant, and `&&`'s and `||`'s operands, which join at a
+target.
 
 **Depths.** There are two value stacks: integers and pointers, and floating values. Each entry's effect on each stack
 is a table lookup, with its absorbed entries' effects folded in. The depths are the effects' prefix sums. The integer
@@ -1438,8 +1455,8 @@ the entry's 32-byte hole block:
 - B, the entry's own local's home, or a compare's first local's;
 - the registers at depth −2 to 0 of each stack.
 
-`tier0_initialize` builds 1,962 templates from the encoder's forms and compiles each into one cache line. A byte the
-template fixes is that byte; a hole's is its index in the hole block. Its tables, about 1 MB, are separate static
+`tier0_initialize` builds 2,364 templates from the encoder's forms and compiles each into one cache line. A byte the
+template fixes is that byte; a hole's is its index in the hole block. Its tables, about 1.3 MB, are separate static
 arrays, whose pages it commits first with one `MADV_POPULATE_WRITE` call each (`tier0_prepare_tables`, #590): a kernel
 whose transparent huge pages are only `madvise`d gave them 257 base pages' faults in every compile. Grouping them in
 one structure, in a huge page of its own, took `tier0_initialize` from 82 to 184 million instructions in 60 builds
@@ -1496,8 +1513,11 @@ parallel move, without emitting it; the scalar path runs the emitter to count, w
 2. **P1:** raw effects, leaf fusions and the entries' own variants, by `vpermb` lookups of kind and class tables and a
    256-byte (row, class) property table. A kind's row groups the kinds with the same properties; at most 16 rows, two
    `vpermi2b` and a blend.
-3. **P2:** the compound fusions (addresses, a branch's compare, x = x op v) from P1's variants of the entries before.
-4. **P3:** each entry's absorber by one pointer-jump step, and the effects folded into it.
+3. **P2:** the compound fusions (addresses, a branch's compare, also behind its test against zero, x = x op v) from
+   P1's variants of the entries before.
+4. **P3:** each entry's absorber by one pointer-jump step, and the effects folded into it. An absorber is 1 to 3
+   entries on and at most five after the step (`BUSTER_TIER0_ABSORB_REACH`): a tested compare's first local is two
+   before the compare and three more before its branch.
 5. **P4:** the depths, by in-register byte prefix sums.
 
 The property tables are built from the template slots, so both paths follow one table; `tier0_initialize` refuses a

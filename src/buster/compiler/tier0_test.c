@@ -688,6 +688,7 @@ static uint64_t tier0_test_hash(const uint8_t* bytes, uint64_t length)
 
 // A program's machine code (each function at its offset, 16-aligned) and its fixups: each field's offset in the code,
 // its instruction's end, its target symbol and its kind (BUSTER_LINK_FIXUP_*).
+#define BUSTER_TIER0_TEST_TESTED_WAYS 5
 typedef struct Tier0TestCode Tier0TestCode;
 struct Tier0TestCode
 {
@@ -707,6 +708,9 @@ struct Tier0TestCode
     // The functions whose frames are realigned (Tier0Code.frame_alignment_log2), and those among them with a base.
     uint64_t realigned;
     uint64_t based;
+    // The conditions tested against zero that are their compare's branch (#2877), by how the compare takes its operands:
+    // both on the stack, a constant, a local, a local and a constant, two locals.
+    uint64_t tested[BUSTER_TIER0_TEST_TESTED_WAYS];
 };
 #endif
 // Whether two compilations of a function made the same code: records, branch columns, references, labels' records and
@@ -1031,6 +1035,27 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
         }
         if (result)
         {
+            // The conditions tested against zero that became their compare's branch (#2877): the compare, the CONST 0 and
+            // the test make no record of their own, and neither do the leaves the compare fuses, which say how it takes
+            // its operands.
+            const uint8_t* kinds = function->kinds;
+            const uint32_t* firsts = scalar.entry_records;
+            for (uint32_t i = 3; i < function->count; i += 1)
+            {
+                const bool shape = (kinds[i] == BUSTER_TYPED_BRANCH_FALSE || kinds[i] == BUSTER_TYPED_BRANCH_TRUE) &&
+                                   (kinds[i - 1] == BUSTER_TYPED_NE || kinds[i - 1] == BUSTER_TYPED_EQ) && kinds[i - 2] == BUSTER_TYPED_CONST &&
+                                   function->values[i - 2] == 0 && kinds[i - 3] >= BUSTER_TYPED_EQ && kinds[i - 3] <= BUSTER_TYPED_GE;
+                if (shape && firsts[i - 3] == firsts[i])
+                {
+                    const bool one = i >= 4 && firsts[i - 4] == firsts[i] && (kinds[i - 4] == BUSTER_TYPED_CONST || kinds[i - 4] == BUSTER_TYPED_LOCAL);
+                    const bool two = one && i >= 5 && firsts[i - 5] == firsts[i] && kinds[i - 5] == BUSTER_TYPED_LOCAL;
+                    const bool constant = one && kinds[i - 4] == BUSTER_TYPED_CONST;
+                    code->tested[!one ? 0 : two ? (constant ? 3 : 4) : (constant ? 1 : 2)] += 1;
+                }
+            }
+        }
+        if (result)
+        {
             const BranchSizingCheck sizing = branch_sizing_validate(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count);
             result = tier0_test_expect(tally, sizing.error == BRANCH_SIZING_OK, "branches", "seed %" PRIu64 " function %u: error %d at %" PRIu64, seed, f, sizing.error,
                                        sizing.index);
@@ -1308,7 +1333,7 @@ static void tier0_test_coverage(const Tier0Functions* functions, uint64_t* cover
 }
 
 static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint64_t seed, uint32_t count, Tier0ProgramOptions options, uint64_t* records,
-                                uint64_t* entries, uint64_t* deferred, uint64_t* deep, uint64_t* frames, uint64_t* coverage)
+                                uint64_t* entries, uint64_t* deferred, uint64_t* deep, uint64_t* frames, uint64_t* tested, uint64_t* coverage)
 {
     Arena arena = arena_reserve(1ull << 32);
     Tier0TestCode* code = BUSTER_ARENA_PUSH_ARRAY(&arena, Tier0TestCode, 1);
@@ -1345,6 +1370,7 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
             code->deep = 0;
             code->realigned = 0;
             code->based = 0;
+            memset(code->tested, 0, sizeof(code->tested));
             if (ok)
             {
                 tier0_test_coverage(functions, coverage);
@@ -1362,6 +1388,10 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
             *deep += code->deep;
             frames[0] += code->realigned;
             frames[1] += code->based;
+            for (uint32_t way = 0; way < BUSTER_TIER0_TEST_TESTED_WAYS; way += 1)
+            {
+                tested[way] += code->tested[way];
+            }
             if (ok)
             {
                 const Tier0TestData data = tier0_test_layout(program);
@@ -6802,9 +6832,10 @@ static int run_tier0_tests(int argc, char** argv)
                 uint64_t deferred = 0;
                 uint64_t deep_entries = 0;
                 uint64_t frames[2] = { 0, 0 };
+                uint64_t fused[BUSTER_TIER0_TEST_TESTED_WAYS] = { 0 };
                 uint64_t coverage[BUSTER_TIER0_TEST_COVERAGE] = { 0 };
                 tier0_test_programs(&tally, &tables, seed + s * 1000003ull, count, s < 4 ? shapes[s] : s == 4 ? records : s == 5 ? deep : s == 6 ? aligned : tested,
-                                    &instructions, &entries, &deferred, &deep_entries, frames, coverage);
+                                    &instructions, &entries, &deferred, &deep_entries, frames, fused, coverage);
                 if (s == 4 || s == 5)
                 {
                     // With the default count, every kind of part, location and result the catalog can make shows: the
@@ -6824,6 +6855,19 @@ static int run_tier0_tests(int argc, char** argv)
                 // count, the last shape has many, a base among them (with variable-length arrays).
                 tier0_test_expect(&tally, s < 4 ? frames[0] == 0 : s < 6 || count < 300 || (frames[0] >= 100 && frames[1] >= 10), "realigned frames",
                                   "%" PRIu64 " realigned frames, %" PRIu64 " with a base", frames[0], frames[1]);
+                // The last shape's conditions must run as their compares' branches, each way a compare takes its operands:
+                // with the default count, hundreds of each.
+                if (s == 7)
+                {
+                    static const char* const ways[BUSTER_TIER0_TEST_TESTED_WAYS] = { "both on the stack", "a constant", "a local", "a local and a constant", "two locals" };
+                    printf("   ");
+                    for (uint32_t way = 0; way < BUSTER_TIER0_TEST_TESTED_WAYS; way += 1)
+                    {
+                        printf(" %s %" PRIu64 "%s", ways[way], fused[way], way + 1 < BUSTER_TIER0_TEST_TESTED_WAYS ? "," : "\n");
+                        tier0_test_expect(&tally, count < 300 || fused[way] >= 100, "tested conditions", "%" PRIu64 " conditions are a compare of %s and its branch",
+                                          fused[way], ways[way]);
+                    }
+                }
                 tier0_test_report(s < 4 ? names[s] : s == 4 ? "programs: records by value" : s == 5 ? "programs: deep values" : s == 6 ? "programs: aligned past 16 bytes"
                                                                                                                                     : "programs: tested conditions",
                                   tally);
@@ -6912,6 +6956,15 @@ static int run_tier0_tests(int argc, char** argv)
                 tier0_test_report("cross-check: aligned past 16 bytes", aligned_cross);
                 total.checks += aligned_cross.checks;
                 total.failures += aligned_cross.failures;
+                // The conditions the generator writes as compares and tests against zero (#2877): their C text is clang's
+                // to judge.
+                Tier0TestTally tested_cross = { 0, 0 };
+                Tier0ProgramOptions tested_defined = tested;
+                tested_defined.defined = true;
+                tier0_test_cross(&tested_cross, &tables, seed + 4000012ull, cross_count, tested_defined, clang, keep);
+                tier0_test_report("cross-check: tested conditions", tested_cross);
+                total.checks += tested_cross.checks;
+                total.failures += tested_cross.failures;
             }
             tier0_tables_close(&tables);
         }

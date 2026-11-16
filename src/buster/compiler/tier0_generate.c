@@ -1653,6 +1653,53 @@ static void tier0_counter_test(Tier0Program* program, uint32_t local, uint32_t b
     tier0_emit(program, BUSTER_TYPED_LT, BUSTER_TYPED_CLASS_I32, 0);
 }
 
+// A statement's condition, an int's value, into the stream and the C text. With Tier0ProgramOptions.tested, half of
+// them are a compare the generator writes itself, of 4- and 8-byte integers, so that each way a compare takes its last
+// operands meets the test against zero often: a value against a constant or a local, a local against a constant, two
+// locals. A program without the option draws what it drew before.
+static void tier0_generate_condition(Tier0Program* program, Tier0GeneratedFunction* function, const Tier0Scope* scope, uint64_t* random,
+                                     const Tier0ProgramOptions* options, uint32_t budget, const char* prefix)
+{
+    static const uint8_t classes[4] = { BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_U32, BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_U64 };
+    static const char* const operators[6] = { "==", "!=", "<", "<=", ">", ">=" };
+    const uint32_t class = options->tested ? classes[tier0_generate_below(random, 4)] : BUSTER_TYPED_CLASS_I32;
+    if (options->tested && scope->local_counts[class] != 0 && tier0_generate_chance(random, 50))
+    {
+        const uint32_t operation = tier0_generate_below(random, 6);
+        const uint32_t form = tier0_generate_below(random, 4);
+        const uint32_t first = scope->locals[class][tier0_generate_below(random, scope->local_counts[class])];
+        const uint32_t second = scope->locals[class][tier0_generate_below(random, scope->local_counts[class])];
+        const uint64_t constant = tier0_generate_value(random, class);
+        tier0_text(program, "(");
+        if (form < 2)
+        {
+            tier0_generate_value_of(program, function, scope, random, class, budget, options->floating, prefix, 0);
+        }
+        else
+        {
+            tier0_emit(program, BUSTER_TYPED_LOCAL, class, first);
+            tier0_text(program, "v%u", first);
+        }
+        tier0_text(program, ") %s (", operators[operation]);
+        if (form % 2 == 0)
+        {
+            tier0_emit(program, BUSTER_TYPED_CONST, class, constant);
+            tier0_text_constant(program, class, constant);
+        }
+        else
+        {
+            tier0_emit(program, BUSTER_TYPED_LOCAL, class, second);
+            tier0_text(program, "v%u", second);
+        }
+        tier0_text(program, ")");
+        tier0_emit(program, BUSTER_TYPED_EQ + operation, BUSTER_TYPED_CLASS_I32, 0);
+    }
+    else
+    {
+        tier0_generate_value_of(program, function, scope, random, BUSTER_TYPED_CLASS_I32, budget, options->floating, prefix, 0);
+    }
+}
+
 // The branch a statement's condition ends in, the condition's value on the stack: BRANCH_FALSE to a target the caller
 // patches. With Tier0ProgramOptions.tested, half the time as the lowering writes it: the value tested against zero
 // first, CONST 0 and NE before the branch, or (a quarter of those) CONST 0 and EQ before BRANCH_TRUE, which goes where
@@ -2186,7 +2233,7 @@ static void tier0_generate_statement(Tier0Program* program, Tier0FunctionState* 
         // if (c) {
         tier0_indent(program, state);
         tier0_text(program, "if (");
-        tier0_generate_value_of(program, function, &state->scope, random, BUSTER_TYPED_CLASS_I32, budget, options->floating, prefix, 0);
+        tier0_generate_condition(program, function, &state->scope, random, options, budget, prefix);
         tier0_text(program, ")\n");
         tier0_indent(program, state);
         tier0_text(program, "{\n");
@@ -2243,7 +2290,7 @@ static void tier0_generate_statement(Tier0Program* program, Tier0FunctionState* 
         const bool continues = tier0_generate_chance(random, 50);
         tier0_indent(program, state);
         tier0_text(program, "if (");
-        tier0_generate_value_of(program, function, &state->scope, random, BUSTER_TYPED_CLASS_I32, budget, options->floating, prefix, 0);
+        tier0_generate_condition(program, function, &state->scope, random, options, budget, prefix);
         tier0_text(program, ") %s;\n", continues ? "continue" : "break");
         const uint32_t skip = tier0_emit_condition(program, random, options);
         tier0_loop_jump(program, state, loop, continues);
@@ -2254,7 +2301,7 @@ static void tier0_generate_statement(Tier0Program* program, Tier0FunctionState* 
         // An early return.
         tier0_indent(program, state);
         tier0_text(program, "if (");
-        tier0_generate_value_of(program, function, &state->scope, random, BUSTER_TYPED_CLASS_I32, budget, options->floating, prefix, 0);
+        tier0_generate_condition(program, function, &state->scope, random, options, budget, prefix);
         tier0_text(program, ") return");
         const uint32_t skip = tier0_emit_condition(program, random, options);
         tier0_generate_return(program, state, random, options, budget);
@@ -2271,7 +2318,7 @@ static void tier0_generate_statement(Tier0Program* program, Tier0FunctionState* 
         const uint32_t when_false = tier0_generate_bit(random, candidates);
         tier0_indent(program, state);
         tier0_text(program, "v%u = (", state->function_pointers[p]);
-        tier0_generate_value_of(program, function, &state->scope, random, BUSTER_TYPED_CLASS_I32, budget, options->floating, prefix, 0);
+        tier0_generate_condition(program, function, &state->scope, random, options, budget, prefix);
         tier0_text(program, ") ? %sf%u : %sf%u;\n", prefix, when_true, prefix, when_false);
         const uint32_t branch = tier0_emit_condition(program, random, options);
         tier0_emit(program, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, program->global_count + 1 + when_true);

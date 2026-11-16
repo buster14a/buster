@@ -91,7 +91,7 @@ contract and regression coverage.
 `./build/compiler test-tier0 [--seed N] [--count N] [--cross-check
 [--cross-count N] [--clang PATH] [--keep]]` (about 1.6 s on the 9700X, and
 14.6 s with `--cross-check`, on CPUs 0 to 7 as its job runs it) checks `tier0.c` on programs from
-`tier0_generate.c`, `--count` (300) of each of seven shapes: one function of
+`tier0_generate.c`, `--count` (300) of each of eight shapes: one function of
 integers; integers and calls; everything (floating values, pointers,
 address-taken locals, objects); larger; larger with structs and unions
 passed and returned by value (#137), from a catalog of records whose parts
@@ -104,7 +104,14 @@ larger past the depth tables (calls of 13 to 32 arguments, each evaluated over
 the ones before it, and deeper expressions, whose deep entries must be at
 least 1% of the entries); and that with objects aligned past 16 bytes (to 32,
 64 and 4096, `over_aligned`), in realigned frames, a base (r15) among them
-where variable-length arrays move rsp, many of each. Their calls pass up to 12
+where variable-length arrays move rsp, many of each; and that again with its
+statements' conditions as the lowering writes them (`tested`, #2877): half are
+compares of 4- and 8-byte integers the generator writes itself (a value
+against a constant or a local, a local against a constant, two locals), and
+half of all of them are tested against zero before their branch (`CONST 0`
+and `NE`, or `EQ` before `BRANCH_TRUE`). Its programs must run at least 100
+conditions that are their compare's branch for each way a compare takes its
+operands. Their calls pass up to 12
 arguments (32 in the deep shape), past the argument registers, a third of them (in the shapes with
 calls) through pointers to functions, and their pointer arithmetic has
 element sizes for each of its templates, past imul's imm32 too. Their objects
@@ -180,6 +187,13 @@ pointer on (`BUSTER_TIER0_RESULT_HIDDEN`) and a return of it after, rdi loaded
 from parameter 0's home right before the call, the probe finding the driver's
 hidden pointer in rdi and the bytes it writes reaching the driver; and each of
 that call's rules broken once.
+Then tested compares (#2877, `tier0_tested_test.c`): a compare, `CONST 0`, `NE`
+or `EQ` and a branch, for every compare, class of 4- and 8-byte integers, way
+the compare takes its operands, test and branch, and each such way at every
+place across a 64-entry block's end. Both paths must make the same records,
+none a `setcc`, the group's last the jump of the right condition. A test
+against 1, a label on the `CONST 0` and a floating compare must keep the
+compare's value.
 Every function must pass `tier0_validate`, both
 paths must compile it to the same records, branch columns and references, and
 the records must pass `x86_validate` and the branch columns
@@ -312,7 +326,7 @@ one's NaNs alike whatever their bits, as C leaves them), then times both; then
 as many programs of the records shape linked mixed, their even functions Tier
 0's and their odd ones clang's, so that calls pass and return structs and
 unions by value between the two compilers both ways, and as many of the deep
-shape. It prints the code's sizes (clang's `.text` against Tier 0's functions) and the
+shape, of the aligned one and of the tested conditions'. It prints the code's sizes (clang's `.text` against Tier 0's functions) and the
 run times. A shared library generated beside them (GNU as source, which `as`
 and `ld -shared` link) defines the globals Tier 0 reaches through the GOT, so
 that the executable's slots for them are the loader's to fill (`GLOB_DAT`, and
@@ -459,7 +473,11 @@ counted into the same census, so that several corpora are one population.
   of a pointer addition's scaled constant (`p + 3` and `p + 20` of 8-byte
   elements take an 8-bit and a 32-bit immediate); each named local's home (a
   register or a slot); the two depths; the symbol's access; a call's counts
-  and flags; a copy's bytes; the frame's kind. Three more are the fusion's
+  and flags; a copy's bytes; the frame's kind. A branch after a compare's test
+  against zero takes the compare and its operands with it (#2877), five
+  entries back: where the stream has that shape, the kinds, classes and homes
+  of the two entries before the compare, the nearer one's value classes and
+  whether either is a jump target are inputs too. Three more are the fusion's
   own answers (its key's kind and class and its variant).
 - **Two figures of a set of inputs.** Its *conflicts* are the entries in keys
   with two patterns: one odd group makes its whole key's entries undecided,
