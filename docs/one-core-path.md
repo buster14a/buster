@@ -1,6 +1,7 @@
 # The one-core path: 73 cycles a token, on records the vector lanes can use (#2850): design
 
-Status: design, with its first two steps measured. Nothing here is in a compile.
+Status: design, with its first two steps and step 2's first piece measured.
+Nothing here is in a compile.
 [#2850](https://github.com/buster14a/buster/issues/2850) has the design whole:
 the budget, the data design and what would refute it. It is
 [#672](https://github.com/buster14a/buster/issues/672)'s per-core research
@@ -24,7 +25,12 @@ its lookups as its rules are today. What a lookup's record costs is its rule's
 hundred instructions and the record's width, not its loads. The follow-up
 measured both ends of that: a lookup that makes only its record's first half
 takes 21 to 45 cycles by its operator, and its load alone 12 to 16. The rest
-is the lookup's facts, which the design gives the lanes.
+is the lookup's facts, which the design gives the lanes. Step 2's first piece
+made the rest of T's records from the same words, a loop a class: exact, and
+T whole at 38 cycles an evaluated node on `sqlite3.c` (32 with lean records)
+where the shadow's own T takes 89.6 and the piece's gate was 25. An
+operator's whole record costs 56 cycles made that way, where step 0's lanes
+made its fact bytes for 12.
 
 ## The budget
 
@@ -48,7 +54,7 @@ token; the issue has each row's source:
 | --- | --- | --- | --- |
 | 0 | The middle's passes on the real nodes, outside the compiler | every entry the stream's; 20 cycles a taken node or less; 0.2 mispredicted branches a node or fewer | measured: 16.7 and 20.6 cycles, 0.025 and 0.045 mispredicted |
 | 1 | The fact words, in the shadow: T's leaves and lookups from one load each | every record the oracle's; 10 cycles a leaf or lookup or less, a body's expressions a run | measured: exact; 15.8 to 26.5 cycles; a leaf about 5, a lookup 25 to 46. Followed up: a lean record 14.1 to 20.8, the loads alone 8.8 to 15.2 |
-| 2 | The machine on these records where it runs (#2524's steps 2 to 4) | the bodies' middle at 38 cycles a node or less in `-c sqlite3.c` | not started |
+| 2 | The machine on these records where it runs (#2524's steps 2 to 4) | the bodies' middle at 38 cycles a node or less in `-c sqlite3.c` | first piece measured, in the shadow: T whole from the fact words, exact; 38 cycles an evaluated node with whole records and 32 with lean ones, where its own gate was 25 |
 | 3 | The front's row, into the window | 35 cycles a token or less | not started |
 | 4 | Tier 0's row | 10 cycles a token or less, the object's bytes unchanged | not started |
 | 5 | Fresh memory and the fixed costs | 6 cycles a token or less | not started |
@@ -448,6 +454,237 @@ reads 17.4 and 11.8).
   byte that says a lookup's operand is fit, which is the lanes' own from the
   operand's standing and flags. Packed windows are worth 3 to 4 cycles a
   taken leaf or lookup on `sqlite3.c` to every variant.
+
+## Step 2's first piece: T's other operators on the fact words' records
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/per-core-step2-operators-2850-2026-11-16).
+`measure-node-machine --shadow --facts-operators`
+([the guide](commands/lowering.md#the-fact-words-2850s-step-1)).
+
+Step 1 made T's leaves and lookups from the fact words and left the rest of
+T's records given: the operators that are no lookup, a quarter of a window's
+records, and a literal's leaf. A machine can't take records from the T it
+replaces. This piece makes them from the same words, in the same kernel, with
+T still the oracle, so that T whole can be read against the shadow's own T on
+the same windows.
+
+### What it is
+
+- **A literal's leaf is a line of its own**: the reader's record of it, 32
+  bytes, which a compile would write as it reads the literal. The kernel
+  copies it as it copies a declaration's line. A literal's lines are read
+  once each, in the window's order, where a declaration's is read at every
+  use.
+- **The other operators are T's rows' and rules' steps on the kernel's
+  records.** A row's operator (arithmetic, a comparison, a shift, a bitwise
+  operator) reads T's own baked table by its operands' type codes; what a
+  row asks of an operand's standing is one load of a 256-byte table. Behind
+  the table are the constants' fold, a pointer plus or minus an integer and
+  a pointer's equality with a null pointer constant. Then `=`, a conversion
+  and an initialization; a control's condition and `!`; `&x`; a cast; `&&`
+  and `||`; the increments and the compound assignments; a comma; `sizeof`
+  and `_Alignof`; and `?:`. T's rules make a value whole for an update, a
+  conditional and the conversions its columns don't hold; the kernel's make
+  the same record from its operands' records alone, wherever no operand is a
+  constant the conversion would change.
+- **Two more words.** A type's side row (32 bytes) has the pointer types to
+  it, from the machine's memo as T fills it, and its size and alignment. A
+  pair's slot (16 bytes, by a hash of two pointer types) says whether one
+  converts to the other as T's rule takes it and whether they point at the
+  same type: a memo of the type table's answers, as the members' slots.
+- **The classes are a round and a code.** Step 1's classes were a level of
+  operands and an operator, and a level a scan of the window's lookups.
+  With fifteen codes that is too many classes for a body, whose expressions
+  are five levels deep with classes of their own at each. A round makes its
+  classes in a fixed order of the codes, each class's operators in the
+  window's order. An operator's round is then the highest of its operands'
+  rounds, and one more only where an operand's code comes after its own: an
+  operand of an earlier code is the round's earlier class, and one of its
+  own code is before it in its class (a chain of `->`, a call's call). The
+  order is the one that gives `sqlite3.c`'s expressions the fewest classes:
+  `->`, a subscript, `.`, `&x`, a cast, the rest, the rows, a call, `&&` and
+  `||`, an update, `*`, `=`, a conversion, a discard, a truth. Nine
+  operators in ten are then of the first round, and a body has 1.6 rounds
+  and 10 classes where it had 5 levels and 14.5 classes.
+- **A class's loop lists what its path doesn't take** and makes it after the
+  loop by its rule, as step 1's. It marks the record wide, so that a later
+  operator of the class that reads it is listed too.
+- **The check.** Every record the kernel makes is compared with T's over
+  poisoned records, the lists with a record-at-a-time twin, and what a lean
+  kernel leaves out with its rule's, as before. Poison reads as no value a
+  path takes, so an operator made before its operand is only left there, to
+  its rule or to T, and nothing differs; and in a timed pass the records
+  hold T's own values, which would hide it too. Two checks are for that. A
+  second checked pass gives the kernel decoys for what it is to make: T's
+  record of each node with one inherited flag the other way. A decoy reads
+  as the operand's own value, and what is made from it carries the flag and
+  differs. And the twin checks the order itself: an operand the kernel makes
+  by class is on a list no later than its operator's. `=`, a call and an
+  update set the decoys' flag themselves, so only the order's check sees one
+  of them made too early.
+
+### What it measured
+
+The 9700X, CPU 2, under the lock, Release; main `be6515fb` and the same with
+the piece's sources; medians of three runs, each the least of five passes.
+The record has two builds of the kernel: its main run, and a second with the
+twin's order check, which no timed pass runs; a third, earlier build of the
+same kernel read 38.6. Cycles an evaluated node (the shadow's own T's
+denominator: 256,292, 57,625 and 109,639), T whole from the fact words:
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| records of the windows | 291,021 | 73,998 | 130,291 |
+| literals, each from its line | 38,961 | 11,041 | 17,324 |
+| the other operators, and those the kernel takes | 69,641, 97.97% | 21,370, 91.82% | 42,551, 95.34% |
+| … by a class's loop; by their rule, one at a time | 86.89%; 11.08% | 55.86%; 35.96% | 82.71%; 12.64% |
+| records that are no literal, and those the kernel makes | 252,060, 99.34% | 62,957, 97.13% | 112,967, 98.08% |
+| records that differ from T's; over decoys | 0; 0 | 0; 0 | 0; 0 |
+| the shadow's own T (main's) | 89.6 | 81.0 | 72.0 |
+| **a body a window:** whole records, the first build | **37.7** | 40.6 | 32.6 |
+| … the second build | **38.2** | 41.5 | 33.8 |
+| instructions; mispredicted branches a record | 118; 0.30 | 179; 0.02 | 146; 0.01 |
+| lean records: the first build, the second | **31.7, 31.9** | 36.2, 36.2 | 28.9, 29.4 |
+| **windows packed to 384 records:** whole | 33.2, 33.9 | 38.1, 39.1 | 31.3, 32.7 |
+| lean | 28.2, 28.2 | 34.4, 34.5 | 27.7, 28.2 |
+
+**Against the piece's gate** (every record the oracle's; 95% of the records
+that are no literal made by the kernel; T whole at 25 cycles an evaluated node
+or less on `sqlite3.c`, a body's expressions a run; refuted above 38, or with
+more than a tenth of these operators left to T):
+
+- **Exact: met**, on the three corpora, with whole and with lean records, and
+  over decoys.
+- **Coverage: met.** The kernel leaves T 2.0%, 8.2% and 4.7% of these
+  operators, mostly constants' casts, casts of other than builtin integers
+  and pointers, `?:` of a constant condition or of pointers, comparisons of
+  two pointers, and a unary plus of no constant.
+- **25 cycles: missed.** T whole is 38 with a body a window, 2.3 to 2.4
+  times less than the shadow's own T and half again the gate. Whole records
+  are at the refutation line: 37.7, 38.2 and 38.6 in the three builds, above
+  it in two. Lean records are under it, 31.7 to 32.6, and 28.2 to 28.6 with
+  the windows packed.
+
+The kernel's time has nothing for the records it leaves to T (1,655, 1,805
+and 2,164 that are no literal: at T's own average, 0.6, 2.5 and 1.4 cycles an
+evaluated node more), nor for making the words, as in step 1; a literal's
+line is a copy of the reader's record of it, which T reads too.
+
+By part on `sqlite3.c`, whole records, a body a window, from profiles of the
+first build's kernel's functions (160 passes a run): cycles each
+(instructions; mispredicted branches).
+
+| part | of them | cycles each | cycles a pass |
+| --- | ---: | ---: | ---: |
+| the lists, the classes and the dispatch, a record of the window | 291,021 | 6.1 (20; 0.05) | 1.77 M |
+| a leaf, an identifier's or a literal's | 132,643 | 3.6 (14; 0.02) | 0.48 M |
+| the lookups: `->` 23.8, `.` 36.7, `*` 37.0, a subscript 60.4, a call 42.2 | 52,013 | 35.4 | 1.84 M |
+| a discard | 36,724 | 17.9 (58; 0.17) | 0.66 M |
+| a row's operator, by the table | 21,679 | 52.2 (180; 0.30) | 1.13 M |
+| the rows' operators the table doesn't type (folds, pointers) | | | 0.51 M |
+| `=` | 16,057 | 58.9 (209; 0.46) | 0.95 M |
+| a conversion or an initialization | 3,846 | 62.5 (212; 0.61) | 0.24 M |
+| a condition or `!` | 12,938 | 24.4 (75; 0.20) | 0.32 M |
+| `&x` | 3,404 | 30.0 (115; 0.21) | 0.10 M |
+| a cast | 2,949 | 70.1 (216; 0.73) | 0.21 M |
+| `&&` or `\|\|` | 3,105 | 46.1 (144; 0.29) | 0.14 M |
+| an update | 3,788 | 77.3 (247; 0.74) | 0.29 M |
+| the rules an operator at a time (a comma, `sizeof`, `?:`, what a loop listed) | | | 0.30 M |
+| all | | | 8.94 M |
+
+The profiles' 160 passes teach the predictor more of the unit than a timed
+run's five (66,129 mispredicted branches a pass against 88,153): the parts
+sum to 8.94 M cycles where a timed pass is 9.67 M. With lean records the
+lists are the same, a row's operator 47.4, `=` 55.8, a condition 17.3, and
+the discards are not made: 7.81 M. With the windows packed and whole records
+the lists are 3.7 a record and the loops between the same and a fifth less:
+7.96 M.
+
+### What moved it, and what didn't
+
+Cycles an evaluated node on `sqlite3.c`, whole records, a body a window and
+packed (the record's "The versions" has each build):
+
+| | the kernel | a body a window | packed |
+| ---: | --- | ---: | ---: |
+| 1 | levels, an expression's last record apart; a vector compress a level, then one a class; every operator by its rule's one path | 49.6 | 42.9 |
+| 2 | rounds of the codes, with chains; one scalar pass to the classes' lists | 42.5 | 38.0 |
+| 3 | short paths for `=`, a conversion, a truth, `&&` and `\|\|`; a row's operands' standings by a table; the rows the table doesn't type in a loop of their own | 40.1 | 36.2 |
+| 4 | `=` as two straight sides (a value, a constant); the rows' loop without a branch; the lists made before the leaves | 38.6 | 34.3 |
+| | the same kernel, the record's first build | 37.7 | 33.2 |
+| | the same kernel, the record's second build | 38.2 | 33.9 |
+
+- **The classes by rounds** are the 7 cycles between the first two: 42,306
+  classes and 14,418 level scans a pass became 29,803 classes and 4,653
+  rounds.
+- **A vector compress lost to the scalar pass, twice.** A compress a class is
+  a scan of the window a class: 44.8 against 40.1. A compress a code while
+  listing is fifteen compresses a vector of sixteen records: 39.1 against
+  38.6, and worse in every setting. The scalar pass is about 6 cycles a made
+  operator, bound by its counts' store and load.
+- **Instructions are a poor guide.** The kernel runs at three a cycle on
+  `sqlite3.c`: the compress a class has 3 more instructions a node and 4.7
+  more cycles, the compress a code 10 more and 0.6.
+- **Software prefetch** of the next window's columns didn't pay: within what
+  a build moves the figure by, and the lookups' kernel alone read 24.8
+  cycles a taken leaf or lookup with it against 22.9.
+- **Step 1's kernels on the new driver** (no `--facts-operators`): the same
+  or better on `sqlite3.c` (22.4 against 23.2 cycles a taken leaf or lookup
+  whole, 20.4 lean, 15.0 the loads) and 0.4 to 2.0 cycles dearer on Lua and
+  musl (whole 18.0 and 16.5 against 17.5 and 15.9; lean 17.3 and 15.3 against
+  the follow-up's 16.0 and 14.1; the loads 12.8 and 10.4 against 10.8 and
+  8.8).
+- **A whole compile** doesn't run the kernel: `-c sqlite3.c` has the same
+  instructions on both builds.
+
+### What stays scalar, and why
+
+- **The pass to the classes' lists**: measured against both vector ways
+  above.
+- **The operators' loops.** Each is T's rule's steps for one operator: its
+  operands' records and their types' rows at places only the records give,
+  32-bit flags by masks that differ by operator, a payload's fold or
+  conversion, one record's store. This piece measured exactly that
+  alternative to the lanes, and it loses: an operator that is no lookup is
+  24 to 77 cycles in its loop, 56 on average, where step 0's lanes made
+  these operators' seven fact bytes for 11.7 cycles a node they typed. The
+  loops are not what the middle's T should be; they are what T's whole
+  record costs an operator at a time, and the scalar twin that lanes for
+  these operators would be checked against and fall back to.
+
+### What it means
+
+- **T whole on these records is exact, and 2.3 to 3.2 times cheaper than
+  T's rules** as the shadow runs them: 9.67 M cycles a unit against 22.96 M
+  on `sqlite3.c` with whole records, 8.13 M lean (the record's run).
+- **It is not within the budget.** The middle has 38 cycles a body node. T's
+  whole record by a loop a class takes 33 to 34 cycles a record of the
+  window by itself (38 an evaluated node). Lean records take 28, and with
+  step 0's C, keys, template and X (14.1 a node on `sqlite3.c`) the middle
+  would be 42 with a body a window and 39 with the windows packed: a sum of
+  parts measured apart, as the follow-up's 25 to 27 was, which had the other
+  operators' facts from step 0's lanes.
+- **What costs is the record, not the load.** The other operators are 24% of
+  the records and 43% of the kernel's cycles. A row's operator, `=`, a
+  conversion, a cast and an update are 180 to 250 instructions each for a
+  whole record, with a third to three quarters of a mispredicted branch.
+  That is step 1's finding for the lookups again, on operators that have no
+  load of their own to make.
+- **Three things are worth what they measured:** lean records 6 cycles an
+  evaluated node; packed windows 3.5 to 4.6; and the lists, the classes and
+  the dispatch 6.1 cycles a record with a body a window (3.7 packed), about
+  half of it the scalar pass, which a front that gives each record its class
+  and its place in the class's list would not need. Together: lean records
+  with the windows packed are 28.2, and about 26 without the scalar pass, by
+  these parts' sum and not by a measurement. The gate's 25 would still be
+  missed.
+- **For step 2:** the other operators' facts belong to the lanes, as the
+  design has them, with a record's wide fields (its type and that type's
+  word, its object and payload) written only where a later rule or X reads
+  them. This kernel is then their oracle and their scalar path on the fact
+  words' records. What that leaves to measure first is which of T's fields
+  C and X read of each operator's record on these windows, beyond the seven
+  fact bytes step 0's lanes made.
 
 ## Related
 
