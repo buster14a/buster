@@ -69,6 +69,14 @@
 // tests where they sit"). BUSTER_NODE_READER_VERIFY: T's rows and rules checked against the action there (--verify).
 #define BUSTER_NODE_READER_TESTS 1u
 #define BUSTER_NODE_READER_VERIFY 2u
+// BUSTER_NODE_READER_OWN: the tests there in the machine's own form (node_tests_expression; --front-own-tests; "The tests
+// in the machine's own form"), whose bits are then the verdict. BUSTER_NODE_READER_BOTH: the census's code on the view
+// run too, on every expression, and the two forms' bits compared (with --verify).
+#define BUSTER_NODE_READER_OWN 4u
+#define BUSTER_NODE_READER_BOTH 8u
+// BUSTER_NODE_READER_LAST: the tests after C and X, on the expressions those take, where they otherwise come between T
+// and C (--front-tests-last).
+#define BUSTER_NODE_READER_LAST 16u
 // A lean leaf's kind, in its record's `leaf_categories`.
 #define BUSTER_NODE_FRONT_LEAF_IDENTIFIER 0u
 #define BUSTER_NODE_FRONT_LEAF_LITERAL 1u
@@ -161,6 +169,27 @@ struct NodeFrontTypes
     // action gives a warning.
     uint64_t twin_differences;
     uint64_t twin_warnings;
+    // BUSTER_NODE_READER_OWN's: the expressions and records the own form ran on; the expressions that had a record sent
+    // to the census's own tests and those records, by what sent them (a NodeTestsTrigger); the expressions walked for
+    // them; and, with BUSTER_NODE_READER_BOTH, the expressions whose bits or whose tokens' span are not the census's
+    // code's on the view, and the walks that reached another count of nodes than T's records.
+    uint64_t own_expressions;
+    uint64_t own_records;
+    uint64_t own_visited;
+    uint64_t own_visits;
+    uint64_t own_walks;
+    uint64_t own_triggers[32];
+    // The records its pass listed: leaves, records whose token's parent the tree's tests read, and operators with tests
+    // of their own; and of the last, the calls, those with a constant operand, and those with a third operand.
+    uint64_t own_leaves;
+    uint64_t own_trees;
+    uint64_t own_operators;
+    uint64_t own_calls;
+    uint64_t own_constants;
+    uint64_t own_thirds;
+    uint64_t own_differences;
+    uint64_t own_count_differences;
+    uint32_t own_listed;
 };
 
 #define BUSTER_NODE_FRONT_TYPED_REFUSAL 0x0fu
