@@ -799,6 +799,10 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/tier0_source_benchmark.c"
 #endif
+// #2874's measure-tier0-entries: what a typed entry's records depend on, on the same functions.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+#include "buster/compiler/tier0_entries_measure.c"
+#endif
 // #1398's test-tier0-inline: Tier 0's splice of always_inline functions, its vector path against its twin, on real C.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/c_check_tier0_inline_test.c"
@@ -825,6 +829,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/c_check_program_templates_test.c"
 #include "buster/compiler/tier0_source_benchmark_test.c"
+#include "buster/compiler/tier0_entries_measure_test.c"
 #include "buster/compiler/c_check_lanes_benchmark_test.c"
 #include "buster/compiler/c_option_table_test.c"
 #include "buster/compiler/c_check_request_test.c"
@@ -2111,6 +2116,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-backend-source") == 0)
     {
         result = run_backend_source_benchmark(argc - 2, argv + 2);
+    }
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "measure-tier0-entries") == 0)
+    {
+        result = run_tier0_entries_measure(argc - 2, argv + 2);
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
