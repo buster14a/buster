@@ -8,7 +8,8 @@
 // would make before it takes it. Include after c_check_lower_inventory.c.
 //
 //   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--fused] [--interleave N] [--facts | --facts-lean | --facts-loads]
-//                                       [--facts-operators] [--facts-packed] [--facts-window N] [--passes N] [--repeat N]] [preprocessor options] file...
+//                                       [--facts-operators] [--facts-reads] [--facts-packed] [--facts-window N] [--passes N] [--repeat N]]
+//                                       [preprocessor options] file...
 //
 // A full expression is a tree of the tasks' pops under one root: a pop that a statement's control pushed (an expression
 // statement's, a condition's, a return's, a switch's, an initializer's) or a nested control (a statement expression's).
@@ -490,6 +491,8 @@ struct NodeCensusScratch
     NodeMachine* machine;
     // --facts: the file's fact words and windows (c_check_node_machine_facts.c), or none.
     NodeFacts* facts;
+    // --facts-reads: the file's census of what reads T's records (c_check_node_machine_reads.c), or none.
+    NodeReads* reads;
     const Tier0Function* function;
     const uint32_t* owners;
     // The log's labels' entries (CheckLowerOwners.labels), which a pop's `label` indexes.
@@ -1965,6 +1968,11 @@ struct NodeShadow
     bool facts;
     bool facts_packed;
     bool facts_operators;
+    // --facts-reads (#2850's step 2's second piece, c_check_node_machine_reads.c): what a later rule of T, C and X read of
+    // each record's wide fields, and where those come from; its counts over every file.
+    bool facts_reads;
+    NodeReadsCounts reads;
+    uint64_t reads_listed;
     uint32_t facts_window;
     uint32_t facts_mode;
     uint64_t facts_operator_records[CHECK_OP_COUNT];
@@ -2907,6 +2915,184 @@ static void node_shadow_facts(NodeShadow* shadow, NodeCensusScratch* s)
         shadow->facts_widest = facts->widest > shadow->facts_widest ? facts->widest : shadow->facts_widest;
         shadow->facts_row_ticks += facts->row_ticks;
         shadow->facts_line_ticks += facts->line_ticks;
+        // --facts-reads, last: its rules' runs fill the members' and the pointer conversions' slots with keys no pass
+        // above asked for. A later rule's reads by the kernel's windows; then C's and X's by the machine's expressions,
+        // typed again one at a time, whose records are the windows' in their order.
+        if (s->reads != NULL)
+        {
+            NodeMachine* machine = s->machine;
+            for (uint32_t window = 0; window < windows; window += 1)
+            {
+                node_reads_consumers(s->reads, facts, window);
+            }
+            uint64_t base = 0;
+            for (uint32_t e = 0; e < shadow->timed_count; e += 1)
+            {
+                const NodeShadowExpression* expression = shadow->timed + e;
+                if (node_machine_type(machine, expression->first, expression->root, expression->count) == NODE_MACHINE_TAKEN)
+                {
+                    node_reads_sweeps(s->reads, facts, machine, base, expression->context, expression->target, expression->object);
+                }
+                base += expression->count;
+            }
+            node_reads_classify(s->reads, facts);
+            // --list N: the first N records C or X decide on an identity of, by file and line, with each reader's bits
+            // of it (BUSTER_NODE_READS_TYPE_DECIDES, _OBJECT_DECIDES, _CONVERTED_DECIDES).
+            for (uint64_t at = 0; at < facts->record_count && shadow->reads_listed < node_census_list; at += 1)
+            {
+                const uint64_t mask = s->reads->masks[at];
+                const uint32_t contexts = (uint32_t)(mask >> (16 * BUSTER_NODE_READS_C)) & BUSTER_NODE_READS_IDENTITY_DECIDES;
+                const uint32_t expanded = (uint32_t)(mask >> (16 * BUSTER_NODE_READS_X)) & BUSTER_NODE_READS_IDENTITY_DECIDES;
+                if ((contexts | expanded) != 0 && s->reads->ran[at] == (BUSTER_NODE_READS_RAN_T | BUSTER_NODE_READS_RAN_SWEEPS))
+                {
+                    // Its place as the preprocessor presumes it (a header's line is the header's), its consumer's
+                    // operator, its type's index and the index of the type it was changed to: one under
+                    // BUSTER_TYPE_CODE_COUNT is a builtin type's code.
+                    const uint32_t op = node_reads_op(facts, at);
+                    const uint32_t ahead = s->reads->ahead[at];
+                    const uint32_t consumer = ahead != 0 && at + ahead < facts->record_count ? node_reads_op(facts, at + ahead) : BUSTER_NODE_READS_OPS;
+                    const Parser* parser = s->program->parser;
+                    const uint32_t token = s->program->input->graph.tokens[facts->nodes[at]];
+                    const char* name = s->file;
+                    uint32_t length = (uint32_t)strlen(s->file);
+                    uint32_t line = 0;
+                    if (token < parser->tokens.count && parser->tokens.sources[token] < s->pp->output.count && s->pp->output.locations != NULL)
+                    {
+                        line = pp_presumed(s->pp, s->pp->output.locations[parser->tokens.sources[token]], &name, &length);
+                    }
+                    const uint32_t index = type_index(facts->expected_types[at]);
+                    shadow->reads_listed += 1;
+                    printf("node-reads: an identity decides: file=%.*s line=%u op=%s consumer=%s C=0x%x X=0x%x type=%u other=%u\n", (int)length, name, line,
+                           op == BUSTER_NODE_READS_LITERAL ? "literal" : op == BUSTER_NODE_READS_DISCARD ? "discard" : op == CHECK_OP_VALUE ? "identifier" :
+                           lower_inventory_op_names[op] != NULL ? lower_inventory_op_names[op] : "?",
+                           consumer == BUSTER_NODE_READS_OPS ? "none" : consumer == BUSTER_NODE_READS_LITERAL ? "literal" : consumer == BUSTER_NODE_READS_DISCARD ? "discard" :
+                           consumer == CHECK_OP_VALUE ? "identifier" : lower_inventory_op_names[consumer] != NULL ? lower_inventory_op_names[consumer] : "?",
+                           contexts, expanded, index, index < facts->row_count ? s->reads->other_types[index] : index);
+                }
+            }
+        }
+    }
+}
+
+// --facts-reads' report (c_check_node_machine_reads.c): the runs; by kind and by operator the records every reader was
+// run again for, by what they need made at them, and by kind which wide fields are read, which of those are new at
+// the record, and which reader reads one; then, for each operator, each reader's reads of each field, the flags' bits
+// read, the payloads that decided, and each read wide field's source. Only what is not zero is printed.
+static void node_shadow_reads_report(const NodeShadow* shadow)
+{
+    const NodeReadsCounts* counts = &shadow->reads;
+    static const char* const readers[BUSTER_NODE_READS_READERS] = { "T", "C", "X" };
+    static const char* const kinds[BUSTER_NODE_READS_KINDS] = { "leaf", "lookup", "operator" };
+    static const char* const bits[BUSTER_NODE_READS_BITS] = {
+        "type-word",      "type-decides",    "type-carried",   "object-kind",      "object-decides",    "object-carried", "payload-decides", "payload-carried",
+        "offset-decides", "offset-carried",  "converted-word", "converted-decides", "converted-carried", "flags",          "conversion-flags",
+    };
+    static const char* const flags[BUSTER_NODE_READS_FLAG_BITS] = {
+        "ice",           "float-literal",    "bit-field",       "register",        "side-effect",         "ice-unevaluated",        "null-pointer",
+        "static-object", "volatile-part",    "gnu-constant",    "gnu-ice-form",    "fp-environment",      "vector-element",         "vector-duplicate",
+        "gnu-division",  "gnu-float-range",  "gnu-object-read", "literal-zero",    "inactive-union-read", "inactive-union-address", "const-read-restricted",
+        "discarded-unevaluable", "modification", "nonnull-address", "register-name",
+    };
+    static const char* const conversions[BUSTER_NODE_READS_CONVERSION_BITS] = {
+        "lvalue", "array", "function", "promotion", "arithmetic", "assignment", "cast", "null", "transparent-union", "atomic", "to-union", "failed",
+    };
+    static const char* const payloads[BUSTER_NODE_READS_PAYLOADS] = { "flipped", "zero", "three", "eight", "seventy-thousand", "large" };
+    static const char* const fields[BUSTER_NODE_READS_FIELDS] = { "type", "object", "payload", "conversion-0", "conversion-1", "offset" };
+    static const char* const sources[BUSTER_NODE_READS_SOURCES] = { "none", "leaf", "builtin", "operand", "row", "input", "new" };
+    uint64_t records = 0;
+    uint64_t measured = 0;
+    for (uint32_t kind = 0; kind < BUSTER_NODE_READS_KINDS; kind += 1)
+    {
+        records += counts->kind_records[kind];
+        measured += counts->kind_measured[kind];
+    }
+    printf("node-reads: expressions=%" PRIu64 " records=%" PRIu64 " measured=%" PRIu64 " (%.2f%%); expressions past %u records=%" PRIu64 " (records %" PRIu64
+           "); consumers left to T=%" PRIu64 "; misplaced=%" PRIu64 "\n",
+           counts->expressions, records, measured, node_census_share(measured, records), BUSTER_NODE_READS_MOST, counts->long_expressions, counts->long_records,
+           counts->left_consumers, counts->misplaced);
+    printf("node-reads: runs with a field changed: rules=%" PRIu64 " sweeps=%" PRIu64 "; with none changed=%" PRIu64 " differences=%" PRIu64 "\n", counts->rule_runs,
+           counts->sweep_runs, counts->same_runs, counts->same_differences);
+    for (uint32_t kind = 0; kind < BUSTER_NODE_READS_KINDS; kind += 1)
+    {
+        const uint64_t* by = counts->kind_classes[kind];
+        printf("node-reads: kind=%s records=%" PRIu64 " measured=%" PRIu64 " none=%" PRIu64 " (%.2f%%) named=%" PRIu64 " (%.2f%%) copied=%" PRIu64 " (%.2f%%) new=%" PRIu64
+               " (%.2f%%); C or X decide on an identity=%" PRIu64 " (%.2f%%); of a type with no other like it=%" PRIu64 "\n",
+               kinds[kind], counts->kind_records[kind], counts->kind_measured[kind], by[0], node_census_share(by[0], counts->kind_measured[kind]), by[1],
+               node_census_share(by[1], counts->kind_measured[kind]), by[2], node_census_share(by[2], counts->kind_measured[kind]), by[3],
+               node_census_share(by[3], counts->kind_measured[kind]), counts->kind_identities[kind], node_census_share(counts->kind_identities[kind], counts->kind_measured[kind]),
+               counts->kind_lone[kind]);
+        const uint64_t* read = counts->kind_fields[kind];
+        const uint64_t* fresh = counts->kind_new[kind];
+        const uint64_t* by_reader = counts->kind_readers[kind];
+        printf("node-reads: kind=%s a wide field read: type=%" PRIu64 " object=%" PRIu64 " payload=%" PRIu64 " offset=%" PRIu64 " conversions=%" PRIu64
+               "; of them new at the record: type=%" PRIu64 " object=%" PRIu64 " payload=%" PRIu64 " (an operand's where it fits: %" PRIu64
+               "; an operand's, its rule not run again: %" PRIu64 ") offset=%" PRIu64 " conversions=%" PRIu64 "; read by T=%" PRIu64 " C=%" PRIu64 " X=%" PRIu64 "\n",
+               kinds[kind], read[0], read[1], read[2], read[3], read[4], fresh[0], fresh[1], fresh[2], counts->kind_fits[kind], counts->kind_unseen[kind], fresh[3],
+               fresh[4], by_reader[BUSTER_NODE_READS_T], by_reader[BUSTER_NODE_READS_C], by_reader[BUSTER_NODE_READS_X]);
+    }
+    for (uint32_t op = 0; op < BUSTER_NODE_READS_OPS; op += 1)
+    {
+        const char* name = op == BUSTER_NODE_READS_LITERAL ? "literal" : op == BUSTER_NODE_READS_DISCARD ? "discard" : op == CHECK_OP_VALUE ? "identifier" :
+                           lower_inventory_op_names[op] != NULL ? lower_inventory_op_names[op] : "?";
+        if (counts->records[op] != 0)
+        {
+            const uint64_t* by = counts->classes[op];
+            printf("node-reads: op=%s records=%" PRIu64 " measured=%" PRIu64 " none=%" PRIu64 " named=%" PRIu64 " copied=%" PRIu64 " new=%" PRIu64 " (%.2f%%)\n", name,
+                   counts->records[op], counts->measured[op], by[0], by[1], by[2], by[3], node_census_share(by[3], counts->measured[op]));
+            for (uint32_t reader = 0; reader < BUSTER_NODE_READS_READERS; reader += 1)
+            {
+                bool any = false;
+                for (uint32_t bit = 0; bit < BUSTER_NODE_READS_BITS; bit += 1)
+                {
+                    any = any || counts->bits[reader][op][bit] != 0;
+                }
+                if (any)
+                {
+                    printf("node-reads: op=%s reader=%s", name, readers[reader]);
+                    for (uint32_t bit = 0; bit < BUSTER_NODE_READS_BITS; bit += 1)
+                    {
+                        if (counts->bits[reader][op][bit] != 0)
+                        {
+                            printf(" %s=%" PRIu64, bits[bit], counts->bits[reader][op][bit]);
+                        }
+                    }
+                    printf("\n");
+                }
+                for (uint32_t bit = 0; bit < BUSTER_NODE_READS_FLAG_BITS; bit += 1)
+                {
+                    if (counts->flag_bits[reader][op][bit] != 0)
+                    {
+                        printf("node-reads: op=%s reader=%s flag=%s records=%" PRIu64 "\n", name, readers[reader], flags[bit], counts->flag_bits[reader][op][bit]);
+                    }
+                }
+                for (uint32_t bit = 0; bit < BUSTER_NODE_READS_CONVERSION_BITS; bit += 1)
+                {
+                    if (counts->conversion_bits[reader][op][bit] != 0)
+                    {
+                        printf("node-reads: op=%s reader=%s conversion-flag=%s records=%" PRIu64 "\n", name, readers[reader], conversions[bit],
+                               counts->conversion_bits[reader][op][bit]);
+                    }
+                }
+            }
+            for (uint32_t k = 0; k < BUSTER_NODE_READS_PAYLOADS; k += 1)
+            {
+                if (counts->payload_values[op][k] != 0)
+                {
+                    printf("node-reads: op=%s payload=%s decides for C or X: records=%" PRIu64 "\n", name, payloads[k], counts->payload_values[op][k]);
+                }
+            }
+            for (uint32_t field = 0; field < BUSTER_NODE_READS_FIELDS; field += 1)
+            {
+                for (uint32_t source = 0; source < BUSTER_NODE_READS_SOURCES; source += 1)
+                {
+                    if (counts->sources[field][op][source] != 0)
+                    {
+                        printf("node-reads: op=%s field=%s read, its source=%s: records=%" PRIu64 "\n", name, fields[field], sources[source],
+                               counts->sources[field][op][source]);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -3302,6 +3488,7 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
         NodeShadow* shadow = census->shadow;
         NodeMachine machine;
         NodeFacts facts;
+        NodeReads reads;
         if (room && shadow != NULL)
         {
             uint32_t locals = 1;
@@ -3338,6 +3525,11 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                 room = node_facts_begin(&facts, &machine, nodes, shadow->facts_window, shadow->facts_packed, shadow->facts_mode != BUSTER_NODE_FACTS_WHOLE,
                                         shadow->facts_operators, &scratch);
                 s.facts = room ? &facts : NULL;
+            }
+            if (room && shadow->facts_reads)
+            {
+                room = node_reads_begin(&reads, &facts, &shadow->reads, &scratch);
+                s.reads = room ? &reads : NULL;
             }
         }
         if (room)
@@ -3595,6 +3787,12 @@ static int run_node_census(int count, char** arguments)
             shadow.facts = true;
             shadow.facts_operators = true;
         }
+        else if (strcmp(arguments[i], "--facts-reads") == 0)
+        {
+            shadow.facts = true;
+            shadow.facts_operators = true;
+            shadow.facts_reads = true;
+        }
         else if (strcmp(arguments[i], "--facts-window") == 0)
         {
             uint64_t number = 0;
@@ -3651,9 +3849,10 @@ static int run_node_census(int count, char** arguments)
             }
         }
     }
-    // The operators' kernel makes whole or lean records: the loads' kernel is a lookup's alone.
+    // The operators' kernel makes whole or lean records: the loads' kernel is a lookup's alone. The reads' census runs the
+    // kernel's rules on whole records.
     valid = valid && file_count != 0 && (shadowed || (!shadow.scalar && !shadow.verify && !shadow.fused && !shadow.interleave && !shadow.facts)) &&
-            !(shadow.facts_operators && shadow.facts_mode == BUSTER_NODE_FACTS_LOADS);
+            !(shadow.facts_operators && shadow.facts_mode == BUSTER_NODE_FACTS_LOADS) && !(shadow.facts_reads && shadow.facts_mode != BUSTER_NODE_FACTS_WHOLE);
     NodeCensus census = { .shadow = shadowed ? &shadow : NULL };
     for (uint32_t i = 0; valid && i < file_count; i += 1)
     {
@@ -3671,18 +3870,22 @@ static int run_node_census(int count, char** arguments)
         {
             node_shadow_facts_report(&shadow);
         }
+        if (shadow.facts_reads)
+        {
+            node_shadow_reads_report(&shadow);
+        }
     }
     else
     {
-        fprintf(stderr, "usage: compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--facts | --facts-lean | --facts-loads] [--facts-operators] [--facts-packed] [--facts-window N] [--passes N] [--repeat N]] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--facts | --facts-lean | --facts-loads] [--facts-operators] [--facts-reads] [--facts-packed] [--facts-window N] [--passes N] [--repeat N]] [preprocessor options] file...\n");
     }
     free(files);
     free(options);
     const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0 || shadow.fused_differences != 0 ||
                                           shadow.facts_differences != 0 || shadow.facts_list_differences != 0 || shadow.facts_failures != 0 ||
-                                          shadow.facts_conversions != shadow.facts_conversions_derived ||
-                                          shadow.front_differences != 0 || shadow.typed_differences != 0 || shadow.typed_object_differences != 0 ||
-                                          shadow.typed_library_differences != 0);
+                                          shadow.facts_conversions != shadow.facts_conversions_derived || shadow.reads.same_differences != 0 ||
+                                          shadow.reads.misplaced != 0 || shadow.front_differences != 0 || shadow.typed_differences != 0 ||
+                                          shadow.typed_object_differences != 0 || shadow.typed_library_differences != 0);
     return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
 }
 

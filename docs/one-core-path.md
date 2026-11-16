@@ -1,6 +1,7 @@
 # The one-core path: 73 cycles a token, on records the vector lanes can use (#2850): design
 
-Status: design, with its first two steps and step 2's first piece measured.
+Status: design, with its first two steps and step 2's first two pieces
+measured.
 Nothing here is in a compile.
 [#2850](https://github.com/buster14a/buster/issues/2850) has the design whole:
 the budget, the data design and what would refute it. It is
@@ -30,7 +31,13 @@ made the rest of T's records from the same words, a loop a class: exact, and
 T whole at 38 cycles an evaluated node on `sqlite3.c` (32 with lean records)
 where the shadow's own T takes 89.6 and the piece's gate was 25. An
 operator's whole record costs 56 cycles made that way, where step 0's lanes
-made its fact bytes for 12.
+made its fact bytes for 12. Its second piece counted what of a record
+anybody reads, by changing each field and running its readers again. Of the
+operators that are no lookup, 84% on `sqlite3.c`, 82% on musl and 59% on Lua
+have no wide field read: their bytes are the whole record. A tenth need a
+copy a selector names. 5% and 6% need a value made at the record, and 24% of
+Lua's, every one a constant's arithmetic. C and X decide on a type's
+identity for one thing, a callee's parameters, at every call.
 
 ## The budget
 
@@ -54,7 +61,7 @@ token; the issue has each row's source:
 | --- | --- | --- | --- |
 | 0 | The middle's passes on the real nodes, outside the compiler | every entry the stream's; 20 cycles a taken node or less; 0.2 mispredicted branches a node or fewer | measured: 16.7 and 20.6 cycles, 0.025 and 0.045 mispredicted |
 | 1 | The fact words, in the shadow: T's leaves and lookups from one load each | every record the oracle's; 10 cycles a leaf or lookup or less, a body's expressions a run | measured: exact; 15.8 to 26.5 cycles; a leaf about 5, a lookup 25 to 46. Followed up: a lean record 14.1 to 20.8, the loads alone 8.8 to 15.2 |
-| 2 | The machine on these records where it runs (#2524's steps 2 to 4) | the bodies' middle at 38 cycles a node or less in `-c sqlite3.c` | first piece measured, in the shadow: T whole from the fact words, exact; 38 cycles an evaluated node with whole records and 32 with lean ones, where its own gate was 25 |
+| 2 | The machine on these records where it runs (#2524's steps 2 to 4) | the bodies' middle at 38 cycles a node or less in `-c sqlite3.c` | first piece measured, in the shadow: T whole from the fact words, exact; 38 cycles an evaluated node with whole records and 32 with lean ones, where its own gate was 25. Second piece counted: of the operators that are no lookup, 5.4%, 24.2% and 6.1% need a value made at the record (`sqlite3.c`, Lua, musl; its line was 15%), and C decides on a type's identity for one question of a call's callee |
 | 3 | The front's row, into the window | 35 cycles a token or less | not started |
 | 4 | Tier 0's row | 10 cycles a token or less, the object's bytes unchanged | not started |
 | 5 | Fresh memory and the fixed costs | 6 cycles a token or less | not started |
@@ -209,7 +216,9 @@ What it is was not found.
   Rebuilt with that line, the two builds the issue names read 20.11 and
   19.93 cycles a record on musl in the first pass (0.9% apart) and 11.41
   and 11.46 in the second: the added line moved the code again, and the
-  constant with it.
+  constant with it. Main with the line and step 2's second piece's branch
+  read 20.31 and 20.58 (1.3% apart), and 39.30 and 39.32 with the
+  operators.
 
 ### A record is one line: what a store a column costs
 
@@ -714,7 +723,254 @@ packed (the record's "The versions" has each build):
   them. This kernel is then their oracle and their scalar path on the fact
   words' records. What that leaves to measure first is which of T's fields
   C and X read of each operator's record on these windows, beyond the seven
-  fact bytes step 0's lanes made.
+  fact bytes step 0's lanes made: the second piece, below.
+
+## Step 2's second piece: what reads T's record
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/per-core-step2-reads-2850-2026-11-16).
+`measure-node-machine --shadow --facts-reads`
+([the guide](commands/lowering.md#what-reads-ts-record-2850s-step-2)),
+`c_check_node_machine_reads.c`.
+
+The first piece ended on a question. The design gives the operators' facts
+to the lanes, as bytes a register holds 64 of, and says that what is only
+carried (a type's identity, an object, a payload) stays in side columns the
+deciding passes never load. That holds only if nothing decides on those
+values, and it leaves open which of them have to be made at an operator's
+record at all. This piece counts both, on every record of the same windows:
+which of a record's wide fields a later reader reads, how, and where the
+field's value comes from. It is a count in the shadow. Nothing is timed.
+
+### What it is
+
+- **A read is found by changing the field and running its reader again**,
+  not by reading the reader's code. One field of one record is changed, the
+  reader makes its result again, and the result is compared with what it
+  made before.
+- **Three readers.** A later rule of T is the record's consumer's rule: the
+  fact words' kernel's, T's exact twin by the first piece's check, on the
+  window's records. A call's rule is the machine's own, since the kernel's
+  leaves each argument's conversion to T and that conversion reads the
+  argument's type. C and X are the machine's own sweeps on the expression's
+  columns; X runs on C's unchanged columns, so that what it reads itself is
+  apart from what reaches it through C.
+- **What a field is changed to says what of it is read.** A type becomes
+  another type of the unit with the same word and the same row's facts, so
+  that its identity alone differs, and a type of another word. Of the types
+  with its word, the other is one whose element and whose size or stride
+  differ from its own where there is one: `int*` becomes `long*` before it
+  becomes `volatile int*`, which no reader of a pointee's size tells from
+  it. An object becomes another of its kind (a local, a global) and one of
+  the other kind. A payload takes the values its type holds, of six, and a
+  member's offset two. Each of the flags' 25 bits is flipped, one at a time.
+  For C and X each operand's conversion's type is changed the same two
+  ways, and its flags' 12 bits.
+- **What changed says how it was read.** A byte-level answer changed (a
+  consumer's standing, flags, type's word or conversions' flags; C's
+  context, template or target's word; the tape's kinds, classes or length;
+  a refusal): the field *decides*. Only a wide value changed (a type's
+  identity, an object, a payload, the tape's value): it is *carried*.
+- **A carried value is a read only where it arrives.** A rule that copies
+  its operand's object into its own record reads nothing if nobody reads
+  that record's object. So what a rule carries is kept as an edge, from the
+  operand's field to the consumer's fields that changed, and counted only
+  where one of those is itself read, from the last record back. Where C
+  alone carries a value (a target's identity), X runs on C's changed columns
+  and the tape says whether it arrives. A flag a consumer only hands on, the
+  same bit of its own flags, is no read of it either.
+- **Where a read field comes from:** a leaf's line; a builtin type, which a
+  code names; an operand's same field; a type an operand's type's row gives
+  (its value type, its promotion, its element, the pointer to it, a
+  function's return type) or that type's size; the node's own type name (a
+  cast's); or none of them: new at the record. A payload that equals an
+  operand's counts as that operand's only where its rule was seen to copy
+  it. One that is computed (`1 << 0`) is new. So is one that a conversion
+  copies only where the value fits its type, and one whose rule is T's own
+  and couldn't be run again: those two are counted apart.
+- **A record's class is what has to be made at it:** nothing wide is read;
+  what is read a code names; what is read is a copy a selector could name;
+  or something read is new at the record, a wide step no lane makes.
+- **The census checks itself.** Before a consumer's or an expression's
+  changes and after they are all taken back, the reader runs with nothing
+  changed and has to make what it made. Each record's place in the windows
+  has to be its place in the machine's expressions.
+
+### What it counted
+
+The 9700X, under the lock, Release, main `3d0d56ed7` with the piece's
+sources, on the first piece's three corpora and windows. The counts are the
+same on every run; `sqlite3.c` takes 2.0 s, Lua 0.7 s and musl 2.7 s with the
+pipeline.
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| records of the windows | 291,021 | 73,998 | 130,291 |
+| measured: every reader run again | 288,697, 99.20% | 71,719, 96.92% | 126,899, 97.40% |
+| runs with a field changed: a rule; the sweeps | 8.18 M; 15.00 M | 2.12 M; 3.85 M | 3.64 M; 6.74 M |
+| runs with nothing changed; those that differ | 415,598; 0 | 99,580; 0 | 179,014; 0 |
+| records misplaced | 0 | 0 | 0 |
+| **the operators that are no lookup**, measured | 69,205 | 20,988 | 41,675 |
+| nothing wide is read | 83.99% | 59.45% | 82.36% |
+| what is read a code names (a builtin type) | 0.85% | 1.40% | 1.81% |
+| what is read is a copy | 9.76% | 14.91% | 9.71% |
+| **something read is new at the record** | **5.41%** | **24.24%** | **6.12%** |
+| **the lookups**, measured | 88,250 | 19,421 | 26,724 |
+| nothing wide is read; a code; a copy; new | 59.3%; 0.2%; 9.9%; 30.7% | 60.1%; 0.2%; 5.2%; 34.6% | 67.2%; 0.8%; 15.9%; 16.1% |
+| **the leaves**, measured | 131,242 | 31,310 | 58,500 |
+| nothing wide is read; a copy of its line | 0.33%; 99.67% | 0.49%; 99.51% | 1.05%; 98.95% |
+| **records C or X decide on an identity of** | 14 | 42 | 206 |
+| records whose type has no other of its word | 0 | 0 | 535 |
+
+What is read of an operator that is no lookup, and by whom (records, and
+their share of the measured ones):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| its type's identity | 5,538, 8.0% | 2,806, 13.4% | 3,706, 8.9% |
+| … from: the pointer to its operand's type or another type that type's row gives; a builtin; its own type name; an operand's | 2,794; 1,331; 881; 532 | 1,216; 505; 425; 660 | 996; 1,521; 468; 721 |
+| its payload | 6,191, 8.9% | 5,746, 27.4% | 4,178, 10.0% |
+| … from: a type's size; an operand's, copied; new | 742; 1,703; 3,746 | 257; 401; 5,088 | 676; 951; 2,551 |
+| its object, an operand's | 107 | 39 | 258 |
+| its operands' conversions' types (an operand's and a builtin) | 269 | 586 | 469 |
+| a wide field read by a later rule of T | 9.1% | 28.0% | 10.2% |
+| … by C | 0.4% | 2.8% | 1.1% |
+| … by X | 7.6% | 15.0% | 9.3% |
+
+- **Every field that is new at an operator's record is a payload**: no
+  type and no conversion's type is. They are constants computed at the
+  record: on `sqlite3.c` a negative literal (`-x`, 1,261), an `|` of flags
+  (736), a constant's cast (532), `<<` (279), `~` (263), `-` (211), `+`
+  (136), `*` (115); on Lua its macros' arithmetic, `<<` (1,574), `+`
+  (1,038), `~` (711), `|` (527), a cast (453), `-x` (380); on musl `-x`
+  (945), a cast (288), a constant condition's truth (239), `-` (234), `+`
+  (181).
+- **Two parts of the new payloads are not folds.** A conversion to a type
+  that doesn't hold every value copies the constant where it fits, a test
+  of the value and a copy: 93, none and 239 records. And a constant's cast is
+  T's own rule, which the census can't run again, so its payload is counted
+  new although it equals its operand's: 515, 505 and 295. Without the two
+  the folds are 4.5%, 21.8% and 4.8% of these operators.
+- **Of all the measured records** the new ones at an operator that is no
+  lookup are 1.3%, 7.1% and 2.0%.
+- **A lookup's new fields are the lookups' own:** a member's type and
+  offset from its slot, an element's type, a call's return type. A discard,
+  41% of `sqlite3.c`'s lookups, has nothing read.
+- **C and X decide on an identity for 14, 42 and 206 records**, all by C,
+  all a type's, and all the callee of a call. C asks whether every parameter
+  of the callee's type is a plain scalar before it takes a call
+  (`node_machine_classify_call`), which neither the type's word nor its row
+  holds. The census sees that only where the callee's other type differs in
+  it. **C asks it of every call it takes**: the windows have 13,323, 4,047
+  and 5,348 calls, 4.6%, 5.5% and 4.1% of their records.
+- **What they decide on of a payload.** X decides on whether it is zero:
+  for a member of an address constant (715 records on `sqlite3.c`, 70 on
+  Lua, 343 on musl), a subscript (58, none, 12) and `&x` (15, 1, 4). C
+  decides on a literal's value for 141, 4 and 97 literals, nearly all where
+  the value eight changes its answer.
+- **The flags.** T's rules decide on 16 of the 25 bits of a record's flags:
+  volatile-part, bit-field, vector-duplicate, null-pointer, register,
+  vector-element, register-name, gnu-ice-form, ice-unevaluated,
+  fp-environment, inactive-union-address, ice, float-literal, literal-zero,
+  inactive-union-read and static-object. C decides on four (side-effect,
+  fp-environment, bit-field, vector-element) and on two of a conversion's
+  (to-union, transparent-union). X decides on none.
+- **A later rule of T decides on a type's identity** for 62% of
+  `sqlite3.c`'s identifiers, 36% of its `->`, 82% of its `&x`, 36% of its
+  casts and 10% of its `+`. The census counts the record that is read, not
+  its consumer. By the rules, the consumers are the lookups, which load by
+  their operand's type, and the conversions of pointers, which compare two
+  types. Each of those types is a leaf's, a lookup's or a copy.
+
+**Against the piece's gate** (the census exact; at most 15% of the operators
+that are no lookup need a wide step; C and X decide on a type's or an
+object's identity for no more than 2% of the records; refuted above 30%
+wide steps, or above 2% identities):
+
+- **Exact: met.** No run with nothing changed differs, of 694,192 on the
+  three corpora, before a consumer's or an expression's changes or after
+  them; no record is misplaced; and the kernel's records are T's, as the
+  first piece's check has them.
+- **15% of the operators: met on `sqlite3.c` and musl, missed on Lua.**
+  5.4% and 6.1% need a value made at the record; 24.2% of Lua's do. Lua's
+  operators are a quarter constant arithmetic, from its instruction
+  formats' macros. The refutation line, 30%, is not crossed: with every
+  operator the census left counted as needing one, Lua is at 25.6%.
+- **Identities: met by the census's count, crossed by what the count is
+  of.** The census finds 0.005%, 0.06% and 0.16% of the measured records.
+  They are one question of a callee's type, and C asks it at every call
+  it takes: 4.1% to 5.5% of the records, over the 2% line. What the claim
+  said would
+  follow does not: no lane has to carry a wide value for it. It is one bit
+  of a function type, which the type's row can hold, and a call is a lookup
+  that loads that row.
+
+### What the counts can't say
+
+- **The records it left**: 0.8%, 3.1% and 2.6% of the windows' records are
+  operands of a consumer the kernel left to T (1,621, 1,805 and 2,171
+  consumers, the first piece's: constants' casts first) or of a call T
+  types by its action. No expression was past the 256 records C and X are
+  run again on.
+- **One other type.** A type's identity is changed to one type of its word.
+  Two types that give a reader the same answer hide the read: two records
+  with the same member at the same offset, or two function types whose
+  parameters are all plain scalars. And musl's small units have 535 records
+  whose type has no other of its word. For C and X the readers' code bounds
+  what that hides. They ask the type table four things by a type's
+  identity: a pointer's stride, which the census sees as a carried value; a
+  member access's record's kind, which the row's facts already hold; a
+  segment override, which no corpus has; and the callee's parameters, above.
+- **Upper bounds.** A change that takes a record out of its rule's reach
+  counts as a decision; a wide value that only a type of another word
+  changes counts as the type's identity's read; and a byte-level answer of
+  a consumer's record counts whether or not anybody reads that byte.
+- **The tests are a fourth reader, and the census doesn't run them.**
+  Before a compile takes an expression, the census's set and its silence
+  tests say whether the action would have warned. #2524's last piece wrote
+  them from T's records
+  ([its note](https://github.com/buster14a/buster/issues/2850#issuecomment-6912816238)).
+  They decide on the operator, the type's class and kind and the flags'
+  bits for every record; on bits of the object and of the declaration for
+  the leaves; and on a property of a constant operand's payload (zero,
+  negative, fits a width) for a tenth of the records. They read no identity
+  but in the 0.3% of the records they send on (5.2% with `-Wall -Wextra`).
+- **A statement's own checks** of its expression's value are not run
+  either.
+
+### What it means
+
+- **The design's premise holds for C and X, with one bit to add.** What
+  they take of a wide field they carry to the tape. The one thing they
+  decide on by a type's identity is whether a callee's parameters are all
+  plain scalars, at every call: a bit for a function type's row. With it
+  their rules can be arithmetic on bytes, with the tape's values written
+  from the side columns.
+- **For four operators in five the fact bytes are the whole record.**
+  Nobody reads the type's identity, the object or the payload of 84% of
+  `sqlite3.c`'s operators that are no lookup, 82% of musl's and 59% of
+  Lua's. A lane that makes their bytes has made them.
+- **One in ten needs a selector, not a value.** What is read of it is its
+  operand's field, the pointer to its operand's type, its own type name, a
+  builtin type or a type's size: a byte that says which, and a copy where
+  the reader is. The first piece's kernel made all of these as T's whole
+  record, 56 cycles an operator.
+- **The constants need a pass of their own.** One operator in twenty on
+  `sqlite3.c` and musl, and one in four on Lua, is arithmetic on constants,
+  whose value no byte holds. Step 0 had every value given, and the first
+  piece's kernel made these by their rule one at a time (11%, 36% and 13%
+  of its operators). A fold's operands are constants and its consumer reads
+  its payload, so it is a pass over the constants' records by operator and
+  class, eight 64-bit payloads to a register or one at a time: 1.3%, 7.1%
+  and 2.0% of the windows' records.
+- **T's own later rules are where an identity decides**: a lookup's load by
+  its operand's type, and a pointer's conversion by the pair of types. The
+  design has both as loads, and the types they need are a leaf's, a
+  lookup's, or one of the copies above.
+- **For step 2:** T's lanes for the operators that are no lookup need, per
+  record, the fact bytes, the flags' bits the rules decide on, and a
+  selector for a tenth of them; the folds are a pass beside them. That, with
+  step 1's leaves and lookups, is the T to measure next against the 25
+  cycles the first piece missed. It is not claimed here.
 
 ## Related
 
