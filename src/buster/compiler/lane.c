@@ -483,8 +483,19 @@ struct ArenaRegions
 {
     uintptr_t middle;
     uint64_t carved[2];
+    // The releases that left their arena mapped (arena_release_keeps).
+    uint32_t kept;
 };
 #define BUSTER_ARENA_REGION_REFUSED ((uintptr_t)1)
+// A release without a pool unmaps its arena: a call that splits the stretch's mapping twice and frees the arena's pages
+// apart from the exit's, about 15,000 kernel cycles more than leaving them to the exit on the 9700X. A small unit
+// makes six. So the first BUSTER_ARENA_KEPT_COUNT releases of a process whose arena was taken from the stretch and
+// pushed no more than BUSTER_ARENA_KEPT_BYTES leave it mapped: the address space is not taken again either way, and
+// the pages, 32 MiB of them at the very most, are the exit's to free, with everything else. A larger arena's release
+// gives its pages back at once, as before, and so does every release after those: a process that reserves and
+// releases without end keeps no more.
+#define BUSTER_ARENA_KEPT_BYTES (1ull << 20)
+#define BUSTER_ARENA_KEPT_COUNT 32
 #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
 extern ArenaRegions arena_regions;
 #elif defined(BUSTER_UNIT)
@@ -1252,6 +1263,16 @@ static Arena arena_measure(void)
     };
 }
 
+// Whether a release without a pool leaves `arena`, whose mapping starts at `mapping`, mapped (above).
+static bool arena_release_keeps(const Arena* arena, const uint8_t* mapping)
+{
+    const uintptr_t middle = __atomic_load_n(&arena_regions.middle, __ATOMIC_ACQUIRE);
+    const bool taken = BUSTER_ARENA_REGIONS && middle > BUSTER_ARENA_REGION_REFUSED && (uintptr_t)mapping >= middle - BUSTER_ARENA_REGION_BYTES &&
+                       (uintptr_t)mapping < middle + BUSTER_ARENA_REGION_BYTES;
+    const bool small = taken && !arena->unaccounted && arena->peak <= BUSTER_ARENA_KEPT_BYTES;
+    return small && __atomic_fetch_add(&arena_regions.kept, 1, __ATOMIC_RELAXED) < BUSTER_ARENA_KEPT_COUNT;
+}
+
 static void arena_release(Arena* arena)
 {
     if (arena->base != 0 && arena->grows)
@@ -1313,7 +1334,7 @@ static void arena_release(Arena* arena)
                 .layout = arena->layout,
             };
         }
-        else
+        else if (!arena_release_keeps(arena, mapping))
         {
             munmap(mapping, bytes);
         }

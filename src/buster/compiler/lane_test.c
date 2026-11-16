@@ -614,7 +614,8 @@ static uint64_t lane_test_carved(uint32_t down)
 // Reservations taken together (#2873: arena_reservation_map). With the limits fixed and the address space unlimited,
 // as a compile's command has them: two arenas reserved one after the other are next to each other in the stretch's
 // upper half, each zero-filled and writable where it pushed, as an arena of its own mapping is, and advised huge pages
-// past its base pages from its reservation; the first's release unmaps it and leaves the second as it was; an arena
+// past its base pages from its reservation; a release without a pool leaves a small arena mapped and unmaps a large
+// one, and unmaps small ones too once BUSTER_ARENA_KEPT_COUNT have been kept (arena_release_keeps); an arena
 // of base pages and an arena of tables come from the lower half, each right below the one before, with their
 // mappings' flags; a pool takes a released arena and gives the same one back; commits take an arena's base pages at
 // once and then four times what is committed where the kernel charges none, 64 KB and then twice where it does
@@ -664,14 +665,32 @@ static void lane_test_arena_regions_child(LaneTestTally* tally)
                          lane_test_huge_capable((uintptr_t)second.base + BUSTER_ARENA_SMALL_BYTES, &flagged) && flagged;
     const bool base_pages = second_bytes != 0 && !(lane_test_huge_capable((uintptr_t)second.base, &flagged) || !flagged);
     lane_test_expect(tally, !regions || (advised && base_pages), "a region's arena wasn't advised huge pages past its base pages, or its base pages could be huge");
-    // The first's release unmaps its part of the region: the kernel has no page there, and the second keeps its bytes.
-    const uint8_t* first_page = first.base;
+    // Releases without a pool (arena_release_keeps). The first, which pushed three pages, stays mapped; the second,
+    // which pushed more than BUSTER_ARENA_KEPT_BYTES, is unmapped: the kernel has no page there. Then small arenas
+    // until BUSTER_ARENA_KEPT_COUNT have been kept: the next one's release unmaps it, small as it is.
+    const uint8_t* first_page = (const uint8_t*)((uintptr_t)first.base & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1));
+    const uint8_t* second_page = (const uint8_t*)((uintptr_t)second.base & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1));
+    const bool neighbour = second_bytes != 0 && second_bytes[0] == 0xa5 && second_bytes[BUSTER_ARENA_SMALL_BYTES + BUSTER_ARENA_HUGE_PAGE_BYTES - 1] == 0xa5;
     arena_release(&first);
-    unsigned char vector = 0;
-    const bool unmapped = first_page != 0 && mincore((void*)((uintptr_t)first_page & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1)), BUSTER_ARENA_PAGE_BYTES, &vector) != 0 && errno == ENOMEM;
-    const bool kept = second_bytes != 0 && second_bytes[0] == 0xa5 && second_bytes[BUSTER_ARENA_SMALL_BYTES + BUSTER_ARENA_HUGE_PAGE_BYTES - 1] == 0xa5;
-    lane_test_expect(tally, unmapped && kept, "a released reservation of a region stayed mapped, or its neighbour lost its bytes");
     arena_release(&second);
+    unsigned char vector = 0;
+    const bool first_mapped = first_page != 0 && mincore((void*)first_page, BUSTER_ARENA_PAGE_BYTES, &vector) == 0;
+    const bool second_unmapped = second_page != 0 && mincore((void*)second_page, BUSTER_ARENA_PAGE_BYTES, &vector) != 0 && errno == ENOMEM;
+    lane_test_expect(tally, neighbour && first.base == 0 && second_unmapped && (!regions || first_mapped), "a small arena's release unmapped it, or a large one's didn't");
+    bool every_kept = true;
+    uint32_t releases = 1;
+    for (; regions && releases < BUSTER_ARENA_KEPT_COUNT; releases += 1)
+    {
+        Arena small = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+        const uint8_t* page = small.base != 0 && arena_push(&small, 1, 1) != 0 ? (const uint8_t*)((uintptr_t)small.base & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1)) : 0;
+        arena_release(&small);
+        every_kept = every_kept && page != 0 && mincore((void*)page, BUSTER_ARENA_PAGE_BYTES, &vector) == 0;
+    }
+    Arena past = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+    const uint8_t* past_page = past.base != 0 && arena_push(&past, 1, 1) != 0 ? (const uint8_t*)((uintptr_t)past.base & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1)) : 0;
+    arena_release(&past);
+    const bool past_unmapped = past_page != 0 && mincore((void*)past_page, BUSTER_ARENA_PAGE_BYTES, &vector) != 0 && errno == ENOMEM;
+    lane_test_expect(tally, every_kept && past_unmapped, "a process's releases kept more small arenas mapped than they may, or fewer");
     // The other flags' regions: base pages of 2 MB or more (MAP_STACK where the kernel maps them so), and tables.
     Arena wide = arena_reserve_small(BUSTER_LANE_TEST_LARGE_ARENA, 4 * BUSTER_ARENA_HUGE_PAGE_BYTES);
     ArenaTable tables[] = {
