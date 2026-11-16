@@ -1372,7 +1372,9 @@ static inline __attribute__((always_inline)) bool node_facts_pointer(NodeFactsRe
 {
     const bool subscript = op == CHECK_OP_SUBSCRIPT;
     const NodeFactsRow* rows[2] = { node_facts_row_of(view, records[a].type), node_facts_row_of(view, records[b].type) };
-    NodeFactsOperand operands[2];
+    // Zeroed: a first operand that isn't taken leaves the second unread, and the steps below read both before `taken`
+    // decides.
+    NodeFactsOperand operands[2] = { 0 };
     TypeId converted[2] = { 0, 0 };
     uint32_t conversion_flags[2] = { 0, 0 };
     bool taken = node_facts_operand(records, rows[0], a, operands, converted, conversion_flags) &&
@@ -1994,7 +1996,8 @@ static inline __attribute__((always_inline)) bool node_facts_cast(NodeFacts* fac
     const uint8_t target_kind = (uint8_t)(target_word >> 16);
     const uint32_t wanted = BUSTER_NODE_MACHINE_WORD_VALID | BUSTER_NODE_MACHINE_WORD_PLAIN;
     const NodeFactsRow* source_row = node_facts_row_of(view, records[a].type);
-    NodeFactsOperand source;
+    // Zeroed: a target that isn't taken leaves the source unread, and the steps below read it before `taken` decides.
+    NodeFactsOperand source = { 0 };
     TypeId converted = 0;
     uint32_t conversion_flags = 0;
     bool taken = written != 0 && (target_word & wanted) == wanted && node_facts_operand(records, source_row, a, &source, &converted, &conversion_flags);

@@ -3605,7 +3605,12 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 {
                     // Publish once, while this enclosing operand is folded. This is only the operand's type for
                     // VLA routing, not an explicit query type or a substitute for the graph's constraint checks.
-                    reader->sizeof_types[token] = action.type != 0 ? action.type : action.operands[0].type;
+                    const TypeId operand = action.type != 0 ? action.type : action.operands[0].type;
+                    if (BUSTER_CHECK_RARE(reader, sizeof_types, token) != operand)
+                    {
+                        check_input_rare_claim(reader, &reader->sizeof_types[token]);
+                        reader->sizeof_types[token] = operand;
+                    }
                 }
                 check_constant_warning_operands(input, &action, first, count);
                 check_constant_runtime_query(input, &action);
