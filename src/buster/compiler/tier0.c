@@ -4285,8 +4285,9 @@ static inline __attribute__((always_inline)) void tier0_fuse_entries(const Tier0
             kinds[i - 1] <= BUSTER_TYPED_GE)
         {
             const bool test = i >= 3 && tier0_is_test(function, labels, entries, i - 1);
+            // Behind two tests the compare is five back, and the entry three back, a compare too, is the first test.
             const bool twice = test && i >= 5 && tier0_is_test(function, labels, entries, i - 3) && tier0_tested_compare(function, entries, i - 5);
-            const bool once = test && !twice && tier0_tested_compare(function, entries, i - 3);
+            const bool once = test && tier0_tested_compare(function, entries, i - 3);
             const uint32_t base = kind == BUSTER_TYPED_BRANCH_TRUE ? BUSTER_TIER0_VARIANT_BRANCH_TRUE : BUSTER_TIER0_VARIANT_BRANCH_FALSE;
             const uint32_t fused = base + entries->variants[i - 1];
             if (once || twice)
