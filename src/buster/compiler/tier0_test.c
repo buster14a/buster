@@ -6405,6 +6405,7 @@ static void tier0_test_frame_address(Tier0TestTally* tally, Tier0Tables* tables)
 // The masks' check (#179), which main.c includes after the typed interpreter it runs (tier0_mask_test.c).
 static void tier0_test_masks(Tier0TestTally* tally, uint64_t seed, uint32_t count, uint64_t* entries);
 #include "buster/compiler/tier0_label_test.c"
+#include "buster/compiler/tier0_tested_test.c"
 #include "buster/compiler/tier0_deep_test.c"
 #include "buster/compiler/tier0_validate_test.c"
 #include "buster/compiler/tier0_tail_test.c"
@@ -6589,6 +6590,10 @@ static int run_tier0_tests(int argc, char** argv)
             deep.records = &tables.records;
             Tier0ProgramOptions aligned = deep;
             aligned.over_aligned = true;
+            // And with conditions as the lowering writes them, tested against zero before their branch (#2877): a program
+            // of its own seed for seed.
+            Tier0ProgramOptions tested = aligned;
+            tested.tested = true;
             {
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_moves(&tally);
@@ -6649,6 +6654,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_branches(&tally);
                 tier0_test_report("branches", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_tested(&tally);
+                tier0_test_report("tested compares", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
@@ -6782,7 +6794,7 @@ static int run_tier0_tests(int argc, char** argv)
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
-            for (uint32_t s = 0; s < 7; s += 1)
+            for (uint32_t s = 0; s < 8; s += 1)
             {
                 Tier0TestTally tally = { 0, 0 };
                 uint64_t instructions = 0;
@@ -6791,8 +6803,8 @@ static int run_tier0_tests(int argc, char** argv)
                 uint64_t deep_entries = 0;
                 uint64_t frames[2] = { 0, 0 };
                 uint64_t coverage[BUSTER_TIER0_TEST_COVERAGE] = { 0 };
-                tier0_test_programs(&tally, &tables, seed + s * 1000003ull, count, s < 4 ? shapes[s] : s == 4 ? records : s == 5 ? deep : aligned, &instructions, &entries,
-                                    &deferred, &deep_entries, frames, coverage);
+                tier0_test_programs(&tally, &tables, seed + s * 1000003ull, count, s < 4 ? shapes[s] : s == 4 ? records : s == 5 ? deep : s == 6 ? aligned : tested,
+                                    &instructions, &entries, &deferred, &deep_entries, frames, coverage);
                 if (s == 4 || s == 5)
                 {
                     // With the default count, every kind of part, location and result the catalog can make shows: the
@@ -6812,7 +6824,9 @@ static int run_tier0_tests(int argc, char** argv)
                 // count, the last shape has many, a base among them (with variable-length arrays).
                 tier0_test_expect(&tally, s < 4 ? frames[0] == 0 : s < 6 || count < 300 || (frames[0] >= 100 && frames[1] >= 10), "realigned frames",
                                   "%" PRIu64 " realigned frames, %" PRIu64 " with a base", frames[0], frames[1]);
-                tier0_test_report(s < 4 ? names[s] : s == 4 ? "programs: records by value" : s == 5 ? "programs: deep values" : "programs: aligned past 16 bytes", tally);
+                tier0_test_report(s < 4 ? names[s] : s == 4 ? "programs: records by value" : s == 5 ? "programs: deep values" : s == 6 ? "programs: aligned past 16 bytes"
+                                                                                                                                    : "programs: tested conditions",
+                                  tally);
                 printf("    %" PRIu64 " entries, %" PRIu64 " records, %" PRIu64 " deferred, %" PRIu64 " deep, %" PRIu64 " realigned frames (%" PRIu64 " with a base)\n",
                        entries, instructions, deferred, deep_entries, frames[0], frames[1]);
                 total.checks += tally.checks;

@@ -35,9 +35,12 @@
 // whether a store's local is the one three back; each named local's home (a general or an XMM register, a slot, an
 // object); the two depths; the symbol's access; whether the entry is the function's last; the function's result; a
 // call's counts of register and stack arguments, its flags, its result and which of its first eight arguments are
-// narrow integers; a copy's bytes; and the frame's kind with the function's rare classes. No input is a value, a
-// displacement, a symbol or a table's row. Three more are the fusion's own answers (its key's kind and class and its
-// variant): lane arithmetic on the others, which Tier 0 makes today.
+// narrow integers; a copy's bytes; and the frame's kind with the function's rare classes. A branch after a compare's
+// test against zero takes the compare and its operands with it (#2877), five entries back: where the stream has that
+// shape, the kinds, classes and homes of the two entries before the compare, the nearer one's value by its two classes,
+// and whether either is a jump target, are inputs too. No input is a value, a displacement, a symbol or a table's row.
+// Three more are the fusion's own answers (its key's kind and class and its variant): lane arithmetic on the others,
+// which Tier 0 makes today.
 //
 // The count, a head's kind at a time, twice: over the raw inputs alone (`keys=raw`), and with the fusion's three
 // offered (`keys=fused`). Two figures are counted of a set of inputs. Its conflicts: the entries in keys with two
@@ -112,6 +115,14 @@ typedef enum Tier0CensusInput
     TIER0_CENSUS_CALL_NARROW,
     TIER0_CENSUS_SIZE,
     TIER0_CENSUS_FRAME,
+    TIER0_CENSUS_CLASS_4,
+    TIER0_CENSUS_CLASS_5,
+    TIER0_CENSUS_KIND_4,
+    TIER0_CENSUS_KIND_5,
+    TIER0_CENSUS_VALUE_4,
+    TIER0_CENSUS_NARROW_4,
+    TIER0_CENSUS_HOME_4,
+    TIER0_CENSUS_HOME_5,
     // The fusion's answers, which the raw count leaves out.
     TIER0_CENSUS_KEY_KIND,
     TIER0_CENSUS_KEY_CLASS,
@@ -164,6 +175,14 @@ static const char* const tier0_census_input_names[TIER0_CENSUS_INPUTS] = {
     [TIER0_CENSUS_CALL_NARROW] = "call-narrow",
     [TIER0_CENSUS_SIZE] = "size",
     [TIER0_CENSUS_FRAME] = "frame",
+    [TIER0_CENSUS_CLASS_4] = "class-4",
+    [TIER0_CENSUS_CLASS_5] = "class-5",
+    [TIER0_CENSUS_KIND_4] = "kind-4",
+    [TIER0_CENSUS_KIND_5] = "kind-5",
+    [TIER0_CENSUS_VALUE_4] = "value-4",
+    [TIER0_CENSUS_NARROW_4] = "narrow-4",
+    [TIER0_CENSUS_HOME_4] = "home-4",
+    [TIER0_CENSUS_HOME_5] = "home-5",
     [TIER0_CENSUS_KEY_KIND] = "key-kind",
     [TIER0_CENSUS_KEY_CLASS] = "key-class",
     [TIER0_CENSUS_VARIANT] = "variant",
@@ -236,6 +255,14 @@ static const uint8_t tier0_census_input_families[TIER0_CENSUS_INPUTS] = {
     [TIER0_CENSUS_CALL_NARROW] = TIER0_CENSUS_FAMILY_CALL,
     [TIER0_CENSUS_SIZE] = TIER0_CENSUS_FAMILY_VALUE,
     [TIER0_CENSUS_FRAME] = TIER0_CENSUS_FAMILY_FUNCTION,
+    [TIER0_CENSUS_CLASS_4] = TIER0_CENSUS_FAMILY_NEIGHBOURS,
+    [TIER0_CENSUS_CLASS_5] = TIER0_CENSUS_FAMILY_NEIGHBOURS,
+    [TIER0_CENSUS_KIND_4] = TIER0_CENSUS_FAMILY_NEIGHBOURS,
+    [TIER0_CENSUS_KIND_5] = TIER0_CENSUS_FAMILY_NEIGHBOURS,
+    [TIER0_CENSUS_VALUE_4] = TIER0_CENSUS_FAMILY_VALUE,
+    [TIER0_CENSUS_NARROW_4] = TIER0_CENSUS_FAMILY_VALUE,
+    [TIER0_CENSUS_HOME_4] = TIER0_CENSUS_FAMILY_HOME,
+    [TIER0_CENSUS_HOME_5] = TIER0_CENSUS_FAMILY_HOME,
     [TIER0_CENSUS_KEY_KIND] = TIER0_CENSUS_FAMILY_FUSED,
     [TIER0_CENSUS_KEY_CLASS] = TIER0_CENSUS_FAMILY_FUSED,
     [TIER0_CENSUS_VARIANT] = TIER0_CENSUS_FAMILY_FUSED,
@@ -758,6 +785,22 @@ static bool tier0_census_function(Tier0Census* census, const Tier0Function* func
                     inputs[TIER0_CENSUS_HOME + back] = tier0_census_home(function, homes, local_count, j);
                     marks |= tier0_label(labels, j) ? (uint8_t)(1u << back) : 0;
                 }
+                // A branch after a compare's test against zero takes the compare with it (#2877), and the compare its
+                // operands: the group reaches five entries back. Where the stream has that shape, and nowhere else, the
+                // two entries before the compare are inputs too.
+                const bool tested = (kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE) && i >= 3 &&
+                                    (kinds[i - 1] == BUSTER_TYPED_NE || kinds[i - 1] == BUSTER_TYPED_EQ) && kinds[i - 2] == BUSTER_TYPED_CONST &&
+                                    kinds[i - 3] >= BUSTER_TYPED_EQ && kinds[i - 3] <= BUSTER_TYPED_GE;
+                for (uint32_t back = 4; tested && back <= 5 && back <= i; back += 1)
+                {
+                    const uint32_t j = i - back;
+                    inputs[TIER0_CENSUS_CLASS_4 + back - 4] = classes[j];
+                    inputs[TIER0_CENSUS_KIND_4 + back - 4] = kinds[j];
+                    inputs[TIER0_CENSUS_HOME_4 + back - 4] = tier0_census_home(function, homes, local_count, j);
+                    marks |= tier0_label(labels, j) ? (uint8_t)(1u << back) : 0;
+                }
+                inputs[TIER0_CENSUS_VALUE_4] = tested && i >= 4 ? tier0_census_value_class((int64_t)values[i - 4]) : 0;
+                inputs[TIER0_CENSUS_NARROW_4] = tested && i >= 4 ? tier0_census_narrow_class(values[i - 4], classes[i - 4]) : 0;
                 inputs[TIER0_CENSUS_LABELS] = marks;
                 inputs[TIER0_CENSUS_VALUE] = tier0_census_value_class((int64_t)values[i]);
                 inputs[TIER0_CENSUS_NARROW] = tier0_census_narrow_class(values[i], class);

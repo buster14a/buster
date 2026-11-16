@@ -215,6 +215,10 @@ struct Tier0ProgramOptions
     // With `objects`, objects aligned past 16 bytes (tier0_generate_alignment: 32, 64 or 4096), whose functions' frames
     // are realigned. A program without them is the same as before they existed, seed for seed.
     bool over_aligned;
+    // Conditions as the lowering writes them (#2877): half the statements' conditions tested against zero before their
+    // branch, CONST 0 and NE, or CONST 0 and EQ before the other branch. The C text is the same. A program without them
+    // is the same as before they existed, seed for seed.
+    bool tested;
 };
 
 typedef struct Tier0GeneratedFunction Tier0GeneratedFunction;
@@ -1649,6 +1653,23 @@ static void tier0_counter_test(Tier0Program* program, uint32_t local, uint32_t b
     tier0_emit(program, BUSTER_TYPED_LT, BUSTER_TYPED_CLASS_I32, 0);
 }
 
+// The branch a statement's condition ends in, the condition's value on the stack: BRANCH_FALSE to a target the caller
+// patches. With Tier0ProgramOptions.tested, half the time as the lowering writes it: the value tested against zero
+// first, CONST 0 and NE before the branch, or (a quarter of those) CONST 0 and EQ before BRANCH_TRUE, which goes where
+// the plain branch goes. Returns the branch's entry.
+static uint32_t tier0_emit_condition(Tier0Program* program, uint64_t* random, const Tier0ProgramOptions* options)
+{
+    uint32_t branch = BUSTER_TYPED_BRANCH_FALSE;
+    if (options->tested && tier0_generate_chance(random, 50))
+    {
+        const bool equal = tier0_generate_chance(random, 25);
+        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 0);
+        tier0_emit(program, equal ? BUSTER_TYPED_EQ : BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
+        branch = equal ? BUSTER_TYPED_BRANCH_TRUE : BUSTER_TYPED_BRANCH_FALSE;
+    }
+    return tier0_emit(program, branch, BUSTER_TYPED_CLASS_I32, 0);
+}
+
 // The stack's position restored from the outermost of the constructs from `outer` to the innermost that saved one: the
 // variable-length arrays of every scope a jump out of them leaves released (STACK_RESTORE).
 static void tier0_restore_from(Tier0Program* program, const Tier0FunctionState* state, uint32_t outer)
@@ -2169,7 +2190,7 @@ static void tier0_generate_statement(Tier0Program* program, Tier0FunctionState* 
         tier0_text(program, ")\n");
         tier0_indent(program, state);
         tier0_text(program, "{\n");
-        const uint32_t branch = tier0_emit(program, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, 0);
+        const uint32_t branch = tier0_emit_condition(program, random, options);
         state->depth += 1;
         state->constructs[state->depth] = (Tier0Construct){ BUSTER_TIER0_CONSTRUCT_THEN, 1 + tier0_generate_below(random, 4), branch, UINT32_MAX, 0, 0, 0, multiplier };
     }
@@ -2192,7 +2213,7 @@ static void tier0_generate_statement(Tier0Program* program, Tier0FunctionState* 
         else
         {
             tier0_counter_test(program, counter, bound);
-            branch = tier0_emit(program, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, 0);
+            branch = tier0_emit_condition(program, random, options);
             if (kind == BUSTER_TIER0_CONSTRUCT_WHILE)
             {
                 tier0_text(program, "while (v%u < %u)\n", counter, bound);
@@ -2224,7 +2245,7 @@ static void tier0_generate_statement(Tier0Program* program, Tier0FunctionState* 
         tier0_text(program, "if (");
         tier0_generate_value_of(program, function, &state->scope, random, BUSTER_TYPED_CLASS_I32, budget, options->floating, prefix, 0);
         tier0_text(program, ") %s;\n", continues ? "continue" : "break");
-        const uint32_t skip = tier0_emit(program, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, 0);
+        const uint32_t skip = tier0_emit_condition(program, random, options);
         tier0_loop_jump(program, state, loop, continues);
         tier0_patch(program, skip, tier0_here(program, function));
     }
@@ -2235,7 +2256,7 @@ static void tier0_generate_statement(Tier0Program* program, Tier0FunctionState* 
         tier0_text(program, "if (");
         tier0_generate_value_of(program, function, &state->scope, random, BUSTER_TYPED_CLASS_I32, budget, options->floating, prefix, 0);
         tier0_text(program, ") return");
-        const uint32_t skip = tier0_emit(program, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, 0);
+        const uint32_t skip = tier0_emit_condition(program, random, options);
         tier0_generate_return(program, state, random, options, budget);
         tier0_text(program, ";\n");
         tier0_patch(program, skip, tier0_here(program, function));
@@ -2252,7 +2273,7 @@ static void tier0_generate_statement(Tier0Program* program, Tier0FunctionState* 
         tier0_text(program, "v%u = (", state->function_pointers[p]);
         tier0_generate_value_of(program, function, &state->scope, random, BUSTER_TYPED_CLASS_I32, budget, options->floating, prefix, 0);
         tier0_text(program, ") ? %sf%u : %sf%u;\n", prefix, when_true, prefix, when_false);
-        const uint32_t branch = tier0_emit(program, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, 0);
+        const uint32_t branch = tier0_emit_condition(program, random, options);
         tier0_emit(program, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, program->global_count + 1 + when_true);
         const uint32_t jump = tier0_emit(program, BUSTER_TYPED_JUMP_VALUE, BUSTER_TYPED_CLASS_U64, 0);
         tier0_patch(program, branch, tier0_here(program, function));

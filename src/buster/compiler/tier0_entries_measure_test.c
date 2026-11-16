@@ -7,10 +7,10 @@
 // exception; and an odd group that a second input sets apart is decided at two inputs and one exception at one. Then
 // the census of the fixture under the fixture root, tests/tier0-entries/entries.c: every typed entry is in one group,
 // every record an entry's or the frame's, every head that takes a template has its template's records, the call and
-// the copy are deferred by their kind and one division by its depth, a compare with zero and its branch are one group
-// of three entries, and two pointer additions differ by their scaled constants' class alone. Its report must have the
-// gate's lines, the totals last. Include after tier0_entries_measure.c; test-checker calls this through its forward
-// declaration.
+// the copy are deferred by their kind and one division by its depth, a compare of two locals, its test against zero and
+// its branch are one group of six entries whose inputs reach the two locals, and two pointer additions differ by their
+// scaled constants' class alone. Its report must have the gate's lines, the totals last. Include after
+// tier0_entries_measure.c; test-checker calls this through its forward declaration.
 #ifndef BUSTER_TIER0_ENTRIES_MEASURE_TEST_INCLUDED
 #define BUSTER_TIER0_ENTRIES_MEASURE_TEST_INCLUDED
 
@@ -171,10 +171,15 @@ static __attribute__((noinline)) void check_test_tier0_entries(CheckTest* test)
         deferred_kinds |= sample->state == TIER0_CENSUS_DEFERRED_KIND && sample->kind == BUSTER_TYPED_CALL ? 1 : 0;
         deferred_kinds |= sample->state == TIER0_CENSUS_DEFERRED_KIND && sample->kind == BUSTER_TYPED_COPY ? 2 : 0;
         division = division || (sample->state == TIER0_CENSUS_DEFERRED_DEPTH && sample->kind == BUSTER_TYPED_DIV);
-        // The loop's condition: the compare's value, then CONST 0, NE and BRANCH_FALSE as one group, a compare with a
-        // constant and its branch (the lowering tests a condition's value against zero).
-        compare = compare || (sample->kind == BUSTER_TYPED_BRANCH_FALSE && sample->weight == 3 && sample->inputs[TIER0_CENSUS_KEY_KIND] == BUSTER_TYPED_NE &&
-                              sample->inputs[TIER0_CENSUS_VARIANT] == BUSTER_TIER0_VARIANT_BRANCH_FALSE + BUSTER_TIER0_VARIANT_CONST);
+        // The loop's condition (the lowering tests a condition's value against zero): LOCAL i, LOCAL count, LT, CONST 0,
+        // NE and BRANCH_FALSE as one group, the branch's (#2877). Its inputs have the two locals, four and five entries
+        // back, both in registers, and the label on the first, which the loop's end jumps to.
+        compare = compare || (sample->kind == BUSTER_TYPED_BRANCH_FALSE && sample->weight == 6 && sample->inputs[TIER0_CENSUS_KEY_KIND] == BUSTER_TYPED_LT &&
+                              sample->inputs[TIER0_CENSUS_VARIANT] == BUSTER_TIER0_VARIANT_TESTED_FALSE + BUSTER_TIER0_VARIANT_HOME_HOME &&
+                              sample->inputs[TIER0_CENSUS_KIND_4] == BUSTER_TYPED_LOCAL && sample->inputs[TIER0_CENSUS_KIND_5] == BUSTER_TYPED_LOCAL &&
+                              sample->inputs[TIER0_CENSUS_CLASS_4] == BUSTER_TYPED_CLASS_I32 && sample->inputs[TIER0_CENSUS_CLASS_5] == BUSTER_TYPED_CLASS_I32 &&
+                              sample->inputs[TIER0_CENSUS_HOME_4] == 1 && sample->inputs[TIER0_CENSUS_HOME_5] == 1 && sample->inputs[TIER0_CENSUS_LABELS] == 1u << 5 &&
+                              sample->records == 2);
         // `p + 3` and `p + 20` of 8-byte elements: the constants are of one class (2 to 127) and the products, 24 and
         // 160, of two (the classes of tier0_census_value_class, plus one).
         const bool addition = sample->kind == BUSTER_TYPED_PTR_ADD && sample->inputs[TIER0_CENSUS_VALUE] == 3 && sample->inputs[TIER0_CENSUS_VALUE_1] == 3 &&
@@ -189,7 +194,7 @@ static __attribute__((noinline)) void check_test_tier0_entries(CheckTest* test)
                       "tier0 entries: every head that takes a template has its template's records");
     check_test_expect(test, ran && deferred_kinds == 3 && states[TIER0_CENSUS_DEFERRED_KIND] == 2, "tier0 entries: the call and the copy are deferred by their kind");
     check_test_expect(test, ran && division && states[TIER0_CENSUS_DEFERRED_DEPTH] == 1, "tier0 entries: the division whose operands aren't in rax's place is deferred by its depth");
-    check_test_expect(test, ran && compare && widest == 3, "tier0 entries: a compare with zero and its branch are one group of three entries, the widest");
+    check_test_expect(test, ran && compare && widest == 6, "tier0 entries: a compare, its test against zero and its branch are one group of six entries, the widest");
     check_test_expect(test, ran && near_pattern != UINT32_MAX && far_pattern != UINT32_MAX && near_pattern != far_pattern,
                       "tier0 entries: two pointer additions differ by their scaled constants' class alone, and in their patterns");
     check_test_expect(test, ran && result.decided[0] == census.entries && result.decided[1] == census.entries && result.undecided[0] == 0 &&

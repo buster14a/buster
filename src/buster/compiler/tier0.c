@@ -1940,6 +1940,10 @@ struct Tier0RecordSpec
 //     are locals (the first B, the last A). For a floating constant, CONST is its zero (xorps).
 //   - INDEX(s): a load's address (or a pointer addition's lea) is [R2 + R1 * 2^s]; OFFSET: [R1 + K].
 //   - BRANCH_FALSE and BRANCH_TRUE, plus the compare's PLAIN to HOME_HOME: a branch with its compare.
+//   - TESTED_FALSE and TESTED_TRUE, plus the compare's PLAIN to HOME_HOME: a branch with the compare whose value the
+//     two entries between test against zero (the compare, CONST 0, NE and the branch: how the lowering writes a
+//     condition, #2877). The branch's records, with the compare's operands two entries further back. With EQ for NE the
+//     branch is the other one's.
 //   - RMW_CONST and RMW_HOME: x = x op v as op x, v (SET_LOCAL's).
 //   - INDEX_CONST(s), INDEX_HOME(s), OFFSET_HOME: a store's address [R2 + R1 * 2^s] (or [R1 + K]) and its value a
 //     constant (K) or a local (A).
@@ -1966,6 +1970,14 @@ struct Tier0RecordSpec
 #define BUSTER_TIER0_VARIANT_ATOMIC 30
 #define BUSTER_TIER0_VARIANT_WIDE_SCALE 31
 #define BUSTER_TIER0_VARIANT_CONVERT_HOME 16
+// A compare's alone, so they share their numbers with a store's INDEX_CONST to OFFSET_HOME and a return's LAST.
+#define BUSTER_TIER0_VARIANT_TESTED_FALSE 21
+#define BUSTER_TIER0_VARIANT_TESTED_TRUE 26
+// The entries between a tested compare and its branch: the CONST 0 and the NE or EQ.
+#define BUSTER_TIER0_TESTED_ENTRIES 2
+// The furthest an absorbed entry is from the entry that takes it at last: a tested compare's first local, two before the
+// compare, which is 1 + BUSTER_TIER0_TESTED_ENTRIES before its branch.
+#define BUSTER_TIER0_ABSORB_REACH 5
 #define BUSTER_TIER0_VARIANTS 32
 
 // A template: up to four records, as specifications (for the scalar expansion and the passes after expansion) and
@@ -2000,7 +2012,7 @@ struct Tier0Template
 // 32 slots (one per variant), or the unsupported block's. A slot holds a template's index, with HOME_DEPENDENT when four
 // templates follow for its homes (A and B each a register or memory: the index plus A's bit plus twice B's), or
 // DEFERRED (tier0_emit_deferred's), or UNSUPPORTED.
-#define BUSTER_TIER0_TEMPLATE_CAPACITY 2048
+#define BUSTER_TIER0_TEMPLATE_CAPACITY 2560
 #define BUSTER_TIER0_SLOT_CAPACITY (512 * BUSTER_TIER0_VARIANTS)
 #define BUSTER_TIER0_SLOT_UNSUPPORTED 0xffff
 #define BUSTER_TIER0_SLOT_DEFERRED 0xfffe
@@ -3362,25 +3374,34 @@ static void tier0_define_templates(void)
                 tier0_add(tier0_r(tier0_setcc[cc], result));
                 tier0_add(tier0_rr(X86_FORM_MOVZX_R32_RM8, result, result));
                 tier0_end(kind, class, variant, 0);
-                for (uint32_t when = 0; when < 2; when += 1)
+                // As a branch's condition: right before the branch, or tested against zero first (#2877), the compare's
+                // operands two entries further back.
+                for (uint32_t context = 0; context < 4; context += 1)
                 {
+                    const uint32_t when = context & 1;
+                    const bool tested = context >= 2;
+                    const uint32_t base = tested ? (when != 0 ? BUSTER_TIER0_VARIANT_TESTED_TRUE : BUSTER_TIER0_VARIANT_TESTED_FALSE)
+                                                 : (when != 0 ? BUSTER_TIER0_VARIANT_BRANCH_TRUE : BUSTER_TIER0_VARIANT_BRANCH_FALSE);
                     tier0_begin();
-                    tier0_compare_holes(variant, 1);
+                    tier0_compare_holes(variant, tested ? 1 + BUSTER_TIER0_TESTED_ENTRIES : 1);
                     tier0_add(tier0_compare_record(class, variant, live));
                     tier0_add(tier0_branch(tier0_jcc_rel8[when != 0 ? cc : cc ^ 1], BUSTER_TIER0_RECORD_BRANCH));
-                    tier0_end(kind, class, (when != 0 ? BUSTER_TIER0_VARIANT_BRANCH_TRUE : BUSTER_TIER0_VARIANT_BRANCH_FALSE) + variant, 0);
+                    tier0_end(kind, class, base + variant, 0);
                 }
             }
             // Two locals: cmp x, y with x (B) or y (A) a register, or through the scratch, as a value and as a branch.
             const uint32_t cmp_r_rm = tier0_wide(class, X86_FORM_CMP_R32_RM32, X86_FORM_CMP_R64_RM64);
             const uint32_t cmp_rm_r = tier0_wide(class, X86_FORM_CMP_RM32_R32, X86_FORM_CMP_RM64_R64);
             const uint32_t load = tier0_wide(class, X86_FORM_MOV_R32_RM32, X86_FORM_MOV_R64_RM64);
-            for (uint32_t context = 0; context < 3; context += 1)
+            for (uint32_t context = 0; context < 5; context += 1)
             {
-                const uint32_t shift = context == 0 ? 0 : 1;
+                const uint32_t shift = context == 0 ? 0 : context <= 2 ? 1 : 1 + BUSTER_TIER0_TESTED_ENTRIES;
+                const bool when = context == 2 || context == 4;
                 const uint32_t variant = context == 0 ? BUSTER_TIER0_VARIANT_HOME_HOME
                                          : context == 1 ? BUSTER_TIER0_VARIANT_BRANCH_FALSE + BUSTER_TIER0_VARIANT_HOME_HOME
-                                                        : BUSTER_TIER0_VARIANT_BRANCH_TRUE + BUSTER_TIER0_VARIANT_HOME_HOME;
+                                         : context == 2 ? BUSTER_TIER0_VARIANT_BRANCH_TRUE + BUSTER_TIER0_VARIANT_HOME_HOME
+                                         : context == 3 ? BUSTER_TIER0_VARIANT_TESTED_FALSE + BUSTER_TIER0_VARIANT_HOME_HOME
+                                                        : BUSTER_TIER0_VARIANT_TESTED_TRUE + BUSTER_TIER0_VARIANT_HOME_HOME;
                 BUSTER_TIER0_HOME_CASES(kind, class, variant, no, 1 + shift, {
                     tier0_builder.current.b_offset = (uint8_t)(2 + shift);
                     Tier0RecordSpec compare = tier0_rh(cmp_r_rm, BUSTER_TIER0_SOURCE_B, BUSTER_TIER0_RM_HOME_A);
@@ -3402,7 +3423,7 @@ static void tier0_define_templates(void)
                     }
                     else
                     {
-                        tier0_add(tier0_branch(tier0_jcc_rel8[context == 2 ? cc : cc ^ 1], BUSTER_TIER0_RECORD_BRANCH));
+                        tier0_add(tier0_branch(tier0_jcc_rel8[when ? cc : cc ^ 1], BUSTER_TIER0_RECORD_BRANCH));
                     }
                 });
             }
@@ -4228,13 +4249,34 @@ static inline __attribute__((always_inline)) void tier0_fuse_entries(const Tier0
                 tier0_absorb(entries, i, i - 1);
             }
         }
-        // A branch's compare.
+        // A branch's compare: the one whose value the entries before the branch test against zero (a compare, CONST 0
+        // of its class, NE or EQ: the compare's value is 0 or 1, so the test is the compare, or with EQ its opposite),
+        // or the one right before the branch.
         if ((kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE) && i >= 1 && !here && kinds[i - 1] >= BUSTER_TYPED_EQ &&
             kinds[i - 1] <= BUSTER_TYPED_GE)
         {
-            const uint32_t base = kind == BUSTER_TYPED_BRANCH_TRUE ? BUSTER_TIER0_VARIANT_BRANCH_TRUE : BUSTER_TIER0_VARIANT_BRANCH_FALSE;
+            const bool when = kind == BUSTER_TYPED_BRANCH_TRUE;
+            bool tested = i >= 3 && !before && !tier0_label(labels, i - 2) && (kinds[i - 1] == BUSTER_TYPED_NE || kinds[i - 1] == BUSTER_TYPED_EQ) &&
+                          entries->variants[i - 1] == BUSTER_TIER0_VARIANT_CONST && values[i - 2] == 0 && kinds[i - 3] >= BUSTER_TYPED_EQ &&
+                          kinds[i - 3] <= BUSTER_TYPED_GE && entries->key_classes[i - 1] == classes[i - 3] &&
+                          entries->variants[i - 3] <= BUSTER_TIER0_VARIANT_HOME_HOME;
+            if (tested)
+            {
+                const bool sense = when != (kinds[i - 1] == BUSTER_TYPED_EQ);
+                const uint32_t fused = (sense ? BUSTER_TIER0_VARIANT_TESTED_TRUE : BUSTER_TIER0_VARIANT_TESTED_FALSE) + entries->variants[i - 3];
+                tested = tier0_slot(kinds[i - 3], entries->key_classes[i - 3], fused) != BUSTER_TIER0_SLOT_UNSUPPORTED;
+                if (tested)
+                {
+                    key_kind = kinds[i - 3];
+                    key_class = entries->key_classes[i - 3];
+                    variant = fused;
+                    tier0_absorb(entries, i, i - 1);
+                    tier0_absorb(entries, i, i - 3);
+                }
+            }
+            const uint32_t base = when ? BUSTER_TIER0_VARIANT_BRANCH_TRUE : BUSTER_TIER0_VARIANT_BRANCH_FALSE;
             const uint32_t fused = base + entries->variants[i - 1];
-            if (entries->variants[i - 1] <= BUSTER_TIER0_VARIANT_HOME_HOME &&
+            if (!tested && entries->variants[i - 1] <= BUSTER_TIER0_VARIANT_HOME_HOME &&
                 tier0_slot(kinds[i - 1], entries->key_classes[i - 1], fused) != BUSTER_TIER0_SLOT_UNSUPPORTED)
             {
                 key_kind = kinds[i - 1];
@@ -13145,11 +13187,14 @@ static uint8_t tier0_properties_of(uint32_t kind, uint32_t class)
     properties |= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_HOME_CONST) != BUSTER_TIER0_SLOT_UNSUPPORTED ? BUSTER_TIER0_PROPERTY_HOME_CONST : 0;
     properties |= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_RMW_CONST) != BUSTER_TIER0_SLOT_UNSUPPORTED ? BUSTER_TIER0_PROPERTY_RMW_CONST : 0;
     properties |= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_RMW_HOME) != BUSTER_TIER0_SLOT_UNSUPPORTED ? BUSTER_TIER0_PROPERTY_RMW_HOME : 0;
-    bool branch = true;
+    // A compare's branches: right before the branch and tested against zero first, every operand variant of both.
+    bool branch = kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE;
     for (uint32_t v = 0; v <= BUSTER_TIER0_VARIANT_HOME_HOME; v += 1)
     {
         branch &= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_BRANCH_FALSE + v) != BUSTER_TIER0_SLOT_UNSUPPORTED;
         branch &= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_BRANCH_TRUE + v) != BUSTER_TIER0_SLOT_UNSUPPORTED;
+        branch &= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_TESTED_FALSE + v) != BUSTER_TIER0_SLOT_UNSUPPORTED;
+        branch &= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_TESTED_TRUE + v) != BUSTER_TIER0_SLOT_UNSUPPORTED;
     }
     properties |= branch ? BUSTER_TIER0_PROPERTY_BRANCH : 0;
     bool address = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_SET;
@@ -13579,7 +13624,9 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         const __m512i classes_3 = tier0_shift_back(classes, previous_classes, 3);
         const __m512i variants_1 = tier0_shift_back(variants, previous_variants, 1);
         const __m512i variants_2 = tier0_shift_back(variants, previous_variants, 2);
+        const __m512i variants_3 = tier0_shift_back(variants, previous_variants, 3);
         const __m512i key_classes_1 = tier0_shift_back(key_classes, previous_key_classes, 1);
+        const __m512i key_classes_3 = tier0_shift_back(key_classes, previous_key_classes, 3);
         const uint64_t labels = bits->labels[block];
         const uint64_t labels_1 = tier0_bits_back(bits->labels, block, 1);
         const uint64_t labels_2 = tier0_bits_back(bits->labels, block, 2);
@@ -13620,7 +13667,18 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         const uint64_t compare_1 = _mm512_test_epi8_mask(flags_1, _mm512_set1_epi8(BUSTER_TIER0_KIND_COMPARE));
         const uint64_t compare_fusable = _mm512_cmple_epu8_mask(variants_1, tier0_variant(BUSTER_TIER0_VARIANT_HOME_HOME)) &
                                          _mm512_test_epi8_mask(compare_properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_BRANCH));
-        const uint64_t fused_branch = lanes & valid_1 & branch & ~labels & compare_1 & compare_fusable;
+        // The compare three back, which CONST 0 of its class and NE or EQ test: its value is 0 or 1, so the test is the
+        // compare, or with EQ its opposite.
+        const __m512i flags_3 = tier0_lookup(tier0_vector_kind_flags, kinds_3);
+        const __m512i tested_row = tier0_lookup(tier0_vector_rows, kinds_3);
+        const __m512i tested_properties = tier0_lookup256(tier0_vector_properties, _mm512_or_si512(_mm512_slli_epi16(tested_row, 4), key_classes_3));
+        const uint64_t equal_1 = _mm512_cmpeq_epi8_mask(kinds_1, _mm512_set1_epi8(BUSTER_TYPED_EQ));
+        const uint64_t test_1 = equal_1 | _mm512_cmpeq_epi8_mask(kinds_1, _mm512_set1_epi8(BUSTER_TYPED_NE));
+        const uint64_t tested = lanes & valid_3 & branch & ~labels & ~labels_1 & ~labels_2 & test_1 & constant_variant_1 & tier0_bits_back(bits->zero, block, 2) &
+                                _mm512_test_epi8_mask(flags_3, _mm512_set1_epi8(BUSTER_TIER0_KIND_COMPARE)) & _mm512_cmpeq_epi8_mask(key_classes_1, classes_3) &
+                                _mm512_cmple_epu8_mask(variants_3, tier0_variant(BUSTER_TIER0_VARIANT_HOME_HOME)) &
+                                _mm512_test_epi8_mask(tested_properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_BRANCH));
+        const uint64_t fused_branch = lanes & valid_1 & branch & ~labels & compare_1 & compare_fusable & ~tested;
         // x = x op v.
         const uint64_t set_local = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_SET_LOCAL));
         const uint64_t rmw_kind_1 = _mm512_test_epi8_mask(flags_1, _mm512_set1_epi8(BUSTER_TIER0_KIND_RMW));
@@ -13636,9 +13694,11 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         (void)leaf_2;
         const uint64_t rmw = lanes & valid_3 & set_local & ~labels & ~labels_1 & ~labels_2 & rmw_kind_1 & rmw_property & x_local &
                              bits->same[block] & _mm512_cmpeq_epi8_mask(classes_3, classes) & _mm512_cmpeq_epi8_mask(classes_1, classes);
-        bits->one[block] = load | fused_branch | rmw;
+        // A tested compare's branch takes the test before it and the compare three back, as x = x op v's SET_LOCAL takes
+        // the op and x.
+        bits->one[block] = load | fused_branch | tested | rmw;
         bits->two[block] = store;
-        bits->rmw[block] = rmw;
+        bits->rmw[block] = rmw | tested;
         // The keys and variants of the compound fusions.
         __m512i variant = variants;
         variant = _mm512_mask_mov_epi8(variant, load & constant_variant_1, tier0_variant(BUSTER_TIER0_VARIANT_OFFSET));
@@ -13650,11 +13710,16 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         const __m512i branch_base = _mm512_mask_blend_epi8(_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_BRANCH_TRUE)),
                                                            tier0_variant(BUSTER_TIER0_VARIANT_BRANCH_FALSE), tier0_variant(BUSTER_TIER0_VARIANT_BRANCH_TRUE));
         variant = _mm512_mask_add_epi8(variant, fused_branch, branch_base, variants_1);
+        const __m512i tested_base = _mm512_mask_blend_epi8(_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_BRANCH_TRUE)) ^ equal_1,
+                                                           tier0_variant(BUSTER_TIER0_VARIANT_TESTED_FALSE), tier0_variant(BUSTER_TIER0_VARIANT_TESTED_TRUE));
+        variant = _mm512_mask_add_epi8(variant, tested, tested_base, variants_3);
         variant = _mm512_mask_mov_epi8(variant, rmw & constant_variant_1, tier0_variant(BUSTER_TIER0_VARIANT_RMW_CONST));
         variant = _mm512_mask_mov_epi8(variant, rmw & inner_home_1, tier0_variant(BUSTER_TIER0_VARIANT_RMW_HOME));
         _mm512_mask_storeu_epi8(entries->variants + first, lanes, variant);
         _mm512_mask_storeu_epi8(entries->key_kinds + first, lanes & (fused_branch | rmw), kinds_1);
+        _mm512_mask_storeu_epi8(entries->key_kinds + first, lanes & tested, kinds_3);
         _mm512_mask_storeu_epi8(entries->key_classes + first, lanes & fused_branch, key_classes_1);
+        _mm512_mask_storeu_epi8(entries->key_classes + first, lanes & tested, key_classes_3);
         previous_variants = variants;
         previous_key_classes = key_classes;
         previous_kinds = kinds;
@@ -13662,8 +13727,9 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
     }
 }
 
-// P3 and P4: each entry's absorber (the consumer that takes it, 1 to 3 entries on, after one pointer-jump step for an
-// absorber that is absorbed itself), the effects folded into the absorbers, and the depths, their prefix sums.
+// P3 and P4: each entry's absorber (the consumer that takes it, 1 to 3 entries on, or up to BUSTER_TIER0_ABSORB_REACH
+// after one pointer-jump step for an absorber that is absorbed itself: a tested compare's first local is two before
+// the compare and five before its branch), the effects folded into the absorbers, and the depths, their prefix sums.
 static void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, Tier0Entries* entries)
 {
     const uint32_t count = function->count;
@@ -13709,10 +13775,11 @@ static void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, 
         const __m512i ultimate = _mm512_maskz_add_epi8(absorbed, direct, absorber_direct);
         const __m512i integer_raw = _mm512_maskz_loadu_epi8(lanes, entries->integer_effects + first);
         const __m512i floating_raw = _mm512_maskz_loadu_epi8(lanes, entries->floating_effects + first);
-        // An entry's folded effects: its own unless absorbed, plus each entry 1 to 3 back whose ultimate absorber it is.
+        // An entry's folded effects: its own unless absorbed, plus each entry 1 to BUSTER_TIER0_ABSORB_REACH back whose
+        // ultimate absorber it is.
         __m512i integer = _mm512_maskz_mov_epi8(~absorbed, integer_raw);
         __m512i floating = _mm512_maskz_mov_epi8(~absorbed, floating_raw);
-        for (uint32_t back = 1; back <= 3; back += 1)
+        for (uint32_t back = 1; back <= BUSTER_TIER0_ABSORB_REACH; back += 1)
         {
             const __m512i ultimate_back = tier0_shift_back(ultimate, previous_ultimate, back);
             const __mmask64 mine = _mm512_cmpeq_epi8_mask(ultimate_back, _mm512_set1_epi8((char)back));
