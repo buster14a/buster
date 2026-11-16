@@ -309,7 +309,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-sweeps] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-sweeps] [--front-tests] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -622,17 +622,21 @@ takes its entries.
     typed=N taken=N roots-not-run=N late-types=N ticks=N setup-ticks=N` (its
     ticks are T's alone, a chunk's expressions a run; the digests are a second
     run), `reader-time T refused=REASON expressions=N`, `reader-time T
-    lowered=N (x%) never-lowered=N (taken N, context N) compared=N (records N)
-    differences=0 (range 0, refusal 0) taken-expressions-the-front-left=N
-    the-front's-not-run=N` and `reader-time T objects=N differences=0
-    library-calls=N differences=0`. `never-lowered` are the expressions it
-    typed that the lowering never popped: a declaration's discard (its
-    initializer's value cast to void at its `;`, which nothing evaluates), a
-    static object's initializer, or a body the selection dropped.
-    `the-front's-not-run` are taken expressions whose nodes the front made
-    without a root for them (an initializer beside a variable-length array's
-    bound). `--list N` lists the first differences. A difference fails the
-    command.
+    lowered=N (x%) never-lowered=N (taken N, context N; of them in a lowered
+    body: taken N, context N) declarations'-discards-not-run=N compared=N
+    (records N) differences=0 (range 0, refusal 0)
+    taken-expressions-the-front-left=N the-front's-not-run=N` and
+    `reader-time T objects=N differences=0 library-calls=N differences=0`.
+    `never-lowered` are the expressions it typed that the lowering never
+    popped: in a body the lowering lowers (a constant's context, a condition
+    the program folds) or in one the selection dropped.
+    `declarations'-discards-not-run` are the front's roots T is not run on: a
+    declaration's discard, its initializer's value cast to void at its `;`,
+    which nothing evaluates (by the parser's tree: the cast's operand is an
+    initializer's `=` or below one). `the-front's-not-run` are taken
+    expressions whose nodes the front made without a root for them (an
+    initializer beside a variable-length array's bound). `--list N` lists the
+    first differences. A difference fails the command.
 - `--front-sweeps` runs **C and X where they sit** too
   (`PPOptions.node_front`'s bit 128, with `--front-types`' bit): after T types
   an expression at reader time and takes it, C and X run on the same records.
@@ -665,6 +669,52 @@ takes its entries.
     the globals' entries, and the direct calls, whose rows hold the callee's
     symbol. `--list N` lists the first differences, and a difference fails the
     command.
+- `--front-tests` runs **the tests where they sit** (`PPOptions.node_reader`'s
+  bit 1, with `--front-sweeps`' bits): after T takes an expression at reader
+  time and before C and X, the census's set and its silence tests run on T's
+  records. [The design](../node-machine.md#the-tests-where-they-sit) has what
+  it measured.
+  - **The tests are the census's own code** (`node_census_expression` and what
+    it calls), reading a node's value, its conversions and a member's offset
+    through a view (`node_view_value` and its kin): the stream's after the
+    pipeline, T's record at reader time (`NodeCensusScratch.records`).
+  - **What stands for the rest** at reader time
+    (`node_census_reader_expression`): the root's kind is the front's root's
+    operator, a nested control's inside a statement expression; an
+    initializer's object's type is its declaration's; the enabled warnings
+    are read before the walk; a body's pragmas are found by the outermost
+    braces around each; the events are the reader's own so far; T keeps its
+    actions' warnings an expression (`NodeMachine.action_warnings`); and any
+    address taken in a unit with a packed record or member stands for a
+    packed member's witness.
+  - **C and X run on the expressions no test refuses** in the timed run. The
+    second run sweeps the others too, so that the report can say what the
+    tests add to C's and X's own refusals.
+  - **The comparison** is after the pipeline, on every root the tests ran on:
+    one the lowering popped has the census's own verdict, and one it never
+    popped is read by the census again from the stream, with the kind and the
+    object's type reader time gave. No expression reader time takes may be
+    one a test of the census's refuses, and no test's bit may differ but
+    reader time's actions' warnings (at least the graph run's), a packed
+    unit's addresses, and the events of the passes after the reader. The
+    lowering's own facts (a body that tracks its stack, a node popped twice)
+    are counted apart: a splice reads them where it pops the root.
+  - **The report:** `node-shadow: reader-time tests expressions=N refused=N
+    nodes-outside-the-records=0 units-whose-enabled-warnings-differ=0`,
+    `reader-time tests refused test=TEST expressions=N first=N`, `reader-time
+    tests compared=N never-lowered=N taken-there=N (nodes N)
+    taken-there-and-refused-by-the-census=0 (for the lowering's facts alone
+    N) differences=0 root-kind-differences=0 refused-by-the-census=N (of them
+    past C and X N, nodes N)` and `reader-time tests test=TEST reader-alone=N
+    census-alone=N`. With this option `reader-time T`'s `ticks` are of T, the
+    tests, C and X together. `past C and X` are the refused expressions C and
+    X take: what the tests add to the sweeps' own refusals. `--list N` lists
+    the first differences, and a difference fails the command.
+  - **With `--verify`** T's rows and rules are checked against the action at
+    reader time too, on every expression it types there (`reader-time verify
+    nodes-whose-value-is-not-the-action's=0 nodes-whose-action-warns=0`): a
+    row or a rule knows no warning, so the action must give none where one
+    typed the node. A value that differs fails the command.
 
 The report gives the expressions, evaluated nodes and calls taken, each
 refusal's (shape, code, leaf, context, diagnostic, template, row, root,
@@ -707,6 +757,16 @@ labels and calls the shadow's, and the fixture's globals' entries and direct
 calls patched. Its lines for them are a `const` object's initializer, one that
 converts nothing, one whose conversion is empty, a static local, a global's
 updates, and the strings.
+The census's six fixtures run again with its tests at reader time
+(`node_tests_test_fixture`, `--front-tests` with `--verify`; after the walk,
+before it, and lean): no expression taken there is one the census refuses, no
+test differs, every root the tests ran on is compared, T's rows and rules are
+the action's without a warning, each fixture's count of expressions a test
+refuses there is exact, and so is its count of declarations' discards left
+alone. A silence test's line has an expression that test refuses there. The
+lines added for them: a conditional whose third operand's conversion changes
+a constant, a call's argument whose conversion does, two members of one
+record written in one expression, and a body with a diagnostic pragma.
 [The design](../node-machine.md)'s "Step 1: the shadow" has the results.
 
 ### The fact words (#2850's step 1)

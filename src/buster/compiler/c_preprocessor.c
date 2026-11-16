@@ -371,6 +371,11 @@ struct PPOptions
     // the machine would run; with 4, the lean front; with 8, its arrays touched beforehand (BUSTER_NODE_FRONT_*). Off in
     // every compile; measure-node-machine --shadow sets it for --front, --front-first, --front-lean and --front-warm.
     uint8_t node_front;
+    // What else runs at reader time on the front's expressions, in the shadow (BUSTER_NODE_READER_*,
+    // c_check_node_machine_reader.c): 1, the census's set and silence tests after T; 2, T's rows and rules checked against
+    // the action there. Off in every compile; measure-node-machine --shadow sets it for --front-tests and, with --verify,
+    // for the check.
+    uint8_t node_reader;
     // Keep where the expansions that can start a line start in the output (PPExpansionStart), which -E's line markers
     // need to place them: the printer can't print markers for a run without them.
     bool expansion_starts;

@@ -1986,6 +1986,7 @@ static __attribute__((noinline)) bool node_machine_conditional(NodeMachine* mach
         value.flags = check_value_source_flags(CHECK_OP_CONDITIONAL, value.flags);
         node_machine_put_value(machine, r, &value);
         node_machine_conversions(machine, r, conversions, conversions + 1, 0);
+        machine->converted_third[r] = conversions[2].type;
     }
     return taken;
 }
@@ -2110,6 +2111,19 @@ static void node_machine_store(NodeMachine* machine, uint32_t r, CheckOp op, Che
     result->value.flags = check_value_source_flags(op, result->value.flags);
     node_machine_put_value(machine, r, &result->value);
     node_machine_conversions(machine, r, result->conversions, result->conversions + 1, result->member_offset);
+    if (op == CHECK_OP_CONDITIONAL)
+    {
+        machine->converted_third[r] = result->conversions[2].type;
+    }
+}
+
+// The action's warnings at record `r` that its node doesn't suppress (CheckGraph.warning_suppressed, the reader's):
+// CheckActionResult.warnings' 25 bits, as the graph run stores them.
+static inline uint32_t node_machine_action_warnings(const NodeMachine* machine, uint32_t r, const CheckActionResult* result)
+{
+    const CheckGraph* graph = machine->graph;
+    const uint32_t suppressed = graph->warning_suppressed != NULL ? graph->warning_suppressed[node_machine_node(machine, r)] : 0;
+    return result->warnings & 0x01ffffffu & ~suppressed;
 }
 
 // Whether two values are the same, field by field (their padding aside).
@@ -2123,7 +2137,7 @@ static bool node_machine_same_values(const CheckValue* left, const CheckValue* r
 }
 
 // Whether record `r`'s columns are what the action gives it: --verify's twin check of a node a row or a rule typed.
-static __attribute__((cold, noinline)) bool node_machine_same_as_action(const NodeMachine* machine, uint32_t r, CheckOp op)
+static __attribute__((cold, noinline)) bool node_machine_same_as_action(NodeMachine* machine, uint32_t r, CheckOp op)
 {
     const NodeMachineColumns* columns = machine->columns;
     CheckActionResult result;
@@ -2141,6 +2155,9 @@ static __attribute__((cold, noinline)) bool node_machine_same_as_action(const No
     {
         same = same && machine->verified[i].type == machine->argument_conversions[first + i].type && machine->verified[i].flags == machine->argument_conversions[first + i].flags;
     }
+    same = same && (op != CHECK_OP_CONDITIONAL || result.conversions[2].type == machine->converted_third[r]);
+    // A row or a rule knows no warning: the action must give none where one typed the node.
+    machine->twin_warnings += node_machine_action_warnings(machine, r, &result) != 0;
     return same;
 }
 
@@ -2193,6 +2210,7 @@ static __attribute__((cold, noinline)) NodeMachineRefusal node_machine_type_acti
     }
     const NodeMachineRefusal refusal = result.diagnostic != CHECK_DIAG_NONE ? NODE_MACHINE_REFUSED_DIAGNOSTIC : NODE_MACHINE_TAKEN;
     node_machine_store(machine, r, op, &result);
+    machine->action_warnings |= node_machine_action_warnings(machine, r, &result);
     machine->action_nodes += 1;
     machine->action_ops[op] += 1;
     return refusal;
@@ -2213,6 +2231,7 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
     machine->count = records;
     machine->wide_count = 0;
     machine->argument_total = 0;
+    machine->action_warnings = 0;
     // The nodes a row or a rule typed, counted here and added to the machine's once: a store into the machine at each
     // record would make every read of its fields after it a load again (-fno-strict-aliasing).
     uint64_t rows = 0;

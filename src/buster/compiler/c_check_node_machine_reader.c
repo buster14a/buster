@@ -42,6 +42,13 @@
 // Each taken expression's tape is kept (NodeFrontTypes' store), with a digest of its labels and calls; after the pipeline
 // the shadow's own C and X run on the same expression, and the kept tape, patched with the program's symbols, must be
 // theirs entry for entry (c_check_node_census.c's node_shadow_swept).
+//
+// The census's set and its silence tests run there too where the options ask (--front-tests, PPOptions.node_reader's
+// BUSTER_NODE_READER_TESTS; "The tests where they sit"): after T takes an expression and before C and X, the census's own
+// test code on T's records (c_check_node_census.c's node_census_reader_expression, whose view reads a record where the
+// census reads the stream's node). Their bits are the machine's verdict before the pipeline, kept by the root's node;
+// C and X run on the expressions no test refuses. After the pipeline the census's verdict for the same root is compared
+// test by test (node_shadow_tested).
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_READER_INCLUDED
 #define BUSTER_C_CHECK_NODE_MACHINE_READER_INCLUDED
 
@@ -58,7 +65,20 @@ struct NodeMachineReader
     NodeFrontTypes* types;
     // The unit's strings whose objects have their symbols' stand-ins (node_machine_reader_strings).
     uint32_t strings;
+    // The census's tests at reader time (c_check_node_census.c's), or null.
+    struct NodeCensusReader* tests;
 };
+
+// The census's tests at reader time (c_check_node_census.c, which follows this file in the unit): their state for the
+// unit `reader` reads, whose machine there is `machine`, with columns for `node_capacity` nodes and the unit's policy
+// kept in `types`; the reader's warning events since the last chunk taken in; and the tests of the
+// machine's current expression, which T has just taken, whose root is node `root`, made by the front's root of operator
+// `op` at token `token`, an initialization's of the object declared at `declaration` (BUSTER_CHECK_NONE otherwise) with
+// type `declared`: their bits, and into `kind` the root's kind.
+struct NodeCensusReader;
+static struct NodeCensusReader* node_census_reader_begin(const CheckInputReader* reader, const NodeMachine* machine, NodeFrontTypes* types, uint32_t node_capacity);
+static void node_census_reader_chunk(struct NodeCensusReader* tests, const CheckInputReader* reader);
+static uint64_t node_census_reader_expression(struct NodeCensusReader* tests, uint32_t root, CheckOp op, uint32_t token, uint32_t declaration, TypeId declared, uint8_t* kind);
 typedef struct NodeMachineReader NodeMachineReader;
 _Static_assert(NODE_MACHINE_REFUSALS <= 16 && NODE_MACHINE_REFUSALS <= BUSTER_NODE_FRONT_TYPED_REFUSAL + 1, "a refusal is NodeFrontTypes.refusals' low four bits");
 
@@ -136,7 +156,7 @@ static bool node_machine_reader_call_library(const NodeMachine* machine, uint32_
 // `identifiers` (check_lower_twice_names'). `symbols` (the caller's too) is what stands for the objects' symbols: each
 // object with a static declaration has itself there, the others 0.
 static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* input, const Parser* parser, TypeTable* types, const CheckGraph* graph,
-                                      const InternTable* identifiers, uint32_t* declarations, uint8_t* facts, uint32_t* symbols, Arena* arena)
+                                      const InternTable* identifiers, uint32_t* declarations, uint8_t* facts, uint32_t* symbols, bool verify, Arena* arena)
 {
     const uint32_t count = input->token_count;
     *machine = (NodeMachine){
@@ -147,7 +167,7 @@ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* in
         .object_count = count + 1,
     };
     const uint32_t late = types->types.capacity - types->types.count < BUSTER_NODE_MACHINE_LATE_TYPES ? types->types.capacity - types->types.count : BUSTER_NODE_MACHINE_LATE_TYPES;
-    const bool room = node_machine_setup(machine, types, graph, types->types.count + late, false, false, arena);
+    const bool room = node_machine_setup(machine, types, graph, types->types.count + late, false, verify, arena);
     machine->reader_declarations = declarations;
     machine->reader_facts = facts;
     if (room)
@@ -222,7 +242,7 @@ static uint64_t node_machine_digest(const NodeMachine* machine, NodeMachineRefus
         digest = node_machine_mix(digest, (uint64_t)columns->words[r] << 32 | (uint64_t)columns->facts[r] << 8 | columns->value_classes[r]);
         digest = node_machine_mix(digest, (uint64_t)node_machine_record_converted(machine, r, 0) << 32 | node_machine_record_conversion_flags(machine, r, 0));
         digest = node_machine_mix(digest, (uint64_t)node_machine_record_converted(machine, r, 1) << 32 | node_machine_record_conversion_flags(machine, r, 1));
-        digest = node_machine_mix(digest, node_machine_record_member_offset(machine, r));
+        digest = node_machine_mix(digest, node_machine_record_member_offset(machine, r) ^ (uint64_t)node_machine_record_converted_third(machine, r) << 40);
         digest = node_machine_mix(digest, node_machine_record_lowest(machine, r));
         if (op == CHECK_OP_CALL)
         {
@@ -313,14 +333,22 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
     uint64_t* tape_values = sweeps ? arena_push_array(reader->arena, tape_capacity, sizeof(uint64_t), _Alignof(uint64_t)) : NULL;
     room = room && (!sweeps || (sweep_refusals != NULL && targets != NULL && root_objects != NULL && tape_firsts != NULL && tape_counts != NULL && side_digests != NULL &&
                                 tape_kinds != NULL && tape_classes != NULL && tape_values != NULL));
+    // The census's tests' results by root node.
+    const uint8_t options = reader->pp->options.node_reader;
+    const bool tested = (options & BUSTER_NODE_READER_TESTS) != 0;
+    uint64_t* tests = tested ? arena_push_array(reader->arena, capacity, sizeof(uint64_t), _Alignof(uint64_t)) : NULL;
+    uint8_t* kinds = tested ? arena_push_array(reader->arena, capacity, sizeof(uint8_t), 1) : NULL;
+    TypeId* declared = tested ? arena_push_array(reader->arena, capacity, sizeof(TypeId), _Alignof(TypeId)) : NULL;
+    room = room && (!tested || (tests != NULL && kinds != NULL && declared != NULL));
     if (room)
     {
         typer->graph = reader->output->graph;
         typer->graph.contexts = shadow->contexts;
         typer->types = types;
         typer->strings = 0;
+        typer->tests = NULL;
         room = node_machine_begin_reader(&typer->machine, reader->output, reader->parser, reader->types, &typer->graph, reader->pp->table, declarations, facts,
-                                         symbols, reader->scratch);
+                                         symbols, (options & BUSTER_NODE_READER_VERIFY) != 0, reader->scratch);
     }
     if (room)
     {
@@ -349,8 +377,16 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
         types->tape_values = tape_values;
         types->tape_capacity = tape_capacity;
         types->node_capacity = capacity;
+        if (tested)
+        {
+            types->tests = tests;
+            types->kinds = kinds;
+            types->declared = declared;
+            typer->tests = node_census_reader_begin(reader, &typer->machine, types, capacity);
+            room = typer->tests != NULL;
+        }
         types->setup_ticks = __rdtsc() - start;
-        shadow->types = types;
+        shadow->types = room ? types : NULL;
     }
     return room ? typer : NULL;
 }
@@ -388,23 +424,50 @@ static inline void node_machine_reader_root(const NodeMachineReader* typer, cons
     *object = declaration < reader->output->token_count ? reader->output->objects[declaration] : 0;
 }
 
+// Whether the front's root `record`, whose operand's record is `operand`, is a declaration's discard: at a declaration's
+// `;` the walk casts each of its initializers' values to void, an initialization's node or a braced initializer's value,
+// as it does an expression statement's value. Nothing evaluates that cast (the program takes an initializer's nodes for
+// data, and the initialization's value is a root of its own), so it is no root of the machine's. By the parser's tree:
+// the operand's token is an initializer's `=` or below one, where an expression statement's is the terminator's child.
+static inline bool node_machine_reader_discard(const CheckInputReader* reader, const NodeFront* front, uint32_t record, uint32_t operand)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t terminator = front->tokens[record];
+    bool discard = false;
+    uint32_t at = front->ops[record] == CHECK_OP_CAST && operand < record ? front->tokens[operand] : count;
+    for (uint32_t steps = 0; !discard && at < count && at != terminator && steps < 64; steps += 1)
+    {
+        discard = reader->initializers[at] != 0;
+        at = parser->tree.parents[at];
+    }
+    return discard;
+}
+
 // T on the roots the front made in the chunk it has just read and compared, each with the walk's nodes of its
 // expression: the root's operand's subtree, one range of nodes ending at the operand's where the expression is whole (T
 // refuses the shape otherwise), and the root. An initialization's expression is its value's alone, whose root the
 // lowering pops with the object's type as its target: its INITIALIZE is no record of the machine's. Twice: a first run,
 // timed, a chunk's expressions a run; and a second for the records' digests, kept by the root's node. With the sweeps
 // (NodeFrontTypes.sweep_refusals), C and X follow T on each expression it takes, in both runs: the first times the three
-// together, and the second keeps their refusal, the root's target and object, the tape and the side's digest.
+// together, and the second keeps their refusal, the root's target and object, the tape and the side's digest. With the
+// census's tests (NodeMachineReader.tests), they run between T and the other two, in both runs, and C and X run on the
+// expressions none refuses: the first run times all of it, and the second keeps the tests' bits and the root's kind.
 static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront* front, const CheckInputReader* reader)
 {
     NodeMachine* machine = &typer->machine;
     NodeFrontTypes* types = typer->types;
     const bool sweeps = types->sweep_refusals != NULL;
+    const bool tested = typer->tests != NULL;
     // The graph as it stands after the chunk, and the types made since the last.
     typer->graph = reader->output->graph;
     typer->graph.contexts = front->shadow->contexts;
     node_machine_settle(machine);
     node_machine_reader_strings(typer, reader->output);
+    if (tested)
+    {
+        node_census_reader_chunk(typer->tests, reader);
+    }
     for (uint32_t pass = 0; pass < 2; pass += 1)
     {
         const uint64_t start = __rdtsc();
@@ -418,11 +481,16 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                                          distance != 0 && distance < BUSTER_NODE_FRONT_FAR ? node_front_record_at(front, front->ordinals[record] - distance) :
                                          BUSTER_NODE_FRONT_UNKNOWN;
                 const bool initialization = front->ops[record] == CHECK_OP_INITIALIZE;
+                const bool discard = node_machine_reader_discard(reader, front, record, operand);
                 const uint32_t inner = operand < record ? front->nodes[operand] : BUSTER_CHECK_NONE;
                 const uint32_t size = operand < record ? front->sizes[operand] : 0;
                 const uint32_t root = initialization ? inner : front->nodes[record];
                 const uint32_t records = initialization ? size : size + 1;
-                if (root < types->node_capacity && inner <= root && size != 0 && size <= inner + 1)
+                if (discard)
+                {
+                    types->discards += pass != 0;
+                }
+                else if (root < types->node_capacity && inner <= root && size != 0 && size <= inner + 1)
                 {
                     const uint32_t first = inner + 1 - size;
                     const NodeMachineRefusal refusal = node_machine_type(machine, first, root, records);
@@ -437,7 +505,33 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                         types->typed += machine->count == 0 ? 0 : refusal == NODE_MACHINE_TAKEN ? machine->count : machine->stopped;
                         types->refused[refusal] += 1;
                     }
-                    if (sweeps && refusal == NODE_MACHINE_TAKEN)
+                    uint64_t verdict = 0;
+                    if (tested && refusal == NODE_MACHINE_TAKEN)
+                    {
+                        // The census's tests on T's records: the machine's verdict before the pipeline.
+                        const uint32_t token = front->tokens[record];
+                        const uint32_t declaration = initialization && token < reader->parser->tokens.count ? reader->initializer_declarations[token] : BUSTER_CHECK_NONE;
+                        const TypeId declared = declaration < reader->output->token_count ? reader->declared_types[declaration] : 0;
+                        uint8_t kind = 0;
+                        verdict = node_census_reader_expression(typer->tests, root, (CheckOp)front->ops[record], token, declaration, declared, &kind);
+                        if (pass != 0)
+                        {
+                            types->refusals[root] |= BUSTER_NODE_FRONT_TYPED_TESTED;
+                            types->tests[root] = verdict;
+                            types->kinds[root] = kind;
+                            types->declared[root] = declared;
+                            types->tested += 1;
+                            types->tested_refused += verdict != 0;
+                            types->tested_first[verdict != 0 ? (uint32_t)__builtin_ctzll(verdict) : 63] += verdict != 0;
+                            for (uint64_t bits = verdict; bits != 0; bits &= bits - 1)
+                            {
+                                types->tested_any[__builtin_ctzll(bits)] += 1;
+                            }
+                        }
+                    }
+                    // C and X on the expressions no test refuses. The second run sweeps the others too: the shadow counts
+                    // what the tests add to C's and X's own refusals.
+                    if (sweeps && refusal == NODE_MACHINE_TAKEN && (verdict == 0 || pass != 0))
                     {
                         TypeId target = 0;
                         uint32_t object = 0;
@@ -488,6 +582,8 @@ static void node_machine_reader_finish(NodeMachineReader* typer)
 {
     node_machine_settle(&typer->machine);
     typer->types->late_types = typer->machine.late_types;
+    typer->types->twin_differences = typer->machine.twin_differences;
+    typer->types->twin_warnings = typer->machine.twin_warnings;
 }
 
 #endif

@@ -430,6 +430,14 @@ struct NodeMachine
     uint8_t* reader_library;
     uint32_t type_capacity;
     uint64_t late_types;
+    // The current expression's actions' warnings (CheckActionResult.warnings' 25 bits, each node's suppressed ones aside),
+    // which the silence tests read at reader time (docs/node-machine.md, "The tests where they sit"): a row or a rule
+    // types a node only where its action gives none, and --verify counts the nodes where one does (`twin_warnings`).
+    uint32_t action_warnings;
+    uint64_t twin_warnings;
+    // A conditional's operand 2's conversion's type, by record: the columns hold two operands' conversions, and the tests
+    // read a constant arm's. Written for a conditional alone (node_machine_record_converted_third).
+    TypeId* converted_third;
 };
 
 // NodeMachine.reader_facts' bits.
@@ -516,7 +524,8 @@ static bool node_machine_setup(NodeMachine* machine, TypeTable* types, const Che
     machine->consumers = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
     machine->updates = BUSTER_ARENA_PUSH_ARRAY(arena, NodeMachineUpdate, most / 2);
     machine->const_pointers = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, (uint64_t)type_room + 64);
-    const bool room = machine->type_words != NULL && machine->type_complete_at != NULL && classes != NULL && facts != NULL && machine->columns != NULL &&
+    machine->converted_third = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, most);
+    const bool room = machine->converted_third != NULL && machine->type_words != NULL && machine->type_complete_at != NULL && classes != NULL && facts != NULL && machine->columns != NULL &&
                       machine->wides != NULL && machine->kinds != NULL && machine->classes != NULL && machine->tape != NULL && machine->label_entries != NULL &&
                       machine->calls_written != NULL && machine->call_records != NULL && machine->arguments != NULL && machine->argument_conversions != NULL &&
                       machine->argument_values != NULL && machine->verified != NULL && machine->stack != NULL && machine->consumers != NULL &&
@@ -733,6 +742,12 @@ static inline TypeId node_machine_record_converted(const NodeMachine* machine, u
 static inline uint32_t node_machine_record_conversion_flags(const NodeMachine* machine, uint32_t r, uint32_t k)
 {
     return machine->columns->conversion_flags[2 * r + k];
+}
+
+// A conditional's operand 2's conversion's type (0 for any other record).
+static inline TypeId node_machine_record_converted_third(const NodeMachine* machine, uint32_t r)
+{
+    return node_machine_record_op(machine, r) == CHECK_OP_CONDITIONAL ? machine->converted_third[r] : 0;
 }
 
 // A member's offset in its record, in bits.

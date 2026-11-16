@@ -64,6 +64,11 @@
 // C and X run there after T, on the expressions it takes (measure-node-machine --shadow --front-sweeps, with
 // BUSTER_NODE_FRONT_TYPES): their tapes kept in NodeFrontShadow.types.
 #define BUSTER_NODE_FRONT_SWEEPS 128u
+// PPOptions.node_reader: what else runs at reader time beside T, C and X, in the shadow. BUSTER_NODE_READER_TESTS: the
+// census's set and silence tests after T, on each expression it takes (measure-node-machine --shadow --front-tests; "The
+// tests where they sit"). BUSTER_NODE_READER_VERIFY: T's rows and rules checked against the action there (--verify).
+#define BUSTER_NODE_READER_TESTS 1u
+#define BUSTER_NODE_READER_VERIFY 2u
 // A lean leaf's kind, in its record's `leaf_categories`.
 #define BUSTER_NODE_FRONT_LEAF_IDENTIFIER 0u
 #define BUSTER_NODE_FRONT_LEAF_LITERAL 1u
@@ -98,6 +103,9 @@ struct NodeFrontTypes
     // The roots whose expression T wasn't run on: an operand's record out of reach (the lean front's, further than a
     // byte), or a node the comparison didn't agree on.
     uint64_t skipped;
+    // The front's roots that are a declaration's discard (the walk's cast to void of an initialization's node at the
+    // declaration's `;`), which nothing evaluates: T isn't run on them.
+    uint64_t discards;
     // What the machine made of the reader's columns in place of the program's (NodeMachine.reader_declarations and
     // reader_facts, `object_count` of each), and by call node its answers to "a library builtin's semantics of its
     // own?" (NodeMachine.reader_library): the shadow compares each with the program's after the pipeline.
@@ -132,10 +140,32 @@ struct NodeFrontTypes
     uint64_t swept_refused[16];
     uint64_t swept_entries;
     uint64_t swept_unkept;
+    // The census's tests at reader time (BUSTER_NODE_READER_TESTS; null otherwise), by root node, for a root T took
+    // (BUSTER_NODE_FRONT_TYPED_TESTED in `refusals`): the tests that refuse its expression, as bits of NodeCensusTest;
+    // its root's kind as the reader derives it from the front's root (a NodeCensusRoot); and the declared type of the
+    // object it initializes (0 for none). C and X then run on the expressions no test refuses. `policy` is the unit's
+    // enabled warnings as reader time read them (a NodeCensusPolicy), which the shadow compares with the pipeline's.
+    uint64_t* tests;
+    uint8_t* kinds;
+    TypeId* declared;
+    const void* policy;
+    // The expressions the tests ran on and those they refused; by test, the expressions it refuses (`tested_any`) and
+    // those it refuses first in the tests' order (`tested_first`); and the nodes a test asked of T's records that the
+    // expression's range doesn't hold, which must be none.
+    uint64_t tested;
+    uint64_t tested_refused;
+    uint64_t tested_any[64];
+    uint64_t tested_first[64];
+    uint64_t tested_missed;
+    // BUSTER_NODE_READER_VERIFY's: the nodes a row or a rule typed there whose value isn't the action's, and those whose
+    // action gives a warning.
+    uint64_t twin_differences;
+    uint64_t twin_warnings;
 };
 
 #define BUSTER_NODE_FRONT_TYPED_REFUSAL 0x0fu
 #define BUSTER_NODE_FRONT_TYPED_SWEPT 0x10u
+#define BUSTER_NODE_FRONT_TYPED_TESTED 0x20u
 #define BUSTER_NODE_FRONT_TYPED_POPPED 0x40u
 #define BUSTER_NODE_FRONT_TYPED_COMPARED 0x80u
 
