@@ -335,8 +335,9 @@ compiler reports with `-Wall -Wextra` and the census must refuse by the test tha
 stands for it; clean idioms it must take (a library call's discarded result, two
 fields written in one expression, a conditional's arms, `&a[N]`, a same-width
 sign change, `size_t` against `(size_t)-1`); the set's refusals; warnings off
-by default refusing nothing; and a system header's macros, taken and counted
-apart. A new warning reported inside an expression needs its test here and a
+by default refusing nothing; what warns without an option, read with the
+default warnings alone (`node_census_test_defaults`); and a system header's
+macros, taken and counted apart. A new warning reported inside an expression needs its test here and a
 line in that fixture: the census is where the machine's silence tests are
 written first. [The design](../node-machine.md)'s
 "Step 0: the census" has the results on `sqlite3.c`, Lua and musl.
@@ -759,6 +760,10 @@ takes its entries.
   lists of records, and the census's code only on the records a silence test
   may refuse. [The design](../node-machine.md#the-tests-in-the-machines-own-form)
   has what it measured.
+  - **It asks nothing that is decided before it runs:** what T refuses (a
+    pragma's region, a callee without a prototype, an overload set's leaf)
+    and what the front leaves to the walk (sizeof, `_Alignof`, a compound
+    literal). The design's table has each with what decides it.
   - **With `--verify` the census's code runs beside it** on every expression
     (bit 8): a bit, a span of tokens or a count of nodes that differs is
     listed (`node-tests: difference`, with `--list N`) and fails the command.
@@ -810,7 +815,7 @@ labels and calls the shadow's, and the fixture's globals' entries and direct
 calls patched. Its lines for them are a `const` object's initializer, one that
 converts nothing, one whose conversion is empty, a static local, a global's
 updates, and the strings.
-The census's six fixtures run again with its tests at reader time, in both
+The census's seven fixtures run again with its tests at reader time, in both
 forms (`node_tests_test_fixture`: `--front-tests` with `--verify`, then
 `--front-own-tests` with the census's code beside it, whose bits, spans and
 counts must be its; after the walk,
@@ -821,7 +826,12 @@ refuses there is exact, and so is its count of declarations' discards left
 alone. A silence test's line has an expression that test refuses there. The
 lines added for them: a conditional whose third operand's conversion changes
 a constant, a call's argument whose conversion does, two members of one
-record written in one expression, and a body with a diagnostic pragma.
+record written in one expression, and a body with a diagnostic pragma. For
+the own form: the seventh fixture, whose lines the own form's conditions
+decide where every warning would send them to the census's code, and a `for`
+statement in the first (its clauses under `-Wfor-loop-analysis`). Each of the
+91 faults that can be put into the own form fails this part of
+`test-checker`.
 [The design](../node-machine.md)'s "Step 1: the shadow" has the results.
 
 ### The fact words (#2850's step 1)

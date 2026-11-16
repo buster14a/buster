@@ -1932,17 +1932,32 @@ static uint64_t node_census_expression(NodeCensusScratch* s, uint32_t root, uint
 // node_census_expression's at reader time, from one pass over T's records in their order. There is no walk of the
 // graph and no step from a node to its record: a record's operands are records below it, whose types' bytes the pass
 // has kept. What every record pays is its operator's place in the set, its type's byte, its flags and its token; a
-// leaf pays its object's and its declaration's bytes. An operator's silence tests are asked only where a condition
+// leaf pays its declaration's byte. An operator's silence tests are asked only where a condition
 // that each of them needs holds (a trigger, by the operator and its operands' bytes and constants); the record is then
 // sent to the census's own code (node_census_node), after a walk of the expression for the tests that read a node's
 // parent. So the pass's own conditions are never the verdict of a silence test: they only say where none can fire.
+//
+// It runs where it sits: on an expression the front made whole and T took. What those decide first it doesn't ask again
+// (each is the census's code's condition still, which runs beside it with --verify, and whose fixtures' lines would show
+// the form's lack the day one of these stops holding):
+// - T refuses a record in a floating-point pragma's region or a constant context (its context refusal, by the same bits
+//   as the region test's), a call whose callee's type has no prototype (node_machine_callee_refused), and a leaf with an
+//   overload set (its leaf refusal). So no record has a region's bit, no call's callee lacks a prototype, and a wide
+//   leaf's bits are its columns', as any leaf's.
+// - The front leaves sizeof, _Alignof and a compound literal to the walk, so no record is one, and no leaf's object is a
+//   compound literal's.
+// - A register object's leaf has BUSTER_CHECK_REGISTER in its flags (the reader's, from the same declaration's bit as
+//   the object's): the flags alone say it, before its declaration's attributes are asked. (The census's code never
+//   asks a register object's: its own register test comes first. So here such a leaf always went to that code, and
+//   neither of the form's two register conditions behind it could fire.)
+// - A root is a condition's only where it is the CHECK_OP_CONDITION wrapper (node_census_reader_expression), whose
+//   operand, a shift or a product read as a truth, the wrapper's own send takes.
 typedef enum NodeTestsTrigger
 {
     NODE_TESTS_TRIGGER_ATOMIC_MEMBER,
     NODE_TESTS_TRIGGER_ENUM,
     NODE_TESTS_TRIGGER_SIGN_COMPARE,
     NODE_TESTS_TRIGGER_VOID_DEREFERENCE,
-    NODE_TESTS_TRIGGER_UNEVALUATED,
     NODE_TESTS_TRIGGER_CONVERSION,
     NODE_TESTS_TRIGGER_DIVISION,
     NODE_TESTS_TRIGGER_SHIFT_COUNT,
@@ -1963,7 +1978,6 @@ static const char* const node_tests_trigger_names[NODE_TESTS_TRIGGERS] = {
     [NODE_TESTS_TRIGGER_ENUM] = "enum-operand",
     [NODE_TESTS_TRIGGER_SIGN_COMPARE] = "sign-compare",
     [NODE_TESTS_TRIGGER_VOID_DEREFERENCE] = "void-dereference",
-    [NODE_TESTS_TRIGGER_UNEVALUATED] = "sizeof-or-alignof",
     [NODE_TESTS_TRIGGER_CONVERSION] = "constant-conversion",
     [NODE_TESTS_TRIGGER_DIVISION] = "constant-divisor",
     [NODE_TESTS_TRIGGER_SHIFT_COUNT] = "constant-shift",
@@ -1983,8 +1997,6 @@ static const char* const node_tests_trigger_names[NODE_TESTS_TRIGGERS] = {
 // at most 128 (node_census_width's: bits 8 to 15) and whether that is signed (bit 16); and bit 31 once made.
 #define BUSTER_NODE_TESTS_RANGE_SIGNED 0x80u
 #define BUSTER_NODE_TESTS_RANGE_WIDE_SIGNED 0x10000u
-// A value of the type calls a function with a prototype: the function's type, or its pointer's pointee's.
-#define BUSTER_NODE_TESTS_RANGE_PROTOTYPED 0x20000u
 #define BUSTER_NODE_TESTS_RANGE_KNOWN 0x80000000u
 
 static __attribute__((noinline)) uint32_t node_tests_ranges_make(const TypeTable* types, TypeId type)
@@ -1994,10 +2006,8 @@ static __attribute__((noinline)) uint32_t node_tests_ranges_make(const TypeTable
     const bool integer = node_census_integer(types, type, &width, &sign);
     bool wide_sign = false;
     const uint32_t wide = node_census_width(types, type, &wide_sign);
-    const TypeId function = node_census_function_type(types, type);
-    const bool prototyped = function != 0 && (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
     return BUSTER_NODE_TESTS_RANGE_KNOWN | (integer ? width : 0) | (integer && sign ? BUSTER_NODE_TESTS_RANGE_SIGNED : 0) | wide << 8 |
-           (wide != 0 && wide_sign ? BUSTER_NODE_TESTS_RANGE_WIDE_SIGNED : 0) | (prototyped ? BUSTER_NODE_TESTS_RANGE_PROTOTYPED : 0);
+           (wide != 0 && wide_sign ? BUSTER_NODE_TESTS_RANGE_WIDE_SIGNED : 0);
 }
 
 static inline uint32_t node_tests_ranges(const NodeCensusScratch* s, TypeId type)
@@ -2262,10 +2272,10 @@ static void node_tests_tables(NodeCensusScratch* s, const TypeTable* types)
                                               (comparison ? BUSTER_NODE_TESTS_OPERAND_COMPARISON : 0) |
                                               (op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_MULTIPLY ? BUSTER_NODE_TESTS_OPERAND_TRUTH : 0));
         s->own_copies[code] = copies ? UINT8_MAX : 0;
-        // A call's callee and arguments, a sizeof's or an alignof's operand and a comma's discard are read at each, and
-        // the third operand of a conditional (or of an operator outside the set); a member's record only in a unit with
-        // an atomic one, a comparison's operands' signs and an assignment's names only under their warnings.
-        const bool always = op == CHECK_OP_CALL || op == CHECK_OP_CONDITIONAL || op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF || op == CHECK_OP_COMMA ||
+        // A call's callee and arguments and a comma's discard are read at each, and the third operand of a conditional
+        // (or of an operator outside the set); a member's record only in a unit with an atomic one, a comparison's
+        // operands' signs and an assignment's names only under their warnings.
+        const bool always = op == CHECK_OP_CALL || op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA ||
                             !node_census_coded(op) || (types->atomic_records && (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)) ||
                             (policy->sign_compare && comparison) || (policy->self_assign && op == CHECK_OP_ASSIGN);
         s->own_always[code] = !leaf && always ? 1 : 0;
@@ -2388,10 +2398,10 @@ static __attribute__((noinline)) uint64_t node_tests_operator(const NodeCensusSc
         }
         fires = (changes & BUSTER_NODE_TESTS_CONVERSION_CHANGES) != 0;
         tests |= aggregate ? UINT64_C(1) << NODE_CENSUS_AGGREGATE : 0;
-        // Its callee's own semantics (node_census_callee's at reader time): a type that calls no function with a
-        // prototype, or a named callee whose declaration has some.
+        // Its callee's own semantics (node_census_callee's at reader time, where T has refused a callee whose type has
+        // no prototype): a named callee whose declaration has some.
         const uint32_t callee_node = graph->operand0[node];
-        bool callee = callee_node >= graph->count || (node_tests_ranges(s, o[0] != UINT32_MAX ? columns->value_types[o[0]] : 0) & BUSTER_NODE_TESTS_RANGE_PROTOTYPED) == 0;
+        bool callee = callee_node >= graph->count;
         if (!callee && graph->ops[callee_node] == CHECK_OP_VALUE)
         {
             const uint32_t token = graph->tokens[callee_node];
@@ -2434,10 +2444,6 @@ static __attribute__((noinline)) uint64_t node_tests_operator(const NodeCensusSc
         else if ((op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT) && policy->void_dereference && (first_bits & BUSTER_NODE_CENSUS_TYPE_VOID_POINTEE) != 0)
         {
             trigger = NODE_TESTS_TRIGGER_VOID_DEREFERENCE;
-        }
-        else if ((op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF) && graph->operand0[node] < graph->count)
-        {
-            trigger = NODE_TESTS_TRIGGER_UNEVALUATED;
         }
         else if (policy->shift_parentheses && shift && ((first_property | second_property) & BUSTER_NODE_TESTS_OPERAND_SUM) != 0)
         {
@@ -2527,7 +2533,7 @@ static inline uint64_t node_tests_root(NodeCensusScratch* s, uint32_t root, Node
 //
 // One loop reads every record once, without a branch on what it is: its operator's classes, its type's byte, its
 // standing, its flags and its token. It keeps what the record is as an operand (a byte), gathers the set's tests as
-// bits over all records, and lists three kinds of record: the leaves, for their objects' and declarations' bytes; the
+// bits over all records, and lists three kinds of record: the leaves, for their flags and their declarations' bytes; the
 // ones whose token's parent the tree's tests read; and the operators that have tests of their own, by their operands'
 // bytes. Each list's records then have their own tests, and the few that a silence test may refuse go to the census's
 // code after a walk.
@@ -2617,41 +2623,32 @@ static uint64_t node_tests_expression(NodeCensusScratch* s, uint32_t root, NodeC
     tests |= (flag_bits & BUSTER_CHECK_BIT_FIELD) != 0 ? UINT64_C(1) << NODE_CENSUS_BIT_FIELD : 0;
     tests |= (copied_bits & BUSTER_NODE_CENSUS_TYPE_AGGREGATE) != 0 ? UINT64_C(1) << NODE_CENSUS_AGGREGATE : 0;
     tests |= (class_bits & BUSTER_NODE_TESTS_CLASS_ADDRESS) != 0 && policy->packed_member && s->packed_unit ? UINT64_C(1) << NODE_CENSUS_PACKED_MEMBER : 0;
-    // A floating-point pragma's region, in a unit that has one.
-    if (input->fp_environments != NULL && graph->fp_environments != NULL)
-    {
-        for (uint32_t r = 0; r < count; r += 1)
-        {
-            const uint32_t node = r + 1 == count ? root : first + r;
-            tests |= (graph->fp_environments[node] & (BUSTER_CHECK_FP_ENV_ACCESS | BUSTER_CHECK_FP_EVAL_MASK)) != 0 ? UINT64_C(1) << NODE_CENSUS_REGION : 0;
-        }
-    }
-    // A leaf's object's and its name's declaration's bytes, by T's columns (node_census_leaf's tests): the census's code
-    // for a wide value, which may be an overload set's, and for a declaration whose attributes no leaf has asked yet.
-    const uint8_t* object_bits = input->declaration_bits;
+    // A leaf's flags and its name's declaration's byte, by T's columns (node_census_leaf's tests, of which a register
+    // object's is its flags' and a compound literal's is no leaf's here): the census's code for a declaration whose
+    // attributes no leaf has asked yet. A register object's leaf never asks them, there or here.
     const uint8_t* kinds = parser->tokens.kinds;
     const uint32_t* declarations = input->declarations;
     const uint8_t* facts = s->declaration_facts;
-    const uint32_t object_count = program->object_count;
     for (uint32_t i = 0; i < leaves; i += 1)
     {
         const uint32_t r = leaf_list[i];
         const uint32_t node = r + 1 == count ? root : first + r;
         const uint32_t token = tokens[node];
-        const uint32_t object = objects[r];
-        const uint8_t declared = object != 0 && object < object_count ? object_bits[object - 1] : 0;
         const bool named = token < token_count && kinds[token] == PARSE_KIND_IDENTIFIER && declarations != NULL && token < input->token_count;
         const uint32_t declaration = named ? declarations[token] : BUSTER_CHECK_NONE;
         const uint8_t known = declaration < token_count ? facts[declaration] : 0;
-        if ((standings[r] & BUSTER_NODE_MACHINE_WIDE) != 0 || (declaration != BUSTER_CHECK_NONE && (known & BUSTER_NODE_CENSUS_DECLARATION_FLAGGED_KNOWN) == 0))
+        if ((value_flags[r] & (BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME)) != 0)
+        {
+            // A register object's: its flags say it, whatever its declaration's attributes are.
+            tests |= UINT64_C(1) << NODE_CENSUS_DECLARATION;
+        }
+        else if (declaration != BUSTER_CHECK_NONE && (known & BUSTER_NODE_CENSUS_DECLARATION_FLAGGED_KNOWN) == 0)
         {
             tests |= node_census_leaf(s, node, token, value_flags[r]);
         }
         else
         {
-            const bool flagged = (declared & BUSTER_CHECK_BITS_REGISTER) != 0 || (value_flags[r] & (BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME)) != 0 ||
-                                 (known & BUSTER_NODE_CENSUS_DECLARATION_FLAGGED) != 0;
-            tests |= ((declared & BUSTER_CHECK_BITS_COMPOUND) != 0 ? UINT64_C(1) << NODE_CENSUS_COMPOUND_LITERAL : 0) | (flagged ? UINT64_C(1) << NODE_CENSUS_DECLARATION : 0);
+            tests |= (known & BUSTER_NODE_CENSUS_DECLARATION_FLAGGED) != 0 ? UINT64_C(1) << NODE_CENSUS_DECLARATION : 0;
         }
     }
     for (uint32_t i = 0; i < trees; i += 1)
@@ -2663,10 +2660,7 @@ static uint64_t node_tests_expression(NodeCensusScratch* s, uint32_t root, NodeC
     }
     uint64_t visit[BUSTER_NODE_MACHINE_MOST / 64];
     uint32_t visits = 0;
-    const bool truths = policy->int_in_bool || policy->tautological;
-    const CheckOp root_op = count != 0 ? graph->ops[root] : CHECK_OP_COUNT;
-    const bool root_truth = truths && context == NODE_CENSUS_ROOT_CONDITION && (root_op == CHECK_OP_SHIFT_LEFT || root_op == CHECK_OP_MULTIPLY) && count != 0;
-    if (operators != 0 || root_truth)
+    if (operators != 0)
     {
         for (uint32_t word = 0; word < (count + 63) / 64; word += 1)
         {
@@ -2677,13 +2671,6 @@ static uint64_t node_tests_expression(NodeCensusScratch* s, uint32_t root, NodeC
             const uint32_t r = operator_list[i];
             const uint8_t operands = properties[(int32_t)left[r]] | properties[(int32_t)right[r]];
             tests |= node_tests_operator(s, r, r + 1 == count ? root : first + r, operands, visit, &visits, counts);
-        }
-        // A root that is a truth itself (a condition's whole value), where it is a shift or a product.
-        if (root_truth)
-        {
-            counts->own_triggers[NODE_TESTS_TRIGGER_TRUTH] += (visit[(count - 1) >> 6] >> ((count - 1) & 63) & 1) == 0;
-            visits += (visit[(count - 1) >> 6] >> ((count - 1) & 63) & 1) == 0;
-            visit[(count - 1) >> 6] |= UINT64_C(1) << ((count - 1) & 63);
         }
     }
     // The unsequenced test needs two writes, or one below the expression's top: a lone write that is the root, or the

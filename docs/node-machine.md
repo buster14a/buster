@@ -2727,19 +2727,38 @@ three kinds of record. Each test is then decided where what it reads is:
 
 | the tests | decided | by |
 | --- | --- | --- |
-| an operator outside the set, a special type, a bit-field, an aggregate copied, a packed member's address, a floating-point pragma's region | in the loop, over all records | the operator's class, the type's byte, the flags |
-| a compound literal, a declaration the tables don't model | at each leaf | the object's bits and the name's declaration's byte |
+| an operator outside the set, a special type, a bit-field, an aggregate copied, a packed member's address | in the loop, over all records | the operator's class, the type's byte, the flags |
+| a register object, a declaration the tables don't model | at each leaf | its flags and the name's declaration's byte |
 | a comparison under a bitwise operator or as a statement, a `!` under a comparison, an assignment as a condition | at a comparison's token, a `!` and an `=` | the parser's tree |
-| a call's aggregates and its callee's own semantics | at each call | the arguments' bytes, the callee's type's word, its declaration's byte |
+| a call's aggregates and its callee's own semantics | at each call | the arguments' bytes, the callee's declaration's byte |
 | a constant its conversion changes, a division by zero, a shift's count, a null dereferenced, a zero that is no literal made a pointer | at an operator with a constant operand, exact in place | the constant's value in T's columns, the types' widths |
 | a pointer cast to a narrow integer, a string plus an integer, a comma's discard | at the operator, exact in place | its operands' bytes |
-| a comparison's bound, a mix of enumerations, signs compared, a void dereferenced, a sizeof's operand, a shift of a sum, a chained comparison, a shift or a product read as a truth, a name assigned to itself, an atomic record's member, a subscript at its array's end or past it, a constant the columns don't hold whole | by the census's code, on that record alone | a condition each of them needs, from the operator's bytes and its operands' |
+| a comparison's bound, a mix of enumerations, signs compared, a void dereferenced, a shift of a sum, a chained comparison, a shift or a product read as a truth, a name assigned to itself, an atomic record's member, a subscript at its array's end or past it, a constant the columns don't hold whole | by the census's code, on that record alone | a condition each of them needs, from the operator's bytes and its operands' |
 | a statement's discard, a for statement's clause, an initializer's constant, a returned local's address, T's actions' warnings | once an expression | the root, and the loop's bits |
 | two writes not apart from a sequence point | by the census's code after its walk | two writes in the expression, or one below its top |
 
 The loop's own conditions are never a silence test's verdict but where the
 test is exact in place: elsewhere they only say where none can fire, and the
 census's code decides.
+
+**What is decided before it, it doesn't ask.** It runs where it sits, on an
+expression the front made whole and T took:
+
+| the census's condition | decided before the form runs, by |
+| --- | --- |
+| a floating-point pragma's region | T's context refusal, by the same bits |
+| a callee whose type has no prototype | T's callee refusal |
+| an overload set's leaf, for which a wide leaf went to the census's code | T's leaf refusal; a wide leaf's flags are in its columns, as any leaf's |
+| a sizeof's or an `_Alignof`'s operand, a compound literal's object | the front, which leaves the three to the walk |
+| a register object by its object's bit | the reader: the leaf's flags have it from the same declaration |
+| a condition's root that is a shift or a product | the root's kind: a condition's root is its wrapper, whose own send takes its operand |
+
+- **Each is the census's code's condition still,** and that code runs beside
+  the own form with `--verify`.
+- **The fixtures have a line for each that could come back:** a pragma's
+  region, a callee without a prototype, a compound literal and
+  `sizeof(x++)`. The day T takes one or the front makes one, `test-checker`
+  shows what the form lacks.
 
 On the 9700X (`sqlite3.c`, Lua, musl):
 
@@ -2754,15 +2773,21 @@ On the 9700X (`sqlite3.c`, Lua, musl):
 | expressions whose bits are not the census's code's, either way | 0 | 0 | 0 |
 
 TSC ticks a record T typed at reader time (medians of seven readings in
-turn, musl's of three):
+turn, musl's of three), at main `cc1c47d62`, the form as it is now ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-own-tests-main-2524-2026-11-16)):
 
 | | `sqlite3.c` | Lua | musl |
 | --- | ---: | ---: | ---: |
-| T, C and X | 135.1 | 158.1 | 265.3 |
-| with the census's code between T and C | 308.6 | 344.2 | 513.3 |
-| with the own form | 225.1 | 276.9 | 422.6 |
-| the census's code alone (the difference) | 173.5 | 186.1 | 248.0 |
-| the own form alone | 90.0 | 118.8 | 157.3 |
+| T, C and X | 129.8 | 154.8 | 259.2 |
+| with the census's code between T and C | 308.0 | 346.4 | 521.6 |
+| with the own form | 216.1 | 270.8 | 411.6 |
+| the census's code alone (the difference) | 178.2 | 191.5 | 262.5 |
+| the own form alone | 86.3 | 115.9 | 152.4 |
+
+What follows was read at main `be6515fba`, before the conditions decided
+before the form were taken out of it: there the own form alone was 90.0,
+118.8 and 157.3 ticks, and the census's code 173.5, 186.1 and 248.0. Taking
+them out changed no count of the table above and a few ticks.
 
 The own form by part (`sqlite3.c`; each part switched off by a knob of a
 build made for it, so the parts overlap by a few ticks):
@@ -2778,7 +2803,7 @@ build made for it, so the parts overlap by a few ticks):
 
 - **Exact.** No expression's bits differ from the census's code's, on the
   three corpora with the default warnings and with every warning, and on the
-  six fixtures.
+  seven fixtures.
 - **Half the cost, not a tenth.** The own form is 90 ticks a typed record on
   `sqlite3.c` where the census's code is 174: about 62 cycles a body token.
   Step 2's sum is 1.19 with it, where 1.13 stood: a hair under the gate
@@ -2810,13 +2835,29 @@ build made for it, so the parts overlap by a few ticks):
 - **With #2871's kernel.** This work merged with that pull request's head
   builds and passes both sides' tests, and the operators' kernel reads the
   same there (within 2%, the same instructions).
-- **The fixtures owe lines.** Of 98 faults put into the own form one at a
-  time, the tests show 63 and the three corpora 5 more. The other 30 show on
-  no input here; a line of C shows each of 19 of them at once (a comparison
-  under a bitwise operator, a shift by too large a count, a chained
-  comparison, a mix of enumerations, a constant outside its operand's type),
-  so those are fixture lines not yet written, and the other 11 are not sorted
-  into lines owed and conditions another repeats.
+- **Every fault fails the tests.** Of 98 faults put into the own form one at
+  a time, the tests first showed 63 and the three corpora 5 more; 30 showed
+  on no input. Sorted, they were:
+  - **27 fixture lines owed.** A line of C showed each of 19 at once (a
+    comparison under a bitwise operator, a shift by too large a count, a
+    chained comparison, a mix of enumerations, a constant outside its
+    operand's type). Three more needed the right line: the front's one
+    operator outside the census's set (`__extension__`, a selection there),
+    a conditional whose third operand alone is a constant its conversion
+    changes, and a comparison as a statement whose operand writes. The
+    corpora's 5 had no line either.
+  - **Why the fixtures missed them:** with `-Wall -Wextra` a comparison and
+    a constant's shift go to the census's code whatever their operands are,
+    which hides the form's other conditions on them. So the lines are a
+    seventh fixture, read with the default warnings alone, and a `for`
+    statement in the first.
+  - **7 conditions decided before the form runs** (the table above), now
+    taken out.
+  - **1 that could not fire where it stood:** a register object's flag,
+    behind the census's code, whose own register test comes before it asks a
+    declaration's attributes, so that such a leaf always went there. It is
+    the leaf's first branch now.
+  - **Of the 91 left, each fails `test-checker`.**
 
 ### What it says of step 2
 
