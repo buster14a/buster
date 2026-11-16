@@ -343,7 +343,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-sweeps] [--front-tests] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-sweeps] [--front-tests|--front-own-tests] [--front-tests-last] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -753,6 +753,21 @@ takes its entries.
     nodes-whose-value-is-not-the-action's=0 nodes-whose-action-warns=0`): a
     row or a rule knows no warning, so the action must give none where one
     typed the node. A value that differs fails the command.
+- `--front-own-tests` runs the same tests in **the machine's own form**
+  (`node_tests_expression`; `PPOptions.node_reader`'s bit 4): one loop over
+  T's records, the unit's tables by operator (`node_tests_tables`), three
+  lists of records, and the census's code only on the records a silence test
+  may refuse. [The design](../node-machine.md#the-tests-in-the-machines-own-form)
+  has what it measured.
+  - **With `--verify` the census's code runs beside it** on every expression
+    (bit 8): a bit, a span of tokens or a count of nodes that differs is
+    listed (`node-tests: difference`, with `--list N`) and fails the command.
+  - **The report** (`node-shadow: own tests`): the records the loop listed
+    (leaves, the tree's, operators, and of those the calls and the ones with
+    a constant or a third operand), the records sent to the census's code by
+    what sent them, the expressions walked, and the differences.
+  - **`--front-tests-last`** (bit 16) runs either form after C and X in the
+    timed run, on the expressions those take.
 
 The report gives the expressions, evaluated nodes and calls taken, each
 refusal's (shape, code, leaf, context, diagnostic, template, row, root,
@@ -795,8 +810,10 @@ labels and calls the shadow's, and the fixture's globals' entries and direct
 calls patched. Its lines for them are a `const` object's initializer, one that
 converts nothing, one whose conversion is empty, a static local, a global's
 updates, and the strings.
-The census's six fixtures run again with its tests at reader time
-(`node_tests_test_fixture`, `--front-tests` with `--verify`; after the walk,
+The census's six fixtures run again with its tests at reader time, in both
+forms (`node_tests_test_fixture`: `--front-tests` with `--verify`, then
+`--front-own-tests` with the census's code beside it, whose bits, spans and
+counts must be its; after the walk,
 before it, and lean): no expression taken there is one the census refuses, no
 test differs, every root the tests ran on is compared, T's rows and rules are
 the action's without a warning, each fixture's count of expressions a test

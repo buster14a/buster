@@ -612,9 +612,11 @@ static bool node_census_test_fixture(const char* directory, const char* name, co
 // by a test, no more (the tests see one expression's warnings, not the unit's so far), and the fixture's `discards` declarations' discards are left alone (an initializer's value cast to
 // void at the declaration's `;`, each value of a braced one; an enumerator's value makes no record of the front's, and
 // so none).
-// In a build without the vector paths the front makes nothing, and no test runs. Whether all of it held.
-static bool node_tests_test_fixture(const char* directory, const char* name, const char* text, char** options, uint32_t option_count, uint8_t front, uint32_t refused,
-                                    uint32_t discards)
+// In a build without the vector paths the front makes nothing, and no test runs. With `own` the tests there are the
+// machine's own form ("The tests in the machine's own form"), and the census's code runs on every expression beside it:
+// their bits, their spans of tokens and their counts of nodes are the same. Whether all of it held.
+static bool node_tests_test_fixture_form(const char* directory, const char* name, const char* text, char** options, uint32_t option_count, uint8_t front, uint32_t refused,
+                                         uint32_t discards, bool own)
 {
     char path[512];
     snprintf(path, sizeof(path), "%s/%s", directory, name);
@@ -622,7 +624,7 @@ static bool node_tests_test_fixture(const char* directory, const char* name, con
     NodeShadow shadow = {
         .verify = true,
         .front = (uint8_t)(front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS),
-        .reader = BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_VERIFY,
+        .reader = (uint8_t)(BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_VERIFY | (own ? BUSTER_NODE_READER_OWN | BUSTER_NODE_READER_BOTH : 0)),
         .passes = 1,
         .repeat = 1,
         .tested_out = calloc(512, sizeof(NodeShadowTested)),
@@ -637,9 +639,13 @@ static bool node_tests_test_fixture(const char* directory, const char* name, con
                                 shadow.tested_unsound == 0 && shadow.tested_differences == 0 && shadow.tested_kind_differences == 0 && shadow.tested_missed == 0 &&
                                     shadow.tested_policy_differences == 0 && shadow.reader_twin_differences == 0 && shadow.reader_twin_warnings == 0 &&
                                     shadow.tested_expressions != 0 && shadow.tested_compared + shadow.tested_compared_unpopped == shadow.tested_expressions &&
-                                    shadow.tested_refused == refused && shadow.typed_discards == discards;
+                                    shadow.tested_refused == refused && shadow.typed_discards == discards &&
+                                    (!own || (shadow.own_differences == 0 && shadow.own_count_differences == 0 && shadow.own_expressions == shadow.tested_expressions));
     if (!valid || !same)
     {
+        fprintf(stderr, "test-checker: node-tests %s%s: %s: the own form ran on %" PRIu64 " expressions, %" PRIu64 " not the census's code's, %" PRIu64
+                " walks of another count\n",
+                name, own ? " (own form)" : "", valid ? "read" : "NOT READ", shadow.own_expressions, shadow.own_differences, shadow.own_count_differences);
         fprintf(stderr, "test-checker: node-tests %s: %s: the tests ran on %" PRIu64 " expressions at reader time and refused %" PRIu64 " (%u expected); %" PRIu64
                 " compared and %" PRIu64 " never lowered; %" PRIu64 " taken there that the census refuses, %" PRIu64 " differ, %" PRIu64 " roots' kinds differ, %" PRIu64
                 " nodes outside the records, %" PRIu64 " units' enabled warnings differ; T's rows and rules there: %" PRIu64 " values not the action's, %" PRIu64
@@ -686,6 +692,16 @@ static bool node_tests_test_fixture(const char* directory, const char* name, con
     free(shadow.tested_out);
     unlink(path);
     return valid && same;
+}
+
+// Both forms of the tests at reader time on one fixture: the census's code on the view, then the machine's own form
+// beside it.
+static bool node_tests_test_fixture(const char* directory, const char* name, const char* text, char** options, uint32_t option_count, uint8_t front, uint32_t refused,
+                                    uint32_t discards)
+{
+    const bool census = node_tests_test_fixture_form(directory, name, text, options, option_count, front, refused, discards, false);
+    const bool own = node_tests_test_fixture_form(directory, name, text, options, option_count, front, refused, discards, true);
+    return census && own;
 }
 
 // --facts' fixture (#2850's step 1, c_check_node_machine_facts.c): each kind of identifier's leaf (an automatic object, a
