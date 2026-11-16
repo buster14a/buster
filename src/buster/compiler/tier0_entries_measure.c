@@ -51,9 +51,10 @@
 // whole key is the first of those sets that leaves only the whole key's conflicts, less the inputs it can drop. Each
 // kind's row has its entries, its whole key's bytes (the kind is the first), that key's rows (its distinct keys), its
 // patterns, the share of its entries a key of each size decides and the share whose pattern is their key's commonest,
-// and the keys the gate counts (BUSTER_TIER0_CENSUS_GATE_BYTES bytes or fewer). The totals have both figures for a key
-// of each size, the line of #2874's gate, the tables' rows, what the gate's keys decide without each family of inputs
-// (so what needs it), and what no key decides.
+// and the keys the gate counts (BUSTER_TIER0_CENSUS_GATE_BYTES bytes or fewer). The totals have the groups by their
+// entries and by the fusion's variant, those that make no record, both figures for a key of each size, the line of
+// #2874's gate, the tables' rows, what the gate's keys decide without each family of inputs (so what needs it), and
+// what no key decides.
 //
 // Tier 0's passes are not called but tier0_compile and the fusion's own inlined body (tier0_fuse_entries), so that no
 // function of a compile gains a caller. Include after tier0_source_benchmark.c.
@@ -1383,6 +1384,33 @@ static bool tier0_census_report(const Tier0Census* census, bool rows, uint32_t l
                census->chosen_entries, 100.0 * (double)census->chosen_entries / entries);
         printf("tier0-census: %" PRIu64 " functions with deep values, %" PRIu64 " with segment overrides (left out), %" PRIu64 " refused\n", census->deep_functions,
                census->special_functions, census->refused);
+        // What the fusion makes of the stream: the groups by their entries, those that make no record, and the groups by
+        // the fusion's variant (BUSTER_TIER0_VARIANT_*: a key's kind has its own).
+        uint64_t sizes[5] = { 0 };
+        uint64_t silent_groups = 0;
+        uint64_t silent_entries = 0;
+        uint64_t variant_groups[BUSTER_TIER0_VARIANTS] = { 0 };
+        uint64_t variant_entries[BUSTER_TIER0_VARIANTS] = { 0 };
+        for (uint64_t s = 0; s < count; s += 1)
+        {
+            const Tier0CensusSample* sample = &census->samples[s];
+            sizes[sample->weight < 4 ? sample->weight : 4] += 1;
+            silent_groups += sample->records == 0 ? 1 : 0;
+            silent_entries += sample->records == 0 ? sample->weight : 0;
+            const uint32_t variant = sample->inputs[TIER0_CENSUS_VARIANT] < BUSTER_TIER0_VARIANTS ? sample->inputs[TIER0_CENSUS_VARIANT] : BUSTER_TIER0_VARIANTS - 1;
+            variant_groups[variant] += 1;
+            variant_entries[variant] += sample->weight;
+        }
+        printf("tier0-census: groups of 1 entry %" PRIu64 ", of 2 %" PRIu64 ", of 3 %" PRIu64 ", of 4 or more %" PRIu64 "; %" PRIu64 " groups (%" PRIu64 " entries, %.2f%%) make no record\n",
+               sizes[1], sizes[2], sizes[3], sizes[4], silent_groups, silent_entries, 100.0 * (double)silent_entries / entries);
+        for (uint32_t variant = 0; variant < BUSTER_TIER0_VARIANTS; variant += 1)
+        {
+            if (variant_groups[variant] != 0)
+            {
+                printf("tier0-census: variant=%u groups=%" PRIu64 " entries=%" PRIu64 " (%.2f%%)\n", variant, variant_groups[variant], variant_entries[variant],
+                       100.0 * (double)variant_entries[variant] / entries);
+            }
+        }
     }
     for (uint32_t kind = 0; room && kind < BUSTER_TYPED_KINDS; kind += 1)
     {

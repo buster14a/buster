@@ -196,6 +196,8 @@ static __attribute__((noinline)) void check_test_tier0_entries(CheckTest* test)
                       "tier0 entries: a key of the gate's bytes decides every entry of the fixture");
     static const char* const lines[] = {
         "tier0-census: 9 functions, ",
+        "tier0-census: groups of 1 entry ",
+        "tier0-census: variant=0 groups=",
         "tier0-census: keys=raw: gate: a key of 8 bytes or fewer decides ",
         "tier0-census: keys=fused: gate: a key of 8 bytes or fewer decides ",
         "tier0-census: keys=raw kind=CALL entries=1 ",
