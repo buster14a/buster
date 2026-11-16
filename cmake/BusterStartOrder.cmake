@@ -5,7 +5,10 @@
 # (cmake/BusterStartOrder.txt, which `compiler start-order` writes), placed together before .text, where the kernel's
 # fault-around maps them in fewer 64 KB windows than where their units' objects have them. They start on a 2 MB
 # boundary (ALIGN), in memory as in the file (CMakeLists.txt's -z max-page-size), so that the kernel can map them by
-# huge pages from their first byte: three of them hold what every compile measured runs.
+# huge pages from their first byte: three of them hold what every compile measured runs. The first 64 KB there, a
+# window of the kernel's fault-around, hold no code (buster_start_probe): no fault of a process's own maps them, so a
+# page of them is mapped only where a huge page maps the range, which the exit helper asks the kernel (lane.c's
+# lane_exit_collapse); buster_start_end, the checker's section's end, is how far it asks for huge pages unasked.
 #
 #   buster_start_order_files(LIST SCRIPT SYMBOLS SHIFT_SOURCE)
 #
@@ -70,9 +73,9 @@ function(buster_start_order_files list script symbols shift_source)
     endif()
     string(CONCAT text
         "/* The start's code order (cmake/BusterStartOrder.cmake), from ${list}. */\n"
-        "SECTIONS\n{\n    .text.buster_start : ALIGN(0x200000)\n    {\n${sections}    }\n"
-        "    ASSERT(SIZEOF(.text.buster_start) > 0, \"the start's code order placed no function: the units' objects or sections aren't the link's\")\n"
-        "    .text.buster_checker :\n    {\n        *(.text.buster_checker)\n    }\n"
+        "SECTIONS\n{\n    .text.buster_start : ALIGN(0x200000)\n    {\n        buster_start_probe = .;\n        . += 0x10000;\n${sections}    }\n"
+        "    ASSERT(SIZEOF(.text.buster_start) > 0x10000, \"the start's code order placed no function: the units' objects or sections aren't the link's\")\n"
+        "    .text.buster_checker :\n    {\n        *(.text.buster_checker)\n        buster_start_end = .;\n    }\n"
         "}\nINSERT BEFORE .text;\n")
     buster_start_order_write("${script}" "${text}")
     # A shifted link's padding before .text's code: the first section lld places there (absent elsewhere, which
