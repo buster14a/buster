@@ -3011,6 +3011,14 @@ static void node_shadow_facts_report(const NodeShadow* shadow)
                "place: %.2f cycles and %.2f instructions a record of the window)\n",
                (double)cycles / (double)taken, (double)instructions / (double)taken, (double)mispredicts / (double)taken,
                (double)shadow->facts_given_cycles / (double)shadow->facts_records, (double)shadow->facts_given_instructions / (double)shadow->facts_records);
+        // The two passes apart (#2872). The figure above is their difference, and the pass that is taken off carries a
+        // constant a unit that the build fixes: on units of a hundred records it moved the difference by a tenth to a
+        // third between two builds of one kernel. The first pass's own figure is what a change of the kernel moves.
+        printf("node-facts: the two passes, a record of the windows: the given records put in place and the kernel: cycles=%.2f instructions=%.2f ticks=%.2f; the given "
+               "records alone: cycles=%.2f instructions=%.2f ticks=%.2f\n",
+               (double)shadow->facts_cycles / (double)shadow->facts_records, (double)shadow->facts_instructions / (double)shadow->facts_records,
+               (double)shadow->facts_ticks / (double)shadow->facts_records, (double)shadow->facts_given_cycles / (double)shadow->facts_records,
+               (double)shadow->facts_given_instructions / (double)shadow->facts_records, (double)shadow->facts_given_ticks / (double)shadow->facts_records);
         if (shadow->facts_operators)
         {
             // T whole: the kernel's time over the unit, a record it made, a record of the windows, and an evaluated

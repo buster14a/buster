@@ -181,6 +181,36 @@ kernel's functions (`perf record`, 121 runs of the unit):
   inside the 38 the budget gives a body node, with 5 to 9 left for the
   statements and the front's own pass.
 
+### The figures are a difference of two passes (#2872)
+
+Every figure of the fact words' kernels on this page (a taken leaf or
+lookup's cycles; T whole's cycles a record or an evaluated node) is a timed
+pass over a unit's windows, each window's given records put in place and
+then the kernel, less a second pass that only puts the given records in
+place. [#2872](https://github.com/buster14a/buster/issues/2872) found that
+the second pass is not always what that copying costs inside the first. On
+musl, whose 1,336 units are 97 records a pass, a build of #2524's read it
+10% dearer (12.57 against 11.41 cycles a record, with the same instructions)
+while the first pass stayed within 0.3%, and the same kernel's figure read
+13% to 30% lower. It is some 120 cycles a unit's pass that a build fixes.
+What it is was not found.
+
+- **Which figures here carry it.** musl's do, and Lua's a twentieth of it
+  (34 units). In this page's own records the second pass on musl read 11.41
+  to 11.53 cycles a record in every build, so their musl figures compare
+  with each other. A musl figure from another build has to be read with its
+  second pass beside it. `sqlite3.c` is one unit and carries none of it, and
+  the gates were read from `sqlite3.c`. Its second pass moves by up to a
+  cycle a record from run to run, which the medians of three are for.
+- **What to compare by.** The command prints the two passes apart, a record
+  of the windows, with their TSC ticks
+  ([the guide](commands/lowering.md#the-fact-words-2850s-step-1)). Two
+  builds of one kernel are compared by the first pass's own figure.
+  Rebuilt with that line, the two builds the issue names read 20.11 and
+  19.93 cycles a record on musl in the first pass (0.9% apart) and 11.41
+  and 11.46 in the second: the added line moved the code again, and the
+  constant with it.
+
 ### A record is one line: what a store a column costs
 
 The first kernels wrote T's record as T's columns have it, a store a field,

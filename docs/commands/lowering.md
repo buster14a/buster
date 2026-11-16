@@ -773,8 +773,8 @@ a short path took and those their rule took, a lean kernel's conversions and
 discards with those derived, the loads' kernel's lookups by their load, the
 given records by operator, the differences, the words made (rows, lines, lines
 made again, member slots), the windows, and the times: the kernel's cycles, instructions
-and mispredicted branches a taken leaf or lookup, and a leaf's and a lookup's
-ticks. With `--facts-operators` they add the operators' records, those made,
+and mispredicted branches a taken leaf or lookup, the two passes apart, and a
+leaf's and a lookup's ticks. With `--facts-operators` they add the operators' records, those made,
 those a class's loop made and those their rules made; each operator's records
 with those left; the literals' lines; the share of the records that are no
 literal's leaf that the kernel made; and the kernel's cycles, instructions and
@@ -783,6 +783,20 @@ an evaluated node (the sweeps' own count, as `node-shadow: time sweeps=T` has
 main's T). `--list N` prints the first N records that differ, with both records.
 The command exits 1 on a difference. On a host without the vector paths the
 listing and the leaves run a record at a time and give the same records.
+
+**The kernel's figures are a difference of two passes**
+([#2872](https://github.com/buster14a/buster/issues/2872)): a pass over a
+unit's windows (each window's given records put in place, then the kernel)
+less a second pass that only puts the given records in place, each the least
+of `--passes N`, summed over the units. The second pass alone is not what the
+copying costs inside the first: on a unit of a hundred records it carries
+some hundred cycles a unit's pass that a build fixes, and two builds of one
+kernel read 13% to 30% apart on musl by the difference. The line
+`node-facts: the two passes, a record of the windows` has each pass's own
+cycles, instructions and TSC ticks. Compare two builds by the first pass's
+figure there: a change of the kernel moves it, and where the units are short
+nothing else measured does. `sqlite3.c` is one unit and its difference
+carries no such constant.
 
 `test-checker` runs `node_facts_test_text` (each kind of leaf and each lookup,
 taken and left) by the whole kernel at three window settings and by the lean
