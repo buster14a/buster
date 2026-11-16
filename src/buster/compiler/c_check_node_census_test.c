@@ -187,7 +187,10 @@ static const char node_census_test_atomic[] =
 // record's with a nested list (their lists' values dropped where nothing takes them, none left waiting), an enumerator's
 // value, a library function called by its name and through its
 // address (the call's library mark), and a switch (its condition's operator, and a case label's constant, whose context
-// the walk's visit gives: unknown to the front).
+// the walk's visit gives: unknown to the front). And a named result (#1375, #2882): `named` returns its one local
+// through its hidden pointer, so the lowering builds it where that pointer points and each of the local's addresses
+// in the stream is the pointer's value, where the tape has the local's address (a store to its member, a member's
+// value in an initializer and a condition, its address as an argument); `either` returns two locals and keeps both.
 static const char node_shadow_test_text[] =
     "struct S { long m; long n; int a[4]; unsigned char c; int (*cb)(int); };\n"
     "struct __jmp_buf_tag { long b[8]; };\n"
@@ -343,6 +346,33 @@ static const char node_shadow_test_text[] =
     "        default: break;\n"
     "    }\n"
     "    return y + x + (long)z; // machine: taken\n"
+    "}\n"
+    "struct W { long a; long b; long c; };\n"
+    "long total(const struct W* w);\n"
+    "struct W named(long x)\n"
+    "{\n"
+    "    struct W w;\n"
+    "    w.a = x; // machine: taken\n"
+    "    w.b = x + 1; // machine: taken\n"
+    "    long y = w.a - x; // machine: taken\n"
+    "    long n = total(&w); // machine: taken\n"
+    "    if (w.a > 3) // machine: taken\n"
+    "    {\n"
+    "        w.c = y + n; // machine: taken\n"
+    "    }\n"
+    "    return w;\n"
+    "}\n"
+    "struct W either(long x)\n"
+    "{\n"
+    "    struct W first;\n"
+    "    struct W second;\n"
+    "    first.a = x; // machine: taken\n"
+    "    second.a = x + 1; // machine: taken\n"
+    "    if (x > 3) // machine: taken\n"
+    "    {\n"
+    "        return first;\n"
+    "    }\n"
+    "    return second;\n"
     "}\n";
 
 // The refusal whose name `name` (`length` bytes) is, or NODE_MACHINE_REFUSALS.

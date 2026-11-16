@@ -764,7 +764,13 @@ Every taken expression's records and entries are compared:
 | T's nodes by a row or a rule, by the action | 75,973, 7,238 | 14,416, 5,098 | 30,299, 4,699 |
 
 c-testsuite's 220 programs (63.7% of their census-taken nodes taken) and
-`main.c` (24.6%) differ in nothing either. What the machine refuses is its
+`main.c` (24.6%) differ in nothing either. (A function's named result reads
+differently in the two since #1375: the lowering builds a returned local where
+the hidden pointer points and, after the tasks wrote the entries, makes each
+`LOCAL_ADDRESS` of it a `LOCAL` of that pointer, where the tape has the
+address. The log gives the comparison each body's named local and hidden
+pointer's local, as it gives the labels' entries; before #2882 it didn't, and
+192 expressions of `main.c` read as different.) What the machine refuses is its
 codes: of `sqlite3.c`'s census-taken nodes, 49.3% are in expressions with an
 operator it has no code for (in 12,836 of those 18,651 expressions the first such
 operator is a call) and 0.5% in ones with a node the templates don't take (a

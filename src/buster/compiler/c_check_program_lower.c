@@ -677,6 +677,12 @@ struct CheckLowerOwners
     uint32_t* labels;
     uint64_t label_count;
     uint64_t label_capacity;
+    // Optional (null for none): each body's named result (#1375), two words a body, set once the body is lowered
+    // (check_lower_owner_named): the local the body builds where its hidden pointer points and that pointer's local, or
+    // BUSTER_CHECK_NONE twice. check_lower_named_rewrite makes each LOCAL_ADDRESS of that local a LOCAL of the hidden
+    // pointer after the tasks wrote them, so #2524's shadow, whose tape has the object's address, reads here what those
+    // entries became (#2882).
+    uint32_t* named;
     // Whether the tasks' loop runs (check_lower_drain_sources), and whether a pop found the log full (or the body's labels
     // the labels' column).
     bool draining;
@@ -16272,6 +16278,19 @@ static __attribute__((noinline)) void check_lower_owner_labels(CheckLowerWriter*
     }
 }
 
+// The body's named result for #2524's shadow (CheckLowerOwners.named): with `rewritten`, the local whose LOCAL_ADDRESS
+// entries check_lower_named_rewrite made LOCALs of the hidden pointer, and that pointer's local.
+static __attribute__((noinline)) void check_lower_owner_named(CheckLowerWriter* writer, bool rewritten)
+{
+    CheckLowerOwners* owners = writer->owners;
+    if (owners->named != NULL)
+    {
+        const uint64_t body = (uint64_t)(writer->body - writer->program->bodies);
+        owners->named[2 * body] = rewritten ? writer->named_result : BUSTER_CHECK_NONE;
+        owners->named[2 * body + 1] = rewritten ? writer->hidden : BUSTER_CHECK_NONE;
+    }
+}
+
 static void check_lower_task_source(CheckLowerWriter* writer, CheckLowerTask task)
 {
     const CheckProgram* program = writer->program;
@@ -20568,13 +20587,15 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 check_lower_fail(writer, CHECK_PROGRAM_INVALID);
             }
         }
-        if (writer->named_result != BUSTER_CHECK_NONE && status->status == CHECK_PROGRAM_OK)
+        const bool rewritten = writer->named_result != BUSTER_CHECK_NONE && status->status == CHECK_PROGRAM_OK;
+        if (rewritten)
         {
             check_lower_named_rewrite(writer);
         }
         if (writer->owners != NULL)
         {
             check_lower_owner_labels(writer);
+            check_lower_owner_named(writer, rewritten);
         }
         // The labels whose addresses the program takes, from their control entries to their entries, as the targets.
         for (uint32_t k = 0; k < writer->label_entry_count && status->status == CHECK_PROGRAM_OK; k += 1)

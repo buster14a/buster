@@ -498,6 +498,9 @@ struct NodeCensusScratch
     // The log's labels' entries (CheckLowerOwners.labels), which a pop's `label` indexes.
     const uint32_t* labels;
     uint64_t label_count;
+    // The body's named result's local and its hidden pointer's (CheckLowerOwners.named), or BUSTER_CHECK_NONE twice.
+    uint32_t named_local;
+    uint32_t hidden_local;
     uint32_t* object_locals;
     uint32_t* object_stamps;
     uint32_t* local_objects;
@@ -2164,8 +2167,16 @@ static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* ma
             // A row of the tape's calls (so that the rows the tape names, distinct as the stream's are, are all its own).
             const bool call = kind == BUSTER_TYPED_CALL && t < machine->entry_count && machine->tape[t] < machine->call_count && function->values[e] >= machine->tape[t];
             base = call && base == UINT64_MAX ? function->values[e] - machine->tape[t] : base;
-            same = same && t < machine->entry_count && machine->kinds[t] == kind && machine->classes[t] == function->classes[e] &&
-                   (node_shadow_local_kind(kind) ? node_shadow_same_local(s, machine->tape[t], function->values[e]) :
+            // A named result's address (#1375, #2882): the body builds that local where its hidden pointer points, and
+            // check_lower_named_rewrite made each LOCAL_ADDRESS of it a LOCAL of the hidden pointer after the tasks wrote
+            // them. The tape has the address, as the tasks had: the two are the same entry where the tape's object is
+            // the named local's, the body's one object there.
+            const bool named = s->named_local != BUSTER_CHECK_NONE && kind == BUSTER_TYPED_LOCAL && function->values[e] == s->hidden_local &&
+                               t < machine->entry_count && machine->kinds[t] == BUSTER_TYPED_LOCAL_ADDRESS;
+            same = same && t < machine->entry_count && machine->classes[t] == function->classes[e] &&
+                   (named                        ? node_shadow_same_local(s, machine->tape[t], s->named_local) :
+                    machine->kinds[t] != kind    ? false :
+                    node_shadow_local_kind(kind) ? node_shadow_same_local(s, machine->tape[t], function->values[e]) :
                     branch                       ? node_shadow_same_label(s, machine, pop, machine->tape[t], function->values[e]) :
                     kind == BUSTER_TYPED_CALL    ? call && machine->tape[t] + base == function->values[e] :
                                                    machine->tape[t] == function->values[e]);
@@ -3445,12 +3456,19 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
     const uint64_t log_capacity = prepared ? 4 * (uint64_t)selected.program.stream->count + 65536 : 0;
     // Each body's labels: its controls' and the ones its tasks number (the shadow's branches are read there).
     const uint64_t label_capacity = prepared ? 2 * (uint64_t)selected.program.control_count + selected.program.body_count + 4 * (uint64_t)selected.program.stream->count + 65536 : 0;
-    Arena log_arena = arena_reserve(log_capacity * sizeof(CheckLowerOwnerPop) + label_capacity * sizeof(uint32_t) + 8192);
+    // Each body's named result, two words a body (CheckLowerOwners.named): none until its body is lowered.
+    const uint64_t named_capacity = prepared ? 2 * ((uint64_t)selected.program.body_count + 1) : 0;
+    Arena log_arena = arena_reserve(log_capacity * sizeof(CheckLowerOwnerPop) + (label_capacity + named_capacity) * sizeof(uint32_t) + 8192);
     CheckLowerOwners owners = { .capacity = log_capacity, .label_capacity = label_capacity };
     owners.pops = prepared ? BUSTER_ARENA_PUSH_ARRAY(&log_arena, CheckLowerOwnerPop, owners.capacity) : 0;
     owners.labels = prepared ? BUSTER_ARENA_PUSH_ARRAY(&log_arena, uint32_t, owners.label_capacity) : 0;
+    owners.named = prepared ? BUSTER_ARENA_PUSH_ARRAY(&log_arena, uint32_t, named_capacity) : 0;
+    if (owners.named != 0)
+    {
+        memset(owners.named, 0xff, named_capacity * sizeof(uint32_t));
+    }
     CheckProgramLowered lowered = { 0 };
-    const bool lowering = prepared && owners.pops != 0 && owners.labels != 0 &&
+    const bool lowering = prepared && owners.pops != 0 && owners.labels != 0 && owners.named != 0 &&
                           check_program_lower_owners(&lowered, &selected.program, &owners, &path->output_arena, &path->scratch);
     const bool complete = lowering && !owners.overflow;
     if (complete)
@@ -3551,6 +3569,8 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                     s.owners = lowered.entry_tokens[b];
                     s.labels = owners.labels;
                     s.label_count = owners.label_count;
+                    s.named_local = owners.named[2 * (uint64_t)b];
+                    s.hidden_local = owners.named[2 * (uint64_t)b + 1];
                     s.body_stamp = b + 1;
                     node_census_body(census, &s, b, owners.pops + first, (uint32_t)(end - first));
                 }

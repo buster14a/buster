@@ -474,7 +474,13 @@ takes its entries.
   the expression's first, at the same entry. A temporary (a postfix update's
   through an address keeps the address and the old value in two) is numbered
   on the tape in the order the tape first names it, and must be a local the
-  body hasn't met, the same one every time the expression names it.
+  body hasn't met, the same one every time the expression names it. A named
+  result's address (#1375: a returned local built where the hidden pointer
+  points) is the hidden pointer's `LOCAL` in the stream, which
+  `check_lower_named_rewrite` made of the local's `LOCAL_ADDRESS` after the
+  tasks wrote it; the log keeps each body's named local and hidden pointer's
+  local (`CheckLowerOwners.named`), and the tape's address of the body's one
+  object there is that entry (#2882).
 - `--verify` types every node a row or a rule types by the action too and
   compares the two, field by field (the twin); `--scalar` types every node by
   the action alone. `--repeat N` (1 by default) runs each expression's sweeps
