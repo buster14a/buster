@@ -405,6 +405,14 @@ struct NodeMachine
     uint32_t* call_ends;
     // The record T, C or X stopped at, for a refusal's report.
     uint32_t stopped;
+    // What C and X ask of the unit's objects, `object_count` of them: each one's symbol (0 for a local: a parameter's, an
+    // automatic object's) and its declaration's bits. After the pipeline the program's (CheckProgram.object_symbols, the
+    // selection's numbering, and its input's declaration_bits). At reader time no symbol is numbered yet: an object with a
+    // static declaration has itself there, which stands for its symbol (X writes it where it writes a symbol, and a
+    // splice patches it), and the bits are the reader's input's.
+    const SymbolId* object_symbols;
+    const uint8_t* declaration_bits;
+    uint32_t object_count;
     // At reader time (node_machine_begin_reader; `program` is null then, and T alone runs): what T asks of the program,
     // made from the reader's columns as the program makes its own from them. Each object's last static declaration's
     // token (CheckProgram.object_declarations', BUSTER_CHECK_NONE for an object without one), `reader_objects` of them,
@@ -422,6 +430,14 @@ struct NodeMachine
     uint8_t* reader_library;
     uint32_t type_capacity;
     uint64_t late_types;
+    // The current expression's actions' warnings (CheckActionResult.warnings' 25 bits, each node's suppressed ones aside),
+    // which the silence tests read at reader time (docs/node-machine.md, "The tests where they sit"): a row or a rule
+    // types a node only where its action gives none, and --verify counts the nodes where one does (`twin_warnings`).
+    uint32_t action_warnings;
+    uint64_t twin_warnings;
+    // A conditional's operand 2's conversion's type, by record: the columns hold two operands' conversions, and the tests
+    // read a constant arm's. Written for a conditional alone (node_machine_record_converted_third).
+    TypeId* converted_third;
 };
 
 // NodeMachine.reader_facts' bits.
@@ -508,7 +524,8 @@ static bool node_machine_setup(NodeMachine* machine, TypeTable* types, const Che
     machine->consumers = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
     machine->updates = BUSTER_ARENA_PUSH_ARRAY(arena, NodeMachineUpdate, most / 2);
     machine->const_pointers = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, (uint64_t)type_room + 64);
-    const bool room = machine->type_words != NULL && machine->type_complete_at != NULL && classes != NULL && facts != NULL && machine->columns != NULL &&
+    machine->converted_third = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, most);
+    const bool room = machine->converted_third != NULL && machine->type_words != NULL && machine->type_complete_at != NULL && classes != NULL && facts != NULL && machine->columns != NULL &&
                       machine->wides != NULL && machine->kinds != NULL && machine->classes != NULL && machine->tape != NULL && machine->label_entries != NULL &&
                       machine->calls_written != NULL && machine->call_records != NULL && machine->arguments != NULL && machine->argument_conversions != NULL &&
                       machine->argument_values != NULL && machine->verified != NULL && machine->stack != NULL && machine->consumers != NULL &&
@@ -535,7 +552,12 @@ static bool node_machine_setup(NodeMachine* machine, TypeTable* types, const Che
 // The machine's columns for `program`'s unit, from `arena`: whether there was room.
 static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program, bool scalar, bool verify, Arena* arena)
 {
-    *machine = (NodeMachine){ .program = program };
+    *machine = (NodeMachine){
+        .program = program,
+        .object_symbols = program->object_symbols,
+        .declaration_bits = program->input->declaration_bits,
+        .object_count = program->object_count,
+    };
     const bool room = node_machine_setup(machine, (TypeTable*)program->types, &program->input->graph, program->types->types.count, scalar, verify, arena);
     if (room)
     {
@@ -722,6 +744,12 @@ static inline uint32_t node_machine_record_conversion_flags(const NodeMachine* m
     return machine->columns->conversion_flags[2 * r + k];
 }
 
+// A conditional's operand 2's conversion's type (0 for any other record).
+static inline TypeId node_machine_record_converted_third(const NodeMachine* machine, uint32_t r)
+{
+    return node_machine_record_op(machine, r) == CHECK_OP_CONDITIONAL ? machine->converted_third[r] : 0;
+}
+
 // A member's offset in its record, in bits.
 static inline uint64_t node_machine_record_member_offset(const NodeMachine* machine, uint32_t r)
 {
@@ -860,18 +888,17 @@ static inline void node_machine_record_set_update(NodeMachine* machine, uint32_t
 }
 
 // Whether `object` is a local of the function: an object without a symbol (a parameter's, an automatic object's), which
-// the function's local numbers; one with a symbol is a global's.
+// the function's local numbers; one with a symbol is a global's (NodeMachine.object_symbols: at reader time, one with a
+// static declaration).
 static bool node_machine_local(const NodeMachine* machine, uint32_t object)
 {
-    const CheckProgram* program = machine->program;
-    return object != 0 && object < program->object_count && program->object_symbols[object] == 0;
+    return object != 0 && object < machine->object_count && machine->object_symbols[object] == 0;
 }
 
 // Whether an object's address is a template's (check_lower_template_address_takes): none's, a local's or a global's.
 static bool node_machine_address_takes(const NodeMachine* machine, uint32_t object)
 {
-    const CheckProgram* program = machine->program;
-    return object == 0 || object < program->object_count;
+    return object == 0 || object < machine->object_count;
 }
 
 // What T, C and X ask of a call's callee, record `a`. Its function type, by check_action_call's steps from its value's
@@ -887,13 +914,12 @@ static TypeId node_machine_callee_function(const NodeMachine* machine, uint32_t 
     return type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION ? function : 0;
 }
 
-// Whether `object` has a symbol of its own: the program's, which its selection numbers; at reader time, before any is
-// numbered, whether it has a static declaration, which is what a referenced object's symbol comes from.
+// Whether `object` has a symbol of its own (NodeMachine.object_symbols): the program's, which its selection numbers; at
+// reader time, before any is numbered, whether it has a static declaration, which is what a referenced object's symbol
+// comes from.
 static inline bool node_machine_symbolled(const NodeMachine* machine, uint32_t object)
 {
-    const CheckProgram* program = machine->program;
-    return program != NULL ? object < program->object_count && program->object_symbols[object] != 0 :
-                             object < machine->reader_objects && machine->reader_declarations[object] != BUSTER_CHECK_NONE;
+    return object < machine->object_count && machine->object_symbols[object] != 0;
 }
 
 // What T's callee refusal asks of a directly called object (node_machine_callee_refused): its declaration's name, and
@@ -940,7 +966,7 @@ static uint32_t node_machine_direct_callee(const NodeMachine* machine, uint32_t 
 static SymbolId node_machine_call_target(const NodeMachine* machine, uint32_t r)
 {
     const uint32_t object = node_machine_direct_callee(machine, node_machine_record_left(machine, r));
-    return object != 0 ? machine->program->object_symbols[object] : 0;
+    return object != 0 ? machine->object_symbols[object] : 0;
 }
 
 static bool node_machine_call_variadic(const NodeMachine* machine, uint32_t r)

@@ -764,7 +764,13 @@ Every taken expression's records and entries are compared:
 | T's nodes by a row or a rule, by the action | 75,973, 7,238 | 14,416, 5,098 | 30,299, 4,699 |
 
 c-testsuite's 220 programs (63.7% of their census-taken nodes taken) and
-`main.c` (24.6%) differ in nothing either. What the machine refuses is its
+`main.c` (24.6%) differ in nothing either. (A function's named result reads
+differently in the two since #1375: the lowering builds a returned local where
+the hidden pointer points and, after the tasks wrote the entries, makes each
+`LOCAL_ADDRESS` of it a `LOCAL` of that pointer, where the tape has the
+address. The log gives the comparison each body's named local and hidden
+pointer's local, as it gives the labels' entries; before #2882 it didn't, and
+192 expressions of `main.c` read as different.) What the machine refuses is its
 codes: of `sqlite3.c`'s census-taken nodes, 49.3% are in expressions with an
 operator it has no code for (in 12,836 of those 18,651 expressions the first such
 operator is a call) and 0.5% in ones with a node the templates don't take (a
@@ -2454,6 +2460,253 @@ On the 9700X (CPU 2, medians of seven readings in turn, musl's of three):
   instructions a node (0.5%) for the tests of where its callee's facts come
   from.
 
+### C and X where they sit
+
+"T where it sits" left the other two sweeps after the pipeline.
+`measure-node-machine --shadow --front-sweeps` runs them at reader time too:
+C and X follow T on each expression it takes there, before the unit's program
+exists. After the pipeline the shadow's own C and X run on the same
+expression, and reader time's tape must be theirs entry for entry. [The
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-reader-sweeps-2524-2026-11-16)
+has the runs.
+
+C and X read T's records and little else:
+
+| what C and X read | after the pipeline | at reader time |
+| --- | --- | --- |
+| whether an object is a local or a global | whether it has a symbol, the selection's numbering | whether it has a static declaration, or is a string's |
+| a global's symbol, in its entries and in a direct call's row | the selection's | the object itself, which a splice patches |
+| a declaration's bits (register, compound, static) | the program's input's | the reader's input's, the same column |
+| the root's context, its conversion's target, its object | the lowering's pop's | none, but an initialization's: its object's type without its qualifiers where the conversion writes entries, and the object |
+
+- **The machine holds the objects' columns itself now**
+  (`NodeMachine.object_symbols`, `declaration_bits`, `object_count`), set
+  where it begins, so C and X read no program in either place. T's test of a
+  direct callee reads the same column, and its test of where the answer comes
+  from is gone.
+- **What a splice patches is told by an entry's kind:** `GLOBAL`,
+  `GLOBAL_ADDRESS`, `STORE_GLOBAL` and `SET_GLOBAL`, and a direct call's row.
+  Locals, labels, calls' rows and temporaries were relative on the tape
+  already.
+- **A string's object is static without a declaration.** Reader time gives the
+  strings' objects their place before each chunk's expressions. Without it
+  1,054 of `sqlite3.c`'s tapes had a local's address where the shadow has a
+  global's: the one thing the first run lacked, with the qualifiers of 14
+  `const` objects' targets.
+
+On the 9700X (CPU 2, medians of seven readings in turn, musl's of three; TSC
+ticks a record T typed):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| expressions C and X ran on at reader time (those T took) | 55,063 | 12,568 | 49,115 |
+| of them taken; refused for a template or a row | 50,393; 4,670 | 10,387; 2,181 | 41,209; 7,906 |
+| compared with the shadow's C and X: expressions, entries, differences | 50,555, 331,155, 0 | 10,544, 65,963, 0 | 22,324, 133,898, 0 |
+| patched in them: globals' entries, direct calls | 2,199, 12,555 | 668, 3,845 | 2,396, 4,871 |
+| T alone at reader time | 69.1 | 85.6 | 138.7 |
+| T, C and X at reader time | 127.7 | 139.9 | 235.9 |
+| C and X in place (the difference) | 58.7 | 54.4 | 97.2 |
+| C and X in the tight loop, its first pass | 44.0 | 39.8 | 42.8 |
+| the three in the tight loop, its first pass | 106.9 | 99.8 | 104.5 |
+
+These are with the whole front before T. After the lean front the three read
+152.8, 160.7 and 264.4, and T alone 93.8, 105.0 and 170.3: the shadow's search
+for a root's operand's record there is in both.
+
+- **Exact.** No expression differs in its root's target or object, its
+  refusal, its tape, its labels or its calls, in any of 34 readings, whole
+  front and lean.
+- **A splice patches little.** In `sqlite3.c`'s compared expressions 2,199
+  entries of 331,155 hold a global, and there are 12,555 direct calls: a
+  quarter of a call an expression. Everything else on a tape was the
+  expression's own already.
+- **Where they sit, the three cost what a body's expressions a run cost.** On
+  `sqlite3.c` they are 1.19 times their tight loop's first pass: about 212
+  cycles a node, where "Where the machine runs" has 216.5 for the three sweeps
+  with a body's expressions a run and 174.9 in the tight loop. C and X pay a
+  third over their tight loop there and T a tenth, so the guess that C and X
+  pay as T does was low for them and right for the sum.
+- **Step 2's sum stands.** It took T and the one sweep at 199 cycles a node, a
+  body's expressions a run, where the three sweeps are 216.5. Reader time ran
+  the three as they are, not the one sweep, and reads them at 212: the sum's
+  upper figure, 91 cycles a body token, holds if the one sweep keeps its
+  twelfth there, and the sum is 1.25 on `sqlite3.c`.
+- **Sparse expressions cost C and X as they cost T:** 1.4 times the tight
+  loop's first pass on Lua for the three, and 2.3 times on musl.
+- **The reader runs them on a declaration's discard too.** Of the 55,063
+  expressions C and X run on at reader time on `sqlite3.c`, 3,941 are ones
+  the lowering never pops (7%); of Lua's 12,568, 1,722 (14%); of musl's
+  49,115, 26,597 (54%). Nearly all of `sqlite3.c`'s and Lua's are a
+  declaration's discard, the walk's cast to void of an initializer's value,
+  which nothing evaluates ("T where it sits"); 20,745 of musl's are in bodies
+  the selection drops. The discards are no roots of the machine's, and the
+  selection before the sweeps matters for musl's headers.
+- **A compile is unchanged** (-0.47% and -0.15% from fresh copies, the same
+  1,363.464 M instructions).
+- **The shadow's own sweeps retire 0.5 to 0.7 fewer instructions a node,**
+  T's test of where a callee's symbol comes from being gone, and read 1.3%
+  more cycles on `sqlite3.c` as built (173.3 to 175.5), 1.7% on Lua, 0.2% on
+  musl.
+- **That is inside what the stack alone does to them.** The machine's
+  structure is a local of the census's function, and the sweeps' frames are
+  below it at a distance the build fixes. With that distance moved at run
+  time over 32 places a page wide, the baseline's three sweeps read from
+  172.8 to 182.4 cycles a node (5.6%) and this build's from 174.5 to 189.1
+  (8.4%); a third and a quarter of the places are the slow ones. Store-to-load
+  interference in the machine's functions is 44% up as built, with its
+  mispredicted branches and its cache misses within 2%. At their best places
+  the two builds are 1.0% apart, all of it X's, whose functions the Release
+  build's parts now place beside T's. A figure of these sweeps is one place
+  of the 32: two builds of the machine compare over the places, or with the
+  structure off the stack.
+- **Faults.** Of 13 faults put into the reader-time path one at a time, the
+  tests show all 13. Two of them needed a fixture line first: a conversion
+  that is empty between two types, and a `for` statement's condition, whose
+  wrapper has a type of its own.
+
+### The tests where they sit
+
+"C and X where they sit" left the decision after the pipeline. At reader time
+the machine took what T, C and X didn't refuse, and the census's set and its
+silence tests, which say what it may take, read the stream.
+`measure-node-machine --shadow --front-tests` runs them at reader time: after
+T takes an expression and before C and X, the census's own test code on T's
+records. Their bits are the machine's verdict before the pipeline. After the
+pipeline the census's verdict for the same root is compared with it, test by
+test. [The
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-reader-tests-2524-2026-11-16)
+has the runs.
+
+The tests are one code with two views of a node: the stream's after the
+pipeline, T's record at reader time. What else they read, and what stands for
+it before the pipeline:
+
+| what the tests read | after the pipeline | at reader time |
+| --- | --- | --- |
+| a node's value, its operands' and arguments' conversions, a member's offset | the stream's | T's record of the node |
+| an action's warnings at a node | the stream's, less an unevaluated operand's | T's own actions', for the whole expression |
+| the root's kind | the control that pushed it | the front's root's operator; a root inside a statement expression is a nested control's |
+| an initializer's object's type | its control's declaration's | the declaration's |
+| the unit's enabled warnings | the options and the diagnostic pragmas | the same, whole before the coded walk |
+| a body's diagnostic and floating-point pragmas | by the body's braces | by the outermost braces around each pragma |
+| the warning events at the expression's tokens | the reader's, the graph run's and the later passes' | the reader's own so far |
+| a packed member's address | the reader's witnesses, a later pass's | any address taken in a unit with a packed record or member |
+| a body that tracks its stack, a node popped twice | the lowering's | nothing: a splice reads them where it pops the root |
+
+On the 9700X (counts; `-Wall -Wextra` turns on the tests that are off by
+default):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| expressions the tests ran on (those T took) | 51,185 | 10,859 | 43,481 |
+| compared with the census: lowered, never lowered | 51,122, 63 | 10,846, 13 | 22,518, 20,963 |
+| taken there that the census refuses; tests that differ | 0; 0 | 0; 0 | 0; 0 |
+| refused by a test there | 567 | 302 | 435 |
+| of them, ones C and X take | 4 | 208 | 298 |
+| with `-Wall -Wextra`: refused by a test; of them, ones C and X take | 3,821; 3,256 | 824; 728 | 2,408; 2,243 |
+| with `-Wall -Wextra`: taken there that the census refuses; tests that differ | 0; 0 | 0; 0 | 0; 0 |
+
+- **Exact.** No expression reader time takes is one the census refuses, with
+  the default warnings or with all of them, on a lowered body's root or on
+  one the lowering never pops (the census reads those from the stream again
+  for the comparison). No test's bit differs but in the three ways it may:
+  reader time's actions' warnings are at least the graph run's, an address in
+  a unit with a packed record stands for a witness, and its events are the
+  reader's own.
+- **What the tests add to the sweeps' own refusals.** T, C and X refuse what
+  they have no row or template for, which is most of the set. They know no
+  warning: with the default warnings they would take 4 expressions of
+  `sqlite3.c` that the census refuses, 208 of Lua's and 298 of musl's, and
+  with `-Wall -Wextra` 3,256, 728 and 2,243: a for statement's clauses under
+  `-Wfor-loop-analysis` most of all (3,244, 523 and 1,857 of the refusals),
+  then musl's parentheses and sign comparisons.
+- **A declaration's discard is no root.** At a declaration's `;` the walk
+  casts each initializer's value to void, and the front made that cast a
+  root: 5,355 of the 56,681 roots T ran on at reader time on `sqlite3.c`,
+  2,275 of Lua's 13,184 and 13,991 of musl's 57,888. Nothing evaluates them.
+  The comparison found them: the census refuses each as a value without an
+  effect, and the lowering pops none. Reader time leaves them alone now, by
+  the parser's tree: the cast's operand is an initializer's `=` or below one.
+- **What the fixtures found.** Each warning has a line in `test-checker`'s
+  fixture, and reader time must refuse it as the census does. Three did not
+  at first: an enumeration's constant under `-Wassign-enum` (the test read a
+  flag the census sets after the pipeline), a statement expression's inner
+  roots (a nested control's, which the front gives as a statement's or an
+  initialization's), and a packed member's address (its witness is made by a
+  pass after the walk).
+- **A conditional's third operand.** T's columns hold two operands'
+  conversions, and a constant second arm's conversion can change its value
+  (`i ? 1.5f : 16777217`). T keeps a conditional's third now, beside them.
+- **T's rows and rules know no warning, and none is missed.** With `--verify`
+  reader time checks each node a row or a rule typed against the action,
+  on every expression it types: its value and conversions are the action's,
+  and the action gives no warning there, on the three corpora with every
+  warning on.
+- **The lowering's own facts are a splice's to read.** A body that tracks its
+  stack (one with a statement expression, or any body of a unit that calls a
+  terminating helper) and a node popped twice are known where the lowering
+  pops the root, not before. On the corpora no expression reader time takes
+  has one; a fixture's body with a statement expression has three.
+
+What they cost in place (TSC ticks a record T typed, medians of seven readings
+in turn, musl's of three; the discards left alone in every row):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| T, C and X at reader time | 134.3 | 158.5 | 254.1 |
+| with the tests between T and C | 299.8 | 338.4 | 528.0 |
+| the tests alone (the difference) | 165.5 | 179.9 | 274.0 |
+| the tests alone as the census had them | 206.1 | 221.7 | 292.8 |
+
+- **As the census writes them, the tests cost more than the three sweeps.**
+  They are 165.5 ticks a typed record on `sqlite3.c` beside 134.3 for T, C
+  and X: about 115 cycles a body token, where ten move step 2's sum by a
+  hundredth. In the machine as they are they would take the sum from 1.25 to
+  about 1.13, under its gate of 1.2.
+- **There is no one thing to fix.** As the census had them the tests read a
+  node's whole value, asked the type table and a declaration's attributes at
+  every node, and ran the constants' tests on every operator. A byte a type
+  and a byte a declaration, kept once, and three tests asked only where the
+  operator can fail them (the constants', the tree's parent, a truth
+  context) took a fifth off. What is left is spread, by the profile: the walk
+  that lists an expression's nodes (a stack and three columns a node), the
+  forty conditions a node passes one after another whatever its operator, and
+  the view's step from a node to its record at every read. Three quarters of
+  the added cycles are in the tests' code and a seventh in the sweeps' own,
+  which run colder with that code between an expression's T and its C. The
+  walk's columns kept by record, an expression's alone, made it slower (181
+  ticks a record), and are not kept.
+- **What the machine needs is the same tests in its own form:** over T's
+  records in their order, with no walk; one case an operator, so that a node
+  runs its operator's tests alone; a leaf's declaration's flags as a byte the
+  reader makes; and the whole after T as a loop of its own. The census's
+  code on the view is then its oracle at reader time, bit for bit, as the
+  action is T's rows'.
+- **Without the discards the three sweeps read 134.3 ticks a record** on
+  `sqlite3.c` where "C and X where they sit" has 127.7, 158.5 on Lua (139.9)
+  and 254.1 on musl (235.9): each scalar initialization's second typing was
+  cheaper than a first. That is 223 cycles a node on `sqlite3.c` where the
+  sum's upper figure took 216.5.
+- **Its state is a unit's:** the enabled warnings, a bit a token for the
+  reader's events and for the statement expressions, and the bytes' columns
+  cleared: 0.19 ms on `sqlite3.c`, 61 µs a unit on Lua's 34 and 6.7 µs a unit
+  on musl's 1,336, beside the machine's own.
+- **A compile is unchanged** (-0.11% and +0.22% from fresh copies, the same
+  1,363.464 M instructions), and the shadow's own sweeps retire the same
+  instructions a node (597.6 on `sqlite3.c`) and read 1% more cycles as
+  built, inside what the stack's place moves them. buster#2850's fact words'
+  pass reads the same a record on the three corpora. Its harness's figure, a
+  pass less a second pass that only puts the given records in place, is 13%
+  to 30% lower on musl in this build, and that is the second pass, which
+  reads a tenth slower alone as built (the record's section 5).
+- **Faults.** Of 26 faults put into the reader-time path one at a time (the
+  view's fields, the root's kind, the object's type, each stand-in, the
+  discards), the tests show 25. Two needed a fixture line first: a call's
+  argument whose conversion changes a constant, and two members of one record
+  written in one expression, which their offsets tell apart. The one that
+  shows on no input reads a conditional's third conversion as its second's:
+  both arms convert to the conditional's common type.
+
 ### What it says of step 2
 
 "Expected gains" took the machine at 55 cycles a body token for a taken
@@ -2464,7 +2717,8 @@ the lean front. With the front's coverage (97.76% of the nodes of the taken
 expressions, which hold 96% of all) the same sum gives step 2 1.25 to 1.27
 times on `-c sqlite3.c` (1.23 to 1.25 with #2857's front): above its gate of
 1.2, under the 1.3 expected. T where it sits costs what the upper figure took,
-so on `sqlite3.c` the sum is at its lower end, 1.25. With #2850's sweeps in
+and C and X where they sit cost what a body's expressions a run cost them, so
+on `sqlite3.c` the sum is at its lower end, 1.25. With #2850's sweeps in
 place of the shadow's, if they carry into the compiler, the reading is most of
 the machine and the sum is 1.34 to 1.35: its step 0 ran them at 17 cycles a
 node with the leaves and the lookups given, and [its step
@@ -2472,7 +2726,17 @@ node with the leaves and the lookups given, and [its step
 measured those at about 5 cycles a leaf and 25 to 40 a lookup, 29 to 33 a node
 in all, over its own line of 20 a lookup. Ten cycles a body token of the
 machine move the sum by a hundredth, a point of coverage by a third of that.
+
+The sum had no term for the set's and the silence tests, which decide what
+the machine takes. "The tests where they sit" ran them at reader time as the
+census writes them: about 115 cycles a body token on `sqlite3.c`, more than
+the three sweeps, which would take 1.25 to about 1.13, under the gate. The
+sum stands only with the tests in the machine's own form, at a tenth of that.
 What would move it:
+
+- **The tests in the machine's own form:** over T's records in their order,
+  a node running its operator's tests alone, with the census's code on the
+  same records as their oracle. They are the sum's largest open term.
 
 - **The front's walk:** over a hundred instructions an acting token for a
   stack walk, lean or not. The structure it derives (counts, distances,

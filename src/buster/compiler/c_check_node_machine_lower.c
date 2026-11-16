@@ -76,7 +76,7 @@ static uint32_t node_machine_back_address(const NodeMachine* machine, NodeMachin
         }
         else
         {
-            n = node_machine_back(out, n, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, machine->program->object_symbols[object]);
+            n = node_machine_back(out, n, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, machine->object_symbols[object]);
         }
     }
     return n;
@@ -327,7 +327,7 @@ static inline __attribute__((always_inline)) uint32_t node_machine_back_own(Node
         {
             const uint32_t target = node_machine_record_op(machine, r) == CHECK_OP_INITIALIZE ? object : node_machine_record_object(machine, node_machine_record_left(machine, r));
             n = node_machine_back(out, n, kind == CHECK_LOWER_TEMPLATE_STORE_LOCAL ? BUSTER_TYPED_STORE_LOCAL : BUSTER_TYPED_STORE_GLOBAL, class,
-                                  kind == CHECK_LOWER_TEMPLATE_STORE_LOCAL ? target : machine->program->object_symbols[target]);
+                                  kind == CHECK_LOWER_TEMPLATE_STORE_LOCAL ? target : machine->object_symbols[target]);
         } break;
         case CHECK_LOWER_TEMPLATE_STORE:
         {
@@ -356,7 +356,7 @@ static inline __attribute__((always_inline)) uint32_t node_machine_back_own(Node
         } break;
         case CHECK_LOWER_TEMPLATE_GLOBAL:
         {
-            n = node_machine_back(out, n, BUSTER_TYPED_GLOBAL, class, machine->program->object_symbols[node_machine_record_object(machine, r)]);
+            n = node_machine_back(out, n, BUSTER_TYPED_GLOBAL, class, machine->object_symbols[node_machine_record_object(machine, r)]);
         } break;
         case CHECK_LOWER_TEMPLATE_ADDRESS:
         {

@@ -1743,7 +1743,7 @@ static __attribute__((noinline)) void node_front_typer(NodeFront* front, CheckIn
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
     if ((fronted & BUSTER_NODE_FRONT_TYPES) != 0)
     {
-        front->typer = node_machine_reader_begin(reader, front->shadow);
+        front->typer = node_machine_reader_begin(reader, front->shadow, (fronted & BUSTER_NODE_FRONT_SWEEPS) != 0);
     }
 #else
     (void)reader;

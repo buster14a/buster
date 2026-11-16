@@ -8,8 +8,8 @@
 // would make before it takes it. Include after c_check_lower_inventory.c.
 //
 //   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--fused] [--interleave N] [--facts | --facts-lean | --facts-loads]
-//                                       [--facts-operators] [--facts-reads] [--facts-packed] [--facts-window N] [--passes N] [--repeat N]]
-//                                       [preprocessor options] file...
+//                                       [--facts-operators] [--facts-reads] [--facts-packed] [--facts-window N] [--front | --front-first] [--front-lean]
+//                                       [--front-warm] [--front-types] [--front-sweeps] [--front-tests] [--passes N] [--repeat N]] [preprocessor options] file...
 //
 // A full expression is a tree of the tasks' pops under one root: a pop that a statement's control pushed (an expression
 // statement's, a condition's, a return's, a switch's, an initializer's) or a nested control (a statement expression's).
@@ -55,6 +55,10 @@
 //
 // --shadow is step 1 (below, node_shadow_expression): the node machine (c_check_node_machine.c) run on every expression
 // the census takes, compared with the pipeline's records and entries, and timed.
+//
+// The tests read what the graph run computes of a node through a view (node_view_value and its kin): the stream's here,
+// and with --shadow --front-tests T's records at reader time, where the same tests run before the pipeline
+// (node_census_reader_expression; docs/node-machine.md, "The tests where they sit") and the two verdicts are compared.
 //
 // This is a measurement outside the compile path: it runs the scalar task loop and reads the finished columns, and has
 // no vector path of its own.
@@ -443,8 +447,6 @@ struct NodeCensus
 
 // --list N: the first N expressions each test refuses.
 static uint32_t node_census_list;
-// The current unit's -Wassign-enum (NodeCensusPolicy.assign_enum), for node_census_constant_changes.
-static bool node_census_assign_enum;
 
 // One file's state: the program and the unit's, and per node and pop the walks' columns, valid for the current
 // expression's stamp alone.
@@ -455,6 +457,23 @@ struct NodeCensusScratch
     Preprocessor* pp;
     const char* file;
     NodeCensusPolicy policy;
+    // The tests' view of a node's value (node_view_value and its kin): the stream's after the pipeline, and at reader time
+    // ("The tests where they sit"), where `records` is the machine there, T's records of its current expression. `missed`
+    // counts the nodes of an expression's walk that the records don't hold.
+    const NodeMachine* records;
+    uint32_t missed;
+    // At reader time, whether the unit has a packed record or member at all: the packed members' witnesses
+    // (CheckInput.packed_members) are a later pass's, so any address taken in such a unit stands for one.
+    bool packed_unit;
+    // What the tests ask of a type, made once a type and kept by its index (node_census_type_bits), `type_bits_count` of
+    // them; and of a name's visible declaration, kept by its token (node_census_declaration_facts), an entry a token.
+    // Both start cleared: a type past the first's room is asked each time.
+    uint8_t* type_bits;
+    uint32_t type_bits_count;
+    uint8_t* declaration_facts;
+    // The declared type of the object whose initializer the current expression is, where the caller gives it (0
+    // otherwise): at reader time, and after the pipeline for a root the lowering never popped, which no control names.
+    TypeId given_declared;
     // Per token: whether a kept warning event is at it, as a running count (events before it), token_count + 1 entries.
     uint32_t* event_prefix;
     // Per token, the first event's ID there (UINT32_MAX for none), for the report's histogram.
@@ -498,6 +517,9 @@ struct NodeCensusScratch
     // The log's labels' entries (CheckLowerOwners.labels), which a pop's `label` indexes.
     const uint32_t* labels;
     uint64_t label_count;
+    // The body's named result's local and its hidden pointer's (CheckLowerOwners.named), or BUSTER_CHECK_NONE twice.
+    uint32_t named_local;
+    uint32_t hidden_local;
     uint32_t* object_locals;
     uint32_t* object_stamps;
     uint32_t* local_objects;
@@ -522,10 +544,13 @@ static double node_census_share(uint64_t part, uint64_t whole)
     return whole != 0 ? 100.0 * (double)part / (double)whole : 0.0;
 }
 
-// The warnings the silence tests stand for, enabled anywhere in the unit.
+// The warnings the silence tests stand for, enabled anywhere in the unit: by the command's options and the unit's
+// diagnostic pragmas, which the reader has whole before its coded walk.
 static NodeCensusPolicy node_census_policy(const Preprocessor* pp, const CheckInput* input)
 {
-    NodeCensusPolicy policy = { 0 };
+    NodeCensusPolicy policy;
+    // Every byte, its padding too: the shadow compares reader time's with the pipeline's as bytes.
+    memset(&policy, 0, sizeof(policy));
     for (uint32_t id = 0; id < 25; id += 1)
     {
         policy.action_bits |= check_common_enabled(pp, input, id, false) ? 1u << id : 0u;
@@ -644,6 +669,110 @@ static bool node_census_events(NodeCensusScratch* s, const CheckCorpusPath* path
     return room;
 }
 
+// The tests' view: what they read of graph node `node` that the graph run computes, from the stream after the pipeline
+// and, at reader time, from T's record of the node (NodeCensusScratch.records): its value, its operands' conversions, a
+// member's offset. Reader time has T's records of the machine's current expression alone, which hold every node its
+// root's subtree reaches (T refuses the shape otherwise): a node outside them reads as none.
+static inline uint32_t node_view_record(const NodeCensusScratch* s, uint32_t node)
+{
+    const NodeMachine* machine = s->records;
+    const uint32_t record = node - machine->first;
+    return node == machine->root ? machine->count - 1 : node >= machine->first && record + 1 < machine->count ? record : UINT32_MAX;
+}
+
+// Whether the view has node `node`'s value.
+static inline bool node_view_has(const NodeCensusScratch* s, uint32_t node)
+{
+    return s->records == NULL ? node < s->program->stream->count : node_view_record(s, node) != UINT32_MAX;
+}
+
+static inline CheckValue node_view_value(const NodeCensusScratch* s, uint32_t node)
+{
+    CheckValue value;
+    if (s->records == NULL)
+    {
+        value = check_stream_value(s->program->stream, node);
+    }
+    else
+    {
+        const uint32_t record = node_view_record(s, node);
+        memset(&value, 0, sizeof(value));
+        if (record != UINT32_MAX)
+        {
+            node_machine_record_value(s->records, record, &value);
+        }
+    }
+    return value;
+}
+
+static inline TypeId node_view_type(const NodeCensusScratch* s, uint32_t node)
+{
+    const uint32_t record = s->records != NULL ? node_view_record(s, node) : UINT32_MAX;
+    return s->records == NULL ? check_stream_type(s->program->stream, node) : record != UINT32_MAX ? node_machine_record_type(s->records, record) : 0;
+}
+
+static inline uint32_t node_view_flags(const NodeCensusScratch* s, uint32_t node)
+{
+    const uint32_t record = s->records != NULL ? node_view_record(s, node) : UINT32_MAX;
+    return s->records == NULL ? check_stream_flags(s->program->stream, node) : record != UINT32_MAX ? node_machine_record_flags(s->records, record) : 0;
+}
+
+static inline CheckConstantKind node_view_constant_kind(const NodeCensusScratch* s, uint32_t node)
+{
+    const uint32_t record = s->records != NULL ? node_view_record(s, node) : UINT32_MAX;
+    return s->records == NULL ? check_stream_constant_kind(s->program->stream, node) :
+           record != UINT32_MAX ? node_machine_record_constant_kind(s->records, record) : CHECK_CONSTANT_NONE;
+}
+
+static inline uint32_t node_view_object(const NodeCensusScratch* s, uint32_t node)
+{
+    const uint32_t record = s->records != NULL ? node_view_record(s, node) : UINT32_MAX;
+    return s->records == NULL ? check_stream_object(s->program->stream, node) : record != UINT32_MAX ? node_machine_record_object(s->records, record) : 0;
+}
+
+// Whether a leaf's value is an overload set's.
+static inline bool node_view_overloaded(const NodeCensusScratch* s, uint32_t node)
+{
+    const uint32_t record = s->records != NULL ? node_view_record(s, node) : UINT32_MAX;
+    return s->records == NULL ? check_stream_value(s->program->stream, node).overload_head != 0 : record != UINT32_MAX && node_machine_record_overloaded(s->records, record);
+}
+
+// A member's offset in its record, as the action gave it.
+static inline uint64_t node_view_member_offset(const NodeCensusScratch* s, uint32_t node)
+{
+    const CheckStream* stream = s->program->stream;
+    const uint32_t record = s->records != NULL ? node_view_record(s, node) : UINT32_MAX;
+    return s->records == NULL ? (stream->member_offsets != NULL ? stream->member_offsets[node] : 0) :
+           record != UINT32_MAX ? node_machine_record_member_offset(s->records, record) : 0;
+}
+
+// The type node `node` converts its operand `k` (0 to 2) to, 0 for none; and a call's argument `i`'s.
+static inline TypeId node_view_converted(const NodeCensusScratch* s, uint32_t node, uint32_t k)
+{
+    const CheckStream* stream = s->program->stream;
+    const uint32_t record = s->records != NULL ? node_view_record(s, node) : UINT32_MAX;
+    return s->records == NULL ? (stream->conversions != NULL ? stream->conversions[node].operands[k].type : 0) :
+           record == UINT32_MAX ? 0 : k < 2 ? node_machine_record_converted(s->records, record, k) : node_machine_record_converted_third(s->records, record);
+}
+
+static inline TypeId node_view_argument_converted(const NodeCensusScratch* s, uint32_t call, uint32_t i)
+{
+    const CheckStream* stream = s->program->stream;
+    const uint32_t record = s->records != NULL ? node_view_record(s, call) : UINT32_MAX;
+    return s->records == NULL ? (stream->argument_conversions != NULL ? stream->argument_conversions[s->program->input->graph.argument_offsets[call] + i].type : 0) :
+           record != UINT32_MAX && i < node_machine_record_argument_count(s->records, record) ? node_machine_record_argument_converted(s->records, record, i) : 0;
+}
+
+// The warnings the graph run kept at node `node`, and those of them its context ignores, into `ignored`. Reader time has
+// none a node: T keeps its actions' warnings an expression (NodeMachine.action_warnings), which node_census_expression
+// reads.
+static inline uint32_t node_view_warnings(const NodeCensusScratch* s, uint32_t node, uint32_t* ignored)
+{
+    const CheckStream* stream = s->program->stream;
+    *ignored = s->records == NULL && stream->warning_ignored != NULL ? stream->warning_ignored[node] : 0;
+    return s->records == NULL && stream->warnings != NULL ? stream->warnings[node] & 0x01ffffffu : 0;
+}
+
 // Type predicates, each on a value's type as the stream holds it.
 static TypeId node_census_base(const TypeTable* types, TypeId type)
 {
@@ -719,14 +848,51 @@ static TypeId node_census_function_type(const TypeTable* types, TypeId type)
     return result;
 }
 
-// A node's value as an integer constant of at most 64 bits: whether it is one, and its value, exact, in `value`.
-static bool node_census_integer_constant(const CheckStream* stream, const TypeTable* types, uint32_t node, __int128* value)
+// What the tests ask of a value's type at every node, as one byte a type: whether it is one the machine has no kind for
+// (node_census_special_type), a struct or a union, an enumeration, a floating type, a pointer (or nullptr_t). Made once
+// a type by the predicates above and kept by the type's index (they read a type past its qualifiers).
+#define BUSTER_NODE_CENSUS_TYPE_KNOWN 0x01u
+#define BUSTER_NODE_CENSUS_TYPE_SPECIAL 0x02u
+#define BUSTER_NODE_CENSUS_TYPE_AGGREGATE 0x04u
+#define BUSTER_NODE_CENSUS_TYPE_ENUM 0x08u
+#define BUSTER_NODE_CENSUS_TYPE_FLOATING 0x10u
+#define BUSTER_NODE_CENSUS_TYPE_POINTER 0x20u
+
+static __attribute__((noinline)) uint8_t node_census_type_bits_make(const TypeTable* types, TypeId type)
 {
+    const uint8_t bits = (uint8_t)(BUSTER_NODE_CENSUS_TYPE_KNOWN | (node_census_special_type(types, type) ? BUSTER_NODE_CENSUS_TYPE_SPECIAL : 0) |
+                                   (node_census_aggregate(types, type) ? BUSTER_NODE_CENSUS_TYPE_AGGREGATE : 0) |
+                                   (node_census_enum(types, type) ? BUSTER_NODE_CENSUS_TYPE_ENUM : 0) |
+                                   (node_census_floating(types, type) ? BUSTER_NODE_CENSUS_TYPE_FLOATING : 0) |
+                                   (node_census_pointer(types, type) ? BUSTER_NODE_CENSUS_TYPE_POINTER : 0));
+    return bits;
+}
+
+static inline uint8_t node_census_type_bits(const NodeCensusScratch* s, TypeId type)
+{
+    const uint32_t index = type_index(type);
+    const bool kept = type != 0 && s->type_bits != NULL && index < s->type_bits_count;
+    uint8_t bits = kept ? s->type_bits[index] : 0;
+    if (type != 0 && bits == 0)
+    {
+        bits = node_census_type_bits_make(s->program->types, type);
+        if (kept)
+        {
+            s->type_bits[index] = bits;
+        }
+    }
+    return bits;
+}
+
+// A node's value as an integer constant of at most 64 bits: whether it is one, and its value, exact, in `value`.
+static bool node_census_integer_constant(const NodeCensusScratch* s, uint32_t node, __int128* value)
+{
+    const TypeTable* types = s->program->types;
     bool result = false;
     *value = 0;
-    if (node < stream->count && check_stream_constant_kind(stream, node) == CHECK_CONSTANT_INTEGER)
+    if (node_view_has(s, node) && node_view_constant_kind(s, node) == CHECK_CONSTANT_INTEGER)
     {
-        const CheckValue v = check_stream_value(stream, node);
+        const CheckValue v = node_view_value(s, node);
         uint32_t width = 0;
         bool sign = false;
         result = v.fault == CHECK_FAULT_NONE && node_census_integer(types, v.type, &width, &sign);
@@ -821,6 +987,46 @@ static const CheckInputAttributeKind node_census_result_kinds[] = {
     CHECK_ATTRIBUTE_WARN_UNUSED_RESULT, CHECK_ATTRIBUTE_CONST, CHECK_ATTRIBUTE_PURE,
 };
 
+static bool node_census_builtin_result(const Preprocessor* pp, uint32_t name);
+
+// What the tests ask of the visible declaration `declaration` of a name `name` (the identifier at a leaf's token), as one
+// byte kept by the declaration's token: whether it has an attribute the tables don't model (node_census_flagged_kinds);
+// whether a call of it has semantics of its own by its name or its attributes (a printf-family name,
+// node_census_callee_kinds); and whether it asks for its result (node_census_result_kinds, or a const or pure builtin's
+// name). Each is its declaration's alone: every leaf of one declaration has its name.
+#define BUSTER_NODE_CENSUS_DECLARATION_KNOWN 0x01u
+#define BUSTER_NODE_CENSUS_DECLARATION_FLAGGED 0x02u
+#define BUSTER_NODE_CENSUS_DECLARATION_CALLEE 0x04u
+#define BUSTER_NODE_CENSUS_DECLARATION_RESULT 0x08u
+
+static __attribute__((noinline)) uint8_t node_census_declaration_facts_make(const NodeCensusScratch* s, uint32_t declaration, uint32_t name)
+{
+    const CheckInput* input = s->program->input;
+    const String8 spelled = { .pointer = (char*)intern_bytes(s->pp->table, name), .length = intern_length(s->pp->table, name) };
+    const bool flagged = node_census_attributed(input, declaration, node_census_flagged_kinds, BUSTER_ARRAY_LENGTH(node_census_flagged_kinds));
+    const bool callee = check_common_format_index(spelled, &s->pp->options) != UINT32_MAX ||
+                        node_census_attributed(input, declaration, node_census_callee_kinds, BUSTER_ARRAY_LENGTH(node_census_callee_kinds));
+    const bool result = node_census_builtin_result(s->pp, name) ||
+                        node_census_attributed(input, declaration, node_census_result_kinds, BUSTER_ARRAY_LENGTH(node_census_result_kinds));
+    return (uint8_t)(BUSTER_NODE_CENSUS_DECLARATION_KNOWN | (flagged ? BUSTER_NODE_CENSUS_DECLARATION_FLAGGED : 0) | (callee ? BUSTER_NODE_CENSUS_DECLARATION_CALLEE : 0) |
+                     (result ? BUSTER_NODE_CENSUS_DECLARATION_RESULT : 0));
+}
+
+static inline uint8_t node_census_declaration_facts(const NodeCensusScratch* s, uint32_t declaration, uint32_t name)
+{
+    const bool kept = s->declaration_facts != NULL && declaration < s->program->parser->tokens.count;
+    uint8_t facts = kept ? s->declaration_facts[declaration] : 0;
+    if (facts == 0)
+    {
+        facts = node_census_declaration_facts_make(s, declaration, name);
+        if (kept)
+        {
+            s->declaration_facts[declaration] = facts;
+        }
+    }
+    return facts;
+}
+
 // Whether a call's callee has semantics of its own (the set's): a library builtin's fold or computation
 // (check_program_call_library), a printf-family name, an attribute of node_census_callee_kinds, or a function type
 // without a prototype.
@@ -828,15 +1034,15 @@ static bool node_census_callee(const NodeCensusScratch* s, uint32_t call)
 {
     const CheckProgram* program = s->program;
     const CheckGraph* graph = &program->input->graph;
-    const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
     const Parser* parser = program->parser;
     const uint32_t member = graph->members != NULL ? graph->members[call] : 0;
     const uint32_t callee = graph->operand0[call];
-    bool result = ((member & BUSTER_CHECK_LIBRARY_CALL) != 0 && check_program_call_library(program, call)) || callee >= graph->count;
+    // At reader time T has asked the same of each call (node_machine_reader_call_library) and refused the expression.
+    bool result = ((member & BUSTER_CHECK_LIBRARY_CALL) != 0 && s->records == NULL && check_program_call_library(program, call)) || callee >= graph->count;
     if (!result)
     {
-        const TypeId function = node_census_function_type(types, check_stream_type(stream, callee));
+        const TypeId function = node_census_function_type(types, node_view_type(s, callee));
         result = function == 0 || (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0;
     }
     if (!result && graph->ops[callee] == CHECK_OP_VALUE)
@@ -845,10 +1051,7 @@ static bool node_census_callee(const NodeCensusScratch* s, uint32_t call)
         const uint32_t declaration = node_census_declaration(program, token);
         if (declaration != BUSTER_CHECK_NONE)
         {
-            const uint32_t name_id = parser->tokens.names[token];
-            const String8 name = { .pointer = (char*)intern_bytes(s->pp->table, name_id), .length = intern_length(s->pp->table, name_id) };
-            result = check_common_format_index(name, &s->pp->options) != UINT32_MAX ||
-                     node_census_attributed(program->input, declaration, node_census_callee_kinds, BUSTER_ARRAY_LENGTH(node_census_callee_kinds));
+            result = (node_census_declaration_facts(s, declaration, parser->tokens.names[token]) & BUSTER_NODE_CENSUS_DECLARATION_CALLEE) != 0;
         }
     }
     return result;
@@ -891,9 +1094,7 @@ static bool node_census_wants_result(const NodeCensusScratch* s, uint32_t call)
         const uint32_t declaration = node_census_declaration(program, token);
         if (declaration != BUSTER_CHECK_NONE)
         {
-            const uint32_t name_id = parser->tokens.names[token];
-            result = node_census_builtin_result(s->pp, name_id) ||
-                     node_census_attributed(program->input, declaration, node_census_result_kinds, BUSTER_ARRAY_LENGTH(node_census_result_kinds));
+            result = (node_census_declaration_facts(s, declaration, parser->tokens.names[token]) & BUSTER_NODE_CENSUS_DECLARATION_RESULT) != 0;
         }
     }
     return result;
@@ -910,29 +1111,28 @@ static bool node_census_string(const CheckProgram* program, uint32_t node)
 
 // The object a node names for the unsequenced and self-assignment tests: a VALUE's object, or a member's of such a value
 // (not through a pointer) by its offset, as clang's sequence checker follows them; 0 for none.
-static uint64_t node_census_named_object(const CheckProgram* program, uint32_t node)
+static uint64_t node_census_named_object(const NodeCensusScratch* s, uint32_t node)
 {
-    const CheckGraph* graph = &program->input->graph;
-    const CheckStream* stream = program->stream;
+    const CheckGraph* graph = &s->program->input->graph;
     uint32_t at = node;
     uint64_t offset = 0;
     uint32_t members = 0;
     for (uint32_t steps = 0; at < graph->count && graph->ops[at] == CHECK_OP_MEMBER && steps < 64; steps += 1)
     {
-        offset += stream->member_offsets != NULL ? stream->member_offsets[at] : 0;
+        offset += node_view_member_offset(s, at);
         members += 1;
         at = graph->operand0[at];
     }
-    const uint32_t object = at < graph->count && graph->ops[at] == CHECK_OP_VALUE ? check_stream_object(stream, at) : 0;
+    const uint32_t object = at < graph->count && graph->ops[at] == CHECK_OP_VALUE ? node_view_object(s, at) : 0;
     return object != 0 ? (uint64_t)object << 32 ^ (offset << 6) ^ members : 0;
 }
 
 // The local object a node names through members and array subscripts (its address the node's), for the return test: 0
 // for none, or a static or global one.
-static uint32_t node_census_local_object(const CheckProgram* program, uint32_t node)
+static uint32_t node_census_local_object(const NodeCensusScratch* s, uint32_t node)
 {
+    const CheckProgram* program = s->program;
     const CheckGraph* graph = &program->input->graph;
-    const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
     uint32_t at = node;
     bool walking = true;
@@ -940,13 +1140,17 @@ static uint32_t node_census_local_object(const CheckProgram* program, uint32_t n
     {
         const CheckOp op = graph->ops[at];
         const uint32_t base = graph->operand0[at];
-        const bool subscript = op == CHECK_OP_SUBSCRIPT && base < graph->count && type_kind_is_array(node_census_kind(types, check_stream_type(stream, base)));
+        const bool subscript = op == CHECK_OP_SUBSCRIPT && base < graph->count && type_kind_is_array(node_census_kind(types, node_view_type(s, base)));
         walking = op == CHECK_OP_MEMBER || subscript;
         at = walking ? base : at;
     }
-    const uint32_t object = at < graph->count && graph->ops[at] == CHECK_OP_VALUE ? check_stream_object(stream, at) : 0;
+    const uint32_t object = at < graph->count && graph->ops[at] == CHECK_OP_VALUE ? node_view_object(s, at) : 0;
+    // A static object is no local: its symbol says so, or its declaration, or its value's own flag. A string's object has
+    // no declaration, and no symbol either in a body the selection leaves out, which the tests at reader time are
+    // compared in too (--front-tests): there the flag alone says it.
     const bool local = object != 0 && object < program->object_count && program->object_symbols[object] == 0 &&
-                       !check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_STATIC);
+                       !check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_STATIC) &&
+                       (node_view_flags(s, at) & BUSTER_CHECK_STATIC_OBJECT) == 0;
     return local ? object : 0;
 }
 
@@ -954,10 +1158,10 @@ static uint32_t node_census_local_object(const CheckProgram* program, uint32_t n
 // conditional's arms and pointer arithmetic: an address of a local, or a local array's value, which decays to it. The
 // operands followed wait in a list of BUSTER_NODE_CENSUS_FOLLOWED (a deeper tree's further nodes are refused).
 #define BUSTER_NODE_CENSUS_FOLLOWED 64u
-static bool node_census_returns_address(const CheckProgram* program, uint32_t root)
+static bool node_census_returns_address(const NodeCensusScratch* s, uint32_t root)
 {
+    const CheckProgram* program = s->program;
     const CheckGraph* graph = &program->input->graph;
-    const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
     uint32_t pending[BUSTER_NODE_CENSUS_FOLLOWED];
     uint32_t count = 0;
@@ -978,11 +1182,11 @@ static bool node_census_returns_address(const CheckProgram* program, uint32_t ro
             const uint32_t second = op == CHECK_OP_CONDITIONAL ? graph->operand2[node] : both ? graph->operand1[node] : BUSTER_CHECK_NONE;
             if (op == CHECK_OP_ADDRESS)
             {
-                result = node_census_local_object(program, graph->operand0[node]) != 0;
+                result = node_census_local_object(s, graph->operand0[node]) != 0;
             }
             else if (first == BUSTER_CHECK_NONE)
             {
-                result = type_kind_is_array(node_census_kind(types, check_stream_type(stream, node))) && node_census_local_object(program, node) != 0;
+                result = type_kind_is_array(node_census_kind(types, node_view_type(s, node))) && node_census_local_object(s, node) != 0;
             }
             else
             {
@@ -1086,14 +1290,14 @@ static bool node_census_unsequenced(const NodeCensusScratch* s, uint32_t count, 
     for (uint32_t i = 0; i < count && !found; i += 1)
     {
         const uint32_t write = s->list[i];
-        const uint64_t object = node_census_modifies(graph->ops[write]) ? node_census_named_object(program, graph->operand0[write]) : 0;
+        const uint64_t object = node_census_modifies(graph->ops[write]) ? node_census_named_object(s, graph->operand0[write]) : 0;
         for (uint32_t j = 0; object != 0 && j < count && !found; j += 1)
         {
             const uint32_t other = s->list[j];
-            const bool named = other != write && other != graph->operand0[write] && node_census_named_object(program, other) == object &&
+            const bool named = other != write && other != graph->operand0[write] && node_census_named_object(s, other) == object &&
                                (graph->ops[other] == CHECK_OP_VALUE || graph->ops[other] == CHECK_OP_MEMBER) &&
                                !(s->parents[other] != BUSTER_CHECK_NONE && graph->ops[s->parents[other]] == CHECK_OP_MEMBER);
-            const bool another_write = other != write && node_census_modifies(graph->ops[other]) && node_census_named_object(program, graph->operand0[other]) == object;
+            const bool another_write = other != write && node_census_modifies(graph->ops[other]) && node_census_named_object(s, graph->operand0[other]) == object;
             const bool inside = named && node_census_under(s, other, write);
             const bool below_root = write != root;
             found = (another_write && !node_census_sequenced(s, graph, write, other)) ||
@@ -1110,7 +1314,6 @@ static bool node_census_discarded(const NodeCensusScratch* s, uint32_t root)
 {
     const CheckProgram* program = s->program;
     const CheckGraph* graph = &program->input->graph;
-    const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
     uint32_t pending[BUSTER_NODE_CENSUS_FOLLOWED];
     uint32_t count = 0;
@@ -1124,7 +1327,7 @@ static bool node_census_discarded(const NodeCensusScratch* s, uint32_t root)
         if (node < graph->count)
         {
             const CheckOp op = graph->ops[node];
-            const TypeId type = check_stream_type(stream, node);
+            const TypeId type = node_view_type(s, node);
             const bool to_void = type != 0 && node_census_kind(types, type) == BUSTER_TYPE_KIND_VOID;
             if (op == CHECK_OP_COMMA || op == CHECK_OP_CONDITIONAL)
             {
@@ -1140,7 +1343,7 @@ static bool node_census_discarded(const NodeCensusScratch* s, uint32_t root)
             }
             else if (!(op == CHECK_OP_CAST && to_void) && !node_census_modifies(op) && !to_void)
             {
-                result = (s->policy.unused_value || s->policy.unused_comparison) && (check_stream_flags(stream, node) & BUSTER_CHECK_SIDE_EFFECT) == 0;
+                result = (s->policy.unused_value || s->policy.unused_comparison) && (node_view_flags(s, node) & BUSTER_CHECK_SIDE_EFFECT) == 0;
             }
         }
     }
@@ -1161,24 +1364,25 @@ static bool node_census_truth(const NodeCensusScratch* s, uint32_t node, bool co
 
 // Whether a constant operand's conversion to `target` changes it: an integer constant that doesn't fit, a floating
 // constant converted to an integer, or an integer one to a floating type that can't hold it exactly.
-static bool node_census_constant_changes(const CheckStream* stream, const TypeTable* types, uint32_t operand, TypeId target)
+static bool node_census_constant_changes(const NodeCensusScratch* s, uint32_t operand, TypeId target)
 {
+    const TypeTable* types = s->program->types;
     bool result = false;
     uint32_t width = 0;
     bool sign = false;
     __int128 value = 0;
-    const CheckConstantKind kind = operand < stream->count ? check_stream_constant_kind(stream, operand) : CHECK_CONSTANT_NONE;
+    const CheckConstantKind kind = node_view_has(s, operand) ? node_view_constant_kind(s, operand) : CHECK_CONSTANT_NONE;
     // -Wassign-enum: an integer constant converted to an enumeration, whatever its value (node_census_constants' callers
     // ask only where it or -Wconstant-conversion is enabled).
-    result = node_census_assign_enum && kind == CHECK_CONSTANT_INTEGER && target != 0 && node_census_enum(types, target);
+    result = s->policy.assign_enum && kind == CHECK_CONSTANT_INTEGER && target != 0 && node_census_enum(types, target);
     if (!result && target != 0 && kind == CHECK_CONSTANT_INTEGER && node_census_integer(types, target, &width, &sign))
     {
         // A conversion to a type at least as wide changes no value but its sign, which -Wsign-conversion says, not
         // -Wconstant-conversion: only a narrower one is tested.
         bool source_sign = false;
-        const uint32_t source_width = node_census_width(types, check_stream_type(stream, operand), &source_sign);
+        const uint32_t source_width = node_census_width(types, node_view_type(s, operand), &source_sign);
         const bool narrows = source_width == 0 || source_width > width;
-        result = narrows && (!node_census_integer_constant(stream, types, operand, &value) || !node_census_fits(value, width, sign));
+        result = narrows && (!node_census_integer_constant(s, operand, &value) || !node_census_fits(value, width, sign));
     }
     else if (!result && target != 0 && kind == CHECK_CONSTANT_FLOATING && node_census_integer(types, target, &width, &sign))
     {
@@ -1189,7 +1393,7 @@ static bool node_census_constant_changes(const CheckStream* stream, const TypeTa
         // Exact where its significant bits fit the type's significand: float's 24, double's 53, long double's 64.
         const TypeId base = node_census_base(types, target);
         const uint32_t precision = base == BUSTER_TYPE_BUILTIN(BUSTER_TYPE_CODE_FLOAT) ? 24 : base == BUSTER_TYPE_BUILTIN(BUSTER_TYPE_CODE_DOUBLE) ? 53 : 64;
-        const bool known = node_census_integer_constant(stream, types, operand, &value);
+        const bool known = node_census_integer_constant(s, operand, &value);
         const uint64_t magnitude = value < 0 ? (uint64_t)(-value) : (uint64_t)value;
         const uint32_t span = magnitude != 0 ? 64 - (uint32_t)__builtin_clzll(magnitude) - (uint32_t)__builtin_ctzll(magnitude) : 0;
         result = !known || span > precision;
@@ -1200,11 +1404,10 @@ static bool node_census_constant_changes(const CheckStream* stream, const TypeTa
 // The silence test of constants at node `node`: its operands' conversions, a division by zero, a shift's constant count or
 // negative operand, a null dereference, a constant subscript outside its array, a comparison with a constant outside or at
 // the bound of its other operand's type, a non-literal null converted to a pointer.
-static bool node_census_constants(const NodeCensusScratch* s, uint32_t node)
+static bool node_census_constant_tests(const NodeCensusScratch* s, uint32_t node)
 {
     const CheckProgram* program = s->program;
     const CheckGraph* graph = &program->input->graph;
-    const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
     const NodeCensusPolicy* policy = &s->policy;
     const CheckOp op = graph->ops[node];
@@ -1213,60 +1416,59 @@ static bool node_census_constants(const NodeCensusScratch* s, uint32_t node)
     bool result = false;
     // The operands' implicit conversions, and a call's arguments'.
     const bool conversions = policy->constant_conversion || policy->assign_enum;
-    for (uint32_t i = 0; i < 3 && op != CHECK_OP_CAST && op != CHECK_OP_VALUE && stream->conversions != NULL && conversions && !result; i += 1)
+    for (uint32_t i = 0; i < 3 && op != CHECK_OP_CAST && op != CHECK_OP_VALUE && conversions && !result; i += 1)
     {
         const uint32_t operand = i == 0 ? a : i == 1 ? b : graph->operand2[node];
-        const CheckConversion conversion = stream->conversions[node].operands[i];
-        result = operand < graph->count && node_census_constant_changes(stream, types, operand, conversion.type);
+        result = operand < graph->count && node_census_constant_changes(s, operand, node_view_converted(s, node, i));
     }
-    if (op == CHECK_OP_CALL && stream->argument_conversions != NULL && conversions && !result)
+    if (op == CHECK_OP_CALL && conversions && !result)
     {
         const uint32_t first = graph->argument_offsets[node];
         for (uint32_t i = 0; i < graph->argument_counts[node] && !result; i += 1)
         {
-            result = node_census_constant_changes(stream, types, graph->argument_nodes[first + i], stream->argument_conversions[first + i].type);
+            result = node_census_constant_changes(s, graph->argument_nodes[first + i], node_view_argument_converted(s, node, i));
         }
     }
     __int128 value = 0;
     const bool divide = op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER || op == CHECK_OP_DIVIDE_ASSIGN || op == CHECK_OP_REMAINDER_ASSIGN;
-    result |= policy->division && divide && node_census_integer_constant(stream, types, b, &value) && value == 0;
+    result |= policy->division && divide && node_census_integer_constant(s, b, &value) && value == 0;
     const bool shift = op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT || op == CHECK_OP_SHIFT_LEFT_ASSIGN || op == CHECK_OP_SHIFT_RIGHT_ASSIGN;
     if (policy->shifts && shift && !result)
     {
         bool sign = false;
-        const uint32_t width = a < graph->count ? node_census_width(types, check_stream_type(stream, a), &sign) : 0;
+        const uint32_t width = a < graph->count ? node_census_width(types, node_view_type(s, a), &sign) : 0;
         const uint32_t promoted = width < 32 ? 32 : width;
-        result = node_census_integer_constant(stream, types, b, &value) && (value < 0 || width == 0 || value >= promoted);
-        const bool left_constant = node_census_integer_constant(stream, types, a, &value);
+        result = node_census_integer_constant(s, b, &value) && (value < 0 || width == 0 || value >= promoted);
+        const bool left_constant = node_census_integer_constant(s, a, &value);
         result |= (op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_LEFT_ASSIGN) && left_constant && value < 0;
     }
     // -Wshift-sign-overflow: a signed left shift by a constant (whose fold may set the sign bit).
     if (policy->shift_sign_overflow && (op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_LEFT_ASSIGN) && !result)
     {
         bool sign = false;
-        const uint32_t width = a < graph->count ? node_census_width(types, check_stream_type(stream, a), &sign) : 0;
-        result = (sign || width < 32) && node_census_integer_constant(stream, types, b, &value);
+        const uint32_t width = a < graph->count ? node_census_width(types, node_view_type(s, a), &sign) : 0;
+        result = (sign || width < 32) && node_census_integer_constant(s, b, &value);
     }
     const bool through = op == CHECK_OP_DEREFERENCE || op == CHECK_OP_ARROW || op == CHECK_OP_SUBSCRIPT;
     if (policy->null_dereference && through && !result)
     {
-        const uint32_t pointer = op == CHECK_OP_SUBSCRIPT && b < graph->count && node_census_pointer(types, check_stream_type(stream, b)) ? b : a;
-        const CheckConstantKind kind = pointer < graph->count ? check_stream_constant_kind(stream, pointer) : CHECK_CONSTANT_NONE;
-        const CheckValue v = kind != CHECK_CONSTANT_NONE ? check_stream_value(stream, pointer) : (CheckValue){ 0 };
+        const uint32_t pointer = op == CHECK_OP_SUBSCRIPT && b < graph->count && node_census_pointer(types, node_view_type(s, b)) ? b : a;
+        const CheckConstantKind kind = pointer < graph->count ? node_view_constant_kind(s, pointer) : CHECK_CONSTANT_NONE;
+        const CheckValue v = kind != CHECK_CONSTANT_NONE ? node_view_value(s, pointer) : (CheckValue){ 0 };
         result = (kind == CHECK_CONSTANT_INTEGER && v.integer == 0) || (kind == CHECK_CONSTANT_ADDRESS && v.object == 0);
     }
     if (policy->array_bounds && op == CHECK_OP_SUBSCRIPT && !result)
     {
-        const bool a_array = a < graph->count && type_kind_is_array(node_census_kind(types, check_stream_type(stream, a)));
+        const bool a_array = a < graph->count && type_kind_is_array(node_census_kind(types, node_view_type(s, a)));
         const uint32_t array = a_array ? a : b;
         const uint32_t index = a_array ? b : a;
-        const TypeId array_type = array < graph->count ? node_census_base(types, check_stream_type(stream, array)) : 0;
+        const TypeId array_type = array < graph->count ? node_census_base(types, node_view_type(s, array)) : 0;
         const bool sized = array_type != 0 && type_kind(types, array_type) == BUSTER_TYPE_KIND_ARRAY;
         const uint64_t element = sized ? type_size(types, type_element(types, array_type)) : 0;
         const uint64_t length = element != 0 ? type_size(types, array_type) / element : 0;
         // `&a[N]` is the array's end, which C allows: an address of a subscript may be one past its last element.
         const bool addressed = s->parents[node] != BUSTER_CHECK_NONE && graph->ops[s->parents[node]] == CHECK_OP_ADDRESS;
-        result = sized && node_census_integer_constant(stream, types, index, &value) && (value < 0 || value > (__int128)length || (value == (__int128)length && !addressed));
+        result = sized && node_census_integer_constant(s, index, &value) && (value < 0 || value > (__int128)length || (value == (__int128)length && !addressed));
     }
     if (policy->tautological && node_census_comparison(op) && !result)
     {
@@ -1277,10 +1479,10 @@ static bool node_census_constants(const NodeCensusScratch* s, uint32_t node)
             uint32_t width = 0;
             bool sign = false;
             bool constant_sign = false;
-            const uint32_t constant_width = constant < graph->count ? node_census_width(types, check_stream_type(stream, constant), &constant_sign) : 0;
-            bool known = node_census_integer_constant(stream, types, constant, &value) && other < graph->count &&
-                         check_stream_constant_kind(stream, other) != CHECK_CONSTANT_INTEGER &&
-                         node_census_integer(types, check_stream_type(stream, other), &width, &sign) && constant_width != 0;
+            const uint32_t constant_width = constant < graph->count ? node_census_width(types, node_view_type(s, constant), &constant_sign) : 0;
+            bool known = node_census_integer_constant(s, constant, &value) && other < graph->count &&
+                         node_view_constant_kind(s, other) != CHECK_CONSTANT_INTEGER &&
+                         node_census_integer(types, node_view_type(s, other), &width, &sign) && constant_width != 0;
             // The comparison's common type, by the usual arithmetic conversions of the promoted operands, and the
             // constant converted to it. A signed operand compared in an unsigned type has no interval of values there.
             const uint32_t promoted = width < 32 ? 32 : width;
@@ -1313,10 +1515,52 @@ static bool node_census_constants(const NodeCensusScratch* s, uint32_t node)
     if (policy->non_literal_null && (op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT) && !result)
     {
         const uint32_t source = op == CHECK_OP_ASSIGN ? b : a;
-        const bool to_pointer = node_census_pointer(types, check_stream_type(stream, node));
+        const bool to_pointer = node_census_pointer(types, node_view_type(s, node));
         result = to_pointer && source < graph->count && graph->ops[source] != CHECK_OP_VALUE && graph->ops[source] != CHECK_OP_CAST &&
-                 node_census_integer_constant(stream, types, source, &value) && value == 0;
+                 node_census_integer_constant(s, source, &value) && value == 0;
     }
+    return result;
+}
+
+// The silence test of constants at node `node` (node_census_constant_tests). Each of its tests reads a constant among
+// the node's operands or a call's arguments: where none is one, none can fire, and none is asked.
+static bool node_census_constants(const NodeCensusScratch* s, uint32_t node)
+{
+    const CheckGraph* graph = &s->program->input->graph;
+    const CheckOp op = graph->ops[node];
+    bool constant = false;
+    for (uint32_t i = 0; i < 3 && !constant; i += 1)
+    {
+        const uint32_t operand = i == 0 ? graph->operand0[node] : i == 1 ? graph->operand1[node] : graph->operand2[node];
+        constant = operand < graph->count && node_view_has(s, operand) && node_view_constant_kind(s, operand) != CHECK_CONSTANT_NONE;
+    }
+    for (uint32_t i = 0; op == CHECK_OP_CALL && !constant && i < graph->argument_counts[node]; i += 1)
+    {
+        const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + i];
+        constant = argument < graph->count && node_view_has(s, argument) && node_view_constant_kind(s, argument) != CHECK_CONSTANT_NONE;
+    }
+    return constant && node_census_constant_tests(s, node);
+}
+
+// check_common_atomic_member's test of member access `node`, with its operand's type read through the view: whether
+// the operand is an atomic struct or union (an arrow's pointer after its lvalue conversion).
+static bool node_view_atomic_member(const NodeCensusScratch* s, uint32_t node)
+{
+    const CheckGraph* graph = &s->program->input->graph;
+    const TypeTable* types = s->program->types;
+    const CheckOp op = graph->ops[node];
+    const uint32_t base = graph->operand0[node];
+    TypeId record = base < graph->count && node_view_has(s, base) ? node_view_type(s, base) : 0;
+    if (op == CHECK_OP_ARROW && record != 0)
+    {
+        record = type_strip_aligned(types, type_conversion_operand(types, record));
+        const uint8_t kind = type_kind(types, record);
+        record = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? type_element(types, record) : 0;
+    }
+    record = record != 0 ? type_strip_aligned(types, record) : 0;
+    const TypeId element = record != 0 && type_kind(types, record) == BUSTER_TYPE_KIND_ATOMIC ? type_strip_aligned(types, type_element(types, record)) : 0;
+    const uint8_t kind = element != 0 ? type_kind(types, element) : BUSTER_TYPE_KIND_NONE;
+    const bool result = (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION);
     return result;
 }
 
@@ -1327,64 +1571,70 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
     const CheckProgram* program = s->program;
     const CheckInput* input = program->input;
     const CheckGraph* graph = &input->graph;
-    const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
     const Parser* parser = program->parser;
     const NodeCensusPolicy* policy = &s->policy;
     const CheckOp op = graph->ops[node];
-    const CheckValue v = check_stream_value(stream, node);
+    // The node's value's type and flags: the tests read no more of it but at a leaf (its object, its overload set). What
+    // they ask of a type at every node is a byte kept a type (node_census_type_bits).
+    const TypeId type = node_view_type(s, node);
+    const uint32_t flags = node_view_flags(s, node);
+    const uint8_t type_bits = node_census_type_bits(s, type);
     const uint32_t a = graph->operand0[node];
     const uint32_t b = graph->operand1[node];
-    const TypeId a_type = a < graph->count && op != CHECK_OP_VALUE ? check_stream_type(stream, a) : 0;
-    const TypeId b_type = b < graph->count && op != CHECK_OP_VALUE ? check_stream_type(stream, b) : 0;
+    const TypeId a_type = a < graph->count && op != CHECK_OP_VALUE ? node_view_type(s, a) : 0;
+    const TypeId b_type = b < graph->count && op != CHECK_OP_VALUE ? node_view_type(s, b) : 0;
     const uint32_t token = graph->tokens[node];
     uint64_t tests = 0;
     // The set.
     tests |= !node_census_coded(op) ? UINT64_C(1) << NODE_CENSUS_OPERATOR : 0;
-    tests |= node_census_special_type(types, v.type) ? UINT64_C(1) << NODE_CENSUS_TYPE : 0;
-    tests |= types->atomic_records && (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && check_common_atomic_member(graph, stream, types, node) ?
+    tests |= (type_bits & BUSTER_NODE_CENSUS_TYPE_SPECIAL) != 0 ? UINT64_C(1) << NODE_CENSUS_TYPE : 0;
+    tests |= types->atomic_records && (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && node_view_atomic_member(s, node) ?
              UINT64_C(1) << NODE_CENSUS_TYPE : 0;
-    tests |= (v.flags & BUSTER_CHECK_BIT_FIELD) != 0 ? UINT64_C(1) << NODE_CENSUS_BIT_FIELD : 0;
+    tests |= (flags & BUSTER_CHECK_BIT_FIELD) != 0 ? UINT64_C(1) << NODE_CENSUS_BIT_FIELD : 0;
     const bool copies = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT || op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA ||
                         op == CHECK_OP_CAST || op == CHECK_OP_CALL;
-    bool aggregate = copies && node_census_aggregate(types, v.type);
+    bool aggregate = copies && (type_bits & BUSTER_NODE_CENSUS_TYPE_AGGREGATE) != 0;
     for (uint32_t i = 0; op == CHECK_OP_CALL && !aggregate && i < graph->argument_counts[node]; i += 1)
     {
         const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + i];
-        aggregate = argument < graph->count && node_census_aggregate(types, check_stream_type(stream, argument));
+        aggregate = argument < graph->count && (node_census_type_bits(s, node_view_type(s, argument)) & BUSTER_NODE_CENSUS_TYPE_AGGREGATE) != 0;
     }
     tests |= aggregate ? UINT64_C(1) << NODE_CENSUS_AGGREGATE : 0;
     if (op == CHECK_OP_VALUE)
     {
-        const uint32_t object = v.object;
+        const uint32_t object = node_view_object(s, node);
         const bool known = object != 0 && object < program->object_count;
         const bool compound = known && check_input_bit(input->declaration_bits, object - 1, BUSTER_CHECK_BITS_COMPOUND);
         const bool register_object = known && check_input_bit(input->declaration_bits, object - 1, BUSTER_CHECK_BITS_REGISTER);
         tests |= compound ? UINT64_C(1) << NODE_CENSUS_COMPOUND_LITERAL : 0;
         const uint32_t declaration = node_census_declaration(program, token);
-        const bool flagged = v.overload_head != 0 || register_object || (v.flags & (BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME)) != 0 ||
+        const bool flagged = node_view_overloaded(s, node) || register_object || (flags & (BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME)) != 0 ||
                              (declaration != BUSTER_CHECK_NONE &&
-                              node_census_attributed(input, declaration, node_census_flagged_kinds, BUSTER_ARRAY_LENGTH(node_census_flagged_kinds)));
+                              (node_census_declaration_facts(s, declaration, parser->tokens.names[token]) & BUSTER_NODE_CENSUS_DECLARATION_FLAGGED) != 0);
         tests |= flagged ? UINT64_C(1) << NODE_CENSUS_DECLARATION : 0;
     }
     // -Wtype-safety reads a call's arguments against its callee's type tags: in a unit that declares any, every call.
     tests |= op == CHECK_OP_CALL && (node_census_callee(s, node) || policy->type_safety) ? UINT64_C(1) << NODE_CENSUS_CALLEE : 0;
     // The silence tests.
-    const uint32_t warnings = stream->warnings != NULL ? stream->warnings[node] & 0x01ffffffu : 0;
-    const uint32_t ignored = stream->warning_ignored != NULL ? stream->warning_ignored[node] : 0;
+    uint32_t ignored = 0;
+    const uint32_t warnings = node_view_warnings(s, node, &ignored);
     const uint32_t kept = (warnings & ~ignored & policy->action_bits) | (warnings & ignored & policy->action_ignored_bits);
     tests |= kept != 0 ? UINT64_C(1) << NODE_CENSUS_ACTION_WARNING : 0;
     const bool binary = op != CHECK_OP_VALUE && a < graph->count && b < graph->count;
     if (policy->enums && op != CHECK_OP_VALUE)
     {
         const TypeId left = op == CHECK_OP_CONDITIONAL ? b_type : a_type;
-        const TypeId right = op == CHECK_OP_CONDITIONAL ? (graph->operand2[node] < graph->count ? check_stream_type(stream, graph->operand2[node]) : 0) : b_type;
-        const bool both = left != 0 && right != 0 && node_census_enum(types, left) && node_census_enum(types, right) &&
-                          node_census_base(types, left) != node_census_base(types, right);
-        const bool floating = left != 0 && right != 0 && ((node_census_enum(types, left) && node_census_floating(types, right)) ||
-                                                         (node_census_enum(types, right) && node_census_floating(types, left)));
-        const bool converts = (op == CHECK_OP_CONVERT || op == CHECK_OP_INITIALIZE) && a_type != 0 && node_census_enum(types, a_type) &&
-                              (node_census_enum(types, v.type) || node_census_floating(types, v.type)) && node_census_base(types, a_type) != node_census_base(types, v.type);
+        const TypeId right = op == CHECK_OP_CONDITIONAL ? (graph->operand2[node] < graph->count ? node_view_type(s, graph->operand2[node]) : 0) : b_type;
+        const uint8_t left_bits = node_census_type_bits(s, left);
+        const uint8_t right_bits = node_census_type_bits(s, right);
+        const uint8_t a_bits = node_census_type_bits(s, a_type);
+        const bool both = (left_bits & right_bits & BUSTER_NODE_CENSUS_TYPE_ENUM) != 0 && node_census_base(types, left) != node_census_base(types, right);
+        const bool floating = ((left_bits & BUSTER_NODE_CENSUS_TYPE_ENUM) != 0 && (right_bits & BUSTER_NODE_CENSUS_TYPE_FLOATING) != 0) ||
+                              ((right_bits & BUSTER_NODE_CENSUS_TYPE_ENUM) != 0 && (left_bits & BUSTER_NODE_CENSUS_TYPE_FLOATING) != 0);
+        const bool converts = (op == CHECK_OP_CONVERT || op == CHECK_OP_INITIALIZE) && (a_bits & BUSTER_NODE_CENSUS_TYPE_ENUM) != 0 &&
+                              (type_bits & (BUSTER_NODE_CENSUS_TYPE_ENUM | BUSTER_NODE_CENSUS_TYPE_FLOATING)) != 0 &&
+                              node_census_base(types, a_type) != node_census_base(types, type);
         tests |= both || floating || converts ? UINT64_C(1) << NODE_CENSUS_ENUM : 0;
     }
     if (policy->sign_compare && node_census_comparison(op) && binary)
@@ -1399,19 +1649,19 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
         const bool integers = node_census_integer(types, a_type, &aw, &as) && node_census_integer(types, b_type, &bw, &bs);
         const bool a_wide = !as && aw >= 32;
         const bool b_wide = !bs && bw >= 32;
-        const bool a_safe = node_census_integer_constant(stream, types, a, &value) && value >= 0;
-        const bool b_safe = node_census_integer_constant(stream, types, b, &value) && value >= 0;
+        const bool a_safe = node_census_integer_constant(s, a, &value) && value >= 0;
+        const bool b_safe = node_census_integer_constant(s, b, &value) && value >= 0;
         const bool mixed = (a_wide && bs && !b_safe) || (b_wide && as && !a_safe);
         tests |= integers && mixed ? UINT64_C(1) << NODE_CENSUS_SIGN_COMPARE : 0;
     }
-    if (op == CHECK_OP_CAST && policy->pointer_casts && a_type != 0 && node_census_pointer(types, a_type))
+    if (op == CHECK_OP_CAST && policy->pointer_casts && (node_census_type_bits(s, a_type) & BUSTER_NODE_CENSUS_TYPE_POINTER) != 0)
     {
         uint32_t width = 0;
         bool sign = false;
-        const bool narrow = node_census_integer(types, v.type, &width, &sign) && width < 64;
-        tests |= narrow || node_census_enum(types, v.type) ? UINT64_C(1) << NODE_CENSUS_POINTER_CAST : 0;
+        const bool narrow = node_census_integer(types, type, &width, &sign) && width < 64;
+        tests |= narrow || (type_bits & BUSTER_NODE_CENSUS_TYPE_ENUM) != 0 ? UINT64_C(1) << NODE_CENSUS_POINTER_CAST : 0;
     }
-    if ((op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT) && policy->void_dereference && a_type != 0 && node_census_pointer(types, a_type))
+    if ((op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT) && policy->void_dereference && (node_census_type_bits(s, a_type) & BUSTER_NODE_CENSUS_TYPE_POINTER) != 0)
     {
         const TypeId pointee = type_unqualified(type_strip_aligned(types, type_element(types, node_census_base(types, a_type))));
         tests |= type_kind(types, pointee) == BUSTER_TYPE_KIND_VOID ? UINT64_C(1) << NODE_CENSUS_POINTER_CAST : 0;
@@ -1420,10 +1670,11 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
     {
         tests |= UINT64_C(1) << NODE_CENSUS_STRING_PLUS_INT;
     }
-    tests |= op == CHECK_OP_ADDRESS && policy->packed_member && token < parser->tokens.count && s->packed[token] != 0 ? UINT64_C(1) << NODE_CENSUS_PACKED_MEMBER : 0;
+    const bool packed = s->records != NULL ? s->packed_unit : token < parser->tokens.count && s->packed[token] != 0;
+    tests |= op == CHECK_OP_ADDRESS && policy->packed_member && packed ? UINT64_C(1) << NODE_CENSUS_PACKED_MEMBER : 0;
     if ((op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF) && a < graph->count)
     {
-        const bool effect = policy->unevaluated && (check_stream_flags(stream, a) & BUSTER_CHECK_SIDE_EFFECT) != 0;
+        const bool effect = policy->unevaluated && (node_view_flags(s, a) & BUSTER_CHECK_SIDE_EFFECT) != 0;
         const bool expression_alignof = op == CHECK_OP_ALIGNOF && policy->alignof_expression;
         // -Wsizeof-array-decay: sizeof of a pointer an operator made of an array (`sizeof(a + 1)`).
         const CheckOp inner = graph->ops[a];
@@ -1432,7 +1683,7 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
         for (uint32_t i = 0; policy->sizeof_decay && operator && i < 3 && !decays; i += 1)
         {
             const uint32_t operand = i == 0 ? graph->operand0[a] : i == 1 ? graph->operand1[a] : graph->operand2[a];
-            decays = operand < graph->count && type_kind_is_array(node_census_kind(types, check_stream_type(stream, operand)));
+            decays = operand < graph->count && type_kind_is_array(node_census_kind(types, node_view_type(s, operand)));
         }
         tests |= effect || expression_alignof || decays ? UINT64_C(1) << NODE_CENSUS_UNEVALUATED : 0;
     }
@@ -1440,7 +1691,9 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
     // The parser's tree: parentheses.
     const uint32_t count = parser->tokens.count;
     const uint8_t role = token < count ? parser->tree.roles[token] : PARSE_ROLE_NONE;
-    const uint32_t parent = token < count ? check_common_parent(parser, token) : BUSTER_CHECK_NONE;
+    // Its token's parent in the tree, which only an assignment's, a `!`'s and a comparison's tests below read.
+    const bool climbs = op == CHECK_OP_ASSIGN || op == CHECK_OP_NOT || check_common_comparison_role(role);
+    const uint32_t parent = climbs && token < count ? check_common_parent(parser, token) : BUSTER_CHECK_NONE;
     const uint8_t parent_role = parent < count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
     bool parentheses = false;
     if (policy->parentheses && op == CHECK_OP_ASSIGN && role == PARSE_ROLE_ASSIGN && token < count && parser->tokens.kinds[token] == PARSE_KIND_EQUAL)
@@ -1468,9 +1721,10 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
         const uint32_t operand = i == 0 ? a : b;
         parentheses |= operand < graph->count && node_census_comparison(graph->ops[operand]) && node_census_unparenthesized(parser, graph->tokens[operand], token);
     }
-    const bool truth = node_census_truth(s, node, context == NODE_CENSUS_ROOT_CONDITION);
+    // A truth context matters to a left shift and a product alone.
+    const bool truth = (op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_MULTIPLY) && node_census_truth(s, node, context == NODE_CENSUS_ROOT_CONDITION);
     __int128 value = 0;
-    const bool constant_shift = op == CHECK_OP_SHIFT_LEFT && node_census_integer_constant(stream, types, a, &value);
+    const bool constant_shift = op == CHECK_OP_SHIFT_LEFT && node_census_integer_constant(s, a, &value);
     parentheses |= truth && ((policy->int_in_bool && (op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_MULTIPLY)) || (policy->tautological && constant_shift));
     tests |= parentheses ? UINT64_C(1) << NODE_CENSUS_PARENTHESES : 0;
     bool unused = policy->unused_comparison && check_common_comparison_role(role) && parent < count && parser->tree.roles[parent] == PARSE_ROLE_TERMINATOR &&
@@ -1479,11 +1733,12 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
     tests |= unused ? UINT64_C(1) << NODE_CENSUS_UNUSED : 0;
     if (policy->self_assign && op == CHECK_OP_ASSIGN && binary)
     {
-        const uint64_t left = node_census_named_object(program, a);
-        const bool same = left != 0 && left == node_census_named_object(program, b);
+        const uint64_t left = node_census_named_object(s, a);
+        const bool same = left != 0 && left == node_census_named_object(s, b);
         tests |= same ? UINT64_C(1) << NODE_CENSUS_SELF_ASSIGN : 0;
     }
-    s->mixed_system |= node_census_system(s, token) && !node_census_system(s, graph->tokens[root]);
+    // The design's system-macro test, counted apart after the pipeline (the report's): no test of reader time's.
+    s->mixed_system |= s->records == NULL && node_census_system(s, token) && !node_census_system(s, graph->tokens[root]);
     tests |= input->fp_environments != NULL && graph->fp_environments != NULL &&
              (graph->fp_environments[node] & (BUSTER_CHECK_FP_ENV_ACCESS | BUSTER_CHECK_FP_EVAL_MASK)) != 0 ? UINT64_C(1) << NODE_CENSUS_REGION : 0;
     return tests;
@@ -1509,12 +1764,13 @@ static TypeId node_census_initialized_type(const NodeCensusScratch* s, uint32_t 
 }
 
 // The tests of the expression whose root is node `root`, popped with `flags`, of root kind `context`: its graph subtree
-// walked into the scratch's list, then each node's tests and the expression's own.
+// walked into the scratch's list, then each node's tests and the expression's own. At reader time (the view's records)
+// the lowering's flags are none, an initializer's object's type is the caller's (NodeCensusScratch.given_declared), the
+// actions' warnings are T's for the whole expression, and the warning events are the caller's to test.
 static uint64_t node_census_expression(NodeCensusScratch* s, uint32_t root, uint8_t flags, NodeCensusRoot context, uint32_t* walked)
 {
     const CheckProgram* program = s->program;
     const CheckGraph* graph = &program->input->graph;
-    const CheckStream* stream = program->stream;
     const Parser* parser = program->parser;
     s->stamp += 1;
     s->mixed_system = false;
@@ -1530,6 +1786,7 @@ static uint64_t node_census_expression(NodeCensusScratch* s, uint32_t root, uint
     {
         const uint32_t node = s->stack[--top];
         s->list[count++] = node;
+        s->missed += s->records != NULL && node_view_record(s, node) == UINT32_MAX;
         const uint32_t token = graph->tokens[node];
         lowest = token < parser->tokens.count && token < lowest ? token : lowest;
         highest = token < parser->tokens.count && token > highest ? token : highest;
@@ -1580,15 +1837,19 @@ static uint64_t node_census_expression(NodeCensusScratch* s, uint32_t root, uint
     tests |= s->policy.loops && node_census_for_clause(parser, graph->tokens[root]) ? UINT64_C(1) << NODE_CENSUS_LOOP : 0;
     tests |= s->policy.unmodeled ? UINT64_C(1) << NODE_CENSUS_UNMODELED : 0;
     // A scalar object's initializer converts its value to the object's type in its plan, not at a node.
-    const TypeId declared = context == NODE_CENSUS_ROOT_INITIALIZER ? node_census_initialized_type(s, root) : 0;
-    tests |= (s->policy.constant_conversion || s->policy.assign_enum) && declared != 0 && node_census_constant_changes(stream, program->types, root, declared) ?
+    const TypeId declared = context != NODE_CENSUS_ROOT_INITIALIZER ? 0 : s->given_declared != 0 || s->records != NULL ? s->given_declared : node_census_initialized_type(s, root);
+    tests |= (s->policy.constant_conversion || s->policy.assign_enum) && declared != 0 && node_census_constant_changes(s, root, declared) ?
              UINT64_C(1) << NODE_CENSUS_CONSTANT : 0;
     tests |= declared != 0 && node_census_special_type(program->types, declared) ? UINT64_C(1) << NODE_CENSUS_TYPE : 0;
-    tests |= s->policy.return_address && context == NODE_CENSUS_ROOT_RETURN && node_census_returns_address(program, root) ?
+    tests |= s->policy.return_address && context == NODE_CENSUS_ROOT_RETURN && node_census_returns_address(s, root) ?
              UINT64_C(1) << NODE_CENSUS_RETURN_ADDRESS : 0;
     tests |= s->policy.unsequenced && node_census_unsequenced(s, count, root) ? UINT64_C(1) << NODE_CENSUS_UNSEQUENCED : 0;
-    const bool events = lowest <= highest && s->event_prefix[highest + 1] != s->event_prefix[lowest];
+    const bool events = s->event_prefix != NULL && lowest <= highest && s->event_prefix[highest + 1] != s->event_prefix[lowest];
     tests |= events ? UINT64_C(1) << NODE_CENSUS_EVENT : 0;
+    // T's actions' warnings for the expression's nodes, those the unit's nodes suppress aside: at least the ones the
+    // graph run keeps a node (it drops an unevaluated operand's folds').
+    const uint32_t actions = s->records != NULL ? s->records->action_warnings & 0x01ffffffu : 0;
+    tests |= (actions & s->policy.action_bits) != 0 ? UINT64_C(1) << NODE_CENSUS_ACTION_WARNING : 0;
     s->span_low = lowest;
     s->span_high = highest;
     *walked = count;
@@ -1753,6 +2014,212 @@ static void node_census_mark_controls(NodeCensusScratch* s, const CheckProgramBo
     }
 }
 
+// The tests where they sit (docs/node-machine.md): the tests above at reader time, for the machine there
+// (c_check_node_machine_reader.c, PPOptions.node_reader's BUSTER_NODE_READER_TESTS), on each expression T has just taken
+// and before C and X run on it. The test code is the census's own, with a view that reads T's record where the census
+// reads the stream's node. What the census reads besides, and what stands for it before the pipeline:
+//
+// - The program: its input, parser and types are the reader's, and its objects' columns the machine's there
+//   (NodeMachine.object_symbols: a static declaration stands for a symbol).
+// - A root's kind, the control's that pushed it: the front's root's operator (a discard's cast, a condition, a return's
+//   conversion, a switch's promotion, an initialization, which the front makes for a scalar object's unbraced
+//   initializer alone).
+// - An initializer's object's type: its declaration's (the reader's declared_types).
+// - The enabled warnings: the options' and the diagnostic pragmas', which the reader has whole before its coded walk.
+// - A body's diagnostic and floating-point pragmas: the same records, by the outermost braces around each.
+// - The warning events at the expression's tokens: the reader's own so far, a chunk at a time. The events the later
+//   passes make aren't there yet: each has a test above that stands for it, or the shadow's comparison finds it.
+// - The actions' warnings a node: T's for the whole expression (NodeMachine.action_warnings).
+// - A packed member's address: its witness is a later pass's of the reader (c_check_packed_input.c), so in a unit with a
+//   packed record or member any address taken stands for one (NodeCensusScratch.packed_unit).
+//
+// The lowering's own facts have nothing at reader time: a body that tracks its stack, a node popped twice.
+typedef struct NodeCensusReader NodeCensusReader;
+struct NodeCensusReader
+{
+    NodeCensusScratch scratch;
+    // What stands for the unit's program in the tests: the reader's input, parser and types, and the machine's objects.
+    CheckProgram program;
+    NodeFrontTypes* types;
+    // A bit a token: a kept warning event of the reader's at it; and the events taken in so far.
+    uint64_t* event_bits;
+    uint32_t events_seen;
+    // The outermost brace pairs that hold a diagnostic or floating-point pragma (node_census_region's bodies), each its
+    // opening's and its closing's tokens.
+    uint32_t* pragma_openings;
+    uint32_t* pragma_closings;
+    uint32_t pragma_count;
+    // A bit a token: inside a statement expression (CheckInput.regions, the reader's): a root there is a nested control's.
+    uint64_t* nested_bits;
+};
+
+// The outermost brace pair around token `token` into `opening` and `closing`: whether there is one. The parser's tree
+// gives an opening brace its closing one as its parent.
+static bool node_census_reader_braces(const Parser* parser, uint32_t token, uint32_t* opening, uint32_t* closing)
+{
+    const uint32_t count = parser->tokens.count;
+    bool found = false;
+    for (uint32_t t = 0; t < count && t < token && !found;)
+    {
+        const uint32_t parent = parser->tokens.kinds[t] == PARSE_KIND_L_BRACE ? parser->tree.parents[t] : count;
+        const bool pair = parent < count && parent > t;
+        found = pair && token < parent;
+        *opening = found ? t : *opening;
+        *closing = found ? parent : *closing;
+        t = pair ? parent + 1 : t + 1;
+    }
+    return found;
+}
+
+static NodeCensusReader* node_census_reader_begin(const CheckInputReader* reader, const NodeMachine* machine, NodeFrontTypes* types, uint32_t node_capacity)
+{
+    Arena* arena = reader->scratch;
+    const CheckInput* input = reader->output;
+    const uint32_t tokens = reader->parser->tokens.count;
+    NodeCensusReader* tests = arena_push_array(arena, 1, sizeof(NodeCensusReader), _Alignof(NodeCensusReader));
+    NodeCensusPolicy* policy = arena_push_array(reader->arena, 1, sizeof(NodeCensusPolicy), _Alignof(NodeCensusPolicy));
+    const uint32_t pragmas = (input->diagnostic_pragmas != NULL ? input->diagnostic_pragmas->count : 0) + (input->fp_pragmas != NULL ? input->fp_pragma_count : 0);
+    bool room = tests != NULL && policy != NULL;
+    if (room)
+    {
+        memset(tests, 0, sizeof(*tests));
+        NodeCensusScratch* s = &tests->scratch;
+        tests->types = types;
+        tests->program.input = input;
+        tests->program.parser = reader->parser;
+        tests->program.types = reader->types;
+        tests->program.object_symbols = (SymbolId*)machine->object_symbols;
+        tests->program.object_count = machine->object_count;
+        s->program = &tests->program;
+        s->pp = reader->pp;
+        s->records = machine;
+        s->policy = node_census_policy(reader->pp, input);
+        *policy = s->policy;
+        types->policy = policy;
+        uint32_t** node_columns[] = { &s->marks, &s->parents, &s->depths, &s->list, &s->stack };
+        for (uint32_t c = 0; room && c < BUSTER_ARRAY_LENGTH(node_columns); c += 1)
+        {
+            *node_columns[c] = arena_push_array(arena, (uint64_t)node_capacity + 1, sizeof(uint32_t), _Alignof(uint32_t));
+            room = *node_columns[c] != NULL;
+        }
+        tests->event_bits = arena_push_array(arena, (uint64_t)tokens / 64 + 1, sizeof(uint64_t), _Alignof(uint64_t));
+        tests->pragma_openings = arena_push_array(arena, (uint64_t)pragmas + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        tests->pragma_closings = arena_push_array(arena, (uint64_t)pragmas + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        tests->nested_bits = arena_push_array(arena, (uint64_t)tokens / 64 + 1, sizeof(uint64_t), _Alignof(uint64_t));
+        // The types' bytes have room for the types T's derivations and the walk make later, as the machine's words do.
+        s->type_bits_count = machine->type_capacity;
+        s->type_bits = arena_push_array(arena, (uint64_t)s->type_bits_count + 1, 1, 1);
+        s->declaration_facts = arena_push_array(arena, (uint64_t)tokens + 1, 1, 1);
+        room = room && s->type_bits != NULL && s->declaration_facts != NULL && tests->event_bits != NULL && tests->pragma_openings != NULL && tests->pragma_closings != NULL && tests->nested_bits != NULL;
+    }
+    if (room)
+    {
+        NodeCensusScratch* s = &tests->scratch;
+        memset(s->marks, 0, ((uint64_t)node_capacity + 1) * sizeof(uint32_t));
+        memset(tests->event_bits, 0, ((uint64_t)tokens / 64 + 1) * sizeof(uint64_t));
+        const TypeTable* table = reader->types;
+        for (uint32_t tag = 0; tag < table->tags.count && !s->packed_unit; tag += 1)
+        {
+            s->packed_unit = table->tags.packed[tag] != 0;
+        }
+        for (uint32_t member = 0; member < table->members.count && !s->packed_unit; member += 1)
+        {
+            s->packed_unit = (table->members.flags[member] & BUSTER_TYPE_MEMBER_PACKED) != 0;
+        }
+        memset(tests->nested_bits, 0, ((uint64_t)tokens / 64 + 1) * sizeof(uint64_t));
+        memset(s->type_bits, 0, (uint64_t)s->type_bits_count + 1);
+        memset(s->declaration_facts, 0, (uint64_t)tokens + 1);
+        for (uint32_t r = 0; r < input->region_count; r += 1)
+        {
+            for (uint32_t t = input->regions[r].opening; t <= input->regions[r].closing && t < tokens; t += 1)
+            {
+                tests->nested_bits[t >> 6] |= UINT64_C(1) << (t & 63);
+            }
+        }
+        for (uint32_t i = 0; i < pragmas; i += 1)
+        {
+            const uint32_t diagnostics = input->diagnostic_pragmas != NULL ? input->diagnostic_pragmas->count : 0;
+            const uint32_t token = i < diagnostics ? input->diagnostic_pragmas->records[i].token : input->fp_pragmas[i - diagnostics].token;
+            uint32_t opening = 0;
+            uint32_t closing = 0;
+            if (node_census_reader_braces(reader->parser, token, &opening, &closing))
+            {
+                tests->pragma_openings[tests->pragma_count] = opening;
+                tests->pragma_closings[tests->pragma_count] = closing;
+                tests->pragma_count += 1;
+            }
+        }
+    }
+    return room ? tests : NULL;
+}
+
+static void node_census_reader_chunk(NodeCensusReader* tests, const CheckInputReader* reader)
+{
+    const CheckInput* input = reader->output;
+    const uint32_t tokens = reader->parser->tokens.count;
+    for (; tests->events_seen < reader->warning_events.count; tests->events_seen += 1)
+    {
+        const CheckWarningEvent* event = reader->warning_events.events + tests->events_seen;
+        if (event->token < tokens && node_census_event_kept(reader->pp, input, event))
+        {
+            tests->event_bits[event->token >> 6] |= UINT64_C(1) << (event->token & 63);
+        }
+    }
+}
+
+static uint64_t node_census_reader_expression(NodeCensusReader* tests, uint32_t root, CheckOp op, uint32_t token, uint32_t declaration, TypeId declared, uint8_t* kind)
+{
+    NodeCensusScratch* s = &tests->scratch;
+    const CheckProgram* program = s->program;
+    const Parser* parser = program->parser;
+    const CheckGraph* graph = &program->input->graph;
+    const TypeTable* types = program->types;
+    // The root's kind, node_census_root's by the control that pushed it. An initializer's whole value is a scalar
+    // object's without a brace before it, as there; and a root inside a statement expression is a nested control's.
+    const bool nested = token < parser->tokens.count && (tests->nested_bits[token >> 6] >> (token & 63) & 1) != 0;
+    NodeCensusRoot context = nested ? NODE_CENSUS_ROOT_OTHER : op == CHECK_OP_CAST ? NODE_CENSUS_ROOT_STATEMENT : op == CHECK_OP_CONDITION ? NODE_CENSUS_ROOT_CONDITION :
+                             op == CHECK_OP_CONVERT ? NODE_CENSUS_ROOT_RETURN : op == CHECK_OP_POSITIVE ? NODE_CENSUS_ROOT_SWITCH : NODE_CENSUS_ROOT_OTHER;
+    if (op == CHECK_OP_INITIALIZE && !nested)
+    {
+        const uint8_t declared_kind = node_census_kind(types, declared);
+        const bool scalar = declared != 0 && !node_census_aggregate(types, declared) && !type_kind_is_array(declared_kind);
+        const uint32_t value_token = root < graph->count ? graph->tokens[root] : 0;
+        bool brace = declaration >= parser->tokens.count;
+        for (uint32_t t = declaration + 1; !brace && t < value_token && t < parser->tokens.count; t += 1)
+        {
+            brace = parser->tokens.kinds[t] == PARSE_KIND_L_BRACE;
+        }
+        context = scalar && !brace ? NODE_CENSUS_ROOT_INITIALIZER : NODE_CENSUS_ROOT_BRACE;
+    }
+    s->given_declared = context == NODE_CENSUS_ROOT_INITIALIZER ? declared : 0;
+    uint32_t walked = 0;
+    uint64_t bits = node_census_expression(s, root, 0, context, &walked);
+    s->given_declared = 0;
+    // A body with a pragma (node_census_region's), by the root's token.
+    const uint32_t root_token = root < graph->count ? graph->tokens[root] : 0;
+    bool region = false;
+    for (uint32_t i = 0; i < tests->pragma_count && !region; i += 1)
+    {
+        region = root_token > tests->pragma_openings[i] && root_token < tests->pragma_closings[i];
+    }
+    bits |= region ? UINT64_C(1) << NODE_CENSUS_REGION : 0;
+    // The reader's own warning events so far at the expression's tokens.
+    bool events = false;
+    for (uint32_t word = s->span_low >> 6; s->span_low <= s->span_high && word <= s->span_high >> 6 && !events; word += 1)
+    {
+        const uint64_t low = word == s->span_low >> 6 ? ~UINT64_C(0) << (s->span_low & 63) : ~UINT64_C(0);
+        const uint64_t high = word == s->span_high >> 6 ? ~UINT64_C(0) >> (63 - (s->span_high & 63)) : ~UINT64_C(0);
+        events = (tests->event_bits[word] & low & high) != 0;
+    }
+    bits |= events ? UINT64_C(1) << NODE_CENSUS_EVENT : 0;
+    // A node the records don't hold refuses the expression (none does: T takes one range of nodes, whole).
+    bits |= s->missed != 0 ? UINT64_C(1) << NODE_CENSUS_SIZE : 0;
+    tests->types->tested_missed += s->missed;
+    s->missed = 0;
+    *kind = (uint8_t)context;
+    return bits;
+}
+
 // #2524's step 1, the shadow (--shadow): the node machine (c_check_node_machine.c) run on every expression the census
 // takes, after the pipeline, its records compared with the stream's values and conversions node by node and its tape
 // with the lowering's entries entry by entry, then timed. --scalar types every node by the action, --verify checks T's
@@ -1908,9 +2375,11 @@ struct NodeShadow
     // (a selected body's roots) and those of the census's taken set, each compared with the shadow's own T by its
     // records' digest (node_machine_digest): the ones whose range, refusal or records differ, which must be none; and
     // the taken expressions it didn't run on: those the front left (`typed_missing`), and those whose nodes the front
-    // made without a root for them (`typed_unrun`: an initializer beside a variable-length array's bound). `typed_unpopped`: the expressions it ran on that the lowering never popped
-    // (a body the selection dropped, a static object's initializer), by T's refusal: what a machine in the reader types
-    // for nothing.
+    // made without a root for them (`typed_unrun`: an initializer beside a variable-length array's bound). `typed_unpopped`:
+    // the expressions it ran on that the lowering never popped, by T's refusal, and of them `typed_unpopped_inside` those
+    // in a body the lowering lowered (a constant's context, a condition the program folds), the others being in a body
+    // the selection dropped or in none: what a machine in the reader types for nothing. `typed_discards`: the front's
+    // roots that are a declaration's discard, which T isn't run on (NodeFrontTypes.discards).
     uint64_t typed_expressions;
     uint64_t typed_records;
     uint64_t typed_typed;
@@ -1921,6 +2390,8 @@ struct NodeShadow
     uint64_t typed_skipped;
     uint64_t typed_popped;
     uint64_t typed_unpopped[NODE_MACHINE_REFUSALS];
+    uint64_t typed_unpopped_inside[NODE_MACHINE_REFUSALS];
+    uint64_t typed_discards;
     uint64_t typed_compared;
     uint64_t typed_compared_records;
     uint64_t typed_differences;
@@ -1936,6 +2407,70 @@ struct NodeShadow
     uint64_t typed_library_calls;
     uint64_t typed_library_differences;
     uint32_t typed_listed;
+    // --front-sweeps: C and X run at reader time after T, on the expressions it took there. The files' reports summed
+    // (NodeFrontTypes'): the expressions they ran on, by their refusal, their entries, and the tapes the store had no room
+    // for. And after the pipeline, for each expression of the census's taken set that T took both times: reader time's
+    // root (its conversion's target and its object against the lowering's pop's), its refusal and, where both took the
+    // expression, its tape, patched with the program's symbols, and its labels, calls and temporaries by their digest,
+    // against the shadow's own C's and X's. `swept_differences` counts the expressions that differ in any, which must be
+    // none. Of the entries compared, `swept_references` are the globals' the patch changed and `swept_call_targets` the
+    // compared expressions' direct calls, whose rows' targets a splice patches too.
+    uint64_t swept_expressions;
+    uint64_t swept_refused[NODE_MACHINE_REFUSALS];
+    uint64_t swept_entries;
+    uint64_t swept_unkept;
+    uint64_t swept_compared;
+    uint64_t swept_compared_entries;
+    uint64_t swept_references;
+    uint64_t swept_call_targets;
+    uint64_t swept_differences;
+    uint64_t swept_root_differences;
+    uint64_t swept_refusal_differences;
+    uint64_t swept_tape_differences;
+    uint64_t swept_side_differences;
+    uint32_t swept_listed;
+    // --front-tests: the census's tests at reader time after T (PPOptions.node_reader, `reader` its bits). The files'
+    // reports summed (NodeFrontTypes'): the expressions they ran on and refused, by test, and the nodes they asked of
+    // T's records that weren't there. And after the pipeline, the census's own verdict on each such root against reader
+    // time's, test by test: the roots the lowering popped (`tested_compared`), and those it never did
+    // (`tested_compared_unpopped`), which the census reads again from the stream for it. `tested_unsound` counts the
+    // expressions reader time takes (no test refuses, and C and X take it) that a test of the census's refuses, which
+    // must be none; `tested_lowering` those it takes that the census refuses for the lowering's own facts alone (a body
+    // that tracks its stack, a node popped twice), which a splice reads where it pops the root; `tested_differences`
+    // those where a test differs otherwise than reader time may (its actions' warnings are at least the graph run's, a
+    // packed unit's addresses at least the witnesses', and its events the reader's own alone), which must be none too;
+    // `tested_kind_differences` the popped roots whose kind the front's root gives otherwise than the control.
+    // By test: the expressions reader time alone refuses by it, and the census alone.
+    uint8_t reader;
+    uint64_t tested_expressions;
+    uint64_t tested_refused;
+    uint64_t tested_any[NODE_CENSUS_TESTS];
+    uint64_t tested_first[NODE_CENSUS_TESTS];
+    uint64_t tested_missed;
+    uint64_t tested_compared;
+    uint64_t tested_compared_unpopped;
+    uint64_t tested_taken;
+    uint64_t tested_taken_nodes;
+    uint64_t tested_unsound;
+    uint64_t tested_lowering;
+    uint64_t tested_differences;
+    uint64_t tested_kind_differences;
+    uint64_t tested_policy_differences;
+    uint64_t tested_reader_alone[NODE_CENSUS_TESTS];
+    uint64_t tested_census_alone[NODE_CENSUS_TESTS];
+    uint64_t tested_census_refused;
+    uint64_t tested_census_taken_refused;
+    uint64_t tested_census_taken_refused_nodes;
+    uint32_t tested_listed;
+    // Optional: each compared root's result, up to `tested_out_capacity` of them (c_check_node_census_test.c's).
+    struct NodeShadowTested* tested_out;
+    uint32_t tested_out_count;
+    uint32_t tested_out_capacity;
+    // --verify with T at reader time: the nodes a row or a rule typed there whose value isn't the action's, and those
+    // whose action gives a warning; and the latter after the pipeline, of the shadow's own T.
+    uint64_t reader_twin_differences;
+    uint64_t reader_twin_warnings;
+    uint64_t twin_warnings;
     // --interleave N: the interleaved sets' chunk (0: a body's expressions), the current file's scratch for the census's
     // walk in the timing passes, the walks' tests (so that the walks aren't dead code), and the sweeps' own TSC ticks in
     // an interleaved set: the last pass's, and each file's least over the passes, summed.
@@ -2164,8 +2699,16 @@ static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* ma
             // A row of the tape's calls (so that the rows the tape names, distinct as the stream's are, are all its own).
             const bool call = kind == BUSTER_TYPED_CALL && t < machine->entry_count && machine->tape[t] < machine->call_count && function->values[e] >= machine->tape[t];
             base = call && base == UINT64_MAX ? function->values[e] - machine->tape[t] : base;
-            same = same && t < machine->entry_count && machine->kinds[t] == kind && machine->classes[t] == function->classes[e] &&
-                   (node_shadow_local_kind(kind) ? node_shadow_same_local(s, machine->tape[t], function->values[e]) :
+            // A named result's address (#1375, #2882): the body builds that local where its hidden pointer points, and
+            // check_lower_named_rewrite made each LOCAL_ADDRESS of it a LOCAL of the hidden pointer after the tasks wrote
+            // them. The tape has the address, as the tasks had: the two are the same entry where the tape's object is
+            // the named local's, the body's one object there.
+            const bool named = s->named_local != BUSTER_CHECK_NONE && kind == BUSTER_TYPED_LOCAL && function->values[e] == s->hidden_local &&
+                               t < machine->entry_count && machine->kinds[t] == BUSTER_TYPED_LOCAL_ADDRESS;
+            same = same && t < machine->entry_count && machine->classes[t] == function->classes[e] &&
+                   (named                        ? node_shadow_same_local(s, machine->tape[t], s->named_local) :
+                    machine->kinds[t] != kind    ? false :
+                    node_shadow_local_kind(kind) ? node_shadow_same_local(s, machine->tape[t], function->values[e]) :
                     branch                       ? node_shadow_same_label(s, machine, pop, machine->tape[t], function->values[e]) :
                     kind == BUSTER_TYPED_CALL    ? call && machine->tape[t] + base == function->values[e] :
                                                    machine->tape[t] == function->values[e]);
@@ -2336,6 +2879,169 @@ static void node_shadow_typed(NodeShadow* shadow, const NodeCensusScratch* s, No
     }
 }
 
+// Whether an entry of kind `kind` holds a global's symbol: at reader time its object, which stands for it.
+static bool node_shadow_global_kind(uint8_t kind)
+{
+    return kind == BUSTER_TYPED_GLOBAL || kind == BUSTER_TYPED_GLOBAL_ADDRESS || kind == BUSTER_TYPED_STORE_GLOBAL || kind == BUSTER_TYPED_SET_GLOBAL;
+}
+
+// C's and X's results on the machine's current expression (root `root`, their refusal `refusal`, and what its pop gave
+// it: the conversion's target `target` and the object `object`) against reader time's on the same root (`typed`,
+// --front-sweeps): the same target and object, the same refusal and, where both took it, the same tape once reader
+// time's is patched with the program's symbols (a global's entry holds its object there), and the same labels, calls
+// and temporaries by their digest. A root reader time didn't sweep (T refused it there, or didn't run) isn't compared.
+static void node_shadow_swept(NodeShadow* shadow, const NodeCensusScratch* s, const NodeFrontTypes* typed, uint32_t root, NodeMachineRefusal refusal, TypeId target,
+                              uint32_t object)
+{
+    const NodeMachine* machine = s->machine;
+    const CheckProgram* program = s->program;
+    if (typed->sweep_refusals != NULL && root < typed->node_capacity && (typed->refusals[root] & BUSTER_NODE_FRONT_TYPED_SWEPT) != 0)
+    {
+        const NodeMachineRefusal earlier = (NodeMachineRefusal)typed->sweep_refusals[root];
+        const bool rooted = typed->targets[root] == target && typed->objects[root] == object;
+        const bool refused = earlier == refusal;
+        const bool taken = refused && refusal == NODE_MACHINE_TAKEN && typed->tape_counts[root] != UINT32_MAX;
+        const uint32_t entries = taken ? typed->tape_counts[root] : 0;
+        const uint64_t first = typed->tape_firsts[root];
+        bool tape = !taken || entries == machine->entry_count;
+        uint32_t at = UINT32_MAX;
+        uint64_t references = 0;
+        for (uint32_t e = 0; taken && tape && e < entries; e += 1)
+        {
+            const uint8_t kind = typed->tape_kinds[first + e];
+            const uint64_t value = typed->tape_values[first + e];
+            const bool global = node_shadow_global_kind(kind);
+            // The splice's patch: a global's entry holds its object at reader time, and its symbol is the program's.
+            const uint64_t patched = !global ? value : value < program->object_count ? program->object_symbols[value] : 0;
+            tape = kind == machine->kinds[e] && typed->tape_classes[first + e] == machine->classes[e] && patched == machine->tape[e];
+            references += global;
+            at = tape ? at : e;
+        }
+        const bool side = !taken || typed->side_digests[root] == node_machine_side_digest(machine);
+        uint64_t targets = 0;
+        for (uint32_t call = 0; taken && call < machine->call_count; call += 1)
+        {
+            targets += node_machine_call_target(machine, machine->call_records[call]) != 0;
+        }
+        const bool same = rooted && refused && tape && side;
+        shadow->swept_compared += 1;
+        shadow->swept_compared_entries += entries;
+        shadow->swept_references += references;
+        shadow->swept_call_targets += targets;
+        shadow->swept_differences += !same;
+        shadow->swept_root_differences += !rooted;
+        shadow->swept_refusal_differences += rooted && !refused;
+        shadow->swept_tape_differences += rooted && refused && !tape;
+        shadow->swept_side_differences += rooted && refused && tape && !side;
+        if (!same && shadow->swept_listed < node_census_list)
+        {
+            const uint32_t e = at != UINT32_MAX ? at : 0;
+            const bool entry = at != UINT32_MAX && at < machine->entry_count;
+            shadow->swept_listed += 1;
+            printf("node-shadow: reader-time C and X difference file=%s line=%u target=%u (pop %u) object=%u (pop %u) refusal=%s (reader %s) entries=%u (reader %u) "
+                   "entry=%u kind=%u (reader %u) class=%u (reader %u) value=%" PRIu64 " (reader %" PRIu64 ") side=%s\n",
+                   s->file, node_census_line(s->pp, program->parser, program->input->graph.tokens[root]), typed->targets[root], target, typed->objects[root], object,
+                   node_machine_refusal_names[refusal], node_machine_refusal_names[earlier < NODE_MACHINE_REFUSALS ? earlier : NODE_MACHINE_TAKEN], machine->entry_count,
+                   typed->tape_counts[root], at, entry ? machine->kinds[e] : 0, entry ? typed->tape_kinds[first + e] : 0, entry ? machine->classes[e] : 0,
+                   entry ? typed->tape_classes[first + e] : 0, entry ? machine->tape[e] : 0, entry ? typed->tape_values[first + e] : 0, side ? "same" : "DIFFERENT");
+        }
+    }
+}
+
+// One compared root's result, for the tests (NodeShadow.tested_out): its line, reader time's tests and the census's, and
+// whether reader time takes the expression (no test refuses it, and C and X take it).
+typedef struct NodeShadowTested NodeShadowTested;
+struct NodeShadowTested
+{
+    uint32_t line;
+    uint64_t reader;
+    uint64_t census;
+    bool taken;
+    bool popped;
+};
+
+// The census's verdict on the expression whose root is node `root` (its tests `census`, and for a root the lowering
+// popped its kind `context` and its `nodes` evaluated nodes) against reader time's (`typed`, --front-tests), test by test.
+// The lowering's own facts aren't reader time's to know; its actions' warnings are at least the graph run's; and its
+// events are the reader's own so far. A root the tests didn't run on there (T refused it, or didn't run) isn't compared.
+static void node_shadow_tested(NodeShadow* shadow, const NodeCensusScratch* s, const NodeFrontTypes* typed, uint32_t root, uint64_t census, NodeCensusRoot context,
+                               uint64_t nodes, bool popped)
+{
+    if (typed->tests != NULL && root < typed->node_capacity && (typed->refusals[root] & BUSTER_NODE_FRONT_TYPED_TESTED) != 0)
+    {
+        const uint64_t reader = typed->tests[root];
+        const uint64_t lowering = UINT64_C(1) << NODE_CENSUS_TRACKED | UINT64_C(1) << NODE_CENSUS_POPPED_AGAIN;
+        const uint64_t reader_alone = reader & ~census & ~lowering;
+        const uint64_t census_alone = census & ~reader & ~lowering;
+        const bool kind = !popped || typed->kinds[root] == (uint8_t)context;
+        const bool swept = typed->sweep_refusals == NULL ||
+                           ((typed->refusals[root] & BUSTER_NODE_FRONT_TYPED_SWEPT) != 0 && typed->sweep_refusals[root] == NODE_MACHINE_TAKEN);
+        const bool taken = reader == 0 && swept;
+        // The lowering's own facts are a splice's to read where it pops the root: no test of reader time's.
+        const bool unsound = taken && (census & ~lowering) != 0;
+        const uint64_t more = UINT64_C(1) << NODE_CENSUS_ACTION_WARNING | UINT64_C(1) << NODE_CENSUS_PACKED_MEMBER;
+        const bool differs = (reader_alone & ~more) != 0 || (census_alone & ~(UINT64_C(1) << NODE_CENSUS_EVENT)) != 0;
+        shadow->tested_lowering += taken && census != 0 && (census & ~lowering) == 0;
+        shadow->tested_compared += popped;
+        shadow->tested_compared_unpopped += !popped;
+        shadow->tested_taken += taken;
+        shadow->tested_taken_nodes += taken ? nodes : 0;
+        shadow->tested_unsound += unsound;
+        shadow->tested_differences += differs;
+        shadow->tested_kind_differences += !kind;
+        shadow->tested_census_refused += census != 0;
+        // What the tests add to the machine's own refusals: the expressions C and X take, or would, that the census refuses.
+        shadow->tested_census_taken_refused += swept && census != 0;
+        shadow->tested_census_taken_refused_nodes += swept && census != 0 ? nodes : 0;
+        for (uint64_t bits = reader_alone; bits != 0; bits &= bits - 1)
+        {
+            shadow->tested_reader_alone[__builtin_ctzll(bits)] += 1;
+        }
+        for (uint64_t bits = census_alone | (census & lowering); bits != 0; bits &= bits - 1)
+        {
+            shadow->tested_census_alone[__builtin_ctzll(bits)] += 1;
+        }
+        if (shadow->tested_out != NULL && shadow->tested_out_count < shadow->tested_out_capacity)
+        {
+            const CheckProgram* program = s->program;
+            shadow->tested_out[shadow->tested_out_count++] = (NodeShadowTested){
+                .line = node_census_line(s->pp, program->parser, program->input->graph.tokens[root]),
+                .reader = reader,
+                .census = census,
+                .taken = taken,
+                .popped = popped,
+            };
+        }
+        if ((unsound || differs || !kind) && shadow->tested_listed < node_census_list)
+        {
+            const CheckProgram* program = s->program;
+            shadow->tested_listed += 1;
+            printf("node-shadow: reader-time tests difference file=%s line=%u %s tests=%#" PRIx64 " (reader %#" PRIx64 ") kind=%s (reader %s) reader-takes=%s%s\n", s->file,
+                   node_census_line(s->pp, program->parser, program->input->graph.tokens[root]), popped ? "popped" : "never-lowered", census, reader,
+                   node_census_root_names[context], node_census_root_names[typed->kinds[root] < NODE_CENSUS_ROOTS ? typed->kinds[root] : NODE_CENSUS_ROOT_OTHER],
+                   taken ? "yes" : "no", unsound ? " UNSOUND" : "");
+        }
+    }
+}
+
+// Whether token `token` is in a body with a diagnostic or floating-point pragma, by the outermost braces around each
+// pragma: node_census_region's answer for a root no lowered body holds.
+static bool node_census_region_at(const CheckProgram* program, uint32_t token)
+{
+    const CheckInput* input = program->input;
+    const uint32_t diagnostics = input->diagnostic_pragmas != NULL ? input->diagnostic_pragmas->count : 0;
+    const uint32_t pragmas = diagnostics + (input->fp_pragmas != NULL ? input->fp_pragma_count : 0);
+    bool found = false;
+    for (uint32_t i = 0; i < pragmas && !found; i += 1)
+    {
+        const uint32_t at = i < diagnostics ? input->diagnostic_pragmas->records[i].token : input->fp_pragmas[i - diagnostics].token;
+        uint32_t opening = 0;
+        uint32_t closing = 0;
+        found = node_census_reader_braces(program->parser, at, &opening, &closing) && token > opening && token < closing;
+    }
+    return found;
+}
+
 // The shadow of the census's taken expression whose root pop is `p` of the body's `pops`, of root kind `context`, whose
 // walk reached `walked` nodes, `nodes` of them evaluated.
 static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, const CheckLowerOwnerPop* pops, uint32_t p, NodeCensusRoot context, uint32_t walked,
@@ -2371,8 +3077,13 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
         // The sweeps one at a time, so that T's records are compared with reader time's before C writes its own.
         refusal = node_machine_type(machine, first, root, records);
         node_shadow_typed(shadow, s, typed, first, root, records, refusal);
+        const bool swept = refusal == NODE_MACHINE_TAKEN;
         refusal = refusal == NODE_MACHINE_TAKEN ? node_machine_contexts(machine, root_context, pop->target, object) : refusal;
         refusal = refusal == NODE_MACHINE_TAKEN ? node_machine_expand(machine, object) : refusal;
+        if (swept)
+        {
+            node_shadow_swept(shadow, s, typed, root, refusal, pop->target, object);
+        }
     }
     else if (ran)
     {
@@ -3327,14 +4038,66 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
                 printf("node-shadow: reader-time T refused=%s expressions=%" PRIu64 "\n", node_machine_refusal_names[refusal], shadow->typed_refused[refusal]);
             }
         }
-        printf("node-shadow: reader-time T lowered=%" PRIu64 " (%.2f%%) never-lowered=%" PRIu64 " (taken %" PRIu64 ", context %" PRIu64 ") compared=%" PRIu64
+        printf("node-shadow: reader-time T lowered=%" PRIu64 " (%.2f%%) never-lowered=%" PRIu64 " (taken %" PRIu64 ", context %" PRIu64 "; of them in a lowered body: taken %"
+               PRIu64 ", context %" PRIu64 ") declarations'-discards-not-run=%" PRIu64 " compared=%" PRIu64
                " (records %" PRIu64 ") differences=%" PRIu64 " (range %" PRIu64 ", refusal %" PRIu64 ") taken-expressions-the-front-left=%" PRIu64
                " the-front's-not-run=%" PRIu64 "\n",
                shadow->typed_popped, node_census_share(shadow->typed_popped, shadow->typed_expressions), shadow->typed_expressions - shadow->typed_popped,
-               shadow->typed_unpopped[NODE_MACHINE_TAKEN], shadow->typed_unpopped[NODE_MACHINE_REFUSED_CONTEXT], shadow->typed_compared, shadow->typed_compared_records,
+               shadow->typed_unpopped[NODE_MACHINE_TAKEN], shadow->typed_unpopped[NODE_MACHINE_REFUSED_CONTEXT], shadow->typed_unpopped_inside[NODE_MACHINE_TAKEN],
+               shadow->typed_unpopped_inside[NODE_MACHINE_REFUSED_CONTEXT], shadow->typed_discards, shadow->typed_compared, shadow->typed_compared_records,
                shadow->typed_differences, shadow->typed_range_differences, shadow->typed_refusal_differences, shadow->typed_missing, shadow->typed_unrun);
         printf("node-shadow: reader-time T objects=%" PRIu64 " differences=%" PRIu64 " library-calls=%" PRIu64 " differences=%" PRIu64 "\n", shadow->typed_objects,
                shadow->typed_object_differences, shadow->typed_library_calls, shadow->typed_library_differences);
+    }
+    if ((shadow->front & BUSTER_NODE_FRONT_SWEEPS) != 0 && shadow->front_units != 0)
+    {
+        // C and X at reader time: what they ran on and made (the ticks above are then T's, C's and X's together), then how
+        // they compare with the shadow's own after the pipeline.
+        if ((shadow->reader & BUSTER_NODE_READER_TESTS) != 0)
+        {
+            printf("node-shadow: reader-time tests expressions=%" PRIu64 " refused=%" PRIu64 " nodes-outside-the-records=%" PRIu64 " units-whose-enabled-warnings-differ=%" PRIu64 "\n",
+                   shadow->tested_expressions, shadow->tested_refused, shadow->tested_missed, shadow->tested_policy_differences);
+            for (uint32_t t = 0; t < NODE_CENSUS_TESTS; t += 1)
+            {
+                if (shadow->tested_any[t] != 0)
+                {
+                    printf("node-shadow: reader-time tests refused test=%s expressions=%" PRIu64 " first=%" PRIu64 "\n", node_census_test_names[t], shadow->tested_any[t],
+                           shadow->tested_first[t]);
+                }
+            }
+            printf("node-shadow: reader-time tests compared=%" PRIu64 " never-lowered=%" PRIu64 " taken-there=%" PRIu64 " (nodes %" PRIu64 ") taken-there-and-refused-by-the-census=%" PRIu64
+                   " (for the lowering's facts alone %" PRIu64 ") differences=%" PRIu64 " root-kind-differences=%" PRIu64 " refused-by-the-census=%" PRIu64 " (of them past C and X %"
+                   PRIu64 ", nodes %" PRIu64 ")\n",
+                   shadow->tested_compared, shadow->tested_compared_unpopped, shadow->tested_taken, shadow->tested_taken_nodes, shadow->tested_unsound, shadow->tested_lowering,
+                   shadow->tested_differences, shadow->tested_kind_differences, shadow->tested_census_refused, shadow->tested_census_taken_refused,
+                   shadow->tested_census_taken_refused_nodes);
+            for (uint32_t t = 0; t < NODE_CENSUS_TESTS; t += 1)
+            {
+                if (shadow->tested_reader_alone[t] != 0 || shadow->tested_census_alone[t] != 0)
+                {
+                    printf("node-shadow: reader-time tests test=%s reader-alone=%" PRIu64 " census-alone=%" PRIu64 "\n", node_census_test_names[t], shadow->tested_reader_alone[t],
+                           shadow->tested_census_alone[t]);
+                }
+            }
+        }
+        if ((shadow->reader & BUSTER_NODE_READER_VERIFY) != 0)
+        {
+            printf("node-shadow: reader-time verify nodes-whose-value-is-not-the-action's=%" PRIu64 " nodes-whose-action-warns=%" PRIu64 "\n", shadow->reader_twin_differences,
+                   shadow->reader_twin_warnings);
+        }
+        printf("node-shadow: reader-time C and X expressions=%" PRIu64 " taken=%" PRIu64 " entries=%" PRIu64 " tapes-not-kept=%" PRIu64 "\n", shadow->swept_expressions,
+               shadow->swept_refused[NODE_MACHINE_TAKEN], shadow->swept_entries, shadow->swept_unkept);
+        for (uint32_t refusal = NODE_MACHINE_TAKEN + 1; refusal < NODE_MACHINE_REFUSALS; refusal += 1)
+        {
+            if (shadow->swept_refused[refusal] != 0)
+            {
+                printf("node-shadow: reader-time C and X refused=%s expressions=%" PRIu64 "\n", node_machine_refusal_names[refusal], shadow->swept_refused[refusal]);
+            }
+        }
+        printf("node-shadow: reader-time C and X compared=%" PRIu64 " (entries %" PRIu64 ") differences=%" PRIu64 " (root %" PRIu64 ", refusal %" PRIu64 ", tape %" PRIu64
+               ", labels-and-calls %" PRIu64 ") patched: globals'-entries=%" PRIu64 " direct-calls=%" PRIu64 "\n",
+               shadow->swept_compared, shadow->swept_compared_entries, shadow->swept_differences, shadow->swept_root_differences, shadow->swept_refusal_differences,
+               shadow->swept_tape_differences, shadow->swept_side_differences, shadow->swept_references, shadow->swept_call_targets);
     }
     // The reader's coded walk in the files' one reading, by its parts (TSC ticks): beside the front's where it ran, and
     // alone where it didn't, the walk as it is.
@@ -3413,6 +4176,10 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t 
             tests |= region ? UINT64_C(1) << NODE_CENSUS_REGION : 0;
             census->largest = walked > census->largest ? walked : census->largest;
             node_census_count(census, s, tests, s->expression_nodes[p], context, pops[p].node);
+            if (census->shadow != NULL && typed != NULL)
+            {
+                node_shadow_tested(census->shadow, s, typed, pops[p].node, tests, context, s->expression_nodes[p], true);
+            }
             if (census->shadow != NULL && tests == 0)
             {
                 node_shadow_expression(census->shadow, s, pops, p, context, walked, s->expression_nodes[p]);
@@ -3437,20 +4204,29 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
 {
     static LowerSource source;
     lower_source_node_front = census->shadow != NULL ? census->shadow->front : 0;
+    lower_source_node_reader = census->shadow != NULL ? census->shadow->reader : 0;
     const bool valid = lower_source_open(&source, file, options, option_count);
     lower_source_node_front = 0;
+    lower_source_node_reader = 0;
     const bool prepared = source.prepared;
     CheckCorpusPath* path = &source.path;
     CheckProgramSelection selected = source.selected;
     const uint64_t log_capacity = prepared ? 4 * (uint64_t)selected.program.stream->count + 65536 : 0;
     // Each body's labels: its controls' and the ones its tasks number (the shadow's branches are read there).
     const uint64_t label_capacity = prepared ? 2 * (uint64_t)selected.program.control_count + selected.program.body_count + 4 * (uint64_t)selected.program.stream->count + 65536 : 0;
-    Arena log_arena = arena_reserve(log_capacity * sizeof(CheckLowerOwnerPop) + label_capacity * sizeof(uint32_t) + 8192);
+    // Each body's named result, two words a body (CheckLowerOwners.named): none until its body is lowered.
+    const uint64_t named_capacity = prepared ? 2 * ((uint64_t)selected.program.body_count + 1) : 0;
+    Arena log_arena = arena_reserve(log_capacity * sizeof(CheckLowerOwnerPop) + (label_capacity + named_capacity) * sizeof(uint32_t) + 8192);
     CheckLowerOwners owners = { .capacity = log_capacity, .label_capacity = label_capacity };
     owners.pops = prepared ? BUSTER_ARENA_PUSH_ARRAY(&log_arena, CheckLowerOwnerPop, owners.capacity) : 0;
     owners.labels = prepared ? BUSTER_ARENA_PUSH_ARRAY(&log_arena, uint32_t, owners.label_capacity) : 0;
+    owners.named = prepared ? BUSTER_ARENA_PUSH_ARRAY(&log_arena, uint32_t, named_capacity) : 0;
+    if (owners.named != 0)
+    {
+        memset(owners.named, 0xff, named_capacity * sizeof(uint32_t));
+    }
     CheckProgramLowered lowered = { 0 };
-    const bool lowering = prepared && owners.pops != 0 && owners.labels != 0 &&
+    const bool lowering = prepared && owners.pops != 0 && owners.labels != 0 && owners.named != 0 &&
                           check_program_lower_owners(&lowered, &selected.program, &owners, &path->output_arena, &path->scratch);
     const bool complete = lowering && !owners.overflow;
     if (complete)
@@ -3469,9 +4245,17 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
         }
         NodeCensusScratch s = { .program = &selected.program, .pp = &source.pp, .file = file };
         s.policy = node_census_policy(&source.pp, selected.program.input);
-        node_census_assign_enum = s.policy.assign_enum;
         uint32_t** node_columns[] = { &s.marks, &s.parents, &s.depths, &s.node_controls, &s.list, &s.stack, &s.node_pop };
         bool room = node_census_events(&s, path, &scratch);
+        s.type_bits_count = selected.program.types->types.count;
+        s.type_bits = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, (uint64_t)s.type_bits_count + 1);
+        s.declaration_facts = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, (uint64_t)source.parser.tokens.count + 1);
+        room = room && s.type_bits != NULL && s.declaration_facts != NULL;
+        if (room)
+        {
+            memset(s.type_bits, 0, (uint64_t)s.type_bits_count + 1);
+            memset(s.declaration_facts, 0, (uint64_t)source.parser.tokens.count + 1);
+        }
         for (uint32_t c = 0; room && c < BUSTER_ARRAY_LENGTH(node_columns); c += 1)
         {
             *node_columns[c] = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, (uint64_t)nodes + 1);
@@ -3551,6 +4335,8 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                     s.owners = lowered.entry_tokens[b];
                     s.labels = owners.labels;
                     s.label_count = owners.label_count;
+                    s.named_local = owners.named[2 * (uint64_t)b];
+                    s.hidden_local = owners.named[2 * (uint64_t)b + 1];
                     s.body_stamp = b + 1;
                     node_census_body(census, &s, b, owners.pops + first, (uint32_t)(end - first));
                 }
@@ -3563,6 +4349,7 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                     shadow->action_ops[op] += machine.action_ops[op];
                 }
                 shadow->scratch = &s;
+                shadow->twin_warnings += machine.twin_warnings;
                 node_shadow_time(shadow, &machine, shadow->file_nodes);
                 shadow->file_nodes = 0;
                 if (s.facts != NULL)
@@ -3619,9 +4406,30 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                     shadow->typed_setup_ticks += typed->setup_ticks;
                     shadow->typed_late_types += typed->late_types;
                     shadow->typed_skipped += typed->skipped;
+                    shadow->typed_discards += typed->discards;
+                    shadow->swept_expressions += typed->swept;
+                    shadow->swept_entries += typed->swept_entries;
+                    shadow->swept_unkept += typed->swept_unkept;
                     for (uint32_t refusal = 0; refusal < NODE_MACHINE_REFUSALS; refusal += 1)
                     {
                         shadow->typed_refused[refusal] += typed->refused[refusal];
+                        shadow->swept_refused[refusal] += typed->swept_refused[refusal];
+                    }
+                    shadow->reader_twin_differences += typed->twin_differences;
+                    shadow->reader_twin_warnings += typed->twin_warnings;
+                    if (typed->tests != NULL)
+                    {
+                        shadow->tested_expressions += typed->tested;
+                        shadow->tested_refused += typed->tested_refused;
+                        shadow->tested_missed += typed->tested_missed;
+                        for (uint32_t t = 0; t < NODE_CENSUS_TESTS; t += 1)
+                        {
+                            shadow->tested_any[t] += typed->tested_any[t];
+                            shadow->tested_first[t] += typed->tested_first[t];
+                        }
+                        // The enabled warnings as reader time read them, against the pipeline's.
+                        const NodeCensusPolicy policy = node_census_policy(&source.pp, selected.program.input);
+                        shadow->tested_policy_differences += typed->policy == NULL || memcmp(typed->policy, &policy, sizeof(policy)) != 0;
                     }
                     const CheckProgram* program = &selected.program;
                     for (uint32_t node = 0; node < path->input.graph.count && node < typed->node_capacity; node += 1)
@@ -3630,6 +4438,31 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                         const uint32_t refusal = typed->refusals[node] & BUSTER_NODE_FRONT_TYPED_REFUSAL;
                         shadow->typed_popped += typed->counts[node] != 0 && popped;
                         shadow->typed_unpopped[refusal < NODE_MACHINE_REFUSALS ? refusal : 0] += typed->counts[node] != 0 && !popped;
+                        if (typed->counts[node] != 0 && !popped)
+                        {
+                            // In a body the lowering lowered, or not: by the bodies' braces.
+                            const uint32_t token = path->input.graph.tokens[node];
+                            bool inside = false;
+                            for (uint32_t b = 0; b < program->body_count && !inside; b += 1)
+                            {
+                                const uint32_t opening = program->bodies[b].opening;
+                                const uint32_t closing = opening < source.parser.tokens.count ? source.parser.tree.parents[opening] : 0;
+                                inside = lowered.entry_tokens[b] != 0 && token > opening && token < closing;
+                            }
+                            shadow->typed_unpopped_inside[refusal < NODE_MACHINE_REFUSALS ? refusal : 0] += inside;
+                        }
+                        if (typed->tests != NULL && typed->counts[node] != 0 && !popped && (typed->refusals[node] & BUSTER_NODE_FRONT_TYPED_TESTED) != 0)
+                        {
+                            // A root the lowering never popped (a body the selection dropped): the census's tests on it
+                            // now, from the stream, with the root's kind and its object's type as reader time gave them.
+                            const NodeCensusRoot context = typed->kinds[node] < NODE_CENSUS_ROOTS ? (NodeCensusRoot)typed->kinds[node] : NODE_CENSUS_ROOT_OTHER;
+                            uint32_t walked = 0;
+                            s.given_declared = typed->declared[node];
+                            uint64_t tests = node_census_expression(&s, node, 0, context, &walked);
+                            s.given_declared = 0;
+                            tests |= node_census_region_at(program, path->input.graph.tokens[node]) ? UINT64_C(1) << NODE_CENSUS_REGION : 0;
+                            node_shadow_tested(shadow, &s, typed, node, tests, context, walked, false);
+                        }
                         if (typed->library[node] != 0)
                         {
                             // Reader time's answer for the call against the program's, which reads the stream.
@@ -3691,6 +4524,7 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
 
 static void node_census_report(const NodeCensus* census)
 {
+
     const uint64_t nodes = census->nodes;
     printf("node-census: files=%" PRIu64 " bodies=%" PRIu64 " expressions=%" PRIu64 " evaluated-nodes=%" PRIu64 " nodes-per-expression=%.2f largest=%" PRIu64
            " failures=%" PRIu64 "\n",
@@ -3804,13 +4638,22 @@ static int run_node_census(int count, char** arguments)
         {
             shadow.front = (uint8_t)((shadow.front & ~BUSTER_NODE_FRONT_ORDER) | (strcmp(arguments[i], "--front") == 0 ? BUSTER_NODE_FRONT_AFTER : BUSTER_NODE_FRONT_BEFORE));
         }
-        else if (strcmp(arguments[i], "--front-lean") == 0 || strcmp(arguments[i], "--front-warm") == 0 || strcmp(arguments[i], "--front-types") == 0)
+        else if (strcmp(arguments[i], "--front-lean") == 0 || strcmp(arguments[i], "--front-warm") == 0 || strcmp(arguments[i], "--front-types") == 0 ||
+                 strcmp(arguments[i], "--front-sweeps") == 0)
         {
-            // The lean front, the front with its arrays touched beforehand, or T at reader time on the front's
-            // expressions: after the walk unless --front-first says before.
-            const uint8_t flag = strcmp(arguments[i], "--front-lean") == 0 ? BUSTER_NODE_FRONT_LEAN : strcmp(arguments[i], "--front-warm") == 0 ? BUSTER_NODE_FRONT_WARM :
-                                                                                                                                                  BUSTER_NODE_FRONT_TYPES;
+            // The lean front, the front with its arrays touched beforehand, T at reader time on the front's expressions,
+            // or T, C and X there: after the walk unless --front-first says before.
+            const uint8_t flag = strcmp(arguments[i], "--front-lean") == 0   ? BUSTER_NODE_FRONT_LEAN :
+                                 strcmp(arguments[i], "--front-warm") == 0   ? BUSTER_NODE_FRONT_WARM :
+                                 strcmp(arguments[i], "--front-types") == 0 ? BUSTER_NODE_FRONT_TYPES :
+                                                                               BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS;
             shadow.front = (uint8_t)(shadow.front | flag | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
+        }
+        else if (strcmp(arguments[i], "--front-tests") == 0)
+        {
+            // The census's tests at reader time, between T and C and X there.
+            shadow.front = (uint8_t)(shadow.front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
+            shadow.reader |= BUSTER_NODE_READER_TESTS;
         }
         else if (strcmp(arguments[i], "--interleave") == 0)
         {
@@ -3853,6 +4696,8 @@ static int run_node_census(int count, char** arguments)
     // kernel's rules on whole records.
     valid = valid && file_count != 0 && (shadowed || (!shadow.scalar && !shadow.verify && !shadow.fused && !shadow.interleave && !shadow.facts)) &&
             !(shadow.facts_operators && shadow.facts_mode == BUSTER_NODE_FACTS_LOADS) && !(shadow.facts_reads && shadow.facts_mode != BUSTER_NODE_FACTS_WHOLE);
+    // --verify with T at reader time checks its rows and rules against the action there too.
+    shadow.reader |= shadow.verify && (shadow.front & BUSTER_NODE_FRONT_TYPES) != 0 ? BUSTER_NODE_READER_VERIFY : 0;
     NodeCensus census = { .shadow = shadowed ? &shadow : NULL };
     for (uint32_t i = 0; valid && i < file_count; i += 1)
     {
@@ -3885,7 +4730,9 @@ static int run_node_census(int count, char** arguments)
                                           shadow.facts_differences != 0 || shadow.facts_list_differences != 0 || shadow.facts_failures != 0 ||
                                           shadow.facts_conversions != shadow.facts_conversions_derived || shadow.reads.same_differences != 0 ||
                                           shadow.reads.misplaced != 0 || shadow.front_differences != 0 || shadow.typed_differences != 0 ||
-                                          shadow.typed_object_differences != 0 || shadow.typed_library_differences != 0);
+                                          shadow.typed_object_differences != 0 || shadow.typed_library_differences != 0 || shadow.swept_differences != 0 ||
+                                          shadow.tested_unsound != 0 || shadow.tested_differences != 0 || shadow.tested_kind_differences != 0 ||
+                                          shadow.tested_missed != 0 || shadow.tested_policy_differences != 0 || shadow.reader_twin_differences != 0);
     return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
 }
 
