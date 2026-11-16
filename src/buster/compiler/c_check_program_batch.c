@@ -117,6 +117,10 @@ static inline __attribute__((always_inline)) bool check_lower_plain(CheckLowerWr
         {
             check_lower_operand(writer, node, 0, op == CHECK_OP_SELECT && address, op == CHECK_OP_SELECT ? 0 : check_stream_type(stream, node));
         }
+        else if (op == CHECK_OP_CONDITION && check_lower_condition_branches(writer, node))
+        {
+            // A statement's condition with `&&` or `||`: its branches, as check_lower_expand writes them (#2883).
+        }
         else
         {
             const TypeId type = stream->conversions[node].operands[0].type;

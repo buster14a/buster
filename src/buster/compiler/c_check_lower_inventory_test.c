@@ -3,10 +3,10 @@
 //
 // measure-lowering-templates' checks (#1048), on an original fixture: the owners' lowering gives the plain lowering's
 // entries (lower_inventory_file fails the file otherwise), every entry has an owner and every node's pattern accounts
-// for its subtree (no stray entry), the exceptions are the fixture's (one call, one && and one ?:), every ordinary key
-// is deterministic, a local's read is the one entry LOCAL of its class, an operand's conversion is its node's ('V'), and
-// the command refuses an unknown category and a missing file. Include after c_check_lower_inventory.c; test-checker
-// calls this through its forward declaration.
+// for its subtree (no stray entry), the exceptions are the fixture's (one call, one && and one ?:, the && a value: a
+// condition's is its branches, #2883), every ordinary key is deterministic, a local's read is the one entry LOCAL of its
+// class, an operand's conversion is its node's ('V'), and the command refuses an unknown category and a missing file.
+// Include after c_check_lower_inventory.c; test-checker calls this through its forward declaration.
 #ifndef BUSTER_C_CHECK_LOWER_INVENTORY_TEST_INCLUDED
 #define BUSTER_C_CHECK_LOWER_INVENTORY_TEST_INCLUDED
 
@@ -40,7 +40,8 @@ static __attribute__((noinline)) void check_test_lowering_inventory(CheckTest* t
         "    }\n"
         "    counter = counter + 1;\n"
         "    (void)f(n);\n"
-        "    return i < n && c != 0 ? (int)sum : -1;\n"
+        "    const int ok = i < n && c != 0;\n"
+        "    return ok ? (int)sum : -1;\n"
         "}\n"
         "int f(int a) { return a; }\n";
     char directory[] = "/tmp/buster-lowering-templates-XXXXXX";

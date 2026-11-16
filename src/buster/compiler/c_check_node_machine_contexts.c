@@ -157,6 +157,50 @@ static __attribute__((noinline)) bool node_machine_sinks(const NodeMachine* mach
     return sinks;
 }
 
+// Whether record `r` is an operator a condition takes as branches, the lowering's rule (check_lower_branch_operator,
+// #2883) from the records: a `!`, `&&` or `||` of an `int` value that isn't a constant, an `&&` or `||` whose first
+// operand's truth isn't known (as node_machine_logical knows it), or with `root` a statement's CONDITION too.
+static bool node_machine_branch_operator(const NodeMachine* machine, uint32_t r, bool root)
+{
+    const CheckOp op = node_machine_record_op(machine, r);
+    const bool logical = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR;
+    bool result = false;
+    if (logical || op == CHECK_OP_NOT || (root && op == CHECK_OP_CONDITION))
+    {
+        const uint32_t flags = node_machine_record_flags(machine, r);
+        const bool constant = node_machine_record_constant_kind(machine, r) != CHECK_CONSTANT_NONE && node_machine_record_fault(machine, r) == CHECK_FAULT_NONE &&
+                              (flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
+        const uint32_t a = node_machine_record_left(machine, r);
+        bool truth = false;
+        const bool known = logical && a < r && node_machine_record_constant_kind(machine, a) != CHECK_CONSTANT_NONE &&
+                           (node_machine_record_flags(machine, a) & BUSTER_CHECK_FP_ENVIRONMENT) == 0 && node_machine_record_fault(machine, a) == CHECK_FAULT_NONE &&
+                           node_machine_record_truth(machine, a, &truth);
+        result = !constant && node_machine_record_category(machine, r) == CHECK_RVALUE &&
+                 (op == CHECK_OP_CONDITION || type_unqualified(node_machine_record_type(machine, r)) == BUSTER_TYPE_INT) && !known;
+    }
+    return result;
+}
+
+// Whether condition record `r` (a statement's CONDITION, or a conditional's first operand) is branches, the lowering's
+// rule (check_lower_branch_condition) from the records: under its `!`s, an `&&` or `||` (node_machine_branch_operator).
+// The tasks write such a condition, and a conditional of one.
+static bool node_machine_branch_condition(const NodeMachine* machine, uint32_t r)
+{
+    uint32_t at = r;
+    bool found = false;
+    bool peeling = true;
+    for (uint32_t steps = 0; peeling && steps < machine->count; steps += 1)
+    {
+        const CheckOp op = node_machine_record_op(machine, at);
+        const bool taken = node_machine_branch_operator(machine, at, at == r);
+        const uint32_t next = node_machine_record_left(machine, at);
+        found = taken && (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR);
+        peeling = taken && !found && next < at;
+        at = peeling ? next : at;
+    }
+    return found;
+}
+
 // C's logical operator or conditional at record `r` (`op`), of value class `class` (check_lower_logical's rules, which
 // check_lower_expand reaches for one that isn't folded, of a scalar class, or a conditional's of void, whose condition is
 // no vector): its template, with its evaluated operands given their targets and its segments after them, or
@@ -173,7 +217,8 @@ static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_log
     const TypeId type_a = node_machine_record_converted(machine, r, 0);
     const TypeId type_b = node_machine_record_converted(machine, r, 1);
     const bool scalar = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64 && (node_machine_record_facts(machine, r) & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) == 0;
-    const bool shape = a < r && b < r && (!conditional || (c < r && a != b));
+    // A conditional whose condition is branches (node_machine_branch_condition, #2883) is the tasks'.
+    const bool shape = a < r && b < r && (!conditional || (c < r && a != b && !node_machine_branch_condition(machine, a)));
     CheckLowerTemplate kind = CHECK_LOWER_TEMPLATE_NONE;
     if (shape && (scalar || (conditional && class == BUSTER_TYPED_CLASS_VOID)))
     {
@@ -490,7 +535,10 @@ static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_cla
                 const TypeId type_a = node_machine_record_converted(machine, r, 0);
                 const uint32_t word_a = node_machine_word(machine, type_a);
                 const uint8_t operand_class = (uint8_t)word_a;
-                if (plain && ((word_a >> 8) & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) == 0 && operand_class < BUSTER_TYPED_CLASS_VECTOR &&
+                // A statement's condition with `&&` or `||` is the lowering's branches (node_machine_branch_condition, #2883):
+                // the tasks'.
+                const bool branches = op == CHECK_OP_CONDITION && node_machine_branch_condition(machine, r);
+                if (plain && !branches && ((word_a >> 8) & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) == 0 && operand_class < BUSTER_TYPED_CLASS_VECTOR &&
                     operand_class != BUSTER_TYPED_CLASS_VOID)
                 {
                     kind = CHECK_LOWER_TEMPLATE_TRUTH;

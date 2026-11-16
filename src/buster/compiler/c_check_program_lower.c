@@ -408,6 +408,9 @@ typedef enum CheckLowerTaskKind
     CHECK_LOWER_CONVERSION,
     CHECK_LOWER_LABEL,
     CHECK_LOWER_CONTROL,
+    // A condition's `!`, `&&` or `||` (or a statement's CONDITION over one) evaluated as branches (check_lower_branch, #2883):
+    // `node` the operator, `value` the label it branches to where its truth is `address`, the next entry where it isn't.
+    CHECK_LOWER_BRANCH,
     CHECK_LOWER_BUILTIN,
     CHECK_LOWER_BUILTIN_MISC,
     CHECK_LOWER_BUILTIN_FLOAT,
@@ -11915,6 +11918,136 @@ static inline __attribute__((always_inline)) void check_lower_logical_arm(CheckL
     }
 }
 
+// A condition's `&&` and `||` as branches (#2883). As a value, `a && b` is made 0 or 1 at a join (check_lower_logical): its
+// second operand's truth jumps to the join, its first operand's branch to a constant there, and a condition then tests the
+// joined value again. As a statement's condition or a conditional's, each operand is a condition of its own instead,
+// branching to the condition's own targets: no value is made, joined or tested again. A `!` swaps the targets.
+//
+// Whether `node` is an operator a condition takes as branches rather than as a value: a `!`, `&&` or `||` of an `int`
+// value (none of a vector's) that check_lower_expand would expand by its operands (no constant), an `&&` or `||` whose
+// first operand's truth the program doesn't know (check_lower_logical writes the rest of one that it knows), or with
+// `root` a statement's CONDITION too.
+static bool check_lower_branch_operator(const CheckProgram* program, uint32_t node, bool root)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const CheckOp op = node < stream->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const bool logical = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR;
+    bool result = false;
+    if (logical || op == CHECK_OP_NOT || (root && op == CHECK_OP_CONDITION))
+    {
+        const CheckValue value = check_stream_value(stream, node);
+        const bool constant = value.constant_kind != CHECK_CONSTANT_NONE && value.fault == CHECK_FAULT_NONE &&
+                              (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
+        bool truth = false;
+        result = !constant && value.category == CHECK_RVALUE && (op == CHECK_OP_CONDITION || type_unqualified(value.type) == BUSTER_TYPE_INT) &&
+                 (!logical || !check_program_runtime_truth(program, node, graph->operand0[node], &truth));
+    }
+    return result;
+}
+
+// Whether condition `node` (a statement's CONDITION, or a conditional's first operand) takes branches: under its `!`s, it
+// is an `&&` or `||` (check_lower_branch_operator). A condition without one (`if (!p)`) is a value tested as before. Its
+// operators alone first, which is all that most conditions read; then each one's value. Of the program alone, as the node
+// machine's census asks it too.
+static bool check_lower_branch_condition(const CheckProgram* program, uint32_t node)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const uint32_t count = program->stream->count;
+    uint32_t at = node;
+    uint32_t steps = 0;
+    CheckOp op = at < count ? graph->ops[at] : CHECK_OP_COUNT;
+    while ((op == CHECK_OP_NOT || (op == CHECK_OP_CONDITION && at == node)) && steps < count)
+    {
+        at = graph->operand0[at];
+        op = at < count ? graph->ops[at] : CHECK_OP_COUNT;
+        steps += 1;
+    }
+    bool found = false;
+    if (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR)
+    {
+        at = node;
+        bool peeling = true;
+        for (uint32_t step = 0; peeling && step <= steps; step += 1)
+        {
+            const bool taken = check_lower_branch_operator(program, at, at == node);
+            found = taken && step == steps;
+            peeling = taken && !found;
+            at = peeling ? graph->operand0[at] : at;
+        }
+    }
+    return found;
+}
+
+// Operand `operand` of `node`, of converted type `type`, as a condition: a branch to `target` where its truth is `sense`.
+// A `!`, `&&` or `||` is a BRANCH task of its own (check_lower_branch); any other operand is its value, its truth and the
+// branch, as check_lower_logical tests its operands.
+static void check_lower_branch_operand(CheckLowerWriter* writer, uint32_t node, uint32_t operand, TypeId type, bool sense, uint32_t target)
+{
+    const CheckGraph* graph = &writer->program->input->graph;
+    const uint32_t child = operand == 0 ? graph->operand0[node] : graph->operand1[node];
+    if (check_lower_branch_operator(writer->program, child, false))
+    {
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BRANCH, .node = child, .value = target, .address = sense });
+    }
+    else
+    {
+        check_lower_instruction(writer, sense ? BUSTER_TYPED_BRANCH_TRUE : BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, target);
+        check_lower_truth(writer, type, false);
+        check_lower_operand(writer, node, operand, false, type);
+    }
+}
+
+// A BRANCH task: `node` (check_lower_branch_operator's) as a condition, a branch to `target` where its truth is `sense`
+// and the next entry where it isn't. An `&&` where false and an `||` where true branch to the target on either operand.
+// An `&&` where true and an `||` where false branch past their second operand, to a label of their own after it, where
+// the first operand decides the other way: the second operand then decides. A `!` swaps the targets, a CONDITION doesn't.
+// The tasks pop in the reverse of their pushes: the second operand's, then the first's.
+static void check_lower_branch(CheckLowerWriter* writer, uint32_t node, uint32_t target, bool sense)
+{
+    const CheckProgram* program = writer->program;
+    const CheckOp op = program->input->graph.ops[node];
+    const CheckConversion* conversions = program->stream->conversions[node].operands;
+    writer->token = node | BUSTER_CHECK_LOWER_TOKEN_NODE;
+    if (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR)
+    {
+        if ((op == CHECK_OP_LOGICAL_OR) == sense)
+        {
+            check_lower_branch_operand(writer, node, 1, conversions[1].type, sense, target);
+            check_lower_branch_operand(writer, node, 0, conversions[0].type, sense, target);
+        }
+        else
+        {
+            const uint32_t past = check_lower_label(writer);
+            check_lower_mark(writer, past);
+            check_lower_branch_operand(writer, node, 1, conversions[1].type, sense, target);
+            check_lower_branch_operand(writer, node, 0, conversions[0].type, !sense, past);
+        }
+    }
+    else
+    {
+        check_lower_branch_operand(writer, node, 0, conversions[0].type, op == CHECK_OP_NOT ? !sense : sense, target);
+    }
+}
+
+// A statement's CONDITION `node` popped with its control's branch under it (check_lower_control's BRANCH_FALSE or
+// BRANCH_TRUE to its target): where the condition is branches (check_lower_branch_condition), the branch comes off the
+// stack and the CONDITION's BRANCH task takes its target and its sense; the CONDITION stays the popped root of the
+// statement's expression, as the inventory and the node machine's census read it. Out of line, as only a condition asks.
+static __attribute__((noinline)) bool check_lower_condition_branches(CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckLowerTask below = writer->depth != 0 ? check_lower_task_unpack(writer->tasks[writer->depth - 1]) : (CheckLowerTask){ 0 };
+    const bool branch = below.kind == CHECK_LOWER_INSTRUCTION && (below.node == BUSTER_TYPED_BRANCH_FALSE || below.node == BUSTER_TYPED_BRANCH_TRUE);
+    const bool taken = branch && check_lower_branch_condition(writer->program, node);
+    if (taken)
+    {
+        writer->depth -= 1;
+        writer->settled = writer->depth < writer->settled ? writer->depth : writer->settled;
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BRANCH, .node = node, .value = below.value, .address = below.node == BUSTER_TYPED_BRANCH_TRUE });
+    }
+    return taken;
+}
+
 // A logical operator or a conditional, of class `class` and value `value` (check_lower_expand's), and a vector's
 // conditional (check_lower_vector_operation's), with `vector` set, which splats a scalar arm (check_lower_logical_arm):
 // check_lower_expand's copy, with `vector` false, has no test of it.
@@ -12001,14 +12134,22 @@ static inline __attribute__((always_inline)) void check_lower_logical(CheckLower
             check_lower_truth(writer, type_b, false);
             check_lower_operand(writer, node, 1, false, type_b);
         }
-        check_lower_instruction(writer, op == CHECK_OP_LOGICAL_OR ? BUSTER_TYPED_BRANCH_TRUE : BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, alternate);
-        check_lower_truth(writer, type_a, false);
-        if (reuse)
+        if (conditional && !reuse && check_lower_branch_condition(program, a))
         {
-            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, check_lower_class(writer, type_a), retained);
-            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(writer, type_a), retained);
+            // A condition with `&&` or `||` under its `!`s: branches to the arms (check_lower_branch, #2883).
+            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BRANCH, .node = a, .value = alternate, .address = false });
         }
-        check_lower_operand(writer, node, 0, false, type_a);
+        else
+        {
+            check_lower_instruction(writer, op == CHECK_OP_LOGICAL_OR ? BUSTER_TYPED_BRANCH_TRUE : BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, alternate);
+            check_lower_truth(writer, type_a, false);
+            if (reuse)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, check_lower_class(writer, type_a), retained);
+                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(writer, type_a), retained);
+            }
+            check_lower_operand(writer, node, 0, false, type_a);
+        }
     }
 }
 
@@ -15879,6 +16020,10 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         check_lower_instruction(writer, op == CHECK_OP_NEGATIVE ? BUSTER_TYPED_NEG : BUSTER_TYPED_NOT, class, 0);
         check_lower_operand(writer, node, 0, false, type_a);
     }
+    else if (op == CHECK_OP_CONDITION && check_lower_condition_branches(writer, node))
+    {
+        // A statement's condition with `&&` or `||`: its branches (check_lower_branch, #2883).
+    }
     else if (op == CHECK_OP_NOT || op == CHECK_OP_CONDITION)
     {
         check_lower_truth(writer, type_a, op == CHECK_OP_NOT);
@@ -16278,7 +16423,7 @@ static void check_lower_task_source(CheckLowerWriter* writer, CheckLowerTask tas
     const uint32_t index = writer->depth;
     const uint32_t pushed = index < writer->settled ? writer->task_sources[index] : writer->source;
     const uint32_t token = writer->owners != NULL ? check_lower_task_owner(writer, task, pushed) :
-                           task.kind == CHECK_LOWER_EXPRESSION ? program->input->graph.tokens[task.node] :
+                           task.kind == CHECK_LOWER_EXPRESSION || task.kind == CHECK_LOWER_BRANCH ? program->input->graph.tokens[task.node] :
                            task.kind == CHECK_LOWER_CONTROL ? program->controls[writer->body->first + task.node].token :
                            pushed;
     writer->settled = index < writer->settled ? index : writer->settled;
@@ -16364,6 +16509,10 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         else if (kind == CHECK_LOWER_CONTROL)
         {
             check_lower_control(writer, node);
+        }
+        else if (kind == CHECK_LOWER_BRANCH)
+        {
+            check_lower_branch(writer, node, (uint32_t)(value >> 32), (flags & 1) != 0);
         }
         else if (kind == CHECK_LOWER_BUILTIN)
         {
