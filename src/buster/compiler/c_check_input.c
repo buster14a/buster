@@ -5239,7 +5239,7 @@ static const CheckInputAttribute* check_input_enum_mode(const CheckInputAttribut
 static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token, uint32_t end, bool definition)
 {
     const Parser* parser = reader->parser;
-    TypeId type = reader->tag_types[token];
+    TypeId type = BUSTER_CHECK_RARE(reader, tag_types, token);
     if (type == 0)
     {
         uint32_t i = check_input_skip_attributes(parser, token + 1, end);
@@ -5534,7 +5534,7 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
 // declaration-time expressions schedule their attribute work explicitly and use that acyclic entry point.
 static TypeId check_input_tag(CheckInputReader* reader, uint32_t token, uint32_t end, bool definition)
 {
-    TypeId type = reader->tag_types[token];
+    TypeId type = BUSTER_CHECK_RARE(reader, tag_types, token);
     if (type == 0)
     {
         // The attributes before the name are the tag's; those after it aren't (check_input_tag_identity, #147).
@@ -7805,7 +7805,7 @@ static inline __attribute__((always_inline)) uint32_t check_input_specifier_defi
     }
     const bool keyword = tag < end && (parser->tokens.kinds[tag] == PARSE_KIND_STRUCT || parser->tokens.kinds[tag] == PARSE_KIND_ENUM);
     const uint32_t body = keyword ? check_input_tag_body(parser, tag, end) : end;
-    return body < end && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE && reader->tag_types[tag] == 0 ? tag : BUSTER_CHECK_NONE;
+    return body < end && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE && BUSTER_CHECK_RARE(reader, tag_types, tag) == 0 ? tag : BUSTER_CHECK_NONE;
 }
 
 // A declarator being read (check_input_declarator), with its frames, parts and parameters in scratch after itself:
@@ -8582,8 +8582,11 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 reader->parameter_previous[token] = reader->parameter_seen[identifier];
                 reader->parameter_seen[identifier] = function->token + 1;
                 reader->declared_types[token] = 0;
-                check_input_rare_claim(reader, &reader->parameter_shapes[token]);
-                reader->parameter_shapes[token] = 0;
+                if (BUSTER_CHECK_RARE(reader, parameter_shapes, token) != 0)
+                {
+                    check_input_rare_claim(reader, &reader->parameter_shapes[token]);
+                    reader->parameter_shapes[token] = 0;
+                }
                 reader->declaration_kinds[token] = C_BINDING_OBJECT;
                 check_input_set_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER, false);
                 reader->objects[token] = token + 1;
@@ -9279,9 +9282,12 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                 reader->parameter_previous[token] = reader->parameter_seen[identifier];
                                 reader->parameter_seen[identifier] = function->token + 1;
                                 reader->declared_types[token] = type_qualify(reader->types, adjusted, type_kind_is_array(kind) ? frame->array_qualifiers : qualifiers);
-                                check_input_rare_claim(reader, &reader->parameter_shapes[token]);
-                                reader->parameter_shapes[token] = (type_kind_is_array(kind) ? 1 : kind == BUSTER_TYPE_KIND_FUNCTION ? 4 : 0) |
-                                                                  (frame->star_array ? 2 : 0);
+                                const uint8_t shape = (uint8_t)((type_kind_is_array(kind) ? 1 : kind == BUSTER_TYPE_KIND_FUNCTION ? 4 : 0) | (frame->star_array ? 2 : 0));
+                                if (BUSTER_CHECK_RARE(reader, parameter_shapes, token) != shape)
+                                {
+                                    check_input_rare_claim(reader, &reader->parameter_shapes[token]);
+                                    reader->parameter_shapes[token] = shape;
+                                }
                                 reader->declaration_kinds[token] = C_BINDING_OBJECT;
                                 check_input_set_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER, frame->storage == C_NAME_REGISTER);
                                 reader->objects[token] = token + 1;
@@ -10641,8 +10647,12 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
                 const TypeId adjusted = check_input_type_result(reader, type_adjust_parameter(reader->types, type));
                 valid = adjusted != 0 && type_kind(reader->types, adjusted) != BUSTER_TYPE_KIND_VOID;
                 reader->declared_types[listed] = valid ? type_qualify(reader->types, adjusted, type_kind_is_array(kind) ? 0 : type_qualifiers(type)) : 0;
-                check_input_rare_claim(reader, &reader->parameter_shapes[listed]);
-                reader->parameter_shapes[listed] = type_kind_is_array(kind) ? 1 : kind == BUSTER_TYPE_KIND_FUNCTION ? 4 : 0;
+                const uint8_t shape = type_kind_is_array(kind) ? 1 : kind == BUSTER_TYPE_KIND_FUNCTION ? 4 : 0;
+                if (BUSTER_CHECK_RARE(reader, parameter_shapes, listed) != shape)
+                {
+                    check_input_rare_claim(reader, &reader->parameter_shapes[listed]);
+                    reader->parameter_shapes[listed] = shape;
+                }
                 check_input_set_bit(reader->declaration_bits, listed, BUSTER_CHECK_BITS_REGISTER, storage == C_NAME_REGISTER);
                 // Its bounds are the listed parameter's, as a prototype's are its parameter's.
                 for (uint32_t v = declarator_vlas; v < reader->output->vla_count; v += 1)
@@ -12587,8 +12597,12 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     reader->initializer_declarations[i] = name;
                     check_input_visit(reader, i, BUSTER_CHECK_RESOLVE_DECLARATION);
                     reader->query_types[i] = type;
-                    check_input_rare_claim(reader, &reader->static_initializers[i]);
-                    reader->static_initializers[i] = is_static || reader->function_result == 0;
+                    const uint8_t static_initializer = is_static || reader->function_result == 0;
+                    if (BUSTER_CHECK_RARE(reader, static_initializers, i) != static_initializer)
+                    {
+                        check_input_rare_claim(reader, &reader->static_initializers[i]);
+                        reader->static_initializers[i] = static_initializer;
+                    }
                     uint32_t end = direct_end;
                     if (direct_initializer)
                     {
@@ -13023,7 +13037,7 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
     {
         const uint32_t previous = reader->bindings.declaration[old - 1];
         const bool auto_type = kind == C_BINDING_OBJECT && reader->bindings.kind[old - 1] == kind &&
-                               (reader->declaration_flags[token] & BUSTER_CHECK_DECLARATION_GNU_AUTO) != 0 &&
+                               (BUSTER_CHECK_RARE(reader, declaration_flags, token) & BUSTER_CHECK_DECLARATION_GNU_AUTO) != 0 &&
                                check_input_auto_type_level(reader->types, reader->declared_types[token]);
         const TypeAnswer compatible = auto_type ? (check_input_auto_type_refused(reader->types, reader->declared_types[token], reader->declared_types[previous]) ?
                                                    TYPE_ANSWER_NO : TYPE_ANSWER_YES) :
@@ -14399,7 +14413,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 }
                 for (uint32_t p = check_sparse_get(reader->parameters, i); p != BUSTER_CHECK_NONE; p = check_sparse_get(reader->parameter_next, p))
                 {
-                    if ((reader->parameter_shapes[p] & 2) != 0)
+                    if ((BUSTER_CHECK_RARE(reader, parameter_shapes, p) & 2) != 0)
                     {
                         check_input_report(reader, p, CHECK_INPUT_DECLARATION);
                     }
@@ -15531,7 +15545,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                 const uint32_t declaration = reader->output->declarations[token];
                 const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
                 check_input_note_enum(reader, token, enumeration, type);
-                const CheckConstexprValue* constant = (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0 ?
+                const CheckConstexprValue* constant = (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0 ?
                     check_input_constexpr_find(reader, declaration) : 0;
                 if (constant != 0)
                 {
@@ -15677,8 +15691,12 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             const uint32_t declaration = reader->initializer_declarations[token];
             const uint32_t opening = check_sparse_get(reader->output->initializer_begins, declaration) - 1;
             reader->query_types[token] = reader->query_types[opening];
-            check_input_rare_claim(reader, &reader->static_initializers[token]);
-            reader->static_initializers[token] = reader->static_initializers[opening];
+            const uint8_t static_initializer = BUSTER_CHECK_RARE(reader, static_initializers, opening);
+            if (BUSTER_CHECK_RARE(reader, static_initializers, token) != static_initializer)
+            {
+                check_input_rare_claim(reader, &reader->static_initializers[token]);
+                reader->static_initializers[token] = static_initializer;
+            }
             op = reader->initializers[opening] == 1 ? CHECK_OP_INITIALIZE : CHECK_OP_COUNT;
             supported = count != 0;
             list = reader->initializers[opening] == 2;
@@ -15928,7 +15946,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
     }
     if (op == CHECK_OP_SIZEOF && supported)
     {
-        TypeId requested = reader->query_types[token] != 0 ? reader->query_types[token] : reader->sizeof_types[token];
+        TypeId requested = reader->query_types[token] != 0 ? reader->query_types[token] : BUSTER_CHECK_RARE(reader, sizeof_types, token);
         if (requested == 0)
         {
             requested = check_input_sizeof_operand(reader, token);
@@ -15943,7 +15961,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             op = CHECK_OP_COUNT;
             supported = node != BUSTER_CHECK_NONE;
         }
-        else if (reader->sizeof_types[token] == 0)
+        else if (BUSTER_CHECK_RARE(reader, sizeof_types, token) == 0)
         {
             // Preparation coalesces known unevaluated spans. A failed/unsupported operand retains the old
             // fallback and its warning handling; the graph still owns the semantic constraint diagnostics.
@@ -16150,11 +16168,11 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                     }
                 }
             }
-            if (reader->static_initializers[token] && op != CHECK_OP_INITIALIZE)
+            if (BUSTER_CHECK_RARE(reader, static_initializers, token) && op != CHECK_OP_INITIALIZE)
             {
                 graph->contexts[node] |= BUSTER_CHECK_CONTEXT_STATIC;
             }
-            if (reader->static_initializers[token] && op == CHECK_OP_INITIALIZE)
+            if (BUSTER_CHECK_RARE(reader, static_initializers, token) && op == CHECK_OP_INITIALIZE)
             {
                 graph->contexts[node] |= BUSTER_CHECK_CONTEXT_VALUE;
             }
@@ -16221,7 +16239,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
         reader->first_value[token] = first;
         reader->last_value[token] = last;
         reader->value_counts[token] = count;
-        if (reader->static_initializers[token])
+        if (BUSTER_CHECK_RARE(reader, static_initializers, token))
         {
             // A braced static initializer's elements are constant expressions, which initializer
             // planning diagnoses: the same constant evaluation its scalar form's INITIALIZE gets.
@@ -17445,13 +17463,16 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     // that the walk reads where it never wrote, at every token of a kind, are in huge pages, where those reads take the
     // huge zero page: in base pages each read would fault its page, 9,600 on sqlite3.c. The others are in base pages at
     // the arena's start, where they take only the pages the walk writes, since only the tokens that write them read them:
-    // the scope stacks, the enumeration constants' values, the specifiers, tags, sizeof types, designators and the
-    // initializers' finishes that a declaration or an expression writes and reads; the cached constants, va_arg calls,
-    // designators and variable arrays' bounds, which the expressions' walk tests only where the sparse marks say (the
-    // marks themselves: a bit a token, CheckInputReader.sparse_marks); and the binding table, whose events the walk appends
-    // and reads no further than the last. In huge pages the few hundred tokens each of those writes on sqlite3.c, spread
-    // over the unit, took every huge page of its column (#628). Where more than one lane reads the deferred bodies of a
-    // large unit, the arena is base pages throughout (check_input_sparse_arena, #764, #847).
+    // the scope stacks, the enumeration constants' values, the specifiers, tag ends, designators and the initializers'
+    // finishes that a declaration or an expression writes and reads; the cached constants, va_arg calls, designators and
+    // variable arrays' bounds, which the expressions' walk tests only where the sparse marks say (the marks themselves: a
+    // bit a token, CheckInputReader.sparse_marks); and the binding table, whose events the walk appends and reads no
+    // further than the last. In huge pages the few hundred tokens each of those writes on sqlite3.c, spread over the unit,
+    // took every huge page of its column (#628). Where more than one lane reads the deferred bodies of a large unit, the
+    // arena is base pages throughout (check_input_sparse_arena, #764, #847). A reading in source order has it all in base
+    // pages, where its vector path reads a rare column only where a write claimed it (BUSTER_CHECK_RARE): the memos a walk
+    // reads before it writes them (the tags' types, the sizeof types) and the columns read at tokens nothing wrote (the
+    // parameters' shapes) are rare columns for those tests (#1167).
 #define BUSTER_CHECK_SPARSE_SMALL_COLUMNS(X) \
     X(scope_marks, uint32_t) \
     X(scope_ends, uint32_t) \
@@ -17467,11 +17488,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     X(designator_indices, uint64_t) \
     X(designator_ranges, uint32_t) \
     X(selection_types, TypeId) \
-    X(sizeof_types, TypeId) \
     X(vla_bounds, uint32_t) \
-    X(parameter_shapes, uint8_t) \
     X(parameter_declaration_next, uint32_t) \
-    X(tag_types, TypeId) \
     X(tag_ends, uint32_t)
 #define BUSTER_CHECK_SPARSE_COLUMNS(X) \
     X(specifier_jobs, CheckInputSpecifierJob*) \
@@ -17489,6 +17507,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     X(builtin_type_ends, uint32_t) \
     X(vararg_types, uint32_t) \
     X(vla_scope_ends, uint32_t) \
+    X(sizeof_types, TypeId) \
+    X(tag_types, TypeId) \
+    X(parameter_shapes, uint8_t) \
     X(warning_suppressed, uint8_t)
 #define BUSTER_CHECK_SPARSE_BYTES(field, type) + ((uint64_t)count + 1) * sizeof(type) + 63
     const uint64_t binding_bytes = c_bindings_bytes(pp->table->count, count * 4 + 1);

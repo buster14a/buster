@@ -223,6 +223,7 @@ static inline __attribute__((always_inline)) void check_input_batch_set_leaf(Che
 }
 
 static inline __m512i check_input_gather_bytes(__mmask16 lanes, __m512i indices, const uint8_t* column);
+static inline __mmask16 check_input_rare_lanes(const CheckInputReader* reader, __mmask16 lanes, __m512i indices, const uint8_t* column);
 
 _Static_assert(sizeof(CheckGraphLeaf) == 32 && offsetof(CheckGraphLeaf, type) == 0 && offsetof(CheckGraphLeaf, overload_head) == 12,
                "a leaf's record is eight dwords, its type the first and its overload head the fourth");
@@ -386,7 +387,9 @@ static void check_input_expression_flush(CheckInputReader* reader, CheckInputBat
             {
                 check_input_batch_record(graph, node, lanes, ops, operands, types, counts, slots, classes_low, classes_high);
             }
-            const __m512i statics = check_input_gather_bytes(operators | initializers, token, reader->static_initializers);
+            // A rare column's (BUSTER_CHECK_RARE): read only where a write claimed it (#1167).
+            const __m512i statics = check_input_gather_bytes(check_input_rare_lanes(reader, operators | initializers, token, reader->static_initializers), token,
+                                                             reader->static_initializers);
             const __mmask16 initialized = _mm512_test_epi32_mask(statics, statics);
             const __m512i added = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, batch->contexts + k));
             const __m512i contexts = _mm512_or_si512(_mm512_or_si512(_mm512_maskz_mov_epi32(initialized & operators, _mm512_set1_epi32(BUSTER_CHECK_CONTEXT_STATIC)),
@@ -432,7 +435,7 @@ static void check_input_expression_flush(CheckInputReader* reader, CheckInputBat
             graph->argument_offsets[node] = batch->argument_offsets[k];
             graph->argument_counts[node] = batch->argument_counts[k];
             graph->types[node] = operator || initializer ? reader->query_types[token] : form == CHECK_INPUT_FORM_DISCARD ? BUSTER_TYPE_VOID : 0;
-            const bool initialized = (operator || initializer) && reader->static_initializers[token];
+            const bool initialized = (operator || initializer) && BUSTER_CHECK_RARE(reader, static_initializers, token);
             graph->contexts[node] = (uint8_t)((initialized && operator ? BUSTER_CHECK_CONTEXT_STATIC : 0) | (initialized && initializer ? BUSTER_CHECK_CONTEXT_VALUE : 0) |
                                               batch->contexts[k]);
             graph->source_positions[node] = check_input_expression_end(reader, token);
@@ -563,7 +566,7 @@ static void check_input_identifier_entry(const CheckInputReader* reader, uint32_
     const CheckInput* input = reader->output;
     const TypeId type = reader->declared_types[token];
     const uint32_t declaration = type != 0 ? input->declarations[token] : 0;
-    const bool acted = input->kr_parameter_count == 0 && (type == 0 || (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) == 0);
+    const bool acted = input->kr_parameter_count == 0 && (type == 0 || (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_CONSTEXPR) == 0);
     const bool enumeration = type != 0 && reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
     if (type != 0)
     {
@@ -586,6 +589,27 @@ static void check_input_identifier_entry(const CheckInputReader* reader, uint32_
 
 // The bytes of `column` at the 16 `indices` in `lanes`, a dword each: the aligned dword that holds each byte, which never
 // crosses a page the column's bytes aren't on (the column's start rounded down to four bytes), shifted down to the byte.
+// The lanes of `lanes` whose byte of a rare column at `column`, at their `indices`, a write may have claimed: sixteen
+// check_input_rare_marked tests at once, a gather of the marks' dwords, on the vector path of a reading in source order;
+// `lanes` anywhere else. The granules count from the marks' base in 32 bits, as the marks of a unit whose tokens
+// gathers can index (CheckInputReader.rare_gate) have fewer.
+static inline __mmask16 check_input_rare_lanes(const CheckInputReader* reader, __mmask16 lanes, __m512i indices, const uint8_t* column)
+{
+    const uint64_t* const gate = reader->rare_gate;
+    __mmask16 result = lanes;
+    if (gate != NULL)
+    {
+        const uint64_t offset = (uintptr_t)column - reader->rare_gate_base;
+        const __m512i bytes = _mm512_add_epi32(indices, _mm512_set1_epi32((int32_t)(offset & ((UINT64_C(1) << BUSTER_CHECK_RARE_GRANULE_SHIFT) - 1))));
+        const __m512i granules = _mm512_add_epi32(_mm512_srli_epi32(bytes, BUSTER_CHECK_RARE_GRANULE_SHIFT),
+                                                  _mm512_set1_epi32((int32_t)(uint32_t)(offset >> BUSTER_CHECK_RARE_GRANULE_SHIFT)));
+        const __m512i dwords = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, _mm512_srli_epi32(granules, 5), (const void*)gate, 4);
+        const __m512i bits = _mm512_srlv_epi32(dwords, _mm512_and_si512(granules, _mm512_set1_epi32(31)));
+        result = _mm512_mask_test_epi32_mask(lanes, bits, _mm512_set1_epi32(1));
+    }
+    return result;
+}
+
 static inline __m512i check_input_gather_bytes(__mmask16 lanes, __m512i indices, const uint8_t* column)
 {
     const uintptr_t start = (uintptr_t)column & ~(uintptr_t)3;
@@ -642,7 +666,10 @@ static uint32_t check_input_expression_identifiers(const CheckInputReader* reade
         const __m512i declaration = _mm512_mask_i32gather_epi32(zero, typed, token, input->declarations, 4);
         const __m512i kinds = check_input_gather_bytes(typed, declaration, reader->declaration_kinds);
         const __m512i bits = check_input_gather_bytes(typed, declaration, reader->declaration_bits);
-        const __m512i declared = check_input_gather_bytes(typed, declaration, reader->declaration_flags);
+        // A rare column's (BUSTER_CHECK_RARE): read only where a write claimed it, so that a declaration's page that no flag
+        // was written to isn't mapped (#1167).
+        const __m512i declared = check_input_gather_bytes(check_input_rare_lanes(reader, typed, declaration, reader->declaration_flags), declaration,
+                                                          reader->declaration_flags);
         const __m512i type_kinds = check_input_gather_bytes(typed, _mm512_srli_epi32(type, BUSTER_TYPE_INDEX_SHIFT), reader->types->types.kind);
         const __m512i objects = _mm512_mask_i32gather_epi32(zero, typed, declaration, reader->objects, 4);
         const __m512i heads = input->overload_heads != NULL ? _mm512_mask_i32gather_epi32(zero, lanes, token, input->overload_heads, 4) : zero;

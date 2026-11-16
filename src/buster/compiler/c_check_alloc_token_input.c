@@ -98,7 +98,7 @@ static TypeId check_input_alloc_sizeof(CheckInputReader* reader, uint32_t token,
     const uint32_t close = reader->ends[token];
     const bool named = close < parser->tokens.count && close > token + 2 && parser->tree.roles[close] == PARSE_ROLE_CLOSE_SIZEOF &&
                        parser->tree.parents[close] == token;
-    TypeId result = reader->query_types[token] != 0 ? reader->query_types[token] : reader->sizeof_types[token];
+    TypeId result = reader->query_types[token] != 0 ? reader->query_types[token] : BUSTER_CHECK_RARE(reader, sizeof_types, token);
     if (result == 0 && named)
     {
         result = reader->query_types[close];
