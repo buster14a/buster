@@ -9,8 +9,10 @@
 // every record an entry's or the frame's, every head that takes a template has its template's records, the call and
 // the copy are deferred by their kind and one division by its depth, a compare of two locals, its test against zero and
 // its branch are one group of six entries whose inputs reach the two locals, and two pointer additions differ by their
-// scaled constants' class alone. Its report must have the gate's lines, the totals last. Include after
-// tier0_entries_measure.c; test-checker calls this through its forward declaration.
+// scaled constants' class alone. Both conditions take a compare behind its test against zero, and the negated one's
+// compare is itself a test, so its value is made and tested again: the one such site, a test of a test. Its report
+// must have the gate's lines, the totals last. Include after tier0_entries_measure.c; test-checker calls this through
+// its forward declaration.
 #ifndef BUSTER_TIER0_ENTRIES_MEASURE_TEST_INCLUDED
 #define BUSTER_TIER0_ENTRIES_MEASURE_TEST_INCLUDED
 
@@ -150,8 +152,8 @@ static __attribute__((noinline)) void check_test_tier0_entries(CheckTest* test)
     memset(&result, 0, sizeof(result));
     char* report = 0;
     const bool ran = length > 0 && length < (int)sizeof(path) && tier0_entries_test_run(path, &census, &result, &report);
-    check_test_expect(test, ran && census.files == 1 && census.failures == 0 && census.left_out == 0 && census.refused == 0 && census.functions == 9,
-                      "tier0 entries: the fixture's nine functions are counted");
+    check_test_expect(test, ran && census.files == 1 && census.failures == 0 && census.left_out == 0 && census.refused == 0 && census.functions == 10,
+                      "tier0 entries: the fixture's ten functions are counted");
     uint64_t entries = 0;
     uint64_t records = 0;
     uint64_t states[TIER0_CENSUS_STATES] = { 0 };
@@ -197,11 +199,21 @@ static __attribute__((noinline)) void check_test_tier0_entries(CheckTest* test)
     check_test_expect(test, ran && compare && widest == 6, "tier0 entries: a compare, its test against zero and its branch are one group of six entries, the widest");
     check_test_expect(test, ran && near_pattern != UINT32_MAX && far_pattern != UINT32_MAX && near_pattern != far_pattern,
                       "tier0 entries: two pointer additions differ by their scaled constants' class alone, and in their patterns");
+    // The loop's condition and the negated compare's: `i < count` is its branch's, and `!(a < b)` is LT, CONST 0, EQ,
+    // CONST 0, NE and the branch, whose compare is the EQ: the LT's value is made (setl; movzx) and tested (test; je).
+    check_test_expect(test, ran && census.conditions[TIER0_CENSUS_CONDITION_TESTED] == 2 && census.conditions[TIER0_CENSUS_CONDITION_COMPARE] == 0 &&
+                                census.conditions[TIER0_CENSUS_CONDITION_ALONE] == 0,
+                      "tier0 entries: both conditions take a compare behind its test against zero");
+    check_test_expect(test, ran && census.tested_again[TIER0_CENSUS_AGAIN_TEST] == 1 && census.tested_again[TIER0_CENSUS_AGAIN_TARGET] == 0 &&
+                                census.tested_again[TIER0_CENSUS_AGAIN_OTHER] == 0,
+                      "tier0 entries: the negated compare's value is made and tested again, a test of a test");
     check_test_expect(test, ran && result.decided[0] == census.entries && result.decided[1] == census.entries && result.undecided[0] == 0 &&
                                 result.common[0] == census.entries && result.rows[0] != 0,
                       "tier0 entries: a key of the gate's bytes decides every entry of the fixture");
     static const char* const lines[] = {
-        "tier0-census: 9 functions, ",
+        "tier0-census: 10 functions, ",
+        "tier0-census: conditions: 2 conditional branches; 0 take the compare before it, 2 take a compare behind its test against zero, 0 take no entry\n",
+        "tier0-census: tested again: 1 sites make a compare's value and test it before a branch (setcc; movzx; test; je or jne): 1 a test of a test",
         "tier0-census: groups of 1 entry ",
         "tier0-census: variant=0 groups=",
         "tier0-census: keys=raw: gate: a key of 8 bytes or fewer decides ",
@@ -257,7 +269,7 @@ static __attribute__((noinline)) void check_test_tier0_entries(CheckTest* test)
     Tier0Census doubled;
     memset(&doubled, 0, sizeof(doubled));
     const bool again = ran && tier0_census_files(&doubled, both, 2, false, BUSTER_TYPED_KINDS, 8, true, &result);
-    check_test_expect(test, again && doubled.files == 2 && doubled.entries == 2 * once && doubled.functions == 18, "tier0 entries: two sets of files are one census");
+    check_test_expect(test, again && doubled.files == 2 && doubled.entries == 2 * once && doubled.functions == 20, "tier0 entries: two sets of files are one census");
     if (again)
     {
         tier0_census_end(&doubled);

@@ -4,8 +4,9 @@
 // measure-tier0-entries' fixture (test-checker's check_test_tier0_entries, tier0_entries_measure_test.c): original C
 // whose functions make each way the census finds a record pattern. Templates with their fusions (a constant, a local,
 // two locals compared, a condition's test and its branch, a pointer addition into a load and a store), a call and a
-// copy (deferred entries), a division with its operands in rax and elsewhere, floating values, a global, and two
-// pointer additions whose constants are of one class and whose scaled constants take an 8-bit and a 32-bit immediate.
+// copy (deferred entries), a division with its operands in rax and elsewhere, floating values, a global, two pointer
+// additions whose constants are of one class and whose scaled constants take an 8-bit and a 32-bit immediate, and a
+// negated compare, whose value is made and tested again (#2877: two tests in a row, of which the fusion takes one).
 struct Row
 {
     long first;
@@ -69,4 +70,13 @@ long* third(long* p)
 long* twentieth(long* p)
 {
     return p + 20;
+}
+
+int negated(int a, int b)
+{
+    if (!(a < b))
+    {
+        return 1;
+    }
+    return 2;
 }

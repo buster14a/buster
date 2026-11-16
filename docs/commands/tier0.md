@@ -492,8 +492,11 @@ counted into the same census, so that several corpora are one population.
   fusion's three offered.
 
 The report has the corpus's totals (entries, records, groups, patterns, how
-each pattern was found, the groups by their entries and by the fusion's
-variant, those that make no record), then for each count the entries a key of
+each pattern was found, the conditional branches by what their group takes
+and the sites where a compare's value is made and tested again before a
+branch (`setcc; movzx; test; je`), by why the fusion left them (#2877), the
+groups by their entries and by the fusion's variant, those that make no
+record), then for each count the entries a key of
 each size decides, the gate's line (a key of 8 bytes or fewer, the kind its first),
 what the gate's keys decide without each family of inputs, and what no key
 decides. `--rows` adds a line a kind and a count, with its whole key, the
