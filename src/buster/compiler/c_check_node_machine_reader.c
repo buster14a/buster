@@ -459,6 +459,7 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
     NodeFrontTypes* types = typer->types;
     const bool sweeps = types->sweep_refusals != NULL;
     const bool tested = typer->tests != NULL;
+    const bool last = (reader->pp->options.node_reader & BUSTER_NODE_READER_LAST) != 0;
     // The graph as it stands after the chunk, and the types made since the last.
     typer->graph = reader->output->graph;
     typer->graph.contexts = front->shadow->contexts;
@@ -505,8 +506,13 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                         types->typed += machine->count == 0 ? 0 : refusal == NODE_MACHINE_TAKEN ? machine->count : machine->stopped;
                         types->refused[refusal] += 1;
                     }
+                    // The tests and then C and X; or (BUSTER_NODE_READER_LAST) C and X and then the tests on what they
+                    // take: the two steps in the order the unit's options give.
                     uint64_t verdict = 0;
-                    if (tested && refusal == NODE_MACHINE_TAKEN)
+                    NodeMachineRefusal swept = NODE_MACHINE_TAKEN;
+                    for (uint32_t step = 0; step < 2; step += 1)
+                    {
+                    if ((step == 0) != last && tested && refusal == NODE_MACHINE_TAKEN && (!last || swept == NODE_MACHINE_TAKEN || pass != 0))
                     {
                         // The census's tests on T's records: the machine's verdict before the pipeline.
                         const uint32_t token = front->tokens[record];
@@ -529,14 +535,14 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                             }
                         }
                     }
-                    // C and X on the expressions no test refuses. The second run sweeps the others too: the shadow counts
-                    // what the tests add to C's and X's own refusals.
-                    if (sweeps && refusal == NODE_MACHINE_TAKEN && (verdict == 0 || pass != 0))
+                    // C and X on the expressions no test refuses (on every one T takes where the tests come last). The
+                    // second run sweeps the others too: the shadow counts what the tests add to C's and X's own refusals.
+                    if ((step == 0) == last && sweeps && refusal == NODE_MACHINE_TAKEN && (last || verdict == 0 || pass != 0))
                     {
                         TypeId target = 0;
                         uint32_t object = 0;
                         node_machine_reader_root(typer, front, reader, record, &target, &object);
-                        NodeMachineRefusal swept = node_machine_contexts(machine, 0, target, object);
+                        swept = node_machine_contexts(machine, 0, target, object);
                         swept = swept == NODE_MACHINE_TAKEN ? node_machine_expand(machine, object) : swept;
                         if (pass != 0)
                         {
@@ -562,6 +568,7 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                             types->swept_entries += entries;
                             types->swept_unkept += taken && !kept;
                         }
+                    }
                     }
                 }
                 else if (pass != 0)

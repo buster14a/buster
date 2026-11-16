@@ -57,6 +57,7 @@ static const char node_census_test_warnings[] =
     "    q = &pp->i; // refuse: packed-member-address\n"
     "    x = \"a\\q\"[0]; // refuse: warning-event\n"
     "    x = old(1); // refuse: declaration-flag\n"
+    "    for (i = 0; i < 4; i += 1) x += i; // refuse: for-loop-analysis\n"
     "    return x + c + e; // take\n"
     "}\n"
     "int* h(void)\n"
@@ -111,6 +112,7 @@ static const char node_census_test_set[] =
     "unsigned long strlen(const char*);\n"
     "void* memset(void*, int, unsigned long);\n"
     "int abs(int);\n"
+    "int loose();\n"
     "int k(struct B* b, struct S* s, struct S* t, int i, ...)\n"
     "{\n"
     "    register int r = i;\n"
@@ -126,6 +128,7 @@ static const char node_census_test_set[] =
     "    x = (int)strlen(\"ab\"); // refuse: callee\n"
     "    memset(s, 0, sizeof(*s)); // refuse: callee\n"
     "    x = abs(i); // refuse: callee\n"
+    "    x = loose(i); // refuse: callee\n"
     "    __builtin_va_start(ap, i); // refuse: operator\n"
     "    __builtin_va_end(ap); // refuse: operator\n"
     "    z = z * 2; // refuse: complex-bitint-atomic-vector-half\n"
@@ -171,6 +174,70 @@ static const char node_census_test_quiet[] =
     "    x = 1 << 31; // take\n"
     "    e = 5; // take\n"
     "    return x + e; // take\n"
+    "}\n";
+
+// What warns without an option, read with the default warnings alone: with -Wall -Wextra a comparison goes to the
+// census's code whatever its operands are (-Wsign-compare), and a shift of a constant too, which hides the own form's
+// other conditions on them ("The tests in the machine's own form"). So these lines' refusals are decided by the
+// conditions the first fixture can't reach: a mix of enumerations at a comparison and at another operator; a comparison
+// under a bitwise operator, an assignment as a condition and a chained comparison; a constant its conversion changes,
+// in an initializer, an assignment and a conditional's third operand alone; a shift's count past its operand's width
+// and under 64, and a negative constant shifted; a constant outside its other operand's type (zero for an unsigned
+// one's ordering, a negative one, 127 and past it for a signed char, 1 and 2 for a bool); a subscript at its array's
+// length; a bit-field compared; the front's one operator outside the census's set (`__extension__`, a selection there);
+// a comparison as a statement whose operand writes (no discarded value: the comparison's own test); a call's aggregate
+// argument; a write and a read of one object, as a subscript, an operand and an assignment's value; and a returned
+// array and a returned address.
+static const char node_census_test_defaults[] =
+    "enum A { A0, A1 };\n"
+    "enum B { B0, B1 };\n"
+    "struct F { unsigned f : 3; int n; };\n"
+    "void use(struct F);\n"
+    "int g(int a, int b, int c, unsigned u, unsigned char uc, signed char sc, _Bool bb, enum A ea, enum B eb, struct F* sf, int* p, int i, float fl)\n"
+    "{\n"
+    "    int x = 0;\n"
+    "    int arr[4];\n"
+    "    x = ea == eb; // refuse: enum-mix\n"
+    "    x = ea | eb; // refuse: enum-mix\n"
+    "    x = ea == A1; // take\n"
+    "    x = a & b == c; // refuse: parentheses\n"
+    "    if (a = b) x = 1; // refuse: parentheses\n"
+    "    x = a < b < c; // refuse: parentheses\n"
+    "    signed char narrow = 200; // refuse: constant\n"
+    "    short small = 40000; // refuse: constant\n"
+    "    int whole = 1.5; // refuse: constant\n"
+    "    whole = 2.5; // refuse: constant\n"
+    "    fl = a ? fl : 16777217; // refuse: constant\n"
+    "    x = a << 40; // refuse: constant\n"
+    "    x = -1 << 3; // refuse: constant\n"
+    "    x = u < 0; // refuse: constant\n"
+    "    x = uc == -1; // refuse: constant\n"
+    "    x = sc > 127; // refuse: constant\n"
+    "    x = bb > 1; // refuse: constant\n"
+    "    x = bb == 2; // refuse: constant\n"
+    "    x = arr[4]; // refuse: constant\n"
+    "    x = sf->f == 9; // refuse: bit-field\n"
+    "    x = __extension__ (a + b); // refuse: operator\n"
+    "    a == i++; // refuse: unused-value\n"
+    "    use(*sf); // refuse: aggregate-value\n"
+    "    p[i++] = i; // refuse: unsequenced\n"
+    "    x = i + i++; // refuse: unsequenced\n"
+    "    i = i++; // refuse: unsequenced\n"
+    "    return x + narrow + small + whole + sf->n; // take\n"
+    "}\n"
+    "int* h(void)\n"
+    "{\n"
+    "    int a[2];\n"
+    "    return a; // refuse: return-address\n"
+    "}\n"
+    "int* k(void)\n"
+    "{\n"
+    "    int a = 0;\n"
+    "    return &a; // refuse: return-address\n"
+    "}\n"
+    "int m(int i)\n"
+    "{\n"
+    "    return i + i++; // refuse: unsequenced\n"
     "}\n";
 
 static const char node_census_test_atomic[] =
@@ -612,9 +679,11 @@ static bool node_census_test_fixture(const char* directory, const char* name, co
 // by a test, no more (the tests see one expression's warnings, not the unit's so far), and the fixture's `discards` declarations' discards are left alone (an initializer's value cast to
 // void at the declaration's `;`, each value of a braced one; an enumerator's value makes no record of the front's, and
 // so none).
-// In a build without the vector paths the front makes nothing, and no test runs. Whether all of it held.
-static bool node_tests_test_fixture(const char* directory, const char* name, const char* text, char** options, uint32_t option_count, uint8_t front, uint32_t refused,
-                                    uint32_t discards)
+// In a build without the vector paths the front makes nothing, and no test runs. With `own` the tests there are the
+// machine's own form ("The tests in the machine's own form"), and the census's code runs on every expression beside it:
+// their bits, their spans of tokens and their counts of nodes are the same. Whether all of it held.
+static bool node_tests_test_fixture_form(const char* directory, const char* name, const char* text, char** options, uint32_t option_count, uint8_t front, uint32_t refused,
+                                         uint32_t discards, bool own)
 {
     char path[512];
     snprintf(path, sizeof(path), "%s/%s", directory, name);
@@ -622,7 +691,7 @@ static bool node_tests_test_fixture(const char* directory, const char* name, con
     NodeShadow shadow = {
         .verify = true,
         .front = (uint8_t)(front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS),
-        .reader = BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_VERIFY,
+        .reader = (uint8_t)(BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_VERIFY | (own ? BUSTER_NODE_READER_OWN | BUSTER_NODE_READER_BOTH : 0)),
         .passes = 1,
         .repeat = 1,
         .tested_out = calloc(512, sizeof(NodeShadowTested)),
@@ -637,9 +706,13 @@ static bool node_tests_test_fixture(const char* directory, const char* name, con
                                 shadow.tested_unsound == 0 && shadow.tested_differences == 0 && shadow.tested_kind_differences == 0 && shadow.tested_missed == 0 &&
                                     shadow.tested_policy_differences == 0 && shadow.reader_twin_differences == 0 && shadow.reader_twin_warnings == 0 &&
                                     shadow.tested_expressions != 0 && shadow.tested_compared + shadow.tested_compared_unpopped == shadow.tested_expressions &&
-                                    shadow.tested_refused == refused && shadow.typed_discards == discards;
+                                    shadow.tested_refused == refused && shadow.typed_discards == discards &&
+                                    (!own || (shadow.own_differences == 0 && shadow.own_count_differences == 0 && shadow.own_expressions == shadow.tested_expressions));
     if (!valid || !same)
     {
+        fprintf(stderr, "test-checker: node-tests %s%s: %s: the own form ran on %" PRIu64 " expressions, %" PRIu64 " not the census's code's, %" PRIu64
+                " walks of another count\n",
+                name, own ? " (own form)" : "", valid ? "read" : "NOT READ", shadow.own_expressions, shadow.own_differences, shadow.own_count_differences);
         fprintf(stderr, "test-checker: node-tests %s: %s: the tests ran on %" PRIu64 " expressions at reader time and refused %" PRIu64 " (%u expected); %" PRIu64
                 " compared and %" PRIu64 " never lowered; %" PRIu64 " taken there that the census refuses, %" PRIu64 " differ, %" PRIu64 " roots' kinds differ, %" PRIu64
                 " nodes outside the records, %" PRIu64 " units' enabled warnings differ; T's rows and rules there: %" PRIu64 " values not the action's, %" PRIu64
@@ -686,6 +759,16 @@ static bool node_tests_test_fixture(const char* directory, const char* name, con
     free(shadow.tested_out);
     unlink(path);
     return valid && same;
+}
+
+// Both forms of the tests at reader time on one fixture: the census's code on the view, then the machine's own form
+// beside it.
+static bool node_tests_test_fixture(const char* directory, const char* name, const char* text, char** options, uint32_t option_count, uint8_t front, uint32_t refused,
+                                    uint32_t discards)
+{
+    const bool census = node_tests_test_fixture_form(directory, name, text, options, option_count, front, refused, discards, false);
+    const bool own = node_tests_test_fixture_form(directory, name, text, options, option_count, front, refused, discards, true);
+    return census && own;
 }
 
 // --facts' fixture (#2850's step 1, c_check_node_machine_facts.c): each kind of identifier's leaf (an automatic object, a
@@ -1249,6 +1332,8 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-census refuses nothing for warnings that are off by default");
     check_test_expect(test, ready && node_census_test_fixture(directory, "atomic.c", node_census_test_atomic, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
                       "node-census refuses atomic record accesses by type without refusing ordinary members or the whole unit");
+    check_test_expect(test, ready && node_census_test_fixture(directory, "defaults.c", node_census_test_defaults, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
+                      "node-census refuses what warns without an option, by its test, with the default warnings alone");
     char headers[512];
     char header[640];
     snprintf(headers, sizeof(headers), "%s/system", directory);
@@ -1261,7 +1346,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-census takes a system header's macros in a user's expression and counts them apart");
     // The same fixtures with the census's tests at reader time, after T there: the machine's verdict before the pipeline
     // is never a take the census refuses, and every test's bit is the census's.
-    check_test_expect(test, ready && node_tests_test_fixture(directory, "warnings.c", node_census_test_warnings, loud, BUSTER_ARRAY_LENGTH(loud), BUSTER_NODE_FRONT_AFTER, 36, 3),
+    check_test_expect(test, ready && node_tests_test_fixture(directory, "warnings.c", node_census_test_warnings, loud, BUSTER_ARRAY_LENGTH(loud), BUSTER_NODE_FRONT_AFTER, 40, 3),
                       "node-tests: at reader time the tests refuse each expression the compiler warns of, as the census does after the pipeline");
     check_test_expect(test, ready && node_tests_test_fixture(directory, "clean.c", node_census_test_clean, loud, BUSTER_ARRAY_LENGTH(loud), BUSTER_NODE_FRONT_BEFORE, 0, 6),
                       "node-tests: at reader time the tests refuse none of the clean idioms");
@@ -1272,6 +1357,8 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-tests: at reader time warnings that are off by default refuse nothing");
     check_test_expect(test, ready && node_tests_test_fixture(directory, "atomic.c", node_census_test_atomic, quiet, BUSTER_ARRAY_LENGTH(quiet), BUSTER_NODE_FRONT_AFTER, 2, 0),
                       "node-tests: at reader time atomic record accesses are refused by type");
+    check_test_expect(test, ready && node_tests_test_fixture(directory, "defaults.c", node_census_test_defaults, quiet, BUSTER_ARRAY_LENGTH(quiet), BUSTER_NODE_FRONT_AFTER, 28, 5),
+                      "node-tests: at reader time the tests refuse what warns without an option, with the default warnings alone");
     check_test_expect(test, written && node_tests_test_fixture(directory, "system.c", node_census_test_system, isystem, BUSTER_ARRAY_LENGTH(isystem), BUSTER_NODE_FRONT_AFTER, 0, 0),
                       "node-tests: at reader time a system header's macros in a user's expression refuse nothing");
     if (written)

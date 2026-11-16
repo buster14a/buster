@@ -9,7 +9,8 @@
 //
 //   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--fused] [--interleave N] [--facts | --facts-lean | --facts-loads]
 //                                       [--facts-operators] [--facts-reads] [--facts-packed] [--facts-window N] [--front | --front-first] [--front-lean]
-//                                       [--front-warm] [--front-types] [--front-sweeps] [--front-tests] [--passes N] [--repeat N]] [preprocessor options] file...
+//                                       [--front-warm] [--front-types] [--front-sweeps] [--front-tests | --front-own-tests] [--front-tests-last] [--passes N]
+//                                       [--repeat N]] [preprocessor options] file...
 //
 // A full expression is a tree of the tasks' pops under one root: a pop that a statement's control pushed (an expression
 // statement's, a condition's, a return's, a switch's, an initializer's) or a nested control (a statement expression's).
@@ -471,6 +472,20 @@ struct NodeCensusScratch
     uint8_t* type_bits;
     uint32_t type_bits_count;
     uint8_t* declaration_facts;
+    // The tests in the machine's own form (node_tests_expression): a type's widths as one word, kept as its byte is
+    // (node_tests_ranges), and each record's type's byte for the operators above it, BUSTER_NODE_MACHINE_MOST of them.
+    uint32_t* type_ranges;
+    uint8_t* own_types;
+    // What each record is as an operand (BUSTER_NODE_TESTS_OPERAND_*), with a zero byte before the first for an operand
+    // that is none; the pass's three lists of records, BUSTER_NODE_MACHINE_MOST each; and the unit's tables by operator
+    // (node_tests_tables).
+    uint8_t* own_properties;
+    uint16_t* own_lists;
+    uint8_t own_classes[128];
+    uint8_t own_operand_bits[128];
+    uint8_t own_copies[128];
+    uint8_t own_always[128];
+    uint8_t own_sends[128];
     // The declared type of the object whose initializer the current expression is, where the caller gives it (0
     // otherwise): at reader time, and after the pipeline for a root the lowering never popped, which no control names.
     TypeId given_declared;
@@ -857,14 +872,22 @@ static TypeId node_census_function_type(const TypeTable* types, TypeId type)
 #define BUSTER_NODE_CENSUS_TYPE_ENUM 0x08u
 #define BUSTER_NODE_CENSUS_TYPE_FLOATING 0x10u
 #define BUSTER_NODE_CENSUS_TYPE_POINTER 0x20u
+// For the tests in the machine's own form: a pointer whose pointee may be void (a void dereference's operand; nullptr_t
+// reads as one, for the census's code to decide), and an array.
+#define BUSTER_NODE_CENSUS_TYPE_VOID_POINTEE 0x40u
+#define BUSTER_NODE_CENSUS_TYPE_ARRAY 0x80u
 
 static __attribute__((noinline)) uint8_t node_census_type_bits_make(const TypeTable* types, TypeId type)
 {
+    const uint8_t kind = node_census_kind(types, type);
+    const TypeId pointee = kind == BUSTER_TYPE_KIND_POINTER ? type_unqualified(type_strip_aligned(types, type_element(types, node_census_base(types, type)))) : 0;
+    const bool void_pointee = kind == BUSTER_TYPE_KIND_NULLPTR || (kind == BUSTER_TYPE_KIND_POINTER && type_kind(types, pointee) == BUSTER_TYPE_KIND_VOID);
     const uint8_t bits = (uint8_t)(BUSTER_NODE_CENSUS_TYPE_KNOWN | (node_census_special_type(types, type) ? BUSTER_NODE_CENSUS_TYPE_SPECIAL : 0) |
                                    (node_census_aggregate(types, type) ? BUSTER_NODE_CENSUS_TYPE_AGGREGATE : 0) |
                                    (node_census_enum(types, type) ? BUSTER_NODE_CENSUS_TYPE_ENUM : 0) |
                                    (node_census_floating(types, type) ? BUSTER_NODE_CENSUS_TYPE_FLOATING : 0) |
-                                   (node_census_pointer(types, type) ? BUSTER_NODE_CENSUS_TYPE_POINTER : 0));
+                                   (node_census_pointer(types, type) ? BUSTER_NODE_CENSUS_TYPE_POINTER : 0) |
+                                   (void_pointee ? BUSTER_NODE_CENSUS_TYPE_VOID_POINTEE : 0) | (type_kind_is_array(kind) ? BUSTER_NODE_CENSUS_TYPE_ARRAY : 0));
     return bits;
 }
 
@@ -993,32 +1016,48 @@ static bool node_census_builtin_result(const Preprocessor* pp, uint32_t name);
 // byte kept by the declaration's token: whether it has an attribute the tables don't model (node_census_flagged_kinds);
 // whether a call of it has semantics of its own by its name or its attributes (a printf-family name,
 // node_census_callee_kinds); and whether it asks for its result (node_census_result_kinds, or a const or pure builtin's
-// name). Each is its declaration's alone: every leaf of one declaration has its name.
-#define BUSTER_NODE_CENSUS_DECLARATION_KNOWN 0x01u
+// name). Each is its declaration's alone: every leaf of one declaration has its name. Each is made when it is first
+// asked (its KNOWN bit): a leaf asks the first, a call's callee the second, a discarded call the third.
+#define BUSTER_NODE_CENSUS_DECLARATION_FLAGGED_KNOWN 0x01u
 #define BUSTER_NODE_CENSUS_DECLARATION_FLAGGED 0x02u
 #define BUSTER_NODE_CENSUS_DECLARATION_CALLEE 0x04u
 #define BUSTER_NODE_CENSUS_DECLARATION_RESULT 0x08u
+#define BUSTER_NODE_CENSUS_DECLARATION_CALLEE_KNOWN 0x10u
+#define BUSTER_NODE_CENSUS_DECLARATION_RESULT_KNOWN 0x20u
 
-static __attribute__((noinline)) uint8_t node_census_declaration_facts_make(const NodeCensusScratch* s, uint32_t declaration, uint32_t name)
+static __attribute__((noinline)) uint8_t node_census_declaration_facts_make(const NodeCensusScratch* s, uint32_t declaration, uint32_t name, uint8_t asked)
 {
     const CheckInput* input = s->program->input;
-    const String8 spelled = { .pointer = (char*)intern_bytes(s->pp->table, name), .length = intern_length(s->pp->table, name) };
-    const bool flagged = node_census_attributed(input, declaration, node_census_flagged_kinds, BUSTER_ARRAY_LENGTH(node_census_flagged_kinds));
-    const bool callee = check_common_format_index(spelled, &s->pp->options) != UINT32_MAX ||
-                        node_census_attributed(input, declaration, node_census_callee_kinds, BUSTER_ARRAY_LENGTH(node_census_callee_kinds));
-    const bool result = node_census_builtin_result(s->pp, name) ||
-                        node_census_attributed(input, declaration, node_census_result_kinds, BUSTER_ARRAY_LENGTH(node_census_result_kinds));
-    return (uint8_t)(BUSTER_NODE_CENSUS_DECLARATION_KNOWN | (flagged ? BUSTER_NODE_CENSUS_DECLARATION_FLAGGED : 0) | (callee ? BUSTER_NODE_CENSUS_DECLARATION_CALLEE : 0) |
-                     (result ? BUSTER_NODE_CENSUS_DECLARATION_RESULT : 0));
+    uint8_t facts = asked;
+    if (asked == BUSTER_NODE_CENSUS_DECLARATION_FLAGGED_KNOWN)
+    {
+        const bool flagged = node_census_attributed(input, declaration, node_census_flagged_kinds, BUSTER_ARRAY_LENGTH(node_census_flagged_kinds));
+        facts |= flagged ? BUSTER_NODE_CENSUS_DECLARATION_FLAGGED : 0;
+    }
+    else if (asked == BUSTER_NODE_CENSUS_DECLARATION_CALLEE_KNOWN)
+    {
+        const String8 spelled = { .pointer = (char*)intern_bytes(s->pp->table, name), .length = intern_length(s->pp->table, name) };
+        const bool callee = check_common_format_index(spelled, &s->pp->options) != UINT32_MAX ||
+                            node_census_attributed(input, declaration, node_census_callee_kinds, BUSTER_ARRAY_LENGTH(node_census_callee_kinds));
+        facts |= callee ? BUSTER_NODE_CENSUS_DECLARATION_CALLEE : 0;
+    }
+    else
+    {
+        const bool result = node_census_builtin_result(s->pp, name) ||
+                            node_census_attributed(input, declaration, node_census_result_kinds, BUSTER_ARRAY_LENGTH(node_census_result_kinds));
+        facts |= result ? BUSTER_NODE_CENSUS_DECLARATION_RESULT : 0;
+    }
+    return facts;
 }
 
-static inline uint8_t node_census_declaration_facts(const NodeCensusScratch* s, uint32_t declaration, uint32_t name)
+// The declaration's byte with the fact `asked` (one of its KNOWN bits) made.
+static inline uint8_t node_census_declaration_facts(const NodeCensusScratch* s, uint32_t declaration, uint32_t name, uint8_t asked)
 {
     const bool kept = s->declaration_facts != NULL && declaration < s->program->parser->tokens.count;
     uint8_t facts = kept ? s->declaration_facts[declaration] : 0;
-    if (facts == 0)
+    if ((facts & asked) == 0)
     {
-        facts = node_census_declaration_facts_make(s, declaration, name);
+        facts |= node_census_declaration_facts_make(s, declaration, name, asked);
         if (kept)
         {
             s->declaration_facts[declaration] = facts;
@@ -1051,7 +1090,7 @@ static bool node_census_callee(const NodeCensusScratch* s, uint32_t call)
         const uint32_t declaration = node_census_declaration(program, token);
         if (declaration != BUSTER_CHECK_NONE)
         {
-            result = (node_census_declaration_facts(s, declaration, parser->tokens.names[token]) & BUSTER_NODE_CENSUS_DECLARATION_CALLEE) != 0;
+            result = (node_census_declaration_facts(s, declaration, parser->tokens.names[token], BUSTER_NODE_CENSUS_DECLARATION_CALLEE_KNOWN) & BUSTER_NODE_CENSUS_DECLARATION_CALLEE) != 0;
         }
     }
     return result;
@@ -1094,7 +1133,7 @@ static bool node_census_wants_result(const NodeCensusScratch* s, uint32_t call)
         const uint32_t declaration = node_census_declaration(program, token);
         if (declaration != BUSTER_CHECK_NONE)
         {
-            result = (node_census_declaration_facts(s, declaration, parser->tokens.names[token]) & BUSTER_NODE_CENSUS_DECLARATION_RESULT) != 0;
+            result = (node_census_declaration_facts(s, declaration, parser->tokens.names[token], BUSTER_NODE_CENSUS_DECLARATION_RESULT_KNOWN) & BUSTER_NODE_CENSUS_DECLARATION_RESULT) != 0;
         }
     }
     return result;
@@ -1564,6 +1603,24 @@ static bool node_view_atomic_member(const NodeCensusScratch* s, uint32_t node)
     return result;
 }
 
+// A leaf's tests of the set, as bits of NodeCensusTest: a compound literal's object; and an object or a name the tables
+// don't model (an overload set's, a register object, a declaration with a flagged attribute). `token` is the leaf's and
+// `flags` its value's.
+static inline uint64_t node_census_leaf(const NodeCensusScratch* s, uint32_t node, uint32_t token, uint32_t flags)
+{
+    const CheckProgram* program = s->program;
+    const CheckInput* input = program->input;
+    const uint32_t object = node_view_object(s, node);
+    const bool known = object != 0 && object < program->object_count;
+    const bool compound = known && check_input_bit(input->declaration_bits, object - 1, BUSTER_CHECK_BITS_COMPOUND);
+    const bool register_object = known && check_input_bit(input->declaration_bits, object - 1, BUSTER_CHECK_BITS_REGISTER);
+    const uint32_t declaration = node_census_declaration(program, token);
+    const bool flagged = node_view_overloaded(s, node) || register_object || (flags & (BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME)) != 0 ||
+                         (declaration != BUSTER_CHECK_NONE &&
+                          (node_census_declaration_facts(s, declaration, program->parser->tokens.names[token], BUSTER_NODE_CENSUS_DECLARATION_FLAGGED_KNOWN) & BUSTER_NODE_CENSUS_DECLARATION_FLAGGED) != 0);
+    return (compound ? UINT64_C(1) << NODE_CENSUS_COMPOUND_LITERAL : 0) | (flagged ? UINT64_C(1) << NODE_CENSUS_DECLARATION : 0);
+}
+
 // The tests of node `node` of the current expression (`root` its root, `context` its root's kind), as bits of
 // NodeCensusTest.
 static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t root, NodeCensusRoot context)
@@ -1601,19 +1658,7 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
         aggregate = argument < graph->count && (node_census_type_bits(s, node_view_type(s, argument)) & BUSTER_NODE_CENSUS_TYPE_AGGREGATE) != 0;
     }
     tests |= aggregate ? UINT64_C(1) << NODE_CENSUS_AGGREGATE : 0;
-    if (op == CHECK_OP_VALUE)
-    {
-        const uint32_t object = node_view_object(s, node);
-        const bool known = object != 0 && object < program->object_count;
-        const bool compound = known && check_input_bit(input->declaration_bits, object - 1, BUSTER_CHECK_BITS_COMPOUND);
-        const bool register_object = known && check_input_bit(input->declaration_bits, object - 1, BUSTER_CHECK_BITS_REGISTER);
-        tests |= compound ? UINT64_C(1) << NODE_CENSUS_COMPOUND_LITERAL : 0;
-        const uint32_t declaration = node_census_declaration(program, token);
-        const bool flagged = node_view_overloaded(s, node) || register_object || (flags & (BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME)) != 0 ||
-                             (declaration != BUSTER_CHECK_NONE &&
-                              (node_census_declaration_facts(s, declaration, parser->tokens.names[token]) & BUSTER_NODE_CENSUS_DECLARATION_FLAGGED) != 0);
-        tests |= flagged ? UINT64_C(1) << NODE_CENSUS_DECLARATION : 0;
-    }
+    tests |= op == CHECK_OP_VALUE ? node_census_leaf(s, node, token, flags) : 0;
     // -Wtype-safety reads a call's arguments against its callee's type tags: in a unit that declares any, every call.
     tests |= op == CHECK_OP_CALL && (node_census_callee(s, node) || policy->type_safety) ? UINT64_C(1) << NODE_CENSUS_CALLEE : 0;
     // The silence tests.
@@ -1763,17 +1808,15 @@ static TypeId node_census_initialized_type(const NodeCensusScratch* s, uint32_t 
     return declaration < program->input->token_count ? program->input->declared_types[declaration] : 0;
 }
 
-// The tests of the expression whose root is node `root`, popped with `flags`, of root kind `context`: its graph subtree
-// walked into the scratch's list, then each node's tests and the expression's own. At reader time (the view's records)
-// the lowering's flags are none, an initializer's object's type is the caller's (NodeCensusScratch.given_declared), the
-// actions' warnings are T's for the whole expression, and the warning events are the caller's to test.
-static uint64_t node_census_expression(NodeCensusScratch* s, uint32_t root, uint8_t flags, NodeCensusRoot context, uint32_t* walked)
+// The walk of the expression whose root is node `root`: its graph subtree's nodes into the scratch's list, each with its
+// parent and its depth, and their count; into `lowest_token` and `highest_token` the least and the greatest of their
+// tokens.
+static uint32_t node_census_walk(NodeCensusScratch* s, uint32_t root, uint32_t* lowest_token, uint32_t* highest_token)
 {
     const CheckProgram* program = s->program;
     const CheckGraph* graph = &program->input->graph;
     const Parser* parser = program->parser;
     s->stamp += 1;
-    s->mixed_system = false;
     uint32_t count = 0;
     uint32_t top = 0;
     uint32_t lowest = UINT32_MAX;
@@ -1811,18 +1854,21 @@ static uint64_t node_census_expression(NodeCensusScratch* s, uint32_t root, uint
             }
         }
     }
+    *lowest_token = lowest;
+    *highest_token = highest;
+    return count;
+}
+
+// The tests of an expression that are its own and no node's, as bits of NodeCensusTest: the expression's root is node
+// `root`, popped with `flags`, of root kind `context`; it has `count` nodes, whose tokens span `lowest` to `highest`.
+// The unsequenced test reads the walk's list of `walked` nodes, and is asked where `unsequenced` says.
+static uint64_t node_census_root_tests(NodeCensusScratch* s, uint32_t root, uint8_t flags, NodeCensusRoot context, uint32_t count, uint32_t lowest, uint32_t highest,
+                                       bool unsequenced, uint32_t walked)
+{
+    const CheckProgram* program = s->program;
+    const CheckGraph* graph = &program->input->graph;
+    const Parser* parser = program->parser;
     uint64_t tests = 0;
-    uint32_t lowest_node = root;
-    uint32_t inner_node = 0;
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        const uint32_t node = s->list[i];
-        tests |= node_census_node(s, node, root, context);
-        lowest_node = node < lowest_node ? node : lowest_node;
-        inner_node = node != root && node > inner_node ? node : inner_node;
-    }
-    s->lowest_node = lowest_node;
-    s->inner_node = count > 1 ? inner_node : root;
     tests |= count > BUSTER_NODE_CENSUS_MOST ? UINT64_C(1) << NODE_CENSUS_SIZE : 0;
     tests |= context == NODE_CENSUS_ROOT_OTHER || context == NODE_CENSUS_ROOT_BRACE ? UINT64_C(1) << NODE_CENSUS_CONTROL : 0;
     tests |= (flags & BUSTER_CHECK_LOWER_OWNER_TRACKED) != 0 ? UINT64_C(1) << NODE_CENSUS_TRACKED : 0;
@@ -1843,7 +1889,7 @@ static uint64_t node_census_expression(NodeCensusScratch* s, uint32_t root, uint
     tests |= declared != 0 && node_census_special_type(program->types, declared) ? UINT64_C(1) << NODE_CENSUS_TYPE : 0;
     tests |= s->policy.return_address && context == NODE_CENSUS_ROOT_RETURN && node_census_returns_address(s, root) ?
              UINT64_C(1) << NODE_CENSUS_RETURN_ADDRESS : 0;
-    tests |= s->policy.unsequenced && node_census_unsequenced(s, count, root) ? UINT64_C(1) << NODE_CENSUS_UNSEQUENCED : 0;
+    tests |= s->policy.unsequenced && unsequenced && node_census_unsequenced(s, walked, root) ? UINT64_C(1) << NODE_CENSUS_UNSEQUENCED : 0;
     const bool events = s->event_prefix != NULL && lowest <= highest && s->event_prefix[highest + 1] != s->event_prefix[lowest];
     tests |= events ? UINT64_C(1) << NODE_CENSUS_EVENT : 0;
     // T's actions' warnings for the expression's nodes, those the unit's nodes suppress aside: at least the ones the
@@ -1852,11 +1898,832 @@ static uint64_t node_census_expression(NodeCensusScratch* s, uint32_t root, uint
     tests |= (actions & s->policy.action_bits) != 0 ? UINT64_C(1) << NODE_CENSUS_ACTION_WARNING : 0;
     s->span_low = lowest;
     s->span_high = highest;
+    return tests;
+}
+
+// The tests of the expression whose root is node `root`, popped with `flags`, of root kind `context`: its graph subtree
+// walked into the scratch's list, then each node's tests and the expression's own. At reader time (the view's records)
+// the lowering's flags are none, an initializer's object's type is the caller's (NodeCensusScratch.given_declared), the
+// actions' warnings are T's for the whole expression, and the warning events are the caller's to test.
+static uint64_t node_census_expression(NodeCensusScratch* s, uint32_t root, uint8_t flags, NodeCensusRoot context, uint32_t* walked)
+{
+    s->mixed_system = false;
+    uint32_t lowest = UINT32_MAX;
+    uint32_t highest = 0;
+    const uint32_t count = node_census_walk(s, root, &lowest, &highest);
+    uint64_t tests = 0;
+    uint32_t lowest_node = root;
+    uint32_t inner_node = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint32_t node = s->list[i];
+        tests |= node_census_node(s, node, root, context);
+        lowest_node = node < lowest_node ? node : lowest_node;
+        inner_node = node != root && node > inner_node ? node : inner_node;
+    }
+    s->lowest_node = lowest_node;
+    s->inner_node = count > 1 ? inner_node : root;
+    tests |= node_census_root_tests(s, root, flags, context, count, lowest, highest, true, count);
     *walked = count;
     return tests;
 }
 
-// The first event's ID in the current expression's span of tokens, for the report.
+// The tests in the machine's own form (docs/node-machine.md, "The tests in the machine's own form"): the same bits as
+// node_census_expression's at reader time, from one pass over T's records in their order. There is no walk of the
+// graph and no step from a node to its record: a record's operands are records below it, whose types' bytes the pass
+// has kept. What every record pays is its operator's place in the set, its type's byte, its flags and its token; a
+// leaf pays its declaration's byte. An operator's silence tests are asked only where a condition
+// that each of them needs holds (a trigger, by the operator and its operands' bytes and constants); the record is then
+// sent to the census's own code (node_census_node), after a walk of the expression for the tests that read a node's
+// parent. So the pass's own conditions are never the verdict of a silence test: they only say where none can fire.
+//
+// It runs where it sits: on an expression the front made whole and T took. What those decide first it doesn't ask again
+// (each is the census's code's condition still, which runs beside it with --verify, and whose fixtures' lines would show
+// the form's lack the day one of these stops holding):
+// - T refuses a record in a floating-point pragma's region or a constant context (its context refusal, by the same bits
+//   as the region test's), a call whose callee's type has no prototype (node_machine_callee_refused), and a leaf with an
+//   overload set (its leaf refusal). So no record has a region's bit, no call's callee lacks a prototype, and a wide
+//   leaf's bits are its columns', as any leaf's.
+// - The front leaves sizeof, _Alignof and a compound literal to the walk, so no record is one, and no leaf's object is a
+//   compound literal's.
+// - A register object's leaf has BUSTER_CHECK_REGISTER in its flags (the reader's, from the same declaration's bit as
+//   the object's): the flags alone say it, before its declaration's attributes are asked. (The census's code never
+//   asks a register object's: its own register test comes first. So here such a leaf always went to that code, and
+//   neither of the form's two register conditions behind it could fire.)
+// - A root is a condition's only where it is the CHECK_OP_CONDITION wrapper (node_census_reader_expression), whose
+//   operand, a shift or a product read as a truth, the wrapper's own send takes.
+typedef enum NodeTestsTrigger
+{
+    NODE_TESTS_TRIGGER_ATOMIC_MEMBER,
+    NODE_TESTS_TRIGGER_ENUM,
+    NODE_TESTS_TRIGGER_SIGN_COMPARE,
+    NODE_TESTS_TRIGGER_VOID_DEREFERENCE,
+    NODE_TESTS_TRIGGER_CONVERSION,
+    NODE_TESTS_TRIGGER_DIVISION,
+    NODE_TESTS_TRIGGER_SHIFT_COUNT,
+    NODE_TESTS_TRIGGER_NULL,
+    NODE_TESTS_TRIGGER_BOUNDS,
+    NODE_TESTS_TRIGGER_COMPARISON,
+    NODE_TESTS_TRIGGER_NULL_CONSTANT,
+    NODE_TESTS_TRIGGER_SHIFT_OPERAND,
+    NODE_TESTS_TRIGGER_CHAINED,
+    NODE_TESTS_TRIGGER_TRUTH,
+    NODE_TESTS_TRIGGER_SELF_ASSIGN,
+    NODE_TESTS_TRIGGER_UNSEQUENCED,
+    NODE_TESTS_TRIGGERS,
+} NodeTestsTrigger;
+
+static const char* const node_tests_trigger_names[NODE_TESTS_TRIGGERS] = {
+    [NODE_TESTS_TRIGGER_ATOMIC_MEMBER] = "atomic-member",
+    [NODE_TESTS_TRIGGER_ENUM] = "enum-operand",
+    [NODE_TESTS_TRIGGER_SIGN_COMPARE] = "sign-compare",
+    [NODE_TESTS_TRIGGER_VOID_DEREFERENCE] = "void-dereference",
+    [NODE_TESTS_TRIGGER_CONVERSION] = "constant-conversion",
+    [NODE_TESTS_TRIGGER_DIVISION] = "constant-divisor",
+    [NODE_TESTS_TRIGGER_SHIFT_COUNT] = "constant-shift",
+    [NODE_TESTS_TRIGGER_NULL] = "constant-pointer",
+    [NODE_TESTS_TRIGGER_BOUNDS] = "array-subscript",
+    [NODE_TESTS_TRIGGER_COMPARISON] = "constant-comparison",
+    [NODE_TESTS_TRIGGER_NULL_CONSTANT] = "constant-to-pointer",
+    [NODE_TESTS_TRIGGER_SHIFT_OPERAND] = "shift-of-sum",
+    [NODE_TESTS_TRIGGER_CHAINED] = "chained-comparison",
+    [NODE_TESTS_TRIGGER_TRUTH] = "shift-or-product-as-truth",
+    [NODE_TESTS_TRIGGER_SELF_ASSIGN] = "assignment-of-a-name",
+    [NODE_TESTS_TRIGGER_UNSEQUENCED] = "writes",
+};
+
+// What the own form asks of a type's widths, as one word kept by the type's index: its width as an integer of at most 64
+// bits (node_census_integer's: bits 0 to 6, 0 for none) and whether that is signed (bit 7); its width before promotion of
+// at most 128 (node_census_width's: bits 8 to 15) and whether that is signed (bit 16); and bit 31 once made.
+#define BUSTER_NODE_TESTS_RANGE_SIGNED 0x80u
+#define BUSTER_NODE_TESTS_RANGE_WIDE_SIGNED 0x10000u
+#define BUSTER_NODE_TESTS_RANGE_KNOWN 0x80000000u
+
+static __attribute__((noinline)) uint32_t node_tests_ranges_make(const TypeTable* types, TypeId type)
+{
+    uint32_t width = 0;
+    bool sign = false;
+    const bool integer = node_census_integer(types, type, &width, &sign);
+    bool wide_sign = false;
+    const uint32_t wide = node_census_width(types, type, &wide_sign);
+    return BUSTER_NODE_TESTS_RANGE_KNOWN | (integer ? width : 0) | (integer && sign ? BUSTER_NODE_TESTS_RANGE_SIGNED : 0) | wide << 8 |
+           (wide != 0 && wide_sign ? BUSTER_NODE_TESTS_RANGE_WIDE_SIGNED : 0);
+}
+
+static inline uint32_t node_tests_ranges(const NodeCensusScratch* s, TypeId type)
+{
+    const uint32_t index = type_index(type);
+    const bool kept = type != 0 && s->type_ranges != NULL && index < s->type_bits_count;
+    uint32_t ranges = kept ? s->type_ranges[index] : 0;
+    if (type != 0 && ranges == 0)
+    {
+        ranges = node_tests_ranges_make(s->program->types, type);
+        if (kept)
+        {
+            s->type_ranges[index] = ranges;
+        }
+    }
+    return ranges;
+}
+
+// An operand's record among T's records of the current expression (node_view_record's, an operand being no root):
+// UINT32_MAX for a node that is none or outside them.
+static inline uint32_t node_tests_record(const NodeMachine* machine, uint32_t node)
+{
+    const uint32_t record = node - machine->first;
+    return node >= machine->first && record + 1 < machine->count ? record : UINT32_MAX;
+}
+
+// Record `r`'s value as an integer constant the way node_census_integer_constant reads it, where its columns hold it
+// whole: whether it is one, and its value into `value`. A wide record reads as none here: `wide` says so, for the
+// caller to send its operator to the census's code.
+static inline bool node_tests_integer(const NodeCensusScratch* s, uint32_t r, int64_t* value, bool* wide)
+{
+    const NodeMachineColumns* columns = s->records->columns;
+    const uint8_t standing = columns->standings[r];
+    const bool integer = ((standing >> 2) & 0x07u) == CHECK_CONSTANT_INTEGER;
+    const uint32_t ranges = integer ? node_tests_ranges(s, columns->value_types[r]) : 0;
+    const uint32_t width = ranges & 0x7fu;
+    const bool plain = (standing & (BUSTER_NODE_MACHINE_WIDE | BUSTER_NODE_MACHINE_FIELD)) == 0;
+    const uint64_t raw = columns->payloads[r];
+    const uint32_t shift = 64 - (width != 0 ? width : 64);
+    const uint64_t bits = raw << shift;
+    const bool sign = (ranges & BUSTER_NODE_TESTS_RANGE_SIGNED) != 0;
+    // An unsigned value past INT64_MAX has no place in `value`: it reads as wide, for the census's code.
+    const bool huge = !sign && width == 64 && (raw >> 63) != 0;
+    *wide = integer && (!plain || huge);
+    *value = sign ? (int64_t)bits >> shift : (int64_t)(bits >> shift);
+    return integer && plain && width != 0 && !huge;
+}
+
+// What a constant operand's conversion to `target` does (node_census_constant_changes'): nothing, a change, or one the
+// census's code is asked about. Operand record `o` has constant kind `kind`. An integer constant changes where it
+// doesn't fit a narrower integer type, and under -Wassign-enum where the target is an enumeration; a floating constant
+// changes to an integer type; an integer constant to a floating type, and one whose value the columns don't hold, are
+// the census's code's.
+#define BUSTER_NODE_TESTS_CONVERSION_NONE 0u
+#define BUSTER_NODE_TESTS_CONVERSION_CHANGES 1u
+#define BUSTER_NODE_TESTS_CONVERSION_ASKED 2u
+
+static inline __attribute__((always_inline)) uint32_t node_tests_conversion(const NodeCensusScratch* s, uint32_t o, uint32_t kind, TypeId target)
+{
+    uint32_t result = BUSTER_NODE_TESTS_CONVERSION_NONE;
+    if (target != 0 && (kind == CHECK_CONSTANT_INTEGER || kind == CHECK_CONSTANT_FLOATING))
+    {
+        const uint8_t target_bits = node_census_type_bits(s, target);
+        const uint32_t target_ranges = node_tests_ranges(s, target);
+        const uint32_t target_width = target_ranges & 0x7fu;
+        const bool target_sign = (target_ranges & BUSTER_NODE_TESTS_RANGE_SIGNED) != 0;
+        const uint32_t source_width = (node_tests_ranges(s, s->records->columns->value_types[o]) >> 8) & 0xffu;
+        const bool narrows = source_width == 0 || source_width > target_width;
+        if (kind == CHECK_CONSTANT_FLOATING)
+        {
+            result = target_width != 0 ? BUSTER_NODE_TESTS_CONVERSION_CHANGES : BUSTER_NODE_TESTS_CONVERSION_NONE;
+        }
+        else if (s->policy.assign_enum && (target_bits & BUSTER_NODE_CENSUS_TYPE_ENUM) != 0)
+        {
+            result = BUSTER_NODE_TESTS_CONVERSION_CHANGES;
+        }
+        else if (target_width != 0 && narrows)
+        {
+            // Whether the value survives, as a value or as the same bits of the other signedness (node_census_fits).
+            int64_t value = 0;
+            bool wide = false;
+            const bool known = node_tests_integer(s, o, &value, &wide);
+            const int64_t smallest = target_width == 64 ? INT64_MIN : -(INT64_C(1) << (target_width - 1));
+            const int64_t largest = target_width == 64 ? INT64_MAX : (INT64_C(1) << (target_width - 1)) - 1;
+            const uint64_t unsigned_largest = target_width == 64 ? UINT64_MAX : (UINT64_C(1) << target_width) - 1;
+            const bool fits = value >= smallest && (target_sign ? value <= largest : value < 0 || (uint64_t)value <= unsigned_largest);
+            result = wide ? BUSTER_NODE_TESTS_CONVERSION_ASKED : !known || !fits ? BUSTER_NODE_TESTS_CONVERSION_CHANGES : BUSTER_NODE_TESTS_CONVERSION_NONE;
+        }
+        else if (target_width == 0 && (target_bits & BUSTER_NODE_CENSUS_TYPE_FLOATING) != 0)
+        {
+            result = BUSTER_NODE_TESTS_CONVERSION_ASKED;
+        }
+    }
+    return result;
+}
+
+// The constants' tests (node_census_constant_tests) at record `r`, operator `op` at node `node`, whose operands'
+// records are `o` (UINT32_MAX for none), one of them a constant: whether one fires, into `fires`, where the columns
+// hold what it reads; and otherwise the trigger for the census's code, or NODE_TESTS_TRIGGERS for none. A comparison's
+// bound, a constant's precision as a floating value, a subscript past its array's length and any constant the columns
+// don't hold whole are the census's code's.
+static inline NodeTestsTrigger node_tests_constants(const NodeCensusScratch* s, uint32_t r, uint32_t node, CheckOp op, const uint32_t* o, bool* fires)
+{
+    const NodeMachineColumns* columns = s->records->columns;
+    const CheckProgram* program = s->program;
+    const CheckGraph* graph = &program->input->graph;
+    const TypeTable* types = program->types;
+    const NodeCensusPolicy* policy = &s->policy;
+    const uint8_t* kept = s->own_types;
+    const uint32_t kinds[3] = { o[0] != UINT32_MAX ? (columns->standings[o[0]] >> 2) & 0x07u : 0, o[1] != UINT32_MAX ? (columns->standings[o[1]] >> 2) & 0x07u : 0,
+                                o[2] != UINT32_MAX ? (columns->standings[o[2]] >> 2) & 0x07u : 0 };
+    NodeTestsTrigger trigger = NODE_TESTS_TRIGGERS;
+    bool fired = false;
+    // The operands' implicit conversions: a first two's targets are the record's columns.
+    if ((policy->constant_conversion || policy->assign_enum) && op != CHECK_OP_CAST)
+    {
+        const uint32_t first = kinds[0] != CHECK_CONSTANT_NONE ? node_tests_conversion(s, o[0], kinds[0], columns->converted[2 * r]) : BUSTER_NODE_TESTS_CONVERSION_NONE;
+        const uint32_t second = kinds[1] != CHECK_CONSTANT_NONE ? node_tests_conversion(s, o[1], kinds[1], columns->converted[2 * r + 1]) : BUSTER_NODE_TESTS_CONVERSION_NONE;
+        const uint32_t third = kinds[2] != CHECK_CONSTANT_NONE ? node_tests_conversion(s, o[2], kinds[2], node_view_converted(s, node, 2)) : BUSTER_NODE_TESTS_CONVERSION_NONE;
+        fired = ((first | second | third) & BUSTER_NODE_TESTS_CONVERSION_CHANGES) != 0;
+        trigger = ((first | second | third) & BUSTER_NODE_TESTS_CONVERSION_ASKED) != 0 ? NODE_TESTS_TRIGGER_CONVERSION : trigger;
+    }
+    int64_t value = 0;
+    bool wide = false;
+    if (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER || op == CHECK_OP_DIVIDE_ASSIGN || op == CHECK_OP_REMAINDER_ASSIGN)
+    {
+        // A division by a constant zero.
+        const bool known = policy->division && kinds[1] == CHECK_CONSTANT_INTEGER && node_tests_integer(s, o[1], &value, &wide);
+        fired |= known && value == 0;
+        trigger = policy->division && kinds[1] == CHECK_CONSTANT_INTEGER && wide ? NODE_TESTS_TRIGGER_DIVISION : trigger;
+    }
+    else if (op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT || op == CHECK_OP_SHIFT_LEFT_ASSIGN || op == CHECK_OP_SHIFT_RIGHT_ASSIGN)
+    {
+        // A shift whose constant count is negative or reaches its operand's promoted width, a left shift of a negative
+        // constant, and under -Wshift-sign-overflow a left shift of a signed or narrow operand by any constant.
+        const bool left = op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_LEFT_ASSIGN;
+        const uint32_t operand_ranges = o[0] != UINT32_MAX ? node_tests_ranges(s, columns->value_types[o[0]]) : 0;
+        const uint32_t operand_width = (operand_ranges >> 8) & 0xffu;
+        const bool operand_sign = (operand_ranges & BUSTER_NODE_TESTS_RANGE_WIDE_SIGNED) != 0;
+        const uint32_t promoted = operand_width < 32 ? 32 : operand_width;
+        bool count_wide = false;
+        const bool counted = kinds[1] == CHECK_CONSTANT_INTEGER && node_tests_integer(s, o[1], &value, &count_wide);
+        const bool out_of_range = counted && (value < 0 || operand_width == 0 || value >= (int64_t)promoted);
+        int64_t shifted = 0;
+        bool shifted_wide = false;
+        const bool negative = left && kinds[0] == CHECK_CONSTANT_INTEGER && node_tests_integer(s, o[0], &shifted, &shifted_wide) && shifted < 0;
+        const bool overflow = policy->shift_sign_overflow && left && (operand_sign || operand_width < 32) && counted;
+        fired |= (policy->shifts && (out_of_range || negative)) || overflow;
+        trigger = (policy->shifts || policy->shift_sign_overflow) && (count_wide || shifted_wide) ? NODE_TESTS_TRIGGER_SHIFT_COUNT : trigger;
+    }
+    else if (op == CHECK_OP_DEREFERENCE || op == CHECK_OP_ARROW || op == CHECK_OP_SUBSCRIPT)
+    {
+        // A dereference of a null constant: the pointer is a subscript's second operand where that is one; null is an
+        // integer constant of 0 or an address constant of no object.
+        const uint8_t second_bits = o[1] != UINT32_MAX ? kept[o[1]] : 0;
+        const uint8_t first_bits = o[0] != UINT32_MAX ? kept[o[0]] : 0;
+        const uint32_t side = op == CHECK_OP_SUBSCRIPT && graph->operand1[node] < graph->count && (second_bits & BUSTER_NODE_CENSUS_TYPE_POINTER) != 0 ? 1 : 0;
+        const uint32_t pointer = o[side];
+        const uint8_t standing = pointer != UINT32_MAX ? columns->standings[pointer] : 0;
+        const bool whole = (standing & BUSTER_NODE_MACHINE_WIDE) == 0;
+        const bool zero = (standing & BUSTER_NODE_MACHINE_FIELD) != 0 || columns->payloads[pointer != UINT32_MAX ? pointer : 0] == 0;
+        const bool null = (kinds[side] == CHECK_CONSTANT_INTEGER && zero) || (kinds[side] == CHECK_CONSTANT_ADDRESS && columns->objects[pointer != UINT32_MAX ? pointer : 0] == 0);
+        const bool pointed = kinds[side] == CHECK_CONSTANT_INTEGER || kinds[side] == CHECK_CONSTANT_ADDRESS;
+        fired |= policy->null_dereference && pointed && whole && null;
+        trigger = policy->null_dereference && pointed && !whole ? NODE_TESTS_TRIGGER_NULL : trigger;
+        // A constant subscript of an array of a known length: inside it, none; at its end or outside, the census's code
+        // (an address of the end is allowed, which its parent says).
+        if (policy->array_bounds && op == CHECK_OP_SUBSCRIPT && ((first_bits | second_bits) & BUSTER_NODE_CENSUS_TYPE_ARRAY) != 0)
+        {
+            const bool first_array = (first_bits & BUSTER_NODE_CENSUS_TYPE_ARRAY) != 0;
+            const uint32_t array = first_array ? o[0] : o[1];
+            const uint32_t index = first_array ? o[1] : o[0];
+            const uint32_t index_kind = first_array ? kinds[1] : kinds[0];
+            const TypeId array_type = array != UINT32_MAX ? node_census_base(types, columns->value_types[array]) : 0;
+            const bool sized = array_type != 0 && type_kind(types, array_type) == BUSTER_TYPE_KIND_ARRAY;
+            const uint64_t element = sized ? type_size(types, type_element(types, array_type)) : 0;
+            const uint64_t length = element != 0 ? type_size(types, array_type) / element : 0;
+            bool index_wide = false;
+            const bool known = sized && index_kind == CHECK_CONSTANT_INTEGER && node_tests_integer(s, index, &value, &index_wide);
+            const bool inside = known && value >= 0 && (uint64_t)value < length;
+            trigger = sized && index_kind == CHECK_CONSTANT_INTEGER && (index_wide || (known && !inside)) ? NODE_TESTS_TRIGGER_BOUNDS : trigger;
+        }
+    }
+    else if (node_census_comparison(op))
+    {
+        // A comparison with a constant that may be outside or at a bound of its other operand's type: none where the
+        // other operand is no integer or is a constant integer too, nor where the constant is a small value strictly
+        // inside every integer type of 8 bits or more that can hold its sign (an equality has no bound: zero is inside
+        // there).
+        for (uint32_t side = 0; policy->tautological && side < 2 && trigger == NODE_TESTS_TRIGGERS; side += 1)
+        {
+            const uint32_t constant = o[side];
+            const uint32_t other = o[1 - side];
+            const uint32_t other_ranges = other != UINT32_MAX ? node_tests_ranges(s, columns->value_types[other]) : 0;
+            const uint32_t other_width = other_ranges & 0x7fu;
+            const bool other_sign = (other_ranges & BUSTER_NODE_TESTS_RANGE_SIGNED) != 0;
+            const bool asked = kinds[side] == CHECK_CONSTANT_INTEGER && other != UINT32_MAX && kinds[1 - side] != CHECK_CONSTANT_INTEGER && other_width != 0;
+            const bool known = asked && node_tests_integer(s, constant, &value, &wide);
+            const bool equality = op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL;
+            const bool inside = known && other_width >= 8 &&
+                                ((value >= 1 && value <= 126) || (value >= -127 && value <= 0 && other_sign) || (value == 0 && equality));
+            // A constant whose own type is no integer of 64 bits at most is none for the test, as there.
+            const bool none = asked && !known && !wide;
+            trigger = asked && !inside && !none ? NODE_TESTS_TRIGGER_COMPARISON : trigger;
+        }
+    }
+    else if (op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT)
+    {
+        // A constant zero that is no literal converted to a pointer.
+        const uint32_t side = op == CHECK_OP_ASSIGN ? 1 : 0;
+        const uint32_t source = side == 1 ? graph->operand1[node] : graph->operand0[node];
+        const bool computed = source < graph->count && graph->ops[source] != CHECK_OP_VALUE && graph->ops[source] != CHECK_OP_CAST;
+        const bool asked = policy->non_literal_null && (kept[r] & BUSTER_NODE_CENSUS_TYPE_POINTER) != 0 && kinds[side] == CHECK_CONSTANT_INTEGER && computed;
+        const bool known = asked && node_tests_integer(s, o[side], &value, &wide);
+        fired |= known && value == 0;
+        trigger = asked && wide ? NODE_TESTS_TRIGGER_NULL_CONSTANT : trigger;
+    }
+    *fires = fired;
+    return trigger;
+}
+
+// An operator's classes for the own form's pass (NodeCensusScratch.own_classes, by CheckOp): outside the set, a leaf, a
+// write, an address, one whose token's parent the tree's tests read (`!`, `=`).
+#define BUSTER_NODE_TESTS_CLASS_UNCODED 0x01u
+#define BUSTER_NODE_TESTS_CLASS_LEAF 0x02u
+#define BUSTER_NODE_TESTS_CLASS_WRITE 0x04u
+#define BUSTER_NODE_TESTS_CLASS_ADDRESS 0x08u
+#define BUSTER_NODE_TESTS_CLASS_TREE 0x10u
+// What a record is as an operand (NodeCensusScratch.own_properties, a byte a record): a constant; of an enumeration's
+// type, a pointer's, a pointer's whose pointee may be void, an array's; an addition or a subtraction; a comparison; a
+// left shift or a product. An operator's `own_sends` says which of its operands' properties send it to its own tests.
+#define BUSTER_NODE_TESTS_OPERAND_CONSTANT 0x01u
+#define BUSTER_NODE_TESTS_OPERAND_ENUM 0x02u
+#define BUSTER_NODE_TESTS_OPERAND_POINTER 0x04u
+#define BUSTER_NODE_TESTS_OPERAND_VOID_POINTEE 0x08u
+#define BUSTER_NODE_TESTS_OPERAND_ARRAY 0x10u
+#define BUSTER_NODE_TESTS_OPERAND_SUM 0x20u
+#define BUSTER_NODE_TESTS_OPERAND_COMPARISON 0x40u
+#define BUSTER_NODE_TESTS_OPERAND_TRUTH 0x80u
+_Static_assert(CHECK_OP_COUNT <= 128, "the own form's tables have an entry an operator");
+
+// The own form's tables for a unit, by its enabled warnings: each operator's classes, what it is as an operand, the
+// mask of its type's byte where it copies its value (an aggregate's), whether it always has tests of its own, and the
+// operand properties that give it some.
+static void node_tests_tables(NodeCensusScratch* s, const TypeTable* types)
+{
+    const NodeCensusPolicy* policy = &s->policy;
+    const bool truths = policy->int_in_bool || policy->tautological;
+    for (uint32_t code = 0; code < 128; code += 1)
+    {
+        const CheckOp op = (CheckOp)code;
+        const bool leaf = op == CHECK_OP_VALUE;
+        const bool comparison = node_census_comparison(op);
+        const bool shift = op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT;
+        const bool copies = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT || op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA ||
+                            op == CHECK_OP_CAST;
+        const bool truth_parent = op == CHECK_OP_NOT || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITION || op == CHECK_OP_CONDITIONAL;
+        s->own_classes[code] = (uint8_t)((!node_census_coded(op) ? BUSTER_NODE_TESTS_CLASS_UNCODED : 0) | (leaf ? BUSTER_NODE_TESTS_CLASS_LEAF : 0) |
+                                         (node_census_modifies(op) ? BUSTER_NODE_TESTS_CLASS_WRITE : 0) | (op == CHECK_OP_ADDRESS ? BUSTER_NODE_TESTS_CLASS_ADDRESS : 0) |
+                                         (op == CHECK_OP_NOT || op == CHECK_OP_ASSIGN ? BUSTER_NODE_TESTS_CLASS_TREE : 0));
+        s->own_operand_bits[code] = (uint8_t)((op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT ? BUSTER_NODE_TESTS_OPERAND_SUM : 0) |
+                                              (comparison ? BUSTER_NODE_TESTS_OPERAND_COMPARISON : 0) |
+                                              (op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_MULTIPLY ? BUSTER_NODE_TESTS_OPERAND_TRUTH : 0));
+        s->own_copies[code] = copies ? UINT8_MAX : 0;
+        // A call's callee and arguments and a comma's discard are read at each, and the third operand of a conditional
+        // (or of an operator outside the set); a member's record only in a unit with an atomic one, a comparison's
+        // operands' signs and an assignment's names only under their warnings.
+        const bool always = op == CHECK_OP_CALL || op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA ||
+                            !node_census_coded(op) || (types->atomic_records && (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)) ||
+                            (policy->sign_compare && comparison) || (policy->self_assign && op == CHECK_OP_ASSIGN);
+        s->own_always[code] = !leaf && always ? 1 : 0;
+        // A constant operand's tests are no cast's (it converts nothing implicitly, and no other constant's test is a
+        // cast's).
+        s->own_sends[code] = leaf ? 0 :
+                             (uint8_t)((op != CHECK_OP_CAST ? BUSTER_NODE_TESTS_OPERAND_CONSTANT : 0) | (policy->enums ? BUSTER_NODE_TESTS_OPERAND_ENUM : 0) |
+                                       (op == CHECK_OP_CAST && policy->pointer_casts ? BUSTER_NODE_TESTS_OPERAND_POINTER : 0) |
+                                       ((op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT) && policy->void_dereference ? BUSTER_NODE_TESTS_OPERAND_VOID_POINTEE : 0) |
+                                       (op == CHECK_OP_ADD && policy->string_plus_int ? BUSTER_NODE_TESTS_OPERAND_ARRAY : 0) |
+                                       (shift && policy->shift_parentheses ? BUSTER_NODE_TESTS_OPERAND_SUM : 0) |
+                                       (comparison && policy->chained ? BUSTER_NODE_TESTS_OPERAND_COMPARISON : 0) |
+                                       (truth_parent && truths ? BUSTER_NODE_TESTS_OPERAND_TRUTH : 0));
+    }
+}
+
+// The parser's tree's tests of record `r` (node `node`, operator `op`, at `token` of role `role`), as node_census_node
+// reads them: a comparison's token under a bitwise operator or an expression statement's terminator, a `!`'s under a
+// comparison, an assignment's under a condition's `)` or in a for statement's head. Each is asked only where the
+// token's parent can be one of those.
+static __attribute__((noinline)) uint64_t node_tests_tree(const NodeCensusScratch* s, CheckOp op, uint32_t token, uint8_t role)
+{
+    const Parser* parser = s->program->parser;
+    const NodeCensusPolicy* policy = &s->policy;
+    const uint32_t token_count = parser->tokens.count;
+    const uint32_t parent = check_common_parent(parser, token);
+    const uint8_t parent_role = parent < token_count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
+    const uint32_t grandparent = parent_role == PARSE_ROLE_TERMINATOR ? check_common_parent(parser, parent) : BUSTER_CHECK_NONE;
+    const bool bitwise = parent_role == PARSE_ROLE_BITWISE_AND || parent_role == PARSE_ROLE_BITWISE_OR || parent_role == PARSE_ROLE_BITWISE_XOR;
+    const bool head = parent_role == PARSE_ROLE_CLOSE_CONDITION || parent_role == PARSE_ROLE_CLOSE_FOR ||
+                      (grandparent < token_count && parser->tree.roles[grandparent] == PARSE_ROLE_CLOSE_FOR);
+    bool parentheses = check_common_comparison_role(role) && policy->parentheses && bitwise && check_common_bitwise_precedence(parser, token, parent);
+    parentheses |= op == CHECK_OP_NOT && policy->logical_not && check_common_comparison_role(parent_role) && token < parent;
+    if (op == CHECK_OP_ASSIGN && policy->parentheses && head && role == PARSE_ROLE_ASSIGN && parser->tokens.kinds[token] == PARSE_KIND_EQUAL)
+    {
+        const bool for_condition = check_common_for_condition(parser, token, parent);
+        const uint32_t opener = parent_role == PARSE_ROLE_CLOSE_CONDITION ? check_common_opener(parser, parent) : BUSTER_CHECK_NONE;
+        const bool switch_condition = opener != BUSTER_CHECK_NONE && opener > 0 && parser->tokens.kinds[opener - 1] == PARSE_KIND_SWITCH;
+        parentheses |= (parent_role == PARSE_ROLE_CLOSE_CONDITION || for_condition) && !switch_condition;
+    }
+    const bool unused = policy->unused_comparison && check_common_comparison_role(role) && parent_role == PARSE_ROLE_TERMINATOR &&
+                        check_common_statement_terminator(parser, parent);
+    return (parentheses ? UINT64_C(1) << NODE_CENSUS_PARENTHESES : 0) | (unused ? UINT64_C(1) << NODE_CENSUS_UNUSED : 0);
+}
+
+// A record sent to the census's own code: its bit in `visit`, counted once with its trigger.
+static inline void node_tests_send(uint32_t r, NodeTestsTrigger trigger, uint64_t* visit, uint32_t* visits, NodeFrontTypes* counts)
+{
+    const bool fresh = (visit[r >> 6] >> (r & 63) & 1) == 0;
+    counts->own_triggers[trigger] += fresh;
+    *visits += fresh;
+    visit[r >> 6] |= UINT64_C(1) << (r & 63);
+}
+
+// The tests of record `r` at node `node`, an operator that always has some or that its operands' bytes `operands` (or a
+// third operand) sent here: the bits that are exact in place (a pointer's cast, a string's sum, a call's aggregates and
+// callee), and into `visit` the records for the census's own code: this one, or an operand that is a shift or a product
+// read as a truth.
+static __attribute__((noinline)) uint64_t node_tests_operator(const NodeCensusScratch* s, uint32_t r, uint32_t node, uint8_t operands, uint64_t* visit, uint32_t* visits,
+                                                              NodeFrontTypes* counts)
+{
+    const NodeMachine* machine = s->records;
+    const NodeMachineColumns* columns = machine->columns;
+    const CheckProgram* program = s->program;
+    const CheckGraph* graph = &program->input->graph;
+    const NodeCensusPolicy* policy = &s->policy;
+    const uint8_t* kept = s->own_types;
+    const uint8_t* properties = s->own_properties;
+    const CheckOp op = (CheckOp)columns->codes[r];
+    const uint8_t own = kept[r];
+    const uint32_t third_node = graph->operand2[node];
+    const uint32_t o[3] = { columns->left[r], columns->right[r], third_node < graph->count ? node_tests_record(machine, third_node) : UINT32_MAX };
+    // The third operand's byte with the two others': a conditional's second arm.
+    const uint8_t all = (uint8_t)(operands | properties[(int32_t)o[2]]);
+    uint64_t tests = 0;
+    NodeTestsTrigger trigger = NODE_TESTS_TRIGGERS;
+    counts->own_calls += op == CHECK_OP_CALL;
+    counts->own_constants += op != CHECK_OP_CALL && (all & BUSTER_NODE_TESTS_OPERAND_CONSTANT) != 0;
+    counts->own_thirds += o[2] != UINT32_MAX;
+    // What sent it: a constant operand alone has the constants' tests and no other.
+    const uint8_t sent = (uint8_t)(all & s->own_sends[op]);
+    bool fires = false;
+    if (s->own_always[op] == 0 && sent == BUSTER_NODE_TESTS_OPERAND_CONSTANT)
+    {
+        trigger = node_tests_constants(s, r, node, op, o, &fires);
+    }
+    else if ((all & BUSTER_NODE_TESTS_OPERAND_TRUTH) != 0 && (s->own_sends[op] & BUSTER_NODE_TESTS_OPERAND_TRUTH) != 0)
+    {
+        for (uint32_t i = 0; i < (op == CHECK_OP_CONDITIONAL ? 1u : 3u); i += 1)
+        {
+            if (o[i] != UINT32_MAX && (properties[o[i]] & BUSTER_NODE_TESTS_OPERAND_TRUTH) != 0)
+            {
+                node_tests_send(o[i], NODE_TESTS_TRIGGER_TRUTH, visit, visits, counts);
+            }
+        }
+    }
+    if (s->own_always[op] == 0 && sent == BUSTER_NODE_TESTS_OPERAND_CONSTANT)
+    {
+        // Done above.
+    }
+    else if (op == CHECK_OP_CALL)
+    {
+        // A call in place: an aggregate result or argument, its callee's own semantics, and its arguments' constants;
+        // the census's code only where one of those may be changed by its parameter's type.
+        const bool conversions = policy->constant_conversion || policy->assign_enum;
+        bool aggregate = (own & BUSTER_NODE_CENSUS_TYPE_AGGREGATE) != 0;
+        uint32_t changes = BUSTER_NODE_TESTS_CONVERSION_NONE;
+        const uint32_t first_argument = graph->argument_offsets[node];
+        for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
+        {
+            const uint32_t argument = node_tests_record(machine, graph->argument_nodes[first_argument + i]);
+            const uint32_t kind = argument != UINT32_MAX ? (columns->standings[argument] >> 2) & 0x07u : 0;
+            aggregate |= argument != UINT32_MAX && (kept[argument] & BUSTER_NODE_CENSUS_TYPE_AGGREGATE) != 0;
+            changes |= conversions && kind != CHECK_CONSTANT_NONE ? node_tests_conversion(s, argument, kind, node_view_argument_converted(s, node, i)) : 0;
+        }
+        for (uint32_t i = 0; i < 3; i += 1)
+        {
+            const uint32_t kind = o[i] != UINT32_MAX ? (columns->standings[o[i]] >> 2) & 0x07u : 0;
+            changes |= conversions && kind != CHECK_CONSTANT_NONE ? node_tests_conversion(s, o[i], kind, node_view_converted(s, node, i)) : 0;
+        }
+        fires = (changes & BUSTER_NODE_TESTS_CONVERSION_CHANGES) != 0;
+        tests |= aggregate ? UINT64_C(1) << NODE_CENSUS_AGGREGATE : 0;
+        // Its callee's own semantics (node_census_callee's at reader time, where T has refused a callee whose type has
+        // no prototype): a named callee whose declaration has some.
+        const uint32_t callee_node = graph->operand0[node];
+        bool callee = callee_node >= graph->count;
+        if (!callee && graph->ops[callee_node] == CHECK_OP_VALUE)
+        {
+            const uint32_t token = graph->tokens[callee_node];
+            const uint32_t declaration = node_census_declaration(program, token);
+            callee = declaration != BUSTER_CHECK_NONE &&
+                     (node_census_declaration_facts(s, declaration, program->parser->tokens.names[token], BUSTER_NODE_CENSUS_DECLARATION_CALLEE_KNOWN) & BUSTER_NODE_CENSUS_DECLARATION_CALLEE) != 0;
+        }
+        tests |= callee || policy->type_safety ? UINT64_C(1) << NODE_CENSUS_CALLEE : 0;
+        const bool enums = policy->enums && (all & BUSTER_NODE_TESTS_OPERAND_ENUM) != 0;
+        trigger = (changes & BUSTER_NODE_TESTS_CONVERSION_ASKED) != 0 ? NODE_TESTS_TRIGGER_CONVERSION : enums ? NODE_TESTS_TRIGGER_ENUM : trigger;
+    }
+    else
+    {
+        const bool comparison = node_census_comparison(op);
+        const bool shift = op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT;
+        const bool binary = graph->operand0[node] < graph->count && graph->operand1[node] < graph->count;
+        const uint8_t first_bits = o[0] != UINT32_MAX ? kept[o[0]] : 0;
+        const uint8_t first_property = properties[(int32_t)o[0]];
+        const uint8_t second_property = properties[(int32_t)o[1]];
+        tests |= op == CHECK_OP_ADD && policy->string_plus_int && binary && (node_census_string(program, graph->operand0[node]) || node_census_string(program, graph->operand1[node])) ?
+                 UINT64_C(1) << NODE_CENSUS_STRING_PLUS_INT : 0;
+        // A pointer cast to an integer narrower than it, or to an enumeration.
+        if (op == CHECK_OP_CAST && policy->pointer_casts && (first_bits & BUSTER_NODE_CENSUS_TYPE_POINTER) != 0)
+        {
+            const uint32_t width = node_tests_ranges(s, columns->value_types[r]) & 0x7fu;
+            tests |= (width != 0 && width < 64) || (own & BUSTER_NODE_CENSUS_TYPE_ENUM) != 0 ? UINT64_C(1) << NODE_CENSUS_POINTER_CAST : 0;
+        }
+        if (program->types->atomic_records && (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW))
+        {
+            trigger = NODE_TESTS_TRIGGER_ATOMIC_MEMBER;
+        }
+        else if (policy->enums && (all & BUSTER_NODE_TESTS_OPERAND_ENUM) != 0)
+        {
+            trigger = NODE_TESTS_TRIGGER_ENUM;
+        }
+        else if (policy->sign_compare && comparison && binary)
+        {
+            trigger = NODE_TESTS_TRIGGER_SIGN_COMPARE;
+        }
+        else if ((op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT) && policy->void_dereference && (first_bits & BUSTER_NODE_CENSUS_TYPE_VOID_POINTEE) != 0)
+        {
+            trigger = NODE_TESTS_TRIGGER_VOID_DEREFERENCE;
+        }
+        else if (policy->shift_parentheses && shift && ((first_property | second_property) & BUSTER_NODE_TESTS_OPERAND_SUM) != 0)
+        {
+            trigger = NODE_TESTS_TRIGGER_SHIFT_OPERAND;
+        }
+        else if (policy->chained && comparison && ((first_property | second_property) & BUSTER_NODE_TESTS_OPERAND_COMPARISON) != 0)
+        {
+            trigger = NODE_TESTS_TRIGGER_CHAINED;
+        }
+        else if (policy->self_assign && op == CHECK_OP_ASSIGN && binary)
+        {
+            // An assignment of a name to itself: both operands a value or a member's chain.
+            const CheckOp inner0 = graph->ops[graph->operand0[node]];
+            const CheckOp inner1 = graph->ops[graph->operand1[node]];
+            trigger = (inner0 == CHECK_OP_VALUE || inner0 == CHECK_OP_MEMBER) && (inner1 == CHECK_OP_VALUE || inner1 == CHECK_OP_MEMBER) ? NODE_TESTS_TRIGGER_SELF_ASSIGN : trigger;
+        }
+        // A comma's discarded operand: a value without an effect.
+        tests |= op == CHECK_OP_COMMA && node_census_discarded(s, graph->operand0[node]) ? UINT64_C(1) << NODE_CENSUS_UNUSED : 0;
+        if (trigger == NODE_TESTS_TRIGGERS && (all & BUSTER_NODE_TESTS_OPERAND_CONSTANT) != 0)
+        {
+            trigger = node_tests_constants(s, r, node, op, o, &fires);
+        }
+    }
+    tests |= fires ? UINT64_C(1) << NODE_CENSUS_CONSTANT : 0;
+    if (trigger != NODE_TESTS_TRIGGERS)
+    {
+        node_tests_send(r, trigger, visit, visits, counts);
+    }
+    return tests;
+}
+
+// The expression's own tests at reader time (node_census_root_tests' there), each asked only where it can fire: a
+// statement's discard where its top doesn't write, an initializer's constant where its root is one that its object's
+// type may change, a return's address where the expression takes an address or has an array (`class_bits` and
+// `type_bits` are the pass's, over all records). The unsequenced test reads the walk's `walked` nodes where
+// `unsequenced` says.
+static inline uint64_t node_tests_root(NodeCensusScratch* s, uint32_t root, NodeCensusRoot context, uint32_t count, uint32_t lowest, uint32_t highest, bool unsequenced,
+                                       uint32_t walked, uint32_t class_bits, uint32_t type_bits)
+{
+    const NodeMachine* machine = s->records;
+    const CheckProgram* program = s->program;
+    const CheckGraph* graph = &program->input->graph;
+    const Parser* parser = program->parser;
+    const NodeCensusPolicy* policy = &s->policy;
+    uint64_t tests = 0;
+    tests |= count > BUSTER_NODE_CENSUS_MOST ? UINT64_C(1) << NODE_CENSUS_SIZE : 0;
+    tests |= context == NODE_CENSUS_ROOT_OTHER || context == NODE_CENSUS_ROOT_BRACE ? UINT64_C(1) << NODE_CENSUS_CONTROL : 0;
+    if (context == NODE_CENSUS_ROOT_STATEMENT)
+    {
+        // An expression statement's root is the reader's cast to void at its `;`: what it discards is its operand, where
+        // an explicit cast's token is its own `)`. A discarded write is no value without an effect.
+        const uint32_t root_token = graph->tokens[root];
+        const bool wrapper = graph->ops[root] == CHECK_OP_CAST && root_token < parser->tokens.count && parser->tree.roles[root_token] != PARSE_ROLE_CLOSE_CAST &&
+                             parser->tree.roles[root_token] != PARSE_ROLE_OPEN_CAST;
+        const uint32_t discarded_node = wrapper ? graph->operand0[root] : root;
+        const bool writes = discarded_node < graph->count && node_census_modifies(graph->ops[discarded_node]);
+        tests |= !writes && node_census_discarded(s, discarded_node) ? UINT64_C(1) << NODE_CENSUS_UNUSED : 0;
+    }
+    tests |= policy->loops && node_census_for_clause(parser, graph->tokens[root]) ? UINT64_C(1) << NODE_CENSUS_LOOP : 0;
+    tests |= policy->unmodeled ? UINT64_C(1) << NODE_CENSUS_UNMODELED : 0;
+    const TypeId declared = context == NODE_CENSUS_ROOT_INITIALIZER ? s->given_declared : 0;
+    if (declared != 0)
+    {
+        // A scalar object's initializer converts its value to the object's type in its plan: the root's record is the
+        // last.
+        const uint32_t kind = count != 0 ? (machine->columns->standings[count - 1] >> 2) & 0x07u : 0;
+        const uint32_t changes = (policy->constant_conversion || policy->assign_enum) && kind != CHECK_CONSTANT_NONE ? node_tests_conversion(s, count - 1, kind, declared) :
+                                 BUSTER_NODE_TESTS_CONVERSION_NONE;
+        const bool changed = changes == BUSTER_NODE_TESTS_CONVERSION_CHANGES || (changes == BUSTER_NODE_TESTS_CONVERSION_ASKED && node_census_constant_changes(s, root, declared));
+        tests |= changed ? UINT64_C(1) << NODE_CENSUS_CONSTANT : 0;
+        tests |= (node_census_type_bits(s, declared) & BUSTER_NODE_CENSUS_TYPE_SPECIAL) != 0 ? UINT64_C(1) << NODE_CENSUS_TYPE : 0;
+    }
+    const bool addresses = (class_bits & BUSTER_NODE_TESTS_CLASS_ADDRESS) != 0 || (type_bits & BUSTER_NODE_CENSUS_TYPE_ARRAY) != 0;
+    tests |= policy->return_address && context == NODE_CENSUS_ROOT_RETURN && addresses && node_census_returns_address(s, root) ? UINT64_C(1) << NODE_CENSUS_RETURN_ADDRESS : 0;
+    tests |= policy->unsequenced && unsequenced && node_census_unsequenced(s, walked, root) ? UINT64_C(1) << NODE_CENSUS_UNSEQUENCED : 0;
+    const bool events = s->event_prefix != NULL && lowest <= highest && s->event_prefix[highest + 1] != s->event_prefix[lowest];
+    tests |= events ? UINT64_C(1) << NODE_CENSUS_EVENT : 0;
+    tests |= (machine->action_warnings & 0x01ffffffu & policy->action_bits) != 0 ? UINT64_C(1) << NODE_CENSUS_ACTION_WARNING : 0;
+    s->span_low = lowest;
+    s->span_high = highest;
+    return tests;
+}
+
+// The tests of the machine's current expression at reader time, as bits of NodeCensusTest: node_census_expression's, by
+// the own form. `root` is its root's node, `context` its root's kind; `walked` receives its records' count, and
+// `counts` what was sent to the census's code.
+//
+// One loop reads every record once, without a branch on what it is: its operator's classes, its type's byte, its
+// standing, its flags and its token. It keeps what the record is as an operand (a byte), gathers the set's tests as
+// bits over all records, and lists three kinds of record: the leaves, for their flags and their declarations' bytes; the
+// ones whose token's parent the tree's tests read; and the operators that have tests of their own, by their operands'
+// bytes. Each list's records then have their own tests, and the few that a silence test may refuse go to the census's
+// code after a walk.
+static uint64_t node_tests_expression(NodeCensusScratch* s, uint32_t root, NodeCensusRoot context, uint32_t* walked, NodeFrontTypes* counts)
+{
+    const NodeMachine* machine = s->records;
+    const NodeMachineColumns* columns = machine->columns;
+    const CheckProgram* program = s->program;
+    const CheckInput* input = program->input;
+    const CheckGraph* graph = &input->graph;
+    const Parser* parser = program->parser;
+    const NodeCensusPolicy* policy = &s->policy;
+    const uint32_t count = machine->count;
+    const uint32_t first = machine->first;
+    const uint32_t token_count = parser->tokens.count;
+    const uint32_t* tokens = graph->tokens;
+    const uint8_t* roles = parser->tree.roles;
+    const uint8_t* codes = columns->codes;
+    const uint8_t* standings = columns->standings;
+    const TypeId* value_types = columns->value_types;
+    const uint32_t* value_flags = columns->value_flags;
+    const uint32_t* left = columns->left;
+    const uint32_t* right = columns->right;
+    const uint8_t* classes = s->own_classes;
+    const uint8_t* operand_bits = s->own_operand_bits;
+    const uint8_t* copies = s->own_copies;
+    const uint8_t* always = s->own_always;
+    const uint8_t* sends = s->own_sends;
+    uint8_t* kept = s->own_types;
+    uint8_t* properties = s->own_properties;
+    uint16_t* leaf_list = s->own_lists;
+    uint16_t* tree_list = s->own_lists + BUSTER_NODE_MACHINE_MOST;
+    uint16_t* operator_list = s->own_lists + 2 * BUSTER_NODE_MACHINE_MOST;
+    const uint32_t* objects = columns->objects;
+    uint32_t leaves = 0;
+    uint32_t trees = 0;
+    uint32_t operators = 0;
+    uint32_t lowest = UINT32_MAX;
+    uint32_t highest = 0;
+    uint32_t writes = 0;
+    uint32_t last_write = UINT32_MAX;
+    uint32_t class_bits = 0;
+    uint32_t type_bits = 0;
+    uint32_t copied_bits = 0;
+    uint32_t flag_bits = 0;
+    s->mixed_system = false;
+    for (uint32_t r = 0; r < count; r += 1)
+    {
+        const uint32_t node = r + 1 == count ? root : first + r;
+        const uint32_t code = codes[r] & 0x7fu;
+        const uint8_t own = node_census_type_bits(s, value_types[r]);
+        const uint8_t standing = standings[r];
+        const uint32_t token = tokens[node];
+        const bool placed = token < token_count;
+        const uint8_t role = placed ? roles[token] : PARSE_ROLE_NONE;
+        const uint8_t class = classes[code];
+        // What it is as an operand: a constant a test may read (no object's address: the tests read an address constant
+        // only for a null one), its type's four bits, its operator's three.
+        const uint32_t kind = (standing >> 2) & 0x07u;
+        const bool constant = kind != CHECK_CONSTANT_NONE && (kind != CHECK_CONSTANT_ADDRESS || (standing & BUSTER_NODE_MACHINE_WIDE) != 0 || objects[r] == 0);
+        const uint8_t property = (uint8_t)((constant ? BUSTER_NODE_TESTS_OPERAND_CONSTANT : 0) | ((own >> 2) & BUSTER_NODE_TESTS_OPERAND_ENUM) |
+                                           ((own >> 3) & (BUSTER_NODE_TESTS_OPERAND_POINTER | BUSTER_NODE_TESTS_OPERAND_VOID_POINTEE | BUSTER_NODE_TESTS_OPERAND_ARRAY)) |
+                                           operand_bits[code]);
+        // Its operands' bytes: no operand reads the zero before the first record's.
+        const uint8_t operands = properties[(int32_t)left[r]] | properties[(int32_t)right[r]];
+        kept[r] = own;
+        properties[r] = property;
+        class_bits |= class;
+        type_bits |= own;
+        copied_bits |= own & copies[code];
+        flag_bits |= value_flags[r];
+        lowest = placed && token < lowest ? token : lowest;
+        highest = placed && token > highest ? token : highest;
+        writes += (class & BUSTER_NODE_TESTS_CLASS_WRITE) != 0;
+        last_write = (class & BUSTER_NODE_TESTS_CLASS_WRITE) != 0 ? r : last_write;
+        leaf_list[leaves] = (uint16_t)r;
+        leaves += (class & BUSTER_NODE_TESTS_CLASS_LEAF) != 0;
+        tree_list[trees] = (uint16_t)r;
+        trees += role == PARSE_ROLE_EQUALITY || role == PARSE_ROLE_RELATIONAL || (class & BUSTER_NODE_TESTS_CLASS_TREE) != 0;
+        operator_list[operators] = (uint16_t)r;
+        operators += (always[code] | (sends[code] & operands)) != 0;
+    }
+    // The set, from the bits of all records.
+    uint64_t tests = 0;
+    tests |= (class_bits & BUSTER_NODE_TESTS_CLASS_UNCODED) != 0 ? UINT64_C(1) << NODE_CENSUS_OPERATOR : 0;
+    tests |= (type_bits & BUSTER_NODE_CENSUS_TYPE_SPECIAL) != 0 ? UINT64_C(1) << NODE_CENSUS_TYPE : 0;
+    tests |= (flag_bits & BUSTER_CHECK_BIT_FIELD) != 0 ? UINT64_C(1) << NODE_CENSUS_BIT_FIELD : 0;
+    tests |= (copied_bits & BUSTER_NODE_CENSUS_TYPE_AGGREGATE) != 0 ? UINT64_C(1) << NODE_CENSUS_AGGREGATE : 0;
+    tests |= (class_bits & BUSTER_NODE_TESTS_CLASS_ADDRESS) != 0 && policy->packed_member && s->packed_unit ? UINT64_C(1) << NODE_CENSUS_PACKED_MEMBER : 0;
+    // A leaf's flags and its name's declaration's byte, by T's columns (node_census_leaf's tests, of which a register
+    // object's is its flags' and a compound literal's is no leaf's here): the census's code for a declaration whose
+    // attributes no leaf has asked yet. A register object's leaf never asks them, there or here.
+    const uint8_t* kinds = parser->tokens.kinds;
+    const uint32_t* declarations = input->declarations;
+    const uint8_t* facts = s->declaration_facts;
+    for (uint32_t i = 0; i < leaves; i += 1)
+    {
+        const uint32_t r = leaf_list[i];
+        const uint32_t node = r + 1 == count ? root : first + r;
+        const uint32_t token = tokens[node];
+        const bool named = token < token_count && kinds[token] == PARSE_KIND_IDENTIFIER && declarations != NULL && token < input->token_count;
+        const uint32_t declaration = named ? declarations[token] : BUSTER_CHECK_NONE;
+        const uint8_t known = declaration < token_count ? facts[declaration] : 0;
+        if ((value_flags[r] & (BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME)) != 0)
+        {
+            // A register object's: its flags say it, whatever its declaration's attributes are.
+            tests |= UINT64_C(1) << NODE_CENSUS_DECLARATION;
+        }
+        else if (declaration != BUSTER_CHECK_NONE && (known & BUSTER_NODE_CENSUS_DECLARATION_FLAGGED_KNOWN) == 0)
+        {
+            tests |= node_census_leaf(s, node, token, value_flags[r]);
+        }
+        else
+        {
+            tests |= (known & BUSTER_NODE_CENSUS_DECLARATION_FLAGGED) != 0 ? UINT64_C(1) << NODE_CENSUS_DECLARATION : 0;
+        }
+    }
+    for (uint32_t i = 0; i < trees; i += 1)
+    {
+        const uint32_t r = tree_list[i];
+        const uint32_t node = r + 1 == count ? root : first + r;
+        const uint32_t token = tokens[node];
+        tests |= node_tests_tree(s, (CheckOp)codes[r], token, token < token_count ? roles[token] : PARSE_ROLE_NONE);
+    }
+    uint64_t visit[BUSTER_NODE_MACHINE_MOST / 64];
+    uint32_t visits = 0;
+    if (operators != 0)
+    {
+        for (uint32_t word = 0; word < (count + 63) / 64; word += 1)
+        {
+            visit[word] = 0;
+        }
+        for (uint32_t i = 0; i < operators; i += 1)
+        {
+            const uint32_t r = operator_list[i];
+            const uint8_t operands = properties[(int32_t)left[r]] | properties[(int32_t)right[r]];
+            tests |= node_tests_operator(s, r, r + 1 == count ? root : first + r, operands, visit, &visits, counts);
+        }
+    }
+    // The unsequenced test needs two writes, or one below the expression's top: a lone write that is the root, or the
+    // root's operand, has every other node but the root in its subtree.
+    const uint32_t top = count >= 2 ? node_tests_record(machine, graph->operand0[root]) : UINT32_MAX;
+    const bool sequenced = writes == 0 || (writes == 1 && (last_write + 1 == count || last_write == top));
+    const bool unsequenced = policy->unsequenced && !sequenced;
+    counts->own_triggers[NODE_TESTS_TRIGGER_UNSEQUENCED] += unsequenced;
+    uint32_t walk_count = count;
+    if (visits != 0 || unsequenced)
+    {
+        // The census's code reads a node's parent for a shift's or a product's truth and for a subscript's address, and
+        // the unsequenced test reads the walk's list: the walk only for those.
+        bool parents = unsequenced;
+        for (uint32_t word = 0; visits != 0 && word < (count + 63) / 64; word += 1)
+        {
+            for (uint64_t pending = visit[word]; pending != 0; pending &= pending - 1)
+            {
+                const CheckOp sent = (CheckOp)codes[word * 64 + (uint32_t)__builtin_ctzll(pending)];
+                parents |= sent == CHECK_OP_SHIFT_LEFT || sent == CHECK_OP_MULTIPLY || sent == CHECK_OP_SUBSCRIPT;
+            }
+        }
+        if (parents)
+        {
+            uint32_t walk_lowest = UINT32_MAX;
+            uint32_t walk_highest = 0;
+            walk_count = node_census_walk(s, root, &walk_lowest, &walk_highest);
+            counts->own_walks += 1;
+            counts->own_count_differences += walk_count != count;
+        }
+        for (uint32_t word = 0; visits != 0 && word < (count + 63) / 64; word += 1)
+        {
+            uint64_t pending = visit[word];
+            while (pending != 0)
+            {
+                const uint32_t r = word * 64 + (uint32_t)__builtin_ctzll(pending);
+                pending &= pending - 1;
+                tests |= node_census_node(s, r + 1 == count ? root : first + r, root, context);
+            }
+        }
+    }
+    counts->own_expressions += 1;
+    counts->own_records += count;
+    counts->own_leaves += leaves;
+    counts->own_trees += trees;
+    counts->own_operators += operators;
+    counts->own_visited += visits != 0;
+    counts->own_visits += visits;
+    tests |= node_tests_root(s, root, context, count, lowest, highest, unsequenced, walk_count, class_bits, type_bits);
+    *walked = count;
+    return tests;
+}
+
 static uint32_t node_census_event_id(const NodeCensusScratch* s)
 {
     uint32_t id = UINT32_MAX;
@@ -2051,6 +2918,9 @@ struct NodeCensusReader
     uint32_t pragma_count;
     // A bit a token: inside a statement expression (CheckInput.regions, the reader's): a root there is a nested control's.
     uint64_t* nested_bits;
+    // BUSTER_NODE_READER_OWN and BUSTER_NODE_READER_BOTH of the unit's options: the tests by the machine's own form
+    // (node_tests_expression), and the census's code run too and compared with it.
+    uint8_t mode;
 };
 
 // The outermost brace pair around token `token` into `opening` and `closing`: whether there is one. The parser's tree
@@ -2110,7 +2980,14 @@ static NodeCensusReader* node_census_reader_begin(const CheckInputReader* reader
         s->type_bits_count = machine->type_capacity;
         s->type_bits = arena_push_array(arena, (uint64_t)s->type_bits_count + 1, 1, 1);
         s->declaration_facts = arena_push_array(arena, (uint64_t)tokens + 1, 1, 1);
-        room = room && s->type_bits != NULL && s->declaration_facts != NULL && tests->event_bits != NULL && tests->pragma_openings != NULL && tests->pragma_closings != NULL && tests->nested_bits != NULL;
+        s->type_ranges = arena_push_array(arena, (uint64_t)s->type_bits_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        s->own_types = arena_push_array(arena, (uint64_t)BUSTER_NODE_MACHINE_MOST + 64, 1, 64);
+        uint8_t* properties = arena_push_array(arena, (uint64_t)BUSTER_NODE_MACHINE_MOST + 128, 1, 64);
+        s->own_properties = properties != NULL ? properties + 64 : NULL;
+        s->own_lists = arena_push_array(arena, 3 * (uint64_t)BUSTER_NODE_MACHINE_MOST + 64, sizeof(uint16_t), 64);
+        tests->mode = reader->pp->options.node_reader & (BUSTER_NODE_READER_OWN | BUSTER_NODE_READER_BOTH);
+        room = room && s->type_bits != NULL && s->declaration_facts != NULL && tests->event_bits != NULL && tests->pragma_openings != NULL && tests->pragma_closings != NULL &&
+               tests->nested_bits != NULL && s->type_ranges != NULL && s->own_types != NULL && s->own_properties != NULL && s->own_lists != NULL;
     }
     if (room)
     {
@@ -2129,6 +3006,9 @@ static NodeCensusReader* node_census_reader_begin(const CheckInputReader* reader
         memset(tests->nested_bits, 0, ((uint64_t)tokens / 64 + 1) * sizeof(uint64_t));
         memset(s->type_bits, 0, (uint64_t)s->type_bits_count + 1);
         memset(s->declaration_facts, 0, (uint64_t)tokens + 1);
+        memset(s->type_ranges, 0, ((uint64_t)s->type_bits_count + 1) * sizeof(uint32_t));
+        memset(s->own_properties - 64, 0, 64);
+        node_tests_tables(s, reader->types);
         for (uint32_t r = 0; r < input->region_count; r += 1)
         {
             for (uint32_t t = input->regions[r].opening; t <= input->regions[r].closing && t < tokens; t += 1)
@@ -2173,7 +3053,6 @@ static uint64_t node_census_reader_expression(NodeCensusReader* tests, uint32_t 
     const CheckProgram* program = s->program;
     const Parser* parser = program->parser;
     const CheckGraph* graph = &program->input->graph;
-    const TypeTable* types = program->types;
     // The root's kind, node_census_root's by the control that pushed it. An initializer's whole value is a scalar
     // object's without a brace before it, as there; and a root inside a statement expression is a nested control's.
     const bool nested = token < parser->tokens.count && (tests->nested_bits[token >> 6] >> (token & 63) & 1) != 0;
@@ -2181,8 +3060,9 @@ static uint64_t node_census_reader_expression(NodeCensusReader* tests, uint32_t 
                              op == CHECK_OP_CONVERT ? NODE_CENSUS_ROOT_RETURN : op == CHECK_OP_POSITIVE ? NODE_CENSUS_ROOT_SWITCH : NODE_CENSUS_ROOT_OTHER;
     if (op == CHECK_OP_INITIALIZE && !nested)
     {
-        const uint8_t declared_kind = node_census_kind(types, declared);
-        const bool scalar = declared != 0 && !node_census_aggregate(types, declared) && !type_kind_is_array(declared_kind);
+        // A scalar's type: no struct, union or array, by its byte.
+        const uint8_t declared_bits = declared != 0 ? node_census_type_bits(s, declared) : 0;
+        const bool scalar = declared != 0 && (declared_bits & (BUSTER_NODE_CENSUS_TYPE_AGGREGATE | BUSTER_NODE_CENSUS_TYPE_ARRAY)) == 0;
         const uint32_t value_token = root < graph->count ? graph->tokens[root] : 0;
         bool brace = declaration >= parser->tokens.count;
         for (uint32_t t = declaration + 1; !brace && t < value_token && t < parser->tokens.count; t += 1)
@@ -2193,7 +3073,26 @@ static uint64_t node_census_reader_expression(NodeCensusReader* tests, uint32_t 
     }
     s->given_declared = context == NODE_CENSUS_ROOT_INITIALIZER ? declared : 0;
     uint32_t walked = 0;
-    uint64_t bits = node_census_expression(s, root, 0, context, &walked);
+    const bool own = (tests->mode & BUSTER_NODE_READER_OWN) != 0;
+    uint64_t bits = own ? node_tests_expression(s, root, context, &walked, tests->types) : node_census_expression(s, root, 0, context, &walked);
+    if (own && (tests->mode & BUSTER_NODE_READER_BOTH) != 0)
+    {
+        // The census's code on the view, the own form's oracle: the same bits and the same span of tokens.
+        const uint32_t low = s->span_low;
+        const uint32_t high = s->span_high;
+        const uint32_t missed = s->missed;
+        uint32_t census_walked = 0;
+        const uint64_t census = node_census_expression(s, root, 0, context, &census_walked);
+        const bool same = census == bits && low == s->span_low && high == s->span_high && census_walked == walked;
+        tests->types->own_differences += !same;
+        if (!same && tests->types->own_listed < node_census_list)
+        {
+            tests->types->own_listed += 1;
+            printf("node-tests: difference line=%u root=%s nodes=%u/%u span=%u..%u/%u..%u own=%#" PRIx64 " census=%#" PRIx64 "\n",
+                   node_census_line(s->pp, parser, root < graph->count ? graph->tokens[root] : 0), node_census_root_names[context], walked, census_walked, low, high, s->span_low, s->span_high, bits, census);
+        }
+        s->missed = missed;
+    }
     s->given_declared = 0;
     // A body with a pragma (node_census_region's), by the root's token.
     const uint32_t root_token = root < graph->count ? graph->tokens[root] : 0;
@@ -2471,6 +3370,21 @@ struct NodeShadow
     uint64_t reader_twin_differences;
     uint64_t reader_twin_warnings;
     uint64_t twin_warnings;
+    // --front-own-tests: the tests at reader time in the machine's own form (NodeFrontTypes' counts, summed).
+    uint64_t own_expressions;
+    uint64_t own_records;
+    uint64_t own_visited;
+    uint64_t own_visits;
+    uint64_t own_walks;
+    uint64_t own_triggers[NODE_TESTS_TRIGGERS];
+    uint64_t own_leaves;
+    uint64_t own_trees;
+    uint64_t own_operators;
+    uint64_t own_calls;
+    uint64_t own_constants;
+    uint64_t own_thirds;
+    uint64_t own_differences;
+    uint64_t own_count_differences;
     // --interleave N: the interleaved sets' chunk (0: a body's expressions), the current file's scratch for the census's
     // walk in the timing passes, the walks' tests (so that the walks aren't dead code), and the sweeps' own TSC ticks in
     // an interleaved set: the last pass's, and each file's least over the passes, summed.
@@ -4085,6 +4999,28 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
             printf("node-shadow: reader-time verify nodes-whose-value-is-not-the-action's=%" PRIu64 " nodes-whose-action-warns=%" PRIu64 "\n", shadow->reader_twin_differences,
                    shadow->reader_twin_warnings);
         }
+        if ((shadow->reader & BUSTER_NODE_READER_OWN) != 0)
+        {
+            // The tests in the machine's own form: what its pass sent to the census's code, and by what.
+            printf("node-shadow: own tests expressions=%" PRIu64 " records=%" PRIu64 " expressions-with-a-record-sent=%" PRIu64 " (%.2f%%) records-sent=%" PRIu64
+                   " (%.2f%%) walks=%" PRIu64 " (%.2f%%)%s differences=%" PRIu64 " walks-of-another-count=%" PRIu64 "\n",
+                   shadow->own_expressions, shadow->own_records, shadow->own_visited, node_census_share(shadow->own_visited, shadow->own_expressions), shadow->own_visits,
+                   node_census_share(shadow->own_visits, shadow->own_records), shadow->own_walks, node_census_share(shadow->own_walks, shadow->own_expressions),
+                   (shadow->reader & BUSTER_NODE_READER_BOTH) != 0 ? " compared-with-the-census's-code" : "", shadow->own_differences, shadow->own_count_differences);
+            printf("node-shadow: own tests listed leaves=%" PRIu64 " (%.2f%%) tree=%" PRIu64 " (%.2f%%) operators=%" PRIu64 " (%.2f%%: calls %" PRIu64
+                   ", with a constant operand %" PRIu64 ", with a third operand %" PRIu64 ")\n",
+                   shadow->own_leaves, node_census_share(shadow->own_leaves, shadow->own_records), shadow->own_trees, node_census_share(shadow->own_trees, shadow->own_records),
+                   shadow->own_operators, node_census_share(shadow->own_operators, shadow->own_records), shadow->own_calls, shadow->own_constants, shadow->own_thirds);
+            for (uint32_t t = 0; t < NODE_TESTS_TRIGGERS; t += 1)
+            {
+                if (shadow->own_triggers[t] != 0)
+                {
+                    printf("node-shadow: own tests sent-by=%s %s=%" PRIu64 " (%.2f%%)\n", node_tests_trigger_names[t],
+                           t == NODE_TESTS_TRIGGER_UNSEQUENCED ? "expressions" : "records", shadow->own_triggers[t],
+                           node_census_share(shadow->own_triggers[t], t == NODE_TESTS_TRIGGER_UNSEQUENCED ? shadow->own_expressions : shadow->own_records));
+                }
+            }
+        }
         printf("node-shadow: reader-time C and X expressions=%" PRIu64 " taken=%" PRIu64 " entries=%" PRIu64 " tapes-not-kept=%" PRIu64 "\n", shadow->swept_expressions,
                shadow->swept_refused[NODE_MACHINE_TAKEN], shadow->swept_entries, shadow->swept_unkept);
         for (uint32_t refusal = NODE_MACHINE_TAKEN + 1; refusal < NODE_MACHINE_REFUSALS; refusal += 1)
@@ -4417,6 +5353,24 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                     }
                     shadow->reader_twin_differences += typed->twin_differences;
                     shadow->reader_twin_warnings += typed->twin_warnings;
+                    // The reader's two passes over a chunk each ran the own form and counted: a pass's counts are half.
+                    shadow->own_expressions += typed->own_expressions / 2;
+                    shadow->own_records += typed->own_records / 2;
+                    shadow->own_visited += typed->own_visited / 2;
+                    shadow->own_visits += typed->own_visits / 2;
+                    shadow->own_walks += typed->own_walks / 2;
+                    shadow->own_leaves += typed->own_leaves / 2;
+                    shadow->own_trees += typed->own_trees / 2;
+                    shadow->own_operators += typed->own_operators / 2;
+                    shadow->own_calls += typed->own_calls / 2;
+                    shadow->own_constants += typed->own_constants / 2;
+                    shadow->own_thirds += typed->own_thirds / 2;
+                    shadow->own_differences += typed->own_differences;
+                    shadow->own_count_differences += typed->own_count_differences;
+                    for (uint32_t t = 0; t < NODE_TESTS_TRIGGERS; t += 1)
+                    {
+                        shadow->own_triggers[t] += typed->own_triggers[t] / 2;
+                    }
                     if (typed->tests != NULL)
                     {
                         shadow->tested_expressions += typed->tested;
@@ -4649,11 +5603,17 @@ static int run_node_census(int count, char** arguments)
                                                                                BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS;
             shadow.front = (uint8_t)(shadow.front | flag | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
         }
-        else if (strcmp(arguments[i], "--front-tests") == 0)
+        else if (strcmp(arguments[i], "--front-tests") == 0 || strcmp(arguments[i], "--front-own-tests") == 0)
         {
-            // The census's tests at reader time, between T and C and X there.
+            // The census's tests at reader time, between T and C and X there: by the census's code on the view, or in the
+            // machine's own form.
             shadow.front = (uint8_t)(shadow.front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
-            shadow.reader |= BUSTER_NODE_READER_TESTS;
+            shadow.reader |= BUSTER_NODE_READER_TESTS | (strcmp(arguments[i], "--front-own-tests") == 0 ? BUSTER_NODE_READER_OWN : 0);
+        }
+        else if (strcmp(arguments[i], "--front-tests-last") == 0)
+        {
+            // The tests after C and X at reader time, on what those take.
+            shadow.reader |= BUSTER_NODE_READER_LAST;
         }
         else if (strcmp(arguments[i], "--interleave") == 0)
         {
@@ -4698,6 +5658,7 @@ static int run_node_census(int count, char** arguments)
             !(shadow.facts_operators && shadow.facts_mode == BUSTER_NODE_FACTS_LOADS) && !(shadow.facts_reads && shadow.facts_mode != BUSTER_NODE_FACTS_WHOLE);
     // --verify with T at reader time checks its rows and rules against the action there too.
     shadow.reader |= shadow.verify && (shadow.front & BUSTER_NODE_FRONT_TYPES) != 0 ? BUSTER_NODE_READER_VERIFY : 0;
+    shadow.reader |= shadow.verify && (shadow.reader & BUSTER_NODE_READER_OWN) != 0 ? BUSTER_NODE_READER_BOTH : 0;
     NodeCensus census = { .shadow = shadowed ? &shadow : NULL };
     for (uint32_t i = 0; valid && i < file_count; i += 1)
     {
@@ -4732,7 +5693,8 @@ static int run_node_census(int count, char** arguments)
                                           shadow.reads.misplaced != 0 || shadow.front_differences != 0 || shadow.typed_differences != 0 ||
                                           shadow.typed_object_differences != 0 || shadow.typed_library_differences != 0 || shadow.swept_differences != 0 ||
                                           shadow.tested_unsound != 0 || shadow.tested_differences != 0 || shadow.tested_kind_differences != 0 ||
-                                          shadow.tested_missed != 0 || shadow.tested_policy_differences != 0 || shadow.reader_twin_differences != 0);
+                                          shadow.tested_missed != 0 || shadow.tested_policy_differences != 0 || shadow.reader_twin_differences != 0 ||
+                                          shadow.own_differences != 0);
     return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
 }
 

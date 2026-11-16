@@ -2707,6 +2707,158 @@ in turn, musl's of three; the discards left alone in every row):
   shows on no input reads a conditional's third conversion as its second's:
   both arms convert to the conditional's common type.
 
+### The tests in the machine's own form
+
+"The tests where they sit" made the verdict at reader time with the census's
+own code, at more than the three sweeps' cost.
+`measure-node-machine --shadow --front-own-tests` makes the same bits as the
+machine would: from T's records in their order, with no walk of the graph and
+no step from a node to its record. With `--verify` the census's code runs
+beside it on every expression, and a bit, a span of tokens or a count of
+nodes that differs fails the command. [The
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-own-tests-2524-2026-11-16)
+has the runs.
+
+One loop reads every record once, without a branch on what it is: its
+operator's bytes in the unit's tables (by its enabled warnings), its type's
+byte, its standing, its flags, its token. It keeps a byte of what the record
+is as an operand, gathers the set's tests as bits over all records, and lists
+three kinds of record. Each test is then decided where what it reads is:
+
+| the tests | decided | by |
+| --- | --- | --- |
+| an operator outside the set, a special type, a bit-field, an aggregate copied, a packed member's address | in the loop, over all records | the operator's class, the type's byte, the flags |
+| a register object, a declaration the tables don't model | at each leaf | its flags and the name's declaration's byte |
+| a comparison under a bitwise operator or as a statement, a `!` under a comparison, an assignment as a condition | at a comparison's token, a `!` and an `=` | the parser's tree |
+| a call's aggregates and its callee's own semantics | at each call | the arguments' bytes, the callee's declaration's byte |
+| a constant its conversion changes, a division by zero, a shift's count, a null dereferenced, a zero that is no literal made a pointer | at an operator with a constant operand, exact in place | the constant's value in T's columns, the types' widths |
+| a pointer cast to a narrow integer, a string plus an integer, a comma's discard | at the operator, exact in place | its operands' bytes |
+| a comparison's bound, a mix of enumerations, signs compared, a void dereferenced, a shift of a sum, a chained comparison, a shift or a product read as a truth, a name assigned to itself, an atomic record's member, a subscript at its array's end or past it, a constant the columns don't hold whole | by the census's code, on that record alone | a condition each of them needs, from the operator's bytes and its operands' |
+| a statement's discard, a for statement's clause, an initializer's constant, a returned local's address, T's actions' warnings | once an expression | the root, and the loop's bits |
+| two writes not apart from a sequence point | by the census's code after its walk | two writes in the expression, or one below its top |
+
+The loop's own conditions are never a silence test's verdict but where the
+test is exact in place: elsewhere they only say where none can fire, and the
+census's code decides.
+
+**What is decided before it, it doesn't ask.** It runs where it sits, on an
+expression the front made whole and T took:
+
+| the census's condition | decided before the form runs, by |
+| --- | --- |
+| a floating-point pragma's region | T's context refusal, by the same bits |
+| a callee whose type has no prototype | T's callee refusal |
+| an overload set's leaf, for which a wide leaf went to the census's code | T's leaf refusal; a wide leaf's flags are in its columns, as any leaf's |
+| a sizeof's or an `_Alignof`'s operand, a compound literal's object | the front, which leaves the three to the walk |
+| a register object by its object's bit | the reader: the leaf's flags have it from the same declaration |
+| a condition's root that is a shift or a product | the root's kind: a condition's root is its wrapper, whose own send takes its operand |
+
+- **Each is the census's code's condition still,** and that code runs beside
+  the own form with `--verify`.
+- **The fixtures have a line for each that could come back:** a pragma's
+  region, a callee without a prototype, a compound literal and
+  `sizeof(x++)`. The day T takes one or the front makes one, `test-checker`
+  shows what the form lacks.
+
+On the 9700X (`sqlite3.c`, Lua, musl):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| records the loop lists: leaves | 45.6% | 44.5% | 48.7% |
+| at a comparison's token, a `!` or an `=` | 9.6% | 6.4% | 8.0% |
+| operators with tests of their own | 16.8% | 21.7% | 16.2% |
+| records sent to the census's code | 0.31% | 1.18% | 0.81% |
+| expressions walked for it | 2.1% | 4.1% | 3.0% |
+| with `-Wall -Wextra`: records sent | 5.2% | 3.9% | 4.7% |
+| expressions whose bits are not the census's code's, either way | 0 | 0 | 0 |
+
+TSC ticks a record T typed at reader time (medians of seven readings in
+turn, musl's of three), at main `cc1c47d62`, the form as it is now ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-own-tests-main-2524-2026-11-16)):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| T, C and X | 129.8 | 154.8 | 259.2 |
+| with the census's code between T and C | 308.0 | 346.4 | 521.6 |
+| with the own form | 216.1 | 270.8 | 411.6 |
+| the census's code alone (the difference) | 178.2 | 191.5 | 262.5 |
+| the own form alone | 86.3 | 115.9 | 152.4 |
+
+What follows was read at main `be6515fba`, before the conditions decided
+before the form were taken out of it: there the own form alone was 90.0,
+118.8 and 157.3 ticks, and the census's code 173.5, 186.1 and 248.0. Taking
+them out changed no count of the table above and a few ticks.
+
+The own form by part (`sqlite3.c`; each part switched off by a knob of a
+build made for it, so the parts overlap by a few ticks):
+
+| | ticks a typed record |
+| --- | ---: |
+| the loop | 27.0 |
+| the operators' tests: calls 6.6, a constant operand's 9.5, the census's code and its walks 4.5, the rest 1.8 | 27.1 |
+| the leaves' tests | 14.7 |
+| the expression's own | 6.2 |
+| the tree's | 5.3 |
+| what is around it: the root's kind, the pragmas' bodies, the events | 8.9 |
+
+- **Exact.** No expression's bits differ from the census's code's, on the
+  three corpora with the default warnings and with every warning, and on the
+  seven fixtures.
+- **Half the cost, not a tenth.** The own form is 90 ticks a typed record on
+  `sqlite3.c` where the census's code is 174: about 62 cycles a body token.
+  Step 2's sum is 1.19 with it, where 1.13 stood: a hair under the gate
+  still. The aim was 30 ticks.
+- **The cost is instructions, not misses.** The first version sent 1.8% of
+  the records to the census's code and still cost two thirds of it: it
+  retired some 470 instructions a record where the census's code retires
+  780. Each later version cut what a part read (the calls' callee by a bit
+  of its type's word, the constants' tests in place, a declaration's three
+  facts each made when first asked, the walk only where a parent is read)
+  and took 114 ticks to 90. No part is a tenth of the rest.
+- **The loop is not its lookups.** Of its 27 ticks, the type's byte, the
+  token's role and the operands' bytes, each looked up by an index, are 3.4
+  together. The other 23.6 are contiguous columns read once, five tables by
+  operator and five stores a record: what 64 records a vector step would
+  make (a table is one byte permute of two registers, a list a compressed
+  store). That form is not built.
+- **Three things are not a pass's to do.** A leaf's two bytes are its
+  declaration's and its object's, 15 ticks here: #2850's fact word has the
+  declaration in hand when it makes the leaf, and a bit there is free. A
+  constant operand's tests read its conversion's type, which the row that
+  typed the operator chose: 9.5 ticks here. And the loop reads again what T
+  had in registers a moment before. The machine's own form of these is in
+  the leaf's maker and in T's rows, not after them.
+- **The order doesn't matter.** With the tests after C and X
+  (`--front-tests-last`), on what those take, the whole reads 3 to 4 ticks
+  less: the tests refuse 1% of what T takes, so C and X run on almost the
+  same expressions either way.
+- **With #2871's kernel.** This work merged with that pull request's head
+  builds and passes both sides' tests, and the operators' kernel reads the
+  same there (within 2%, the same instructions).
+- **Every fault fails the tests.** Of 98 faults put into the own form one at
+  a time, the tests first showed 63 and the three corpora 5 more; 30 showed
+  on no input. Sorted, they were:
+  - **27 fixture lines owed.** A line of C showed each of 19 at once (a
+    comparison under a bitwise operator, a shift by too large a count, a
+    chained comparison, a mix of enumerations, a constant outside its
+    operand's type). Three more needed the right line: the front's one
+    operator outside the census's set (`__extension__`, a selection there),
+    a conditional whose third operand alone is a constant its conversion
+    changes, and a comparison as a statement whose operand writes. The
+    corpora's 5 had no line either.
+  - **Why the fixtures missed them:** with `-Wall -Wextra` a comparison and
+    a constant's shift go to the census's code whatever their operands are,
+    which hides the form's other conditions on them. So the lines are a
+    seventh fixture, read with the default warnings alone, and a `for`
+    statement in the first.
+  - **7 conditions decided before the form runs** (the table above), now
+    taken out.
+  - **1 that could not fire where it stood:** a register object's flag,
+    behind the census's code, whose own register test comes before it asks a
+    declaration's attributes, so that such a leaf always went there. It is
+    the leaf's first branch now.
+  - **Of the 91 left, each fails `test-checker`.**
+
 ### What it says of step 2
 
 "Expected gains" took the machine at 55 cycles a body token for a taken
@@ -2730,13 +2882,16 @@ machine move the sum by a hundredth, a point of coverage by a third of that.
 The sum had no term for the set's and the silence tests, which decide what
 the machine takes. "The tests where they sit" ran them at reader time as the
 census writes them: about 115 cycles a body token on `sqlite3.c`, more than
-the three sweeps, which would take 1.25 to about 1.13, under the gate. The
-sum stands only with the tests in the machine's own form, at a tenth of that.
-What would move it:
+the three sweeps, which would take 1.25 to about 1.13, under the gate. "The
+tests in the machine's own form" made the same bits from T's records at 62:
+1.19, a hair under it. The sum stands only with the tests at a third of
+that. What would move it:
 
-- **The tests in the machine's own form:** over T's records in their order,
-  a node running its operator's tests alone, with the census's code on the
-  same records as their oracle. They are the sum's largest open term.
+- **The tests where their inputs are:** a leaf's declaration's bit in the
+  record its maker fills (#2850's fact word), a constant operand's tests in
+  the row that types its operator, and the rest's loop 64 records a step.
+  The own form as a pass after T is their oracle, as the census's code is
+  its. They are the sum's largest open term.
 
 - **The front's walk:** over a hundred instructions an acting token for a
   stack walk, lean or not. The structure it derives (counts, distances,
