@@ -878,6 +878,18 @@ its operands. They are the machine's now (#2569):
   label and each body's labels' entries. Each label of a taken expression must
   be the lowering's of the same number counted from the expression's first, at
   the same entry, and each branch's target that entry.
+- **A condition's `&&` and `||` (#2883).** The lowering writes a statement's
+  condition whose expression, under its `!`s, is an `&&` or `||` as branches to
+  the statement's own targets, and a conditional's condition so too, to its arms
+  (`check_lower_branch`): no 0 or 1 is made, joined and tested again. The
+  `CONDITION` stays the root the census reads; its `&&`, `||` and `!` aren't
+  popped. The machine doesn't write branches yet: C leaves such a `CONDITION`,
+  and a conditional whose condition is one, to the tasks
+  (`node_machine_branch_condition`, the lowering's rule read from the records),
+  and the shadow counts them as refused by `template`. Writing them is the
+  follow-up under #2524: a condition's operand takes a branch context in C, X
+  writes its branches, and the comparison reads the control's target as a label
+  outside the expression.
 
 On the 9700X, against main `0af27a30` (`--verify`, CPU 2, under the lock;
 [the record](https://github.com/buster14a/buster-performance/tree/18dc758cb1e170014646de5a6ed39dc5b966c65e/docs/measurements/node-machine-logical-2524-2026-11-12)):
