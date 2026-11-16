@@ -90,7 +90,7 @@ struct Tier0TestLabelShared
 static __attribute__((no_sanitize("function"))) bool tier0_test_label_native(const uint8_t* code, uint32_t length, const uint32_t* offsets, const uint32_t* records, const uint64_t* inputs,
                                     Tier0TestLabelShared* shared)
 {
-    const pid_t child = fork();
+    const pid_t child = tier0_test_fork();
     if (child == 0)
     {
         alarm(BUSTER_TIER0_TEST_RUN_SECONDS);

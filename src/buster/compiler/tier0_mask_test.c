@@ -817,7 +817,7 @@ static bool tier0_test_mask_native(const uint8_t* code, uint32_t length, Tier0Te
     if (ran)
     {
         memcpy(mapped, shared, sizeof(*mapped));
-        const pid_t child = fork();
+        const pid_t child = tier0_test_fork();
         if (child == 0)
         {
             alarm(BUSTER_TIER0_TEST_RUN_SECONDS);

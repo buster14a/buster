@@ -712,7 +712,7 @@ typedef void (*Tier0TestInt128Run)(const void* code, Tier0TestInt128Shared* shar
 // its own, `run` calling it from C.
 static bool tier0_test_int128_native(const uint8_t* code, uint32_t length, Tier0TestInt128Run run, Tier0TestInt128Shared* shared)
 {
-    const pid_t child = fork();
+    const pid_t child = tier0_test_fork();
     if (child == 0)
     {
         alarm(BUSTER_TIER0_TEST_RUN_SECONDS);
