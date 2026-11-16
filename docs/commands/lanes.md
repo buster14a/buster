@@ -56,6 +56,25 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
   takes its place without it at once, since either holds the CPU the late lane
   needs; two lanes on the process's own CPUs, where it has more than one, read
   theirs as not sharing them;
+- the exit helper's look at the executable's pages and the probe that
+  decides it (#2873, `lane_exit_look`, `lane_exit_probe`): the segments it
+  takes from program headers (the read-only ones a multiple of 2 MB from
+  their place in the file, by their whole 2 MB ranges), the pages it counts
+  of a scan's regions by range and the ranges a huge page maps, the ranges
+  it asks for by their pages, the placed code past a probe's range, the
+  processes that look whatever their probe says (about one in 64 of IDs in
+  a row, of every other and of every fourth), and the look on a mapped file
+  of the test's, 80 pages read in its first range and one in its second:
+  the second stays as mapped, and the first is mapped by a huge page
+  afterwards where the kernel collapsed it; the second range, asked for as
+  placed code past a probe in the first, likewise; then the probe's two
+  questions of a page no read touched: the kernel's answer says it is mapped
+  where a huge page maps its range and only there, and a read of it takes
+  fewer ticks than a fault can where it is mapped, the least of eight
+  pages' reads, and no fewer where it faults, as the read of the file's
+  last page, past its ranges, always does (the test says what the kernel
+  did and the ticks: one before 6.7, one without huge pages for a file's
+  pages, or a process with them off refuses);
 - thread counts, which the teams and sessions checks compare: a thread in
   `/proc/self/task` counts unless its stat's flags say it has begun to exit
   (`PF_EXITING`), as a thread just joined may still be listed there. The

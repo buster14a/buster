@@ -21,7 +21,13 @@
 //     numbered in order;
 //   - start-order: local functions of main.c's units by their FILE symbols (two parts of one), a unit's global and the C
 //     library's functions by name, a split's alias, a benchmark's function whose name a unit's static shares (left out),
-//     two sample files that repeat functions, the second's new one after the first's, and symbols without functions;
+//     two sample files that repeat functions, the second's new one after the first's, and symbols without functions; a
+//     file of three traces, its functions by how many of them ran each (one that a trace ran twice counted once), alone
+//     and after a file that ran one of them first;
+//   - start-trace: this executable's own -dumpversion traced twice into one file, each trace the same addresses, every
+//     one once, main's among them, with the command's status; a path that isn't there; and symbols read from bytes that
+//     are no executable, one with a function outside its instructions, and one with an alias (a build without a
+//     sanitizer: LeakSanitizer stops its own process with ptrace, which a traced one refuses);
 //   - branch-misses: records with M, P and neither, a field that isn't one and one of a branch at 0, with the load bias
 //     and the disassembly's instructions, and an address the disassembly doesn't have; then 10,000 branches, which grow
 //     the table, without a disassembly;
@@ -40,8 +46,10 @@
 #include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <string.h>
 #include <stdio.h>
+
 
 // objdump -p's lines for a file /t/bin whose LOAD segment maps the file at its own addresses, as GNU ld's do.
 #define BUSTER_PROFILE_TEST_IMAGE                                                                          \
@@ -293,6 +301,20 @@ static const char profile_test_start_order[] = "# start-order: 9 addresses, 1 of
                                                "- check_entry\n"
                                                "- _int_malloc\n"
                                                "- memset\n";
+
+// start-trace's file of three commands: each trace's addresses in the order they first ran.
+static const char profile_test_start_traces[] = "trace\n"
+                                                "0x401020\n"
+                                                "0x402040\n"
+                                                "0x405000\n"
+                                                "trace\n"
+                                                "0x402040\n"
+                                                "0x405000\n"
+                                                "0x402060\n"
+                                                "0x402040\n"
+                                                "trace\n"
+                                                "0x405000\n"
+                                                "0x400100\n";
 
 typedef struct ProfileTest ProfileTest;
 struct ProfileTest
@@ -547,6 +569,28 @@ static void profile_test_text_tools(ProfileTest* test)
     profile_test_check(test, "start-order of one file", ok, true, profile_report_text(&test->report), profile_test_start_order);
     ok = profile_start_order(&test->arena, &test->report, profile_test_string("Symbol table '.symtab' contains 0 entries:\n"), start_samples, 1);
     profile_test_check(test, "start-order without functions", ok, false, profile_report_text(&test->report), "start-order: no functions in the symbols\n");
+
+    // A file of three traces (start-trace's): memset in all three, check_one in two (and twice in one of them), and
+    // main_driver, check_two and _start in one each, which stay in address order.
+    const String8 start_traces = profile_test_string(profile_test_start_traces);
+    ok = profile_start_order(&test->arena, &test->report, profile_test_string(profile_test_start_symbols), &start_traces, 1);
+    profile_test_check(test, "start-order of a file of traces", ok, true, profile_report_text(&test->report),
+                       "# start-order: 9 addresses, 0 of them in no function; 3 local functions of main.c's units (0 KB) and 2 by name (0 KB)\n"
+                       "- memset\n"
+                       "main_unit_checker.c check_one\n"
+                       "- _start\n"
+                       "main.c main_driver\n"
+                       "main_unit_checker.c check_two\n");
+    // After a file that ran check_two first, the traces' file places the others, check_two's traces there uncounted.
+    const String8 start_traces_after[] = { profile_test_string("402064\n"), start_traces };
+    ok = profile_start_order(&test->arena, &test->report, profile_test_string(profile_test_start_symbols), start_traces_after, 2);
+    profile_test_check(test, "start-order of a file of traces after another", ok, true, profile_report_text(&test->report),
+                       "# start-order: 10 addresses, 0 of them in no function; 3 local functions of main.c's units (0 KB) and 2 by name (0 KB)\n"
+                       "main_unit_checker.c check_two\n"
+                       "- memset\n"
+                       "main_unit_checker.c check_one\n"
+                       "- _start\n"
+                       "main.c main_driver\n");
 }
 
 // 10,000 branches, branch b recorded b % 3 + 1 times and mispredicted b % 3 times: the table grows past its first
@@ -1115,6 +1159,261 @@ static void profile_test_entry_program(ProfileTest* test)
     test->arena.length = 0;
 }
 
+// start-trace's reader of an executable's functions, on bytes made here: a file's header, four section headers (none,
+// instructions, data, the symbol table) and seven symbols: two functions, an alias of the first, a function in the data
+// section, one without a size, an undefined one and an object.
+typedef struct ProfileTestImage ProfileTestImage;
+struct ProfileTestImage
+{
+    Elf64_Ehdr header;
+    Elf64_Shdr sections[4];
+    Elf64_Sym symbols[7];
+};
+
+static void profile_test_trace_symbols(ProfileTest* test)
+{
+    const ProfileTestImage image = {
+        .header = {
+            .e_ident = { ELFMAG0, ELFMAG1, ELFMAG2, ELFMAG3, ELFCLASS64, ELFDATA2LSB, EV_CURRENT },
+            .e_type = ET_DYN,
+            .e_machine = EM_X86_64,
+            .e_entry = 0x1010,
+            .e_shoff = offsetof(ProfileTestImage, sections),
+            .e_shentsize = sizeof(Elf64_Shdr),
+            .e_shnum = 4,
+        },
+        .sections = {
+            { 0 },
+            {
+                .sh_type = SHT_PROGBITS,
+                .sh_flags = SHF_ALLOC | SHF_EXECINSTR,
+            },
+            {
+                .sh_type = SHT_PROGBITS,
+                .sh_flags = SHF_ALLOC | SHF_WRITE,
+            },
+            {
+                .sh_type = SHT_SYMTAB,
+                .sh_offset = offsetof(ProfileTestImage, symbols),
+                .sh_size = sizeof(image.symbols),
+                .sh_entsize = sizeof(Elf64_Sym),
+            },
+        },
+        .symbols = {
+            {
+                .st_info = ELF64_ST_INFO(STB_GLOBAL, STT_FUNC),
+                .st_shndx = 1,
+                .st_value = 0x1010,
+                .st_size = 4,
+            },
+            {
+                .st_info = ELF64_ST_INFO(STB_LOCAL, STT_FUNC),
+                .st_shndx = 1,
+                .st_value = 0x1000,
+                .st_size = 8,
+            },
+            {
+                .st_info = ELF64_ST_INFO(STB_GLOBAL, STT_FUNC),
+                .st_shndx = 1,
+                .st_value = 0x1000,
+                .st_size = 8,
+            },
+            {
+                .st_info = ELF64_ST_INFO(STB_GLOBAL, STT_FUNC),
+                .st_shndx = 2,
+                .st_value = 0x2000,
+                .st_size = 4,
+            },
+            {
+                .st_info = ELF64_ST_INFO(STB_GLOBAL, STT_FUNC),
+                .st_shndx = 1,
+                .st_value = 0x1020,
+            },
+            {
+                .st_info = ELF64_ST_INFO(STB_GLOBAL, STT_FUNC),
+                .st_shndx = SHN_UNDEF,
+                .st_value = 0x1030,
+                .st_size = 4,
+            },
+            {
+                .st_info = ELF64_ST_INFO(STB_GLOBAL, STT_OBJECT),
+                .st_shndx = 1,
+                .st_value = 0x1040,
+                .st_size = 4,
+            },
+        },
+    };
+    uint64_t count = 0;
+    uint64_t entry = 0;
+    bool relocatable = false;
+    const ProfileBreakpoint* breakpoints = profile_trace_breakpoints(&test->arena, (String8){ .pointer = (char*)&image, .length = sizeof(image) }, &count, &entry, &relocatable);
+    bool ok = breakpoints != 0 && count == 2 && breakpoints[0].address == 0x1000 && breakpoints[1].address == 0x1010 && entry == 0x1010 && relocatable;
+    ok = ok && profile_trace_find(breakpoints, count, 0x1010) == 1 && profile_trace_find(breakpoints, count, 0x1008) == count && profile_trace_find(breakpoints, count, 0x2000) == count;
+    // A file cut short of its symbols, and bytes that are no executable, have none.
+    ok = ok && profile_trace_breakpoints(&test->arena, (String8){ .pointer = (char*)&image, .length = sizeof(image) - 1 }, &count, &entry, &relocatable) == 0 && count == 0;
+    ok = ok && profile_trace_breakpoints(&test->arena, profile_test_string("#!/bin/sh\n"), &count, &entry, &relocatable) == 0 && count == 0;
+    test->cases += 1;
+    if (!ok)
+    {
+        test->failures += 1;
+        printf("  start-trace's functions of an executable: FAILED\n");
+    }
+    test->arena.length = 0;
+}
+
+// The most functions the traced -dumpversion may run.
+#define BUSTER_PROFILE_TEST_TRACE_ADDRESSES 65536
+
+// The addresses of start-trace's `text`, its traces' lines but `trace`, into `addresses` (at most `capacity`), and how
+// many traces it has. False if a line is neither or an address is there twice in one trace.
+static bool profile_test_trace_read(String8 text, uint64_t* addresses, uint64_t capacity, uint64_t* count, uint64_t* traces)
+{
+    bool result = true;
+    uint64_t position = 0;
+    uint64_t first = 0;
+    *count = 0;
+    *traces = 0;
+    while (result && position < text.length)
+    {
+        const String8 line = profile_line(text, &position);
+        uint64_t at = 0;
+        uint64_t address = 0;
+        if (profile_equal(line, profile_string(BUSTER_PROFILE_START_TRACE)))
+        {
+            *traces += 1;
+            first = *count;
+        }
+        else
+        {
+            result = *traces != 0 && *count < capacity && profile_starts_with(line, profile_string("0x")) && profile_hex(line, &at, &address) && at == line.length;
+            for (uint64_t i = first; result && i < *count; i += 1)
+            {
+                result = addresses[i] != address;
+            }
+            if (result)
+            {
+                addresses[*count] = address;
+                *count += 1;
+            }
+        }
+    }
+    return result;
+}
+
+// The address in `image`, an ELF64 file's bytes, of its function named `name`, by its symbol table and that table's
+// strings; 0 if it has none. The test looks main up so, by name: taking its address would make the test's command one
+// that reaches every command's code, which the call graph's check of split variables then follows.
+static uint64_t profile_test_function_address(String8 image, const char* name)
+{
+    uint64_t result = 0;
+    Elf64_Ehdr header = { 0 };
+    bool valid = image.length >= sizeof(header);
+    if (valid)
+    {
+        memcpy(&header, image.pointer, sizeof(header));
+    }
+    valid = valid && header.e_shentsize == sizeof(Elf64_Shdr) && header.e_shoff <= image.length && (uint64_t)header.e_shnum * sizeof(Elf64_Shdr) <= image.length - header.e_shoff;
+    for (uint32_t i = 0; valid && result == 0 && i < header.e_shnum; i += 1)
+    {
+        Elf64_Shdr table;
+        Elf64_Shdr strings = { 0 };
+        memcpy(&table, image.pointer + header.e_shoff + (uint64_t)i * sizeof(table), sizeof(table));
+        const bool symbols = table.sh_type == SHT_SYMTAB && table.sh_entsize == sizeof(Elf64_Sym) && table.sh_link < header.e_shnum && table.sh_offset <= image.length &&
+                             table.sh_size <= image.length - table.sh_offset;
+        if (symbols)
+        {
+            memcpy(&strings, image.pointer + header.e_shoff + (uint64_t)table.sh_link * sizeof(strings), sizeof(strings));
+        }
+        const bool named = symbols && strings.sh_offset <= image.length && strings.sh_size <= image.length - strings.sh_offset;
+        for (uint64_t s = 0; named && result == 0 && s < table.sh_size / sizeof(Elf64_Sym); s += 1)
+        {
+            Elf64_Sym symbol;
+            memcpy(&symbol, image.pointer + table.sh_offset + s * sizeof(symbol), sizeof(symbol));
+            const uint64_t room = symbol.st_name < strings.sh_size ? strings.sh_size - symbol.st_name : 0;
+            const char* text = image.pointer + strings.sh_offset + symbol.st_name;
+            const bool same = ELF64_ST_TYPE(symbol.st_info) == STT_FUNC && room > strlen(name) && memcmp(text, name, strlen(name) + 1) == 0;
+            result = same ? symbol.st_value : 0;
+        }
+    }
+    return result;
+}
+
+// start-trace of this executable's own -dumpversion, twice into one file: each trace must hold the same addresses in
+// the same order (the command is deterministic: it runs without its exit helper, a second task whose first function
+// would land anywhere among the first's last ones, or nowhere), each once, main's among them, and the command's status
+// is the trace's. Then a path that isn't there. A sanitizer's build leaves the live trace out: LeakSanitizer stops its
+// own process with ptrace as it exits, which a process that is already traced refuses.
+static void profile_test_start_trace(ProfileTest* test)
+{
+    const char* temporary = oracle_temporary_directory();
+    char directory[512];
+    char path[600];
+    snprintf(directory, sizeof(directory), "%s/buster-test-profile-XXXXXX", temporary);
+    const bool made = mkdtemp(directory) != 0;
+    snprintf(path, sizeof(path), "%s/trace.txt", directory);
+    bool ok = made;
+    if (!BUSTER_SANITIZER_RESOURCES)
+    {
+        char* trace[] = { "/proc/self/exe", "start-trace", path, "/proc/self/exe", "-dumpversion", 0 };
+        const char* helper = getenv("BUSTER_EXIT_HELPER");
+        char inherited[64];
+        snprintf(inherited, sizeof(inherited), "%s", helper != 0 ? helper : "");
+        setenv("BUSTER_EXIT_HELPER", "0", 1);
+        ok = ok && profile_test_command(trace, "/dev/null") && profile_test_command(trace, "/dev/null");
+        if (helper != 0)
+        {
+            setenv("BUSTER_EXIT_HELPER", inherited, 1);
+        }
+        else
+        {
+            unsetenv("BUSTER_EXIT_HELPER");
+        }
+        const String8 text = ok ? profile_read_file(&test->arena, path) : (String8){ 0 };
+        uint64_t* addresses = BUSTER_ARENA_PUSH_ARRAY(&test->arena, uint64_t, BUSTER_PROFILE_TEST_TRACE_ADDRESSES);
+        uint64_t count = 0;
+        uint64_t traces = 0;
+        ok = ok && text.pointer != 0 && addresses != 0 && profile_test_trace_read(text, addresses, BUSTER_PROFILE_TEST_TRACE_ADDRESSES, &count, &traces);
+        ok = ok && traces == 2 && count >= 4 && count % 2 == 0 && memcmp(addresses, addresses + count / 2, count / 2 * sizeof(uint64_t)) == 0;
+        // main's address in the file, from its symbols.
+        const int file = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
+        struct stat stats;
+        const bool sized = file != -1 && fstat(file, &stats) == 0 && stats.st_size > 0;
+        void* mapping = sized ? mmap(0, (size_t)stats.st_size, PROT_READ, MAP_PRIVATE, file, 0) : MAP_FAILED;
+        if (file != -1)
+        {
+            close(file);
+        }
+        const uint64_t main_address = mapping != MAP_FAILED ? profile_test_function_address((String8){ .pointer = mapping, .length = (uint64_t)stats.st_size }, "main") : 0;
+        if (mapping != MAP_FAILED)
+        {
+            munmap(mapping, (size_t)stats.st_size);
+        }
+        bool ran_main = false;
+        for (uint64_t i = 0; ok && i < count / 2; i += 1)
+        {
+            ran_main = ran_main || addresses[i] == main_address;
+        }
+        ok = ok && main_address != 0 && ran_main;
+        test->cases += 1;
+        if (!ok)
+        {
+            test->failures += 1;
+            printf("  start-trace of this executable's -dumpversion: FAILED (%llu addresses in %llu traces; %s)\n", (unsigned long long)count, (unsigned long long)traces, path);
+        }
+        test->arena.length = 0;
+    }
+    if (ok)
+    {
+        unlink(path);
+        rmdir(directory);
+    }
+    int status = 0;
+    char* missing[] = { "/proc/self/buster-test-profile-not-there", 0 };
+    ok = profile_start_trace(&test->arena, &test->report, missing, &status);
+    profile_test_check(test, "start-trace of a path that isn't there", ok, false, profile_report_text(&test->report),
+                       "start-trace: /proc/self/buster-test-profile-not-there isn't an ELF64 executable with a symbol table of functions\n");
+}
+
 static int run_profile_tests(int argc, char** argv)
 {
     (void)argv;
@@ -1131,6 +1430,8 @@ static int run_profile_tests(int argc, char** argv)
         };
         printf("test-profile:\n");
         profile_test_text_tools(&test);
+        profile_test_trace_symbols(&test);
+        profile_test_start_trace(&test);
         profile_test_branch_growth(&test);
         profile_test_program(&test);
         profile_test_entry_program(&test);

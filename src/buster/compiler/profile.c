@@ -12,6 +12,7 @@
 //   build/compiler spill-report FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]
 //   build/compiler branch-misses BRSTACK [--bias ADDRESS] [--disassembly FILE] [--branches N]
 //   build/compiler start-order SYMBOLS SAMPLES...
+//   build/compiler start-trace OUTPUT COMMAND...
 //   build/compiler time-runs [--runs N] [--warmups N] [--after-scalar MS] [--copies N] [--directory PATH]
 //                            [--executable PATH | --build NAME PATH]... --list ARGUMENT... [--list ARGUMENT...]...
 //
@@ -36,11 +37,16 @@
 // - branch-misses reads `perf script -F brstack` of last-branch records (`perf record -j any,u`) and ranks the branches
 //   by their mispredictions, at addresses less the load bias (where a PIE was mapped, from --show-mmap-events), so
 //   that `addr2line` and objdump of the file take them; with the file's disassembly, each with its instruction.
-// - start-order reads `readelf -sW` of the executable and `perf script -F ip,brstack` of its samples (one file per command
-//   profiled, the smallest command first) and writes the functions they ran, by the first file that ran each, each
-//   file's in address order: a local function of one of main.c's units as its unit and name, and any other (a global
-//   one, the C library's) as `-` and its name: cmake/BusterStartOrder.txt, which the link places before .text, and the
-//   parallel split first in .text.buster_checker (build.md, "The start's code order", #1444).
+// - start-order reads `readelf -sW` of the executable and what its commands ran (start-trace's addresses, or `perf
+//   script -F ip,brstack` of its samples; one file per command profiled, the smallest command first) and writes the
+//   functions they ran, by the first file that ran each, each file's in address order, or for a file of several traces
+//   by how many of them ran each: a local function of one of main.c's units as its unit and name, and any other (a
+//   global one, the C library's) as `-` and its name: cmake/BusterStartOrder.txt, which the link places before .text,
+//   and the parallel split first in .text.buster_checker (build.md, "The start's code order", #1444, #2873).
+// - start-trace runs COMMAND, whose first word is its executable's path, with a breakpoint at the entry of every
+//   function of the executable, each removed as it is reached, and appends to OUTPUT a line `trace` and the address of
+//   each function the command ran, in the order they first ran: exactly what it runs, each function stopping it once.
+//   Its exit status is the command's.
 // - time-runs times whole processes of this executable (or of each --executable, and of each --build's placements),
 //   one per argument list, executable and copy in each run, in each run's order of a Williams design (profile_ab_tree:
 //   each slot follows each other equally often), after warm-up runs in slot order: each one's wall time from its exec's release to wait4's return, its user and system time, peak
@@ -56,13 +62,14 @@
 //   with each one's spread over its placements and copies and each difference's range over them (profile_time_compare).
 //
 // Each tool's work is a function of its input texts that writes its report into a ProfileReport (profile_hot_loops,
-// profile_label_spills, profile_spill_report, profile_branch_misses, profile_start_order, and time-runs'
-// profile_time_compare), which
+// profile_label_spills, profile_spill_report, profile_branch_misses, profile_start_order, profile_start_trace, and
+// time-runs' profile_time_compare), which
 // profile_test.c checks, and ab's order is profile_ab_tree. main.c includes this file after lane.c, for its arenas, and profile_test.c after it.
 //
 // Layout, in this order: the report (ProfileReport, profile_print), reading text (profile_line and the others), the
 // disassembly (ProfileDisassembly, profile_disassembly_read, profile_jump_target), hot-loops, label-spills,
-// spill-report, branch-misses, start-order (profile_start_order), ab (profile_ab_tree, profile_ab_run), time-runs (profile_time_slot, profile_time_one,
+// spill-report, branch-misses, start-order (profile_start_order), start-trace (profile_trace_breakpoints,
+// profile_trace_follow, profile_start_trace), ab (profile_ab_tree, profile_ab_run), time-runs (profile_time_slot, profile_time_one,
 // profile_time_compare, profile_time_make_copies, profile_time_runs), and the commands (run_profile_command).
 
 #include "buster/compiler/test_paths.h"
@@ -80,6 +87,11 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
+#include <sys/mman.h>
+#include <sys/ptrace.h>
+#include <sys/user.h>
+#include <errno.h>
+#include <elf.h>
 #include <signal.h>
 #include <time.h>
 #include <linux/perf_event.h>
@@ -1541,12 +1553,35 @@ struct ProfileFunction
     String8 name;
     String8 unit;
     bool hit;
-    // The first sample file that ran it, when hit.
+    // The first sample file that ran it, when hit; how many of that file's traces ran it, and the last of them that did.
     uint32_t first;
+    uint32_t traces;
+    uint32_t last_trace;
 };
 
 // start-order's sample files, one per command profiled.
 #define BUSTER_PROFILE_START_SAMPLES 64
+// The line that starts a trace in a sample file of several (start-trace writes one before each command's addresses).
+#define BUSTER_PROFILE_START_TRACE "trace"
+
+// A function start-order lists, for its place: after those of earlier files, among its file's after those that more of
+// the file's traces ran, and among those in address order (the functions' order).
+typedef struct ProfileStartPlace ProfileStartPlace;
+struct ProfileStartPlace
+{
+    uint32_t first;
+    uint32_t traces;
+    uint64_t function;
+};
+
+static int profile_start_place_compare(const void* a, const void* b)
+{
+    const ProfileStartPlace* x = a;
+    const ProfileStartPlace* y = b;
+    int result = (x->first > y->first) - (x->first < y->first);
+    result = result != 0 ? result : (x->traces < y->traces) - (x->traces > y->traces);
+    return result != 0 ? result : (x->function > y->function) - (x->function < y->function);
+}
 
 static int profile_function_compare(const void* a, const void* b)
 {
@@ -1667,9 +1702,10 @@ static uint64_t profile_function_at(const ProfileFunction* functions, uint64_t c
     return inside ? low - 1 : count;
 }
 
-// Marks the function that holds `address` as run, by sample file `sample` if none ran it before; counts it, and in
-// *outside if none holds it.
-static void profile_start_hit(ProfileFunction* functions, uint64_t count, uint64_t address, uint32_t sample, uint64_t* addresses, uint64_t* outside)
+// Marks the function that holds `address` as run, by sample file `sample` if none ran it before, and by one more of that
+// file's traces if `trace` is the first of them to run it again; counts the address, and in *outside if no function
+// holds it.
+static void profile_start_hit(ProfileFunction* functions, uint64_t count, uint64_t address, uint32_t sample, uint32_t trace, uint64_t* addresses, uint64_t* outside)
 {
     const uint64_t index = profile_function_at(functions, count, address);
     *addresses += 1;
@@ -1678,18 +1714,29 @@ static void profile_start_hit(ProfileFunction* functions, uint64_t count, uint64
     {
         functions[index].hit = true;
         functions[index].first = sample;
+        functions[index].traces = 1;
+        functions[index].last_trace = trace;
+    }
+    else if (index != count && functions[index].first == sample && functions[index].last_trace != trace)
+    {
+        functions[index].traces += 1;
+        functions[index].last_trace = trace;
     }
 }
 
-// Marks the function that holds each address of `samples`, sample file `sample` (perf script -F ip,brstack: each line's
-// ip, then its records, 0xFROM/0xTO/...) as run. Returns the addresses read, and in *outside those no function holds.
+// Marks the function that holds each address of `samples`, sample file `sample`, as run: perf script -F ip,brstack (each
+// line's ip, then its records, 0xFROM/0xTO/...), or start-trace's addresses, one a line. A line that is `trace` starts
+// the file's next trace; a file without one is one trace. Returns the addresses read, and in *outside those no function
+// holds.
 static uint64_t profile_start_hits(ProfileFunction* functions, uint64_t count, String8 samples, uint32_t sample, uint64_t* outside)
 {
     uint64_t addresses = 0;
     uint64_t position = 0;
+    uint32_t trace = 0;
     while (position < samples.length)
     {
         const String8 line = profile_line(samples, &position);
+        trace += profile_equal(profile_trim(line), profile_string(BUSTER_PROFILE_START_TRACE));
         uint64_t at = 0;
         while (at < line.length)
         {
@@ -1698,12 +1745,12 @@ static uint64_t profile_start_hits(ProfileFunction* functions, uint64_t count, S
             uint64_t address = 0;
             if (field.length != 0 && profile_hex(field, &i, &address))
             {
-                profile_start_hit(functions, count, address, sample, &addresses, outside);
+                profile_start_hit(functions, count, address, sample, trace, &addresses, outside);
                 // A record's branch target, after the '/' that ends its source.
                 i += i < field.length && field.pointer[i] == '/';
                 if (i < field.length && field.pointer[i - 1] == '/' && profile_hex(field, &i, &address))
                 {
-                    profile_start_hit(functions, count, address, sample, &addresses, outside);
+                    profile_start_hit(functions, count, address, sample, trace, &addresses, outside);
                 }
             }
         }
@@ -1711,20 +1758,23 @@ static uint64_t profile_start_hits(ProfileFunction* functions, uint64_t count, S
     return addresses;
 }
 
-// start-order: the functions that `samples` ran (perf script -F ip,brstack of user instructions, one text per command
-// profiled, the smallest command first), by their copies in `symbols` (readelf -sW of the same executable), one a line:
-// `UNIT NAME` for a local function of one of main.c's units, which the link script places by its unit's object and its
-// section (-ffunction-sections' .text.NAME), so that one unit's copy of a static helper moves and the others' don't;
-// and `- NAME` for any other, a global function (whose name is the link's alone) or the C library's, which the symbol
-// ordering file places by name. One whose name a unit's local function has too, which the name would move as well, is
-// left out. They go by the first file that ran each, each file's in address order: the smallest command's functions
+// start-order: the functions that `samples` ran (start-trace's addresses, or perf script -F ip,brstack of user
+// instructions; one text per command profiled, the smallest command first), by their copies in `symbols` (readelf -sW
+// of the same executable), one a line: `UNIT NAME` for a local function of one of main.c's units, which the link script
+// places by its unit's object and its section (-ffunction-sections' .text.NAME), so that one unit's copy of a static
+// helper moves and the others' don't; and `- NAME` for any other, a global function (whose name is the link's alone) or
+// the C library's, which the symbol ordering file places by name. One whose name a unit's local function has too, which
+// the name would move as well, is left out. They go by the first file that ran each: the smallest command's functions
 // are together, in the fewest of the 64 KB windows the kernel's fault-around maps, and each larger command's add to
-// them (#1444, build.md's "The start's code order").
+// them (#1444, build.md's "The start's code order"). A file's functions go in address order; those of a file of
+// several traces (musl's units, a process each) by how many of its traces ran each, most first, so that what every
+// unit runs is together and what few run comes last (#2873).
 static bool profile_start_order(Arena* arena, ProfileReport* report, String8 symbols, const String8* samples, uint32_t sample_count)
 {
     uint64_t count = 0;
     ProfileFunction* functions = profile_functions_read(arena, symbols, &count);
-    const bool valid = functions != 0 && count != 0;
+    ProfileStartPlace* places = functions != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, ProfileStartPlace, count) : 0;
+    const bool valid = places != 0 && count != 0;
     uint64_t addresses = 0;
     uint64_t outside = 0;
     for (uint32_t s = 0; valid && s < sample_count; s += 1)
@@ -1763,25 +1813,370 @@ static bool profile_start_order(Arena* arena, ProfileReport* report, String8 sym
             profile_print(report, ", %llu left out that share a unit's function's name", (unsigned long long)shared);
         }
         profile_print(report, "\n");
-        for (uint32_t s = 0; s < sample_count; s += 1)
+        uint64_t placed = 0;
+        for (uint64_t f = 0; f < count; f += 1)
         {
-            for (uint64_t f = 0; f < count; f += 1)
-            {
-                const ProfileFunction* function = &functions[f];
-                if (function->hit && function->first == s)
-                {
-                    const String8 unit = function->unit.length != 0 ? function->unit : profile_string("-");
-                    profile_print(report, "%.*s %.*s\n", (int)unit.length, unit.pointer, (int)function->name.length, function->name.pointer);
-                }
-            }
+            places[placed] = (ProfileStartPlace){
+                .first = functions[f].first,
+                .traces = functions[f].traces,
+                .function = f,
+            };
+            placed += functions[f].hit;
+        }
+        qsort(places, placed, sizeof(ProfileStartPlace), profile_start_place_compare);
+        for (uint64_t p = 0; p < placed; p += 1)
+        {
+            const ProfileFunction* function = &functions[places[p].function];
+            const String8 unit = function->unit.length != 0 ? function->unit : profile_string("-");
+            profile_print(report, "%.*s %.*s\n", (int)unit.length, unit.pointer, (int)function->name.length, function->name.pointer);
         }
     }
     else
     {
-        profile_print(report, "start-order: %s\n", functions == 0 ? "out of memory" : "no functions in the symbols");
+        profile_print(report, "start-order: %s\n", places == 0 ? "out of memory" : "no functions in the symbols");
     }
     return valid && !report->full;
 }
+// ---------------------------------------------------------------------------------------------------------------------
+// start-trace
+
+// A breakpoint: a function's entry, as its address in the file; the byte the breakpoint replaced in the traced
+// process; whether it was set there; and whether a task has reached it.
+typedef struct ProfileBreakpoint ProfileBreakpoint;
+struct ProfileBreakpoint
+{
+    uint64_t address;
+    uint8_t original;
+    bool set;
+    bool reached;
+};
+
+// The tasks a trace follows at once: the command's threads and the processes it starts.
+#define BUSTER_PROFILE_TRACE_TASKS 4096
+// x86's breakpoint, int3, one byte.
+#define BUSTER_PROFILE_TRACE_BREAKPOINT 0xcc
+// The page the breakpoints are written by.
+#define BUSTER_PROFILE_TRACE_PAGE 4096
+
+static int profile_breakpoint_compare(const void* a, const void* b)
+{
+    const ProfileBreakpoint* x = a;
+    const ProfileBreakpoint* y = b;
+    return (x->address > y->address) - (x->address < y->address);
+}
+
+// The entries of the functions of `image`, an ELF64 executable's bytes: its symbol table's FUNC symbols that have a size
+// and are defined in a section of instructions, as breakpoints sorted by address, one an address (an alias has its
+// function's). *entry is the file's entry point, and *relocatable whether the kernel chooses where it is loaded
+// (ET_DYN). Null, with a count of 0, if the image isn't such a file, has no symbol table, or the arena is full.
+static ProfileBreakpoint* profile_trace_breakpoints(Arena* arena, String8 image, uint64_t* count, uint64_t* entry, bool* relocatable)
+{
+    Elf64_Ehdr header = { 0 };
+    bool valid = image.length >= sizeof(header);
+    if (valid)
+    {
+        memcpy(&header, image.pointer, sizeof(header));
+    }
+    valid = valid && memcmp(header.e_ident, ELFMAG, SELFMAG) == 0 && header.e_ident[EI_CLASS] == ELFCLASS64 && header.e_ident[EI_DATA] == ELFDATA2LSB &&
+            (header.e_type == ET_EXEC || header.e_type == ET_DYN) && header.e_shentsize == sizeof(Elf64_Shdr) && header.e_shoff <= image.length &&
+            (uint64_t)header.e_shnum * sizeof(Elf64_Shdr) <= image.length - header.e_shoff;
+    Elf64_Shdr table = { 0 };
+    bool found = false;
+    for (uint32_t i = 0; valid && !found && i < header.e_shnum; i += 1)
+    {
+        memcpy(&table, image.pointer + header.e_shoff + (uint64_t)i * sizeof(table), sizeof(table));
+        found = table.sh_type == SHT_SYMTAB && table.sh_entsize == sizeof(Elf64_Sym) && table.sh_offset <= image.length && table.sh_size <= image.length - table.sh_offset;
+    }
+    const uint64_t symbols = found ? table.sh_size / sizeof(Elf64_Sym) : 0;
+    ProfileBreakpoint* breakpoints = symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, ProfileBreakpoint, symbols) : 0;
+    uint64_t functions = 0;
+    for (uint64_t i = 0; breakpoints != 0 && i < symbols; i += 1)
+    {
+        Elf64_Sym symbol;
+        memcpy(&symbol, image.pointer + table.sh_offset + i * sizeof(symbol), sizeof(symbol));
+        Elf64_Shdr section = { 0 };
+        if (symbol.st_shndx != SHN_UNDEF && symbol.st_shndx < header.e_shnum)
+        {
+            memcpy(&section, image.pointer + header.e_shoff + (uint64_t)symbol.st_shndx * sizeof(section), sizeof(section));
+        }
+        // A breakpoint is written over the entry's byte, so only where the file says instructions are.
+        const bool function = ELF64_ST_TYPE(symbol.st_info) == STT_FUNC && symbol.st_size != 0 && (section.sh_flags & SHF_EXECINSTR) != 0;
+        breakpoints[functions] = (ProfileBreakpoint){ .address = symbol.st_value };
+        functions += function;
+    }
+    uint64_t unique = 0;
+    if (breakpoints != 0)
+    {
+        qsort(breakpoints, functions, sizeof(ProfileBreakpoint), profile_breakpoint_compare);
+        for (uint64_t i = 0; i < functions; i += 1)
+        {
+            const bool repeated = unique != 0 && breakpoints[unique - 1].address == breakpoints[i].address;
+            breakpoints[unique] = breakpoints[i];
+            unique += !repeated;
+        }
+    }
+    *count = unique;
+    *entry = header.e_entry;
+    *relocatable = header.e_type == ET_DYN;
+    return unique != 0 ? breakpoints : 0;
+}
+
+// The breakpoint at `address`, or count.
+static uint64_t profile_trace_find(const ProfileBreakpoint* breakpoints, uint64_t count, uint64_t address)
+{
+    uint64_t low = 0;
+    uint64_t high = count;
+    while (low < high)
+    {
+        const uint64_t middle = low + (high - low) / 2;
+        if (breakpoints[middle].address < address)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low < count && breakpoints[low].address == address ? low : count;
+}
+
+// How far from the file's addresses the stopped process `pid` has its image: for a relocatable one, the entry point its
+// auxiliary vector gives less the file's `entry`; 0 for a fixed one. False if the vector can't be read or has none.
+static bool profile_trace_bias(pid_t pid, uint64_t entry, bool relocatable, uint64_t* bias)
+{
+    bool result = !relocatable;
+    *bias = 0;
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/auxv", (int)pid);
+    const int file = relocatable ? open(path, O_RDONLY | O_CLOEXEC) : -1;
+    Elf64_auxv_t item;
+    while (file != -1 && !result && read(file, &item, sizeof(item)) == (ssize_t)sizeof(item) && item.a_type != AT_NULL)
+    {
+        if (item.a_type == AT_ENTRY)
+        {
+            *bias = item.a_un.a_val - entry;
+            result = true;
+        }
+    }
+    if (file != -1)
+    {
+        close(file);
+    }
+    return result;
+}
+
+// Sets the breakpoints in the stopped process whose memory `memory` is (/proc/PID/mem), a page at a time: each entry's
+// byte kept, then replaced. A page that can't be read or written keeps its bytes, and its breakpoints stay unset.
+// Returns how many are set.
+static uint64_t profile_trace_set(int memory, ProfileBreakpoint* breakpoints, uint64_t count, uint64_t bias)
+{
+    uint64_t result = 0;
+    uint64_t first = 0;
+    while (first < count)
+    {
+        const uint64_t page = (breakpoints[first].address + bias) & ~(uint64_t)(BUSTER_PROFILE_TRACE_PAGE - 1);
+        uint64_t end = first;
+        while (end < count && ((breakpoints[end].address + bias) & ~(uint64_t)(BUSTER_PROFILE_TRACE_PAGE - 1)) == page)
+        {
+            end += 1;
+        }
+        uint8_t bytes[BUSTER_PROFILE_TRACE_PAGE];
+        const bool read_page = pread(memory, bytes, sizeof(bytes), (off_t)page) == (ssize_t)sizeof(bytes);
+        for (uint64_t i = first; read_page && i < end; i += 1)
+        {
+            const uint64_t offset = breakpoints[i].address + bias - page;
+            breakpoints[i].original = bytes[offset];
+            bytes[offset] = BUSTER_PROFILE_TRACE_BREAKPOINT;
+        }
+        const bool written = read_page && pwrite(memory, bytes, sizeof(bytes), (off_t)page) == (ssize_t)sizeof(bytes);
+        for (uint64_t i = first; i < end; i += 1)
+        {
+            breakpoints[i].set = written;
+        }
+        result += written ? end - first : 0;
+        first = end;
+    }
+    return result;
+}
+
+// A task stopped by SIGTRAP: whether it is just past one of the breakpoints. If so, its instruction is put back in the
+// task's own memory and the task set to run it: a thread's memory is the command's, where another thread may have put
+// it back already, and a forked process's is a copy, with every breakpoint the command had at the fork. The first task
+// to reach a breakpoint adds its address to the report.
+static bool profile_trace_reached(pid_t task, ProfileBreakpoint* breakpoints, uint64_t count, uint64_t bias, ProfileReport* report)
+{
+    struct user_regs_struct registers;
+    const bool stopped = ptrace(PTRACE_GETREGS, task, 0, &registers) == 0;
+    const uint64_t address = stopped ? registers.rip - 1 - bias : 0;
+    const uint64_t index = stopped ? profile_trace_find(breakpoints, count, address) : count;
+    const bool result = index != count && breakpoints[index].set;
+    if (result)
+    {
+        errno = 0;
+        const long word = ptrace(PTRACE_PEEKTEXT, task, (void*)(uintptr_t)(address + bias), 0);
+        if (errno == 0 && (word & 0xff) == BUSTER_PROFILE_TRACE_BREAKPOINT)
+        {
+            ptrace(PTRACE_POKETEXT, task, (void*)(uintptr_t)(address + bias), (void*)((word & ~0xffl) | (long)breakpoints[index].original));
+        }
+        if (!breakpoints[index].reached)
+        {
+            breakpoints[index].reached = true;
+            profile_print(report, "0x%llx\n", (unsigned long long)address);
+        }
+        registers.rip = address + bias;
+        ptrace(PTRACE_SETREGS, task, 0, &registers);
+    }
+    return result;
+}
+
+// Follows the traced `command` and every task it starts until all have gone: a task at a breakpoint goes on without it
+// (profile_trace_reached), a new task's first stop and the stops that report a clone, a fork or an exec are passed over,
+// and any other signal is given to its task. Returns the command's status, its exit code or 128 and the signal that
+// ended it; -1 if more tasks ran at once than it follows.
+static int profile_trace_follow(pid_t command, ProfileBreakpoint* breakpoints, uint64_t count, uint64_t bias, ProfileReport* report)
+{
+    pid_t tasks[BUSTER_PROFILE_TRACE_TASKS];
+    uint32_t task_count = 1;
+    tasks[0] = command;
+    int result = 1;
+    bool followed = true;
+    while (task_count != 0 && followed)
+    {
+        int status = 0;
+        const pid_t task = waitpid(-1, &status, __WALL);
+        followed = task > 0 || errno == EINTR;
+        uint32_t slot = 0;
+        while (slot < task_count && tasks[slot] != task)
+        {
+            slot += 1;
+        }
+        const bool known = slot < task_count;
+        if (task > 0 && (WIFEXITED(status) || WIFSIGNALED(status)))
+        {
+            if (task == command)
+            {
+                result = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+            }
+            if (known)
+            {
+                tasks[slot] = tasks[task_count - 1];
+                task_count -= 1;
+            }
+        }
+        else if (task > 0 && WIFSTOPPED(status))
+        {
+            const int stop_signal = WSTOPSIG(status);
+            const bool event = (status >> 16) != 0;
+            int delivered = stop_signal;
+            if (!known && task_count < BUSTER_PROFILE_TRACE_TASKS)
+            {
+                // A task the command started, traced from its start, at the stop it starts with.
+                tasks[task_count] = task;
+                task_count += 1;
+                delivered = 0;
+            }
+            else if (!known)
+            {
+                followed = false;
+                result = -1;
+            }
+            else if (stop_signal == SIGTRAP && (event || profile_trace_reached(task, breakpoints, count, bias, report)))
+            {
+                delivered = 0;
+            }
+            ptrace(PTRACE_CONT, task, 0, (void*)(intptr_t)delivered);
+        }
+    }
+    return result;
+}
+
+// start-trace: runs `command` (its first word the executable's path) with a breakpoint at the entry of every function
+// of its executable, each removed as a task reaches it, and writes `trace` and then the address in the file of each
+// function the command ran, one a line, in the order they first ran: what a command runs, exactly, where perf's samples
+// miss a function that runs briefly, for start-order (#2873). Each function stops the command once, so a compile of
+// sqlite3.c, which runs 1,161 of the compiler's 13,573, takes 0.16 s traced on the 9700X. The command's threads and
+// the processes it starts are followed (profile_trace_follow); a process it replaces by another program (exec) runs on
+// untraced. *status is the command's exit status. False, with the reason in the report, if the executable has no symbol
+// table or the command can't be started and traced.
+static bool profile_start_trace(Arena* arena, ProfileReport* report, char** command, int* status)
+{
+    const int file = open(command[0], O_RDONLY | O_CLOEXEC);
+    struct stat stats;
+    const bool regular = file != -1 && fstat(file, &stats) == 0 && S_ISREG(stats.st_mode) && stats.st_size > 0;
+    // Mapped, not read: an executable with debug information is mostly bytes the symbols' reader never touches.
+    void* mapping = regular ? mmap(0, (size_t)stats.st_size, PROT_READ, MAP_PRIVATE, file, 0) : MAP_FAILED;
+    if (file != -1)
+    {
+        close(file);
+    }
+    uint64_t count = 0;
+    uint64_t entry = 0;
+    bool relocatable = false;
+    ProfileBreakpoint* breakpoints = 0;
+    if (mapping != MAP_FAILED)
+    {
+        breakpoints = profile_trace_breakpoints(arena, (String8){ .pointer = mapping, .length = (uint64_t)stats.st_size }, &count, &entry, &relocatable);
+        munmap(mapping, (size_t)stats.st_size);
+    }
+    bool result = false;
+    *status = 1;
+    if (breakpoints == 0)
+    {
+        profile_print(report, "start-trace: %s isn't an ELF64 executable with a symbol table of functions\n", command[0]);
+    }
+    else
+    {
+        fflush(0);
+        const pid_t child = fork();
+        if (child == 0)
+        {
+            // The exec stops the new image before its first instruction, for the breakpoints.
+            if (ptrace(PTRACE_TRACEME, 0, 0, 0) == 0)
+            {
+                execv(command[0], command);
+            }
+            _exit(127);
+        }
+        int wait_status = 0;
+        bool traced = child > 0 && waitpid(child, &wait_status, 0) == child && WIFSTOPPED(wait_status);
+        traced = traced && ptrace(PTRACE_SETOPTIONS, child, 0, (void*)(intptr_t)(PTRACE_O_TRACECLONE | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACEEXEC | PTRACE_O_EXITKILL)) == 0;
+        uint64_t bias = 0;
+        traced = traced && profile_trace_bias(child, entry, relocatable, &bias);
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%d/mem", (int)child);
+        const int memory = traced ? open(path, O_RDWR | O_CLOEXEC) : -1;
+        const uint64_t set = memory != -1 ? profile_trace_set(memory, breakpoints, count, bias) : 0;
+        if (memory != -1)
+        {
+            close(memory);
+        }
+        if (set != 0)
+        {
+            profile_print(report, BUSTER_PROFILE_START_TRACE "\n");
+            ptrace(PTRACE_CONT, child, 0, 0);
+            *status = profile_trace_follow(child, breakpoints, count, bias, report);
+            result = *status >= 0;
+            if (!result)
+            {
+                arena_pop_to(&report->arena, 0);
+                profile_print(report, "start-trace: %s ran more than %u tasks at once\n", command[0], BUSTER_PROFILE_TRACE_TASKS);
+            }
+        }
+        else
+        {
+            // A child that never stopped has gone; one that stopped is ended here.
+            if (child > 0 && WIFSTOPPED(wait_status))
+            {
+                kill(child, SIGKILL);
+                waitpid(child, &wait_status, 0);
+            }
+            profile_print(report, "start-trace: can't run and trace %s\n", command[0]);
+        }
+    }
+    return result && !report->full;
+}
+
 // The tree that run `position` of a round runs (#1311): round r takes row r of a Williams design, a Latin square
 // whose rows each run every tree once, and over its period every tree runs at every place and directly after every
 // other tree equally often. A rotation ran the trees in one cyclic order from different starts, so each tree followed
@@ -2975,7 +3370,53 @@ static int run_profile_text_command(Arena* arena, ProfileReport* report, int arg
     return succeeded ? 0 : 1;
 }
 
-// argv[0] is the command's name: ab, hot-loops, label-spills, spill-report, start-order or branch-misses.
+// start-trace OUTPUT COMMAND...: the trace appended to OUTPUT, so that a file holds a trace a command (start-order ranks
+// the functions of such a file by how many of its traces ran each). The exit status is the command's, or 1 if it
+// couldn't be traced or the trace couldn't be written.
+static int run_start_trace_command(Arena* arena, ProfileReport* report, int argc, char** argv)
+{
+    int result = 1;
+    if (argc < 3)
+    {
+        fprintf(stderr, "usage: start-trace OUTPUT COMMAND...\n");
+    }
+    else
+    {
+        int status = 1;
+        const bool traced = profile_start_trace(arena, report, argv + 2, &status);
+        const String8 text = profile_report_text(report);
+        const int file = traced ? open(argv[1], O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644) : -1;
+        uint64_t written = 0;
+        bool writing = file != -1;
+        while (writing && written < text.length)
+        {
+            const ssize_t count = write(file, text.pointer + written, text.length - written);
+            writing = count > 0;
+            written += writing ? (uint64_t)count : 0;
+        }
+        const bool closed = file != -1 && close(file) == 0;
+        if (!traced)
+        {
+            fwrite(text.pointer, 1, text.length, stderr);
+            if (report->full)
+            {
+                fprintf(stderr, "start-trace: out of memory for the trace\n");
+            }
+        }
+        else if (written != text.length || !closed)
+        {
+            fprintf(stderr, "start-trace: can't write %s\n", argv[1]);
+        }
+        else
+        {
+            result = status;
+        }
+    }
+    return result;
+}
+
+// argv[0] is the command's name: ab, time-runs, start-trace, hot-loops, label-spills, spill-report, start-order or
+// branch-misses.
 static int run_profile_command(int argc, char** argv)
 {
     int result = 1;
@@ -2988,6 +3429,10 @@ static int run_profile_command(int argc, char** argv)
     else if (strcmp(argv[0], "time-runs") == 0)
     {
         result = run_time_runs_command(&arena, argc, argv);
+    }
+    else if (strcmp(argv[0], "start-trace") == 0)
+    {
+        result = run_start_trace_command(&arena, &report, argc, argv);
     }
     else
     {

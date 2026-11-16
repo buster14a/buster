@@ -1,9 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 #
-# The start's code order (#1444, docs/commands/build.md): the functions that small compiles run, from LIST
+# The start's code order (#1444, #2873, docs/commands/build.md): the functions that compiles run, from LIST
 # (cmake/BusterStartOrder.txt, which `compiler start-order` writes), placed together before .text, where the kernel's
-# fault-around maps them in fewer 64 KB windows than where their units' objects have them.
+# fault-around maps them in fewer 64 KB windows than where their units' objects have them. They start on a 2 MB
+# boundary (ALIGN), in memory as in the file (CMakeLists.txt's -z max-page-size), so that the kernel can map them by
+# huge pages from their first byte: three of them hold what every compile measured runs. The first 128 KB there, two
+# windows of the kernel's fault-around (lane.c's BUSTER_LANE_EXIT_WINDOW_BYTES), hold no code (buster_start_probe): no
+# fault of a process's own maps them, so a page of them is mapped only where a huge page maps the range, which a
+# process reads of the first as it exits and, where that read faulted, asks the kernel of the second (lane.c's
+# lane_exit_probe); buster_start_end, the checker's section's end, is how far its exit helper then asks for huge pages
+# whatever the process ran.
 #
 #   buster_start_order_files(LIST SCRIPT SYMBOLS SHIFT_SOURCE)
 #
@@ -68,9 +75,9 @@ function(buster_start_order_files list script symbols shift_source)
     endif()
     string(CONCAT text
         "/* The start's code order (cmake/BusterStartOrder.cmake), from ${list}. */\n"
-        "SECTIONS\n{\n    .text.buster_start :\n    {\n${sections}    }\n"
-        "    ASSERT(SIZEOF(.text.buster_start) > 0, \"the start's code order placed no function: the units' objects or sections aren't the link's\")\n"
-        "    .text.buster_checker :\n    {\n        *(.text.buster_checker)\n    }\n"
+        "SECTIONS\n{\n    .text.buster_start : ALIGN(0x200000)\n    {\n        buster_start_probe = .;\n        . += 0x20000;\n${sections}    }\n"
+        "    ASSERT(SIZEOF(.text.buster_start) > 0x20000, \"the start's code order placed no function: the units' objects or sections aren't the link's\")\n"
+        "    .text.buster_checker :\n    {\n        *(.text.buster_checker)\n        buster_start_end = .;\n    }\n"
         "}\nINSERT BEFORE .text;\n")
     buster_start_order_write("${script}" "${text}")
     # A shifted link's padding before .text's code: the first section lld places there (absent elsewhere, which

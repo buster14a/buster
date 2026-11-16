@@ -81,8 +81,10 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/auxv.h>
 #include <sys/syscall.h>
 #include <sys/utsname.h>
+#include <elf.h>
 #include <linux/futex.h>
 
 // CPU architecture dependent includes: x86intrin.h has AMD's monitorx and mwaitx besides immintrin.h (lane_wait uses
@@ -262,6 +264,18 @@ extern bool arena_pages_busy;
 bool arena_pages_busy;
 #else
 static bool arena_pages_busy;
+#endif
+// Whether the exit helper may ask the kernel for huge pages of the executable's own pages (#2873, lane_exit_probe):
+// transparent huge pages are on for the whole process (not PR_SET_THP_DISABLE: a virtual machine, BUSTER_HUGE_PAGES=0,
+// or the process that started this one), and the kernel says how a process mapped a range in one call (PAGEMAP_SCAN,
+// Linux 6.7, which collapses a file's pages when asked too). arena_page_policy sets it once, before the process starts
+// any thread; main.c's units share it.
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+extern bool arena_executable_huge_pages;
+#elif defined(BUSTER_UNIT)
+bool arena_executable_huge_pages;
+#else
+static bool arena_executable_huge_pages;
 #endif
 // Whether a mapping made with MAP_STACK is VM_NOHUGEPAGE from the start, as Linux's are since 6.7 (#1444): then a
 // reservation that its layout doesn't keep in base pages (arena_reserve_policy's base pages of 2 MB or more, a busy
@@ -1097,7 +1111,9 @@ static bool arena_kernel_maps_stack_base_pages(const char* release)
 static void arena_page_policy(const char* setting)
 {
     struct utsname kernel;
-    arena_stack_base_pages = uname(&kernel) == 0 && arena_kernel_maps_stack_base_pages(kernel.release);
+    // Linux 6.7 or later: MAP_STACK's base pages, and PAGEMAP_SCAN, which the exit helper's look at the executable needs.
+    const bool recent = uname(&kernel) == 0 && arena_kernel_maps_stack_base_pages(kernel.release);
+    arena_stack_base_pages = recent;
     uint32_t eax = 0;
     uint32_t ebx = 0;
     uint32_t ecx = 0;
@@ -1105,7 +1121,10 @@ static void arena_page_policy(const char* setting)
     const bool virtual_machine = __get_cpuid(1, &eax, &ebx, &ecx, &edx) != 0 && (ecx & (1u << 31)) != 0;
     const bool off = setting != 0 && strcmp(setting, "0") == 0;
     const bool on = setting != 0 && strcmp(setting, "1") == 0;
-    arena_pages_busy = !off && !on && !virtual_machine && prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) == 0 && arena_host_busy();
+    // Asked only where neither the setting nor the machine decides: off as the process was started.
+    const bool inherited = !off && !on && !virtual_machine && prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) != 0;
+    arena_pages_busy = !off && !on && !virtual_machine && !inherited && arena_host_busy();
+    arena_executable_huge_pages = recent && !off && !(virtual_machine && !on) && !inherited;
     if (off || (virtual_machine && !on))
     {
         prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
@@ -2473,7 +2492,10 @@ static __attribute__((unused)) LaneSession* lane_session_current(void);
 // process that shares the address space and holds nothing else, which ends as soon as the caller has, so that the
 // caller's exit leaves the address space's teardown to it rather than run it before its parent's wait returns. By
 // default only where orphans are reaped (lane_exit_reaped); BUSTER_EXIT_HELPER=1 starts it wherever it can, =0 never.
-// Never in a sanitizer build. What the caller writes after it reaches no descriptor it had.
+// Never in a sanitizer build. What the caller writes after it reaches no descriptor it had. Where the caller finds that
+// no huge page maps the executable's code (#2873, lane_exit_probe), the helper, before it ends, looks at how the process
+// mapped the executable's own pages and asks the kernel for huge pages of the ranges it used, unless huge pages are off
+// for the process or BUSTER_EXECUTABLE_HUGE_PAGES is 0.
 static __attribute__((unused)) void lane_exit_helper_start(void);
 // Whether this process's PID namespace reaps orphans, by its PID 1, which takes them where no subreaper does first:
 // whether it blocks, ignores or catches SIGCHLD (/proc/1/stat), as an init that waits does (systemd's signalfd, tini's
@@ -3423,16 +3445,398 @@ static __attribute__((unused)) long lane_exit_syscall(long number, long first, l
     return result;
 }
 
+// The executable's own pages in huge pages (#2873)
+//
+// A process maps its executable's code and read-only data from the page cache as it first runs or reads them, 16 pages
+// of 4 KB a fault (the kernel's fault-around), and its exit unmaps each page again. On the 9700X that was 0.67 M of the
+// 3.86 M kernel cycles of a unit of musl's compiled by a process of its own, and 3.4% of its user cycles for the
+// instruction TLB's misses. Where the page cache holds a 2 MB range of the file as one huge page, and the link placed
+// the segment so that the range starts on a 2 MB boundary in memory as in the file (CMakeLists.txt's -z max-page-size,
+// cmake/BusterStartOrder.cmake), one fault maps all of it and the exit unmaps it at once.
+//
+// The kernel makes such a page of a file's own accord only for a process that lives long enough for khugepaged to reach
+// it, which a compile doesn't, or when asked (MADV_COLLAPSE, Linux 6.1, of a kernel with CONFIG_READ_ONLY_THP_FOR_FS).
+// So the exit helper asks, after its command has gone, which no compile waits for. The huge pages stay in the page
+// cache, for every later process of the executable, until the kernel reclaims them or the file is written: an
+// executable's first run asks, and the later ones find them.
+//
+// - The probe, the caller's as it exits (lane_exit_probe): the start order's link script leaves the first 128 KB of the
+//   code it places empty (buster_start_probe), two windows of the kernel's fault-around that no fault of the process's
+//   own maps. So a page of them is mapped only where a huge page maps the whole 2 MB range. The caller reads a byte of
+//   the first window between two readings of the time-stamp counter (lane_exit_touch): a read that returns in fewer
+//   ticks than a page fault can (BUSTER_LANE_EXIT_FAULT_TICKS) found its page mapped, and that read is all that a
+//   process of an executable in huge pages adds: no system call, and the helper it would have had without this. A
+//   slower read was a fault, which mapped that window, or was interrupted; then the kernel says whether a page of the
+//   second window, which nothing reads, is mapped (lane_exit_mapped: move_pages, as a query).
+// - The look, the helper's once the caller has gone (lane_exit_look): where the probe's page isn't mapped (a new
+//   executable, or one the kernel reclaimed), the helper first asks the kernel to collapse the code the start order
+//   places past the probe's range (to buster_start_end), whatever this process ran of it: the next command may be a
+//   larger one, and a kernel that makes no huge page of a file's pages refuses here, at one call's cost. Then it reads
+//   how the process mapped each read-only segment of the executable (PAGEMAP_SCAN of /proc/self/pagemap, Linux 6.7)
+//   and asks for each whole 2 MB range with BUSTER_LANE_EXIT_HOT_PAGES or more mapped by 4 KB pages. A range the
+//   process touched little stays as it is: a huge page would hold 2 MB of the file in memory for a few pages' use. The
+//   probe's range is asked for last, so that its huge page says the others were made.
+// - Now and then: one process in 64 (lane_exit_sampled) looks whatever its probe says, by the pages it mapped alone,
+//   for the ranges another kind of command uses and those the kernel reclaimed apart from the probe's. An executable
+//   another linker placed has no probe (its segments are as far from their bytes in the file, but its code starts
+//   wherever .text does): those processes of it look, and no other.
+//
+// A refusal ends the helper's asking, so that a kernel that can't make a huge page now isn't asked for each range in
+// turn; the next process's probe has it asked again. But a segment other than the code's that the kernel refuses
+// outright (EINVAL: one it makes no huge page of) is passed over, and the code's ranges, the probe's last, are still
+// asked for: otherwise every process would look. A process with transparent huge pages off or on a kernel before 6.7
+// (arena_executable_huge_pages) neither probes nor looks, nor does one started with BUSTER_EXECUTABLE_HUGE_PAGES=0.
+
+// MADV_COLLAPSE and PAGEMAP_SCAN, which the C library's headers may not name: the ioctl of /proc/PID/pagemap, its
+// argument (struct pm_scan_arg) and its answer's regions (struct page_region), and the categories asked of it: a page
+// that is mapped, and one mapped by a huge page.
+#define BUSTER_LANE_EXIT_MADV_COLLAPSE 25
+#define BUSTER_LANE_EXIT_PAGEMAP_SCAN UINT64_C(0xc0606610)
+#define BUSTER_LANE_EXIT_PAGE_PRESENT (UINT64_C(1) << 3)
+#define BUSTER_LANE_EXIT_PAGE_HUGE (UINT64_C(1) << 6)
+typedef struct LaneExitScan LaneExitScan;
+struct LaneExitScan
+{
+    uint64_t size;
+    uint64_t flags;
+    uint64_t start;
+    uint64_t end;
+    uint64_t walk_end;
+    uint64_t vector;
+    uint64_t vector_length;
+    uint64_t max_pages;
+    uint64_t category_inverted;
+    uint64_t category_mask;
+    uint64_t category_anyof_mask;
+    uint64_t return_mask;
+};
+typedef struct LaneExitRegion LaneExitRegion;
+struct LaneExitRegion
+{
+    uint64_t start;
+    uint64_t end;
+    uint64_t categories;
+};
+_Static_assert(sizeof(LaneExitScan) == 96 && sizeof(LaneExitRegion) == 24, "PAGEMAP_SCAN's argument and region are the kernel's");
+
+// The whole 2 MB ranges of a read-only segment of the executable, from `begin` to `end`.
+typedef struct LaneExitSegment LaneExitSegment;
+struct LaneExitSegment
+{
+    uint64_t begin;
+    uint64_t end;
+};
+// The segments the helper looks at (an executable has two, its read-only data and its code), the ranges of each it
+// counts (128 MB, a bit a range in a word), the regions a scan answers at once (they and the ranges' counts are on the
+// helper's stack, a page), the pages of 4 KB mapped in a range from which it is worth a huge page (four of the kernel's
+// fault-around windows, three faults saved a process), and how many processes go by for one that looks whatever its
+// probe says, as a power of two.
+#define BUSTER_LANE_EXIT_SEGMENTS 4
+#define BUSTER_LANE_EXIT_RANGES 64
+#define BUSTER_LANE_EXIT_REGIONS 64
+#define BUSTER_LANE_EXIT_HOT_PAGES 64
+#define BUSTER_LANE_EXIT_SAMPLE_BITS 6
+// A window of the kernel's fault-around (fault_around_bytes, 64 KB), the most a fault on a file's page maps: the size of
+// each of the probe's two, which cmake/BusterStartOrder.cmake leaves empty.
+#define BUSTER_LANE_EXIT_WINDOW_BYTES UINT64_C(0x10000)
+// Ticks of the time-stamp counter that no page fault returns in. A fault on a file's page takes the kernel's entry, its
+// mapping of the page and its return: about 3,000 ticks on the 9700X for one page (test-lanes says). The counter ticks
+// at a processor's base rate, no less than a quarter of its fastest cycles'. A read of a mapped page takes the two
+// readings' own time, 1 tick on the 9700X: the second reading doesn't wait for the read.
+#define BUSTER_LANE_EXIT_FAULT_TICKS 128
+// The signal that tells a helper with segments to look at that its caller has gone: blocked, and waited for.
+#define BUSTER_LANE_EXIT_GONE SIGUSR1
+
+// The start order's link script's marks (cmake/BusterStartOrder.cmake), absent from any other link: the first byte of
+// the code it places, 128 KB of padding no code is in (two of BUSTER_LANE_EXIT_WINDOW_BYTES), and the end of that code.
+extern const char buster_start_probe[] __attribute__((weak));
+extern const char buster_start_end[] __attribute__((weak));
+
+// The executable for the helper, which the caller writes before it starts it (lane_exit_probe): its segments, 0 of them
+// for a helper that only tears the address space down; and, where the probe's page wasn't mapped, the probe's first
+// byte and the end of the code placed after it, which the helper then asks for whole (0 otherwise).
+typedef struct LaneExitExecutable LaneExitExecutable;
+struct LaneExitExecutable
+{
+    LaneExitSegment segments[BUSTER_LANE_EXIT_SEGMENTS];
+    uint32_t count;
+    uint64_t probe;
+    uint64_t placed_end;
+};
+static LaneExitExecutable lane_exit_executable;
+
+// The segments of the program headers `headers`, loaded `bias` bytes from their addresses, that the kernel can map by
+// huge pages: each that is loaded read-only (code, read-only data) as far from its place in the file as a multiple of
+// 2 MB, by its whole 2 MB ranges, where it has any. Returns how many, at most BUSTER_LANE_EXIT_SEGMENTS.
+static __attribute__((unused)) uint32_t lane_exit_segments(const Elf64_Phdr* headers, uint64_t count, uint64_t bias, LaneExitSegment* segments)
+{
+    uint32_t result = 0;
+    for (uint64_t i = 0; i < count && result < BUSTER_LANE_EXIT_SEGMENTS; i += 1)
+    {
+        const Elf64_Phdr* header = &headers[i];
+        const bool aligned = ((bias + header->p_vaddr - header->p_offset) & (BUSTER_ARENA_HUGE_PAGE_BYTES - 1)) == 0;
+        const uint64_t first = bias + header->p_vaddr;
+        const uint64_t last = (first + header->p_filesz + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uint64_t)(BUSTER_ARENA_PAGE_BYTES - 1);
+        const uint64_t begin = (first + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uint64_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+        const uint64_t end = last & ~(uint64_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+        if (header->p_type == PT_LOAD && (header->p_flags & PF_W) == 0 && aligned && begin < end)
+        {
+            segments[result] = (LaneExitSegment){
+                .begin = begin,
+                .end = end,
+            };
+            result += 1;
+        }
+    }
+    return result;
+}
+
+// This process's own executable's segments (lane_exit_segments), from the program headers the kernel gave it.
+static __attribute__((unused)) uint32_t lane_exit_executable_segments(LaneExitSegment* segments)
+{
+    const Elf64_Phdr* headers = (const Elf64_Phdr*)(uintptr_t)getauxval(AT_PHDR);
+    const uint64_t count = headers != 0 && getauxval(AT_PHENT) == sizeof(Elf64_Phdr) ? getauxval(AT_PHNUM) : 0;
+    // The headers' own address, which a program header gives, says how far the image is from its file's addresses.
+    uint64_t bias = 0;
+    for (uint64_t i = 0; i < count; i += 1)
+    {
+        bias = headers[i].p_type == PT_PHDR ? (uint64_t)(uintptr_t)headers - headers[i].p_vaddr : bias;
+    }
+    return lane_exit_segments(headers, count, bias, segments);
+}
+
+// The ticks of the time-stamp counter between a reading before a read of `page`'s first byte and one after it. Where
+// the page isn't mapped the read faults, and retires only once the kernel has returned from the fault, so the second
+// reading, which follows it, is taken after the fault. Where it is mapped, the second reading may be taken while the
+// read still waits for its byte: the ticks are the readings' own.
+static __attribute__((unused)) uint64_t lane_exit_touch(const char* page)
+{
+    const uint64_t before = __rdtsc();
+    const char byte = *(const volatile char*)page;
+    const uint64_t after = __rdtsc();
+    (void)byte;
+    return after - before;
+}
+
+// Whether the kernel has `page` mapped in this process: move_pages as a query, which maps nothing and answers the
+// page's node, or an error where no page is mapped there.
+static __attribute__((unused)) bool lane_exit_mapped(const char* page)
+{
+    const void* pages[1] = { page };
+    int node = -1;
+    return syscall(SYS_move_pages, 0, sizeof(pages) / sizeof(pages[0]), pages, (const int*)0, &node, 0) == 0 && node >= 0;
+}
+
+// Whether process `process` is one that looks whatever its probe says, one in 2^BUSTER_LANE_EXIT_SAMPLE_BITS: by a hash
+// of its ID, since a build's compiles may have every other ID, or every fourth.
+static __attribute__((unused)) bool lane_exit_sampled(uint64_t process)
+{
+    return (process * UINT64_C(0x9e3779b97f4a7c15)) >> (64 - BUSTER_LANE_EXIT_SAMPLE_BITS) == 0;
+}
+
+// The caller's probe, as it exits: what its helper has to look at, written to `executable`. Nothing, for a process that
+// may not ask (arena_executable_huge_pages, BUSTER_EXECUTABLE_HUGE_PAGES=0), and for one whose probe's page a huge page
+// maps, unless it is one that looks all the same (lane_exit_sampled). Where the link has the probe and its page isn't
+// mapped, the helper asks for the placed code whole.
+static __attribute__((unused)) void lane_exit_probe(LaneExitExecutable* executable, pid_t process)
+{
+    const char* setting = getenv("BUSTER_EXECUTABLE_HUGE_PAGES");
+    const bool allowed = arena_executable_huge_pages && !(setting != 0 && strcmp(setting, "0") == 0);
+    const char* probe = buster_start_probe;
+    const bool marked = allowed && probe != 0;
+    const bool mapped = marked && (lane_exit_touch(probe) < BUSTER_LANE_EXIT_FAULT_TICKS || lane_exit_mapped(probe + BUSTER_LANE_EXIT_WINDOW_BYTES));
+    const bool placing = marked && !mapped;
+    const bool looking = allowed && (placing || lane_exit_sampled((uint64_t)process));
+    executable->count = looking ? lane_exit_executable_segments(executable->segments) : 0;
+    executable->probe = placing ? (uint64_t)(uintptr_t)probe : 0;
+    executable->placed_end = placing ? (uint64_t)(uintptr_t)buster_start_end : 0;
+}
+
+// Adds to `pages`, a count for each 2 MB range of `segment` (BUSTER_LANE_EXIT_RANGES of them at most), the pages of
+// `regions`, a scan's answer, that are mapped by 4 KB pages, and sets in *huge the bit of each range a region mapped by
+// a huge page starts in or covers.
+static __attribute__((unused)) void lane_exit_count(const LaneExitRegion* regions, uint64_t count, LaneExitSegment segment, uint16_t* pages, uint64_t* huge)
+{
+    for (uint64_t r = 0; r < count; r += 1)
+    {
+        const bool by_huge = (regions[r].categories & BUSTER_LANE_EXIT_PAGE_HUGE) != 0;
+        uint64_t at = regions[r].start > segment.begin ? regions[r].start : segment.begin;
+        const uint64_t end = regions[r].end < segment.end ? regions[r].end : segment.end;
+        while (at < end)
+        {
+            const uint64_t range = (at - segment.begin) / BUSTER_ARENA_HUGE_PAGE_BYTES;
+            const uint64_t range_end = segment.begin + (range + 1) * BUSTER_ARENA_HUGE_PAGE_BYTES;
+            const uint64_t part_end = end < range_end ? end : range_end;
+            if (range < BUSTER_LANE_EXIT_RANGES && by_huge)
+            {
+                *huge |= UINT64_C(1) << range;
+            }
+            else if (range < BUSTER_LANE_EXIT_RANGES)
+            {
+                pages[range] += (uint16_t)((part_end - at) / BUSTER_ARENA_PAGE_BYTES);
+            }
+            at = part_end;
+        }
+    }
+}
+
+// The ranges to ask huge pages for by what the process mapped of them, a bit each: those of the first `ranges` with
+// BUSTER_LANE_EXIT_HOT_PAGES or more of `pages`, the pages mapped by 4 KB pages (lane_exit_count).
+static __attribute__((unused)) uint64_t lane_exit_asked(const uint16_t* pages, uint64_t ranges)
+{
+    uint64_t result = 0;
+    for (uint64_t i = 0; i < ranges; i += 1)
+    {
+        result |= (uint64_t)(pages[i] >= BUSTER_LANE_EXIT_HOT_PAGES) << i;
+    }
+    return result;
+}
+
+// The code the start order places past its probe's range: the whole 2 MB ranges of `segment` after the one `probe` is
+// in that hold any of the code, which ends at `placed_end`. Empty (0 to 0) where the probe isn't in the segment or the
+// code ends in the probe's range.
+static __attribute__((unused)) LaneExitSegment lane_exit_placed(LaneExitSegment segment, uint64_t probe, uint64_t placed_end)
+{
+    const bool inside = probe >= segment.begin && probe < segment.end;
+    const uint64_t begin = (probe & ~(uint64_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1)) + BUSTER_ARENA_HUGE_PAGE_BYTES;
+    const uint64_t rounded = (placed_end + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uint64_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+    const uint64_t end = rounded < segment.end ? rounded : segment.end;
+    const bool any = inside && begin < end;
+    return (LaneExitSegment){
+        .begin = any ? begin : 0,
+        .end = any ? end : 0,
+    };
+}
+
+// The helper's first asking where the probe's page wasn't mapped: the placed code past the probe's range
+// (lane_exit_placed), in one call, before anything is read of what the process mapped. 0, also where there is none to
+// ask for, or the kernel's refusal, a negative error.
+static __attribute__((unused)) long lane_exit_collapse_placed(const LaneExitExecutable* executable)
+{
+    long result = 0;
+    for (uint32_t s = 0; s < executable->count; s += 1)
+    {
+        const LaneExitSegment placed = lane_exit_placed(executable->segments[s], executable->probe, executable->placed_end);
+        if (placed.begin < placed.end)
+        {
+            result = lane_exit_syscall(SYS_madvise, (long)placed.begin, (long)(placed.end - placed.begin), BUSTER_LANE_EXIT_MADV_COLLAPSE, 0);
+        }
+    }
+    return result;
+}
+
+// The helper's look at one segment through `file`, /proc/self/pagemap: its ranges' pages counted (lane_exit_count), then
+// each run of the ranges to ask for (lane_exit_asked) collapsed in one call, but the range `probe` is in, where it is in
+// the segment: that one is asked for last, alone and whatever was mapped of it, so that its huge page says the others
+// were made. 0, or the first refusal, of a scan or of a collapse, a negative error, which ends the segment's asking.
+static __attribute__((unused)) long lane_exit_collapse_segment(long file, LaneExitSegment segment, uint64_t probe)
+{
+    // On the stack, under half of the helper's page: statics of their own would be two more pages of .bss to fault in.
+    // Zeroed, so that a sanitizer, which doesn't see the kernel fill them, takes what is read of them for written.
+    _Static_assert(sizeof(LaneExitRegion) * BUSTER_LANE_EXIT_REGIONS + sizeof(uint16_t) * BUSTER_LANE_EXIT_RANGES + sizeof(LaneExitScan) <= sizeof(lane_exit_stack) / 2,
+                   "the exit helper's scan fits half of its stack");
+    LaneExitRegion regions[BUSTER_LANE_EXIT_REGIONS] = { 0 };
+    uint16_t pages[BUSTER_LANE_EXIT_RANGES] = { 0 };
+    uint64_t huge = 0;
+    const uint64_t ranges = (segment.end - segment.begin) / BUSTER_ARENA_HUGE_PAGE_BYTES < BUSTER_LANE_EXIT_RANGES ?
+                                (segment.end - segment.begin) / BUSTER_ARENA_HUGE_PAGE_BYTES : BUSTER_LANE_EXIT_RANGES;
+    const uint64_t end = segment.begin + ranges * BUSTER_ARENA_HUGE_PAGE_BYTES;
+    long result = 0;
+    uint64_t at = segment.begin;
+    while (result == 0 && at < end)
+    {
+        LaneExitScan scan = {
+            .size = sizeof(scan),
+            .start = at,
+            .end = end,
+            .vector = (uint64_t)(uintptr_t)regions,
+            .vector_length = BUSTER_LANE_EXIT_REGIONS,
+            .category_mask = BUSTER_LANE_EXIT_PAGE_PRESENT,
+            .return_mask = BUSTER_LANE_EXIT_PAGE_PRESENT | BUSTER_LANE_EXIT_PAGE_HUGE,
+        };
+        const long found = lane_exit_syscall(SYS_ioctl, file, (long)BUSTER_LANE_EXIT_PAGEMAP_SCAN, (long)&scan, 0);
+        // A scan that filled its regions stopped short of the end, and the next goes on from there.
+        result = found < 0 ? found : scan.walk_end > at ? 0 : -EIO;
+        if (result == 0)
+        {
+            lane_exit_count(regions, (uint64_t)found, segment, pages, &huge);
+            at = scan.walk_end;
+        }
+    }
+    const uint64_t asked = result == 0 ? lane_exit_asked(pages, ranges) : 0;
+    const uint64_t last = probe >= segment.begin && probe < end ? (probe - segment.begin) / BUSTER_ARENA_HUGE_PAGE_BYTES : ranges;
+    uint64_t first = 0;
+    while (result == 0 && first < ranges)
+    {
+        uint64_t run = first;
+        while (run < ranges && run != last && ((asked >> run) & 1) != 0)
+        {
+            run += 1;
+        }
+        if (run > first)
+        {
+            result = lane_exit_syscall(SYS_madvise, (long)(segment.begin + first * BUSTER_ARENA_HUGE_PAGE_BYTES), (long)((run - first) * BUSTER_ARENA_HUGE_PAGE_BYTES),
+                                       BUSTER_LANE_EXIT_MADV_COLLAPSE, 0);
+        }
+        first = run + 1;
+    }
+    if (result == 0 && last < ranges)
+    {
+        result = lane_exit_syscall(SYS_madvise, (long)(segment.begin + last * BUSTER_ARENA_HUGE_PAGE_BYTES), BUSTER_ARENA_HUGE_PAGE_BYTES, BUSTER_LANE_EXIT_MADV_COLLAPSE, 0);
+    }
+    return result;
+}
+
+// The helper's look at the executable (lane_exit_executable), raw system calls alone: the placed code first, where the
+// caller's probe asked for it (lane_exit_collapse_placed), then each segment in the file's order
+// (lane_exit_collapse_segment), which has the code's last and the probe's range last of it. A refusal ends it, but one
+// outright (EINVAL) of a segment the probe isn't in, which is passed over. Out of line: a helper that doesn't look runs
+// none of it, on the stack it had before.
+static __attribute__((noinline, unused)) void lane_exit_look(void)
+{
+    static const char path[] = "/proc/self/pagemap";
+    const LaneExitExecutable* executable = &lane_exit_executable;
+    const long file = lane_exit_collapse_placed(executable) == 0 ? lane_exit_syscall(SYS_open, (long)path, O_RDONLY | O_CLOEXEC, 0, 0) : -1;
+    bool asking = file >= 0;
+    for (uint32_t s = 0; asking && s < executable->count; s += 1)
+    {
+        const LaneExitSegment segment = executable->segments[s];
+        const bool coded = executable->probe >= segment.begin && executable->probe < segment.end;
+        const long refused = lane_exit_collapse_segment(file, segment, executable->probe);
+        asking = refused == 0 || (refused == -EINVAL && !coded);
+    }
+    if (file >= 0)
+    {
+        lane_exit_syscall(SYS_close, file, 0, 0, 0);
+    }
+}
+
 // The helper: every signal blocked, it ends with its caller, by the SIGKILL PR_SET_PDEATHSIG sends as the caller exits,
-// or at once where the caller had gone before the request took (its parent no longer the caller).
+// or at once where the caller had gone before the request took (its parent no longer the caller). With segments of the
+// executable to look at (lane_exit_probe), it outlives the caller by that look (lane_exit_look): the caller's end is
+// then a signal it waits for, blocked as the others are, so that no compile waits for the look and it sees all the
+// compile mapped.
 static __attribute__((noreturn, unused)) void lane_exit_helper_main(void)
 {
     const uint64_t blocked = UINT64_MAX;
+    const uint64_t gone = UINT64_C(1) << (BUSTER_LANE_EXIT_GONE - 1);
+    const bool looking = lane_exit_executable.count != 0;
     lane_exit_syscall(SYS_rt_sigprocmask, SIG_SETMASK, (long)&blocked, 0, sizeof(blocked));
-    lane_exit_syscall(SYS_prctl, PR_SET_PDEATHSIG, SIGKILL, 0, 0);
+    lane_exit_syscall(SYS_prctl, PR_SET_PDEATHSIG, looking ? BUSTER_LANE_EXIT_GONE : SIGKILL, 0, 0);
     while (lane_exit_syscall(SYS_getppid, 0, 0, 0, 0) == lane_exit_caller)
     {
-        lane_exit_syscall(SYS_pause, 0, 0, 0, 0);
+        if (looking)
+        {
+            lane_exit_syscall(SYS_rt_sigtimedwait, (long)&gone, 0, 0, sizeof(gone));
+        }
+        else
+        {
+            lane_exit_syscall(SYS_pause, 0, 0, 0, 0);
+        }
+    }
+    if (looking)
+    {
+        lane_exit_look();
     }
     while (true)
     {
@@ -3499,6 +3903,8 @@ static void lane_exit_helper_start(void)
         fflush(0);
         const bool closed = syscall(BUSTER_LANE_EXIT_SYS_CLOSE_RANGE, 0u, ~0u, 0u) == 0;
         lane_exit_caller = getpid();
+        // What the helper looks at of the executable once this process has gone: nothing, where a huge page maps its code.
+        lane_exit_probe(&lane_exit_executable, lane_exit_caller);
         const LaneExitCloneArguments arguments = {
             .flags = BUSTER_LANE_EXIT_CLONE_VM | BUSTER_LANE_EXIT_CLONE_CLEAR_SIGHAND,
             .stack = (uint64_t)(uintptr_t)lane_exit_stack,

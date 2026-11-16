@@ -116,7 +116,18 @@ must be exactly the expected one:
   alias, a benchmark's and the C library's functions, a name a unit's static
   shares (left out), two sample files that repeat functions, the second's
   new one listed after the first's, and symbols without functions (an
-  error);
+  error); a file of three traces, its functions by how many of them ran
+  each (one that a trace ran twice counted once), alone and after a file
+  that ran one of them first;
+- `start-trace`: its reader of an executable's functions on an image made
+  in the test (an alias, a function outside the instructions, one without a
+  size, an undefined one and an object; a file cut short, and bytes that are
+  no executable); this executable's own `-dumpversion` traced twice into one
+  file, without its exit helper, whose two traces must hold the same
+  addresses in the same order, each once, `main`'s among them; and a path
+  that isn't there (an error). A sanitizer's build leaves the live trace
+  out: LeakSanitizer stops its own process with ptrace as it exits, which a
+  traced process refuses;
 - `ab`: the order of a Williams design (#1311) for 1 to 17 trees, each
   tree at every place and after every other equally often over the period,
   and runs that succeed, fail and can't start, with
@@ -142,11 +153,18 @@ resident set, page faults and user cycles and instructions, and the builds
 compared over their placements and copies; under `ab`), `hot-loops FUNCTION DISASSEMBLY SAMPLES
 [--loops N]`, `label-spills FUNCTION TAG INPUT.s OUTPUT.s`, `spill-report
 FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]`, `branch-misses BRSTACK [--bias
-ADDRESS] [--disassembly FILE] [--branches N]` and `start-order SYMBOLS
-SAMPLES...` (the functions that `perf script -F ip,brstack` samples ran, by
-their copies in `readelf -sW` of the executable, grouped by the first sample
-file that ran each, smallest command first, each group in address order, for
-`cmake/BusterStartOrder.txt`: the build guide's "The start's code order");
+ADDRESS] [--disassembly FILE] [--branches N]`, `start-trace OUTPUT
+COMMAND...` (runs COMMAND, whose first word is its executable's path, with a
+breakpoint at the entry of every function of the executable, each removed as
+it is reached, and appends to OUTPUT a line `trace` and the address of each
+function the command ran, in the order they first ran: what it runs,
+exactly; its exit status is the command's) and `start-order SYMBOLS
+SAMPLES...` (the functions that `start-trace`'s traces or `perf script -F
+ip,brstack` samples ran, by their copies in `readelf -sW` of the executable,
+grouped by the first sample file that ran each, smallest command first,
+each group in address order, or for a file of several traces by how many of
+them ran each, for `cmake/BusterStartOrder.txt`: the build guide's "The
+start's code order");
 `docs/profiling.md` has the
 perf and objdump commands that make their inputs. Run `ab` itself outside the
 9700X's lock, with `--lock ~/buster-fast-bench/exclusive.sh`, which takes it

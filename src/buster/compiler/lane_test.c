@@ -57,6 +57,11 @@
 //     CPU, which this thread's mask is cut to, read their group as sharing it, and the lane that waited for lane 0's
 //     stall must have slept; two lanes on the process's own CPUs, where it has more than one, read theirs as not sharing
 //     them.
+//   - The exit helper's look at the executable's pages (#2873) and the probe that decides it: the segments it takes
+//     from program headers, the pages it counts of a scan's regions by 2 MB range, the placed code past a probe's range,
+//     the processes that look whatever their probe says, and the look on a mapped file of the test's, whose hot range
+//     the kernel collapses or refuses, with the probe's read and query of a page no read touched
+//     (lane_test_exit_executable).
 //   - Thread counts, which the teams and sessions checks compare: a thread is counted from /proc/self/task unless its
 //     stat's flags say it has begun to exit, as a thread just joined may still be listed (lane_test_task_exiting). The
 //     flags read from stat texts of a command with spaces and parentheses, and none from texts that stop short of them;
@@ -2436,6 +2441,321 @@ static void* lane_test_nothing(void* argument)
     return argument;
 }
 
+// The exit helper's look at the executable's pages (#2873, lane_exit_look) and the probe that decides it
+// (lane_exit_probe): the segments it takes from program headers (read-only ones as far from their place in the file as
+// a multiple of 2 MB, by their whole 2 MB ranges; none that is writable, apart by another distance, or shorter than a
+// range; and none where the image is loaded a page off); the pages it counts of a scan's regions, by range, a region
+// across two ranges, one past the segment's end, and a region mapped by a huge page as its range's bit; the ranges it
+// asks for by their pages; the placed code past a probe's range; the processes that look whatever their probe says,
+// about one in 64 of consecutive IDs, of every other and of every fourth; and the look itself, on a file of this
+// test's mapped at a 2 MB boundary: 80 pages read in its first range and one in its second. Whatever the kernel
+// answers, a range with fewer pages mapped than are worth a huge page stays as it was mapped; where the kernel
+// collapsed the first, a huge page must map it when read again; the second range, asked for as placed code past a
+// probe in the first, likewise; and a look with its probe in a range a huge page maps already is granted. Then the
+// probe's two questions of a page of the second range that no read touched: the kernel's answer says it is mapped where
+// a huge page maps the range and only there, and a read of it takes fewer ticks than BUSTER_LANE_EXIT_FAULT_TICKS where
+// it is mapped (the least of eight pages' reads, as an interrupt can land in one) and no fewer where the read faults,
+// as the read of the file's last page, past its ranges, always does. A kernel without the scan (before 6.7) or without
+// huge pages for a file's pages refuses, which the test passes over: it says which happened, and the ticks its reads
+// took.
+static uint64_t lane_test_exit_executable(void)
+{
+    uint64_t failures = 0;
+    const Elf64_Phdr headers[] = {
+        {
+            .p_type = PT_PHDR,
+            .p_offset = 0x40,
+            .p_vaddr = 0x200040,
+            .p_filesz = 0x230,
+        },
+        {
+            .p_type = PT_LOAD,
+            .p_flags = PF_R,
+            .p_vaddr = 0x200000,
+            .p_filesz = 0xb517c4,
+        },
+        {
+            .p_type = PT_LOAD,
+            .p_flags = PF_R | PF_X,
+            .p_offset = 0xc00000,
+            .p_vaddr = 0x1000000,
+            .p_filesz = 0x24a3c40,
+        },
+        {
+            .p_type = PT_LOAD,
+            .p_flags = PF_R | PF_W,
+            .p_offset = 0x30a3c40,
+            .p_vaddr = 0x36a3c40,
+            .p_filesz = 0xc66f98,
+        },
+        {
+            .p_type = PT_LOAD,
+            .p_flags = PF_R,
+            .p_offset = 0x4000000,
+            .p_vaddr = 0x5001000,
+            .p_filesz = 0x800000,
+        },
+        {
+            .p_type = PT_LOAD,
+            .p_flags = PF_R,
+            .p_offset = 0x5000000,
+            .p_vaddr = 0x6000000,
+            .p_filesz = 0x1ff000,
+        },
+        {
+            .p_type = PT_LOAD,
+            .p_flags = PF_R,
+            .p_offset = 0x6100000,
+            .p_vaddr = 0x7100000,
+            .p_filesz = 0x500000,
+        },
+        {
+            .p_type = PT_GNU_STACK,
+            .p_flags = PF_R | PF_W,
+        },
+    };
+    LaneExitSegment segments[BUSTER_LANE_EXIT_SEGMENTS];
+    const uint32_t found = lane_exit_segments(headers, BUSTER_ARRAY_LENGTH(headers), 0, segments);
+    const bool taken = found == 3 && segments[0].begin == 0x200000 && segments[0].end == 0xc00000 && segments[1].begin == 0x1000000 && segments[1].end == 0x3400000 &&
+                       segments[2].begin == 0x7200000 && segments[2].end == 0x7600000;
+    const bool moved = lane_exit_segments(headers, BUSTER_ARRAY_LENGTH(headers), 0x400000, segments) == 3 && segments[0].begin == 0x600000 && segments[0].end == 0x1000000;
+    // Loaded 0x1ff000 further, only the segment that is a page more from its place in the file is a multiple of 2 MB from it.
+    const bool off = lane_exit_segments(headers, BUSTER_ARRAY_LENGTH(headers), 0x1ff000, segments) == 1 && segments[0].begin == 0x5200000 && segments[0].end == 0x5a00000 &&
+                     lane_exit_segments(headers, BUSTER_ARRAY_LENGTH(headers), 0x1000, segments) == 0;
+    // More read-only segments than the helper looks at: the first of them.
+    Elf64_Phdr many[BUSTER_LANE_EXIT_SEGMENTS + 2];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(many); i += 1)
+    {
+        many[i] = (Elf64_Phdr){
+            .p_type = PT_LOAD,
+            .p_flags = PF_R,
+            .p_offset = (uint64_t)i << 24,
+            .p_vaddr = (uint64_t)i << 24,
+            .p_filesz = 0x400000,
+        };
+    }
+    const bool bounded = lane_exit_segments(many, BUSTER_ARRAY_LENGTH(many), 0, segments) == BUSTER_LANE_EXIT_SEGMENTS && segments[BUSTER_LANE_EXIT_SEGMENTS - 1].begin == (BUSTER_LANE_EXIT_SEGMENTS - 1) << 24;
+    if (!taken || !moved || !off || !bounded)
+    {
+        failures += 1;
+        printf("  exit helper: the executable's segments weren't the read-only ones' whole 2 MB ranges (%d %d %d %d)\n", taken, moved, off, bounded);
+    }
+    const LaneExitSegment counted = {
+        .begin = 0x200000,
+        .end = 0xa00000,
+    };
+    const LaneExitRegion regions[] = {
+        { .start = 0x100000, .end = 0x200000, .categories = BUSTER_LANE_EXIT_PAGE_PRESENT },
+        { .start = 0x200000, .end = 0x210000, .categories = BUSTER_LANE_EXIT_PAGE_PRESENT },
+        { .start = 0x3f0000, .end = 0x410000, .categories = BUSTER_LANE_EXIT_PAGE_PRESENT },
+        { .start = 0x600000, .end = 0x800000, .categories = BUSTER_LANE_EXIT_PAGE_PRESENT | BUSTER_LANE_EXIT_PAGE_HUGE },
+        { .start = 0x7ff000, .end = 0xa10000, .categories = BUSTER_LANE_EXIT_PAGE_PRESENT },
+        { .start = 0xb00000, .end = 0xb10000, .categories = BUSTER_LANE_EXIT_PAGE_PRESENT },
+    };
+    uint16_t pages[BUSTER_LANE_EXIT_RANGES] = { 0 };
+    uint64_t huge = 0;
+    lane_exit_count(regions, BUSTER_ARRAY_LENGTH(regions), counted, pages, &huge);
+    if (pages[0] != 32 || pages[1] != 16 || pages[2] != 1 || pages[3] != 512 || pages[4] != 0 || huge != 4)
+    {
+        failures += 1;
+        printf("  exit helper: a scan's regions counted %u, %u, %u, %u and %u pages by range, not 32, 16, 1, 512 and 0, or the ranges by huge pages are %llx, not 4\n", pages[0],
+               pages[1], pages[2], pages[3], pages[4], (unsigned long long)huge);
+    }
+    // The ranges asked for by their pages: the fourth, with 512 of 4 KB, and a fifth with 70, not the first, with 32, nor
+    // the third, which a huge page maps; and of the first four ranges alone, the fourth.
+    pages[4] = 70;
+    const uint64_t used = lane_exit_asked(pages, 5);
+    const uint64_t used_four = lane_exit_asked(pages, 4);
+    if (used != 0x18 || used_four != 0x8)
+    {
+        failures += 1;
+        printf("  exit helper: the ranges asked for were %llx and %llx, not 18 and 8\n", (unsigned long long)used, (unsigned long long)used_four);
+    }
+    // The placed code past a probe's range: to the end of the range its end is in; none where it ends in the probe's
+    // range, or the probe is in another segment; and no further than the segment.
+    const LaneExitSegment code = {
+        .begin = 0x1000000,
+        .end = 0x3400000,
+    };
+    const LaneExitSegment past = lane_exit_placed(code, 0x1000000, 0x1701b35);
+    const LaneExitSegment within = lane_exit_placed(code, 0x1000000, 0x1100000);
+    const LaneExitSegment elsewhere = lane_exit_placed(code, 0x800000, 0x1701b35);
+    const LaneExitSegment beyond = lane_exit_placed(code, 0x3000000, 0x3900000);
+    const LaneExitSegment whole = lane_exit_placed(code, 0x1200000, 0x1600000);
+    if (past.begin != 0x1200000 || past.end != 0x1800000 || within.begin != within.end || elsewhere.begin != elsewhere.end || beyond.begin != 0x3200000 || beyond.end != 0x3400000 ||
+        whole.begin != 0x1400000 || whole.end != 0x1600000)
+    {
+        failures += 1;
+        printf("  exit helper: the placed code past a probe's range was %llx to %llx, %llx to %llx, %llx to %llx, %llx to %llx and %llx to %llx\n", (unsigned long long)past.begin,
+               (unsigned long long)past.end, (unsigned long long)within.begin, (unsigned long long)within.end, (unsigned long long)elsewhere.begin, (unsigned long long)elsewhere.end,
+               (unsigned long long)beyond.begin, (unsigned long long)beyond.end, (unsigned long long)whole.begin, (unsigned long long)whole.end);
+    }
+    // The processes that look whatever their probe says: about one in 64 of 65,536 IDs in a row (1,024), of every
+    // other ID and of every fourth, which a count by the ID's remainder would give all or none of.
+    for (uint64_t step = 1; step <= 4; step *= 2)
+    {
+        uint64_t sampled = 0;
+        for (uint64_t process = 1; process <= 65536 * step; process += step)
+        {
+            sampled += lane_exit_sampled(process) ? 1 : 0;
+        }
+        if (sampled < 896 || sampled > 1152)
+        {
+            failures += 1;
+            printf("  exit helper: %llu of 65536 process IDs %llu apart look whatever their probe says, not about 1024\n", (unsigned long long)sampled, (unsigned long long)step);
+        }
+    }
+    // The look itself: a file of two ranges and a page, mapped read-only at a 2 MB boundary as an executable's segment is.
+    const uint64_t bytes = 2 * BUSTER_ARENA_HUGE_PAGE_BYTES + BUSTER_ARENA_PAGE_BYTES;
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/buster-test-lanes-exit-XXXXXX", oracle_temporary_directory());
+    const int file = mkstemp(path);
+    uint8_t* reserved = mmap(0, bytes + BUSTER_ARENA_HUGE_PAGE_BYTES, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool written = file != -1 && reserved != MAP_FAILED;
+    uint8_t block[BUSTER_ARENA_PAGE_BYTES];
+    for (uint64_t at = 0; written && at < bytes; at += sizeof(block))
+    {
+        memset(block, (int)(at / sizeof(block) % 251) + 1, sizeof(block));
+        written = write(file, block, sizeof(block)) == (ssize_t)sizeof(block);
+    }
+    // Clean pages of a file no one has open for writing: the kernel collapses none that still wait to be written, and
+    // none of a file that may be.
+    written = written && fsync(file) == 0;
+    if (file != -1)
+    {
+        close(file);
+    }
+    const int reading = written ? open(path, O_RDONLY | O_CLOEXEC) : -1;
+    uint8_t* aligned = (uint8_t*)(((uintptr_t)reserved + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1));
+    const uint8_t* mapping = reading != -1 ? mmap(aligned, bytes, PROT_READ, MAP_PRIVATE | MAP_FIXED, reading, 0) : MAP_FAILED;
+    if (reading != -1)
+    {
+        close(reading);
+    }
+    const int pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
+    if (mapping != MAP_FAILED && pagemap != -1)
+    {
+        // 80 pages of the first range read, each a few pages on from the last, and one of the second: what the kernel maps
+        // around each is its own choice, so the test reads what the look will find before it looks.
+        uint64_t sum = 0;
+        for (uint64_t page = 0; page < 80; page += 1)
+        {
+            sum += mapping[page * 6 * BUSTER_ARENA_PAGE_BYTES];
+        }
+        sum += mapping[BUSTER_ARENA_HUGE_PAGE_BYTES + 3 * 16 * BUSTER_ARENA_PAGE_BYTES];
+        const LaneExitSegment segment = {
+            .begin = (uint64_t)(uintptr_t)mapping,
+            .end = (uint64_t)(uintptr_t)mapping + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES,
+        };
+        // Zeroed: the kernel fills them through a raw system call, which a sanitizer doesn't see write them.
+        LaneExitRegion found_regions[BUSTER_LANE_EXIT_REGIONS] = { 0 };
+        // What three scans find: the ranges as read, after a look that asks by the pages mapped, and after the asking for
+        // the second range as placed code past a probe in the first.
+        uint16_t found_pages[3][BUSTER_LANE_EXIT_RANGES] = { 0 };
+        uint64_t found_huge[3] = { 0, 0, 0 };
+        long scanned[3] = { 0, 0, 0 };
+        bool asked[2] = { false, false };
+        const LaneExitExecutable placing = {
+            .segments = { segment },
+            .count = 1,
+            .probe = segment.begin,
+            .placed_end = segment.end,
+        };
+        for (uint32_t pass = 0; pass < 3; pass += 1)
+        {
+            LaneExitScan scan = {
+                .size = sizeof(scan),
+                .start = segment.begin,
+                .end = segment.end,
+                .vector = (uint64_t)(uintptr_t)found_regions,
+                .vector_length = BUSTER_LANE_EXIT_REGIONS,
+                .category_mask = BUSTER_LANE_EXIT_PAGE_PRESENT,
+                .return_mask = BUSTER_LANE_EXIT_PAGE_PRESENT | BUSTER_LANE_EXIT_PAGE_HUGE,
+            };
+            scanned[pass] = syscall(SYS_ioctl, pagemap, BUSTER_LANE_EXIT_PAGEMAP_SCAN, &scan);
+            if (scanned[pass] >= 0)
+            {
+                lane_exit_count(found_regions, (uint64_t)scanned[pass], segment, found_pages[pass], &found_huge[pass]);
+            }
+            if (pass == 0)
+            {
+                asked[0] = lane_exit_collapse_segment(pagemap, segment, 0) == 0;
+            }
+            else if (pass == 1)
+            {
+                asked[1] = lane_exit_collapse_placed(&placing) == 0;
+            }
+            // Read again: a range the kernel collapsed is mapped by the next fault.
+            sum += mapping[0];
+            sum += mapping[BUSTER_ARENA_HUGE_PAGE_BYTES + 3 * 16 * BUSTER_ARENA_PAGE_BYTES];
+        }
+        const bool scans = scanned[0] >= 0 && scanned[1] >= 0 && scanned[2] >= 0;
+        const bool hot = scans && found_pages[0][0] >= BUSTER_LANE_EXIT_HOT_PAGES;
+        const bool cold = scans && found_pages[0][1] < BUSTER_LANE_EXIT_HOT_PAGES;
+        // Read back as written, whatever the pages are mapped by.
+        const bool same = mapping[0] == 1 && mapping[BUSTER_ARENA_HUGE_PAGE_BYTES - 1] == (BUSTER_ARENA_HUGE_PAGE_BYTES / BUSTER_ARENA_PAGE_BYTES - 1) % 251 + 1 && sum != 0;
+        // The first look leaves the second range as it was mapped, and where the kernel collapsed the first, a huge page
+        // maps it since; the second range, asked for as placed code, likewise.
+        const bool kept = !cold || (found_pages[1][1] == found_pages[0][1] && (found_huge[1] & 2) == 0);
+        const bool mapped = !(asked[0] && hot) || (found_huge[1] & 1) != 0;
+        const bool placed = !(asked[1] && cold) || (found_huge[2] & 2) != 0;
+        // A look whose probe is in the first range asks for that range last, whatever is mapped of it: granted where a
+        // huge page maps it already.
+        const bool last = !(asked[0] && hot && (found_huge[2] & 1) != 0) || lane_exit_collapse_segment(pagemap, segment, segment.begin) == 0;
+        // The probe's two questions, of pages of the second range that no read touched, while the kernel maps no more
+        // around a read than its window: the kernel's answer, and the ticks of a read, the least of eight pages'.
+        const char* untouched = (const char*)mapping + BUSTER_ARENA_HUGE_PAGE_BYTES + 300 * BUSTER_ARENA_PAGE_BYTES;
+        const bool windowed = scans && cold && found_pages[0][1] <= 64;
+        const bool huge_second = (found_huge[2] & 2) != 0;
+        const bool answered = lane_exit_mapped(untouched);
+        uint64_t ticks = UINT64_MAX;
+        uint64_t first_ticks = 0;
+        for (uint64_t read = 0; read < 8; read += 1)
+        {
+            const uint64_t took = lane_exit_touch(untouched + read * BUSTER_LANE_EXIT_WINDOW_BYTES);
+            first_ticks = read == 0 ? took : first_ticks;
+            ticks = took < ticks ? took : ticks;
+        }
+        // Where a huge page maps the range, no read faults; where none does, each read is of a window of its own, and
+        // faults.
+        const bool probed = !windowed || (answered == huge_second && (huge_second ? ticks < BUSTER_LANE_EXIT_FAULT_TICKS : ticks >= BUSTER_LANE_EXIT_FAULT_TICKS));
+        // The file's last page, past its two ranges, which no huge page can map and nothing has read: its read faults,
+        // whatever the kernel did with the ranges.
+        const uint64_t fault_ticks = lane_exit_touch((const char*)mapping + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES);
+        const bool faulted = fault_ticks >= BUSTER_LANE_EXIT_FAULT_TICKS;
+        if (!same || !kept || !mapped || !placed || !last || !probed || !faulted)
+        {
+            failures += 1;
+            printf("  exit helper: the looks at a mapped file found %u and %u pages of 4 KB in its ranges, then %u and %u, then %u and %u (asked: %d %d, by huge pages: %llx %llx, "
+                   "the last range granted: %d, an untouched page mapped: %d, its reads' least ticks %llu, a faulting read's %llu, bytes the same: %d)\n",
+                   found_pages[0][0], found_pages[0][1], found_pages[1][0], found_pages[1][1], found_pages[2][0], found_pages[2][1], asked[0], asked[1],
+                   (unsigned long long)found_huge[1], (unsigned long long)found_huge[2], last, answered, (unsigned long long)ticks, (unsigned long long)fault_ticks, same);
+        }
+        printf("  exit helper: a file's range of %u pages in %s: %s; an untouched page: %s, read in %llu ticks at first and %llu at least; a read that faults: %llu ticks\n",
+               found_pages[0][0], oracle_temporary_directory(),
+               !scans ? "the kernel has no PAGEMAP_SCAN" : !hot ? "too few to ask for" : asked[0] ? "collapsed, and mapped by a huge page since" : "the kernel refused to collapse it",
+               answered ? "mapped" : "not mapped", (unsigned long long)first_ticks, (unsigned long long)ticks, (unsigned long long)fault_ticks);
+    }
+    else
+    {
+        failures += 1;
+        printf("  exit helper: a file couldn't be written and mapped in %s, or /proc/self/pagemap opened\n", oracle_temporary_directory());
+    }
+    if (pagemap != -1)
+    {
+        close(pagemap);
+    }
+    if (reserved != MAP_FAILED)
+    {
+        munmap(reserved, bytes + BUSTER_ARENA_HUGE_PAGE_BYTES);
+    }
+    if (file != -1)
+    {
+        unlink(path);
+    }
+    return failures;
+}
+
 // Thread counts (lane_test_thread_count): stat texts' flags, read past commands with spaces and parentheses, and refused
 // where a text stops short of them; this thread, read as live; and BUSTER_LANE_TEST_JOINS threads started and joined,
 // each followed by a count that must be the one before them all. On a 4-CPU cloud VM, a count that listed every thread
@@ -4060,6 +4380,7 @@ static int run_lane_tests(int argc, char** argv)
     {
         bool passed = lane_test_watchdog();
         passed = lane_test_arenas() && passed;
+        passed = lane_test_exit_executable() == 0 && passed;
         passed = lane_test_thread_counts() == 0 && passed;
         passed = lane_test_teams() == 0 && passed;
         passed = lane_test_cpuinfo_controls() == 0 && passed;
