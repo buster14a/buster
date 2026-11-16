@@ -89,8 +89,8 @@ contract and regression coverage.
 ## Tier 0 tests
 
 `./build/compiler test-tier0 [--seed N] [--count N] [--cross-check
-[--cross-count N] [--clang PATH] [--keep]]` (about 1.6 s on the 9700X, and
-14.6 s with `--cross-check`, on CPUs 0 to 7 as its job runs it) checks `tier0.c` on programs from
+[--cross-count N] [--clang PATH] [--keep]]` (about 2.8 s on the 9700X, and
+22.3 s with `--cross-check`, on CPUs 0 to 7 as its job runs it) checks `tier0.c` on programs from
 `tier0_generate.c`, `--count` (300) of each of eight shapes: one function of
 integers; integers and calls; everything (floating values, pointers,
 address-taken locals, objects); larger; larger with structs and unions
@@ -327,8 +327,9 @@ on the same inputs and compares the results and every global (a floating
 one's NaNs alike whatever their bits, as C leaves them), then times both; then
 as many programs of the records shape linked mixed, their even functions Tier
 0's and their odd ones clang's, so that calls pass and return structs and
-unions by value between the two compilers both ways, and as many of the deep
-shape, of the aligned one and of the tested conditions'. It prints the code's sizes (clang's `.text` against Tier 0's functions) and the
+unions by value between the two compilers both ways, as many of the deep
+shape and of the aligned one, and a third as many of the tested conditions'.
+It prints the code's sizes (clang's `.text` against Tier 0's functions) and the
 run times. A shared library generated beside them (GNU as source, which `as`
 and `ld -shared` link) defines the globals Tier 0 reaches through the GOT, so
 that the executable's slots for them are the loader's to fill (`GLOB_DAT`, and

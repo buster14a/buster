@@ -6963,11 +6963,12 @@ static int run_tier0_tests(int argc, char** argv)
                 total.checks += aligned_cross.checks;
                 total.failures += aligned_cross.failures;
                 // The conditions the generator writes as compares and tests against zero (#2877): their C text is clang's
-                // to judge.
+                // to judge. A third as many programs as the other shapes: each has dozens of conditions, and the shape is
+                // the one before's but for them.
                 Tier0TestTally tested_cross = { 0, 0 };
                 Tier0ProgramOptions tested_defined = tested;
                 tested_defined.defined = true;
-                tier0_test_cross(&tested_cross, &tables, seed + 4000012ull, cross_count, tested_defined, clang, keep);
+                tier0_test_cross(&tested_cross, &tables, seed + 4000012ull, (cross_count + 2) / 3, tested_defined, clang, keep);
                 tier0_test_report("cross-check: tested conditions", tested_cross);
                 total.checks += tested_cross.checks;
                 total.failures += tested_cross.failures;
