@@ -71,13 +71,19 @@ buster_settings_tools("${CMAKE_C_COMPILER}")
 buster_settings_linker()
 # The start's code order (#1444, cmake/BusterStartOrder.cmake): in a static link, whatever the linker, so that switching
 # it relinks alone, every unit's functions in sections of their own, and the units in parts' and the parallel split's
-# with the functions small compiles run (cmake/BusterStartOrder.txt) first in .text.buster_checker, which is the
+# with the functions compiles run (cmake/BusterStartOrder.txt) first in .text.buster_checker, which is the
 # object's own order; and with lld, those functions placed together before .text.
+#
+# The executable's pages in huge pages (#2873, docs/commands/build.md): a static link places each segment as far from
+# its bytes in the file as a multiple of 2 MB (-z max-page-size), which is what lets the kernel map a 2 MB range of the
+# file that the page cache holds as one huge page by one fault, where main's text was a page off. The segments' sizes
+# and contents are the same; the addresses between them skip to the next 2 MB.
 set(buster_start_order FALSE)
 set(buster_split_order FALSE)
 if(buster_static)
     list(APPEND buster_host_flags -ffunction-sections)
     list(APPEND buster_flags -ffunction-sections)
+    list(APPEND buster_linker_flags -Wl,-z,max-page-size=0x200000)
     set(buster_split_order TRUE)
     include(cmake/BusterStartOrder.cmake)
     set(start_order_list "${CMAKE_SOURCE_DIR}/cmake/BusterStartOrder.txt")

@@ -57,6 +57,9 @@
 //     CPU, which this thread's mask is cut to, read their group as sharing it, and the lane that waited for lane 0's
 //     stall must have slept; two lanes on the process's own CPUs, where it has more than one, read theirs as not sharing
 //     them.
+//   - The exit helper's look at the executable's pages (#2873): the segments it takes from program headers, the pages
+//     it counts of a scan's regions by 2 MB range, and the look on a mapped file of the test's, whose hot range the
+//     kernel collapses or refuses (lane_test_exit_executable).
 //   - Thread counts, which the teams and sessions checks compare: a thread is counted from /proc/self/task unless its
 //     stat's flags say it has begun to exit, as a thread just joined may still be listed (lane_test_task_exiting). The
 //     flags read from stat texts of a command with spaces and parentheses, and none from texts that stop short of them;
@@ -2436,6 +2439,228 @@ static void* lane_test_nothing(void* argument)
     return argument;
 }
 
+// The exit helper's look at the executable's pages (#2873, lane_exit_collapse): the segments it takes from program
+// headers (read-only ones as far from their place in the file as a multiple of 2 MB, by their whole 2 MB ranges; none
+// that is writable, apart by another distance, or shorter than a range; and none where the image is loaded a page off);
+// the pages it counts of a scan's regions, by range, a region across two ranges, one past the segment's end, and none
+// of a region mapped by a huge page; and the look itself, on a file of this test's mapped at a 2 MB boundary: 80 pages
+// read in its first range and one in its second. Whatever the kernel answers, a range with fewer pages mapped than are
+// worth a huge page stays as it was mapped; and where the kernel collapsed the first, it must map it by a huge page
+// when read again. A kernel without the scan (before 6.7), without huge pages for a file's pages, or a temporary
+// directory whose file system has none (tmpfs's default) refuses, which the test passes over: it says which happened.
+static uint64_t lane_test_exit_executable(void)
+{
+    uint64_t failures = 0;
+    const Elf64_Phdr headers[] = {
+        {
+            .p_type = PT_PHDR,
+            .p_offset = 0x40,
+            .p_vaddr = 0x200040,
+            .p_filesz = 0x230,
+        },
+        {
+            .p_type = PT_LOAD,
+            .p_flags = PF_R,
+            .p_vaddr = 0x200000,
+            .p_filesz = 0xb517c4,
+        },
+        {
+            .p_type = PT_LOAD,
+            .p_flags = PF_R | PF_X,
+            .p_offset = 0xc00000,
+            .p_vaddr = 0x1000000,
+            .p_filesz = 0x24a3c40,
+        },
+        {
+            .p_type = PT_LOAD,
+            .p_flags = PF_R | PF_W,
+            .p_offset = 0x30a3c40,
+            .p_vaddr = 0x36a3c40,
+            .p_filesz = 0xc66f98,
+        },
+        {
+            .p_type = PT_LOAD,
+            .p_flags = PF_R,
+            .p_offset = 0x4000000,
+            .p_vaddr = 0x5001000,
+            .p_filesz = 0x800000,
+        },
+        {
+            .p_type = PT_LOAD,
+            .p_flags = PF_R,
+            .p_offset = 0x5000000,
+            .p_vaddr = 0x6000000,
+            .p_filesz = 0x1ff000,
+        },
+        {
+            .p_type = PT_LOAD,
+            .p_flags = PF_R,
+            .p_offset = 0x6100000,
+            .p_vaddr = 0x7100000,
+            .p_filesz = 0x500000,
+        },
+        {
+            .p_type = PT_GNU_STACK,
+            .p_flags = PF_R | PF_W,
+        },
+    };
+    LaneExitSegment segments[BUSTER_LANE_EXIT_SEGMENTS];
+    const uint32_t found = lane_exit_segments(headers, BUSTER_ARRAY_LENGTH(headers), 0, segments);
+    const bool taken = found == 3 && segments[0].begin == 0x200000 && segments[0].end == 0xc00000 && segments[1].begin == 0x1000000 && segments[1].end == 0x3400000 &&
+                       segments[2].begin == 0x7200000 && segments[2].end == 0x7600000;
+    const bool moved = lane_exit_segments(headers, BUSTER_ARRAY_LENGTH(headers), 0x400000, segments) == 3 && segments[0].begin == 0x600000 && segments[0].end == 0x1000000;
+    // Loaded 0x1ff000 further, only the segment that is a page more from its place in the file is a multiple of 2 MB from it.
+    const bool off = lane_exit_segments(headers, BUSTER_ARRAY_LENGTH(headers), 0x1ff000, segments) == 1 && segments[0].begin == 0x5200000 && segments[0].end == 0x5a00000 &&
+                     lane_exit_segments(headers, BUSTER_ARRAY_LENGTH(headers), 0x1000, segments) == 0;
+    // More read-only segments than the helper looks at: the first of them.
+    Elf64_Phdr many[BUSTER_LANE_EXIT_SEGMENTS + 2];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(many); i += 1)
+    {
+        many[i] = (Elf64_Phdr){
+            .p_type = PT_LOAD,
+            .p_flags = PF_R,
+            .p_offset = (uint64_t)i << 24,
+            .p_vaddr = (uint64_t)i << 24,
+            .p_filesz = 0x400000,
+        };
+    }
+    const bool bounded = lane_exit_segments(many, BUSTER_ARRAY_LENGTH(many), 0, segments) == BUSTER_LANE_EXIT_SEGMENTS && segments[BUSTER_LANE_EXIT_SEGMENTS - 1].begin == (BUSTER_LANE_EXIT_SEGMENTS - 1) << 24;
+    if (!taken || !moved || !off || !bounded)
+    {
+        failures += 1;
+        printf("  exit helper: the executable's segments weren't the read-only ones' whole 2 MB ranges (%d %d %d %d)\n", taken, moved, off, bounded);
+    }
+    const LaneExitSegment counted = {
+        .begin = 0x200000,
+        .end = 0xa00000,
+    };
+    const LaneExitRegion regions[] = {
+        { .start = 0x100000, .end = 0x200000, .categories = BUSTER_LANE_EXIT_PAGE_PRESENT },
+        { .start = 0x200000, .end = 0x210000, .categories = BUSTER_LANE_EXIT_PAGE_PRESENT },
+        { .start = 0x3f0000, .end = 0x410000, .categories = BUSTER_LANE_EXIT_PAGE_PRESENT },
+        { .start = 0x600000, .end = 0x800000, .categories = BUSTER_LANE_EXIT_PAGE_PRESENT | BUSTER_LANE_EXIT_PAGE_HUGE },
+        { .start = 0x7ff000, .end = 0xa10000, .categories = BUSTER_LANE_EXIT_PAGE_PRESENT },
+        { .start = 0xb00000, .end = 0xb10000, .categories = BUSTER_LANE_EXIT_PAGE_PRESENT },
+    };
+    uint16_t pages[BUSTER_LANE_EXIT_RANGES] = { 0 };
+    lane_exit_count(regions, BUSTER_ARRAY_LENGTH(regions), counted, pages);
+    if (pages[0] != 32 || pages[1] != 16 || pages[2] != 1 || pages[3] != 512 || pages[4] != 0)
+    {
+        failures += 1;
+        printf("  exit helper: a scan's regions counted %u, %u, %u, %u and %u pages by range, not 32, 16, 1, 512 and 0\n", pages[0], pages[1], pages[2], pages[3], pages[4]);
+    }
+    // The look itself: a file of two ranges and a page, mapped read-only at a 2 MB boundary as an executable's segment is.
+    const uint64_t bytes = 2 * BUSTER_ARENA_HUGE_PAGE_BYTES + BUSTER_ARENA_PAGE_BYTES;
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/buster-test-lanes-exit-XXXXXX", oracle_temporary_directory());
+    const int file = mkstemp(path);
+    uint8_t* reserved = mmap(0, bytes + BUSTER_ARENA_HUGE_PAGE_BYTES, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool written = file != -1 && reserved != MAP_FAILED;
+    uint8_t block[BUSTER_ARENA_PAGE_BYTES];
+    for (uint64_t at = 0; written && at < bytes; at += sizeof(block))
+    {
+        memset(block, (int)(at / sizeof(block) % 251) + 1, sizeof(block));
+        written = write(file, block, sizeof(block)) == (ssize_t)sizeof(block);
+    }
+    // Clean pages of a file no one has open for writing: the kernel collapses none that still wait to be written, and
+    // none of a file that may be.
+    written = written && fsync(file) == 0;
+    if (file != -1)
+    {
+        close(file);
+    }
+    const int reading = written ? open(path, O_RDONLY | O_CLOEXEC) : -1;
+    uint8_t* aligned = (uint8_t*)(((uintptr_t)reserved + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1));
+    const uint8_t* mapping = reading != -1 ? mmap(aligned, bytes, PROT_READ, MAP_PRIVATE | MAP_FIXED, reading, 0) : MAP_FAILED;
+    if (reading != -1)
+    {
+        close(reading);
+    }
+    const int pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
+    if (mapping != MAP_FAILED && pagemap != -1)
+    {
+        // 80 pages of the first range read, each a few pages on from the last, and one of the second: what the kernel maps
+        // around each is its own choice, so the test reads what the look will find before it looks.
+        uint64_t sum = 0;
+        for (uint64_t page = 0; page < 80; page += 1)
+        {
+            sum += mapping[page * 6 * BUSTER_ARENA_PAGE_BYTES];
+        }
+        sum += mapping[BUSTER_ARENA_HUGE_PAGE_BYTES + 3 * 16 * BUSTER_ARENA_PAGE_BYTES];
+        const LaneExitSegment segment = {
+            .begin = (uint64_t)(uintptr_t)mapping,
+            .end = (uint64_t)(uintptr_t)mapping + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES,
+        };
+        // Zeroed: the kernel fills them through a raw system call, which a sanitizer doesn't see write them.
+        LaneExitRegion found_regions[BUSTER_LANE_EXIT_REGIONS] = { 0 };
+        uint16_t found_pages[2][BUSTER_LANE_EXIT_RANGES] = { 0 };
+        long scanned[2] = { 0, 0 };
+        bool asked = false;
+        bool first_huge = false;
+        for (uint32_t pass = 0; pass < 2; pass += 1)
+        {
+            LaneExitScan scan = {
+                .size = sizeof(scan),
+                .start = segment.begin,
+                .end = segment.end,
+                .vector = (uint64_t)(uintptr_t)found_regions,
+                .vector_length = BUSTER_LANE_EXIT_REGIONS,
+                .category_mask = BUSTER_LANE_EXIT_PAGE_PRESENT,
+                .return_mask = BUSTER_LANE_EXIT_PAGE_PRESENT | BUSTER_LANE_EXIT_PAGE_HUGE,
+            };
+            scanned[pass] = syscall(SYS_ioctl, pagemap, BUSTER_LANE_EXIT_PAGEMAP_SCAN, &scan);
+            if (scanned[pass] >= 0)
+            {
+                lane_exit_count(found_regions, (uint64_t)scanned[pass], segment, found_pages[pass]);
+            }
+            for (long r = 0; pass == 1 && r < scanned[pass]; r += 1)
+            {
+                first_huge = first_huge || (found_regions[r].start == segment.begin && found_regions[r].end >= segment.begin + BUSTER_ARENA_HUGE_PAGE_BYTES &&
+                                            (found_regions[r].categories & BUSTER_LANE_EXIT_PAGE_HUGE) != 0);
+            }
+            if (pass == 0)
+            {
+                asked = lane_exit_collapse_segment(pagemap, segment);
+                // Read again: a range the kernel collapsed is mapped by the next fault.
+                sum += mapping[0];
+            }
+        }
+        const bool scans = scanned[0] >= 0 && scanned[1] >= 0;
+        const bool hot = scans && found_pages[0][0] >= BUSTER_LANE_EXIT_HOT_PAGES;
+        const bool cold = scans && found_pages[0][1] < BUSTER_LANE_EXIT_HOT_PAGES;
+        // Read back as written, whatever the pages are mapped by.
+        const bool same = mapping[0] == 1 && mapping[BUSTER_ARENA_HUGE_PAGE_BYTES - 1] == (BUSTER_ARENA_HUGE_PAGE_BYTES / BUSTER_ARENA_PAGE_BYTES - 1) % 251 + 1 && sum != 0;
+        const bool kept = !cold || found_pages[1][1] == found_pages[0][1];
+        const bool mapped = !(asked && hot) || first_huge;
+        if (!same || !kept || !mapped)
+        {
+            failures += 1;
+            printf("  exit helper: the look at a mapped file found %u and %u pages of 4 KB in its ranges and left %u and %u (asked: %d, by a huge page: %d, bytes the same: %d)\n",
+                   found_pages[0][0], found_pages[0][1], found_pages[1][0], found_pages[1][1], asked, first_huge, same);
+        }
+        printf("  exit helper: a file's range of %u pages in %s: %s\n", found_pages[0][0], oracle_temporary_directory(),
+               !scans ? "the kernel has no PAGEMAP_SCAN" : !hot ? "too few to ask for" : asked ? "collapsed, and mapped by a huge page since" : "the kernel refused to collapse it");
+    }
+    else
+    {
+        failures += 1;
+        printf("  exit helper: a file couldn't be written and mapped in %s, or /proc/self/pagemap opened\n", oracle_temporary_directory());
+    }
+    if (pagemap != -1)
+    {
+        close(pagemap);
+    }
+    if (reserved != MAP_FAILED)
+    {
+        munmap(reserved, bytes + BUSTER_ARENA_HUGE_PAGE_BYTES);
+    }
+    if (file != -1)
+    {
+        unlink(path);
+    }
+    return failures;
+}
+
 // Thread counts (lane_test_thread_count): stat texts' flags, read past commands with spaces and parentheses, and refused
 // where a text stops short of them; this thread, read as live; and BUSTER_LANE_TEST_JOINS threads started and joined,
 // each followed by a count that must be the one before them all. On a 4-CPU cloud VM, a count that listed every thread
@@ -4060,6 +4285,7 @@ static int run_lane_tests(int argc, char** argv)
     {
         bool passed = lane_test_watchdog();
         passed = lane_test_arenas() && passed;
+        passed = lane_test_exit_executable() == 0 && passed;
         passed = lane_test_thread_counts() == 0 && passed;
         passed = lane_test_teams() == 0 && passed;
         passed = lane_test_cpuinfo_controls() == 0 && passed;
