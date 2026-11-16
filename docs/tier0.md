@@ -1362,7 +1362,8 @@ A target ends every window: a jump arriving there brings a value the template wo
 (after `EQ`, its opposite), and the branch takes the four entries and what the compare fused as one group: `cmp a, b;
 jge`, where the test alone fused with the branch gave `cmp; setl; movzx; test; je`. The window holds where:
 
-- the test's constant is zero, fused into it, and its class is the class of the compare's value;
+- the test's constant is zero, fused into it (an integer's, so that the test's first operand is the value the
+  compare made: validation asks a compare's operands to be of one class);
 - the compare is an integer one of 4 or 8 bytes, its own operands on the stack or a leaf fusion's (a constant, a
   local, a local and a constant, two locals);
 - no target is on the branch, the test or the `CONST 0`. One on the compare or on the group's first entry leaves it

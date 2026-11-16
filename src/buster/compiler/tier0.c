@@ -4249,17 +4249,17 @@ static inline __attribute__((always_inline)) void tier0_fuse_entries(const Tier0
                 tier0_absorb(entries, i, i - 1);
             }
         }
-        // A branch's compare: the one whose value the entries before the branch test against zero (a compare, CONST 0
-        // of its class, NE or EQ: the compare's value is 0 or 1, so the test is the compare, or with EQ its opposite),
-        // or the one right before the branch.
+        // A branch's compare: the one whose value the entries before the branch test against zero (a compare, CONST 0,
+        // NE or EQ: the compare's value is 0 or 1, so the test is the compare, or with EQ its opposite), or the one
+        // right before the branch. A test that fused its constant has an integer's, and a compare's operands are of
+        // one class (validation's rule), so the test's first operand is the value the compare three back made.
         if ((kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE) && i >= 1 && !here && kinds[i - 1] >= BUSTER_TYPED_EQ &&
             kinds[i - 1] <= BUSTER_TYPED_GE)
         {
             const bool when = kind == BUSTER_TYPED_BRANCH_TRUE;
             bool tested = i >= 3 && !before && !tier0_label(labels, i - 2) && (kinds[i - 1] == BUSTER_TYPED_NE || kinds[i - 1] == BUSTER_TYPED_EQ) &&
                           entries->variants[i - 1] == BUSTER_TIER0_VARIANT_CONST && values[i - 2] == 0 && kinds[i - 3] >= BUSTER_TYPED_EQ &&
-                          kinds[i - 3] <= BUSTER_TYPED_GE && entries->key_classes[i - 1] == classes[i - 3] &&
-                          entries->variants[i - 3] <= BUSTER_TIER0_VARIANT_HOME_HOME;
+                          kinds[i - 3] <= BUSTER_TYPED_GE && entries->variants[i - 3] <= BUSTER_TIER0_VARIANT_HOME_HOME;
             if (tested)
             {
                 const bool sense = when != (kinds[i - 1] == BUSTER_TYPED_EQ);
@@ -13667,15 +13667,15 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         const uint64_t compare_1 = _mm512_test_epi8_mask(flags_1, _mm512_set1_epi8(BUSTER_TIER0_KIND_COMPARE));
         const uint64_t compare_fusable = _mm512_cmple_epu8_mask(variants_1, tier0_variant(BUSTER_TIER0_VARIANT_HOME_HOME)) &
                                          _mm512_test_epi8_mask(compare_properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_BRANCH));
-        // The compare three back, which CONST 0 of its class and NE or EQ test: its value is 0 or 1, so the test is the
-        // compare, or with EQ its opposite.
+        // The compare three back, which CONST 0 and NE or EQ test: its value is 0 or 1, so the test is the compare, or
+        // with EQ its opposite.
         const __m512i flags_3 = tier0_lookup(tier0_vector_kind_flags, kinds_3);
         const __m512i tested_row = tier0_lookup(tier0_vector_rows, kinds_3);
         const __m512i tested_properties = tier0_lookup256(tier0_vector_properties, _mm512_or_si512(_mm512_slli_epi16(tested_row, 4), key_classes_3));
         const uint64_t equal_1 = _mm512_cmpeq_epi8_mask(kinds_1, _mm512_set1_epi8(BUSTER_TYPED_EQ));
         const uint64_t test_1 = equal_1 | _mm512_cmpeq_epi8_mask(kinds_1, _mm512_set1_epi8(BUSTER_TYPED_NE));
         const uint64_t tested = lanes & valid_3 & branch & ~labels & ~labels_1 & ~labels_2 & test_1 & constant_variant_1 & tier0_bits_back(bits->zero, block, 2) &
-                                _mm512_test_epi8_mask(flags_3, _mm512_set1_epi8(BUSTER_TIER0_KIND_COMPARE)) & _mm512_cmpeq_epi8_mask(key_classes_1, classes_3) &
+                                _mm512_test_epi8_mask(flags_3, _mm512_set1_epi8(BUSTER_TIER0_KIND_COMPARE)) &
                                 _mm512_cmple_epu8_mask(variants_3, tier0_variant(BUSTER_TIER0_VARIANT_HOME_HOME)) &
                                 _mm512_test_epi8_mask(tested_properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_BRANCH));
         const uint64_t fused_branch = lanes & valid_1 & branch & ~labels & compare_1 & compare_fusable & ~tested;
