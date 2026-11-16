@@ -151,8 +151,12 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
                   (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0 ||
                   (reader->type_tag_attributes && check_type_tags_pending(reader->output, declaration) != NULL)))
     {
-        check_input_rare_claim(reader, &reader->incomplete_array_types[declaration]);
-        reader->incomplete_array_types[declaration] = incomplete ? type : 0;
+        const TypeId incomplete_type = incomplete ? type : 0;
+        if (BUSTER_CHECK_RARE(reader, incomplete_array_types, declaration) != incomplete_type)
+        {
+            check_input_rare_claim(reader, &reader->incomplete_array_types[declaration]);
+            reader->incomplete_array_types[declaration] = incomplete_type;
+        }
         check_input_rare_claim(reader, &reader->initializer_finish_next[declaration]);
         reader->initializer_finish_next[declaration] = reader->initializer_finish_heads[end];
         reader->initializer_finish_heads[end] = declaration;
@@ -312,8 +316,8 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
     TypeTable* types = reader->types;
     const uint32_t assignment = begin - 1;
     // Deduced through its declarator (check_input_c23_auto_deduce): C23's auto's, or __auto_type's, whose errors name it.
-    const bool deduced_declarator = (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_DEDUCED) != 0;
-    const bool gnu = (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_GNU_AUTO) != 0;
+    const bool deduced_declarator = (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0;
+    const bool gnu = (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_GNU_AUTO) != 0;
     const bool c23 = deduced_declarator && !gnu;
     uint32_t self = BUSTER_CHECK_NONE;
     for (uint32_t token = begin; token < end && self == BUSTER_CHECK_NONE; token += 1)

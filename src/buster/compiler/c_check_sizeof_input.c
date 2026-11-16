@@ -40,7 +40,7 @@ static void check_input_sizeof_prepare(CheckInputReader* reader)
             {
                 continue;
             }
-            TypeId requested = reader->query_types[token] != 0 ? reader->query_types[token] : reader->sizeof_types[token];
+            TypeId requested = reader->query_types[token] != 0 ? reader->query_types[token] : BUSTER_CHECK_RARE(reader, sizeof_types, token);
             const uint32_t close = reader->ends[token];
             if (requested == 0 && close < count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_SIZEOF && parser->tree.parents[close] == token)
             {
@@ -52,7 +52,11 @@ static void check_input_sizeof_prepare(CheckInputReader* reader)
             {
                 requested = check_input_sizeof_operand(reader, token);
             }
-            reader->sizeof_types[token] = requested;
+            if (BUSTER_CHECK_RARE(reader, sizeof_types, token) != requested)
+            {
+                check_input_rare_claim(reader, &reader->sizeof_types[token]);
+                reader->sizeof_types[token] = requested;
+            }
             if (requested != 0 && !check_input_vla_runtime_size(reader->types, requested))
             {
                 const uint32_t end = reader->ends[token] + 1;
