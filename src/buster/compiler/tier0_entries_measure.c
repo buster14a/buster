@@ -32,12 +32,12 @@
 // before it and which of the four are jump targets; a class of each one's value by magnitude, as 64 bits and as its own
 // class's width (zero, one, minus one, 8 bits, 32 bits, more); a pointer addition's element size as a SIB scale; whether
 // a fused constant fits its consumer (with the element's size, the product) and that product's class by magnitude;
-// whether a store's local is the one three back; each named local's home (a general or an XMM register, a slot, an object); the two depths; the symbol's
-// access; whether the entry is the function's last; the function's result; a call's counts of register and stack
-// arguments, its flags, its result and which of its first eight arguments are narrow integers; a copy's bytes; and the
-// frame's kind with the function's rare classes. No input is a value, a displacement, a symbol or a table's row. Three
-// more are the fusion's own answers (its key's kind and class and its variant): lane arithmetic on the others, which
-// Tier 0 makes today.
+// whether a store's local is the one three back; each named local's home (a general or an XMM register, a slot, an
+// object); the two depths; the symbol's access; whether the entry is the function's last; the function's result; a
+// call's counts of register and stack arguments, its flags, its result and which of its first eight arguments are
+// narrow integers; a copy's bytes; and the frame's kind with the function's rare classes. No input is a value, a
+// displacement, a symbol or a table's row. Three more are the fusion's own answers (its key's kind and class and its
+// variant): lane arithmetic on the others, which Tier 0 makes today.
 //
 // The count, a head's kind at a time, twice: over the raw inputs alone (`keys=raw`), and with the fusion's three
 // offered (`keys=fused`). Two figures are counted of a set of inputs. Its conflicts: the entries in keys with two
@@ -1001,8 +1001,8 @@ struct Tier0CensusKind
     uint32_t distinct;
 };
 
-// The kind's keys among the inputs of `allowed` (tier0_entries_measure.c's header has the rule), over its distinct samples
-// (`samples`, `count` of them, each with its groups' entries). `entries` is the kind's.
+// The kind's keys among the inputs of `allowed` (tier0_entries_measure.c's header has the rule), over its distinct
+// samples (`samples`, `count` of them, each with its groups' entries). `entries` is the kind's.
 static void tier0_census_search(Tier0CensusSearch* search, const Tier0CensusSample* samples, uint32_t count, uint64_t allowed, uint64_t entries, Tier0CensusRow* row)
 {
     // The allowed inputs that vary over the kind's samples.

@@ -7,9 +7,10 @@
 // exception; and an odd group that a second input sets apart is decided at two inputs and one exception at one. Then
 // the census of the fixture under the fixture root, tests/tier0-entries/entries.c: every typed entry is in one group,
 // every record an entry's or the frame's, every head that takes a template has its template's records, the call and
-// the copy are deferred by their kind and one division by its depth, and a compare with zero and its branch are one
-// group of three entries. Its report must have the gate's lines, the totals last. Include after tier0_entries_measure.c; test-checker calls this
-// through its forward declaration.
+// the copy are deferred by their kind and one division by its depth, a compare with zero and its branch are one group
+// of three entries, and two pointer additions differ by their scaled constants' class alone. Its report must have the
+// gate's lines, the totals last. Include after tier0_entries_measure.c; test-checker calls this through its forward
+// declaration.
 #ifndef BUSTER_TIER0_ENTRIES_MEASURE_TEST_INCLUDED
 #define BUSTER_TIER0_ENTRIES_MEASURE_TEST_INCLUDED
 

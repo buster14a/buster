@@ -435,7 +435,7 @@ to one allowed CPU, where a pull request changes what it measures.
 [preprocessor options] file... [--next [preprocessor options] file...]...`
 (`tier0_entries_measure.c`; about 25 s for `sqlite3.c`, most of it the search)
 counts what a typed entry's records depend on: the one-core path's step 4's
-first piece ([the page](../one-core-path.md#step-4-a-census-of-tier-0s-row)).
+first piece ([the page](../one-core-path.md#step-4s-first-piece-a-census-of-tier-0s-row)).
 It times nothing and changes no compile. The functions are the ones `-c`
 lowers, as `benchmark-backend-source` takes them, compiled by `tier0_compile`
 as it is. `--next` starts another set of files with options of their own,
