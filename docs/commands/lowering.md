@@ -866,7 +866,13 @@ the fronts leave empty, and, where the lean front's stack is full, the records
 the stack lost made by the flat front alone. A third text takes it past its
 rings' reach (`node_flat_test_reach`): a condition whose body is 13,500
 tokens, whose record the flat front alone lacks, then a call, a sum and a
-conditional of a `sizeof`, whose consumers keep their places empty.
+conditional of a `sizeof`, whose consumers keep their places empty; and two
+declarations whose `;` the flat front leaves because its first value is past
+the reach, a braced initializer of four values (one's consumer over 255
+records after it, one's four records after it) and 9,000 adjacent strings.
+Their near values have a consumer in the lean front alone, which the
+comparison takes for no difference where that consumer is a record only the
+lean front made.
 C and X run at
 reader time too (`BUSTER_NODE_FRONT_SWEEPS`) in the `--scalar` and the
 `-funsigned-char` runs, in a fourth run of the fixture without warnings (where

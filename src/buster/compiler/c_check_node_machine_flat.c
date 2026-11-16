@@ -1191,6 +1191,17 @@ static void node_flat_compare(NodeFlat* flat, const NodeFront* front, const Chec
     uint64_t only[BUSTER_NODE_FLAT_RECORDS / 64] = { 0 };
     uint32_t orphans[256];
     uint32_t orphan_count = 0;
+    // Their mirror: the records only the lean front made, a bit a record of its own, and the records whose consumer
+    // the flat front doesn't have though the lean front does. Such a consumer must be one only the lean front made:
+    // the flat front left the token that takes the value, because another of its values is past the rings' reach,
+    // where the lean front's stack keeps a value however far its consumer is (a declaration's `;` after a braced
+    // initializer of long values, or after thousands of adjacent strings). A consumer further than the byte holds is
+    // matched by count with the far operands of the records only the lean front made.
+    uint64_t lean_only[BUSTER_NODE_FRONT_RECORDS / 64] = { 0 };
+    uint32_t widows[256];
+    uint32_t widow_count = 0;
+    uint32_t far_takers = 0;
+    uint32_t last_far_taker = 0;
     uint32_t theirs = front->made;
     uint32_t mine = flat->chunk_ordinal;
     while (theirs < front->count || mine != flat->ordinal)
@@ -1212,6 +1223,13 @@ static void node_flat_compare(NodeFlat* flat, const NodeFront* front, const Chec
         }
         else if (their_position < my_position)
         {
+            lean_only[theirs >> 6 & (BUSTER_NODE_FRONT_RECORDS / 64 - 1)] |= UINT64_C(1) << (theirs & 63);
+            for (uint32_t k = 0; k < 3; k += 1)
+            {
+                const bool far = front->distances[k][theirs] == BUSTER_NODE_FRONT_FAR;
+                far_takers += far;
+                last_far_taker = far ? theirs : last_far_taker;
+            }
             shadow->flat_lean_only += 1;
             theirs += 1;
         }
@@ -1281,6 +1299,12 @@ static void node_flat_compare(NodeFlat* flat, const NodeFront* front, const Chec
                     orphans[orphan_count] = mine;
                     orphan_count += 1;
                 }
+                else if (up == 0 && record->place == 0 && lean != 0 && widow_count < BUSTER_ARRAY_LENGTH(widows))
+                {
+                    // The flat front has no consumer for it: checked below too.
+                    widows[widow_count] = theirs;
+                    widow_count += 1;
+                }
                 else
                 {
                     const uint32_t empties = up != 0 ? node_flat_empties_between(flat, mine, mine + up) : 0;
@@ -1329,6 +1353,21 @@ static void node_flat_compare(NodeFlat* flat, const NodeFront* front, const Chec
         if (!flat_only)
         {
             node_flat_differs(shadow, record->token, BUSTER_NODE_FLAT_FIELD_CONSUMER);
+        }
+    }
+    uint32_t far_widows = 0;
+    for (uint32_t k = 0; k < widow_count; k += 1)
+    {
+        const uint32_t operand = widows[k];
+        const uint32_t up = front->ups[operand];
+        const uint32_t consumer = operand + up;
+        const bool far = up == BUSTER_NODE_FRONT_FAR;
+        far_widows += far;
+        const bool left = far ? far_widows <= far_takers && last_far_taker >= operand + BUSTER_NODE_FRONT_FAR :
+                                consumer < front->count && (lean_only[consumer >> 6 & (BUSTER_NODE_FRONT_RECORDS / 64 - 1)] >> (consumer & 63) & 1) != 0;
+        if (!left)
+        {
+            node_flat_differs(shadow, front->tokens[operand], BUSTER_NODE_FLAT_FIELD_CONSUMER);
         }
     }
 }

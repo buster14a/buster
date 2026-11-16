@@ -1347,9 +1347,13 @@ static bool node_front_test_limits(const char* directory, bool boundaries, uint8
 //   - four whose bodies are over 255 records, one at least within a chunk: the consumer is found by its place, not by
 //     the byte;
 //   - a sizeof alone, a declaration of two initializers, one of them left (the other's discard is empty with it), a
-//     literal the front leaves under an operator, and a switch.
-// Whether the long body's condition is the one record the flat front lacks, every other record is equal, and the left
-// values' consumers kept their places, empty.
+//     literal the front leaves under an operator, and a switch;
+//   - two declarations whose `;` the flat front leaves, its first value past the rings' reach, where the lean front
+//     makes the `;`'s discards: a braced initializer of four values, and 9,000 adjacent strings. A value near the `;`
+//     has a consumer in the lean front and none in the flat one, within the byte (the fourth value's, and the
+//     strings') and past it (the third's): no difference, where that consumer is a record only the lean front made.
+// Whether the long body's condition and those two declarations' five discards are the six records the flat front lacks,
+// every other record is equal, and the left values' consumers kept their places, empty.
 static bool node_flat_test_reach(const char* directory, bool first, char** options, uint32_t option_count)
 {
     char path[512];
@@ -1389,6 +1393,31 @@ static bool node_flat_test_reach(const char* directory, bool first, char** optio
         length += (uint32_t)snprintf(text + length, capacity - length,
                                      "    sizeof(a);\n    int p = a, q = (int)sizeof(a) + b;\n    x += p + q;\n    x = a + '\\n';\n    switch (a)\n    {\n        default:\n"
                                      "            x++;\n    }\n    return x;\n}\n");
+        // A declaration's `;` whose first value is past the rings' reach and whose last ones are not: the flat front
+        // leaves it, and the lean front, whose stack holds every value, makes its discards. A braced initializer of
+        // four values: the second 4,200 terms long, the third's consumer over 255 records after it, the fourth's four
+        // records after it. And 9,000 adjacent strings, whose one value is the first's.
+        length += (uint32_t)snprintf(text + length, capacity - length, "static const unsigned far_values[] = { 1, 0");
+        for (uint32_t round = 0; round < 420 && length + 128 < capacity; round += 1)
+        {
+            length += (uint32_t)snprintf(text + length, capacity - length, " + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0\n");
+        }
+        length += (uint32_t)snprintf(text + length, capacity - length, ", 2");
+        for (uint32_t round = 0; round < 6 && length + 128 < capacity; round += 1)
+        {
+            length += (uint32_t)snprintf(text + length, capacity - length, " + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0\n");
+        }
+        length += (uint32_t)snprintf(text + length, capacity - length, ", 3");
+        for (uint32_t round = 0; round < 14 && length + 128 < capacity; round += 1)
+        {
+            length += (uint32_t)snprintf(text + length, capacity - length, " + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0\n");
+        }
+        length += (uint32_t)snprintf(text + length, capacity - length, " };\nstatic const char far_strings[] =\n");
+        for (uint32_t round = 0; round < 900 && length + 128 < capacity; round += 1)
+        {
+            length += (uint32_t)snprintf(text + length, capacity - length, " \"a\" \"a\" \"a\" \"a\" \"a\" \"a\" \"a\" \"a\" \"a\" \"a\"\n");
+        }
+        length += (uint32_t)snprintf(text + length, capacity - length, ";\nunsigned far_use(void) { return far_values[0] + (unsigned)far_strings[0]; }\n");
     }
     valid = valid && length + 256 < capacity && parse_test_write(path, text, length);
     NodeShadow shadow = {
@@ -1402,8 +1431,8 @@ static bool node_flat_test_reach(const char* directory, bool first, char** optio
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
     // In a build without the vector paths the reader's walk is the scalar one, and the fronts must make nothing.
     const bool fronts = BUSTER_HOST_VECTOR != 0;
-    const bool same = fronts ? shadow.front_differences == 0 && shadow.flat_differences == 0 && shadow.flat_beyond == 1 && shadow.flat_lean_only == 1 &&
-                                   shadow.flat_only == 0 && shadow.flat_unread == 0 && shadow.flat_compared + 1 == shadow.front_records && shadow.flat_empties >= 8 :
+    const bool same = fronts ? shadow.front_differences == 0 && shadow.flat_differences == 0 && shadow.flat_beyond == 3 && shadow.flat_lean_only == 6 &&
+                                   shadow.flat_only == 0 && shadow.flat_unread == 0 && shadow.flat_compared + 6 == shadow.front_records && shadow.flat_empties >= 8 :
                                shadow.front_units == 0 && shadow.flat_compared == 0 && shadow.flat_records == 0;
     if (!valid || !same)
     {

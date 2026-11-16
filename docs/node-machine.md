@@ -2507,6 +2507,19 @@ and 0.84, the records 1.44 and 1.11, the empty records 0.03.
   front makes four records the flat one doesn't: values further back than the
   rings' 8,192 positions (a condition before a very long body). The flat front
   leaves 4,656, 2,255 and 95,511 places empty.
+- **On the compiler's own source too, once the comparison knew the reach's
+  other face.** A declaration's `;` takes every value of its initializer.
+  Where the first is past the rings' reach the flat front leaves the `;`, and
+  the lean front, whose stack holds a value however far its consumer is,
+  makes its discards. A value near that `;` then has a consumer in the lean
+  front and none in the flat one. `main.c` has two: the 808 KB string of
+  `c_unicode_names.inc`, and `branch_sizing.c`'s table of sixteen long
+  constant expressions. The comparison read each as a difference; it now
+  takes a consumer only the lean front made as it took one only the flat
+  front made. On `main.c` the lean front makes 18 records the flat one
+  doesn't, 17 of them those two declarations' discards, and the flat front
+  35,340 the lean one doesn't: discards of tables with more values than the
+  lean front's stack holds.
 - **The stack was not the cost.** Without it the front is 14% faster on
   `sqlite3.c` (its pass 52.9 cycles, 113 instructions and 0.48 mispredicted
   branches a token it visits). Making the hops' positions independent of the
