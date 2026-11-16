@@ -130,7 +130,12 @@ requirements. [Command index](README.md).
   (`PR_SET_PDEATHSIG`), so that its parent's wait returns before `exit_mmap` runs. By default only where PID 1 reaps
   orphans (`lane_exit_reaped`: it blocks, ignores or catches `SIGCHLD`), since one that never does would keep each
   helper as a zombie; `BUSTER_EXIT_HELPER=1` starts it wherever it can, `=0` never, and a sanitizer build never does.
-  The exit status, the output's bytes and the exit handlers are as without it.
+  The exit status, the output's bytes and the exit handlers are as without it. As it exits, the command reads a page
+  that only a huge page of the executable's code maps (`lane_exit_probe`, a read timed by the time-stamp counter, no
+  system call where it is mapped); where none maps it, the helper, once the command has gone, looks at how the process
+  mapped the executable's code and read-only data and asks the kernel for huge pages of the 2 MB ranges it used
+  (#2873, `lane_exit_look`; `BUSTER_EXECUTABLE_HUGE_PAGES=0` turns both off): the
+  [build guide](build.md#the-executable-in-huge-pages) has what that takes and saves.
   The checker reads
   a unit in source order; `--deferred-bodies` reads its function bodies apart on
   those lanes too (#113's deferred reader, `check_input_deferred_compile`), where

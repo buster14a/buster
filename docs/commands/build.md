@@ -1271,14 +1271,18 @@ that fails at any compile.
 
 ## The start's code order
 
-A small compile's code is spread over the executable: on the 9700X, an empty
+A compile's code is spread over the executable: on the 9700X, an empty
 file's `-fsyntax-only` ran 185 functions in 52 of `.text`'s 64 KB windows, the
 stretch the kernel maps at a fault on a file's pages (fault-around), and
-`hello.c`'s `-c` 532 in 106 (#1444). Each window it touches is a fault. So
-where lld links the static executable, the functions that small compiles run
+`hello.c`'s `-c` 532 in 106 (#1444). Each window it touches is a fault, and
+its 16 pages are unmapped again at the exit. So
+where lld links the static executable, the functions that compiles run
 go first, together, in a section of their own before `.text`
 (`.text.buster_start`), and the C library's ones right after it, first in
-`.text`. The checker's own code stays in its section, `.text.buster_checker`
+`.text`. They are what every compile measured runs, exactly (#2873): the
+four small commands' functions, then those of musl's units and of
+`sqlite3.c`'s `-c`, 1,432 functions of the executable's 13,573, 4.2 MB of
+code. The checker's own code stays in its section, `.text.buster_checker`
 (one section of each unit, which starts on a page, `main.c`'s pragmas, #502),
 which held 18 of the empty file's windows and 60 of `hello.c`'s; the script
 puts every unit's together, between `.text.buster_start` and `.text`, and
@@ -1290,8 +1294,11 @@ build's parallel split, put the list's functions of that section first in it.
   one, whose name is the link's alone, or the C library's. The functions go by
   the smallest command that ran each, an empty file's `-fsyntax-only` first,
   then what `-E -P`, `tiny.c`'s `-c` and `hello.c`'s `-c` add, each command's
-  in the order the profiled build had them: the smallest compile's code is
-  together, and each larger one's follows it.
+  in the order the traced build had them: the smallest compile's code is
+  together, and each larger one's follows it. Then what musl's 1,336 units'
+  `-c` add, a process each, by how many of the units ran each function, most
+  first: 415 functions run in every unit, and what few units run comes last.
+  Then what `sqlite3.c`'s `-c` adds.
 - **Each unit's copy apart:** every unit compiles a copy of the static helpers
   it uses, and a symbol ordering file, which names symbols, moves every copy:
   one built so faulted more (75 times against 69 in `.text`, #1444's opening
@@ -1330,7 +1337,7 @@ build's parallel split, put the list's functions of that section first in it.
   before that section's first unlisted function, in the list's order, before
   it plans the parts; every other function keeps its order, and a list that
   moves nothing fails the split, as a stale one would. The checker's unit
-  puts 269 functions, 1.95 MB of its 5.4 MB, there. Release's single
+  puts 2.8 MB of its 5.6 MB there (1.95 MB with the small commands' list). Release's single
   compiles (`BUSTER_BUILD_DEFINES`, `BUSTER_PGO`, so `BUSTER_CHECKER_OFFSET`'s
   builds too) keep the section in source order.
 - **Shifts:** a shifted link's padding (`.text.buster_shift_padding`, above)
@@ -1379,23 +1386,149 @@ and 1.5%; `-E -P`, `main.c`'s `-fsyntax-only` and `sqlite3.c`'s `-c` stayed
 within theirs ([the
 record](https://github.com/buster14a/buster-performance/tree/256c516de9f30d80da1a750b80a98909c005c138/docs/measurements/checker-start-order-1444-2026-11-14)).
 
-Refresh the list when small compiles' code has moved, from a Release build of
-the tree as the benchmark builds are, on the 9700X under its lock: sample each
-control, a few hundred processes of each of an empty file's `-fsyntax-only`
-and `-E -P`, `tiny.c`'s `-c` and `hello.c`'s `-c`, each process under a `perf
-record -b -e instructions:u -c PERIOD` of its own with a different period
-(4999 + 2i for the i-th), and `perf script -F ip,brstack` of them all. A
-compile is deterministic: under one period every process is sampled at about
-the same instructions, and the short functions those samples miss stay out
-of the list in every run; the 2026-11-13 list, sampled so, left out functions
-that an empty file's compile runs. Take the executable's symbols (`readelf
--sW`), then write the list with `start-order` below the header, which names
-the revision, the host and the commands, giving the samples smallest command
-first, the order it groups them by:
+With the list of what real compiles run (#2873), from fresh copies of each
+executable, every compile on CPU 2 counted as a whole, main `1c6cc8ab`
+against the list alone, the page cache holding 4 KB pages
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/executable-pages-2873-2026-11-16)):
+`sqlite3.c`'s `-c` took 45 fewer faults of its 5,899 and 1.5 M fewer kernel
+cycles of 86.3 M (17 of 21 rounds lower); musl's units, a process each, 38
+fewer faults a unit, 4.6% fewer kernel cycles and 1.1% fewer user cycles;
+the four small commands 2.2% to 3.8% fewer kernel cycles. The instruction TLB
+missed 5% to 10% less.
+
+Refresh the list when compiles' code has moved, from a Release build of
+the tree as the benchmark builds are, on the 9700X under its lock: trace each
+command with `start-trace`, which runs it with a breakpoint at the entry of
+every function of its executable, each removed as it is reached, and appends
+the addresses of the functions it ran to a file, a trace a command. Each
+function stops the command once, so `sqlite3.c`'s `-c` takes 0.16 s traced and
+all of musl's units 32 s. The commands are an empty file's `-fsyntax-only`
+and `-E -P`, `tiny.c`'s `-c` and `hello.c`'s `-c`, each into a file of its
+own; the `-c` of each of the frozen corpus's units of musl, a process each,
+all into one file; and `sqlite3.c`'s `-c`:
 
 ```sh
-./build/compiler start-order symbols.txt syntax.txt preprocess.txt tiny.txt hello.txt > body.txt
+./build/compiler start-trace syntax.txt ./build/compiler -fsyntax-only empty.c
+./build/compiler start-trace musl.txt ./build/compiler OPTIONS... -c UNIT.c -o /dev/shm/unit.o
 ```
+
+Take the executable's symbols (`readelf -sW`), then write the list with
+`start-order` below the header, which names the revision, the host and the
+commands, giving the files smallest command first, the order it groups them
+by. A file of several traces has its functions by how many of them ran each:
+
+```sh
+./build/compiler start-order symbols.txt syntax.txt preprocess.txt tiny.txt hello.txt musl.txt sqlite.txt > body.txt
+```
+
+perf's samples (`perf record -b -e instructions:u -c PERIOD`, `perf script
+-F ip,brstack`), which made the list before, are still read. They miss a
+function that runs briefly: a compile is deterministic, so under one period
+every process is sampled at about the same instructions, and even with a
+period a process (4999 + 2i for the i-th of 300) the list lacked 86 to 111 of
+the functions a trace of each small command finds, and named 35 that no small
+command's trace enters, on a tree two days newer.
+
+## The executable in huge pages
+
+A process maps its executable from the page cache as it first runs or reads
+it, 16 pages of 4 KB a fault, and its exit unmaps each page again. A unit of
+musl's compiled by a process of its own took 186 faults in the executable,
+140 of them in its code and read-only data (#2873's census); `-c sqlite3.c`
+took 216, 151 of them there. Where the page cache holds
+a 2 MB range of the file as one huge page, and the range starts on a 2 MB
+boundary in memory too, one fault maps all of it, the exit unmaps it at
+once, and the instruction TLB holds it in one entry (#2873).
+
+- **The link:** a static link places every segment as far from its bytes in
+  the file as a multiple of 2 MB (`-z max-page-size=0x200000`, any linker),
+  and lld's start order script starts `.text.buster_start` on a 2 MB
+  boundary (`ALIGN`), so that the code compiles run is in whole 2 MB ranges
+  from its first byte: three of them hold it. Before, the text was a page off
+  its place in the file, and the kernel could never map it by huge pages. The
+  segments' contents are the same; the file is up to 2 MB longer, and the
+  addresses between segments skip to the next 2 MB.
+- **The asking:** the kernel makes a huge page of a file's pages for a process
+  that lives long enough for `khugepaged` to reach it, which a compile
+  doesn't, or when asked (`MADV_COLLAPSE`, Linux 6.1, of a kernel with
+  `CONFIG_READ_ONLY_THP_FOR_FS`). So the exit helper asks (`lane_exit_look`,
+  `lane.c`), after its command has gone, which no compile waits for. The
+  huge pages stay in the page cache, for every later process, until the
+  kernel reclaims them or the file is written: an executable's first runs
+  ask, and the later ones find them.
+- **The probe:** the link script leaves the first 128 KB of the code it
+  places empty (`buster_start_probe`), two windows of the kernel's
+  fault-around that no fault of a process's own maps. A page of them is
+  mapped only where a huge page maps the whole range. A process reads a byte
+  of the first window as it exits, between two readings of the time-stamp
+  counter (`lane_exit_probe`): a read that takes fewer ticks than any page
+  fault (128) found its page mapped, and then the process does nothing more:
+  no system call, and the exit helper it would have had. On the 9700X a
+  mapped page's read takes 1 tick, the two readings side by side, and a
+  faulting one's about 3,000. A slower read faulted, or was interrupted; the
+  kernel then says whether a page of the second window, which nothing reads,
+  is mapped (`move_pages`, as a query), and where it isn't, the helper looks.
+  With the look on and off on one copy of the executable, musl's units, a
+  process each, read the same kernel cycles on the 9700X (0.04% apart over
+  15 rounds, 6 of them lower with it off), and a process ran 42 instructions
+  for its probe; a probe that was the helper's query of the kernel each time
+  read 4,900 kernel cycles a process (0.12%, 11 of 15 rounds).
+- **The look:** where the probe's page isn't mapped (a new executable, or one
+  the kernel reclaimed), the helper first asks the kernel to collapse every
+  range of the code the start order places past the probe's (to
+  `buster_start_end`), whatever this process ran of it. Then it reads how
+  the process mapped each read-only segment of the executable
+  (`PAGEMAP_SCAN` of `/proc/self/pagemap`, Linux 6.7) and asks for each
+  whole 2 MB range with 64 or more pages mapped by 4 KB pages. A range the
+  process touched less stays as it is: a huge page would hold 2 MB of the
+  file in memory for a few pages' use. The probe's range is asked for last,
+  so that its huge page says the others were made. On the 9700X a new
+  executable's first look made one range of six and its second the rest, 7 M
+  to 13 M kernel cycles of the helper's over those two runs (about 2 ms).
+  One process in 64 looks whatever its probe says, by the pages it mapped,
+  for the ranges another kind of command uses and those the kernel reclaimed
+  apart from the probe's.
+- **A file just written** (a build's, an install's) is collapsed once its
+  pages have been written back: until then the kernel refuses, and each run
+  asks again (a copy written on the 9700X was in huge pages after its third
+  run). A copy by reflink has no page to write.
+- **Where not:** a process on a kernel before 6.7, or with huge pages off (a
+  virtual machine, `BUSTER_HUGE_PAGES=0`: `arena_executable_huge_pages`),
+  neither probes nor looks, nor does one without an exit helper (a
+  sanitizer's build, a PID 1 that doesn't reap, a command whose lanes
+  started threads), nor one started with `BUSTER_EXECUTABLE_HUGE_PAGES=0`. A
+  kernel that makes no huge page of a file's pages refuses the helper's
+  first call, which ends its look: each process there pays its probe's
+  fault, the query and that call. An executable another linker placed has
+  its segments at the right distance, but its code from wherever `.text`
+  starts and no probe: one process in 64 of it looks, and no other.
+- **Memory:** a process's resident set counts a huge page whole, so
+  `-c sqlite3.c`'s peak reads 5.7 MB more (241,656 KB against 235,780) and
+  an empty file's `-c` 13,780 KB against 8,004; the pages are the page
+  cache's, 12 MB of the executable shared by every process of it, and no
+  process's own memory grows.
+
+On the 9700X, main `1c6cc8ab` against this with the start order above, from
+fresh copies of each executable after warm-up runs, in ABBA order, every
+compile on CPU 2 counted as a whole, its exit's teardown and its helper
+included ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/executable-pages-2873-2026-11-16)).
+Medians, and the paired difference's median:
+
+| | kernel cycles | | user cycles | | page faults |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `-c sqlite3.c`, 21 rounds | 86.18 → 83.99 M | −2.30 M (−2.7%) | 595.9 → 592.9 M | −0.5% | 5,899 → 5,763 |
+| musl's 1,336 units, a process each, 5 rounds | 6,239 → 5,439 M | −12.8% | 5,265 → 5,071 M | −3.6% | 906,362 → 752,195 |
+| the same units as one command | 995.9 → 995.4 M | −0.05% | 2,826 → 2,794 M | −1.0% | 275,776 → 275,634 |
+| an empty file's `-fsyntax-only`, 100 runs a count | 230.1 → 204.6 M | −10.6% | 62.5 → 58.8 M | −6.4% | 33,211 → 28,307 |
+| an empty file's `-E -P` | 186.1 → 169.8 M | −8.1% | 48.5 → 46.4 M | −4.8% | 25,315 → 22,714 |
+| `tiny.c`'s `-c` | 287.9 → 244.6 M | −14.5% | 86.7 → 80.0 M | −7.7% | 40,211 → 32,700 |
+| `hello.c`'s `-c` | 421.4 → 376.7 M | −10.8% | 368.9 → 358.1 M | −3.1% | 62,389 → 53,381 |
+
+The counts hold the harness's own processes, the same on both sides. The
+instruction TLB misses 68% to 95% less (48% in `-E -P`). The objects are the
+same bytes. What the executable still takes is its data: of `-c sqlite3.c`'s
+80 faults in it, 20 are in `.data.rel.ro`, 21 in the baked tables and 22 in
+`.bss`, where the text took 121 and the read-only data 29 before.
 
 ## Experiments
 

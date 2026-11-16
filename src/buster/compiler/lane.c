@@ -3540,9 +3540,9 @@ struct LaneExitSegment
 // each of the probe's two, which cmake/BusterStartOrder.cmake leaves empty.
 #define BUSTER_LANE_EXIT_WINDOW_BYTES UINT64_C(0x10000)
 // Ticks of the time-stamp counter that no page fault returns in. A fault on a file's page takes the kernel's entry, its
-// mapping of the pages around it and its return: FAULT_CYCLES_PLACEHOLDER. The counter ticks at
-// a processor's base rate, which is no less than a quarter of its fastest cycles'. A read of a mapped page takes the two
-// readings' own time, TOUCH_TICKS_PLACEHOLDER: the second reading doesn't wait for the read.
+// mapping of the page and its return: about 3,000 ticks on the 9700X for one page (test-lanes says). The counter ticks
+// at a processor's base rate, no less than a quarter of its fastest cycles'. A read of a mapped page takes the two
+// readings' own time, 1 tick on the 9700X: the second reading doesn't wait for the read.
 #define BUSTER_LANE_EXIT_FAULT_TICKS 128
 // The signal that tells a helper with segments to look at that its caller has gone: blocked, and waited for.
 #define BUSTER_LANE_EXIT_GONE SIGUSR1

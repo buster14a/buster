@@ -409,6 +409,10 @@ before `exit_mmap` runs. It starts only where PID 1 reaps orphans
 (`lane_exit_reaped`, a read of `/proc/1/stat` of about 3 µs), or by
 `BUSTER_EXIT_HELPER=1`: a PID 1 that never waits, as in some containers and
 virtual machines, would keep each helper as a zombie, a process ID per compile.
+Since #2873, where the exiting command finds that no huge page maps the
+executable's code, the helper also looks, once the command has gone, at how
+the process mapped the executable's own pages, and asks the kernel for huge
+pages of the ranges it used ([the build guide](commands/build.md#the-executable-in-huge-pages)).
 With it the one-line `-c`'s process took 0.31% longer than main's run one at a
 time (`time-runs`, the floor −0.23%), a `stdio.h` file's 1.43% less, and an empty
 file's `-fsyntax-only`, which never had lanes, 3.5% less. 400 one-line compiles in
