@@ -236,6 +236,40 @@ after which no integer CONST precedes a CONVERT on either lowering, and the node
 templates' entries are the tasks'; and the conversions that don't fold, a
 join's to `double` among them.
 
+## Conditions as branches (#2883)
+
+A statement's condition (`if`, `while`, `for`, `do`) and a conditional's
+condition whose expression, under its `!`s, is an `&&` or `||` are written as
+branches to the condition's own targets (`check_lower_branch`), not as a value
+that a join makes 0 or 1 and the branch tests again. A statement's `CONDITION`,
+popped with its control's branch under it, takes that branch off the stack and
+pushes a `CHECK_LOWER_BRANCH` task with its target in its place
+(`check_lower_condition_branches`); `check_lower_logical` pushes one in place of
+a conditional's test of its condition. Popped, an `&&` where false and an `||`
+where true branch to the target on either operand, an `&&` where true and an
+`||` where false branch on their first operand to a label of their own past the
+second, and a `!` swaps the targets. Each operand that is no `!`, `&&` or `||`
+is its value, its truth and the branch, as `check_lower_logical` tests its
+operands, so that the order and the evaluation of the operands are C's.
+`check_lower_branch_operator` takes an operator of an `int` value that the
+expansion would expand (no constant), and an `&&` or `||` whose first operand's
+truth the program doesn't know; a condition without an `&&` or `||` (`if (!p)`),
+GNU's `a ?: b`, and `&&` and `||` used as values, an `&&` that is an `||`'s
+first operand among them, are written as before. The `CONDITION` stays the
+popped root of the statement's expression, which owns the branches; its `&&`,
+`||` and `!` are never popped, and its leaves are popped under it. The node
+machine leaves such a condition, and a conditional whose condition is branches,
+to the tasks.
+
+`tests/checker/branch-conditions` holds the regressions, which run natively
+against clang (`c_check_branch_condition_test.c`): conditions written as
+branches, whose functions have no `JUMP_VALUE` but their conditionals' and no
+jump to a test of a joined value, and values that keep their joins; and the
+operands' order and effects, traced by calls, nested three deep and more, in
+every statement's condition, a conditional's and a statement expression's, of
+every scalar type (NaN among the doubles), a first operand the program knows,
+and chains of 17 operands. The node templates' entries are the tasks' there.
+
 ## Node machine census (#2524)
 
 `./build/compiler measure-node-machine [--list N] [preprocessor options] file...`

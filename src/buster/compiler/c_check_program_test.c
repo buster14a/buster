@@ -697,6 +697,8 @@ static void check_test_program_source(CheckTest* test, const char* source, const
 static bool check_test_program_function(const Tier0Function* a, const Tier0Function* b);
 static void check_test_constant_conversion_lowered(CheckTest* test, const char* name, const CheckProgramLowered lowered[2], const CheckProgram* program, Arena* output,
                                                    Arena* scratch);
+static void check_test_branch_condition_lowered(CheckTest* test, const char* name, const CheckProgramLowered lowered[2], const CheckProgram* program, Arena* output,
+                                                Arena* scratch);
 
 // The bodies fixture's columns, and those of a unit of many small bodies, each with a switch, its own labels of one name,
 // a goto back, and an empty body and a label alone among them; then the bodies fixture compiled and run against clang.
@@ -2177,6 +2179,11 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             {
                 check_test_constant_conversion_lowered(test, name, lower, &program, &output, &scratch);
             }
+            // #2883's fixtures: their conditions' `&&` and `||` written as branches, on both lowerings and by the node templates.
+            if (strcmp(name, "branch-condition-shapes") == 0 || strcmp(name, "branch-condition-order") == 0)
+            {
+                check_test_branch_condition_lowered(test, name, lower, &program, &output, &scratch);
+            }
             for (uint32_t p = 0; p < 2; p += 1)
             {
                 check_test_expect(test, expected_pools < 0 || lower[p].initializers.count == (uint32_t)expected_pools,
@@ -3552,6 +3559,7 @@ static void check_test_program_return_library(CheckTest* test)
 #include "c_check_literal_table_test.c"
 #include "c_check_power_divmod_test.c"
 #include "c_check_constant_conversion_test.c"
+#include "c_check_branch_condition_test.c"
 
 static void check_test_program_many_arguments(CheckTest* test, const char* clang)
 {
@@ -3996,6 +4004,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_batch(test);
         check_test_power_divmod(test, clang);
         check_test_constant_conversions(test, clang);
+        check_test_branch_conditions(test, clang);
         check_test_program_many_arguments(test, clang);
         check_test_program_many_aggregate_returns(test, clang);
         check_test_program_source(test,
