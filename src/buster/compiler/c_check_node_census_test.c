@@ -781,6 +781,214 @@ static bool node_facts_test_operators(const char* directory, uint32_t mode, uint
     return valid && held;
 }
 
+// --facts-reads' fixture (#2850's step 2's second piece, c_check_node_machine_reads.c): records whose wide fields are
+// read, each by a reader the census has to find, beside records nobody reads a wide field of. A row's operator of
+// builtin operands (`a + 1`, `a * 8`): nothing. A fold and a negative literal (`3 + 4`, `-1`): a payload new at the
+// record, which X writes. A pointer plus an integer whose type a store's pointer conversion, a dereference and a call's
+// argument's conversion read (`q + 1`, `*(q + a)`, `f(q + 2)`): its operand's type, a copy. A store whose type a member
+// access reads through to the member's offset (`(p = p->next)->m`): its operand's. `&x` as a call's argument: the
+// pointer to its operand's type, a row's. sizeof: its type's size, a row's, which X writes. A cast whose type a member
+// access reads (`((struct T*)p)->m`): the node's own input. A member of an address constant (`gs.a[1]`): an offset
+// new at the record, and whether it is zero decides X's entries. The two records' types and the three pointers' are
+// each other's other selves: a type with no other of its word in the unit has no identity the census can change.
+// A fold whose value is one of its operands' (`1 << 0`): computed, so new, where a returned constant's conversion to a
+// type that holds every value copies it (`return 5` as long); one to a type that doesn't copies it where it fits
+// (`return 65` as char), and a constant's cast is T's own rule, which the census can't run again (`(long)3`): both are
+// counted new, and apart. And the address of a volatile object as an argument (`&gv`): the pointer to its operand's
+// type, which that pointer type's own row names where the operand's side row doesn't hold it. With `volatile int*`
+// among the pointers, `int*`'s other self has to be `long*`, whose pointee's size differs: C's and X's reads of a
+// pointer sum's conversions show by that. And a returned null pointer constant (`return 0` as `int*`): its literal's
+// zero decides for the conversion's rule. `byvalue`, which nothing calls, is there for its type: `f`'s type's other
+// self, a function whose parameter is no plain scalar, which C asks of a callee's type before it takes a call. The two
+// calls of `f` are the records C decides on an identity of. And a subscript of an array of long (`gla[1]`): its first
+// conversion's type is the pointer its operand's array type decays to, which only that type's row gives (the fixture's
+// other subscript's is also the pointer to its index's type).
+// And the two kinds of record the census leaves: a sum of 129 terms, an expression of 260 records, past what C and X
+// are run again on; and a fold of two floating literals, which the kernel leaves to T, and so does the store of it:
+// the operands of both aren't measured, nor is the constant's cast's.
+static const char node_reads_test_text[] =
+    "#define A4 a + a + a + a\n"
+    "#define A16 A4 + A4 + A4 + A4\n"
+    "#define A64 A16 + A16 + A16 + A16\n"
+    "struct S { long m; int a[4]; struct S* next; };\n"
+    "struct T { char c; long m; };\n"
+    "int g;\n"
+    "int ga[8];\n"
+    "struct S gs;\n"
+    "struct T gt;\n"
+    "double gd;\n"
+    "volatile int gv;\n"
+    "long gla[4];\n"
+    "int f(int*);\n"
+    "int byvalue(struct T);\n"
+    "void takev(volatile int*);\n"
+    "long reads(struct S* p, struct T* t, int a, int* q, long y, long* lp)\n"
+    "{\n"
+    "    int x = 0;\n"
+    "    x = a + 1;\n"
+    "    x = 3 + 4;\n"
+    "    y = -1;\n"
+    "    x = a * 8;\n"
+    "    q = q + 1;\n"
+    "    y = (p = p->next)->m;\n"
+    "    x = *(q + a);\n"
+    "    x = f(&x);\n"
+    "    x = f(q + 2);\n"
+    "    y = sizeof(struct S);\n"
+    "    x = p == 0;\n"
+    "    x = gs.a[1];\n"
+    "    y = ((struct T*)p)->m + t->m + *lp;\n"
+    "    x = 1 << 0;\n"
+    "    y = (long)3;\n"
+    "    takev(&gv);\n"
+    "    y = gla[1];\n"
+    "    x = A64 + A64 + a;\n"
+    "    gd = 1.5 + 2.5;\n"
+    "    return y + x;\n"
+    "}\n"
+    "long five(void)\n"
+    "{\n"
+    "    return 5;\n"
+    "}\n"
+    "char sixty(void)\n"
+    "{\n"
+    "    return 65;\n"
+    "}\n"
+    "int* none(void)\n"
+    "{\n"
+    "    return 0;\n"
+    "}\n";
+
+// The reads' fixture written to `directory` and read with `options` by the census of what reads T's record, its
+// windows cut at `window` records (0 for the kernel's own cut): whether nothing changed made what was made, the
+// records the census leaves are the fixture's two kinds and every other was measured, the measured records by kind and
+// class are the fixture's, and so are the reads the fixture is there for.
+static bool node_reads_test(const char* directory, uint32_t window, char** options, uint32_t option_count)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/reads.c", directory);
+    bool valid = parse_test_write(path, node_reads_test_text, strlen(node_reads_test_text));
+    NodeShadow shadow = { .facts = true, .facts_operators = true, .facts_reads = true, .facts_mode = BUSTER_NODE_FACTS_WHOLE, .facts_window = window, .passes = 1, .repeat = 1 };
+    NodeCensus census = { .shadow = &shadow };
+    fflush(stdout);
+    valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
+    const NodeReadsCounts* counts = &shadow.reads;
+    // The records by kind (a leaf, a lookup, another operator) and class (nothing wide read, a named type, a copy, a
+    // value new at the record).
+    static const uint64_t classes[BUSTER_NODE_READS_KINDS][BUSTER_NODE_READS_CLASSES] = {
+        { 0, 0, 52, 0 },
+        { 23, 1, 2, 4 },
+        { 24, 1, 9, 5 },
+    };
+    // By kind: the measured records each of whose wide fields is read (its type, its object, its payload, a member's
+    // offset, a conversion's type), those whose read field is new at the record, and those each reader (T, C, X) reads
+    // a wide field of.
+    static const uint64_t fields[BUSTER_NODE_READS_KINDS][5] = {
+        { 14, 33, 16, 0, 0 },
+        { 5, 1, 1, 4, 2 },
+        { 8, 1, 7, 0, 3 },
+    };
+    static const uint64_t fresh[BUSTER_NODE_READS_KINDS][5] = {
+        { 0, 0, 0, 0, 0 },
+        { 1, 0, 1, 3, 0 },
+        { 0, 0, 5, 0, 0 },
+    };
+    static const uint64_t by_reader[BUSTER_NODE_READS_KINDS][BUSTER_NODE_READS_READERS] = {
+        { 24, 2, 40 },
+        { 5, 2, 7 },
+        { 8, 3, 11 },
+    };
+    // The records C or X decide on an identity of: the two calls' callee.
+    static const uint64_t identities[BUSTER_NODE_READS_KINDS] = { 2, 0, 0 };
+    const uint32_t decides = (uint32_t)__builtin_ctz(BUSTER_NODE_READS_TYPE_DECIDES);
+    const uint32_t carried = (uint32_t)__builtin_ctz(BUSTER_NODE_READS_TYPE_CARRIED);
+    const uint32_t written = (uint32_t)__builtin_ctz(BUSTER_NODE_READS_PAYLOAD_CARRIED);
+    // The records by kind, and those the census left: the long sum's 260, the floating fold's four operands, the
+    // cast's one, and the volatile object's leaf under an address the kernel leaves to T.
+    static const uint64_t records[BUSTER_NODE_READS_KINDS] = { 187, 31, 169 };
+    static const uint64_t left[BUSTER_NODE_READS_KINDS] = { 135, 1, 130 };
+    bool held = shadow.facts_differences == 0 && shadow.facts_list_differences == 0 && shadow.facts_failures == 0 && counts->same_differences == 0 && counts->misplaced == 0 &&
+                counts->left_consumers == 4 && counts->long_expressions == 1 && counts->long_records == 260 && counts->same_runs != 0 && counts->rule_runs != 0 &&
+                counts->sweep_runs != 0;
+    for (uint32_t kind = 0; kind < BUSTER_NODE_READS_KINDS; kind += 1)
+    {
+        held = held && counts->kind_records[kind] == records[kind] && counts->kind_measured[kind] == records[kind] - left[kind] &&
+               counts->kind_identities[kind] == identities[kind] && counts->kind_lone[kind] == 0 && counts->kind_fits[kind] == (kind == BUSTER_NODE_READS_KIND_OPERATOR) &&
+               counts->kind_unseen[kind] == (kind == BUSTER_NODE_READS_KIND_OPERATOR);
+        for (uint32_t class = 0; class < BUSTER_NODE_READS_CLASSES; class += 1)
+        {
+            held = held && counts->kind_classes[kind][class] == classes[kind][class];
+        }
+        for (uint32_t field = 0; field < 5; field += 1)
+        {
+            held = held && counts->kind_fields[kind][field] == fields[kind][field] && counts->kind_new[kind][field] == fresh[kind][field];
+        }
+        for (uint32_t reader = 0; reader < BUSTER_NODE_READS_READERS; reader += 1)
+        {
+            held = held && counts->kind_readers[kind][reader] == by_reader[kind][reader];
+        }
+    }
+    // The reads the fixture is there for: a call's rule decides on its argument's type (`&x`, `&gv`, `q + 2`), a store's
+    // conversion and a dereference on a pointer sum's; a member access carries a store's and a cast's type to its
+    // offset; X writes a fold's, a negative literal's and a sizeof's payload; whether a member's offset in an
+    // address constant is zero decides X's entries; and a literal's value decides for a rule of T (a null pointer
+    // constant's zero in `p == 0` and in `return 0` as a pointer, and two more).
+    held = held && counts->bits[BUSTER_NODE_READS_T][CHECK_OP_ADDRESS][decides] == 2 && counts->bits[BUSTER_NODE_READS_T][CHECK_OP_ADD][decides] == 4 &&
+           counts->bits[BUSTER_NODE_READS_T][CHECK_OP_ASSIGN][carried] == 1 && counts->bits[BUSTER_NODE_READS_T][CHECK_OP_CAST][carried] == 1 &&
+           counts->bits[BUSTER_NODE_READS_X][CHECK_OP_ADD][written] == 1 && counts->bits[BUSTER_NODE_READS_X][CHECK_OP_NEGATIVE][written] == 1 &&
+           counts->bits[BUSTER_NODE_READS_X][CHECK_OP_SIZEOF][written] == 1 && counts->payload_values[CHECK_OP_MEMBER][1] == 1 &&
+           counts->bits[BUSTER_NODE_READS_T][BUSTER_NODE_READS_LITERAL][(uint32_t)__builtin_ctz(BUSTER_NODE_READS_PAYLOAD_DECIDES)] == 4;
+    // The flags: C reads whether each store's destination is a bit-field, and T's rules whether an operand is one; a
+    // store's side effect is handed on by its consumer, which is no read of it, and C reads it of the six stores of a
+    // constant; a call hands its argument's flags on, so its rule reads no flag of `&x`. And an identifier's object's
+    // kind (a local, a global) decides for C.
+    const uint32_t bit_field = (uint32_t)__builtin_ctz(BUSTER_CHECK_BIT_FIELD);
+    const uint32_t side_effect = (uint32_t)__builtin_ctz(BUSTER_CHECK_SIDE_EFFECT);
+    const uint32_t flags = (uint32_t)__builtin_ctz(BUSTER_NODE_READS_FLAGS);
+    const uint32_t object_kind = (uint32_t)__builtin_ctz(BUSTER_NODE_READS_OBJECT_KIND);
+    held = held && counts->flag_bits[BUSTER_NODE_READS_C][CHECK_OP_VALUE][bit_field] == 17 && counts->flag_bits[BUSTER_NODE_READS_T][CHECK_OP_VALUE][bit_field] == 23 &&
+           counts->flag_bits[BUSTER_NODE_READS_T][CHECK_OP_ASSIGN][side_effect] == 0 && counts->flag_bits[BUSTER_NODE_READS_C][CHECK_OP_ASSIGN][side_effect] == 6 &&
+           counts->bits[BUSTER_NODE_READS_T][CHECK_OP_ADDRESS][flags] == 0 && counts->bits[BUSTER_NODE_READS_C][CHECK_OP_VALUE][object_kind] == 33;
+    // A type of another word: the pointer sums' and the dereferenced sum's for a rule of T, and most leaves'; three
+    // identifiers' for C.
+    // C decides on the callee's type's identity at the two calls of `f`. And a conversion's flags: C reads whether a
+    // discard's and a call's argument's are to a union.
+    const uint32_t type_word = (uint32_t)__builtin_ctz(BUSTER_NODE_READS_TYPE_WORD);
+    held = held && counts->bits[BUSTER_NODE_READS_T][CHECK_OP_ADD][type_word] == 4 && counts->bits[BUSTER_NODE_READS_C][CHECK_OP_VALUE][type_word] == 3 &&
+           counts->bits[BUSTER_NODE_READS_T][CHECK_OP_VALUE][type_word] == 35 && counts->bits[BUSTER_NODE_READS_T][BUSTER_NODE_READS_LITERAL][type_word] == 11 &&
+           counts->bits[BUSTER_NODE_READS_C][CHECK_OP_VALUE][decides] == 2 &&
+           counts->conversion_bits[BUSTER_NODE_READS_C][BUSTER_NODE_READS_DISCARD][(uint32_t)__builtin_ctz(BUSTER_CHECK_CONVERT_TO_UNION)] == 18 &&
+           counts->conversion_bits[BUSTER_NODE_READS_C][CHECK_OP_CALL][(uint32_t)__builtin_ctz(BUSTER_CHECK_CONVERT_TRANSPARENT_UNION)] == 3;
+    // And where each read field comes from.
+    held = held && counts->sources[BUSTER_NODE_READS_FIELD_TYPE][CHECK_OP_ADDRESS][BUSTER_NODE_READS_SOURCE_ROW] == 2 &&
+           counts->sources[BUSTER_NODE_READS_FIELD_TYPE][CHECK_OP_ADDRESS][BUSTER_NODE_READS_SOURCE_NEW] == 0 &&
+           counts->sources[BUSTER_NODE_READS_FIELD_TYPE][CHECK_OP_CAST][BUSTER_NODE_READS_SOURCE_INPUT] == 1 &&
+           counts->sources[BUSTER_NODE_READS_FIELD_TYPE][CHECK_OP_ASSIGN][BUSTER_NODE_READS_SOURCE_OPERAND] == 1 &&
+           counts->sources[BUSTER_NODE_READS_FIELD_TYPE][CHECK_OP_ADD][BUSTER_NODE_READS_SOURCE_OPERAND] == 3 &&
+           counts->sources[BUSTER_NODE_READS_FIELD_PAYLOAD][CHECK_OP_ADD][BUSTER_NODE_READS_SOURCE_NEW] == 1 &&
+           counts->sources[BUSTER_NODE_READS_FIELD_PAYLOAD][CHECK_OP_NEGATIVE][BUSTER_NODE_READS_SOURCE_NEW] == 1 &&
+           counts->sources[BUSTER_NODE_READS_FIELD_PAYLOAD][CHECK_OP_SIZEOF][BUSTER_NODE_READS_SOURCE_ROW] == 1 &&
+           counts->sources[BUSTER_NODE_READS_FIELD_OBJECT][CHECK_OP_MEMBER][BUSTER_NODE_READS_SOURCE_OPERAND] == 1 &&
+           counts->sources[BUSTER_NODE_READS_FIELD_PAYLOAD][CHECK_OP_SHIFT_LEFT][BUSTER_NODE_READS_SOURCE_NEW] == 1 &&
+           counts->sources[BUSTER_NODE_READS_FIELD_PAYLOAD][CHECK_OP_SHIFT_LEFT][BUSTER_NODE_READS_SOURCE_OPERAND] == 0 &&
+           counts->sources[BUSTER_NODE_READS_FIELD_PAYLOAD][CHECK_OP_CONVERT][BUSTER_NODE_READS_SOURCE_OPERAND] == 1 &&
+           counts->sources[BUSTER_NODE_READS_FIELD_PAYLOAD][CHECK_OP_CONVERT][BUSTER_NODE_READS_SOURCE_NEW] == 1 &&
+           counts->sources[BUSTER_NODE_READS_FIELD_PAYLOAD][CHECK_OP_CAST][BUSTER_NODE_READS_SOURCE_NEW] == 1 &&
+           counts->sources[BUSTER_NODE_READS_FIELD_CONVERTED][CHECK_OP_SUBSCRIPT][BUSTER_NODE_READS_SOURCE_ROW] == 2;
+    if (!valid || !held)
+    {
+        fprintf(stderr, "test-checker: node-reads: window %u: %s: %" PRIu64 " differences with nothing changed, %" PRIu64 " misplaced, %" PRIu64 " consumers left:\n", window,
+                valid ? "read" : "NOT READ", counts->same_differences, counts->misplaced, counts->left_consumers);
+        for (uint32_t kind = 0; kind < BUSTER_NODE_READS_KINDS; kind += 1)
+        {
+            fprintf(stderr, "        { %" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %" PRIu64 " }, // %" PRIu64 " of %" PRIu64 " measured\n", counts->kind_classes[kind][0],
+                    counts->kind_classes[kind][1], counts->kind_classes[kind][2], counts->kind_classes[kind][3], counts->kind_measured[kind], counts->kind_records[kind]);
+        }
+    }
+    unlink(path);
+    return valid && held;
+}
+
 // The front at its limits, on generated text read with `options`, the front run as `front` asks (BUSTER_NODE_FRONT_*:
 // after the walk acted at a chunk or before it, whole or lean). `boundaries`: a body of statements whose tokens are 29 a round, so that the chunks' ends (1,024
 // postorder positions each) fall at every place within a call of a library function by its name and through its address:
@@ -918,6 +1126,10 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-facts operators lean: a record's first half is T's, and the conversions left out are their rules'");
     check_test_expect(test, ready && node_facts_test_operators(directory, BUSTER_NODE_FACTS_LEAN, 16, false, quiet, BUSTER_ARRAY_LENGTH(quiet)),
                       "node-facts operators lean: the same where a window is cut every 16 records");
+    check_test_expect(test, ready && node_reads_test(directory, 0, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-reads: the readers of a record's wide fields are found, and each read field's source is the fixture's");
+    check_test_expect(test, ready && node_reads_test(directory, 16, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-reads: the same reads where a window is cut every 16 records");
     // The machine's own front at its limits (step 1b): a chunk's end at every place within a call, and a full stack.
     check_test_expect(test, ready && node_front_test_limits(directory, true, BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_TYPES, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-front: a callee waiting across a chunk's end keeps its use, a library call's mark the walk's");

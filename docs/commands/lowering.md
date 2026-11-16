@@ -664,11 +664,13 @@ declaration points to, whose pointer type T makes itself.
 
 ### The fact words (#2850's step 1)
 
-`./build/compiler measure-node-machine --shadow --facts | --facts-lean | --facts-loads [--facts-operators] [--facts-packed] [--facts-window N] [--passes N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow --facts | --facts-lean | --facts-loads [--facts-operators] [--facts-reads] [--facts-packed] [--facts-window N] [--passes N] [--list N] [preprocessor options] file...`
 (`c_check_node_machine_facts.c`) is step 1 of [the one-core
 path](../one-core-path.md): T's identifier leaves and lookups made from fact
 words, with T's records as the oracle. With `--facts-operators` (step 2's
-first piece) it makes T's other records too. It runs in the shadow's own pass,
+first piece) it makes T's other records too, and `--facts-reads` (its second
+piece, [below](#what-reads-ts-record-2850s-step-2)) counts what reads them.
+It runs in the shadow's own pass,
 after the pipeline and the shadow's sweeps; no compile takes any of it.
 
 - **The words.** A declaration's line (32 bytes: its leaf's record's first
@@ -773,8 +775,8 @@ a short path took and those their rule took, a lean kernel's conversions and
 discards with those derived, the loads' kernel's lookups by their load, the
 given records by operator, the differences, the words made (rows, lines, lines
 made again, member slots), the windows, and the times: the kernel's cycles, instructions
-and mispredicted branches a taken leaf or lookup, and a leaf's and a lookup's
-ticks. With `--facts-operators` they add the operators' records, those made,
+and mispredicted branches a taken leaf or lookup, the two passes apart, and a
+leaf's and a lookup's ticks. With `--facts-operators` they add the operators' records, those made,
 those a class's loop made and those their rules made; each operator's records
 with those left; the literals' lines; the share of the records that are no
 literal's leaf that the kernel made; and the kernel's cycles, instructions and
@@ -783,6 +785,20 @@ an evaluated node (the sweeps' own count, as `node-shadow: time sweeps=T` has
 main's T). `--list N` prints the first N records that differ, with both records.
 The command exits 1 on a difference. On a host without the vector paths the
 listing and the leaves run a record at a time and give the same records.
+
+**The kernel's figures are a difference of two passes**
+([#2872](https://github.com/buster14a/buster/issues/2872)): a pass over a
+unit's windows (each window's given records put in place, then the kernel)
+less a second pass that only puts the given records in place, each the least
+of `--passes N`, summed over the units. The second pass alone is not what the
+copying costs inside the first: on a unit of a hundred records it carries
+some hundred cycles a unit's pass that a build fixes, and two builds of one
+kernel read 13% to 30% apart on musl by the difference. The line
+`node-facts: the two passes, a record of the windows` has each pass's own
+cycles, instructions and TSC ticks. Compare two builds by the first pass's
+figure there: a change of the kernel moves it, and where the units are short
+nothing else measured does. `sqlite3.c` is one unit and its difference
+carries no such constant.
 
 `test-checker` runs `node_facts_test_text` (each kind of leaf and each lookup,
 taken and left) by the whole kernel at three window settings and by the lean
@@ -802,3 +818,116 @@ the fixtures and the corpora's comparison say where. [The
 design](../one-core-path.md#step-1-the-fact-words) has the results, and
 [step 2's first piece](../one-core-path.md#step-2s-first-piece-ts-other-operators-on-the-fact-words-records)
 the operators' kernel's.
+
+### What reads T's record (#2850's step 2)
+
+`./build/compiler measure-node-machine --shadow --facts-reads [--facts-window N] [--passes 0] [--list N] [preprocessor options] file...`
+(`c_check_node_machine_reads.c`) is step 2's second piece of [the one-core
+path](../one-core-path.md): for every record of the fact words' windows, which
+of its wide fields a later reader reads, and where each field's value comes
+from. It implies `--facts --facts-operators` with whole records and runs
+after the kernel's passes (`--passes 0` skips the timed ones). It is a count:
+it times nothing and no compile takes it.
+
+- **A read is found by changing the field and running its reader again**,
+  not by reading the reader's code. The readers are a later rule of T (the
+  record's consumer's rule, the kernel's own `node_facts_slow`, on the
+  window's records: `node_reads_consumers`; a call's is the machine's
+  `node_machine_call_rule`, which converts each argument: `node_reads_call`)
+  and C and X (the machine's `node_machine_contexts` and
+  `node_machine_expand` on the expression's columns: `node_reads_sweeps`). X
+  runs on C's unchanged columns, so what it reads itself is apart from what
+  reaches it through C.
+- **The changes** (`node_reads_changes`), one at a time: the record's type to
+  another type of the unit with the same word and the same row's facts (its
+  identity alone differs) and to a type of another word; each of its flags'
+  25 bits flipped; its object to another of its kind (a local, a global) and
+  to one of the other kind; its payload to the values its type holds of six
+  (its own with the low bit flipped, 0, 3, 8, 70,000 and 2^40 + 5); a
+  member's offset to two. For C and X also each operand's conversion's type,
+  the same two ways, and its flags' 12 bits. A type's other self is, of the
+  types with its word, one whose element and whose size or stride differ
+  from its own where there is one (`node_reads_begin`): `int*` becomes
+  `long*` before `volatile int*`, which no reader of a pointee's size tells
+  from it.
+- **What changed says how the field was read.** A byte-level answer (a
+  consumer's standing, flags, type's word or conversions' flags; C's
+  context, template or target's word; the tape's kinds, classes or length; a
+  refusal): the field *decides*. A wide value alone (a type's identity, an
+  object, a payload, the tape's value): it is *carried*. A flag a consumer
+  only hands on, the same bit of its own flags, is no read. A carried value
+  is a read only where it arrives: what a rule carries is kept as an edge
+  from the operand's field to the consumer's fields that changed, and
+  counted where one of those is itself read (`node_reads_classify`, from the
+  last record to the first); where C alone carries a value, X runs on C's
+  changed columns and the tape says.
+- **Where a read field comes from** (`node_reads_sources`): none (no object,
+  no payload); a leaf's line; a builtin type, which a code names; an
+  operand's same field; a type an operand's type's row gives (its value
+  type, promotion, element, pointer types, return type) or that type's size;
+  the node's own type name; or new at the record. A payload that equals an
+  operand's is that operand's only where its rule was seen to copy it, over
+  the changes of the operand's payload that leave the rule's byte-level
+  answer as it was: one that is computed (`1 << 0`) is new. So is one a
+  conversion copies only where it fits its type, and one whose rule is T's
+  own and didn't run again; the report counts both apart.
+- **A record's class** is what has to be made at it: nothing wide is read; a
+  code names what is read; it is a copy a selector could name; or something
+  read is new at the record, a step no lane makes.
+- **The census checks itself.** Before a consumer's or an expression's
+  changes and after them all, the reader runs with nothing changed and must
+  make what it made (`same differences`, which must be 0), and each record's
+  place in the windows must be its place in the machine's expressions
+  (`misplaced`).
+- **What it leaves.** The operands of a consumer the kernel left to T, and of
+  a call T types by its action; an expression past 256 records
+  (`BUSTER_NODE_READS_MOST`), which C and X aren't run again on. Each is
+  counted, and its records aren't among the measured ones.
+
+The report's `node-reads:` lines give the expressions, the records and those
+measured; the runs; by kind (a leaf; a lookup: a member, a dereference, a
+subscript, a call, a discard; another operator) the records by class, the
+records C or X decide on an identity of, those whose type has no other of
+its word in the unit (its identity can't be changed), the records by which
+wide field is read and by which of those is new, and by reader; then for
+each operator its records by class, each reader's reads by field, the flags'
+bits read, the payloads' values that decide for C or X, and each read
+field's source. `--list N` prints the first N records C or X decide on an
+identity of: the file and line, the record's operator and its consumer's,
+each reader's bits, and the indexes of its type and of the type it was
+changed to. The command exits 1 if a run with nothing changed differs or a
+record is misplaced.
+
+What the counts can and can't say:
+
+- A type's identity is changed to one other type. Two types that give a
+  reader the same answer hide a read: two records with the same member at
+  the same offset, or two function types whose parameters are all plain
+  scalars, which is how C's question of every callee shows for few of them.
+- A change that takes a record out of its rule's reach counts as a decision,
+  and a wide value that a type of another word changes counts as that
+  type's identity's read: the counts of wide reads are upper bounds there.
+- A byte-level answer of a consumer's record counts whether a later reader
+  reads that byte or not.
+- The readers past the expression (a statement's own checks) and the
+  silence tests are not run.
+
+`test-checker` runs `node_reads_test_text` by the census at two window
+settings: a read of each kind the census has to find, beside records nobody
+reads a wide field of, and the kinds of record it leaves. The counts by
+kind and class, by field and by reader, the reads the fixture is there for,
+their sources, and the records left are pinned. [The
+design](../one-core-path.md#step-2s-second-piece-what-reads-ts-record) has
+the results.
+
+The census gives a reader records no program does: an operand whose type,
+flags, object or payload was changed alone. So under the sanitizers its
+tests also test the rules and the sweeps on those. The merge queue's
+MemorySanitizer row found one such read: the fact words' pointer rule
+(`node_facts_pointer`) read its second operand's type where its first
+operand wasn't taken and the second had never been read into its place (the
+rule's answer didn't depend on it). That rule's operands and the cast's
+source are zeroed for it. A pull request's checks don't run the sanitizer
+rows: before queueing a change to the census or to a reader, build with
+`BUSTER_HOST_ARCH=x86-64 BUSTER_SANITIZER=memory` (then `address` and
+`thread`) and run the part of `test-checker` that has the census's tests.
