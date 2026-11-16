@@ -1,7 +1,8 @@
-# The one-core path: 73 cycles a token, on records the vector lanes can use (#2850): design
+# The one-core path: 82 cycles a token, on records the vector lanes can use (#2850): design
 
 Status: design, with its first two steps, step 2's first piece and steps 4's
-and 5's censuses measured. Nothing here is in a compile.
+and 5's censuses measured, and step 5's allocation settled. Nothing here is in
+a compile.
 [#2850](https://github.com/buster14a/buster/issues/2850) has the design whole:
 the budget, the data design and what would refute it. It is
 [#672](https://github.com/buster14a/buster/issues/672)'s per-core research
@@ -10,8 +11,10 @@ builds on, and [the all-core path](all-core-path.md) (#2536), whose windows it
 uses. This page keeps the summary and each step's result; the measurements are
 in buster-performance, linked at each step.
 
-**In one paragraph.** 1 GB/s on one core is 52 M cycles for `-c sqlite3.c`: 73
-a token, where main takes 952 and tcc 307. The design gives the compile's
+**In one paragraph.** The target is 82 cycles a token, 58.7 M cycles for
+`-c sqlite3.c`, 0.89 GB/s on one core, where main takes 952 and tcc 307.
+#2850 set 1 GB/s, 73 a token; step 5's census moved the kernel's row from 6 to
+15 and the target with it (below). The design gives the compile's
 middle (`check-input` to `lower`) 18 of them, about 38 a body node, and gets
 there by making what a rule decides on a byte its producer wrote: T's, C's and
 X's rules as arithmetic over byte columns, 64 records to a register, and the
@@ -44,7 +47,10 @@ kernel with every arena reused or windowed is 5.8 to 6.4 cycles a token at
 warm-cache costs and 10.3 to 12.5 at the costs the compile pays, and beside
 it 5.2 to 6.7 more that no arena removes (the include search, the
 executable's own pages, the arenas' calls): the budget's 6 for the kernel
-doesn't hold.
+doesn't hold. Step 5's allocation, with a census of musl's units beside it,
+gives the kernel's row 15 cycles a token on `sqlite3.c` and 25 on musl as one
+command, and leaves a unit compiled as its own process outside the budget:
+its process's own rows alone are about 440 cycles a token.
 
 ## The budget
 
@@ -58,9 +64,14 @@ token; the issue has each row's source:
 | parse | 33 | 17 | 12 |
 | `check-input` to `lower` | 682 | 37 | 18 |
 | Tier 0 to the code's atoms, the object and the rest | 78 | 78 | 10 |
-| the kernel and the process's fixed costs | 120 | 120 | 6 |
+| the kernel and the process's fixed costs | 120 | 120 | 15 |
 | refused code, on today's pipeline | | | 4 |
-| **total** | **973** | **about 300** | **73** |
+| **total** | **973** | **about 300** | **82** |
+
+The kernel's row was 6, and the total 73 (1 GB/s), until step 5's allocation
+([#2873](https://github.com/buster14a/buster/issues/2873#issuecomment-6918089795)):
+15 and 82, 0.89 GB/s, with the other rows' lines unchanged. A row that comes
+in under its line can win the 9 back.
 
 ## The steps and their gates
 
@@ -71,7 +82,7 @@ token; the issue has each row's source:
 | 2 | The machine on these records where it runs (#2524's steps 2 to 4) | the bodies' middle at 38 cycles a node or less in `-c sqlite3.c` | first piece measured, in the shadow: T whole from the fact words, exact; 38 cycles an evaluated node with whole records and 32 with lean ones, where its own gate was 25 |
 | 3 | The front's row, into the window | 35 cycles a token or less | not started |
 | 4 | Tier 0's row | 10 cycles a token or less, the object's bytes unchanged | census measured: the row 64.7 cycles a token (117 a typed entry), Tier 0 38.4 of them; a key of 8 bytes or fewer decides 99.83% of the entries; the encoder, branch sizing and the object 8.3 in a compile, 6.3 at their own rates |
-| 5 | Fresh memory and the fixed costs | 6 cycles a token or less | census measured: the kernel 121 cycles a token; its floor 5.8 to 6.4 at item 3's costs, 10.3 to 12.5 at the compile's, and 5.2 to 6.7 more beside it: the 6 refuted |
+| 5 | Fresh memory and the fixed costs | 15 cycles a token or less on `sqlite3.c`, 25 on musl as one command (6 until the allocation) | census measured: the kernel 121 cycles a token; its floor 5.8 to 6.4 at item 3's costs, 10.3 to 12.5 at the compile's, and 5.2 to 6.7 more beside it: the 6 refuted. Allocated: 14.3 to 15.0 on `sqlite3.c`, 25.0 on musl as one command, each row to the issue that removes it or kept; a unit a process outside the budget |
 
 ## Step 0: the lanes on the real nodes
 
@@ -990,6 +1001,74 @@ and the start and exit (1.4) are 5.3 before any table.
   #2536's windows are its answer.
 - **For measuring:** a compile's kernel cycles counted by its own task's
   counters leave out its teardown on this kernel; the CPU's count holds it.
+
+## Step 5's allocation: musl's units, and the kernel's row
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/kernel-census-musl-2873-2026-11-16)
+(`9d50cfb`, `8fa9cbc`), [#2873](https://github.com/buster14a/buster/issues/2873)
+([the design](https://github.com/buster14a/buster/issues/2873#issuecomment-6917154449),
+[settled](https://github.com/buster14a/buster/issues/2873#issuecomment-6918089795)).
+The census's attribution over musl's 1,336 units (5,039,639 tokens, 3,772 a
+unit) at main `dbf591b9`, two ways: a unit a process, one after another, as a
+build tool runs them on one core, and as one command on one lane, which pays a
+process's fixed costs once. No compile changes.
+
+### What it measured
+
+- **A unit a process, the kernel takes 1,022 cycles a token**, 3.86 M a unit:
+  about as much as the compiles' own user time. **As one command, 212.5.**
+- **By cause, a unit a process, cycles a token:** fresh memory 313; the
+  teardown 191, and 33 more deferred to `ksoftirqd`; the arenas' system calls
+  149; the executable's own pages after the start 123; the start 99; the
+  include search 64; the rest of the exit 41; the stack 19; the object 9.
+- **As one command:** fresh memory 108; the arena pool's discards between units
+  (`madvise`) 70; the include search 19.5; the objects' writes 8.4.
+- **A unit as its own process pays 3.05 M kernel cycles more** than inside the
+  command: 2.19 M for the start, the exit and its teardown, the executable's
+  own pages and the arenas' reservations and commits, 0.59 M for fresh memory
+  cleared again.
+- **Its gate:** 99.6% (a unit a process) and 99.3% (one command) of the
+  kernel's cycles are in a named row; the faults by owner are the faults
+  counted, 0.9% apart.
+- **Counted besides:** a unit a process fails 37 include probes (its
+  directories never reach the 32 misses at which #653's listings start); as
+  one command, each unit stats its search directories again and each source
+  three times, 6.6 cycles a token (#2879).
+
+### The allocation
+
+Each row goes to the step or issue that removes it, with that one's evidence,
+or is kept as the kernel's fixed cost. Cycles a token, today and allocated:
+
+| row | `sqlite3.c` | | musl as one command | | by |
+| --- | ---: | ---: | ---: | ---: | --- |
+| fresh memory | 96.2 | 1.9 to 2.6 | 107.5 | 0.5 | #2536's windows, #1701's lifetimes, #1167's sparse columns; on musl #1213's pages kept between units under its reset contract |
+| the arenas' discards and unmaps | 4.2 | 0 | 69.6 | 0 | the same; on musl #1213 |
+| the teardown | 6.8 | 0.1 | 1.2 | 0.1 | scales with the pages |
+| the search directories' stats a unit | | | 6.6 | 0 | #2879 |
+| the include search, the source's mapping, the object's write | 6.5 | 6.5 | 21.3 | 21.3 | kept: a unit's source and object are files |
+| the executable's pages, the reservations and commits, the start, the exit, the stack | 5.6 | 5.6 | 1.3 | 1.3 | kept |
+| timer ticks | 1.5 | 0.1 | 3.8 | 0.4 | scale with the compile's time |
+| no named row | 0.1 | 0.1 | 1.4 | 1.4 | kept |
+| **the kernel's row** | **120.8** | **14.3 to 15.0** | **212.5** | **25.0** | |
+
+### What it means
+
+- **The budget's row is 15 and the target 82 cycles a token**, 0.89 GB/s on
+  `sqlite3.c`, as David settled it: no other row has measured room for the 9
+  (step 2's T is at 38 an evaluated node against 25, the front's best 52
+  against 23).
+- **On musl as one command the row is 25**: a unit's two files, its source and
+  its object, are about 80 K kernel cycles a unit that a large unit pays once.
+  The 82 holds there only if the other rows come in 10 under theirs.
+- **A unit compiled as its own process has no allocation.** Its process's rows
+  that no window removes (the start, the executable's pages, the reservations
+  and commits, the exit, the stack, the include search, the object) are about
+  440 cycles a token on musl: small units reach the target only many to a
+  process, as the one command runs them.
+- **The census's per-fault attribution is high for reads:** #1167's step 1
+  removed 1,093 of the reader's faults, mostly zero-page reads, for about 1 M
+  kernel cycles, where the census's samples gave them about 2.8 M.
 
 ## Related
 
