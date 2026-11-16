@@ -35,9 +35,14 @@
 // whether a store's local is the one three back; each named local's home (a general or an XMM register, a slot, an
 // object); the two depths; the symbol's access; whether the entry is the function's last; the function's result; a
 // call's counts of register and stack arguments, its flags, its result and which of its first eight arguments are
-// narrow integers; a copy's bytes; and the frame's kind with the function's rare classes. No input is a value, a
-// displacement, a symbol or a table's row. Three more are the fusion's own answers (its key's kind and class and its
-// variant): lane arithmetic on the others, which Tier 0 makes today.
+// narrow integers; a copy's bytes; and the frame's kind with the function's rare classes. A condition as the lowering
+// writes it (#2877) is a compare, its value's tests against zero (CONST 0 and NE or EQ, once or twice) and the branch:
+// the compare leaves its flags and the branch is the jump on them. So a compare has one input of the entries after it
+// (whether it is such a branch's, behind one test or two, as the stream's shape says), and a branch behind a test has
+// the kinds and classes of the entries four to six back and whether any is a jump target: its compare's kind, and its
+// operands' class, are there. No input is a value, a displacement, a symbol or a table's row. Three more are the
+// fusion's own answers (its key's kind and class and its variant): lane arithmetic on the others, which Tier 0 makes
+// today.
 //
 // The count, a head's kind at a time, twice: over the raw inputs alone (`keys=raw`), and with the fusion's three
 // offered (`keys=fused`). Two figures are counted of a set of inputs. Its conflicts: the entries in keys with two
@@ -112,6 +117,12 @@ typedef enum Tier0CensusInput
     TIER0_CENSUS_CALL_NARROW,
     TIER0_CENSUS_SIZE,
     TIER0_CENSUS_FRAME,
+    TIER0_CENSUS_CLASS_4,
+    TIER0_CENSUS_CLASS_5,
+    TIER0_CENSUS_CLASS_6,
+    TIER0_CENSUS_KIND_4,
+    TIER0_CENSUS_KIND_5,
+    TIER0_CENSUS_AHEAD,
     // The fusion's answers, which the raw count leaves out.
     TIER0_CENSUS_KEY_KIND,
     TIER0_CENSUS_KEY_CLASS,
@@ -164,6 +175,12 @@ static const char* const tier0_census_input_names[TIER0_CENSUS_INPUTS] = {
     [TIER0_CENSUS_CALL_NARROW] = "call-narrow",
     [TIER0_CENSUS_SIZE] = "size",
     [TIER0_CENSUS_FRAME] = "frame",
+    [TIER0_CENSUS_CLASS_4] = "class-4",
+    [TIER0_CENSUS_CLASS_5] = "class-5",
+    [TIER0_CENSUS_CLASS_6] = "class-6",
+    [TIER0_CENSUS_KIND_4] = "kind-4",
+    [TIER0_CENSUS_KIND_5] = "kind-5",
+    [TIER0_CENSUS_AHEAD] = "ahead",
     [TIER0_CENSUS_KEY_KIND] = "key-kind",
     [TIER0_CENSUS_KEY_CLASS] = "key-class",
     [TIER0_CENSUS_VARIANT] = "variant",
@@ -186,7 +203,7 @@ typedef enum Tier0CensusFamily
 
 static const char* const tier0_census_family_names[TIER0_CENSUS_FAMILIES] = {
     [TIER0_CENSUS_FAMILY_OWN] = "the entry's class",
-    [TIER0_CENSUS_FAMILY_NEIGHBOURS] = "the kinds, classes and labels of the entries before",
+    [TIER0_CENSUS_FAMILY_NEIGHBOURS] = "the kinds, classes and labels of the entries before (and a compare's branch after)",
     [TIER0_CENSUS_FAMILY_VALUE] = "a bit of a value",
     [TIER0_CENSUS_FAMILY_HOME] = "a home's case",
     [TIER0_CENSUS_FAMILY_DEPTH] = "a depth",
@@ -236,6 +253,12 @@ static const uint8_t tier0_census_input_families[TIER0_CENSUS_INPUTS] = {
     [TIER0_CENSUS_CALL_NARROW] = TIER0_CENSUS_FAMILY_CALL,
     [TIER0_CENSUS_SIZE] = TIER0_CENSUS_FAMILY_VALUE,
     [TIER0_CENSUS_FRAME] = TIER0_CENSUS_FAMILY_FUNCTION,
+    [TIER0_CENSUS_CLASS_4] = TIER0_CENSUS_FAMILY_NEIGHBOURS,
+    [TIER0_CENSUS_CLASS_5] = TIER0_CENSUS_FAMILY_NEIGHBOURS,
+    [TIER0_CENSUS_CLASS_6] = TIER0_CENSUS_FAMILY_NEIGHBOURS,
+    [TIER0_CENSUS_KIND_4] = TIER0_CENSUS_FAMILY_NEIGHBOURS,
+    [TIER0_CENSUS_KIND_5] = TIER0_CENSUS_FAMILY_NEIGHBOURS,
+    [TIER0_CENSUS_AHEAD] = TIER0_CENSUS_FAMILY_NEIGHBOURS,
     [TIER0_CENSUS_KEY_KIND] = TIER0_CENSUS_FAMILY_FUSED,
     [TIER0_CENSUS_KEY_CLASS] = TIER0_CENSUS_FAMILY_FUSED,
     [TIER0_CENSUS_VARIANT] = TIER0_CENSUS_FAMILY_FUSED,
@@ -315,6 +338,66 @@ static const char* const tier0_census_state_names[TIER0_CENSUS_STATES] = {
     [TIER0_CENSUS_OTHER] = "not its template's records",
 };
 
+// What a conditional branch's group takes (#2877): its compare, right before it; its compare, behind the compare's test
+// against zero (CONST 0 and NE or EQ: how the lowering writes a condition); its compare behind two such tests (a
+// negation, or a macro's `!= 0`, first); the branch alone, the value on the stack.
+typedef enum Tier0CensusCondition
+{
+    TIER0_CENSUS_CONDITION_COMPARE,
+    TIER0_CENSUS_CONDITION_TESTED,
+    TIER0_CENSUS_CONDITION_TESTED_TWICE,
+    TIER0_CENSUS_CONDITION_ALONE,
+    TIER0_CENSUS_CONDITIONS,
+} Tier0CensusCondition;
+
+static const char* const tier0_census_condition_names[TIER0_CENSUS_CONDITIONS] = {
+    [TIER0_CENSUS_CONDITION_COMPARE] = "the compare before it",
+    [TIER0_CENSUS_CONDITION_TESTED] = "a compare behind its test against zero",
+    [TIER0_CENSUS_CONDITION_TESTED_TWICE] = "a compare behind two tests",
+    [TIER0_CENSUS_CONDITION_ALONE] = "no entry",
+};
+
+// Why a compare's value is made and tested again before a branch (setcc al; movzx eax, al; test eax, eax; je or jne,
+// what #2877 counted in the objects), read at the entry that holds the test: a third test in a row (a branch takes its
+// compare from behind two, so the first of three tests the value); a jump's target on the branch, its test or the
+// test's constant, where another value can arrive; a compare of a class with no branch's template (floating values,
+// whose compares are made as values); anything else.
+typedef enum Tier0CensusAgain
+{
+    TIER0_CENSUS_AGAIN_TESTS,
+    TIER0_CENSUS_AGAIN_TARGET,
+    TIER0_CENSUS_AGAIN_CLASS,
+    TIER0_CENSUS_AGAIN_OTHER,
+    TIER0_CENSUS_AGAINS,
+} Tier0CensusAgain;
+
+static const char* const tier0_census_again_names[TIER0_CENSUS_AGAINS] = {
+    [TIER0_CENSUS_AGAIN_TESTS] = "a third test in a row",
+    [TIER0_CENSUS_AGAIN_TARGET] = "a jump's target on the branch, its test or the constant",
+    [TIER0_CENSUS_AGAIN_CLASS] = "a compare of a class with no branch's template",
+    [TIER0_CENSUS_AGAIN_OTHER] = "other",
+};
+
+// Whether entry k's value is a branch's condition as the lowering writes it: 1 behind one test against zero (CONST 0, NE
+// or EQ, then the branch), 2 behind two, 0 otherwise; no jump's target on the entries after it up to the branch.
+static uint8_t tier0_census_ahead(const Tier0Function* function, const uint64_t* labels, uint32_t k)
+{
+    const uint8_t* kinds = function->kinds;
+    const uint32_t count = function->count;
+    uint8_t tests = 0;
+    uint32_t at = k + 1;
+    bool chain = true;
+    while (chain && tests < 2 && at + 1 < count && kinds[at] == BUSTER_TYPED_CONST && function->values[at] == 0 && !tier0_label(labels, at) &&
+           (kinds[at + 1] == BUSTER_TYPED_NE || kinds[at + 1] == BUSTER_TYPED_EQ) && !tier0_label(labels, at + 1))
+    {
+        tests += 1;
+        at += 2;
+        chain = !(at < count && (kinds[at] == BUSTER_TYPED_BRANCH_FALSE || kinds[at] == BUSTER_TYPED_BRANCH_TRUE));
+    }
+    const bool branch = tests != 0 && at < count && (kinds[at] == BUSTER_TYPED_BRANCH_FALSE || kinds[at] == BUSTER_TYPED_BRANCH_TRUE) && !tier0_label(labels, at);
+    return branch ? tests : 0;
+}
+
 typedef struct Tier0CensusSample Tier0CensusSample;
 struct Tier0CensusSample
 {
@@ -375,6 +458,10 @@ struct Tier0Census
     uint64_t home_entries;
     uint64_t choice_entries;
     uint64_t chosen_entries;
+    // The conditional branches' groups by what they take, and the sites where a compare's value is made and tested
+    // again, by why.
+    uint64_t conditions[TIER0_CENSUS_CONDITIONS];
+    uint64_t tested_again[TIER0_CENSUS_AGAINS];
     // Functions with deep values, and with each of the rare classes' flags.
     uint64_t deep_functions;
     uint64_t special_functions;
@@ -688,6 +775,56 @@ static bool tier0_census_function(Tier0Census* census, const Tier0Function* func
                                         (function->incoming_variadic != 0 ? 8 : 0) | (function->returns_twice ? 16 : 0) | (function->x87 || function->int128 ? 32 : 0) |
                                         (function->vectors ? 64 : 0) | (function->masks ? 128 : 0));
         const uint8_t result = (uint8_t)(function->result.kind | function->result.flags << 4);
+        // The conditional branches by what their group takes: a jump on the flags of a compare behind its tests, which
+        // takes two of them where it takes the entry three back; a compare right before it; or no entry.
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            if (kinds[i] == BUSTER_TYPED_BRANCH_FALSE || kinds[i] == BUSTER_TYPED_BRANCH_TRUE)
+            {
+                const uint8_t variant = entries.variants[i];
+                const bool compared = entries.key_kinds[i] >= BUSTER_TYPED_EQ && entries.key_kinds[i] <= BUSTER_TYPED_GE;
+                const bool tested = compared && (variant == BUSTER_TIER0_VARIANT_JUMP_FALSE || variant == BUSTER_TIER0_VARIANT_JUMP_TRUE);
+                const bool twice = tested && i >= 3 && entries.absorbed[i - 3];
+                census->conditions[twice ? TIER0_CENSUS_CONDITION_TESTED_TWICE : tested ? TIER0_CENSUS_CONDITION_TESTED : compared ? TIER0_CENSUS_CONDITION_COMPARE
+                                                                                                                                  : TIER0_CENSUS_CONDITION_ALONE] += 1;
+            }
+        }
+        // A compare's value made and tested again, in the records as an object's code has them: each site is given to
+        // the entry whose records hold the test (a branch's group with its test, or a test that left its flags to a
+        // branch), and its reason read from the stream there: `tested` is the entry whose value the test reads.
+        uint32_t owner = 0;
+        for (uint32_t r = 2; r + 1 < code.count; r += 1)
+        {
+            const X86Instruction* set = &code.records[r - 2];
+            const X86Instruction* extend = &code.records[r - 1];
+            const X86Instruction* test = &code.records[r];
+            const uint32_t jump = code.records[r + 1].form & BUSTER_X86_FORM_NUMBER;
+            bool sets = false;
+            for (uint32_t cc = 0; cc < 16; cc += 1)
+            {
+                sets = sets || (set->form & BUSTER_X86_FORM_NUMBER) == tier0_setcc[cc];
+            }
+            const bool again = sets && set->mode == BUSTER_X86_REGISTER_DIRECT && set->rm == X86_REGISTER_RAX && (extend->form & BUSTER_X86_FORM_NUMBER) == X86_FORM_MOVZX_R32_RM8 &&
+                               extend->mode == BUSTER_X86_REGISTER_DIRECT && extend->reg == X86_REGISTER_RAX && extend->rm == X86_REGISTER_RAX &&
+                               (test->form & BUSTER_X86_FORM_NUMBER) == X86_FORM_TEST_RM32_R32 && test->mode == BUSTER_X86_REGISTER_DIRECT && test->reg == X86_REGISTER_RAX &&
+                               test->rm == X86_REGISTER_RAX && (jump == X86_FORM_JE_REL8 || jump == X86_FORM_JNE_REL8);
+            if (again)
+            {
+                while (owner + 1 < count && entry_records[owner + 1] <= r)
+                {
+                    owner += 1;
+                }
+                const uint32_t i = owner;
+                const bool branch = kinds[i] == BUSTER_TYPED_BRANCH_FALSE || kinds[i] == BUSTER_TYPED_BRANCH_TRUE;
+                const bool flags = (kinds[i] == BUSTER_TYPED_NE || kinds[i] == BUSTER_TYPED_EQ) && entries.variants[i] == BUSTER_TIER0_VARIANT_FLAGS + BUSTER_TIER0_VARIANT_CONST;
+                const uint32_t back = branch ? 3 : 2;
+                const bool compare = (branch || flags) && i >= back && kinds[i - back] >= BUSTER_TYPED_EQ && kinds[i - back] <= BUSTER_TYPED_GE;
+                const bool templated = compare && tier0_slot(kinds[i - back], entries.key_classes[i - back], BUSTER_TIER0_VARIANT_JUMP_FALSE) != BUSTER_TIER0_SLOT_UNSUPPORTED;
+                const bool target = branch && (tier0_label(labels, i) || (i >= 1 && tier0_label(labels, i - 1)) || (i >= 2 && tier0_label(labels, i - 2)));
+                census->tested_again[flags && templated ? TIER0_CENSUS_AGAIN_TESTS : target ? TIER0_CENSUS_AGAIN_TARGET : compare && !templated ? TIER0_CENSUS_AGAIN_CLASS
+                                                                                                                                             : TIER0_CENSUS_AGAIN_OTHER] += 1;
+            }
+        }
         uint32_t absorbed = 0;
         for (uint32_t i = 0; room && i < count; i += 1)
         {
@@ -758,6 +895,20 @@ static bool tier0_census_function(Tier0Census* census, const Tier0Function* func
                     inputs[TIER0_CENSUS_HOME + back] = tier0_census_home(function, homes, local_count, j);
                     marks |= tier0_label(labels, j) ? (uint8_t)(1u << back) : 0;
                 }
+                // A branch behind a test against zero may be the jump on its compare's flags (#2877), the compare three
+                // or five back and its operands' class one further: where the stream has a test there, and nowhere
+                // else, the entries four to six back are inputs too. And a compare has what the stream after it says.
+                const bool tested = (kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE) && i >= 3 &&
+                                    (kinds[i - 1] == BUSTER_TYPED_NE || kinds[i - 1] == BUSTER_TYPED_EQ) && kinds[i - 2] == BUSTER_TYPED_CONST;
+                for (uint32_t back = 4; tested && back <= 6 && back <= i; back += 1)
+                {
+                    const uint32_t j = i - back;
+                    inputs[TIER0_CENSUS_CLASS_4 + back - 4] = classes[j];
+                    marks |= tier0_label(labels, j) ? (uint8_t)(1u << back) : 0;
+                }
+                inputs[TIER0_CENSUS_KIND_4] = tested && i >= 4 ? kinds[i - 4] : 0;
+                inputs[TIER0_CENSUS_KIND_5] = tested && i >= 5 ? kinds[i - 5] : 0;
+                inputs[TIER0_CENSUS_AHEAD] = kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE ? tier0_census_ahead(function, labels, i) : 0;
                 inputs[TIER0_CENSUS_LABELS] = marks;
                 inputs[TIER0_CENSUS_VALUE] = tier0_census_value_class((int64_t)values[i]);
                 inputs[TIER0_CENSUS_NARROW] = tier0_census_narrow_class(values[i], class);
@@ -1384,6 +1535,28 @@ static bool tier0_census_report(const Tier0Census* census, bool rows, uint32_t l
                census->chosen_entries, 100.0 * (double)census->chosen_entries / entries);
         printf("tier0-census: %" PRIu64 " functions with deep values, %" PRIu64 " with segment overrides (left out), %" PRIu64 " refused\n", census->deep_functions,
                census->special_functions, census->refused);
+        // The conditions (#2877).
+        uint64_t conditions = 0;
+        uint64_t again = 0;
+        for (uint32_t c = 0; c < TIER0_CENSUS_CONDITIONS; c += 1)
+        {
+            conditions += census->conditions[c];
+        }
+        for (uint32_t a = 0; a < TIER0_CENSUS_AGAINS; a += 1)
+        {
+            again += census->tested_again[a];
+        }
+        printf("tier0-census: conditions: %" PRIu64 " conditional branches", conditions);
+        for (uint32_t c = 0; c < TIER0_CENSUS_CONDITIONS; c += 1)
+        {
+            printf("%s %" PRIu64 " take %s", c == 0 ? ";" : ",", census->conditions[c], tier0_census_condition_names[c]);
+        }
+        printf("\ntier0-census: tested again: %" PRIu64 " sites make a compare's value and test it before a branch (setcc; movzx; test; je or jne)", again);
+        for (uint32_t a = 0; a < TIER0_CENSUS_AGAINS; a += 1)
+        {
+            printf("%s %" PRIu64 " %s", a == 0 ? ":" : ";", census->tested_again[a], tier0_census_again_names[a]);
+        }
+        printf("\n");
         // What the fusion makes of the stream: the groups by their entries, those that make no record, and the groups by
         // the fusion's variant (BUSTER_TIER0_VARIANT_*: a key's kind has its own).
         uint64_t sizes[5] = { 0 };

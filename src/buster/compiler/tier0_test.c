@@ -688,6 +688,8 @@ static uint64_t tier0_test_hash(const uint8_t* bytes, uint64_t length)
 
 // A program's machine code (each function at its offset, 16-aligned) and its fixups: each field's offset in the code,
 // its instruction's end, its target symbol and its kind (BUSTER_LINK_FIXUP_*).
+// The ways a condition is its compare's jump: behind one test or two, by how the compare takes its operands.
+#define BUSTER_TIER0_TEST_TESTED_WAYS 10
 typedef struct Tier0TestCode Tier0TestCode;
 struct Tier0TestCode
 {
@@ -707,6 +709,9 @@ struct Tier0TestCode
     // The functions whose frames are realigned (Tier0Code.frame_alignment_log2), and those among them with a base.
     uint64_t realigned;
     uint64_t based;
+    // The conditions tested against zero that are their compare's jump (#2877), by how the compare takes its operands
+    // (both on the stack, a constant, a local, a local and a constant, two locals), behind one test and then two.
+    uint64_t tested[BUSTER_TIER0_TEST_TESTED_WAYS];
 };
 #endif
 // Whether two compilations of a function made the same code: records, branch columns, references, labels' records and
@@ -1031,6 +1036,28 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
         }
         if (result)
         {
+            // The conditions tested against zero that became their compare's jump (#2877): the branch's group is one
+            // record, which only the jump on a compare's flags is, the tests between make none, and the leaves the
+            // compare fuses, which make none either, say how it takes its operands.
+            const uint8_t* kinds = function->kinds;
+            const uint32_t* firsts = scalar.entry_records;
+            for (uint32_t i = 3; i < function->count; i += 1)
+            {
+                const bool branch = (kinds[i] == BUSTER_TYPED_BRANCH_FALSE || kinds[i] == BUSTER_TYPED_BRANCH_TRUE) && firsts[i + 1] - firsts[i] == 1;
+                const bool twice = branch && i >= 5 && firsts[i - 4] == firsts[i];
+                const bool once = branch && !twice && firsts[i - 2] == firsts[i];
+                if (once || twice)
+                {
+                    const uint32_t compare = twice ? i - 5 : i - 3;
+                    const bool one = compare >= 1 && firsts[compare - 1] == firsts[compare] && (kinds[compare - 1] == BUSTER_TYPED_CONST || kinds[compare - 1] == BUSTER_TYPED_LOCAL);
+                    const bool two = one && compare >= 2 && firsts[compare - 2] == firsts[compare] && kinds[compare - 2] == BUSTER_TYPED_LOCAL;
+                    const bool constant = one && kinds[compare - 1] == BUSTER_TYPED_CONST;
+                    code->tested[(twice ? 5 : 0) + (!one ? 0 : two ? (constant ? 3 : 4) : (constant ? 1 : 2))] += 1;
+                }
+            }
+        }
+        if (result)
+        {
             const BranchSizingCheck sizing = branch_sizing_validate(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count);
             result = tier0_test_expect(tally, sizing.error == BRANCH_SIZING_OK, "branches", "seed %" PRIu64 " function %u: error %d at %" PRIu64, seed, f, sizing.error,
                                        sizing.index);
@@ -1308,7 +1335,7 @@ static void tier0_test_coverage(const Tier0Functions* functions, uint64_t* cover
 }
 
 static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint64_t seed, uint32_t count, Tier0ProgramOptions options, uint64_t* records,
-                                uint64_t* entries, uint64_t* deferred, uint64_t* deep, uint64_t* frames, uint64_t* coverage)
+                                uint64_t* entries, uint64_t* deferred, uint64_t* deep, uint64_t* frames, uint64_t* tested, uint64_t* coverage)
 {
     Arena arena = arena_reserve(1ull << 32);
     Tier0TestCode* code = BUSTER_ARENA_PUSH_ARRAY(&arena, Tier0TestCode, 1);
@@ -1345,6 +1372,7 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
             code->deep = 0;
             code->realigned = 0;
             code->based = 0;
+            memset(code->tested, 0, sizeof(code->tested));
             if (ok)
             {
                 tier0_test_coverage(functions, coverage);
@@ -1362,6 +1390,10 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
             *deep += code->deep;
             frames[0] += code->realigned;
             frames[1] += code->based;
+            for (uint32_t way = 0; way < BUSTER_TIER0_TEST_TESTED_WAYS; way += 1)
+            {
+                tested[way] += code->tested[way];
+            }
             if (ok)
             {
                 const Tier0TestData data = tier0_test_layout(program);
@@ -6405,6 +6437,7 @@ static void tier0_test_frame_address(Tier0TestTally* tally, Tier0Tables* tables)
 // The masks' check (#179), which main.c includes after the typed interpreter it runs (tier0_mask_test.c).
 static void tier0_test_masks(Tier0TestTally* tally, uint64_t seed, uint32_t count, uint64_t* entries);
 #include "buster/compiler/tier0_label_test.c"
+#include "buster/compiler/tier0_tested_test.c"
 #include "buster/compiler/tier0_deep_test.c"
 #include "buster/compiler/tier0_validate_test.c"
 #include "buster/compiler/tier0_tail_test.c"
@@ -6589,6 +6622,10 @@ static int run_tier0_tests(int argc, char** argv)
             deep.records = &tables.records;
             Tier0ProgramOptions aligned = deep;
             aligned.over_aligned = true;
+            // And with conditions as the lowering writes them, tested against zero before their branch (#2877): a program
+            // of its own seed for seed.
+            Tier0ProgramOptions tested = aligned;
+            tested.tested = true;
             {
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_moves(&tally);
@@ -6649,6 +6686,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_branches(&tally);
                 tier0_test_report("branches", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_tested(&tally);
+                tier0_test_report("tested compares", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
@@ -6782,7 +6826,7 @@ static int run_tier0_tests(int argc, char** argv)
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
-            for (uint32_t s = 0; s < 7; s += 1)
+            for (uint32_t s = 0; s < 8; s += 1)
             {
                 Tier0TestTally tally = { 0, 0 };
                 uint64_t instructions = 0;
@@ -6790,9 +6834,10 @@ static int run_tier0_tests(int argc, char** argv)
                 uint64_t deferred = 0;
                 uint64_t deep_entries = 0;
                 uint64_t frames[2] = { 0, 0 };
+                uint64_t fused[BUSTER_TIER0_TEST_TESTED_WAYS] = { 0 };
                 uint64_t coverage[BUSTER_TIER0_TEST_COVERAGE] = { 0 };
-                tier0_test_programs(&tally, &tables, seed + s * 1000003ull, count, s < 4 ? shapes[s] : s == 4 ? records : s == 5 ? deep : aligned, &instructions, &entries,
-                                    &deferred, &deep_entries, frames, coverage);
+                tier0_test_programs(&tally, &tables, seed + s * 1000003ull, count, s < 4 ? shapes[s] : s == 4 ? records : s == 5 ? deep : s == 6 ? aligned : tested,
+                                    &instructions, &entries, &deferred, &deep_entries, frames, fused, coverage);
                 if (s == 4 || s == 5)
                 {
                     // With the default count, every kind of part, location and result the catalog can make shows: the
@@ -6812,7 +6857,26 @@ static int run_tier0_tests(int argc, char** argv)
                 // count, the last shape has many, a base among them (with variable-length arrays).
                 tier0_test_expect(&tally, s < 4 ? frames[0] == 0 : s < 6 || count < 300 || (frames[0] >= 100 && frames[1] >= 10), "realigned frames",
                                   "%" PRIu64 " realigned frames, %" PRIu64 " with a base", frames[0], frames[1]);
-                tier0_test_report(s < 4 ? names[s] : s == 4 ? "programs: records by value" : s == 5 ? "programs: deep values" : "programs: aligned past 16 bytes", tally);
+                // The last shape's conditions must run as their compares' jumps, behind one test and behind two, each way
+                // a compare takes its operands: with the default count, dozens of each at least.
+                if (s == 7)
+                {
+                    static const char* const ways[5] = { "both on the stack", "a constant", "a local", "a local and a constant", "two locals" };
+                    for (uint32_t tests = 1; tests <= 2; tests += 1)
+                    {
+                        printf("    behind %s:", tests == 1 ? "one test" : "two tests");
+                        for (uint32_t way = 0; way < 5; way += 1)
+                        {
+                            const uint64_t reached = fused[(tests - 1) * 5 + way];
+                            printf(" %s %" PRIu64 "%s", ways[way], reached, way + 1 < 5 ? "," : "\n");
+                            tier0_test_expect(&tally, count < 300 || reached >= 50, "tested conditions", "%" PRIu64 " conditions behind %u tests are a compare of %s and its jump",
+                                              reached, tests, ways[way]);
+                        }
+                    }
+                }
+                tier0_test_report(s < 4 ? names[s] : s == 4 ? "programs: records by value" : s == 5 ? "programs: deep values" : s == 6 ? "programs: aligned past 16 bytes"
+                                                                                                                                    : "programs: tested conditions",
+                                  tally);
                 printf("    %" PRIu64 " entries, %" PRIu64 " records, %" PRIu64 " deferred, %" PRIu64 " deep, %" PRIu64 " realigned frames (%" PRIu64 " with a base)\n",
                        entries, instructions, deferred, deep_entries, frames[0], frames[1]);
                 total.checks += tally.checks;
@@ -6898,6 +6962,16 @@ static int run_tier0_tests(int argc, char** argv)
                 tier0_test_report("cross-check: aligned past 16 bytes", aligned_cross);
                 total.checks += aligned_cross.checks;
                 total.failures += aligned_cross.failures;
+                // The conditions the generator writes as compares and tests against zero (#2877): their C text is clang's
+                // to judge. A third as many programs as the other shapes: each has dozens of conditions, and the shape is
+                // the one before's but for them.
+                Tier0TestTally tested_cross = { 0, 0 };
+                Tier0ProgramOptions tested_defined = tested;
+                tested_defined.defined = true;
+                tier0_test_cross(&tested_cross, &tables, seed + 4000012ull, (cross_count + 2) / 3, tested_defined, clang, keep);
+                tier0_test_report("cross-check: tested conditions", tested_cross);
+                total.checks += tested_cross.checks;
+                total.failures += tested_cross.failures;
             }
             tier0_tables_close(&tables);
         }

@@ -1352,9 +1352,31 @@ a window of entries. The windows:
 | a pointer addition before a load | `[base + index * scale]` (scale 1, 2, 4 or 8) or `[base + c * size]` |
 | a pointer addition and a constant or a local before a store | `mov [base + index * scale], imm/home` |
 | a compare before a branch | `cmp …; jcc`, with no `setcc` |
+| a compare, one or two tests of its value (`CONST 0` and `NE` or `EQ`), and a branch | the compare's `cmp …` and the branch's `jcc` (#2877), the jump's condition turned by each `EQ` |
 | `LOCAL x, v, op, SET_LOCAL x` | `op home_x, v`: `inc ecx`, `add edx, ecx` |
 
 A target ends every window: a jump arriving there brings a value the template wouldn't know.
+
+**A condition's window (#2877).** The lowering writes a condition as its value tested against zero: `if (a < b)` is
+`LOCAL a`, `LOCAL b`, `LT`, `CONST 0`, `NE`, `BRANCH_FALSE`; a negated one, or a macro's `(x) != 0` around it, has a
+second `CONST 0` and `EQ` or `NE` before that. A compare's value is 0 or 1, so a test of it is the compare (after
+`EQ`, its opposite). The compare then leaves its flags (the `FLAGS` variants: its `cmp` alone) and the branch, with
+the tests between, is the jump on them (`JUMP_FALSE`, `JUMP_TRUE`, keyed by the compare's kind and class): `cmp a,
+b; jge`, where the test alone fused with the branch gave `cmp; setl; movzx; test; je`. Nothing between the two
+records writes the flags: the tests make no record. The window holds where:
+
+- each test's constant is zero, fused into it (an integer's, so that the test's first operand is the value the entry
+  before the constant made: validation asks a compare's operands to be of one class);
+- there are one or two tests, the compare three or five entries before the branch;
+- the compare is an integer one of 4 or 8 bytes, its own operands on the stack or a leaf fusion's (a constant, a
+  local, a local and a constant, two locals);
+- no target is on the branch, a test or a test's `CONST 0`. One on the compare or on its first operand leaves the
+  window whole: a jump there runs all of it.
+
+The compare takes its variant from the branch, three or five entries on: the one fusion whose consumer changes an
+entry before it. A floating compare has no such template, so its value is made and tested as before; so is a compare
+tested by another constant. Behind three tests the branch takes the last two, with the first as its compare, of the
+value the compare before it made; `&&`'s and `||`'s operands join at a target.
 
 **Depths.** There are two value stacks: integers and pointers, and floating values. Each entry's effect on each stack
 is a table lookup, with its absorbed entries' effects folded in. The depths are the effects' prefix sums. The integer
@@ -1438,8 +1460,8 @@ the entry's 32-byte hole block:
 - B, the entry's own local's home, or a compare's first local's;
 - the registers at depth −2 to 0 of each stack.
 
-`tier0_initialize` builds 1,962 templates from the encoder's forms and compiles each into one cache line. A byte the
-template fixes is that byte; a hole's is its index in the hole block. Its tables, about 1 MB, are separate static
+`tier0_initialize` builds 2,220 templates from the encoder's forms and compiles each into one cache line. A byte the
+template fixes is that byte; a hole's is its index in the hole block. Its tables, about 1.2 MB, are separate static
 arrays, whose pages it commits first with one `MADV_POPULATE_WRITE` call each (`tier0_prepare_tables`, #590): a kernel
 whose transparent huge pages are only `madvise`d gave them 257 base pages' faults in every compile. Grouping them in
 one structure, in a huge page of its own, took `tier0_initialize` from 82 to 184 million instructions in 60 builds
@@ -1497,7 +1519,13 @@ parallel move, without emitting it; the scalar path runs the emitter to count, w
    256-byte (row, class) property table. A kind's row groups the kinds with the same properties; at most 16 rows, two
    `vpermi2b` and a blend.
 3. **P2:** the compound fusions (addresses, a branch's compare, x = x op v) from P1's variants of the entries before.
-4. **P3:** each entry's absorber by one pointer-jump step, and the effects folded into it.
+   A branch's rules read 64-bit masks of the entries behind it (the tests against zero, those that are `EQ`, the
+   compares a branch can take), each block's kept for the next. A compare behind a branch's tests takes the flags'
+   variant from the branch's lane: in the same block, or in the block before, whose variants are stored again in
+   those lanes.
+4. **P3:** each entry's absorber by one pointer-jump step, and the effects folded into it. An absorber is 1 to 3
+   entries on and at most four after the step (`BUSTER_TIER0_ABSORB_REACH`): the constant of the first of two tests
+   is one before its test and three more before the branch.
 5. **P4:** the depths, by in-register byte prefix sums.
 
 The property tables are built from the template slots, so both paths follow one table; `tier0_initialize` refuses a

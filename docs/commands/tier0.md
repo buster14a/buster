@@ -89,9 +89,9 @@ contract and regression coverage.
 ## Tier 0 tests
 
 `./build/compiler test-tier0 [--seed N] [--count N] [--cross-check
-[--cross-count N] [--clang PATH] [--keep]]` (about 1.6 s on the 9700X, and
-14.6 s with `--cross-check`, on CPUs 0 to 7 as its job runs it) checks `tier0.c` on programs from
-`tier0_generate.c`, `--count` (300) of each of seven shapes: one function of
+[--cross-count N] [--clang PATH] [--keep]]` (about 2.8 s on the 9700X, and
+22.3 s with `--cross-check`, on CPUs 0 to 7 as its job runs it) checks `tier0.c` on programs from
+`tier0_generate.c`, `--count` (300) of each of eight shapes: one function of
 integers; integers and calls; everything (floating values, pointers,
 address-taken locals, objects); larger; larger with structs and unions
 passed and returned by value (#137), from a catalog of records whose parts
@@ -104,7 +104,15 @@ larger past the depth tables (calls of 13 to 32 arguments, each evaluated over
 the ones before it, and deeper expressions, whose deep entries must be at
 least 1% of the entries); and that with objects aligned past 16 bytes (to 32,
 64 and 4096, `over_aligned`), in realigned frames, a base (r15) among them
-where variable-length arrays move rsp, many of each. Their calls pass up to 12
+where variable-length arrays move rsp, many of each; and that again with its
+statements' conditions as the lowering writes them (`tested`, #2877): half are
+compares of 4- and 8-byte integers the generator writes itself (a value
+against a constant or a local, a local against a constant, two locals), and
+half of all of them are tested against zero before their branch, once or
+twice (`CONST 0` and `NE` or `EQ`, the branch `BRANCH_TRUE` after an odd
+number of `EQ`s). Its programs must run at least 50 conditions that are
+their compare's jump for each way a compare takes its operands, behind one
+test and behind two. Their calls pass up to 12
 arguments (32 in the deep shape), past the argument registers, a third of them (in the shapes with
 calls) through pointers to functions, and their pointer arithmetic has
 element sizes for each of its templates, past imul's imm32 too. Their objects
@@ -180,6 +188,14 @@ pointer on (`BUSTER_TIER0_RESULT_HIDDEN`) and a return of it after, rdi loaded
 from parameter 0's home right before the call, the probe finding the driver's
 hidden pointer in rdi and the bytes it writes reaching the driver; and each of
 that call's rules broken once.
+Then tested compares (#2877, `tier0_tested_test.c`): a compare, one or two
+tests of its value (`CONST 0` and `NE` or `EQ`) and a branch, for every
+compare, class of 4- and 8-byte integers, way the compare takes its operands,
+tests and branch, and each such way at every place across a 64-entry block's
+end. Both paths must make the same records, none a `setcc`: the compare's
+own, none for the tests, and for the branch the jump of the right condition
+alone. A test against 1, a label on a test's `CONST 0`, a third test and a
+floating compare must keep a compare's value.
 Every function must pass `tier0_validate`, both
 paths must compile it to the same records, branch columns and references, and
 the records must pass `x86_validate` and the branch columns
@@ -311,8 +327,9 @@ on the same inputs and compares the results and every global (a floating
 one's NaNs alike whatever their bits, as C leaves them), then times both; then
 as many programs of the records shape linked mixed, their even functions Tier
 0's and their odd ones clang's, so that calls pass and return structs and
-unions by value between the two compilers both ways, and as many of the deep
-shape. It prints the code's sizes (clang's `.text` against Tier 0's functions) and the
+unions by value between the two compilers both ways, as many of the deep
+shape and of the aligned one, and a third as many of the tested conditions'.
+It prints the code's sizes (clang's `.text` against Tier 0's functions) and the
 run times. A shared library generated beside them (GNU as source, which `as`
 and `ld -shared` link) defines the globals Tier 0 reaches through the GOT, so
 that the executable's slots for them are the loader's to fill (`GLOB_DAT`, and
@@ -459,8 +476,13 @@ counted into the same census, so that several corpora are one population.
   of a pointer addition's scaled constant (`p + 3` and `p + 20` of 8-byte
   elements take an 8-bit and a 32-bit immediate); each named local's home (a
   register or a slot); the two depths; the symbol's access; a call's counts
-  and flags; a copy's bytes; the frame's kind. Three more are the fusion's
-  own answers (its key's kind and class and its variant).
+  and flags; a copy's bytes; the frame's kind. A condition (#2877) is a
+  compare that leaves its flags and a branch behind its tests that jumps on
+  them: a compare has one input of the entries after it (whether it is such
+  a branch's, behind one test or two), and a branch behind a test has the
+  kinds and classes of the entries four to six back, where its compare and
+  the compare's operands' class are. Three more are the fusion's own answers
+  (its key's kind and class and its variant).
 - **Two figures of a set of inputs.** Its *conflicts* are the entries in keys
   with two patterns: one odd group makes its whole key's entries undecided,
   which is #2874's gate's rule. Its *exceptions* are the entries whose pattern
@@ -474,8 +496,11 @@ counted into the same census, so that several corpora are one population.
   fusion's three offered.
 
 The report has the corpus's totals (entries, records, groups, patterns, how
-each pattern was found, the groups by their entries and by the fusion's
-variant, those that make no record), then for each count the entries a key of
+each pattern was found, the conditional branches by what their group takes
+and the sites where a compare's value is made and tested again before a
+branch (`setcc; movzx; test; je`), by why the fusion left them (#2877), the
+groups by their entries and by the fusion's variant, those that make no
+record), then for each count the entries a key of
 each size decides, the gate's line (a key of 8 bytes or fewer, the kind its first),
 what the gate's keys decide without each family of inputs, and what no key
 decides. `--rows` adds a line a kind and a count, with its whole key, the
