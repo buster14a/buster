@@ -493,7 +493,8 @@ struct ArenaRegions
 // pushed no more than BUSTER_ARENA_KEPT_BYTES leave it mapped: the address space is not taken again either way, and
 // the pages, 32 MiB of them at the very most, are the exit's to free, with everything else. A larger arena's release
 // gives its pages back at once, as before, and so does every release after those: a process that reserves and
-// releases without end keeps no more.
+// releases without end keeps no more. Where commit is charged (strict overcommit, a finite RLIMIT_DATA) every release
+// unmaps, as before, and returns its charge.
 #define BUSTER_ARENA_KEPT_BYTES (1ull << 20)
 #define BUSTER_ARENA_KEPT_COUNT 32
 #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
@@ -1269,7 +1270,8 @@ static bool arena_release_keeps(const Arena* arena, const uint8_t* mapping)
     const uintptr_t middle = __atomic_load_n(&arena_regions.middle, __ATOMIC_ACQUIRE);
     const bool taken = BUSTER_ARENA_REGIONS && middle > BUSTER_ARENA_REGION_REFUSED && (uintptr_t)mapping >= middle - BUSTER_ARENA_REGION_BYTES &&
                        (uintptr_t)mapping < middle + BUSTER_ARENA_REGION_BYTES;
-    const bool small = taken && !arena->unaccounted && arena->peak <= BUSTER_ARENA_KEPT_BYTES;
+    // Not where commit is charged: an arena left mapped would keep its charge until the exit (#1521).
+    const bool small = taken && arena_limits.fixed && arena_limits.commit_unbounded && !arena->unaccounted && arena->peak <= BUSTER_ARENA_KEPT_BYTES;
     return small && __atomic_fetch_add(&arena_regions.kept, 1, __ATOMIC_RELAXED) < BUSTER_ARENA_KEPT_COUNT;
 }
 

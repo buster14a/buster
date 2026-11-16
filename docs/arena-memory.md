@@ -281,7 +281,8 @@ address space now makes about half of them (5, 35, 7 and 2 for `hello.c`):
   taken from the stretch and pushed no more than 1 MiB leave it mapped
   instead, 32 MiB at the very most, which the exit frees with everything
   else. A larger arena's release gives its pages back at once, as before, and
-  so does every release after those. With one executable on the 9700X,
+  so does every release after those, and every release where commit is
+  charged, which returns its charge. With one executable on the 9700X,
   leaving every such arena mapped took 2.25% of the kernel cycles off
   musl's units compiled a process each (9 rounds of 9) and nothing off
   `sqlite3.c`, whose releases are its large arenas' pages.

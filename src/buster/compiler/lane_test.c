@@ -615,7 +615,8 @@ static uint64_t lane_test_carved(uint32_t down)
 // as a compile's command has them: two arenas reserved one after the other are next to each other in the stretch's
 // upper half, each zero-filled and writable where it pushed, as an arena of its own mapping is, and advised huge pages
 // past its base pages from its reservation; a release without a pool leaves a small arena mapped and unmaps a large
-// one, and unmaps small ones too once BUSTER_ARENA_KEPT_COUNT have been kept (arena_release_keeps); an arena
+// one, and unmaps small ones too once BUSTER_ARENA_KEPT_COUNT have been kept, or where commit is charged
+// (arena_release_keeps); an arena
 // of base pages and an arena of tables come from the lower half, each right below the one before, with their
 // mappings' flags; a pool takes a released arena and gives the same one back; commits take an arena's base pages at
 // once and then four times what is committed where the kernel charges none, 64 KB and then twice where it does
@@ -691,6 +692,17 @@ static void lane_test_arena_regions_child(LaneTestTally* tally)
     arena_release(&past);
     const bool past_unmapped = past_page != 0 && mincore((void*)past_page, BUSTER_ARENA_PAGE_BYTES, &vector) != 0 && errno == ENOMEM;
     lane_test_expect(tally, every_kept && past_unmapped, "a process's releases kept more small arenas mapped than they may, or fewer");
+    // Where commit is charged, a small arena's release unmaps it, whatever has been kept: with the count as it was
+    // before any release.
+    const uint32_t kept_count = __atomic_exchange_n(&arena_regions.kept, 0, __ATOMIC_RELAXED);
+    arena_limits.commit_unbounded = false;
+    Arena charged_small = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+    const uint8_t* charged_page = charged_small.base != 0 && arena_push(&charged_small, 1, 1) != 0 ? (const uint8_t*)((uintptr_t)charged_small.base & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1)) : 0;
+    arena_release(&charged_small);
+    const bool charged_unmapped = charged_page != 0 && mincore((void*)charged_page, BUSTER_ARENA_PAGE_BYTES, &vector) != 0 && errno == ENOMEM;
+    lane_test_expect(tally, charged_unmapped && __atomic_load_n(&arena_regions.kept, __ATOMIC_RELAXED) == 0, "a small arena's release stayed mapped where commit is charged");
+    arena_limits.commit_unbounded = true;
+    __atomic_store_n(&arena_regions.kept, kept_count, __ATOMIC_RELAXED);
     // The other flags' regions: base pages of 2 MB or more (MAP_STACK where the kernel maps them so), and tables.
     Arena wide = arena_reserve_small(BUSTER_LANE_TEST_LARGE_ARENA, 4 * BUSTER_ARENA_HUGE_PAGE_BYTES);
     ArenaTable tables[] = {
