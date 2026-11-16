@@ -620,11 +620,13 @@ takes its entries.
     differences=0 (range 0, refusal 0) taken-expressions-the-front-left=N
     the-front's-not-run=N` and `reader-time T objects=N differences=0
     library-calls=N differences=0`. `never-lowered` are the expressions it
-    typed that no lowered body holds: a body the selection dropped, a static
-    object's initializer. `the-front's-not-run` are taken expressions whose
-    nodes the front made without a root for them (an initializer beside a
-    variable-length array's bound). `--list N` lists the first differences. A
-    difference fails the command.
+    typed that the lowering never popped: a declaration's discard (its
+    initializer's value cast to void at its `;`, which nothing evaluates), a
+    static object's initializer, or a body the selection dropped.
+    `the-front's-not-run` are taken expressions whose nodes the front made
+    without a root for them (an initializer beside a variable-length array's
+    bound). `--list N` lists the first differences. A difference fails the
+    command.
 
 The report gives the expressions, evaluated nodes and calls taken, each
 refusal's (shape, code, leaf, context, diagnostic, template, row, root,

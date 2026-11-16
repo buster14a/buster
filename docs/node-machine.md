@@ -2374,7 +2374,9 @@ On the 9700X (CPU 2, medians of seven readings in turn, musl's of three):
 | | `sqlite3.c` | Lua | musl |
 | --- | ---: | ---: | ---: |
 | expressions T ran on at reader time | 56,681 | 13,184 | 57,888 |
-| of them, in no lowered body, and taken | 3,941 (7.0%) | 1,722 (13.1%) | 26,597 (45.9%) |
+| of them, taken, that the lowering never pops | 3,941 (7.0%) | 1,722 (13.1%) | 26,597 (45.9%) |
+| of those, a declaration's discard | 3,828 | 1,708 | 5,557 |
+| of those, in a body that is never lowered | 22 | 9 | 20,745 |
 | compared with the shadow's T: expressions, differences | 50,555, 0 | 10,545, 0 | 22,363, 0 |
 | T at reader time, TSC ticks a record | 67.5 | 84.3 | 134.5 |
 | the shadow's T, its first pass in the tight loop | 61.8 | 59.8 | 61.7 |
@@ -2393,10 +2395,21 @@ On the 9700X (CPU 2, medians of seven readings in turn, musl's of three):
   asked.
 - **What a reader types for nothing.** Of the expressions T runs on at reader
   time, 7% on `sqlite3.c`, 13% on Lua and 46% on musl are ones it takes that
-  the lowering never pops: bodies the selection drops, most of them headers'
-  inline functions. The pipeline reads and types those nodes today and
-  doesn't lower them. A machine in the reader runs C and X on them too,
-  unless the selection comes first.
+  the lowering never pops. On `sqlite3.c` and Lua nearly all of them are a
+  declaration's discard: at a declaration's `;` the walk casts each
+  initializer's value to void, as it does an expression statement's value,
+  and the front makes that cast a root. Nothing evaluates it (the program
+  takes an initializer's nodes for data, and the initialization's value is a
+  root of its own), so T types each such value once more under the cast. 22
+  and 9 are in bodies the selection drops. On musl 20,745 are, most of them
+  headers' inline functions, and 5,557 are discards. The pipeline reads and
+  types all of those nodes today and lowers none. A machine in the reader
+  must leave a declaration's discard alone, and it runs C and X on a dropped
+  body's expressions too unless the selection comes first. The split was
+  counted after this section's runs, with [the tests where they
+  sit](https://github.com/buster14a/buster/issues/2524#issuecomment-6908043343):
+  this section's first reading had all of them as dropped bodies', which
+  holds for musl alone.
 - **Where it sits, T costs what a body's expressions a run cost.** On
   `sqlite3.c` it is 9% over the tight loop's first pass and 25% over its
   best, which is what "Where the machine runs" found for a body a run (199
@@ -2461,8 +2474,12 @@ What would move it:
 - **Where the sweeps run:** 164 cycles a node in the tight loop, 199 a body's
   expressions a run, and at reader time, a chunk's expressions a run, T alone
   2.2 times its tight loop on musl.
-- **The selection before C and X:** 7% to 46% of the expressions a reader
-  types are in bodies that are never lowered.
+- **The selection before C and X:** 20,745 of the 57,888 expressions a reader
+  types on musl (36%) are ones it takes in bodies that are never lowered, its
+  headers' inline functions; 22 of `sqlite3.c`'s and 9 of Lua's are.
+- **A declaration's discard:** 9%, 17% and 24% of the roots the front gives T
+  (5,355, 2,275 and 13,991) are an initializer's value cast to void at the
+  declaration's `;`, which nothing evaluates.
 
 ## Expected gains
 
