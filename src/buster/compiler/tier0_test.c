@@ -688,7 +688,8 @@ static uint64_t tier0_test_hash(const uint8_t* bytes, uint64_t length)
 
 // A program's machine code (each function at its offset, 16-aligned) and its fixups: each field's offset in the code,
 // its instruction's end, its target symbol and its kind (BUSTER_LINK_FIXUP_*).
-#define BUSTER_TIER0_TEST_TESTED_WAYS 5
+// The ways a condition is its compare's jump: behind one test or two, by how the compare takes its operands.
+#define BUSTER_TIER0_TEST_TESTED_WAYS 10
 typedef struct Tier0TestCode Tier0TestCode;
 struct Tier0TestCode
 {
@@ -708,8 +709,8 @@ struct Tier0TestCode
     // The functions whose frames are realigned (Tier0Code.frame_alignment_log2), and those among them with a base.
     uint64_t realigned;
     uint64_t based;
-    // The conditions tested against zero that are their compare's branch (#2877), by how the compare takes its operands:
-    // both on the stack, a constant, a local, a local and a constant, two locals.
+    // The conditions tested against zero that are their compare's jump (#2877), by how the compare takes its operands
+    // (both on the stack, a constant, a local, a local and a constant, two locals), behind one test and then two.
     uint64_t tested[BUSTER_TIER0_TEST_TESTED_WAYS];
 };
 #endif
@@ -1035,22 +1036,23 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
         }
         if (result)
         {
-            // The conditions tested against zero that became their compare's branch (#2877): the compare, the CONST 0 and
-            // the test make no record of their own, and neither do the leaves the compare fuses, which say how it takes
-            // its operands.
+            // The conditions tested against zero that became their compare's jump (#2877): the branch's group is one
+            // record, which only the jump on a compare's flags is, the tests between make none, and the leaves the
+            // compare fuses, which make none either, say how it takes its operands.
             const uint8_t* kinds = function->kinds;
             const uint32_t* firsts = scalar.entry_records;
             for (uint32_t i = 3; i < function->count; i += 1)
             {
-                const bool shape = (kinds[i] == BUSTER_TYPED_BRANCH_FALSE || kinds[i] == BUSTER_TYPED_BRANCH_TRUE) &&
-                                   (kinds[i - 1] == BUSTER_TYPED_NE || kinds[i - 1] == BUSTER_TYPED_EQ) && kinds[i - 2] == BUSTER_TYPED_CONST &&
-                                   function->values[i - 2] == 0 && kinds[i - 3] >= BUSTER_TYPED_EQ && kinds[i - 3] <= BUSTER_TYPED_GE;
-                if (shape && firsts[i - 3] == firsts[i])
+                const bool branch = (kinds[i] == BUSTER_TYPED_BRANCH_FALSE || kinds[i] == BUSTER_TYPED_BRANCH_TRUE) && firsts[i + 1] - firsts[i] == 1;
+                const bool twice = branch && i >= 5 && firsts[i - 4] == firsts[i];
+                const bool once = branch && !twice && firsts[i - 2] == firsts[i];
+                if (once || twice)
                 {
-                    const bool one = i >= 4 && firsts[i - 4] == firsts[i] && (kinds[i - 4] == BUSTER_TYPED_CONST || kinds[i - 4] == BUSTER_TYPED_LOCAL);
-                    const bool two = one && i >= 5 && firsts[i - 5] == firsts[i] && kinds[i - 5] == BUSTER_TYPED_LOCAL;
-                    const bool constant = one && kinds[i - 4] == BUSTER_TYPED_CONST;
-                    code->tested[!one ? 0 : two ? (constant ? 3 : 4) : (constant ? 1 : 2)] += 1;
+                    const uint32_t compare = twice ? i - 5 : i - 3;
+                    const bool one = compare >= 1 && firsts[compare - 1] == firsts[compare] && (kinds[compare - 1] == BUSTER_TYPED_CONST || kinds[compare - 1] == BUSTER_TYPED_LOCAL);
+                    const bool two = one && compare >= 2 && firsts[compare - 2] == firsts[compare] && kinds[compare - 2] == BUSTER_TYPED_LOCAL;
+                    const bool constant = one && kinds[compare - 1] == BUSTER_TYPED_CONST;
+                    code->tested[(twice ? 5 : 0) + (!one ? 0 : two ? (constant ? 3 : 4) : (constant ? 1 : 2))] += 1;
                 }
             }
         }
@@ -6855,17 +6857,21 @@ static int run_tier0_tests(int argc, char** argv)
                 // count, the last shape has many, a base among them (with variable-length arrays).
                 tier0_test_expect(&tally, s < 4 ? frames[0] == 0 : s < 6 || count < 300 || (frames[0] >= 100 && frames[1] >= 10), "realigned frames",
                                   "%" PRIu64 " realigned frames, %" PRIu64 " with a base", frames[0], frames[1]);
-                // The last shape's conditions must run as their compares' branches, each way a compare takes its operands:
-                // with the default count, hundreds of each.
+                // The last shape's conditions must run as their compares' jumps, behind one test and behind two, each way
+                // a compare takes its operands: with the default count, dozens of each at least.
                 if (s == 7)
                 {
-                    static const char* const ways[BUSTER_TIER0_TEST_TESTED_WAYS] = { "both on the stack", "a constant", "a local", "a local and a constant", "two locals" };
-                    printf("   ");
-                    for (uint32_t way = 0; way < BUSTER_TIER0_TEST_TESTED_WAYS; way += 1)
+                    static const char* const ways[5] = { "both on the stack", "a constant", "a local", "a local and a constant", "two locals" };
+                    for (uint32_t tests = 1; tests <= 2; tests += 1)
                     {
-                        printf(" %s %" PRIu64 "%s", ways[way], fused[way], way + 1 < BUSTER_TIER0_TEST_TESTED_WAYS ? "," : "\n");
-                        tier0_test_expect(&tally, count < 300 || fused[way] >= 100, "tested conditions", "%" PRIu64 " conditions are a compare of %s and its branch",
-                                          fused[way], ways[way]);
+                        printf("    behind %s:", tests == 1 ? "one test" : "two tests");
+                        for (uint32_t way = 0; way < 5; way += 1)
+                        {
+                            const uint64_t reached = fused[(tests - 1) * 5 + way];
+                            printf(" %s %" PRIu64 "%s", ways[way], reached, way + 1 < 5 ? "," : "\n");
+                            tier0_test_expect(&tally, count < 300 || reached >= 50, "tested conditions", "%" PRIu64 " conditions behind %u tests are a compare of %s and its jump",
+                                              reached, tests, ways[way]);
+                        }
                     }
                 }
                 tier0_test_report(s < 4 ? names[s] : s == 4 ? "programs: records by value" : s == 5 ? "programs: deep values" : s == 6 ? "programs: aligned past 16 bytes"

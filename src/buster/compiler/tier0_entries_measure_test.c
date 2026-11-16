@@ -7,12 +7,12 @@
 // exception; and an odd group that a second input sets apart is decided at two inputs and one exception at one. Then
 // the census of the fixture under the fixture root, tests/tier0-entries/entries.c: every typed entry is in one group,
 // every record an entry's or the frame's, every head that takes a template has its template's records, the call and
-// the copy are deferred by their kind and one division by its depth, a compare of two locals, its test against zero and
-// its branch are one group of six entries whose inputs reach the two locals, and two pointer additions differ by their
-// scaled constants' class alone. Both conditions take a compare behind its test against zero, and the negated one's
-// compare is itself a test, so its value is made and tested again: the one such site, a test of a test. Its report
-// must have the gate's lines, the totals last. Include after tier0_entries_measure.c; test-checker calls this through
-// its forward declaration.
+// the copy are deferred by their kind and one division by its depth, a condition is its compare, which leaves the
+// flags, and its branch, the jump on them with the test between, a negated one's branch takes two tests, and two
+// pointer additions differ by their scaled constants' class alone. A twice negated compare's value and a long double
+// compare's are made and tested again: the two such sites, a third test in a row and a class with no branch's
+// template. Its report must have the gate's lines, the totals last. Include after tier0_entries_measure.c;
+// test-checker calls this through its forward declaration.
 #ifndef BUSTER_TIER0_ENTRIES_MEASURE_TEST_INCLUDED
 #define BUSTER_TIER0_ENTRIES_MEASURE_TEST_INCLUDED
 
@@ -152,8 +152,8 @@ static __attribute__((noinline)) void check_test_tier0_entries(CheckTest* test)
     memset(&result, 0, sizeof(result));
     char* report = 0;
     const bool ran = length > 0 && length < (int)sizeof(path) && tier0_entries_test_run(path, &census, &result, &report);
-    check_test_expect(test, ran && census.files == 1 && census.failures == 0 && census.left_out == 0 && census.refused == 0 && census.functions == 10,
-                      "tier0 entries: the fixture's ten functions are counted");
+    check_test_expect(test, ran && census.files == 1 && census.failures == 0 && census.left_out == 0 && census.refused == 0 && census.functions == 12,
+                      "tier0 entries: the fixture's twelve functions are counted");
     uint64_t entries = 0;
     uint64_t records = 0;
     uint64_t states[TIER0_CENSUS_STATES] = { 0 };
@@ -161,6 +161,7 @@ static __attribute__((noinline)) void check_test_tier0_entries(CheckTest* test)
     uint32_t deferred_kinds = 0;
     bool division = false;
     bool compare = false;
+    bool flags = false;
     uint32_t near_pattern = UINT32_MAX;
     uint32_t far_pattern = UINT32_MAX;
     for (uint64_t s = 0; ran && s < census.sample_count; s += 1)
@@ -172,16 +173,21 @@ static __attribute__((noinline)) void check_test_tier0_entries(CheckTest* test)
         widest = sample->weight > widest ? sample->weight : widest;
         deferred_kinds |= sample->state == TIER0_CENSUS_DEFERRED_KIND && sample->kind == BUSTER_TYPED_CALL ? 1 : 0;
         deferred_kinds |= sample->state == TIER0_CENSUS_DEFERRED_KIND && sample->kind == BUSTER_TYPED_COPY ? 2 : 0;
+        // The long double compare's function: its two locals' reads and the compare are the x87 class's.
+        deferred_kinds |= sample->state == TIER0_CENSUS_DEFERRED_KIND && sample->kind == BUSTER_TYPED_LOCAL ? 4 : 0;
+        deferred_kinds |= sample->state == TIER0_CENSUS_DEFERRED_KIND && sample->kind == BUSTER_TYPED_LT ? 8 : 0;
         division = division || (sample->state == TIER0_CENSUS_DEFERRED_DEPTH && sample->kind == BUSTER_TYPED_DIV);
         // The loop's condition (the lowering tests a condition's value against zero): LOCAL i, LOCAL count, LT, CONST 0,
-        // NE and BRANCH_FALSE as one group, the branch's (#2877). Its inputs have the two locals, four and five entries
-        // back, both in registers, and the label on the first, which the loop's end jumps to.
-        compare = compare || (sample->kind == BUSTER_TYPED_BRANCH_FALSE && sample->weight == 6 && sample->inputs[TIER0_CENSUS_KEY_KIND] == BUSTER_TYPED_LT &&
-                              sample->inputs[TIER0_CENSUS_VARIANT] == BUSTER_TIER0_VARIANT_TESTED_FALSE + BUSTER_TIER0_VARIANT_HOME_HOME &&
-                              sample->inputs[TIER0_CENSUS_KIND_4] == BUSTER_TYPED_LOCAL && sample->inputs[TIER0_CENSUS_KIND_5] == BUSTER_TYPED_LOCAL &&
-                              sample->inputs[TIER0_CENSUS_CLASS_4] == BUSTER_TYPED_CLASS_I32 && sample->inputs[TIER0_CENSUS_CLASS_5] == BUSTER_TYPED_CLASS_I32 &&
-                              sample->inputs[TIER0_CENSUS_HOME_4] == 1 && sample->inputs[TIER0_CENSUS_HOME_5] == 1 && sample->inputs[TIER0_CENSUS_LABELS] == 1u << 5 &&
-                              sample->records == 2);
+        // NE and BRANCH_FALSE (#2877). The compare with its two locals is one group, the flags' alone, whose input of
+        // the entries after it says a branch behind one test; and the test with the branch is another, the jump where
+        // LT doesn't hold, whose inputs have the two locals four and five back and the label on the first, which the
+        // loop's end jumps to.
+        compare = compare || (sample->kind == BUSTER_TYPED_BRANCH_FALSE && sample->weight == 3 && sample->inputs[TIER0_CENSUS_KEY_KIND] == BUSTER_TYPED_LT &&
+                              sample->inputs[TIER0_CENSUS_VARIANT] == BUSTER_TIER0_VARIANT_JUMP_FALSE && sample->inputs[TIER0_CENSUS_KIND_4] == BUSTER_TYPED_LOCAL &&
+                              sample->inputs[TIER0_CENSUS_KIND_5] == BUSTER_TYPED_LOCAL && sample->inputs[TIER0_CENSUS_CLASS_4] == BUSTER_TYPED_CLASS_I32 &&
+                              sample->inputs[TIER0_CENSUS_LABELS] == 1u << 5 && sample->records == 1);
+        flags = flags || (sample->kind == BUSTER_TYPED_LT && sample->weight == 3 && sample->inputs[TIER0_CENSUS_AHEAD] == 1 &&
+                          sample->inputs[TIER0_CENSUS_VARIANT] == BUSTER_TIER0_VARIANT_FLAGS + BUSTER_TIER0_VARIANT_HOME_HOME && sample->records == 1);
         // `p + 3` and `p + 20` of 8-byte elements: the constants are of one class (2 to 127) and the products, 24 and
         // 160, of two (the classes of tier0_census_value_class, plus one).
         const bool addition = sample->kind == BUSTER_TYPED_PTR_ADD && sample->inputs[TIER0_CENSUS_VALUE] == 3 && sample->inputs[TIER0_CENSUS_VALUE_1] == 3 &&
@@ -194,26 +200,32 @@ static __attribute__((noinline)) void check_test_tier0_entries(CheckTest* test)
     check_test_expect(test, ran && records + census.frame_records == census.records, "tier0 entries: every record is an entry's, a prologue's or an epilogue's");
     check_test_expect(test, ran && states[TIER0_CENSUS_OTHER] == 0 && states[TIER0_CENSUS_TEMPLATED] != 0,
                       "tier0 entries: every head that takes a template has its template's records");
-    check_test_expect(test, ran && deferred_kinds == 3 && states[TIER0_CENSUS_DEFERRED_KIND] == 2, "tier0 entries: the call and the copy are deferred by their kind");
+    check_test_expect(test, ran && deferred_kinds == 15 && states[TIER0_CENSUS_DEFERRED_KIND] == 5,
+                      "tier0 entries: the call, the copy and the long double compare with its two operands are deferred by their kind");
     check_test_expect(test, ran && division && states[TIER0_CENSUS_DEFERRED_DEPTH] == 1, "tier0 entries: the division whose operands aren't in rax's place is deferred by its depth");
-    check_test_expect(test, ran && compare && widest == 6, "tier0 entries: a compare, its test against zero and its branch are one group of six entries, the widest");
+    check_test_expect(test, ran && compare && flags && widest == 5,
+                      "tier0 entries: a condition is its compare's group, the flags alone, and its branch's with the test; a negated one's branch has five entries, the widest");
     check_test_expect(test, ran && near_pattern != UINT32_MAX && far_pattern != UINT32_MAX && near_pattern != far_pattern,
                       "tier0 entries: two pointer additions differ by their scaled constants' class alone, and in their patterns");
-    // The loop's condition and the negated compare's: `i < count` is its branch's, and `!(a < b)` is LT, CONST 0, EQ,
-    // CONST 0, NE and the branch, whose compare is the EQ: the LT's value is made (setl; movzx) and tested (test; je).
-    check_test_expect(test, ran && census.conditions[TIER0_CENSUS_CONDITION_TESTED] == 2 && census.conditions[TIER0_CENSUS_CONDITION_COMPARE] == 0 &&
-                                census.conditions[TIER0_CENSUS_CONDITION_ALONE] == 0,
-                      "tier0 entries: both conditions take a compare behind its test against zero");
-    check_test_expect(test, ran && census.tested_again[TIER0_CENSUS_AGAIN_TEST] == 1 && census.tested_again[TIER0_CENSUS_AGAIN_TARGET] == 0 &&
-                                census.tested_again[TIER0_CENSUS_AGAIN_OTHER] == 0,
-                      "tier0 entries: the negated compare's value is made and tested again, a test of a test");
+    // The four conditions: the loop's is behind one test; `!(a < b)` (LT, CONST 0, EQ, CONST 0, NE and the branch)
+    // behind two; `!!(a < b)` has three tests, so its branch takes the last two with the first as its compare, which
+    // tests LT's value: made (setl; movzx) and tested (test; jne) again; and a long double compare has no branch's
+    // template, so its value is made (seta; movzx) and the branch has the test of it.
+    check_test_expect(test, ran && census.conditions[TIER0_CENSUS_CONDITION_TESTED] == 1 && census.conditions[TIER0_CENSUS_CONDITION_TESTED_TWICE] == 2 &&
+                                census.conditions[TIER0_CENSUS_CONDITION_COMPARE] == 1 && census.conditions[TIER0_CENSUS_CONDITION_ALONE] == 0,
+                      "tier0 entries: the conditions take a compare behind one test, two behind two, and one the test before it");
+    check_test_expect(test, ran && census.tested_again[TIER0_CENSUS_AGAIN_TESTS] == 1 && census.tested_again[TIER0_CENSUS_AGAIN_CLASS] == 1 &&
+                                census.tested_again[TIER0_CENSUS_AGAIN_TARGET] == 0 && census.tested_again[TIER0_CENSUS_AGAIN_OTHER] == 0,
+                      "tier0 entries: a third test's and a long double compare's values are made and tested again");
     check_test_expect(test, ran && result.decided[0] == census.entries && result.decided[1] == census.entries && result.undecided[0] == 0 &&
                                 result.common[0] == census.entries && result.rows[0] != 0,
                       "tier0 entries: a key of the gate's bytes decides every entry of the fixture");
     static const char* const lines[] = {
-        "tier0-census: 10 functions, ",
-        "tier0-census: conditions: 2 conditional branches; 0 take the compare before it, 2 take a compare behind its test against zero, 0 take no entry\n",
-        "tier0-census: tested again: 1 sites make a compare's value and test it before a branch (setcc; movzx; test; je or jne): 1 a test of a test",
+        "tier0-census: 12 functions, ",
+        "tier0-census: conditions: 4 conditional branches; 1 take the compare before it, 1 take a compare behind its test against zero, 2 take a compare behind two "
+        "tests, 0 take no entry\n",
+        "tier0-census: tested again: 2 sites make a compare's value and test it before a branch (setcc; movzx; test; je or jne): 1 a third test in a row; 0 a jump's "
+        "target on the branch, its test or the constant; 1 a compare of a class with no branch's template; 0 other\n",
         "tier0-census: groups of 1 entry ",
         "tier0-census: variant=0 groups=",
         "tier0-census: keys=raw: gate: a key of 8 bytes or fewer decides ",
@@ -269,7 +281,7 @@ static __attribute__((noinline)) void check_test_tier0_entries(CheckTest* test)
     Tier0Census doubled;
     memset(&doubled, 0, sizeof(doubled));
     const bool again = ran && tier0_census_files(&doubled, both, 2, false, BUSTER_TYPED_KINDS, 8, true, &result);
-    check_test_expect(test, again && doubled.files == 2 && doubled.entries == 2 * once && doubled.functions == 20, "tier0 entries: two sets of files are one census");
+    check_test_expect(test, again && doubled.files == 2 && doubled.entries == 2 * once && doubled.functions == 24, "tier0 entries: two sets of files are one census");
     if (again)
     {
         tier0_census_end(&doubled);

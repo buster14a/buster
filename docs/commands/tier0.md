@@ -108,10 +108,11 @@ where variable-length arrays move rsp, many of each; and that again with its
 statements' conditions as the lowering writes them (`tested`, #2877): half are
 compares of 4- and 8-byte integers the generator writes itself (a value
 against a constant or a local, a local against a constant, two locals), and
-half of all of them are tested against zero before their branch (`CONST 0`
-and `NE`, or `EQ` before `BRANCH_TRUE`). Its programs must run at least 100
-conditions that are their compare's branch for each way a compare takes its
-operands. Their calls pass up to 12
+half of all of them are tested against zero before their branch, once or
+twice (`CONST 0` and `NE` or `EQ`, the branch `BRANCH_TRUE` after an odd
+number of `EQ`s). Its programs must run at least 50 conditions that are
+their compare's jump for each way a compare takes its operands, behind one
+test and behind two. Their calls pass up to 12
 arguments (32 in the deep shape), past the argument registers, a third of them (in the shapes with
 calls) through pointers to functions, and their pointer arithmetic has
 element sizes for each of its templates, past imul's imm32 too. Their objects
@@ -187,13 +188,14 @@ pointer on (`BUSTER_TIER0_RESULT_HIDDEN`) and a return of it after, rdi loaded
 from parameter 0's home right before the call, the probe finding the driver's
 hidden pointer in rdi and the bytes it writes reaching the driver; and each of
 that call's rules broken once.
-Then tested compares (#2877, `tier0_tested_test.c`): a compare, `CONST 0`, `NE`
-or `EQ` and a branch, for every compare, class of 4- and 8-byte integers, way
-the compare takes its operands, test and branch, and each such way at every
-place across a 64-entry block's end. Both paths must make the same records,
-none a `setcc`, the group's last the jump of the right condition. A test
-against 1, a label on the `CONST 0` and a floating compare must keep the
-compare's value.
+Then tested compares (#2877, `tier0_tested_test.c`): a compare, one or two
+tests of its value (`CONST 0` and `NE` or `EQ`) and a branch, for every
+compare, class of 4- and 8-byte integers, way the compare takes its operands,
+tests and branch, and each such way at every place across a 64-entry block's
+end. Both paths must make the same records, none a `setcc`: the compare's
+own, none for the tests, and for the branch the jump of the right condition
+alone. A test against 1, a label on a test's `CONST 0`, a third test and a
+floating compare must keep a compare's value.
 Every function must pass `tier0_validate`, both
 paths must compile it to the same records, branch columns and references, and
 the records must pass `x86_validate` and the branch columns
@@ -473,12 +475,13 @@ counted into the same census, so that several corpora are one population.
   of a pointer addition's scaled constant (`p + 3` and `p + 20` of 8-byte
   elements take an 8-bit and a 32-bit immediate); each named local's home (a
   register or a slot); the two depths; the symbol's access; a call's counts
-  and flags; a copy's bytes; the frame's kind. A branch after a compare's test
-  against zero takes the compare and its operands with it (#2877), five
-  entries back: where the stream has that shape, the kinds, classes and homes
-  of the two entries before the compare, the nearer one's value classes and
-  whether either is a jump target are inputs too. Three more are the fusion's
-  own answers (its key's kind and class and its variant).
+  and flags; a copy's bytes; the frame's kind. A condition (#2877) is a
+  compare that leaves its flags and a branch behind its tests that jumps on
+  them: a compare has one input of the entries after it (whether it is such
+  a branch's, behind one test or two), and a branch behind a test has the
+  kinds and classes of the entries four to six back, where its compare and
+  the compare's operands' class are. Three more are the fusion's own answers
+  (its key's kind and class and its variant).
 - **Two figures of a set of inputs.** Its *conflicts* are the entries in keys
   with two patterns: one odd group makes its whole key's entries undecided,
   which is #2874's gate's rule. Its *exceptions* are the entries whose pattern

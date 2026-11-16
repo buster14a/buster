@@ -5,8 +5,9 @@
 // whose functions make each way the census finds a record pattern. Templates with their fusions (a constant, a local,
 // two locals compared, a condition's test and its branch, a pointer addition into a load and a store), a call and a
 // copy (deferred entries), a division with its operands in rax and elsewhere, floating values, a global, two pointer
-// additions whose constants are of one class and whose scaled constants take an 8-bit and a 32-bit immediate, and a
-// negated compare, whose value is made and tested again (#2877: two tests in a row, of which the fusion takes one).
+// additions whose constants are of one class and whose scaled constants take an 8-bit and a 32-bit immediate, and the
+// conditions' ways (#2877): a compare behind its test against zero (the loop's), a negated one behind two, a twice
+// negated one, whose first test's value is made and tested again, and a long double compare, whose value is too.
 struct Row
 {
     long first;
@@ -75,6 +76,24 @@ long* twentieth(long* p)
 int negated(int a, int b)
 {
     if (!(a < b))
+    {
+        return 1;
+    }
+    return 2;
+}
+
+int twice_negated(int a, int b)
+{
+    if (!!(a < b))
+    {
+        return 1;
+    }
+    return 2;
+}
+
+int extended(long double a, long double b)
+{
+    if (a < b)
     {
         return 1;
     }

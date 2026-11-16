@@ -1940,10 +1940,11 @@ struct Tier0RecordSpec
 //     are locals (the first B, the last A). For a floating constant, CONST is its zero (xorps).
 //   - INDEX(s): a load's address (or a pointer addition's lea) is [R2 + R1 * 2^s]; OFFSET: [R1 + K].
 //   - BRANCH_FALSE and BRANCH_TRUE, plus the compare's PLAIN to HOME_HOME: a branch with its compare.
-//   - TESTED_FALSE and TESTED_TRUE, plus the compare's PLAIN to HOME_HOME: a branch with the compare whose value the
-//     two entries between test against zero (the compare, CONST 0, NE and the branch: how the lowering writes a
-//     condition, #2877). The branch's records, with the compare's operands two entries further back. With EQ for NE the
-//     branch is the other one's.
+//   - FLAGS, plus the compare's PLAIN to HOME_HOME: a compare whose value only a branch reads, behind tests of it
+//     against zero (the compare, CONST 0, NE or EQ, once or twice, and the branch: how the lowering writes a condition,
+//     a negated one, or a macro's `!= 0` before it, #2877). The compare's record alone: the flags are its value.
+//   - JUMP_FALSE and JUMP_TRUE: that branch, keyed by its compare's kind and class, with the tests between: the jump
+//     alone, where the compare doesn't hold or where it does.
 //   - RMW_CONST and RMW_HOME: x = x op v as op x, v (SET_LOCAL's).
 //   - INDEX_CONST(s), INDEX_HOME(s), OFFSET_HOME: a store's address [R2 + R1 * 2^s] (or [R1 + K]) and its value a
 //     constant (K) or a local (A).
@@ -1970,14 +1971,13 @@ struct Tier0RecordSpec
 #define BUSTER_TIER0_VARIANT_ATOMIC 30
 #define BUSTER_TIER0_VARIANT_WIDE_SCALE 31
 #define BUSTER_TIER0_VARIANT_CONVERT_HOME 16
-// A compare's alone, so they share their numbers with a store's INDEX_CONST to OFFSET_HOME and a return's LAST.
-#define BUSTER_TIER0_VARIANT_TESTED_FALSE 21
-#define BUSTER_TIER0_VARIANT_TESTED_TRUE 26
-// The entries between a tested compare and its branch: the CONST 0 and the NE or EQ.
-#define BUSTER_TIER0_TESTED_ENTRIES 2
-// The furthest an absorbed entry is from the entry that takes it at last: a tested compare's first local, two before the
-// compare, which is 1 + BUSTER_TIER0_TESTED_ENTRIES before its branch.
-#define BUSTER_TIER0_ABSORB_REACH 5
+// A compare's alone, so they share their numbers with a store's INDEX_CONST to OFFSET_HOME.
+#define BUSTER_TIER0_VARIANT_FLAGS 21
+#define BUSTER_TIER0_VARIANT_JUMP_FALSE 26
+#define BUSTER_TIER0_VARIANT_JUMP_TRUE 27
+// The furthest an absorbed entry is from the entry that takes it at last: the constant of the first of two tests that a
+// branch takes, one before the test and three more before the branch.
+#define BUSTER_TIER0_ABSORB_REACH 4
 #define BUSTER_TIER0_VARIANTS 32
 
 // A template: up to four records, as specifications (for the scalar expansion and the passes after expansion) and
@@ -2012,7 +2012,7 @@ struct Tier0Template
 // 32 slots (one per variant), or the unsupported block's. A slot holds a template's index, with HOME_DEPENDENT when four
 // templates follow for its homes (A and B each a register or memory: the index plus A's bit plus twice B's), or
 // DEFERRED (tier0_emit_deferred's), or UNSUPPORTED.
-#define BUSTER_TIER0_TEMPLATE_CAPACITY 2560
+#define BUSTER_TIER0_TEMPLATE_CAPACITY 2304
 #define BUSTER_TIER0_SLOT_CAPACITY (512 * BUSTER_TIER0_VARIANTS)
 #define BUSTER_TIER0_SLOT_UNSUPPORTED 0xffff
 #define BUSTER_TIER0_SLOT_DEFERRED 0xfffe
@@ -3374,34 +3374,34 @@ static void tier0_define_templates(void)
                 tier0_add(tier0_r(tier0_setcc[cc], result));
                 tier0_add(tier0_rr(X86_FORM_MOVZX_R32_RM8, result, result));
                 tier0_end(kind, class, variant, 0);
-                // As a branch's condition: right before the branch, or tested against zero first (#2877), the compare's
-                // operands two entries further back.
-                for (uint32_t context = 0; context < 4; context += 1)
+                // As a branch's condition, right before the branch.
+                for (uint32_t when = 0; when < 2; when += 1)
                 {
-                    const uint32_t when = context & 1;
-                    const bool tested = context >= 2;
-                    const uint32_t base = tested ? (when != 0 ? BUSTER_TIER0_VARIANT_TESTED_TRUE : BUSTER_TIER0_VARIANT_TESTED_FALSE)
-                                                 : (when != 0 ? BUSTER_TIER0_VARIANT_BRANCH_TRUE : BUSTER_TIER0_VARIANT_BRANCH_FALSE);
                     tier0_begin();
-                    tier0_compare_holes(variant, tested ? 1 + BUSTER_TIER0_TESTED_ENTRIES : 1);
+                    tier0_compare_holes(variant, 1);
                     tier0_add(tier0_compare_record(class, variant, live));
                     tier0_add(tier0_branch(tier0_jcc_rel8[when != 0 ? cc : cc ^ 1], BUSTER_TIER0_RECORD_BRANCH));
-                    tier0_end(kind, class, base + variant, 0);
+                    tier0_end(kind, class, (when != 0 ? BUSTER_TIER0_VARIANT_BRANCH_TRUE : BUSTER_TIER0_VARIANT_BRANCH_FALSE) + variant, 0);
                 }
+                // As a branch's condition behind its tests against zero (#2877): the flags alone.
+                tier0_begin();
+                tier0_compare_holes(variant, 0);
+                tier0_add(tier0_compare_record(class, variant, live));
+                tier0_end(kind, class, BUSTER_TIER0_VARIANT_FLAGS + variant, 0);
             }
-            // Two locals: cmp x, y with x (B) or y (A) a register, or through the scratch, as a value and as a branch.
             const uint32_t cmp_r_rm = tier0_wide(class, X86_FORM_CMP_R32_RM32, X86_FORM_CMP_R64_RM64);
             const uint32_t cmp_rm_r = tier0_wide(class, X86_FORM_CMP_RM32_R32, X86_FORM_CMP_RM64_R64);
             const uint32_t load = tier0_wide(class, X86_FORM_MOV_R32_RM32, X86_FORM_MOV_R64_RM64);
-            for (uint32_t context = 0; context < 5; context += 1)
+            // Two locals: cmp x, y with x (B) or y (A) a register, or through the scratch, as a value, as a branch and as
+            // the flags alone.
+            for (uint32_t context = 0; context < 4; context += 1)
             {
-                const uint32_t shift = context == 0 ? 0 : context <= 2 ? 1 : 1 + BUSTER_TIER0_TESTED_ENTRIES;
-                const bool when = context == 2 || context == 4;
+                const uint32_t shift = context == 1 || context == 2 ? 1 : 0;
+                const bool when = context == 2;
                 const uint32_t variant = context == 0 ? BUSTER_TIER0_VARIANT_HOME_HOME
                                          : context == 1 ? BUSTER_TIER0_VARIANT_BRANCH_FALSE + BUSTER_TIER0_VARIANT_HOME_HOME
                                          : context == 2 ? BUSTER_TIER0_VARIANT_BRANCH_TRUE + BUSTER_TIER0_VARIANT_HOME_HOME
-                                         : context == 3 ? BUSTER_TIER0_VARIANT_TESTED_FALSE + BUSTER_TIER0_VARIANT_HOME_HOME
-                                                        : BUSTER_TIER0_VARIANT_TESTED_TRUE + BUSTER_TIER0_VARIANT_HOME_HOME;
+                                                        : BUSTER_TIER0_VARIANT_FLAGS + BUSTER_TIER0_VARIANT_HOME_HOME;
                 BUSTER_TIER0_HOME_CASES(kind, class, variant, no, 1 + shift, {
                     tier0_builder.current.b_offset = (uint8_t)(2 + shift);
                     Tier0RecordSpec compare = tier0_rh(cmp_r_rm, BUSTER_TIER0_SOURCE_B, BUSTER_TIER0_RM_HOME_A);
@@ -3421,11 +3421,18 @@ static void tier0_define_templates(void)
                         tier0_add(tier0_r(tier0_setcc[cc], BUSTER_TIER0_SOURCE_R0));
                         tier0_add(tier0_rr(X86_FORM_MOVZX_R32_RM8, BUSTER_TIER0_SOURCE_R0, BUSTER_TIER0_SOURCE_R0));
                     }
-                    else
+                    else if (context != 3)
                     {
                         tier0_add(tier0_branch(tier0_jcc_rel8[when ? cc : cc ^ 1], BUSTER_TIER0_RECORD_BRANCH));
                     }
                 });
+            }
+            // The branch behind the tests of a compare that left the flags: the jump alone.
+            for (uint32_t when = 0; when < 2; when += 1)
+            {
+                tier0_begin();
+                tier0_add(tier0_branch(tier0_jcc_rel8[when != 0 ? cc : cc ^ 1], BUSTER_TIER0_RECORD_BRANCH));
+                tier0_end(kind, class, when != 0 ? BUSTER_TIER0_VARIANT_JUMP_TRUE : BUSTER_TIER0_VARIANT_JUMP_FALSE, 0);
             }
         }
     }
@@ -4115,6 +4122,24 @@ static void tier0_absorb(Tier0Entries* entries, uint32_t consumer, uint32_t abso
     entries->absorbed[absorbed] = 1;
 }
 
+// Whether entry j tests the value before it against zero (#2877): NE or EQ that fused its constant, a zero no jump
+// arrives at. The constant is an integer's (a fused one is), so the tested value is the entry before the constant's.
+static bool tier0_is_test(const Tier0Function* function, const uint64_t* labels, const Tier0Entries* entries, uint32_t j)
+{
+    return (function->kinds[j] == BUSTER_TYPED_NE || function->kinds[j] == BUSTER_TYPED_EQ) && entries->variants[j] == BUSTER_TIER0_VARIANT_CONST &&
+           function->values[j - 1] == 0 && !tier0_label(labels, j - 1);
+}
+
+// Whether entry j is a compare that a branch behind its tests can take: its operands on the stack or a leaf fusion's,
+// with the templates that leave its flags to the branch's jump.
+static bool tier0_tested_compare(const Tier0Function* function, const Tier0Entries* entries, uint32_t j)
+{
+    const uint8_t kind = function->kinds[j];
+    return kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE && entries->variants[j] <= BUSTER_TIER0_VARIANT_HOME_HOME &&
+           tier0_slot(kind, entries->key_classes[j], BUSTER_TIER0_VARIANT_FLAGS + entries->variants[j]) != BUSTER_TIER0_SLOT_UNSUPPORTED &&
+           tier0_slot(kind, entries->key_classes[j], BUSTER_TIER0_VARIANT_JUMP_FALSE) != BUSTER_TIER0_SLOT_UNSUPPORTED;
+}
+
 // Whether entry i takes a last operand whose class both paths read from the entry before it (its stack in
 // tier0_raw_effects, and the entry's template key and variant): a kind whose shape has one, but RETURN of nothing. A
 // call reads its own arguments' classes.
@@ -4249,35 +4274,38 @@ static inline __attribute__((always_inline)) void tier0_fuse_entries(const Tier0
                 tier0_absorb(entries, i, i - 1);
             }
         }
-        // A branch's compare: the one whose value the entries before the branch test against zero (a compare, CONST 0,
-        // NE or EQ: the compare's value is 0 or 1, so the test is the compare, or with EQ its opposite), or the one
-        // right before the branch. A test that fused its constant has an integer's, and a compare's operands are of
-        // one class (validation's rule), so the test's first operand is the value the compare three back made.
+        // A branch's compare: the one right before it, or the one whose value the entries between test against zero
+        // (#2877), once (a compare, CONST 0, NE or EQ: how the lowering writes a condition) or twice (a negation, or a
+        // macro's `!= 0`, before that). A compare's value is 0 or 1, so a test of it is the compare, or with EQ its
+        // opposite: the compare, already this function's, leaves its flags (its variant becomes the flags' one) and
+        // the branch is the jump on them, with the tests. A test's first operand is the value the entry before its
+        // constant made: a compare's operands are of one class (validation's rule), and the fused constant is an
+        // integer's.
         if ((kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE) && i >= 1 && !here && kinds[i - 1] >= BUSTER_TYPED_EQ &&
             kinds[i - 1] <= BUSTER_TYPED_GE)
         {
-            const bool when = kind == BUSTER_TYPED_BRANCH_TRUE;
-            bool tested = i >= 3 && !before && !tier0_label(labels, i - 2) && (kinds[i - 1] == BUSTER_TYPED_NE || kinds[i - 1] == BUSTER_TYPED_EQ) &&
-                          entries->variants[i - 1] == BUSTER_TIER0_VARIANT_CONST && values[i - 2] == 0 && kinds[i - 3] >= BUSTER_TYPED_EQ &&
-                          kinds[i - 3] <= BUSTER_TYPED_GE && entries->variants[i - 3] <= BUSTER_TIER0_VARIANT_HOME_HOME;
-            if (tested)
+            const bool test = i >= 3 && tier0_is_test(function, labels, entries, i - 1);
+            const bool twice = test && i >= 5 && tier0_is_test(function, labels, entries, i - 3) && tier0_tested_compare(function, entries, i - 5);
+            const bool once = test && !twice && tier0_tested_compare(function, entries, i - 3);
+            const uint32_t base = kind == BUSTER_TYPED_BRANCH_TRUE ? BUSTER_TIER0_VARIANT_BRANCH_TRUE : BUSTER_TIER0_VARIANT_BRANCH_FALSE;
+            const uint32_t fused = base + entries->variants[i - 1];
+            if (once || twice)
             {
-                const bool sense = when != (kinds[i - 1] == BUSTER_TYPED_EQ);
-                const uint32_t fused = (sense ? BUSTER_TIER0_VARIANT_TESTED_TRUE : BUSTER_TIER0_VARIANT_TESTED_FALSE) + entries->variants[i - 3];
-                tested = tier0_slot(kinds[i - 3], entries->key_classes[i - 3], fused) != BUSTER_TIER0_SLOT_UNSUPPORTED;
-                if (tested)
+                // The branch is taken where the compare holds if it is BRANCH_TRUE, turned by each EQ among the tests.
+                const uint32_t compare = twice ? i - 5 : i - 3;
+                const bool holds = (kind == BUSTER_TYPED_BRANCH_TRUE) != ((kinds[i - 1] == BUSTER_TYPED_EQ) != (twice && kinds[i - 3] == BUSTER_TYPED_EQ));
+                entries->variants[compare] = (uint8_t)(BUSTER_TIER0_VARIANT_FLAGS + entries->variants[compare]);
+                key_kind = kinds[compare];
+                key_class = entries->key_classes[compare];
+                variant = holds ? BUSTER_TIER0_VARIANT_JUMP_TRUE : BUSTER_TIER0_VARIANT_JUMP_FALSE;
+                tier0_absorb(entries, i, i - 1);
+                if (twice)
                 {
-                    key_kind = kinds[i - 3];
-                    key_class = entries->key_classes[i - 3];
-                    variant = fused;
-                    tier0_absorb(entries, i, i - 1);
                     tier0_absorb(entries, i, i - 3);
                 }
             }
-            const uint32_t base = when ? BUSTER_TIER0_VARIANT_BRANCH_TRUE : BUSTER_TIER0_VARIANT_BRANCH_FALSE;
-            const uint32_t fused = base + entries->variants[i - 1];
-            if (!tested && entries->variants[i - 1] <= BUSTER_TIER0_VARIANT_HOME_HOME &&
-                tier0_slot(kinds[i - 1], entries->key_classes[i - 1], fused) != BUSTER_TIER0_SLOT_UNSUPPORTED)
+            else if (entries->variants[i - 1] <= BUSTER_TIER0_VARIANT_HOME_HOME &&
+                     tier0_slot(kinds[i - 1], entries->key_classes[i - 1], fused) != BUSTER_TIER0_SLOT_UNSUPPORTED)
             {
                 key_kind = kinds[i - 1];
                 key_class = entries->key_classes[i - 1];
@@ -13187,14 +13215,15 @@ static uint8_t tier0_properties_of(uint32_t kind, uint32_t class)
     properties |= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_HOME_CONST) != BUSTER_TIER0_SLOT_UNSUPPORTED ? BUSTER_TIER0_PROPERTY_HOME_CONST : 0;
     properties |= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_RMW_CONST) != BUSTER_TIER0_SLOT_UNSUPPORTED ? BUSTER_TIER0_PROPERTY_RMW_CONST : 0;
     properties |= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_RMW_HOME) != BUSTER_TIER0_SLOT_UNSUPPORTED ? BUSTER_TIER0_PROPERTY_RMW_HOME : 0;
-    // A compare's branches: right before the branch and tested against zero first, every operand variant of both.
-    bool branch = kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE;
+    // A compare's branches: right before the branch, every operand variant of both; and behind its tests, the flags of
+    // every operand variant and both jumps.
+    bool branch = kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE && tier0_slot(kind, class, BUSTER_TIER0_VARIANT_JUMP_FALSE) != BUSTER_TIER0_SLOT_UNSUPPORTED &&
+                  tier0_slot(kind, class, BUSTER_TIER0_VARIANT_JUMP_TRUE) != BUSTER_TIER0_SLOT_UNSUPPORTED;
     for (uint32_t v = 0; v <= BUSTER_TIER0_VARIANT_HOME_HOME; v += 1)
     {
         branch &= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_BRANCH_FALSE + v) != BUSTER_TIER0_SLOT_UNSUPPORTED;
         branch &= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_BRANCH_TRUE + v) != BUSTER_TIER0_SLOT_UNSUPPORTED;
-        branch &= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_TESTED_FALSE + v) != BUSTER_TIER0_SLOT_UNSUPPORTED;
-        branch &= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_TESTED_TRUE + v) != BUSTER_TIER0_SLOT_UNSUPPORTED;
+        branch &= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_FLAGS + v) != BUSTER_TIER0_SLOT_UNSUPPORTED;
     }
     properties |= branch ? BUSTER_TIER0_PROPERTY_BRANCH : 0;
     bool address = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_SET;
@@ -13247,10 +13276,21 @@ static bool tier0_build_vector_tables(void)
         {
             row[class] = kind < BUSTER_TIER0_KINDS && kind != BUSTER_TYPED_CONVERT ? tier0_properties_of(kind, class) : 0;
             // A compare takes two locals exactly where it takes a local and a constant: the vector path reads one bit.
+            // And its branches' templates are all there or none is, right before the branch and behind its tests: one
+            // bit again, where the scalar fusion asks for the slot it takes.
             if ((flags & BUSTER_TIER0_KIND_COMPARE) != 0)
             {
                 const bool home_home = tier0_slot(kind, class, BUSTER_TIER0_VARIANT_HOME_HOME) != BUSTER_TIER0_SLOT_UNSUPPORTED;
                 valid &= home_home == ((row[class] & BUSTER_TIER0_PROPERTY_HOME_CONST) != 0);
+                bool some = tier0_slot(kind, class, BUSTER_TIER0_VARIANT_JUMP_FALSE) != BUSTER_TIER0_SLOT_UNSUPPORTED ||
+                            tier0_slot(kind, class, BUSTER_TIER0_VARIANT_JUMP_TRUE) != BUSTER_TIER0_SLOT_UNSUPPORTED;
+                for (uint32_t v = 0; v <= BUSTER_TIER0_VARIANT_HOME_HOME; v += 1)
+                {
+                    some |= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_BRANCH_FALSE + v) != BUSTER_TIER0_SLOT_UNSUPPORTED;
+                    some |= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_BRANCH_TRUE + v) != BUSTER_TIER0_SLOT_UNSUPPORTED;
+                    some |= tier0_slot(kind, class, BUSTER_TIER0_VARIANT_FLAGS + v) != BUSTER_TIER0_SLOT_UNSUPPORTED;
+                }
+                valid &= some == ((row[class] & BUSTER_TIER0_PROPERTY_BRANCH) != 0);
             }
         }
         uint32_t found = row_count;
@@ -13336,6 +13376,13 @@ static uint64_t tier0_bits_back(const uint64_t* bits, uint32_t block, uint32_t b
     return back == 0 ? current : current << back | previous >> (64 - back);
 }
 
+// A block's mask of its own entries shifted back by `back` (bit j is entry first + j - back's), the block before's
+// mask filling its first bits.
+static uint64_t tier0_mask_back(uint64_t current, uint64_t previous, uint32_t back)
+{
+    return current << back | previous >> (64 - back);
+}
+
 // And forward by `ahead` (bit j is entry first + j + ahead's), across the block after (`blocks` of them).
 static uint64_t tier0_bits_ahead(const uint64_t* bits, uint32_t block, uint32_t blocks, uint32_t ahead)
 {
@@ -13370,8 +13417,9 @@ struct Tier0Bits
     uint64_t* sequential;
     uint8_t* sib_log2;
     uint64_t* labels;
-    // A consumer takes the leaf before it; takes a local and a constant (HOME_CONST); takes a pointer addition or a
-    // compare before it; takes a pointer addition two back; takes x = x op v's op and x.
+    // A consumer takes the leaf before it; takes a local and a constant (HOME_CONST); takes a pointer addition, a
+    // compare or a test before it; takes a pointer addition two back; takes the entry three back (x = x op v's x, and
+    // the first of the two tests behind a branch).
     uint64_t* leaf;
     uint64_t* home_const;
     uint64_t* one;
@@ -13604,11 +13652,19 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
             calls &= calls - 1;
         }
     }
-    // P2: the compound fusions, from P1's variants of the entries before.
+    // P2: the compound fusions, from P1's variants of the entries before. A branch's rules read three masks of the
+    // entries behind it, each block's kept for the next: the tests against zero, those of them that are EQ, and the
+    // compares a branch can take. A compare that leaves its flags to a branch behind its tests takes the flags'
+    // variant from the branch's lane, three or five on: in the block before for a block's first branches, whose
+    // variants are kept for that.
     __m512i previous_variants = _mm512_setzero_si512();
     __m512i previous_key_classes = _mm512_setzero_si512();
+    __m512i previous_fused = _mm512_setzero_si512();
     previous_kinds = _mm512_setzero_si512();
     previous_classes = _mm512_setzero_si512();
+    uint64_t previous_tests = 0;
+    uint64_t previous_equals = 0;
+    uint64_t previous_takable = 0;
     for (uint32_t block = 0; block < bits->blocks; block += 1)
     {
         const uint32_t first = block * 64;
@@ -13620,13 +13676,14 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         const __m512i kinds_1 = tier0_shift_back(kinds, previous_kinds, 1);
         const __m512i kinds_2 = tier0_shift_back(kinds, previous_kinds, 2);
         const __m512i kinds_3 = tier0_shift_back(kinds, previous_kinds, 3);
+        const __m512i kinds_5 = tier0_shift_back(kinds, previous_kinds, 5);
         const __m512i classes_1 = tier0_shift_back(classes, previous_classes, 1);
         const __m512i classes_3 = tier0_shift_back(classes, previous_classes, 3);
         const __m512i variants_1 = tier0_shift_back(variants, previous_variants, 1);
         const __m512i variants_2 = tier0_shift_back(variants, previous_variants, 2);
-        const __m512i variants_3 = tier0_shift_back(variants, previous_variants, 3);
         const __m512i key_classes_1 = tier0_shift_back(key_classes, previous_key_classes, 1);
         const __m512i key_classes_3 = tier0_shift_back(key_classes, previous_key_classes, 3);
+        const __m512i key_classes_5 = tier0_shift_back(key_classes, previous_key_classes, 5);
         const uint64_t labels = bits->labels[block];
         const uint64_t labels_1 = tier0_bits_back(bits->labels, block, 1);
         const uint64_t labels_2 = tier0_bits_back(bits->labels, block, 2);
@@ -13659,26 +13716,28 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         const uint64_t store = lanes & valid_2 & set & leaf & ~labels & ~labels_1 & pointer_add_2 &
                                ((index_2 & value_constant & property_address_const) | (index_2 & value_home & property_address) |
                                 (constant_variant_2 & value_home & property_address));
-        // A branch's compare.
-        const uint64_t branch = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_BRANCH_FALSE)) |
-                                _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_BRANCH_TRUE));
-        const __m512i compare_row = tier0_lookup(tier0_vector_rows, kinds_1);
-        const __m512i compare_properties = tier0_lookup256(tier0_vector_properties, _mm512_or_si512(_mm512_slli_epi16(compare_row, 4), key_classes_1));
-        const uint64_t compare_1 = _mm512_test_epi8_mask(flags_1, _mm512_set1_epi8(BUSTER_TIER0_KIND_COMPARE));
-        const uint64_t compare_fusable = _mm512_cmple_epu8_mask(variants_1, tier0_variant(BUSTER_TIER0_VARIANT_HOME_HOME)) &
-                                         _mm512_test_epi8_mask(compare_properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_BRANCH));
-        // The compare three back, which CONST 0 and NE or EQ test: its value is 0 or 1, so the test is the compare, or
-        // with EQ its opposite.
-        const __m512i flags_3 = tier0_lookup(tier0_vector_kind_flags, kinds_3);
-        const __m512i tested_row = tier0_lookup(tier0_vector_rows, kinds_3);
-        const __m512i tested_properties = tier0_lookup256(tier0_vector_properties, _mm512_or_si512(_mm512_slli_epi16(tested_row, 4), key_classes_3));
-        const uint64_t equal_1 = _mm512_cmpeq_epi8_mask(kinds_1, _mm512_set1_epi8(BUSTER_TYPED_EQ));
-        const uint64_t test_1 = equal_1 | _mm512_cmpeq_epi8_mask(kinds_1, _mm512_set1_epi8(BUSTER_TYPED_NE));
-        const uint64_t tested = lanes & valid_3 & branch & ~labels & ~labels_1 & ~labels_2 & test_1 & constant_variant_1 & tier0_bits_back(bits->zero, block, 2) &
-                                _mm512_test_epi8_mask(flags_3, _mm512_set1_epi8(BUSTER_TIER0_KIND_COMPARE)) &
-                                _mm512_cmple_epu8_mask(variants_3, tier0_variant(BUSTER_TIER0_VARIANT_HOME_HOME)) &
-                                _mm512_test_epi8_mask(tested_properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_BRANCH));
-        const uint64_t fused_branch = lanes & valid_1 & branch & ~labels & compare_1 & compare_fusable & ~tested;
+        // A branch's compare. First this block's own entries: the tests against zero (NE or EQ that fused its constant,
+        // a zero no jump arrives at) and the compares a branch can take (their operands a leaf fusion's, with the
+        // branches' templates).
+        const uint64_t branch_true = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_BRANCH_TRUE));
+        const uint64_t branch = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_BRANCH_FALSE)) | branch_true;
+        const __m512i own_flags = tier0_lookup(tier0_vector_kind_flags, kinds);
+        const __m512i own_properties = tier0_lookup256(tier0_vector_properties, _mm512_or_si512(_mm512_slli_epi16(row, 4), key_classes));
+        const uint64_t equals = lanes & _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_EQ));
+        const uint64_t tests = (equals | (lanes & _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_NE)))) & value_constant &
+                               tier0_bits_back(bits->zero, block, 1) & ~labels_1;
+        const uint64_t takable = lanes & _mm512_test_epi8_mask(own_flags, _mm512_set1_epi8(BUSTER_TIER0_KIND_COMPARE)) &
+                                 _mm512_test_epi8_mask(own_properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_BRANCH)) &
+                                 _mm512_cmple_epu8_mask(variants, tier0_variant(BUSTER_TIER0_VARIANT_HOME_HOME));
+        // Then the branch: the compare behind two tests, five back; or behind one, three back (#2877: a compare's value
+        // is 0 or 1, so a test of it is the compare, or with EQ its opposite); or right before it.
+        const uint64_t test_1 = tier0_mask_back(tests, previous_tests, 1);
+        const uint64_t twice = lanes & branch & ~labels & test_1 & tier0_mask_back(tests, previous_tests, 3) & tier0_mask_back(takable, previous_takable, 5);
+        const uint64_t once = lanes & branch & ~labels & test_1 & ~twice & tier0_mask_back(takable, previous_takable, 3);
+        const uint64_t tested = once | twice;
+        const uint64_t fused_branch = lanes & branch & ~labels & tier0_mask_back(takable, previous_takable, 1) & ~tested;
+        // Where the branch is taken: where the compare holds for BRANCH_TRUE, turned by each EQ among the tests.
+        const uint64_t holds = branch_true ^ tier0_mask_back(equals, previous_equals, 1) ^ (twice & tier0_mask_back(equals, previous_equals, 3));
         // x = x op v.
         const uint64_t set_local = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_SET_LOCAL));
         const uint64_t rmw_kind_1 = _mm512_test_epi8_mask(flags_1, _mm512_set1_epi8(BUSTER_TIER0_KIND_RMW));
@@ -13694,11 +13753,11 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         (void)leaf_2;
         const uint64_t rmw = lanes & valid_3 & set_local & ~labels & ~labels_1 & ~labels_2 & rmw_kind_1 & rmw_property & x_local &
                              bits->same[block] & _mm512_cmpeq_epi8_mask(classes_3, classes) & _mm512_cmpeq_epi8_mask(classes_1, classes);
-        // A tested compare's branch takes the test before it and the compare three back, as x = x op v's SET_LOCAL takes
-        // the op and x.
+        // A branch behind its tests takes the test before it; behind two, the first one too, three back, as x = x op v's
+        // SET_LOCAL takes the op and x.
         bits->one[block] = load | fused_branch | tested | rmw;
         bits->two[block] = store;
-        bits->rmw[block] = rmw | tested;
+        bits->rmw[block] = rmw | twice;
         // The keys and variants of the compound fusions.
         __m512i variant = variants;
         variant = _mm512_mask_mov_epi8(variant, load & constant_variant_1, tier0_variant(BUSTER_TIER0_VARIANT_OFFSET));
@@ -13710,26 +13769,39 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         const __m512i branch_base = _mm512_mask_blend_epi8(_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_BRANCH_TRUE)),
                                                            tier0_variant(BUSTER_TIER0_VARIANT_BRANCH_FALSE), tier0_variant(BUSTER_TIER0_VARIANT_BRANCH_TRUE));
         variant = _mm512_mask_add_epi8(variant, fused_branch, branch_base, variants_1);
-        const __m512i tested_base = _mm512_mask_blend_epi8(_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_BRANCH_TRUE)) ^ equal_1,
-                                                           tier0_variant(BUSTER_TIER0_VARIANT_TESTED_FALSE), tier0_variant(BUSTER_TIER0_VARIANT_TESTED_TRUE));
-        variant = _mm512_mask_add_epi8(variant, tested, tested_base, variants_3);
+        // A branch behind its tests is the jump on its compare's flags, keyed by the compare's kind and class; and the
+        // compare, three or five lanes before, takes the flags' variant: in this block, or in the one before, whose
+        // variants are stored again in those lanes.
+        const __m512i taken_kinds = _mm512_mask_blend_epi8(twice, kinds_3, kinds_5);
+        const __m512i taken_classes = _mm512_mask_blend_epi8(twice, key_classes_3, key_classes_5);
+        variant = _mm512_mask_blend_epi8(tested & holds, variant, tier0_variant(BUSTER_TIER0_VARIANT_JUMP_TRUE));
+        variant = _mm512_mask_blend_epi8(tested & ~holds, variant, tier0_variant(BUSTER_TIER0_VARIANT_JUMP_FALSE));
+        variant = _mm512_mask_add_epi8(variant, once >> 3 | twice >> 5, variant, tier0_variant(BUSTER_TIER0_VARIANT_FLAGS));
+        const uint64_t flags_before = once << 61 | twice << 59;
+        _mm512_mask_storeu_epi8(entries->variants + (block != 0 ? first - 64 : 0), block != 0 ? flags_before : 0,
+                                _mm512_add_epi8(previous_fused, tier0_variant(BUSTER_TIER0_VARIANT_FLAGS)));
         variant = _mm512_mask_mov_epi8(variant, rmw & constant_variant_1, tier0_variant(BUSTER_TIER0_VARIANT_RMW_CONST));
         variant = _mm512_mask_mov_epi8(variant, rmw & inner_home_1, tier0_variant(BUSTER_TIER0_VARIANT_RMW_HOME));
         _mm512_mask_storeu_epi8(entries->variants + first, lanes, variant);
         _mm512_mask_storeu_epi8(entries->key_kinds + first, lanes & (fused_branch | rmw), kinds_1);
-        _mm512_mask_storeu_epi8(entries->key_kinds + first, lanes & tested, kinds_3);
+        _mm512_mask_storeu_epi8(entries->key_kinds + first, lanes & tested, taken_kinds);
         _mm512_mask_storeu_epi8(entries->key_classes + first, lanes & fused_branch, key_classes_1);
-        _mm512_mask_storeu_epi8(entries->key_classes + first, lanes & tested, key_classes_3);
+        _mm512_mask_storeu_epi8(entries->key_classes + first, lanes & tested, taken_classes);
         previous_variants = variants;
         previous_key_classes = key_classes;
+        previous_fused = variant;
         previous_kinds = kinds;
         previous_classes = classes;
+        previous_tests = tests;
+        previous_equals = equals;
+        previous_takable = takable;
     }
 }
 
-// P3 and P4: each entry's absorber (the consumer that takes it, 1 to 3 entries on, or up to BUSTER_TIER0_ABSORB_REACH
-// after one pointer-jump step for an absorber that is absorbed itself: a tested compare's first local is two before
-// the compare and five before its branch), the effects folded into the absorbers, and the depths, their prefix sums.
+// P3 and P4: each entry's absorber (the consumer that takes it, 1 to 3 entries on, and up to BUSTER_TIER0_ABSORB_REACH
+// after one pointer-jump step for an absorber that is absorbed itself: the constant of the first of two tests behind a
+// branch is one before its test and four before the branch), the effects folded into the absorbers, and the depths,
+// their prefix sums.
 static void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, Tier0Entries* entries)
 {
     const uint32_t count = function->count;

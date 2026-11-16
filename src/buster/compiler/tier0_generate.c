@@ -1702,19 +1702,23 @@ static void tier0_generate_condition(Tier0Program* program, Tier0GeneratedFuncti
 
 // The branch a statement's condition ends in, the condition's value on the stack: BRANCH_FALSE to a target the caller
 // patches. With Tier0ProgramOptions.tested, half the time as the lowering writes it: the value tested against zero
-// first, CONST 0 and NE before the branch, or (a quarter of those) CONST 0 and EQ before BRANCH_TRUE, which goes where
-// the plain branch goes. Returns the branch's entry.
+// first, once or (two times in five) twice, by CONST 0 and NE or (a quarter of the tests) EQ, which turns the branch:
+// after an odd number of EQs it is BRANCH_TRUE, which goes where the plain branch goes. Returns the branch's entry.
 static uint32_t tier0_emit_condition(Tier0Program* program, uint64_t* random, const Tier0ProgramOptions* options)
 {
-    uint32_t branch = BUSTER_TYPED_BRANCH_FALSE;
+    bool turned = false;
     if (options->tested && tier0_generate_chance(random, 50))
     {
-        const bool equal = tier0_generate_chance(random, 25);
-        tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 0);
-        tier0_emit(program, equal ? BUSTER_TYPED_EQ : BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
-        branch = equal ? BUSTER_TYPED_BRANCH_TRUE : BUSTER_TYPED_BRANCH_FALSE;
+        const uint32_t tests = tier0_generate_chance(random, 40) ? 2 : 1;
+        for (uint32_t t = 0; t < tests; t += 1)
+        {
+            const bool equal = tier0_generate_chance(random, 25);
+            tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 0);
+            tier0_emit(program, equal ? BUSTER_TYPED_EQ : BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
+            turned = turned != equal;
+        }
     }
-    return tier0_emit(program, branch, BUSTER_TYPED_CLASS_I32, 0);
+    return tier0_emit(program, turned ? BUSTER_TYPED_BRANCH_TRUE : BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, 0);
 }
 
 // The stack's position restored from the outermost of the constructs from `outer` to the innermost that saved one: the
