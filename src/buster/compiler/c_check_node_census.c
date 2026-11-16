@@ -1145,8 +1145,12 @@ static uint32_t node_census_local_object(const NodeCensusScratch* s, uint32_t no
         at = walking ? base : at;
     }
     const uint32_t object = at < graph->count && graph->ops[at] == CHECK_OP_VALUE ? node_view_object(s, at) : 0;
+    // A static object is no local: its symbol says so, or its declaration, or its value's own flag. A string's object has
+    // no declaration, and no symbol either in a body the selection leaves out, which the tests at reader time are
+    // compared in too (--front-tests): there the flag alone says it.
     const bool local = object != 0 && object < program->object_count && program->object_symbols[object] == 0 &&
-                       !check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_STATIC);
+                       !check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_STATIC) &&
+                       (node_view_flags(s, at) & BUSTER_CHECK_STATIC_OBJECT) == 0;
     return local ? object : 0;
 }
 

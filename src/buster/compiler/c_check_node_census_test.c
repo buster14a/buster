@@ -93,6 +93,15 @@ static const char node_census_test_clean[] =
     "    if ((x = i)) x = 2; // take\n"
     "    p[x] = *e; // take\n"
     "    return x + uc + ud + big + (int)d; // take\n"
+    "}\n"
+    "__attribute__((unused)) static const char* left(int a)\n"
+    "{\n"
+    "    if (a > 2) return \"two\";\n"
+    "    return a ? \"one\" : \"none\";\n"
+    "}\n"
+    "const char* kept(int a)\n"
+    "{\n"
+    "    return a ? \"one\" : \"none\"; // take\n"
     "}\n";
 
 static const char node_census_test_set[] =

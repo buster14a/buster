@@ -698,7 +698,11 @@ takes its entries.
     reader time's actions' warnings (at least the graph run's), a packed
     unit's addresses, and the events of the passes after the reader. The
     lowering's own facts (a body that tracks its stack, a node popped twice)
-    are counted apart: a splice reads them where it pops the root.
+    are counted apart: a splice reads them where it pops the root. The
+    comparison reads bodies that are never lowered too, where the census's
+    tests can't lean on the selection: a string's object has no symbol
+    there, so the test of a returned address takes a static object by its
+    value's flag (the compiler's own source has two such returns).
   - **The report:** `node-shadow: reader-time tests expressions=N refused=N
     nodes-outside-the-records=0 units-whose-enabled-warnings-differ=0`,
     `reader-time tests refused test=TEST expressions=N first=N`, `reader-time
