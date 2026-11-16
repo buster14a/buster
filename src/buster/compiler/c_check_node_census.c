@@ -8,7 +8,7 @@
 // would make before it takes it. Include after c_check_lower_inventory.c.
 //
 //   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--fused] [--interleave N] [--facts | --facts-lean | --facts-loads]
-//                                       [--facts-packed] [--facts-window N] [--passes N] [--repeat N]] [preprocessor options] file...
+//                                       [--facts-operators] [--facts-packed] [--facts-window N] [--passes N] [--repeat N]] [preprocessor options] file...
 //
 // A full expression is a tree of the tasks' pops under one root: a pop that a statement's control pushed (an expression
 // statement's, a condition's, a return's, a switch's, an initializer's) or a nested control (a statement expression's).
@@ -1925,10 +1925,20 @@ struct NodeShadow
     // rules made (`facts_taken_leaves`, `facts_taken_lookups`), those that differ from T's, the words made, and the
     // kernel's time over each file's windows: its least cycles, instructions and TSC ticks over the passes, the ticks of
     // its two loops, and those of each window's second run of two in a row (`facts_warm`).
+    // With --facts-operators (#2850's step 2's first piece), the operators that are no lookup too, and a literal's leaf
+    // from a line: each operator's records, those the kernel made (`facts_operator_taken`) and those a class's loop
+    // made (`facts_operator_short`), and the literals' lines.
     bool facts;
     bool facts_packed;
+    bool facts_operators;
     uint32_t facts_window;
     uint32_t facts_mode;
+    uint64_t facts_operator_records[CHECK_OP_COUNT];
+    uint64_t facts_operator_taken[CHECK_OP_COUNT];
+    uint64_t facts_operator_short[CHECK_OP_COUNT];
+    uint64_t facts_literal_lines;
+    uint64_t facts_taken_lines;
+    uint64_t facts_pairs;
     uint64_t facts_records;
     uint64_t facts_literals;
     uint64_t facts_identifiers;
@@ -1940,6 +1950,7 @@ struct NodeShadow
     uint64_t facts_taken_leaves;
     uint64_t facts_taken_lookups;
     uint64_t facts_differences;
+    uint64_t facts_decoy_differences;
     uint64_t facts_list_differences;
     uint64_t facts_listed;
     uint64_t facts_short_lookups;
@@ -2536,7 +2547,7 @@ static void node_shadow_time(NodeShadow* shadow, NodeMachine* machine, uint64_t 
 
 // --facts, a file's: the kernel (node_facts_window) over each window of the file's machine-taken expressions. First a
 // pass over records no rule has written, whose every identifier's leaf and lookup is compared with T's record
-// (node_facts_same); then the timing: `passes` passes over the windows, and as many with each window run twice in a row,
+// (node_facts_same), and a second over decoys; then the timing: `passes` passes over the windows, and as many with each window run twice in a row,
 // whose second run finds its inputs in the caches.
 static void node_shadow_facts(NodeShadow* shadow, NodeCensusScratch* s)
 {
@@ -2573,20 +2584,28 @@ static void node_shadow_facts(NodeShadow* shadow, NodeCensusScratch* s)
             {
                 const uint32_t w = first + i;
                 const uint8_t kind = facts->kinds[w];
-                if (kind == BUSTER_NODE_FACTS_IDENTIFIER || kind == BUSTER_NODE_FACTS_LOOKUP)
+                // What the kernel makes: a leaf with a line (an identifier's, a literal's) and a made operator (a lookup,
+                // another operator).
+                const bool leaf = kind == BUSTER_NODE_FACTS_IDENTIFIER || kind == BUSTER_NODE_FACTS_LITERAL_LINE;
+                const bool lookup = kind == BUSTER_NODE_FACTS_LOOKUP;
+                const bool operation = kind == BUSTER_NODE_FACTS_OPERATOR;
+                if (leaf || lookup || operation)
                 {
                     const CheckOp op = (CheckOp)facts->ops[w];
-                    const bool leaf = kind == BUSTER_NODE_FACTS_IDENTIFIER;
+                    const bool line = kind == BUSTER_NODE_FACTS_LITERAL_LINE;
                     const bool brief = facts->records[i].taken == BUSTER_NODE_FACTS_SHORT;
                     const bool taken = brief || facts->records[i].taken == BUSTER_NODE_FACTS_RULED;
                     const bool same = node_facts_same(facts, first, i, checked);
-                    shadow->facts_taken_leaves += taken && leaf;
-                    shadow->facts_taken_lookups += taken && !leaf;
-                    shadow->facts_short_lookups += brief && !leaf;
-                    shadow->facts_left_identifiers += !taken && leaf;
-                    shadow->facts_left_lookups[leaf ? 0 : node_facts_lookup(op)] += !taken && !leaf;
+                    shadow->facts_taken_leaves += taken && leaf && !line;
+                    shadow->facts_taken_lines += taken && line;
+                    shadow->facts_taken_lookups += taken && lookup;
+                    shadow->facts_short_lookups += brief && lookup;
+                    shadow->facts_left_identifiers += !taken && leaf && !line;
+                    shadow->facts_left_lookups[lookup ? node_facts_lookup(op) : 0] += !taken && lookup;
+                    shadow->facts_operator_taken[op] += taken && operation;
+                    shadow->facts_operator_short[op] += brief && operation;
                     shadow->facts_differences += !same;
-                    facts->fits[w] = brief && !leaf;
+                    facts->fits[w] = brief && lookup;
                     if (!same && shadow->facts_listed < node_census_list)
                     {
                         shadow->facts_listed += 1;
@@ -2600,7 +2619,7 @@ static void node_shadow_facts(NodeShadow* shadow, NodeCensusScratch* s)
                                facts->records[i].conversion_flags[1], facts->expected_conversion_flags[2 * (uint64_t)w],
                                facts->expected_conversion_flags[2 * (uint64_t)w + 1], facts->records[i].member_offset, facts->expected_member_offsets[w]);
                     }
-                    // What the lean kernel left to C: the lookup's conversions' entries must be its rule's on these records.
+                    // What the lean kernel left to C: the operator's conversions' entries must be its rule's on these records.
                     if (checked == BUSTER_NODE_FACTS_LEAN && !leaf && taken)
                     {
                         shadow->facts_conversions += 1;
@@ -2634,6 +2653,36 @@ static void node_shadow_facts(NodeShadow* shadow, NodeCensusScratch* s)
                                    node_census_line(s->pp, program->parser, program->input->graph.tokens[facts->nodes[w]]), facts->records[i].taken, facts->records[i].type,
                                    facts->expected_types[w], facts->records[i].word, facts->expected_words[w], facts->records[i].member_offset, facts->expected_member_offsets[w]);
                         }
+                    }
+                }
+            }
+        }
+        // The checked pass again over decoys: T's record of each node the kernel is to make, with one inherited flag the
+        // other way. An operator made before its operand takes the decoy for it, as it would take T's record in a
+        // timed pass, and differs here; over poison it would only be left to its rule.
+        for (uint32_t window = 0; window < windows; window += 1)
+        {
+            const uint32_t first = facts->windows[window];
+            const uint32_t count = facts->windows[window + 1] - first;
+            node_facts_given(facts, window, BUSTER_NODE_FACTS_POISON_DECOY);
+            node_facts_window(facts, window, checked, false);
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const uint32_t w = first + i;
+                const uint8_t kind = facts->kinds[w];
+                if ((kind == BUSTER_NODE_FACTS_IDENTIFIER || kind == BUSTER_NODE_FACTS_LITERAL_LINE || kind == BUSTER_NODE_FACTS_LOOKUP || kind == BUSTER_NODE_FACTS_OPERATOR) &&
+                    !node_facts_same(facts, first, i, checked))
+                {
+                    shadow->facts_differences += 1;
+                    shadow->facts_decoy_differences += 1;
+                    if (shadow->facts_listed < node_census_list)
+                    {
+                        const CheckOp op = (CheckOp)facts->ops[w];
+                        shadow->facts_listed += 1;
+                        printf("node-facts: difference over decoys file=%s line=%u op=%s taken=%u type=%u/%u flags=%#x/%#x standing=%#x/%#x\n", s->file,
+                               node_census_line(s->pp, program->parser, program->input->graph.tokens[facts->nodes[w]]),
+                               lower_inventory_op_names[op] != NULL ? lower_inventory_op_names[op] : "?", facts->records[i].taken, facts->records[i].type, facts->expected_types[w],
+                               facts->records[i].flags, facts->expected_flags[w], facts->records[i].standing, facts->expected_standings[w]);
                     }
                 }
             }
@@ -2752,7 +2801,10 @@ static void node_shadow_facts(NodeShadow* shadow, NodeCensusScratch* s)
         for (uint32_t op = 0; op < CHECK_OP_COUNT; op += 1)
         {
             shadow->facts_given[op] += facts->given[op];
+            shadow->facts_operator_records[op] += facts->operator_records[op];
         }
+        shadow->facts_literal_lines += facts->literal_lines;
+        shadow->facts_pairs += facts->pair_count;
         shadow->facts_rows += facts->row_count;
         shadow->facts_lines += facts->line_count;
         shadow->facts_line_versions += facts->line_versions;
@@ -2787,9 +2839,11 @@ static void node_shadow_facts_report(const NodeShadow* shadow)
            " automatic-objects=%" PRIu64 ") literals=%" PRIu64 " lookups=%" PRIu64 " given=%" PRIu64 "\n",
            variants[shadow->facts_mode < BUSTER_NODE_FACTS_MODES ? shadow->facts_mode : 0], shadow->facts_records, shadow->facts_identifiers, shadow->facts_named[0],
            shadow->facts_named[1], shadow->facts_named[2], shadow->facts_named[3], shadow->facts_literals, made, given + (lookups - made));
-    printf("node-facts: taken identifiers=%" PRIu64 " (%.2f%%) lookups=%" PRIu64 " (%.2f%%) differences=%" PRIu64 " list-differences=%" PRIu64 " failures=%" PRIu64 "\n",
+    printf("node-facts: taken identifiers=%" PRIu64 " (%.2f%%) lookups=%" PRIu64 " (%.2f%%) differences=%" PRIu64 " list-differences=%" PRIu64 " failures=%" PRIu64
+           " (differences over decoys %" PRIu64 ")\n",
            shadow->facts_taken_leaves, node_census_share(shadow->facts_taken_leaves, shadow->facts_identifiers), shadow->facts_taken_lookups,
-           node_census_share(shadow->facts_taken_lookups, made), shadow->facts_differences, shadow->facts_list_differences, shadow->facts_failures);
+           node_census_share(shadow->facts_taken_lookups, made), shadow->facts_differences, shadow->facts_list_differences, shadow->facts_failures,
+           shadow->facts_decoy_differences);
     printf("node-facts: lookups by a short path=%" PRIu64 " (%.2f%%) by their rule=%" PRIu64 "\n", shadow->facts_short_lookups,
            node_census_share(shadow->facts_short_lookups, made), shadow->facts_taken_lookups - shadow->facts_short_lookups);
     if (lean)
@@ -2806,6 +2860,38 @@ static void node_shadow_facts_report(const NodeShadow* shadow)
     {
         printf("node-facts: lookup=%s records=%" PRIu64 " left=%" PRIu64 " (%.2f%%)\n", node_facts_lookup_names[lookup], shadow->facts_lookups[lookup],
                shadow->facts_left_lookups[lookup], node_census_share(shadow->facts_left_lookups[lookup], shadow->facts_lookups[lookup]));
+    }
+    uint64_t operators = 0;
+    uint64_t operators_taken = 0;
+    uint64_t operators_short = 0;
+    for (uint32_t op = 0; op < CHECK_OP_COUNT; op += 1)
+    {
+        operators += shadow->facts_operator_records[op];
+        operators_taken += shadow->facts_operator_taken[op];
+        operators_short += shadow->facts_operator_short[op];
+    }
+    if (shadow->facts_operators)
+    {
+        // The operators' kernel's: the operators that are no lookup, a literal's leaf from its line, and of the records
+        // that are no literal's leaf, those the kernel made.
+        const uint64_t named = shadow->facts_records - shadow->facts_literals;
+        const uint64_t kernel = taken + operators_taken;
+        printf("node-facts: operators records=%" PRIu64 " taken=%" PRIu64 " (%.2f%%) by a class's loop=%" PRIu64 " (%.2f%%) by their rules=%" PRIu64
+               "; literals' lines=%" PRIu64 " taken=%" PRIu64 "; pointer-conversion slots=%" PRIu64 "\n",
+               operators, operators_taken, node_census_share(operators_taken, operators), operators_short, node_census_share(operators_short, operators),
+               operators_taken - operators_short, shadow->facts_literal_lines, shadow->facts_taken_lines, shadow->facts_pairs);
+        printf("node-facts: records that are no literal=%" PRIu64 " made by the kernel=%" PRIu64 " (%.2f%%)\n", named, kernel, node_census_share(kernel, named));
+        for (uint32_t op = 0; op < CHECK_OP_COUNT; op += 1)
+        {
+            if (shadow->facts_operator_records[op] != 0)
+            {
+                printf("node-facts: operator op=%s records=%" PRIu64 " left=%" PRIu64 " (%.2f%%) by-rule=%" PRIu64 "\n",
+                       lower_inventory_op_names[op] != NULL ? lower_inventory_op_names[op] : "?", shadow->facts_operator_records[op],
+                       shadow->facts_operator_records[op] - shadow->facts_operator_taken[op],
+                       node_census_share(shadow->facts_operator_records[op] - shadow->facts_operator_taken[op], shadow->facts_operator_records[op]),
+                       shadow->facts_operator_taken[op] - shadow->facts_operator_short[op]);
+            }
+        }
     }
     for (uint32_t op = 0; op < CHECK_OP_COUNT; op += 1)
     {
@@ -2831,6 +2917,19 @@ static void node_shadow_facts_report(const NodeShadow* shadow)
                "place: %.2f cycles and %.2f instructions a record of the window)\n",
                (double)cycles / (double)taken, (double)instructions / (double)taken, (double)mispredicts / (double)taken,
                (double)shadow->facts_given_cycles / (double)shadow->facts_records, (double)shadow->facts_given_instructions / (double)shadow->facts_records);
+        if (shadow->facts_operators)
+        {
+            // T whole: the kernel's time over the unit, a record it made, a record of the windows, and an evaluated
+            // node as the sweeps' own lines count them.
+            const uint64_t all = taken + operators_taken + shadow->facts_taken_lines;
+            printf("node-facts: the operators' kernel a unit: cycles=%" PRIu64 " instructions=%" PRIu64 " mispredicted-branches=%" PRIu64
+                   "; a record it made: cycles=%.2f; a record of the windows: cycles=%.2f instructions=%.2f mispredicted-branches=%.3f; an evaluated node: cycles=%.2f "
+                   "instructions=%.2f\n",
+                   cycles, instructions, mispredicts, all != 0 ? (double)cycles / (double)all : 0.0, (double)cycles / (double)shadow->facts_records,
+                   (double)instructions / (double)shadow->facts_records, (double)mispredicts / (double)shadow->facts_records,
+                   shadow->timed_nodes != 0 ? (double)cycles / (double)shadow->timed_nodes : 0.0,
+                   shadow->timed_nodes != 0 ? (double)instructions / (double)shadow->timed_nodes : 0.0);
+        }
         printf("node-facts: the kernel's loops, TSC ticks (%.3f cycles a tick): a leaf=%.2f a lookup=%.2f; a window's second run: a leaf=%.2f a lookup=%.2f\n", tick,
                shadow->facts_taken_leaves != 0 ? (double)shadow->facts_loop_ticks[0] / (double)shadow->facts_taken_leaves : 0.0,
                shadow->facts_taken_lookups != 0 ? (double)shadow->facts_loop_ticks[1] / (double)shadow->facts_taken_lookups : 0.0,
@@ -3105,7 +3204,8 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
             }
             if (room && shadow->facts)
             {
-                room = node_facts_begin(&facts, &machine, nodes, shadow->facts_window, shadow->facts_packed, shadow->facts_mode != BUSTER_NODE_FACTS_WHOLE, &scratch);
+                room = node_facts_begin(&facts, &machine, nodes, shadow->facts_window, shadow->facts_packed, shadow->facts_mode != BUSTER_NODE_FACTS_WHOLE,
+                                        shadow->facts_operators, &scratch);
                 s.facts = room ? &facts : NULL;
             }
         }
@@ -3303,6 +3403,11 @@ static int run_node_census(int count, char** arguments)
             shadow.facts = true;
             shadow.facts_mode = strcmp(arguments[i], "--facts-lean") == 0 ? BUSTER_NODE_FACTS_LEAN : BUSTER_NODE_FACTS_LOADS;
         }
+        else if (strcmp(arguments[i], "--facts-operators") == 0)
+        {
+            shadow.facts = true;
+            shadow.facts_operators = true;
+        }
         else if (strcmp(arguments[i], "--facts-window") == 0)
         {
             uint64_t number = 0;
@@ -3358,7 +3463,9 @@ static int run_node_census(int count, char** arguments)
             }
         }
     }
-    valid = valid && file_count != 0 && (shadowed || (!shadow.scalar && !shadow.verify && !shadow.fused && !shadow.interleave && !shadow.facts));
+    // The operators' kernel makes whole or lean records: the loads' kernel is a lookup's alone.
+    valid = valid && file_count != 0 && (shadowed || (!shadow.scalar && !shadow.verify && !shadow.fused && !shadow.interleave && !shadow.facts)) &&
+            !(shadow.facts_operators && shadow.facts_mode == BUSTER_NODE_FACTS_LOADS);
     NodeCensus census = { .shadow = shadowed ? &shadow : NULL };
     for (uint32_t i = 0; valid && i < file_count; i += 1)
     {
@@ -3379,7 +3486,7 @@ static int run_node_census(int count, char** arguments)
     }
     else
     {
-        fprintf(stderr, "usage: compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--facts | --facts-lean | --facts-loads] [--facts-packed] [--facts-window N] [--passes N] [--repeat N]] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--facts | --facts-lean | --facts-loads] [--facts-operators] [--facts-packed] [--facts-window N] [--passes N] [--repeat N]] [preprocessor options] file...\n");
     }
     free(files);
     free(options);

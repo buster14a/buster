@@ -596,6 +596,167 @@ static bool node_facts_test_fixture(const char* directory, uint32_t mode, uint32
     return valid && held;
 }
 
+// --facts-operators' fixture (#2850's step 2's first piece): each operator the operators' kernel makes, by each case of
+// its rule, and beside each the shapes its rule leaves to T. The rows' operators, of int, unsigned, a promoted char and
+// double operands, lvalues and literals; the constants' folds; a pointer plus and minus an integer, an array's and an
+// address constant's too, at a constant index either way; a pointer's equality with a null pointer constant, either
+// side, and with another pointer (T's); stores of each case (a value, an integer constant, one that its target's width
+// extends, a null pointer, a pointer to another pointer type and to void and back, an array's pointer, a floating
+// constant and a truth to bool (T's)); conversions (a return's, an initializer's); truths of an integer, a pointer, a
+// floating value, a constant and an array; `&&` and `||` with and without a constant side; `&x` of an object, an
+// element, a member and a function; casts between integers and pointers, of a constant and of a floating value (T's);
+// every update, of an integer, a char, a double and a pointer, prefix and postfix; a comma; sizeof and _Alignof of a
+// type and of an expression; and `?:` of arithmetic arms, either one converted to the other's type, and of void arms,
+// and of a constant condition (T's). A store, a call and an update of an operand whose code is after their own (a
+// truth, a dereference): each is a round after it, which only the lists' order check sees, since these set the decoys'
+// flag themselves. And chains of `->` whose first link is T's (a member of a record whose type has an aligned typedef's
+// wrapper): the links after it are of its class and read it, so each must wait for it.
+static const char node_facts_test_operators_text[] =
+    "struct S { long m; int a[4]; unsigned char c; struct S* next; };\n"
+    "typedef struct S Wide __attribute__((aligned(32)));\n"
+    "int g;\n"
+    "int ga[8];\n"
+    "struct S gs;\n"
+    "int f(int);\n"
+    "void w(void);\n"
+    "long ops(struct S* p, int a, int* q, char* s, unsigned char uc, double d, _Bool flag, Wide* wp)\n"
+    "{\n"
+    "    long y = a;\n"
+    "    int x = 0;\n"
+    "    unsigned u = 2u;\n"
+    "    const char* cs = 0;\n"
+    "    void* vp = 0;\n"
+    "    x = a + x; x = a - 1; u = u * 2u; x = a / 2; x = a % 3; x = a << 2; x = a >> 1;\n"
+    "    x = a < x; x = a <= x; x = a > x; x = a >= x; x = a == x; x = a != x;\n"
+    "    x = a & 3; x = a | 4; x = a ^ 5; x = -a; x = ~a; x = uc + 1; d = d * 2.0; d = a + d; y = y + a;\n"
+    "    x = -1; x = ~0; x = 1 << 4; x = 3 + 4; x = 7 - 2; x = (2 | 8) & 10; x = +5; x = +a; y = -1;\n"
+    "    q = q + 1; q = q - a; q = 1 + q; s = s + a; q = ga + 2; q = &ga[1] + 1; q = &ga[3] - 1;\n"
+    "    x = p == 0; x = 0 != p; x = vp == (void*)0; x = q == q; x = q < q; y = q - q;\n"
+    "    x = a; y = a; uc = a; d = a; y = 1; uc = 255; p = 0; s = 0; q = q; cs = s; vp = p; p = vp; s = (void*)0; q = ga;\n"
+    "    flag = a; flag = 1; d = 1.5;\n"
+    "    if (a) x = 1;\n"
+    "    if (p) x = 2;\n"
+    "    if (!a) x = 3;\n"
+    "    while (0) x = 4;\n"
+    "    if (d) x = 5;\n"
+    "    if (ga) x = 6;\n"
+    "    x = a && x; x = a || p; x = 0 && a; x = 1 || a; x = a && 0;\n"
+    "    q = &x; q = &ga[0]; p = &gs; q = &p->a[1]; vp = &f;\n"
+    "    x = (int)y; y = (long)a; uc = (unsigned char)a; p = (struct S*)vp; vp = (void*)p; y = (long)p; q = (int*)y; x = (int)1; x = (int)d; flag = (_Bool)a;\n"
+    "    x++; ++x; x--; --x; x += a; x -= 1; x *= 2; x /= 2; x %= 3; x <<= 1; x >>= 1; x &= 3; x |= 4; x ^= 5;\n"
+    "    q++; --q; q += 2; q -= a; uc++; d += 1.0; y = x++ + 1; gs.m++;\n"
+    "    x = (a++, x);\n"
+    "    y = sizeof(struct S); y = sizeof x; y = sizeof(ga); y = _Alignof(long);\n"
+    "    x = a ? x : 1; y = a ? y : x; a ? w() : w(); x = 1 ? a : x; d = a ? d : x; d = a ? x : d;\n"
+    "    x = !a; x = f(!a); x = f(*q); *q += 1; (*q)++;\n"
+    "    y = wp->next->m; y = wp->next->next->m + wp->next->a[1];\n"
+    "    return y + x;\n"
+    "}\n";
+
+// The operators' fixture written to `directory` and read with `options` by the operators' kernel as variant `mode`
+// (whole or lean), its windows cut at `window` records (0 for the kernel's own cut) and holding several bodies'
+// expressions with `packed`: whether every record the kernel made is T's, its lists are the twin's, each operator's
+// records, those made and those a class's loop made are the fixture's, every literal's leaf was its line, and, of a lean
+// kernel, every conversion's entry it left out is its rule's on the kernel's records.
+static bool node_facts_test_operators(const char* directory, uint32_t mode, uint32_t window, bool packed, char** options, uint32_t option_count)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/operators.c", directory);
+    bool valid = parse_test_write(path, node_facts_test_operators_text, strlen(node_facts_test_operators_text));
+    NodeShadow shadow = { .facts = true, .facts_operators = true, .facts_mode = mode, .facts_packed = packed, .facts_window = window, .passes = 1, .repeat = 1 };
+    NodeCensus census = { .shadow = &shadow };
+    fflush(stdout);
+    valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
+    // Each operator's records, those the kernel made, and of them those a class's loop made (the rest by a rule).
+    static const struct
+    {
+        CheckOp op;
+        uint16_t records;
+        uint16_t taken;
+        uint16_t brief;
+    } pins[] = {
+        { CHECK_OP_POSITIVE, 2, 1, 0 },
+        { CHECK_OP_NEGATIVE, 3, 3, 1 },
+        { CHECK_OP_NOT, 3, 3, 3 },
+        { CHECK_OP_BIT_NOT, 2, 2, 1 },
+        { CHECK_OP_ADD, 12, 12, 7 },
+        { CHECK_OP_SUBTRACT, 4, 4, 1 },
+        { CHECK_OP_MULTIPLY, 2, 2, 2 },
+        { CHECK_OP_REMAINDER, 1, 1, 1 },
+        { CHECK_OP_SHIFT_LEFT, 2, 2, 1 },
+        { CHECK_OP_SHIFT_RIGHT, 1, 1, 1 },
+        { CHECK_OP_LESS, 2, 1, 1 },
+        { CHECK_OP_LESS_EQUAL, 1, 1, 1 },
+        { CHECK_OP_GREATER, 1, 1, 1 },
+        { CHECK_OP_GREATER_EQUAL, 1, 1, 1 },
+        { CHECK_OP_EQUAL, 4, 3, 1 },
+        { CHECK_OP_NOT_EQUAL, 2, 2, 1 },
+        { CHECK_OP_BIT_AND, 2, 2, 1 },
+        { CHECK_OP_BIT_OR, 2, 2, 1 },
+        { CHECK_OP_BIT_XOR, 1, 1, 1 },
+        { CHECK_OP_LOGICAL_AND, 3, 3, 1 },
+        { CHECK_OP_LOGICAL_OR, 2, 2, 1 },
+        { CHECK_OP_CONDITIONAL, 6, 5, 0 },
+        { CHECK_OP_CAST, 12, 8, 8 },
+        { CHECK_OP_ADDRESS, 7, 7, 7 },
+        { CHECK_OP_ASSIGN, 100, 97, 95 },
+        { CHECK_OP_COMMA, 1, 1, 0 },
+        { CHECK_OP_SIZEOF, 3, 3, 0 },
+        { CHECK_OP_ALIGNOF, 1, 1, 0 },
+        { CHECK_OP_CONVERT, 1, 1, 1 },
+        { CHECK_OP_CONDITION, 6, 5, 4 },
+        { CHECK_OP_PRE_INCREMENT, 1, 1, 1 },
+        { CHECK_OP_PRE_DECREMENT, 2, 2, 2 },
+        { CHECK_OP_POST_INCREMENT, 7, 7, 7 },
+        { CHECK_OP_POST_DECREMENT, 1, 1, 1 },
+        { CHECK_OP_ADD_ASSIGN, 4, 4, 4 },
+        { CHECK_OP_SUBTRACT_ASSIGN, 2, 2, 2 },
+        { CHECK_OP_MULTIPLY_ASSIGN, 1, 1, 1 },
+        { CHECK_OP_REMAINDER_ASSIGN, 1, 1, 1 },
+        { CHECK_OP_SHIFT_LEFT_ASSIGN, 1, 1, 1 },
+        { CHECK_OP_SHIFT_RIGHT_ASSIGN, 1, 1, 1 },
+        { CHECK_OP_BIT_AND_ASSIGN, 1, 1, 1 },
+        { CHECK_OP_BIT_OR_ASSIGN, 1, 1, 1 },
+        { CHECK_OP_BIT_XOR_ASSIGN, 1, 1, 1 },
+    };
+    bool held = shadow.facts_differences == 0 && shadow.facts_list_differences == 0 && shadow.facts_failures == 0 && shadow.value_differences == 0 &&
+                shadow.facts_left_identifiers == 0 && shadow.facts_literal_lines == shadow.facts_taken_lines && shadow.facts_literal_lines == shadow.facts_literals &&
+                shadow.facts_literal_lines != 0;
+    uint64_t pinned = 0;
+    uint64_t operators = 0;
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(pins); k += 1)
+    {
+        held = held && shadow.facts_operator_records[pins[k].op] == pins[k].records && shadow.facts_operator_taken[pins[k].op] == pins[k].taken &&
+               shadow.facts_operator_short[pins[k].op] == pins[k].brief;
+        pinned += pins[k].records;
+    }
+    for (uint32_t op = 0; op < CHECK_OP_COUNT; op += 1)
+    {
+        operators += shadow.facts_operator_records[op];
+    }
+    const bool lean = mode != BUSTER_NODE_FACTS_WHOLE;
+    held = held && operators == pinned && shadow.facts_conversions_derived == shadow.facts_conversions && (shadow.facts_conversions != 0) == lean &&
+           shadow.facts_discards_derived == shadow.facts_discards;
+    if (!valid || !held)
+    {
+        fprintf(stderr, "test-checker: node-facts operators: variant %u window %u%s: %s: %" PRIu64 " records differ, %" PRIu64 " lists differ, %" PRIu64
+                        " leaves left; literals %" PRIu64 ", their lines %" PRIu64 ", taken %" PRIu64 "; conversions %" PRIu64 " of %" PRIu64 "; operators %" PRIu64
+                        " (pinned %" PRIu64 "):\n",
+                mode, window, packed ? " packed" : "", valid ? "read" : "NOT READ", shadow.facts_differences, shadow.facts_list_differences, shadow.facts_left_identifiers,
+                shadow.facts_literals, shadow.facts_literal_lines, shadow.facts_taken_lines, shadow.facts_conversions_derived, shadow.facts_conversions, operators, pinned);
+        for (uint32_t op = 0; op < CHECK_OP_COUNT; op += 1)
+        {
+            if (shadow.facts_operator_records[op] != 0)
+            {
+                fprintf(stderr, "        { %u, %" PRIu64 ", %" PRIu64 ", %" PRIu64 " }, // %s\n", op, shadow.facts_operator_records[op], shadow.facts_operator_taken[op],
+                        shadow.facts_operator_short[op], lower_inventory_op_names[op] != NULL ? lower_inventory_op_names[op] : "?");
+            }
+        }
+    }
+    unlink(path);
+    return valid && held;
+}
+
 // The front at its limits, on generated text read with `options`, the front run as `front` asks (BUSTER_NODE_FRONT_*:
 // after the walk acted at a chunk or before it, whole or lean). `boundaries`: a body of statements whose tokens are 29 a round, so that the chunks' ends (1,024
 // postorder positions each) fall at every place within a call of a library function by its name and through its address:
@@ -714,6 +875,16 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-facts loads: a lookup's type, word and member's offset from its load alone are T's");
     check_test_expect(test, ready && node_facts_test_fixture(directory, BUSTER_NODE_FACTS_LOADS, BUSTER_NODE_FACTS_WINDOW, true, quiet, BUSTER_ARRAY_LENGTH(quiet)),
                       "node-facts loads: the same where a window packs the bodies' expressions to its most");
+    check_test_expect(test, ready && node_facts_test_operators(directory, BUSTER_NODE_FACTS_WHOLE, 0, false, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-facts operators: every operator the kernel's rules make is T's record, and what they leave is the fixture's");
+    check_test_expect(test, ready && node_facts_test_operators(directory, BUSTER_NODE_FACTS_WHOLE, 16, false, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-facts operators: the same records where a window is cut every 16 records");
+    check_test_expect(test, ready && node_facts_test_operators(directory, BUSTER_NODE_FACTS_WHOLE, BUSTER_NODE_FACTS_WINDOW, true, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-facts operators: the same records where a window packs the bodies' expressions to its most");
+    check_test_expect(test, ready && node_facts_test_operators(directory, BUSTER_NODE_FACTS_LEAN, 0, false, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-facts operators lean: a record's first half is T's, and the conversions left out are their rules'");
+    check_test_expect(test, ready && node_facts_test_operators(directory, BUSTER_NODE_FACTS_LEAN, 16, false, quiet, BUSTER_ARRAY_LENGTH(quiet)),
+                      "node-facts operators lean: the same where a window is cut every 16 records");
     // The machine's own front at its limits (step 1b): a chunk's end at every place within a call, and a full stack.
     check_test_expect(test, ready && node_front_test_limits(directory, true, BUSTER_NODE_FRONT_AFTER, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-front: a callee waiting across a chunk's end keeps its use, a library call's mark the walk's");

@@ -621,11 +621,12 @@ with a call astride its last entry.
 
 ### The fact words (#2850's step 1)
 
-`./build/compiler measure-node-machine --shadow --facts | --facts-lean | --facts-loads [--facts-packed] [--facts-window N] [--passes N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow --facts | --facts-lean | --facts-loads [--facts-operators] [--facts-packed] [--facts-window N] [--passes N] [--list N] [preprocessor options] file...`
 (`c_check_node_machine_facts.c`) is step 1 of [the one-core
 path](../one-core-path.md): T's identifier leaves and lookups made from fact
-words, with T's records as the oracle. It runs in the shadow's own pass, after
-the pipeline and the shadow's sweeps; no compile takes any of it.
+words, with T's records as the oracle. With `--facts-operators` (step 2's
+first piece) it makes T's other records too. It runs in the shadow's own pass,
+after the pipeline and the shadow's sweeps; no compile takes any of it.
 
 - **The words.** A declaration's line (32 bytes: its leaf's record's first
   half), a type's row (64 bytes, by type index: its word, value type,
@@ -638,25 +639,56 @@ the pipeline and the shadow's sweeps; no compile takes any of it.
 - **The windows.** As the shadow takes each expression, `node_facts_append`
   adds its records to the window at hand: each record's operator, kind (a
   given record, a literal's leaf, an identifier's leaf, a lookup), operands as
-  distances back, a lookup's class, and T's record of it. A window is a
+  distances back, a made operator's class, and T's record of it. A window is a
   body's expressions, cut where the next expression would take it past 384
   records (`BUSTER_NODE_FACTS_CUT`). `--facts-packed` lets a window hold
   several bodies' expressions; `--facts-window N` cuts at N records (16 to
   4,096). Either implies `--facts`.
-- **The kernel** (`node_facts_window`): the window's identifiers' leaves and
-  its lookups listed sixteen records a step (`node_facts_list`); each leaf one
-  load of its declaration's line and one store of its record
-  (`node_facts_leaves`); then the lookups a class at a time, the lower levels
-  first (`node_facts_batch`, and one loop an operator: `node_facts_arrows`,
+- **The classes.** A made operator's class is its round and its code
+  (`node_facts_class`). The codes are the operators' loops, in an order that
+  puts an operator's operands mostly before it (`BUSTER_NODE_FACTS_CODE_*`).
+  An operator's round is the highest of its operands' rounds, and one more
+  than an operand's whose code is after its own (`node_facts_round`): a round
+  makes its classes in the codes' order, each class's operators in the
+  window's order, so an operator finds its operands made, those of its own
+  code before it in its class. Four rounds have classes
+  (`BUSTER_NODE_FACTS_ROUNDS`); what would be of a later one is made after
+  them by its rule.
+- **The kernel** (`node_facts_window`): the window's leaves and its made
+  operators listed sixteen records a step (`node_facts_list`); the operators
+  appended each to its class's list (`node_facts_distribute`); each leaf one
+  load of its line and one store of its record (`node_facts_leaves`); then
+  the classes, a round at a time, one loop an operator (`node_facts_arrows`,
   `_dots`, `_dereferences`, `_subscripts`, `_calls`, `_discards`). Each
   lookup has a short path (`node_facts_*_fast`) and behind it its rule
   (`node_facts_slow`), T's own rule's steps on rows and slots; what neither
-  takes is T's record, counted as left. A loop lists the lookups its short
+  takes is T's record, counted as left. A loop lists the operators its short
   path didn't take and makes them after it (`node_facts_slow_each`), so that
-  no call is in the loop. A short path's choices are between registers: what
-  a choice may need is loaded whichever way it goes, since clang compiles a
-  choice with a load behind it as a branch. The kernel's record is one
-  64-byte line (`NodeFactsRecord`), T's fields together.
+  no call is in the loop; it marks each one's record as a wide value's, so
+  that a later operator of the class that reads it is listed too. A short
+  path's choices are between registers: what a choice may need is loaded
+  whichever way it goes, since clang compiles a choice with a load behind it
+  as a branch. The kernel's record is one 64-byte line (`NodeFactsRecord`),
+  T's fields together.
+- **The operators' kernel** (`--facts-operators`, with `--facts` or
+  `--facts-lean`). A literal's leaf is a line of its own, the reader's record
+  of it (`node_facts_literal`), copied as a declaration's. The operators that
+  are no lookup are made by T's rows' and rules' steps on the kernel's
+  records, a loop a code: the rows' operators (`node_facts_rows_made`, T's
+  baked table through `node_facts_row_made`, and behind it
+  `node_facts_rows_rest`: the constants' fold, a pointer plus or minus an
+  integer, a pointer's equality with a null pointer constant); `=` and a
+  conversion or an initialization (`node_facts_stores`, `_converts`); a
+  control's condition and `!` (`_truths`); `&x` (`_addresses_made`); a cast
+  (`_casts`); `&&` and `||` (`_logics`); the increments and the compound
+  assignments (`_updates`); and a comma, sizeof, `_Alignof`, `?:` and a unary
+  plus, each by its rule (`node_facts_slow_list`). A store, a truth and a
+  logic operator have short paths (`node_facts_store_fast`, `_truth_fast`,
+  `_logic_fast`); the others run their rule. Beyond a type's row the rules
+  read a side row a type (`NodeFactsSide`: the pointer types to it, from the
+  machine's memo as T fills it, and its size and alignment) and a slot a pair
+  of pointer types (`NodeFactsPair`: whether one converts to the other, and
+  whether they point at the same type), a memo as the members' slots.
 - **The variants.** `--facts` is the whole kernel: a leaf's and a lookup's
   record with every field T writes. `--facts-lean` makes what later rules
   decide on: a leaf is its declaration's line alone, a lookup writes its
@@ -669,16 +701,24 @@ the pipeline and the shadow's sweeps; no compile takes any of it.
   The loads' kernel is a measurement of the load, not a kernel a compile
   could run alone.
 - **The comparison.** A checked pass gives the kernel T's records of the given
-  nodes and poisoned bytes for the leaves and lookups, then compares what the
+  nodes and poisoned bytes for what it is to make, then compares what the
   variant makes of each record with T's (`node_facts_same`: every field for
   the whole kernel) and the kernel's lists and classes with a
-  record-at-a-time twin (`node_facts_lists_same`). What a lean kernel leaves
+  record-at-a-time twin (`node_facts_lists_same`), which also checks the
+  order itself: an operand the kernel makes by class is on a list no later
+  than its operator's. What a lean kernel leaves
   out is made in the checked pass by the record's rule from the kernel's own
   records (`node_facts_derived`): each taken lookup's two conversions' entries
   must be T's, or the command fails, and each discard's whole record is
   counted as its rule's or not. The loads' kernel is checked after the lean
   one, on records whose given fields are T's and whose loaded fields are
-  poisoned. The timed
+  poisoned. A second checked pass gives the kernel decoys for what it is to
+  make: T's record of each node with one inherited flag the other way. Poison
+  reads as no value a path takes, so an operator made before its operand would
+  only be left there, to its rule or to T; a decoy reads as the operand's own
+  value, as T's record does in a timed pass, and what is made from it
+  differs (but for `=`, a call and an update, which set that flag
+  themselves: the twin's order check is what sees those). The timed
   passes follow: `--passes N` of the windows whole, by the cycle, instruction
   and mispredicted-branch counters; as many of the given records put in place
   alone, which is taken off; and as many with the two parts' TSC ticks apart,
@@ -691,7 +731,13 @@ discards with those derived, the loads' kernel's lookups by their load, the
 given records by operator, the differences, the words made (rows, lines, lines
 made again, member slots), the windows, and the times: the kernel's cycles, instructions
 and mispredicted branches a taken leaf or lookup, and a leaf's and a lookup's
-ticks. `--list N` prints the first N records that differ, with both records.
+ticks. With `--facts-operators` they add the operators' records, those made,
+those a class's loop made and those their rules made; each operator's records
+with those left; the literals' lines; the share of the records that are no
+literal's leaf that the kernel made; and the kernel's cycles, instructions and
+mispredicted branches a unit, a record it made, a record of the windows and
+an evaluated node (the sweeps' own count, as `node-shadow: time sweeps=T` has
+main's T). `--list N` prints the first N records that differ, with both records.
 The command exits 1 on a difference. On a host without the vector paths the
 listing and the leaves run a record at a time and give the same records.
 
@@ -700,7 +746,16 @@ taken and left) by the whole kernel at three window settings and by the lean
 and the loads' kernels at two each: every record T's in what the variant
 makes, the lists the twin's, the counts of leaves, lookups and lookups left
 the fixture's, and every conversion and discard a lean kernel left out its
-rule's. A
+rule's. It runs `node_facts_test_operators_text` (each operator the
+operators' kernel makes, by each case of its rule, the shapes each rule
+leaves to T, a store, a call and an update of an operand of a later code,
+and chains whose first link is T's) by the operators' kernel with whole
+records at three window settings and with lean ones at two: every record
+T's, the lists the twin's, each operator's records, those made and those a
+class's loop made the fixture's, and every conversion a lean kernel left out
+its rule's. A
 rule changed in T needs its step changed in the facts' rule and short path:
-the fixture and the corpora's comparison say where. [The
-design](../one-core-path.md#step-1-the-fact-words) has the results.
+the fixtures and the corpora's comparison say where. [The
+design](../one-core-path.md#step-1-the-fact-words) has the results, and
+[step 2's first piece](../one-core-path.md#step-2s-first-piece-ts-other-operators-on-the-fact-words-records)
+the operators' kernel's.
