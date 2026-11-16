@@ -74,7 +74,9 @@ requirements. [Command index](README.md).
   `tier0_test.c` holds `test-tier0`, `tier0_benchmark.c` provides
   `benchmark-backend` and `tier0_source_benchmark.c` `benchmark-backend-source`,
   the same measurement (`tier0_benchmark_measure.c`) on the functions `-c`
-  compiles of C files. `docs/tier0.md` has the contract, the design and the
+  compiles of C files; `tier0_entries_measure.c` provides
+  `measure-tier0-entries`, a census of what those functions' entries' records
+  depend on (#2874). `docs/tier0.md` has the contract, the design and the
   9700X measurements.
 
 `Tier0Function.table_addresses` optionally accompanies the jump-table columns
@@ -426,6 +428,65 @@ totals the files measured, left out and failed and the measurement's outcome
 resources' failures injected, and the corpus's add at its capacity. Run it under the 9700X's lock with
 `taskset -c 2`. The default 9700X job runs it on the frozen `sqlite3.c`, pinned
 to one allowed CPU, where a pull request changes what it measures.
+
+## The entries' census (#2874)
+
+`./build/compiler measure-tier0-entries [--rows] [--list KIND|all] [--top N]
+[preprocessor options] file... [--next [preprocessor options] file...]...`
+(`tier0_entries_measure.c`; about 25 s for `sqlite3.c`, most of it the search)
+counts what a typed entry's records depend on: the one-core path's step 4's
+first piece ([the page](../one-core-path.md#step-4s-first-piece-a-census-of-tier-0s-row)).
+It times nothing and changes no compile. The functions are the ones `-c`
+lowers, as `benchmark-backend-source` takes them, compiled by `tier0_compile`
+as it is. `--next` starts another set of files with options of their own,
+counted into the same census, so that several corpora are one population.
+
+- **A sample is a group:** an entry that makes records, with the entries
+  before it that it absorbs. Every typed entry is in one group and counts with
+  its absorber.
+- **Its answer is its record pattern.** For a head that takes a template, the
+  template's content with the forms its records have after the immediates'
+  choice. The census finds the template as selection does and checks it
+  against the records `tier0_compile` made. For a deferred entry (a call, a
+  copy, a division where its fixed registers are taken), the records with
+  each register named by its place from the head's depth. A constant, a
+  symbol, a branch's target and a frame displacement are carried: no pattern
+  has them.
+- **Its inputs are bytes** a producer could write beside the head: its class;
+  the kinds and classes of the three entries before it and which are jump
+  targets; each one's value as a class by magnitude; a pointer addition's
+  element size as a SIB scale; whether a fused constant fits, and the class
+  of a pointer addition's scaled constant (`p + 3` and `p + 20` of 8-byte
+  elements take an 8-bit and a 32-bit immediate); each named local's home (a
+  register or a slot); the two depths; the symbol's access; a call's counts
+  and flags; a copy's bytes; the frame's kind. Three more are the fusion's
+  own answers (its key's kind and class and its variant).
+- **Two figures of a set of inputs.** Its *conflicts* are the entries in keys
+  with two patterns: one odd group makes its whole key's entries undecided,
+  which is #2874's gate's rule. Its *exceptions* are the entries whose pattern
+  isn't their key's commonest: what a table with a way out for the rest would
+  get wrong.
+- **The search,** a head's kind at a time: every set of up to four inputs
+  where the kind's distinct samples allow it, then the best set with the
+  input that takes the most away. A size's figure is the best of the sets
+  tried, so past four inputs it is a lower bound.
+- **Two counts:** `keys=raw` over the raw inputs, `keys=fused` with the
+  fusion's three offered.
+
+The report has the corpus's totals (entries, records, groups, patterns, how
+each pattern was found, the groups by their entries and by the fusion's
+variant, those that make no record), then for each count the entries a key of
+each size decides, the gate's line (a key of 8 bytes or fewer, the kind its first),
+what the gate's keys decide without each family of inputs, and what no key
+decides. `--rows` adds a line a kind and a count, with its whole key, the
+shares decided at each size and the gate's key. `--list KIND` prints that
+kind's keys with their patterns' forms, `--list all` every kind's, the
+first `--top` (40) of each.
+
+Its exit status is 1 if a file fails, if Tier 0 refuses a function its
+emission compiled, or if there is no entry. `test-checker` checks the rules
+on samples made for them and the census of `tests/tier0-entries/entries.c`
+(`tier0_entries_measure_test.c`).
 
 The public-driver deep-value regression is in `test-checker-driver`
 (`c_check_deep_driver_test.c`): scalar and vector routes, with and without

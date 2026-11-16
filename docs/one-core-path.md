@@ -1,7 +1,7 @@
 # The one-core path: 73 cycles a token, on records the vector lanes can use (#2850): design
 
-Status: design, with its first two steps, step 2's first two pieces and
-step 5's census measured. Nothing here is in a compile.
+Status: design, with its first two steps, step 2's first two pieces and steps
+4's and 5's censuses measured. Nothing here is in a compile.
 [#2850](https://github.com/buster14a/buster/issues/2850) has the design whole:
 the budget, the data design and what would refute it. It is
 [#672](https://github.com/buster14a/buster/issues/672)'s per-core research
@@ -36,14 +36,22 @@ operators that are no lookup, 84% on `sqlite3.c`, 82% on musl and 59% on Lua
 have no wide field read: their bytes are the whole record. A tenth need a
 copy a selector names. 5% and 6% need a value made at the record, and 24% of
 Lua's, every one a constant's arithmetic. C and X decide on a type's
-identity for one thing, a callee's parameters, at every call. Step 5's census
+identity for one thing, a callee's parameters, at every call.
+Step 4's census counted Tier 0's row: 117 cycles
+and 295 instructions a typed entry in `-c sqlite3.c`, 64.7 cycles a token,
+Tier 0 itself 38 of them and the unwind table, the atoms and the emission's
+own driver 17. A key of eight bytes or fewer decides the records of 99.8% of
+three corpora's entries with no conflict, from tables of thousands of rows.
+The encoder, branch sizing and the object are 8.3 cycles a token in a compile
+and 6.3 at their own benchmarks' rates: under the census's gate of 10, and
+most of the row's allocation of 10 before Tier 0 runs. Step 5's census
 counted the kernel's 121 cycles a token by cause: 82% page faults, 58% the
-clearing of fresh 2 MB pages alone.
-What a compile would still take from the kernel with every arena reused or
-windowed is 5.8 to 6.4 cycles a token at warm-cache costs and 10.3 to 12.5 at
-the costs the compile pays, and beside it 5.2 to 6.7 more that no arena
-removes (the include search, the executable's own pages, the arenas' calls):
-the budget's 6 for the kernel doesn't hold.
+clearing of fresh 2 MB pages alone. What a compile would still take from the
+kernel with every arena reused or windowed is 5.8 to 6.4 cycles a token at
+warm-cache costs and 10.3 to 12.5 at the costs the compile pays, and beside
+it 5.2 to 6.7 more that no arena removes (the include search, the
+executable's own pages, the arenas' calls): the budget's 6 for the kernel
+doesn't hold.
 
 ## The budget
 
@@ -69,7 +77,7 @@ token; the issue has each row's source:
 | 1 | The fact words, in the shadow: T's leaves and lookups from one load each | every record the oracle's; 10 cycles a leaf or lookup or less, a body's expressions a run | measured: exact; 15.8 to 26.5 cycles; a leaf about 5, a lookup 25 to 46. Followed up: a lean record 14.1 to 20.8, the loads alone 8.8 to 15.2 |
 | 2 | The machine on these records where it runs (#2524's steps 2 to 4) | the bodies' middle at 38 cycles a node or less in `-c sqlite3.c` | first piece measured, in the shadow: T whole from the fact words, exact; 38 cycles an evaluated node with whole records and 32 with lean ones, where its own gate was 25. Second piece counted: of the operators that are no lookup, 5.4%, 24.2% and 6.1% need a value made at the record (`sqlite3.c`, Lua, musl; its line was 15%), and C decides on a type's identity for one question of a call's callee |
 | 3 | The front's row, into the window | 35 cycles a token or less | not started |
-| 4 | Tier 0's row | 10 cycles a token or less, the object's bytes unchanged | not started |
+| 4 | Tier 0's row | 10 cycles a token or less, the object's bytes unchanged | census measured: the row 64.7 cycles a token (117 a typed entry), Tier 0 38.4 of them; a key of 8 bytes or fewer decides 99.83% of the entries; the encoder, branch sizing and the object 8.3 in a compile, 6.3 at their own rates |
 | 5 | Fresh memory and the fixed costs | 6 cycles a token or less | census measured: the kernel 121 cycles a token; its floor 5.8 to 6.4 at item 3's costs, 10.3 to 12.5 at the compile's, and 5.2 to 6.7 more beside it: the 6 refuted |
 
 ## Step 0: the lanes on the real nodes
@@ -978,6 +986,194 @@ wide steps, or above 2% identities):
   step 1's leaves and lookups, is the T to measure next against the 25
   cycles the first piece missed. It is not claimed here.
 
+## Step 4's first piece: a census of Tier 0's row
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-census-2874-2026-11-16)
+(`a465b001`), [#2874](https://github.com/buster14a/buster/issues/2874). A
+count on Tier 0 as it is, at main `3d0d56ed`: no object's bytes change and no
+function of a compile does. The budget gives "Tier 0 to the code's atoms, the
+object and the rest" 10 of the 73 cycles a token, 18 a typed entry, from 78.
+
+### What it is
+
+- **The row** is what `-c` runs from a function's lowered typed stream to the
+  object's bytes: Tier 0, the immediates' form choice, branch sizing, the
+  encoder, the unwind rows, the atoms and relocations and the object writer.
+  `sqlite3.c` has 395,061 typed entries for its 716,136 tokens (0.55 a token)
+  and 354,742 records; Lua 89,543 entries and musl 199,891.
+- **The row by part.** User-mode samples of cycles, instructions,
+  mispredicted branches and first-level fills, of each corpus's compiles and
+  of `benchmark-backend-source`. A Release compiler inlines Tier 0's passes
+  into two functions, so each sample is given to the pass its inline chain
+  names; libc's samples go to their callers by the samples' branch stacks. In
+  the benchmark a part is its profile less a control's, which runs the
+  validation in the timed passes' place.
+- **What an entry's records depend on.** `measure-tier0-entries`
+  ([guide](commands/tier0.md#the-entries-census-2874)) compiles each function
+  with Tier 0 as it is. A sample is an entry that makes records with the
+  entries it absorbs. Its answer is its record pattern: forms and operands by
+  role, with a template's constant, a symbol, a branch's target and a frame
+  displacement as holes. Its inputs are 40 bytes a producer could write
+  beside the entry: the kinds and classes of the three entries before, each
+  value's class by magnitude, the homes' cases, the depths, a call's counts
+  and flags. A head's kind at a time, it searches the smallest sets of those
+  bytes that leave no key with two patterns.
+- **What no table removes.** The encoder, branch sizing and the object: as the
+  first count has them in a compile, and at the rates of
+  `benchmark-x86-encoder`, `benchmark-branch-sizing` and
+  `benchmark-object-writer` on the corpus's own records and bytes.
+
+### What it measured
+
+On the 9700X, CPU 2, under the lock.
+
+**The row by part**, `-c sqlite3.c`, a typed entry; the last column is cycles
+a token:
+
+| part | instructions | cycles | mispredicted | fills | cycles a token |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| the stream's decode | 27.1 | 9.1 | 0.060 | 0.21 | 5.0 |
+| the selection | 71.8 | 31.2 | 0.233 | 0.64 | 17.2 |
+| the homes and the frame | 19.8 | 8.9 | 0.102 | 0.07 | 4.9 |
+| the records' emission | 57.7 | 20.4 | 0.136 | 0.41 | 11.3 |
+| the encoder | 13.6 | 4.3 | 0.015 | 0.06 | 2.4 |
+| branch sizing | 12.6 | 6.4 | 0.030 | 0.23 | 3.5 |
+| the atoms and relocations | 24.1 | 7.4 | 0.043 | 0.10 | 4.1 |
+| the object's sections | 13.9 | 4.4 | 0.056 | 0.10 | 2.4 |
+| the unwind table | 32.8 | 10.7 | 0.044 | 0.10 | 5.9 |
+| the emission's driver | 19.0 | 13.6 | 0.064 | 0.36 | 7.5 |
+| the static data's atoms | 2.8 | 0.9 | 0.005 | 0.01 | 0.5 |
+| **the row** | **295.1** | **117.3** | **0.788** | **2.30** | **64.7** |
+
+- **The row is 117 cycles and 295 instructions a typed entry, 64.7 cycles a
+  token**, in user mode. The stage clock's nine stages are 9.38 ms: 72.5
+  cycles a token with the kernel's time in them.
+- **Tier 0 itself is 70 of the 117 cycles** (the first four parts) and 176
+  instructions. In `benchmark-backend-source` the four are 65.1 cycles and
+  173.2 instructions, where its own counters read 64.9 and 174.4; the issue's
+  153 were an older main's. By pass, cycles an entry in a compile: the
+  fusion 6.4, the templates' words 9.6, measuring the homes' cases, lengths
+  and positions 8.5, the immediates' forms 3.6, the expansion 12.9, the
+  decode's three passes 9.1, the homes, the frame and its prologue 8.9.
+- **The last three parts are not in the issue's list** and are 18.5% of the
+  row's instructions: the unwind table, which costs as much as the encoder
+  and branch sizing together; the emission's driver (the bodies' loop, the
+  windows' copies, the inline callees' table); the static data's atoms.
+- **The deferred entries** (calls, copies, a division whose fixed registers
+  are taken: 3.5% of the entries, nearly all calls) are counted and written
+  by code of their own: 9.0 of Tier 0's 69.7 cycles an entry, about 255
+  cycles and 640 instructions each.
+- **Outside the row,** Tier 0's validation of the stream, which `lower` runs,
+  is 13.9 cycles an entry more.
+- **Lua and musl** are a process a file (2,634 and 150 entries each), and a
+  part holds its work a file and its first run in a new process: the row is
+  273 and 732 cycles an entry, 42.8 and 19.4 a token. In the benchmark,
+  where neither counts, Tier 0 is 84.7 and 98.0 cycles an entry (220.9 and
+  266.6 instructions). musl's long double code adds the x87 values'
+  transfers, 13 of the 98.
+
+**What an entry's records depend on.** The share of the entries a key of that
+many bytes decides with no conflict, the entry's kind being its first byte
+(in brackets, the share whose pattern is their key's commonest):
+
+| key bytes | `sqlite3.c` | Lua | musl | the three as one |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 13.49 (60.76) | 11.48 (62.57) | 11.93 (52.24) | 11.94 (57.92) |
+| 2 | 40.87 (85.58) | 46.64 (87.04) | 28.62 (79.09) | 23.48 (82.91) |
+| 3 | 61.28 (94.96) | 73.42 (96.15) | 59.48 (92.60) | 55.17 (93.85) |
+| 4 | 86.17 (98.95) | 93.60 (99.30) | 84.61 (97.96) | 77.69 (98.49) |
+| 5 | 95.62 (99.76) | 98.55 (99.80) | 94.70 (99.42) | 93.49 (99.58) |
+| 6 | 99.47 (99.94) | 99.77 (99.95) | 98.81 (99.74) | 97.51 (99.82) |
+| 7 | 99.88 (99.99) | 99.95 (99.99) | 99.49 (99.84) | 99.54 (99.92) |
+| 8 | 99.99 (100.00) | 100.00 (100.00) | 99.68 (99.90) | 99.83 (99.95) |
+
+- **A key of 8 bytes or fewer decides 99.83% of the three corpora's 684,495
+  entries** as one population, and 99.99%, 100% and 99.68% of each alone.
+- **The tables are not small, and a corpus's keys are mostly its own:** 5,906
+  rows on `sqlite3.c`, 2,383 on Lua, 13,361 on musl and 24,650 on the three
+  together, more than their sum. The patterns converge: 700, 456 and 827
+  alone, 1,041 together.
+- **What decides:** without the entry's own class the keys leave 48.6% of
+  the three corpora's entries undecided; without the kinds and classes of
+  the entries before it 37.5%; without a value's class 32.6%; without a
+  depth 13.0%; without a home's case 5.9%; without a call's counts 2.6%.
+- **No entry needs an operand's value or a type's identity.** The 334
+  entries no key decides are musl's: 288 are long double values', whose
+  records the x87 values' transfers rewrite by what reads the value later
+  (52 of them constants, three stores of their own bits); 44 are `X86`
+  entries, a row of the function's table of operations; 2 are `alloca`s.
+- **One input came from a first census** that left 682 pointer additions
+  undecided: `p + 3` and `p + 20` of 8-byte elements differ in their scaled
+  constant's immediate alone. Its class is the fortieth input.
+- **A third of the entries are absorbed** by another's template, and a tenth
+  are in groups that make no record (a discard, a return the epilogue
+  covers).
+
+**What no table removes**, cycles a token on `sqlite3.c`:
+
+| | in a compile | at its own benchmark's rate |
+| --- | ---: | ---: |
+| the encoder | 2.37 | 1.64 (3.32 cycles a record) |
+| branch sizing | 3.52 | 3.32 (6.70 cycles a record) |
+| the object | 2.45 | 1.36 (its build, 12.85 GB/s) |
+| **the three** | **8.33** | **6.32** |
+| the atoms and relocations | 4.09 | |
+| the unwind table | 5.90 | |
+
+The object's write is the kernel's (step 5: 1.7 cycles a token). Lua's three
+are 6.88 in a compile and musl's 3.44, a token.
+
+**A by-product.** The keys show a conditional branch's group as `CONST 0`,
+`NE` and the branch, after a compare: the lowering tests a condition's value
+against zero, so `if (a < b)` is `cmp; setl; movzx; test; je`. 8,915 of
+`sqlite3.c`'s 16,876 conditional branches are that, 7.5% of its instructions
+([#2877](https://github.com/buster14a/buster/issues/2877)).
+
+### Against its gate
+
+- **95% of the row's instructions in a part of item 1: missed as written.**
+  The issue's eight parts hold 81.5% on `sqlite3.c` (75.0% on Lua, 66.8% on
+  musl). Every instruction of the row is in a named part: the three the list
+  doesn't have are the other 18.5%.
+- **A key of eight bytes or fewer decides 95% of the entries with no
+  conflict: met**, 99.68% at the least.
+- **Item 3's parts at or under 10 cycles a token: met**, 8.33 on `sqlite3.c`
+  in a compile.
+
+**Step 4's allocation is not refuted** by the issue's two conditions: no
+entry's selection needs a wide input (0.014% of the entries), and the
+encoder, branch sizing and the object are 6.32 cycles a token at their own
+benchmarks' rates.
+
+### What it means
+
+- **The 10 can't come from the selection alone.** Tier 0 is 38.4 of the
+  row's 64.7 cycles a token. With Tier 0 at nothing the row is 26.3: the
+  driver 7.5, the unwind table 5.9, the atoms and relocations 4.1, branch
+  sizing 3.5, the object 2.4, the encoder 2.4, the static data 0.5.
+- **What no table removes leaves 1.7 to 3.7 of the 10** for parts that take
+  56.4 today. The conditions the issue set don't refute the allocation; these
+  counts say it holds only if the unwind table, the atoms and the driver
+  shrink with Tier 0, or the stream has fewer entries.
+- **An entry's records are a table's answer on bytes,** as the design asks of
+  every stage, but not a table two registers hold: thousands of rows that a
+  corpus doesn't close. The answer is Tier 0's own rules, which make a
+  three-byte key by lane arithmetic today and gather the template's words on
+  it.
+- **A key written beside the entry replaces at most 25 of Tier 0's 70
+  cycles an entry:** the decode 9.1, the fusion 6.4, the templates' gather
+  9.6. The other 45 come after an entry's template is known: measuring its
+  lengths and positions 8.5, the immediates' forms 3.6, the expansion and
+  the output's arrays 14.6, the deferred entries 9.0, the homes and the frame
+  8.9.
+- **The deferred entries are where an entry costs most.** A call's records
+  are decided by bytes too (its class, its depth, its counts of register and
+  stack arguments, its flags: 154 patterns in 444 rows on `sqlite3.c`), so a
+  call can be a template's.
+- **For step 4:** a design on #2874, from these rows. It has to say what the
+  unwind table and the atoms become, since they are 10 cycles a token by
+  themselves.
+
 ## Step 5's first piece: a census of the kernel's time and fresh memory
 
 [The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/kernel-census-2873-2026-11-16)
@@ -1088,3 +1284,5 @@ and the start and exit (1.4) are 5.3 before any table.
 - [The node machine](node-machine.md) (#2524): the shadow this runs in, T's
   rules and columns, and the machine's own front.
 - [The all-core path](all-core-path.md) (#2536): the windows.
+- [Tier 0](tier0.md): the row's passes. Step 4's census's command is in
+  [its guide](commands/tier0.md#the-entries-census-2874).

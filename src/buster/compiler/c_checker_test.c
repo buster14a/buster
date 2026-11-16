@@ -3613,6 +3613,7 @@ static void check_test_node_census(CheckTest* test);
 static void check_test_attested(CheckTest* test);
 static void check_test_lowering_templates(CheckTest* test);
 static void check_test_backend_source_benchmark(CheckTest* test);
+static void check_test_tier0_entries(CheckTest* test);
 static void check_test_check_lanes_benchmark(CheckTest* test);
 static void check_test_requests(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
@@ -4350,6 +4351,11 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_corpus_symbol_reasons(&test, clang);
+            }
+            // Dealt last, so that the units before it keep their parts and their random states.
+            if (check_test_takes())
+            {
+                check_test_tier0_entries(&test);
             }
             // The coded walk's classes (#1038) need every source fixture's counts: a part has only its own.
             if (check_test_part.count == 1)
