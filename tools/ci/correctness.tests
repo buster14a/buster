@@ -985,7 +985,7 @@ clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags
 # checks that the truth values became branches, constants are stores' immediates, no shift by zero is left, each
 # computed goto has its own indirect jump, (#2676) each select of a comparison is a cmov of its flags, with no setcc,
 # (#2791) a select of a floating comparison by <, <=, > or >= a cmov of its ucomis's flags, on NaN and signed-zero
-# operands, and
+# operands, (#2922) one of == or != two cmovs, the parity flag's too, unless its values recur through it, and
 # (#2745) no object a vector's value writes whole is zeroed first.
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns

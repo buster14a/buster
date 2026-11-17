@@ -17,8 +17,11 @@
 //   immediate and with a register, a doubleword's comparison choosing quadwords, an unsigned one): a cmov of the
 //   comparison's flags for each, no setcc;
 // - #2791's selects of floating comparisons (<, a negated >, a loop's conditional count by >=, and a sign's nested `?:`,
-//   whose outer test stays a branch): ucomis and a cmov or jump of its flags for each, no setcc (== and != keep their
-//   truth values, whose selects the oracle checks on unordered operands too);
+//   whose outer test stays a branch): ucomis and a cmov or jump of its flags for each, no setcc;
+// - #2922's selects of floating == and != (a select of each, and a loop's sum of selects of two invariant values): a
+//   cmov of the parity flag too, no setcc; and where the loop's accumulator recurs through a select's values (a
+//   conditional count by ==, a running last match), its truth value instead, no cmov of the parity flag; the oracle
+//   checks all of them on unordered operands too;
 // - #2745's objects a vector's value initializes whole, as the intrinsics' wrappers are (a struct's, a union's, a
 //   compound literal's): no store of zeros before the vector's, while a volatile object and a union whose designator
 //   moves to another member after the vector's (whose rest clang leaves zeros) keep their eight;
@@ -392,6 +395,43 @@ __attribute__((noinline)) long patterns_float_unequal(float a, float b, long x)
     return a != b ? x : 0;
 }
 
+__attribute__((noinline)) long patterns_float_equal_sum(const double* p, int n, double t, long x, long y)
+{
+    long s = 0;
+    for (int i = 0; i < n; i += 1)
+    {
+        s += p[i] == t ? x : y;
+    }
+    return s;
+}
+
+__attribute__((noinline)) long patterns_float_equal_count(const double* p, int n, double t)
+{
+    long c = 0;
+    for (int i = 0; i < n; i += 1)
+    {
+        if (p[i] == t)
+        {
+            c += 5;
+        }
+        else
+        {
+            c += 1;
+        }
+    }
+    return c;
+}
+
+__attribute__((noinline)) int patterns_float_last_unequal(const float* p, int n, float t)
+{
+    int last = -1;
+    for (int i = 0; i < n; i += 1)
+    {
+        last = p[i] != t ? i : last;
+    }
+    return last;
+}
+
 typedef long long patterns_vector __attribute__((vector_size(64)));
 typedef struct
 {
@@ -482,6 +522,9 @@ long patterns_float_count(const double* p, int n, double t);
 int patterns_float_sign(double x);
 int patterns_float_equal(double a, double b, int x, int y);
 long patterns_float_unequal(float a, float b, long x);
+long patterns_float_equal_sum(const double* p, int n, double t, long x, long y);
+long patterns_float_equal_count(const double* p, int n, double t);
+int patterns_float_last_unequal(const float* p, int n, float t);
 struct patterns_state
 {
     long* base;
@@ -824,10 +867,24 @@ int main(void)
         }
         valid = patterns_float_sign(reals[i]) == (reals[i] < 0 ? -1 : reals[i] > 0 ? 1 : 0) && valid;
         long counted = 0;
+        long summed_equal = 0;
+        long counted_equal = 0;
+        int last = -1;
+        float narrowed[sizeof(reals) / sizeof(reals[0])];
+        for (int n = 0; n < real_count; n += 1)
+        {
+            narrowed[n] = (float)reals[n];
+        }
         for (int n = 0; n < real_count; n += 1)
         {
             valid = patterns_float_count(reals, n, reals[i]) == counted && valid;
+            valid = patterns_float_equal_sum(reals, n, reals[i], 11, -(long)i) == summed_equal && valid;
+            valid = patterns_float_equal_count(reals, n, reals[i]) == counted_equal && valid;
+            valid = patterns_float_last_unequal(narrowed, n, narrowed[i]) == last && valid;
             counted += reals[n] >= reals[i] ? 3 : -1;
+            summed_equal += reals[n] == reals[i] ? 11 : -(long)i;
+            counted_equal += reals[n] == reals[i] ? 5 : 1;
+            last = narrowed[n] != narrowed[i] ? n : last;
         }
     }
     const long values[] = { 4, 9, -3, 9, 12 };
@@ -971,6 +1028,8 @@ typedef enum PatternsKind
     PATTERNS_FETCH,
     PATTERNS_SPILLED,
     PATTERNS_SELECT,
+    PATTERNS_FLOAT_EQUAL,
+    PATTERNS_FLOAT_RECURRENT,
     PATTERNS_WHOLE,
     PATTERNS_CLEARED,
     PATTERNS_GSUB,
@@ -1006,6 +1065,11 @@ static const PatternsFunction patterns_functions[] = {
     { "patterns_float_not_greater", PATTERNS_SELECT },
     { "patterns_float_count", PATTERNS_SELECT },
     { "patterns_float_sign", PATTERNS_SELECT },
+    { "patterns_float_equal", PATTERNS_FLOAT_EQUAL },
+    { "patterns_float_unequal", PATTERNS_FLOAT_EQUAL },
+    { "patterns_float_equal_sum", PATTERNS_FLOAT_EQUAL },
+    { "patterns_float_equal_count", PATTERNS_FLOAT_RECURRENT },
+    { "patterns_float_last_unequal", PATTERNS_FLOAT_RECURRENT },
     { "patterns_whole_literal", PATTERNS_WHOLE },
     { "patterns_whole_declaration", PATTERNS_WHOLE },
     { "patterns_whole_union", PATTERNS_WHOLE },
@@ -1046,6 +1110,8 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
 {
     unsigned sets = 0;
     unsigned moves = 0;
+    // cmovs of the parity flag, a select's of a floating == or != (#2922).
+    unsigned parity = 0;
     unsigned shifts = 0;
     unsigned immediates = 0;
     unsigned registers = 0;
@@ -1071,6 +1137,7 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
         const char* destination = comma != NULL ? comma + 1 : operands;
         sets += strncmp(operation, "set", 3) == 0;
         moves += strncmp(operation, "cmov", 4) == 0;
+        parity += strncmp(operation, "cmovp", 5) == 0 || strncmp(operation, "cmovnp", 6) == 0;
         shifts += (strncmp(operation, "shl", 3) == 0 || strncmp(operation, "shr", 3) == 0 || strncmp(operation, "sar", 3) == 0) && strncmp(operands, "$0x0,", 5) == 0;
         const bool move = strncmp(operation, "mov", 3) == 0 && strncmp(operation, "movz", 4) != 0 && strncmp(operation, "movs", 4) != 0;
         immediates += move && operands[0] == '$' && patterns_memory(destination);
@@ -1125,6 +1192,12 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     case PATTERNS_SELECT:
         valid = valid && sets == 0 && moves >= 1;
         break;
+    case PATTERNS_FLOAT_EQUAL:
+        valid = valid && sets == 0 && moves >= 2 && parity >= 1;
+        break;
+    case PATTERNS_FLOAT_RECURRENT:
+        valid = valid && sets >= 2 && moves >= 1 && parity == 0;
+        break;
     case PATTERNS_WHOLE:
         valid = valid && zeros == 0;
         break;
@@ -1137,8 +1210,8 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     }
     if (!valid)
     {
-        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u cmov=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u loaded-jumps=%u zero-stores=%u stored-back=%u\n",
-                function->name, body->definitions, sets, moves, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, loaded, zeros, stored_back);
+        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u cmov=%u parity-cmov=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u loaded-jumps=%u zero-stores=%u stored-back=%u\n",
+                function->name, body->definitions, sets, moves, parity, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, loaded, zeros, stored_back);
     }
     return valid;
 }

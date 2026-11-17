@@ -159,9 +159,9 @@ typedef enum Tier1SelectRule
     // on one, < and <= with its operands swapped, `condition` the unsigned condition (UGT, UGE, or their negations ULE and
     // ULT) whose jump reads ucomis's flags: ja and jae are false for unordered operands, and jbe and jb, !(a > b) and
     // !(a >= b), true. A select of one (FLOAT_SELECT_COMPARE, #2791), whose integer result is a general register's:
-    // values[0] and values[1] the ucomis's operands and `condition` as the branch's; values[2] and values[3] the select's
-    // values where the comparison holds and where it doesn't, `width` the select's and `source_width` the comparison's
-    // (tier1_select_expand's records). The conversions
+    // values[0] and values[1] the ucomis's operands and `condition` as the branch's, or EQ and NE, unswapped, which read
+    // the parity flag too (#2922); values[2] and values[3] the select's values where the comparison holds and where it
+    // doesn't, `width` the select's and `source_width` the comparison's (tier1_select_expand's records). The conversions
     // (FLOAT_CONVERT, `scale` its kind: BUSTER_TIER1_FLOAT_FROM_SIGNED and the others, `width` and `source_width` the
     // result's and the operand's bytes, an integer's by its memory width). A return of values[0] in xmm0. Only the CFG
     // consumer takes them.
@@ -3067,9 +3067,38 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     case TIER1_RULE_FLOAT_SELECT_COMPARE:
     {
         // ucomis, then the select's mov and cmov (#2791), whose condition is the branch's: true for unordered operands only
-        // negated. The comparison's operands are in the vector class, so the general destination holds neither.
+        // negated. The comparison's operands are in the vector class, so the general destination holds neither. == and !=
+        // (#2922) take their equal value only where ZF is set and PF clear: the select's true value for ==, its false value
+        // for !=, then cmovne and cmovp of the other one, as clang's select of an `fcmp oeq`. Where the destination holds
+        // that other value, the scratch register keeps it for the cmovp past the cmove of the equal value.
         tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(holes->source_width)->compare, holes->left & 15, holes->right & 15));
-        tier1_select_fused_moves(&result, holes, destination, width);
+        const uint32_t condition = holes->condition;
+        if (condition == IR_EQ || condition == IR_NE)
+        {
+            const uint16_t* moves = tier1_select_condition_moves[width == 8];
+            const uint8_t equal = condition == IR_EQ ? holes->third : holes->fourth;
+            const uint8_t other = condition == IR_EQ ? holes->fourth : holes->third;
+            const uint16_t parity = width == 8 ? X86_FORM_CMOVP_R64_RM64 : X86_FORM_CMOVP_R32_RM32;
+            if (destination == other && other != equal)
+            {
+                tier1_select_append(&result, tier1_select_move(width, BUSTER_TIER1_SELECT_SCRATCH, other));
+                tier1_select_append(&result, tier1_select_register_record(moves[IR_EQ], destination, equal));
+                tier1_select_append(&result, tier1_select_register_record(parity, destination, BUSTER_TIER1_SELECT_SCRATCH));
+            }
+            else
+            {
+                if (destination != equal)
+                {
+                    tier1_select_append(&result, tier1_select_move(width, destination, equal));
+                }
+                tier1_select_append(&result, tier1_select_register_record(moves[IR_NE], destination, other));
+                tier1_select_append(&result, tier1_select_register_record(parity, destination, other));
+            }
+        }
+        else
+        {
+            tier1_select_fused_moves(&result, holes, destination, width);
+        }
         break;
     }
     case TIER1_RULE_FLOAT_CONVERT:
@@ -3402,6 +3431,9 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
 // The most links a pattern's walk follows through a truth value's chain or an address's (tier1_select_truth,
 // tier1_select_address): a bound on each node's walk, which every node of a chain takes again as its own pattern's.
 #define BUSTER_TIER1_SELECT_WALK 8
+// The rows a select's recurrence walk visits back from its values (tier1_select_recurrent, #2922): if-conversion's bound
+// for its condition's (BUSTER_IR_IF_CONVERT_RECURRENCE_ROWS).
+#define BUSTER_TIER1_SELECT_RECURRENCE_ROWS 16u
 
 // Cold per-node emission metadata. The hot rule-choice pass uses contiguous 16-lane cost arrays; the emitter consumes
 // all fields of one selected pattern. `values` preserve operand roles, including absent slots, while the effective-use
@@ -5147,24 +5179,75 @@ static inline __attribute__((always_inline)) void tier1_select_add_comparison(co
     tier1_select_add_candidate(forest, node, candidates, pattern);
 }
 
+// Whether a select's values recur through it (#2922): a walk back from its two values, through their operands and the
+// incoming values of the phis it meets, reaches the select itself within BUSTER_TIER1_SELECT_RECURRENCE_ROWS rows, as a
+// loop's accumulator or running choice does (`c = select(p[i] == t, c + 5, c + 1)`, `best = select(p[i] == t, i,
+// best)`). A select of a floating == or != by two cmovs puts both on the path from each value to the result, where its
+// truth value's single cmov is one: such a select keeps that, its comparison's path off the loop's carried chain (as
+// ir_if_convert_recurrence keeps a branch whose condition is on it). Its condition isn't walked: two cmovs shorten the
+// comparison's path to the result. Both selection paths ask it of the same select (tier1_select_candidates and
+// tier1_burs_equality), the scalar rare case of the classifiers.
+static __attribute__((noinline)) bool tier1_select_recurrent(const IrFunction* function, uint32_t select)
+{
+    const uint32_t count = function->instruction_count;
+    uint32_t stack[BUSTER_TIER1_SELECT_RECURRENCE_ROWS];
+    uint32_t seen[BUSTER_TIER1_SELECT_RECURRENCE_ROWS];
+    uint32_t depth = 2;
+    uint32_t visited = 0;
+    bool found = false;
+    stack[0] = function->b[select];
+    stack[1] = function->c[select];
+    while (depth != 0 && !found && visited < BUSTER_TIER1_SELECT_RECURRENCE_ROWS)
+    {
+        const uint32_t row = stack[--depth];
+        bool known = row >= count;
+        for (uint32_t k = 0; k < visited && !known; k += 1)
+        {
+            known = seen[k] == row;
+        }
+        if (!known)
+        {
+            seen[visited++] = row;
+            const uint32_t operands = (uint32_t)ir_operand_count(function, row);
+            for (uint32_t p = 0; p < operands && !found && depth < BUSTER_TIER1_SELECT_RECURRENCE_ROWS; p += 1)
+            {
+                const uint32_t value = ir_operand(function, row, p, 0).value;
+                found = value == select;
+                stack[depth++] = value;
+            }
+        }
+    }
+    return found;
+}
+
+// Whether `select` may take the comparison `tested` by two cmovs (#2922): a floating == or != that is its condition, or
+// whose I1 copy is, through no truth value's chain, and the select's values don't recur through it.
+static bool tier1_select_equality_select(const IrFunction* function, uint32_t select, uint32_t tested)
+{
+    const uint32_t condition = function->a[select];
+    const bool direct = tested == condition || (function->op[condition] == IR_COPY && function->a[condition] == tested);
+    return direct && function->op[tested] == IR_FCMP && function->c[tested] <= IR_NE && !tier1_select_recurrent(function, select);
+}
+
 // The comparison `tested`, an FCMP of F32 or F64 values by <, <=, > or >= that only `root`'s pattern uses, as the
 // pattern's own (#141, TIER1_RULE_FLOAT_BRANCH_COMPARE): ucomis of its operands, swapped for < and <=, and the unsigned
 // condition that reads its flags, UGT (ja) for a strict one and UGE (jae) for the other, which are false for unordered
 // operands; with `negated`, their negations ULE and ULT (jbe and jb), which are true for them, as !(a > b) and
-// !(a >= b) are. == and != read the parity flag too, which a single jump can't: their truth value is tested instead. A
-// select of one takes the same (TIER1_RULE_FLOAT_SELECT_COMPARE, #2791): two cmovs could read both flags, as clang's
-// select of an `fcmp oeq` does, but both are on the path from the select's values to its result, which a loop's
-// accumulator recurs through (docs/tier1-selection.md has the measurement).
-static bool tier1_select_float_comparison(const Tier1SelectForest* forest, uint32_t root, uint32_t tested, bool negated, Tier1SelectPattern* pattern)
+// !(a >= b) are. == and != read the parity flag too, which a single jump can't: a branch tests their truth value
+// instead. A select's two cmovs can (`equality`, TIER1_RULE_FLOAT_SELECT_COMPARE, #2922): their operands in order, and
+// the predicate, negated to the other one, since !(a == b) is a != b for unordered operands too.
+static bool tier1_select_float_comparison(const Tier1SelectForest* forest, uint32_t root, uint32_t tested, bool negated, bool equality, Tier1SelectPattern* pattern)
 {
     const IrFunction* function = forest->function;
     const uint32_t left = function->a[tested];
     const uint32_t predicate = function->c[tested];
-    const bool result = function->op[tested] == IR_FCMP && tier1_select_tree_child(forest, root, tested) && tier1_select_float_width(function->type[left]) != 0 && predicate >= IR_LT && predicate <= IR_GE;
+    const bool equal = predicate == IR_EQ || predicate == IR_NE;
+    const bool result = function->op[tested] == IR_FCMP && tier1_select_tree_child(forest, root, tested) && tier1_select_float_width(function->type[left]) != 0 &&
+                        ((predicate >= IR_LT && predicate <= IR_GE) || (equality && equal));
     if (result)
     {
         const bool swapped = predicate == IR_LT || predicate == IR_LE;
-        const uint8_t condition = predicate == IR_LT || predicate == IR_GT ? IR_UGT : IR_UGE;
+        const uint8_t condition = equal ? (uint8_t)predicate : predicate == IR_LT || predicate == IR_GT ? IR_UGT : IR_UGE;
         pattern->values[0] = swapped ? function->b[tested] : left;
         pattern->values[1] = swapped ? left : function->b[tested];
         pattern->width = (uint8_t)tier1_select_float_width(function->type[left]);
@@ -7155,14 +7238,18 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.values[3] = c;
             tier1_select_add_comparison(forest, node, &candidates, folded, base.width);
         }
-        // A floating comparison by <, <=, > or >= (#2791): its ucomis, then the select's mov and cmovCC.
-        else if (tier1_select_float_comparison(forest, node, tested, negated, &folded))
+        // A floating comparison (#2791): its ucomis, then the select's mov and cmovCC. For == and != a cmovne and a cmovp
+        // (#2922), where the condition is their comparison or its copy (ir_truth.c's), no truth value's chain of theirs,
+        // and the select's values don't recur through it (tier1_select_recurrent); the grammar takes the same
+        // (tier1_burs_equality).
+        else if (tier1_select_float_comparison(forest, node, tested, negated, tier1_select_equality_select(function, node, tested), &folded))
         {
             folded.rule = TIER1_RULE_FLOAT_SELECT_COMPARE;
             folded.source_width = folded.width;
             folded.width = base.width;
             folded.values[2] = b;
             folded.values[3] = c;
+            folded.intrinsic_cost = folded.condition == IR_EQ || folded.condition == IR_NE ? 4 : 3;
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
     }
@@ -7230,7 +7317,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             folded.rule = TIER1_RULE_BRANCH_COMPARE;
             tier1_select_add_comparison(forest, node, &candidates, folded, 0);
         }
-        else if (tested != BUSTER_IR_NONE && tier1_select_float_comparison(forest, node, tested, negated, &folded))
+        else if (tested != BUSTER_IR_NONE && tier1_select_float_comparison(forest, node, tested, negated, false, &folded))
         {
             folded.rule = TIER1_RULE_FLOAT_BRANCH_COMPARE;
             tier1_select_add_candidate(forest, node, &candidates, folded);
@@ -8035,13 +8122,15 @@ static inline __attribute__((always_inline)) void tier1_select_ties(const Tier1S
                       rule == TIER1_RULE_FLOAT_LOAD_OPERAND || rule == TIER1_RULE_FLOAT_NEGATE;
     const bool select = rule == TIER1_RULE_SELECT;
     // A fused select's values are past its comparison's (#2676, #2791): where its comparison holds in values[2], else
-    // values[3].
-    const bool fused = rule == TIER1_RULE_SELECT_COMPARE || rule == TIER1_RULE_FLOAT_SELECT_COMPARE;
+    // values[3]. A floating == keeps its true value instead (#2922), the one equal operands choose, as != keeps its false
+    // one; it takes the other value's register through the scratch register.
+    const bool equality = rule == TIER1_RULE_FLOAT_SELECT_COMPARE && pattern->condition == IR_EQ;
+    const bool fused = (rule == TIER1_RULE_SELECT_COMPARE || rule == TIER1_RULE_FLOAT_SELECT_COMPARE) && !equality;
     // An address from a register (#2592): `lea d(%r),%r` costs what a lea into another register does, and an incremented
     // pointer, Lua's `pc + 1` in OP_LFALSESKIP, keeps the register its dispatch takes it in.
     const bool address = rule == TIER1_RULE_ADDRESS && !pattern->rip && pattern->stack_object == BUSTER_IR_NONE;
-    *first = left || address ? pattern->values[0] : select ? pattern->values[2] : fused ? pattern->values[3] : BUSTER_IR_NONE;
-    *second = swapped ? pattern->values[1] : select ? pattern->values[1] : fused ? pattern->values[2] : BUSTER_IR_NONE;
+    *first = left || address ? pattern->values[0] : select ? pattern->values[2] : fused ? pattern->values[3] : equality ? pattern->values[2] : BUSTER_IR_NONE;
+    *second = swapped ? pattern->values[1] : select ? pattern->values[1] : fused ? pattern->values[2] : equality ? pattern->values[3] : BUSTER_IR_NONE;
 }
 
 // Marks each node whose value a return reads in `returned` (one byte per node, cleared here). Such a value takes no tie
