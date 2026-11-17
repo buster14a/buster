@@ -408,7 +408,7 @@ static bool check_input_symbol_function_clone(const CheckInput* input, CheckInpu
     return functions;
 }
 
-// Deferred lanes share the immutable top level. Only an actual function lookup set requiring selection needs the
+// Deferred lanes share the immutable top level. Only a function lookup set, which needs selection, needs the
 // overload reader's source-order fallback; weak object aliases keep their ordinary deferred reading schedule.
 static bool check_input_symbol_overload_needed(CheckInputReader* reader)
 {
@@ -421,10 +421,7 @@ static bool check_input_symbol_overload_needed(CheckInputReader* reader)
         const bool eligible = record->supported && record->warning == CHECK_SYMBOL_WARNING_NONE && record->kind == CHECK_SYMBOL_PRAGMA_ALIAS;
         const CheckInputSymbolClone clone = eligible ? check_input_symbol_clone(reader, record, input->token_count) :
                                             (CheckInputSymbolClone){ .target = BUSTER_CHECK_NONE, .previous = BUSTER_CHECK_NONE };
-        const TypeAnswer compatible = check_input_symbol_function_clone(input, clone) ?
-            type_compatible(reader->types, input->declared_types[clone.previous], input->declared_types[clone.target]) : TYPE_ANSWER_YES;
-        input->resource |= compatible == TYPE_ANSWER_FULL;
-        needed = compatible == TYPE_ANSWER_NO;
+        needed = check_input_symbol_function_clone(input, clone);
     }
     return needed;
 }
@@ -437,7 +434,13 @@ static uint32_t check_input_symbol_overload_original(CheckInputReader* reader, u
     CheckInput* input = reader->output;
     if (input->overload_heads == NULL)
     {
-        (void)check_input_overload_initialize(reader, true, reader->overload_capacity, reader->overload_call_capacity, reader->arena);
+        // Target multiversioning's calls grow tables of their own only after the source walk that names the clone
+        // (check_input_multiversion_flush); tables grown before this would be lost, so they are refused as no room.
+        input->resource |= reader->overload_candidates != NULL;
+        if (!input->resource)
+        {
+            (void)check_input_overload_initialize(reader, true, reader->overload_planned_capacity, reader->overload_call_capacity, reader->arena);
+        }
     }
     uint32_t head = !input->resource ? input->overload_heads[declaration] : 0;
     if (!input->resource && head == 0)
@@ -474,8 +477,10 @@ static uint32_t check_input_symbol_overload_original(CheckInputReader* reader, u
     return head;
 }
 
-// Clang inserts a function clone without checking the previous function declaration. Different signatures can
-// consequently form an overload set without overloadable attributes. Capture its head while the source scope is
+// Clang inserts a function clone without checking the previous function declaration, so the two form an overload
+// set without overloadable attributes, whatever their signatures (#2449): a call selects by its arguments (equal
+// signatures are ambiguous), and a reference that isn't called converts as '<overloaded function type>' does, as a
+// typed pointer selects it, or with clang's error and candidate notes. Capture its head while the source scope is
 // live, so sizeof/typeof and initializer constants see the same selection as the final graph. Independent clones
 // retain distinct identities and form one immutable chain; all name the ordinary ELF symbol A. A block declaration
 // shadows the translation-unit lookup set even if it shares that symbol's linkage identity.
@@ -498,10 +503,7 @@ static void check_input_symbol_overload_use(CheckInputReader* reader, uint32_t t
             {
                 record->alias_declaration = clone.target;
                 record->overload_declaration = clone.previous;
-                const TypeAnswer compatible = record->overload_head != 0 ? TYPE_ANSWER_NO :
-                    type_compatible(reader->types, input->declared_types[clone.previous], input->declared_types[clone.target]);
-                input->resource |= compatible == TYPE_ANSWER_FULL;
-                active |= compatible == TYPE_ANSWER_NO;
+                active = true;
             }
         }
     }
@@ -711,8 +713,8 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
         const uint8_t alias_kind = alias.previous != BUSTER_CHECK_NONE ? input->declaration_kinds[alias.previous] : C_BINDING_KINDS;
         const bool functions = kind == C_BINDING_FUNCTION && alias_kind == C_BINDING_FUNCTION;
         // An object in the lookup set makes every reference ambiguous, even when its kind or type differs from the
-        // clone's. Two functions with different parameter types can instead form a valid overload set in clang; those
-        // still need overload selection and keep the existing refusal.
+        // clone's. Two functions form an overload set instead (check_input_symbol_overload_use), whose selection
+        // reports their uses after the clone: these reports remain for a function use that selection didn't take.
         const bool overloaded = record->overload_head != 0;
         const bool ambiguous = !overloaded && (!mismatched || (!functions && (alias_kind == C_BINDING_FUNCTION || alias_kind == C_BINDING_OBJECT)));
         if (ambiguous && alias.previous != BUSTER_CHECK_NONE && (kind == C_BINDING_FUNCTION || kind == C_BINDING_OBJECT))

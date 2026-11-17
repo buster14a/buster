@@ -47,3 +47,6 @@ overload-address	overload-address.c	-	a typed function pointer selects the match
 overload-address-mismatch	overload-address-mismatch.c	rejected	a typed address with no matching function retains candidate notes
 overload-type	overload-type.c	-	unevaluated calls retain the selected candidate's result type
 overload-same-parameters	overload-same-parameters.c	rejected	return types alone cannot disambiguate identical function parameters
+overload-identical-address	overload-identical-address.c	rejected	identical signatures still form an overload set for typed addresses, assignments and arguments
+object-repeated-clones	object-repeated-clones.c	rejected	each object clone made before a reference is a candidate, newest first
+object-repeated-forward	object-repeated-forward.c	rejected	forward targets order an object's candidates by when their clones are made

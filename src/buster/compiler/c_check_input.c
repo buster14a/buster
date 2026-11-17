@@ -2039,6 +2039,11 @@ struct CheckInputReader
     TypeId enum_types[64];
     CheckOverloadCandidate* overload_candidates;
     uint32_t overload_capacity;
+    // The sizes check_input_run plans for the tables of overloads, its candidates' and its calls': a unit without an
+    // overloadable function makes them only for a `#pragma weak A = T` function clone (#2449,
+    // check_input_symbol_overload_original). overload_capacity stays 0 until a table exists, where target
+    // multiversioning's calls grow theirs from.
+    uint32_t overload_planned_capacity;
     uint32_t overload_call_capacity;
     CheckOverloadIndex overload_index;
     bool declarator_overloadable;

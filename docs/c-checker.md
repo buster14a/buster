@@ -11750,12 +11750,18 @@ Once the clone is visible, an earlier ALIAS declaration and the clone both
 participate in lookup. A set containing an object is ambiguous, including
 mixed object/function and internal-linkage declarations. Two functions use the
 ordinary overload selection for calls and typed addresses, with the selected
-return type retained in expressions and constant evaluation. Equal viable
-signatures remain ambiguous. A function clone's candidate note names the
+return type retained in expressions and constant evaluation, whatever their
+signatures, as clang never merges the clone with the earlier declaration.
+Equal viable signatures remain ambiguous: a call is "call to 'A' is
+ambiguous", and an uncalled reference converts as `'<overloaded function
+type>'` (initializing, assigning or passing a function pointer), with the
+overload machinery's coverage and limits. A function clone's candidate note names the
 pragma, and two functions' notes are sorted by location as clang's overload
 candidates are, so a declaration written between the pragma and a later TARGET
-follows the pragma's note; an object clone's names TARGET's declaration and
-precedes the earlier declaration's. References before a later
+follows the pragma's note. An object's set lists every clone made before the
+reference, newest first (an object clone at TARGET's declaration, a function
+clone at the pragma), then the earlier declaration
+(`check_driver_weak_alias_candidates`). References before a later
 TARGET declaration keep their earlier lookup. Local parameters and block/loop
 declarations shadow the outer lookup set normally. Later declarations diagnose
 conflicting kind, type, definition or linkage against the clone and retain

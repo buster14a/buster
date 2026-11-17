@@ -4640,6 +4640,58 @@ static bool check_driver_jump_kept(const Parser* parser, const CheckInput* input
     return kept;
 }
 
+// An ambiguous reference's candidates where its lookup set holds an object (#2449, CHECK_INPUT_WEAK_ALIAS_OBJECT_AMBIGUOUS):
+// every `#pragma weak A = T` clone of the name made before the reference, newest first as clang's lookup lists them
+// (an object clone at T's declaration, a function clone at the pragma's A), then A's earlier declaration at
+// `declaration`. Their count, 0 where the notes have no room in `scratch`.
+static uint32_t check_driver_weak_alias_candidates(const Parser* parser, const CheckInput* input, uint32_t token, uint32_t declaration, const char* message,
+                                                   PPOutputDiagnosticNote** notes, Arena* scratch)
+{
+    const CheckInputSymbolPragmas* history = input->symbol_pragmas;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t name = parser->tokens.names[token];
+    uint32_t clones = 0;
+    for (uint32_t i = 0; history != NULL && i < history->count; i += 1)
+    {
+        const CheckInputSymbolPragma* record = history->records + i;
+        const uint32_t made = record->token > record->alias_declaration ? record->token : record->alias_declaration;
+        clones += record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->name == name && record->alias_declaration < count && made < token;
+    }
+    PPOutputDiagnosticNote* listed = clones != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, PPOutputDiagnosticNote, (uint64_t)clones + 1) : NULL;
+    uint64_t* order = listed != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, clones) : NULL;
+    uint32_t listed_count = 0;
+    for (uint32_t i = 0; order != NULL && i < history->count; i += 1)
+    {
+        const CheckInputSymbolPragma* record = history->records + i;
+        const uint32_t made = record->token > record->alias_declaration ? record->token : record->alias_declaration;
+        if (record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->name == name && record->alias_declaration < count && made < token)
+        {
+            // Newest first: by creation, then by directive, both descending (an insertion of a few records).
+            const uint64_t key = (uint64_t)made << 32 | i;
+            uint32_t at = listed_count;
+            while (at != 0 && order[at - 1] < key)
+            {
+                order[at] = order[at - 1];
+                at -= 1;
+            }
+            order[at] = key;
+            listed_count += 1;
+        }
+    }
+    for (uint32_t c = 0; order != NULL && c < listed_count; c += 1)
+    {
+        const CheckInputSymbolPragma* record = history->records + (uint32_t)order[c];
+        const bool function = input->declaration_kinds[record->alias_declaration] == C_BINDING_FUNCTION;
+        listed[c] = (PPOutputDiagnosticNote){ .token = function ? record->source + 3 : parser->tokens.sources[record->alias_declaration], .message = message };
+    }
+    if (order != NULL)
+    {
+        listed[listed_count] = (PPOutputDiagnosticNote){ .token = declaration, .message = message };
+    }
+    *notes = listed;
+    return order != NULL ? listed_count + 1 : 0;
+}
+
 // `from`: the first token whose reports, warnings, pragmas' diagnostics and packed members' warnings it publishes, 0 for
 // all of them (check_driver_rejected_common's second reading publishes those past where the first one stopped).
 static bool check_driver_reports_from(const Parser* parser, const Parser* original, Preprocessor* pp, uint32_t publication_end,
@@ -6536,8 +6588,12 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 { .token = first, .message = kind != CHECK_INPUT_WEAK_ALIAS_REDEFINITION ? candidate : "previous definition is here" },
                                 { .token = second, .message = candidate },
                             };
+                            // An object's set lists each clone made before the reference, where several directives name A.
+                            PPOutputDiagnosticNote* listed = NULL;
+                            const uint32_t listed_count = object ? check_driver_weak_alias_candidates(parser, input, token, later, candidate, &listed, scratch) : 0;
                             const bool call = token + 1 < count && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN;
-                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, notes, kind != CHECK_INPUT_WEAK_ALIAS_REDEFINITION ? 2u : 1u,
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, listed_count != 0 ? listed : notes,
+                                                        listed_count != 0 ? listed_count : kind != CHECK_INPUT_WEAK_ALIAS_REDEFINITION ? 2u : 1u,
                                                         kind == CHECK_INPUT_WEAK_ALIAS_REDEFINITION ? "redefinition of '%.*s' as different kind of symbol" :
                                                         call && !object ? "call to '%.*s' is ambiguous" : "reference to '%.*s' is ambiguous",
                                                         (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
