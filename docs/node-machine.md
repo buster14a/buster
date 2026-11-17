@@ -891,13 +891,64 @@ its operands. They are the machine's now (#2569):
   `CONDITION` stays the root the census reads; its `&&`, `||` and `!` aren't
   popped. A value's `&&` or `||` whose first operand is such an operator takes
   that operand as branches too, to the value's own label (#2891). The machine
-  doesn't write branches yet: C leaves such a `CONDITION`, a conditional whose
-  condition is one, and an `&&` or `||` whose first operand is, to the tasks
-  (`node_machine_branch_condition`, the lowering's rule read from the records),
-  and the shadow counts them as refused by `template`. Writing them is the
-  follow-up under #2524: a condition's operand takes a branch context in C, X
-  writes its branches, and the comparison reads the control's target as a label
-  outside the expression.
+  writes the same entries (#2890), by the lowering's rule read from the records
+  (`node_machine_branch_condition`):
+  - **C gives such an operator a target and a sense in place of a value's
+    context** (`node_machine_classify_branches`), the two things a
+    `CHECK_LOWER_BRANCH` task carries: the record whose label the branch goes
+    to, or the control's own, and the truth it is taken at. An `&&` where false
+    and an `||` where true hand both operands theirs. An `&&` where true and an
+    `||` where false send their first operand the other way, to a label of
+    their own past their second operand. A `!` swaps the sense. A statement's
+    `CONDITION` starts with the control's label and the control's sense, which
+    the root's context carries: a do statement's control branches back where
+    its condition holds, the others' away where it doesn't.
+  - **An operand that is no such operator is a value,** converted to the
+    operator's conversion's type, with a segment after its row as a logical
+    operator's condition has: its test and the branch
+    (`node_machine_branch_hook`). A type a truth's entries don't test (a
+    `__float128`'s) refuses the expression, as under a value's `&&`.
+  - **X writes no entry for the operator itself.** One with a label of its own
+    places it at its row, which is past its second operand's branch. It is a
+    labeled record of one label, so the numbering counts labels, two a value's
+    and one such an operator's, where it counted labeled records.
+  - **The control's label is outside the expression.** On the tape it is one
+    value (`BUSTER_NODE_MACHINE_CONTROL_LABEL`), which step 2's splice gives the
+    control's. The comparison takes the stream's branch for it where its target
+    is the entry of the root's control's target: the inventory's log keeps each
+    body's first label (`CheckLowerOwnerPop.labels`), and a control's label is
+    its index from there.
+  - **At reader time** the sense is the parser's: a do statement's condition is
+    a child of its statement's terminator, and any other is its statement's
+    own token. The one sweep (`--fused`) writes the same segments from the
+    tape's end.
+
+  With it the machine takes what it took before #2889. Machine-taken
+  evaluated nodes, of the census-taken (main `178c9e2` and the same with
+  #2890; before #2889 they were 98.85%, 94.32% and 91.13%):
+
+  | | `sqlite3.c` | Lua | musl |
+  | --- | ---: | ---: | ---: |
+  | main: expressions; evaluated nodes | 48,877; 89.76% | 10,128; 86.29% | 20,626; 82.73% |
+  | with #2890 | 51,047; 98.84% | 10,433; 94.29% | 21,561; 91.07% |
+
+  On the 9700X (Release, CPU 2, under the lock; main `178c9e2` with the front
+  by passes, and the same with #2890;
+  [the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-condition-branches-2890-2026-11-17)),
+  a machine-taken evaluated node of the three sweeps after the pipeline, and a
+  record of T, C and X at reader time (medians of three readings):
+
+  | | `sqlite3.c` | Lua | musl |
+  | --- | ---: | ---: | ---: |
+  | cycles a node: main; with #2890 | 176.0; 183.8 | 154.2; 155.2 | 140.1; 141.6 |
+  | instructions a node: main; with #2890 | 603.6; 606.4 | 688.1; 691.2 | 655.8; 661.6 |
+  | at reader time, TSC ticks a record: main; with #2890 | 156.8; 168.6 | 180.8; 189.0 | 275.6; 290.5 |
+
+  The nodes it takes back cost more than the others. `sqlite3.c`'s 23,251 take
+  6.07 M cycles, 261 each, and write 1.89 entries each where the others write
+  1.24: a test and a branch an operand. No compile runs the machine, and
+  `-c sqlite3.c` takes the time it took (+0.14% and -0.00% in two sets of 21
+  runs a build; the base against itself -0.04% and +0.09%).
 
 On the 9700X, against main `0af27a30` (`--verify`, CPU 2, under the lock;
 [the record](https://github.com/buster14a/buster-performance/tree/18dc758cb1e170014646de5a6ed39dc5b966c65e/docs/measurements/node-machine-logical-2524-2026-11-12)):

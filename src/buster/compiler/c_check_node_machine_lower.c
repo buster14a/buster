@@ -234,7 +234,8 @@ static __attribute__((noinline)) uint32_t node_machine_back_update_last(NodeMach
 }
 
 // What follows record `r`'s row (node_machine_after_row's, `state` its state past BUSTER_NODE_MACHINE_EVALUATED), from
-// the last entry: its consumer's segment (node_machine_hook's) or an update's first row (node_machine_split's). A label's
+// the last entry: its consumer's segment (node_machine_hook's), a tested value's test and branch
+// (node_machine_branch_hook's) or an update's first row (node_machine_split's). A label's
 // entry is kept as the entries written when the sweep reached it (`ends`, by the label's number in the sweep's order),
 // which is its place from the tape's end. Into `takes` whether an update's first row is a row the machine takes.
 static __attribute__((noinline)) uint32_t node_machine_back_after_row(NodeMachine* machine, NodeMachineBack out, uint32_t n, uint32_t r, uint8_t state, uint32_t* ends, bool* takes)
@@ -257,7 +258,15 @@ static __attribute__((noinline)) uint32_t node_machine_back_after_row(NodeMachin
             n = node_machine_back(out, n, class == BUSTER_TYPED_CLASS_VOID ? BUSTER_TYPED_JUMP : BUSTER_TYPED_JUMP_VALUE, class, alternate + 1);
         }
     }
-    else
+    else if ((state & BUSTER_NODE_MACHINE_AFTER_BRANCH) != 0)
+    {
+        // node_machine_branch_hook's: the branch, to its hook's label as the sweep knows it until the labels are numbered
+        // (node_machine_lower_number), then the test.
+        n = node_machine_back(out, n, (state & BUSTER_NODE_MACHINE_BRANCH_TRUE) != 0 ? BUSTER_TYPED_BRANCH_TRUE : BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32,
+                              node_machine_branch_label(machine, node_machine_record_hook(machine, r)));
+        n = node_machine_back_truth(out, n, node_machine_class(machine, node_machine_record_target(machine, r)), false);
+    }
+    else if ((state & BUSTER_NODE_MACHINE_SPLIT) != 0)
     {
         const uint32_t before = n;
         n = node_machine_back_update_first(machine, out, n, node_machine_record_update(machine, r), takes);
@@ -400,6 +409,14 @@ static inline __attribute__((always_inline)) uint32_t node_machine_back_own(Node
         {
             n = node_machine_back_update_last(machine, out, n, node_machine_record_update(machine, r));
         } break;
+        case NODE_MACHINE_TEMPLATE_BRANCHES:
+        {
+            // node_machine_own's: an `&&` where true's or an `||` where false's own label, past its second operand.
+            if (node_machine_record_past(machine, r))
+            {
+                ends[node_machine_record_label_base(machine, r)] = n;
+            }
+        } break;
         case NODE_MACHINE_TEMPLATE_CALL:
         {
             // Its row waits for the calls before its subtree, which the sweep meets after it.
@@ -420,13 +437,14 @@ static inline __attribute__((always_inline)) uint32_t node_machine_back_own(Node
 // by the order it writes in. Only an expression with one of them runs it.
 static __attribute__((noinline)) void node_machine_lower_number(NodeMachine* machine, NodeMachineBack out, uint32_t n, uint32_t* ends)
 {
-    const uint32_t labeled = machine->label_count / 2;
+    const uint32_t labeled = machine->labeled_count;
     const uint32_t calls = machine->call_count;
     const uint32_t temporaries = machine->temporary_count;
     if (labeled != 0)
     {
         // The rows hold each label by its record's place among the labeled records as the sweep met them (2k and 2k + 1
-        // for the kth): C's ranks give its number, and its entry is its place from the tape's start.
+        // for the kth, a branched operator's one label 2k): C's numbering gives its number, and its entry is its place
+        // from the tape's start. A branch to the control's own label keeps it.
         uint32_t* met = machine->label_met;
         for (uint32_t k = 0; k < labeled; k += 1)
         {
@@ -437,14 +455,18 @@ static __attribute__((noinline)) void node_machine_lower_number(NodeMachine* mac
         {
             const uint32_t base = node_machine_record_label_base(machine, met[k]);
             machine->label_entries[base] = n - ends[2 * k];
-            machine->label_entries[base + 1] = n - ends[2 * k + 1];
+            if (node_machine_record_labels(machine, met[k]) == 2)
+            {
+                machine->label_entries[base + 1] = n - ends[2 * k + 1];
+            }
         }
         for (uint32_t i = 1; i <= n; i += 1)
         {
             const uint8_t kind = out.kinds[-(int64_t)i];
-            if (kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE || kind == BUSTER_TYPED_JUMP || kind == BUSTER_TYPED_JUMP_VALUE)
+            const uint64_t label = out.tape[-(int64_t)i];
+            if ((kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE || kind == BUSTER_TYPED_JUMP || kind == BUSTER_TYPED_JUMP_VALUE) &&
+                label != BUSTER_NODE_MACHINE_CONTROL_LABEL)
             {
-                const uint64_t label = out.tape[-(int64_t)i];
                 out.tape[-(int64_t)i] = node_machine_record_label_base(machine, met[label / 2]) + (label & 1);
             }
         }
@@ -511,14 +533,12 @@ static NodeMachineRefusal node_machine_lower(NodeMachine* machine, uint8_t conte
     uint32_t* ends = machine->label_ends;
     node_machine_records_set_unevaluated(machine, count);
     machine->label_count = 0;
+    machine->labeled_count = 0;
     machine->update_count = 0;
     machine->call_count = 0;
     machine->temporary_count = 0;
     const uint32_t root = count - 1;
-    node_machine_record_set_evaluated(machine, root);
-    node_machine_record_set_context(machine, root, context);
-    node_machine_record_set_target(machine, root, target);
-    node_machine_record_set_call_depth(machine, root, 0);
+    node_machine_root(machine, root, context, target);
     uint32_t r = count;
     uint32_t stopped = root;
     uint32_t n = 0;
@@ -538,8 +558,9 @@ static NodeMachineRefusal node_machine_lower(NodeMachine* machine, uint8_t conte
             NodeMachineUse use = {
                 .count = 0,
             };
-            const uint32_t labels = machine->label_count;
-            const CheckLowerTemplate kind = node_machine_record_op(machine, r) == CHECK_OP_CALL ? node_machine_classify_call(machine, r) :
+            const uint32_t labeled = machine->labeled_count;
+            const CheckLowerTemplate kind = __builtin_expect((state & BUSTER_NODE_MACHINE_BRANCHED) != 0, 0) ? node_machine_classify_branches(machine, r) :
+                                            node_machine_record_op(machine, r) == CHECK_OP_CALL ? node_machine_classify_call(machine, r) :
                                                                                                    node_machine_classify(machine, r, r == root ? object : 0, &use);
             refusal = kind == CHECK_LOWER_TEMPLATE_NONE ? NODE_MACHINE_REFUSED_TEMPLATE : NODE_MACHINE_TAKEN;
             stopped = r;
@@ -552,10 +573,10 @@ static NodeMachineRefusal node_machine_lower(NodeMachine* machine, uint8_t conte
                     node_machine_evaluate_at(machine, use.children[1], use.addresses[1], use.targets[1], depth);
                 }
             }
-            if (__builtin_expect(machine->label_count != labels, 0))
+            if (__builtin_expect(machine->labeled_count != labeled, 0))
             {
                 // A labeled record: its labels by its place among those the sweep has met, until they are numbered.
-                node_machine_record_set_label_base(machine, r, labels);
+                node_machine_record_set_label_base(machine, r, 2 * labeled);
             }
             // Its row, from the last entry: its conversion's entries, then its own. An integer constant's one CONST takes
             // its conversion where it folds, as the tasks' does (#2678).

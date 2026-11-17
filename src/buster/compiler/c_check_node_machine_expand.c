@@ -6,7 +6,8 @@
 // check_lower_template_own's, and the logical operators' and the conditional's) and then its conversion's to its target
 // in its context (node_machine_conversion, check_lower_template_conversion's; an integer constant's folded into its CONST
 // where it folds, node_machine_fold_conversion), then its consumer's segment after it
-// where it has one (node_machine_hook) or an update's first row (node_machine_split, node_machine_update_first), both
+// where it has one (node_machine_hook), a tested value's test and branch (node_machine_branch_hook, #2890) or an update's
+// first row (node_machine_split, node_machine_update_first), all
 // behind one test of its state (node_machine_after_row); an update's second row, its own, by node_machine_update_last;
 // a call's CALL by node_machine_call_own, its row numbered as the lowering numbers it. It reads the records T typed and
 // C classified through the record accessors alone; the tape (NodeMachine's kinds, classes and tape), its labels'
@@ -205,6 +206,15 @@ static void node_machine_own(NodeMachine* machine, uint32_t r, uint32_t object)
         case NODE_MACHINE_TEMPLATE_UPDATE:
         {
             node_machine_update_last(machine, node_machine_record_update(machine, r));
+        } break;
+        case NODE_MACHINE_TEMPLATE_BRANCHES:
+        {
+            // An operator evaluated as branches writes no entry: its operands' branches are after their rows. An `&&`
+            // where true and an `||` where false place their own label here, past their second operand's branch.
+            if (node_machine_record_past(machine, r))
+            {
+                machine->label_entries[node_machine_record_label_base(machine, r)] = machine->entry_count;
+            }
         } break;
         default:
         {
@@ -409,6 +419,16 @@ static void node_machine_hook(NodeMachine* machine, uint32_t r, uint8_t state)
     }
 }
 
+// A tested value's segment after record `r`'s row (BUSTER_NODE_MACHINE_AFTER_BRANCH; check_lower_branch_operand's): the
+// test of its value, which its row left converted to its target, and the branch to its hook's label where its truth is
+// its state's sense.
+static void node_machine_branch_hook(NodeMachine* machine, uint32_t r, uint8_t state)
+{
+    node_machine_put_truth(machine, node_machine_class(machine, node_machine_record_target(machine, r)), false);
+    node_machine_put(machine, (state & BUSTER_NODE_MACHINE_BRANCH_TRUE) != 0 ? BUSTER_TYPED_BRANCH_TRUE : BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32,
+                     node_machine_branch_label(machine, node_machine_record_hook(machine, r)));
+}
+
 // Call record `r`'s own entry, after its callee's and its arguments': a CALL of its result's class, whose value is its row
 // relative to the expression's. The lowering numbers a call's row when its task pops, before its operands' tasks (the
 // tasks' preorder), where X writes in postorder: its row is the evaluated calls before its subtree, every one written
@@ -431,8 +451,9 @@ static void node_machine_call_own(NodeMachine* machine, uint32_t r)
 }
 
 // What follows record `r`'s row, where its state `state` has more than BUSTER_NODE_MACHINE_EVALUATED: its consumer's
-// segment (node_machine_hook), or else an update's first row (node_machine_split), which is all an update's destination
-// read by name writes, since it isn't evaluated.
+// segment (node_machine_hook), a tested value's test and branch (node_machine_branch_hook), or an update's first row
+// (node_machine_split), which is all an update's destination read by name writes, since it isn't evaluated. Nothing
+// follows an operator evaluated as branches.
 static NodeMachineRefusal node_machine_after_row(NodeMachine* machine, uint32_t r, uint8_t state)
 {
     NodeMachineRefusal refusal = NODE_MACHINE_TAKEN;
@@ -440,7 +461,11 @@ static NodeMachineRefusal node_machine_after_row(NodeMachine* machine, uint32_t 
     {
         node_machine_hook(machine, r, state);
     }
-    else
+    else if ((state & BUSTER_NODE_MACHINE_AFTER_BRANCH) != 0)
+    {
+        node_machine_branch_hook(machine, r, state);
+    }
+    else if ((state & BUSTER_NODE_MACHINE_SPLIT) != 0)
     {
         refusal = node_machine_split(machine, r);
     }

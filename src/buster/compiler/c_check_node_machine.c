@@ -98,9 +98,25 @@
 // An update's destination, after whose entries (none, for a local's or a global's by name) the update's first row goes
 // (node_machine_record_update).
 #define BUSTER_NODE_MACHINE_SPLIT 0x08u
+// A value that an operator evaluated as branches tests (#2890): after its row, its test and a branch to its target, the
+// label of the record its hook names (NodeMachine.hooks) or, for BUSTER_NODE_MACHINE_NO_OWNER, the control's own,
+// taken where its truth is BUSTER_NODE_MACHINE_BRANCH_TRUE's (set: where it holds).
+#define BUSTER_NODE_MACHINE_AFTER_BRANCH 0x10u
+#define BUSTER_NODE_MACHINE_BRANCH_TRUE 0x20u
+// An operator evaluated as branches (NODE_MACHINE_TEMPLATE_BRANCHES): a `!`, `&&` or `||` under a condition, or a
+// statement's CONDITION over one. It makes no value; its target and its sense are kept as a tested value's are.
+#define BUSTER_NODE_MACHINE_BRANCHED 0x40u
+#define BUSTER_NODE_MACHINE_NO_OWNER UINT32_MAX
 // A temporary's entry on the tape (an update's of an address, after its postfix): its number among the expression's
 // temporaries, in the order X makes them, with this bit. The lowering's are locals it adds (check_lower_temporary).
 #define BUSTER_NODE_MACHINE_TEMPORARY (UINT64_C(1) << 63)
+// A branch's entry on the tape whose target is its control's (a statement's condition that is branches): a label
+// outside the expression, which the lowering's control numbered before the expression's own and step 2's splice gives.
+#define BUSTER_NODE_MACHINE_CONTROL_LABEL (UINT64_C(1) << 62)
+// The root's context past the lowering's own bits (BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS and _DISCARD), a statement's
+// CONDITION's alone: its control branches where the condition holds (a do statement's, CHECK_CONTROL_BRANCH_TRUE), not
+// where it doesn't. C reads it where the condition is branches, and keeps it out of the root's context.
+#define BUSTER_NODE_MACHINE_ROOT_BRANCH_TRUE 0x80u
 
 // A type's word's flags (NodeMachine.type_words): no aligned typedef's wrapper (type_strip_aligned is the type itself), and
 // type_is_valid.
@@ -134,6 +150,9 @@ typedef enum NodeMachineTemplate
     NODE_MACHINE_TEMPLATE_CALL,
     // An update (check_lower_update's): its second row (node_machine_update_last); its plan is node_machine_record_update.
     NODE_MACHINE_TEMPLATE_UPDATE,
+    // An operator evaluated as branches (check_lower_branch's, BUSTER_NODE_MACHINE_BRANCHED): no entry of its own; an
+    // `&&` where true and an `||` where false have one label, past their second operand, which their row places.
+    NODE_MACHINE_TEMPLATE_BRANCHES,
 } NodeMachineTemplate;
 
 // A call's and an update's templates (node_machine_record_template), the machine's own, past #1048's CheckLowerTemplate
@@ -374,9 +393,12 @@ struct NodeMachine
     // record, whose segment follows its row; where its template is NODE_MACHINE_TEMPLATE_BRANCH, its label base is the
     // first of its two labels, counted from the expression's first in the order the tasks number them
     // (node_machine_number_labels), of the expression's `label_count`. `stack` is the numbering's: the labeled records C
-    // met, then their subtrees' first records.
+    // met, `labeled_count` of them, then their subtrees' first records. A logical operator's or a conditional's value
+    // has two labels; an operator evaluated as branches that has one of its own (node_machine_record_past) has that one,
+    // and it is its label base.
     uint32_t* stack;
     uint32_t label_count;
+    uint32_t labeled_count;
     // For an update and its destination (BUSTER_NODE_MACHINE_SPLIT), its plan among the expression's `update_count`
     // `updates` (node_machine_record_update).
     uint32_t* consumers;
@@ -829,6 +851,30 @@ static inline uint32_t node_machine_record_label_base(const NodeMachine* machine
     return machine->columns->label_bases[r];
 }
 
+// Whether an operator evaluated as branches (BUSTER_NODE_MACHINE_BRANCHED) has a label of its own, past its second
+// operand: an `&&` branched where true and an `||` where false (check_lower_branch's `past`), whose first operand
+// decides the other way.
+static inline bool node_machine_record_past(const NodeMachine* machine, uint32_t r)
+{
+    const CheckOp op = node_machine_record_op(machine, r);
+    const bool sense = (machine->columns->states[r] & BUSTER_NODE_MACHINE_BRANCH_TRUE) != 0;
+    return (op == CHECK_OP_LOGICAL_AND && sense) || (op == CHECK_OP_LOGICAL_OR && !sense);
+}
+
+// A labeled record's labels: one for an operator evaluated as branches, two for a value's.
+static inline uint32_t node_machine_record_labels(const NodeMachine* machine, uint32_t r)
+{
+    return (machine->columns->states[r] & BUSTER_NODE_MACHINE_BRANCHED) != 0 ? 1 : 2;
+}
+
+// The tape's value of a branch to the label of record `owner` (a tested value's or a branched operator's hook): the
+// control's own for BUSTER_NODE_MACHINE_NO_OWNER, else the record's first label, a value's alternate or a branched
+// operator's own.
+static inline uint64_t node_machine_branch_label(const NodeMachine* machine, uint32_t owner)
+{
+    return owner == BUSTER_NODE_MACHINE_NO_OWNER ? BUSTER_NODE_MACHINE_CONTROL_LABEL : node_machine_record_label_base(machine, owner);
+}
+
 // An update's plan, at the update's record and at its destination's (BUSTER_NODE_MACHINE_SPLIT).
 static inline const NodeMachineUpdate* node_machine_record_update(const NodeMachine* machine, uint32_t r)
 {
@@ -871,6 +917,16 @@ static inline void node_machine_record_set_hook(NodeMachine* machine, uint32_t r
 static inline void node_machine_record_set_label_base(NodeMachine* machine, uint32_t r, uint32_t base)
 {
     machine->columns->label_bases[r] = base;
+}
+
+// An evaluated record `r` as a condition: a branch to `owner`'s label (BUSTER_NODE_MACHINE_NO_OWNER: the control's) where
+// its truth is `sense`. With `branched` it is an operator evaluated as branches, and otherwise a value its consumer
+// tests after its row.
+static inline void node_machine_record_set_branch(NodeMachine* machine, uint32_t r, uint32_t owner, bool sense, bool branched)
+{
+    machine->columns->states[r] = (uint8_t)(BUSTER_NODE_MACHINE_EVALUATED | (branched ? BUSTER_NODE_MACHINE_BRANCHED : BUSTER_NODE_MACHINE_AFTER_BRANCH) |
+                                            (sense ? BUSTER_NODE_MACHINE_BRANCH_TRUE : 0u));
+    machine->columns->hooks[r] = owner;
 }
 
 static inline void node_machine_record_set_call_depth(NodeMachine* machine, uint32_t r, uint32_t depth)

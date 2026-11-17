@@ -265,8 +265,10 @@ c`, `(a && b) || c`), `check_lower_logical` pushes the `CHECK_LOWER_BRANCH` task
 for it, as for a conditional's condition, to the value's own constant label:
 where false for an `&&`, where true for an `||` (#2891). No value of the first
 operand is made, joined and tested again; the value's outermost join is the one
-left. The node machine leaves such a condition, a conditional whose condition is
-branches, and an `&&` or `||` whose first operand is, to the tasks.
+left. The node machine writes the same branches (#2890): its C sweep gives such
+an operator a target and a sense where a value has a context, and X writes each
+operand's test and branch after its row ([the design](../node-machine.md), "The
+logical operators and the conditional").
 
 `tests/checker/branch-conditions` holds the regressions, which run natively
 against clang (`c_check_branch_condition_test.c`): conditions written as
@@ -844,7 +846,14 @@ construct a line, each taken or refused by a named reason), with `--verify`
 and with `--scalar`, each time with `--fused` and `--interleave 3`: the one
 sweep must give C's and X's refusal, tape, labels and calls for every
 expression of the fixture, nested calls, labels under and around calls and
-several postfix updates through addresses in one expression among them. The
+several postfix updates through addresses in one expression among them. Its
+conditions that are branches (#2890) are there by shape: an `&&` and an `||`
+where true and where false, under an if, a while and a do statement, under a
+`!` and two, three deep, as a conditional's condition and as a value's first
+operand, with a call, an update and a conditional as operands; and what stays
+a value. Reader time sweeps what the census leaves too, so its refusals there
+are counted: four operands a truth's entries don't test (a cast to
+`__float128`) must be C's refusals, not X's. The
 front runs over the fixture too (after the walk in the `--verify` run, before
 it in the `--scalar` one, lean in the `-funsigned-char` one): every record the
 walk's node, no value left waiting, and each taken line's expressions the

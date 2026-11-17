@@ -1084,8 +1084,9 @@ static uint32_t node_reads_contexts_differ(const NodeMachine* machine, const Nod
     {
         const uint8_t state = kept->states[r];
         const bool evaluated = (state & BUSTER_NODE_MACHINE_EVALUATED) != 0;
-        const bool hooked = (state & (BUSTER_NODE_MACHINE_AFTER_CONDITION | BUSTER_NODE_MACHINE_AFTER_ARM)) != 0;
-        const bool labeled = evaluated && kept->templates[r] == (uint8_t)NODE_MACHINE_TEMPLATE_BRANCH;
+        const bool hooked = (state & (BUSTER_NODE_MACHINE_AFTER_CONDITION | BUSTER_NODE_MACHINE_AFTER_ARM | BUSTER_NODE_MACHINE_AFTER_BRANCH | BUSTER_NODE_MACHINE_BRANCHED)) != 0;
+        const bool labeled = evaluated && (kept->templates[r] == (uint8_t)NODE_MACHINE_TEMPLATE_BRANCH ||
+                                           (kept->templates[r] == (uint8_t)NODE_MACHINE_TEMPLATE_BRANCHES && node_machine_record_past(machine, r)));
         const bool planned = evaluated && ((state & BUSTER_NODE_MACHINE_SPLIT) != 0 || kept->templates[r] == (uint8_t)NODE_MACHINE_TEMPLATE_UPDATE);
         decided = columns->states[r] != state ||
                   (evaluated && (columns->contexts[r] != kept->contexts[r] || columns->templates[r] != kept->templates[r] || columns->call_depths[r] != kept->call_depths[r] ||

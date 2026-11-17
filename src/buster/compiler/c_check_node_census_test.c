@@ -257,7 +257,21 @@ static const char node_census_test_atomic[] =
 // const char and to void, and null), through a pointer, a member and a call's result; and refused, a long double's
 // parameter (the templates'), and callees that return twice: a pointer whose first parameter is a jmp_buf's, and a
 // function of such a name. Calls under and around `&&`, `||` and `?:` too, whose labels are numbered from their
-// subtrees' least records, a call's arguments included, and whose calls' rows in the tasks' preorder. The argument
+// subtrees' least records, a call's arguments included, and whose calls' rows in the tasks' preorder. Conditions
+// that are branches (#2890, check_lower_branch's): an `&&` and an `||` under an if, a while and a do statement, whose
+// control branches where its condition holds; each where true and where false, by a `!` and two of them over it and by
+// its place under the other operator, three deep; with a call, an update, an assignment of an `&&`'s value and a
+// conditional as operands, a char, a double, a float and a pointer tested; a conditional's condition and an `&&`'s and
+// an `||`'s first operand (#2891), to the operator's own label; and what stays a value: a `!` alone, and an `&&` whose
+// first operand's truth is known. Three in a row for the labels' places: a branched `&&` with a label of its own over
+// an `||` with one, then the same records with the `&&`'s label gone, then with the inner operator's gone (a place
+// written for an operator that has no label would land on the other's, whose number the record's column still holds
+// from the line before, X's after the other's and the one sweep's after it too). Two `||` with a label each under an
+// `&&`, whose places the one sweep numbers in the order it meets them, the right one first. An `&&` and a `!` as an
+// initializer's value, the root at reader time, which is no statement's condition. And, for reader time alone (the
+// census leaves them, so no line names the machine's answer; node_shadow_test_fixture counts them), operands a truth's
+// entries don't test, a cast to __float128: under a statement's condition as either operand, under a conditional's,
+// and as a value's first operand's. The argument
 // memo's keys come again
 // (node_machine_argument_memo): a string and a null pointer constant for the same parameters, integer constants where a
 // value of their type filled the entry, variadic constants, and a function designator. T's direct rules for what the
@@ -346,16 +360,75 @@ static const char node_shadow_test_text[] =
     "        q = 0; // machine: taken\n"
     "    x = a && b; // machine: taken\n"
     "    x = a || (b && c); // machine: taken\n"
-    "    x = (a && b) || (c && u); // machine: template\n"
-    "    x = !(a || b) && c; // machine: template\n"
+    "    x = (a && b) || (c && u); // machine: taken\n"
+    "    x = !(a || b) && c; // machine: taken\n"
     "    x = !(a && d); // machine: taken\n"
     "    x = a ? b : 1; // machine: taken\n"
     "    d = a ? d : e; // machine: taken\n"
     "    y = q ? *q : (a < b ? a : b); // machine: taken\n"
     "    (void)(a ? (void)0 : (void)b); // machine: taken\n"
-    "    if (a && (b || c)) // machine: template\n"
+    "    if (a && (b || c)) // machine: taken\n"
     "        x = 2; // machine: taken\n"
-    "    x = (a && b) ? c : u; // machine: template\n"
+    "    x = (a && b) ? c : u; // machine: taken\n"
+    "    if (a && b) // machine: taken\n"
+    "        x = 3; // machine: taken\n"
+    "    if (a || b) // machine: taken\n"
+    "        x = 4; // machine: taken\n"
+    "    if (!(a && b)) // machine: taken\n"
+    "        x = 5; // machine: taken\n"
+    "    if (!(a || b)) // machine: taken\n"
+    "        x = 6; // machine: taken\n"
+    "    if (!!(a && b)) // machine: taken\n"
+    "        x = 7; // machine: taken\n"
+    "    if ((a && b) || (c && (u || d))) // machine: taken\n"
+    "        x = 8; // machine: taken\n"
+    "    if (!(a && (q || !(e && p->n)))) // machine: taken\n"
+    "        x = 9; // machine: taken\n"
+    "    if (f(a) && (x++ || f(b))) // machine: taken\n"
+    "        x = 10; // machine: taken\n"
+    "    if ((x = a && b) || (a ? b : c)) // machine: taken\n"
+    "        x = 11; // machine: taken\n"
+    "    while (a < b && u > 3u) // machine: taken\n"
+    "        a++; // machine: taken\n"
+    "    do\n"
+    "        x++; // machine: taken\n"
+    "    while (a && b); // machine: taken\n"
+    "    do\n"
+    "        x--; // machine: taken\n"
+    "    while (a || b); // machine: taken\n"
+    "    do\n"
+    "        x++; // machine: taken\n"
+    "    while (!(a || b) && c); // machine: taken\n"
+    "    for (; a || b; a = 0)\n"
+    "        b = 0;\n"
+    "    x = (a || b) ? c : u; // machine: taken\n"
+    "    x = !(a && b) ? c : u; // machine: taken\n"
+    "    x = ((a && b) || c) && u; // machine: taken\n"
+    "    x = (a || b) && (c || u); // machine: taken\n"
+    "    x = f((a && b) || c) + (!(a || b) || d); // machine: taken\n"
+    "    if (!a) // machine: taken\n"
+    "        x = 12; // machine: taken\n"
+    "    if (1 && a) // machine: taken\n"
+    "        x = 13; // machine: taken\n"
+    "    if (a || 1) // machine: taken\n"
+    "        x = 14; // machine: taken\n"
+    "    if (!((a || b) && c)) // machine: taken\n"
+    "        x = 15; // machine: taken\n"
+    "    if ((a || b) && c) // machine: taken\n"
+    "        x = 16; // machine: taken\n"
+    "    if (!((a && b) && c)) // machine: taken\n"
+    "        x = 17; // machine: taken\n"
+    "    if ((a || b) && (c || d)) // machine: taken\n"
+    "        x = 18; // machine: taken\n"
+    "    int lw = (a && b) || c; // machine: taken\n"
+    "    int ln = !(a && b); // machine: taken\n"
+    "    x = lw + ln; // machine: taken\n"
+    "    if ((__float128)a && b)\n"
+    "        x = 19;\n"
+    "    if (a && (__float128)b)\n"
+    "        x = 20;\n"
+    "    x = ((__float128)a || b) ? c : u;\n"
+    "    x = ((__float128)a && b) || c;\n"
     "    x = 1 && a; // machine: taken\n"
     "    x = 0 || a; // machine: taken\n"
     "    x = 1 ? a : b; // machine: taken\n"
@@ -466,6 +539,10 @@ static const char node_shadow_test_text[] =
     "    {\n"
     "        w.c = y + n; // machine: taken\n"
     "    }\n"
+    "    while (y > 0 && n > 0) // machine: taken\n"
+    "    {\n"
+    "        y -= 1; // machine: taken\n"
+    "    }\n"
     "    return w;\n"
     "}\n"
     "struct W either(long x)\n"
@@ -478,6 +555,10 @@ static const char node_shadow_test_text[] =
     "    {\n"
     "        return first;\n"
     "    }\n"
+    "    do\n"
+    "    {\n"
+    "        x -= 1; // machine: taken\n"
+    "    } while (x > 9 || x < -9); // machine: taken\n"
     "    return second;\n"
     "}\n";
 
@@ -533,10 +614,15 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, uint8_t
     // C and X at reader time, where the front asks for them: they ran on every expression T took there and kept every
     // tape; each one compared has the lowering's pop's target and object and the shadow's refusal, tape, labels and
     // calls; and the fixture's globals' entries and direct calls' rows were patched with the program's symbols.
+    // Reader time sweeps what the census leaves too, so its refusals are counted: the fixture's lines C refuses by a
+    // template (nine: the five `// machine: template` lines' and the four operands a truth's entries don't test, which C
+    // refuses at their operator, where X would refuse their conversion's row), and none by a row.
     const bool swept = (front & BUSTER_NODE_FRONT_SWEEPS) == 0 || !fronts ? shadow.swept_expressions == 0 && shadow.swept_compared == 0 :
                                                                             shadow.swept_differences == 0 && shadow.swept_compared != 0 && shadow.swept_unkept == 0 &&
                                                                                 shadow.swept_expressions == shadow.typed_refused[NODE_MACHINE_TAKEN] &&
-                                                                                shadow.swept_references >= 20 && shadow.swept_call_targets >= 24;
+                                                                                shadow.swept_references >= 20 && shadow.swept_call_targets >= 24 &&
+                                                                                shadow.swept_refused[NODE_MACHINE_REFUSED_TEMPLATE] == 9 &&
+                                                                                shadow.swept_refused[NODE_MACHINE_REFUSED_ROW] == 0;
     // The flat front, where the front asks for it: every record the lean front made is the flat front's, field for
     // field, neither made a record the other didn't, and the tokens the fixture's fronts leave within an operator's
     // values kept their places, empty.
@@ -554,10 +640,10 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, uint8_t
     {
         fprintf(stderr, "test-checker: node-shadow%s: C and X at reader time ran on %" PRIu64 " expressions (T took %" PRIu64 "), %" PRIu64 " compared, %" PRIu64
                 " differ (root %" PRIu64 ", refusal %" PRIu64 ", tape %" PRIu64 ", labels and calls %" PRIu64 "), %" PRIu64 " tapes not kept, %" PRIu64
-                " globals' entries and %" PRIu64 " direct calls patched\n",
+                " globals' entries and %" PRIu64 " direct calls patched; refused there by a template %" PRIu64 " (expected 9), by a row %" PRIu64 " (expected 0)\n",
                 scalar ? " --scalar" : "", shadow.swept_expressions, shadow.typed_refused[NODE_MACHINE_TAKEN], shadow.swept_compared, shadow.swept_differences,
                 shadow.swept_root_differences, shadow.swept_refusal_differences, shadow.swept_tape_differences, shadow.swept_side_differences, shadow.swept_unkept,
-                shadow.swept_references, shadow.swept_call_targets);
+                shadow.swept_references, shadow.swept_call_targets, shadow.swept_refused[NODE_MACHINE_REFUSED_TEMPLATE], shadow.swept_refused[NODE_MACHINE_REFUSED_ROW]);
     }
     if (!valid || !same)
     {

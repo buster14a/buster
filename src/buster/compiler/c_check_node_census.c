@@ -3608,13 +3608,20 @@ static bool node_shadow_same_label(const NodeCensusScratch* s, const NodeMachine
 // their conversions own, from the root's pop on; whether each of its labels is the lowering's of the same number,
 // counted from the expression's first, at the same entry; and its calls. A call's row is relative on the tape: the
 // stream's rows are the tape's plus one base, the row its first call has, and their contents the machine's
-// (node_shadow_same_calls).
+// (node_shadow_same_calls). A branch to the control's own label (BUSTER_NODE_MACHINE_CONTROL_LABEL, a statement's
+// condition that is branches, #2890) is the stream's where its target is the entry of the root's control's target, a
+// label of the body's by the control's index (CheckLowerOwnerPop.labels).
 static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* machine, const CheckLowerOwnerPop* pop, uint32_t* compared)
 {
     const Tier0Function* function = s->function;
     const uint32_t first = machine->first;
     const uint32_t last = first + machine->count - 2;
     const uint32_t root = machine->root;
+    const uint32_t control_index = s->node_controls[root];
+    const CheckControl* control = control_index != BUSTER_CHECK_NONE ? s->program->controls + control_index : NULL;
+    const bool branching = control != NULL && (control->kind == CHECK_CONTROL_BRANCH_FALSE || control->kind == CHECK_CONTROL_BRANCH_TRUE);
+    const uint64_t control_label = branching ? (uint64_t)pop->labels + control->target : UINT64_MAX;
+    const uint64_t control_entry = control_label < s->label_count ? s->labels[control_label] : UINT64_MAX;
     uint32_t e = pop->entry;
     uint32_t t = 0;
     bool same = true;
@@ -3643,6 +3650,7 @@ static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* ma
                    (named                        ? node_shadow_same_local(s, machine->tape[t], s->named_local) :
                     machine->kinds[t] != kind    ? false :
                     node_shadow_local_kind(kind) ? node_shadow_same_local(s, machine->tape[t], function->values[e]) :
+                    branch && machine->tape[t] == BUSTER_NODE_MACHINE_CONTROL_LABEL ? function->values[e] == control_entry :
                     branch                       ? node_shadow_same_label(s, machine, pop, machine->tape[t], function->values[e]) :
                     kind == BUSTER_TYPED_CALL    ? call && machine->tape[t] + base == function->values[e] :
                                                    machine->tape[t] == function->values[e]);
@@ -3742,6 +3750,10 @@ static void node_shadow_fused(NodeShadow* shadow, NodeCensusScratch* s, NodeMach
         memcpy(s->fused_tape, machine->tape, (uint64_t)entries * sizeof(uint64_t));
         memcpy(s->fused_labels, machine->label_entries, (uint64_t)labels * sizeof(uint32_t));
         memcpy(s->fused_calls, machine->call_records, (uint64_t)calls * sizeof(uint32_t));
+        // The one sweep writes its labels' entries and its calls' records where the three sweeps wrote theirs: an entry
+        // it doesn't write must not read as theirs.
+        memset(machine->label_entries, 0xff, (uint64_t)labels * sizeof(uint32_t));
+        memset(machine->call_records, 0xff, (uint64_t)calls * sizeof(uint32_t));
     }
     const NodeMachineRefusal fused = node_machine_lower(machine, context, target, object);
     bool same = fused == refusal;
@@ -3995,10 +4007,15 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
         const uint32_t declaration = control != BUSTER_CHECK_NONE ? program->controls[control].token : BUSTER_CHECK_NONE;
         object = declaration < program->input->token_count ? program->input->objects[declaration] : 0;
     }
-    // The root's context, as its control's task gives it: an address, a discard, or neither.
+    // The root's context, as its control's task gives it: an address, a discard, or neither; and for a statement's
+    // condition its control's sense (a do statement's branches where the condition holds), which C reads where the
+    // condition is branches.
     const uint8_t flags = pop->flags & (uint8_t)~BUSTER_CHECK_LOWER_OWNER_TRACKED;
-    const uint8_t root_context = flags & (BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS | BUSTER_CHECK_LOWER_TEMPLATE_DISCARD);
-    NodeMachineRefusal refusal = walked != records ? NODE_MACHINE_REFUSED_SHAPE : (flags & ~root_context) != 0 ? NODE_MACHINE_REFUSED_ROOT : NODE_MACHINE_TAKEN;
+    const uint8_t task_context = flags & (BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS | BUSTER_CHECK_LOWER_TEMPLATE_DISCARD);
+    const uint32_t root_control = s->node_controls[root];
+    const bool branch_true = context == NODE_CENSUS_ROOT_CONDITION && root_control != BUSTER_CHECK_NONE && program->controls[root_control].kind == CHECK_CONTROL_BRANCH_TRUE;
+    const uint8_t root_context = (uint8_t)(task_context | (branch_true ? BUSTER_NODE_MACHINE_ROOT_BRANCH_TRUE : 0u));
+    NodeMachineRefusal refusal = walked != records ? NODE_MACHINE_REFUSED_SHAPE : (flags & ~task_context) != 0 ? NODE_MACHINE_REFUSED_ROOT : NODE_MACHINE_TAKEN;
     const uint64_t row_nodes = machine->row_nodes;
     const uint64_t action_nodes = machine->action_nodes;
     const uint64_t twins = machine->twin_differences;

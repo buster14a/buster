@@ -664,6 +664,9 @@ struct CheckLowerOwnerPop
     // The next label the body numbered then (CheckLowerWriter.label_count), as an index of CheckLowerOwners.labels: the
     // first of the labels the node and the tasks it pushed number, in the order they pop.
     uint32_t label;
+    // The body's first label, as an index of CheckLowerOwners.labels: a control's own label is its index in the body
+    // from there (#2524's shadow finds the target of a condition's branches by it, #2890).
+    uint32_t labels;
     uint8_t flags;
 };
 
@@ -16369,6 +16372,7 @@ static __attribute__((noinline)) uint32_t check_lower_task_owner(CheckLowerWrite
                 .pusher = pushed,
                 .entry = writer->count,
                 .label = (uint32_t)owners->label_count + writer->label_count,
+                .labels = (uint32_t)owners->label_count,
                 .flags = (uint8_t)((uint32_t)task.address | (uint32_t)task.initialized << 1 | (uint32_t)task.discard << 2 | (uint32_t)task.volatile_copy << 3 |
                                    (uint32_t)task.bit_int << 4 | (writer->track ? BUSTER_CHECK_LOWER_OWNER_TRACKED : 0u)),
             };
