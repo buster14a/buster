@@ -259,6 +259,9 @@ enum
     // Zero-size records and constant arrays (#2409), both ignored by default. Only the array warning is pedantic's.
     CHECK_WARNING_ID_CXX_ZERO_SIZE_RECORD = 164,
     CHECK_WARNING_ID_ZERO_LENGTH_ARRAY = 165,
+    // A character literal added to a character pointer (#2406, clang's diagnoseStringPlusChar): on by default,
+    // independently of -Wstring-plus-int, which can also diagnose the same addition.
+    CHECK_WARNING_ID_STRING_PLUS_CHAR = 166,
     CHECK_WARNING_ID_COUNT,
 };
 

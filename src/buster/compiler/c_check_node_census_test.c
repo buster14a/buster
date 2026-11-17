@@ -1680,6 +1680,19 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-census refuses atomic record accesses by type without refusing ordinary members or the whole unit");
     check_test_expect(test, ready && node_census_test_fixture(directory, "defaults.c", node_census_test_defaults, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
                       "node-census refuses what warns without an option, by its test, with the default warnings alone");
+    CheckTestFixtures character_storage = { .storage = arena_reserve(UINT64_C(1) << 20) };
+    char character_path[PATH_MAX];
+    snprintf(character_path, sizeof(character_path), "%s/checker/string-plus-char/census.c", check_test_fixture_root);
+    uint64_t character_length = 0;
+    const char* characters = check_test_fixture_read(&character_storage, character_path, &character_length);
+    const bool character_ready = ready && characters != NULL && character_length != 0;
+    char* character_options[] = { "-nostdinc", "-Wno-string-plus-int" };
+    check_test_expect(test, character_ready && node_census_test_fixture(directory, "characters.c", characters, character_options, BUSTER_ARRAY_LENGTH(character_options), &system),
+                      "node-census refuses character pointer additions while string-plus-int is disabled");
+    check_test_expect(test, character_ready && node_tests_test_fixture(directory, "characters.c", characters, character_options, BUSTER_ARRAY_LENGTH(character_options),
+                                                                     BUSTER_NODE_FRONT_AFTER, 5, 0),
+                      "node-tests: character pointer additions have the same refusals in both forms at reader time");
+    arena_release(&character_storage.storage);
     char headers[512];
     char header[640];
     snprintf(headers, sizeof(headers), "%s/system", directory);
