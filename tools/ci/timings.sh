@@ -26,6 +26,26 @@ while IFS=$'\t' read -r run event kind; do
         *) exit 1 ;;
     esac
     gh api --paginate "repos/$repository/actions/runs/$run/jobs?per_page=100&filter=latest" > "$output/jobs-$run.json"
+    # First feedback and total runner cost (#1427). Keep all attempts: retrying infrastructure still costs runners.
+    # Older API fixtures/runs with no creation/status data give no observation, never a zero-second result.
+    if [ "$event" = pull_request ] && jq -e --argjson run "$run" \
+        '.workflow_runs[] | select(.id == $run and .status == "completed" and .created_at != null)' "$output/runs.json" > /dev/null; then
+        gh api --paginate "repos/$repository/actions/runs/$run/jobs?per_page=100&filter=all" > "$output/all-jobs-$run.json"
+        jq -rs --argjson run "$run" --slurpfile runs "$output/runs.json" '
+            def epoch: if type == "string" then try fromdateiso8601 catch null else null end;
+            ($runs[0].workflow_runs[] | select(.id == $run) | .created_at | epoch) as $created |
+            [.[].jobs[]?] as $jobs |
+            if ($jobs | map(.id) | unique | length) != ($jobs | length) then error("duplicate job in feedback costs") else
+            ([$jobs[] | select(.name != "Integration qualification" and .name != "Coverage record") | .steps[]?
+                | select((.name == "Early hosted feedback (not qualification)" and .conclusion == "success") or .conclusion == "failure")
+                | (.completed_at | epoch) | select(. != null and $created != null and . >= $created)] | min) as $first |
+            ([$jobs[] | select((.runner_id // 0) > 0) | (.started_at | epoch) as $a | (.completed_at | epoch) as $b |
+                if $a != null and $b != null and $b >= $a then $b - $a else null end]) as $durations |
+            (if $first != null then [$run, "pr", "first-result", ($first - $created)] | @tsv else empty end),
+            (if ($durations | length) > 0 and ($durations | all(. != null)) then [$run, "pr", "runner-minutes", ($durations | add)] | @tsv else empty end)
+            end
+        ' "$output/all-jobs-$run.json" >> "$output/observations.tsv"
+    fi
     jq -r --arg group "$group" '
         def epoch: if type == "string" then try fromdateiso8601 catch null else null end;
         def elapsed($start; $end): ($start | epoch) as $a | ($end | epoch) as $b | if $a != null and $b != null and $b >= $a then $b - $a else null end;

@@ -16,7 +16,7 @@ set -euo pipefail
 [[ "$1" == api ]]
 case "${*: -1}" in
     *workflows/9700x.yml/runs\?per_page=100)
-        printf '%s\n' '{"workflow_runs":[{"id":1,"event":"pull_request"},{"id":2,"event":"push"},{"id":3,"event":"schedule"},{"id":4,"event":"unsupported"},{"id":5,"event":"workflow_dispatch","display_title":"Nightly backlog (admit) of 0123456789abcdef0123456789abcdef01234567 [20261104.9.1.admit]"},{"id":6,"event":"workflow_dispatch","display_title":"Tests and Zen 5 benchmarks"}]}' ;;
+        printf '%s\n' '{"workflow_runs":[{"id":1,"event":"pull_request"},{"id":2,"event":"push"},{"id":3,"event":"schedule"},{"id":4,"event":"unsupported"},{"id":5,"event":"workflow_dispatch","display_title":"Nightly backlog (admit) of 0123456789abcdef0123456789abcdef01234567 [20261104.9.1.admit]"},{"id":6,"event":"workflow_dispatch","display_title":"Tests and Zen 5 benchmarks"},{"id":17,"event":"pull_request","status":"completed","created_at":"2026-11-17T09:00:00Z"},{"id":18,"event":"pull_request","status":"completed","created_at":"2026-11-17T09:00:00Z"},{"id":19,"event":"pull_request","status":"completed","created_at":"2026-11-17T09:00:00Z"}]}' ;;
     *runs/1/jobs\?per_page=100\&filter=latest)
         cat <<'JSON'
 {"jobs":[{"id":11,"name":"Native tests and benchmarks on Benchpress (Ryzen 7 9700X)","status":"completed","conclusion":"success","created_at":"2026-11-03T01:00:00Z","started_at":"2026-11-03T01:00:10Z","completed_at":"2026-11-03T01:02:00Z","steps":[{"name":"Set up runner","conclusion":"success","started_at":"2026-11-03T01:00:10Z","completed_at":"2026-11-03T01:00:20Z"},{"name":"Verify benchmark host","conclusion":"success","started_at":"2026-11-03T01:00:20Z","completed_at":"2026-11-03T01:00:21Z"},{"name":"Run complete native vector correctness before benchmarks","conclusion":"success","started_at":"2026-11-03T01:00:30Z","completed_at":"2026-11-03T01:01:00Z"},{"name":"Benchmark first","conclusion":"success","started_at":"2026-11-03T01:01:00Z","completed_at":"2026-11-03T01:01:10Z"},{"name":"Measure second","conclusion":"success","started_at":"2026-11-03T01:01:10Z","completed_at":"2026-11-03T01:01:15Z"},{"name":"Benchmark skipped","conclusion":"skipped","started_at":"2026-11-03T01:01:15Z","completed_at":"2026-11-03T01:01:59Z"}]}]}
@@ -95,6 +95,17 @@ JSON
         printf '%s\n' '{"jobs":[{"id":101,"name":"Integration qualification","conclusion":"failure","runner_id":0,"created_at":"2026-11-13T09:10:00Z","started_at":"2026-11-13T09:10:00Z","completed_at":"2026-11-13T09:10:00Z"},{"id":102,"name":"Coverage record","conclusion":"failure","runner_id":0,"created_at":"2026-11-13T09:10:00Z","started_at":"2026-11-13T09:10:00Z","completed_at":"2026-11-13T09:10:00Z"}]}' ;;
     *runs/16/jobs\?per_page=100\&filter=latest)
         printf '%s\n' '{"jobs":[{"id":161,"name":"Tests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 2 of 4)","conclusion":"failure","runner_id":6,"labels":["ubuntu-26.04"],"created_at":"2026-11-13T09:00:00Z","started_at":"2026-11-13T09:00:05Z","completed_at":"2026-11-13T09:05:05Z"},{"id":162,"name":"Integration qualification","conclusion":"failure","runner_id":0,"created_at":"2026-11-13T09:06:00Z","started_at":"2026-11-13T09:06:00Z","completed_at":"2026-11-13T09:06:00Z"}]}' ;;
+    # First feedback includes queue/setup and prior-attempt failures. Costs include setup, redraws and retries.
+    *runs/17/jobs\?per_page=100\&filter=latest|*runs/18/jobs\?per_page=100\&filter=latest|*runs/19/jobs\?per_page=100\&filter=latest)
+        echo '{"jobs":[]}' ;;
+    *runs/17/jobs\?per_page=100\&filter=all)
+        [[ "$2" == --paginate ]]
+        echo '{"jobs":[{"id":171,"runner_id":1,"started_at":"2026-11-17T09:00:20Z","completed_at":"2026-11-17T09:01:20Z","steps":[{"name":"Build compiler","conclusion":"failure","completed_at":"2026-11-17T09:01:10Z"}]}]}'
+        echo '{"jobs":[{"id":172,"runner_id":2,"started_at":"2026-11-17T09:03:00Z","completed_at":"2026-11-17T09:05:00Z","steps":[{"name":"Early hosted feedback (not qualification)","conclusion":"success","completed_at":"2026-11-17T09:04:00Z"}]},{"id":173,"runner_id":3,"started_at":"2026-11-17T09:00:00Z","completed_at":"2026-11-17T09:00:30Z"},{"id":174,"runner_id":0,"conclusion":"cancelled"}]}' ;;
+    *runs/18/jobs\?per_page=100\&filter=all)
+        echo '{"jobs":[{"id":181,"runner_id":4,"started_at":"2026-11-17T09:03:00Z","completed_at":null,"steps":[{"name":"Early hosted feedback (not qualification)","conclusion":"cancelled","completed_at":"2026-11-17T09:04:00Z"}]},{"id":182,"name":"Integration qualification","runner_id":0,"steps":[{"name":"Require hosted and native correctness before successful qualification","conclusion":"failure","completed_at":"2026-11-17T09:04:10Z"}]}]}' ;;
+    *runs/19/jobs\?per_page=100\&filter=all)
+        echo '{"jobs":[{"id":191,"runner_id":5,"started_at":"2026-11-17T09:02:00Z","completed_at":"2026-11-17T09:03:00Z","steps":[{"name":"Early hosted feedback (not qualification)","conclusion":"success","completed_at":"2026-11-17T09:03:00Z"}]}]}' ;;
     *) echo "unexpected gh invocation: $*" >&2; exit 1 ;;
 esac
 SH
@@ -117,6 +128,10 @@ cat > "$work/expected.tsv" <<'TSV'
 51	targeted	execution	240
 61	full	queue	20
 61	full	execution	1200
+17	pr	first-result	70
+17	pr	runner-minutes	210
+19	pr	first-result	180
+19	pr	runner-minutes	60
 11	pr	lock-wait	10
 11	pr	lock-hold	100
 51	targeted	lock-wait	8
@@ -124,6 +139,9 @@ cat > "$work/expected.tsv" <<'TSV'
 61	full	lock-wait	1
 TSV
 cmp "$work/expected.tsv" "$work/report/observations.tsv"
+grep -Fq '| PR | first-result | 2 | 125.0 | 180 |' "$work/report/summary.md"
+grep -Fq '| PR | runner-minutes | 2 | 2.25 | 3.50 |' "$work/report/summary.md"
+grep -Fq '| PR | total runner-minutes | 2 | 4.50 |' "$work/report/summary.md"
 grep -Fq '| nightly targeted | lock-wait | 1 | 8.0 | 8 |' "$work/report/summary.md"
 grep -Fq '| PR | lock-hold | 1 | 100.0 | 100 |' "$work/report/summary.md"
 grep -Fq '| full (daily, dispatched, snapshot) | lock-wait | 1 | 1.0 | 1 |' "$work/report/summary.md"

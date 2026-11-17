@@ -35,6 +35,16 @@ on:
         type: string
         required: false
         default: ''
+      feedback-profile:
+        description: Author-requested reproduction only; ordinary callers retain full coverage
+        type: string
+        required: false
+        default: full
+      feedback-files:
+        description: Newline-separated changed paths for an advisory affected reproduction
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -49,6 +59,8 @@ env:
   # Nothing here reads the executable's debug information, which takes a fifth of the build's time; the inventory's own
   # build.sh calls (check-call-graph) configure and build in the checkout's tree.
   BUSTER_DEBUG_INFO: '0'
+  # The exact successful preparation attempt's offline handoff, for replay while its artifact is retained.
+  BUSTER_FEEDBACK_HOSTED_TOOLS: ${{ inputs.hosted-tools }}
   # The vector row's configurations (#2033): its sanitizers, `none` on a pull request and all four on the runs that run
   # the sanitizer rows, whose shards are one pool of items (tools/ci/vector-draw.sh). An item is a configuration's
   # initial and its shard: `m2` is memory's shard 2 of its 4. They are listed the costliest first, the order in which the
@@ -120,7 +132,26 @@ jobs:
         run: bash tests/ci/hosted-product.sh
 
       - name: Build the external Clang pragma oracle, the clang server and the compiler
-        run: bash tools/ci/hosted-product.sh build
+        run: bash tools/ci/feedback.sh build "$RUNNER_TEMP/feedback-build"
+
+      # Reuse this build; no compiler build or full shard is added. A failed prerequisite publishes its case immediately
+      # and prevents the product and its downstream shards from starting. This result never qualifies a merge.
+      - name: Early hosted feedback (not qualification)
+        if: inputs.sanitizer == 'none'
+        run: bash tools/ci/feedback.sh run "$RUNNER_TEMP/feedback-early" smoke --jobs "$(nproc)" --timeout 120 --fail-fast
+
+      - name: Prove the early corpus detects a regression in each promised area
+        if: inputs.sanitizer == 'none'
+        run: bash tests/ci/feedback.sh --compiler "$BUSTER_COMPILER"
+
+      - name: Preserve exact build and early-feedback reproductions
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: feedback-${{ inputs.host_arch }}-${{ inputs.sanitizer }}-build-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/feedback-*/
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: Check unity fixture ownership on the build's tree
         run: bash tools/ci/hosted-product.sh ownership
@@ -160,11 +191,11 @@ jobs:
 
   shards:
     name: Tests on Ubuntu 26.04 (Clang 23, ${{ inputs.host_arch }}, ${{ inputs.sanitizer }}, O${{ inputs.optimization }}, shard ${{ matrix.shard }} of ${{ inputs.shards }})
-    # A shared row's shards start when its product is published, and fail at once without one (a failed, cancelled or
-    # skipped build): no shard falls back to building or fetching it. A native row's shards don't wait: its `compiler`
+    # A shared row's shards start only after its product is published. A failed early check admits no downstream shard;
+    # no shard falls back to building or fetching it. A native row's shards don't wait: its `compiler`
     # job is skipped. The vector row's shards are its draws' items (draw-1 to draw-4 below), which run these same steps.
     needs: compiler
-    if: ${{ !cancelled() && inputs.host_arch != 'vector' }}
+    if: ${{ !cancelled() && inputs.host_arch != 'vector' && (inputs.host_arch != 'x86-64' || needs.compiler.result == 'success') }}
     runs-on: ubuntu-26.04
     # The sanitizer rows run their shard of the inventory on runners whose detectors make it several times slower; the
     # driver's in-process commands take tens of minutes each there. Unsharded, the plain rows took up to 80 minutes and the
@@ -529,7 +560,7 @@ jobs:
         # its probe qualified, for the configuration's items: the build runs the executable (the post-link step's
         # baked tables, #590).
         if: env.BUSTER_SHARD != '' && (inputs.host_arch == 'native' || env.BUSTER_VECTOR_BUILDER == '1')
-        run: bash tools/ci/hosted-product.sh build
+        run: bash tools/ci/feedback.sh build "$RUNNER_TEMP/feedback-build"
 
       # The vector configuration's item 1 packs its build as a portable row's build job does (tools/ci/hosted-product.sh):
       # the ownership check on the build's tree, its sanitizer reports so far, then the product with its identity, which
@@ -728,7 +759,11 @@ jobs:
           retention-days: 7
 
       - name: Run correctness tests within the hosted CPU budget
+        id: correctness
         if: env.BUSTER_SHARD != ''
+        env:
+          FEEDBACK_PROFILE: ${{ inputs.feedback-profile }}
+          FEEDBACK_FILES: ${{ inputs.feedback-files }}
         run: |
           timeout=600
           # The driver's in-process checks run the whole compiler per fixture; with a detector they take tens of
@@ -750,14 +785,36 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" = pull_request ] || [ "$GITHUB_EVENT_NAME" = merge_group ]; then
               fail_fast=(--fail-fast)
           fi
-          "$BUSTER_COMPILER" parallel --github --jobs "$(nproc)" --timeout "$timeout" "${fail_fast[@]}" \
-            --shard "$BUSTER_SHARD/$shards" \
-            --costs "tools/ci/costs/$BUSTER_HOST_ARCH-$BUSTER_SANITIZER-O$BUSTER_SANITIZER_OPTIMIZATION.costs" < tools/ci/correctness.tests
+          # Only the manual reproduction workflow supplies a partial profile. Every qualifying caller uses full.
+          # Defense in depth: partial feedback must never run under a PR or merge-group qualification context.
+          if [ "$GITHUB_EVENT_NAME" != workflow_dispatch ] && [ "$FEEDBACK_PROFILE" != full ]; then
+              echo '::error::Partial feedback cannot replace required correctness coverage'
+              exit 1
+          fi
+          printf '%s' "$FEEDBACK_FILES" > "$RUNNER_TEMP/feedback-files"
+          export BUSTER_FEEDBACK_FILES="$RUNNER_TEMP/feedback-files"
+          # A partial inventory is still shard 1/1 of its selected headings. The existing costs reader ignores
+          # unselected headings and retains the row's measured peak-memory admission, especially for sanitizers.
+          deal=(--shard 1/1 --costs "tools/ci/costs/$BUSTER_HOST_ARCH-$BUSTER_SANITIZER-O$BUSTER_SANITIZER_OPTIMIZATION.costs")
+          if [ "$FEEDBACK_PROFILE" = full ]; then
+              deal=(--shard "$BUSTER_SHARD/$shards" --costs "tools/ci/costs/$BUSTER_HOST_ARCH-$BUSTER_SANITIZER-O$BUSTER_SANITIZER_OPTIMIZATION.costs")
+          fi
+          bash tools/ci/feedback.sh run "$RUNNER_TEMP/feedback-suite" "$FEEDBACK_PROFILE" \
+            --jobs "$(nproc)" --timeout "$timeout" "${fail_fast[@]}" "${deal[@]}"
           oracle="${XDG_CACHE_HOME:-$HOME/.cache}/buster/oracle"
           if [ "$BUSTER_ORACLE_CACHE" = check ] && [ -d "$oracle" ]; then
               find "$oracle" -type f -mtime +2 -delete
               find "$oracle" -mindepth 1 -type d -empty -delete
           fi
+
+      - name: Preserve exact correctness reproduction and first failure
+        if: ${{ always() && env.BUSTER_SHARD != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: feedback-${{ inputs.host_arch }}-${{ env.BUSTER_SANITIZER }}-shard${{ env.BUSTER_SHARD }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/feedback-*/
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: Preserve failed source SSA comparison inputs
         if: ${{ failure() && env.BUSTER_SHARD != '' }}
@@ -799,7 +856,7 @@ jobs:
         # The parallel list's main.c -c heading leaves its three compiles to this step under TSan and MSan: they peak
         # at 10.2 GiB and 6.6 GiB, too much beside the suite but within the runner alone. docs/ci.md records the
         # measurements and the coverage boundary.
-        if: ${{ success() && (env.BUSTER_SANITIZER == 'thread' || env.BUSTER_SANITIZER == 'memory') && env.BUSTER_SHARD == '1' }}
+        if: ${{ success() && inputs.feedback-profile == 'full' && (env.BUSTER_SANITIZER == 'thread' || env.BUSTER_SANITIZER == 'memory') && env.BUSTER_SHARD == '1' }}
         run: |
           set -euo pipefail
           unset CPATH C_INCLUDE_PATH
@@ -882,7 +939,7 @@ jobs:
   sqlite-full:
     name: SQLite's full Tcl suite by both tiers against clang's (Clang 23, ${{ inputs.host_arch }}, ${{ inputs.sanitizer }})
     needs: compiler
-    if: ${{ !cancelled() && inputs.host_arch == 'x86-64' && inputs.sanitizer == 'none' && github.event_name != 'pull_request' && github.event_name != 'push' && github.event_name != 'merge_group' }}
+    if: ${{ !cancelled() && needs.compiler.result == 'success' && inputs.feedback-profile == 'full' && inputs.host_arch == 'x86-64' && inputs.sanitizer == 'none' && github.event_name != 'pull_request' && github.event_name != 'push' && github.event_name != 'merge_group' }}
     runs-on: ubuntu-26.04
     # About 9 minutes a build on a 4-CPU runner, three builds.
     timeout-minutes: 120

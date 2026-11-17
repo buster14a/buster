@@ -27,7 +27,7 @@
 // and the nightly snapshot's comprehensive run).
 static const char* const timing_groups[] = { "pr", "main", "targeted", "full" };
 static const char* const timing_group_labels[] = { "PR", "main push", "nightly targeted", "full (daily, dispatched, snapshot)" };
-static const char* const timing_metrics[] = { "queue", "execution", "runner-hook", "lock-wait", "lock-hold", "setup-build", "native-tests", "benchmark-steps", "host-occupation" };
+static const char* const timing_metrics[] = { "queue", "execution", "runner-hook", "lock-wait", "lock-hold", "setup-build", "native-tests", "benchmark-steps", "host-occupation", "first-result", "runner-minutes" };
 #define BUSTER_TIMINGS_GROUPS (sizeof(timing_groups) / sizeof(timing_groups[0]))
 #define BUSTER_TIMINGS_METRICS (sizeof(timing_metrics) / sizeof(timing_metrics[0]))
 
@@ -177,9 +177,9 @@ static int timing_report(FILE* input, FILE* output)
     }
     else
     {
-        fputs("## 9700X CI latency\n\n", output);
-        fputs("Successful hardware jobs only; seconds of wall time. Event classes are not benchmark-coverage certificates.\n\n", output);
-        fputs("| Event class | Metric | Samples | Median (s) | p95 (s) |\n| --- | --- | ---: | ---: | ---: |\n", output);
+        fputs("## CI latency and cost\n\n", output);
+        fputs("Hardware metrics use successful hardware jobs. PR first-result includes useful early passes and actionable failures; cost includes every allocated job and attempt, including failures and redraws. Values are seconds except runner-minutes. Event classes are not coverage certificates.\n\n", output);
+        fputs("| Event class | Metric | Samples | Median | p95 |\n| --- | --- | ---: | ---: | ---: |\n", output);
         for (size_t group = 0; group < BUSTER_TIMINGS_GROUPS; group += 1)
         {
             for (size_t metric = 0; metric < BUSTER_TIMINGS_METRICS; metric += 1)
@@ -189,7 +189,20 @@ static int timing_report(FILE* input, FILE* output)
                 uint32_t p95 = 0;
                 if (timing_quantiles(series, &median, &p95))
                 {
-                    fprintf(output, "| %s | %s | %zu | %.1f | %u |\n", timing_group_labels[group], timing_metrics[metric], series->count, median, p95);
+                    if (strcmp(timing_metrics[metric], "runner-minutes") == 0)
+                    {
+                        uint64_t total = 0;
+                        for (size_t i = 0; i < series->count; i += 1)
+                        {
+                            total += series->samples[i].seconds;
+                        }
+                        fprintf(output, "| %s | runner-minutes | %zu | %.2f | %.2f |\n", timing_group_labels[group], series->count, median / 60, (double)p95 / 60);
+                        fprintf(output, "| %s | total runner-minutes | %zu | %.2f | — |\n", timing_group_labels[group], series->count, (double)total / 60);
+                    }
+                    else
+                    {
+                        fprintf(output, "| %s | %s | %zu | %.1f | %u |\n", timing_group_labels[group], timing_metrics[metric], series->count, median, p95);
+                    }
                 }
             }
         }
@@ -198,6 +211,7 @@ static int timing_report(FILE* input, FILE* output)
             fputs("\nNo eligible observations were returned; this is not zero latency.\n", output);
         }
         fputs("\np95 uses the nearest-rank definition. Missing timestamps are omitted.\n", output);
+        fputs("`first-result` starts at run creation (queue/setup included) and ends at the first completed early-feedback pass or failed prerequisite/test step. Qualification/coverage aggregates are excluded: cancellation can fail them without an actionable product or infrastructure failure. Cancelled, skipped and incomplete steps never count as passes. Completed PR runs without a first result or complete job timestamps have no corresponding sample. `runner-minutes` sums actual allocated job durations across all attempts, not rounded billing minutes.\n", output);
         fputs("`runner-hook` is the job-started hook's step, from the API's whole-second step times. `lock-wait` and `lock-hold` come from the hooks' own log lines instead, rounded to whole seconds: the wait runs from the job-started hook's start to its `this job has the machine`, the hold from there to the job-completed hook's `gave the machine back`, the host's time under this job's lock. Those lines bracket the lock operations, so each includes the hook's own work around them, tens of milliseconds, below the rounding.\n", output);
         fputs("`setup-build` spans host verification through the start of native tests. `benchmark-steps` is the sum of successful benchmark/measurement step durations, not a performance result.\n", output);
         fputs("`host-occupation` spans the job's first step after the runner hook (the lock is held by then) through the job's end: the time the host was this job's.\n", output);
