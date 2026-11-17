@@ -4,8 +4,9 @@
 // #174's opt-in C-source qualification, included by ir_source_test.c after dominators_export.c, dominators_test.c
 // and ir.c.
 // Each actual IR CFG is analyzed twice with all optional outputs; the two results must be equal, and the first must
-// match the independent deleted-node/forward-path definition oracle. No generated graph replaces a source
-// function, no matrix-limit refusal counts as a pass, and the caller reports the file, function and representation.
+// match the independent deleted-node/forward-path definition oracle and the order and tree columns' contract. No
+// generated graph replaces a source function, no matrix-limit refusal counts as a pass, and the caller reports the
+// file, function and representation.
 // The optional text stream receives each validated CFG as a buster-dominators-v1 record (dominators_export.c), which
 // benchmark-dominators --cfg reads.
 // A corpus is usable only when its caller writes the completion record after EVERY file and function has passed.
@@ -67,6 +68,7 @@ static bool ir_source_dominator_check(const IrFunction* function, Arena* output,
             };
             // The definition oracle shares no algorithm with the analyzer. This work is never timed.
             dominator_test_definition(&tally, output, &graph, &analysis, true);
+            dominator_test_columns(&tally, &analysis);
             check->checks = tally.checks;
             valid = tally.failures == 0;
         }

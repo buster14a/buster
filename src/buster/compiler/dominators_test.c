@@ -526,8 +526,51 @@ static void dominator_test_definition(DominatorTestTally* tally, Arena* memory, 
     arena_pop_to(memory, saved);
 }
 
-// One analysis with every output, checked by the definition (see dominator_test_definition for bodies), by a
-// repeated analysis, and against frozen when given.
+// The order and tree columns' contract (docs/dominators.md, "Results"), which the definition reads only through
+// dominance: rpo lists the reachable blocks from entry, every block after its immediate dominator, then NONE, and
+// rpo_index is its inverse; each block's children are those whose immediate dominator it is, in ascending order.
+static void dominator_test_columns(DominatorTestTally* tally, const Dominators* result)
+{
+    const uint32_t count = result->block_count;
+    const uint32_t reachable = result->reachable_count;
+    bool order = count == 0 || (reachable != 0 && result->rpo[0] == result->entry);
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint32_t block = result->rpo[i];
+        if (i < reachable)
+        {
+            order = order && block < count && result->rpo_index[block] == i;
+            order = order && (block == result->entry || result->rpo_index[result->idom[block]] < i);
+        }
+        else
+        {
+            order = order && block == BUSTER_DOMINATOR_NONE;
+        }
+    }
+    uint32_t indexed = 0;
+    for (uint32_t block = 0; block < count; block += 1)
+    {
+        indexed += result->rpo_index[block] != BUSTER_DOMINATOR_NONE;
+    }
+    dominator_test_expect(tally, order && indexed == reachable, "reverse postorder and its inverse");
+    bool tree = count == 0 || (result->tree_offsets[0] == 0 && result->tree_offsets[count] == reachable - 1);
+    for (uint32_t parent = 0; tree && parent < count; parent += 1)
+    {
+        const uint32_t first = result->tree_offsets[parent];
+        const uint32_t end = result->tree_offsets[(uint64_t)parent + 1];
+        tree = first <= end;
+        for (uint32_t child = first; tree && child < end; child += 1)
+        {
+            const uint32_t block = result->tree_children[child];
+            tree = block < count && block != result->entry && result->idom[block] == parent;
+            tree = tree && (child == first || result->tree_children[child - 1] < block);
+        }
+    }
+    dominator_test_expect(tally, tree, "children by immediate dominator, ascending");
+}
+
+// One analysis with every output, checked by the definition (see dominator_test_definition for bodies), by the
+// columns' contract, by a repeated analysis, and against frozen when given.
 static void dominator_test_case(DominatorTestTally* tally, Arena* memory, Arena* scratch, const DominatorCfg* cfg, bool bodies, const uint64_t* frozen)
 {
     const uint64_t saved = memory->length;
@@ -558,6 +601,7 @@ static void dominator_test_case(DominatorTestTally* tally, Arena* memory, Arena*
             }
         }
         dominator_test_definition(tally, memory, cfg, &result, bodies);
+        dominator_test_columns(tally, &result);
         if (frozen != 0)
         {
             dominator_test_expect(tally, dominator_test_digest(&result) == *frozen, "frozen default-seed result");
@@ -620,6 +664,17 @@ static void dominator_test_limits(DominatorTestTally* tally, Arena* memory, Aren
         result = sentinel;
         status = dominators_analyze(memory, scratch, &cfg, options, &result);
         dominator_test_expect(tally, status == DOMINATOR_MATRIX_LIMIT && memory->length == start && memcmp(&result, &sentinel, sizeof(result)) == 0, "a budget one byte short");
+        // Frontiers alone: the budget admits exactly their rows.
+        options = dominators_options();
+        options.outputs = BUSTER_DOMINATOR_FRONTIERS;
+        options.max_matrix_bytes = (uint64_t)cfg.block_count * 64;
+        status = dominators_analyze(memory, scratch, &cfg, options, &result);
+        dominator_test_expect(tally, status == DOMINATOR_OK && result.matrix_peak_bytes == options.max_matrix_bytes && result.loop_bodies == 0, "a budget of exactly the frontiers");
+        arena_pop_to(memory, start);
+        options.max_matrix_bytes -= 1;
+        result = sentinel;
+        status = dominators_analyze(memory, scratch, &cfg, options, &result);
+        dominator_test_expect(tally, status == DOMINATOR_MATRIX_LIMIT && memory->length == start && memcmp(&result, &sentinel, sizeof(result)) == 0, "a frontier budget one byte short");
         options = dominators_options();
         uint32_t* reverse = (uint32_t*)cfg.predecessors;
         const uint32_t first = reverse[0];
@@ -828,6 +883,160 @@ static void dominator_test_irreducible_regions(DominatorTestTally* tally, Arena*
             dominator_test_expect(tally, analysis.loop_count == 2 && analysis.loop_irreducible[0] == 1 && analysis.loop_irreducible[1] == 1, "natural subloops cannot authorize LICM in irreducible SCC");
             dominator_test_expect(tally, analysis.preorder[5] == 0 && analysis.subtree_end[5] == 0 && analysis.preorder[6] == 0 && analysis.subtree_end[6] == 0, "unreachable intervals match IR verifier");
         }
+    }
+    arena_pop_to(memory, saved);
+}
+
+// SEMI-NCA's path evaluation on two 6-block graphs whose DFS numbers are their block IDs. No generated shape had
+// either path.
+// - The climb passes the vertex numbered right after the one being processed: 2's predecessor 5 reaches, through 4
+//   and 3, the semidominator 0 that 3's edge from 0 gives it, so 2's immediate dominator is 0, not its DFS parent 1.
+// - A compressed link carries its path's least semidominator: processing 3 links 5 past 4, whose semidominator is 0;
+//   processing 2 then reads 5's link alone, and 2's immediate dominator is 0, not 1.
+static void dominator_test_semi_nca_paths(DominatorTestTally* tally, Arena* memory, Arena* scratch)
+{
+    const uint64_t saved = memory->length;
+    const DominatorTestEdge through[] = {
+        {
+            .source = 0,
+            .target = 1,
+        },
+        {
+            .source = 0,
+            .target = 3,
+        },
+        {
+            .source = 1,
+            .target = 2,
+        },
+        {
+            .source = 2,
+            .target = 3,
+        },
+        {
+            .source = 3,
+            .target = 4,
+        },
+        {
+            .source = 4,
+            .target = 5,
+        },
+        {
+            .source = 5,
+            .target = 2,
+        },
+    };
+    const DominatorTestEdge compressed[] = {
+        {
+            .source = 0,
+            .target = 1,
+        },
+        {
+            .source = 0,
+            .target = 4,
+        },
+        {
+            .source = 1,
+            .target = 2,
+        },
+        {
+            .source = 2,
+            .target = 3,
+        },
+        {
+            .source = 4,
+            .target = 1,
+        },
+        {
+            .source = 4,
+            .target = 5,
+        },
+        {
+            .source = 5,
+            .target = 3,
+        },
+        {
+            .source = 5,
+            .target = 2,
+        },
+    };
+    const DominatorTestEdge* const graphs[] = {
+        through,
+        compressed,
+    };
+    const uint32_t edge_counts[] = {
+        sizeof(through) / sizeof(through[0]),
+        sizeof(compressed) / sizeof(compressed[0]),
+    };
+    const uint32_t expected[][6] = {
+        {
+            0,
+            0,
+            0,
+            0,
+            3,
+            4,
+        },
+        {
+            0,
+            0,
+            0,
+            0,
+            0,
+            4,
+        },
+    };
+    tally->blocks = 6;
+    for (uint32_t graph = 0; graph < 2; graph += 1)
+    {
+        DominatorCfg cfg;
+        const bool built = dominator_test_cfg(memory, 6, 0, graphs[graph], edge_counts[graph], &cfg);
+        dominator_test_expect(tally, built, "SEMI-NCA path fixture");
+        if (built)
+        {
+            dominator_test_case(tally, memory, scratch, &cfg, true, 0);
+            Dominators analysis;
+            const DominatorStatus status = dominators_analyze(memory, scratch, &cfg, dominators_options(), &analysis);
+            dominator_test_expect(tally, status == DOMINATOR_OK && memcmp(analysis.idom, expected[graph], sizeof(expected[graph])) == 0, "SEMI-NCA's semidominators through the processed forest");
+        }
+        arena_pop_to(memory, saved);
+    }
+}
+
+// An acyclic graph whose cross edge 2 -> 1 leaves the block numbered right at the end of 1's DFS subtree: an SCC test
+// that took that block for one of 1's descendants would flag a retreating edge. No generated shape had this edge.
+static void dominator_test_cross_edge(DominatorTestTally* tally, Arena* memory, Arena* scratch)
+{
+    const uint64_t saved = memory->length;
+    const DominatorTestEdge edges[] = {
+        {
+            .source = 0,
+            .target = 1,
+        },
+        {
+            .source = 0,
+            .target = 2,
+        },
+        {
+            .source = 2,
+            .target = 1,
+        },
+    };
+    DominatorCfg cfg;
+    tally->blocks = 3;
+    const bool built = dominator_test_cfg(memory, 3, 0, edges, sizeof(edges) / sizeof(edges[0]), &cfg);
+    dominator_test_expect(tally, built, "cross edge fixture");
+    if (built)
+    {
+        dominator_test_case(tally, memory, scratch, &cfg, true, 0);
+        Dominators analysis;
+        const DominatorStatus status = dominators_analyze(memory, scratch, &cfg, dominators_options(), &analysis);
+        bool flagged = status != DOMINATOR_OK;
+        for (uint32_t block = 0; status == DOMINATOR_OK && block < cfg.block_count; block += 1)
+        {
+            flagged = flagged || analysis.irreducible[block] != 0;
+        }
+        dominator_test_expect(tally, !flagged && analysis.loop_count == 0, "a cross edge to a finished subtree is not irreducible");
     }
     arena_pop_to(memory, saved);
 }
@@ -1362,6 +1571,8 @@ static __attribute__((unused)) int run_dominator_tests(int argc, char** argv)
                 tally.blocks = 4;
                 dominator_test_case(&tally, &memory, &scratch, &special, true, 0);
             }
+            dominator_test_semi_nca_paths(&tally, &memory, &scratch);
+            dominator_test_cross_edge(&tally, &memory, &scratch);
             dominator_test_deep(&tally, &memory, &scratch);
             dominator_test_export(&tally, &memory, &scratch);
         }
