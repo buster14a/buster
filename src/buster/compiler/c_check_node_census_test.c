@@ -188,6 +188,12 @@ static const char node_census_test_quiet[] =
 // a comparison as a statement whose operand writes (no discarded value: the comparison's own test); a call's aggregate
 // argument; a write and a read of one object, as a subscript, an operand and an assignment's value; and a returned
 // array and a returned address.
+// Seventy of one name summed: 139 records, so that the other operand of what is above them is further back than the
+// block before.
+#define BUSTER_NODE_CENSUS_TEST_TEN(name) name " + " name " + " name " + " name " + " name " + " name " + " name " + " name " + " name " + " name
+#define BUSTER_NODE_CENSUS_TEST_SEVENTY(name)                                                                                                                                 \
+    BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name) " + "             \
+    BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name)
 static const char node_census_test_defaults[] =
     "enum A { A0, A1 };\n"
     "enum B { B0, B1 };\n"
@@ -238,6 +244,38 @@ static const char node_census_test_defaults[] =
     "int m(int i)\n"
     "{\n"
     "    return i + i++; // refuse: unsequenced\n"
+    "}\n"
+    // The window's own places ("The tests on the window"): a name's leaf without a line, whose declaration is asked
+    // for at each leaf; a register object's member, whose flags are an operator's record's too; an ordering under a
+    // bitwise operator; an operator listed for an address constant the record doesn't hold whole alone (a static
+    // record's bit-field); and expressions of some 140 records, more than two blocks of the loop's and three words of
+    // an expression's bits, whose test is their last operator's (a constant operand further back than the block
+    // before, as a first and as a second operand, once with a sum beside it that lists the operator too and once the
+    // only thing that does; a comparison under a bitwise operator; a bit-field) or is asked of records in their last
+    // words; an initializer of as many, which has no root's record to give its tokens' span its end; and an aggregate
+    // that only a root's record copies.
+    "enum Wide : unsigned __int128 { WIDE __attribute__((deprecated)) = (unsigned __int128)1 << 70 };\n"
+    "struct R { int n; };\n"
+    "static struct F gs;\n"
+    "int w(int a, int b, int c, float fl, struct F* sf)\n"
+    "{\n"
+    "    int x = 0;\n"
+    "    register struct R rs;\n"
+    "    x = WIDE > 1; // refuse: declaration-flag\n"
+    "    x = rs.n; // refuse: declaration-flag\n"
+    "    x = a & b < c; // refuse: parentheses\n"
+    "    x = gs.f + a; // refuse: bit-field\n"
+    "    x = -1 << (" BUSTER_NODE_CENSUS_TEST_SEVENTY("a") "); // refuse: constant\n"
+    "    fl = 16777217 + (" BUSTER_NODE_CENSUS_TEST_SEVENTY("fl") "); // refuse: constant\n"
+    "    fl = a ? 16777217 : (" BUSTER_NODE_CENSUS_TEST_SEVENTY("fl") "); // refuse: constant\n"
+    "    x = (" BUSTER_NODE_CENSUS_TEST_SEVENTY("a") ") & b == c; // refuse: parentheses\n"
+    "    x = (" BUSTER_NODE_CENSUS_TEST_SEVENTY("a") ") + sf->f; // refuse: bit-field\n"
+    "    int sum = " BUSTER_NODE_CENSUS_TEST_SEVENTY("a") "; // take\n"
+    "    return x + sum; // take\n"
+    "}\n"
+    "struct F r(struct F* sf)\n"
+    "{\n"
+    "    return *sf; // refuse: aggregate-value\n"
     "}\n";
 
 static const char node_census_test_atomic[] =
@@ -869,6 +907,20 @@ static bool node_census_test_fixture(const char* directory, const char* name, co
     return valid;
 }
 
+// What the tests on the window count on a fixture, which the verdicts don't show: the expressions they run on; the
+// records their loop lists for the tree's tests and the operators it lists for their own; the records then sent to the
+// census's code and the expressions walked for it; and the operands further back than the block before their record's.
+typedef struct NodeTestsWindowed NodeTestsWindowed;
+struct NodeTestsWindowed
+{
+    uint32_t expressions;
+    uint32_t trees;
+    uint32_t operators;
+    uint32_t sent;
+    uint32_t walks;
+    uint32_t far;
+};
+
 // The census's tests at reader time (docs/node-machine.md, "The tests where they sit") on fixture `text`, written to
 // `directory` as `name` and read with `options`, the front `front` before T: the verdict there against the census's after
 // the pipeline. No expression reader time takes is one the census refuses; no test differs but as it may; every root
@@ -878,19 +930,21 @@ static bool node_census_test_fixture(const char* directory, const char* name, co
 // by a test, no more (the tests see one expression's warnings, not the unit's so far), and the fixture's `discards` declarations' discards are left alone (an initializer's value cast to
 // void at the declaration's `;`, each value of a braced one; an enumerator's value makes no record of the front's, and
 // so none).
-// In a build without the vector paths the front makes nothing, and no test runs. With `own` the tests there are the
-// machine's own form ("The tests in the machine's own form"), and the census's code runs on every expression beside it:
-// their bits, their spans of tokens and their counts of nodes are the same. Whether all of it held.
+// With `window` the lean front writes the window, the kernel makes its records in place, and the tests in the machine's
+// own form run on it too ("The tests on the window"), on `windowed`'s expressions: each one's bits, its root's kind and
+// its span of tokens are the census's code's, a walk for a record sent there reaches as many nodes as T's records, and
+// what their loop lists and sends is `windowed`'s counts, which no verdict shows. Whether all of it held.
 static bool node_tests_test_fixture_form(const char* directory, const char* name, const char* text, char** options, uint32_t option_count, uint8_t front, uint32_t refused,
-                                         uint32_t discards, bool own)
+                                         uint32_t discards, bool window, const NodeTestsWindowed* windowed)
 {
     char path[512];
     snprintf(path, sizeof(path), "%s/%s", directory, name);
     bool valid = parse_test_write(path, text, strlen(text));
     NodeShadow shadow = {
         .verify = true,
-        .front = (uint8_t)(front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS),
-        .reader = (uint8_t)(BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_VERIFY | (own ? BUSTER_NODE_READER_OWN | BUSTER_NODE_READER_BOTH : 0)),
+        .front = (uint8_t)(front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | (window ? BUSTER_NODE_FRONT_LEAN : 0)),
+        .reader = (uint8_t)(BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_VERIFY |
+                            (window ? BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_WINDOW | BUSTER_NODE_READER_WINDOW_TESTS : 0)),
         .passes = 1,
         .repeat = 1,
         .tested_out = calloc(512, sizeof(NodeShadowTested)),
@@ -906,12 +960,24 @@ static bool node_tests_test_fixture_form(const char* directory, const char* name
                                     shadow.tested_policy_differences == 0 && shadow.reader_twin_differences == 0 && shadow.reader_twin_warnings == 0 &&
                                     shadow.tested_expressions != 0 && shadow.tested_compared + shadow.tested_compared_unpopped == shadow.tested_expressions &&
                                     shadow.tested_refused == refused && shadow.typed_discards == discards &&
-                                    (!own || (shadow.own_differences == 0 && shadow.own_count_differences == 0 && shadow.own_expressions == shadow.tested_expressions));
+                                    (!window || (shadow.reader_facts[NODE_FACTS_COUNT_TESTS_DIFFERENCES] == 0 && shadow.own_count_differences == 0 &&
+                                                 shadow.own_expressions == windowed->expressions &&
+                                                 shadow.reader_facts[NODE_FACTS_COUNT_TESTS_EXPRESSIONS] == windowed->expressions &&
+                                                 shadow.own_trees == windowed->trees && shadow.own_operators == windowed->operators &&
+                                                 shadow.own_visits == windowed->sent && shadow.own_walks == windowed->walks &&
+                                                 shadow.reader_facts[NODE_FACTS_COUNT_TESTS_FAR] == windowed->far &&
+                                                 shadow.reader_facts[NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES] == 0 &&
+                                                 shadow.reader_facts[NODE_FACTS_COUNT_WINDOW_DIFFERENCES] == 0));
     if (!valid || !same)
     {
-        fprintf(stderr, "test-checker: node-tests %s%s: %s: the own form ran on %" PRIu64 " expressions, %" PRIu64 " not the census's code's, %" PRIu64
-                " walks of another count\n",
-                name, own ? " (own form)" : "", valid ? "read" : "NOT READ", shadow.own_expressions, shadow.own_differences, shadow.own_count_differences);
+        fprintf(stderr, "test-checker: node-tests %s%s: %s: the tests on the window ran on %" PRIu64 " expressions (%u expected), %" PRIu64
+                " not the census's code's, %" PRIu64 " walks of another count; their loop listed %" PRIu64 " records for the tree's tests (%u) and %" PRIu64
+                " operators (%u), %" PRIu64 " records went to the census's code (%u) after %" PRIu64 " walks (%u), and %" PRIu64
+                " operands were before the block before (%u)\n",
+                name, window ? " (on the window)" : "", valid ? "read" : "NOT READ", shadow.reader_facts[NODE_FACTS_COUNT_TESTS_EXPRESSIONS],
+                window ? windowed->expressions : 0, shadow.reader_facts[NODE_FACTS_COUNT_TESTS_DIFFERENCES], shadow.own_count_differences, shadow.own_trees,
+                window ? windowed->trees : 0, shadow.own_operators, window ? windowed->operators : 0, shadow.own_visits, window ? windowed->sent : 0, shadow.own_walks,
+                window ? windowed->walks : 0, shadow.reader_facts[NODE_FACTS_COUNT_TESTS_FAR], window ? windowed->far : 0);
         fprintf(stderr, "test-checker: node-tests %s: %s: the tests ran on %" PRIu64 " expressions at reader time and refused %" PRIu64 " (%u expected); %" PRIu64
                 " compared and %" PRIu64 " never lowered; %" PRIu64 " taken there that the census refuses, %" PRIu64 " differ, %" PRIu64 " roots' kinds differ, %" PRIu64
                 " nodes outside the records, %" PRIu64 " units' enabled warnings differ; T's rows and rules there: %" PRIu64 " values not the action's, %" PRIu64
@@ -960,14 +1026,14 @@ static bool node_tests_test_fixture_form(const char* directory, const char* name
     return valid && same;
 }
 
-// Both forms of the tests at reader time on one fixture: the census's code on the view, then the machine's own form
-// beside it.
+// The tests at reader time on one fixture: the census's code on the view, with the whole front; then the same with the
+// lean front and its window, the machine's own form beside it on the `windowed` expressions the kernel makes in place.
 static bool node_tests_test_fixture(const char* directory, const char* name, const char* text, char** options, uint32_t option_count, uint8_t front, uint32_t refused,
-                                    uint32_t discards)
+                                    uint32_t discards, NodeTestsWindowed windowed)
 {
-    const bool census = node_tests_test_fixture_form(directory, name, text, options, option_count, front, refused, discards, false);
-    const bool own = node_tests_test_fixture_form(directory, name, text, options, option_count, front, refused, discards, true);
-    return census && own;
+    const bool census = node_tests_test_fixture_form(directory, name, text, options, option_count, front, refused, discards, false, &windowed);
+    const bool window = node_tests_test_fixture_form(directory, name, text, options, option_count, front, refused, discards, true, &windowed);
+    return census && window;
 }
 
 // --facts' fixture (#2850's step 1, c_check_node_machine_facts.c): each kind of identifier's leaf (an automatic object, a
@@ -1558,7 +1624,9 @@ static bool node_front_test_limits(const char* directory, bool boundaries, uint8
 // kernel's counts hold (node_shadow_test_kernel: 64 expressions not there, by either making; the 1,042 literals of the
 // if statements' bodies, of `r`'s initializer and of the return's subscript each a line's; one record left to T, the
 // statement expression's value's discard), the chunks' ends kept and cut as many values as they must, and nothing
-// reset the stack (which a count of waiting values past the arrays' room does, with the window as without).
+// reset the stack (which a count of waiting values past the arrays' room does, with the window as without). Read again
+// with the tests on the window ("The tests on the window"): they run on the 8,259 expressions the kernel makes in place
+// and on none of the 64 the chunks' ends cut, whose records are not the window's, and none differs.
 static bool node_facts_test_window_room(const char* directory, char** options, uint32_t option_count)
 {
     char path[512];
@@ -1616,9 +1684,30 @@ static bool node_facts_test_window_room(const char* directory, char** options, u
                 valid ? "read" : "NOT READ", shadow.reader_window_whys[BUSTER_NODE_FACTS_WHY_CUT], shadow.reader_facts_whys[BUSTER_NODE_FACTS_WHY_CUT], cut,
                 shadow.front_window_kept_values, shadow.front_window_kept_records, shadow.front_window_cut_values, shadow.front_resets);
     }
+    NodeShadow tested = {
+        .front = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS,
+        .reader = BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_WINDOW | BUSTER_NODE_READER_WINDOW_TESTS,
+        .passes = 1,
+        .repeat = 1,
+    };
+    NodeCensus again = { .shadow = &tested };
+    fflush(stdout);
+    const bool read = valid && node_census_file(&again, path, options, option_count) && again.files == 1 && again.failures == 0;
+    const uint64_t placed = 8259;
+    const bool tests = read && tested.reader_facts[NODE_FACTS_COUNT_WINDOW_SKIPPED] == cut && tested.tested_expressions == placed + cut &&
+                       tested.reader_facts[NODE_FACTS_COUNT_TESTS_EXPRESSIONS] == placed && tested.own_expressions == placed &&
+                       tested.reader_facts[NODE_FACTS_COUNT_TESTS_DIFFERENCES] == 0 && tested.own_count_differences == 0;
+    if (!tests)
+    {
+        fprintf(stderr, "test-checker: node-facts window, no room for the waiting values' records, with the tests on the window: %s; the tests ran on %" PRIu64
+                " expressions at reader time, of which %" PRIu64 " were cut for the window (expected %" PRIu64 "), and on the window on %" PRIu64 " (expected %" PRIu64
+                "), %" PRIu64 " not the census's code's, %" PRIu64 " walks of another count\n",
+                read ? "read" : "NOT READ", tested.tested_expressions, tested.reader_facts[NODE_FACTS_COUNT_WINDOW_SKIPPED], cut,
+                tested.reader_facts[NODE_FACTS_COUNT_TESTS_EXPRESSIONS], placed, tested.reader_facts[NODE_FACTS_COUNT_TESTS_DIFFERENCES], tested.own_count_differences);
+    }
     free(text);
     unlink(path);
-    return held;
+    return held && tests;
 }
 
 // The front that writes the window where a value waits through several chunks' ends: an if statement's condition, a
@@ -2002,22 +2091,72 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, written && node_census_test_fixture(directory, "system.c", node_census_test_system, isystem, BUSTER_ARRAY_LENGTH(isystem), &system) &&
                                 system == 2,
                       "node-census takes a system header's macros in a user's expression and counts them apart");
+    // What the tests on the window count on each of the seven fixtures, which no verdict shows.
+    static const NodeTestsWindowed windowed_warnings = {
+        .expressions = 45,
+        .trees = 38,
+        .operators = 69,
+        .sent = 23,
+        .walks = 4,
+    };
+    static const NodeTestsWindowed windowed_clean = {
+        .expressions = 23,
+        .trees = 18,
+        .operators = 29,
+        .sent = 10,
+        .walks = 4,
+    };
+    static const NodeTestsWindowed windowed_set = {
+        .expressions = 13,
+        .trees = 5,
+        .operators = 10,
+    };
+    static const NodeTestsWindowed windowed_quiet = {
+        .expressions = 7,
+        .trees = 5,
+        .operators = 5,
+        .sent = 3,
+    };
+    static const NodeTestsWindowed windowed_atomic = {
+        .expressions = 3,
+        .operators = 4,
+        .sent = 3,
+    };
+    static const NodeTestsWindowed windowed_defaults = {
+        .expressions = 46,
+        .trees = 46,
+        .operators = 28,
+        .sent = 14,
+        .walks = 7,
+        .far = 9,
+    };
+    static const NodeTestsWindowed windowed_system = {
+        .expressions = 3,
+        .trees = 1,
+        .operators = 2,
+    };
     // The same fixtures with the census's tests at reader time, after T there: the machine's verdict before the pipeline
     // is never a take the census refuses, and every test's bit is the census's.
-    check_test_expect(test, ready && node_tests_test_fixture(directory, "warnings.c", node_census_test_warnings, loud, BUSTER_ARRAY_LENGTH(loud), BUSTER_NODE_FRONT_AFTER, 40, 3),
+    check_test_expect(test, ready && node_tests_test_fixture(directory, "warnings.c", node_census_test_warnings, loud, BUSTER_ARRAY_LENGTH(loud),
+                                                             BUSTER_NODE_FRONT_AFTER, 40, 3, windowed_warnings),
                       "node-tests: at reader time the tests refuse each expression the compiler warns of, as the census does after the pipeline");
-    check_test_expect(test, ready && node_tests_test_fixture(directory, "clean.c", node_census_test_clean, loud, BUSTER_ARRAY_LENGTH(loud), BUSTER_NODE_FRONT_BEFORE, 0, 6),
+    check_test_expect(test, ready && node_tests_test_fixture(directory, "clean.c", node_census_test_clean, loud, BUSTER_ARRAY_LENGTH(loud),
+                                                             BUSTER_NODE_FRONT_BEFORE, 0, 6, windowed_clean),
                       "node-tests: at reader time the tests refuse none of the clean idioms");
     check_test_expect(test, ready && node_tests_test_fixture(directory, "set.c", node_census_test_set, loud, BUSTER_ARRAY_LENGTH(loud),
-                                                             BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN, 10, 6),
+                                                             BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN, 10, 6, windowed_set),
                       "node-tests: at reader time the set's tests and T's own refusals leave nothing the census refuses");
-    check_test_expect(test, ready && node_tests_test_fixture(directory, "quiet.c", node_census_test_quiet, quiet, BUSTER_ARRAY_LENGTH(quiet), BUSTER_NODE_FRONT_AFTER, 0, 1),
+    check_test_expect(test, ready && node_tests_test_fixture(directory, "quiet.c", node_census_test_quiet, quiet, BUSTER_ARRAY_LENGTH(quiet),
+                                                             BUSTER_NODE_FRONT_AFTER, 0, 1, windowed_quiet),
                       "node-tests: at reader time warnings that are off by default refuse nothing");
-    check_test_expect(test, ready && node_tests_test_fixture(directory, "atomic.c", node_census_test_atomic, quiet, BUSTER_ARRAY_LENGTH(quiet), BUSTER_NODE_FRONT_AFTER, 2, 0),
+    check_test_expect(test, ready && node_tests_test_fixture(directory, "atomic.c", node_census_test_atomic, quiet, BUSTER_ARRAY_LENGTH(quiet),
+                                                             BUSTER_NODE_FRONT_AFTER, 2, 0, windowed_atomic),
                       "node-tests: at reader time atomic record accesses are refused by type");
-    check_test_expect(test, ready && node_tests_test_fixture(directory, "defaults.c", node_census_test_defaults, quiet, BUSTER_ARRAY_LENGTH(quiet), BUSTER_NODE_FRONT_AFTER, 28, 5),
+    check_test_expect(test, ready && node_tests_test_fixture(directory, "defaults.c", node_census_test_defaults, quiet, BUSTER_ARRAY_LENGTH(quiet),
+                                                             BUSTER_NODE_FRONT_AFTER, 38, 7, windowed_defaults),
                       "node-tests: at reader time the tests refuse what warns without an option, with the default warnings alone");
-    check_test_expect(test, written && node_tests_test_fixture(directory, "system.c", node_census_test_system, isystem, BUSTER_ARRAY_LENGTH(isystem), BUSTER_NODE_FRONT_AFTER, 0, 0),
+    check_test_expect(test, written && node_tests_test_fixture(directory, "system.c", node_census_test_system, isystem, BUSTER_ARRAY_LENGTH(isystem),
+                                                               BUSTER_NODE_FRONT_AFTER, 0, 0, windowed_system),
                       "node-tests: at reader time a system header's macros in a user's expression refuse nothing");
     if (written)
     {

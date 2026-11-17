@@ -2861,13 +2861,19 @@ in turn, musl's of three; the discards left alone in every row):
 
 "The tests where they sit" made the verdict at reader time with the census's
 own code, at more than the three sweeps' cost.
-`measure-node-machine --shadow --front-own-tests` makes the same bits as the
+`measure-node-machine --shadow --front-own-tests` made the same bits as the
 machine would: from T's records in their order, with no walk of the graph and
-no step from a node to its record. With `--verify` the census's code runs
+no step from a node to its record. With `--verify` the census's code ran
 beside it on every expression, and a bit, a span of tokens or a count of
-nodes that differs fails the command. [The
+nodes that differed failed the command. [The
 record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-own-tests-2524-2026-11-16)
 has the runs.
+
+**This section is what that form measured as a pass over T's columns.** Its
+loop and its leaves' tests are now the window's, 64 records a step ("The
+tests on the window", below), and there is one form: the option and the pass
+over T's columns are gone. The tables of what each test reads, and of what is
+decided before the form runs, are the form's still.
 
 One loop reads every record once, without a branch on what it is: its
 operator's bytes in the unit's tables (by its enabled warnings), its type's
@@ -3009,6 +3015,170 @@ build made for it, so the parts overlap by a few ticks):
     the leaf's first branch now.
   - **Of the 91 left, each fails `test-checker`.**
 
+### The tests on the window
+
+The own form read T's columns in a pass after T: 86 ticks a typed record,
+where its aim was 30. Three of its inputs were not a pass's to look up: a
+leaf's declaration's bit, a type's byte, and its own loop a record at a
+time. #2850's window has them where the record is made ("The front writes
+the window" in [the one-core path](one-core-path.md)): the front writes a
+record's inputs, and the kernel makes T's record from them in place.
+`measure-node-machine --shadow --window-tests` makes the tests there, once
+the kernel has made a chunk's records. [The
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/window-tests-2850-2026-11-17)
+has the runs, the variants and their patches.
+
+**What changed, part by part:**
+
+| the form's part | as a pass over T's columns | on the window |
+| --- | --- | --- |
+| a type's byte | a table by the type's index, at every record | six bits of the type's word, which every record has whichever path wrote it |
+| a leaf's declaration | its declaration's byte, by the leaf's token, at every leaf | a byte a declaration's line, made at the line's first leaf; a register object by its record's flags |
+| the loop | a record a turn: five tables by operator, the operands' bytes by their indexes | 64 records a step: a table is one byte permute of two registers, an operand's byte comes by its distance from this block's bytes and the block before's |
+| the lists | three lists of records, a store each a record | a mask a block for the tree's records, the operators with tests and the writes; no list of leaves |
+| the set's tests | bits gathered in the loop | an OR of one byte column over the expression's records |
+| the tree's tests, the operators', the expression's own | on T's records | the same code, on T's records still |
+
+- **The records' bytes** are read from the kernel's records sixteen at a
+  step: a gather each of the word, the flags, the object and the standing,
+  one of a name's line's byte, one of the token's role.
+- **An expression's part** is its records' range in the window: the set's
+  OR, the masks' words aligned at its first record, its tokens' lowest and
+  highest by a masked minimum and maximum.
+- **One form.** `node_tests_expression` takes what the loop made. The pass
+  over T's columns, the leaves' pass and `--front-own-tests` are removed
+  (#2924).
+- **The reference is the census's code** on T's records at reader time: each
+  expression's bits, its root's kind and its tokens' span.
+
+**What still reads T's records.** The tree's tests, the operators' tests and
+the expression's own are the own form's code, and T's records are gone by
+the time the kernel has run. The shadow has T make each expression's records
+again before them and times T alone on the same expressions to take it off.
+That second run is scaffolding: it goes when those tests read the kernel's
+records, the piece after this one.
+
+On the 9700X (`sqlite3.c`, Lua, musl):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| expressions the tests ran on | 50,993 | 10,839 | 43,415 |
+| their records | 289,838 | 76,304 | 224,326 |
+| operands further back than the block before | 970 | 129 | 386 |
+| declarations' lines whose byte was made | 18,295 | 6,687 | 36,782 |
+| roots whose record is apart from their operand's | 21.2% | 14.8% | 14.8% |
+| records sent to the census's code | 0.31% | 1.18% | 0.80% |
+| expressions walked for it | 2.06% | 4.11% | 3.01% |
+| expressions that differ from the census's code's, with the default warnings, with every warning, and beside `--verify` | 0 | 0 | 0 |
+
+TSC ticks a record of the expressions the tests ran on (medians of seven
+readings in turn, musl's of three; the own form at the base in the same
+turns, by its sets as before: on `sqlite3.c` it read 86 at its own piece's
+build, and 82 to 87 in this piece's four jobs):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| the own form, a pass over T's columns (main `9a1422eab`) | 83.0 | 112.4 | 158.4 |
+| **the tests on the window** | **54.1** | **69.5** | **111.8** |
+| of which the records' bytes | 8.9 | 9.8 | 16.6 |
+| the loop | 0.7 | 0.9 | 1.9 |
+| an expression's part | 7.2 | 7.7 | 13.6 |
+| the tests on T's records | 37.2 | 51.1 | 78.8 |
+| with every warning (one reading) | 72.6 | 81.1 | 136.4 |
+| beside `--verify` (one reading) | 61.3 | 78.8 | 136.2 |
+
+- **Exact.** No expression's bits, root's kind or span differ from the
+  census's code's: on the three corpora and the compiler's own source, with
+  the default warnings, with every warning and beside `--verify`, and on the
+  seven fixtures.
+- **No walk for the loop.** The expressions walked and the records sent are
+  the own form's, to the expression.
+- **The loop is 0.7 ticks a record where it was 27.0.** What it reads is in
+  byte columns by then, and nothing in it is a branch on what a record is.
+- **Its inputs cost more than it does.** 8.9 ticks a record for the records'
+  bytes, of which 5.5 are the gathers (a second run over the same chunk) and
+  the rest a first run's: each declaration's line's byte made once by the
+  census's code, and the records' lines read where the kernel left them.
+- **A third less, not a half.** 54.1 ticks a record where the own form reads
+  83.0: 65% of it on `sqlite3.c`, 62% on Lua, 71% on musl. 37.2 of the 54.1
+  are tests this piece didn't move.
+- **Between the gate and its refutation.** The piece's gate was 40 ticks a
+  record on `sqlite3.c` and its refutation 65: 54.1 is neither.
+- **musl pays a unit's first uses again.** Its 1,336 units make a
+  declaration's line's byte at 16% of the records, and touch the tests'
+  arrays for the first time in every unit.
+- **Nothing else moved.** Without the tests the window's kernel in place
+  reads 15.7 and 15.7 ticks a record, base and piece (Lua 20.2 and 20.2,
+  musl 18.7 and 19.0). `-c sqlite3.c`, read twice, is +0.1% and 0.0% in
+  wall time and 0.0% both times in user cycles; the base against itself is
+  +0.1% in wall time.
+- **The front reads more with the same instructions.** 52.4 and 53.3 ticks
+  a record on `sqlite3.c` (+1.7%), 69.6 and 71.3 on Lua (+2.5%), base and
+  piece; musl's three readings spread 5%. Its function is the same 1,705
+  instructions in both builds, not a line of the disassembly apart. Every
+  build of the piece has it at one address, 6,064 bytes before the base's
+  and 16 bytes further into its cache line.
+
+**What moved it, and what didn't** (`sqlite3.c`, ticks a record; three
+readings each):
+
+| the records' bytes | |
+| --- | ---: |
+| six gathers a step of sixteen records | 9.4 |
+| the same, out of line | 9.3 |
+| the same, a second run over the chunk | 5.5 |
+| a loop a record, its choices written `?:` and `&&` | 22.4 |
+| a loop a record written without branches, where clang made one mask a branch on the leaf | 21.0 |
+| that loop with the mask opaque to the compiler: no branch on a record's kind | 14.2 |
+| the same, out of line | 15.9 |
+
+- **The gathers stay.** A loop a record is slower on the 9700X in every form
+  tried. Its four loads of a record's line are the gathers' loads; what it
+  adds is a record's work a turn.
+- **Lists as bits cost the same as lists.** With the tree's records and the
+  operators compressed into lists, an expression's part read 9.1 and the
+  tests on T's records 36.8. As words of the blocks' masks, read bit by bit
+  by the tests, 7.4 and 38.9: the same sum. The words are less code, and no
+  store a listed record.
+- **A leaf needs no test of its operator.** A name's leaf and a leaf without
+  a line are kinds the front gives leaves alone, and a register object's
+  flags are on its leaf: the pass reads no operator. It took the bytes from
+  9.4 to 8.9.
+
+**What stays scalar, and why:**
+
+- **The tests on T's records:** 37.2 of the 54.1. They are the next piece's,
+  on the kernel's records.
+- **A line's byte's first making:** once a declaration's line, by the
+  census's code's reading of the declaration's attributes: 18,295 on
+  `sqlite3.c`.
+- **An operand further back than the block before:** a load each, 970 of
+  289,838 records on `sqlite3.c` (0.33%).
+- **An expression's part:** a few vector steps an expression, 5.7 records
+  each on `sqlite3.c`. It is a loop over expressions, 7.2 ticks a record.
+
+**Faults.** 87 were put into the new code, one at a time, in a copy of the
+tree: 85 fail the node machine's tests. The other two change no bit a test
+can read:
+
+- **Every record's bytes made, a tested expression's or not.** No test reads
+  the bytes of a record that is not a tested expression's.
+- **A token past the unit's count taken into an expression's span.** The
+  front gives every record a token of the unit's. The bound is on an index
+  into the events' prefix, and is kept.
+
+The campaign's earlier runs found what the fixtures didn't hold and what the
+code did for no result:
+
+- **New fixture lines:** a name's leaf without a line, a register object's
+  member, an ordering under a bitwise operator, an address constant the
+  record doesn't hold whole, expressions of more than two blocks with their
+  test in the last words, an initializer of as many, an aggregate only a
+  root's record copies, and an expression a chunk's end cuts.
+- **Removed:** a leaf's test of its operator, a root's record's bits for the
+  tree's tests and the writes, and the undoing of a root's bytes after its
+  tests. Nothing differed without them on the four corpora.
+
 ### What it says of step 2
 
 "Expected gains" took the machine at 55 cycles a body token for a taken
@@ -3034,14 +3204,17 @@ the machine takes. "The tests where they sit" ran them at reader time as the
 census writes them: about 115 cycles a body token on `sqlite3.c`, more than
 the three sweeps, which would take 1.25 to about 1.13, under the gate. "The
 tests in the machine's own form" made the same bits from T's records at 62:
-1.19, a hair under it. The sum stands only with the tests at a third of
-that. What would move it:
+1.19, a hair under it. "The tests on the window" made its loop 64 records a
+step and its leaves' bits a byte a declaration's line: 65% of the own form's
+ticks on `sqlite3.c`, which at the same share is about 40 cycles a body
+token and 1.21. The sum stands only with the tests at a third of the own
+form's. What would move it:
 
-- **The tests where their inputs are:** a leaf's declaration's bit in the
-  record its maker fills (#2850's fact word), a constant operand's tests in
-  the row that types its operator, and the rest's loop 64 records a step.
-  The own form as a pass after T is their oracle, as the census's code is
-  its. They are the sum's largest open term.
+- **The rest of the tests where their inputs are:** a constant operand's
+  tests in the rule that types its operator, a call's from the window, and
+  the tree's from a byte the front writes: 37 of the window's 54 ticks a
+  record are those, on T's records still. The census's code is their
+  oracle. They are the sum's largest open term.
 
 - **The front's walk:** over a hundred instructions an acting token for a
   stack walk, lean or not. The structure it derives (counts, distances,

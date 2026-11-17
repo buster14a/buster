@@ -81,17 +81,24 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
 static void node_facts_reader_expression(struct NodeFactsReader* state, const NodeFront* front, uint32_t first, uint32_t root, uint32_t count, uint32_t record,
                                          uint32_t operand, bool taken);
 static void node_facts_reader_chunk(struct NodeFactsReader* state, const NodeFront* front);
+// The unit's tests' state given to the kernel's, which then runs the tests on each chunk's window too
+// (BUSTER_NODE_READER_WINDOW_TESTS).
+static void node_facts_reader_tests(struct NodeFactsReader* state, struct NodeCensusReader* tests);
 
 // The census's tests at reader time (c_check_node_census.c, which follows this file in the unit): their state for the
 // unit `reader` reads, whose machine there is `machine`, with columns for `node_capacity` nodes and the unit's policy
 // kept in `types`; the reader's warning events since the last chunk taken in; and the tests of the
 // machine's current expression, which T has just taken, whose root is node `root`, made by the front's root of operator
 // `op` at token `token`, an initialization's of the object declared at `declaration` (BUSTER_CHECK_NONE otherwise) with
-// type `declared`: their bits, and into `kind` the root's kind.
+// type `declared`: their bits, and into `kind` the root's kind. They are the census's code's on T's records; or, where
+// `given` is what the tests' loop on the window made of the expression (node_tests_window_chunk), the machine's own
+// form's from that.
 struct NodeCensusReader;
 static struct NodeCensusReader* node_census_reader_begin(const CheckInputReader* reader, const NodeMachine* machine, NodeFrontTypes* types, uint32_t node_capacity);
 static void node_census_reader_chunk(struct NodeCensusReader* tests, const CheckInputReader* reader);
-static uint64_t node_census_reader_expression(struct NodeCensusReader* tests, uint32_t root, CheckOp op, uint32_t token, uint32_t declaration, TypeId declared, uint8_t* kind);
+struct NodeTestsLoop;
+static uint64_t node_census_reader_expression(struct NodeCensusReader* tests, uint32_t root, CheckOp op, uint32_t token, uint32_t declaration, TypeId declared, uint8_t* kind,
+                                              const struct NodeTestsLoop* given);
 typedef struct NodeMachineReader NodeMachineReader;
 _Static_assert(NODE_MACHINE_REFUSALS <= 16 && NODE_MACHINE_REFUSALS <= BUSTER_NODE_FRONT_TYPED_REFUSAL + 1, "a refusal is NodeFrontTypes.refusals' low four bits");
 
@@ -403,6 +410,10 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
         {
             // It reads the lean front's records. Without room for its windows it doesn't run, and the shadow reports that.
             typer->facts = node_facts_reader_begin(reader, &typer->machine, types);
+            if (typer->facts != NULL && typer->tests != NULL && (options & BUSTER_NODE_READER_WINDOW_TESTS) != 0)
+            {
+                node_facts_reader_tests(typer->facts, typer->tests);
+            }
         }
         types->setup_ticks = __rdtsc() - start;
         shadow->types = room ? types : NULL;
@@ -547,7 +558,7 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                         const uint32_t declaration = initialization && token < reader->parser->tokens.count ? reader->initializer_declarations[token] : BUSTER_CHECK_NONE;
                         const TypeId declared = declaration < reader->output->token_count ? reader->declared_types[declaration] : 0;
                         uint8_t kind = 0;
-                        verdict = node_census_reader_expression(typer->tests, root, (CheckOp)front->ops[record], token, declaration, declared, &kind);
+                        verdict = node_census_reader_expression(typer->tests, root, (CheckOp)front->ops[record], token, declaration, declared, &kind, NULL);
                         if (pass != 0)
                         {
                             types->refusals[root] |= BUSTER_NODE_FRONT_TYPED_TESTED;

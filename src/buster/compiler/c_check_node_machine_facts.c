@@ -3920,11 +3920,21 @@ struct NodeFactsInputs
     uint32_t argument_count;
 };
 
+// The census's tests on the window the front wrote (c_check_node_census.c, which follows this file in the unit;
+// BUSTER_NODE_READER_WINDOW_TESTS): `tests` is the unit's tests' state, and `state` has just run the kernel on `front`'s
+// chunk in place, whose records are the kernel's by the front's record.
+struct NodeCensusReader;
+struct NodeFactsReader;
+static void node_tests_window_chunk(struct NodeCensusReader* tests, struct NodeFactsReader* state, const NodeFront* front);
+static bool node_tests_window_lines(struct NodeCensusReader* tests, Arena* arena, uint32_t capacity);
+
 struct NodeFactsReader
 {
     NodeFacts facts;
     NodeFrontTypes* types;
     CheckInputReader* reader;
+    // The unit's tests' state where they run on the window too (BUSTER_NODE_READER_WINDOW_TESTS), or null.
+    struct NodeCensusReader* tests;
     // The batch's windows' inputs as the front's records give them (node_facts_front_expression).
     NodeFactsInputs front;
     // Where the front writes the window (`windowed`), for the kernel's run on the front's columns in place
@@ -3963,6 +3973,9 @@ struct NodeFactsReader
     uint32_t* operands;
     uint32_t* argument_bases;
     uint8_t* given;
+    // Whether the expression's records are the front's window's in a row, which the kernel's run in place then makes
+    // (node_facts_window_expression).
+    uint8_t* placed;
     uint32_t expression_count;
     // By the batch's record: whether its expression is one the whole machine takes there.
     uint8_t* taken;
@@ -3997,6 +4010,7 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
         state->operands = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
         state->argument_bases = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
         state->given = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
+        state->placed = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, BUSTER_NODE_FACTS_READER_EXPRESSIONS);
         state->taken = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, records);
         state->front.ops = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, records);
         state->front.kinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, records);
@@ -4009,9 +4023,9 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
         state->front.positions = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, records);
         state->front.arguments = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, records);
         room = state->firsts != NULL && state->roots != NULL && state->counts != NULL && state->bases != NULL && state->records != NULL && state->operands != NULL &&
-               state->argument_bases != NULL && state->given != NULL && state->taken != NULL && state->front.ops != NULL && state->front.kinds != NULL && state->front.classes != NULL &&
-               state->front.fits != NULL && state->front.left != NULL && state->front.right != NULL && state->front.inputs != NULL && state->front.counts != NULL &&
-               state->front.positions != NULL && state->front.arguments != NULL;
+               state->argument_bases != NULL && state->given != NULL && state->placed != NULL && state->taken != NULL && state->front.ops != NULL && state->front.kinds != NULL &&
+               state->front.classes != NULL && state->front.fits != NULL && state->front.left != NULL && state->front.right != NULL && state->front.inputs != NULL &&
+               state->front.counts != NULL && state->front.positions != NULL && state->front.arguments != NULL;
     }
     const bool window = (reader->pp->options.node_reader & BUSTER_NODE_READER_WINDOW) != 0;
     if (room && window)
@@ -4957,6 +4971,11 @@ static void node_facts_window_run(struct NodeFactsReader* state, const NodeFront
     const uint64_t t0 = __rdtsc();
     node_facts_window(facts, 0, mode, false);
     counts[NODE_FACTS_COUNT_WINDOW_KERNEL_TICKS] += __rdtsc() - t0;
+    if (state->tests != NULL)
+    {
+        // The tests of the chunk's expressions, from the records the kernel has just made in place.
+        node_tests_window_chunk(state->tests, state, front);
+    }
     facts->windows = windows;
     facts->window_count = window_count;
     node_facts_window_expected_exchange(state);
@@ -5216,6 +5235,7 @@ static void node_facts_reader_expression(struct NodeFactsReader* state, const No
         types->facts_counts[NODE_FACTS_COUNT_FRONT_DIFFERENCES] += state->front.argument_count != facts->argument_count;
     }
     const bool kept = given && state->front.argument_count == facts->argument_count;
+    bool placed = false;
     if (appended && !kept)
     {
         // The front's records don't give the expression: its inputs are node_facts_append's.
@@ -5241,6 +5261,7 @@ static void node_facts_reader_expression(struct NodeFactsReader* state, const No
         const uint32_t size = operand < record ? front->sizes[operand] : 0;
         const bool whole = size != 0 && count == (initialization ? size : size + 1) && size <= operand + 1 &&
                            front->window_classes[operand] != BUSTER_NODE_FACTS_CLASS_CUT;
+        placed = whole;
         if (whole)
         {
             node_facts_window_expression(state, front, base, count, record, operand + 1 - size, size, kept);
@@ -5270,6 +5291,7 @@ static void node_facts_reader_expression(struct NodeFactsReader* state, const No
         state->operands[e] = operand;
         state->argument_bases[e] = argument_base;
         state->given[e] = kept;
+        state->placed[e] = placed;
         state->expression_count = e + 1;
     }
 }
@@ -5277,6 +5299,12 @@ static void node_facts_reader_expression(struct NodeFactsReader* state, const No
 static void node_facts_reader_chunk(struct NodeFactsReader* state, const NodeFront* front)
 {
     node_facts_reader_flush(state, front);
+}
+
+static void node_facts_reader_tests(struct NodeFactsReader* state, struct NodeCensusReader* tests)
+{
+    // The tests keep a byte a declaration's line: without room for them they don't run on the window.
+    state->tests = node_tests_window_lines(tests, state->reader->scratch, state->facts.line_capacity) ? tests : NULL;
 }
 
 #endif
