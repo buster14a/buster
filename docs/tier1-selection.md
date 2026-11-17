@@ -378,8 +378,8 @@ patterns are:
   for the first and maximal munch's cover chooses the same.
   `tests/ir/float-selects.ir` and `float-select-loops.ir` are among the
   grammar's twin fixtures (main's grammar took munch's fallback for one of the
-  first's selects), which must take no fallback and whose candidates must cost
-  what their patterns do. The driver's pattern test requires `ucomis` and a
+  first's selects), which must take no fallback; a fused select's candidate
+  must cost its pattern's 3 or 4. The driver's pattern test requires `ucomis` and a
   `cmov` or jump of its flags, no `setcc`, in four C selects of ordered
   comparisons, a parity `cmov` in three of `==` and `!=` (a loop's sum and a
   running last match among them), and the truth value in a conditional count
