@@ -771,7 +771,6 @@ static inline __attribute__((always_inline)) void check_stream_value_to(const Ch
         const uint32_t row = stream->payload_rows[node];
         whole = row != 0 && row <= stream->payload_count ? stream->payloads + row - 1 : NULL;
     }
-#if BUSTER_HOST_VECTOR
     uint8_t* bytes = (uint8_t*)destination;
     if (whole != NULL)
     {
@@ -784,22 +783,6 @@ static inline __attribute__((always_inline)) void check_stream_value_to(const Ch
         _mm512_storeu_si512(bytes, _mm512_zextsi128_si512(header));
         _mm256_storeu_si256((__m256i*)(bytes + 64), _mm256_zextsi128_si256(_mm_cvtsi32_si128((int)stream->value_objects[node])));
     }
-#else
-    if (whole != NULL)
-    {
-        *destination = *whole;
-    }
-    else
-    {
-        *destination = (CheckValue){
-            .type = stream->value_types[node],
-            .category = (CheckCategory)stream->value_categories[node],
-            .flags = stream->value_flags[node],
-            .constant_kind = (CheckConstantKind)stream->value_constants[node],
-            .object = stream->value_objects[node],
-        };
-    }
-#endif
 }
 
 // A node's value in a typed stream (CheckStream.value_types and the columns beside it, #628), by assignment: its callers,
@@ -2098,7 +2081,6 @@ static inline __attribute__((always_inline)) uint32_t check_graph_marked_end(con
     (void)scalar;
 
     uint32_t end = node;
-#if BUSTER_HOST_VECTOR
     bool open = !BUSTER_SCALAR_PATH(scalar);
     while (open && end < count)
     {
@@ -2109,7 +2091,6 @@ static inline __attribute__((always_inline)) uint32_t check_graph_marked_end(con
         open = unmarked == 0;
         end += open ? live : (uint32_t)_tzcnt_u64(unmarked);
     }
-#endif
     while (end < count && marks[end] != 0)
     {
         end += 1;
@@ -4026,14 +4007,12 @@ static void check_graph_constant_contexts(const CheckGraph* graph, uint8_t* mark
     for (uint32_t node = graph->count; node > 0;)
     {
         bool skipped = false;
-#if BUSTER_HOST_VECTOR
         if (!BUSTER_SCALAR_PATH(scalar) && graph->contexts != NULL && node >= BUSTER_CHECK_CONTEXT_LANES)
         {
             const uint32_t first = node - BUSTER_CHECK_CONTEXT_LANES;
             const __m512i contexts = _mm512_and_si512(_mm512_loadu_si512(graph->contexts + first), _mm512_set1_epi8((char)required));
             skipped = _mm512_test_epi8_mask(_mm512_or_si512(contexts, _mm512_loadu_si512(marks + first)), _mm512_set1_epi8(-1)) == 0;
         }
-#endif
         if (skipped)
         {
             node -= BUSTER_CHECK_CONTEXT_LANES;
@@ -4070,11 +4049,6 @@ static void check_graph_constant_contexts(const CheckGraph* graph, uint8_t* mark
 
 static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* output, Arena* scratch, const CheckOptions* options, CheckStream* stream)
 {
-#if !BUSTER_HOST_VECTOR
-    CheckOptions host_options = *options;
-    host_options.scalar = true;
-    options = &host_options;
-#endif
     const uint64_t output_start = output->length;
     const uint64_t scratch_start = scratch->length;
     *stream = (CheckStream){

@@ -10685,7 +10685,6 @@ static void tier0_wide_depths_scalar(const Tier0Function* function, Tier0Entries
     floating_depths[count] = (uint32_t)floating;
 }
 
-#if BUSTER_HOST_VECTOR
 // Inclusive prefix sum in sixteen dword lanes; the masks zero the lanes before each shift, not just the indices.
 static __m512i tier0_wide_prefix(__m512i values)
 {
@@ -10697,13 +10696,11 @@ static __m512i tier0_wide_prefix(__m512i values)
     }
     return values;
 }
-#endif
 
 // The same corrected effects, sixteen entries at a time, with masked tails. The ordinary 64-byte depth scan stays
 // unchanged; only a function already sent to deep selection allocates or computes these wider columns.
 static void tier0_wide_depths_vector(const Tier0Function* function, Tier0Entries* entries)
 {
-#if BUSTER_HOST_VECTOR
     const uint32_t count = function->count;
     const uint8_t* kinds = function->kinds;
     const int8_t* integer_effects = entries->integer_effects;
@@ -10734,9 +10731,6 @@ static void tier0_wide_depths_vector(const Tier0Function* function, Tier0Entries
     }
     integer_depths[count] = (uint32_t)integer;
     floating_depths[count] = (uint32_t)floating;
-#else
-    tier0_wide_depths_scalar(function, entries);
-#endif
 }
 
 // The deep entries of a function whose stacks go past the depth tables (selection's TIER0_ERROR_DEPTH): their values in
@@ -14632,7 +14626,6 @@ static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries*
     }
 }
 
-#if BUSTER_HOST_VECTOR
 // tier0_compile's body, with a function's segment overrides (tier0_apply_segments; 0 without them).
 static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint8_t* segments, Arena* output)
 {
@@ -14689,7 +14682,6 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
     scratch_end(scratch);
     return code;
 }
-#endif
 
 // A function with segment overrides (#1447, Tier0Function.segments), out of line: its values without them, in a copy of
 // its values column (`values`), and each entry's override (`segments`), from a LOAD's, STORE's, SET's, ATOMIC_RMW's or
@@ -14728,12 +14720,7 @@ static __attribute__((noinline)) Tier0Code tier0_compile_segments(const Tier0Fun
         Tier0Function stripped = *function;
         stripped.values = values;
         stripped.segments = false;
-#if BUSTER_HOST_VECTOR
         code = BUSTER_VECTOR_PATH(vector) ? tier0_compile_entries(&stripped, segments, output) : tier0_compile_scalar_entries(&stripped, segments, output);
-#else
-        (void)vector;
-        code = tier0_compile_scalar_entries(&stripped, segments, output);
-#endif
     }
     scratch_end(scratch);
     return code;
@@ -14746,11 +14733,7 @@ static Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* outp
 
 static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
 {
-#if !BUSTER_HOST_VECTOR
-    return tier0_compile_scalar(function, output);
-#else
     return __builtin_expect(function->segments, 0) ? tier0_compile_segments(function, output, true) : tier0_compile_entries(function, 0, output);
-#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

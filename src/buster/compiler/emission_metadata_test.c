@@ -18,11 +18,9 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#if defined(BUSTER_EMISSION_METADATA_TEST_STANDALONE) && defined(BUSTER_EMISSION_METADATA_TEST_VECTOR)
-#if !defined(BUSTER_HOST_VECTOR)
-#define BUSTER_HOST_VECTOR 1
-#endif
-#else
+// The standalone wrapper (tests/emission-metadata/test.c) builds this module alone, for any AVX-512F target: it needs
+// no more of the host's features than emission_metadata.c's own.
+#if !defined(BUSTER_EMISSION_METADATA_TEST_STANDALONE)
 #include "host_isa.h"
 #endif
 #include "emission_metadata.c"
@@ -1086,11 +1084,7 @@ int run_emission_metadata_tests(int argc, char** argv)
         test_frame_vocabulary();
         test_limits_and_state_stack();
         test_wide_frame_values();
-#if defined(BUSTER_HOST_VECTOR) && BUSTER_HOST_VECTOR
         const uint32_t vector = 1;
-#else
-        const uint32_t vector = 0;
-#endif
         printf("emission metadata: %" PRIu64 " checks, %" PRIu64 " failures (vector=%u, seed=%u)\n",
             test_tally.checks, test_tally.failures, vector, seed);
         result = test_tally.failures == 0 ? 0 : 1;

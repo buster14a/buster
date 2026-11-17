@@ -18,7 +18,7 @@ Hosted CPU models vary, so the bootstrap draws a runner that has it, as the
 hosted correctness rows do: it is `drawn.yml`'s `bootstrap` row, whose
 candidates probe their CPUs and whose collector gives the job to a qualifying
 one (#2924; [the CI guide](ci.md), "Drawn AVX-512 jobs"). The holder still
-checks that the staged official Clang selects `BUSTER_HOST_VECTOR` before
+checks that `host_isa.h` takes the staged official Clang's native target before
 building, and fails if it doesn't. No bootstrap is skipped any more: one
 without a qualifying CPU after the last draw fails its verdict as incomplete.
 The `x86-64` bootstrap of the baseline scalar host path (#1193) is gone with

@@ -690,7 +690,7 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, uint8_t
             shadow.record_count < shadow.record_capacity;
     // The front runs beside the reader's coded walk, the vector path's: a build without the vector paths reads by the
     // scalar walk, where the front must make nothing and no line is expected of it.
-    const bool fronts = BUSTER_HOST_VECTOR != 0;
+    const bool fronts = true;
     // C and X as one sweep too: every expression T typed, with C's and X's refusal, tape, labels and calls.
     // T at reader time, where the front asks for it: every expression it ran on that the shadow takes has the shadow's
     // records, it ran on each the front made, the objects' columns and the library calls' answers it made are the
@@ -900,7 +900,7 @@ static bool node_tests_test_fixture_form(const char* directory, const char* name
     fflush(stdout);
     valid = valid && shadow.tested_out != NULL && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0 &&
             shadow.tested_out_count < shadow.tested_out_capacity;
-    const bool fronts = BUSTER_HOST_VECTOR != 0;
+    const bool fronts = true;
     const bool same = !fronts ? shadow.tested_expressions == 0 && shadow.tested_compared == 0 :
                                 shadow.tested_unsound == 0 && shadow.tested_differences == 0 && shadow.tested_kind_differences == 0 && shadow.tested_missed == 0 &&
                                     shadow.tested_policy_differences == 0 && shadow.reader_twin_differences == 0 && shadow.reader_twin_warnings == 0 &&
@@ -1501,7 +1501,7 @@ static bool node_front_test_limits(const char* directory, bool boundaries, uint8
     fflush(stdout);
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
     // In a build without the vector paths the reader's walk is the scalar one, and the front must make nothing.
-    const bool fronts = BUSTER_HOST_VECTOR != 0;
+    const bool fronts = true;
     const bool typed = (front & BUSTER_NODE_FRONT_TYPES) == 0 || !fronts ? shadow.typed_expressions == 0 && shadow.typed_compared == 0 :
                                                                            shadow.typed_differences == 0 && shadow.typed_compared != 0 && shadow.typed_unrun == 0 &&
                                                                                shadow.typed_object_differences == 0 && shadow.typed_library_differences == 0;
@@ -1602,7 +1602,7 @@ static bool node_facts_test_window_room(const char* directory, char** options, u
     NodeCensus census = { .shadow = &shadow };
     fflush(stdout);
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
-    const bool fronts = BUSTER_HOST_VECTOR != 0;
+    const bool fronts = true;
     const uint64_t cut = fronts ? 64 : 0;
     const bool held = valid && node_shadow_test_kernel(&shadow, shadow.reader, fronts, cut, fronts ? 1 : 0, fronts ? 1042 : 0, 0, 0, cut) &&
                       (!fronts || (shadow.reader_window_whys[BUSTER_NODE_FACTS_WHY_CUT] == cut && shadow.reader_facts_whys[BUSTER_NODE_FACTS_WHY_CUT] == cut &&
@@ -1681,7 +1681,7 @@ static bool node_facts_test_window_wait(const char* directory, char** options, u
     NodeCensus census = { .shadow = &shadow };
     fflush(stdout);
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
-    const bool fronts = BUSTER_HOST_VECTOR != 0;
+    const bool fronts = true;
     const bool held = valid && node_shadow_test_kernel(&shadow, shadow.reader, fronts, 0, fronts ? 3 : 0, fronts ? 139 : 0, 0, 0, 0) &&
                       (!fronts || (shadow.front_window_kept_values == 6 && shadow.front_window_kept_records == 60 && shadow.front_window_cut_values == 0 &&
                                    shadow.front_window_arguments_most == 67 && shadow.front_resets == 0 && shadow.front_differences == 0));
@@ -1731,7 +1731,7 @@ static bool node_facts_test_window_calls(const char* directory, char** options, 
     NodeCensus census = { .shadow = &shadow };
     fflush(stdout);
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
-    const bool fronts = BUSTER_HOST_VECTOR != 0;
+    const bool fronts = true;
     const bool held = valid && node_shadow_test_kernel(&shadow, shadow.reader, fronts, 0, 0, fronts ? 1 : 0, 0, 0, 0) &&
                       (!fronts || (shadow.front_window_kept_values == 7015 && shadow.front_window_kept_records == 34939 &&
                                    shadow.front_window_cut_values == 10376 && shadow.front_window_arguments_most == 2133 && shadow.front_resets == 0 &&
@@ -1800,7 +1800,7 @@ static bool node_facts_test_window_again(const char* directory, char** options, 
     NodeCensus census = { .shadow = &shadow };
     fflush(stdout);
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
-    const bool fronts = BUSTER_HOST_VECTOR != 0;
+    const bool fronts = true;
     const bool held = valid && node_shadow_test_kernel(&shadow, shadow.reader, fronts, 0, 0, fronts ? 1 : 0, 0, 0, 0) &&
                       (!fronts || (shadow.front_window_kept_values == 10137 && shadow.front_window_kept_records == 12529 && shadow.front_window_cut_values == 2 &&
                                    shadow.front_resets == 0 && shadow.front_differences == 0));
@@ -1851,7 +1851,7 @@ static bool node_facts_test_reader_lines(const char* directory, uint8_t reader, 
     NodeCensus census = { .shadow = &shadow };
     fflush(stdout);
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
-    const bool fronts = BUSTER_HOST_VECTOR != 0;
+    const bool fronts = true;
     const bool held = valid && node_shadow_test_kernel(&shadow, shadow.reader, fronts, 0, 0, fronts ? statements : 0, 0, 0, 0);
     if (!held)
     {
@@ -1956,7 +1956,7 @@ static bool node_flat_test_reach(const char* directory, bool first, char** optio
     fflush(stdout);
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
     // In a build without the vector paths the reader's walk is the scalar one, and the fronts must make nothing.
-    const bool fronts = BUSTER_HOST_VECTOR != 0;
+    const bool fronts = true;
     const bool same = fronts ? shadow.front_differences == 0 && shadow.flat_differences == 0 && shadow.flat_beyond == 3 && shadow.flat_lean_only == 6 &&
                                    shadow.flat_only == 0 && shadow.flat_unread == 0 && shadow.flat_compared + 6 == shadow.front_records && shadow.flat_empties >= 8 :
                                shadow.front_units == 0 && shadow.flat_compared == 0 && shadow.flat_records == 0;

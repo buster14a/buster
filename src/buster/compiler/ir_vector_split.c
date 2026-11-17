@@ -28,8 +28,7 @@
 // remapped. The counts are 64-bit, and an output past a u32's count is refused (IR_ERROR_LIMIT). SIMD: what pays. Every
 // function --tier1 compiles at such a target is scanned for a wide vector instruction, 64 type bytes two compares on the
 // vector path, one at a time on its scalar twin, which must agree; a function without one is returned as it is. The
-// rewrite is scalar: it runs on the functions with wide vectors alone (the scalar host's emulations of AVX2's and
-// AVX-512's intrinsics, host_scalar_vectors.h, among the compiler's own).
+// rewrite is scalar: it runs on the functions with wide vectors alone.
 
 #ifndef BUSTER_IR_VECTOR_SPLIT_C
 #define BUSTER_IR_VECTOR_SPLIT_C
@@ -601,11 +600,7 @@ static IrCheck ir_vector_split_path(const IrFunction* function, uint32_t piece_b
 
 static __attribute__((unused)) IrCheck ir_vector_split(const IrFunction* function, uint32_t piece_bytes, Arena* output, Arena* scratch, IrVectorSplitResult* result)
 {
-#if !BUSTER_HOST_VECTOR
-    return ir_vector_split_path(function, piece_bytes, output, scratch, false, result);
-#else
     return ir_vector_split_path(function, piece_bytes, output, scratch, true, result);
-#endif
 }
 
 static __attribute__((unused)) IrCheck ir_vector_split_scalar(const IrFunction* function, uint32_t piece_bytes, Arena* output, Arena* scratch, IrVectorSplitResult* result)

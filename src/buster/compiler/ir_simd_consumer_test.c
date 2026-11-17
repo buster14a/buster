@@ -181,7 +181,7 @@ static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* 
                 ir_test_expect(tally, checked.error == IR_OK && inlined.function_count == 1 && inlined.functions[0].instruction_count == function.instruction_count && scratch->length == 0,
                                "the inliner takes masks (#1282)");
                 arena_pop_to(output, 0);
-                ir_test_expect(tally, scalar != 0 ? ir_scan_vector_paths == scans : !BUSTER_HOST_VECTOR || ir_scan_vector_paths > scans,
+                ir_test_expect(tally, scalar != 0 ? ir_scan_vector_paths == scans : ir_scan_vector_paths > scans,
                                "the passes' scans for SIMD values take the requested path: none the vector path on a scalar run");
                 function.symbol_count = 0;
             }

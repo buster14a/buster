@@ -7769,9 +7769,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
     uint8_t* built = 0;
     uint32_t* kids = 0;
     uint32_t* states = 0;
-#if BUSTER_HOST_VECTOR
     uint32_t* words = 0;
-#endif
     if (burs)
     {
         bool ok = tier1_select_initialize();
@@ -7781,14 +7779,11 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
         states = ir_allocate(scratch, count, 4, &ok);
         rules = ir_allocate(scratch, count, 4, &ok);
         built = ir_allocate(scratch, count, 1, &ok);
-#if BUSTER_HOST_VECTOR
         words = BUSTER_VECTOR_PATH(vector) ? ir_allocate(scratch, count, 4, &ok) : 0;
-#endif
         error = ok || error != TIER1_SELECT_OK ? error : TIER1_SELECT_ERROR_MEMORY;
     }
     if (burs && error == TIER1_SELECT_OK)
     {
-#if BUSTER_HOST_VECTOR
         if (vector)
         {
             tier1_burs_classify_vector(&forest, users, words, classes, kids);
@@ -7796,7 +7791,6 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
             tier1_burs_rules_vector(count, classes, states, rules);
         }
         else
-#endif
         {
             tier1_burs_classify_scalar(&forest, users, classes, kids);
             tier1_burs_label_scalar(count, classes, kids, states);

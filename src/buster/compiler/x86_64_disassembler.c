@@ -499,9 +499,6 @@ static uint64_t x86_decode_classify_scalar(const uint8_t* source, uint32_t lengt
 
 static uint64_t x86_decode_classify(const uint8_t* source, uint32_t length)
 {
-#if !BUSTER_HOST_VECTOR
-    return x86_decode_classify_scalar(source, length);
-#else
     // Each nibble selects a set; their intersection identifies exactly the legacy/REX prefix bytes.
     const __m128i low = _mm_setr_epi8(5, 1, 5, 5, 3, 3, 11, 3, 1, 1, 1, 17, 1, 1, 9, 1);
     const __m128i high = _mm_setr_epi8(0, 0, 8, 8, 1, 0, 2, 0, 0, 16, 0, 0, 0, 0, 0, 4);
@@ -510,7 +507,6 @@ static uint64_t x86_decode_classify(const uint8_t* source, uint32_t length)
     const __m512i lo = _mm512_shuffle_epi8(_mm512_broadcast_i32x4(low), _mm512_and_si512(bytes, _mm512_set1_epi8(15)));
     const __m512i hi = _mm512_shuffle_epi8(_mm512_broadcast_i32x4(high), _mm512_and_si512(_mm512_srli_epi16(bytes, 4), _mm512_set1_epi8(15)));
     return _mm512_test_epi8_mask(lo, hi) & active;
-#endif
 }
 
 static __m512i x86_decode_window(const uint8_t* source, uint64_t size, uint32_t offset)
@@ -1209,11 +1205,7 @@ static X86DecodeResult x86_disassemble_batched(const uint8_t* source, uint64_t s
 
 static X86DecodeResult x86_disassemble(const uint8_t* source, uint64_t size, X86Decoded* output, uint64_t capacity)
 {
-#if !BUSTER_HOST_VECTOR
-    return x86_disassemble_scalar(source, size, output, capacity);
-#else
     return x86_disassemble_batched(source, size, output, capacity);
-#endif
 }
 
 typedef struct X86DisassemblyText X86DisassemblyText;

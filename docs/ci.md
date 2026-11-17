@@ -93,7 +93,7 @@ feature set. The vector row draws runners until one whose CPU qualifies runs
 each of its items (see "The vector row"), with no emulation.
 Required native vector coverage of the measured `znver5` build comes from the real Ryzen 7 9700X, after
 both hosted variants pass on the same triggering revision. The hardware job
-asserts `BUSTER_HOST_VECTOR=1`, builds with `BUSTER_HOST_ARCH=znver5` and runs
+asserts that `host_isa.h` takes its target, builds with `BUSTER_HOST_ARCH=znver5` and runs
 the complete suite before any benchmarks. A pull request never runs it (#2055,
 the owner's choice on 2026-11-10, after #1272 had dropped its native suite on
 2026-11-04): its hosted rows qualify it, and native correctness and
@@ -378,7 +378,8 @@ function and compare byte for byte:
   PATH and every setting, which `./build.sh configure` writes;
 - `print-compile-flags`, `print-sanitizer-flags` and `print-sources`;
 - the target's flags (`print-host-flags`) and its predefined macros with
-  `host_isa.h` (`BUSTER_HOST_VECTOR` 1);
+  `host_isa.h`, which must take them (it refuses a target without every
+  AVX-512 feature it names, #2924);
 - for the vector target, the row's probe's answers on the runner, every
   feature `yes`;
 - `ldd`'s resolution of each executable.
@@ -509,8 +510,8 @@ on the pull requests whose paths their workflows list, which include
 **The target.** `BUSTER_HOST_ARCH=vector` builds `-march=x86-64-v4 -maes
 -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg
 -mavx512vnni`, exactly `host_isa.h`'s predicate, never `native` or `znver5`;
-configuring fails unless it selects `BUSTER_HOST_VECTOR=1`
-(`cmake/BusterSettings.cmake`). `./build.sh print-host-flags` prints the host
+configuring fails for a target `host_isa.h` refuses
+(`cmake/BusterSettings.cmake`; since #2924, every target without its features). `./build.sh print-host-flags` prints the host
 target, which the inventory's commands that compile for the build's host
 (`tools/ci/correctness.tests`) and the row's predefines and parser smoke test
 pass to clang and to the compiler, for every row. The row tests the vector
@@ -624,8 +625,8 @@ out of date: a check there failed in #2033's first full run). An
 explicit target is shared only where it runs: `hosted-product.sh` packs or
 installs a vector product only where the row's probe (`BUSTER_VECTOR_PROBE`),
 run again, passes, and the identity holds the target's flags
-(`./build.sh print-host-flags`), `BUSTER_HOST_VECTOR 1` and the probe's
-answers, every feature `yes`. An item fails, never builds, when no candidate
+(`./build.sh print-host-flags`), `host_isa.h`'s macros with them and the
+probe's answers, every feature `yes`. An item fails, never builds, when no candidate
 can hold item 1 any more (the last draw assigned it to none), when item 1's
 holder ended without publishing, when its attempt has two products, or after
 90 minutes. Products stay in their run, as the portable rows' do: no cache,
@@ -720,12 +721,12 @@ runner-minutes and costs each waiting item about half a minute, against four
 builds that each test their own binary.
 
 **Evidence and verdict.** Before its suite, an item's candidate confirms that
-the build's target selects `BUSTER_HOST_VECTOR=1` and runs `benchmark-lexer`
-on `x86_64_encoder.c`, which a scalar build refuses: the vector lexer lexes
+`host_isa.h` takes the build's target and runs `benchmark-lexer` on
+`x86_64_encoder.c`: the vector lexer lexes
 all 592 KB on this CPU, no part needing the scalar lexer, and the tokens must
 match the scalar twin's. Once every step passed, it uploads its evidence
 (`-evidence-ITEM`): the probe's verdict and CPU, its decision, the target,
-`BUSTER_HOST_VECTOR=1`, the kernels' run, its item and configuration, the
+`host-vector 1` (`host_isa.h` took it), the kernels' run, its item and configuration, the
 product it built (item 1) or installed, with its SHA-256, and the suite's pass.
 The `verdict` job (`vector-draw.sh verdict`) requires exactly one passing
 qualified execution of each item by the candidate its assignment names, item 1

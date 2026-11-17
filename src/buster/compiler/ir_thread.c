@@ -100,7 +100,6 @@ static uint64_t ir_thread_candidates(const uint8_t* operations, uint32_t count, 
     uint64_t candidates = 0;
     if (count != 0 && count <= BUSTER_IR_THREAD_BATCH)
     {
-#if BUSTER_HOST_VECTOR
         if (!scalar)
         {
             const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_THREAD_BATCH - count);
@@ -108,7 +107,6 @@ static uint64_t ir_thread_candidates(const uint8_t* operations, uint32_t count, 
             candidates = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_CBR));
         }
         else
-#endif
         {
             for (uint32_t lane = 0; lane < count; lane += 1)
             {
@@ -246,7 +244,6 @@ static void ir_thread_escapes_scalar(IrThreadWork* work)
     }
 }
 
-#if BUSTER_HOST_VECTOR
 // The escapes of 16 instructions at a time (#2554's measured cost: this scan was a third of the pass on speedtest1):
 // each one's value mask is its opcode's operand bits, the optional ones where present (ir_value_mask's), by two 128-byte
 // tables' lookups; each used operand's block is gathered, then whether that block is a candidate's, and a candidate's
@@ -299,18 +296,15 @@ static void ir_thread_escapes_vector(IrThreadWork* work)
         }
     }
 }
-#endif
 
 // Each candidate block's values that are used where threading couldn't follow them, by the vector scan or its twin.
 static void ir_thread_escapes(IrThreadWork* work, bool scalar)
 {
-#if BUSTER_HOST_VECTOR
     if (!scalar)
     {
         ir_thread_escapes_vector(work);
     }
     else
-#endif
     {
         ir_thread_escapes_scalar(work);
     }

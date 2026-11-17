@@ -16,16 +16,16 @@ draws and qualification rules are in [CI](ci.md#the-vector-row).
 | Merge-queue candidate and full daily/dispatched runs | `vector`, plain, ASan/UBSan, TSan and MSan | `native` plain; frontend and ELF libFuzzer campaigns and a crash/replay proof |
 | Plain-scope nightly runs | No guaranteed vector row | `native` plain |
 
-The `x86-64` rows, which built the scalar host's compiler (`BUSTER_HOST_VECTOR=0`),
-are gone (#2924, the owner's decision on 2026-11-17): the scalar paths are being
-removed.
+The `x86-64` rows, which built the scalar host's compiler, are gone (#2924, the
+owner's decision on 2026-11-17), and so is the scalar host: `host_isa.h` refuses a
+target without every AVX-512 feature it names.
 
 The table describes runs that execute hosted tests; a nightly dispatch may
 reuse qualifying earlier plain-row evidence. The selector may exempt a pull
 request with no relevant code changes. A failed, cancelled, skipped or
 incomplete row is not a passing execution. Each `vector` compiler is built for x86-64-v4 plus the
-additional features in [`host_isa.h`](../src/buster/compiler/host_isa.h), and
-must select `BUSTER_HOST_VECTOR=1`. A candidate's CPU and OS must pass the
+additional features in [`host_isa.h`](../src/buster/compiler/host_isa.h), which
+must take them. A candidate's CPU and OS must pass the
 feature probe before it receives an item; no vector emulation is used. The
 four vector shards of a configuration share one verified compiler product.
 The `native` row draws qualifying CPUs too (#2924) and each of its items builds

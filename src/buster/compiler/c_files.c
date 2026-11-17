@@ -707,9 +707,6 @@ static void files_remap_scalar(PPFileData* data, const IdentId* shared);
 
 static void files_remap(PPFileData* data, const IdentId* shared)
 {
-#if !BUSTER_HOST_VECTOR
-    files_remap_scalar(data, shared);
-#else
     for (uint32_t i = 0; i < data->token_count; i += 64)
     {
         const __mmask64 valid = _bzhi_u64(~0ull, data->token_count - i < 64 ? data->token_count - i : 64);
@@ -726,7 +723,6 @@ static void files_remap(PPFileData* data, const IdentId* shared)
         }
     }
     data->guard = data->guard >= C_NAME_COUNT ? shared[data->guard] : data->guard;
-#endif
 }
 
 static void files_remap_scalar(PPFileData* data, const IdentId* shared)

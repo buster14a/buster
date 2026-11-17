@@ -174,7 +174,6 @@ static uint32_t ir_truth_simplify_rules(IrFunction* function, bool scalar, bool 
     {
         const uint32_t lanes = count - first < BUSTER_IR_TRUTH_BATCH ? count - first : BUSTER_IR_TRUTH_BATCH;
         uint64_t candidates = 0;
-#if BUSTER_HOST_VECTOR
         if (!scalar)
         {
             const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_TRUTH_BATCH - lanes);
@@ -183,7 +182,6 @@ static uint32_t ir_truth_simplify_rules(IrFunction* function, bool scalar, bool 
             candidates = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_ICMP)) & _mm512_cmpeq_epi8_mask(type, _mm512_set1_epi8(IR_I1));
         }
         else
-#endif
         {
             for (uint32_t lane = 0; lane < lanes; lane += 1)
             {

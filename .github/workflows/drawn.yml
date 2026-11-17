@@ -122,7 +122,7 @@ jobs:
           settings=()
           case "$BUSTER_DRAW_ROW" in
               bootstrap)
-                  settings=(BUSTER_HOST_ARCH=native BUSTER_DEBUG_INFO=0 BUSTER_SANITIZER=none BUSTER_FUZZ_AVAILABLE=0 BUSTER_FUZZ_ENTRY= BUSTER_BUILD_DEFINES= BUSTER_HOST_RUNTIME=)
+                  settings=(BUSTER_HOST_ARCH=native BUSTER_DEBUG_INFO=0 BUSTER_SANITIZER=none BUSTER_FUZZ_AVAILABLE=0 BUSTER_FUZZ_ENTRY= BUSTER_BUILD_DEFINES=)
                   ;;
               fuzz)
                   entries=(frontend elf-override crash-replay-proof)
@@ -166,7 +166,7 @@ jobs:
           TMPDIR="$RUNNER_TEMP" "$RUNNER_TEMP/build-regression"
 
       # --- The self-host bootstrap (selfhost.yml) ---
-      # The drawn CPU has the complete host vector path; the official Clang's must select it (no bootstrap is skipped).
+      # The drawn CPU has every feature of the host's; host_isa.h must take the official Clang's native target.
       - name: Record the host and verify the staged official Clang's host path
         if: env.BUSTER_SHARD != '' && inputs.row == 'bootstrap'
         run: |
@@ -186,9 +186,9 @@ jobs:
               printf 'official_toolchain:\n'
               "$llvm_root/bin/clang" --version
           } > "$artifacts/metadata.txt"
-          defines=$("$llvm_root/bin/clang" -march="$BUSTER_HOST_ARCH" -Isrc -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null)
-          if ! grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$defines"; then
-              printf '%s\n' '::error::The staged official Clang does not select the complete host vector path on the CPU the draw qualified.'
+          # The host is AVX-512 alone (#2924): host_isa.h refuses a target without every feature its predicate names.
+          if ! "$llvm_root/bin/clang" -march="$BUSTER_HOST_ARCH" -Isrc -E -include src/buster/compiler/host_isa.h -x c /dev/null -o /dev/null; then
+              printf '%s\n' '::error::host_isa.h refuses the staged official Clang'"'"'s native target on the CPU the draw qualified.'
               exit 1
           fi
           printf 'host_path=vector\n' >> "$artifacts/metadata.txt"

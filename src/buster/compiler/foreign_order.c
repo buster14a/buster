@@ -26,7 +26,6 @@ static __m512i foreign_order_digits(const uint64_t* keys, uint32_t count, uint32
 static __attribute__((unused)) __m512i foreign_order_values(const uint64_t* keys, uint32_t count, const uint32_t* values)
 {
     __m512i result;
-#if BUSTER_HOST_VECTOR
     const __mmask16 mask = (__mmask16)_bzhi_u32(0xffff, count);
     const __m512i ids = foreign_order_digits(keys, count, 0);
     const __m512i half = _mm512_set1_epi32(INT32_MAX);
@@ -37,14 +36,6 @@ static __attribute__((unused)) __m512i foreign_order_values(const uint64_t* keys
     {
         result = _mm512_mask_i32gather_epi32(result, upper, offsets, values + (1ull << 31), 4);
     }
-#else
-    uint32_t rows[16] = { 0 };
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        rows[i] = values[(uint32_t)keys[i]];
-    }
-    result = _mm512_loadu_si512(rows);
-#endif
     return result;
 }
 

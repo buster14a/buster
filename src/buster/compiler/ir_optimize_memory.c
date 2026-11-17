@@ -233,7 +233,6 @@ static void ir_memory_classify_scalar(IrMemoryWork* m)
     }
 }
 
-#if BUSTER_HOST_VECTOR
 // The vector classification, 16 instructions at a time: the kinds by a 128-byte table's lookup, refined by masks, and
 // the follow operands by gathers of the operands' info words.
 static void ir_memory_classify_vector(IrMemoryWork* m)
@@ -293,7 +292,6 @@ static void ir_memory_classify_vector(IrMemoryWork* m)
         _mm512_mask_storeu_epi32(m->follow + first, valid, follow);
     }
 }
-#endif
 
 // The slot each reachable value's follow chain starts at: in reverse postorder, each one's followed operand first (it
 // dominates the value). Scalar twin.
@@ -314,7 +312,6 @@ static void ir_memory_derive_scalar(IrMemoryWork* m)
     }
 }
 
-#if BUSTER_HOST_VECTOR
 // The vector derivation: pointer jumping along the reachable values' follow operands until no jump moves (a reachable
 // value's operand is reachable and dominates it, so no chain is a cycle), then each chain's start's slot.
 static bool ir_memory_derive_vector(IrMemoryWork* m, Arena* scratch)
@@ -361,7 +358,6 @@ static bool ir_memory_derive_vector(IrMemoryWork* m, Arena* scratch)
     }
     return ok;
 }
-#endif
 
 // Whether instruction i keeps a slot's address at operand `position` (0 to 2: a, b, c) private: a plain load's or
 // store's address, or the operand its own address is read through.
@@ -404,7 +400,6 @@ static void ir_memory_escapes_scalar(IrMemoryWork* m)
     }
 }
 
-#if BUSTER_HOST_VECTOR
 // The vector escapes: the derived values found 16 at a time, by a mask of their slots.
 static void ir_memory_escapes_vector(IrMemoryWork* m)
 {
@@ -421,7 +416,6 @@ static void ir_memory_escapes_vector(IrMemoryWork* m)
         }
     }
 }
-#endif
 
 // An event's undo records in the walk: three for a store (its class's and family's counts and its key's entry), one for
 // any other.
@@ -466,7 +460,6 @@ static void ir_memory_events_scalar(IrMemoryWork* m)
     }
 }
 
-#if BUSTER_HOST_VECTOR
 // The vector events: 16 instructions at a time, a volatile slot's accesses made writes by masks, the events' and the
 // accesses' indices compressed into their lists; the slots' addresses, few, set one by one.
 static void ir_memory_events_vector(IrMemoryWork* m)
@@ -510,7 +503,6 @@ static void ir_memory_events_vector(IrMemoryWork* m)
         }
     }
 }
-#endif
 
 // One step of an address toward its root, from its current value (state->root): through a conversion, an IR_ADDRESS
 // (its displacement and its constant index's product into the offset, or its index as the address's first), or an
@@ -617,7 +609,6 @@ static void ir_memory_hash_scalar(IrMemoryWork* m, bool keys)
     }
 }
 
-#if BUSTER_HOST_VECTOR
 static __m512i ir_memory_mix8(__m512i hash, __m512i value)
 {
     return _mm512_mullo_epi64(_mm512_xor_si512(hash, value), _mm512_set1_epi64((long long)BUSTER_IR_MEMORY_HASH_MULTIPLIER));
@@ -660,7 +651,6 @@ static void ir_memory_hash_vector(IrMemoryWork* m, bool keys)
         _mm512_mask_storeu_epi64(m->hashes + first, lanes, hash);
     }
 }
-#endif
 
 // The accesses' families (keys false) or keys (true), numbered in access order by their hashes' open-addressed table
 // (`heads`, of `buckets`, a power of two), comparing whole keys. Returns the number made.
@@ -1056,8 +1046,6 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, bool reques
     // AVX-512's gather indices are signed dwords, and the constants' and addresses' gathers double theirs: larger value
     // spaces take the scalar twin.
     const bool scalar = !BUSTER_VECTOR_PATH(!requested_scalar) || n >= (UINT32_C(1) << 30) || f->address_count >= (UINT32_C(1) << 30);
-    // A host without the vector phases (BUSTER_HOST_VECTOR 0) reads it nowhere.
-    (void)scalar;
     IrMemoryWork m = { .ir = work, .undo_bound = (uint64_t)f->block_count * 2 };
     m.info = ir_memory_push(scratch, n, sizeof(uint32_t), &ok);
     m.follow = ir_memory_push(scratch, n, sizeof(uint32_t), &ok);
@@ -1079,7 +1067,6 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, bool reques
     }
     if (ok)
     {
-#if BUSTER_HOST_VECTOR
         if (!scalar)
         {
             ir_memory_classify_vector(&m);
@@ -1088,7 +1075,6 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, bool reques
             ir_memory_events_vector(&m);
         }
         else
-#endif
         {
             ir_memory_classify_scalar(&m);
             ir_memory_derive_scalar(&m);
@@ -1149,13 +1135,11 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, bool reques
         }
         for (uint32_t pass = 0; pass < 2; pass += 1)
         {
-#if BUSTER_HOST_VECTOR
             if (!scalar)
             {
                 ir_memory_hash_vector(&m, pass != 0);
             }
             else
-#endif
             {
                 ir_memory_hash_scalar(&m, pass != 0);
             }

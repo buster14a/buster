@@ -855,7 +855,7 @@ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* 
                 {
                     const bool kept = output.registers[2] == output.registers[0] && output.registers[3] == output.registers[1];
                     // Both production paths swap them without hints; the independent scan, lowest free first, keeps
-                    // them anyway. The fixture distinguishes assignment policies even on a baseline host (#1395).
+                    // them anyway. The fixture distinguishes assignment policies (#1395).
                     const bool swapped = output.registers[2] == output.registers[1] && output.registers[3] == output.registers[0];
                     tier1_allocation_test_expect(tally, hinted != 0 ? kept : (path < 2 ? swapped : kept), hinted != 0 ? "a hinted range keeps its value's register" : "the level rule alone gives the ranges each other's registers");
                 }

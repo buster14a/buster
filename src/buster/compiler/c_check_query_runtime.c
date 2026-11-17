@@ -196,9 +196,6 @@ static bool check_query_scalar_conversion_exact(const TypeTable* types, const Ch
 
 static bool check_query_conversion_exact(const TypeTable* types, const CheckValue* before, const CheckValue* after)
 {
-#if !BUSTER_HOST_VECTOR
-    return check_query_scalar_conversion_exact(types, before, after);
-#else
     const bool complex_target = check_action_kind(types, after->type) == BUSTER_TYPE_KIND_COMPLEX;
     const bool complex_source = check_action_kind(types, before->type) == BUSTER_TYPE_KIND_COMPLEX;
     const CheckValue real_before = complex_source ? check_complex_component(types, before, false) : *before;
@@ -211,7 +208,6 @@ static bool check_query_conversion_exact(const TypeTable* types, const CheckValu
         exact &= check_query_scalar_conversion_exact(types, &imaginary_before, &imaginary_after);
     }
     return exact;
-#endif
 }
 
 typedef struct CheckQueryProof CheckQueryProof;

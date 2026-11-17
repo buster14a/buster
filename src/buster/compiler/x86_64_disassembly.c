@@ -202,15 +202,6 @@ static char* x86_disassembly_write_signed(char* output, int64_t value, bool plus
 
 static char* x86_disassembly_write_hex(char* output, uint64_t value)
 {
-#if !BUSTER_HOST_VECTOR
-    static const char hex[] = "0123456789abcdef";
-    const uint32_t first = (uint32_t)__builtin_clzll(value | 1) / 4;
-    for (uint32_t i = first; i < 16; i += 1)
-    {
-        output[i - first] = hex[(value >> ((15 - i) * 4)) & 15];
-    }
-    return output + 16 - first;
-#else
     // Convert all sixteen nibbles together. VPSHUFB XMM's measured Zen 5 register latency is two cycles; using
     // a 128-bit register avoids wide temporaries for this single immediate and needs no gather or compress.
     const __m128i reverse = _mm_setr_epi8(7, 6, 5, 4, 3, 2, 1, 0, 7, 6, 5, 4, 3, 2, 1, 0);
@@ -223,7 +214,6 @@ static char* x86_disassembly_write_hex(char* output, uint64_t value)
     const uint32_t length = 16 - first;
     _mm_mask_storeu_epi8(output, (uint16_t)((1u << length) - 1), _mm_shuffle_epi8(digits, positions));
     return output + length;
-#endif
 }
 
 static char* x86_disassembly_write_memory(char* output, const X86Decoded* decoded, const X86DisassemblyPlan* plan)

@@ -4094,7 +4094,7 @@ static bool pp_test_scalar_reference(const char* directory)
         result = stream != 0 && intern_initialize(&tables[k]) && pp_initialize(pp, &options, &tables[k]);
         if (result)
         {
-            const bool vectorized = BUSTER_HOST_VECTOR && !options.scalar;
+            const bool vectorized = !options.scalar;
             result = pp_prepare_options(&options).vectorized == vectorized && pp->vectorized == vectorized &&
                      pp->cache->prepare.vectorized == vectorized;
             if (!result)
@@ -5659,7 +5659,7 @@ static bool pp_test_raw_recovery_failures(void)
 // #595's review: an argument expanded in place (pp_expand_argument_in_place) that runs out of room, as the history records
 // it, ends the run before anything is substituted from it. X's body is 1,100 tokens, past the 1,024 origins a stack
 // starts with, so expanding F(X)'s argument grows its origins first. The direct path expands in pp->arguments; the
-// capture path — the scalar request, or every run on a scalar host — first captures the expansion. Limit the buffer
+// capture path — the scalar request — first captures the expansion. Limit the buffer
 // each path actually fills: each fault must give one
 // fatal error and no output token. The control, with nothing taken away, gives F's whole expansion in both modes.
 static bool pp_test_direct_argument_failures(void)

@@ -963,12 +963,8 @@ static CBuiltinLowerResult cbuiltin_misc_lower_scalar(CBuiltinLowerBuffer* buffe
 
 static CBuiltinLowerResult cbuiltin_misc_lower(CBuiltinLowerBuffer* buffer, const CBuiltinMiscLowerCall* call)
 {
-#if !BUSTER_HOST_VECTOR
-    return cbuiltin_misc_lower_scalar(buffer, call);
-#else
     const CBuiltinLowerResult result = cbuiltin_misc_append(buffer, call, true);
     return result;
-#endif
 }
 
 static CBuiltinLowerResult cbuiltin_misc_lower_scalar(CBuiltinLowerBuffer* buffer, const CBuiltinMiscLowerCall* call)

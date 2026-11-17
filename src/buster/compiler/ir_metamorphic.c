@@ -264,7 +264,6 @@ static void ir_meta_remap_column(uint32_t* column, const uint8_t* masks, uint32_
     }
     else
     {
-#if BUSTER_HOST_VECTOR
         for (uint32_t first = 0; first < count; first += 16)
         {
             const uint32_t lanes = count - first < 16 ? count - first : 16;
@@ -276,7 +275,6 @@ static void ir_meta_remap_column(uint32_t* column, const uint8_t* masks, uint32_
             const __m512i values = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), selected, indices, map, 4);
             _mm512_mask_storeu_epi32(column + first, selected, values);
         }
-#endif
     }
 }
 

@@ -3,7 +3,7 @@
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 #
 # The hosted jobs' external inputs besides the release inputs (#2275; docs/hosted-toolchain.md, "Offline inputs"): the
-# apt packages setup-hosted.sh installs, the baseline runtime's .debs (setup-baseline-runtime.sh), the frozen corpus
+# apt packages setup-hosted.sh installs, the frozen corpus
 # (fetch-corpus.sh), c-testsuite's and SQLite's pinned commits (fetch-c-testsuite.sh, fetch-sqlite.sh), and Lua's release
 # archive (this script's lua command). The
 # preparation job acquires them once per run into a bundle, ROOT, which every hosted job then reads with no network:
@@ -42,8 +42,8 @@ format='buster-hosted-apt 1'
 # image's: its cache key names the image.
 packages=(gcc g++ binutils libc6-dev gdb tcc zstd linux-perf qemu-user valgrind libzstd-dev libxml2-dev zlib1g-dev tcl8.6-dev)
 # The inputs under ROOT/ci, each acquired and checked by its own script, and the scripts whose contents pin them.
-ci_inputs=(baseline corpus c-testsuite sqlite lua)
-ci_scripts=(setup-baseline-runtime.sh fetch-corpus.sh fetch-c-testsuite.sh fetch-sqlite.sh cached-download.sh hosted-offline.sh)
+ci_inputs=(corpus c-testsuite sqlite lua)
+ci_scripts=(fetch-corpus.sh fetch-c-testsuite.sh fetch-sqlite.sh cached-download.sh hosted-offline.sh)
 # The pause before a failed acquisition's next attempt, times the attempt's number: 20 and 40 s. The fixtures set it
 # to 0.
 retry_seconds=${BUSTER_HOSTED_RETRY_SECONDS:-20}
@@ -167,7 +167,7 @@ check_apt()
 # attempts, each apt host that doesn't resolve here is pinned in /etc/hosts to an address a DNS-over-HTTPS resolver
 # gives it (Cloudflare's, else Google's), as setup-hosted.sh did before it stopped using the network. This brings in
 # nothing unverified: apt checks the archive's signed Release files and every package's hash, and the downloads here
-# keep their SHA-256 pins (setup-baseline-runtime.sh's come from snapshot.ubuntu.com, the archive's snapshots).
+# keep their SHA-256 pins.
 apt_hosts()
 {
     local file
@@ -324,8 +324,6 @@ run_ci_input()
 {
     local name=$1 offline=$2 cache=$3 scratch=$4
     case "$name" in
-        baseline)
-            RUNNER_TEMP=$scratch GITHUB_ENV='' BUSTER_CI_CACHE=$cache BUSTER_CI_OFFLINE=$offline bash "$here/setup-baseline-runtime.sh" ;;
         corpus)
             BUSTER_CI_CACHE=$cache BUSTER_CI_OFFLINE=$offline bash "$here/fetch-corpus.sh" "$scratch/corpus" ;;
         c-testsuite)

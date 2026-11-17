@@ -131,10 +131,10 @@ static bool ir_dataflow_benchmark_function(const IrFunction* function, const cha
         }
         const double median = tier0_benchmark_median(cycles);
         const uint64_t block_iterations = (uint64_t)function->block_count * iterations[variant & 1];
-        printf("ir-dataflow-benchmark: file=%s function=%s form=%s operation=%s path=%s vector_host=%u blocks=%u instructions=%u dense=%u phi_uses=%u"
+        printf("ir-dataflow-benchmark: file=%s function=%s form=%s operation=%s path=%s blocks=%u instructions=%u dense=%u phi_uses=%u"
                " row_words=%" PRIu64 " matrix_bytes=%" PRIu64 " retained_bytes=%" PRIu64 " iterations=%" PRIu64
                " cycles_per_function=%.3f cycles_per_block_iteration=%.3f ns_per_function=%.3f\n",
-               file, name, form, operation, path, BUSTER_HOST_VECTOR, function->block_count, function->instruction_count, prepared[0].flow.value_count,
+               file, name, form, operation, path, function->block_count, function->instruction_count, prepared[0].flow.value_count,
                prepared[0].phi_use_count, prepared[0].flow.row_words, (uint64_t)function->block_count * prepared[0].flow.row_words * 32,
                prepared[0].arena_bytes, iterations[variant & 1], median, block_iterations != 0 ? median / (double)block_iterations : 0.0,
                tier0_benchmark_median(nanoseconds));

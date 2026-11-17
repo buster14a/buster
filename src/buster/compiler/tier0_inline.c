@@ -511,7 +511,6 @@ static bool tier0_inline_plan(const Tier0InlineInput* input, bool vector, Arena*
     uint32_t candidates = 0;
     uint32_t* calls = BUSTER_TIER0_INLINE_PUSH(arena, uint32_t, count);
     bool valid = calls != 0 && input->row_callees != 0 && caller->call_count != 0;
-#if BUSTER_HOST_VECTOR
     if (valid && vector)
     {
         const __m512i call = _mm512_set1_epi8(BUSTER_TYPED_CALL);
@@ -531,8 +530,7 @@ static bool tier0_inline_plan(const Tier0InlineInput* input, bool vector, Arena*
             }
         }
     }
-#endif
-    for (uint32_t e = 0; valid && !(BUSTER_HOST_VECTOR && vector) && e < count; e += 1)
+    for (uint32_t e = 0; valid && !vector && e < count; e += 1)
     {
         const uint64_t row = caller->values[e];
         calls[candidates] = e;
@@ -735,7 +733,6 @@ static bool tier0_inline_plan(const Tier0InlineInput* input, bool vector, Arena*
     plan->positions = valid ? BUSTER_TIER0_INLINE_PUSH(arena, uint32_t, plan->insertion_count) : 0;
     valid = valid && plan->positions != 0;
     uint32_t sum = 0;
-#if BUSTER_HOST_VECTOR
     if (valid && vector)
     {
         const __m512i iota = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
@@ -760,8 +757,7 @@ static bool tier0_inline_plan(const Tier0InlineInput* input, bool vector, Arena*
             _mm512_mask_storeu_epi32(plan->starts + e, lanes, starts);
         }
     }
-#endif
-    for (uint32_t e = 0; valid && !(BUSTER_HOST_VECTOR && vector) && e <= count; e += 1)
+    for (uint32_t e = 0; valid && !vector && e <= count; e += 1)
     {
         plan->positions[plan->position_count] = e;
         plan->position_count += plan->heads[e] != 0 ? 1u : 0u;
@@ -1214,7 +1210,6 @@ static uint32_t tier0_inline_body_scalar(const Tier0Function* callee, const Tier
     return at;
 }
 
-#if BUSTER_HOST_VECTOR
 // The caller's entries [from, to) at G's `at` (the vector path): 64 kinds and classes at a time, and their values 8 at
 // a time, the branches' targets remapped lane by lane (a stream's branches are a small share of it); returns G's entry
 // after them. Every load and store is masked to the segment.
@@ -1296,7 +1291,6 @@ static uint32_t tier0_inline_body_vector(const Tier0Function* callee, const Tier
     }
     return at;
 }
-#endif
 
 // G's entries from the plan, by `vector`'s path or its twin's: each position's segment of the caller and its
 // insertions. Returns G's count.
@@ -1308,11 +1302,7 @@ static uint32_t tier0_inline_entries(const Tier0InlineInput* input, const Tier0I
     for (uint32_t p = 0; p < plan->position_count; p += 1)
     {
         const uint32_t position = plan->positions[p];
-#if BUSTER_HOST_VECTOR
         at = vector ? tier0_inline_segment_vector(caller, plan, cursor, position, g, at) : tier0_inline_segment_scalar(caller, plan, cursor, position, g, at);
-#else
-        at = tier0_inline_segment_scalar(caller, plan, cursor, position, g, at);
-#endif
         cursor = position;
         for (uint32_t i = plan->heads[position]; i != 0; i = plan->insertions[i - 1].next)
         {
@@ -1333,21 +1323,13 @@ static uint32_t tier0_inline_entries(const Tier0InlineInput* input, const Tier0I
                     tier0_inline_put(g, at + 1, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, site->local_base);
                     at += 2;
                 }
-#if BUSTER_HOST_VECTOR
                 at = vector ? tier0_inline_body_vector(callee, plan, site, g, at) : tier0_inline_body_scalar(callee, plan, site, g, at);
-#else
-                at = tier0_inline_body_scalar(callee, plan, site, g, at);
-#endif
                 at = tier0_inline_result(caller, callee, plan, site, g, at);
                 cursor = position + 1;
             }
         }
     }
-#if BUSTER_HOST_VECTOR
     at = vector ? tier0_inline_segment_vector(caller, plan, cursor, caller->count, g, at) : tier0_inline_segment_scalar(caller, plan, cursor, caller->count, g, at);
-#else
-    at = tier0_inline_segment_scalar(caller, plan, cursor, caller->count, g, at);
-#endif
     return at;
 }
 
@@ -1550,7 +1532,7 @@ static bool tier0_inline_path(const Tier0InlineInput* input, bool vector, Arena*
 // The splice (the vector path, or the scalar one on a host without AVX-512).
 static bool tier0_inline(const Tier0InlineInput* input, Arena* arena, Tier0Inlined* result)
 {
-    return tier0_inline_path(input, BUSTER_HOST_VECTOR != 0, arena, result);
+    return tier0_inline_path(input, true, arena, result);
 }
 
 // The splice's scalar twin, the tests' oracle.

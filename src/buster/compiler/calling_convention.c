@@ -3170,14 +3170,10 @@ static void abi_classify_scalar(AbiTable* abi, const TypeTable* table, const Typ
 
 static void abi_classify(AbiTable* abi, const TypeTable* table, const TypeId* types, uint32_t count)
 {
-#if !BUSTER_HOST_VECTOR
-    abi_classify_scalar(abi, table, types, count);
-#else
     if (!abi_classify_vector(abi, table, types, count))
     {
         abi_classify_scalar(abi, table, types, count);
     }
-#endif
 }
 
 // The kind of a type that can be classified (a complete object type, or void), ALIGNED looked through; NONE for another.
@@ -3542,11 +3538,7 @@ static uint32_t abi_classify_all_scalar(AbiTable* abi, const TypeTable* table);
 
 static uint32_t abi_classify_all(AbiTable* abi, const TypeTable* table)
 {
-#if !BUSTER_HOST_VECTOR
-    return abi_classify_all_scalar(abi, table);
-#else
     return abi_classify_levels(abi, table, false);
-#endif
 }
 
 static uint32_t abi_classify_all_scalar(AbiTable* abi, const TypeTable* table)
@@ -3896,9 +3888,6 @@ static __m512i abi_scan_or(__m512i values, AbiScan scan, __m512i carry)
 // scans' inclusive values are its totals, which a last pass over the calls reads.
 static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls)
 {
-#if !BUSTER_HOST_VECTOR
-    abi_assign_scalar(abi, signatures, locations, calls);
-#else
     Scratch scratch = scratch_begin(0);
     uint64_t total = 0;
     for (uint32_t c = 0; c < signatures.count; c += 1)
@@ -4087,7 +4076,6 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
         }
     }
     scratch_end(scratch);
-#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

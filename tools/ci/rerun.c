@@ -5,8 +5,7 @@
 // re-run (rerun-failed-jobs) only when every job that stopped did so in setup, before any test ran, so that green keeps
 // meaning the tests passed. A job stops at its first step that didn't pass: one that failed, or one that was cancelled
 // or left running (the job's timeout, a lost runner, fail-fast). That step must be a setup step of the allowlist below
-// (rerun_steps: GitHub's own "Set up job", the checkouts, the hosted tools, setup-hosted.sh, setup-baseline-runtime.sh
-// and the fetches), or a step that fails only because a setup failure stopped another job (its row's compiler build,
+// (rerun_steps: GitHub's own "Set up job", the checkouts, the hosted tools, setup-hosted.sh and the fetches), or a step that fails only because a setup failure stopped another job (its row's compiler build,
 // its row's draws, the required aggregate's needs). The jobs API reports a job that its timeout stopped exactly as one
 // that fail-fast cancelled, a cancelled job whose step was cancelled; only the job's annotations tell them apart. A job
 // that fail-fast cancelled, by its annotation, stopped nothing of its own, wherever it was. Everything else keeps the
@@ -140,7 +139,7 @@ static const SetupStep rerun_steps[] = {
         // rows' name now.
         .historical = true,
     },
-    // tools/ci/setup-baseline-runtime.sh and the fetches.
+    // The fetches, and the baseline runtime's for the scalar host's emulation, gone with it (#2924).
     {
         .name = "Fetch generic baseline startup objects and runtime for emulation",
         .kind = STEP_SETUP,

@@ -273,9 +273,6 @@ static __attribute__((unused)) uint16_t ir_optimize_fold_scalar(IrOptimizeFoldBa
 
 static __attribute__((unused)) uint16_t ir_optimize_fold_vector(IrOptimizeFoldBatch batch, uint16_t active)
 {
-#if !BUSTER_HOST_VECTOR
-    return ir_optimize_fold_scalar(batch, active);
-#else
     uint16_t folded = 0;
     if (batch.count <= BUSTER_IR_OPTIMIZE_BATCH)
     {
@@ -404,7 +401,6 @@ static __attribute__((unused)) uint16_t ir_optimize_fold_vector(IrOptimizeFoldBa
         }
     }
     return folded;
-#endif
 }
 
 // Up to 64 block ids fit four registers. A masked tail load authorizes only the logical source entries, and every
@@ -1297,7 +1293,6 @@ static const uint8_t ir_optimize_identity_kinds[BUSTER_IR_OP_TABLE] = {
 static uint64_t ir_optimize_identity_candidates(const uint8_t* operations, uint32_t count, bool scalar)
 {
     uint64_t candidates = 0;
-#if BUSTER_HOST_VECTOR
     if (!scalar)
     {
         const __mmask64 valid = count >= 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
@@ -1306,7 +1301,6 @@ static uint64_t ir_optimize_identity_candidates(const uint8_t* operations, uint3
         candidates = _mm512_mask_test_epi8_mask(valid, kinds, kinds);
     }
     else
-#endif
     {
         for (uint32_t lane = 0; lane < count; lane += 1)
         {

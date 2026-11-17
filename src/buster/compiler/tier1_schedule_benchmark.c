@@ -8,7 +8,6 @@
 // states. Timing/perf helpers below are original, with no imported timing harness or third-party cost data.
 
 #include "host_isa.h"
-#if BUSTER_HOST_VECTOR
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -399,11 +398,3 @@ int run_tier1_schedule_benchmark(int argc, char** argv)
     return valid ? 0 : 1;
 }
 
-#else
-int run_tier1_schedule_benchmark(int argc, char** argv)
-{
-    (void)argc;
-    (void)argv;
-    return 1;
-}
-#endif // BUSTER_HOST_VECTOR

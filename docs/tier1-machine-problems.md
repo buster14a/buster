@@ -227,13 +227,14 @@ Run from the repository root. These commands are correctness tests, not
 performance measurements; use the approved shared host lock for target runs.
 
 ```sh
-clang -std=c17 -O2 -g -march=x86-64 -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread -DBUSTER_TP_INTEGRATION tests/tier1-problem/test.c -o /tmp/tier1-problem && /tmp/tier1-problem
+clang -std=c17 -O2 -g -march=native -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread -DBUSTER_TP_INTEGRATION tests/tier1-problem/test.c -o /tmp/tier1-problem && /tmp/tier1-problem
 ```
 
 Without `-DBUSTER_TP_INTEGRATION`, only the standalone codec is tested. With it,
 the test includes the real arena, real `tier1_allocate`, scalar twin and actual
 input validator, never substitute implementations. The focused hosted workflow
-runs both baseline/native builds, ASan/UBSan, and seeded libFuzzer tests. These
+runs the native build on a drawn AVX-512 runner (#2924; the baseline build went
+with the scalar host), ASan/UBSan, and seeded libFuzzer tests. These
 are separate from the repository's required full qualification.
 
 Fixtures cover native/wire round trips, canonical byte identity, all truncated
@@ -260,7 +261,7 @@ The report runs on the seeds. The workflow checks that it accepts the
 straight-line one with both paths certified and refuses the others by reason:
 
 ```sh
-clang -std=c17 -O2 -g -march=x86-64 -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread tests/tier1-problem/report.c -o /tmp/tier1-problem-report && /tmp/tier1-problem-report FILE...
+clang -std=c17 -O2 -g -march=native -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread tests/tier1-problem/report.c -o /tmp/tier1-problem-report && /tmp/tier1-problem-report FILE...
 ```
 
 ## Remaining #938 acceptance

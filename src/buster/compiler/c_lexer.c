@@ -2294,9 +2294,7 @@ BUSTER_INLINE __m512i shift_in_previous(__m512i current, __m512i previous)
 {
     __m512i indices = _mm512_load_si512(shift_in_indices);
 #if !defined(_MSC_VER)
-#if BUSTER_HOST_VECTOR
     __asm__("" : "+v"(indices));
-#endif
 #endif
     return _mm512_permutex2var_epi8(current, indices, previous);
 }
@@ -3687,9 +3685,6 @@ static bool c_tokenize_scalar_only(const uint8_t* source, uint64_t length, uint3
 
 BUSTER_LEXER_ENTRY int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
 {
-#if !BUSTER_HOST_VECTOR
-    return c_tokenize_scalar(source, length, kinds, starts, ends, flags);
-#else
     int64_t result;
     if (length > UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
     {
@@ -3712,7 +3707,6 @@ BUSTER_LEXER_ENTRY int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t
         result = tokenize_with_flags(flags, source, length, begin, kinds, starts, ends, &written, &restart, &scalar_until);
     }
     return result;
-#endif
 }
 
 // The vectorized path from `begin` (the source's start, past a byte order mark, or the start of a line), until a chunk
@@ -3746,9 +3740,6 @@ static int64_t c_tokenize_from(const uint8_t* source, uint64_t length, uint64_t 
 
 BUSTER_LEXER_ENTRY int64_t c_tokenize(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
 {
-#if !BUSTER_HOST_VECTOR
-    return c_tokenize_scalar(source, length, kinds, starts, ends, flags);
-#else
     int64_t result;
     if (length > UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
     {
@@ -3768,21 +3759,10 @@ BUSTER_LEXER_ENTRY int64_t c_tokenize(const uint8_t* source, uint64_t length, ui
         result = c_tokenize_from(source, length, begin, kinds, starts, ends, flags);
     }
     return result;
-#endif
 }
 
 BUSTER_LEXER_ENTRY int64_t c_tokenize_lines(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
 {
-#if !BUSTER_HOST_VECTOR
-    uint64_t resume;
-    int64_t result = C_TOKENIZER_ERROR_FILE_TOO_BIG;
-    if (length <= UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
-    {
-        const bool mark = begin == 0 && length >= 3 && source[0] == 0xEF && source[1] == 0xBB && source[2] == 0xBF;
-        result = begin >= length ? 0 : (int64_t)c_tokenize_scalar_range(source, length, mark ? 3 : begin, true, UINT64_MAX, kinds, starts, ends, 0, flags, &resume);
-    }
-    return result;
-#else
     int64_t result;
     if (length > UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
     {
@@ -3798,5 +3778,4 @@ BUSTER_LEXER_ENTRY int64_t c_tokenize_lines(const uint8_t* source, uint64_t leng
         result = c_tokenize_from(source, length, mark ? 3 : begin, kinds, starts, ends, flags);
     }
     return result;
-#endif
 }

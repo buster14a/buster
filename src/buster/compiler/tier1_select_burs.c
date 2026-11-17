@@ -1002,7 +1002,6 @@ static void tier1_burs_classify_scalar(const Tier1SelectForest* forest, const ui
     }
 }
 
-#if BUSTER_HOST_VECTOR
 // Per IR operation: an ALU operation's index (BUSTER_TIER1_BURS_ADD32 to XOR, 0xff for none), and a shift's operator.
 static uint32_t tier1_burs_alu_index(uint32_t op)
 {
@@ -1273,7 +1272,6 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         }
     }
 }
-#endif
 
 // Each node's state, in node order: every visible child precedes its parent (tier1_burs_visible). This scalar twin of
 // tier1_burs_label_vector uses neither vector kernels nor the vector path's level traversal.
@@ -1299,7 +1297,6 @@ static void tier1_burs_rules_scalar(uint32_t count, const uint32_t* classes, con
     }
 }
 
-#if BUSTER_HOST_VECTOR
 // A 16-bit entry of the pool at each lane's index, by 32-bit gathers (the pool's pad covers the last one's high half).
 static __m512i tier1_burs_gather_pool(__mmask16 active, __m512i index)
 {
@@ -1375,7 +1372,6 @@ static void tier1_burs_rules_vector(uint32_t count, const uint32_t* classes, con
         _mm512_mask_storeu_epi32(rules + first, active, rule);
     }
 }
-#endif
 
 // The candidate of `node` that its rule names (Tier1BursAction): its index in `candidates`, or munch's choice where the
 // rule names none or the walks didn't make the one it names, which *munched says.

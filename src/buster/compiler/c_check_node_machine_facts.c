@@ -1184,29 +1184,14 @@ static inline __attribute__((always_inline)) bool node_facts_leaf(NodeFactsRecor
 {
     const uint64_t* line = view->lines + 4 * (uint64_t)view->inputs[w];
     const bool taken = (uint32_t)(line[3] >> 32) == 0;
-    if (BUSTER_SCALAR_PATH(false))
+    const __m256i half = _mm256_loadu_si256((const __m256i*)(const void*)line);
+    if (taken && lean)
     {
-        if (taken)
-        {
-            memcpy(records + w, line, 4 * sizeof(uint64_t));
-            if (!lean)
-            {
-                node_facts_conversions(records, w, (TypeId)line[0], 0, 0, 0, 0);
-                node_facts_store(records + w, 56, 0);
-            }
-        }
+        _mm256_storeu_si256((__m256i*)(void*)(records + w), half);
     }
-    else
+    else if (taken)
     {
-        const __m256i half = _mm256_loadu_si256((const __m256i*)(const void*)line);
-        if (taken && lean)
-        {
-            _mm256_storeu_si256((__m256i*)(void*)(records + w), half);
-        }
-        else if (taken)
-        {
-            _mm512_storeu_si512(records + w, _mm512_inserti64x4(_mm512_castsi256_si512(half), _mm256_zextsi128_si256(_mm_cvtsi32_si128((int)(uint32_t)line[0])), 1));
-        }
+        _mm512_storeu_si512(records + w, _mm512_inserti64x4(_mm512_castsi256_si512(half), _mm256_zextsi128_si256(_mm_cvtsi32_si128((int)(uint32_t)line[0])), 1));
     }
     return taken;
 }
@@ -2514,42 +2499,26 @@ static inline __attribute__((always_inline)) void node_facts_list(uint32_t* leaf
     uint32_t leaves = 0;
     uint32_t lookups = 0;
     uint32_t present = 0;
-    if (BUSTER_SCALAR_PATH(false))
+    const __m512i step = _mm512_set1_epi32(16);
+    __m512i places = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    __m512i seen = _mm512_setzero_si512();
+    for (uint32_t w = 0; w < count; w += 16)
     {
-        for (uint32_t w = 0; w < count; w += 1)
-        {
-            const uint8_t kind = kinds[w] & 0x03u;
-            leaf_list[leaves] = w;
-            lookup_list[lookups] = w;
-            keys[lookups] = classes[w];
-            present |= kind == 0x03u ? 1u << (classes[w] >> 4) : 0;
-            leaves += kind == 0x02u;
-            lookups += kind == 0x03u;
-        }
+        const uint32_t live = count - w < 16 ? count - w : 16;
+        const __mmask16 mask = (__mmask16)((1u << live) - 1);
+        const __m128i block = _mm_and_si128(_mm_maskz_loadu_epi8(mask, kinds + w), _mm_set1_epi8(0x03));
+        const __mmask16 leaf = _mm_mask_cmpeq_epi8_mask(mask, block, _mm_set1_epi8(0x02));
+        const __mmask16 lookup = _mm_mask_cmpeq_epi8_mask(mask, block, _mm_set1_epi8(0x03));
+        const __m128i own = _mm_maskz_loadu_epi8(lookup, classes + w);
+        _mm512_storeu_si512(leaf_list + leaves, _mm512_maskz_compress_epi32(leaf, places));
+        _mm512_storeu_si512(lookup_list + lookups, _mm512_maskz_compress_epi32(lookup, places));
+        _mm_storeu_si128((__m128i*)(void*)(keys + lookups), _mm_maskz_compress_epi8(lookup, own));
+        seen = _mm512_or_si512(seen, _mm512_maskz_sllv_epi32(lookup, _mm512_set1_epi32(1), _mm512_srli_epi32(_mm512_cvtepu8_epi32(own), 4)));
+        leaves += (uint32_t)__builtin_popcount((uint32_t)leaf);
+        lookups += (uint32_t)__builtin_popcount((uint32_t)lookup);
+        places = _mm512_add_epi32(places, step);
     }
-    else
-    {
-        const __m512i step = _mm512_set1_epi32(16);
-        __m512i places = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-        __m512i seen = _mm512_setzero_si512();
-        for (uint32_t w = 0; w < count; w += 16)
-        {
-            const uint32_t live = count - w < 16 ? count - w : 16;
-            const __mmask16 mask = (__mmask16)((1u << live) - 1);
-            const __m128i block = _mm_and_si128(_mm_maskz_loadu_epi8(mask, kinds + w), _mm_set1_epi8(0x03));
-            const __mmask16 leaf = _mm_mask_cmpeq_epi8_mask(mask, block, _mm_set1_epi8(0x02));
-            const __mmask16 lookup = _mm_mask_cmpeq_epi8_mask(mask, block, _mm_set1_epi8(0x03));
-            const __m128i own = _mm_maskz_loadu_epi8(lookup, classes + w);
-            _mm512_storeu_si512(leaf_list + leaves, _mm512_maskz_compress_epi32(leaf, places));
-            _mm512_storeu_si512(lookup_list + lookups, _mm512_maskz_compress_epi32(lookup, places));
-            _mm_storeu_si128((__m128i*)(void*)(keys + lookups), _mm_maskz_compress_epi8(lookup, own));
-            seen = _mm512_or_si512(seen, _mm512_maskz_sllv_epi32(lookup, _mm512_set1_epi32(1), _mm512_srli_epi32(_mm512_cvtepu8_epi32(own), 4)));
-            leaves += (uint32_t)__builtin_popcount((uint32_t)leaf);
-            lookups += (uint32_t)__builtin_popcount((uint32_t)lookup);
-            places = _mm512_add_epi32(places, step);
-        }
-        present = (uint32_t)_mm512_reduce_or_epi32(seen);
-    }
+    present = (uint32_t)_mm512_reduce_or_epi32(seen);
     *leaf_count = leaves;
     *lookup_count = lookups;
     *rounds = present;

@@ -2912,7 +2912,7 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
 
 static __attribute__((unused)) Tier1CfgError tier1_cfg_allocate(const Tier1CfgInput* input, Arena* output, Arena* scratch, Tier1CfgAllocation* result)
 {
-    return tier1_cfg_allocate_impl(input, output, scratch, BUSTER_HOST_VECTOR, result);
+    return tier1_cfg_allocate_impl(input, output, scratch, true, result);
 }
 
 static __attribute__((unused)) Tier1CfgError tier1_cfg_allocate_scalar(const Tier1CfgInput* input, Arena* output, Arena* scratch, Tier1CfgAllocation* result)

@@ -705,7 +705,7 @@ static void check_test_intrinsic_fill(CheckTest* test)
             {
                 scalar |= (uint32_t)check_input_intrinsic_candidate(&tables[0], first + lane) << lane;
             }
-            lanes = BUSTER_SCALAR_PATH(false) || check_input_intrinsic_candidates(&tables[0], first, mask, written) == scalar;
+            lanes = check_input_intrinsic_candidates(&tables[0], first, mask, written) == scalar;
         }
         check_test_expect(test, lanes, "the 16-lane filter passes exactly the ids its scalar twin passes, short spellings at the records' end included");
         bool exact = ready;

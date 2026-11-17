@@ -573,13 +573,12 @@ jobs:
 
       - name: Require the complete native vector feature set
         run: |
-          defines=$(clang -march="$BUSTER_HOST_ARCH" -Isrc -dM -E \
-            -include src/buster/compiler/host_isa.h -x c /dev/null)
-          if ! grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$defines"; then
-            printf '%s\n' '::error::9700X correctness requires BUSTER_HOST_VECTOR=1; vector coverage cannot be qualified by scalar kernels.'
+          # host_isa.h refuses a target without every feature its predicate names (#2924).
+          if ! clang -march="$BUSTER_HOST_ARCH" -Isrc -E -include src/buster/compiler/host_isa.h -x c /dev/null -o /dev/null; then
+            printf '%s\n' '::error::host_isa.h refuses the 9700X'"'"'s target; its correctness can'"'"'t be qualified.'
             exit 1
           fi
-          printf 'Selected host path: vector (%s)\n' "$BUSTER_HOST_ARCH"
+          printf 'Host target: %s\n' "$BUSTER_HOST_ARCH"
 
       - name: Build the external Clang pragma oracle and the Zen 5 executable
         id: compiler_builds
@@ -767,8 +766,9 @@ jobs:
                   cp src/buster/compiler/branch_sizing_benchmark.c src/buster/compiler/branch_sizing_generate.c \
                       "$ab_dir/$side/src/buster/compiler/"
                   # The shared harness includes the host-ISA adapter and the encoder's baked-table header. Keep each
-                  # revision's headers when present; a base predating one uses the current header on this host.
-                  for header in host_isa.h host_scalar.h host_scalar_vectors.h baked.h; do
+                  # revision's headers when present; a base predating one uses the current header on this host. With
+                  # the 9700X's flags a base's host_isa.h before #2924 never reaches its scalar headers.
+                  for header in host_isa.h baked.h; do
                       dest="$ab_dir/$side/src/buster/compiler/$header"
                       if [[ "$side" == before ]] && git cat-file -e "${AB_BASE_SHA}:src/buster/compiler/$header" 2>/dev/null; then
                           git show "${AB_BASE_SHA}:src/buster/compiler/$header" > "$dest"
@@ -799,9 +799,8 @@ jobs:
               for side in before after; do
                   tree="$ab_dir/$side/src"
                   sha256sum "$tree"/buster/compiler/*.[ch]
-                  host_defines=$(clang "${flags[@]}" -I "$tree" -dM -E \
-                      -include "$tree/buster/compiler/host_isa.h" -x c /dev/null)
-                  grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$host_defines"
+                  # Each side's host_isa.h takes the flags: the vector paths, before #2924 and since.
+                  clang "${flags[@]}" -I "$tree" -E -include "$tree/buster/compiler/host_isa.h" -x c /dev/null -o /dev/null
                   timeout 60s clang "${flags[@]}" -I "$tree" "$tree/buster/compiler/branch_sizing_benchmark.c" \
                       "$fixture/benchmark-main.c" -o "$ab_dir/$side-module"
                   timeout 60s clang "${flags[@]}" -I "$tree" "$fixture/scaling.c" -o "$ab_dir/$side-scaling"

@@ -688,7 +688,7 @@ static Tier1CfgTwoOrders tier1_cfg_test_two_orders(const Tier1CfgInput* plain, c
     const uint32_t* preferred_allowed = 0;
     Tier1CfgError preferred_error = TIER1_CFG_OK;
     bool taken = false;
-    Tier1CfgError stands = tier1_cfg_order_prepare(&one, output, scratch, vector && BUSTER_HOST_VECTOR, &order);
+    Tier1CfgError stands = tier1_cfg_order_prepare(&one, output, scratch, vector, &order);
     stands = stands == TIER1_CFG_OK ? tier1_cfg_order_run(&one, &preference, output, scratch, &order, &result, &preferred_allowed, &preferred_error, &taken) : stands;
     outcome.agreed = stands == first_error && (one.definition_registers == 0) == (two.definition_registers == 0);
     outcome.verified = true;
@@ -871,7 +871,7 @@ static void tier1_cfg_test_two_problems(Tier1CfgTestTally* tally, const Tier1Cfg
     {
         Tier1CfgPrepared prepared = { 0 };
         uint32_t* column = 0;
-        const bool held = tier1_cfg_prepare(&plain, output, scratch, BUSTER_HOST_VECTOR, &prepared) == TIER1_CFG_OK;
+        const bool held = tier1_cfg_prepare(&plain, output, scratch, true, &prepared) == TIER1_CFG_OK;
         tier1_cfg_test_expect(tally, !held || tier1_cfg_column(&plain, &prepared, output, &column) == TIER1_CFG_INVALID, "another problem's column is refused where fixed ranges cut the intervals");
         if (held)
         {

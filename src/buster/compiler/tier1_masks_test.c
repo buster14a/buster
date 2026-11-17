@@ -4025,7 +4025,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         {
             printf("test-tier1-masks: %s, %s path: emission error %u at node %u\n", fixture->name, vector ? "vector" : "scalar", (unsigned)error, node);
         }
-        tier1_masks_test_expect(test, vector ? !BUSTER_HOST_VECTOR || ir_scan_vector_paths > scans : ir_scan_vector_paths == scans,
+        tier1_masks_test_expect(test, vector ? ir_scan_vector_paths > scans : ir_scan_vector_paths == scans,
                                 "selection's and the CFG consumer's scans for vectors take the requested path: none the vector path on a scalar run");
     }
     if (ok)
