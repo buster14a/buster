@@ -1757,8 +1757,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     {
         // The branch columns alone, which sizing reads and writes by: the code generators' records are valid by
         // construction, which x86_validate checks above only with `verify` (#532).
-        const BranchSizingCheck shape = run->scalar ? branch_sizing_validate_branches_scalar(code->records, code->count, code->branches, code->targets, code->branch_count) :
-                                                      branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
+        const BranchSizingCheck shape = branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
         const BranchSizing sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) : (BranchSizing){ .error = shape.error };
         check_clock_lap(run->stage_clock, CHECK_STAGE_BRANCH_SIZING);
         const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 :
@@ -5506,8 +5505,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             }
             if (encodes)
             {
-                const BranchSizingCheck shape = BUSTER_SCALAR_PATH(scalar) ? branch_sizing_validate_branches_scalar(code->records, code->count, code->branches, code->targets, code->branch_count) :
-                                                         branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
+                const BranchSizingCheck shape = branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
                 const BranchSizing sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) : (BranchSizing){ .error = shape.error };
                 const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 :
                                        BUSTER_SCALAR_PATH(scalar) ? x86_encode_scalar(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends) :

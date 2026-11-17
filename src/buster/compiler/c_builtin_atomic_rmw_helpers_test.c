@@ -420,8 +420,7 @@ static bool cbuiltin_atomic_rmw_test_map(CBuiltinAtomicRmwTest* test, const Tier
     if (result)
     {
         memcpy(records, helper->records, helper->count * sizeof(*records));
-        const BranchSizing sized = scalar ? size_branches_scalar(records, helper->count, helper->branches, helper->targets, helper->branch_count, offsets) :
-                                          size_branches(records, helper->count, helper->branches, helper->targets, helper->branch_count, offsets);
+        const BranchSizing sized = size_branches(records, helper->count, helper->branches, helper->targets, helper->branch_count, offsets);
         const int64_t encoded = sized.error != BRANCH_SIZING_OK ? -1 : scalar ? x86_encode_scalar(records, helper->count, program->mapping, helper_capacity, NULL, NULL) :
                                                                             x86_encode(records, helper->count, program->mapping, helper_capacity, NULL, NULL);
         result = cbuiltin_atomic_rmw_test_expect(test, encoded > 0, "branch sizing and native helper encoding", item);
