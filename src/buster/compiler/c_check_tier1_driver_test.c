@@ -1150,7 +1150,7 @@ static uint32_t check_test_tier1_function(const char* path, const char* name, X8
     // no precondition.
     valid = valid && text != NULL && function->st_size != 0 && function->st_value <= text->sh_size && function->st_size <= text->sh_size - function->st_value &&
             check_test_elf_range(elf.file, text->sh_offset, text->sh_size) && x86_disassembler_initialize();
-    const X86DecodeResult decoded = valid ? x86_disassemble_scalar((const uint8_t*)bytes + text->sh_offset + function->st_value, function->st_size, records, capacity)
+    const X86DecodeResult decoded = valid ? x86_disassemble((const uint8_t*)bytes + text->sh_offset + function->st_value, function->st_size, records, capacity)
                                           : (X86DecodeResult){ .status = X86_DECODE_BAD_ARGUMENT };
     valid = valid && decoded.status == X86_DECODE_OK && decoded.consumed == function->st_size;
     *relocation_count = 0;
