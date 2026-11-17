@@ -16,6 +16,8 @@
 // - #2676's selects of comparisons (a maximum, a clamp, a loop's conditional sum, a comparison of a load with an
 //   immediate and with a register, a doubleword's comparison choosing quadwords, an unsigned one): a cmov of the
 //   comparison's flags for each, no setcc;
+// - #2791's selects of floating comparisons (<, a negated >, a loop's conditional count by >=, and == and !=): ucomis
+//   and a cmov of its flags for each, no setcc, and for == and != a cmov of the parity flag too;
 // - #2745's objects a vector's value initializes whole, as the intrinsics' wrappers are (a struct's, a union's, a
 //   compound literal's): no store of zeros before the vector's, while a volatile object and a union whose designator
 //   moves to another member after the vector's (whose rest clang leaves zeros) keep their eight;
@@ -347,6 +349,43 @@ __attribute__((noinline)) unsigned patterns_unsigned(unsigned a, unsigned b, uns
     return a >= b ? x : 0;
 }
 
+__attribute__((noinline)) int patterns_float_less(double a, double b, int x, int y)
+{
+    return a < b ? x : y;
+}
+
+__attribute__((noinline)) long patterns_float_not_greater(float a, float b, long x, long y)
+{
+    return !(a > b) ? x : y;
+}
+
+__attribute__((noinline)) long patterns_float_count(const double* p, int n, double t)
+{
+    long c = 0;
+    for (int i = 0; i < n; i += 1)
+    {
+        if (p[i] >= t)
+        {
+            c += 3;
+        }
+        else
+        {
+            c -= 1;
+        }
+    }
+    return c;
+}
+
+__attribute__((noinline)) int patterns_float_equal(double a, double b, int x, int y)
+{
+    return a == b ? x : y;
+}
+
+__attribute__((noinline)) long patterns_float_unequal(float a, float b, long x)
+{
+    return a != b ? x : 0;
+}
+
 typedef long long patterns_vector __attribute__((vector_size(64)));
 typedef struct
 {
@@ -431,6 +470,11 @@ int patterns_loaded(const int* p, int x, int y);
 int patterns_loaded_other(const int* p, int q, int x, int y);
 long patterns_mixed(int a, int b, long x, long y);
 unsigned patterns_unsigned(unsigned a, unsigned b, unsigned x);
+int patterns_float_less(double a, double b, int x, int y);
+long patterns_float_not_greater(float a, float b, long x, long y);
+long patterns_float_count(const double* p, int n, double t);
+int patterns_float_equal(double a, double b, int x, int y);
+long patterns_float_unequal(float a, float b, long x);
 struct patterns_state
 {
     long* base;
@@ -755,6 +799,29 @@ int main(void)
         valid = patterns_sum(summed, n) == sum && valid;
         sum += n < 8 && summed[n] > 128 ? summed[n] : 0;
     }
+    // #2791's floating selects, on NaN, zeros of both signs and infinities among the operands.
+    const double reals[] = { -__builtin_inf(), -2.5, -0.0, 0.0, 1.0, 2.5, __builtin_inf(), __builtin_nan(""), -__builtin_nan("") };
+    const int real_count = (int)(sizeof(reals) / sizeof(reals[0]));
+    for (int i = 0; i < real_count; i += 1)
+    {
+        for (int j = 0; j < real_count; j += 1)
+        {
+            const double a = reals[i];
+            const double b = reals[j];
+            const float f = (float)a;
+            const float g = (float)b;
+            valid = patterns_float_less(a, b, i, j + 100) == (a < b ? i : j + 100) && valid;
+            valid = patterns_float_not_greater(f, g, (long)i << 40, -(long)j) == (!(f > g) ? (long)i << 40 : -(long)j) && valid;
+            valid = patterns_float_equal(a, b, i + 7, j - 9) == (a == b ? i + 7 : j - 9) && valid;
+            valid = patterns_float_unequal(f, g, (long)i * 3 + 1) == (f != g ? (long)i * 3 + 1 : 0) && valid;
+        }
+        long counted = 0;
+        for (int n = 0; n < real_count; n += 1)
+        {
+            valid = patterns_float_count(reals, n, reals[i]) == counted && valid;
+            counted += reals[n] >= reals[i] ? 3 : -1;
+        }
+    }
     const long values[] = { 4, 9, -3, 9, 12 };
     for (long n = -1; n <= 5; n += 1)
     {
@@ -896,6 +963,7 @@ typedef enum PatternsKind
     PATTERNS_FETCH,
     PATTERNS_SPILLED,
     PATTERNS_SELECT,
+    PATTERNS_FLOAT_EQUAL,
     PATTERNS_WHOLE,
     PATTERNS_CLEARED,
     PATTERNS_GSUB,
@@ -927,6 +995,11 @@ static const PatternsFunction patterns_functions[] = {
     { "patterns_loaded_other", PATTERNS_SELECT },
     { "patterns_mixed", PATTERNS_SELECT },
     { "patterns_unsigned", PATTERNS_SELECT },
+    { "patterns_float_less", PATTERNS_SELECT },
+    { "patterns_float_not_greater", PATTERNS_SELECT },
+    { "patterns_float_count", PATTERNS_SELECT },
+    { "patterns_float_equal", PATTERNS_FLOAT_EQUAL },
+    { "patterns_float_unequal", PATTERNS_FLOAT_EQUAL },
     { "patterns_whole_literal", PATTERNS_WHOLE },
     { "patterns_whole_declaration", PATTERNS_WHOLE },
     { "patterns_whole_union", PATTERNS_WHOLE },
@@ -967,6 +1040,8 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
 {
     unsigned sets = 0;
     unsigned moves = 0;
+    // cmovs of the parity flag, a floating == or !='s (#2791).
+    unsigned parity = 0;
     unsigned shifts = 0;
     unsigned immediates = 0;
     unsigned registers = 0;
@@ -992,6 +1067,7 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
         const char* destination = comma != NULL ? comma + 1 : operands;
         sets += strncmp(operation, "set", 3) == 0;
         moves += strncmp(operation, "cmov", 4) == 0;
+        parity += strncmp(operation, "cmovp", 5) == 0 || strncmp(operation, "cmovnp", 6) == 0;
         shifts += (strncmp(operation, "shl", 3) == 0 || strncmp(operation, "shr", 3) == 0 || strncmp(operation, "sar", 3) == 0) && strncmp(operands, "$0x0,", 5) == 0;
         const bool move = strncmp(operation, "mov", 3) == 0 && strncmp(operation, "movz", 4) != 0 && strncmp(operation, "movs", 4) != 0;
         immediates += move && operands[0] == '$' && patterns_memory(destination);
@@ -1046,6 +1122,9 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     case PATTERNS_SELECT:
         valid = valid && sets == 0 && moves >= 1;
         break;
+    case PATTERNS_FLOAT_EQUAL:
+        valid = valid && sets == 0 && moves >= 2 && parity >= 1;
+        break;
     case PATTERNS_WHOLE:
         valid = valid && zeros == 0;
         break;
@@ -1058,8 +1137,8 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     }
     if (!valid)
     {
-        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u cmov=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u loaded-jumps=%u zero-stores=%u stored-back=%u\n",
-                function->name, body->definitions, sets, moves, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, loaded, zeros, stored_back);
+        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u cmov=%u parity-cmov=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u loaded-jumps=%u zero-stores=%u stored-back=%u\n",
+                function->name, body->definitions, sets, moves, parity, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, loaded, zeros, stored_back);
     }
     return valid;
 }

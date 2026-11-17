@@ -5576,6 +5576,7 @@ static void tier1_select_test_walks(Tier1SelectTest* test)
 }
 
 #include "buster/compiler/tier1_compare_memory_test.c"
+#include "buster/compiler/tier1_float_select_test.c"
 #endif
 #include "buster/compiler/tier1_select_burs_test.c"
 
@@ -5641,6 +5642,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_narrow_refusals(&test);
             tier1_select_test_unreachable(&test);
             tier1_select_test_walks(&test);
+            tier1_select_test_float_selects(&test);
             tier1_select_test_room(&test);
             tier1_select_test_overlong(&test);
             tier1_select_test_indirect(&test);
