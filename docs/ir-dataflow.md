@@ -109,6 +109,12 @@ CFG/postorder, phi records, use/def/in/out, and sweep counts. An independently
 written opcode-based checker reconstructs dense membership, ordinary uses,
 edge-specific phi uses, reverse-instruction transfer equations, and zero padding.
 It does not use the adapter's operand-mask tables or phi CSR for those checks.
+A layout check reads the rest from the IR: each block's successors are its
+terminator's distinct targets in their first order, the postorder holds every
+block once, and each predecessor's phi records are the pairs naming it, in
+block, phi and pair order, with their dense values and target blocks. dataflow's
+sweep search ([`dataflow.md`](dataflow.md#the-sweep-search)) checks every live
+bit and the exact sweep count.
 
 The raw fixtures run only under `--dataflow-self-test`; ordinary source
 invocations run the per-function checks above and do not repeat them, so a

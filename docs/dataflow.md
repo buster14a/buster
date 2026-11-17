@@ -87,6 +87,8 @@ solvers, it checks the liveness equations, zero padding, repeatability and
 the least solution on small hand-checkable graphs. A separate reverse-CFG
 reachability oracle checks selected values at every block of 257- and
 2,049-block graphs; a planted incorrect bit checks the oracle itself.
+The sweep search below checks every value at every block, and the iteration
+count, of every graph, and IR dataflow's test runs it on every function.
 A handwritten multigraph checks repeated successors, self-edges and exit
 edges against the corresponding deduplicated CFG. Guard-page cases put
 the last row word immediately before an inaccessible page, including empty
@@ -102,6 +104,27 @@ copy another compiler's implementation. Generator version 2 mixes the initial
 seed with the public-domain SplitMix64 finalizer before drawing from the LCG,
 so small consecutive seeds do not all start with the same draw. The retained
 license and provenance are in `THIRD_PARTY_NOTICES.md`.
+
+
+### The sweep search
+
+`dataflow_sweeps_test.c` finds, without a fixpoint, the sweep in which the
+solver first sets each live bit, and with it the solver's exact iteration
+count. Each sweep visits the postorder and reads every successor's `in` row as
+the sweep has left it, so an edge to a later block in the postorder, or to the
+block itself, reads the previous sweep's row: call it stale. Value `v` is live
+into block `b` after sweep `t` exactly when some path from `b` reaches a use of
+`v` through blocks that neither use nor define it, crossing at most `t - 1`
+stale edges (by induction over the sweeps and, within one, over the
+postorder). With `D(b, v)` the fewest stale edges on such a path, `b`'s bit for
+`v` is first set in sweep `D(b, v) + 1`. A sweep reads only what the previous
+one left, so the first that changes nothing is a fixpoint, and the count, which
+includes that last sweep, is `2 + max D` over the live pairs, or 1 when nothing
+is live. A 0-1 breadth-first search per value, backwards from its uses over
+predecessor edges weighted 1 where stale, finds every `D`; the `in` rows must
+hold exactly the pairs it reaches. Over main's two solvers (#2924), the formula
+matched both counts on every generated graph of 16 seeds, c-testsuite's IR
+forms and sqlite3.c's.
 
 ## Measuring the alternatives
 

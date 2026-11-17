@@ -33,6 +33,12 @@ liveness and interference primitives in `dataflow.c`:
   path reaches its use before its definition. Graphs of 257 and 2,049 blocks
   independently check selected boundary and seed-derived values at every
   block with a reverse-reachability oracle;
+- the sweep search (`dataflow_sweeps_test.c`), on every graph: for each value,
+  a 0-1 breadth-first search backwards from its uses finds the sweep in which
+  the solver first sets each block's bit, without a fixpoint. The `in` rows
+  must hold exactly the pairs it reaches, and the iteration count must be 2
+  plus the latest of those sweeps' distances, or 1 when nothing is live
+  ([the reasoning](../dataflow.md#the-sweep-search));
 - handwritten graphs: disconnected cycles, a self-loop without a use, a value
   both used and defined in one block, every combination of the transfer
   function's three input bits, the exact postorder of a chain, and repeated
