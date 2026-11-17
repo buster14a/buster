@@ -12,9 +12,9 @@
 //   (if-conversion's truth simplification's), through a copy past another node, or through one or two of C's truth
 //   values' links, by both paths, must fold exactly the shapes the grammar takes: every one of an ordered predicate but
 //   the distant copy, and == and != directly and through their copy.
-// - tier1_select_recurrent (#2922) finds a select's values' recurrence through a phi, its values' operations and a phi of
-//   phis, up to its bound of rows and not past it, and finds none where only the select's result or its condition reaches
-//   the phi.
+// - tier1_select_recurrent (#2922) finds a select's values' recurrence through an operation, directly, through a phi of
+//   phis and where the walk reaches the phi through phis alone first, up to its bound of rows and not past it; and none
+//   through phis alone (a running choice), nor where only the select's result or its condition reaches the phi.
 
 // Whether a floating select's `condition` holds for `left` and `right`, the operands' bits at `width` bytes (a float's in
 // the low half), by C's own comparisons of their values.
@@ -308,7 +308,9 @@ static void tier1_select_test_float_select_plan(Tier1SelectTest* test, uint32_t 
 // `kind` the select whose recurrence the walk looks for. 0: its true value `chain` additions past the accumulator
 // (`chain` 0 is the accumulator itself), its false value a parameter. 1: its true value another phi, the accumulator's
 // previous value. 2: an addition of it to the accumulator is the phi's value, its own values parameters. 3: the
-// accumulator is the phi's value and the condition's operand, its values parameters. Returns the select.
+// accumulator is the phi's value and the condition's operand, its values parameters. 4: as 1, the other phi's value the
+// accumulator plus one. 5: its true value the accumulator plus one, its false value the accumulator, which the walk
+// visits first. Returns the select.
 static uint32_t tier1_select_test_float_recurrence_function(IrFunction* function, uint32_t kind, uint32_t chain)
 {
     uint32_t next = 0;
@@ -326,11 +328,12 @@ static uint32_t tier1_select_test_float_recurrence_function(IrFunction* function
     const uint32_t zero = tier1_select_test_append(function, &next, IR_CONST, IR_F64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
     const uint32_t compared = kind == 3 ? tier1_select_test_append(function, &next, IR_SITOFP, IR_F64, accumulator, BUSTER_IR_NONE, BUSTER_IR_NONE) : a;
     const uint32_t condition = tier1_select_test_append(function, &next, IR_FCMP, IR_I1, compared, zero, IR_EQ);
-    const uint32_t chosen = kind == 0 ? value : kind == 1 ? other : x;
-    const uint32_t select = tier1_select_test_append(function, &next, IR_SELECT, IR_I64, condition, chosen, kind == 0 ? x : y);
+    const uint32_t increment = kind >= 4 ? tier1_select_test_append(function, &next, IR_ADD, IR_I64, accumulator, one, BUSTER_IR_NONE) : accumulator;
+    const uint32_t chosen = kind == 0 ? value : kind == 1 || kind == 4 ? other : kind == 5 ? increment : x;
+    const uint32_t select = tier1_select_test_append(function, &next, IR_SELECT, IR_I64, condition, chosen, kind == 0 ? x : kind == 5 ? accumulator : y);
     const uint32_t updated = kind == 2 ? tier1_select_test_append(function, &next, IR_ADD, IR_I64, accumulator, select, BUSTER_IR_NONE) : select;
     tier1_select_test_append(function, &next, IR_RET, IR_VOID, accumulator, BUSTER_IR_NONE, BUSTER_IR_NONE);
-    const uint32_t incoming[8] = { 0, x, 1, updated, 0, y, 1, accumulator };
+    const uint32_t incoming[8] = { 0, x, 1, updated, 0, y, 1, kind == 4 ? increment : accumulator };
     memcpy(function->extra, incoming, sizeof(incoming));
     function->instruction_count = next;
     return select;
@@ -338,7 +341,9 @@ static uint32_t tier1_select_test_float_recurrence_function(IrFunction* function
 
 // tier1_select_recurrent (#2922): a recurrence through the select's value's additions up to the walk's bound of rows (16:
 // the false value, the chain's additions, their constant and the phi, so a chain of 13 is the longest it sees) and not
-// past it, through a phi of phis, and none where only the select's result or its condition reaches the phi.
+// past it, through a phi of phis with an addition, and where the walk reaches the phi through phis alone first; none
+// through the phi itself or a phi of phis alone (a running choice), nor where only the select's result or its condition
+// reaches the phi.
 static void tier1_select_test_float_recurrence(Tier1SelectTest* test)
 {
     Arena input = arena_reserve(1u << 20);
@@ -358,11 +363,11 @@ static void tier1_select_test_float_recurrence(Tier1SelectTest* test)
         if (created)
         {
             const uint32_t select = tier1_select_test_float_recurrence_function(&function, 0, chain);
-            tier1_select_test_expect(test, tier1_select_recurrent(&function, select) == (chain <= 13), "a select's value recurs through its additions up to the walk's bound");
+            tier1_select_test_expect(test, tier1_select_recurrent(&function, select) == (chain >= 1 && chain <= 13), "a select's value recurs through its additions up to the walk's bound, not through the phi alone");
         }
         arena_pop_to(&input, 0);
     }
-    for (uint32_t kind = 1; kind < 4; kind += 1)
+    for (uint32_t kind = 1; kind < 6; kind += 1)
     {
         IrFunction function;
         const bool created = ir_create(&input, &sizes, &function) == IR_OK;
@@ -370,7 +375,7 @@ static void tier1_select_test_float_recurrence(Tier1SelectTest* test)
         if (created)
         {
             const uint32_t select = tier1_select_test_float_recurrence_function(&function, kind, 0);
-            tier1_select_test_expect(test, tier1_select_recurrent(&function, select) == (kind == 1), "a select's value recurs through a phi of phis, not where only its result or its condition does");
+            tier1_select_test_expect(test, tier1_select_recurrent(&function, select) == (kind >= 4), "a select's value recurs through an operation past phis, not through phis alone, nor where only its result or its condition does");
         }
         arena_pop_to(&input, 0);
     }

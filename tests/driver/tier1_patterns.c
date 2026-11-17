@@ -18,10 +18,10 @@
 //   comparison's flags for each, no setcc;
 // - #2791's selects of floating comparisons (<, a negated >, a loop's conditional count by >=, and a sign's nested `?:`,
 //   whose outer test stays a branch): ucomis and a cmov or jump of its flags for each, no setcc;
-// - #2922's selects of floating == and != (a select of each, and a loop's sum of selects of two invariant values): a
-//   cmov of the parity flag too, no setcc; and where the loop's accumulator recurs through a select's values (a
-//   conditional count by ==, a running last match), its truth value instead, no cmov of the parity flag; the oracle
-//   checks all of them on unordered operands too;
+// - #2922's selects of floating == and != (a select of each, a loop's sum of selects of two invariant values, and a
+//   running last match by !=, whose recurrence is its own earlier results alone): a cmov of the parity flag too, no
+//   setcc; and where the loop's accumulator recurs through a select's values by an operation (a conditional count by
+//   ==), its truth value instead, no cmov of the parity flag; the oracle checks all of them on unordered operands too;
 // - #2745's objects a vector's value initializes whole, as the intrinsics' wrappers are (a struct's, a union's, a
 //   compound literal's): no store of zeros before the vector's, while a volatile object and a union whose designator
 //   moves to another member after the vector's (whose rest clang leaves zeros) keep their eight;
@@ -1069,7 +1069,7 @@ static const PatternsFunction patterns_functions[] = {
     { "patterns_float_unequal", PATTERNS_FLOAT_EQUAL },
     { "patterns_float_equal_sum", PATTERNS_FLOAT_EQUAL },
     { "patterns_float_equal_count", PATTERNS_FLOAT_RECURRENT },
-    { "patterns_float_last_unequal", PATTERNS_FLOAT_RECURRENT },
+    { "patterns_float_last_unequal", PATTERNS_FLOAT_EQUAL },
     { "patterns_whole_literal", PATTERNS_WHOLE },
     { "patterns_whole_declaration", PATTERNS_WHOLE },
     { "patterns_whole_union", PATTERNS_WHOLE },

@@ -16,9 +16,10 @@
 // must be C's for NaN, signed zero, infinite and finite operands.
 //
 // A loop's select of each predicate (#2922, tier1_float_select_loop_function) must fuse for an ordered predicate, and for
-// == and != only where its values don't recur through it: an accumulator that both values or one of them read, directly
-// or through another phi, keeps the truth value's single cmov on its chain, and a sum of selects of two parameters
-// fuses. Its code must certify and compute C's result.
+// == and != only where its values don't recur through it by an operation: an accumulator that its values read through an
+// addition, directly or through another phi, keeps the truth value's single cmov on its chain, while a running choice of
+// its own earlier results through phis alone and a sum of selects of two parameters fuse; maximal munch's cover must
+// choose the same. Its code must certify and compute C's result.
 
 #define BUSTER_TIER1_FLOAT_SELECT_SHAPES 4u
 
@@ -92,14 +93,15 @@ static bool tier1_float_select_function(Tier1EmitTest* test, uint32_t source_wid
     return ready;
 }
 
-#define BUSTER_TIER1_FLOAT_SELECT_LOOPS 4u
+#define BUSTER_TIER1_FLOAT_SELECT_LOOPS 5u
 #define BUSTER_TIER1_FLOAT_SELECT_ITERATIONS 5u
 
 // A loop of BUSTER_TIER1_FLOAT_SELECT_ITERATIONS iterations over a select of the comparison of two F32 or F64 values (the
 // parameters' bits, as tier1_float_select_function's) by `predicate`, choosing among x and y (I32 or I64) and an
 // accumulator that starts at y and is returned. By `kind`, the accumulator recurs through both of the select's values,
 // `acc = cmp ? acc + x : acc + y` (0); through one, `acc = cmp ? x : acc` (1); through another phi, `acc = cmp ? other :
-// x` with `other` the previous accumulator, starting at x (2); or only through its result, `acc += cmp ? x : y` (3).
+// x` with `other` the previous accumulator, starting at x (2); only through its result, `acc += cmp ? x : y` (3); or
+// through another phi and an addition, `acc = cmp ? other : x` with `other` the previous accumulator plus y (4).
 // Blocks: the entry, the header with the phis and the exit test, the body, the exit.
 static bool tier1_float_select_loop_function(Tier1EmitTest* test, uint32_t source_width, uint32_t width, uint32_t predicate, uint32_t kind, IrFunction* function, uint32_t* root)
 {
@@ -140,13 +142,14 @@ static bool tier1_float_select_loop_function(Tier1EmitTest* test, uint32_t sourc
         function->block_offsets[1] = next;
         const uint32_t i = tier1_select_test_append(function, &next, IR_PHI, IR_I64, 0, 2, BUSTER_IR_NONE);
         const uint32_t accumulator = tier1_select_test_append(function, &next, IR_PHI, type, 4, 2, BUSTER_IR_NONE);
-        const uint32_t other = kind == 2 ? tier1_select_test_append(function, &next, IR_PHI, type, 8, 2, BUSTER_IR_NONE) : BUSTER_IR_NONE;
+        const uint32_t other = kind == 2 || kind == 4 ? tier1_select_test_append(function, &next, IR_PHI, type, 8, 2, BUSTER_IR_NONE) : BUSTER_IR_NONE;
         const uint32_t count = tier1_select_test_append(function, &next, IR_CONST, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
         const uint32_t below = tier1_select_test_append(function, &next, IR_ICMP, IR_I1, i, count, IR_ULT);
         tier1_select_test_append(function, &next, IR_CBR, IR_VOID, below, 2, 3);
         function->block_offsets[2] = next;
         const uint32_t condition = tier1_select_test_append(function, &next, IR_FCMP, IR_I1, operands[0], operands[1], predicate);
         uint32_t updated = BUSTER_IR_NONE;
+        uint32_t previous = accumulator;
         if (kind == 0)
         {
             const uint32_t chosen = tier1_select_test_append(function, &next, IR_ADD, type, accumulator, x, BUSTER_IR_NONE);
@@ -159,8 +162,9 @@ static bool tier1_float_select_loop_function(Tier1EmitTest* test, uint32_t sourc
             *root = tier1_select_test_append(function, &next, IR_SELECT, type, condition, x, accumulator);
             updated = *root;
         }
-        else if (kind == 2)
+        else if (kind == 2 || kind == 4)
         {
+            previous = kind == 4 ? tier1_select_test_append(function, &next, IR_ADD, type, accumulator, y, BUSTER_IR_NONE) : accumulator;
             *root = tier1_select_test_append(function, &next, IR_SELECT, type, condition, other, x);
             updated = *root;
         }
@@ -174,7 +178,7 @@ static bool tier1_float_select_loop_function(Tier1EmitTest* test, uint32_t sourc
         tier1_select_test_append(function, &next, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
         function->block_offsets[3] = next;
         tier1_select_test_append(function, &next, IR_RET, IR_VOID, accumulator, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        const uint32_t incoming[12] = { 0, zero, 2, step, 0, y, 2, updated, 0, x, 2, accumulator };
+        const uint32_t incoming[12] = { 0, zero, 2, step, 0, y, 2, updated, 0, x, 2, previous };
         memcpy(function->extra, incoming, sizeof(incoming));
         function->instruction_count = next;
         function->block_offsets[4] = next;
@@ -306,13 +310,14 @@ static uint64_t tier1_float_select_loop_oracle(uint32_t kind, bool holds, uint64
             updated = holds ? x : accumulator;
             break;
         case 2:
+        case 4:
             updated = holds ? other : x;
             break;
         default:
             updated = accumulator + (holds ? x : y);
             break;
         }
-        other = accumulator;
+        other = kind == 4 ? (accumulator + y) & mask : accumulator;
         accumulator = updated & mask;
     }
     return accumulator;
@@ -350,7 +355,7 @@ static void tier1_float_select_loops(Tier1EmitTest* test, uint32_t* fused_loops)
             {
                 for (uint32_t kind = 0; kind < BUSTER_TIER1_FLOAT_SELECT_LOOPS; kind += 1)
                 {
-                    const bool fused = (predicate != IR_EQ && predicate != IR_NE) || kind == 3;
+                    const bool fused = (predicate != IR_EQ && predicate != IR_NE) || (kind != 0 && kind != 4);
                     for (uint32_t variant = 0; variant < 8; variant += 1)
                     {
                         const bool vector = (variant & 1) != 0;
@@ -506,5 +511,5 @@ static void tier1_float_select_tests(Tier1EmitTest* test)
                            "every shape the grammar takes fuses");
     uint32_t fused_loops = 0;
     tier1_float_select_loops(test, &fused_loops);
-    tier1_emit_test_expect(test, fused_loops == 2 * 2 * (4 * BUSTER_TIER1_FLOAT_SELECT_LOOPS + 2) * 8, "every loop's select the recurrence leaves fuses");
+    tier1_emit_test_expect(test, fused_loops == 2 * 2 * (4 * BUSTER_TIER1_FLOAT_SELECT_LOOPS + 2 * 3) * 8, "every loop's select the recurrence leaves fuses");
 }

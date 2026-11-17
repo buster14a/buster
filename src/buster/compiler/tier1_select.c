@@ -5179,41 +5179,58 @@ static inline __attribute__((always_inline)) void tier1_select_add_comparison(co
     tier1_select_add_candidate(forest, node, candidates, pattern);
 }
 
-// Whether a select's values recur through it (#2922): a walk back from its two values, through their operands and the
-// incoming values of the phis it meets, reaches the select itself within BUSTER_TIER1_SELECT_RECURRENCE_ROWS rows, as a
-// loop's accumulator or running choice does (`c = select(p[i] == t, c + 5, c + 1)`, `best = select(p[i] == t, i,
-// best)`). A select of a floating == or != by two cmovs puts both on the path from each value to the result, where its
-// truth value's single cmov is one: such a select keeps that, its comparison's path off the loop's carried chain (as
-// ir_if_convert_recurrence keeps a branch whose condition is on it). Its condition isn't walked: two cmovs shorten the
-// comparison's path to the result. Both selection paths ask it of the same select (tier1_select_candidates and
-// tier1_burs_equality), the scalar rare case of the classifiers.
+// Whether a select's values recur through it by an operation (#2922): a walk back from its two values, through their
+// operands and the incoming values of the phis it meets, reaches the select itself within
+// BUSTER_TIER1_SELECT_RECURRENCE_ROWS rows along a path through a row that is neither a phi nor a copy, as a loop's
+// accumulator does (`c = select(p[i] == t, c + 5, c + 1)`). A select of a floating == or != by two cmovs puts both on the
+// path from each value to the result, where its truth value's single cmov is one, so that such a chain takes an
+// operation and two cmovs an iteration: the select keeps its truth value, its comparison's path off the chain (as
+// ir_if_convert_recurrence keeps a branch whose condition is on it). A running choice whose values are its own earlier
+// results through phis alone (`best = select(p[i] == t, i, best)`) fuses: its chain is the two cmovs, which the 9700X
+// runs at the loop's pace, faster than the truth value's longer sequence (docs/tier1-selection.md). Its condition isn't
+// walked: two cmovs shorten the comparison's path to the result. A row reached through an operation is walked again
+// where an earlier visit reached it through phis alone. Both selection paths ask it of the same select
+// (tier1_select_candidates and tier1_burs_equality), the scalar rare case of the classifiers.
 static __attribute__((noinline)) bool tier1_select_recurrent(const IrFunction* function, uint32_t select)
 {
     const uint32_t count = function->instruction_count;
+    // Each row to visit and whether its path from the select's values passed an operation.
     uint32_t stack[BUSTER_TIER1_SELECT_RECURRENCE_ROWS];
+    bool operated[BUSTER_TIER1_SELECT_RECURRENCE_ROWS];
     uint32_t seen[BUSTER_TIER1_SELECT_RECURRENCE_ROWS];
+    bool seen_operated[BUSTER_TIER1_SELECT_RECURRENCE_ROWS];
     uint32_t depth = 2;
     uint32_t visited = 0;
     bool found = false;
     stack[0] = function->b[select];
     stack[1] = function->c[select];
+    operated[0] = false;
+    operated[1] = false;
     while (depth != 0 && !found && visited < BUSTER_TIER1_SELECT_RECURRENCE_ROWS)
     {
-        const uint32_t row = stack[--depth];
+        depth -= 1;
+        const uint32_t row = stack[depth];
+        const bool through = operated[depth];
         bool known = row >= count;
         for (uint32_t k = 0; k < visited && !known; k += 1)
         {
-            known = seen[k] == row;
+            known = seen[k] == row && (seen_operated[k] || !through);
         }
         if (!known)
         {
-            seen[visited++] = row;
+            seen[visited] = row;
+            seen_operated[visited] = through;
+            visited += 1;
+            const uint32_t op = function->op[row];
+            const bool passed = through || (op != IR_PHI && op != IR_COPY);
             const uint32_t operands = (uint32_t)ir_operand_count(function, row);
             for (uint32_t p = 0; p < operands && !found && depth < BUSTER_TIER1_SELECT_RECURRENCE_ROWS; p += 1)
             {
                 const uint32_t value = ir_operand(function, row, p, 0).value;
-                found = value == select;
-                stack[depth++] = value;
+                found = value == select && passed;
+                stack[depth] = value;
+                operated[depth] = passed;
+                depth += value != select ? 1 : 0;
             }
         }
     }
