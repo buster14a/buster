@@ -1654,6 +1654,22 @@ scalar printer's alone (`pp_print_vector` hands such a unit to
 `pp_print_scalar`), which turns a replacement list's `//` comment into a block
 comment and starts a line after any other: the rarest of these modes.
 
+**Cost** (the 9700X, CPU 2, the frozen `sqlite3.c` with its pinned headers; [the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/e-output-modes-1380-2026-11-17),
+buster-performance `59c2b612`). Without these options a run is main's: `-E -P`,
+`-E` and `-c` of `sqlite3.c` within main's own repeat (11.435 against 11.450 ms,
+13.878 against 13.878, 120.220 against 120.586), with 0.05% fewer, 0.08% and
+0.02% more instructions. With them, `-E -P -C` takes 28.8 ms against `-E -P`'s
+11.5, and `-E -C` 34.7 against 13.9: the scalar lexer takes 15.7 ms where the
+vectorized one takes 2.4 without comments, refinement 4.6 against 1.5 (the
+comments' bytes are tokens'), and the main loop 6.9 against 5.4 (`-C`'s arguments
+a token at a time). `-E -P -CC` takes 39.4 ms, its printing by the scalar printer
+13.5 against 2.1. `-E -dD -dI` takes 15.4 ms against `-E`'s 13.9 (26.5 before
+the vector printer printed them). These modes are `-E`'s opt-in output for tools
+and small inputs (a linker script's `$(CPP) -P -C`), which no compile reads: the
+comments' lexer and `-CC`'s printing stay scalar, and a vectorized lexer's comment
+tokens would be the next step if a corpus needed them fast.
+
 **Where clang's output differs.** Line markers differ in form, as `-E`'s do.
 The predefines under `<built-in>` are buster's, in its order. After each `-dI`
 line clang writes a marker back to that line (`# 3 "a.c"`), which a reader
