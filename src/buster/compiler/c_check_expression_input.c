@@ -1690,6 +1690,13 @@ static __attribute__((noinline)) uint64_t node_front_prepared(NodeFront* front, 
     uint64_t fronting = 0;
     if ((fronted & BUSTER_NODE_FRONT_ORDER) == BUSTER_NODE_FRONT_BEFORE)
     {
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+        if (front->window)
+        {
+            node_front_chunk_windowed(front, reader, tokens, classes, acting, identifiers, literals);
+        }
+        else
+#endif
         if (front->lean)
         {
             node_front_chunk_lean(front, reader, tokens, classes, acting, identifiers, literals);
@@ -1724,6 +1731,13 @@ static __attribute__((noinline)) uint64_t node_front_acted(NodeFront* front, uin
     const uint64_t flushing = __rdtsc();
     check_input_expression_flush(reader, batch, false);
     const uint64_t flushed = __rdtsc() - flushing;
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    if ((fronted & BUSTER_NODE_FRONT_ORDER) == BUSTER_NODE_FRONT_AFTER && front->window)
+    {
+        node_front_chunk_windowed(front, reader, tokens, classes, acting, identifiers, literals);
+    }
+    else
+#endif
     if ((fronted & BUSTER_NODE_FRONT_ORDER) == BUSTER_NODE_FRONT_AFTER && front->lean)
     {
         node_front_chunk_lean(front, reader, tokens, classes, acting, identifiers, literals);
@@ -1753,12 +1767,19 @@ static __attribute__((noinline)) uint64_t node_front_acted(NodeFront* front, uin
 }
 
 // What else the options ask of a unit the front reads, begun: the machine's state at reader time for T there
-// (BUSTER_NODE_FRONT_TYPES), the checker unit's alone, as the machine is; and the flat front's state
+// (BUSTER_NODE_FRONT_TYPES), the checker unit's alone, as the machine is, with the window the front writes for the
+// fact words' kernel there (BUSTER_NODE_READER_WINDOW); and the flat front's state
 // (BUSTER_NODE_FRONT_FLAT), on the scratch as the front's, touched beforehand where the front's is
 // (BUSTER_NODE_FRONT_WARM).
 static __attribute__((noinline)) void node_front_started(NodeFront* front, CheckInputReader* reader, uint8_t fronted)
 {
     front->typer = NULL;
+    front->window = false;
+    front->window_facts = NULL;
+    front->window_numbers = NULL;
+    front->window_argument_count = 0;
+    front->plain = NULL;
+    front->chunks = 0;
     front->flat = (fronted & BUSTER_NODE_FRONT_FLAT) != 0 ? arena_push_array(reader->scratch, 1, sizeof(NodeFlat), 64) : NULL;
     if (front->flat != NULL)
     {
@@ -1772,6 +1793,8 @@ static __attribute__((noinline)) void node_front_started(NodeFront* front, Check
     if ((fronted & BUSTER_NODE_FRONT_TYPES) != 0)
     {
         front->typer = node_machine_reader_begin(reader, front->shadow, (fronted & BUSTER_NODE_FRONT_SWEEPS) != 0);
+        // Whether the front writes the fact words' window (BUSTER_NODE_READER_WINDOW), where the kernel runs there.
+        node_facts_window_begin(front, reader);
     }
 #else
     (void)reader;

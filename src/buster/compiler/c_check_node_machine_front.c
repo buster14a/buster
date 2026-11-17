@@ -85,6 +85,11 @@
 // #2850's fact words' kernel at reader time too (measure-node-machine --shadow --front-facts;
 // c_check_node_machine_facts.c's node_facts_reader_chunk): on each chunk's expressions T took there, T's records the oracle.
 #define BUSTER_NODE_READER_FACTS 32u
+// The lean front writes #2850's window too, a record's inputs for the fact words' kernel as it makes the record, and
+// the kernel reads them where they are written (measure-node-machine --shadow --front-window, with
+// BUSTER_NODE_READER_FACTS; c_check_node_machine_facts.c's "The window the front writes"). The front then keeps a
+// waiting value's whole subtree across a chunk's end, where it otherwise keeps the value's place alone.
+#define BUSTER_NODE_READER_WINDOW 64u
 // A lean leaf's kind, in its record's `leaf_categories`.
 #define BUSTER_NODE_FRONT_LEAF_IDENTIFIER 0u
 #define BUSTER_NODE_FRONT_LEAF_LITERAL 1u
@@ -111,6 +116,11 @@
 //   node_facts_append made from T's columns and the walk's nodes), the expressions the front's records don't give
 //   whole, the ticks of making them as each expression came (a read of the counter before and after each), and the
 //   ticks and the records of making a batch's again in one loop.
+// - The windows the front wrote itself (BUSTER_NODE_READER_WINDOW), which the kernel reads where they are written: the
+//   expressions whose records are there in a row and their records, the records whose inputs differ from either of the
+//   other two makings', the expressions that are not there; and the kernel's run in place: the records it is to make
+//   and those it made, the records that differ from T's (over poison, over decoys, or by its lists), and its later
+//   run's ticks.
 typedef enum NodeFactsCount
 {
     NODE_FACTS_COUNT_EXPRESSIONS,
@@ -149,12 +159,21 @@ typedef enum NodeFactsCount
     NODE_FACTS_COUNT_FRONT_TICKS,
     NODE_FACTS_COUNT_FRONT_AGAIN_TICKS,
     NODE_FACTS_COUNT_FRONT_AGAIN_RECORDS,
+    NODE_FACTS_COUNT_WINDOW_EXPRESSIONS,
+    NODE_FACTS_COUNT_WINDOW_RECORDS,
+    NODE_FACTS_COUNT_WINDOW_DIFFERENCES,
+    NODE_FACTS_COUNT_WINDOW_SKIPPED,
+    NODE_FACTS_COUNT_WINDOW_WANTED,
+    NODE_FACTS_COUNT_WINDOW_MADE,
+    NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES,
+    NODE_FACTS_COUNT_WINDOW_KERNEL_TICKS,
     NODE_FACTS_COUNTS,
 } NodeFactsCount;
 
 // Why the front's records don't give an expression's inputs (node_facts_front_expression): its records are not all the
 // chunk's own (a chunk's end cut it); an operand is out of a byte's reach; a literal the reader doesn't decode again; a
-// call of 255 operands or more.
+// call of 255 operands or more. The front's own window doesn't give one for the first reason alone: its records are
+// not there in a row (a chunk's end had no room to keep them whole).
 #define BUSTER_NODE_FACTS_WHY_GIVEN 0u
 #define BUSTER_NODE_FACTS_WHY_CUT 1u
 #define BUSTER_NODE_FACTS_WHY_REACH 2u
@@ -163,11 +182,14 @@ typedef enum NodeFactsCount
 #define BUSTER_NODE_FACTS_WHYS 5u
 
 // What a listed difference of the kernel's at reader time is of: a record over poison, a record over decoys, a window's
-// lists, or a record's inputs as the front's records give them.
+// lists, a record's inputs as the front's records give them, a record's inputs as the front wrote them, or a record
+// the kernel made of the front's window in place.
 #define BUSTER_NODE_FACTS_DIFFERENCE_RECORD 0u
 #define BUSTER_NODE_FACTS_DIFFERENCE_DECOY 1u
 #define BUSTER_NODE_FACTS_DIFFERENCE_LISTS 2u
 #define BUSTER_NODE_FACTS_DIFFERENCE_FRONT 3u
+#define BUSTER_NODE_FACTS_DIFFERENCE_WINDOW 4u
+#define BUSTER_NODE_FACTS_DIFFERENCE_PLACE 5u
 
 // What T made, at reader time, of the full expressions the front made whole (BUSTER_NODE_FRONT_TYPES;
 // c_check_node_machine_reader.c), in the output's arena: by each expression's root's graph node, for the shadow's
@@ -293,6 +315,11 @@ struct NodeFrontTypes
     uint32_t facts_skipped_tokens[BUSTER_NODE_FRONT_LISTED];
     uint8_t facts_skipped_reasons[BUSTER_NODE_FRONT_LISTED];
     uint32_t facts_skipped_listed;
+    // The same of the expressions the front's own window doesn't give (BUSTER_NODE_READER_WINDOW).
+    uint64_t facts_window_whys[BUSTER_NODE_FACTS_WHYS];
+    uint32_t facts_window_tokens[BUSTER_NODE_FRONT_LISTED];
+    uint8_t facts_window_reasons[BUSTER_NODE_FRONT_LISTED];
+    uint32_t facts_window_listed;
     uint32_t own_listed;
 };
 
@@ -385,6 +412,29 @@ struct NodeFrontShadow
     // The first records that differed: each one's token and field (BUSTER_NODE_FLAT_FIELD_*).
     uint32_t flat_difference_tokens[BUSTER_NODE_FRONT_LISTED];
     uint32_t flat_difference_fields[BUSTER_NODE_FRONT_LISTED];
+    // Where the front writes the window (BUSTER_NODE_READER_WINDOW): the same lean front without the window run on the
+    // same chunks beside it (NodeFront.plain), whose ticks are what `ticks` rose from, with the records it made and the
+    // chunks in which the two made other records or left other values waiting (a failure). And of the chunks' ends:
+    // the waiting values whose subtrees were kept whole, the records kept for them, and the values kept as their place
+    // alone, which are cut.
+    uint64_t plain_ticks;
+    uint64_t plain_records;
+    uint64_t plain_differences;
+    uint64_t window_kept_values;
+    uint64_t window_kept_records;
+    uint64_t window_cut_values;
+    // The most the calls' arguments' list held at a chunk's end (NodeFront.window_arguments, which has room for
+    // BUSTER_NODE_FRONT_RECORDS: more is a failure).
+    uint64_t window_arguments_most;
+    // The names' pass over each chunk's records, after the front's own (node_facts_window_names): its ticks, the
+    // names' leaves it gave their lines, the declarations' lines it made, each at its declaration's first use, with
+    // their ticks, which are part of the pass's; and the leaves whose kind or line its scalar path gave otherwise (a
+    // failure).
+    uint64_t window_name_ticks;
+    uint64_t window_names;
+    uint64_t window_lines;
+    uint64_t window_line_ticks;
+    uint64_t window_name_differences;
 };
 
 #define BUSTER_NODE_FRONT_CONTEXT_UNKNOWN 0xffu
@@ -512,12 +562,87 @@ struct NodeFront
     // walk's nodes where the expression is whole, which T at reader time reads (BUSTER_NODE_FRONT_TYPES).
     uint32_t sizes[BUSTER_NODE_FRONT_RECORDS];
     uint8_t sizes_stagger[BUSTER_NODE_FRONT_STAGGER];
+    // #2850's window, where the lean front writes it (BUSTER_NODE_READER_WINDOW): what the fact words' kernel reads of a
+    // record beside the words, written as the record is made (node_facts_window_leaf and its kin, in
+    // c_check_node_machine_facts.c, whose NodeFacts' columns of the same names these are; its operator is `ops`). The
+    // kernel reads them here, where they are written.
+    // - `window_kinds`: its kind.
+    // - `window_classes`: its class, made from its operands' classes, which are made before it. Or
+    //   BUSTER_NODE_FACTS_CLASS_CUT: its subtree's records are not all in these arrays in a row before it (a chunk's end
+    //   had no room to keep them), and neither are its consumers': the kernel makes none of them.
+    // - `window_left` and `window_right`: its first two operands' distances back, whole. A root's operand is wherever
+    //   its value waited.
+    // - `window_entries`: a leaf's line's number (a literal's or a string's own, the batch's line of its record's
+    //   number, made as the leaf is; a name's declaration until the names' pass over the chunk gives it its
+    //   declaration's line's), a member's name, a cast's or a return's type, a conditional's third operand's distance,
+    //   a call's first argument's place in `window_arguments`.
+    // - `window_counts`: a call's arguments (no other record's is read).
+    // - `window_positions`: its source position.
+    // - `window_arguments`: the calls' arguments' distances back, a call's in a row, `window_argument_count` of them.
+    // `window_op_kinds` and `window_op_codes` are an operator's kind and code by its op, the kernel's
+    // (node_facts_window_begin).
+    bool window;
+    // The kernel's words there, whose lines the leaves' writer and the names' pass make; and the lines' numbers by
+    // declaration (NodeFacts.numbers), which a name's leaf's writer asks the cache for.
+    struct NodeFacts* window_facts;
+    const uint32_t* window_numbers;
+    uint32_t window_argument_count;
+    uint8_t window_op_kinds[256];
+    uint8_t window_op_codes[256];
+    uint8_t window_kinds[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t window_kinds_stagger[BUSTER_NODE_FRONT_STAGGER];
+    uint8_t window_classes[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t window_classes_stagger[BUSTER_NODE_FRONT_STAGGER];
+    uint16_t window_left[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t window_left_stagger[BUSTER_NODE_FRONT_STAGGER];
+    uint16_t window_right[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t window_right_stagger[BUSTER_NODE_FRONT_STAGGER];
+    uint16_t window_counts[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t window_counts_stagger[BUSTER_NODE_FRONT_STAGGER];
+    uint16_t window_arguments[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t window_arguments_stagger[BUSTER_NODE_FRONT_STAGGER];
+    uint32_t window_entries[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t window_entries_stagger[BUSTER_NODE_FRONT_STAGGER];
+    uint32_t window_positions[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t window_positions_stagger[BUSTER_NODE_FRONT_STAGGER];
+    // The same front without the window, run on the same chunks for its ticks (NodeFrontShadow.plain_ticks), or null;
+    // and the chunks read, by whose parity one of the two runs first.
+    struct NodeFront* plain;
+    uint32_t chunks;
     // The machine's state at reader time (c_check_node_machine_reader.c), or null.
     struct NodeMachineReader* typer;
     // The flat front's state (c_check_node_machine_flat.c), or null.
     struct NodeFlat* flat;
     CheckValue wide_values[BUSTER_NODE_FRONT_WIDES];
 };
+
+// A record's class where its subtree's records are not all in the front's arrays in a row before it
+// (NodeFront.window_classes): no made operator's class (BUSTER_NODE_FACTS_ROUNDS rounds and a code under 15), and not
+// BUSTER_NODE_FACTS_NO_CLASS.
+#define BUSTER_NODE_FACTS_CLASS_CUT 0xfeu
+
+// The window's writers (c_check_node_machine_facts.c, which follows this file in the checker's unit, the only one with
+// the kernel), each called right after the lean front made the record:
+// - a leaf's, of `category` (BUSTER_NODE_FRONT_LEAF_*): a name's with its declaration, a literal's with the reader's
+//   decoding of it where the front's columns don't hold its value, a string's;
+// - an operator's with its operands' records (BUSTER_NODE_FRONT_UNKNOWN for none; `entry`: a member's name, a cast's or
+//   a return's type);
+// - a call's with its callee's and its arguments' (`values`, `count` of them).
+// And what begins them for a unit (whether the front writes the window, the operators' kinds and codes, the front run
+// beside it); the names' pass over a chunk's records, after the front's own, which gives each name's leaf its
+// declaration's line; and a record kept at a chunk's end, at `to` from `from`, whose literal's line and whose call's
+// arguments (`arguments`: the kept calls' so far) go with it. Each call of one is under this guard too: the other units have the front without the window.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+static inline __attribute__((always_inline)) void node_facts_window_leaf(NodeFront* front, CheckInputReader* reader, uint32_t record, uint32_t token, uint32_t category,
+                                                                         uint32_t declaration, const CheckLiteral* decoded);
+static inline __attribute__((always_inline)) void node_facts_window_operator(NodeFront* front, const CheckInputReader* reader, uint32_t record, CheckOp op, uint32_t token,
+                                                                             uint32_t a, uint32_t b, uint32_t c, uint32_t entry);
+static inline __attribute__((always_inline)) void node_facts_window_call(NodeFront* front, const CheckInputReader* reader, uint32_t record, uint32_t token,
+                                                                         const uint32_t* values, uint32_t count);
+static void node_facts_window_begin(NodeFront* front, CheckInputReader* reader);
+static void node_facts_window_names(NodeFront* front);
+static inline void node_facts_window_kept(NodeFront* front, uint32_t to, uint32_t from, uint32_t* arguments);
+#endif
 
 // T at reader time (c_check_node_machine_reader.c): the machine is the checker unit's alone, so the reader's other
 // consumers (the complete driver's) have the front without it.
@@ -829,28 +954,136 @@ static uint32_t node_front_library(NodeFront* front, CheckInputReader* reader, u
     return library;
 }
 
+// A kept record's columns moved down from `from` to `to`: the lean front's and the window's, every one a later record,
+// the kernel or the shadow's comparisons read of a waiting value's subtree (node_front_keep, BUSTER_NODE_READER_WINDOW).
+static inline void node_front_keep_record(NodeFront* front, uint32_t to, uint32_t from)
+{
+    front->ops[to] = front->ops[from];
+    front->forms[to] = front->forms[from];
+    front->tokens[to] = front->tokens[from];
+    front->distances[0][to] = front->distances[0][from];
+    front->distances[1][to] = front->distances[1][from];
+    front->distances[2][to] = front->distances[2][from];
+    front->roots[to] = front->roots[from];
+    front->counts[to] = front->counts[from];
+    front->ups[to] = front->ups[from];
+    front->places[to] = front->places[from];
+    front->ordinals[to] = front->ordinals[from];
+    front->nodes[to] = front->nodes[from];
+    front->sizes[to] = front->sizes[from];
+    front->leaf_types[to] = front->leaf_types[from];
+    front->leaf_integers[to] = front->leaf_integers[from];
+    front->leaf_categories[to] = front->leaf_categories[from];
+    front->window_kinds[to] = front->window_kinds[from];
+    front->window_classes[to] = front->window_classes[from];
+    front->window_left[to] = front->window_left[from];
+    front->window_right[to] = front->window_right[from];
+    front->window_counts[to] = front->window_counts[from];
+    front->window_entries[to] = front->window_entries[from];
+    front->window_positions[to] = front->window_positions[from];
+}
+
 // Before a chunk: the records the waiting values still name kept, in their order, and every other one dropped. A
 // condition's value waits for its statement's body (the tree puts a control's closing after it). A kept record was
 // compared in its own chunk, so only what a later record reads of it stays: its place in the postorder (an operand's
 // distance), its node (the comparison of its consumer), and its operator, token and use (a callee's library mark).
+//
+// Where the front writes the window (BUSTER_NODE_READER_WINDOW) a waiting value's whole subtree is kept, the records in
+// a row that end at it, with every column the lean front and the window have of them: its expression's window is made
+// of them when its root comes. The values wait in the postorder's order and one's subtree holds no other's, so each
+// row moves down past nothing that is kept. A value keeps its place alone, as without the window, and is cut
+// (BUSTER_NODE_FACTS_CLASS_CUT) where its records are not there in a row, or where the rows would take more of the
+// arrays than a record a waiting value and a chunk's records leave: the front forgets its waiting values at the same
+// count of them with the window as without. A row that is where it would be moved to stays as it is: the values that
+// wait through many chunks (a table's elements, for their list's end) are the arrays' first, and are moved once. A kept
+// row's calls' arguments are kept with it, the kept calls' the arguments' first. A cut value's are not, a call's among
+// them: nothing reads them, and the list then holds an argument for a record the arrays hold and no more (each argument
+// is a record's value taken once: one of a kept row, or one this chunk's call took), which is its room.
 static void node_front_keep(NodeFront* front)
 {
     uint32_t kept = 0;
-    for (uint32_t i = 0; i < front->stack_count; i += 1)
+    if (front->window)
     {
-        const uint32_t record = front->stack[i];
-        if (record != BUSTER_NODE_FRONT_UNKNOWN)
+        NodeFrontShadow* shadow = front->shadow;
+        uint32_t kept_values = 0;
+        uint32_t kept_records = 0;
+        uint32_t cut_values = 0;
+        // The kept calls' arguments, which are the next chunk's first.
+        uint32_t arguments = 0;
+        uint32_t known = 0;
+        shadow->window_arguments_most = front->window_argument_count > shadow->window_arguments_most ? front->window_argument_count : shadow->window_arguments_most;
+        for (uint32_t i = 0; i < front->stack_count; i += 1)
         {
-            front->ops[kept] = front->ops[record];
-            front->tokens[kept] = front->tokens[record];
-            front->ordinals[kept] = front->ordinals[record];
-            front->uses[kept] = front->uses[record];
-            front->nodes[kept] = front->nodes[record];
-            front->sizes[kept] = front->sizes[record];
-            front->ups[kept] = 0;
-            front->places[kept] = 0;
-            front->stack[i] = kept;
-            kept += 1;
+            known += front->stack[i] != BUSTER_NODE_FRONT_UNKNOWN;
+        }
+        const uint32_t most = BUSTER_NODE_FRONT_RECORDS - BUSTER_CHECK_EXPRESSION_CHUNK;
+        // The records the rows may take beyond one a value.
+        uint32_t spare = known <= most ? most - known : 0;
+        // One past the last record a kept value took, among the records as they were.
+        uint32_t passed = 0;
+        for (uint32_t i = 0; i < front->stack_count; i += 1)
+        {
+            const uint32_t record = front->stack[i];
+            if (record != BUSTER_NODE_FRONT_UNKNOWN)
+            {
+                const uint32_t size = front->sizes[record];
+                // Its row has room, and is here: a value cut at an earlier end is not whole again, since of its records
+                // its own alone is here, after the kept ones before it.
+                const bool whole = size - 1 <= spare && passed + size <= record + 1;
+                const uint32_t count = whole ? size : 1;
+                const uint32_t first = record + 1 - count;
+                for (uint32_t k = 0; k < count; k += 1)
+                {
+                    if (kept != first)
+                    {
+                        node_front_keep_record(front, kept + k, first + k);
+                    }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+                    if (whole)
+                    {
+                        node_facts_window_kept(front, kept + k, first + k, &arguments);
+                    }
+#endif
+                }
+                const uint32_t last = kept + count - 1;
+                if (!whole)
+                {
+                    front->window_classes[last] = BUSTER_NODE_FACTS_CLASS_CUT;
+                }
+                front->ups[last] = 0;
+                front->places[last] = 0;
+                front->stack[i] = last;
+                kept_values += whole;
+                kept_records += whole ? count : 0;
+                cut_values += !whole;
+                spare -= count - 1;
+                kept += count;
+                passed = record + 1;
+            }
+        }
+        shadow->window_kept_values += kept_values;
+        shadow->window_kept_records += kept_records;
+        shadow->window_cut_values += cut_values;
+        front->window_argument_count = arguments;
+    }
+    else
+    {
+        for (uint32_t i = 0; i < front->stack_count; i += 1)
+        {
+            const uint32_t record = front->stack[i];
+            if (record != BUSTER_NODE_FRONT_UNKNOWN)
+            {
+                front->ops[kept] = front->ops[record];
+                front->tokens[kept] = front->tokens[record];
+                front->ordinals[kept] = front->ordinals[record];
+                front->uses[kept] = front->uses[record];
+                front->nodes[kept] = front->nodes[record];
+                front->sizes[kept] = front->sizes[record];
+                front->ups[kept] = 0;
+                front->places[kept] = 0;
+                front->stack[i] = kept;
+                kept += 1;
+            }
         }
     }
     front->count = kept;
@@ -862,10 +1095,11 @@ static void node_front_keep(NodeFront* front)
 
 // The front's pass over a chunk's `acting` tokens and classes, in the walk's order, with the chunk's identifiers' and
 // literals' entries (check_input_expression_identifiers, check_input_expression_literals): each token's record, or
-// none, by its class.
+// none, by its class. With `window` (the lean front's alone, and a constant where this is inlined, as `lean` is) each
+// record's inputs for the fact words' kernel are written as it is made (BUSTER_NODE_READER_WINDOW).
 static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront* front, CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes,
                                                                     uint32_t acting, const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals,
-                                                                    const bool lean)
+                                                                    const bool lean, const bool window)
 {
     const Parser* parser = reader->parser;
     const CheckInput* input = reader->output;
@@ -875,7 +1109,8 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
     node_front_keep(front);
     if (front->count + BUSTER_CHECK_EXPRESSION_CHUNK > BUSTER_NODE_FRONT_RECORDS)
     {
-        // More values wait than the arrays keep beside a chunk's records.
+        // More values wait than the arrays keep beside a chunk's records. (Where the front writes the window, none of
+        // them kept a row then, so the calls' arguments' list is empty already.)
         node_front_forget(front);
         front->count = 0;
         front->pending = 0;
@@ -928,6 +1163,12 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                             {
                                 front->leaf_categories[record] = BUSTER_NODE_FRONT_LEAF_IDENTIFIER;
                                 front->leaf_integers[record] = declaration;
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+                                if (window)
+                                {
+                                    node_facts_window_leaf(front, reader, record, token, BUSTER_NODE_FRONT_LEAF_IDENTIFIER, declaration, NULL);
+                                }
+#endif
                             }
                         }
                         break;
@@ -970,6 +1211,12 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                             front->leaf_categories[record] = BUSTER_NODE_FRONT_LEAF_LITERAL;
                             front->leaf_types[record] = decoded.type;
                             front->leaf_integers[record] = decoded.integer;
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+                            if (window)
+                            {
+                                node_facts_window_leaf(front, reader, record, token, BUSTER_NODE_FRONT_LEAF_LITERAL, 0, &decoded);
+                            }
+#endif
                         }
                     }
                     else if (!left)
@@ -992,6 +1239,12 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                             front->leaf_categories[record] = BUSTER_NODE_FRONT_LEAF_STRING;
                             front->leaf_types[record] = string->type;
                             front->leaf_integers[record] = string->object;
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+                            if (window)
+                            {
+                                node_facts_window_leaf(front, reader, record, token, BUSTER_NODE_FRONT_LEAF_STRING, 0, NULL);
+                            }
+#endif
                         }
                     }
                     else if (value)
@@ -1077,6 +1330,13 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                         {
                             front->members[record] = member;
                         }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+                        if (record != BUSTER_NODE_FRONT_UNKNOWN && window)
+                        {
+                            // A member's name, and a cast's type, its token's query's.
+                            node_facts_window_operator(front, reader, record, op, token, values[0], b, c, code == CHECK_INPUT_CODE_CAST ? reader->query_types[token] : member);
+                        }
+#endif
                     }
                     break;
                 }
@@ -1115,6 +1375,12 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                                     front->argument_count += 1;
                                 }
                             }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+                            if (window)
+                            {
+                                node_facts_window_call(front, reader, record, token, values, count);
+                            }
+#endif
                         }
                     }
                     break;
@@ -1142,8 +1408,19 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                         left = count == BUSTER_NODE_FRONT_UNKNOWN || (condition && count > 1) || (region && count != 1);
                         for (uint32_t k = 0; !left && k < count; k += 1)
                         {
-                            (void)node_front_add(front, condition ? CHECK_OP_CONDITION : CHECK_OP_CAST, token, values[k], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN,
-                                                 CHECK_INPUT_FORM_DISCARD, BUSTER_TYPE_VOID, lean);
+                            const CheckOp op = condition ? CHECK_OP_CONDITION : CHECK_OP_CAST;
+                            const uint32_t root = node_front_add(front, op, token, values[k], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, CHECK_INPUT_FORM_DISCARD,
+                                                                 BUSTER_TYPE_VOID, lean);
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+                            if (root != BUSTER_NODE_FRONT_UNKNOWN && window)
+                            {
+                                // A statement's discard is a cast to void.
+                                node_facts_window_operator(front, reader, root, op, token, values[k], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN,
+                                                           condition ? 0 : BUSTER_TYPE_VOID);
+                            }
+#else
+                            (void)root;
+#endif
                         }
                     }
                     break;
@@ -1156,11 +1433,18 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                     {
                         const uint32_t keyword = reader->first_child[token];
                         const bool switched = keyword < token_count && parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH;
-                        record = node_front_add(front, switched ? CHECK_OP_POSITIVE : CHECK_OP_CONDITION, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN,
-                                                CHECK_INPUT_FORM_OPERATOR, reader->query_types[token], lean);
+                        const CheckOp op = switched ? CHECK_OP_POSITIVE : CHECK_OP_CONDITION;
+                        record = node_front_add(front, op, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, CHECK_INPUT_FORM_OPERATOR,
+                                                reader->query_types[token], lean);
                         if (record != BUSTER_NODE_FRONT_UNKNOWN)
                         {
                             front->roots[record] = 1;
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+                            if (window)
+                            {
+                                node_facts_window_operator(front, reader, record, op, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, 0);
+                            }
+#endif
                         }
                     }
                     break;
@@ -1177,6 +1461,13 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                         if (record != BUSTER_NODE_FRONT_UNKNOWN)
                         {
                             front->roots[record] = 1;
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+                            if (window)
+                            {
+                                // Its conversion's type is the function's.
+                                node_facts_window_operator(front, reader, record, CHECK_OP_CONVERT, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, type);
+                            }
+#endif
                         }
                     }
                     break;
@@ -1197,6 +1488,14 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                         {
                             record = node_front_add(front, CHECK_OP_INITIALIZE, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, CHECK_INPUT_FORM_INITIALIZER,
                                                     reader->query_types[token], lean);
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+                            if (record != BUSTER_NODE_FRONT_UNKNOWN && window)
+                            {
+                                // No window holds an initialization's own record: its expression is its value's.
+                                node_facts_window_operator(front, reader, record, CHECK_OP_INITIALIZE, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN,
+                                                           reader->query_types[token]);
+                            }
+#endif
                         }
                     }
                     break;
@@ -1227,19 +1526,60 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
     shadow->ticks += __rdtsc() - start;
 }
 
-// The front's pass with every column, and the lean one: each its own copy of the loop, which is the lean choice's
-// constant away from the other.
+// The front's pass with every column, the lean one, and the lean one that writes the window: each its own copy of the
+// loop, which is the choices' constants away from the others.
 static __attribute__((noinline)) void node_front_chunk(NodeFront* front, CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes, uint32_t acting,
                                                        const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals)
 {
-    node_front_chunk_by(front, reader, tokens, classes, acting, identifiers, literals, false);
+    node_front_chunk_by(front, reader, tokens, classes, acting, identifiers, literals, false, false);
 }
 
 static __attribute__((noinline)) void node_front_chunk_lean(NodeFront* front, CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes, uint32_t acting,
                                                             const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals)
 {
-    node_front_chunk_by(front, reader, tokens, classes, acting, identifiers, literals, true);
+    node_front_chunk_by(front, reader, tokens, classes, acting, identifiers, literals, true, false);
 }
+
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+static __attribute__((noinline)) void node_front_chunk_window(NodeFront* front, CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes, uint32_t acting,
+                                                              const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals)
+{
+    node_front_chunk_by(front, reader, tokens, classes, acting, identifiers, literals, true, true);
+}
+
+// A chunk by the front that writes the window and by the same lean front without it (NodeFront.plain), whose ticks are
+// what the window's columns and its chunks' ends add to: one after the other on the same tokens, which of them first by
+// the chunk's parity, so that neither is always the one that finds the reader's columns as the other left them. The
+// two make the same records of the chunk's tokens and leave the same values waiting, or the chunk is counted.
+static __attribute__((noinline)) void node_front_chunk_windowed(NodeFront* front, CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes, uint32_t acting,
+                                                                const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals)
+{
+    NodeFront* plain = front->plain;
+    NodeFrontShadow* shadow = front->shadow;
+    const bool first = plain != NULL && (front->chunks & 1) == 0;
+    if (first)
+    {
+        node_front_chunk_lean(plain, reader, tokens, classes, acting, identifiers, literals);
+    }
+    node_front_chunk_window(front, reader, tokens, classes, acting, identifiers, literals);
+    // The names' pass, the window's too: each name's leaf of the chunk's gets its declaration's line.
+    node_facts_window_names(front);
+    if (plain != NULL && !first)
+    {
+        node_front_chunk_lean(plain, reader, tokens, classes, acting, identifiers, literals);
+    }
+    front->chunks += 1;
+    if (plain != NULL)
+    {
+        const uint32_t made = front->count - front->made;
+        const bool same = plain->count - plain->made == made && plain->stack_count == front->stack_count && memcmp(plain->ops + plain->made, front->ops + front->made, made) == 0 &&
+                          memcmp(plain->tokens + plain->made, front->tokens + front->made, (uint64_t)made * sizeof(uint32_t)) == 0;
+        shadow->plain_ticks = plain->shadow->ticks;
+        shadow->plain_records = plain->shadow->records;
+        shadow->plain_differences += !same;
+    }
+}
+#endif
 
 // The front's own records among the walk's nodes strictly between two of them, counted up to `limit`.
 static uint32_t node_front_made_between(const NodeFrontShadow* shadow, uint32_t low, uint32_t high, uint32_t limit)
