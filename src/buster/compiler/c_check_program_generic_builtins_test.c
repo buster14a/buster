@@ -354,6 +354,21 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "static struct L89 deep;int tested(int n){h=(unsigned)n;memset(&deep,0xff,sizeof deep);__builtin_clear_padding(&deep);\n"
         "for(unsigned long i=0;i<sizeof deep;i++)mix(((const unsigned char*)&deep)[i]);return (int)(h^(h>>32));}\n",
         "generic-clear-padding-deep", clang);
+    // __builtin_clear_padding's repeats in each of their forms (#1842), against clang's build: two inner arrays in place,
+    // each a nest of loops of its stores; an array of four levels, the nest's most; one of six, past them, in the table's
+    // loop; and an array of a record of 50 runs, too many to make in place, its repeats the table's too; each alone and as
+    // an array's element.
+    check_test_program_source(test,
+        "void *memset(void *, int, unsigned long);static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+        "static void bytes(const void* p,unsigned long n){for(unsigned long i=0;i<n;i++)mix(((const unsigned char*)p)[i]);}\n"
+        "#define T(decl) do{decl;memset((void*)&v,0xff,sizeof v);__builtin_clear_padding(&v);bytes((const void*)&v,sizeof v);}while(0)\n"
+        "#define F(n) char a##n;int b##n;\n#define F10(n) F(n##0)F(n##1)F(n##2)F(n##3)F(n##4)F(n##5)F(n##6)F(n##7)F(n##8)F(n##9)\n"
+        "struct P{char c;int i;};struct E{F10(1)F10(2)F10(3)F10(4)F10(5)};struct L{char c;struct E e[20];short t;};\n"
+        "struct N4{char c;struct P p[2][3][2][5];char d;};struct N6{char c;struct P p[2][2][2][2][2][3];char d;};\n"
+        "struct G2{char c;struct P p[30];short s;struct{char x;long y;}q[30];char z;};\n"
+        "int tested(int n){h=(unsigned)n;T(struct G2 v);T(struct N4 v);T(struct N6 v);T(struct L v);\n"
+        "T(struct G2 v[2]);T(struct N4 v[3]);T(struct N6 v[2]);T(struct L v[2]);return (int)(h^(h>>32));}\n",
+        "generic-clear-padding-loops", clang);
     // __builtin_clear_padding past what the plan once refused (#1842): an element of 2.2 million runs (an array of 1.1
     // million records inside one), arrays inside the arrays of a record's member, a union's array, whose members' bits
     // overlap, and an element past 4 GiB (each mmap'd, the last's ends alone touched). Clang's walk takes every element of
@@ -687,10 +702,11 @@ static __attribute__((noinline)) void check_test_generic_cpu_programs(CheckTest*
         "generic-cpu-init", clang);
 }
 
-// __builtin_clear_padding's repeats unrolled (#1842, c_check_program_padding.c's check_lower_padding_unroll): a table of a
-// plain entry and a repeated one, three instances of 8 bytes in each of four combinations of two outer pairs, comes out
-// as 13 plain entries sorted by offset, the loop's offsets; with 100 instances (past the inline cost) and with no
-// repeats, it stays as it is.
+// __builtin_clear_padding's repeats (#1842, c_check_program_padding.c): unrolled (check_lower_padding_unroll), a table of
+// a plain entry and a repeated one, three instances of 8 bytes in each of four combinations of two outer pairs, comes out
+// as 13 plain entries sorted by offset, the table loop's offsets; with 100 instances (past the inline cost) and with no
+// repeats, it stays as it is; an unrolled run of zeros joins the next. In place (check_lower_padding_cost), each shared
+// repeat costs one nest of loops, and a repeat past the nest's levels is left to the table.
 static __attribute__((noinline)) void check_test_generic_clear_padding_unroll(CheckTest* test)
 {
     _Alignas(64) static uint8_t buffer[4096];
@@ -713,6 +729,24 @@ static __attribute__((noinline)) void check_test_generic_clear_padding_unroll(Ch
     const bool large = check_lower_padding_unroll(table, 2, &scratch, &untouched, &count);
     const bool plain = check_lower_padding_unroll(table, 1, &scratch, &untouched, &count);
     check_test_expect(test, !large && !plain && untouched == NULL, "clear_padding: many repeats, or none, keep the table");
+    // An inner array's last run of zeros and its parent's after it, joined: 2 instances of 2 bytes at 6, by 8, then 4 at 16.
+    uint64_t joined[] = { 1, 0, 1, 0, 0, 0, 6 | r, 2 << 8, 2, 8, 1, 0, 0, 0, 16, 4 << 8 };
+    const bool unrolled_joined = check_lower_padding_unroll(joined, 2, &scratch, &result, &count);
+    check_test_expect(test, unrolled_joined && count == 2 && result[6] == 6 && result[7] == 2 << 8 && result[8] == 14 && result[9] == 6 << 8,
+                      "clear_padding: an unrolled repeat's last run of zeros joins the run after it");
+    // In place, a run of 3 bytes costs 12 typed entries, of 2 bytes 6, and a repeat's nest of loops
+    // BUSTER_CBUILTIN_PADDING_LOOP a level: the table's plain entry and its repeat of three levels; two entries sharing a
+    // repeat of one level, one nest; not sharing it, two; a repeat past the nest's levels, the table's alone.
+    const uint64_t levels = check_lower_padding_cost(table, 2);
+    uint64_t pair_of[] = { 1, 0, 1, 0, 0, 0, 1 | r, 3 << 8, 64, 12, 1, 0, 0, 0, 10 | r, 2 << 8, 64, 12, 1, 0, 0, 0 };
+    const uint64_t shared = check_lower_padding_cost(pair_of, 2);
+    pair_of[16] = 32;
+    const uint64_t apart = check_lower_padding_cost(pair_of, 2);
+    table[14] = BUSTER_CBUILTIN_PADDING_LEVELS;
+    const uint64_t deep = check_lower_padding_cost(table, 2);
+    check_test_expect(test, levels == 12 + 6 + 3 * BUSTER_CBUILTIN_PADDING_LOOP && shared == 12 + 6 + BUSTER_CBUILTIN_PADDING_LOOP &&
+                           apart == 12 + 6 + 2 * BUSTER_CBUILTIN_PADDING_LOOP && deep == UINT64_MAX,
+                      "clear_padding: in place, a shared repeat's loops cost one nest, and a repeat past its levels can't be");
 }
 
 static __attribute__((noinline)) void check_test_generic_builtins(CheckTest* test, const char* clang)

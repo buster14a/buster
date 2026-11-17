@@ -13,9 +13,9 @@
 // element of any size and any number of runs has one. A union's array, whose members' bits overlap, has its first element
 // walked and its intervals copied for the others, or merged into one where the element has no padding. The intervals
 // sorted and merged, each byte no interval touches is a zero, in runs, and each that one touches in part an AND of its
-// held bits. A plan of few stores is the call's own recipe's, its repeats unrolled where their instances are few; a longer
-// one is a table of its entries in a read-only pool of the unit's (CheckLowerInitializers.items), which the recipe's loop
-// reads.
+// held bits. A plan of few stores is the call's own recipe's: its repeats unrolled where their instances are few, else
+// each shared repeat a nest of loops of its stores. A longer one is a table of its entries in a read-only pool of the
+// unit's (CheckLowerInitializers.items), which the recipe's loop reads.
 //
 // This is a cold, per-call plan of a type's layout, made once a call before the lanes run; it stays scalar.
 
@@ -672,29 +672,36 @@ static uint32_t check_lower_padding_entries(const CheckProgram* program, const T
 }
 
 // The cost, in a builtin's typed entries, of an element's stores made in place (cbuiltin_misc_lower_padding_stores): a
-// run's stores of 8, 4, 2 and 1 bytes 6 entries each, a byte's AND 12; UINT64_MAX where an entry repeats, which only the
-// table's loop makes.
+// run's stores of 8, 4, 2 and 1 bytes 6 entries each, a byte's AND 12, and each nest of loops of a shared repeat
+// BUSTER_CBUILTIN_PADDING_LOOP a level (#1842); UINT64_MAX where a repeat has more levels than the nest's room, which only
+// the table's loop makes.
 static uint64_t check_lower_padding_cost(const uint64_t* table, uint32_t count)
 {
     uint64_t cost = 0;
     const uint64_t* entry = table + BUSTER_CBUILTIN_PADDING_HEADER;
+    const uint64_t* group = NULL;
     for (uint32_t i = 0; cost != UINT64_MAX && i < count; i += 1)
     {
         const uint64_t run = entry[1] >> 8;
         const bool zeros = (entry[1] & 0xff) == 0;
         const bool repeated = (entry[0] & BUSTER_CBUILTIN_PADDING_REPEATED) != 0;
-        const uint64_t own = zeros ? (run / 8 + (uint64_t)__builtin_popcountll(run & 7)) * 6 : 12;
-        cost = repeated || own > UINT64_MAX / 2 - cost ? UINT64_MAX : cost + own;
-        entry += BUSTER_CBUILTIN_PADDING_PLAIN;
+        const bool opens = repeated && (group == NULL || !cbuiltin_misc_lower_padding_shared(group, entry));
+        const bool deep = repeated && entry[6] >= BUSTER_CBUILTIN_PADDING_LEVELS;
+        const uint64_t loops = opens ? (entry[6] + 1) * BUSTER_CBUILTIN_PADDING_LOOP : 0;
+        const uint64_t own = (zeros ? (run / 8 + (uint64_t)__builtin_popcountll(run & 7)) * 6 : 12) + loops;
+        cost = deep || own > UINT64_MAX / 2 - cost ? UINT64_MAX : cost + own;
+        group = repeated ? (opens ? entry : group) : NULL;
+        entry += repeated ? BUSTER_CBUILTIN_PADDING_WORDS : BUSTER_CBUILTIN_PADDING_PLAIN;
     }
     return cost;
 }
 
 // A table's repeats unrolled into plain entries (#1842), where all their instances' stores cost at most what a call's
-// recipe makes in place: a small inner array's few stores, not the table's loop. The instances' offsets are the loop's:
-// each combination's digits by its pairs' counts, innermost first, each times its stride, then the innermost repeat's
-// instances. The entries come out sorted by offset, as the walk makes a plan without repeats. True where it unrolled them
-// into `*result` (`*result_count` entries after the header), in `scratch`; false, and `*result` untouched, otherwise.
+// recipe makes in place: a small inner array's few stores, not loops. The instances' offsets are the table loop's: each
+// combination's digits by its pairs' counts, innermost first, each times its stride, then the innermost repeat's
+// instances. The entries come out sorted by offset, adjacent runs of zeros joined, as the walk makes a plan without
+// repeats. True where it unrolled them into `*result` (`*result_count` entries after the header), in `scratch`; false,
+// and `*result` untouched, otherwise.
 static bool check_lower_padding_unroll(const uint64_t* table, uint32_t count, Arena* scratch, uint64_t** result, uint32_t* result_count)
 {
     uint64_t cost = 0;
@@ -759,8 +766,28 @@ static bool check_lower_padding_unroll(const uint64_t* table, uint32_t count, Ar
             }
             at += repeated ? BUSTER_CBUILTIN_PADDING_WORDS : BUSTER_CBUILTIN_PADDING_PLAIN;
         }
+        // Adjacent runs of zeros, one (an inner array's last element's padding and its parent's after it), as the walk
+        // makes them without repeats.
+        uint64_t kept = 0;
+        for (uint64_t j = 0; j < made_count; j += 1)
+        {
+            const bool zeros = (made[2 * j + 1] & 0xff) == 0;
+            const uint64_t* previous = kept != 0 ? made + 2 * (kept - 1) : NULL;
+            const bool joined = previous != NULL && zeros && (previous[1] & 0xff) == 0 && previous[0] + (previous[1] >> 8) == made[2 * j] &&
+                                (previous[1] >> 8) + (made[2 * j + 1] >> 8) <= BUSTER_CHECK_LOWER_PADDING_RUN;
+            if (joined)
+            {
+                made[2 * (kept - 1) + 1] += made[2 * j + 1];
+            }
+            else
+            {
+                made[2 * kept] = made[2 * j];
+                made[2 * kept + 1] = made[2 * j + 1];
+                kept += 1;
+            }
+        }
         *result = entries;
-        *result_count = (uint32_t)made_count;
+        *result_count = (uint32_t)kept;
     }
     return entries != NULL;
 }

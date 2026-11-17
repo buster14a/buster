@@ -1563,8 +1563,7 @@ static void check_test_driver_windowed_loop(CheckTest* test, const char* executa
 }
 
 // Builtins clang's Sema takes and its code generation refuses for x86 (#148), which -c refuses by name on both paths:
-// BPF's preserve_access_index and HLSL's resource pointer; __builtin_clear_padding of an element past 4 GiB; an NSString of
-// no literal, which clang's code reads as one
+// BPF's preserve_access_index and HLSL's resource pointer; an NSString of no literal, which clang's code reads as one
 // (check_test_driver_cfstrings has the constant strings' objects); z/OS's va_start and
 // va_copy, which clang's x86-64 code makes over a char *; os_log's
 // data taken again across side effects, a __float128's and a 2-byte vector's, those clang's code crashes on (a 32-byte
@@ -1581,8 +1580,6 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
           "unsupported: __builtin_preserve_access_index, which clang compiles for BPF alone (an error without -g)" },
         { "void f(int x) { __builtin_hlsl_resource_getpointer_typed(x); }\n",
           "unsupported: __builtin_hlsl_resource_getpointer_typed, which clang doesn't compile either" },
-        { "struct S { char c[1L << 32]; int i; };\nvoid f(struct S* p) { __builtin_clear_padding(p); }\n",
-          "unsupported: __builtin_clear_padding of an element past 4 GiB" },
         { "const void* f(const char* s) { return __builtin___NSStringMakeConstantString(s); }\n",
           "unsupported: an NSString of no string literal, whose object clang's code makes from the literal its argument isn't" },
         // A static initializer of one, which clang's evaluator takes as an address constant (#1785): its object refused by the

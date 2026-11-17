@@ -1971,13 +1971,20 @@ object p points to, as clang's `PaddingClearer` does.
   array's elements, through arrays of arrays, are cleared in a loop by their
   element's stores. A variable length array is left as it is, as clang's code
   leaves it.
-- **The table** (#1842). Where an element's stores, its repeats' instances
-  each, would pass about 460 of a builtin's entries (some 40 runs), they are a
-  read-only pool of the unit's, which the recipe's loop reads. Below that, a
-  small inner array's repeats are unrolled into entries of their own, sorted
-  by offset, and the call's recipe makes their stores in place
-  (`check_lower_padding_unroll`). The pool's layout, which
-  `cbuiltin_misc_lower_padding_table` reads (`CBuiltinMiscLowerCall.padding`):
+- **In place, or a table** (#1842). The call's recipe makes the element's
+  stores itself where they cost at most about 460 of a builtin's entries:
+  - a plain entry's stores;
+  - a small inner array's repeats unrolled into entries of their own, sorted
+    by offset, adjacent runs of zeros joined (`check_lower_padding_unroll`),
+    where all their instances fit;
+  - else each repeat a nest of loops of its stores, at most four levels (its
+    outer repeats' and its innermost's), one nest for the entries that share
+    it (`cbuiltin_misc_lower_padding_stores`). Each level costs about 20
+    entries, so the code grows with the type's description, not its size.
+
+  Past that (a description of some 40 runs or more, or a repeat of more than
+  four levels), the entries are a read-only pool of the unit's, which
+  `cbuiltin_misc_lower_padding_table`'s loop reads (`CBuiltinMiscLowerCall.padding`):
   - a header, the repeat of an entry that doesn't repeat;
   - each entry's 64-bit offset and its bytes and mask, 16 bytes;
   - a repeated entry's six more words: its innermost repeat's count and
