@@ -2101,6 +2101,10 @@ and c-testsuite were above #2646's bound of clang -O0's bytes.
   a value that lives past the call doesn't take it, as the call would clobber it
   there; one that lives across an earlier call takes callee-saved registers
   alone in the preferred problem, where the hint isn't allowed and is ignored.
+  The straight-line consumer (`tier1_emit_prepare`), whose allocation has an
+  interval a value, gives the same register to each interval that ends at a
+  call reading it in a register, the first argument's for a value passed
+  twice; it then allocates with hints where before only a tie made it.
 - **Its rank.** `tier1_allocation_value_hint` returns it only where no value
   hint names a register (a named interval's opening or closing, the value's own
   place, its hint value's): a range that enters a block keeps its value's
@@ -2116,16 +2120,18 @@ and c-testsuite were above #2646's bound of clang -O0's bytes.
 What stays: a function whose parameters live across its calls in their
 incoming registers, saved around each call, has no argument register free for
 its calls' other arguments (`sqlite3DeleteFrom`'s five, saved and reloaded at
-every call), and a two-address result tied to its operand's register goes where
-the operand was (#2823's swaps). 21,497 moves into argument registers remain in
-`sqlite3.c`'s object.
+every call); an argument whose register an incoming parameter still holds takes
+another and moves (#2823's `v5`, now one move where it took a swap's three); a
+two-address result tied to its operand's register goes where the operand was;
+and an indirect callee's `r10` isn't among the registers its range may take.
+21,323 moves into argument registers remain in `sqlite3.c`'s object.
 
 | Objects' Tier 1 function bytes (`--tier1-no-inline`), against clang -O0 | main `d876a5e0` | this | clang -O0 |
 | --- | ---: | ---: | ---: |
-| `sqlite3.c` | 904,862 | 885,508 | 913,339 |
-| Lua's 34 sources | 205,026 | 197,343 | 248,990 |
-| c-testsuite's 220 programs | 48,365 | 45,394 | 47,293 |
-| `sqlite3.c`'s register-to-register moves | 40,142 | 33,518 | 6,813 |
+| `sqlite3.c` | 904,862 | 884,975 | 913,339 |
+| Lua's 34 sources | 205,026 | 196,906 | 248,990 |
+| c-testsuite's 220 programs | 48,365 | 45,227 | 47,293 |
+| `sqlite3.c`'s register-to-register moves | 40,142 | 33,335 | 6,813 |
 
 (The x86-64 host path's objects and the AVX-512 host path's are the same bytes.)
 
@@ -2135,8 +2141,10 @@ it is read in where the lowest free one is another; a second argument whose
 register a recipe holds, which it doesn't take; a value read by the call that
 lives on, which takes no hint; and a range that enters a block in its value's
 register though a call there reads it in another. `tier1_call_test.c` checks
-that the CFG consumer names each register argument's register at its call. A
-mutation of each rule fails its check.
+that the CFG consumer names each register argument's register at its call, and
+that the straight-line consumer hints it to each argument's interval that ends
+there, both of them over the call fixtures. A mutation of each rule fails its
+check.
 
 ## Rematerialization
 

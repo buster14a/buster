@@ -31,6 +31,10 @@ struct Tier1EmitTest
     uint64_t native_skipped;
     // The floating fixtures' compiles whose calls save an xmm register (#1116's check of their rows).
     uint32_t vector_saves;
+    // The call fixtures' register arguments whose hint each consumer was checked to name (#2646): the CFG consumer's
+    // uses, and the straight-line consumer's intervals that end at their calls.
+    uint32_t general_hints;
+    uint32_t straight_hints;
 };
 
 // A requested output policy may exceed the current CPU. The policy/encoding checks still run; only the native call skips.

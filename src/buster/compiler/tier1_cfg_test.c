@@ -821,7 +821,9 @@ static bool tier1_cfg_test_definition_uses(const Tier1CfgInput* input, Arena* ar
     uint32_t* offsets = arena_push_array(arena, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint32_t* positions = arena_push_array(arena, (uint64_t)input->use_count + values + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint8_t* required = arena_push(arena, (uint64_t)input->use_count + values + 1, 1);
-    const bool ready = phi != 0 && offsets != 0 && positions != 0 && required != 0;
+    // The uses' registers (#2646) follow their uses; a definition's own use names none.
+    uint8_t* registers = input->use_registers != 0 ? arena_push(arena, (uint64_t)input->use_count + values + 1, 1) : 0;
+    const bool ready = phi != 0 && offsets != 0 && positions != 0 && required != 0 && (input->use_registers == 0 || registers != 0);
     if (ready)
     {
         memset(phi, 0, (uint64_t)values + 1);
@@ -841,6 +843,10 @@ static bool tier1_cfg_test_definition_uses(const Tier1CfgInput* input, Arena* ar
                 {
                     positions[count] = input->definitions[v];
                     required[count] = 1;
+                    if (registers != 0)
+                    {
+                        registers[count] = UINT8_MAX;
+                    }
                     count += 1;
                     added = true;
                 }
@@ -848,6 +854,10 @@ static bool tier1_cfg_test_definition_uses(const Tier1CfgInput* input, Arena* ar
                 {
                     positions[count] = input->use_positions[u];
                     required[count] = input->use_required != 0 ? input->use_required[u] : 0;
+                    if (registers != 0)
+                    {
+                        registers[count] = input->use_registers[u];
+                    }
                     count += 1;
                 }
             }
@@ -857,6 +867,7 @@ static bool tier1_cfg_test_definition_uses(const Tier1CfgInput* input, Arena* ar
         result->use_offsets = offsets;
         result->use_positions = positions;
         result->use_required = required;
+        result->use_registers = registers;
         result->use_count = count;
     }
     return ready;

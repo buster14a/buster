@@ -95,7 +95,7 @@ it records `enforced=1`, and that result makes the command exit 1. Missing or
 invalid evidence fails both modes. Every failure retains its files.
 
 Hosted and native correctness use `--check-code-size` for c-testsuite
-(#2646): 45,394 bytes against Clang's 47,293 when it was enabled, where #2643
+(#2646): 45,227 bytes against Clang's 47,293 when it was enabled, where #2643
 had measured 2.65% above the bound. `measure-tier1-programs --check-code-size`
 enforces the same bound on SQLite's `sqlite3.c` and on #1116's original Lua
 corpus, all 34 source files including `luac.c`.

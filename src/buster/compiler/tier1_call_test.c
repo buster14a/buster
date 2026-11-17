@@ -1157,13 +1157,17 @@ static uint32_t tier1_call_record(const Tier1EmitResult* emitted, uint32_t k)
 
 // #2646: whether the CFG consumer's input names, at each call, the register each register argument is read in (the
 // argument registers by the arguments' places, an xmm one's number in the vector class), a use of the argument's value
-// at the call's input position, where the allocation takes it as its hint (Tier1CfgInput.use_registers).
-static bool tier1_call_use_registers(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted)
+// at the call's input position, where the allocation takes it as its hint (Tier1CfgInput.use_registers); and whether the
+// straight-line consumer's allocation input hints that register to each argument's interval that ends at the call
+// (Tier1AllocationInput.register_hints), the first argument's of a value passed twice.
+static bool tier1_call_use_registers(Tier1EmitTest* test, const Tier1SelectPlan* plan, const Tier1EmitResult* emitted)
 {
     const IrFunction* function = plan->function;
     const Tier1CfgInput* input = &emitted->cfg_input;
-    const uint32_t base = 2 * (input->block_count - function->block_count);
-    bool named = input->use_registers != 0;
+    const Tier1AllocationInput* straight = &emitted->prepared.allocation;
+    const bool general = emitted->general;
+    const uint32_t base = general ? 2 * (input->block_count - function->block_count) : 0;
+    bool named = !general || input->use_registers != 0;
     for (uint32_t node = 0; named && node < function->instruction_count; node += 1)
     {
         const bool call = tier1_select_function_call(function, node);
@@ -1174,11 +1178,30 @@ static bool tier1_call_use_registers(const Tier1SelectPlan* plan, const Tier1Emi
             const Tier1SelectPlace place = tier1_select_argument_place(function, called, argument, &places);
             const bool registered = place.kind == BUSTER_TIER1_PLACE_GENERAL || place.kind == BUSTER_TIER1_PLACE_VECTOR;
             const uint8_t expected = place.kind == BUSTER_TIER1_PLACE_GENERAL ? tier1_select_parameter_registers[place.index] : place.index;
-            const uint32_t v = emitted->node_values[plan->effective_use_values[plan->effective_use_offsets[node] + argument]];
-            bool found = !registered || v == BUSTER_TIER1_CFG_NONE;
-            for (uint32_t u = v != BUSTER_TIER1_CFG_NONE ? input->use_offsets[v] : 0; !found && u < input->use_offsets[v + 1]; u += 1)
+            const uint32_t value = plan->effective_use_values[plan->effective_use_offsets[node] + argument];
+            bool found = !registered;
+            if (general)
             {
-                found = input->use_positions[u] == base + 2 * node && input->use_registers[u] == expected;
+                const uint32_t v = emitted->node_values[value];
+                found = found || v == BUSTER_TIER1_CFG_NONE;
+                for (uint32_t u = v != BUSTER_TIER1_CFG_NONE ? input->use_offsets[v] : 0; !found && u < input->use_offsets[v + 1]; u += 1)
+                {
+                    found = input->use_positions[u] == base + 2 * node && input->use_registers[u] == expected;
+                    test->general_hints += found;
+                }
+            }
+            else
+            {
+                bool earlier = false;
+                for (uint32_t k = 0; k < argument; k += 1)
+                {
+                    earlier |= plan->effective_use_values[plan->effective_use_offsets[node] + k] == value;
+                }
+                const uint32_t interval = emitted->prepared.value_intervals[value];
+                const bool ends = interval < straight->count && straight->values[interval] == value && straight->ends[interval] == 2 * node + 1;
+                const bool hinted = straight->register_hints != 0 && straight->register_hints[interval] == expected;
+                test->straight_hints += registered && !earlier && ends && hinted;
+                found = found || earlier || !ends || hinted;
             }
             named = found;
         }
@@ -1230,7 +1253,7 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
             Tier1CfgCheck check;
             const bool verified = emitted.general ? tier1_cfg_verify(&emitted.cfg_input, &emitted.cfg, &test->scratch, &check) : tier1_allocation_verify(&emitted.prepared.allocation, &emitted.allocation);
             tier1_emit_test_expect(test, verified, "direct-call allocation passes independent interference verification");
-            tier1_emit_test_expect(test, !emitted.general || tier1_call_use_registers(&plan, &emitted), "a call's register arguments' uses name the registers it reads them in (#2646)");
+            tier1_emit_test_expect(test, tier1_call_use_registers(test, &plan, &emitted), "a call's register arguments' uses name the registers it reads them in (#2646)");
             tier1_emit_test_expect(test, tier1_emit_test_saves_loaded(&emitted), "every value a call stores is loaded back before the code leaves its straight-line run");
             tier1_emit_test_expect(test, tier1_emit_test_general_rows_used(&emitted), "a call-save row is a register some call stores, and no other register has one (#177)");
             // A call past which no value lives (the pointer's, the empty one's) takes no call-save row, where every
@@ -1566,6 +1589,8 @@ static void tier1_call_cases(Tier1EmitTest* test)
         }
         arena_pop_to(&test->input, 0);
     }
+    // Both consumers' hints were checked where a call reads an argument in a register (#2646).
+    tier1_emit_test_expect(test, test->general_hints != 0 && test->straight_hints != 0, "the call fixtures check both consumers' argument register hints");
     tier1_call_failures(test);
     tier1_call_probe_tests(test);
 }
