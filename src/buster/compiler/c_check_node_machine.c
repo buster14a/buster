@@ -122,6 +122,13 @@
 // type_is_valid.
 #define BUSTER_NODE_MACHINE_WORD_PLAIN 0x01000000u
 #define BUSTER_NODE_MACHINE_WORD_VALID 0x02000000u
+// And its six bits from BUSTER_NODE_MACHINE_WORD_TESTS_SHIFT: what the census's tests ask of a value's type at every
+// record (c_check_node_census.c's node_census_type_bits_make, which follows this file in the unit), less the bits they
+// ask of a conversion's type alone. In order: a type the machine has no kind for, a struct or union, an enumeration, a
+// pointer, a pointer whose pointee may be void, an array. A record's word has them wherever T or the kernel wrote the
+// record, so the tests on the window read a record's type's byte from the record (node_tests_window_bytes).
+#define BUSTER_NODE_MACHINE_WORD_TESTS_SHIFT 26u
+static uint8_t node_census_type_bits_make(const TypeTable* types, TypeId type);
 
 // A record's standing (NodeMachine.standings): its value's category (bits 0 and 1) and constant kind (bits 2 to 4), the
 // field its payload holds (bits 5 and 6: its integer, its offset or its floating value, the others zero), and
@@ -502,7 +509,11 @@ static uint32_t node_machine_make_word(const TypeTable* types, uint32_t index, u
     const bool valid = type_is_valid(types, type);
     const bool plain = types->types.kind[index] < BUSTER_TYPE_KIND_WRAPPERS;
     const uint8_t kind = valid ? check_action_kind(types, type) : BUSTER_TYPE_KIND_NONE;
-    return (uint32_t)class | (uint32_t)facts << 8 | (uint32_t)kind << 16 | (plain ? BUSTER_NODE_MACHINE_WORD_PLAIN : 0) | (valid ? BUSTER_NODE_MACHINE_WORD_VALID : 0);
+    // The tests' byte's bits 1 to 3 (special, aggregate, enumeration) and 5 to 7 (pointer, void pointee, array), in a row.
+    const uint32_t byte = node_census_type_bits_make(types, type);
+    const uint32_t tests = ((byte >> 1) & 0x07u) | ((byte >> 2) & 0x38u);
+    return (uint32_t)class | (uint32_t)facts << 8 | (uint32_t)kind << 16 | (plain ? BUSTER_NODE_MACHINE_WORD_PLAIN : 0) | (valid ? BUSTER_NODE_MACHINE_WORD_VALID : 0) |
+           tests << BUSTER_NODE_MACHINE_WORD_TESTS_SHIFT;
 }
 
 // The machine's columns for a unit whose types are `types` and whose graph is `graph`, from `arena`, with room for

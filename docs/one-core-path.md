@@ -1,9 +1,9 @@
 # The one-core path: 73 cycles a token, on records the vector lanes can use (#2850): design
 
-Status: design, with its first two steps, step 2's first three pieces, the
-first part of step 3 and steps 4's and 5's censuses measured. Of all this,
-only what step 5's allocation kept as the kernel's own is in a compile: three
-changes to those rows, merged.
+Status: design, with its first two steps, step 2's first three pieces and
+its tests' loop on the window, the first part of step 3 and steps 4's and
+5's censuses measured. Of all this, only what step 5's allocation kept as
+the kernel's own is in a compile: three changes to those rows, merged.
 [#2850](https://github.com/buster14a/buster/issues/2850) has the design whole:
 the budget, the data design and what would refute it. It is
 [#672](https://github.com/buster14a/buster/issues/672)'s per-core research
@@ -51,7 +51,11 @@ and the kernel read it there: 29.9 ticks a record on `sqlite3.c` with its
 inputs, 14.4 of them the inputs where the copy took 30.4, and every
 expression T takes read in place. On musl it costs more than the copy: the
 front writes for every record it makes, and a small unit's names are first
-uses.
+uses. The set's and the silence tests, which decide what the machine takes,
+then run on that window, their loop 64 records a step over bytes read out of
+the kernel's records: exact, and 55 ticks a record on `sqlite3.c` where the
+tests as a pass over T's columns read 87. The loop itself is 0.7 of them,
+and 38 are the tests that read T's records still.
 Step 4's census counted Tier 0's row: 117 cycles
 and 295 instructions a typed entry in `-c sqlite3.c`, 64.7 cycles a token,
 Tier 0 itself 38 of them and the unwind table, the atoms and the emission's
@@ -97,7 +101,7 @@ token; the issue has each row's source:
 | --- | --- | --- | --- |
 | 0 | The middle's passes on the real nodes, outside the compiler | every entry the stream's; 20 cycles a taken node or less; 0.2 mispredicted branches a node or fewer | measured: 16.7 and 20.6 cycles, 0.025 and 0.045 mispredicted |
 | 1 | The fact words, in the shadow: T's leaves and lookups from one load each | every record the oracle's; 10 cycles a leaf or lookup or less, a body's expressions a run | measured: exact; 15.8 to 26.5 cycles; a leaf about 5, a lookup 25 to 46. Followed up: a lean record 14.1 to 20.8, the loads alone 8.8 to 15.2 |
-| 2 | The machine on these records where it runs (#2524's steps 2 to 4) | the bodies' middle at 38 cycles a node or less in `-c sqlite3.c` | first piece measured, in the shadow: T whole from the fact words, exact; 38 cycles an evaluated node with whole records and 32 with lean ones, where its own gate was 25. Second piece counted: of the operators that are no lookup, 5.4%, 24.2% and 6.1% need a value made at the record (`sqlite3.c`, Lua, musl; its line was 15%), and C decides on a type's identity for one question of a call's callee. Third piece measured: the kernel at reader time, its inputs from the front's records, exact; 16.4 TSC ticks a record where T again takes 49.2, and 44.8 with its inputs' making, where its gate was 35 |
+| 2 | The machine on these records where it runs (#2524's steps 2 to 4) | the bodies' middle at 38 cycles a node or less in `-c sqlite3.c` | first piece measured, in the shadow: T whole from the fact words, exact; 38 cycles an evaluated node with whole records and 32 with lean ones, where its own gate was 25. Second piece counted: of the operators that are no lookup, 5.4%, 24.2% and 6.1% need a value made at the record (`sqlite3.c`, Lua, musl; its line was 15%), and C decides on a type's identity for one question of a call's callee. Third piece measured: the kernel at reader time, its inputs from the front's records, exact; 16.4 TSC ticks a record where T again takes 49.2, and 44.8 with its inputs' making, where its gate was 35. The tests on the window measured: exact; 54.1 TSC ticks a record on `sqlite3.c` where their pass over T's columns reads 83.0 (gate 40, refuted at 65): the loop 0.7, its inputs 8.9, and 37.2 the tests that read T's records still |
 | 3 | The front's row, into the window | 35 cycles a token or less | first part measured, in the shadow: the node machine's front writes the kernel's window and the kernel reads it in place, exact; the kernel with its inputs 29.9 TSC ticks a record on `sqlite3.c` (gate 35), 38.4 on Lua, 61.5 on musl. The lexer's and the parser's rows are not started |
 | 4 | Tier 0's row | 10 cycles a token or less, the object's bytes unchanged | census measured: the row 64.7 cycles a token (117 a typed entry), Tier 0 38.4 of them; a key of 8 bytes or fewer decides 99.83% of the entries; the encoder, branch sizing and the object 8.3 in a compile, 6.3 at their own rates |
 | 5 | Fresh memory and the fixed costs | 6 cycles a token or less | census measured: the kernel 121 cycles a token; its floor 5.8 to 6.4 at item 3's costs, 10.3 to 12.5 at the compile's, and 5.2 to 6.7 more beside it: the 6 refuted. Allocated: 14.3 to 15.0 on `sqlite3.c` and 25.0 on musl as one command, each row to the issue that removes it or kept. The kept rows optimized in the compile since (#2885, #2903, #2941): the row about 12 on `sqlite3.c`. Whether the budget's line moves to it is not settled |
@@ -1442,6 +1446,74 @@ of three or five readings:
   ([#2894](node-machine.md)) writing the same columns by passes is its next
   part; the lean front's 44 ticks a record of its own are now three times the
   window's cost.
+
+## The tests on the window
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/window-tests-2850-2026-11-17).
+`measure-node-machine --shadow --window-tests`
+([the guide](commands/lowering.md#the-tests-on-the-window-2850)).
+
+The set's and the silence tests decide what the machine takes. As a pass
+over T's columns they cost 86 TSC ticks a typed record on `sqlite3.c`, more
+than the kernel with its inputs. This piece runs them on the window, once
+the kernel has made a chunk's records in place. [The node machine's
+page](node-machine.md#the-tests-on-the-window) has it whole: what changed
+part by part, the counts, and what moved it and what didn't.
+[Its specification](https://github.com/buster14a/buster/issues/2850#issuecomment-6951406678)
+had four parts. This is the first two, the inputs where the record is made
+and the loop 64 records a step. A constant operand's tests in the kernel's
+rule and a call's tests from the window are the piece after it.
+
+### What it measured
+
+The 9700X, CPU 2, under the lock, Release; main `9a1422eab` with the piece;
+medians of seven readings in turn, musl's of three. TSC ticks a record of
+the expressions the tests ran on:
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| the tests as a pass over T's columns, at the base | 83.0 | 112.4 | 158.4 |
+| **the tests on the window** | **54.1** | **69.5** | **111.8** |
+| of which the records' bytes | 8.9 | 9.8 | 16.6 |
+| the loop | 0.7 | 0.9 | 1.9 |
+| an expression's part | 7.2 | 7.7 | 13.6 |
+| the tests that read T's records still | 37.2 | 51.1 | 78.8 |
+
+### Against its gate
+
+- **Exact: met.** Every expression's bits, root's kind and span of tokens
+  are the census's code's, on the three corpora and the compiler's own
+  source, with the default warnings and with every warning, and on
+  `test-checker`'s fixtures.
+- **No walk for the loop: met.** An expression is walked only where a
+  record is sent to the census's code: 2.06%, 4.11% and 3.01% of them, the
+  pass's own counts.
+- **40 ticks a record on `sqlite3.c`: not met.** 54.1. It would have been
+  refuted at 65.
+
+### What stays scalar, and why
+
+- **The tests that read T's records:** the tree's, the operators' and an
+  expression's own, 37.2 of the 54.1. They are the piece after this one, on
+  the kernel's records.
+- **A declaration's line's byte's first making,** once a line, by the
+  census's code: 18,295 on `sqlite3.c`.
+- **An operand further back than the block before its record's:** 0.33% of
+  the records, a load each.
+- **A loop a record for the records' bytes was tried, and lost:** 14.2 ticks
+  a record at its best where six gathers a step of sixteen read 9.4.
+
+### What it means
+
+- **The loop was not what its 27 ticks bought.** On byte columns it is 0.7.
+  The pass's cost was reading each record's inputs where they were.
+- **The inputs are now the loop's cost:** 8.9 ticks a record to read four
+  fields out of each 64-byte record, a line's byte and a role. The kernel
+  holds the word, the standing and the flags in registers when it writes a
+  record. Having it write these bytes then is not tried.
+- **Two thirds of what is left is the next piece's.** With the operators'
+  tests on the kernel's records, T's second run in the shadow goes too, and
+  the gate is read again.
 
 ## Step 4's first piece: a census of Tier 0's row
 

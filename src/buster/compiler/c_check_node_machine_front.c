@@ -74,11 +74,6 @@
 // tests where they sit"). BUSTER_NODE_READER_VERIFY: T's rows and rules checked against the action there (--verify).
 #define BUSTER_NODE_READER_TESTS 1u
 #define BUSTER_NODE_READER_VERIFY 2u
-// BUSTER_NODE_READER_OWN: the tests there in the machine's own form (node_tests_expression; --front-own-tests; "The tests
-// in the machine's own form"), whose bits are then the verdict. BUSTER_NODE_READER_BOTH: the census's code on the view
-// run too, on every expression, and the two forms' bits compared (with --verify).
-#define BUSTER_NODE_READER_OWN 4u
-#define BUSTER_NODE_READER_BOTH 8u
 // BUSTER_NODE_READER_LAST: the tests after C and X, on the expressions those take, where they otherwise come between T
 // and C (--front-tests-last).
 #define BUSTER_NODE_READER_LAST 16u
@@ -90,6 +85,12 @@
 // BUSTER_NODE_READER_FACTS; c_check_node_machine_facts.c's "The window the front writes"). The front then keeps a
 // waiting value's whole subtree across a chunk's end, where it otherwise keeps the value's place alone.
 #define BUSTER_NODE_READER_WINDOW 64u
+// The census's tests in the machine's own form, on that window (measure-node-machine --shadow --window-tests, with
+// BUSTER_NODE_READER_WINDOW and BUSTER_NODE_READER_TESTS; c_check_node_census.c's node_tests_window_chunk; "The tests
+// on the window"): once the kernel has made a chunk's records in place, the tests of each of its expressions from
+// those records and the front's columns, 64 records a step, compared with the bits the census's code gave on T's
+// records.
+#define BUSTER_NODE_READER_WINDOW_TESTS 128u
 // A lean leaf's kind, in its record's `leaf_categories`.
 #define BUSTER_NODE_FRONT_LEAF_IDENTIFIER 0u
 #define BUSTER_NODE_FRONT_LEAF_LITERAL 1u
@@ -167,6 +168,24 @@ typedef enum NodeFactsCount
     NODE_FACTS_COUNT_WINDOW_MADE,
     NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES,
     NODE_FACTS_COUNT_WINDOW_KERNEL_TICKS,
+    // The tests on the window (BUSTER_NODE_READER_WINDOW_TESTS): the expressions and records they ran on, the
+    // expressions whose bits are not the reference's, and their ticks.
+    NODE_FACTS_COUNT_TESTS_EXPRESSIONS,
+    NODE_FACTS_COUNT_TESTS_RECORDS,
+    NODE_FACTS_COUNT_TESTS_DIFFERENCES,
+    NODE_FACTS_COUNT_TESTS_TICKS,
+    // Of the ticks: the records' bytes made, the loop over them, and the tests that read T's records still (the rest is
+    // each expression's own part of the loop's results). Then the operands before the block before, the declarations'
+    // lines whose byte was made, and the chunks' records the bytes and the loop ran over.
+    NODE_FACTS_COUNT_TESTS_BYTES_TICKS,
+    NODE_FACTS_COUNT_TESTS_LOOP_TICKS,
+    NODE_FACTS_COUNT_TESTS_REST_TICKS,
+    NODE_FACTS_COUNT_TESTS_FAR,
+    NODE_FACTS_COUNT_TESTS_LINES,
+    NODE_FACTS_COUNT_TESTS_SWEPT,
+    // The expressions whose root's record is apart from its operand's, and T's ticks alone on the tests' expressions.
+    NODE_FACTS_COUNT_TESTS_APART,
+    NODE_FACTS_COUNT_TESTS_AGAIN_TICKS,
     NODE_FACTS_COUNTS,
 } NodeFactsCount;
 
@@ -278,25 +297,22 @@ struct NodeFrontTypes
     // action gives a warning.
     uint64_t twin_differences;
     uint64_t twin_warnings;
-    // BUSTER_NODE_READER_OWN's: the expressions and records the own form ran on; the expressions that had a record sent
-    // to the census's own tests and those records, by what sent them (a NodeTestsTrigger); the expressions walked for
-    // them; and, with BUSTER_NODE_READER_BOTH, the expressions whose bits or whose tokens' span are not the census's
-    // code's on the view, and the walks that reached another count of nodes than T's records.
+    // BUSTER_NODE_READER_WINDOW_TESTS's: the expressions and records the tests' own form ran on; the expressions that
+    // had a record sent to the census's code and those records, by what sent them (a NodeTestsTrigger); the expressions
+    // walked for them; and the walks that reached another count of nodes than T's records.
     uint64_t own_expressions;
     uint64_t own_records;
     uint64_t own_visited;
     uint64_t own_visits;
     uint64_t own_walks;
     uint64_t own_triggers[32];
-    // The records its pass listed: leaves, records whose token's parent the tree's tests read, and operators with tests
-    // of their own; and of the last, the calls, those with a constant operand, and those with a third operand.
-    uint64_t own_leaves;
+    // The records its loop listed: those whose token's parent the tree's tests read, and the operators with tests of
+    // their own; and of the last, the calls, those with a constant operand, and those with a third operand.
     uint64_t own_trees;
     uint64_t own_operators;
     uint64_t own_calls;
     uint64_t own_constants;
     uint64_t own_thirds;
-    uint64_t own_differences;
     uint64_t own_count_differences;
     // The fact words' kernel at reader time (BUSTER_NODE_READER_FACTS; c_check_node_machine_facts.c's
     // node_facts_reader_flush): its counts (NodeFactsCount); the records it is to make and those it left to T, by
