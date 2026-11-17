@@ -884,6 +884,22 @@ static X86Instruction tier1_select_shift(X86Operation operation, uint32_t width,
     return result;
 }
 
+// A fused select's records past its comparison's (#2676, #2791): a move of the value the destination doesn't hold, then a
+// cmov of the other value by the comparison's condition, inverted where the destination holds the value it chooses.
+// Neither writes the flags, as the xor zero idiom would.
+static void tier1_select_fused_moves(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination, uint32_t width)
+{
+    const bool inverse = destination == holes->third;
+    const uint8_t initial = inverse ? holes->third : holes->fourth;
+    const uint8_t alternate = inverse ? holes->fourth : holes->third;
+    const uint8_t condition = inverse ? tier1_select_negations[holes->condition] : holes->condition;
+    if (destination != initial)
+    {
+        tier1_select_append(result, tier1_select_move(width, destination, initial));
+    }
+    tier1_select_append(result, tier1_select_register_record(tier1_select_condition_moves[width == 8][condition], destination, alternate));
+}
+
 static void tier1_select_compare(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
 {
     if (holes->compare_memory)
@@ -2402,19 +2418,11 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     case TIER1_RULE_SELECT_COMPARE:
     {
         // The comparison at its own width first, which reads its operands before the move can overwrite one in the
-        // destination; then the move and the cmov, neither of which writes the flags (#2676). The xor zero idiom would.
+        // destination; then the move and the cmov (#2676).
         Tier1SelectHoles comparison = *holes;
         comparison.width = holes->source_width;
         tier1_select_compare(&result, &comparison);
-        const bool inverse = destination == holes->third;
-        const uint8_t initial = inverse ? holes->third : holes->fourth;
-        const uint8_t alternate = inverse ? holes->fourth : holes->third;
-        const uint8_t condition = inverse ? tier1_select_negations[holes->condition] : holes->condition;
-        if (destination != initial)
-        {
-            tier1_select_append(&result, tier1_select_move(width, destination, initial));
-        }
-        tier1_select_append(&result, tier1_select_register_record(tier1_select_condition_moves[width == 8][condition], destination, alternate));
+        tier1_select_fused_moves(&result, holes, destination, width);
         break;
     }
     case TIER1_RULE_JUMP:
@@ -3058,20 +3066,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         break;
     case TIER1_RULE_FLOAT_SELECT_COMPARE:
     {
-        // ucomis, then the select's mov and cmov, neither of which writes the flags (#2791). Its operands are in the vector
-        // class, so the general destination holds neither. The cmov's condition is the branch's, true for unordered
-        // operands only negated, and inverted where the destination holds the value it chooses, as
-        // TIER1_RULE_SELECT_COMPARE's.
+        // ucomis, then the select's mov and cmov (#2791), whose condition is the branch's: true for unordered operands only
+        // negated. The comparison's operands are in the vector class, so the general destination holds neither.
         tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(holes->source_width)->compare, holes->left & 15, holes->right & 15));
-        const bool inverse = destination == holes->third;
-        const uint8_t initial = inverse ? holes->third : holes->fourth;
-        const uint8_t alternate = inverse ? holes->fourth : holes->third;
-        const uint8_t condition = inverse ? tier1_select_negations[holes->condition] : holes->condition;
-        if (destination != initial)
-        {
-            tier1_select_append(&result, tier1_select_move(width, destination, initial));
-        }
-        tier1_select_append(&result, tier1_select_register_record(tier1_select_condition_moves[width == 8][condition], destination, alternate));
+        tier1_select_fused_moves(&result, holes, destination, width);
         break;
     }
     case TIER1_RULE_FLOAT_CONVERT:
