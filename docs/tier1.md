@@ -916,12 +916,16 @@ greater than the matching Clang `-O0` sum. Its Tier 1 objects are built with
 `--tier1-no-inline` (#2541 step 2): the bound is per function against clang
 -O0's same function, which a body with other functions' bodies expanded into
 it has no counterpart of; inlining's growth is the [unit inlining
-design](tier1-unit-inlining.md)'s own measurement. The command also reports SQLite's
-`sqlite3.c`; `test-c-testsuite --tier1 --code-size` reports the same quantities
-for c-testsuite. Their above-bound results stay visible as `gate=fail` with
-`enforced=0`. Strict optional gates remain available with the bare
-`--check-code-size` flag on either command, or `=sqlite` on the program
-command. `--sizes-only` needs no runtime scripts or hardware counters.
+design](tier1-unit-inlining.md)'s own measurement. CI enforces the same bound on SQLite's
+`sqlite3.c` (the bare `--check-code-size`, Lua's and SQLite's together) and,
+with `test-c-testsuite --tier1 --check-code-size`, on c-testsuite's 220
+programs, whose size objects are compiled with `--tier1-no-inline` as well
+(#2646). Those two exceeded the bound when #2643 measured them, by 6.40% and
+2.65%; Tier 1's allocation now takes a call's arguments in the registers the
+call reads them in ([the allocation guide](tier1-allocation.md)'s "Call
+arguments in their registers"), and both are below it. `--check-code-size=lua`
+or `=sqlite` enforces one corpus alone. `--sizes-only` needs no runtime
+scripts or hardware counters.
 
 An opt-in, versioned `--tier1-function-sizes` manifest identifies source bodies
 by exact emitted symbol names and their actual tier after publication. The

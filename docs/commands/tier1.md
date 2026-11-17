@@ -147,14 +147,14 @@ requirements. [Command index](README.md).
   and the Tier 1 compiler uses one lane:
 
   ```sh
-  ./build/compiler measure-tier1-programs --sizes-only --check-code-size=lua --clang clang --sqlite /path/to/sqlite --lua /path/to/lua/src
+  ./build/compiler measure-tier1-programs --sizes-only --check-code-size --clang clang --sqlite /path/to/sqlite --lua /path/to/lua/src
   ```
 
   The regular program measurement reports the same sizes before timing, and
-  its existing 9700X CI step enforces the Lua bound. Hosted correctness uses
-  the same Lua gate, the existing compiler build and verified offline inputs;
-  SQLite and `test-c-testsuite --tier1 --code-size` report their current size
-  status without enforcing the threshold. It also checks the size reader and
+  its existing 9700X CI step enforces both bounds. Hosted correctness uses
+  the same gates, the existing compiler build and verified offline inputs, and
+  enforces c-testsuite's with `test-c-testsuite --tier1 --check-code-size`
+  (#2646). It also checks the size reader and
   command with original synthetic sources. PR and merge-queue hardware policy
   is unchanged. These deterministic size checks make no runtime-performance
   claim and require no 9700X run.
