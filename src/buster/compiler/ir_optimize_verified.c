@@ -94,7 +94,6 @@ static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Ar
         };
         DominatorOptions options = dominators_options();
         options.outputs = 0;
-        options.path = BUSTER_SCALAR_PATH(scalar) ? DOMINATOR_SCALAR : DOMINATOR_AUTO;
         candidate.dominator_builds += 1;
         const DominatorStatus status = dominators_analyze(analyses, scratch, &graph, options, &candidate.dominators);
         check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_DOMINANCE;

@@ -3,8 +3,8 @@
 //
 // #174's opt-in C-source qualification, included by ir_source_test.c after dominators_export.c, dominators_test.c
 // and ir.c.
-// Each actual IR CFG is checked by forced scalar, forced vector and AUTO analysis, including all optional outputs,
-// then against the independent deleted-node/forward-path definition oracle. No generated graph replaces a source
+// Each actual IR CFG is analyzed twice with all optional outputs; the two results must be equal, and the first must
+// match the independent deleted-node/forward-path definition oracle. No generated graph replaces a source
 // function, no matrix-limit refusal counts as a pass, and the caller reports the file, function and representation.
 // The optional text stream receives each validated CFG as a buster-dominators-v1 record (dominators_export.c), which
 // benchmark-dominators --cfg reads.
@@ -16,7 +16,7 @@ struct IrSourceDominatorCheck
 {
     const char* reason;
     IrError cfg_error;
-    DominatorStatus status[3];
+    DominatorStatus status;
     uint64_t checks;
 };
 
@@ -26,11 +26,7 @@ static bool ir_source_dominator_check(const IrFunction* function, Arena* output,
     const uint64_t scratch_mark = scratch->length;
     *check = (IrSourceDominatorCheck){
         .reason = "CFG construction failed",
-        .status = {
-            DOMINATOR_INVALID,
-            DOMINATOR_INVALID,
-            DOMINATOR_INVALID,
-        },
+        .status = DOMINATOR_INVALID,
     };
     IrCfg cfg = { 0 };
     check->cfg_error = ir_build_cfg(function, output, scratch, &cfg);
@@ -46,24 +42,21 @@ static bool ir_source_dominator_check(const IrFunction* function, Arena* output,
             .predecessor_offsets = cfg.predecessor_offsets,
             .predecessors = cfg.predecessors,
         };
-        Dominators analyses[3] = { 0 };
-        const DominatorPath paths[] = {
-            DOMINATOR_SCALAR,
-            DOMINATOR_VECTOR,
-            DOMINATOR_AUTO,
-        };
-        DominatorOptions options = dominators_options();
+        Dominators analysis = { 0 };
+        Dominators repeated = { 0 };
+        const DominatorOptions options = dominators_options();
         check->reason = "a complete analysis failed or retained scratch";
-        for (uint32_t path = 0; valid && path < 3; path += 1)
+        check->status = dominators_analyze(output, scratch, &graph, options, &analysis);
+        valid = check->status == DOMINATOR_OK && scratch->length == scratch_mark;
+        if (valid)
         {
-            options.path = paths[path];
-            check->status[path] = dominators_analyze(output, scratch, &graph, options, &analyses[path]);
-            valid = check->status[path] == DOMINATOR_OK && scratch->length == scratch_mark;
+            check->status = dominators_analyze(output, scratch, &graph, options, &repeated);
+            valid = check->status == DOMINATOR_OK && scratch->length == scratch_mark;
         }
         if (valid)
         {
-            check->reason = "scalar, vector and AUTO disagree";
-            valid = dominator_test_equal(&analyses[0], &analyses[1]) && dominator_test_equal(&analyses[0], &analyses[2]);
+            check->reason = "a repeated analysis differs";
+            valid = dominator_test_equal(&analysis, &repeated);
         }
         if (valid)
         {
@@ -72,9 +65,8 @@ static bool ir_source_dominator_check(const IrFunction* function, Arena* output,
                 .blocks = cfg.block_count,
                 .shape = BUSTER_DOMINATOR_TEST_SHAPES,
             };
-            // The definition oracle uses neither solver's transfer equation. Complete equality above makes its
-            // result apply to all three paths, not just the one whose output it reads. This work is never timed.
-            dominator_test_definition(&tally, output, &graph, &analyses[0]);
+            // The definition oracle shares no algorithm with the analyzer. This work is never timed.
+            dominator_test_definition(&tally, output, &graph, &analysis, true);
             check->checks = tally.checks;
             valid = tally.failures == 0;
         }

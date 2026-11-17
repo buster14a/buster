@@ -1441,7 +1441,6 @@ static bool tier1_cfg_test_generate(Tier1CfgTestBuilder* builder, uint64_t seed,
     };
     DominatorOptions options = dominators_options();
     options.outputs = 0;
-    options.path = DOMINATOR_SCALAR;
     Dominators dominance;
     bool valid = dominators_analyze(arena, scratch, &cfg, options, &dominance) == DOMINATOR_OK;
     // Parameters at the entry's first instruction: two general values, a vector one and a mask.

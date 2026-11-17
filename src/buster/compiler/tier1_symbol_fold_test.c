@@ -553,7 +553,7 @@ static void tier1_symbol_fold_tests(Tier1EmitTest* test)
         const bool valid = created && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK;
         tier1_emit_test_expect(test, valid, "the folded symbols' fixture is valid IR");
         IrDominance dominance;
-        const bool dominated = valid && tier1_terminal_dominance(test, &function, vector, &dominance);
+        const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
         const Tier1EmitOptions options = {
             .register_mask = tier1_liveness_register_mask(),
             .vector = vector,

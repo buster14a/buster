@@ -146,7 +146,7 @@ static void tier1_induction_tests(Tier1EmitTest* test)
                 {
                     const uint64_t output_mark = test->output.length;
                     IrDominance dominance;
-                    const bool dominated = tier1_terminal_dominance(test, &function, path != 0, &dominance);
+                    const bool dominated = tier1_terminal_dominance(test, &function, &dominance);
                     Tier1SelectPlan plan;
                     uint32_t failed = BUSTER_IR_NONE;
                     const Tier1SelectError selected = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, path != 0, &plan, &failed) : TIER1_SELECT_ERROR_INVALID;
