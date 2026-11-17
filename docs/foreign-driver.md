@@ -160,6 +160,24 @@ lld make of them, where the corpus test below compares it:
   an executable whose libraries' dependencies it doesn't see. A library's
   reference doesn't make an `--as-needed` library needed either; only a
   regular object's or the command line's does.
+- **Versions, in the source driver's mixed links (#1590).** With
+  `ForeignCommand.library_versions`, which the source driver sets and
+  `link-foreign` doesn't, the resolution checks the libraries' versions as
+  the direct path checks its `-l` libraries' (foreign.c's "Shared libraries'
+  versions"): a needed library's strong reference that requires a version
+  binds only to an export at that version, its name's default or not, of the
+  first library on the line that has one, which an `--as-needed` library is
+  then kept for unless the referring library's `DT_NEEDED` names it, as GNU ld
+  keeps it; such a reference that no library exports is refused
+  (`FOREIGN_ERROR_LIBRARY_UNDEFINED`, `PATH: undefined reference to
+  'foo@V1'`), unless the library's `DT_NEEDED` names a library the link
+  doesn't have; version needs that don't read are malformed; and the version
+  needs of the libraries the program loads, the needed ones and those their
+  `DT_NEEDED` entries name, must be defined by the library each entry's file
+  names, unless it defines no versions or the need is weak
+  (`FOREIGN_ERROR_LIBRARY_VERSION`, `PATH: version 'V1' not found (required
+  by PATH)`, as glibc's loader words it). A refusal comes before the
+  conversion, so the output that was there stays.
 - **Copy relocations,** as both linkers make them: a library's data that a
   retained fixup reaches other than through the GOT or by an address the
   loader relocates (GCC's `-fPIE` code reads `stdout` and `environ` by

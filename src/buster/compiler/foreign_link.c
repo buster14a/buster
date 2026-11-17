@@ -724,37 +724,18 @@ static ImportResult foreign_link_relocations(ForeignLink* output, const Foreign*
 }
 
 // Preserve the resolver's needed-library choices, including an unversioned as-needed DSO. Original ELF version
-// indices are local to each library; the writer needs one global index space and version rows grouped by library.
-// A needed library's DT_NEEDED name: its soname, or without one the basename of a -l search's path and the full
-// path of a positional input. A searched library must remain relocatable through the loader's search directories.
-static String8 foreign_link_library_name(const Foreign* foreign, const ForeignLibrary* library)
-{
-    const ForeignInput* input = &foreign->inputs[library->input];
-    String8 name = library->library.soname.length != 0 ? library->library.soname : input->path;
-    if (library->library.soname.length == 0 && (input->flags & BUSTER_FOREIGN_INPUT_LIBRARY) != 0)
-    {
-        for (uint64_t i = name.length; i != 0; i -= 1)
-        {
-            if (name.pointer[i - 1] == '/')
-            {
-                name.pointer += i;
-                name.length -= i;
-                break;
-            }
-        }
-    }
-    return name;
-}
+// indices are local to each library; the writer needs one global index space and version rows grouped by library. A
+// needed library's DT_NEEDED name is foreign_library_name's (foreign.c).
 
 // The earlier needed library of the same DT_NEEDED name as needed library `l` (given twice, as g++'s driver gives -lgcc_s),
 // plus 1, or 0: GNU ld, lld and mold take a library once, by its soname, and so does the output.
 static uint32_t foreign_link_duplicate(const Foreign* foreign, uint32_t l)
 {
-    const String8 name = foreign_link_library_name(foreign, &foreign->libraries[l]);
+    const String8 name = foreign_library_name(foreign, &foreign->libraries[l]);
     uint32_t result = 0;
     for (uint32_t e = 0; result == 0 && e < l; e += 1)
     {
-        const String8 earlier = foreign->libraries[e].needed ? foreign_link_library_name(foreign, &foreign->libraries[e]) : (String8){ 0 };
+        const String8 earlier = foreign->libraries[e].needed ? foreign_library_name(foreign, &foreign->libraries[e]) : (String8){ 0 };
         result = earlier.length == name.length && memcmp(earlier.pointer, name.pointer, name.length) == 0 ? e + 1 : 0;
     }
     return result;
@@ -792,7 +773,7 @@ static ForeignLinkError foreign_link_libraries(ForeignLink* output, const Foreig
         output->library_versions[l] = duplicate != 0 ? output->library_versions[duplicate - 1] : 0;
         if (library->needed && duplicate == 0)
         {
-            const String8 name = foreign_link_library_name(foreign, library);
+            const String8 name = foreign_library_name(foreign, library);
             libraries[next_library] = (ExecutableLibrary){
                 .name = name,
                 .required = true,

@@ -111,7 +111,20 @@ and every COMDAT group's fate.
   symbols in sections 65522 and 65521 through `SHN_XINDEX` (the values of
   `SHN_COMMON` and `SHN_ABS`) beside an absolute and a common one: each must
   be what its `st_shndx` says, by both paths, and with a second object that
-  defines the first strongly too, a duplicate.
+  defines the first strongly too, a duplicate;
+- shared libraries' versions (`foreign_versions_test.c`, #1590), with
+  `ForeignCommand.library_versions` as the source driver's mixed links set
+  it: libraries `cc` builds with version scripts, libA's `foo@V1` of
+  `libB.so` against libBs of `foo@V1` alone and of `foo@@V2` alone, a libC of
+  `foo@@V1` and 40 libraries of another name, under `--as-needed`. The
+  failure (the library, its reference or need, and the provider) or the
+  libraries needed must be the case's: libB not kept for `foo@V1` (libA's
+  `DT_NEEDED` names it), libC kept for it, also as the 42nd library;
+  `foo@V1` refused where no library exports it; libA's need of `V1` refused
+  against a libB without it; the same linked without the flag, as
+  `link-foreign` links it; and libA's references unchecked without a libB on
+  the line. The driver's own cases are `test-checker-driver`'s
+  `check_test_driver_versions`, by the direct route and a mixed one.
 
 The files go in a new directory under `--directory` (`TMPDIR` or `/tmp`),
 removed unless `--keep`. `--seed N` changes the generated programs, and
