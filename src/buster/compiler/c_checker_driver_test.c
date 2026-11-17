@@ -5445,6 +5445,467 @@ static void check_test_driver_versions(CheckTest* test, const char* clang, const
     }
 }
 
+// Unversioned shared-library references (#2910), through the direct route and a mixed one forced by an unrelated
+// object. Each route must retain exactly the libraries the program needs, run, and write identical bytes by both
+// paths, or name the library and missing reference and preserve the old output. The two-reference cases define
+// either name in the executable: whichever reference the library reader puts first, satisfying it must not hide
+// the other one. Libraries built without the runtime have genuinely unversioned references, including getpid.
+static void check_test_driver_unversioned_libraries(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    enum
+    {
+        CHECK_TEST_LIBRARY_CALL,
+        CHECK_TEST_LIBRARY_DEFINE,
+        CHECK_TEST_LIBRARY_WEAK,
+        CHECK_TEST_LIBRARY_PROTECTED,
+        CHECK_TEST_LIBRARY_HIDDEN,
+        CHECK_TEST_LIBRARY_FIRST,
+        CHECK_TEST_LIBRARY_SECOND,
+        CHECK_TEST_LIBRARY_UNUSED,
+    };
+    static const char* const definitions[] = {
+        "",
+        "int u_value(void) { return 11; }\n",
+        "__attribute__((weak)) int u_value(void) { return 11; }\n",
+        "__attribute__((visibility(\"protected\"))) int u_value(void) { return 11; }\n",
+        "__attribute__((visibility(\"hidden\"))) int u_value(void) { return 22; }\n",
+        "int u_first(void) { return 11; }\n",
+        "int u_second(void) { return 11; }\n",
+        "",
+    };
+    static const char calls[] = "int u_func(void);\nint main(void) { return u_func() == 11 ? 0 : 1; }\n";
+    static const char calls_hidden[] = "int u_func(void);\nint main(void) { return u_value() == 22 && u_func() == 11 ? 0 : 1; }\n";
+    static const char unused[] = "int main(void) { return 0; }\n";
+    static const char extra_source[] = "int unversioned_extra = 1;\n";
+    static const char old_output[] = "the output before the unversioned link\n";
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        const char* dependency;
+    } libraries[] = {
+        {
+            "UP",
+            "int u_value(void) { return 11; }\n",
+            NULL,
+        },
+        {
+            "U",
+            "int u_value(void);\nint u_func(void) { return u_value(); }\n",
+            NULL,
+        },
+        {
+            "UD",
+            "int u_value(void);\nint u_func(void) { return u_value(); }\n",
+            "-lUP",
+        },
+        {
+            "UW",
+            "__attribute__((weak)) int u_value(void);\nint u_func(void) { return u_value ? u_value() : 11; }\n",
+            NULL,
+        },
+        {
+            "UM",
+            "int u_first(void);\nint u_second(void);\nint u_func(void) { return u_first() + u_second(); }\n",
+            NULL,
+        },
+        {
+            "UC",
+            "int q_value(void);\nint u_value(void) { return q_value(); }\n",
+            NULL,
+        },
+        {
+            "UQ",
+            "int q_value(void) { return 11; }\n",
+            NULL,
+        },
+        {
+            "UR",
+            "int getpid(void);\nint u_func(void) { return getpid() > 0 ? 11 : 0; }\n",
+            NULL,
+        },
+    };
+    static const struct
+    {
+        const char* name;
+        uint32_t source;
+        const char* first;
+        const char* second;
+        const char* third;
+        const char* needed;
+        const char* refusing;
+        const char* reference;
+    } cases[] = {
+        {
+            "unversioned: a needed library's missing strong reference is refused",
+            CHECK_TEST_LIBRARY_CALL,
+            "-lU",
+            NULL,
+            NULL,
+            NULL,
+            "U",
+            "u_value",
+        },
+        {
+            "unversioned: a needed library retains its as-needed provider",
+            CHECK_TEST_LIBRARY_CALL,
+            "-lU",
+            "-lUP",
+            NULL,
+            "libU.so libUP.so libc.so.6",
+            NULL,
+            NULL,
+        },
+        {
+            "unversioned: an as-needed provider before its consumer is retained",
+            CHECK_TEST_LIBRARY_CALL,
+            "-lUP",
+            "-lU",
+            NULL,
+            "libUP.so libU.so libc.so.6",
+            NULL,
+            NULL,
+        },
+        {
+            "unversioned: an executable definition drops the as-needed provider",
+            CHECK_TEST_LIBRARY_DEFINE,
+            "-lU",
+            "-lUP",
+            NULL,
+            "libU.so libc.so.6",
+            NULL,
+            NULL,
+        },
+        {
+            "unversioned: an executable definition satisfies the reference alone",
+            CHECK_TEST_LIBRARY_DEFINE,
+            "-lU",
+            NULL,
+            NULL,
+            "libU.so libc.so.6",
+            NULL,
+            NULL,
+        },
+        {
+            "unversioned: an executable's weak definition drops the as-needed provider",
+            CHECK_TEST_LIBRARY_WEAK,
+            "-lU",
+            "-lUP",
+            NULL,
+            "libU.so libc.so.6",
+            NULL,
+            NULL,
+        },
+        {
+            "unversioned: an executable's protected definition drops the as-needed provider",
+            CHECK_TEST_LIBRARY_PROTECTED,
+            "-lU",
+            "-lUP",
+            NULL,
+            "libU.so libc.so.6",
+            NULL,
+            NULL,
+        },
+        {
+            "unversioned: an executable's hidden definition cannot satisfy the reference",
+            CHECK_TEST_LIBRARY_HIDDEN,
+            "-lU",
+            NULL,
+            NULL,
+            NULL,
+            "U",
+            "u_value",
+        },
+        {
+            "unversioned: an executable's hidden definition does not drop the provider",
+            CHECK_TEST_LIBRARY_HIDDEN,
+            "-lU",
+            "-lUP",
+            NULL,
+            "libU.so libUP.so libc.so.6",
+            NULL,
+            NULL,
+        },
+        {
+            "unversioned: an unresolved weak library reference is allowed",
+            CHECK_TEST_LIBRARY_CALL,
+            "-lUW",
+            NULL,
+            NULL,
+            "libUW.so libc.so.6",
+            NULL,
+            NULL,
+        },
+        {
+            "unversioned: a weak library reference retains no as-needed provider",
+            CHECK_TEST_LIBRARY_CALL,
+            "-lUW",
+            "-lUP",
+            NULL,
+            "libUW.so libc.so.6",
+            NULL,
+            NULL,
+        },
+        {
+            "unversioned: the referring library's DT_NEEDED covers the provider",
+            CHECK_TEST_LIBRARY_CALL,
+            "-lUD",
+            "-lUP",
+            NULL,
+            "libUD.so libc.so.6",
+            NULL,
+            NULL,
+        },
+        {
+            "unversioned: a dependency absent from the line leaves resolution to the loader",
+            CHECK_TEST_LIBRARY_CALL,
+            "-lUD",
+            NULL,
+            NULL,
+            "libUD.so libc.so.6",
+            NULL,
+            NULL,
+        },
+        {
+            "unversioned: an unneeded library's references retain no provider and are unchecked",
+            CHECK_TEST_LIBRARY_UNUSED,
+            "-lU",
+            "-lUC",
+            NULL,
+            "libc.so.6",
+            NULL,
+            NULL,
+        },
+        {
+            "unversioned: an as-needed provider's own reference retains the next provider",
+            CHECK_TEST_LIBRARY_CALL,
+            "-lU",
+            "-lUC",
+            "-lUQ",
+            "libU.so libUC.so libUQ.so libc.so.6",
+            NULL,
+            NULL,
+        },
+        {
+            "unversioned: a newly retained provider's missing reference is refused",
+            CHECK_TEST_LIBRARY_CALL,
+            "-lU",
+            "-lUC",
+            NULL,
+            NULL,
+            "UC",
+            "q_value",
+        },
+        {
+            "unversioned: a provider displaced by the executable is not checked",
+            CHECK_TEST_LIBRARY_DEFINE,
+            "-lU",
+            "-lUC",
+            NULL,
+            "libU.so libc.so.6",
+            NULL,
+            NULL,
+        },
+        {
+            "unversioned: defining the first of two names does not hide the second",
+            CHECK_TEST_LIBRARY_FIRST,
+            "-lUM",
+            NULL,
+            NULL,
+            NULL,
+            "UM",
+            "u_second",
+        },
+        {
+            "unversioned: defining the second of two names does not hide the first",
+            CHECK_TEST_LIBRARY_SECOND,
+            "-lUM",
+            NULL,
+            NULL,
+            NULL,
+            "UM",
+            "u_first",
+        },
+        {
+            "unversioned: the runtime satisfies a needed library's reference",
+            CHECK_TEST_LIBRARY_CALL,
+            "-lUR",
+            NULL,
+            NULL,
+            "libUR.so libc.so.6",
+            NULL,
+            NULL,
+        },
+    };
+    char fixture[256];
+    char source[256];
+    char extra[256];
+    char outputs[2][2][256];
+    char search[300];
+    snprintf(fixture, sizeof(fixture), "%s/unversioned_fixture.c", directory);
+    snprintf(source, sizeof(source), "%s/unversioned.c", directory);
+    snprintf(extra, sizeof(extra), "%s/unversioned_extra.o", directory);
+    snprintf(search, sizeof(search), "LD_LIBRARY_PATH=%s", directory);
+    for (uint32_t route = 0; route < 2; route += 1)
+    {
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            snprintf(outputs[route][scalar], sizeof(outputs[route][scalar]), "%s/unversioned-%u-%u", directory, route, scalar);
+        }
+    }
+    bool built = parse_test_write(fixture, extra_source, sizeof(extra_source) - 1);
+    char* text = NULL;
+    char* const build_extra[] = {
+        (char*)clang,
+        "-c",
+        "-o",
+        extra,
+        fixture,
+        NULL,
+    };
+    built = built && check_test_driver_spawn(build_extra, &text) == 0;
+    free(text);
+    text = NULL;
+    for (uint32_t l = 0; built && l < BUSTER_ARRAY_LENGTH(libraries); l += 1)
+    {
+        char library[256];
+        char soname[64];
+        snprintf(library, sizeof(library), "%s/lib%s.so", directory, libraries[l].name);
+        snprintf(soname, sizeof(soname), "-Wl,-soname,lib%s.so", libraries[l].name);
+        built = parse_test_write(fixture, libraries[l].source, strlen(libraries[l].source));
+        char* const build[] = {
+            (char*)clang,
+            "-shared",
+            "-nostdlib",
+            "-fPIC",
+            "-o",
+            library,
+            fixture,
+            soname,
+            "-L",
+            (char*)directory,
+            (char*)libraries[l].dependency,
+            NULL,
+        };
+        built = built && check_test_driver_spawn(build, &text) == 0;
+        if (!built)
+        {
+            printf("  unversioned library %s: %s\n", library, text != NULL ? text : "could not write its source");
+        }
+        free(text);
+        text = NULL;
+    }
+    check_test_expect(test, built, "unversioned libraries: clang builds them and the unrelated object");
+    for (uint32_t c = 0; built && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        char program[512];
+        const char* main_source = cases[c].source == CHECK_TEST_LIBRARY_UNUSED ? unused : cases[c].source == CHECK_TEST_LIBRARY_HIDDEN ? calls_hidden : calls;
+        const int length = snprintf(program, sizeof(program), "%s%s", definitions[cases[c].source], main_source);
+        const bool written = length > 0 && (uint32_t)length < sizeof(program) && parse_test_write(source, program, (uint32_t)length);
+        const bool linking = cases[c].needed != NULL;
+        char expected[352] = { 0 };
+        if (!linking)
+        {
+            snprintf(expected, sizeof(expected), "%s/lib%s.so: undefined reference to '%s'", directory, cases[c].refusing, cases[c].reference);
+        }
+        char route_needed[2][512] = { 0 };
+        for (uint32_t route = 0; route < 2; route += 1)
+        {
+            bool right = written;
+            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            {
+                char* link[14];
+                uint32_t count = 0;
+                link[count++] = (char*)executable;
+                if (scalar != 0)
+                {
+                    link[count++] = "--scalar";
+                }
+                link[count++] = "-o";
+                link[count++] = outputs[route][scalar];
+                link[count++] = source;
+                if (route != 0)
+                {
+                    link[count++] = extra;
+                }
+                link[count++] = "-L";
+                link[count++] = (char*)directory;
+                link[count++] = (char*)cases[c].first;
+                link[count++] = (char*)cases[c].second;
+                link[count++] = (char*)cases[c].third;
+                link[count] = NULL;
+                const bool sentinel = !linking && parse_test_write(outputs[route][scalar], old_output, sizeof(old_output) - 1);
+                const int linked = written ? check_test_driver_spawn(link, &text) : -1;
+                bool outcome = false;
+                if (linking)
+                {
+                    char needed[512] = { 0 };
+                    const bool listed = linked == 0 && check_test_driver_needed(outputs[route][scalar], needed, sizeof(needed)) && strcmp(needed, cases[c].needed) == 0;
+                    if (scalar == 0)
+                    {
+                        snprintf(route_needed[route], sizeof(route_needed[route]), "%s", needed);
+                    }
+                    char* const run[] = {
+                        "env",
+                        search,
+                        outputs[route][scalar],
+                        NULL,
+                    };
+                    char* run_text = NULL;
+                    const int ran = linked == 0 ? check_test_driver_spawn(run, &run_text) : -1;
+                    outcome = listed && ran == 0;
+                    if (!outcome)
+                    {
+                        printf("  %s, %s, %s: link status %d, run status %d, DT_NEEDED \"%s\": %s%s\n", cases[c].name, route == 0 ? "direct" : "mixed",
+                               scalar == 0 ? "vector" : "scalar", linked, ran, needed, text != NULL ? text : "", run_text != NULL ? run_text : "");
+                    }
+                    free(run_text);
+                }
+                else
+                {
+                    char after[sizeof(old_output)] = { 0 };
+                    FILE* file = fopen(outputs[route][scalar], "rb");
+                    const size_t got = file != NULL ? fread(after, 1, sizeof(after), file) : 0;
+                    if (file != NULL)
+                    {
+                        fclose(file);
+                    }
+                    const bool kept = sentinel && got == sizeof(old_output) - 1 && memcmp(after, old_output, got) == 0;
+                    outcome = linked == 1 && text != NULL && strstr(text, expected) != NULL && kept;
+                    if (!outcome)
+                    {
+                        printf("  %s, %s, %s: link status %d, output %s: %s\n", cases[c].name, route == 0 ? "direct" : "mixed",
+                               scalar == 0 ? "vector" : "scalar", linked, kept ? "kept" : "replaced", text != NULL ? text : "");
+                    }
+                }
+                right = right && outcome;
+                free(text);
+                text = NULL;
+            }
+            right = right && (!linking || (check_test_driver_same_files(outputs[route][0], outputs[route][1]) && strcmp(route_needed[route], route_needed[0]) == 0));
+            char name[300];
+            snprintf(name, sizeof(name), "%s (%s)", cases[c].name, route == 0 ? "direct" : "mixed");
+            check_test_expect(test, right, name);
+        }
+    }
+    for (uint32_t l = 0; l < BUSTER_ARRAY_LENGTH(libraries); l += 1)
+    {
+        char library[256];
+        snprintf(library, sizeof(library), "%s/lib%s.so", directory, libraries[l].name);
+        unlink(library);
+    }
+    for (uint32_t route = 0; route < 2; route += 1)
+    {
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            unlink(outputs[route][scalar]);
+        }
+    }
+    unlink(fixture);
+    unlink(source);
+    unlink(extra);
+}
+
 // Compiler identification is an action, while an option operand that spells an action is still an operand.
 static void check_test_driver_identification(CheckTest* test, const char* executable, const char* directory)
 {
@@ -11035,6 +11496,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_versions(&test, clang, executable, directory);
+                check_test_driver_unversioned_libraries(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
