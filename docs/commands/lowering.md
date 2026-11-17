@@ -888,7 +888,7 @@ labels and calls the shadow's, and the fixture's globals' entries and direct
 calls patched. Its lines for them are a `const` object's initializer, one that
 converts nothing, one whose conversion is empty, a static local, a global's
 updates, and the strings.
-The census's seven fixtures run again with its tests at reader time
+The census's eight fixtures run again with its tests at reader time
 (`node_tests_test_fixture`: `--front-tests` with `--verify`, then the same
 with the lean front's window and `--window-tests`, the machine's own form
 beside the census's code, whose bits, root's kinds and spans must be its;
@@ -909,7 +909,17 @@ line, a register object's member, an ordering under a bitwise operator, an
 operator listed for an address constant the record doesn't hold whole, and
 four expressions of some 140 records, whose operands are further back than
 the block before), and each fixture's counts of what the loop lists and
-sends (`NodeTestsWindowed`), which no verdict shows.
+sends (`NodeTestsWindowed`), which no verdict shows. For the loop's rule of
+the constants with no test to make: the seventh's functions `q` to `q3` (a
+line for each class of operator the rule leaves out, and for what it must
+keep listed: a constant past a bound, zero against an unsigned operand, a
+shift by 32, a division by zero, a bool, a bit-field, an enumeration, a
+128-bit operand, a floating one, a constant first, a return whose constant
+doesn't fit and one whose own type is no integer's), the eighth fixture (no
+warning of a mix of enumerations and `-Wassign-enum`, where an enumeration's
+constant is listed for itself alone), and each fixture's counts of the
+operators left out, each checked, and of the constants whose record says
+its value.
 The fact words' kernel runs at reader time on the fixture twice
 (`node_shadow_test_kernel`: after T alone, and in the `--scalar` run with the
 census's tests and C and X beside it) and on the two generated texts: no
@@ -1463,15 +1473,30 @@ kernel's run in place (`node_facts_window_run`).
   (`NodeCensusReader.line_bytes`, which the census's code makes at the
   line's first leaf), and one of the token's role. Three byte columns come
   out: the type's byte, the value's (a constant a test may read, a
-  bit-field, a declaration the tests refuse) and the role.
+  bit-field, a declaration the tests refuse, and the record's kind for the
+  rule below) and the role.
 - **The loop** (`node_tests_window_loop`), 64 records a step. Each of the
-  five tables by operator is one byte permute of two registers. An operand's
+  six tables by operator is one byte permute of two registers. An operand's
   byte comes by its distance, from this block's bytes and the block
   before's, one permute a side; an operand further back is read by a load,
   and counted. It writes what each record is as an operand, its operands'
-  bytes together, its part of the set's tests, and three masks a block: the
+  bytes together, its part of the set's tests, and four masks a block: the
   records with a tree's test, the operators with tests of their own, the
-  writes.
+  writes, and the operators the rule below left out.
+- **The constants with no test to make.** An operator listed for a constant
+  operand alone is left out of the list where its operands' kinds say its
+  tests have nothing to say (`BUSTER_NODE_TESTS_QUIET_*`, the classes;
+  `node_tests_quiet_pairs`, the rule, a 64-byte table by the two operands'
+  kinds). A record's kind as an operand is three bits of its value's byte,
+  which the records' bytes' pass makes (`BUSTER_NODE_TESTS_KIND_*`: none, a
+  plain pointer, a plain integer signed or unsigned, an integer constant
+  zero, 1 to 31, 32 to 126 or other). A constant's value is what its
+  record's exponent says (`node_facts_small` in
+  `c_check_node_machine_facts.c`: the payload and one, 0xffff past 0xfffd,
+  0 for none), which the standing's gather has; the kernel writes it where
+  it makes a constant's record, and T's own record says none. With
+  `--verify`, each operator left out has its tests run all the same and
+  must have none, and each value said is compared with its payload.
 - **An expression's part** (`node_tests_window_chunk`'s first sweep). The
   set is an OR of its records' bytes. Its lists are the masks' words aligned
   at its first record (`node_tests_window_word`), its root's bit last. Its
@@ -1495,12 +1520,19 @@ The report adds:
 - `node-shadow: own tests`: the expressions with a record sent to the
   census's code, the records sent and the walks; what the loop listed (the
   tree's records, the operators, and of those the calls and the ones with a
-  constant or a third operand); and the records sent, by what sent them.
+  constant or a third operand); and the records sent, by what sent them;
+- `node-shadow: own tests operators-left-out-for-quiet-constants=N
+  checked=N of-them-with-a-test=0 constants'-said-values-checked=N
+  not-their-payloads'=0`: the operators the rule left out, of every record
+  the loop swept; with `--verify`, those of them in an expression the tests
+  ran on, each checked (a swept record of an expression without tests has
+  none to check), and the integer constants whose record says its value.
 
 `--list N` lists the first differences (`node-tests: window difference`),
-and a difference fails the command.
+and a difference, an operator left out with a test, or a value said that is
+not its payload's fails the command.
 
-`test-checker` runs it on the census's seven fixtures, as "The shadow" above
+`test-checker` runs it on the census's eight fixtures, as "The shadow" above
 has, and on the window's test of values without room at a chunk's end: the
 tests run on the 8,259 expressions the kernel makes in place there, and on
 none of the 64 that the ends cut. [The

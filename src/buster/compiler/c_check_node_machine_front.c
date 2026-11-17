@@ -314,6 +314,15 @@ struct NodeFrontTypes
     uint64_t own_constants;
     uint64_t own_thirds;
     uint64_t own_count_differences;
+    // The operators the loop left out of its list for a constant operand whose tests have nothing to say
+    // (BUSTER_NODE_TESTS_QUIET_*), and, with the reader's verify, those of them whose tests had something.
+    uint64_t own_quiet;
+    uint64_t own_quiet_checked;
+    uint64_t own_quiet_wrong;
+    // With the reader's verify: the integer constants whose record says its value (node_facts_small), and those of them
+    // whose payload is another.
+    uint64_t own_values_checked;
+    uint64_t own_values_wrong;
     // The fact words' kernel at reader time (BUSTER_NODE_READER_FACTS; c_check_node_machine_facts.c's
     // node_facts_reader_flush): its counts (NodeFactsCount); the records it is to make and those it left to T, by
     // operator; and the first differences, each by its record's token, its operator and what differed
