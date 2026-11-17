@@ -321,9 +321,6 @@ struct CheckInputAttribute
     bool subject_ignored;
     // A keyword's record (_Alignas, asm, a calling convention, _Noreturn, a nullability), not an attribute list's item.
     bool keyword;
-    // A counted_by family's top-level `,` (#1842), where clang's parser expects the argument's `)`, or 0: the argument ends
-    // there, and the member's check gives the "expected ')'" (check_input_counted_by_member).
-    uint32_t counted_paren;
     // A calling convention's wrong count of arguments (BUSTER_CHECK_COUNT_* and its bound), clang's error where the
     // convention meets a function (check_input_attribute_conventions) or a tag; on another subject, its warning alone.
     uint8_t convention_count;
@@ -352,6 +349,10 @@ struct CheckInputAttribute
     bool constant_argument;
     uint32_t constants;
     uint32_t wide;
+    // A counted_by family's top-level `,` (#1842), where clang's parser expects the argument's `)`, or 0: the argument ends
+    // there, and the member's check gives the "expected ')'" (check_input_counted_by_member). (In the hole before the
+    // pointer that follows, which keeps the record's size.)
+    uint32_t counted_paren;
     // An argument's error clang's handler gives once the attribute's subject takes it (#147: tls_model's model, constructor's,
     // destructor's and assume_aligned's integers), which the attributes' reader made and moved here
     // (check_input_attribute_defer), for check_input_attribute_subjects to give; or NULL.
