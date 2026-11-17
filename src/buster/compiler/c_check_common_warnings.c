@@ -4956,10 +4956,23 @@ static uint32_t check_common_operand_root(const Parser* parser, uint32_t op, uin
     return at < count && parser->tree.parents[at] == op && (!strings || parser->tokens.kinds[at] == PARSE_KIND_STRING) ? at : BUSTER_CHECK_NONE;
 }
 
+// Whether the operand's converted type is a pointer or array of char, signed char or unsigned char. An atomic
+// pointer's lvalue conversion keeps its pointer value; an atomic character pointee remains a different type.
+static bool check_common_character_pointer(const TypeTable* types, TypeId type)
+{
+    const TypeId base = type_conversion_operand(types, type);
+    const uint8_t kind = base != 0 ? type_kind(types, base) : 0;
+    const TypeId element = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ?
+                           type_unqualified(type_strip_aligned(types, type_element(types, base))) : 0;
+    return element == BUSTER_TYPE_CHAR || element == BUSTER_TYPE_SCHAR || element == BUSTER_TYPE_UCHAR;
+}
+
 // -Wstring-plus-int (#2190, clang's diagnoseStringPlusInt): a `+` of a string literal, unparenthesized, and an operand of
 // integer, boolean or enumeration type, in either order, "adding 'T' to a string does not append to the string" at the
 // `+`, T the operand's type as written, with its note there; given as clang builds the `+`, after its operands' own. A
-// `+` whose neighbor isn't a string literal is skipped at once.
+// `+` whose neighbor isn't a string literal is skipped at once. The same scan gives -Wstring-plus-char (#2406): an
+// unparenthesized character literal added to a character pointer, including a parenthesized string or a variable. The
+// two warnings are independent; where both apply, the integer warning and its note come first.
 static void check_common_string_plus_int(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                          CheckWarningSpelling* spell, Arena* scratch)
 {
@@ -4967,13 +4980,15 @@ static void check_common_string_plus_int(const Parser* parser, Preprocessor* pp,
     const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
     static const uint8_t roles[] = { PARSE_ROLE_ADDITIVE };
     CheckCommonScan scan = { 0 };
-    const bool enabled = stream != NULL && types != NULL && input->token_nodes != NULL && check_common_enabled(pp, input, CHECK_WARNING_ID_STRING_PLUS_INT, false);
+    const bool integers = check_common_enabled(pp, input, CHECK_WARNING_ID_STRING_PLUS_INT, false);
+    const bool characters = check_common_enabled(pp, input, CHECK_WARNING_ID_STRING_PLUS_CHAR, false);
+    const bool enabled = stream != NULL && types != NULL && input->token_nodes != NULL && (integers || characters);
     for (uint32_t token = enabled ? check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector) : count; token < count;
          token = check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector))
     {
         const bool plus = parser->tokens.kinds[token] == PARSE_KIND_PLUS && token > 0 && token + 1 < count;
-        const uint32_t left_string = plus && parser->tokens.kinds[token - 1] == PARSE_KIND_STRING ? check_common_operand_root(parser, token, token - 1, true) : BUSTER_CHECK_NONE;
-        const uint32_t right_string = plus && left_string == BUSTER_CHECK_NONE && parser->tokens.kinds[token + 1] == PARSE_KIND_STRING ?
+        const uint32_t left_string = integers && plus && parser->tokens.kinds[token - 1] == PARSE_KIND_STRING ? check_common_operand_root(parser, token, token - 1, true) : BUSTER_CHECK_NONE;
+        const uint32_t right_string = integers && plus && left_string == BUSTER_CHECK_NONE && parser->tokens.kinds[token + 1] == PARSE_KIND_STRING ?
                                       check_common_operand_root(parser, token, token + 1, true) : BUSTER_CHECK_NONE;
         const bool string = left_string != BUSTER_CHECK_NONE || right_string != BUSTER_CHECK_NONE;
         const uint32_t index = !string ? BUSTER_CHECK_NONE : left_string != BUSTER_CHECK_NONE ? check_common_operand_root(parser, token, token + 1, false) :
@@ -4981,6 +4996,7 @@ static void check_common_string_plus_int(const Parser* parser, Preprocessor* pp,
         const uint32_t node = index < input->token_count ? input->token_nodes[index] : BUSTER_CHECK_NONE;
         const TypeId value = node < stream->count ? check_stream_type(stream, node) : 0;
         const uint8_t value_kind = value != 0 ? type_kind(types, type_unqualified(type_strip_aligned(types, value))) : 0;
+        uint32_t completion = BUSTER_CHECK_NONE;
         if (value_kind == BUSTER_TYPE_KIND_INTEGER || value_kind == BUSTER_TYPE_KIND_ENUM || value_kind == BUSTER_TYPE_KIND_BIT_INT)
         {
             // Its type as clang names it past its implicit conversions: a typedef's or typeof's spelling, an integer's
@@ -4995,8 +5011,34 @@ static void check_common_string_plus_int(const Parser* parser, Preprocessor* pp,
             const CheckCommonNote note = { token, "use array indexing to silence this warning" };
             if (message != NULL)
             {
-                check_common_report_at(parser, pp, input, token, check_common_operand_end(parser, token), CHECK_WARNING_ID_STRING_PLUS_INT, false, message, &note, 1,
+                completion = check_common_operand_end(parser, token);
+                check_common_report_at(parser, pp, input, token, completion, CHECK_WARNING_ID_STRING_PLUS_INT, false, message, &note, 1,
                                        scratch);
+            }
+            arena_pop_to(scratch, mark);
+        }
+        const uint32_t character = characters && plus && parser->tokens.kinds[token - 1] == PARSE_KIND_CHARACTER && parser->tree.parents[token - 1] == token ? token - 1 :
+                                   characters && plus && parser->tokens.kinds[token + 1] == PARSE_KIND_CHARACTER && parser->tree.parents[token + 1] == token ? token + 1 :
+                                   BUSTER_CHECK_NONE;
+        const uint32_t pointer = character != BUSTER_CHECK_NONE ? check_common_operand_root(parser, token, character < token ? token + 1 : token - 1, false) : BUSTER_CHECK_NONE;
+        const uint32_t pointer_node = pointer < input->token_count ? input->token_nodes[pointer] : BUSTER_CHECK_NONE;
+        const TypeId pointer_type = pointer_node < stream->count ? check_stream_type(stream, pointer_node) : 0;
+        if (character != BUSTER_CHECK_NONE && check_common_character_pointer(types, pointer_type))
+        {
+            const uint64_t mark = scratch->length;
+            const String8 written = check_semantic_token(parser, pp, character, scratch);
+            const CheckLiteral literal = check_literal_character_by((const uint8_t*)written.pointer, (uint32_t)written.length,
+                pp->options.language.standard >= 2023, pp->options.predefines.char_unsigned, true);
+            // Clang calls a value fitting one byte 'char', except for a UTF-8 literal's own unsigned char type. A
+            // multi-character or wide literal whose value does not fit keeps its type; an ordinary negative byte too.
+            const TypeId type = literal.integer <= UINT8_MAX && literal.type != BUSTER_TYPE_UCHAR ? BUSTER_TYPE_CHAR : literal.type;
+            const String8 name = literal.valid ? check_driver_warning_type(parser, pp, input, types, spell, scratch, type, 0) : (String8){ 0 };
+            const char* message = name.length != 0 ? check_warning_text(scratch, "adding %.*s to a string pointer does not append to the string", (int)name.length, name.pointer) : NULL;
+            const CheckCommonNote note = { token, "use array indexing to silence this warning" };
+            if (message != NULL)
+            {
+                completion = completion == BUSTER_CHECK_NONE ? check_common_operand_end(parser, token) : completion;
+                check_common_report_at(parser, pp, input, token, completion, CHECK_WARNING_ID_STRING_PLUS_CHAR, false, message, &note, 1, scratch);
             }
             arena_pop_to(scratch, mark);
         }

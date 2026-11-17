@@ -352,6 +352,7 @@ static const uint8_t node_census_warning_classes[CHECK_WARNING_ID_COUNT] = {
     [CHECK_WARNING_ID_ATOMIC_ACCESS] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_CXX_ZERO_SIZE_RECORD] = NODE_CENSUS_WARNING_OUTSIDE,
     [CHECK_WARNING_ID_ZERO_LENGTH_ARRAY] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_STRING_PLUS_CHAR] = NODE_CENSUS_WARNING_TESTED,
 };
 
 // Which of the warnings the silence tests stand for the unit enables anywhere (check_common_enabled): the actions' warning
@@ -366,6 +367,7 @@ struct NodeCensusPolicy
     bool pointer_casts;
     bool void_dereference;
     bool string_plus_int;
+    bool string_plus_char;
     bool packed_member;
     bool unevaluated;
     bool alignof_expression;
@@ -589,6 +591,7 @@ static NodeCensusPolicy node_census_policy(const Preprocessor* pp, const CheckIn
                            check_common_enabled(pp, input, CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST, false);
     policy.void_dereference = check_common_enabled(pp, input, CHECK_WARNING_ID_VOID_PTR_DEREFERENCE, false);
     policy.string_plus_int = check_common_enabled(pp, input, CHECK_WARNING_ID_STRING_PLUS_INT, false);
+    policy.string_plus_char = check_common_enabled(pp, input, CHECK_WARNING_ID_STRING_PLUS_CHAR, false);
     policy.packed_member = check_common_enabled(pp, input, CHECK_WARNING_ID_ADDRESS_OF_PACKED_MEMBER, false);
     policy.unevaluated = check_common_enabled(pp, input, CHECK_WARNING_ID_UNEVALUATED_EXPRESSION, false);
     policy.alignof_expression = check_common_enabled(pp, input, CHECK_WARNING_ID_GNU_ALIGNOF_EXPRESSION, false);
@@ -1146,6 +1149,18 @@ static bool node_census_string(const CheckProgram* program, uint32_t node)
     const uint32_t token = node < graph->count ? graph->tokens[node] : BUSTER_CHECK_NONE;
     return node < graph->count && graph->ops[node] == CHECK_OP_VALUE && token < program->parser->tokens.count &&
            program->parser->tokens.kinds[token] == PARSE_KIND_STRING;
+}
+
+// A character literal plus a character pointer can warn independently of a string literal's integer addition (#2406).
+// The graph drops parentheses, so this conservatively refuses a parenthesized character literal too.
+static bool node_census_character_addition(const CheckProgram* program, uint32_t first, uint32_t second, TypeId first_type, TypeId second_type)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const Parser* parser = program->parser;
+    const uint32_t first_token = first < graph->count && graph->ops[first] == CHECK_OP_VALUE ? graph->tokens[first] : BUSTER_CHECK_NONE;
+    const uint32_t second_token = second < graph->count && graph->ops[second] == CHECK_OP_VALUE ? graph->tokens[second] : BUSTER_CHECK_NONE;
+    return (first_token < parser->tokens.count && parser->tokens.kinds[first_token] == PARSE_KIND_CHARACTER && check_common_character_pointer(program->types, second_type)) ||
+           (second_token < parser->tokens.count && parser->tokens.kinds[second_token] == PARSE_KIND_CHARACTER && check_common_character_pointer(program->types, first_type));
 }
 
 // The object a node names for the unsequenced and self-assignment tests: a VALUE's object, or a member's of such a value
@@ -1711,7 +1726,8 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
         const TypeId pointee = type_unqualified(type_strip_aligned(types, type_element(types, node_census_base(types, a_type))));
         tests |= type_kind(types, pointee) == BUSTER_TYPE_KIND_VOID ? UINT64_C(1) << NODE_CENSUS_POINTER_CAST : 0;
     }
-    if (op == CHECK_OP_ADD && policy->string_plus_int && binary && (node_census_string(program, a) || node_census_string(program, b)))
+    if (op == CHECK_OP_ADD && binary && ((policy->string_plus_int && (node_census_string(program, a) || node_census_string(program, b))) ||
+        (policy->string_plus_char && node_census_character_addition(program, a, b, a_type, b_type))))
     {
         tests |= UINT64_C(1) << NODE_CENSUS_STRING_PLUS_INT;
     }
@@ -2283,9 +2299,9 @@ static void node_tests_tables(NodeCensusScratch* s, const TypeTable* types)
         // cast's).
         s->own_sends[code] = leaf ? 0 :
                              (uint8_t)((op != CHECK_OP_CAST ? BUSTER_NODE_TESTS_OPERAND_CONSTANT : 0) | (policy->enums ? BUSTER_NODE_TESTS_OPERAND_ENUM : 0) |
-                                       (op == CHECK_OP_CAST && policy->pointer_casts ? BUSTER_NODE_TESTS_OPERAND_POINTER : 0) |
+                                       ((op == CHECK_OP_CAST && policy->pointer_casts) || (op == CHECK_OP_ADD && policy->string_plus_char) ? BUSTER_NODE_TESTS_OPERAND_POINTER : 0) |
                                        ((op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT) && policy->void_dereference ? BUSTER_NODE_TESTS_OPERAND_VOID_POINTEE : 0) |
-                                       (op == CHECK_OP_ADD && policy->string_plus_int ? BUSTER_NODE_TESTS_OPERAND_ARRAY : 0) |
+                                       (op == CHECK_OP_ADD && (policy->string_plus_int || policy->string_plus_char) ? BUSTER_NODE_TESTS_OPERAND_ARRAY : 0) |
                                        (shift && policy->shift_parentheses ? BUSTER_NODE_TESTS_OPERAND_SUM : 0) |
                                        (comparison && policy->chained ? BUSTER_NODE_TESTS_OPERAND_COMPARISON : 0) |
                                        (truth_parent && truths ? BUSTER_NODE_TESTS_OPERAND_TRUTH : 0));
@@ -2421,7 +2437,9 @@ static __attribute__((noinline)) uint64_t node_tests_operator(const NodeCensusSc
         const uint8_t first_bits = o[0] != UINT32_MAX ? kept[o[0]] : 0;
         const uint8_t first_property = properties[(int32_t)o[0]];
         const uint8_t second_property = properties[(int32_t)o[1]];
-        tests |= op == CHECK_OP_ADD && policy->string_plus_int && binary && (node_census_string(program, graph->operand0[node]) || node_census_string(program, graph->operand1[node])) ?
+        tests |= op == CHECK_OP_ADD && binary && ((policy->string_plus_int && (node_census_string(program, graph->operand0[node]) || node_census_string(program, graph->operand1[node]))) ||
+                 (policy->string_plus_char && node_census_character_addition(program, graph->operand0[node], graph->operand1[node],
+                    o[0] != UINT32_MAX ? columns->value_types[o[0]] : 0, o[1] != UINT32_MAX ? columns->value_types[o[1]] : 0))) ?
                  UINT64_C(1) << NODE_CENSUS_STRING_PLUS_INT : 0;
         // A pointer cast to an integer narrower than it, or to an enumeration.
         if (op == CHECK_OP_CAST && policy->pointer_casts && (first_bits & BUSTER_NODE_CENSUS_TYPE_POINTER) != 0)

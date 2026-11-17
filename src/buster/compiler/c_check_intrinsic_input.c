@@ -13,6 +13,8 @@
 // retained through info. Custom checking, ignored signatures and unsupported descriptors never acquire an ordinary
 // call record. Failed descriptor facts may be cached; a resource failure publishes neither that declaration nor a
 // partial call. Type interning remains monotonic as documented by builtin_intrinsic_types_decode.
+// A diagnostic view's malformed call retains this declaration lookup but no call record: its surviving arguments
+// are independent expressions, and cannot inherit the builtin's count, conversion or ICE constraints (#2406).
 //
 // Source argument slices are half-open parser-token intervals, excluding commas and parentheses. Their actual
 // count is retained even when it disagrees with the prototype. No argument is evaluated here. Call ids are index+1
@@ -28,6 +30,7 @@ typedef enum CheckInputIntrinsicStatus
 {
     CHECK_INPUT_INTRINSIC_NOT_FOUND,
     CHECK_INPUT_INTRINSIC_PREPARED,
+    CHECK_INPUT_INTRINSIC_INVALID_CALL,
     CHECK_INPUT_INTRINSIC_FAILED,
 } CheckInputIntrinsicStatus;
 
@@ -525,13 +528,18 @@ static CheckInputIntrinsicStatus check_input_intrinsic_prepare(CheckInputReader*
             }
             const bool ordinary = capacity && !output->resource && declaration.types.status == BUILTIN_INTRINSIC_TYPES_SUCCESS &&
                                   !declaration.types.signature_ignored;
+            const bool file = capacity && declaration.types.status == BUILTIN_INTRINSIC_TYPES_UNSUPPORTED &&
+                              (declaration.types.unsupported & BUSTER_INTRINSIC_TYPE_UNSUPPORTED_CONTEXT) != 0 &&
+                              declaration.types.error_offset < info->encoding_length && info->encoding[declaration.types.error_offset] == 'P';
             const bool call = check_input_intrinsic_call_shape(parser, keyword);
+            const bool malformed = call && __builtin_expect(parser->invalid_call_count != 0, 0) &&
+                                   check_input_invalid_call_index(parser, keyword) < parser->invalid_call_count;
             const uint32_t closing = call ? parser->tree.parents[keyword] : parser->tokens.count;
             const uint32_t existing = call ? output->intrinsic_ids[closing] : 0;
             uint32_t count = 0;
             CheckInputIntrinsicArgument* arguments = 0;
             const uint64_t mark = reader->arena->length;
-            if (ordinary && call && existing == 0)
+            if (ordinary && call && !malformed && existing == 0)
             {
                 for (uint32_t first = keyword + 2; first < closing;)
                 {
@@ -553,13 +561,17 @@ static CheckInputIntrinsicStatus check_input_intrinsic_prepare(CheckInputReader*
             }
             if (!output->resource)
             {
-                if (fresh)
+                if (fresh && !(file && malformed))
                 {
                     output->intrinsic_declarations[index] = declaration;
                     output->intrinsic_declaration_count += 1;
                     reader->intrinsic_names[name] = index + 1;
                 }
-                if (ordinary && call)
+                if (ordinary && malformed)
+                {
+                    status = CHECK_INPUT_INTRINSIC_INVALID_CALL;
+                }
+                else if (ordinary && call)
                 {
                     if (existing == 0)
                     {
@@ -583,10 +595,14 @@ static CheckInputIntrinsicStatus check_input_intrinsic_prepare(CheckInputReader*
                 {
                     // A FILE builtin without the unit's FILE (check_input_file_type) is clang's error, with its warning
                     // that the builtin needs its header; any other prototype that doesn't decode is refused by name.
-                    const bool file = capacity && declaration.types.status == BUILTIN_INTRINSIC_TYPES_UNSUPPORTED &&
-                                      (declaration.types.unsupported & BUSTER_INTRINSIC_TYPE_UNSUPPORTED_CONTEXT) != 0 &&
-                                      declaration.types.error_offset < info->encoding_length && info->encoding[declaration.types.error_offset] == 'P';
-                    if (file)
+                    if (file && malformed)
+                    {
+                        // Without FILE, Clang handles this spelling as an unknown builtin's implicit declaration.
+                        // The original malformed call still needs that binding and its lookup diagnostic before its
+                        // parser error, then later uses must see the implicit declaration (#2406).
+                        status = CHECK_INPUT_INTRINSIC_NOT_FOUND;
+                    }
+                    else if (file)
                     {
                         const CheckWarningEvent event =
                         {
@@ -600,7 +616,10 @@ static CheckInputIntrinsicStatus check_input_intrinsic_prepare(CheckInputReader*
                         };
                         check_input_warning_event(reader, &event, NULL, 0);
                     }
-                    check_input_report(reader, keyword, file ? CHECK_INPUT_UNKNOWN_BUILTIN : CHECK_INPUT_UNSUPPORTED);
+                    if (!file || !malformed)
+                    {
+                        check_input_report(reader, keyword, file ? CHECK_INPUT_UNKNOWN_BUILTIN : CHECK_INPUT_UNSUPPORTED);
+                    }
                 }
             }
             else

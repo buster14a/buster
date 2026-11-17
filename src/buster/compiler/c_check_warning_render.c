@@ -1878,7 +1878,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = check_warning_text(scratch, "incompatible redeclaration of library function '%.*s'", (int)name.length, name.pointer);
             break;
         case CHECK_WARNING_EVENT_BUILTIN_HEADER:
-            result = check_warning_text(scratch, "declaration of built-in function '%.*s' requires inclusion of its header", (int)name.length, name.pointer);
+            // A recovered explicit FILE builtin names stdio.h, as its lookup does before the malformed call (#2406).
+            result = check_warning_text(scratch, "declaration of built-in function '%.*s' requires inclusion of %s", (int)name.length, name.pointer,
+                                        payload->data != 0 ? "the header <stdio.h>" : "its header");
             break;
         case CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE:
         {

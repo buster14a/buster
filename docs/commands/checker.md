@@ -83,7 +83,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --operand-diagnostics-only | --label-attributes-only |
-  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --record-extensions-only | --auto-qualifiers-only |
+  --attribute-recovery-only | --malformed-calls-only | --string-plus-only | --assert-bool-only | --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
@@ -189,7 +189,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   in C99–C17, the call portion before C23, and the label portion in every
   tested standard. This focused section supports sanitizer and in-process/child
   differential checks without running the unrelated recovery fixtures.
-  `--malformed-calls-only` runs the ordinary balanced type-first call recovery
+  `--malformed-calls-only` runs the ordinary and builtin type-first call recovery
   cases in `tests/checker/parse-recovery/malformed-calls.*` (#2406), comparing
   complete GNU89/GNU17/C23 diagnostics and status, both readers, syntax/object
   output, warning policies, `-fno-builtin` and error limits. Mixed ordinary and
@@ -201,10 +201,18 @@ unused-warning fixtures also check exact scope-completion tokens.
   prevents artificial arity, argument-conversion and noncallable diagnostics while
   keeping independent argument checks and warnings. Type-first repairs after valid
   arguments and nested calls retain their original parse errors through successive
-  rounds, without duplicating earlier arguments' diagnostics.
-  Boundary controls exclude empty later arguments, semicolon crossings, mismatched
-  delimiters, member callees and catalog names. Rejected output is preserved and valid
+  rounds, without duplicating earlier arguments' diagnostics. Block expression
+  calls also recover at their first outer semicolon, checking subsequent clauses
+  as statements and preserving Clang's C23 loop-typo correction. Builtin controls
+  keep lookup/header diagnostics and independent arguments without imposing
+  intrinsic constraints on the synthetic call. Boundary controls exclude empty
+  later arguments, mismatched delimiters, member callees and semicolon crossings
+  in nested calls, initializers or returns. Rejected output is preserved and valid
   cast/`sizeof` controls must produce an ELF object.
+  `--string-plus-only` runs both string-addition warning suites, including the
+  runtime sources in `tests/checker/string-plus-char/`: character and integer
+  warnings with their notes, their independent option controls and ordering,
+  character-pointer and literal variants, rejected units and both readers.
   `--type-sugar-only` runs
   `c_check_type_sugar_driver_test.c` alone, the typedef sugar diagnostics keep
   through typedef chains, members and qualified arrays, and const assignment's

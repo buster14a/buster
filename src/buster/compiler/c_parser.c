@@ -791,12 +791,22 @@ struct ParseDiagnostic
     // A rejected call retains its callee, parentheses and arguments before/after the unread one in the diagnostic
     // view. The original parse error stays; the callee is invalid before expression checking.
     bool resume_call;
+    // The failed argument belongs directly to a block expression statement's call. Only this parser-proven form
+    // can end that call at a semicolon without also abandoning an initializer, return expression or enclosing call.
+    bool call_statement;
+    // A recovered orphan closer follows this complete expression, [begin, token). Zero means none. Its parser
+    // diagnostics are conditional: an unresolved name can make Clang skip that closer without diagnosing it.
+    uint32_t recovery_expression_begin;
     // The callee can precede the diagnostic, where an argument is a type instead of an expression.
     uint32_t resume_callee;
     // The first later argument to retain through the closing parenthesis, or zero for an empty lookup-only call.
     uint32_t resume_call_arguments;
     // An ordinary call uses its callee's value; an attribute-led call only classifies the name before rejecting it.
     bool resume_call_value;
+    // A malformed argument stopped at a semicolon before the call's closer. The diagnostic-only view keeps its
+    // callee and valid argument prefix, appends a synthetic ')', and resumes at the original semicolon. It never
+    // consumes the statements after that boundary; resume_call_arguments is zero for this form.
+    bool resume_call_semi;
     // A K&R parameter declaration's missing semicolon skips its malformed tail through the next semicolon, or up
     // to the mandatory body brace. Its recovery view replaces [token, resume_end) with one semicolon; zero means
     // the ordinary insertion before token. This is diagnostic-only metadata, never acceptance of the input.
@@ -813,7 +823,8 @@ struct ParseDiagnostic
     // undeclared one makes the expression invalid, whose rest is skipped to the `;` without this error. The checker's
     // view decides which (check_driver_typo_edits).
     bool probe;
-    // A tentative typo's tail that a recovery view left out (CheckPrefixTails, check_driver_typo_tail).
+    // A tentative typo's tail that a recovery view left out (CheckPrefixTails, check_driver_typo_tail), or an orphan
+    // closer skipped because of an unresolved name (check_driver_orphan_diagnostics), marked after the final reading.
     bool tail;
 };
 

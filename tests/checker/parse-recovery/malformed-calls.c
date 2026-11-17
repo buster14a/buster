@@ -150,12 +150,14 @@ void check(void)
 void check(void)
 {
     __builtin_clz(int);
+    after_builtin_call;
 }
 #elif BUSTER_CASE == 18
 int printf(const char*, ...);
 void check(void)
 {
     printf(int);
+    after_library_call;
 }
 #elif BUSTER_CASE == 19
 struct Pair { int (*member)(int); } pair;
@@ -349,6 +351,7 @@ int printf(const char*, ...);
 void check(void)
 {
     printf("%d", int);
+    after_library_later_argument;
 }
 #elif BUSTER_CASE == 45
 int known(int, int);
@@ -375,5 +378,138 @@ void check(void)
 {
     known((int (*)(Missing value))0, int, missing_later);
     after_earlier_parse_diagnostic;
+}
+#elif BUSTER_CASE == 49
+void check(int n)
+{
+    int s = 0;
+    foo(int i = 0; i < n; i++) s += i;
+    after_loop_like_call;
+    (void)s;
+}
+#elif BUSTER_CASE == 50
+struct Pair { int member; } pair;
+void check(void)
+{
+    sizeo(int) + pair.missing;
+    after_sizeof_typo;
+}
+#elif BUSTER_CASE == 51
+int foo(int);
+void check(int n)
+{
+    int s = 0;
+    foo(int i = 0; i < n; i++) s += i;
+    after_declared_loop_like_call;
+    (void)s;
+}
+#elif BUSTER_CASE == 52
+int known(int);
+void check(int n, int i)
+{
+    known(int; i < n; i++);
+    after_semicolon_warning;
+}
+#elif BUSTER_CASE == 53
+void check(void)
+{
+    __builtin_clz(int, missing_builtin_argument);
+    after_builtin_arguments;
+}
+#elif BUSTER_CASE == 54
+void check(void)
+{
+    printf(int);
+    after_implicit_library;
+}
+#elif BUSTER_CASE == 55
+void check(void)
+{
+    __attribute__((unused)) __builtin_ctz(unread_argument);
+    after_attributed_builtin;
+}
+#elif BUSTER_CASE == 56
+void check(void)
+{
+    __builtin_va_start(int);
+    after_varargs_builtin;
+}
+#elif BUSTER_CASE == 57
+void check(void)
+{
+    __builtin_invoke(int);
+    after_invoke_builtin;
+}
+#elif BUSTER_CASE == 58
+void check(void)
+{
+    __builtin_ia32_pause(int, missing_pause_argument);
+    after_target_builtin;
+}
+#elif BUSTER_CASE == 59
+void check(void)
+{
+    __builtin_fprintf(int);
+    after_header_builtin;
+}
+#elif BUSTER_CASE == 60
+int known(int);
+int outer(int);
+void check(void)
+{
+    outer(known(int; unread;));
+}
+#elif BUSTER_CASE == 61
+int known(int);
+void check(void)
+{
+    int value = known(int; unread;);
+}
+#elif BUSTER_CASE == 62
+int known(int);
+int check(void)
+{
+    return known(int; unread;);
+}
+#elif BUSTER_CASE == 63
+void check(void)
+{
+    __builtin_fprintf(int);
+    __builtin_fprintf(1);
+    after_first_header_builtin;
+}
+void second(void)
+{
+    __attribute__((unused)) __builtin_fprintf(unread_argument);
+    after_second_header_builtin;
+}
+#elif BUSTER_CASE == 64
+int known(int);
+void check(int i)
+{
+    known(int x; 0; i++) skipped_tail;
+    after_valid_postfix;
+}
+#elif BUSTER_CASE == 65
+int known(int);
+int target(int);
+void check(void)
+{
+    known(int x; 0; target(missing_tail_operand)) skipped_tail;
+    after_call_operand;
+}
+#elif BUSTER_CASE == 66
+int known(int);
+void check(void)
+{
+    known(int x; 0; missing_tail_operand++) skipped_tail;
+    after_invalid_postfix;
+}
+#elif BUSTER_CASE == 67
+int known(int);
+void check(void)
+{
+    known(int x; 0; 1 + missing_tail_operand) skipped_tail;
+    after_invalid_binary;
 }
 #endif
