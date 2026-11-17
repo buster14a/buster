@@ -1221,10 +1221,8 @@ static bool tier1_emit_cfg_incoming(const Tier1EmitResult* emitted, uint64_t pas
 // before it. The hull takes each block's start where the object is live before it, its end where the object is live
 // after it, and each marker's own position: an access through the object's address, at a node between a start and an
 // end on some path, has its positions inside. Scratch keeps the dataflow's rows; the caller restores it.
-static Tier1EmitError tier1_emit_cfg_lifetimes(const IrFunction* function, const Tier1CfgInput* input, bool vector, Arena* scratch, uint32_t* starts, uint32_t* ends)
+static Tier1EmitError tier1_emit_cfg_lifetimes(const IrFunction* function, const Tier1CfgInput* input, Arena* scratch, uint32_t* starts, uint32_t* ends)
 {
-    (void)vector;
-
     const uint32_t objects = function->slot_count;
     const uint32_t blocks = input->block_count;
     const uint32_t added = blocks - function->block_count;
@@ -1278,14 +1276,7 @@ static Tier1EmitError tier1_emit_cfg_lifetimes(const IrFunction* function, const
                 }
             }
         }
-        if (BUSTER_VECTOR_PATH(vector))
-        {
-            (void)dataflow_liveness_vector(&lifetimes);
-        }
-        else
-        {
-            (void)dataflow_liveness_scalar(&lifetimes);
-        }
+        (void)dataflow_liveness(&lifetimes);
         uint32_t* low = ir_allocate(scratch, marked, 4, &ok);
         uint32_t* high = ir_allocate(scratch, marked, 4, &ok);
         error = ok ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
@@ -1441,7 +1432,7 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
     }
     if (error == TIER1_EMIT_OK)
     {
-        error = tier1_emit_cfg_lifetimes(plan->function, input, options->vector, scratch, prepared->starts + count + fixed_columns, prepared->ends + count + fixed_columns);
+        error = tier1_emit_cfg_lifetimes(plan->function, input, scratch, prepared->starts + count + fixed_columns, prepared->ends + count + fixed_columns);
     }
     if (error == TIER1_EMIT_OK)
     {

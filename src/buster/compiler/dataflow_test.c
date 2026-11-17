@@ -2,7 +2,9 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // main.c includes this file after dataflow.c; run_dataflow_tests implements test-dataflow.
-// The generated cases compare both kernels and their iteration counts, equations, padding and repeatability.
+// The solver is AVX-512 alone (#2924), so no case compares two solvers. Generated cases check its rows by the liveness
+// equations and its iteration count, and every live bit, by the sweep search (dataflow_sweeps_test.c), with padding,
+// placement and repeatability over poisoned rows; the same inputs at another place must give the same solve.
 // dataflow_test_reachability independently derives liveness one value at a time by finding a use before a def.
 // dataflow_test_sampled_reachability checks selected values at every block of large graphs by backward reachability.
 // dataflow_test_sweeps (dataflow_sweeps_test.c) checks every value at every block, and the exact iteration count.
@@ -379,44 +381,46 @@ static bool dataflow_test_order(const Dataflow* graph, Arena* scratch)
     return result;
 }
 
-static void dataflow_test_pair(DataflowTestTally* tally, Dataflow* vector, Dataflow* scalar, Arena* scratch, bool reachability)
+// One solve, checked without a second solver. Afterwards the graph holds that solve's rows and the count is returned.
+static uint64_t dataflow_test_solve(DataflowTestTally* tally, Dataflow* graph, Arena* scratch, bool reachability)
 {
-    dataflow_test_expect(tally, dataflow_test_order(vector, scratch), "postorder does not visit every block once");
-    const uint64_t vector_iterations = dataflow_liveness_vector(vector);
-    const uint64_t scalar_iterations = dataflow_liveness_scalar(scalar);
-    dataflow_test_expect(tally, vector_iterations == scalar_iterations && vector_iterations != 0, "iteration counts differ");
-    dataflow_test_expect(tally, dataflow_test_rows_equal(vector, scalar), "scalar and vector rows differ");
-    dataflow_test_expect(tally, dataflow_test_equations(vector), "liveness equations do not hold");
+    dataflow_test_expect(tally, dataflow_test_order(graph, scratch), "postorder does not visit every block once");
+    const uint64_t iterations = dataflow_liveness(graph);
     uint64_t expected_iterations = 0;
-    dataflow_test_expect(tally, dataflow_test_sweeps(vector, scratch, &expected_iterations), "in rows differ from the sweep search's live pairs");
-    dataflow_test_expect(tally, expected_iterations == vector_iterations && expected_iterations == scalar_iterations,
-        "iteration count differs from the sweep search's");
-    dataflow_test_expect(tally, dataflow_test_padding(vector) && dataflow_test_padding(scalar), "padding bits are nonzero");
+    dataflow_test_expect(tally, iterations != 0, "a solve counted no sweep");
+    dataflow_test_expect(tally, dataflow_test_equations(graph), "liveness equations do not hold");
+    dataflow_test_expect(tally, dataflow_test_sweeps(graph, scratch, &expected_iterations), "in rows differ from the sweep search's live pairs");
+    dataflow_test_expect(tally, expected_iterations == iterations, "iteration count differs from the sweep search's");
+    dataflow_test_expect(tally, dataflow_test_padding(graph), "padding bits are nonzero");
     if (reachability)
     {
-        dataflow_test_expect(tally, dataflow_test_reachability(vector, scratch), "liveness differs from use-before-def reachability");
+        dataflow_test_expect(tally, dataflow_test_reachability(graph, scratch), "liveness differs from use-before-def reachability");
     }
 
-    // A solver must begin from the empty solution, independent of a previous run's contents.
-    const uint64_t bytes = (uint64_t)vector->block_count * vector->row_words * sizeof(uint64_t);
-    if (bytes != 0)
+    // A solve must begin from the empty solution, independent of a previous run's contents: poisoned, the rows must come
+    // back as the first solve left them.
+    const uint64_t bytes = (uint64_t)graph->block_count * graph->row_words * sizeof(uint64_t);
+    const uint64_t mark = scratch->length;
+    uint64_t* first_in = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, bytes / sizeof(uint64_t));
+    uint64_t* first_out = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, bytes / sizeof(uint64_t));
+    const bool saved = bytes == 0 || (first_in != 0 && first_out != 0);
+    dataflow_test_expect(tally, saved, "no scratch for the first solve's rows");
+    if (saved)
     {
-        memset(vector->in, 0xFF, bytes);
-        memset(vector->out, 0xFF, bytes);
+        if (bytes != 0)
+        {
+            memcpy(first_in, graph->in, bytes);
+            memcpy(first_out, graph->out, bytes);
+            memset(graph->in, 0xFF, bytes);
+            memset(graph->out, 0xFF, bytes);
+        }
+        const uint64_t repeated_iterations = dataflow_liveness(graph);
+        const bool same = bytes == 0 || (memcmp(first_in, graph->in, bytes) == 0 && memcmp(first_out, graph->out, bytes) == 0);
+        dataflow_test_expect(tally, repeated_iterations == iterations && same, "solve depends on previous output");
+        dataflow_test_expect(tally, dataflow_test_padding(graph), "poisoned padding survived a repeated solve");
     }
-    const uint64_t repeated_iterations = dataflow_liveness_vector(vector);
-    dataflow_test_expect(tally, repeated_iterations == vector_iterations && dataflow_test_rows_equal(vector, scalar),
-        "vector solve depends on previous output");
-    if (bytes != 0)
-    {
-        memset(scalar->in, 0xFF, bytes);
-        memset(scalar->out, 0xFF, bytes);
-    }
-    const uint64_t repeated_scalar_iterations = dataflow_liveness_scalar(scalar);
-    dataflow_test_expect(tally, repeated_scalar_iterations == scalar_iterations && dataflow_test_rows_equal(vector, scalar),
-        "scalar solve depends on previous output");
-    dataflow_test_expect(tally, dataflow_test_padding(vector) && dataflow_test_padding(scalar),
-        "poisoned padding survived a repeated solve");
+    arena_pop_to(scratch, mark);
+    return iterations;
 }
 
 static void dataflow_test_generated(DataflowTestTally* tally, Arena* memory, Arena* scratch, uint32_t blocks, uint32_t values, uint32_t shape, uint64_t seed)
@@ -427,13 +431,13 @@ static void dataflow_test_generated(DataflowTestTally* tally, Arena* memory, Are
     tally->shape = shape;
     tally->seed = seed;
     Dataflow vector = { 0 };
-    Dataflow scalar = { 0 };
+    Dataflow other = { 0 };
     const bool made_vector = dataflow_generate(memory, blocks, values, shape, seed, &vector);
-    const bool made_scalar = dataflow_generate(memory, blocks, values, shape, seed, &scalar);
-    dataflow_test_expect(tally, made_vector && made_scalar, "generated graph allocation failed");
-    if (made_vector && made_scalar)
+    const bool made_other = dataflow_generate(memory, blocks, values, shape, seed, &other);
+    dataflow_test_expect(tally, made_vector && made_other, "generated graph allocation failed");
+    if (made_vector && made_other)
     {
-        dataflow_test_expect(tally, dataflow_test_inputs_equal(&vector, &scalar), "same seed generated different inputs");
+        dataflow_test_expect(tally, dataflow_test_inputs_equal(&vector, &other), "same seed generated different inputs");
         const uint64_t expected_words = ((uint64_t)values + 511) / 512 * 8;
         bool aligned = vector.row_words == expected_words;
         if (values != 0 && blocks != 0)
@@ -442,7 +446,11 @@ static void dataflow_test_generated(DataflowTestTally* tally, Arena* memory, Are
             aligned = aligned && ((uintptr_t)vector.in % 64) == 0 && ((uintptr_t)vector.out % 64) == 0;
         }
         dataflow_test_expect(tally, aligned, "row size or alignment is wrong");
-        dataflow_test_pair(tally, &vector, &scalar, scratch, blocks <= 8);
+        const uint64_t iterations = dataflow_test_solve(tally, &vector, scratch, blocks <= 8);
+        // The same inputs at another place in the arena: the same rows and count.
+        const uint64_t other_iterations = dataflow_liveness(&other);
+        dataflow_test_expect(tally, other_iterations == iterations && dataflow_test_rows_equal(&vector, &other),
+            "the same inputs elsewhere solved differently");
         if (blocks == 257 || blocks == 2049)
         {
             dataflow_test_expect(tally, dataflow_test_sampled_reachability(&vector, scratch, seed),
@@ -518,62 +526,47 @@ static void dataflow_test_known(DataflowTestTally* tally, Arena* memory, Arena* 
     tally->values = 7;
     tally->shape = BUSTER_DATAFLOW_SHAPE_IRREDUCIBLE;
     Dataflow vector = { 0 };
-    Dataflow scalar = { 0 };
-    bool valid = dataflow_create(memory, 9, 7, 10, &vector) && dataflow_create(memory, 9, 7, 10, &scalar);
+    bool valid = dataflow_create(memory, 9, 7, 10, &vector);
     if (valid)
     {
         memcpy(vector.successor_offsets, offsets, sizeof(offsets));
-        memcpy(scalar.successor_offsets, offsets, sizeof(offsets));
         memcpy(vector.successors, targets, sizeof(targets));
-        memcpy(scalar.successors, targets, sizeof(targets));
         for (uint32_t block = 0; block < 9; block += 1)
         {
             const uint64_t index = (uint64_t)block * vector.row_words;
             vector.use[index] = uses[block];
-            scalar.use[index] = uses[block];
             vector.def[index] = defs[block];
-            scalar.def[index] = defs[block];
         }
-        valid = dataflow_postorder(&vector, scratch) && dataflow_postorder(&scalar, scratch);
+        valid = dataflow_postorder(&vector, scratch);
     }
     dataflow_test_expect(tally, valid, "handwritten graph setup failed");
     if (valid)
     {
-        dataflow_test_pair(tally, &vector, &scalar, scratch, true);
+        (void)dataflow_test_solve(tally, &vector, scratch, true);
         dataflow_test_expect(tally, vector.in[7 * vector.row_words] == 0, "empty self-loop acquired a live value");
         dataflow_test_expect(tally, vector.in[4 * vector.row_words] == 4, "use must survive a definition in the same block");
 
         // The successor supplies out=0xCC, so use=0xF0 and def=0xAA exercise every truth-table combination.
         vector.block_count = 2;
-        scalar.block_count = 2;
         vector.value_count = 8;
-        scalar.value_count = 8;
         vector.edge_count = 1;
-        scalar.edge_count = 1;
         vector.successor_offsets[0] = 0;
-        scalar.successor_offsets[0] = 0;
         vector.successor_offsets[1] = 1;
-        scalar.successor_offsets[1] = 1;
         vector.successor_offsets[2] = 1;
-        scalar.successor_offsets[2] = 1;
         vector.successors[0] = 1;
-        scalar.successors[0] = 1;
         const uint64_t bytes = 2 * vector.row_words * sizeof(uint64_t);
         memset(vector.use, 0, bytes);
-        memset(scalar.use, 0, bytes);
         memset(vector.def, 0, bytes);
-        memset(scalar.def, 0, bytes);
         vector.use[0] = 0xF0;
-        scalar.use[0] = 0xF0;
         vector.def[0] = 0xAA;
-        scalar.def[0] = 0xAA;
         vector.use[vector.row_words] = 0xCC;
-        scalar.use[scalar.row_words] = 0xCC;
-        valid = dataflow_postorder(&vector, scratch) && dataflow_postorder(&scalar, scratch);
+        valid = dataflow_postorder(&vector, scratch);
         dataflow_test_expect(tally, valid, "truth-table graph postorder failed");
         if (valid)
         {
-            dataflow_test_pair(tally, &vector, &scalar, scratch, true);
+            // Block 1 is a sink, visited first: one sweep sets every bit and the second changes nothing.
+            const uint64_t iterations = dataflow_test_solve(tally, &vector, scratch, true);
+            dataflow_test_expect(tally, iterations == 2, "the two-block chain did not take two sweeps");
             dataflow_test_expect(tally, vector.in[0] == 0xF4 && vector.out[0] == 0xCC, "transfer truth table is wrong");
         }
         vector.block_count = 8;
@@ -676,9 +669,12 @@ static void dataflow_test_repeated_edges(DataflowTestTally* tally, Arena* memory
     {
         dataflow_test_expect(tally, memcmp(repeated.postorder, simple.postorder, 4 * sizeof(uint32_t)) == 0,
             "repeated edges changed the DFS postorder");
-        // Both kernels see both versions, including repeated self-edges, a back edge and repeated exit edges.
-        dataflow_test_pair(tally, &repeated, &simple, scratch, true);
-        dataflow_test_pair(tally, &simple, &repeated, scratch, true);
+        // Repeated self-edges, a back edge and repeated exit edges change nothing: the multigraph solves as its
+        // deduplicated CFG does, the same rows in the same number of sweeps.
+        const uint64_t repeated_iterations = dataflow_test_solve(tally, &repeated, scratch, true);
+        const uint64_t simple_iterations = dataflow_test_solve(tally, &simple, scratch, true);
+        dataflow_test_expect(tally, repeated_iterations == simple_iterations && dataflow_test_rows_equal(&repeated, &simple),
+            "repeated edges changed the solve");
         dataflow_test_expect(tally, dataflow_test_sampled_reachability(&repeated, scratch, tally->seed),
             "backward reachability differs on repeated edges");
     }
@@ -689,7 +685,7 @@ static void dataflow_test_interference(DataflowTestTally* tally)
 {
     _Alignas(64) uint64_t a[24] = { 0 };
     _Alignas(64) uint64_t b[24] = { 0 };
-    dataflow_test_expect(tally, !dataflow_intersects_vector(0, 0, 0) && !dataflow_intersects_scalar(0, 0, 0),
+    dataflow_test_expect(tally, !dataflow_intersects(0, 0, 0),
         "empty rows interfere");
     for (uint64_t words = 8; words <= 24; words += 8)
     {
@@ -700,10 +696,10 @@ static void dataflow_test_interference(DataflowTestTally* tally)
             a[value / 64] = 1ull << (value % 64);
             const uint64_t next = (value + 1) % (words * 64);
             b[next / 64] = 1ull << (next % 64);
-            dataflow_test_expect(tally, !dataflow_intersects_vector(a, b, words) && !dataflow_intersects_scalar(a, b, words),
+            dataflow_test_expect(tally, !dataflow_intersects(a, b, words),
                 "disjoint rows interfere");
             b[value / 64] |= 1ull << (value % 64);
-            dataflow_test_expect(tally, dataflow_intersects_vector(a, b, words) && dataflow_intersects_scalar(a, b, words),
+            dataflow_test_expect(tally, dataflow_intersects(a, b, words),
                 "shared value was not found");
         }
     }
@@ -723,9 +719,9 @@ static void dataflow_test_guards(DataflowTestTally* tally, Arena* memory, Arena*
             tally->values = dataflow_test_values[value_index];
             tally->shape = BUSTER_DATAFLOW_SHAPE_IRREDUCIBLE;
             Dataflow vector = { 0 };
-            Dataflow scalar = { 0 };
+            Dataflow regular = { 0 };
             bool valid = dataflow_generate(memory, 3, tally->values, tally->shape, tally->seed, &vector);
-            valid = valid && dataflow_generate(memory, 3, tally->values, tally->shape, tally->seed, &scalar);
+            valid = valid && dataflow_generate(memory, 3, tally->values, tally->shape, tally->seed, &regular);
             void* mappings[4] = {
                 MAP_FAILED,
                 MAP_FAILED,
@@ -762,16 +758,23 @@ static void dataflow_test_guards(DataflowTestTally* tally, Arena* memory, Arena*
             dataflow_test_expect(tally, valid, "guard-page setup failed");
             if (valid)
             {
-                dataflow_test_pair(tally, &vector, &scalar, scratch, true);
-                const uint64_t guarded_iterations = dataflow_liveness_scalar(&vector);
-                const uint64_t regular_iterations = dataflow_liveness_scalar(&scalar);
-                dataflow_test_expect(tally, guarded_iterations == regular_iterations && dataflow_test_rows_equal(&vector, &scalar),
-                    "scalar solve at a guard page differs");
+                const uint64_t guarded_iterations = dataflow_test_solve(tally, &vector, scratch, true);
+                const uint64_t regular_iterations = dataflow_liveness(&regular);
+                dataflow_test_expect(tally, guarded_iterations == regular_iterations && dataflow_test_rows_equal(&vector, &regular),
+                    "solve at a guard page differs from the same solve elsewhere");
+                // The last rows end at the page: in holds use, so they share a bit exactly when use has one, and a row
+                // shares one with itself exactly when it has one.
                 const uint64_t* last_use = vector.use + 2 * vector.row_words;
-                const uint64_t* last_def = vector.def + 2 * vector.row_words;
-                const bool reference = dataflow_intersects_scalar(last_use, last_def, vector.row_words);
-                dataflow_test_expect(tally, dataflow_intersects_vector(last_use, last_def, vector.row_words) == reference,
-                    "guard-page interference differs");
+                const uint64_t* last_in = vector.in + 2 * vector.row_words;
+                uint64_t use_bits = 0;
+                uint64_t in_bits = 0;
+                for (uint64_t word = 0; word < vector.row_words; word += 1)
+                {
+                    use_bits |= last_use[word];
+                    in_bits |= last_in[word];
+                }
+                dataflow_test_expect(tally, dataflow_intersects(last_use, last_in, vector.row_words) == (use_bits != 0) &&
+                    dataflow_intersects(last_in, last_in, vector.row_words) == (in_bits != 0), "guard-page interference is wrong");
                 bool prefix_intact = true;
                 for (uint32_t row = 0; row < 4; row += 1)
                 {

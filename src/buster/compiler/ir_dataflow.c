@@ -19,7 +19,7 @@
 #ifndef BUSTER_IR_DATAFLOW_C
 #define BUSTER_IR_DATAFLOW_C
 
-// AVX-512 gathers use signed 32-bit element indices; both paths expose the same explicit bound.
+// AVX-512 gathers use signed 32-bit element indices: the explicit bound on a function's instructions.
 #define BUSTER_IR_DATAFLOW_MAX_INSTRUCTIONS INT32_MAX
 
 #include <stdbool.h>
@@ -49,45 +49,30 @@ struct IrDataflow
 // Each pass takes the first active ID's word, ORs every active ID's bit in that word (one reduction of both halves),
 // and retires them: no conflict detection, whose cost the few IDs of a block's phi inputs never repaid, and nothing at
 // all when no ID is active (#2950).
-static void ir_dataflow_set(uint64_t* row, const uint32_t* ids, uint32_t count, bool vector)
+static void ir_dataflow_set(uint64_t* row, const uint32_t* ids, uint32_t count)
 {
-    (void)vector;
-    if (BUSTER_VECTOR_PATH(vector))
+    const __mmask16 tail = (__mmask16)((1u << count) - 1);
+    const __m512i values = _mm512_maskz_loadu_epi32(tail, ids);
+    uint32_t active = tail & _mm512_cmpneq_epi32_mask(values, _mm512_set1_epi32(-1));
+    if (active != 0)
     {
-        const __mmask16 tail = (__mmask16)((1u << count) - 1);
-        const __m512i values = _mm512_maskz_loadu_epi32(tail, ids);
-        uint32_t active = tail & _mm512_cmpneq_epi32_mask(values, _mm512_set1_epi32(-1));
-        if (active != 0)
+        const __m512i words = _mm512_srli_epi32(values, 6);
+        const __m512i shifts = _mm512_and_si512(values, _mm512_set1_epi32(63));
+        const __m512i low = _mm512_sllv_epi64(_mm512_set1_epi64(1), _mm512_cvtepu32_epi64(_mm512_castsi512_si256(shifts)));
+        __m512i high = _mm512_setzero_si512();
+        if (count > 8)
         {
-            const __m512i words = _mm512_srli_epi32(values, 6);
-            const __m512i shifts = _mm512_and_si512(values, _mm512_set1_epi32(63));
-            const __m512i low = _mm512_sllv_epi64(_mm512_set1_epi64(1), _mm512_cvtepu32_epi64(_mm512_castsi512_si256(shifts)));
-            __m512i high = _mm512_setzero_si512();
-            if (count > 8)
-            {
-                high = _mm512_sllv_epi64(_mm512_set1_epi64(1), _mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(shifts, 1)));
-            }
-            uint32_t word_ids[16];
-            _mm512_storeu_si512(word_ids, words);
-            while (active != 0)
-            {
-                const uint32_t word = word_ids[__builtin_ctz(active)];
-                const __mmask16 group = (__mmask16)active & _mm512_cmpeq_epi32_mask(words, _mm512_set1_epi32((int)word));
-                const __m512i bits = _mm512_or_si512(_mm512_maskz_mov_epi64((__mmask8)group, low), _mm512_maskz_mov_epi64((__mmask8)(group >> 8), high));
-                row[word] |= (uint64_t)_mm512_reduce_or_epi64(bits);
-                active &= ~(uint32_t)group;
-            }
+            high = _mm512_sllv_epi64(_mm512_set1_epi64(1), _mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(shifts, 1)));
         }
-    }
-    else
-    {
-        for (uint32_t i = 0; i < count; i += 1)
+        uint32_t word_ids[16];
+        _mm512_storeu_si512(word_ids, words);
+        while (active != 0)
         {
-            const uint32_t id = ids[i];
-            if (id != BUSTER_IR_NONE)
-            {
-                row[id >> 6] |= UINT64_C(1) << (id & 63);
-            }
+            const uint32_t word = word_ids[__builtin_ctz(active)];
+            const __mmask16 group = (__mmask16)active & _mm512_cmpeq_epi32_mask(words, _mm512_set1_epi32((int)word));
+            const __m512i bits = _mm512_or_si512(_mm512_maskz_mov_epi64((__mmask8)group, low), _mm512_maskz_mov_epi64((__mmask8)(group >> 8), high));
+            row[word] |= (uint64_t)_mm512_reduce_or_epi64(bits);
+            active &= ~(uint32_t)group;
         }
     }
 }
@@ -96,229 +81,147 @@ static void ir_dataflow_set(uint64_t* row, const uint32_t* ids, uint32_t count, 
 // or adding their dense IDs to use. Inactive columns can contain metadata, NONE, or values outside the function:
 // they NEVER participate in a gather. Logical tails need no readable padding. A block's instructions are the range
 // block_offsets gives it, so an operand is local exactly when it falls in that range: two compares, where gathering
-// each operand's block cost the smallest functions' preparation more than the scalar twin's lookups (#2950).
+// each operand's block cost the smallest functions' preparation more than the scalar twin's lookups did (#2950).
 static void ir_dataflow_operands(const uint32_t* values, uint32_t count, uint32_t selected, uint32_t block,
-                                 const uint32_t* block_offsets, const IrCfg* cfg, uint64_t* cross, IrDataflow* flow, bool vector)
+                                 const uint32_t* block_offsets, uint64_t* cross, IrDataflow* flow)
 {
-    (void)vector;
-    uint64_t* row = flow == NULL ? cross : flow->flow.use + (uint64_t)block * flow->flow.row_words;
-    if (BUSTER_VECTOR_PATH(vector))
+    const __mmask16 active = (__mmask16)selected;
+    const __m512i operands = _mm512_maskz_loadu_epi32(active, values);
+    const __m512i begin = _mm512_set1_epi32((int)block_offsets[block]);
+    const __m512i end = _mm512_set1_epi32((int)block_offsets[block + 1]);
+    const __mmask16 nonlocal = _mm512_mask_cmplt_epu32_mask(active, operands, begin) | _mm512_mask_cmpge_epu32_mask(active, operands, end);
+    // Only a batch with an operand from another block gathers dense IDs or sets a bit: a zmm gather is 64 uops
+    // whatever its mask, and most batches of most functions have none (#2950).
+    if (nonlocal != 0)
     {
-        const __mmask16 active = (__mmask16)selected;
-        const __m512i operands = _mm512_maskz_loadu_epi32(active, values);
-        const __m512i begin = _mm512_set1_epi32((int)block_offsets[block]);
-        const __m512i end = _mm512_set1_epi32((int)block_offsets[block + 1]);
-        const __mmask16 nonlocal = _mm512_mask_cmplt_epu32_mask(active, operands, begin) | _mm512_mask_cmpge_epu32_mask(active, operands, end);
-        // Only a batch with an operand from another block gathers dense IDs or sets a bit: a zmm gather is 64 uops
-        // whatever its mask, and most batches of most functions have none (#2950).
-        if (nonlocal != 0)
-        {
-            const __m512i ids = flow == NULL ? operands :
-                _mm512_mask_i32gather_epi32(_mm512_set1_epi32(-1), nonlocal, operands, flow->ids, 4);
-            uint32_t picked[16];
-            _mm512_storeu_si512(picked, _mm512_mask_mov_epi32(_mm512_set1_epi32(-1), nonlocal, ids));
-            ir_dataflow_set(row, picked, count, true);
-        }
-    }
-    else
-    {
+        const __m512i ids = flow == NULL ? operands :
+            _mm512_mask_i32gather_epi32(_mm512_set1_epi32(-1), nonlocal, operands, flow->ids, 4);
         uint32_t picked[16];
-        for (uint32_t i = 0; i < count; i += 1)
-        {
-            picked[i] = BUSTER_IR_NONE;
-            if ((selected & (1u << i)) != 0 && cfg->instruction_blocks[values[i]] != block)
-            {
-                picked[i] = flow == NULL ? values[i] : flow->ids[values[i]];
-            }
-        }
-        ir_dataflow_set(row, picked, count, false);
+        _mm512_storeu_si512(picked, _mm512_mask_mov_epi32(_mm512_set1_epi32(-1), nonlocal, ids));
+        uint64_t* row = flow == NULL ? cross : flow->flow.use + (uint64_t)block * flow->flow.row_words;
+        ir_dataflow_set(row, picked, count);
     }
 }
 
 // Fixed operands from sixteen instruction columns at a time. The IR's required/optional value masks exclude
 // predicates, symbols, slots, switch cases, labels and other metadata. Calls' variable argument slices are batches
-// too. The scalar twin enumerates individual operands instead, including the indirect callee and aggregate result.
-static void ir_dataflow_ordinary(const IrFunction* function, const IrCfg* cfg, uint64_t* cross, IrDataflow* flow, bool vector)
+// too, and so is a ternary intrinsic's third operand.
+static void ir_dataflow_ordinary(const IrFunction* function, uint64_t* cross, IrDataflow* flow)
 {
-    (void)vector;
-    if (BUSTER_VECTOR_PATH(vector))
+    // The opcode tables' two halves each (BUSTER_IR_OP_TABLE), one vpermi2b per lookup.
+    const __m512i required_low = _mm512_loadu_si512(ir_operand_table);
+    const __m512i required_high = _mm512_loadu_si512(ir_operand_table + 64);
+    const __m512i optional_low = _mm512_loadu_si512(ir_optional_table);
+    const __m512i optional_high = _mm512_loadu_si512(ir_optional_table + 64);
+    const uint32_t* const columns[3] = { function->a, function->b, function->c };
+    for (uint32_t block = 0; block < function->block_count; block += 1)
     {
-        // The opcode tables' two halves each (BUSTER_IR_OP_TABLE), one vpermi2b per lookup.
-        const __m512i required_low = _mm512_loadu_si512(ir_operand_table);
-        const __m512i required_high = _mm512_loadu_si512(ir_operand_table + 64);
-        const __m512i optional_low = _mm512_loadu_si512(ir_optional_table);
-        const __m512i optional_high = _mm512_loadu_si512(ir_optional_table + 64);
-        const uint32_t* const columns[3] = { function->a, function->b, function->c };
-        for (uint32_t block = 0; block < function->block_count; block += 1)
+        const uint32_t end = function->block_offsets[block + 1];
+        for (uint32_t first = function->block_offsets[block]; first < end;)
         {
-            const uint32_t end = function->block_offsets[block + 1];
-            for (uint32_t first = function->block_offsets[block]; first < end;)
+            const uint32_t count = end - first < 16 ? end - first : 16;
+            const __mmask16 tail = (__mmask16)((1u << count) - 1);
+            const __m128i bytes = _mm_maskz_loadu_epi8(tail, function->op + first);
+            const __m512i keys = _mm512_zextsi128_si512(bytes);
+            const __m512i ops = _mm512_cvtepu8_epi32(bytes);
+            const __m512i required = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutex2var_epi8(required_low, keys, required_high)));
+            const __m512i optional = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutex2var_epi8(optional_low, keys, optional_high)));
+            for (uint32_t field = 0; field < 3; field += 1)
             {
-                const uint32_t count = end - first < 16 ? end - first : 16;
-                const __mmask16 tail = (__mmask16)((1u << count) - 1);
-                const __m128i bytes = _mm_maskz_loadu_epi8(tail, function->op + first);
-                const __m512i keys = _mm512_zextsi128_si512(bytes);
-                const __m512i ops = _mm512_cvtepu8_epi32(bytes);
-                const __m512i required = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutex2var_epi8(required_low, keys, required_high)));
-                const __m512i optional = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutex2var_epi8(optional_low, keys, optional_high)));
-                for (uint32_t field = 0; field < 3; field += 1)
-                {
-                    const __m512i bit = _mm512_set1_epi32(1u << field);
-                    const __m512i values = _mm512_maskz_loadu_epi32(tail, columns[field] + first);
-                    const __mmask16 present = _mm512_cmpneq_epi32_mask(values, _mm512_set1_epi32(-1));
-                    const __mmask16 selected = tail & (_mm512_test_epi32_mask(required, bit) | (_mm512_test_epi32_mask(optional, bit) & present));
-                    ir_dataflow_operands(columns[field] + first, count, selected, block, function->block_offsets, cfg, cross, flow, true);
-                }
-                uint32_t calls = tail & (_mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(IR_CALL)) |
-                                         _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(IR_CALL_INDIRECT)));
-                while (calls != 0)
-                {
-                    const uint32_t node = first + (uint32_t)__builtin_ctz(calls);
-                    const IrCall call = function->calls[function->b[node]];
-                    for (uint32_t argument = 0; argument < call.argument_count;)
-                    {
-                        const uint32_t length = call.argument_count - argument < 16 ? call.argument_count - argument : 16;
-                        ir_dataflow_operands(function->extra + call.argument_first + argument, length, (1u << length) - 1,
-                                             block, function->block_offsets, cfg, cross, flow, true);
-                        argument += length;
-                    }
-                    calls &= calls - 1;
-                }
-                // A ternary intrinsic's third operand (#1840), which the extra array holds, its `c` the kind and its place.
-                const __m512i kinds = _mm512_and_si512(_mm512_maskz_loadu_epi32(tail, function->c + first), _mm512_set1_epi32(BUSTER_IR_INTRINSIC_KIND));
-                uint32_t ternaries = tail & _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(IR_INTRINSIC)) &
-                                     _mm512_cmpge_epu32_mask(kinds, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY)) &
-                                     _mm512_cmplt_epu32_mask(kinds, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY_END));
-                while (ternaries != 0)
-                {
-                    const uint32_t node = first + (uint32_t)__builtin_ctz(ternaries);
-                    ir_dataflow_operands(function->extra + ir_intrinsic_extra(function->c[node]), 1, 1, block, function->block_offsets, cfg, cross, flow, true);
-                    ternaries &= ternaries - 1;
-                }
-                first += count;
+                const __m512i bit = _mm512_set1_epi32(1u << field);
+                const __m512i values = _mm512_maskz_loadu_epi32(tail, columns[field] + first);
+                const __mmask16 present = _mm512_cmpneq_epi32_mask(values, _mm512_set1_epi32(-1));
+                const __mmask16 selected = tail & (_mm512_test_epi32_mask(required, bit) | (_mm512_test_epi32_mask(optional, bit) & present));
+                ir_dataflow_operands(columns[field] + first, count, selected, block, function->block_offsets, cross, flow);
             }
-        }
-    }
-    else
-    {
-        for (uint32_t node = 0; node < function->instruction_count; node += 1)
-        {
-            if (function->op[node] != IR_PHI)
+            uint32_t calls = tail & (_mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(IR_CALL)) |
+                                     _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(IR_CALL_INDIRECT)));
+            while (calls != 0)
             {
-                const uint32_t block = cfg->instruction_blocks[node];
-                const uint64_t count = ir_operand_count(function, node);
-                for (uint32_t i = 0; i < count; i += 1)
+                const uint32_t node = first + (uint32_t)__builtin_ctz(calls);
+                const IrCall call = function->calls[function->b[node]];
+                for (uint32_t argument = 0; argument < call.argument_count;)
                 {
-                    const IrOperand operand = ir_operand(function, node, i, block);
-                    if (cfg->instruction_blocks[operand.value] != block)
-                    {
-                        const uint32_t id = flow == NULL ? operand.value : flow->ids[operand.value];
-                        uint64_t* row = flow == NULL ? cross : flow->flow.use + (uint64_t)block * flow->flow.row_words;
-                        ir_dataflow_set(row, &id, 1, false);
-                    }
+                    const uint32_t length = call.argument_count - argument < 16 ? call.argument_count - argument : 16;
+                    ir_dataflow_operands(function->extra + call.argument_first + argument, length, (1u << length) - 1,
+                                         block, function->block_offsets, cross, flow);
+                    argument += length;
                 }
+                calls &= calls - 1;
             }
+            // A ternary intrinsic's third operand (#1840), which the extra array holds, its `c` the kind and its place.
+            const __m512i kinds = _mm512_and_si512(_mm512_maskz_loadu_epi32(tail, function->c + first), _mm512_set1_epi32(BUSTER_IR_INTRINSIC_KIND));
+            uint32_t ternaries = tail & _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(IR_INTRINSIC)) &
+                                 _mm512_cmpge_epu32_mask(kinds, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY)) &
+                                 _mm512_cmplt_epu32_mask(kinds, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY_END));
+            while (ternaries != 0)
+            {
+                const uint32_t node = first + (uint32_t)__builtin_ctz(ternaries);
+                ir_dataflow_operands(function->extra + ir_intrinsic_extra(function->c[node]), 1, 1, block, function->block_offsets, cross, flow);
+                ternaries &= ternaries - 1;
+            }
+            first += count;
         }
     }
 }
 
 // Separate the IR's interleaved predecessor/value pairs. A final slice of at most eight pairs has no second load,
 // even a zero-masked one: do not form an out-of-object pointer to the next sixteen words.
-static void ir_dataflow_phi_batch(const uint32_t* pairs, uint32_t count, uint32_t* blocks, uint32_t* values, bool vector)
+static void ir_dataflow_phi_batch(const uint32_t* pairs, uint32_t count, uint32_t* blocks, uint32_t* values)
 {
-    (void)vector;
-    if (BUSTER_VECTOR_PATH(vector))
+    const uint32_t low_count = count < 8 ? count * 2 : 16;
+    const __m512i low = _mm512_maskz_loadu_epi32((__mmask16)((1u << low_count) - 1), pairs);
+    __m512i high = _mm512_setzero_si512();
+    if (count > 8)
     {
-        const uint32_t low_count = count < 8 ? count * 2 : 16;
-        const __m512i low = _mm512_maskz_loadu_epi32((__mmask16)((1u << low_count) - 1), pairs);
-        __m512i high = _mm512_setzero_si512();
-        if (count > 8)
-        {
-            high = _mm512_maskz_loadu_epi32((__mmask16)((1u << ((count - 8) * 2)) - 1), pairs + 16);
-        }
-        const __m512i even = _mm512_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30);
-        const __m512i odd = _mm512_add_epi32(even, _mm512_set1_epi32(1));
-        _mm512_storeu_si512(blocks, _mm512_permutex2var_epi32(low, even, high));
-        _mm512_storeu_si512(values, _mm512_permutex2var_epi32(low, odd, high));
+        high = _mm512_maskz_loadu_epi32((__mmask16)((1u << ((count - 8) * 2)) - 1), pairs + 16);
     }
-    else
-    {
-        for (uint32_t i = 0; i < count; i += 1)
-        {
-            blocks[i] = pairs[i * 2];
-            values[i] = pairs[i * 2 + 1];
-        }
-    }
+    const __m512i even = _mm512_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30);
+    const __m512i odd = _mm512_add_epi32(even, _mm512_set1_epi32(1));
+    _mm512_storeu_si512(blocks, _mm512_permutex2var_epi32(low, even, high));
+    _mm512_storeu_si512(values, _mm512_permutex2var_epi32(low, odd, high));
 }
 
-static uint32_t ir_dataflow_count(const uint64_t* cross, uint32_t words, bool vector)
+static uint32_t ir_dataflow_count(const uint64_t* cross, uint32_t words)
 {
-    (void)vector;
     uint32_t count = 0;
-    if (BUSTER_VECTOR_PATH(vector))
+    for (uint32_t first = 0; first < words;)
     {
-        for (uint32_t first = 0; first < words;)
-        {
-            const uint32_t length = words - first < 8 ? words - first : 8;
-            const __m512i bits = _mm512_maskz_loadu_epi64((__mmask8)((1u << length) - 1), cross + first);
-            count += (uint32_t)_mm512_reduce_add_epi64(_mm512_popcnt_epi64(bits));
-            first += length;
-        }
-    }
-    else
-    {
-        for (uint32_t word = 0; word < words; word += 1)
-        {
-            count += (uint32_t)__builtin_popcountll(cross[word]);
-        }
+        const uint32_t length = words - first < 8 ? words - first : 8;
+        const __m512i bits = _mm512_maskz_loadu_epi64((__mmask8)((1u << length) - 1), cross + first);
+        count += (uint32_t)_mm512_reduce_add_epi64(_mm512_popcnt_epi64(bits));
+        first += length;
     }
     return count;
 }
 
-static void ir_dataflow_dense(const uint64_t* cross, IrDataflow* result, bool vector)
+static void ir_dataflow_dense(const uint64_t* cross, IrDataflow* result)
 {
-    (void)vector;
     const uint32_t count = result->instruction_count;
     uint32_t dense = 0;
     if (count != 0)
     {
         memset(result->ids, 0xff, (uint64_t)count * sizeof(uint32_t));
     }
-    if (BUSTER_VECTOR_PATH(vector))
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    const __m512i prefixes = _mm512_setr_epi32(0, 1, 3, 7, 15, 31, 63, 127, 255, 511, 1023, 2047, 4095, 8191, 16383, 32767);
+    for (uint32_t first = 0; first < count;)
     {
-        const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-        const __m512i prefixes = _mm512_setr_epi32(0, 1, 3, 7, 15, 31, 63, 127, 255, 511, 1023, 2047, 4095, 8191, 16383, 32767);
-        for (uint32_t first = 0; first < count;)
+        const uint32_t length = count - first < 16 ? count - first : 16;
+        const __mmask16 selected = (__mmask16)((cross[first >> 6] >> (first & 63)) & ((1u << length) - 1));
+        if (selected != 0)
         {
-            const uint32_t length = count - first < 16 ? count - first : 16;
-            const __mmask16 selected = (__mmask16)((cross[first >> 6] >> (first & 63)) & ((1u << length) - 1));
-            if (selected != 0)
-            {
-                const __m512i rank = _mm512_popcnt_epi32(_mm512_and_si512(prefixes, _mm512_set1_epi32(selected)));
-                _mm512_mask_storeu_epi32(result->ids + first, selected, _mm512_add_epi32(rank, _mm512_set1_epi32((int)dense)));
-                _mm512_mask_compressstoreu_epi32(result->values + dense, selected, _mm512_add_epi32(lanes, _mm512_set1_epi32((int)first)));
-                dense += (uint32_t)__builtin_popcount((uint32_t)selected);
-            }
-            first += length;
+            const __m512i rank = _mm512_popcnt_epi32(_mm512_and_si512(prefixes, _mm512_set1_epi32(selected)));
+            _mm512_mask_storeu_epi32(result->ids + first, selected, _mm512_add_epi32(rank, _mm512_set1_epi32((int)dense)));
+            _mm512_mask_compressstoreu_epi32(result->values + dense, selected, _mm512_add_epi32(lanes, _mm512_set1_epi32((int)first)));
+            dense += (uint32_t)__builtin_popcount((uint32_t)selected);
         }
-    }
-    else
-    {
-        for (uint32_t value = 0; value < count; value += 1)
-        {
-            if ((cross[value >> 6] & (UINT64_C(1) << (value & 63))) != 0)
-            {
-                result->ids[value] = dense;
-                result->values[dense] = value;
-                dense += 1;
-            }
-        }
+        first += length;
     }
 }
 
-static IrCheck ir_dataflow_prepare_path(const IrFunction* function, Arena* output, Arena* scratch, IrDataflow* result, bool vector)
+static __attribute__((unused)) IrCheck ir_dataflow_prepare(const IrFunction* function, Arena* output, Arena* scratch, IrDataflow* result)
 {
-    (void)vector;
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     IrCheck check = output == scratch ? ir_check(IR_ERROR_STRUCTURE, BUSTER_IR_NONE, 0) :
@@ -326,7 +229,7 @@ static IrCheck ir_dataflow_prepare_path(const IrFunction* function, Arena* outpu
     IrCfg cfg = { 0 };
     if (check.error == IR_OK)
     {
-        check = ir_check_rows(function, BUSTER_VECTOR_PATH(vector));
+        check = ir_check_rows(function, true);
     }
     if (check.error == IR_OK)
     {
@@ -334,7 +237,7 @@ static IrCheck ir_dataflow_prepare_path(const IrFunction* function, Arena* outpu
     }
     if (check.error == IR_OK)
     {
-        check = ir_check_graph(function, &cfg, scratch, NULL, BUSTER_VECTOR_PATH(vector));
+        check = ir_check_graph(function, &cfg, scratch, NULL, true);
     }
     IrDataflow candidate = { .instruction_count = function->instruction_count };
     bool allocated = true;
@@ -352,7 +255,7 @@ static IrCheck ir_dataflow_prepare_path(const IrFunction* function, Arena* outpu
     uint64_t phi_count = 0;
     if (check.error == IR_OK)
     {
-        ir_dataflow_ordinary(function, &cfg, cross, NULL, BUSTER_VECTOR_PATH(vector));
+        ir_dataflow_ordinary(function, cross, NULL);
     }
     for (uint32_t block = 0; check.error == IR_OK && block < function->block_count; block += 1)
     {
@@ -368,8 +271,8 @@ static IrCheck ir_dataflow_prepare_path(const IrFunction* function, Arena* outpu
                 const uint32_t count = function->b[node] - first < 16 ? function->b[node] - first : 16;
                 uint32_t blocks[16];
                 uint32_t values[16];
-                ir_dataflow_phi_batch(function->extra + function->a[node] + (uint64_t)first * 2, count, blocks, values, BUSTER_VECTOR_PATH(vector));
-                ir_dataflow_set(cross, values, count, BUSTER_VECTOR_PATH(vector));
+                ir_dataflow_phi_batch(function->extra + function->a[node] + (uint64_t)first * 2, count, blocks, values);
+                ir_dataflow_set(cross, values, count);
                 for (uint32_t lane = 0; lane < count; lane += 1)
                 {
                     candidate.phi_offsets[blocks[lane] + 1] += 1;
@@ -380,7 +283,7 @@ static IrCheck ir_dataflow_prepare_path(const IrFunction* function, Arena* outpu
     }
     if (check.error == IR_OK)
     {
-        const uint32_t values = ir_dataflow_count(cross, cross_words, BUSTER_VECTOR_PATH(vector));
+        const uint32_t values = ir_dataflow_count(cross, cross_words);
         candidate.phi_use_count = (uint32_t)phi_count;
         candidate.values = ir_allocate(output, values, sizeof(uint32_t), &allocated);
         candidate.phi_values = ir_allocate(output, phi_count, sizeof(uint32_t), &allocated);
@@ -390,7 +293,7 @@ static IrCheck ir_dataflow_prepare_path(const IrFunction* function, Arena* outpu
     }
     if (check.error == IR_OK)
     {
-        ir_dataflow_dense(cross, &candidate, BUSTER_VECTOR_PATH(vector));
+        ir_dataflow_dense(cross, &candidate);
         memcpy(candidate.flow.successor_offsets, cfg.successor_offsets, ((uint64_t)function->block_count + 1) * sizeof(uint32_t));
         if (cfg.edge_count != 0)
         {
@@ -410,7 +313,7 @@ static IrCheck ir_dataflow_prepare_path(const IrFunction* function, Arena* outpu
                     const uint32_t count = function->b[node] - first < 16 ? function->b[node] - first : 16;
                     uint32_t blocks[16];
                     uint32_t values[16];
-                    ir_dataflow_phi_batch(function->extra + function->a[node] + (uint64_t)first * 2, count, blocks, values, BUSTER_VECTOR_PATH(vector));
+                    ir_dataflow_phi_batch(function->extra + function->a[node] + (uint64_t)first * 2, count, blocks, values);
                     for (uint32_t lane = 0; lane < count; lane += 1)
                     {
                         const uint32_t place = cursor[blocks[lane]]++;
@@ -424,7 +327,7 @@ static IrCheck ir_dataflow_prepare_path(const IrFunction* function, Arena* outpu
         // No row-pointer arithmetic when every value is local: the four matrix pointers are then null.
         if (candidate.flow.value_count != 0)
         {
-            ir_dataflow_ordinary(function, &cfg, NULL, &candidate, BUSTER_VECTOR_PATH(vector));
+            ir_dataflow_ordinary(function, NULL, &candidate);
             for (uint32_t block = 0; block < function->block_count; block += 1)
             {
                 uint64_t* def = candidate.flow.def + (uint64_t)block * candidate.flow.row_words;
@@ -432,41 +335,29 @@ static IrCheck ir_dataflow_prepare_path(const IrFunction* function, Arena* outpu
                 for (uint32_t first = function->block_offsets[block]; first < end;)
                 {
                     const uint32_t count = end - first < 16 ? end - first : 16;
-                    ir_dataflow_set(def, candidate.ids + first, count, BUSTER_VECTOR_PATH(vector));
+                    ir_dataflow_set(def, candidate.ids + first, count);
                     first += count;
                 }
                 for (uint32_t first = candidate.phi_offsets[block]; first < candidate.phi_offsets[block + 1];)
                 {
                     const uint32_t count = candidate.phi_offsets[block + 1] - first < 16 ? candidate.phi_offsets[block + 1] - first : 16;
                     uint32_t* values = candidate.phi_values + first;
-                    // Still original IDs here. Add only the inputs not defined in this predecessor to use.
-                    if (BUSTER_VECTOR_PATH(vector))
+                    // Still original IDs here. Every phi input crosses blocks, so one gather gives every lane's dense
+                    // ID: the inputs not defined in this predecessor join its use row, and all replace their original
+                    // IDs. A second gather, of the operands' for use, cost functions with phis more (#2950).
+                    const __mmask16 tail = (__mmask16)((1u << count) - 1);
+                    const __m512i original = _mm512_maskz_loadu_epi32(tail, values);
+                    const __m512i ids = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), tail, original, candidate.ids, 4);
+                    const __m512i begin = _mm512_set1_epi32((int)function->block_offsets[block]);
+                    const __m512i finish = _mm512_set1_epi32((int)function->block_offsets[block + 1]);
+                    const __mmask16 nonlocal = _mm512_mask_cmplt_epu32_mask(tail, original, begin) | _mm512_mask_cmpge_epu32_mask(tail, original, finish);
+                    if (nonlocal != 0)
                     {
-                        // Every phi input crosses blocks, so one gather gives every lane's dense ID: the inputs from
-                        // other blocks join use, and all replace their original IDs. A second gather, of the operands'
-                        // for use, cost the preparation of functions with phis more than the scalar twin (#2950).
-                        const __mmask16 tail = (__mmask16)((1u << count) - 1);
-                        const __m512i original = _mm512_maskz_loadu_epi32(tail, values);
-                        const __m512i ids = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), tail, original, candidate.ids, 4);
-                        const __m512i begin = _mm512_set1_epi32((int)function->block_offsets[block]);
-                        const __m512i end = _mm512_set1_epi32((int)function->block_offsets[block + 1]);
-                        const __mmask16 nonlocal = _mm512_mask_cmplt_epu32_mask(tail, original, begin) | _mm512_mask_cmpge_epu32_mask(tail, original, end);
-                        if (nonlocal != 0)
-                        {
-                            uint32_t picked[16];
-                            _mm512_storeu_si512(picked, _mm512_mask_mov_epi32(_mm512_set1_epi32(-1), nonlocal, ids));
-                            ir_dataflow_set(candidate.flow.use + (uint64_t)block * candidate.flow.row_words, picked, count, true);
-                        }
-                        _mm512_mask_storeu_epi32(values, tail, ids);
+                        uint32_t picked[16];
+                        _mm512_storeu_si512(picked, _mm512_mask_mov_epi32(_mm512_set1_epi32(-1), nonlocal, ids));
+                        ir_dataflow_set(candidate.flow.use + (uint64_t)block * candidate.flow.row_words, picked, count);
                     }
-                    else
-                    {
-                        ir_dataflow_operands(values, count, (1u << count) - 1, block, function->block_offsets, &cfg, NULL, &candidate, false);
-                        for (uint32_t i = 0; i < count; i += 1)
-                        {
-                            values[i] = candidate.ids[values[i]];
-                        }
-                    }
+                    _mm512_mask_storeu_epi32(values, tail, ids);
                     first += count;
                 }
             }
@@ -486,40 +377,19 @@ static IrCheck ir_dataflow_prepare_path(const IrFunction* function, Arena* outpu
     return check;
 }
 
-static __attribute__((unused)) IrCheck ir_dataflow_prepare(const IrFunction* function, Arena* output, Arena* scratch, IrDataflow* result)
+static __attribute__((unused)) uint64_t ir_dataflow_solve(IrDataflow* dataflow)
 {
-    return ir_dataflow_prepare_path(function, output, scratch, result, true);
-}
-
-static __attribute__((unused)) IrCheck ir_dataflow_prepare_scalar(const IrFunction* function, Arena* output, Arena* scratch, IrDataflow* result)
-{
-    return ir_dataflow_prepare_path(function, output, scratch, result, false);
-}
-
-static uint64_t ir_dataflow_solve_path(IrDataflow* dataflow, bool vector)
-{
-    (void)vector;
-    const uint64_t iterations = BUSTER_VECTOR_PATH(vector) ? dataflow_liveness_vector(&dataflow->flow) : dataflow_liveness_scalar(&dataflow->flow);
+    const uint64_t iterations = dataflow_liveness(&dataflow->flow);
     for (uint32_t block = 0; block < dataflow->flow.block_count; block += 1)
     {
         for (uint32_t first = dataflow->phi_offsets[block]; first < dataflow->phi_offsets[block + 1];)
         {
             const uint32_t count = dataflow->phi_offsets[block + 1] - first < 16 ? dataflow->phi_offsets[block + 1] - first : 16;
-            ir_dataflow_set(dataflow->flow.out + (uint64_t)block * dataflow->flow.row_words, dataflow->phi_values + first, count, BUSTER_VECTOR_PATH(vector));
+            ir_dataflow_set(dataflow->flow.out + (uint64_t)block * dataflow->flow.row_words, dataflow->phi_values + first, count);
             first += count;
         }
     }
     return iterations;
-}
-
-static __attribute__((unused)) uint64_t ir_dataflow_solve(IrDataflow* dataflow)
-{
-    return ir_dataflow_solve_path(dataflow, true);
-}
-
-static __attribute__((unused)) uint64_t ir_dataflow_solve_scalar(IrDataflow* dataflow)
-{
-    return ir_dataflow_solve_path(dataflow, false);
 }
 
 #endif

@@ -763,7 +763,7 @@ static SsaError ssa_place_phis(SsaWork* work)
     SsaError error = (blocks == 0 || frontiers != 0) && active != 0 && next != 0 && live != 0 && placed != 0 ? SSA_OK : SSA_ERROR_MEMORY;
     if (error == SSA_OK)
     {
-        dataflow_liveness_vector(&work->flow);
+        dataflow_liveness(&work->flow);
         for (uint32_t dense = 0; dense < work->promoted_count; dense += 1)
         {
             memset(active, 0, words * sizeof(uint64_t));

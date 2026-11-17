@@ -10,10 +10,12 @@ machine liveness are different interfaces.
 
 Include `ir_dataflow.c` after `lane.c`, `ir.c` and `dataflow.c`.
 
-- `ir_dataflow_prepare` and `ir_dataflow_prepare_scalar` validate the function and
-  build identical owned maps, CFG, use/def matrices and outgoing phi records.
-- `ir_dataflow_solve` and `ir_dataflow_solve_scalar` compute live-in/live-out and
-  return the underlying solver's sweep count, including its final stable sweep.
+- `ir_dataflow_prepare` validates the function and builds the owned maps, CFG,
+  use/def matrices and outgoing phi records. It is AVX-512 alone (#2924); its
+  scalar twin `ir_dataflow_prepare_scalar` went once the vector path won every
+  class of function (#2950, below).
+- `ir_dataflow_solve` computes live-in/live-out and returns the underlying
+  solver's sweep count, including its final stable sweep.
 - `IrDataflow.ids` maps original instruction IDs to dense IDs, with
   `BUSTER_IR_NONE` for ordinary block-local values. `values` is the inverse map,
   ordered by original ID. Every phi input is an edge use and receives a bit,
@@ -98,13 +100,8 @@ masked reduction of both halves, store it with one ordinary 64-bit OR and retire
 those IDs, until none is active. A batch with no active ID does nothing.
 `VPCONFLICTD`, which grouped the words before #2950, cost more than it saved
 for the few IDs of a block's phi inputs. There is no hardware scatter and no
-`uint32_t*` alias of the bitset storage.
-The scalar twin enumerates individual operands and uses ordinary scalar bit ORs.
-
-The existing measured fixpoints, their selected dispatch and intersection
-primitives are unchanged. Introducing an adapter is not evidence that every new
-construction kernel is faster than its scalar twin; target measurements must
-establish that separately.
+`uint32_t*` alias of the bitset storage. Until #2924 a scalar twin enumerated
+individual operands and used ordinary scalar bit ORs.
 
 ## Qualification
 
@@ -115,8 +112,9 @@ producer separately; it does not label them as tested functions. The existing
 correctness manifest's c-testsuite subset, SQLite and musl invocations therefore
 exercise dataflow on the same declared corpus and forms.
 
-For each form, scalar and vector preparation/solving must agree on dense maps,
-CFG/postorder, phi records, use/def/in/out, and sweep counts. An independently
+For each form, two preparations at different places in the output arena must
+agree on dense maps, CFG/postorder, phi records and use/def, and, solved, on
+in/out and sweep counts; until #2924 the second was the scalar twin's. An independently
 written opcode-based checker reconstructs dense membership, ordinary uses,
 edge-specific phi uses, reverse-instruction transfer equations, and zero padding.
 It does not use the adapter's operand-mask tables or phi CSR for those checks.
@@ -154,21 +152,18 @@ not a claim that the frozen corpus or target measurements have run.
 ## Measuring the source functions
 
 The optional `--dataflow-benchmark` flag measures the same accepted source forms.
-For each function it reports the scalar and host-vector paths for both
-`solve` and `prepare-solve`. The latter includes structural verification, CFG and
+For each function it reports `solve` and `prepare-solve`; until #2924 it
+reported the scalar twin's beside them. The latter includes structural verification, CFG and
 dense-map construction, allocation, use/def construction and solving. Neither
 operation includes frontend preparation, IR lowering, SSA promotion, printing,
 or correctness oracles.
 
 The benchmark requires readable hardware CPU-cycle and instruction counters.
 It never labels TSC ticks or missing counters as CPU cycles. A warm-up estimates
-batch repetition counts, matched between the two paths. Twenty-one passes rotate
-the four variants' order. The output includes every raw batch, medians in cycles
+batch repetition counts. Twenty-one passes alternate the two operations' order. The output includes every raw batch, medians in cycles
 per function and cycles per block/sweep, the actual sweep count, matrix bytes,
 retained bytes, dense-value count and phi-use count. For `prepare-solve`, the
 block/sweep normalization includes setup; it is not a pure solver metric.
-`vector_host=0` explicitly means the vector entry used the baseline scalar
-fallback; such a run is not Zen 5 vector evidence.
 
 On the 9700X, hold the shared exclusive lock for the complete run and pin to CPU 2:
 
