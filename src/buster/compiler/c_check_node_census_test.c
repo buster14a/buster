@@ -551,6 +551,9 @@ static const char node_shadow_test_text[] =
     "    struct W second;\n"
     "    first.a = x; // machine: taken\n"
     "    second.a = x + 1; // machine: taken\n"
+    "    unsigned short narrow = 3;\n"
+    "    *&narrow = 4; // machine: taken\n"
+    "    x += *&narrow; // machine: taken\n"
     "    if (x > 3) // machine: taken\n"
     "    {\n"
     "        return first;\n"
@@ -573,10 +576,60 @@ static uint32_t node_shadow_test_named(const char* name, uint32_t length)
     return found;
 }
 
+// The fact words' kernel at reader time (`reader` has BUSTER_NODE_READER_FACTS) as a shadow's run counted it: whether
+// it ran on every expression T took there, nothing differed (its records from T's over poison and over decoys, its
+// lists from their twin's, the front's inputs from those made of T's columns, as each expression came and made
+// again), every expression's inputs came from the front's records or were counted as not given, and the second
+// making made as many records' as the first; as many expressions not given as `given`, as many records left to T as
+// `left`, as many literals' leaves from a line of their own as `lines`, and as many records of the whole machine's
+// expressions as `whole` (none unless the census's tests and C and X ran there too), `whole_made` of them made. In a
+// build without the vector paths, or where it isn't asked for, it must have counted nothing.
+static bool node_shadow_test_kernel(const NodeShadow* shadow, uint8_t reader, bool fronts, uint64_t given, uint64_t left, uint64_t lines, uint64_t whole,
+                                    uint64_t whole_made)
+{
+    const uint64_t* counts = shadow->reader_facts;
+    bool held = true;
+    if ((reader & BUSTER_NODE_READER_FACTS) == 0 || !fronts)
+    {
+        for (uint32_t c = 0; c < NODE_FACTS_COUNTS; c += 1)
+        {
+            held = held && counts[c] == 0;
+        }
+    }
+    else
+    {
+        const uint64_t skipped = counts[NODE_FACTS_COUNT_FRONT_SKIPPED];
+        held = counts[NODE_FACTS_COUNT_DIFFERENCES] == 0 && counts[NODE_FACTS_COUNT_DECOY_DIFFERENCES] == 0 && counts[NODE_FACTS_COUNT_LIST_DIFFERENCES] == 0 &&
+               counts[NODE_FACTS_COUNT_FAILURES] == 0 && counts[NODE_FACTS_COUNT_FRONT_DIFFERENCES] == 0 &&
+               counts[NODE_FACTS_COUNT_EXPRESSIONS] == shadow->typed_refused[NODE_MACHINE_TAKEN] && counts[NODE_FACTS_COUNT_EXPRESSIONS] != 0 &&
+               counts[NODE_FACTS_COUNT_MADE] != 0 && counts[NODE_FACTS_COUNT_MADE] + left == counts[NODE_FACTS_COUNT_WANTED] &&
+               counts[NODE_FACTS_COUNT_LINES_MADE] == counts[NODE_FACTS_COUNT_LINES] && counts[NODE_FACTS_COUNT_LINES] == lines &&
+               counts[NODE_FACTS_COUNT_FRONT_EXPRESSIONS] + skipped == counts[NODE_FACTS_COUNT_EXPRESSIONS] && counts[NODE_FACTS_COUNT_FRONT_EXPRESSIONS] != 0 &&
+               counts[NODE_FACTS_COUNT_FRONT_AGAIN_RECORDS] == counts[NODE_FACTS_COUNT_FRONT_RECORDS] && skipped == given &&
+               counts[NODE_FACTS_COUNT_TAKEN_RECORDS] == whole && counts[NODE_FACTS_COUNT_TAKEN_MADE] == whole_made;
+    }
+    if (!held)
+    {
+        fprintf(stderr, "test-checker: node-facts at reader time: %" PRIu64 " expressions (T took %" PRIu64 "), %" PRIu64 " records, %" PRIu64 " to make, %" PRIu64
+                " made (expected %" PRIu64 " left); %" PRIu64 " literals, %" PRIu64 " from a line (expected %" PRIu64 "), %" PRIu64 " made; %" PRIu64 " differ (%" PRIu64
+                " over decoys), %" PRIu64 " lists differ, %" PRIu64 " failures; the front's inputs: %" PRIu64 " expressions, %" PRIu64
+                " not given (expected %" PRIu64 "), %" PRIu64 " records, %" PRIu64 " made again, %" PRIu64 " differ; the whole machine's records %" PRIu64 ", made %" PRIu64
+                " (expected %" PRIu64 " and %" PRIu64 ")\n",
+                counts[NODE_FACTS_COUNT_EXPRESSIONS], shadow->typed_refused[NODE_MACHINE_TAKEN], counts[NODE_FACTS_COUNT_RECORDS], counts[NODE_FACTS_COUNT_WANTED],
+                counts[NODE_FACTS_COUNT_MADE], left, counts[NODE_FACTS_COUNT_LITERALS], counts[NODE_FACTS_COUNT_LINES], lines, counts[NODE_FACTS_COUNT_LINES_MADE],
+                counts[NODE_FACTS_COUNT_DIFFERENCES], counts[NODE_FACTS_COUNT_DECOY_DIFFERENCES], counts[NODE_FACTS_COUNT_LIST_DIFFERENCES],
+                counts[NODE_FACTS_COUNT_FAILURES], counts[NODE_FACTS_COUNT_FRONT_EXPRESSIONS], counts[NODE_FACTS_COUNT_FRONT_SKIPPED], given,
+                counts[NODE_FACTS_COUNT_FRONT_RECORDS], counts[NODE_FACTS_COUNT_FRONT_AGAIN_RECORDS], counts[NODE_FACTS_COUNT_FRONT_DIFFERENCES],
+                counts[NODE_FACTS_COUNT_TAKEN_RECORDS], counts[NODE_FACTS_COUNT_TAKEN_MADE], whole, whole_made);
+    }
+    return held;
+}
+
 // The shadow's fixture written to `directory` and read with `options`, its T by the rows (and verified against the
-// action) or (`scalar`) by the action alone, with the machine's front as `front` asks (BUSTER_NODE_FRONT_*): whether
-// every line held and nothing differed from the pipeline.
-static bool node_shadow_test_fixture(const char* directory, bool scalar, uint8_t front, char** options, uint32_t option_count)
+// action) or (`scalar`) by the action alone, with the machine's front as `front` asks (BUSTER_NODE_FRONT_*) and what
+// else runs at reader time as `reader` does (BUSTER_NODE_READER_*): whether every line held and nothing differed from
+// the pipeline.
+static bool node_shadow_test_fixture(const char* directory, bool scalar, uint8_t front, uint8_t reader, char** options, uint32_t option_count)
 {
     char path[512];
     snprintf(path, sizeof(path), "%s/shadow.c", directory);
@@ -590,6 +643,7 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, uint8_t
         .fused = true,
         .interleave = true,
         .front = front,
+        .reader = reader,
         .chunk = 3,
         .passes = 1,
         .repeat = 1,
@@ -635,7 +689,16 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, uint8_t
                       (scalar || shadow.row_nodes != 0) && shadow.fused_differences == 0 && shadow.fused_expressions >= shadow.taken_expressions &&
                       shadow.front_differences == 0 && shadow.front_checked == shadow.front_records && shadow.front_resets == 0 && shadow.front_waiting == 0 &&
                       (fronts ? shadow.front_units == 1 && shadow.front_unread == 0 && shadow.front_records != 0 : shadow.front_units == 0 && shadow.front_records == 0) && typed &&
-                      swept && flat;
+                      swept && flat &&
+                      // The fact words' kernel at reader time, where asked: the front's records give every expression of
+                      // the fixture but the three its chunks' two ends cut, and the kernel leaves 24 of its records to T
+                      // (an enumerator's leaf is none of them: its value is the reader's own column's there). Each of its
+                      // 125 literals' leaves is a line's. With the tests and C and X there too, the whole machine's
+                      // expressions have 1,223 of the 1,313 records, and the kernel makes 1,088 of them. Its last body
+                      // dereferences an address twice (`*&narrow`), whose pointer type T derives there: the type's row
+                      // is made before the expression is appended, or the dereference's record is not T's.
+                      node_shadow_test_kernel(&shadow, reader, fronts, 3, 24, 125, (reader & BUSTER_NODE_READER_TESTS) != 0 ? 1223 : 0,
+                                              (reader & BUSTER_NODE_READER_TESTS) != 0 ? 1088 : 0);
     if (valid && !swept)
     {
         fprintf(stderr, "test-checker: node-shadow%s: C and X at reader time ran on %" PRIu64 " expressions (T took %" PRIu64 "), %" PRIu64 " compared, %" PRIu64
@@ -1347,7 +1410,7 @@ static bool node_reads_test(const char* directory, uint32_t window, char** optio
 // the front's stack holds: an automatic array's initializer of some 4,150 elements with ten calls about its 4,096th
 // value, one of them astride the stack's last entry, which must make every waiting value unknown (a reset) and leave the
 // call to the walk. Whether every record was the walk's node, none was left waiting, and the stack was reset as expected.
-static bool node_front_test_limits(const char* directory, bool boundaries, uint8_t front, char** options, uint32_t option_count)
+static bool node_front_test_limits(const char* directory, bool boundaries, uint8_t front, uint8_t reader, char** options, uint32_t option_count)
 {
     char path[512];
     snprintf(path, sizeof(path), "%s/limits.c", directory);
@@ -1358,14 +1421,25 @@ static bool node_front_test_limits(const char* directory, bool boundaries, uint8
     if (valid && boundaries)
     {
         length += (uint32_t)snprintf(text + length, capacity - length,
-                                     "unsigned long strlen(const char*);\nvoid sink(void*);\nint late[5];\nint lb(int a)\n{\n    int x = a;\n");
+                                     "unsigned long strlen(const char*);\nvoid sink(void*);\nint two(int, int);\nint late[5];\n"
+                                     "enum Wide : unsigned __int128 { WIDE = (unsigned __int128)1 << 70, NARROW = 3 };\nint lb(int a)\n{\n    int x = a;\n");
         for (uint32_t round = 0; round < 1100 && length + 128 < capacity; round += 1)
         {
             length += (uint32_t)snprintf(text + length, capacity - length, "    x += (int)(&strlen)(\"ab\"); x += (int)strlen(\"cd\"); x++; x++;\n");
         }
         // The address of an array no declaration points to: T makes its pointer type itself, in a chunk where nothing
         // else makes a type (BUSTER_NODE_FRONT_TYPES: at reader time its word must be there when T reads it).
-        length += (uint32_t)snprintf(text + length, capacity - length, "    sink(&late);\n    return x;\n}\n");
+        // And an enumerator past 64 bits beside one within them: T's record of the first is no columns', and the fact
+        // words' kernel at reader time (BUSTER_NODE_READER_FACTS) has the second's value from the reader's own column.
+        length += (uint32_t)snprintf(text + length, capacity - length, "    sink(&late);\n    x += (int)(WIDE >> 68) + NARROW;\n");
+        // And a sum whose first operand, a call, is 260 records before it, past a byte's distance: the front's records
+        // don't give that expression's inputs, which are then the other making's, its call's arguments among them.
+        length += (uint32_t)snprintf(text + length, capacity - length, "    x = two(a, x) + (a");
+        for (uint32_t term = 1; term < 130 && length + 64 < capacity; term += 1)
+        {
+            length += (uint32_t)snprintf(text + length, capacity - length, " + a");
+        }
+        length += (uint32_t)snprintf(text + length, capacity - length, ");\n    return x;\n}\n");
     }
     else if (valid)
     {
@@ -1381,6 +1455,7 @@ static bool node_front_test_limits(const char* directory, bool boundaries, uint8
     NodeShadow shadow = {
         .scalar = true,
         .front = front,
+        .reader = reader,
         .passes = 1,
         .repeat = 1,
     };
@@ -1404,7 +1479,14 @@ static bool node_front_test_limits(const char* directory, bool boundaries, uint8
                                                                              (shadow.flat_only != 0) == !boundaries;
     const bool same = shadow.front_differences == 0 && shadow.front_checked == shadow.front_records && shadow.front_waiting == 0 &&
                       (fronts ? shadow.front_units == 1 && shadow.front_unread == 0 && shadow.front_records != 0 && (shadow.front_resets != 0) == !boundaries :
-                                shadow.front_units == 0 && shadow.front_records == 0) && typed && swept && flat;
+                                shadow.front_units == 0 && shadow.front_records == 0) && typed && swept && flat &&
+                      // The fact words' kernel at reader time, where asked: at the chunks' ends an expression whose records
+                      // an earlier chunk made is not given by the front's, and its inputs are those of T's columns: four
+                      // such, and the sum whose first operand is past a byte's distance. It leaves three records to T at
+                      // the chunks' ends (the wide enumerator's shift and its cast, and their sum) and none where the stack
+                      // is full. Either text has one literal in the expressions T takes there (the library calls' strings
+                      // and the array's elements are in none), a line's; the wide enumerator's leaf is given.
+                      node_shadow_test_kernel(&shadow, reader, fronts, boundaries ? 5 : 0, boundaries ? 3 : 0, 1, 0, 0);
     if (!valid || !same)
     {
         fprintf(stderr, "test-checker: node-front %s%s: %s: records %" PRIu64 ", compared %" PRIu64 ", %" PRIu64 " differ, %" PRIu64 " resets, %" PRIu64
@@ -1420,6 +1502,52 @@ static bool node_front_test_limits(const char* directory, bool boundaries, uint8
     free(text);
     unlink(path);
     return valid && same;
+}
+
+// The fact words' kernel at reader time on more literals than a batch's lines hold (BUSTER_NODE_FACTS_READER_LINES, a
+// third of them to each making of the inputs): one body of 16,500 statements `x += 1;`, read with `options`. A batch's
+// lines are taken away with the batch, so each literal's leaf is a line's; were the lines kept, the unit's last hundred
+// literals would have none. Whether the kernel's counts hold (node_shadow_test_kernel): nothing differs, a line a
+// literal, no record left to T, and every expression given by the front's records (none of these is cut by a chunk's
+// end).
+static bool node_facts_test_reader_lines(const char* directory, char** options, uint32_t option_count)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/lines.c", directory);
+    const uint32_t statements = 16500;
+    const uint32_t capacity = 1u << 18;
+    char* text = malloc(capacity);
+    uint32_t length = 0;
+    bool valid = text != NULL;
+    if (valid)
+    {
+        length += (uint32_t)snprintf(text + length, capacity - length, "int ll(int a)\n{\n    int x = a;\n");
+        for (uint32_t statement = 0; statement < statements && length + 64 < capacity; statement += 1)
+        {
+            length += (uint32_t)snprintf(text + length, capacity - length, (statement & 15) == 15 ? "x += 1;\n" : "x += 1; ");
+        }
+        length += (uint32_t)snprintf(text + length, capacity - length, "    return x;\n}\n");
+    }
+    valid = valid && length + 64 < capacity && parse_test_write(path, text, length);
+    NodeShadow shadow = {
+        .scalar = true,
+        .front = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_TYPES,
+        .reader = BUSTER_NODE_READER_FACTS,
+        .passes = 1,
+        .repeat = 1,
+    };
+    NodeCensus census = { .shadow = &shadow };
+    fflush(stdout);
+    valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
+    const bool fronts = BUSTER_HOST_VECTOR != 0;
+    const bool held = valid && node_shadow_test_kernel(&shadow, shadow.reader, fronts, 0, 0, fronts ? statements : 0, 0, 0);
+    if (!held)
+    {
+        fprintf(stderr, "test-checker: node-facts at reader time, %u literals in one body: %s\n", statements, valid ? "read" : "NOT READ");
+    }
+    free(text);
+    unlink(path);
+    return held;
 }
 
 // The flat front past its rings' reach, and its empty records, on generated text read with `options`:
@@ -1587,22 +1715,30 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     // With T at reader time too (BUSTER_NODE_FRONT_TYPES): the shadow's records on every expression both type; by the rows
     // there against the action alone here in the --scalar run. And with C and X there (BUSTER_NODE_FRONT_SWEEPS) in the
     // --scalar and the lean runs: their tapes, patched with the program's symbols, the shadow's own.
-    check_test_expect(test, ready && node_shadow_test_fixture(directory, false, BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_TYPES, loud, BUSTER_ARRAY_LENGTH(loud)),
+    check_test_expect(test, ready && node_shadow_test_fixture(directory, false, BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_TYPES, 0, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-shadow: the machine takes its codes with the pipeline's values and entries, T's rows the action's, and refuses the rest by reason");
-    check_test_expect(test, ready && node_shadow_test_fixture(directory, true, BUSTER_NODE_FRONT_BEFORE | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS, loud,
+    check_test_expect(test, ready && node_shadow_test_fixture(directory, true, BUSTER_NODE_FRONT_BEFORE | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS, 0, loud,
                                                               BUSTER_ARRAY_LENGTH(loud)),
                       "node-shadow --scalar: T by the action alone gives the pipeline's values and entries, and C and X at reader time the shadow's tapes");
     // Plain char unsigned: T's rules convert a char constant by the unit's signedness, not the bake's.
     char* unsigned_char[] = { "-nostdinc", "-Wall", "-Wextra", "-Wshift-sign-overflow", "-Wassign-enum", "-funsigned-char" };
     check_test_expect(test, ready && node_shadow_test_fixture(directory, false,
-                                                              BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS,
+                                                              BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS, 0,
                                                               unsigned_char, BUSTER_ARRAY_LENGTH(unsigned_char)),
                       "node-shadow -funsigned-char: the machine converts plain char constants as the unit's char is signed, at reader time too");
     // Without warnings the census takes a for statement's clauses too, and C and X at reader time are compared on them.
     check_test_expect(test, ready && node_shadow_test_fixture(directory, false,
-                                                              BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS, quiet,
+                                                              BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS, 0, quiet,
                                                               BUSTER_ARRAY_LENGTH(quiet)),
                       "node-shadow without warnings: a for statement's clauses' tapes at reader time are the shadow's");
+    // #2850's fact words' kernel at reader time (BUSTER_NODE_READER_FACTS), on the lean front's records: after T alone,
+    // and with the census's tests and C and X there too, where it counts the whole machine's expressions.
+    const uint8_t lean_types = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_TYPES;
+    check_test_expect(test, ready && node_shadow_test_fixture(directory, false, lean_types, BUSTER_NODE_READER_FACTS, loud, BUSTER_ARRAY_LENGTH(loud)),
+                      "node-facts at reader time: the kernel's records from the front's inputs are T's there, and the inputs those made of T's columns");
+    check_test_expect(test, ready && node_shadow_test_fixture(directory, true, lean_types | BUSTER_NODE_FRONT_SWEEPS, BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_TESTS,
+                                                              unsigned_char, BUSTER_ARRAY_LENGTH(unsigned_char)),
+                      "node-facts at reader time, with the tests and C and X there: the same records, and the whole machine's expressions counted");
     check_test_expect(test, ready && node_facts_test_fixture(directory, BUSTER_NODE_FACTS_WHOLE, 0, false, quiet, BUSTER_ARRAY_LENGTH(quiet)),
                       "node-facts: every leaf and lookup the fact words' rules make is T's record, and what they leave is the fixture's");
     check_test_expect(test, ready && node_facts_test_fixture(directory, BUSTER_NODE_FACTS_WHOLE, 16, false, quiet, BUSTER_ARRAY_LENGTH(quiet)),
@@ -1632,30 +1768,36 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_reads_test(directory, 16, quiet, BUSTER_ARRAY_LENGTH(quiet)),
                       "node-reads: the same reads where a window is cut every 16 records");
     // The machine's own front at its limits (step 1b): a chunk's end at every place within a call, and a full stack.
-    check_test_expect(test, ready && node_front_test_limits(directory, true, BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_TYPES, loud, BUSTER_ARRAY_LENGTH(loud)),
+    check_test_expect(test, ready && node_front_test_limits(directory, true, BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_TYPES, 0, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-front: a callee waiting across a chunk's end keeps its use, a library call's mark the walk's");
-    check_test_expect(test, ready && node_front_test_limits(directory, true, BUSTER_NODE_FRONT_BEFORE, loud, BUSTER_ARRAY_LENGTH(loud)),
+    check_test_expect(test, ready && node_front_test_limits(directory, true, BUSTER_NODE_FRONT_BEFORE, 0, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-front before the walk: a callee waiting across a chunk's end keeps its use");
     check_test_expect(test, ready && node_front_test_limits(directory, true,
-                                                            BUSTER_NODE_FRONT_BEFORE | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS, loud,
+                                                            BUSTER_NODE_FRONT_BEFORE | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS, 0, loud,
                                                             BUSTER_ARRAY_LENGTH(loud)),
                       "node-front, lean: a value waiting across a chunk's end gets its consumer's distance and its place there, and C and X its tape");
-    check_test_expect(test, ready && node_front_test_limits(directory, false, BUSTER_NODE_FRONT_AFTER, loud, BUSTER_ARRAY_LENGTH(loud)),
+    check_test_expect(test, ready && node_front_test_limits(directory, false, BUSTER_NODE_FRONT_AFTER, 0, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-front: a full stack makes every waiting value unknown and leaves the call astride its end to the walk");
-    check_test_expect(test, ready && node_front_test_limits(directory, false, BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN, loud, BUSTER_ARRAY_LENGTH(loud)),
+    check_test_expect(test, ready && node_front_test_limits(directory, false, BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN, 0, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-front, lean: a full stack makes every waiting value unknown");
+    check_test_expect(test, ready && node_front_test_limits(directory, true, lean_types, BUSTER_NODE_READER_FACTS, loud, BUSTER_ARRAY_LENGTH(loud)),
+                      "node-facts at reader time: an expression a chunk's end cuts has the inputs of T's columns, and every other the front's");
+    check_test_expect(test, ready && node_front_test_limits(directory, false, lean_types, BUSTER_NODE_READER_FACTS, loud, BUSTER_ARRAY_LENGTH(loud)),
+                      "node-facts at reader time: the same records where the front's stack is full");
+    check_test_expect(test, ready && node_facts_test_reader_lines(directory, loud, BUSTER_ARRAY_LENGTH(loud)),
+                      "node-facts at reader time: a batch's lines are taken away with it, and a unit of 16,500 literals has a line for each");
     // The flat front beside the lean one, its twin: on the shadow's fixture, at the chunks' ends, where the lean front's
     // stack is full, and past its own rings' reach.
     const uint8_t flat = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_FLAT;
-    check_test_expect(test, ready && node_shadow_test_fixture(directory, false, flat, loud, BUSTER_ARRAY_LENGTH(loud)),
+    check_test_expect(test, ready && node_shadow_test_fixture(directory, false, flat, 0, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-flat: the flat front's records are the lean front's on the shadow's fixture, the left tokens' places empty");
-    check_test_expect(test, ready && node_shadow_test_fixture(directory, true, flat | BUSTER_NODE_FRONT_FLAT_FIRST, unsigned_char, BUSTER_ARRAY_LENGTH(unsigned_char)),
+    check_test_expect(test, ready && node_shadow_test_fixture(directory, true, flat | BUSTER_NODE_FRONT_FLAT_FIRST, 0, unsigned_char, BUSTER_ARRAY_LENGTH(unsigned_char)),
                       "node-flat before the walk: the same records");
-    check_test_expect(test, ready && node_front_test_limits(directory, true, flat, loud, BUSTER_ARRAY_LENGTH(loud)),
+    check_test_expect(test, ready && node_front_test_limits(directory, true, flat, 0, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-flat: a value whose consumer is in the next chunk is found there by its position");
-    check_test_expect(test, ready && node_front_test_limits(directory, true, flat | BUSTER_NODE_FRONT_FLAT_FIRST, loud, BUSTER_ARRAY_LENGTH(loud)),
+    check_test_expect(test, ready && node_front_test_limits(directory, true, flat | BUSTER_NODE_FRONT_FLAT_FIRST, 0, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-flat before the walk: a value whose consumer is in the next chunk is found there");
-    check_test_expect(test, ready && node_front_test_limits(directory, false, flat, loud, BUSTER_ARRAY_LENGTH(loud)),
+    check_test_expect(test, ready && node_front_test_limits(directory, false, flat, 0, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-flat: where the lean front's stack is full the flat front makes the records it lost");
     check_test_expect(test, ready && node_flat_test_reach(directory, false, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-flat: a value past the rings' reach leaves its consumer, and the left values' consumers keep their places empty");

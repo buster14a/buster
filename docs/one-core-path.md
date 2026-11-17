@@ -1,7 +1,7 @@
 # The one-core path: 73 cycles a token, on records the vector lanes can use (#2850): design
 
-Status: design, with its first two steps, step 2's first two pieces and steps
-4's and 5's censuses measured. Nothing here is in a compile.
+Status: design, with its first two steps, step 2's first three pieces and
+steps 4's and 5's censuses measured. Nothing here is in a compile.
 [#2850](https://github.com/buster14a/buster/issues/2850) has the design whole:
 the budget, the data design and what would refute it. It is
 [#672](https://github.com/buster14a/buster/issues/672)'s per-core research
@@ -36,7 +36,15 @@ operators that are no lookup, 84% on `sqlite3.c`, 82% on musl and 59% on Lua
 have no wide field read: their bytes are the whole record. A tenth need a
 copy a selector names. 5% and 6% need a value made at the record, and 24% of
 Lua's, every one a constant's arithmetic. C and X decide on a type's
-identity for one thing, a callee's parameters, at every call.
+identity for one thing, a callee's parameters, at every call. Its third
+piece ran the kernel at reader time, where the machine sits, with each
+window's inputs made from the lean front's records and the reader's columns
+alone: exact, and every input a compile needs is there. The kernel makes a
+record in 16.4 TSC ticks where T takes 49.2 on the same expressions. Making
+its inputs as a copy of the front's records costs 28.4 more, a record at a
+time or by passes, so T by the kernel is 44.8 ticks a record where the
+piece's gate was 35: the window's columns are the front's to write, not a
+stage after it.
 Step 4's census counted Tier 0's row: 117 cycles
 and 295 instructions a typed entry in `-c sqlite3.c`, 64.7 cycles a token,
 Tier 0 itself 38 of them and the unwind table, the atoms and the emission's
@@ -75,7 +83,7 @@ token; the issue has each row's source:
 | --- | --- | --- | --- |
 | 0 | The middle's passes on the real nodes, outside the compiler | every entry the stream's; 20 cycles a taken node or less; 0.2 mispredicted branches a node or fewer | measured: 16.7 and 20.6 cycles, 0.025 and 0.045 mispredicted |
 | 1 | The fact words, in the shadow: T's leaves and lookups from one load each | every record the oracle's; 10 cycles a leaf or lookup or less, a body's expressions a run | measured: exact; 15.8 to 26.5 cycles; a leaf about 5, a lookup 25 to 46. Followed up: a lean record 14.1 to 20.8, the loads alone 8.8 to 15.2 |
-| 2 | The machine on these records where it runs (#2524's steps 2 to 4) | the bodies' middle at 38 cycles a node or less in `-c sqlite3.c` | first piece measured, in the shadow: T whole from the fact words, exact; 38 cycles an evaluated node with whole records and 32 with lean ones, where its own gate was 25. Second piece counted: of the operators that are no lookup, 5.4%, 24.2% and 6.1% need a value made at the record (`sqlite3.c`, Lua, musl; its line was 15%), and C decides on a type's identity for one question of a call's callee |
+| 2 | The machine on these records where it runs (#2524's steps 2 to 4) | the bodies' middle at 38 cycles a node or less in `-c sqlite3.c` | first piece measured, in the shadow: T whole from the fact words, exact; 38 cycles an evaluated node with whole records and 32 with lean ones, where its own gate was 25. Second piece counted: of the operators that are no lookup, 5.4%, 24.2% and 6.1% need a value made at the record (`sqlite3.c`, Lua, musl; its line was 15%), and C decides on a type's identity for one question of a call's callee. Third piece measured: the kernel at reader time, its inputs from the front's records, exact; 16.4 TSC ticks a record where T again takes 49.2, and 44.8 with its inputs' making, where its gate was 35 |
 | 3 | The front's row, into the window | 35 cycles a token or less | not started |
 | 4 | Tier 0's row | 10 cycles a token or less, the object's bytes unchanged | census measured: the row 64.7 cycles a token (117 a typed entry), Tier 0 38.4 of them; a key of 8 bytes or fewer decides 99.83% of the entries; the encoder, branch sizing and the object 8.3 in a compile, 6.3 at their own rates |
 | 5 | Fresh memory and the fixed costs | 6 cycles a token or less | census measured: the kernel 121 cycles a token; its floor 5.8 to 6.4 at item 3's costs, 10.3 to 12.5 at the compile's, and 5.2 to 6.7 more beside it: the 6 refuted |
@@ -985,6 +993,232 @@ wide steps, or above 2% identities):
   selector for a tenth of them; the folds are a pass beside them. That, with
   step 1's leaves and lookups, is the T to measure next against the 25
   cycles the first piece missed. It is not claimed here.
+
+## Step 2's third piece: the kernel where the machine sits
+
+[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/per-core-step2-reader-2850-2026-11-17).
+`measure-node-machine --shadow --front-facts`
+([the guide](commands/lowering.md#the-kernel-where-the-machine-sits-2850s-step-2)).
+
+The first two pieces ran after the pipeline, on windows made from T's own
+columns and the walk's nodes. A compile that skips the walk for an expression
+has neither. This piece runs the same kernel at reader time, where
+[#2524](node-machine.md#t-where-it-sits) put the machine, and makes each
+window's inputs a second time from what a compile has there: the lean front's
+records and the reader's columns.
+[Its specification](https://github.com/buster14a/buster/issues/2850#issuecomment-6933299446)
+has step 2's remaining pieces by size, and why this one came first.
+
+### What it is
+
+- **A batch is a chunk's expressions.** The reader's hook types a chunk's
+  roots with T. Each expression T takes is appended to the batch's windows,
+  and after the chunk's roots the batch is run: the kernel on each window as
+  it finds the words; again over poison, every record compared with T's;
+  again over decoys; and a timed turn, the kernel and T again on the same
+  expressions, the kernel first in every other batch.
+- **The words are the unit's as it stands there.** A type's row is made
+  before the first expression that reads the type is appended, for the walk's
+  types and for T's own derivations. A declaration's line is made at its
+  first use. An enumerator's value comes from the reader's own column: the
+  list the pipeline reads it from is made when the reader ends. A member's
+  and a pointer conversion's slot is filled when the kernel first meets it.
+- **A window's inputs from the front's records**
+  (`node_facts_front_expression`), with no node of the walk's and no record
+  of T's:
+  - an operand is a distance back in the postorder, and a root's operand the
+    record before it;
+  - an identifier's leaf is its declaration's line, a literal's a line of its
+    own (an integer's as the reader decoded it, any other decoded again), a
+    string's of its type and its object;
+  - a member's name is the token after the operator's, a cast's type its
+    token's query's, a return's conversion's type the function's;
+  - a call's arguments are the records before it, each found by the
+    subtree's size of the one after it;
+  - a record's kind and class come from its operator and its operands'
+    classes, as after the pipeline.
+- **Their twin is the making from T's columns** (`node_facts_append`, the
+  first two pieces'). The two are compared field for field, a literal's line
+  by its content and a call's arguments one by one. The checked run takes the
+  front's inputs, so what the kernel makes of them is T's record or a
+  difference.
+- **What the front's records don't give is counted by why:** an expression
+  some of whose records a chunk's end cut off (the lean front keeps a waiting
+  value's place across chunks, not its record), an operand past a byte's
+  distance, a call of 255 operands or more. Those expressions take the twin's
+  inputs.
+
+### What it measured
+
+The 9700X, CPU 2, under the lock, Release; main `178c9e2` with #2894's and
+#2890's sources and the piece's; medians of five readings in turn. TSC ticks
+at 3,792.9 MHz, 1.45 cycles each at the core's 5.49 GHz, a record of the
+windows:
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| expressions T takes at reader time; their records | 50,993; 289,838 | 10,839; 76,304 | 43,415; 224,326 |
+| records that are no literal, and those the kernel makes | 250,805, 98.84% | 64,965, 96.75% | 198,338, 96.57% |
+| … in the expressions the whole machine takes there | 243,928, 99.39% | 59,894, 97.25% | 182,939, 98.03% |
+| … after the pipeline (the first piece) | 99.34% | 97.13% | 98.08% |
+| records that differ from T's; over decoys; lists | 0; 0; 0 | 0; 0; 0 | 0; 0; 0 |
+| expressions whose inputs the front's records give | 50,094, 98.24% | 10,605, 97.84% | 42,685, 98.32% |
+| their records' inputs that differ from the twin's | 0 | 0 | 0 |
+| not given: cut by a chunk's end; any other reason | 899; 0 | 234; 0 | 730; 0 |
+| **T, its first run** (T alone on the lean front; beside the kernel) | 100.4; 101.9 | 118.3; 122.2 | 184.9; 185.7 |
+| **T again** on the batch's expressions | 49.2 | 52.0 | 52.6 |
+| **the kernel:** its first run; a later run | 27.9; **16.4** | 125.6; 20.6 | 337.6; 19.6 |
+| **the inputs from the front's records:** as each expression came; again, a batch in one loop | 46.7; **28.4** | 57.9; 27.9 | 78.9; 34.2 |
+| the kernel's later run and the inputs' second making | **44.8** | 48.5 | 53.7 |
+| the rows' making; the lines' | 0.9; 2.5 | 8.8; 15.9 | 44.9; 23.1 |
+| the twin's making, from T's columns | 68.1 | 116.1 | 355.0 |
+
+- **The two shares are of different sets.** At reader time T takes
+  expressions the census's tests then refuse, and the front leaves some the
+  shadow takes after the pipeline (`sizeof`, a statement expression). The
+  second row of shares is of the expressions that pass the tests and C and X
+  at reader time, which is the set the first piece's was nearest to.
+- **What the kernel leaves** is what it left after the pipeline: constants'
+  casts and casts of other than builtin integers and pointers first (1,090,
+  1,389 and 1,425 casts), then `?:`, pointers' comparisons and, on musl, 1,038
+  conversions.
+- **Lua's and musl's first runs are their units' starts.** Lua is 34 units
+  and musl 1,336, and the shadow starts each unit's kernel on fresh memory.
+  The kernel's first run, the rows, the lines and the twin's making all read
+  several times `sqlite3.c`'s there, and the later runs are within 5 ticks of
+  each other on the three. What of it is page faults was not counted;
+  `sqlite3.c`, one unit, is the figure of a first run.
+- **A compile doesn't run it.** `-c sqlite3.c` retires 140 more instructions
+  of 1,362.1 M with the piece in the executable, and its wall time reads
+  -0.12% and +0.01% in two comparisons of 21 runs a build, where the base
+  against itself reads -0.11% and +0.06%.
+
+**Against the piece's gate** (every record the oracle's and every window the
+twin's; the kernel makes at least the share it makes after the pipeline; 35
+ticks a record or less on `sqlite3.c`, the window's making in it, where T's
+first run read 71.2 in #2887's record; refuted above 53):
+
+- **Exact: met**, for every record the kernel makes and every input the
+  front's records give, on the three corpora and the compiler's own source,
+  with the tests and C and X beside it and without.
+- **Every window from the front's records: missed by 1.7% to 2.2% of the
+  expressions**, each one cut by a chunk's end. No other reason occurs on the
+  corpora.
+- **The share: met** on `sqlite3.c` and Lua, and 0.05 point under on musl.
+- **35 ticks: missed.** The kernel's later run and the inputs' second making
+  are 44.8 ticks a record on `sqlite3.c`. As a compile would run them, once
+  each as the expressions come, they are 46.7 and 27.9, with 3.3 for the
+  words: 77.9, where T's first run beside them is 101.9.
+- **The refutation line is crossed** by the first runs on every corpus, and
+  by the later runs on musl. What the line was to test did not happen: the
+  kernel keeps its gain where the machine sits. It makes a record in 16.4
+  ticks where T takes 49.2 on the same expressions, and in 27.9 on its first
+  run where T's takes 101.9. What crosses the line is the inputs' making,
+  which is dearer than the kernel.
+
+T's first run reads 102 ticks a record on the lean front, and read 71.2 in
+#2887's record on the whole front (`--front-types` alone). T, C and X
+together are as far apart: 156.8 on the lean front in #2890's record, 134.1
+on the whole one in #2887's. What of the lean front's chunk makes T's first
+run dearer was not measured. This piece's comparisons are within one run,
+and the kernel reads no node of the walk's.
+
+### The inputs' making: what moved it, and what didn't
+
+Ticks a record, the batch's expressions in one loop (the record's "The
+versions" has each build; three readings, five from `m` on):
+
+| | the inputs' making | `sqlite3.c` | Lua | musl |
+| --- | --- | ---: | ---: | ---: |
+| `a` | a record at a time, a branch on its operator | 32.4 | 31.5 | 42.0 |
+| `h` | by passes over the batch: every record's columns, the lists by counters, a pass a list, the classes last | 51.2 | 55.0 | 72.8 |
+| `l` | … every load made and every choice a mask; a tag a record and a vector compress to the lists; the outputs' places in locals | 34.3 | 39.9 | 55.9 |
+| `m` | … the sparse columns cleared a batch; the class of the record before kept at hand; what an operand's class asks from a table | 33.6 | 38.0 | 53.7 |
+| `n` | a record at a time again, without the tests the front's own check has made | 30.5 | 29.3 | 35.9 |
+| `q` | … an enumerator's leaf from the reader's column, and one test fewer | 29.4 | 28.9 | 34.7 |
+| | the commit: `q` without a taking back its caller makes anyway, with its tests | 28.4 | 27.9 | 34.2 |
+
+The passes of `h`, `l` and `m` on `sqlite3.c`, ticks a record:
+
+| pass | `h` | `l` | `m` |
+| --- | ---: | ---: | ---: |
+| every record: its operator, distances, position, kind, code and tag | 24.1 | 12.8 | 13.6 |
+| the identifiers' leaves, a line each | 2.2 | 2.2 | 2.2 |
+| the other leaves | 2.7 | 2.7 | 2.8 |
+| the members, the casts and the returns | 2.2 | 2.4 | 2.4 |
+| the calls and the conditions | 2.9 | 2.9 | 2.9 |
+| the made operators' classes | 17.1 | 11.2 | 9.5 |
+| all | 51.2 | 34.3 | 33.6 |
+
+- **The first pass went from 24.1 ticks a record to 12.8** by two things.
+  A choice with a load behind it is a branch: clang compiles
+  `condition ? value : load` and `a && load` as one, and a record's operator
+  is what the predictor would have to guess. Every load is made, and the
+  choice is between registers. And seven lists' lengths with a dozen
+  columns' pointers in one loop spill: 25 loads and stores of the stack a
+  record. One tag byte a record and a vector compress to each list, as the
+  kernel lists a window, took them out.
+- **A class read back from the column just stored is a chain through
+  memory.** The classes' pass reads its operands' classes, and the operand is
+  most often the record before. Keeping that one at hand, and what an
+  operand's class asks as a table's byte, took the pass from 17.1 to 9.5.
+- **A store a column a record is about a cycle,** as step 1 measured. The
+  columns most records have nothing in are cleared for the batch and written
+  by the lists' passes.
+- **The reader's per-token columns are sparse to a record.** A cast's type
+  and a return's are read for the casts and the returns alone: a pass that
+  read them for every record touched lines the walk had not just read.
+- **A profile of `m` has no hot spot:** about 125 instructions a record,
+  spread over the passes.
+
+### What stays scalar, and why
+
+- **The inputs' making is a record at a time.** By passes with no branch a
+  record it is 33.6 ticks on `sqlite3.c` where the loop with a branch on the
+  operator is 30.5, and 38.0 and 53.7 against 29.3 and 35.9 on Lua and musl,
+  whose batches are short. The work is a copy: each record of the window is
+  read through its place in the front's columns and the reader's, a line or
+  two a record, and written to eight columns. Passes read the same lines
+  once a pass. The passes' version is in the record
+  (`patches/facts-m.patch`, what the 9700X built), with its twin's check.
+- **The kernel** is the first piece's, unchanged.
+
+### What it means
+
+- **The kernel's gain is a reader's chunk's to keep.** In #2524, T at reader
+  time was 9% over its tight loop's first pass and 25% over its best. The
+  kernel after the pipeline read 22.9 ticks a record of the windows (the
+  first piece's 33.2 cycles); at reader time its first run is 27.9 and a
+  later one 16.4, a third of T's 49.2 on the same expressions.
+- **A window made as a copy takes the gain back.** 28.4 ticks a record at
+  best, more than the kernel itself, and 46.7 as the expressions come. T by
+  the kernel is then 44.8 ticks a record where T again is 49.2, and 77.9
+  where T's first run is 101.9: 9% and 24% less, not the half the gate asked.
+- **So the window is not a stage between the front and the kernel.** The
+  front already holds each record's operator, its operands' distances and
+  its leaf's declaration when it makes the record; the kinds, the codes and
+  the tags are a table's bytes by the operator. What this piece paid for is
+  reading them back by place. Step 3's row is where they belong: the front
+  writes the window's columns as it makes each record, and keeps a waiting
+  record whole at a chunk's end, which is also the 2% of the expressions
+  this piece could not give. The classes could be the kernel's own
+  listing's, which reads every record once already: not measured.
+- **What a compile has at reader time is enough.** Every input the kernel
+  reads comes from the front's records and the reader's columns, exactly,
+  for every expression not cut by a chunk's end: no walk's node is needed to
+  type an expression this way. That was the open question of T at reader
+  time, which reads the walk's nodes.
+- **The words cost 3.3 ticks a record on `sqlite3.c`,** and 24.7 and 68.0 on
+  Lua and musl, where every unit makes the rows of its headers' types again:
+  265,765 rows for musl's 224,326 records. That is the environment's side
+  (#2536): a row and a line made once, where the type and the declaration
+  are made.
+- **For step 2:** the order of its remaining pieces stands (the tests where
+  their inputs are; C and X on these records; the splice; T's lanes), with
+  one change. The kernel's inputs are step 3's to write. Until the front
+  writes them, T by the kernel at reader time is worth a quarter of T's
+  first run, where the kernel with its inputs given would be worth two
+  thirds (31.2 ticks a record with the words, against 101.9).
 
 ## Step 4's first piece: a census of Tier 0's row
 

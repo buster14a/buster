@@ -67,7 +67,20 @@ struct NodeMachineReader
     uint32_t strings;
     // The census's tests at reader time (c_check_node_census.c's), or null.
     struct NodeCensusReader* tests;
+    // #2850's fact words' kernel at reader time (c_check_node_machine_facts.c's), or null.
+    struct NodeFactsReader* facts;
 };
+
+// The fact words' kernel at reader time (c_check_node_machine_facts.c, which follows this file in the unit): its state
+// for the unit `reader` reads, whose machine there is `machine`, its counts kept in `types`; the machine's current
+// expression, which T has taken (nodes `first` to its root `root`, `count` records; the front's root `record`, whose
+// operand's record is `operand`; `taken`: the whole machine takes it there), appended to the chunk's windows; and, once T
+// has run on each of a chunk's roots, the kernel on the chunk's windows, checked against T's records and timed.
+struct NodeFactsReader;
+static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader, NodeMachine* machine, NodeFrontTypes* types);
+static void node_facts_reader_expression(struct NodeFactsReader* state, const NodeFront* front, uint32_t first, uint32_t root, uint32_t count, uint32_t record,
+                                         uint32_t operand, bool taken);
+static void node_facts_reader_chunk(struct NodeFactsReader* state, const NodeFront* front);
 
 // The census's tests at reader time (c_check_node_census.c, which follows this file in the unit): their state for the
 // unit `reader` reads, whose machine there is `machine`, with columns for `node_capacity` nodes and the unit's policy
@@ -347,6 +360,7 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
         typer->types = types;
         typer->strings = 0;
         typer->tests = NULL;
+        typer->facts = NULL;
         room = node_machine_begin_reader(&typer->machine, reader->output, reader->parser, reader->types, &typer->graph, reader->pp->table, declarations, facts,
                                          symbols, (options & BUSTER_NODE_READER_VERIFY) != 0, reader->scratch);
     }
@@ -384,6 +398,11 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
             types->declared = declared;
             typer->tests = node_census_reader_begin(reader, &typer->machine, types, capacity);
             room = typer->tests != NULL;
+        }
+        if (room && (options & BUSTER_NODE_READER_FACTS) != 0 && (reader->pp->options.node_front & BUSTER_NODE_FRONT_LEAN) != 0)
+        {
+            // It reads the lean front's records. Without room for its windows it doesn't run, and the shadow reports that.
+            typer->facts = node_facts_reader_begin(reader, &typer->machine, types);
         }
         types->setup_ticks = __rdtsc() - start;
         shadow->types = room ? types : NULL;
@@ -579,6 +598,13 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                         }
                     }
                     }
+                    if (pass != 0 && typer->facts != NULL && refusal == NODE_MACHINE_TAKEN)
+                    {
+                        // The fact words' kernel's expression, after the tests and C and X, which write none of T's
+                        // records: with both, whether the whole machine takes it there.
+                        node_facts_reader_expression(typer->facts, front, first, root, records, record, operand,
+                                                     tested && sweeps && verdict == 0 && swept == NODE_MACHINE_TAKEN);
+                    }
                 }
                 else if (pass != 0)
                 {
@@ -590,6 +616,10 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
         {
             types->ticks += __rdtsc() - start;
         }
+    }
+    if (typer->facts != NULL)
+    {
+        node_facts_reader_chunk(typer->facts, front);
     }
 }
 

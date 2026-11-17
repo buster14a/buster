@@ -10,7 +10,7 @@
 //   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--fused] [--interleave N] [--facts | --facts-lean | --facts-loads]
 //                                       [--facts-operators] [--facts-reads] [--facts-packed] [--facts-window N] [--front | --front-first] [--front-lean]
 //                                       [--front-warm] [--front-types] [--front-sweeps] [--front-tests | --front-own-tests] [--front-tests-last] [--passes N]
-//                                       [--repeat N]] [preprocessor options] file...
+//                                       [--front-facts] [--repeat N]] [preprocessor options] file...
 //
 // A full expression is a tree of the tasks' pops under one root: a pop that a statement's control pushed (an expression
 // statement's, a condition's, a return's, a switch's, an initializer's) or a nested control (a statement expression's).
@@ -3405,6 +3405,15 @@ struct NodeShadow
     uint64_t own_thirds;
     uint64_t own_differences;
     uint64_t own_count_differences;
+    // --front-facts (#2850's step 2's third piece): the fact words' kernel at reader time
+    // (c_check_node_machine_facts.c's node_facts_reader_flush). The files' counts summed (NodeFrontTypes.facts_counts,
+    // facts_wanted_ops and facts_left_ops), and the differences listed.
+    uint64_t reader_facts[NODE_FACTS_COUNTS];
+    uint64_t reader_facts_wanted[CHECK_OP_COUNT];
+    uint64_t reader_facts_left[CHECK_OP_COUNT];
+    uint64_t reader_facts_whys[BUSTER_NODE_FACTS_WHYS];
+    uint32_t reader_facts_listed;
+    uint32_t reader_facts_skipped_listed;
     // --interleave N: the interleaved sets' chunk (0: a body's expressions), the current file's scratch for the census's
     // walk in the timing passes, the walks' tests (so that the walks aren't dead code), and the sweeps' own TSC ticks in
     // an interleaved set: the last pass's, and each file's least over the passes, summed.
@@ -4888,6 +4897,83 @@ static void node_shadow_facts_report(const NodeShadow* shadow)
     }
 }
 
+// --front-facts' report: what the kernel ran on at reader time, what it made and left, how it compares with T's records
+// there, the words, and its time beside T's on the same expressions.
+static void node_shadow_reader_facts_report(const NodeShadow* shadow)
+{
+    const uint64_t* counts = shadow->reader_facts;
+    const uint64_t records = counts[NODE_FACTS_COUNT_RECORDS];
+    const uint64_t named = records - counts[NODE_FACTS_COUNT_LITERALS];
+    const uint64_t wanted = counts[NODE_FACTS_COUNT_WANTED];
+    const uint64_t made = counts[NODE_FACTS_COUNT_MADE];
+    printf("node-shadow: reader-time fact words expressions=%" PRIu64 " records=%" PRIu64 " windows=%" PRIu64 " literals=%" PRIu64 " (from a line %" PRIu64 ", made %" PRIu64
+           ") records-that-are-no-literal=%" PRIu64 " to-make=%" PRIu64 " given=%" PRIu64 "\n",
+           counts[NODE_FACTS_COUNT_EXPRESSIONS], records, counts[NODE_FACTS_COUNT_WINDOWS], counts[NODE_FACTS_COUNT_LITERALS], counts[NODE_FACTS_COUNT_LINES],
+           counts[NODE_FACTS_COUNT_LINES_MADE], named, wanted, named - wanted);
+    printf("node-shadow: reader-time fact words made=%" PRIu64 " (%.2f%% of the records that are no literal; by a short path or a class's loop %" PRIu64 ", %.2f%%) left=%" PRIu64
+           " differences=%" PRIu64 " (over decoys %" PRIu64 ") list-differences=%" PRIu64 " failures=%" PRIu64 "\n",
+           made, node_census_share(made, named), counts[NODE_FACTS_COUNT_SHORT], node_census_share(counts[NODE_FACTS_COUNT_SHORT], named), wanted - made,
+           counts[NODE_FACTS_COUNT_DIFFERENCES], counts[NODE_FACTS_COUNT_DECOY_DIFFERENCES], counts[NODE_FACTS_COUNT_LIST_DIFFERENCES], counts[NODE_FACTS_COUNT_FAILURES]);
+    if (counts[NODE_FACTS_COUNT_TAKEN_RECORDS] != 0)
+    {
+        // The same share of the records in the expressions the whole machine takes there, which are the kernel's
+        // windows' after the pipeline.
+        const uint64_t taken_named = counts[NODE_FACTS_COUNT_TAKEN_RECORDS] - counts[NODE_FACTS_COUNT_TAKEN_LITERALS];
+        printf("node-shadow: reader-time fact words in the expressions the whole machine takes there: records=%" PRIu64 " no-literal=%" PRIu64 " to-make=%" PRIu64
+               " made=%" PRIu64 " (%.2f%% of the records that are no literal)\n",
+               counts[NODE_FACTS_COUNT_TAKEN_RECORDS], taken_named, counts[NODE_FACTS_COUNT_TAKEN_WANTED], counts[NODE_FACTS_COUNT_TAKEN_MADE],
+               node_census_share(counts[NODE_FACTS_COUNT_TAKEN_MADE], taken_named));
+    }
+    for (uint32_t op = 0; op < CHECK_OP_COUNT; op += 1)
+    {
+        if (shadow->reader_facts_left[op] != 0)
+        {
+            printf("node-shadow: reader-time fact words left op=%s records=%" PRIu64 " of %" PRIu64 " (%.2f%%)\n",
+                   lower_inventory_op_names[op] != NULL ? lower_inventory_op_names[op] : "?", shadow->reader_facts_left[op], shadow->reader_facts_wanted[op],
+                   node_census_share(shadow->reader_facts_left[op], shadow->reader_facts_wanted[op]));
+        }
+    }
+    printf("node-shadow: reader-time fact words words rows=%" PRIu64 " (%.1f ticks each) declarations'-lines=%" PRIu64 " (%.1f ticks each; %" PRIu64
+           " made again) member-slots=%" PRIu64 " pointer-conversion-slots=%" PRIu64 "\n",
+           counts[NODE_FACTS_COUNT_ROWS], counts[NODE_FACTS_COUNT_ROWS] != 0 ? (double)counts[NODE_FACTS_COUNT_ROW_TICKS] / (double)counts[NODE_FACTS_COUNT_ROWS] : 0.0,
+           counts[NODE_FACTS_COUNT_DECLARATION_LINES],
+           counts[NODE_FACTS_COUNT_DECLARATION_LINES] != 0 ? (double)counts[NODE_FACTS_COUNT_LINE_TICKS] / (double)counts[NODE_FACTS_COUNT_DECLARATION_LINES] : 0.0,
+           counts[NODE_FACTS_COUNT_LINE_VERSIONS], counts[NODE_FACTS_COUNT_MEMBER_SLOTS], counts[NODE_FACTS_COUNT_PAIR_SLOTS]);
+    if (records != 0)
+    {
+        // The kernel's ticks a record of its windows, beside T's on the same expressions in the same turn; and the
+        // words' making, which the kernel's own ticks leave out.
+        const uint64_t again = counts[NODE_FACTS_COUNT_AGAIN_RECORDS];
+        printf("node-shadow: reader-time fact words ticks a record: the kernel's first run=%.2f a later run=%.2f; T again=%.2f; the rows' and the lines' making=%.2f; "
+               "the windows' making from T's columns=%.2f\n",
+               (double)counts[NODE_FACTS_COUNT_FIRST_TICKS] / (double)records, (double)counts[NODE_FACTS_COUNT_TICKS] / (double)records,
+               again != 0 ? (double)counts[NODE_FACTS_COUNT_AGAIN_TICKS] / (double)again : 0.0,
+               (double)(counts[NODE_FACTS_COUNT_ROW_TICKS] + counts[NODE_FACTS_COUNT_LINE_TICKS]) / (double)records,
+               (double)counts[NODE_FACTS_COUNT_APPEND_TICKS] / (double)records);
+        printf("node-shadow: reader-time fact words ticks first=%" PRIu64 " later=%" PRIu64 " again=%" PRIu64 " rows=%" PRIu64 " lines=%" PRIu64 " append=%" PRIu64 "\n",
+               counts[NODE_FACTS_COUNT_FIRST_TICKS], counts[NODE_FACTS_COUNT_TICKS], counts[NODE_FACTS_COUNT_AGAIN_TICKS], counts[NODE_FACTS_COUNT_ROW_TICKS],
+               counts[NODE_FACTS_COUNT_LINE_TICKS], counts[NODE_FACTS_COUNT_APPEND_TICKS]);
+    }
+    if (counts[NODE_FACTS_COUNT_FRONT_EXPRESSIONS] + counts[NODE_FACTS_COUNT_FRONT_SKIPPED] != 0)
+    {
+        // The windows' inputs from the front's records: what they were made for, how they compare with those made from
+        // T's columns, and their ticks: as each expression came (a declaration's line made at its first use among them,
+        // and two reads of the counter an expression) and a batch's again in one loop.
+        const uint64_t front_records = counts[NODE_FACTS_COUNT_FRONT_RECORDS];
+        const uint64_t front_again = counts[NODE_FACTS_COUNT_FRONT_AGAIN_RECORDS];
+        printf("node-shadow: reader-time fact words inputs from the front's records: expressions=%" PRIu64 " (%.2f%%) records=%" PRIu64 " (%.2f%%) differences=%" PRIu64
+               " expressions-not-given-whole=%" PRIu64 " ticks=%" PRIu64 " (%.2f a record) again-ticks=%" PRIu64 " (%.2f a record of %" PRIu64 ")\n",
+               counts[NODE_FACTS_COUNT_FRONT_EXPRESSIONS], node_census_share(counts[NODE_FACTS_COUNT_FRONT_EXPRESSIONS], counts[NODE_FACTS_COUNT_EXPRESSIONS]), front_records,
+               node_census_share(front_records, records), counts[NODE_FACTS_COUNT_FRONT_DIFFERENCES], counts[NODE_FACTS_COUNT_FRONT_SKIPPED],
+               counts[NODE_FACTS_COUNT_FRONT_TICKS], front_records != 0 ? (double)counts[NODE_FACTS_COUNT_FRONT_TICKS] / (double)front_records : 0.0,
+               counts[NODE_FACTS_COUNT_FRONT_AGAIN_TICKS], front_again != 0 ? (double)counts[NODE_FACTS_COUNT_FRONT_AGAIN_TICKS] / (double)front_again : 0.0, front_again);
+        printf("node-shadow: reader-time fact words not given by the front's records: a chunk's end cut it=%" PRIu64 " an operand out of reach=%" PRIu64
+               " a literal not decoded again=%" PRIu64 " a call of 255 operands or more=%" PRIu64 "\n",
+               shadow->reader_facts_whys[BUSTER_NODE_FACTS_WHY_CUT], shadow->reader_facts_whys[BUSTER_NODE_FACTS_WHY_REACH],
+               shadow->reader_facts_whys[BUSTER_NODE_FACTS_WHY_LITERAL], shadow->reader_facts_whys[BUSTER_NODE_FACTS_WHY_CALL]);
+    }
+}
+
 static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_ops)
 {
     printf("node-shadow: census-taken expressions=%" PRIu64 " evaluated-nodes=%" PRIu64 " records=%" PRIu64 "\n", shadow->expressions, shadow->nodes, shadow->records);
@@ -5017,6 +5103,10 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
                shadow->typed_differences, shadow->typed_range_differences, shadow->typed_refusal_differences, shadow->typed_missing, shadow->typed_unrun);
         printf("node-shadow: reader-time T objects=%" PRIu64 " differences=%" PRIu64 " library-calls=%" PRIu64 " differences=%" PRIu64 "\n", shadow->typed_objects,
                shadow->typed_object_differences, shadow->typed_library_calls, shadow->typed_library_differences);
+    }
+    if ((shadow->reader & BUSTER_NODE_READER_FACTS) != 0 && shadow->front_units != 0)
+    {
+        node_shadow_reader_facts_report(shadow);
     }
     if ((shadow->front & BUSTER_NODE_FRONT_SWEEPS) != 0 && shadow->front_units != 0)
     {
@@ -5298,7 +5388,7 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
             if (room && shadow->facts)
             {
                 room = node_facts_begin(&facts, &machine, nodes, shadow->facts_window, shadow->facts_packed, shadow->facts_mode != BUSTER_NODE_FACTS_WHOLE,
-                                        shadow->facts_operators, &scratch);
+                                        shadow->facts_operators, 0, &scratch);
                 s.facts = room ? &facts : NULL;
             }
             if (room && shadow->facts_reads)
@@ -5449,6 +5539,42 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                     shadow->own_thirds += typed->own_thirds / 2;
                     shadow->own_differences += typed->own_differences;
                     shadow->own_count_differences += typed->own_count_differences;
+                    for (uint32_t c = 0; c < NODE_FACTS_COUNTS; c += 1)
+                    {
+                        shadow->reader_facts[c] += typed->facts_counts[c];
+                    }
+                    for (uint32_t op = 0; op < CHECK_OP_COUNT; op += 1)
+                    {
+                        shadow->reader_facts_wanted[op] += typed->facts_wanted_ops[op];
+                        shadow->reader_facts_left[op] += typed->facts_left_ops[op];
+                    }
+                    static const char* const facts_whys[BUSTER_NODE_FACTS_WHYS] = { "given", "its records are not all the chunk's", "an operand out of a byte's reach",
+                                                                                     "a literal not decoded again", "a call of 255 operands or more" };
+                    for (uint32_t why = 0; why < BUSTER_NODE_FACTS_WHYS; why += 1)
+                    {
+                        shadow->reader_facts_whys[why] += typed->facts_skipped_whys[why];
+                    }
+                    // The differences first, and on a count of their own: the expressions not given are many.
+                    static const char* const facts_kinds[] = { "a record over poison", "a record over decoys", "a window's lists", "a record's inputs from the front's records" };
+                    for (uint32_t d = 0; d < typed->facts_listed && shadow->reader_facts_listed < node_census_list; d += 1)
+                    {
+                        const uint32_t token = typed->facts_difference_tokens[d];
+                        const uint8_t op = typed->facts_difference_ops[d];
+                        const uint8_t kind = typed->facts_difference_kinds[d];
+                        shadow->reader_facts_listed += 1;
+                        printf("node-shadow: reader-time fact words difference file=%s line=%u token=%u op=%s of=\"%s\"\n", file,
+                               token != BUSTER_CHECK_NONE ? node_census_line(&source.pp, &source.parser, token) : 0, token,
+                               op < CHECK_OP_COUNT && lower_inventory_op_names[op] != NULL ? lower_inventory_op_names[op] : "?",
+                               kind < BUSTER_ARRAY_LENGTH(facts_kinds) ? facts_kinds[kind] : "?");
+                    }
+                    for (uint32_t d = 0; d < typed->facts_skipped_listed && shadow->reader_facts_skipped_listed < node_census_list; d += 1)
+                    {
+                        const uint32_t token = typed->facts_skipped_tokens[d];
+                        const uint8_t why = typed->facts_skipped_reasons[d];
+                        shadow->reader_facts_skipped_listed += 1;
+                        printf("node-shadow: reader-time fact words not given by the front's records file=%s line=%u token=%u why=\"%s\"\n", file,
+                               node_census_line(&source.pp, &source.parser, token), token, why < BUSTER_NODE_FACTS_WHYS ? facts_whys[why] : "?");
+                    }
                     for (uint32_t t = 0; t < NODE_TESTS_TRIGGERS; t += 1)
                     {
                         shadow->own_triggers[t] += typed->own_triggers[t] / 2;
@@ -5699,6 +5825,12 @@ static int run_node_census(int count, char** arguments)
             shadow.front = (uint8_t)(shadow.front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
             shadow.reader |= BUSTER_NODE_READER_TESTS | (strcmp(arguments[i], "--front-own-tests") == 0 ? BUSTER_NODE_READER_OWN : 0);
         }
+        else if (strcmp(arguments[i], "--front-facts") == 0)
+        {
+            // #2850's fact words' kernel at reader time, after T there, on the lean front's expressions.
+            shadow.front = (uint8_t)(shadow.front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_LEAN | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
+            shadow.reader |= BUSTER_NODE_READER_FACTS;
+        }
         else if (strcmp(arguments[i], "--front-tests-last") == 0)
         {
             // The tests after C and X at reader time, on what those take.
@@ -5783,7 +5915,9 @@ static int run_node_census(int count, char** arguments)
                                           shadow.typed_object_differences != 0 || shadow.typed_library_differences != 0 || shadow.swept_differences != 0 ||
                                           shadow.tested_unsound != 0 || shadow.tested_differences != 0 || shadow.tested_kind_differences != 0 ||
                                           shadow.tested_missed != 0 || shadow.tested_policy_differences != 0 || shadow.reader_twin_differences != 0 ||
-                                          shadow.own_differences != 0 || shadow.flat_differences != 0);
+                                          shadow.own_differences != 0 || shadow.flat_differences != 0 ||
+                                          shadow.reader_facts[NODE_FACTS_COUNT_DIFFERENCES] != 0 || shadow.reader_facts[NODE_FACTS_COUNT_LIST_DIFFERENCES] != 0 ||
+                                          shadow.reader_facts[NODE_FACTS_COUNT_FAILURES] != 0 || shadow.reader_facts[NODE_FACTS_COUNT_FRONT_DIFFERENCES] != 0);
     return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
 }
 
