@@ -191,8 +191,8 @@ where SEMI-NCA's semidominators cost O(E log B) and its tree walks are short.
 Re-measured on main `aa09d1a04` before the deletion (`znver5` Release build,
 CPU 2, the whole analysis per block, median of three processes):
 
-- **sqlite3.c's 7,806 exported CFGs, tree only:** the matrix took 1.3× SEMI-NCA's
-  time for 2–8 blocks, 1.4–1.9× for 8–128, 2.0× for 128–512, 2.7× for 512–1,024
+- **sqlite3.c's 7,806 exported CFGs, tree only:** the matrix took 1.27–1.37×
+  SEMI-NCA's time for 2–8 blocks, 1.35–1.94× for 8–128, 2.0× for 128–512, 2.7× for 512–1,024
   and 3.3× above, as for `sqlite3VdbeExec`'s 1,577 blocks; 1.44× over all of them
   (39.8 against 27.6 ns per block).
 - **The same CFGs, every output:** SEMI-NCA with the loop worklist took 46.3 ns
@@ -218,7 +218,9 @@ nested suffix loops, irreducible regions, random graphs, unreachable
 components, and #1352's goto ladder, nested-if joins and a `?:` chain's single
 join, whose dominator trees are half the graph deep. Fixed sizes include
 empty/singleton graphs and boundaries at 63/64/65, 511/512/513 and 1,025
-blocks. Every result is checked against the definitions below, analyzed again
+blocks. Every result is checked against the definitions below and the order
+and tree columns' contract (`rpo` and its inverse, each block after its
+immediate dominator, each block's children in ascending order), analyzed again
 to the same result, and must keep its rows aligned and their tails zero. A
 100,000-block chain requests only the tree and a zero matrix budget, checking
 the explicit stacks and linear storage.
@@ -237,15 +239,21 @@ match frozen digests of their complete results. They were taken from main at
 295417ae7, where SEMI-NCA and the bit-matrix solver gave equal results on every
 generated graph and every one passed the whole definition, loop bodies
 included. Another seed checks those graphs by the definitions alone.
+
 Fixtures cover several latches, repeated/self edges, entry incoming edges,
 an unreachable predecessor of reachable code, and natural self-loops inside a
 two-entry SCC. They verify its conservative flags exclude exits and unreachable
-cycles. CSR arrays end at inaccessible pages. Malformed columns, mismatched CSR
-views, invalid IDs, arena exhaustion at every allocation, and a matrix budget
-one byte short of the frontiers and loop bodies check rollback. These are
+cycles. #2924's mutation check added three paths no generated shape takes: two
+6-block graphs on which SEMI-NCA's evaluation must climb through the vertex
+numbered right after the one being processed, and carry a compressed link's
+least semidominator; and a 3-block acyclic graph whose cross edge into a
+just-finished DFS subtree the SCC pass must not flag. CSR arrays end at
+inaccessible pages. Malformed columns, mismatched CSR views, invalid IDs, arena
+exhaustion at every allocation, and matrix budgets one byte short of the
+frontiers alone, or of the frontiers and loop bodies, check rollback. These are
 module checks, not corpus or frontend coverage. `test-ir-source --dominators`
 analyzes the IR CFGs of real C sources twice each, and checks them against the
-whole definition.
+whole definition and the columns' contract.
 
 `benchmark-dominators [--seed N] [--phase analysis|pipeline]` measures
 seven fixed synthetic shapes, the last three the 8,192-block `ladder`,
