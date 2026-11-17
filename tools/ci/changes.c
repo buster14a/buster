@@ -63,11 +63,11 @@
 // The hosted correctness row that 9700x.yml's test job calls: its shards, and the build of a portable row's compiler.
 #define BUSTER_CHANGES_ROW_WORKFLOW ".github/workflows/hosted-correctness.yml"
 #define BUSTER_CHANGES_ROW_WORKFLOW_USES "./" BUSTER_CHANGES_ROW_WORKFLOW
-// The test job's rows: both host architectures, `native` everywhere but on pull requests (#2033), and the vector row,
-// one call whose sanitizer lists its configurations: a pull request's plain one in place of `native`, and the plain and
-// sanitizer configurations as one pool of items wherever the sanitizer rows run (not in the `plain` scope elsewhere).
-#define BUSTER_CHANGES_HOST_ARCHES "        host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '[\"x86-64\"]' || '[\"x86-64\", \"native\"]') }}"
-#define BUSTER_CHANGES_VECTOR_ROWS "        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{\"host_arch\":\"vector\",\"sanitizer\":\"none\",\"optimization\":3}]' || needs.evidence.outputs.scope == 'plain' && '[]' || '[{\"host_arch\":\"vector\",\"sanitizer\":\"none address thread memory\",\"optimization\":3}]') }}"
+// The test job's rows (the x86-64 rows are gone with the scalar host, #2924): a pull request's vector row, `native`
+// everywhere else (#2033), and the vector row's call whose sanitizer lists its configurations, the plain and sanitizer
+// configurations as one pool of items wherever the sanitizer rows run (not on a pull request, nor in the `plain` scope).
+#define BUSTER_CHANGES_HOST_ARCHES "        host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '[\"vector\"]' || '[\"native\"]') }}"
+#define BUSTER_CHANGES_VECTOR_ROWS "        include: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[]' || '[{\"host_arch\":\"vector\",\"sanitizer\":\"none address thread memory\",\"optimization\":3}]') }}"
 // The host predicate, the build's explicit vector target and the vector row's probe of it (changes_vector_policy).
 #define BUSTER_CHANGES_HOST_ISA "src/buster/compiler/host_isa.h"
 #define BUSTER_CHANGES_SETTINGS "cmake/BusterSettings.cmake"
@@ -3003,8 +3003,8 @@ static void changes_test_split(ChangesTest* test)
 // and skip fuzzing only in the plain scope, as a pull request does. A pull request's 9700X job skips the native
 // correctness step (#1272); every other run's runs it before the measurements. Nightly backlog runs reuse the oracle cache, as
 // pull requests do; the snapshot's comprehensive run checks it, as the daily run did. The hosted rows are the row
-// workflow's jobs (`row`), which the test job calls for both host architectures: its shards check the oracle cache, and
-// they and the build of a shared compiler check out the triggering revision, in every checkout of this repository there
+// workflow's jobs (`row`), which the test job calls for each row: its shards check the oracle cache, and they check out
+// the triggering revision, in every checkout of this repository there
 // (a `ref` that doesn't follow a `repository`), such as the shards' sparse checkout of the vector draw's script and runtime (#2309).
 // Keep the periodic/manual full recheck explicit; changes to this policy must update its counterexamples below too.
 static bool changes_oracle_policy(Text workflow, Text row)
@@ -3014,7 +3014,6 @@ static bool changes_oracle_policy(Text workflow, Text row)
     bool hosted_variants = false;
     bool hosted_vector = false;
     bool hosted_calls = false;
-    bool build_revision = false;
     bool shard_revision = false;
     bool other_revision = false;
     bool after_repository = false;
@@ -3058,19 +3057,18 @@ static bool changes_oracle_policy(Text workflow, Text row)
     {
         if (line.length > 2 && line.data[0] == ' ' && line.data[1] == ' ' && line.data[2] != ' ' && line.data[2] != '#')
         {
-            job = text_equal_c(line, "  compiler:") ? 1 : text_equal_c(line, "  shards:") ? 2 : 0;
+            job = text_equal_c(line, "  shards:") ? 2 : 0;
         }
         else if (line.length > 0 && line.data[0] != ' ' && line.data[0] != '#')
         {
             job = 0;
         }
         hosted_check |= job == 2 && text_equal_c(line, "      BUSTER_ORACLE_CACHE: check");
-        build_revision |= job == 1 && text_equal_c(line, "          ref: ${{ github.sha }}");
         shard_revision |= job == 2 && text_equal_c(line, "          ref: ${{ github.sha }}");
         other_revision |= job != 0 && !after_repository && text_starts_with(line, "          ref: ") && !text_equal_c(line, "          ref: ${{ github.sha }}");
         after_repository = text_starts_with(line, "          repository: ");
     }
-    return hosted_check && hosted_variants && hosted_vector && hosted_calls && build_revision && shard_revision && !other_revision && native_needs && native_success && native_modes && native_revision && native_step;
+    return hosted_check && hosted_variants && hosted_vector && hosted_calls && shard_revision && !other_revision && native_needs && native_success && native_modes && native_revision && native_step;
 }
 
 // The text with its first `before` from `from` on replaced by `after`, and whether there was one: a mutant for the
@@ -3118,11 +3116,10 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow, Text ro
         const char* after;
     } mutants[] = {
         { "    uses: " BUSTER_CHANGES_ROW_WORKFLOW_USES, "    uses: ./.github/workflows/absent.yml" },
-        { "'[\"x86-64\", \"native\"]'", "'[\"native\"]'" },
-        { "'[\"x86-64\", \"native\"]'", "'[\"x86-64\"]'" },
-        { "github.event_name == 'pull_request' && '[\"x86-64\"]'", "github.event_name == 'pull_request' && '[]'" },
-        { "github.event_name == 'pull_request' && '[\"x86-64\"]'", "github.event_name != 'push' && '[\"x86-64\"]'" },
-        { "'[{\"host_arch\":\"vector\",\"sanitizer\":\"none\",\"optimization\":3}]'", "'[]'" },
+        { "|| '[\"native\"]') }}", "|| '[\"vector\"]') }}" },
+        { "github.event_name == 'pull_request' && '[\"vector\"]'", "github.event_name == 'pull_request' && '[]'" },
+        { "github.event_name == 'pull_request' && '[\"vector\"]'", "github.event_name != 'push' && '[\"vector\"]'" },
+        { "(github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[]'", "true && '[]'" },
         { "\"sanitizer\":\"none address thread memory\"", "\"sanitizer\":\"none\"" },
         { "\"sanitizer\":\"none address thread memory\"", "\"sanitizer\":\"none address memory\"" },
         { "    needs: [changes, evidence, test, fuzz]", "    needs: changes" },
@@ -3165,14 +3162,13 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow, Text ro
         }
         changes_expect(test, found != NULL && !changes_oracle_policy(changed, row), "oracle policy rejects weakened check/reuse boundary", text_c(mutants[i].before));
     }
-    // Each job's first checkout, until the next job: the row's build and shards, and the 9700X job; and the shards' own
+    // Each job's first checkout, until the next job: the row's shards, and the 9700X job; and the shards' own
     // checkout after the one-file checkout of the vector draw's script.
     static const struct
     {
         bool row;
         const char* job;
     } jobs[] = {
-        { true, "\n  compiler:\n" },
         { true, "\n  shards:\n" },
         { true, "\n      - name: Check out triggering commit\n        if: env.BUSTER_SHARD != ''\n" },
         { false, "\n  benchmarks:\n" },
@@ -3455,11 +3451,10 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
         { "  test:", " || github.event_name == 'merge_group' }}", " }}", "a candidate's rows don't fail fast" },
         { "  test:", "((github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.policy.result == 'success')", "(github.event_name != 'pull_request' || needs.policy.result == 'success')", "a candidate's tests don't wait for the policy job" },
         { "  prepare-hosted-tools:", "((github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.policy.result == 'success')", "(github.event_name != 'pull_request' || needs.policy.result == 'success')", "a candidate's fuzzing doesn't wait for the policy job" },
-        { "  test:", "'[\"x86-64\", \"native\"]'", "'[\"native\"]'", "missing baseline architecture" },
-        { "  test:", "'[\"x86-64\", \"native\"]'", "'[\"x86-64\", \"vector\"]'", "main's native row replaced before its qualification" },
+        { "  test:", "|| '[\"native\"]') }}", "|| '[\"vector\"]') }}", "main's native row replaced before its qualification" },
         { "  test:", "\"sanitizer\":\"none address thread memory\"", "\"sanitizer\":\"none\"", "the vector sanitizer configurations dropped" },
         { "  test:", "\"sanitizer\":\"none address thread memory\"", "\"sanitizer\":\"none address thread\"", "the vector memory configuration dropped" },
-        { "  test:", " || needs.evidence.outputs.scope == 'plain' && '[]' || '[{", " || '[]' || '[{", "the vector sanitizer configurations never run" },
+        { "  test:", " || needs.evidence.outputs.scope == 'plain') && '[]' || '[{", " || true) && '[]' || '[{", "the vector sanitizer configurations never run" },
         { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"thread\", \"memory\"]') }}", "missing address sanitizer" },
         { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"memory\"]') }}", "missing thread sanitizer" },
         { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\"]') }}", "missing memory sanitizer" },
@@ -3497,10 +3492,8 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
 
 // The hosted rows' workflow, which the test job calls for each row (#2032; docs/ci.md, "Shared row products"). Both its
 // jobs take the row's settings from the workflow's environment and check out the triggering commit with the verified
-// hosted inputs. A portable row's (x86-64, never native) compiler is built once, by `hosted-product.sh build`, after the
-// ownership check on its tree, packed with its identity and published under the attempt's name and the archive's
-// SHA-256. Its shards require that build's success, check the archive against its SHA-256 and install it with
-// `hosted-product.sh install`, and a native row's shards build their own. A vector configuration's item 1 builds,
+// hosted inputs. A native row's shards build their own compiler (the x86-64 rows, whose portable compiler one job built
+// for their shards, are gone with the scalar host, #2924). A vector configuration's item 1 builds,
 // checks ownership, packs and publishes its product under a name with the attempt and the SHA-256, and its other items
 // build nothing: they wait for it (`vector-draw.sh product`), download it by that name and install it by that SHA-256
 // (#2033). Nothing comes from a cache or another run. This pins the repository's YAML spelling, as the other policies
@@ -3516,25 +3509,10 @@ static bool changes_row_policy(Text row)
         { 0, "  BUSTER_HOST_ARCH: ${{ inputs.host_arch }}" },
         { 0, "  BUSTER_SANITIZER: ${{ inputs.sanitizer }}" },
         { 0, "  BUSTER_SANITIZER_OPTIMIZATION: ${{ inputs.optimization }}" },
-        { 1, "    if: inputs.host_arch == 'x86-64'" },
-        { 1, "      artifact: ${{ steps.name.outputs.artifact }}" },
-        { 1, "      digest: ${{ steps.pack.outputs.digest }}" },
-        { 1, "          ref: ${{ github.sha }}" },
-        { 1, "          artifact-name: ${{ inputs.hosted-tools }}" },
-        { 1, "        run: bash tools/ci/hosted-product.sh build" },
-        { 1, "        run: bash tools/ci/hosted-product.sh ownership" },
-        { 1, "        run: bash tools/ci/hosted-product.sh pack \"$RUNNER_TEMP/compiler-product\"" },
-        { 1, "          name: ${{ steps.name.outputs.artifact }}" },
-        { 2, "    needs: compiler" },
         { 2, "    if: ${{ !cancelled() && inputs.host_arch != 'vector' }}" },
         { 2, "      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}" },
         { 2, "          ref: ${{ github.sha }}" },
         { 2, "          artifact-name: ${{ inputs.hosted-tools }}" },
-        { 2, "          BUILD: ${{ needs.compiler.result }}" },
-        { 2, "          if [ \"$BUILD\" != success ]; then" },
-        { 2, "          name: ${{ needs.compiler.outputs.artifact }}" },
-        { 2, "          DIGEST: ${{ needs.compiler.outputs.digest }}" },
-        { 2, "        run: bash tools/ci/hosted-product.sh install \"$RUNNER_TEMP/compiler-product-download\" \"$DIGEST\"" },
         { 2, "        if: env.BUSTER_SHARD != '' && (inputs.host_arch == 'native' || env.BUSTER_VECTOR_BUILDER == '1')" },
         { 2, "        run: bash tools/ci/hosted-product.sh build" },
         { 2, "        if: env.BUSTER_SHARD != '' && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER != '1'" },
@@ -3549,7 +3527,7 @@ static bool changes_row_policy(Text row)
         { 2, "          name: ${{ steps.probe.outputs.product }}-${{ env.BUSTER_SANITIZER }}-${{ steps.pack.outputs.digest }}" },
     };
     bool seen[sizeof(required) / sizeof(required[0])] = { false };
-    // 0 outside `jobs:`; in it, 1 the compiler job, 2 the shards, 3 any other.
+    // 0 outside `jobs:`; in it, 2 the shards, 3 any other.
     bool jobs = false;
     uint32_t job = 0;
     size_t offset = 0;
@@ -3563,7 +3541,7 @@ static bool changes_row_policy(Text row)
         }
         else if (jobs && line.length > 2 && line.data[0] == ' ' && line.data[1] == ' ' && line.data[2] != ' ' && line.data[2] != '#')
         {
-            job = text_equal_c(line, "  compiler:") ? 1 : text_equal_c(line, "  shards:") ? 2 : 3;
+            job = text_equal_c(line, "  shards:") ? 2 : 3;
         }
         for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
         {
@@ -3582,7 +3560,7 @@ static bool changes_row_policy(Text row)
 
 static void changes_test_row_policy(ChangesTest* test, Text row)
 {
-    changes_expect(test, changes_row_policy(row), "row policy: a portable row's compiler built once, verified by its shards, from this run alone", (Text){ 0 });
+    changes_expect(test, changes_row_policy(row), "row policy: native rows build their own, a vector configuration's product built once and verified by its items, from this run alone", (Text){ 0 });
     static const struct
     {
         const char* section;
@@ -3590,19 +3568,7 @@ static void changes_test_row_policy(ChangesTest* test, Text row)
         const char* after;
         const char* name;
     } mutants[] = {
-        { "  compiler:", "    if: inputs.host_arch == 'x86-64'", "    if: inputs.host_arch != 'none'", "a native row's product shared" },
-        { "  compiler:", "          ref: ${{ github.sha }}", "          ref: main", "a build of another revision" },
-        { "  compiler:", "          artifact-name: ${{ inputs.hosted-tools }}", "          artifact-name: ''", "a build without the verified preparation" },
-        { "  compiler:", "        run: bash tools/ci/hosted-product.sh ownership", "        run: 'true'", "no ownership check on the build's tree" },
-        { "  compiler:", "      digest: ${{ steps.pack.outputs.digest }}", "      digest: ''", "no digest for the shards" },
-        { "  compiler:", "          name: ${{ steps.name.outputs.artifact }}", "          name: compiler", "a name without the attempt" },
-        { "  shards:", "    needs: compiler", "    needs: []", "shards that don't wait for the build" },
         { "  shards:", "    if: ${{ !cancelled() && inputs.host_arch != 'vector' }}", "    if: ${{ always() && inputs.host_arch != 'vector' }}", "shards after a cancellation" },
-        { "  shards:", "          ref: ${{ github.sha }}", "          ref: main", "shards of another revision" },
-        { "  shards:", "          if [ \"$BUILD\" != success ]; then", "          if [ \"$BUILD\" = failure ]; then", "a skipped build passes" },
-        { "  shards:", "          DIGEST: ${{ needs.compiler.outputs.digest }}", "          DIGEST: ''", "an unchecked digest" },
-        { "  shards:", "\"$RUNNER_TEMP/compiler-product-download\" \"$DIGEST\"", "\"$RUNNER_TEMP/compiler-product-download\" \"$(cat \"$RUNNER_TEMP\"/compiler-product-download/*.sha256)\"", "a digest from the download" },
-        { "  shards:", "          name: ${{ needs.compiler.outputs.artifact }}", "          name: ${{ needs.compiler.outputs.artifact }}\n          run-id: 1", "another run's product" },
         { "  shards:", "        if: env.BUSTER_SHARD != '' && (inputs.host_arch == 'native' || env.BUSTER_VECTOR_BUILDER == '1')", "        if: false", "native rows unbuilt" },
         { "  shards:", "        if: env.BUSTER_SHARD != '' && (inputs.host_arch == 'native' || env.BUSTER_VECTOR_BUILDER == '1')", "        if: env.BUSTER_SHARD != '' && inputs.host_arch != 'x86-64'", "every vector item builds its own" },
         { "  shards:", "          script: bash tools/ci/vector-draw.sh product \"$BUSTER_SANITIZER\"", "          script: 'true'", "a vector item that doesn't wait for its product" },
@@ -3611,8 +3577,9 @@ static void changes_test_row_policy(ChangesTest* test, Text row)
         { "  shards:", "          name: ${{ steps.product.outputs.name }}", "          name: ${{ steps.product.outputs.name }}\n          run-id: 1", "another run's vector product" },
         { "  shards:", "          name: ${{ steps.probe.outputs.product }}-${{ env.BUSTER_SANITIZER }}-${{ steps.pack.outputs.digest }}", "          name: ${{ steps.probe.outputs.product }}-${{ env.BUSTER_SANITIZER }}", "a vector product named without its SHA-256" },
         { "  shards:", "        run: bash tools/ci/hosted-product.sh pack \"$RUNNER_TEMP/vector-product\"", "        run: 'true'", "an unpacked vector product" },
+        { "  shards:", "        run: bash tools/ci/hosted-product.sh ownership", "        run: 'true'", "no ownership check on the vector build's tree" },
         { "env:", "  BUSTER_SANITIZER: ${{ inputs.sanitizer }}", "  BUSTER_SANITIZER: none", "a row's settings not the workflow's" },
-        { "jobs:", "  compiler:", "  compiler:\n    steps:\n      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4", "a cached product" },
+        { "jobs:", "  shards:", "  shards:\n    steps:\n      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4", "a cached product" },
     };
     for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
     {

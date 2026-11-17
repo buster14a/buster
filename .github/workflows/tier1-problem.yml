@@ -30,11 +30,11 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     strategy:
-      # On a pull request or a merge-queue candidate, the first failing architecture cancels the other; dispatched runs
-      # report both.
+      # On a pull request or a merge-queue candidate, the first failure cancels the rest; dispatched runs report them
+      # all. The x86-64 (baseline host) entry is gone with the scalar host (#2924).
       fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
-        arch: [x86-64, native]
+        arch: [native]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:

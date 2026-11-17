@@ -2,10 +2,9 @@
 
 Every change reaches `main` through the merge queue (#1430). The queue's
 candidate for it runs the complete hosted contract on its exact commit before
-it merges: the portable `x86-64` architecture with all four O3 build modes
-(plain and three sanitizer configurations) and the `native` plain row, across
-each row's shards, the vector pool (whose sanitizer configurations replaced the
-`native` sanitizer rows, #2032), the
+it merges: the `native` plain row, across its shards, the vector pool (plain
+and three sanitizer configurations, which replaced the `native` sanitizer rows,
+#2032, and the `x86-64` rows, which went with the scalar host, #2924), the
 three fuzz campaigns, and each auxiliary workflow its change touches (see "The
 merge queue"). Documentation-only changes run it too. Main's ruleset requires
 the queue, with no bypass, and main is fast-forwarded to the commit the queue
@@ -32,16 +31,17 @@ with an all-skipped suite: only pre-merge PRs can use the no-code exemption.
 
 The workflow in `.github/workflows/9700x.yml` runs correctness tests on
 GitHub-hosted `ubuntu-26.04` runners. Its matrix builds the triggering revision
-with `BUSTER_HOST_ARCH=x86-64` and `BUSTER_HOST_ARCH=native`; on a pull request,
-the second row is the vector row, `BUSTER_HOST_ARCH=vector` (see "The vector
-row", #2033), which the runs that run the sanitizer rows have too, beside
-`native`, with its sanitizer configurations. All use the current
+with `BUSTER_HOST_ARCH=native`; on a pull request, the row is the vector row,
+`BUSTER_HOST_ARCH=vector` (see "The vector row", #2033), which the runs that run
+the sanitizer rows have too, beside `native`, with its sanitizer configurations.
+The `x86-64` rows, the scalar host's, are gone (#2924, the owner's decision on
+2026-11-17). All use the current
 official stable LLVM 23.1.4 release, including its matching C++ pragma oracle,
 LLVM object/DWARF tools and lld. Each row also builds the clang server that
 the semantic driver's checks send the oracle clang's runs to (#2071), from the
-release's static clang and LLVM archives: an `x86-64` row's build job, once for
-its shards (see "Shared row products"), and each shard of a `native` row. The
-native plain row's `--differential` compares every served run with a child's.
+release's static clang and LLVM archives: each shard of a `native` row, and a
+vector configuration's builder, once for its items (see "Shared row products").
+The plain rows' `--differential` compares every served run with a child's.
 The installer runs only on disposable hosted runners. GCC remains the `cc`
 oracle for fixtures that require GNU C extensions.
 
@@ -55,15 +55,14 @@ configured default (`BUSTER_HOST_SSP_DEFAULT`). The build's post-link step
 checks each linked executable for a `__stack_chk_fail` reference and fails if
 the policy did not take effect.
 
-The baseline build runs on x86-64 without AVX-512. Native builds select the
-existing scalar twins when the compiler's host target lacks the full SIMD
-feature set. Intrinsic-only shared helpers have scalar definitions for that
-build. Generated-code ISA and ABI remain controlled by the existing target
-options. Both hosted variants log their CPU, target features and selected path.
-The baseline leg must report `scalar`; the native leg uses vector kernels when
-the full predicate in `host_isa.h` holds, and scalar kernels otherwise. A hosted
-CPU without AVX-512 therefore still runs the complete correctness suite. The
-vector row must report `vector`, on CPUs its probe qualified.
+The baseline build (`BUSTER_HOST_ARCH=x86-64`) still builds until #2924's next
+step requires the AVX-512 host, but no hosted row runs it. Native builds select
+the existing scalar twins when the compiler's host target lacks the full SIMD
+feature set. Generated-code ISA and ABI remain controlled by the existing target
+options. Every hosted row logs its CPU, target features and selected path: the
+native row uses vector kernels when the full predicate in `host_isa.h` holds,
+and scalar kernels otherwise; the vector row must report `vector`, on CPUs its
+probe qualified.
 
 Each matrix row is a call of `.github/workflows/hosted-correctness.yml`, which
 runs the row's inventory as the row's own number of shards (`matrix.shard`, its
@@ -72,23 +71,21 @@ tools/ci/costs/ROW.costs`: the runner deals the commands to the shards by the
 row's own costs on a hosted runner, the costliest first, each to the shard that
 would end the earliest with it, the same deal on every shard's runner, so that
 a row's shards run every command once (docs/commands/parallel.md). The plain
-rows run as 4 shards, the `x86-64` TSan and MSan rows as 7 and its ASan row as
-4 (#2031; [Shard costs](commands/ci.md#shard-costs)
-has the tables and the plans). Unsharded, a plain row's test step took 14.6
-minutes of its 18-minute job on one 4-CPU runner, and the MSan rows took up to
-98 minutes. A portable `x86-64` row builds its compiler once, in a job of its
-own, and its shards run that verified product (see "Shared row products"
-below). The `native` plain row's shards each build the compiler themselves,
+rows run as 4 shards and each vector configuration as 4 items (#2031; [Shard
+costs](commands/ci.md#shard-costs) has the tables and the plans). Unsharded, a
+plain row's test step took 14.6 minutes of its 18-minute job on one 4-CPU
+runner, and the MSan rows took up to 98 minutes. The `native` plain row's
+shards each build the compiler themselves,
 since a native build must run on the CPU model it was built for, which hosted
 runners don't share. That was why the `native` sanitizer rows went (#2032, the
 owner's go-ahead on 2026-11-14): their 13 shards each built an instrumented
 compiler, 5 to 11 minutes, and on 160 merge-queue candidates the `native`
 shards took 316 of a merged candidate's 912 runner-minutes, its MSan or TSan
 row finishing last in 18 of 43 (#2703). The vector row's sanitizer
-configurations test the vector path under each detector, and the `x86-64`
-rows the scalar one. A row's once-only steps (the baseline fallback checks, the QEMU
-smoke test, the constrained arenas, the parser smoke test, the performance
-readers and the TSan/MSan `main.c` compiles) run in its shard 1, which the deal
+configurations test the vector path under each detector. A row's once-only
+steps (the baseline fallback checks, the constrained arenas on the `native` row,
+the parser smoke test, the performance readers and the TSan/MSan `main.c`
+compiles) run in its shard 1, which the deal
 gives that much less of the inventory (its table's `#: first-shard`), and each
 shard's sanitizer reports are an artifact of its own.
 
@@ -110,28 +107,24 @@ transparent huge pages off (#1109, `arena_page_policy` in `lane.c`), and the
 9700X with them as its system has them.
 Baseline memory boundary tests also run with undefined-behavior checks.
 The hosted matrix additionally builds the entire compiler with each of
-`BUSTER_SANITIZER=address|thread|memory`, for the `x86-64` architecture and the
-vector row's configurations (the `native` sanitizer rows went in #2032).
+`BUSTER_SANITIZER=address|thread|memory`, for the vector row's configurations
+(the `native` sanitizer rows went in #2032, the `x86-64` ones in #2924).
 Every variant runs `tools/ci/correctness.tests`, including the same corpus,
 seeds, lane counts, generated-code execution and external cross-checks. These
 are full suites, a row's shards together; the TSan and MSan rows are not
 reduced module lists.
-The baseline job additionally runs Buster under QEMU's `qemu64` CPU to preprocess
-and compile a C fixture and assemble a multi-instruction fixture, then links and
-executes their results on that same emulated CPU.
-That leg links generic Ubuntu startup objects, libc and compiler support routines
-from checksum-pinned packages in a private directory (`BUSTER_HOST_RUNTIME`).
-It uses their loader explicitly for emulation: a hosted VM's installed startup
-objects and libraries can require a newer ISA independently of `-march=x86-64`.
+The `x86-64` rows' QEMU `qemu64` smoke test, and the Valgrind (Callgrind) run
+of the constrained-arena harness, which runs no AVX-512 code, went with them
+(#2924).
 `BUSTER_CLANG_RESOURCE_DIR` selects the matching Clang builtin headers, preserving
 their paths in line markers even when Clang is staged outside `/usr/lib/clang`.
 
 The self-host qualification is a separate workflow,
 `.github/workflows/selfhost.yml`, and also runs only on GitHub-hosted runners.
 It builds the compiler with the compiler, runs a bounded smoke subset, and
-compares deterministic probe objects and executables, once for each host path:
-`native` (the vector path, skipped on a runner without it) and `x86-64` (the
-scalar path, #1193). It is not part of the required correctness or benchmark
+compares deterministic probe objects and executables for the `native` host path
+(the vector path, skipped on a runner without it; the `x86-64` bootstrap of the
+scalar path, #1193, is gone, #2924). It is not part of the required correctness or benchmark
 path; see [the self-host guide](self-hosting-ci.md).
 
 The frozen corpus comes from the
@@ -329,15 +322,15 @@ Benchpress.
 
 ## Shared row products
 
-A portable row (`x86-64`: plain, ASan, TSan and MSan) builds its compiler once
-for its shards (#2032). The test job calls
-`.github/workflows/hosted-correctness.yml` for each row. In a portable row, that
-workflow's `compiler` job sets its runner up as a shard does: the verified
-hosted inputs, `setup-hosted.sh`, the sanitizer host report, the fatal policy
-and detector proofs, and the baseline runtime for the plain row. The build's
-settings are the workflow's environment, the same for the build and the
-shards. The job then builds and packs the product in four steps, three of them
-`tools/ci/hosted-product.sh`'s:
+A vector configuration builds its compiler once for its items (#2032, #2033):
+its item 1's holder, on a CPU its probe qualified. The x86-64 rows' `compiler`
+job, which built a portable row's compiler once for its shards, is gone with the
+scalar host (#2924). The test job calls `.github/workflows/hosted-correctness.yml`
+for each row; the builder sets its runner up as every item does (the verified
+hosted inputs, `setup-hosted.sh`, the sanitizer host report, the fatal policy and
+detector proofs). The build's settings are the workflow's environment, the same
+for the builder and the other items. It then builds and packs the product in
+four steps, three of them `tools/ci/hosted-product.sh`'s:
 
 - `build`: the pragma oracle, the clang server and
   `./build.sh --config Release --jobs "$(nproc)"`, with the build step's checks
@@ -368,10 +361,10 @@ shards. The job then builds and packs the product in four steps, three of them
   item 1).
 
 It publishes the archive as this run's artifact
-`compiler-ARCH-SANITIZER-OOPT-ATTEMPT`, kept 7 days, and its outputs give the
-artifact's name and the archive's SHA-256.
+`vector-product-OOPT-ATTEMPT-CONFIGURATION-SHA256`, kept 7 days, whose name
+holds the archive's SHA-256 (`tools/ci/vector-draw.sh`).
 
-The product's identity is what the build and every shard compute with the same
+The product's identity is what the build and every item compute with the same
 function and compare byte for byte:
 
 - the repository, the run, the commit and its tree, with the tracked files
@@ -381,12 +374,12 @@ function and compare byte for byte:
   resource directory with the sanitizer runtimes, lld, mold, wild,
   libclang-cpp, LLVM's and clang's archives, CMake and Ninja), which the
   install step reports the time of;
-- the baseline runtime's tree, in the plain row;
+- the baseline runtime's tree (`none`: only the x86-64 plain row had one);
 - build.sh's own configuration record, the toolchain identity, the tools on
   PATH and every setting, which `./build.sh configure` writes;
 - `print-compile-flags`, `print-sanitizer-flags` and `print-sources`;
 - the target's flags (`print-host-flags`) and its predefined macros with
-  `host_isa.h` (`BUSTER_HOST_VECTOR` 0, or 1 for the vector target);
+  `host_isa.h` (`BUSTER_HOST_VECTOR` 1);
 - for the vector target, the row's probe's answers on the runner, every
   feature `yes`;
 - `ldd`'s resolution of each executable.
@@ -397,13 +390,12 @@ the ownership check's result. Runner images can differ between a row's jobs, as
 they could between its shards when each built its own compiler, so a shard
 reports where the image, glibc or packages differ from its own.
 
-A portable row's shards need its `compiler` job and start once it ends. Their
-first step fails unless the build succeeded: no shard builds the compiler or
-fetches it elsewhere. After the usual setup, sanitizer probes and host report,
-they download the artifact by the build's output name, and
+A configuration's other items build nothing. After the usual setup, sanitizer
+probes and host report, they wait for its product (`vector-draw.sh product`),
+fail without one, download the artifact by its name, and
 `hosted-product.sh install` checks it:
 
-1. the archive's SHA-256 against the build's output;
+1. the archive's SHA-256 against the one its name holds;
 2. that it holds only directories and regular files under `product/`;
 3. exactly the files it lists, each with its hash;
 4. the identity, which a difference fails, printed;
@@ -419,34 +411,29 @@ the product records its pass and exits 77 (skipped); every other command runs
 as before. `check-call-graph`'s `./build.sh` call configures the tree and
 builds the IR it checks, which no product replaces.
 
-Products stay in their run. No cache holds one. A shard downloads only
+Products stay in their run. No cache holds one. An item downloads only
 from its own run (no `run-id` or token), by the name and SHA-256 that its
-run's build job gave, and the identity binds the product to the repository,
+configuration's builder published, and the identity binds the product to the repository,
 run, commit and tree. A pull request's run builds and tests its own products, a
 merge-queue candidate or a dispatch builds its own, and no run can use
 another's. The
 selector's row policy (`changes_row_policy`) pins this with counterexamples.
 
-A failed build fails its row's shards at their first step, and a cancelled one
-cancels them. Rerunning the failed jobs reruns the build first, under a new
-attempt's name and SHA-256. A shard always reads the product that its run's
-build job last published, by that job's outputs, so a shard rerun without the
-build reads the attempt that succeeded, as the hosted inputs' handoff does. A
-missing (expired), truncated or altered archive, a partial extraction or a
-mismatched configuration fails the shard and says why. Rerun the build job, or
-the workflow: nothing rebuilds or refetches by itself, so one bad product can't
-start four builds. `bash tests/ci/hosted-product.sh`, which the build job runs
-before building, checks each of these refusals, a product without its server,
-the clang server's status 77 (failing the build on the hosted toolchain and a
-notice with another clang) and the inventory's skip on a fake checkout,
+A failed build, or a builder that ends without publishing, fails its
+configuration's other items (see "The vector row"). A missing (expired),
+truncated or altered archive, a partial extraction or a mismatched configuration
+fails the item and says why: nothing rebuilds or refetches by itself. `bash
+tests/ci/hosted-product.sh`, which the CI glue job runs (the x86-64 rows' build
+job did before #2924), checks each of these refusals, a product without its
+server, the clang server's status 77 (failing the build on the hosted toolchain
+and a notice with another clang) and the inventory's skip on a fake checkout,
 toolchain and build. `bash tests/ci/hosted-tools.sh` checks the same 77 failure
 against the tree that `install-hosted-tools.sh` installs.
 
 Native rows keep their per-shard builds: each hosted CPU selects its own path.
 The vector row's explicit target makes each configuration's builds one, so
-each configuration shares one product too, built by its item 1's holder on a
-CPU its probe qualified (see "The vector row"). Reuse across revisions (a
-change to fixture data alone) is a separate extension (#2032's discussion).
+each configuration shares one product. Reuse across revisions (a change to
+fixture data alone) is a separate extension (#2032's discussion).
 
 ## The vector row
 
@@ -823,8 +810,8 @@ A candidate's run is the only per-merge correctness run (the owner's decision
 on 2026-11-10). It works like this:
 
 - **Scope.** The full hosted contract runs on the candidate's exact commit:
-  - `x86-64` with its plain, ASan, TSan and MSan O3 builds, and the `native`
-    plain row (#2032), every row's shards;
+  - the `native` plain row (#2032), every shard (the `x86-64` rows are gone,
+    #2924);
   - the vector pool's 16 items;
   - the three fuzz campaigns.
 
@@ -889,9 +876,9 @@ on 2026-11-10). It works like this:
   - The coverage step (`nightly.sh coverage`, `nightly coverage`) reads the
     run's own jobs, because a test job's result alone stays green when a shard
     or a row is skipped.
-  - It requires every shard 1..N of every row of the contract (one N per
-    row): `x86-64`'s four and `native`'s plain one. A `native` sanitizer row
-    counts for nothing either way (#2032). It also requires the vector pool's
+  - It requires every shard 1..N of the contract's row, `native`'s plain one.
+    A `native` sanitizer row or an `x86-64` row counts for nothing either way
+    (#2032, #2924). It also requires the vector pool's
     verdict and each fuzz campaign to have completed successfully.
   - Each auxiliary workflow the selector named must have run at least one job,
     and every job it ran must have succeeded. One the selector didn't name must

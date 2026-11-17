@@ -10,18 +10,20 @@ draws and qualification rules are in [CI](ci.md#the-vector-row).
 
 ## Rows and evidence
 
-| Run | Scalar host | Vector host | Other coverage |
-| --- | --- | --- | --- |
-| Code-changing pull request | `x86-64`, plain | `vector`, plain | No sanitizer rows or libFuzzer campaigns |
-| Merge-queue candidate and full daily/dispatched runs | `x86-64`, plain, ASan/UBSan, TSan and MSan | `vector`, plain, ASan/UBSan, TSan and MSan | `native` plain; frontend and ELF libFuzzer campaigns and a crash/replay proof |
-| Plain-scope nightly runs | `x86-64`, plain | No guaranteed vector row | `native` plain |
+| Run | Vector host | Other coverage |
+| --- | --- | --- |
+| Code-changing pull request | `vector`, plain | No sanitizer rows or libFuzzer campaigns |
+| Merge-queue candidate and full daily/dispatched runs | `vector`, plain, ASan/UBSan, TSan and MSan | `native` plain; frontend and ELF libFuzzer campaigns and a crash/replay proof |
+| Plain-scope nightly runs | No guaranteed vector row | `native` plain |
+
+The `x86-64` rows, which built the scalar host's compiler (`BUSTER_HOST_VECTOR=0`),
+are gone (#2924, the owner's decision on 2026-11-17): the scalar paths are being
+removed.
 
 The table describes runs that execute hosted tests; a nightly dispatch may
 reuse qualifying earlier plain-row evidence. The selector may exempt a pull
 request with no relevant code changes. A failed, cancelled, skipped or
-incomplete row is not a passing execution. Each
-`x86-64` compiler is built for baseline x86-64 and must select
-`BUSTER_HOST_VECTOR=0`. Each `vector` compiler is built for x86-64-v4 plus the
+incomplete row is not a passing execution. Each `vector` compiler is built for x86-64-v4 plus the
 additional features in [`host_isa.h`](../src/buster/compiler/host_isa.h), and
 must select `BUSTER_HOST_VECTOR=1`. A candidate's CPU and OS must pass the
 feature probe before it receives an item; no vector emulation is used. The
@@ -33,9 +35,7 @@ Each vector item records its target and predicate, then runs `benchmark-lexer`
 over `x86_64_encoder.c`; the entire input must use vector lexer kernels and
 match the scalar twin. This is direct execution evidence for that lexer input,
 not a counter proving that every vector implementation ran. The verdict
-requires a passing qualified execution of every item. The baseline plain row's
-first shard additionally preprocesses, compiles, assembles and runs a small
-fixture under QEMU `qemu64`; that is a baseline smoke test, not vector coverage.
+requires a passing qualified execution of every item.
 
 The full suites use the same inventory, sharded by row-specific costs. The
 baseline TSan and MSan rows have seven shards; other configurations have four.
@@ -67,9 +67,9 @@ compiler. Those options alone do not establish host-vector execution.
 - Pull requests have no sanitizer rows or hosted libFuzzer campaigns in their
   own run; the inventory does include preprocessor fuzz tests. The merge-queue
   candidate runs the full contract on its own revision. The full-scope frontend
-  libFuzzer campaign uses `native`, whose path depends on its runner. The ELF
-  override campaign and crash/replay proof use `x86-64`; none is a guaranteed
-  vector-target fuzz campaign.
+  libFuzzer campaign, the ELF override campaign and the crash/replay proof use
+  `native`, whose path depends on its runner (the last two used `x86-64` before
+  #2924); none is a guaranteed vector-target fuzz campaign.
 - ASan combines address, undefined-behavior, bounds, leak and stack-lifetime
   checks; standalone UBSan is manual. TSan and MSan omit the whole-compiler
   `main.c` checking comparison, although separate `-c` compiles and their
