@@ -389,17 +389,20 @@ full_jobs()
     if [ "$odd" != vector ]; then
         printf '{"name":"Tests on Ubuntu 26.04 (vector, none address thread memory, O3) / Vector row verdict (Clang 23, none address thread memory, O3)","status":"completed","conclusion":"%s"},' "$( [ "$odd" = vector-failed ] && echo failure || echo success )"
     fi
-    for entry in frontend elf-override crash-replay-proof; do
-        if [ "$odd" != "fuzz $entry" ]; then
-            printf '{"name":"libFuzzer (ASan + UBSan + leaks, %s)","status":"completed","conclusion":"success"},' "$entry"
-        fi
-    done
+    # The fuzz campaigns draw AVX-512 runners (drawn.yml, #2924): a candidate, a later draw skipped, and the verdict.
+    printf '{"name":"libFuzzer (ASan + UBSan + leaks) / Vector draw 1, candidate 5 (fuzz)","status":"completed","conclusion":"success"},'
+    printf '{"name":"libFuzzer (ASan + UBSan + leaks) / Vector draw 2, candidate ${{ matrix.candidate }} (${{ inputs.row }})","status":"completed","conclusion":"skipped"},'
+    if [ "$odd" != fuzz ]; then
+        printf '{"name":"libFuzzer (ASan + UBSan + leaks) / Vector row verdict (fuzz)","status":"completed","conclusion":"success"},'
+    fi
     printf '{"name":"Native tests and benchmarks on Benchpress (Ryzen 7 9700X)","status":"completed","conclusion":"skipped"},'
     # The auxiliary workflows: selfhost.yml called (its jobs, a nested call's included), the others skipped.
     printf '{"name":"Auxiliary (build.yml)","status":"completed","conclusion":"skipped"},'
     printf '{"name":"Auxiliary (selfhost.yml) / Self-host harness regression tests","status":"completed","conclusion":"success"},'
     printf '{"name":"Auxiliary (selfhost.yml) / prepare-hosted-tools / Prepare verified hosted release inputs","status":"completed","conclusion":"success"},'
-    printf '{"name":"Auxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native)","status":"completed","conclusion":"%s"},' "$( [ "$odd" = selfhost-failed ] && echo failure || echo success )"
+    printf '{"name":"Auxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native) / Vector draw 1, candidate 2 (bootstrap)","status":"completed","conclusion":"success"},'
+    printf '{"name":"Auxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native) / Vector draw 2'"'"'s assignment (${{ inputs.row }})","status":"completed","conclusion":"skipped"},'
+    printf '{"name":"Auxiliary (selfhost.yml) / Self-host bootstrap and probe equivalence (native) / Vector row verdict (bootstrap)","status":"completed","conclusion":"%s"},' "$( [ "$odd" = selfhost-failed ] && echo failure || echo success )"
     printf '{"name":"Build and execute on Ryzen 7 9700X","status":"in_progress","conclusion":null}]}\n'
 }
 coverage_case()
@@ -417,12 +420,12 @@ expect_line "$work/coverage.log" $'coverage\tcomplete' 'a full candidate'"'"'s c
 expect_line "$work/coverage.log" $'native\tnone\tok' 'the native plain row, by its verdict'
 ! grep -q $'^row\t' "$work/coverage.log" || fail 'no sharded row is the contract'"'"'s since #2924'
 ! grep -q $'^row\tnative memory' "$work/coverage.log" || fail 'a retired native sanitizer row is no row of the contract'
-expect_line "$work/coverage.log" $'auxiliary\tselfhost\tcalled\tok\t3' 'a called auxiliary workflow, every job of it'
+expect_line "$work/coverage.log" $'auxiliary\tselfhost\tcalled\tok\t5' 'a called auxiliary workflow, every job of it, its draws'"'"' too'
 expect_line "$work/coverage.log" $'auxiliary\tbuild\tnot called\tok\t0' 'and one not called, which ran nothing'
 expect_match "$GITHUB_STEP_SUMMARY" 'Merge-queue coverage' 'and the summary says so'
 test "$(grep -c 'actions/runs/9100/jobs' "$fixtures/calls.log")" -eq 1 || fail 'a complete set is read once'
 # Each way a candidate's coverage falls short fails it, after asking again.
-for odd in 'native:' 'native-failed:' 'vector:' 'vector-failed:' 'fuzz elf-override:' 'selfhost-failed:'; do
+for odd in 'native:' 'native-failed:' 'vector:' 'vector-failed:' 'fuzz:' 'selfhost-failed:'; do
     full_jobs "${odd%%:*}" "${odd#*:}" > "$fixtures/jobs-9101.json"
     coverage_case 9101 1
     expect_line "$work/coverage.log" $'coverage\tincomplete' "a candidate with $odd is incomplete"
@@ -435,7 +438,7 @@ full_jobs > "$fixtures/jobs-9101.json"
 coverage_case 9101 1 ,build,selfhost,
 expect_line "$work/coverage.log" $'auxiliary\tbuild\tcalled\tmissing\t0' 'a called auxiliary workflow that ran nothing'
 coverage_case 9101 1 ,
-expect_line "$work/coverage.log" $'auxiliary\tselfhost\tnot called\tran although it doesn\'t apply\t3' 'an auxiliary workflow the selector did not name'
+expect_line "$work/coverage.log" $'auxiliary\tselfhost\tnot called\tran although it doesn\'t apply\t5' 'an auxiliary workflow the selector did not name'
 coverage_case 9101 1 ''
 expect_line "$work/coverage.log" $'auxiliary\t\tnot the selector\'s list' 'no selector list'
 # A shard beyond the row's count, or a row whose shards disagree.

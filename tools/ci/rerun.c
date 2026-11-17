@@ -70,13 +70,14 @@ struct SetupStep
     StepKind kind;
     // GitHub's own step, which no workflow file names.
     bool runner;
-    // A step of runs from before the x86-64 rows were gone (#2924), which no workflow names now: a rerun of such a run's
-    // failed jobs still reads it.
+    // A step of runs from before the x86-64 rows were gone and the fuzz campaigns drew their runners (#2924), which no
+    // workflow names now: a rerun of such a run's failed jobs still reads it.
     bool historical;
 };
 
-// The allowlist, by the step names of the watched workflows (9700x.yml, and hosted-correctness.yml and
-// prepare-hosted-tools.yml, which it calls). It applies to every GitHub-hosted job of the watched run.
+// The allowlist, by the step names of the watched workflows (9700x.yml, and the workflows it calls: hosted-correctness.yml,
+// prepare-hosted-tools.yml, drawn.yml, whose draws the fuzz campaigns and the AVX-512 jobs are, and the auxiliary ones).
+// It applies to every GitHub-hosted job of the watched run.
 static const SetupStep rerun_steps[] = {
     // The runner's provisioning: the job's environment and its actions' downloads.
     {
@@ -135,6 +136,9 @@ static const SetupStep rerun_steps[] = {
     {
         .name = "Install official Clang, sanitizer and libFuzzer runtimes",
         .kind = STEP_SETUP,
+        // The fuzz campaigns' own name before they drew AVX-512 runners (drawn.yml, #2924), whose setup step is the
+        // rows' name now.
+        .historical = true,
     },
     // tools/ci/setup-baseline-runtime.sh and the fetches.
     {

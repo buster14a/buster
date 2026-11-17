@@ -480,6 +480,32 @@ the two rows' draws in one run never meet. Its verdict job, `Tests on Ubuntu
 native row's credit: `tools/ci/nightly.c`'s plain verdict and the merge queue's
 coverage read it, as they read an older run's native shards.
 
+**Drawn AVX-512 jobs** (#2924). Every other hosted job that builds the compiler
+for its runner's CPU, or runs code built for it, draws its runner the same way,
+through one reusable workflow, `.github/workflows/drawn.yml`, whose `row` input
+names the job: `regressions` (`build.yml`'s build regressions, whose post-link
+bake runs the compiler), `bootstrap` (`selfhost.yml`'s), `tier1-problem`
+(`tier1-problem.yml`'s, which compiles the allocator's sources with
+`-march=native`), `fuzz` (`9700x.yml`'s three campaigns, one pool of 3 items, an
+item a campaign: `f1` the frontend, `f2` the ELF override, `f3` the crash-replay
+proof) and `sqlite-full` (the native plain row's SQLite suite). The row is a
+row of `vector-draw.sh`'s table (`BUSTER_DRAW_ROW`), which gives its
+configuration and items; its artifacts, REST ledgers and job names are the
+row's (`fuzz-ATTEMPT-...`, `Vector draw 1, candidate 2 (fuzz)`), so they never
+meet a hosted row's or another job's. The draws are the rows': 3 candidates per
+item first (3, or 9 for the fuzz campaigns), then 4, 5 and 5 per item still
+missing, a collector each, and a verdict, `Vector row verdict (ROW)`, which is
+the job's credit. Its item sets no sanitizer: each job's own settings (the
+self-host bootstrap's, the campaigns' `address` and entry) are set once the
+item is taken, its steps run only for the candidate that holds it, and its
+evidence is the probe's CPU and its steps' pass, with no product or kernels'
+run. A job without a qualifying CPU after the last draw fails as incomplete,
+where before #2924 the self-host bootstrap skipped itself on such a runner and
+passed. The fuzz campaigns and SQLite's suite never run on a pull request, so
+their draws first run in a merge-queue candidate or the nightly; the others run
+on the pull requests whose paths their workflows list, which include
+`drawn.yml`, the draw's script and its probe.
+
 **The target.** `BUSTER_HOST_ARCH=vector` builds `-march=x86-64-v4 -maes
 -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg
 -mavx512vnni`, exactly `host_isa.h`'s predicate, never `native` or `znver5`;
@@ -511,8 +537,10 @@ candidate that probes is the one that works. Each draw starts generic
 candidates, which run the shards' own steps (`*row-steps`), each step gated on
 the item the candidate holds:
 
-1. **Probe**, before the checkout: a C probe, built by the image's `cc` with
-   the target's flags, whose `#if` is the predicate itself, asks
+1. **Probe**, before the checkout but the draw's own (the script and the
+   probe, by a sparse checkout of this commit): `tools/ci/vector-probe.c`,
+   built by `vector-draw.sh probe` with the image's `cc` and the target's
+   flags, whose `#if` is the predicate itself, asks
    `__builtin_cpu_supports` for `x86-64-v4` and each predicate feature. It
    reads what the OS enables too, so a VM that masks AVX-512 fails it, whatever
    its model. A probe that stops (a CPU without AVX2 may meet an instruction
@@ -631,7 +659,12 @@ row's bound, not a promise about unrelated workflows' consumption.
 The daily/full pool's twelve product consumers raise its first-attempt bound
 to 34. The native row (#2924), which runs outside pull requests, has no product
 consumers: its four collectors and two quota samples make at most 10, under its
-16-request bound (the formula's, which counts three product consumers). Job lists larger than their allowance remain unknown; they do not
+16-request bound (the formula's, which counts three product consumers). A drawn
+AVX-512 job (`drawn.yml`) has none either: at most 10, the fuzz campaigns'
+bound 14. So a pull request that runs the build regressions, the self-host
+bootstrap and Tier 1's problem interchange beside its vector row adds at most
+30, and a merge-queue candidate that calls all three and runs the campaigns
+beside its two rows makes at most 98 (34 + 10 + 14 + 30) in its first attempt. Job lists larger than their allowance remain unknown; they do not
 extend the budget or permit a partial list to establish that a job is absent.
 
 Failed-job and full reruns need additional job identity reads: the jobs API
@@ -848,7 +881,8 @@ on 2026-11-10). It works like this:
   - Its tests and fuzz campaigns don't start when the policy job fails.
   - Its first failing row cancels the other rows, and within a row its first
     failing shard or vector draw cancels the rest.
-  - Its first failing fuzz campaign cancels the other campaigns.
+  - Its first failing fuzz campaign cancels the other candidates of its draw
+    (`drawn.yml`'s draws fail fast), and with them the campaigns they hold.
   - Within a shard, its first failing command stops the shard (`parallel
     --fail-fast`, #2703): nothing more starts, and the commands beside it are
     killed.
@@ -894,11 +928,16 @@ on 2026-11-10). It works like this:
   - It requires the native plain row's verdict, exactly one, successful. A
     sharded row (a `native` sanitizer row, an `x86-64` row, a native row's
     shard) counts for nothing either way (#2032, #2924). It also requires the
-    vector pool's
-    verdict and each fuzz campaign to have completed successfully.
+    vector pool's verdict and the fuzz campaigns' verdict (`libFuzzer (ASan +
+    UBSan + leaks) / Vector row verdict (fuzz)`, which requires each campaign's
+    pass) to have completed successfully, each exactly once.
   - Each auxiliary workflow the selector named must have run at least one job,
-    and every job it ran must have succeeded. One the selector didn't name must
-    have run none. A missing list (no selector) fails.
+    and every job it ran must have succeeded, but the skipped jobs of its drawn
+    job's draws (`Vector draw ...`, the later draws when an earlier one held
+    the item). Its drawn job's verdict (`Vector row verdict (regressions)`,
+    `(bootstrap)` or `(tier1-problem)`) must have run once and succeeded. One
+    the selector didn't name must have run none. A missing list (no selector)
+    fails.
   - A missing, skipped, cancelled, failed or timed-out job fails it, and so do
     shard counts that disagree.
   - It reads the jobs up to three times, 15 s apart, since the API may not

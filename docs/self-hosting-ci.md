@@ -14,10 +14,15 @@ backstop for compiler changes that never touch the gate itself.
 
 The bootstrap job runs with `BUSTER_HOST_ARCH=native`, which qualifies the
 vector host path and needs the complete `host_isa.h` host vector feature set.
-Hosted CPU models vary, so the workflow checks the export `BUSTER_HOST_VECTOR`
-before building. A hosted runner without that path skips this bootstrap with a
-job warning and a **SKIPPED** entry in the step summary. The `x86-64` bootstrap
-of the baseline scalar host path (#1193) is gone with the scalar host (#2924).
+Hosted CPU models vary, so the bootstrap draws a runner that has it, as the
+hosted correctness rows do: it is `drawn.yml`'s `bootstrap` row, whose
+candidates probe their CPUs and whose collector gives the job to a qualifying
+one (#2924; [the CI guide](ci.md), "Drawn AVX-512 jobs"). The holder still
+checks that the staged official Clang selects `BUSTER_HOST_VECTOR` before
+building, and fails if it doesn't. No bootstrap is skipped any more: one
+without a qualifying CPU after the last draw fails its verdict as incomplete.
+The `x86-64` bootstrap of the baseline scalar host path (#1193) is gone with
+the scalar host (#2924).
 
 The inexpensive harness job runs regardless. The bootstrap uploads its own
 artifact, named by its `BUSTER_HOST_ARCH`.

@@ -39,8 +39,8 @@ nothing, since the queue tested it before it landed.
   It takes its own run-id concurrency group. Like a pull request's run, it
   stops at its first failure (the owner's choice on 2026-11-12):
   - its tests and fuzz campaigns wait for the policy job;
-  - its rows, shards, vector draws and fuzz campaigns fail fast, each within
-    its own matrix;
+  - its rows, shards, vector draws and the fuzz campaigns' draws fail fast,
+    each within its own matrix;
   - each shard stops at its first failing command (`parallel --fail-fast`,
     #2703), as a pull request's does;
   - once its test rows or fuzz campaigns have failed, `stop-tests` or
@@ -67,9 +67,11 @@ nothing, since the queue tested it before it landed.
   run's jobs and runs `nightly coverage --run RUN < FACTS`, which needs:
   - the native plain row's verdict (drawn since #2924);
   - the vector verdict;
-  - each fuzz campaign;
+  - the fuzz campaigns' verdict (they draw AVX-512 runners through
+    `drawn.yml`, #2924);
   - every job of each auxiliary workflow the selector named
-    (`--auxiliary "$AUXILIARY"`), and none of the others;
+    (`--auxiliary "$AUXILIARY"`), but its draws' skipped ones, and its drawn
+    job's one verdict; and none of the others;
 
   all completed and successful. `qualification.c` reads the step's outcome
   (`COVERAGE_RESULT`); no other event runs the step.

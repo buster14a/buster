@@ -348,141 +348,22 @@ jobs:
       hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
       performance: ${{ needs.changes.outputs.performance }}
 
+  # The fuzz campaigns: libFuzzer with ASan, UBSan and leaks, each of the frontend, the ELF import's override and the
+  # crash-replay proof. Each builds the compiler for its runner's CPU and runs it, so they draw AVX-512 runners as one
+  # pool of 3 items, one a campaign (drawn.yml's `fuzz` row, which holds their steps; #2924). Its verdict is the job
+  # the merge queue's coverage credits (tools/ci/nightly.c), and a failed campaign fails this call as its job did.
   fuzz:
-    name: libFuzzer (ASan + UBSan + leaks, ${{ matrix.entry }})
+    name: libFuzzer (ASan + UBSan + leaks)
     needs: [changes, evidence, prepare-hosted-tools]
     # Like the sanitizer rows, not on pull requests, nor in the `plain` scope.
     if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 45
-    strategy:
-      # A merge-queue candidate's first failing campaign cancels the others, as its test rows fail fast (#1430). The
-      # daily and dispatched runs, and pushes before the nightly mode, run every campaign to its end.
-      fail-fast: ${{ github.event_name == 'merge_group' }}
-      matrix:
-        include:
-          - entry: frontend
-            host_arch: native
-            source: src/buster/compiler/fuzz.c
-          - entry: elf-override
-            host_arch: native
-            source: tests/fuzz/entry_override.c
-          - entry: crash-replay-proof
-            host_arch: native
-            source: tests/fuzz/entry_probe.c
-    defaults:
-      run:
-        shell: bash
-    env:
-      BUSTER_HOST_ARCH: ${{ matrix.host_arch }}
-      BUSTER_SANITIZER: address
-      BUSTER_FUZZ_AVAILABLE: '1'
-      BUSTER_FUZZ_ENTRY: ${{ matrix.source }}
-      BUSTER_LINKER: lld
-    steps:
-      - name: Check out triggering commit
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Restore verified hosted release inputs
-        uses: ./.github/actions/hosted-tools
-        with:
-          artifact-name: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
-
-      - name: Install official Clang, sanitizer and libFuzzer runtimes
-        run: bash tools/ci/setup-hosted.sh
-
-      # Before the build, as in the sanitizer rows (#2060). It never fails the job.
-      - name: Report sanitizer host kernel, CPU, seccomp and ptrace state
-        continue-on-error: true
-        run: bash tools/ci/sanitizers.sh host
-
-      - name: Set fatal sanitizer policy and verify detectors
-        run: |
-          bash tools/ci/sanitizers.sh configure "$RUNNER_TEMP/sanitizer-reports"
-          bash tools/ci/sanitizers.sh probe "$RUNNER_TEMP/sanitizer-probes"
-
-      - name: Build the selected coverage-instrumented entry and check ordinary dispatch
-        run: |
-          ./build.sh --config Release
-          compiler=$(./build.sh print-output --config Release)
-          test build/compiler -ef "$compiler"
-          printf 'BUSTER_COMPILER=%s\n' "$compiler" >> "$GITHUB_ENV"
-          "$compiler" -fsyntax-only tests/fuzz/corpus/basic.c
-
-      - name: Fuzz the compiler with retained seeds and deterministic mutation seed
-        if: matrix.entry != 'crash-replay-proof'
-        run: |
-          mkdir -p "$RUNNER_TEMP/fuzz-corpus" "$RUNNER_TEMP/fuzz-artifacts"
-          cp tests/fuzz/corpus/* "$RUNNER_TEMP/fuzz-corpus/"
-          clang -c -march=x86-64 tests/fuzz/corpus/basic.c -o "$RUNNER_TEMP/fuzz-corpus/object.elf"
-          clang -shared -fPIC tests/fuzz/corpus/basic.c -o "$RUNNER_TEMP/fuzz-corpus/shared.elf"
-          runs=10000
-          if [ "$GITHUB_EVENT_NAME" = schedule ] || [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then runs=100000; fi
-          "$BUSTER_COMPILER" --fuzz -seed=133 -runs="$runs" -max_len=4096 -timeout=10 -rss_limit_mb=4096 \
-            -dict=tests/fuzz/c.dict -artifact_prefix="$RUNNER_TEMP/fuzz-artifacts/" \
-            "$RUNNER_TEMP/fuzz-corpus" 2>&1 | tee "$RUNNER_TEMP/fuzzer.log"
-          if [ '${{ matrix.entry }}' = elf-override ]; then
-            grep -Fq 'Buster fuzz entry: ELF import' "$RUNNER_TEMP/fuzzer.log"
-          fi
-
-      - name: Prove entry override, crash preservation and exact-input replay
-        if: matrix.entry == 'crash-replay-proof'
-        run: |
-          mkdir -p "$RUNNER_TEMP/fuzz-corpus" "$RUNNER_TEMP/fuzz-artifacts" "$RUNNER_TEMP/fuzz-replay" "$RUNNER_TEMP/fuzz-planted"
-          printf %s BUSTER_FUZZ_ENTRY_PROBE > "$RUNNER_TEMP/fuzz-corpus/trigger"
-          # The planted abort's stack traces go to reports of their own, each of which must be the probe's; the
-          # audit below still rejects any other diagnostic. configure writes log_path last, and the combined runtime
-          # takes it from whichever of these options it parses last.
-          planted() { env "ASAN_OPTIONS=${ASAN_OPTIONS%log_path=*}log_path=$RUNNER_TEMP/fuzz-planted/report" \
-              "UBSAN_OPTIONS=${UBSAN_OPTIONS%log_path=*}log_path=$RUNNER_TEMP/fuzz-planted/report" \
-              "LSAN_OPTIONS=${LSAN_OPTIONS%log_path=*}log_path=$RUNNER_TEMP/fuzz-planted/report" "$@"; }
-          status=0
-          planted "$BUSTER_COMPILER" --fuzz -seed=133 -runs=2 -artifact_prefix="$RUNNER_TEMP/fuzz-artifacts/" \
-            "$RUNNER_TEMP/fuzz-corpus" > "$RUNNER_TEMP/fuzzer.log" 2>&1 || status=$?
-          test "$status" -eq 77
-          grep -Fq 'libFuzzer: deadly signal' "$RUNNER_TEMP/fuzzer.log"
-          artifacts=("$RUNNER_TEMP/fuzz-artifacts/"crash-*)
-          test "${#artifacts[@]}" -eq 1
-          cmp "$RUNNER_TEMP/fuzz-corpus/trigger" "${artifacts[0]}"
-          status=0
-          planted "$BUSTER_COMPILER" --fuzz -runs=1 -artifact_prefix="$RUNNER_TEMP/fuzz-replay/" \
-            "${artifacts[0]}" > "$RUNNER_TEMP/fuzzer-replay.log" 2>&1 || status=$?
-          test "$status" -eq 77
-          grep -Fq 'libFuzzer: deadly signal' "$RUNNER_TEMP/fuzzer-replay.log"
-          reports=("$RUNNER_TEMP/fuzz-planted/"report.*)
-          test "${#reports[@]}" -eq 2
-          for report in "${reports[@]}"; do
-              grep -Fq 'in buster_fuzz_test_input' "$report"
-              grep -Fq 'tests/fuzz/entry_probe.c:' "$report"
-          done
-
-      - name: Reject every unexpected sanitizer diagnostic
-        if: ${{ !cancelled() }}
-        run: bash tools/ci/sanitizers.sh audit "$RUNNER_TEMP/sanitizer-reports"
-
-      - name: Preserve corpus, crash inputs, reports and the matching executable
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: libfuzzer-${{ matrix.entry }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/fuzz-corpus
-            ${{ runner.temp }}/fuzz-artifacts
-            ${{ runner.temp }}/fuzz-replay
-            ${{ runner.temp }}/fuzz-planted
-            ${{ runner.temp }}/fuzzer*.log
-            ${{ runner.temp }}/sanitizer-reports
-            ${{ runner.temp }}/sanitizer-probes
-            build/compiler
-            build/compile_commands.json
-            LICENSE
-            THIRD_PARTY_NOTICES.md
-            LICENSES/
-          if-no-files-found: error
-          retention-days: 14
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/drawn.yml
+    with:
+      row: fuzz
+      hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
 
   benchmarks:
     name: Native tests and benchmarks on Benchpress (Ryzen 7 9700X)
@@ -2084,6 +1965,10 @@ jobs:
     name: Auxiliary (build.yml)
     needs: [changes, policy]
     if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',build,') }}
+    # Its AVX-512 job draws its runner, whose collectors and candidates read the run's jobs (drawn.yml, #2924).
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/build.yml
 
   auxiliary-build-pgo:
@@ -2096,12 +1981,20 @@ jobs:
     name: Auxiliary (selfhost.yml)
     needs: [changes, policy]
     if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',selfhost,') }}
+    # Its AVX-512 job draws its runner, whose collectors and candidates read the run's jobs (drawn.yml, #2924).
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/selfhost.yml
 
   auxiliary-tier1-problem:
     name: Auxiliary (tier1-problem.yml)
     needs: [changes, policy]
     if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',tier1-problem,') }}
+    # Its AVX-512 job draws its runner, whose collectors and candidates read the run's jobs (drawn.yml, #2924).
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/tier1-problem.yml
 
   qualification:

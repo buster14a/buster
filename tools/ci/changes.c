@@ -35,8 +35,9 @@
 // --root (the repository by default), and checks the workflow's policies: the oracle cache's (changes_oracle_policy),
 // main's trigger and the hosted scope the evidence job decides (changes_main_policy), the hosted rows' workflow
 // (.github/workflows/hosted-correctness.yml, which the test job calls for each row: changes_row_policy) and its shards,
-// their list, their N and the counts the test job gives each row alike (changes_shard_policy), and the vector row's probe, target and claims against host_isa.h's
-// predicate and the build's flags (changes_vector_policy, #2033). The row workflow's steps are not the selector's: a
+// their list, their N and the counts the test job gives each row alike (changes_shard_policy), the vector row's probe
+// (tools/ci/vector-probe.c), target and claims against host_isa.h's predicate and the build's flags
+// (changes_vector_policy, #2033), and the AVX-512 jobs' draws (.github/workflows/drawn.yml: changes_drawn_policy, #2924). The row workflow's steps are not the selector's: a
 // change to that file runs the steps it gates on an output (the performance readers' qualification). The selector is CI
 // tooling outside the compile path and has no vector path: it reads a few hundred lines and files.
 //
@@ -68,9 +69,12 @@
 // configurations as one pool of items wherever the sanitizer rows run (not on a pull request, nor in the `plain` scope).
 #define BUSTER_CHANGES_HOST_ARCHES "        host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '[\"vector\"]' || '[\"native\"]') }}"
 #define BUSTER_CHANGES_VECTOR_ROWS "        include: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[]' || '[{\"host_arch\":\"vector\",\"sanitizer\":\"none address thread memory\",\"optimization\":3}]') }}"
-// The host predicate, the build's explicit vector target and the vector row's probe of it (changes_vector_policy).
+// The host predicate, the build's explicit vector target, the draws' probe of it and the script that builds the probe
+// (changes_vector_policy).
 #define BUSTER_CHANGES_HOST_ISA "src/buster/compiler/host_isa.h"
 #define BUSTER_CHANGES_SETTINGS "cmake/BusterSettings.cmake"
+#define BUSTER_CHANGES_PROBE "tools/ci/vector-probe.c"
+#define BUSTER_CHANGES_DRAW_SCRIPT "tools/ci/vector-draw.sh"
 
 typedef struct Text Text;
 struct Text
@@ -3216,15 +3220,23 @@ static bool changes_main_policy(Text workflow)
         // the aggregate requires them (tools/ci/qualification.c's qualification_evidence).
         { 3, "    name: CI glue fixtures" },
         { 3, "    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'" },
+        // Each auxiliary workflow by its job (7 build, 8 selfhost, 9 tier1-problem, 10 build-pgo); the three whose jobs
+        // draw AVX-512 runners (drawn.yml, #2924) grant the draws' job reads.
         { 7, "    uses: ./.github/workflows/build.yml" },
         { 7, "    if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',build,') }}" },
-        { 7, "    uses: ./.github/workflows/build-pgo.yml" },
-        { 7, "    if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',build-pgo,') }}" },
-        { 7, "    uses: ./.github/workflows/selfhost.yml" },
-        { 7, "    if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',selfhost,') }}" },
-        { 7, "    uses: ./.github/workflows/tier1-problem.yml" },
-        { 7, "    if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',tier1-problem,') }}" },
         { 7, "    needs: [changes, policy]" },
+        { 7, "      actions: read" },
+        { 10, "    uses: ./.github/workflows/build-pgo.yml" },
+        { 10, "    if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',build-pgo,') }}" },
+        { 10, "    needs: [changes, policy]" },
+        { 8, "    uses: ./.github/workflows/selfhost.yml" },
+        { 8, "    if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',selfhost,') }}" },
+        { 8, "    needs: [changes, policy]" },
+        { 8, "      actions: read" },
+        { 9, "    uses: ./.github/workflows/tier1-problem.yml" },
+        { 9, "    if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',tier1-problem,') }}" },
+        { 9, "    needs: [changes, policy]" },
+        { 9, "      actions: read" },
         { 4, "    needs: [changes, evidence, policy]" },
         { 4, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && ((github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.policy.result == 'success') }}" },
         { 4, "    uses: ./.github/workflows/prepare-hosted-tools.yml" },
@@ -3237,14 +3249,15 @@ static bool changes_main_policy(Text workflow)
         { 1, BUSTER_CHANGES_VECTOR_ROWS },
         { 1, "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}" },
         { 1, "        optimization: [3]" },
+        // The fuzz campaigns draw AVX-512 runners (#2924): drawn.yml's `fuzz` row, whose items are the campaigns
+        // (changes_drawn_policy keeps them, and their fail-fast, in that file).
         { 2, "    needs: [changes, evidence, prepare-hosted-tools]" },
-        { 2, "          artifact-name: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}" },
+        { 2, "      hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}" },
+        { 2, "    uses: ./.github/workflows/drawn.yml" },
+        { 2, "      row: fuzz" },
+        { 2, "      actions: read" },
+
         { 2, "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}" },
-        { 2, "      fail-fast: ${{ github.event_name == 'merge_group' }}" },
-        { 2, "          - entry: frontend" },
-        { 2, "          - entry: elf-override" },
-        { 2, "          - entry: crash-replay-proof" },
-        { 2, "          ref: ${{ github.sha }}" },
     };
     bool seen[sizeof(required) / sizeof(required[0])] = { false };
     bool valid = true;
@@ -3292,7 +3305,7 @@ static bool changes_main_policy(Text workflow)
             }
             else if (section == 3 && indent == 2)
             {
-                job = text_equal_c(line, "  test:") ? 1 : text_equal_c(line, "  fuzz:") ? 2 : text_equal_c(line, "  prepare-hosted-tools:") ? 4 : text_equal_c(line, "  changes:") ? 5 : text_equal_c(line, "  qualification:") ? 6 : text_starts_with(line, "  auxiliary-") ? 7 : 3;
+                job = text_equal_c(line, "  test:") ? 1 : text_equal_c(line, "  fuzz:") ? 2 : text_equal_c(line, "  prepare-hosted-tools:") ? 4 : text_equal_c(line, "  changes:") ? 5 : text_equal_c(line, "  qualification:") ? 6 : text_equal_c(line, "  auxiliary-build:") ? 7 : text_equal_c(line, "  auxiliary-selfhost:") ? 8 : text_equal_c(line, "  auxiliary-tier1-problem:") ? 9 : text_equal_c(line, "  auxiliary-build-pgo:") ? 10 : 3;
             }
             const uint32_t current = section == 2 ? 0 : section == 3 ? job : 3;
             for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
@@ -3466,12 +3479,13 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
         { "  fuzz:", "needs.prepare-hosted-tools.result == 'success' && ", "", "fuzzing bypasses preparation failure" },
         { "  fuzz:", "needs.prepare-hosted-tools.result == 'success'", "needs.prepare-hosted-tools.result != 'failure'", "fuzzing accepts skipped preparation" },
         { "  fuzz:", "    needs: [changes, evidence, prepare-hosted-tools]", "    needs: [changes, evidence]", "fuzzing omits preparation dependency" },
-        { "  fuzz:", "      fail-fast: ${{ github.event_name == 'merge_group' }}", "      fail-fast: true", "fuzz campaign cancellation" },
-        { "  fuzz:", "      fail-fast: ${{ github.event_name == 'merge_group' }}", "      fail-fast: false", "a candidate's fuzz campaigns don't fail fast" },
-        { "  fuzz:", "          - entry: frontend", "          - entry: removed", "missing frontend fuzzing" },
-        { "  fuzz:", "          - entry: elf-override", "          - entry: removed", "missing ELF fuzzing" },
-        { "  fuzz:", "          - entry: crash-replay-proof", "          - entry: removed", "missing replay proof" },
-        { "  fuzz:", "          ref: ${{ github.sha }}", "          ref: main", "moving fuzz revision" },
+        { "  fuzz:", "      row: fuzz", "      row: regressions", "the fuzz campaigns replaced by another drawn job" },
+        { "  fuzz:", "    uses: ./.github/workflows/drawn.yml", "    uses: ./.github/workflows/absent.yml", "missing fuzz workflow" },
+        { "  fuzz:", "      hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}", "      hosted-tools: ''", "fuzzing without the verified preparation" },
+        { "  fuzz:", "      actions: read\n", "", "fuzz draws that can't read the run's jobs" },
+        { "  auxiliary-selfhost:", "      actions: read\n", "      actions: none\n", "auxiliary draws that can't read the run's jobs" },
+        { "  auxiliary-build:", "      actions: read\n", "", "the build's regressions' draws that can't read the run's jobs" },
+        { "  auxiliary-tier1-problem:", "      actions: read\n", "", "Tier 1's problem interchange's draws that can't read the run's jobs" },
     };
     const char* original = text_terminated(workflow);
     for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
@@ -3761,33 +3775,106 @@ static Text changes_feature_name(Text macro)
     return name;
 }
 
-// The vector row (#2033; docs/ci.md, "The vector row"). Its probe and the build's explicit vector target must be
-// host_isa.h's predicate: the probe's #if names the predicate's macros, in its order; it asks __builtin_cpu_supports for
-// x86-64-v4 and then each macro's feature, in that order, each on a line that prints the name it asks for; and it is
-// built with the flags that cmake/BusterSettings.cmake gives BUSTER_HOST_ARCH=vector, character for character. A
+// How many times `needle` occurs in `text`.
+static uint32_t changes_count(const char* text, const char* needle)
+{
+    uint32_t count = 0;
+    for (const char* at = strstr(text, needle); at != NULL; at = strstr(at + 1, needle))
+    {
+        count += 1;
+    }
+    return count;
+}
+
+// A drawn workflow's draws (tools/ci/vector-draw.sh; docs/ci.md, "The vector row"): the hosted correctness rows'
+// (hosted-correctness.yml) and the AVX-512 jobs' (drawn.yml, #2924) alike. Its candidates fetch the draw's script and
+// probe from this commit first, then probe (`vector-draw.sh probe`), publish the verdict, take only what their draw's
+// collector assigns, which one job publishes once; the draws' records are this run attempt's and never overwrite one
+// another; the first draw holds the candidates' steps (ANCHOR), the other three reuse them, and each of the 4 draws has
+// its collector, whose steps the first's are; the verdict waits for every draw and collector, even after a failure, and
+// reads every attempt's records (PATTERN). Polling steps run inside the runtime action (#2309), and every candidate and
+// collector publishes its REST ledger (named by LEDGER, this attempt's) even after a failure; artifact polling never
+// falls back to the repository REST API.
+static bool changes_draw_scaffold(const char* text, const char* anchor, const char* ledger, const char* pattern)
+{
+    static const char* const required[] = {
+        "\n      - name: Fetch the vector draw's script from this commit\n        uses: actions/checkout@",
+        "\n      - name: Probe this runner's CPU for the explicit vector target\n        id: probe\n        run: bash .vector-draw-script/tools/ci/vector-draw.sh probe \"$BUSTER_DRAW_LEVEL\" \"$BUSTER_DRAW_CANDIDATE\"\n",
+        "\n          name: ${{ steps.probe.outputs.prefix }}-probe-${{ env.BUSTER_DRAW_LEVEL }}-${{ env.BUSTER_DRAW_CANDIDATE }}-${{ steps.probe.outputs.verdict == 'qualified' && 'yes' || 'no' }}\n",
+        "\n      - name: Take the vector item the draw assigns, or end as a redraw\n        uses: ./.vector-draw-script/.github/actions/vector-runtime\n",
+        "\n            bash \"$RUNNER_TEMP/vector-draw.sh\" take \"$BUSTER_DRAW_LEVEL\" \"$BUSTER_DRAW_CANDIDATE\" \"$VERDICT\" \"$RUNNER_TEMP/vector-draw/record\"\n",
+        "\n      - name: Assign the draw's vector items to its qualifying candidates by rank\n        id: assign\n        uses: ./.vector-draw-script/.github/actions/vector-runtime\n",
+        "\n            bash \"$RUNNER_TEMP/vector-draw.sh\" assign \"$BUSTER_DRAW_LEVEL\" \"$BUSTER_DRAW_CANDIDATES\" \"$BUSTER_DRAW_NEXT\"\n",
+        "\n          name: ${{ steps.assign.outputs.name }}\n          path: ${{ runner.temp }}/vector-assignment\n          overwrite: false\n",
+        "\n      - name: Record the vector candidate's REST requests\n        if: ${{ always() }}\n",
+        "\n      - name: Record the vector collector's REST requests\n        if: always()\n",
+        "\n          bash \"$RUNNER_TEMP/vector-draw.sh\" verdict \"$RUNNER_TEMP/vector-records\"\n",
+        "\n    steps: &collect-steps\n",
+        "\n    needs: [draw-1, collect-1, draw-2, collect-2, draw-3, collect-3, draw-4, collect-4]\n    if: ${{ !cancelled() }}\n",
+        "\n      BUSTER_DRAW_NEXT: '0'\n    steps: *collect-steps\n",
+    };
+    bool valid = true;
+    for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
+    {
+        valid = valid && strstr(text, required[i]) != NULL;
+    }
+    char line[512];
+    snprintf(line, sizeof(line), "\n          name: %s-${{ github.run_attempt }}-rest-draw-${{ env.BUSTER_DRAW_LEVEL }}-${{ env.BUSTER_DRAW_CANDIDATE }}\n          path: ${{ runner.temp }}/vector-rest/*.tsv\n          overwrite: false\n          if-no-files-found: ignore\n", ledger);
+    valid = valid && strstr(text, line) != NULL;
+    snprintf(line, sizeof(line), "\n          name: %s-${{ github.run_attempt }}-rest-collect-${{ env.BUSTER_DRAW_LEVEL }}\n          path: ${{ runner.temp }}/vector-rest/*.tsv\n          overwrite: false\n          if-no-files-found: ignore\n", ledger);
+    valid = valid && strstr(text, line) != NULL;
+    snprintf(line, sizeof(line), "\n          pattern: %s\n", pattern);
+    valid = valid && strstr(text, line) != NULL;
+    // The candidates' checkout holds the probe, the collectors' doesn't need it, and the helper stays for the whole
+    // polling step; no workflow may restore REST artifact polls.
+    valid = valid && changes_count(text, "\n          sparse-checkout: |\n            tools/ci/vector-draw.sh\n            tools/ci/vector-probe.c\n            .github/actions/vector-runtime\n") == 1;
+    valid = valid && changes_count(text, "\n          sparse-checkout: |\n            tools/ci/vector-draw.sh\n            .github/actions/vector-runtime\n") == 1;
+    valid = valid && strstr(text, "/artifacts?") == NULL && strstr(text, "application/vnd.github.raw") == NULL;
+    valid = valid && strstr(text, "\n            rm -rf -- \"$GITHUB_WORKSPACE/.vector-draw-script\"") == NULL;
+    // The probe before the verdict's publication, which is before the take.
+    const char* fetch = strstr(text, "\n      - name: Fetch the vector draw's script from this commit\n");
+    const char* probe = strstr(text, "\n      - name: Probe this runner's CPU for the explicit vector target\n");
+    const char* publish = strstr(text, "\n      - name: Publish the probe's verdict\n");
+    const char* take = strstr(text, "\n      - name: Take the vector item the draw assigns, or end as a redraw\n");
+    valid = valid && fetch != NULL && probe != NULL && publish != NULL && take != NULL && fetch < probe && probe < publish && publish < take;
+    snprintf(line, sizeof(line), "\n    steps: &%s\n", anchor);
+    const uint32_t first = changes_count(text, line);
+    snprintf(line, sizeof(line), "\n    steps: *%s\n", anchor);
+    const uint32_t draws = first + changes_count(text, line);
+    const uint32_t collectors = changes_count(text, "\n    steps: *collect-steps\n");
+    uint32_t records = 0;
+    for (const char* record = strstr(text, "outputs.prefix }}-"); valid && record != NULL; record = strstr(record + 1, "outputs.prefix }}-"))
+    {
+        const char* next = strstr(record, "\n      - ");
+        const char* overwrite = strstr(record, "\n          overwrite: false\n");
+        valid = overwrite != NULL && (next == NULL || overwrite < next);
+        records += 1;
+    }
+    return valid && first == 1 && draws == 4 && collectors == 3 && records >= 3;
+}
+
+// The vector row (#2033; docs/ci.md, "The vector row"). Its probe (tools/ci/vector-probe.c) and the build's explicit
+// vector target must be host_isa.h's predicate: the probe's #if names the predicate's macros, in its order; it asks
+// __builtin_cpu_supports for x86-64-v4 and then each macro's feature, in that order, each on a line that prints the name
+// it asks for; and the draw's script (tools/ci/vector-draw.sh) builds it with the flags that cmake/BusterSettings.cmake
+// gives BUSTER_HOST_ARCH=vector, character for character, and names its records by the row and this run attempt. A
 // feature added to the predicate without the probe, or flags changed in one place alone, fail here, before a runner
-// could pass a CPU the build's code doesn't run on. The draws' records and the configurations' products are this run
-// attempt's (the prefixes' GITHUB_RUN_ATTEMPT) and never overwrite one another; candidates take only what their draw's
-// collector assigns (tools/ci/vector-draw.sh take), which one job publishes once (assign); the draws run the shards' own
-// steps (`*row-steps`) and each of the 4 draws has its collector; an item's configuration is checked after the take
-// set it; and the verdict waits for every draw and collector, even after a failure, and reads every attempt's records.
-// Polling steps run inside the runtime action (#2309), builders publish their terminal marker after the product step,
-// and every candidate and collector publishes its REST ledger even after a failure. Artifact polling never falls
-// back to the repository REST API.
+// could pass a CPU the build's code doesn't run on. The row's draws are changes_draw_scaffold's; an item's configuration
+// is checked after the take set it; builders publish their terminal marker after the product step.
 // This pins the repository's spelling, as the other policies do; tests/ci/vector-draw.sh tests the script.
-static bool changes_vector_policy(Text row, Text host_isa, Text settings)
+static bool changes_vector_policy(Text row, Text host_isa, Text settings, Text probe_source, Text script)
 {
     const TextList predicate = changes_predicate_macros(host_isa, "#if ");
-    const TextList probe = changes_predicate_macros(row, "          #if !(");
+    const TextList probe = changes_predicate_macros(probe_source, "#if !(");
     bool valid = predicate.count != 0 && predicate.count == probe.count;
     for (uint32_t i = 0; valid && i < predicate.count; i += 1)
     {
         valid = text_equal(predicate.items[i], probe.items[i]);
     }
     // The probe's questions, in order: x86-64-v4, then the predicate's features.
-    const char* text = text_terminated(row);
+    const char* probe_text = text_terminated(probe_source);
     static const char ask[] = "__builtin_cpu_supports(\"";
-    const char* at = strstr(text, ask);
+    const char* at = strstr(probe_text, ask);
     uint32_t asked = 0;
     while (valid && at != NULL)
     {
@@ -3796,14 +3883,15 @@ static bool changes_vector_policy(Text row, Text host_isa, Text settings)
         const Text feature = close != NULL ? (Text){ .data = name, .length = (size_t)(close - name) } : (Text){ 0 };
         const Text expected = asked == 0 ? text_c("x86-64-v4") : asked <= predicate.count ? changes_feature_name(predicate.items[asked - 1]) : (Text){ 0 };
         char line[256];
-        snprintf(line, sizeof(line), "\n              qualified &= probe_feature(\"%.*s\", __builtin_cpu_supports(\"%.*s\"));\n",
+        snprintf(line, sizeof(line), "\n    qualified &= probe_feature(\"%.*s\", __builtin_cpu_supports(\"%.*s\"));\n",
                  (int)feature.length, feature.data, (int)feature.length, feature.data);
-        valid = close != NULL && expected.length != 0 && text_equal(feature, expected) && strstr(text, line) != NULL;
+        valid = close != NULL && expected.length != 0 && text_equal(feature, expected) && strstr(probe_text, line) != NULL;
         asked += 1;
         at = strstr(name, ask);
     }
     valid = valid && asked == predicate.count + 1;
     // The build's vector flags, on the line after its `vector` test, and the probe's build with the same.
+    const char* script_text = text_terminated(script);
     static const char test[] = "\n    if(arch STREQUAL \"vector\")\n        set(host_flags ";
     const char* settings_text = text_terminated(settings);
     const char* flags = strstr(settings_text, test);
@@ -3814,73 +3902,42 @@ static bool changes_vector_policy(Text row, Text host_isa, Text settings)
     {
         const int length = (int)(end - (flags + sizeof(test) - 1));
         char build[1024];
-        snprintf(build, sizeof(build), "\n          cc -std=c17 -O2 -Wall -Wextra -Werror %.*s \"$draw/probe.c\" -o \"$draw/probe\"\n",
+        snprintf(build, sizeof(build), "\n    cc -std=c17 -O2 -Wall -Wextra -Werror %.*s \"$source\" -o \"$draw/probe\"\n",
                  length, flags + sizeof(test) - 1);
-        valid = strstr(text, build) != NULL;
+        valid = changes_count(script_text, build) == 1 && changes_count(script_text, "\n    cc ") == 1;
     }
+    // The script's records: the row's or the job's, and this attempt's.
+    static const char* const named[] = {
+        "\n    prefix=\"$row_arch-O$optimization\"\n",
+        "\n    prefix=$draw_row\n",
+        "\n        printf 'prefix=%s-%s\\n' \"$prefix\" \"$attempt\"\n",
+        "\n        printf 'product=%s-%s\\n' \"$product_prefix\" \"$attempt\"\n",
+    };
+    for (uint32_t i = 0; i < sizeof(named) / sizeof(named[0]); i += 1)
+    {
+        valid = valid && strstr(script_text, named[i]) != NULL;
+    }
+    const char* text = text_terminated(row);
     static const char* const required[] = {
-        "\n          printf 'prefix=%s-O%s-%s\\n' \"$BUSTER_HOST_ARCH\" \"$BUSTER_SANITIZER_OPTIMIZATION\" \"$GITHUB_RUN_ATTEMPT\" >> \"$GITHUB_OUTPUT\"\n",
-        "\n          printf 'product=vector-product-O%s-%s\\n' \"$BUSTER_SANITIZER_OPTIMIZATION\" \"$GITHUB_RUN_ATTEMPT\" >> \"$GITHUB_OUTPUT\"\n",
         "\n          case \" $BUSTER_VECTOR_CONFIGURATIONS \" in\n              *\" $BUSTER_SANITIZER \"*) ;;\n",
         "\n          test \"${BUSTER_VECTOR_ITEM:0:1}\" = \"${BUSTER_SANITIZER:0:1}\"\n          test \"${BUSTER_VECTOR_ITEM:1}\" = \"$BUSTER_SHARD\"\n",
-        "\n          name: ${{ steps.probe.outputs.prefix }}-probe-${{ env.BUSTER_DRAW_LEVEL }}-${{ env.BUSTER_DRAW_CANDIDATE }}-${{ steps.probe.outputs.verdict == 'qualified' && 'yes' || 'no' }}\n",
-        "\n      - name: Take the vector item the draw assigns, or end as a redraw\n        uses: ./.vector-draw-script/.github/actions/vector-runtime\n",
-        "\n            bash \"$RUNNER_TEMP/vector-draw.sh\" take \"$BUSTER_DRAW_LEVEL\" \"$BUSTER_DRAW_CANDIDATE\" \"$VERDICT\" \"$RUNNER_TEMP/vector-draw/record\"\n",
-        "\n      - name: Assign the draw's vector items to its qualifying candidates by rank\n        id: assign\n        uses: ./.vector-draw-script/.github/actions/vector-runtime\n",
-        "\n            bash \"$RUNNER_TEMP/vector-draw.sh\" assign \"$BUSTER_DRAW_LEVEL\" \"$BUSTER_DRAW_CANDIDATES\" \"$BUSTER_DRAW_NEXT\"\n",
         "\n      - name: Wait for the vector configuration's product\n        id: product\n        if: env.BUSTER_SHARD != '' && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER != '1'\n        uses: ./.github/actions/vector-runtime\n",
         "\n          script: bash tools/ci/vector-draw.sh product \"$BUSTER_SANITIZER\"\n",
-        "\n          name: ${{ steps.assign.outputs.name }}\n          path: ${{ runner.temp }}/vector-assignment\n          overwrite: false\n",
         "\n      - name: Record that the vector builder has finished publishing\n        if: ${{ always() && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER == '1' }}\n",
         "\n          name: ${{ steps.probe.outputs.prefix }}-builder-${{ env.BUSTER_SANITIZER }}-ended\n          path: ${{ runner.temp }}/vector-draw/record\n          overwrite: false\n",
-        "\n      - name: Record the vector candidate's REST requests\n        if: ${{ always() }}\n",
-        "\n          name: ${{ inputs.host_arch }}-O${{ inputs.optimization }}-${{ github.run_attempt }}-rest-draw-${{ env.BUSTER_DRAW_LEVEL }}-${{ env.BUSTER_DRAW_CANDIDATE }}\n          path: ${{ runner.temp }}/vector-rest/*.tsv\n          overwrite: false\n          if-no-files-found: ignore\n",
-        "\n      - name: Record the vector collector's REST requests\n        if: always()\n",
-        "\n          name: ${{ inputs.host_arch }}-O${{ inputs.optimization }}-${{ github.run_attempt }}-rest-collect-${{ env.BUSTER_DRAW_LEVEL }}\n          path: ${{ runner.temp }}/vector-rest/*.tsv\n          overwrite: false\n          if-no-files-found: ignore\n",
-        "\n          bash \"$RUNNER_TEMP/vector-draw.sh\" verdict \"$RUNNER_TEMP/vector-records\"\n",
-        "\n          pattern: ${{ inputs.host_arch }}-O${{ inputs.optimization }}-*\n",
-        "\n    steps: &row-steps\n",
-        "\n    steps: &collect-steps\n",
-        "\n    needs: [draw-1, collect-1, draw-2, collect-2, draw-3, collect-3, draw-4, collect-4]\n    if: ${{ !cancelled() }}\n",
         "\n          if [ \"$path\" != vector ]; then\n",
     };
     for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
     {
         valid = valid && strstr(text, required[i]) != NULL;
     }
-    uint32_t runtime_checkouts = 0;
-    static const char runtime_checkout[] = "\n          sparse-checkout: |\n            tools/ci/vector-draw.sh\n            .github/actions/vector-runtime\n";
-    for (const char* checkout = strstr(text, runtime_checkout); checkout != NULL; checkout = strstr(checkout + 1, runtime_checkout))
-    {
-        runtime_checkouts += 1;
-    }
-    // The helper must remain available for the whole polling step, and no workflow may restore REST artifact polls.
-    valid = valid && runtime_checkouts == 2 && strstr(text, "/artifacts?") == NULL && strstr(text, "application/vnd.github.raw") == NULL;
-    valid = valid && strstr(text, "\n            rm -rf -- \"$GITHUB_WORKSPACE/.vector-draw-script\"") == NULL;
+    valid = valid && changes_draw_scaffold(text, "row-steps", "${{ inputs.host_arch }}-O${{ inputs.optimization }}", "${{ inputs.host_arch }}-O${{ inputs.optimization }}-*");
     const char* builder_marker = strstr(text, "\n      - name: Record that the vector builder has finished publishing\n");
     const char* product_upload = strstr(text, "\n      - name: Publish the product to the configuration's other items\n");
     const char* kernels = strstr(text, "\n      - name: Confirm the vector kernels run on this CPU\n");
     valid = valid && product_upload != NULL && builder_marker != NULL && kernels != NULL && product_upload < builder_marker && builder_marker < kernels;
-    // The first draw holds every row's steps (#2924: no row has shards), the other three reuse them, and each collector
-    // the first's; every vector record refuses to overwrite one.
-    uint32_t draws = strstr(text, "\n  draw-1:\n") != NULL && strstr(text, "\n  shards:\n") == NULL ? 1 : 0;
-    for (const char* step = strstr(text, "\n    steps: *row-steps\n"); step != NULL; step = strstr(step + 1, "\n    steps: *row-steps\n"))
-    {
-        draws += 1;
-    }
-    uint32_t collectors = 0;
-    for (const char* step = strstr(text, "\n    steps: *collect-steps\n"); step != NULL; step = strstr(step + 1, "\n    steps: *collect-steps\n"))
-    {
-        collectors += 1;
-    }
-    uint32_t records = 0;
-    for (const char* record = strstr(text, "outputs.prefix }}-"); valid && record != NULL; record = strstr(record + 1, "outputs.prefix }}-"))
-    {
-        const char* next = strstr(record, "\n      - ");
-        const char* overwrite = strstr(record, "\n          overwrite: false\n");
-        valid = overwrite != NULL && (next == NULL || overwrite < next);
-        records += 1;
-    }
+    // The first draw holds every row's steps (#2924: no row has shards).
+    valid = valid && strstr(text, "\n  draw-1:\n") != NULL && strstr(text, "\n  shards:\n") == NULL;
     uint32_t products = 0;
     for (const char* product = strstr(text, "outputs.product }}-"); valid && product != NULL; product = strstr(product + 1, "outputs.product }}-"))
     {
@@ -3889,12 +3946,12 @@ static bool changes_vector_policy(Text row, Text host_isa, Text settings)
         valid = overwrite != NULL && (next == NULL || overwrite < next);
         products += 1;
     }
-    return valid && draws == 4 && collectors == 3 && records == 4 && products == 1;
+    return valid && products == 1;
 }
 
-static void changes_test_vector_policy(ChangesTest* test, Text row, Text host_isa, Text settings)
+static void changes_test_vector_policy(ChangesTest* test, Text row, Text host_isa, Text settings, Text probe, Text script)
 {
-    changes_expect(test, changes_vector_policy(row, host_isa, settings), "vector policy: the probe and the build's vector target are host_isa.h's predicate; items assigned per attempt", (Text){ 0 });
+    changes_expect(test, changes_vector_policy(row, host_isa, settings, probe, script), "vector policy: the probe and the build's vector target are host_isa.h's predicate; items assigned per attempt", (Text){ 0 });
     static const struct
     {
         uint32_t file;
@@ -3904,21 +3961,25 @@ static void changes_test_vector_policy(ChangesTest* test, Text row, Text host_is
     } mutants[] = {
         { 1, "defined(__AVX512VNNI__) && ", "defined(__AVX512VNNI__) && defined(__AVX512IFMA__) && ", "a predicate feature the probe lacks" },
         { 1, "defined(__XSAVE__)", "defined(__XSAVE__) && defined(__SHA__)", "a predicate feature at the end the probe lacks" },
-        { 0, "defined(__GFNI__) && ", "", "a probe #if without a predicate feature" },
-        { 0, "              qualified &= probe_feature(\"gfni\", __builtin_cpu_supports(\"gfni\"));\n", "", "a probe that doesn't ask for a feature" },
-        { 0, "              qualified &= probe_feature(\"x86-64-v4\", __builtin_cpu_supports(\"x86-64-v4\"));\n", "", "a probe that doesn't ask for x86-64-v4" },
-        { 0, "probe_feature(\"vaes\", __builtin_cpu_supports(\"vaes\"))", "probe_feature(\"vaes\", __builtin_cpu_supports(\"aes\"))", "a probe that asks for another feature than it prints" },
-        { 0, "probe_feature(\"sse4.1\", __builtin_cpu_supports(\"sse4.1\"))", "probe_feature(\"sse4.2\", __builtin_cpu_supports(\"sse4.2\"))", "a probe that asks for a feature the predicate doesn't name" },
+        { 3, "defined(__GFNI__) && ", "", "a probe #if without a predicate feature" },
+        { 3, "    qualified &= probe_feature(\"gfni\", __builtin_cpu_supports(\"gfni\"));\n", "", "a probe that doesn't ask for a feature" },
+        { 3, "    qualified &= probe_feature(\"x86-64-v4\", __builtin_cpu_supports(\"x86-64-v4\"));\n", "", "a probe that doesn't ask for x86-64-v4" },
+        { 3, "probe_feature(\"vaes\", __builtin_cpu_supports(\"vaes\"))", "probe_feature(\"vaes\", __builtin_cpu_supports(\"aes\"))", "a probe that asks for another feature than it prints" },
+        { 3, "probe_feature(\"sse4.1\", __builtin_cpu_supports(\"sse4.1\"))", "probe_feature(\"sse4.2\", __builtin_cpu_supports(\"sse4.2\"))", "a probe that asks for a feature the predicate doesn't name" },
         { 2, "-mavx512bitalg -mavx512vnni)", "-mavx512bitalg -mavx512vnni -mavx512ifma)", "build flags the probe isn't built with" },
-        { 0, "-mavx512bitalg -mavx512vnni \"$draw/probe.c\"", "-mavx512bitalg \"$draw/probe.c\"", "a probe built without a flag of the build's" },
+        { 4, "-mavx512bitalg -mavx512vnni \"$source\"", "-mavx512bitalg \"$source\"", "a probe built without a flag of the build's" },
+        { 4, "    cc -std=c17 -O2 -Wall -Wextra -Werror -march=x86-64-v4 ", "    cc -std=c17 -O2 -Wall -Wextra -Werror -march=x86-64-v4 -mno-avx512f -march=x86-64-v4 ", "a probe built with flags beside the build's" },
         { 2, "set(host_flags -march=x86-64-v4 ", "set(host_flags -march=znver5 ", "a vector target of one CPU model" },
-        { 0, "'prefix=%s-O%s-%s\\n' \"$BUSTER_HOST_ARCH\" \"$BUSTER_SANITIZER_OPTIMIZATION\" \"$GITHUB_RUN_ATTEMPT\"", "'prefix=%s-O%s-%s\\n' \"$BUSTER_HOST_ARCH\" \"$BUSTER_SANITIZER_OPTIMIZATION\" 1", "records shared between attempts" },
-        { 0, "'prefix=%s-O%s-%s\\n' \"$BUSTER_HOST_ARCH\" \"$BUSTER_SANITIZER_OPTIMIZATION\" \"$GITHUB_RUN_ATTEMPT\"", "'prefix=vector-O%s-%s\\n' \"$BUSTER_SANITIZER_OPTIMIZATION\" \"$GITHUB_RUN_ATTEMPT\"", "rows sharing their records" },
-        { 0, "'product=vector-product-O%s-%s\\n' \"$BUSTER_SANITIZER_OPTIMIZATION\" \"$GITHUB_RUN_ATTEMPT\"", "'product=vector-product-O%s-%s\\n' \"$BUSTER_SANITIZER_OPTIMIZATION\" 1", "products shared between attempts" },
+        { 4, "        printf 'prefix=%s-%s\\n' \"$prefix\" \"$attempt\"\n", "        printf 'prefix=%s-1\\n' \"$prefix\"\n", "records shared between attempts" },
+        { 4, "    prefix=\"$row_arch-O$optimization\"\n", "    prefix=\"vector-O$optimization\"\n", "rows sharing their records" },
+        { 4, "    prefix=$draw_row\n", "    prefix=vector-O3\n", "jobs sharing a row's records" },
+        { 4, "        printf 'product=%s-%s\\n' \"$product_prefix\" \"$attempt\"\n", "        printf 'product=%s-1\\n' \"$product_prefix\"\n", "products shared between attempts" },
         { 0, "-${{ steps.pack.outputs.digest }}\n          path: ${{ runner.temp }}/vector-product/product.tar.zst\n          compression-level: 0\n          overwrite: false", "-${{ steps.pack.outputs.digest }}\n          path: ${{ runner.temp }}/vector-product/product.tar.zst\n          compression-level: 0\n          overwrite: true", "a product that overwrites another" },
         { 0, "          test \"${BUSTER_VECTOR_ITEM:1}\" = \"$BUSTER_SHARD\"\n", "", "an item's shard unchecked" },
         { 0, "      BUSTER_DRAW_NEXT: '0'\n    steps: *collect-steps\n", "      BUSTER_DRAW_NEXT: '0'\n    steps: []\n", "a last draw without its collector" },
         { 0, "-${{ steps.probe.outputs.verdict == 'qualified' && 'yes' || 'no' }}", "-yes", "a verdict published as qualified whatever the probe found" },
+        { 0, "        run: bash .vector-draw-script/tools/ci/vector-draw.sh probe \"$BUSTER_DRAW_LEVEL\" \"$BUSTER_DRAW_CANDIDATE\"\n", "        run: echo 'verdict=qualified' >> \"$GITHUB_OUTPUT\"\n", "a candidate that doesn't probe" },
+        { 0, "            tools/ci/vector-draw.sh\n            tools/ci/vector-probe.c\n", "            tools/ci/vector-draw.sh\n", "a candidate's checkout without the probe" },
         { 0, "            bash \"$RUNNER_TEMP/vector-draw.sh\" take ", "            true ", "candidates that take an item without an assignment" },
         { 0, "        uses: ./.vector-draw-script/.github/actions/vector-runtime", "        uses: ./unrelated-action", "a candidate without runtime artifact polling" },
         { 0, "        id: assign\n        uses: ./.vector-draw-script/.github/actions/vector-runtime", "        id: assign\n        uses: ./unrelated-action", "a collector without runtime artifact polling" },
@@ -3945,10 +4006,88 @@ static void changes_test_vector_policy(ChangesTest* test, Text row, Text host_is
     for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
     {
         bool found = false;
-        const Text original = mutants[i].file == 0 ? row : mutants[i].file == 1 ? host_isa : settings;
-        const Text changed = changes_mutant(original, NULL, mutants[i].before, mutants[i].after, &found);
-        const bool valid = changes_vector_policy(mutants[i].file == 0 ? changed : row, mutants[i].file == 1 ? changed : host_isa, mutants[i].file == 2 ? changed : settings);
+        const Text files[] = { row, host_isa, settings, probe, script };
+        const Text changed = changes_mutant(files[mutants[i].file], NULL, mutants[i].before, mutants[i].after, &found);
+        const bool valid = changes_vector_policy(mutants[i].file == 0 ? changed : row, mutants[i].file == 1 ? changed : host_isa, mutants[i].file == 2 ? changed : settings,
+                                                 mutants[i].file == 3 ? changed : probe, mutants[i].file == 4 ? changed : script);
         changes_expect(test, found && !valid, "vector policy rejects a probe, target or assignment out of step", text_c(mutants[i].name));
+    }
+}
+
+// The AVX-512 jobs' draws (.github/workflows/drawn.yml, #2924): its draws are changes_draw_scaffold's; its first draw
+// has 3 candidates per item (9 for the fuzz campaigns' 3, which tools/ci/vector-draw.sh's table names, 3 otherwise), and
+// every draw and collector of a job fails fast where its job's workflow did; the fuzz campaigns are the items' shards
+// 1 to 3, the frontend, the ELF import's override and the crash-replay proof; each job's own steps, between the
+// draw's record and the item's evidence, run only for a candidate that took an item; and its ledgers and verdict are
+// the job's row's.
+#define BUSTER_CHANGES_DRAWN_WORKFLOW ".github/workflows/drawn.yml"
+static bool changes_drawn_policy(Text drawn, Text script)
+{
+    const char* text = text_terminated(drawn);
+    static const char* const required[] = {
+        "\n        candidate: ${{ fromJSON(inputs.row == 'fuzz' && '[1, 2, 3, 4, 5, 6, 7, 8, 9]' || '[1, 2, 3]') }}\n",
+        "\n      BUSTER_DRAW_CANDIDATES: ${{ inputs.row == 'fuzz' && '9' || '3' }}\n",
+        "\n                  entries=(frontend elf-override crash-replay-proof)\n",
+        "\n                  sources=(src/buster/compiler/fuzz.c tests/fuzz/entry_override.c tests/fuzz/entry_probe.c)\n",
+        "\n  BUSTER_DRAW_ROW: ${{ inputs.row }}\n",
+        "\n          ref: ${{ github.sha }}\n          persist-credentials: false\n",
+    };
+    bool valid = changes_draw_scaffold(text, "job-steps", "${{ inputs.row }}", "${{ inputs.row }}-*");
+    for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
+    {
+        valid = valid && strstr(text, required[i]) != NULL;
+    }
+    valid = valid && changes_count(text, "\n      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}\n") == 4;
+    valid = valid && strstr(text_terminated(script), "\n        fuzz) configurations=(fuzz) every_item=(f1 f2 f3) ;;\n") != NULL;
+    // Each job's steps: every step after the draw's record, up to the item's evidence, runs only with an item.
+    const char* first = strstr(text, "\n      - name: Record the draw\n");
+    const char* last = strstr(text, "\n      - name: Write the vector item's evidence\n");
+    valid = valid && first != NULL && last != NULL && first < last;
+    uint32_t steps = 0;
+    for (const char* step = first != NULL ? strstr(first + 1, "\n      - name: ") : NULL; valid && step != NULL && step < last; step = strstr(step + 1, "\n      - name: "))
+    {
+        const char* next = strstr(step + 1, "\n      - ");
+        const char* gate = strstr(step, "\n        if: ");
+        const char* gate_end = gate != NULL ? strchr(gate + 1, '\n') : NULL;
+        const char* item = gate != NULL ? strstr(gate, "env.BUSTER_SHARD != ''") : NULL;
+        valid = gate != NULL && gate_end != NULL && item != NULL && item < gate_end && (next == NULL || gate < next);
+        steps += 1;
+    }
+    return valid && steps >= 20;
+}
+
+static void changes_test_drawn_policy(ChangesTest* test, Text drawn, Text script)
+{
+    changes_expect(test, changes_drawn_policy(drawn, script), "drawn policy: the AVX-512 jobs' draws, campaigns and gates", (Text){ 0 });
+    static const struct
+    {
+        uint32_t file;
+        const char* before;
+        const char* after;
+        const char* name;
+    } mutants[] = {
+        { 0, "'[1, 2, 3, 4, 5, 6, 7, 8, 9]' || '[1, 2, 3]'", "'[1, 2, 3, 4, 5, 6]' || '[1, 2, 3]'", "a fuzz draw of fewer than 3 candidates per campaign" },
+        { 0, "inputs.row == 'fuzz' && '9' || '3'", "inputs.row == 'fuzz' && '6' || '3'", "a fuzz collector waiting for other candidates than the draw's" },
+        { 0, "entries=(frontend elf-override crash-replay-proof)", "entries=(frontend crash-replay-proof)", "a missing fuzz campaign" },
+        { 0, "sources=(src/buster/compiler/fuzz.c tests/fuzz/entry_override.c tests/fuzz/entry_probe.c)", "sources=(src/buster/compiler/fuzz.c tests/fuzz/entry_probe.c tests/fuzz/entry_override.c)", "fuzz campaigns on each other's entries" },
+        { 1, "fuzz) configurations=(fuzz) every_item=(f1 f2 f3) ;;", "fuzz) configurations=(fuzz) every_item=(f1 f2) ;;", "a fuzz campaign without an item" },
+        { 0, "    strategy:\n      fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}", "    strategy:\n      fail-fast: false", "a candidate's job that doesn't fail fast" },
+        { 0, "      - name: Check the build's regressions\n        if: env.BUSTER_SHARD != '' && inputs.row == 'regressions'", "      - name: Check the build's regressions\n        if: inputs.row == 'regressions'", "a job's step in every redraw" },
+        { 0, "      - name: Preserve corpus, crash inputs, reports and the matching executable\n        if: always() && env.BUSTER_SHARD != '' && inputs.row == 'fuzz'", "      - name: Preserve corpus, crash inputs, reports and the matching executable\n        if: always() && inputs.row == 'fuzz'", "a job's upload in every redraw" },
+        { 0, "      - name: Check out triggering commit\n        if: env.BUSTER_SHARD != ''\n", "      - name: Check out triggering commit\n", "a redraw's checkout" },
+        { 0, "          ref: ${{ github.sha }}\n          persist-credentials: false\n", "          ref: main\n          persist-credentials: false\n", "a job on a moving revision" },
+        { 0, "      BUSTER_DRAW_LEVEL: '4'\n      BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}\n    steps: *job-steps\n", "      BUSTER_DRAW_LEVEL: '4'\n      BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}\n    steps: []\n", "a draw without the job's steps" },
+        { 0, "          name: ${{ inputs.row }}-${{ github.run_attempt }}-rest-draw-", "          name: vector-O3-${{ github.run_attempt }}-rest-draw-", "a job's ledgers in a row's records" },
+        { 0, "          pattern: ${{ inputs.row }}-*", "          pattern: ${{ inputs.row }}-${{ github.run_attempt }}-*", "a job's verdict blind to the attempt a rerun keeps" },
+        { 0, "        run: bash .vector-draw-script/tools/ci/vector-draw.sh probe \"$BUSTER_DRAW_LEVEL\" \"$BUSTER_DRAW_CANDIDATE\"\n", "        run: echo 'verdict=qualified' >> \"$GITHUB_OUTPUT\"\n", "a job's candidate that doesn't probe" },
+        { 0, "  BUSTER_DRAW_ROW: ${{ inputs.row }}\n", "  BUSTER_DRAW_ROW: fuzz\n", "every job drawn as the fuzz campaigns" },
+    };
+    for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
+    {
+        bool found = false;
+        const Text changed = changes_mutant(mutants[i].file == 0 ? drawn : script, NULL, mutants[i].before, mutants[i].after, &found);
+        const bool valid = changes_drawn_policy(mutants[i].file == 0 ? changed : drawn, mutants[i].file == 1 ? changed : script);
+        changes_expect(test, found && !valid, "drawn policy rejects draws, campaigns or gates out of step", text_c(mutants[i].name));
     }
 }
 
@@ -3988,9 +4127,22 @@ static int changes_self_test(const char* root)
         changes_test_row_policy(&test, row);
         changes_test_shard_policy(&test, workflow, row);
     }
-    if (row_readable && isa_readable && settings_readable)
+    Text probe;
+    Text script;
+    Text drawn;
+    bool probe_readable = read_file(path_join(root, text_c(BUSTER_CHANGES_PROBE)), &probe);
+    changes_expect(&test, probe_readable, "the vector draws' probe", text_c(BUSTER_CHANGES_PROBE));
+    bool script_readable = read_file(path_join(root, text_c(BUSTER_CHANGES_DRAW_SCRIPT)), &script);
+    changes_expect(&test, script_readable, "the vector draws' script", text_c(BUSTER_CHANGES_DRAW_SCRIPT));
+    bool drawn_readable = read_file(path_join(root, text_c(BUSTER_CHANGES_DRAWN_WORKFLOW)), &drawn);
+    changes_expect(&test, drawn_readable, "the AVX-512 jobs' draws", text_c(BUSTER_CHANGES_DRAWN_WORKFLOW));
+    if (drawn_readable && script_readable)
     {
-        changes_test_vector_policy(&test, row, host_isa, settings);
+        changes_test_drawn_policy(&test, drawn, script);
+    }
+    if (row_readable && isa_readable && settings_readable && probe_readable && script_readable)
+    {
+        changes_test_vector_policy(&test, row, host_isa, settings, probe, script);
     }
     printf("changes --self-test: %u checks, %u failures\n", test.checks, test.failures);
     return test.failures != 0 ? 1 : 0;
