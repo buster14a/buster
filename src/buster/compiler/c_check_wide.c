@@ -796,7 +796,7 @@ static __attribute__((noinline, cold)) bool check_wide_convert(const TypeTable* 
             if (!in_range)
             {
                 value->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM);
-                value->flags |= BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_GNU_FLOAT_RANGE;
+                value->flags |= BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_GNU_FLOAT_RANGE | BUSTER_CHECK_INVALID_CONSTANT;
             }
         }
     }
@@ -870,7 +870,7 @@ static void check_wide_fold_result(const CheckWideFold* fold, CheckValue* value,
     {
         const bool ice_form = (value->flags & (BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM)) != 0;
         value->flags &= ~BUSTER_CHECK_ICE;
-        value->flags |= BUSTER_CHECK_GNU_CONSTANT | (ice_form ? BUSTER_CHECK_GNU_ICE_FORM : 0);
+        value->flags |= BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_INVALID_CONSTANT | (ice_form ? BUSTER_CHECK_GNU_ICE_FORM : 0);
         value->flags |= fold->op == CHECK_OP_DIVIDE || fold->op == CHECK_OP_REMAINDER ? BUSTER_CHECK_GNU_DIVISION : 0;
         check_wide_publish(value, answer);
     }

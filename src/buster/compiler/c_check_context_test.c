@@ -362,6 +362,117 @@ static void check_test_context_provenance(CheckTest* test, TypeTable* types)
                       "dereference restores union-read evidence without clearing restricted pointer provenance");
 }
 
+// A GNU-folded payload remains usable by the existing required-constant policy, but it cannot prove that this
+// evaluation was defined (#2900). Selection excludes unexecuted operations; an accepted receipt starts a new read.
+static void check_test_context_invalid_constants(CheckTest* test, TypeTable* types)
+{
+    const CheckContext context = { .extensions = BUSTER_CHECK_EXTENSION_GNU_CONSTANT, .constant_evaluated = true };
+    const CheckAction sources[] = {
+        { .op = CHECK_OP_ADD, .operands = { check_test_integer(BUSTER_TYPE_INT, INT32_MAX), check_test_integer(BUSTER_TYPE_INT, 1) }, .context = context },
+        { .op = CHECK_OP_SHIFT_LEFT, .operands = { check_test_integer(BUSTER_TYPE_INT, 1), check_test_integer(BUSTER_TYPE_INT, 32) }, .context = context },
+        { .op = CHECK_OP_CAST, .type = BUSTER_TYPE_INT, .operands = { check_test_float(BUSTER_TYPE_DOUBLE, 1e99L) }, .context = context },
+    };
+    const uint32_t expected[] = { UINT32_C(0x80000000), UINT32_C(0x80000000), INT32_MAX };
+    CheckValue folded[BUSTER_ARRAY_LENGTH(sources)];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sources); i += 1)
+    {
+        const CheckActionResult result = check_test_action(test, types, sources[i]);
+        folded[i] = result.value;
+        check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.fault == CHECK_FAULT_NONE &&
+                               result.value.constant_kind == CHECK_CONSTANT_INTEGER && result.value.integer == expected[i] &&
+                               (result.value.flags & BUSTER_CHECK_INVALID_CONSTANT) != 0 &&
+                               check_action_integer_constant(&result.value, context.extensions),
+                          "overflow, invalid shifts and saturated conversions retain GNU payloads with an invalid-evaluation witness");
+    }
+    CheckAction sign_bit = sources[1];
+    sign_bit.operands[1] = check_test_integer(BUSTER_TYPE_INT, 31);
+    const CheckActionResult shifted = check_test_action(test, types, sign_bit);
+    check_test_expect(test, shifted.diagnostic == CHECK_DIAG_NONE && shifted.value.fault == CHECK_FAULT_NONE &&
+                           shifted.value.constant_kind == CHECK_CONSTANT_INTEGER && shifted.value.integer == UINT32_C(0x80000000) &&
+                           (shifted.value.flags & BUSTER_CHECK_INVALID_CONSTANT) == 0,
+                      "shifting a nonnegative value into its sign bit remains a defined constant evaluation");
+    const CheckOp ancestors[] = { CHECK_OP_POSITIVE, CHECK_OP_CAST, CHECK_OP_COMMA, CHECK_OP_STATEMENT_VALUE };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(ancestors); i += 1)
+    {
+        const CheckAction action = { .op = ancestors[i], .type = BUSTER_TYPE_LONG,
+                                     .operands = { folded[0], check_test_integer(BUSTER_TYPE_INT, 4) }, .context = context };
+        const CheckActionResult result = check_test_action(test, types, action);
+        check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.fault == CHECK_FAULT_NONE &&
+                               result.value.constant_kind == CHECK_CONSTANT_INTEGER && (result.value.flags & BUSTER_CHECK_INVALID_CONSTANT) != 0,
+                          "unary, cast, discarded comma and statement-value parents retain evaluated invalid operations");
+    }
+    for (uint32_t logical = 0; logical < 2; logical += 1)
+    {
+        for (uint32_t evaluates = 0; evaluates < 2; evaluates += 1)
+        {
+            const CheckAction action = {
+                .op = logical == 0 ? CHECK_OP_LOGICAL_AND : CHECK_OP_LOGICAL_OR,
+                .operands = { check_test_integer(BUSTER_TYPE_INT, logical == 0 ? evaluates : !evaluates), folded[0] },
+                .context = context,
+            };
+            const CheckActionResult result = check_test_action(test, types, action);
+            check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.fault == CHECK_FAULT_NONE &&
+                                   result.value.constant_kind == CHECK_CONSTANT_INTEGER && result.value.integer == (logical != 0 || evaluates != 0) &&
+                                   ((result.value.flags & BUSTER_CHECK_INVALID_CONSTANT) != 0) == (evaluates != 0),
+                              "logical short circuit excludes only the unexecuted invalid right operand");
+        }
+    }
+    for (uint32_t selects = 0; selects < 2; selects += 1)
+    {
+        const CheckAction action = { .op = CHECK_OP_CONDITIONAL,
+                                     .operands = { check_test_integer(BUSTER_TYPE_INT, selects), folded[0], check_test_integer(BUSTER_TYPE_INT, 4) },
+                                     .context = context };
+        const CheckActionResult result = check_test_action(test, types, action);
+        check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.fault == CHECK_FAULT_NONE &&
+                               result.value.constant_kind == CHECK_CONSTANT_INTEGER && result.value.integer == (selects != 0 ? expected[0] : 4) &&
+                               ((result.value.flags & BUSTER_CHECK_INVALID_CONSTANT) != 0) == (selects != 0),
+                          "a conditional inherits the selected arm's invalid evaluation without inheriting the unselected arm's");
+    }
+    const CheckAction conditional = { .op = CHECK_OP_CONDITIONAL,
+                                      .operands = { folded[0], check_test_integer(BUSTER_TYPE_INT, 4), check_test_integer(BUSTER_TYPE_INT, 5) },
+                                      .context = context };
+    const CheckActionResult selected = check_test_action(test, types, conditional);
+    check_test_expect(test, selected.diagnostic == CHECK_DIAG_NONE && selected.value.integer == 4 &&
+                           (selected.value.flags & BUSTER_CHECK_INVALID_CONSTANT) != 0,
+                      "a known conditional result retains an invalid operation in its evaluated condition");
+
+    Arena storage = arena_reserve(65536);
+    CheckConstBuffer buffer = { .arena = &storage };
+    const TypeId ci = type_qualify(types, BUSTER_TYPE_INT, BUSTER_TYPE_CONST);
+    bool ready = storage.base != NULL && ci != 0;
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(folded); i += 1)
+    {
+        ready = check_const_test_append_value(&buffer, types, i + 1, 10, ci, folded[i]);
+    }
+    check_test_expect(test, ready, "accepted invalid-initializer receipt storage");
+    const CheckConstValues view = check_const_view(&buffer);
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(folded); i += 1)
+    {
+        CheckContext read_context = context;
+        read_context.const_values = &view;
+        read_context.source_position = 10;
+        const CheckAction load = { .op = CHECK_OP_POSITIVE,
+                                   .operands = { { .type = ci, .category = CHECK_LVALUE, .constant_kind = CHECK_CONSTANT_ADDRESS, .object = i + 1 } },
+                                   .context = read_context };
+        const CheckActionResult read = check_test_action(test, types, load);
+        check_test_expect(test, read.diagnostic == CHECK_DIAG_NONE && read.value.fault == CHECK_FAULT_NONE &&
+                               read.value.constant_kind == CHECK_CONSTANT_INTEGER && read.value.integer == expected[i] &&
+                               (read.value.flags & (BUSTER_CHECK_INVALID_CONSTANT | BUSTER_CHECK_ICE)) == 0 &&
+                               (read.value.flags & BUSTER_CHECK_GNU_OBJECT_READ) != 0 &&
+                               ((read.value.flags & BUSTER_CHECK_GNU_FLOAT_RANGE) != 0) == (i == 2),
+                          "reading an accepted receipt drops initializer execution provenance but retains its stored value and GNU range witness");
+        const CheckAction overflow = { .op = i == 2 ? CHECK_OP_ADD : CHECK_OP_SUBTRACT,
+                                       .operands = { read.value, check_test_integer(BUSTER_TYPE_INT, 1) }, .context = context };
+        const CheckActionResult repeated = check_test_action(test, types, overflow);
+        check_test_expect(test, repeated.diagnostic == CHECK_DIAG_NONE && repeated.value.fault == CHECK_FAULT_NONE &&
+                               repeated.value.constant_kind == CHECK_CONSTANT_INTEGER &&
+                               repeated.value.integer == (i == 2 ? UINT32_C(0x80000000) : INT32_MAX) &&
+                               (repeated.value.flags & BUSTER_CHECK_INVALID_CONSTANT) != 0,
+                          "a new overflowing operation on a stored value introduces a new invalid-evaluation witness");
+    }
+    arena_release(&storage);
+}
+
 static __attribute__((noinline)) void check_test_semantic_context(CheckTest* test)
 {
     CheckTestTypes types = { 0 };
@@ -374,6 +485,7 @@ static __attribute__((noinline)) void check_test_semantic_context(CheckTest* tes
         check_test_context_contract(test);
         check_test_context_receipts(test, &types.table);
         check_test_context_provenance(test, &types.table);
+        check_test_context_invalid_constants(test, &types.table);
         check_const_test_exhaustion(test, &types.table);
     }
     check_test_types_close(&types);

@@ -17,6 +17,13 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The `-Wconstant-logical-operand` warning facts, their constant/type-query and
+checked-graph producers, and the original `constant_logical_*.c` driver fixtures
+(#2900) use the project default terms. Clang 23.1.4, LLVM revision
+`7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`, is an external diagnostic oracle
+for operand distinctions, source policy, wording and ordering. No upstream
+implementation, fixture or generated data is imported.
+
 The failed static assertion boolean-conversion recovery in
 `c_check_common_warnings.c` and `c_checker_driver.c`, its driver tests and the
 original `tests/driver/assert_bool_nested*.c` sources (#2409) use the project

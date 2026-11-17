@@ -261,7 +261,8 @@ static __attribute__((unused)) void check_builtin_bit_cast_one(const TypeTable* 
                         {
                             output->action.value.constant_kind = CHECK_CONSTANT_INTEGER;
                             output->action.value.integer = bits & check_action_mask(destination_width);
-                            output->action.value.flags = input->source_proof == CHECK_BUILTIN_BIT_CAST_PROOF_ICE ? BUSTER_CHECK_ICE : 0;
+                            output->action.value.flags = (input->source_proof == CHECK_BUILTIN_BIT_CAST_PROOF_ICE ? BUSTER_CHECK_ICE : 0) |
+                                                         (source->flags & BUSTER_CHECK_INVALID_CONSTANT);
                         }
                         if (destination_float)
                         {

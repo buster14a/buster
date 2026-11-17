@@ -259,6 +259,8 @@ enum
     // Zero-size records and constant arrays (#2409), both ignored by default. Only the array warning is pedantic's.
     CHECK_WARNING_ID_CXX_ZERO_SIZE_RECORD = 164,
     CHECK_WARNING_ID_ZERO_LENGTH_ARRAY = 165,
+    // An integer logical operator with a non-boolean constant right operand (#2900), on by default, no parent group.
+    CHECK_WARNING_ID_CONSTANT_LOGICAL_OPERAND = 166,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -616,6 +618,8 @@ typedef enum CheckWarningEventKind
     // An enum's fixed underlying type in a declaration with a declarator (#2213), at its `:`: its description's words.
     CHECK_WARNING_EVENT_ELABORATED_ENUM_BASE,
     CHECK_WARNING_EVENT_UNDERLYING_ATOMIC_QUALIFIER,
+    // payload.data is 0 for &&, 1 for ||. The source adapter retains the operator's construction boundary.
+    CHECK_WARNING_EVENT_CONSTANT_LOGICAL_OPERAND,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -694,6 +698,8 @@ typedef enum CheckWarningNoteKind
     // "use '=' to turn this equality comparison into an assignment" (payload.data BUSTER_CHECK_UNUSED_EQUALITY), or "use '|='
     // to turn this inequality comparison into an or-assignment" (BUSTER_CHECK_UNUSED_INEQUALITY).
     CHECK_WARNING_NOTE_COMPARISON_ASSIGNMENT,
+    CHECK_WARNING_NOTE_LOGICAL_BITWISE,
+    CHECK_WARNING_NOTE_LOGICAL_REMOVE_CONSTANT,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 
