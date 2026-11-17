@@ -537,7 +537,7 @@ static __attribute__((unused)) Tier1LivenessError tier1_liveness_build(const Tie
         }
         else
         {
-            live.iterations = BUSTER_VECTOR_PATH(vector) ? dataflow_liveness_vector(&dataflow) : dataflow_liveness_scalar(&dataflow);
+            live.iterations = dataflow_liveness(&dataflow);
             tier1_liveness_envelopes(function, &dataflow, dense_values, intervals, starts, ends);
             live.allocation = (Tier1AllocationInput){
                 .starts = starts,

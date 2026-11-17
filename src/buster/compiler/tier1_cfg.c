@@ -2121,7 +2121,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         }
         if (ready)
         {
-            candidate.liveness_iterations = BUSTER_VECTOR_PATH(vector) ? dataflow_liveness_vector(&liveness) : dataflow_liveness_scalar(&liveness);
+            candidate.liveness_iterations = dataflow_liveness(&liveness);
             // The same edge uses contribute to OUT even when their defining block kills propagation to IN.
             // Local operands have no dense id; their flag supplies the home tail during interval construction.
             for (uint32_t b = 0; b < blocks; b += 1)

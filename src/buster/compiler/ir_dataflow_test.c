@@ -4,9 +4,10 @@
 // Raw-IR dataflow qualification, included after ir_dataflow.c by ir_source_test.c. The independent oracle enumerates
 // operands by semantic opcode, NOT ir_operand_table/ir_operand. It scans instructions backwards and places phi uses
 // on the actual incoming edges. Small fixtures also use byte-per-original-value fixpoints, with numeric reverse block
-// order rather than dataflow.c's postorder. Every source form gets scalar/vector identity and independent equation,
-// dense-map, CFG and padding checks, the layout check of its successor columns, postorder and phi records from the IR,
-// and dataflow_sweeps_test.c's search for its live bits and sweep count. No oracle is in a measured kernel.
+// order rather than dataflow.c's postorder. IR dataflow is AVX-512 alone (#2924). Every source form gets independent
+// equation, dense-map, CFG and padding checks; two preparations that must agree; the layout check of its successor
+// columns, postorder and phi records from the IR; and dataflow_sweeps_test.c's search for its live bits and sweep
+// count. No oracle is in a measured kernel.
 
 #include <sys/mman.h>
 #include <unistd.h>
@@ -459,23 +460,25 @@ static bool ir_dataflow_test_function(const IrFunction* f, Arena* output, Arena*
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     const uint64_t failures = tests->failures;
+    // A second preparation, at another place in the output arena, must give the same columns and, solved, the same rows:
+    // the reference the poisoned re-solve below must reproduce.
     IrDataflow vector = { 0 };
-    IrDataflow scalar = { 0 };
+    IrDataflow again = { 0 };
     const IrCheck vector_check = ir_dataflow_prepare(f, output, scratch, &vector);
     const bool vector_scratch = scratch->length == scratch_mark;
-    const IrCheck scalar_check = ir_dataflow_prepare_scalar(f, output, scratch, &scalar);
-    const bool prepared = vector_check.error == IR_OK && scalar_check.error == IR_OK;
+    const IrCheck again_check = ir_dataflow_prepare(f, output, scratch, &again);
+    const bool prepared = vector_check.error == IR_OK && again_check.error == IR_OK;
     ir_dataflow_expect(tests, prepared, "an accepted IR function could not be prepared");
     ir_dataflow_expect(tests, vector_scratch && scratch->length == scratch_mark, "preparation retained scratch");
     if (prepared)
     {
         const uint64_t vector_iterations = ir_dataflow_solve(&vector);
-        const uint64_t scalar_iterations = ir_dataflow_solve_scalar(&scalar);
-        ir_dataflow_expect(tests, vector_iterations == scalar_iterations, "scalar/vector sweep counts disagree");
+        const uint64_t again_iterations = ir_dataflow_solve(&again);
         uint64_t expected_iterations = 0;
         ir_dataflow_expect(tests, dataflow_test_sweeps(&vector.flow, scratch, &expected_iterations) && expected_iterations == vector_iterations,
             "the sweep search's live pairs or count disagree");
-        ir_dataflow_expect(tests, ir_dataflow_test_equal(&vector, &scalar), "scalar/vector maps, edge uses or matrices disagree");
+        ir_dataflow_expect(tests, again_iterations == vector_iterations && ir_dataflow_test_equal(&vector, &again),
+            "a second preparation and solve disagree");
         ir_dataflow_expect(tests, ir_dataflow_test_equations(f, &vector, scratch), "independent IR equations, dense IDs or padding disagree");
         ir_dataflow_expect(tests, ir_dataflow_test_layout(f, &vector, scratch), "CFG columns, postorder or phi lists differ from the IR");
         const uint64_t bytes = (uint64_t)vector.flow.block_count * vector.flow.row_words * 8;
@@ -489,11 +492,11 @@ static bool ir_dataflow_test_function(const IrFunction* f, Arena* output, Arena*
             {
                 memset(vector.flow.in, 0xff, bytes);
                 memset(vector.flow.out, 0xff, bytes);
-                memset(scalar.flow.in, 0xa5, bytes);
-                memset(scalar.flow.out, 0x5a, bytes);
+                memset(again.flow.in, 0xa5, bytes);
+                memset(again.flow.out, 0x5a, bytes);
             }
-            ir_dataflow_expect(tests, ir_dataflow_solve(&vector) == vector_iterations && ir_dataflow_solve_scalar(&scalar) == scalar_iterations &&
-                ir_dataflow_test_equal(&vector, &scalar) && ir_dataflow_test_byte_oracle(f, &vector, scratch), "re-solving poisoned rows changed liveness");
+            ir_dataflow_expect(tests, ir_dataflow_solve(&vector) == vector_iterations && ir_dataflow_solve(&again) == vector_iterations &&
+                ir_dataflow_test_equal(&vector, &again) && ir_dataflow_test_byte_oracle(f, &vector, scratch), "re-solving poisoned rows changed liveness");
         }
     }
     ir_dataflow_expect(tests, scratch->length == scratch_mark, "a dataflow check retained scratch");
@@ -819,46 +822,43 @@ static void ir_dataflow_test_failures(IrFunction* function, Arena* output, Arena
     memset(&result, 0xa5, sizeof(result));
     uint8_t before[sizeof(result)];
     memcpy(before, &result, sizeof(result));
-    for (uint32_t path = 0; path < 2; path += 1)
+    Arena empty = *output;
+    empty.capacity = empty.length;
+    IrCheck check = ir_dataflow_prepare(function, &empty, scratch, &result);
+    ir_dataflow_expect(tests, check.error == IR_ERROR_MEMORY && empty.length == mark && scratch->length == temporary &&
+        memcmp(before, &result, sizeof(result)) == 0, "output exhaustion was not transactional");
+    empty = *scratch;
+    empty.capacity = empty.length;
+    check = ir_dataflow_prepare(function, output, &empty, &result);
+    ir_dataflow_expect(tests, check.error == IR_ERROR_MEMORY && output->length == mark && empty.length == temporary &&
+        memcmp(before, &result, sizeof(result)) == 0, "scratch exhaustion was not transactional");
+    check = ir_dataflow_prepare(function, output, output, &result);
+    ir_dataflow_expect(tests, check.error == IR_ERROR_STRUCTURE && output->length == mark &&
+        memcmp(before, &result, sizeof(result)) == 0, "aliased arenas were not rejected transactionally");
+    IrFunction invalid = *function;
+    invalid.instruction_count = UINT32_MAX;
+    check = ir_dataflow_prepare(&invalid, output, scratch, &result);
+    ir_dataflow_expect(tests, check.error == IR_ERROR_LIMIT && output->length == mark && scratch->length == temporary &&
+        memcmp(before, &result, sizeof(result)) == 0, "signed-gather limit was not rejected before column access");
+    const uint32_t value = function->extra[1];
+    function->extra[1] = function->instruction_count;
+    check = ir_dataflow_prepare(function, output, scratch, &result);
+    ir_dataflow_expect(tests, check.error == IR_ERROR_PHI && output->length == mark && scratch->length == temporary &&
+        memcmp(before, &result, sizeof(result)) == 0, "malformed phi was not rejected transactionally");
+    function->extra[1] = value;
+    IrDataflow sizing = { 0 };
+    check = ir_dataflow_prepare(function, output, scratch, &sizing);
+    const uint64_t needed = sizing.arena_bytes;
+    ir_dataflow_expect(tests, check.error == IR_OK && needed != 0, "could not size the allocation-failure fixture");
+    arena_pop_to(output, mark);
+    // Fail inside the output's mapping, not only at its first push, including the final matrix allocation.
+    for (uint64_t room = 1; room < needed; room += 31)
     {
-        Arena empty = *output;
-        empty.capacity = empty.length;
-        IrCheck check = ir_dataflow_prepare_path(function, &empty, scratch, &result, path == 0);
-        ir_dataflow_expect(tests, check.error == IR_ERROR_MEMORY && empty.length == mark && scratch->length == temporary &&
-            memcmp(before, &result, sizeof(result)) == 0, "output exhaustion was not transactional");
-        empty = *scratch;
-        empty.capacity = empty.length;
-        check = ir_dataflow_prepare_path(function, output, &empty, &result, path == 0);
-        ir_dataflow_expect(tests, check.error == IR_ERROR_MEMORY && output->length == mark && empty.length == temporary &&
-            memcmp(before, &result, sizeof(result)) == 0, "scratch exhaustion was not transactional");
-        check = ir_dataflow_prepare_path(function, output, output, &result, path == 0);
-        ir_dataflow_expect(tests, check.error == IR_ERROR_STRUCTURE && output->length == mark &&
-            memcmp(before, &result, sizeof(result)) == 0, "aliased arenas were not rejected transactionally");
-        IrFunction invalid = *function;
-        invalid.instruction_count = UINT32_MAX;
-        check = ir_dataflow_prepare_path(&invalid, output, scratch, &result, path == 0);
-        ir_dataflow_expect(tests, check.error == IR_ERROR_LIMIT && output->length == mark && scratch->length == temporary &&
-            memcmp(before, &result, sizeof(result)) == 0, "signed-gather limit was not rejected before column access");
-        const uint32_t value = function->extra[1];
-        function->extra[1] = function->instruction_count;
-        check = ir_dataflow_prepare_path(function, output, scratch, &result, path == 0);
-        ir_dataflow_expect(tests, check.error == IR_ERROR_PHI && output->length == mark && scratch->length == temporary &&
-            memcmp(before, &result, sizeof(result)) == 0, "malformed phi was not rejected transactionally");
-        function->extra[1] = value;
-        IrDataflow sizing = { 0 };
-        check = ir_dataflow_prepare_path(function, output, scratch, &sizing, path == 0);
-        const uint64_t needed = sizing.arena_bytes;
-        ir_dataflow_expect(tests, check.error == IR_OK && needed != 0, "could not size the allocation-failure fixture");
-        arena_pop_to(output, mark);
-        // Fail inside the output's mapping, not only at its first push, including the final matrix allocation.
-        for (uint64_t room = 1; room < needed; room += 31)
-        {
-            Arena bounded = *output;
-            bounded.capacity = mark + room;
-            check = ir_dataflow_prepare_path(function, &bounded, scratch, &result, path == 0);
-            ir_dataflow_expect(tests, check.error == IR_ERROR_MEMORY && bounded.length == mark && scratch->length == temporary &&
-                memcmp(before, &result, sizeof(result)) == 0, "intermediate output exhaustion was not transactional");
-        }
+        Arena bounded = *output;
+        bounded.capacity = mark + room;
+        check = ir_dataflow_prepare(function, &bounded, scratch, &result);
+        ir_dataflow_expect(tests, check.error == IR_ERROR_MEMORY && bounded.length == mark && scratch->length == temporary &&
+            memcmp(before, &result, sizeof(result)) == 0, "intermediate output exhaustion was not transactional");
     }
 }
 

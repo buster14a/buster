@@ -41,9 +41,12 @@ row's whole padding words alone; the AVX-512 loops don't, since their sweeps
 store all of every row, padding included, and nothing reads `out` ("Clearing
 and storing out").
 
-## The two kernels
+## The kernel
 
-For each block in postorder:
+The solver is AVX-512 alone. Until #2924 a scalar twin solved the same
+equations word by word as its test oracle and benchmark alternative; the
+sections below that measure it are the record of that time. For each block in
+postorder:
 
 ```text
 out[block] = OR(in[successor] for each successor)
@@ -61,38 +64,35 @@ previous block's row" below). The two loops are separate
 functions, so that Clang compiles each alone ("Where the AVX-512 solver's
 frame falls" below has why).
 
-The scalar twin visits the same blocks and successors in the same order,
-but processes only `ceil(value_count / 64)` words per row. Whole padding
-words remain zero after output initialization; charging the scalar loop for
-them would inflate the vector comparison, particularly for short rows.
-Its word loops disable Clang loop vectorization so the measured alternative
-remains scalar, and its edge loop isn't unrolled ("Where the scalar twin's
-code falls" below has why). Both count complete sweeps, including the final
-sweep that changes nothing. Comparing iteration counts catches changes to the
-update schedule as well as differences in the resulting bits.
+The scalar twin visited the same blocks and successors in the same order,
+but processed only `ceil(value_count / 64)` words per row, with Clang's loop
+vectorization off. The solver counts complete sweeps, including the final
+sweep that changes nothing; the sweep search (below) gives that count exactly,
+so the tests catch changes to the update schedule as well as to the bits.
 
-Both kernels copy the column bases and dimensions into locals. The bases
+The kernel copies the column bases and dimensions into locals. The bases
 are `restrict` because `dataflow_create` allocates disjoint columns and
 matrices. Derived successor pointers into `in` are unqualified: a self-loop
 must be able to read the same row that the current block updates.
 
-`dataflow_intersects_vector` uses `_mm512_test_epi64_mask` to detect a shared
-bit in two padded rows. `dataflow_intersects_scalar` checks the same words
-with scalar ANDs. The vector primitive asserts that its row length is a
-multiple of eight words and that nonempty rows are 64-byte aligned. An empty
-row does not intersect anything.
+`dataflow_intersects` uses `_mm512_test_epi64_mask` to detect a shared bit
+in two padded rows. It asserts that its row length is a multiple of eight
+words and that nonempty rows are 64-byte aligned. An empty row does not
+intersect anything.
 
 ## Tests and synthetic inputs
 
-`dataflow_test.c` runs through `test-dataflow`. Besides comparing the two
-solvers, it checks the liveness equations, zero padding, repeatability and
-the least solution on small hand-checkable graphs. A separate reverse-CFG
+`dataflow_test.c` runs through `test-dataflow`. With no second solver to
+compare since #2924, it checks the liveness equations, zero padding,
+repeatability, the same solve at another place, and the least solution on
+small hand-checkable graphs. A separate reverse-CFG
 reachability oracle checks selected values at every block of 257- and
 2,049-block graphs; a planted incorrect bit checks the oracle itself.
 The sweep search below checks every value at every block, and the iteration
 count, of every graph, and IR dataflow's test runs it on every function.
 A handwritten multigraph checks repeated successors, self-edges and exit
-edges against the corresponding deduplicated CFG. Guard-page cases put
+edges against the corresponding deduplicated CFG: the same rows in as many
+sweeps. Guard-page cases put
 the last row word immediately before an inaccessible page, including empty
 rows pointing at that page. Value counts include 0, 1, 63, 64, 65, 511, 512,
 513, 1,024 and 1,025. Padding must be zero again after poisoned output rows
@@ -124,17 +124,20 @@ one left, so the first that changes nothing is a fixpoint, and the count, which
 includes that last sweep, is `2 + max D` over the live pairs, or 1 when nothing
 is live. A 0-1 breadth-first search per value, backwards from its uses over
 predecessor edges weighted 1 where stale, finds every `D`; the `in` rows must
-hold exactly the pairs it reaches. Over main's two solvers (#2924), the formula
-matched both counts on every generated graph of 16 seeds, c-testsuite's IR
-forms and sqlite3.c's.
+hold exactly the pairs it reaches. Before the scalar twin went (#2924), the
+formula matched both solvers' counts on every generated graph of 16 seeds,
+c-testsuite's IR forms and sqlite3.c's.
 
 ## Measuring the alternatives
 
-`benchmark-dataflow` checks scalar/vector results before measuring six
-generated functions. It reports 21 interleaved-pass medians and pass ranges,
-with elapsed time and hardware cycles per function, and cycles per block per
-iteration. Warm calibration repeatedly runs both variants in both orders,
-using one common repetition count until every batch lasts at least 4 ms.
+`benchmark-dataflow` checks each solve (the liveness equations, and for the
+default seed the rows' digest and sweep count that the solver and its scalar
+twin gave alike before #2924) before measuring six generated functions. It
+reports 21-pass medians and pass ranges, with elapsed time and hardware cycles
+per function, and cycles per block per iteration. Until #2924 the passes
+interleaved the scalar twin and the AVX-512 solver, and the measurements below
+are of that benchmark. Warm calibration repeats batches until every batch
+lasts at least 4 ms.
 Every retained sample must last at least 2 ms. A shorter sample discards the
 whole distribution and doubles the repetition count, with bounded retries.
 The output includes the shortest retained sample and the number of restarts.
@@ -143,9 +146,10 @@ relabeled as CPU cycles. It also gives the throttle per block per iteration:
 PMCx1A0's umask 0x08 (raw event `0x1000008a0`), which AMD doesn't document
 and #199 reads, from its controls, as the dispatch slots that Zen 5's per-core
 power cap takes.
-`--only scalar` or `--only avx512` times one solver alone, back to back, and
-`--after-scalar MS` runs complete scalar solves of the workload, untimed, for
-MS ms before every AVX-512 sample: "The power cap's state" below has why.
+`--after-scalar MS` runs scalar work, untimed, for MS ms before every sample:
+"The power cap's state" below has why. Since #2924 that work is an FNV-1a hash
+of the workload's `use` rows; before, it was the scalar twin's solves, and
+`--only scalar` or `--only avx512` timed one solver alone, back to back.
 
 The benchmark includes the rows each solver clears in each solve, but excludes
 generation and postorder construction. Both timed paths call explicit
