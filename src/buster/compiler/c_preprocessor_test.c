@@ -371,9 +371,11 @@ static bool pp_stream_spellings(Preprocessor* pp, PPSpellings* spellings)
             pp_embed_bytes(pp, out->values[i], &data);
             embedded += 2 * (uint64_t)data;
         }
+        // An unknown token's two more: -CC's `//` comment of a replacement list prints as a block comment.
         bytes += pp_spelled_as_written(pragma, kind) ? pp_written_spelling(pp, out->values[i], out->locations[i], scratch.arena, &written)
                  : kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END) ? intern_length(pp->table, out->values[i])
-                 : kind == BUSTER_PP_KIND_PRAGMA_END ? 0 : kind == BUSTER_PP_KIND_INTEGER ? 24 : kind == BUSTER_PP_KIND_EMBED ? 4 * (uint64_t)data : out->values[i] - out->locations[i];
+                 : kind == BUSTER_PP_KIND_PRAGMA_END ? 0 : kind == BUSTER_PP_KIND_INTEGER ? 24 : kind == BUSTER_PP_KIND_EMBED ? 4 * (uint64_t)data
+                 : out->values[i] - out->locations[i] + (kind == C_TOKEN_UNKNOWN ? 2 : 0);
         result = !pp_spelled_as_written(pragma, kind) || written != 0;
         arena_pop_to(scratch.arena, mark);
         pragma = pp_pragma_state(pp, pragma, kind, out->locations[i]);
@@ -410,9 +412,20 @@ static bool pp_stream_spellings(Preprocessor* pp, PPSpellings* spellings)
             const uint8_t lexed = kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END ? C_TOKEN_RAW_IDENTIFIER
                                   : kind == BUSTER_PP_KIND_INTEGER                                  ? C_TOKEN_NUMERIC_CONSTANT
                                                                                                     : kind;
+            // -CC's `// x` of a replacement list is the `/* x*/` the printer prints (pp_print_scalar).
+            const bool converted = result && kind == C_TOKEN_UNKNOWN && pp->options.keep_macro_comments && pp_line_comment_spelling(spelling, length) &&
+                                   pp_comment_in_directive(pp, out->locations[i]);
+            uint8_t* block = converted ? arena_push(scratch.arena, (uint64_t)length + 2, 1) : 0;
+            result = !converted || block != 0;
+            if (converted && result)
+            {
+                memcpy(block, "/*", 2);
+                memcpy(block + 2, spelling + 2, length - 2);
+                memcpy(block + length, "*/", 2);
+            }
             if (result)
             {
-                pp_spellings_add(spellings, spelling, length, out->locations[i], lexed);
+                pp_spellings_add(spellings, converted ? block : spelling, length + 2 * converted, out->locations[i], lexed);
             }
             arena_pop_to(scratch.arena, mark);
         }
@@ -422,12 +435,16 @@ static bool pp_stream_spellings(Preprocessor* pp, PPSpellings* spellings)
     return result;
 }
 
+static void pp_test_directive_lines(char* text, size_t length, FILE* listing, const char* predefines);
+
 // The lexer's flags a run's printed text lexes back with, and clang's text and a case's expected text: the mode's, without
 // trigraphs (no printer leaves one) and with C_TOKENIZER_NO_DOLLARS where '$' is punctuation (pp_dollar_punctuation, the
 // scalar lexer's, not the stream's pp_split_dollars).
 static uint32_t pp_test_lex_flags(const Preprocessor* pp)
 {
-    return (pp->refine_flags & ~(uint32_t)C_TOKENIZER_TRIGRAPHS) | (pp_dollar_punctuation(&pp->options) ? C_TOKENIZER_NO_DOLLARS : 0);
+    // -C's and -CC's comments are tokens (#1380), in the stream as in the printed texts.
+    return (pp->refine_flags & ~(uint32_t)C_TOKENIZER_TRIGRAPHS) | (pp_dollar_punctuation(&pp->options) ? C_TOKENIZER_NO_DOLLARS : 0) |
+           (pp->options.keep_comments ? C_TOKENIZER_KEEP_COMMENTS : 0);
 }
 
 // Lexes a text as the language mode does: c_tokenize with the mode's `flags` (pp_test_lex_flags), then the prefixed
@@ -911,6 +928,10 @@ static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const cha
         free(scalar_text);
     }
     PPSpellings printed = { 0 };
+    if (result && (pp->options.dump_defines || pp->options.dump_includes))
+    {
+        pp_test_directive_lines(text, length, 0, 0);
+    }
     result = result && pp_text_spellings((const uint8_t*)text, length, pp->split_kinds, pp_test_lex_flags(pp), &printed);
     if (result)
     {
@@ -1296,10 +1317,146 @@ static bool pp_compare_placed(const PPPlaced* ours, const PPPlaced* theirs, cons
 
 // Our line markers against clang's (`theirs`, from pp_test_clang): the vectorized printer's text with markers must
 // place every token as clang's does.
+// Whether line [at, end) of a printed text is one of -dD's or -dI's directives (pp_print_events): a #define, an #undef,
+// or an include that ends in clang's ` /* clang -E -dI */`.
+static bool pp_test_directive_line(const char* text, size_t at, size_t end)
+{
+    static const char note[] = " /* clang -E -dI */";
+    const size_t length = end - at;
+    const bool include = (length > 9 && memcmp(text + at, "#include ", 9) == 0) || (length > 14 && memcmp(text + at, "#include_next ", 14) == 0) ||
+                         (length > 8 && memcmp(text + at, "#import ", 8) == 0);
+    return (length > 8 && memcmp(text + at, "#define ", 8) == 0) || (length > 7 && memcmp(text + at, "#undef ", 7) == 0) ||
+           (include && length > sizeof(note) - 1 && memcmp(text + end - (sizeof(note) - 1), note, sizeof(note) - 1) == 0);
+}
+
+// Whether a block comment is open at the end of line [at, end) of a printed text, if one is at its start (`inside`): a
+// -dD #define's line goes on with its replacement list's comment (-CC). Literals and `//` comments open none.
+static bool pp_test_open_comment(const char* text, size_t at, size_t end, bool inside)
+{
+    for (size_t i = at; i < end; i += 1)
+    {
+        const bool opens = !inside && text[i] == '/' && i + 1 < end && text[i + 1] == '*';
+        const bool closes = inside && text[i] == '*' && i + 1 < end && text[i + 1] == '/';
+        if (!inside && (text[i] == '"' || text[i] == '\''))
+        {
+            size_t j = i + 1;
+            while (j < end && text[j] != text[i])
+            {
+                j += text[j] == '\\' ? 2 : 1;
+            }
+            i = j;
+        }
+        else if (!inside && text[i] == '/' && i + 1 < end && text[i + 1] == '/')
+        {
+            i = end;
+        }
+        inside = (inside && !closes) || opens;
+        i += opens || closes;
+    }
+    return inside;
+}
+
+// -dD's and -dI's directives of a text -E printed with line markers (#1380): each blanked (spaces for its bytes, its line
+// breaks kept), a #define's lines that a comment in its replacement list carries on with too, so that the text's tokens
+// are the stream's and keep their places; and with `listing`, written there with its presumed file and line as the
+// markers place it (`name:line: text`), but those of <built-in>, <command line> and `predefines` (--predefines' file, or
+// null): clang's predefines and the command line's, whose order and set buster's don't follow.
+static void pp_test_directive_lines(char* text, size_t length, FILE* listing, const char* predefines)
+{
+    size_t name = 0;
+    uint32_t name_length = 0;
+    uint32_t line = 1;
+    bool inside = false;
+    bool listed = false;
+    for (size_t at = 0; at < length;)
+    {
+        const char* newline = memchr(text + at, '\n', length - at);
+        const size_t end = newline != 0 ? (size_t)(newline - text) : length;
+        uint32_t marked = 0;
+        uint64_t marked_name = 0;
+        uint32_t marked_length = 0;
+        bool flags[5] = { false };
+        if (!inside && pp_marker_line((const uint8_t*)text, at, end, &marked, &marked_name, &marked_length, flags))
+        {
+            line = marked;
+            name = marked_name;
+            name_length = marked_length;
+        }
+        else
+        {
+            const bool continued = inside;
+            if (continued || pp_test_directive_line(text, at, end))
+            {
+                const bool virtual_file = (name_length == 10 && memcmp(text + name, "<built-in>", 10) == 0) ||
+                                          (name_length == 14 && memcmp(text + name, "<command line>", 14) == 0) ||
+                                          (predefines != 0 && strlen(predefines) == name_length && memcmp(text + name, predefines, name_length) == 0);
+                listed = continued ? listed : listing != 0 && !virtual_file;
+                if (listed && continued)
+                {
+                    fprintf(listing, "\n    %.*s", (int)(end - at), text + at);
+                }
+                else if (listed)
+                {
+                    fprintf(listing, "%.*s:%u: %.*s", (int)name_length, text + name, line, (int)(end - at), text + at);
+                }
+                inside = pp_test_open_comment(text, at, end, inside);
+                if (listed && !inside)
+                {
+                    fputc('\n', listing);
+                }
+                memset(text + at, ' ', end - at);
+            }
+            line += 1;
+        }
+        at = end + 1;
+    }
+}
+
+// -dD's and -dI's directives in our text with line markers against clang's, where each is and what it says
+// (pp_test_directive_lines), then clang's blanked, as ours are for the comparisons of the tokens.
+static bool pp_test_dumped_directives(Preprocessor* pp, char* clang_text, size_t clang_length, const char* name)
+{
+    size_t length = 0;
+    char* text = pp_test_print(pp, true, true, &length);
+    char* ours = 0;
+    char* theirs = 0;
+    size_t ours_length = 0;
+    size_t theirs_length = 0;
+    FILE* ours_stream = open_memstream(&ours, &ours_length);
+    FILE* theirs_stream = open_memstream(&theirs, &theirs_length);
+    bool result = text != 0 && ours_stream != 0 && theirs_stream != 0;
+    if (result)
+    {
+        pp_test_directive_lines(text, length, ours_stream, pp->options.predefines_path);
+        pp_test_directive_lines(clang_text, clang_length, theirs_stream, 0);
+    }
+    if (ours_stream != 0)
+    {
+        fclose(ours_stream);
+    }
+    if (theirs_stream != 0)
+    {
+        fclose(theirs_stream);
+    }
+    result = result && ours != 0 && theirs != 0 && ours_length == theirs_length && memcmp(ours, theirs, ours_length) == 0;
+    if (!result && ours != 0 && theirs != 0)
+    {
+        printf("%s: -dD's or -dI's directives differ from clang's:\n  ours:\n%s  clang's:\n%s", name, ours, theirs);
+    }
+    free(text);
+    free(ours);
+    free(theirs);
+    return result;
+}
+
 static bool pp_test_placed(Preprocessor* pp, const PPPlaced* theirs, const char* name)
 {
     size_t length = 0;
     char* text = pp_test_print(pp, true, true, &length);
+    if (text != 0 && (pp->options.dump_defines || pp->options.dump_includes))
+    {
+        pp_test_directive_lines(text, length, 0, 0);
+    }
     PPPlaced ours = { 0 };
     const bool result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, pp->split_kinds, pp_test_lex_flags(pp), &ours) && pp_compare_placed(&ours, theirs, name, "clang");
     pp_placed_release(&ours);
@@ -1350,6 +1507,13 @@ struct PPTestCase
 };
 
 static const PPTestFile pp_test_files_include_next[] = {
+    { "first/wrapper.h", "LAYER_ONE\n#include_next <wrapper.h>\n" },
+    { "second/wrapper.h", "LAYER_TWO\n" },
+    { 0, 0 },
+};
+
+// -dI's includes (#1380): an #include_next from the first -I directory's header to the second's.
+static const PPTestFile pp_test_files_dumped_includes[] = {
     { "first/wrapper.h", "LAYER_ONE\n#include_next <wrapper.h>\n" },
     { "second/wrapper.h", "LAYER_TWO\n" },
     { 0, 0 },
@@ -2830,6 +2994,87 @@ static const PPTestCase pp_test_cases[] = {
         .options = "-I%d --embed-dir=%d",
         .files = pp_test_files_header_tails,
     },
+    {
+        .name = "-C (#1380): comments are tokens outside directives, not in a macro's arguments, and a comment before '#' makes text",
+        .source = "/* lead */ int a; // tail\n#define F(x) [x]\n#define O /* in body */ 1\nF /* not invoked */ (1)\nF(2 /* dropped */) O\n"
+                  "/* c */ #define NOT 9\nNOT\n#if 0\n/* skipped */ #endif\n/* still skipped */\n#endif /* after endif */\n"
+                  "#include \"other.h\"\n#include \"other.h\"\n/* multi\n   line */ int m; // splice \\\ncontinued\nint last; /* end */\n",
+        .other = "/* header lead */\n#ifndef OTHER\n#define OTHER\nint other; /* in header */\n#endif\n// header trail\n",
+        .expected = "/* lead */ int a; // tail\nF /* not invoked */ (1)\n[2] 1\n/* c */ #define NOT 9\nNOT\n/* header lead */\n"
+                    "int other; /* in header */\n// header trail\n/* multi\n   line */ int m; // splice continued\nint last; /* end */\n",
+        .standard = "gnu17",
+        .options = "-E -C",
+        .markers = "# 1 \"%d/case.c\"\n/* lead */ int a; // tail\n\n\nF /* not invoked */ (1)\n[2] 1\n/* c */ #define NOT 9\nNOT\n"
+                   "# 1 \"%d/other.h\" 1\n/* header lead */\n\n\nint other; /* in header */\n\n// header trail\n# 14 \"%d/case.c\" 2\n"
+                   "/* multi\n   line */ int m; // splice continued\n\nint last; /* end */\n",
+    },
+    {
+        .name = "-C (#1380): a comment before #endif in a skipped group leaves the group open",
+        .source = "#if 0\n/* c */ #endif\nhidden\n#endif\nshown /* c */\n",
+        .expected = "shown /* c */\n",
+        .standard = "gnu17",
+        .options = "-E -C",
+        .markers = "# 1 \"%d/case.c\"\n\n\n\n\nshown /* c */\n",
+    },
+    {
+        .name = "-CC (#1380): replacement lists' and arguments' comments, a // one a block comment there, stringized and pasted",
+        .source = "#define F(x, ...) ((x) /* fc */ + __VA_ARGS__) // trailing\n#define S(x) #x\n#define P a /* in */ ## b\n"
+                  "#define O /* only */\nint y = F(1, 2 /* arg */);\nS(5 /* str */ 6) O P;\nF(3, // line\n  4) end\nO\n",
+        .expected = "int y = ((1) /* fc */ + 2 /* arg */) /* trailing*/;\n\"5 /* str */ 6\" /* only */ a b;\n((3) /* fc */ + // line\n"
+                    "4) /* trailing*/ end\n/* only */\n",
+        .standard = "gnu17",
+        .options = "-E -CC",
+        .markers = "# 1 \"%d/case.c\"\n\n\n\n\nint y = ((1) /* fc */ + 2 /* arg */) /* trailing*/;\n\"5 /* str */ 6\" /* only */ a b;\n"
+                   "((3) /* fc */ + // line\n# 7 \"%d/case.c\"\n4) /* trailing*/ end\n\n/* only */\n",
+    },
+    {
+        .name = "-dD (#1380): each #define and #undef on its line, defined or not, a redefinition too",
+        .source = "#define A 1\n#define F(a, ...) a + __VA_ARGS__\n#undef A\n#undef NEVER\n#define A 2 /* c */\nint x = A;\n"
+                  "#include \"other.h\"\n#include \"other.h\"\nint y = F(1, 2);\n#define  G( x )  x\n#undef G\n",
+        .other = "#ifndef OTHER\n#define OTHER\nint other;\n#endif\n",
+        .expected = "int x = 2;\nint other;\nint y = 1 + 2;\n",
+        .standard = "gnu17",
+        .options = "-dD -undef",
+        .markers = "# 1 \"%d/case.c\"\n# 1 \"<built-in>\" 1 3\n#define __STDC_EMBED_EMPTY__ 2\n#define __STDC_EMBED_FOUND__ 1\n"
+                   "#define __STDC_EMBED_NOT_FOUND__ 0\n#define __STDC_UTF_16__ 1\n#define __STDC_UTF_32__ 1\n#define __STDC__ 1\n"
+                   "#define __STDC_VERSION__ 201710L\n#define __STDC_HOSTED__ 1\n# 1 \"%d/case.c\" 2\n#define A 1\n"
+                   "#define F(a,...) a + __VA_ARGS__\n#undef A\n#undef NEVER\n#define A 2\nint x = 2;\n# 2 \"%d/other.h\" 1\n"
+                   "#define OTHER \nint other;\n# 9 \"%d/case.c\" 2\nint y = 1 + 2;\n#define G(x) x\n#undef G\n",
+    },
+    {
+        .name = "-dI (#1380): each include before what it enters, a guarded one, a computed one and #include_next",
+        .source = "#include \"other.h\"\n#include \"other.h\"\n#define H <wrapper.h>\n#include H\nint y;\n",
+        .other = "#ifndef OTHER\n#define OTHER\nint other;\n#endif\n",
+        .expected = "int other;\nLAYER_ONE\nLAYER_TWO\nint y;\n",
+        .standard = "gnu17",
+        .options = "-dI -I%d/first -I%d/second",
+        .files = pp_test_files_dumped_includes,
+        .markers = "# 1 \"%d/case.c\"\n#include \"other.h\" /* clang -E -dI */\n# 3 \"%d/other.h\" 1\nint other;\n# 2 \"%d/case.c\" 2\n"
+                   "#include \"other.h\" /* clang -E -dI */\n\n#include <wrapper.h> /* clang -E -dI */\n# 1 \"%d/first/wrapper.h\" 1\n"
+                   "LAYER_ONE\n#include_next <wrapper.h> /* clang -E -dI */\n# 1 \"%d/second/wrapper.h\" 1\nLAYER_TWO\n"
+                   "# 3 \"%d/first/wrapper.h\" 2\n# 5 \"%d/case.c\" 2\nint y;\n",
+    },
+    {
+        .name = "-dD -dI -CC (#1380): directives, comments and the replacement lists' comments together",
+        .source = "/* a */\n#define M(x) x // m\n#include \"other.h\" /* i */\nint v = M(1); /* v */\n#undef M\n",
+        .other = "#define O /* o */ 2\n",
+        .expected = "/* a */\nint v = 1 /* m*/; /* v */\n",
+        .standard = "gnu17",
+        .options = "-E -dD -dI -CC -undef",
+        .markers = "# 1 \"%d/case.c\"\n# 1 \"<built-in>\" 1 3\n#define __STDC_EMBED_EMPTY__ 2\n#define __STDC_EMBED_FOUND__ 1\n"
+                   "#define __STDC_EMBED_NOT_FOUND__ 0\n#define __STDC_UTF_16__ 1\n#define __STDC_UTF_32__ 1\n#define __STDC__ 1\n"
+                   "#define __STDC_VERSION__ 201710L\n#define __STDC_HOSTED__ 1\n# 1 \"%d/case.c\" 2\n/* a */\n#define M(x) x /* m*/\n"
+                   "#include \"other.h\" /* clang -E -dI */\n# 1 \"%d/other.h\" 1\n#define O /* o */ 2\n# 4 \"%d/case.c\" 2\n"
+                   "int v = 1 /* m*/; /* v */\n#undef M\n",
+    },
+    {
+        .name = "-dN (#1380): taken, and reported unused, as clang's driver does",
+        .source = "x\n",
+        .expected = "x\n",
+        .standard = "gnu17",
+        .warnings = 1,
+        .options = "-dN",
+    },
 };
 
 // Writes `length` bytes of `text` to a file, or all of it up to its zero byte when `length` is 0; returns whether it could.
@@ -3153,7 +3398,9 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
             size_t length;
             char* clang_text = pp_test_clang(arguments, argument_count, path, 0, &length);
             PPPlaced theirs = { 0 };
-            result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &theirs) &&
+            const bool plain = !runs[0].options.dump_defines && !runs[0].options.dump_includes;
+            result = clang_text != 0 && (plain || pp_test_dumped_directives(&runs[0], clang_text, length, test->name)) &&
+                     pp_placed_tokens((const uint8_t*)clang_text, length, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &theirs) &&
                      pp_compare_printed_spellings(&runs[0], &ours, &theirs.spellings, test->name, "clang") && pp_test_placed(&runs[0], &theirs, test->name);
             pp_placed_release(&theirs);
             free(clang_text);
@@ -4190,6 +4437,11 @@ static bool pp_test_macros(int argument_count, char** arguments, const PPOptions
 {
     PPOptions options = *base;
     options.predefines_path = 0;
+    // -dM turns -C, -CC, -dD and -dI off, as clang's -dM does (pp_parse_options): no comment stays in a definition.
+    options.keep_comments = false;
+    options.keep_macro_comments = false;
+    options.dump_defines = false;
+    options.dump_includes = false;
     static InternTable table;
     static Preprocessor pp;
     char* ours = 0;
@@ -4417,10 +4669,20 @@ static bool pp_test_file_output(const PPOptions* base, const char* path, bool wi
     result = result && pp_stream_spellings(&runs[0], &ours) && pp_test_printed(&runs[0], &ours, path);
     if (result && with_clang)
     {
+        // -dD's and -dI's directives against clang's, then blanked in a copy of clang's text (pp_test_dumped_directives).
+        const bool dumped = runs[0].options.dump_defines || runs[0].options.dump_includes;
+        char* copy = dumped && text != 0 ? malloc(length + 1) : 0;
+        if (copy != 0)
+        {
+            memcpy(copy, text, length);
+        }
+        const char* clang_text = dumped ? copy : text;
         PPPlaced theirs = { 0 };
-        result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &theirs) && pp_compare_spellings(&runs[0], &ours, &theirs.spellings, path, "clang") &&
-                 pp_test_placed(&runs[0], &theirs, path);
+        result = clang_text != 0 && (!dumped || pp_test_dumped_directives(&runs[0], copy, length, path)) &&
+                 pp_placed_tokens((const uint8_t*)clang_text, length, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &theirs) &&
+                 pp_compare_spellings(&runs[0], &ours, &theirs.spellings, path, "clang") && pp_test_placed(&runs[0], &theirs, path);
         pp_placed_release(&theirs);
+        free(copy);
     }
     if (guards != 0)
     {

@@ -726,6 +726,85 @@ static bool check_comments(TokenArrays* vectorized, TokenArrays* scalar, uint32_
     return failed[0] == 0 && failed[1] == 0;
 }
 
+// The scalar lexer's comment tokens (C_TOKENIZER_KEEP_COMMENTS, -E's -C and -CC, #1380), against its own tokens without
+// them, on 20,000 random inputs (fuzz_input, from a sequence of their own) and five fixtures (splices in the delimiters, a
+// trigraph's splice, an unterminated comment, delimiters that overlap), in both number modes, with and without
+// trigraphs: the tokens but the comments (an unknown token whose first byte is '/') are the plain ones, an unterminated
+// block comment, which both make, aside; a plain token starts a line where one of the comments before it on its line
+// (since the token before) or it does, as a comment takes the line's start; and between the kept tokens there are only
+// blanks, line breaks and line splices, so that every comment is one. Prints the counts; true if none fails.
+#define BUSTER_TEST_KEPT_COMMENT_INPUTS 20000
+
+static bool check_kept_comments(TokenArrays* kept, TokenArrays* plain, uint32_t flags)
+{
+    uint8_t buffer[BUSTER_TEST_BUFFER_ALIGNMENT + BUSTER_TEST_RANDOM_INPUT_BYTES] __attribute__((aligned(BUSTER_TEST_BUFFER_ALIGNMENT)));
+    static const char* const fixtures[] = {
+        "/* a */ int x; // b\n#define X /* c */ 1\n/* d */ # e\n",
+        "a /\\\n* spliced opener *\\\n/ b // line \\\n continued\nc\n",
+        "a ?\?/\n/* trigraph splice */ b ?\?/\n// c\n",
+        "x /* unterminated",
+        "/**/y/***/z/*/*/w//\n",
+    };
+    Random random = { .state = BUSTER_TEST_GOLDEN_RATIO * 3 + 1 };
+    uint64_t checked = 0;
+    uint64_t failed = 0;
+    memset(buffer, 0, sizeof(buffer));
+    for (uint64_t i = 0; i < BUSTER_TEST_KEPT_COMMENT_INPUTS + BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        const bool fixture = i < BUSTER_ARRAY_LENGTH(fixtures);
+        const String8 input = fixture ? (String8){ .pointer = (char*)fixtures[i], .length = strlen(fixtures[i]) }
+                                      : fuzz_input(&random, buffer, BUSTER_TEST_RANDOM_INPUT_BYTES, flags);
+        const uint8_t* bytes = (const uint8_t*)input.pointer;
+        for (uint32_t variant = 0; variant < 2 * BUSTER_TEST_NUMBER_MODES; variant += 1)
+        {
+            const bool trigraphs = variant >= BUSTER_TEST_NUMBER_MODES;
+            const uint32_t mode = flags | number_mode_flags[variant % BUSTER_TEST_NUMBER_MODES] | (trigraphs ? C_TOKENIZER_TRIGRAPHS : 0);
+            const int64_t kept_count = c_tokenize_scalar(bytes, input.length, kept->kinds, kept->starts, kept->ends, mode | C_TOKENIZER_KEEP_COMMENTS);
+            const int64_t plain_count = c_tokenize_scalar(bytes, input.length, plain->kinds, plain->starts, plain->ends, mode);
+            bool same = kept_count >= plain_count && plain_count >= 0;
+            int64_t p = 0;
+            bool line = false;
+            uint32_t previous_end = 0;
+            for (int64_t k = 0; same && k < kept_count; k += 1)
+            {
+                // The gap before it: blanks, line breaks and splices (a backslash, or with trigraphs "??/").
+                for (uint32_t b = previous_end; same && b < kept->starts[k]; b += 1)
+                {
+                    const uint8_t c = bytes[b];
+                    const bool trigraph = trigraphs && (c == '?' || (c == '/' && b >= 2 && bytes[b - 1] == '?' && bytes[b - 2] == '?'));
+                    same = c == ' ' || c == '\t' || c == '\f' || c == '\v' || c == '\n' || c == '\r' || c == '\\' || c == 0 || trigraph;
+                }
+                previous_end = kept->ends[k];
+                const bool start = (kept->kinds[k] & BUSTER_C_TOKEN_START_OF_LINE) != 0;
+                const bool comment = (kept->kinds[k] & 0x7F) == C_TOKEN_UNKNOWN && bytes[kept->starts[k]] == '/';
+                // The plain lexer's unterminated block comment is a token too: the last, at the same place.
+                const bool both = comment && p < plain_count && plain->starts[p] == kept->starts[k] && (plain->kinds[p] & 0x7F) == C_TOKEN_UNKNOWN;
+                if (comment && !both)
+                {
+                    line = line || start;
+                }
+                else
+                {
+                    same = same && p < plain_count && plain->starts[p] == kept->starts[k] && plain->ends[p] == kept->ends[k] &&
+                           (plain->kinds[p] & 0x7F) == (kept->kinds[k] & 0x7F) && ((plain->kinds[p] & BUSTER_C_TOKEN_START_OF_LINE) != 0) == (line || start);
+                    p += 1;
+                    line = false;
+                }
+            }
+            same = same && p == plain_count;
+            if (!same && failed < BUSTER_TEST_REPORTED_INPUTS)
+            {
+                printf("kept comments: input %lu%s%s: the tokens differ from the plain ones\n", (unsigned long)i, number_mode_names[variant % BUSTER_TEST_NUMBER_MODES],
+                       trigraphs ? " with trigraphs" : "");
+            }
+            failed += !same;
+            checked += 1;
+        }
+    }
+    printf("kept comments: %lu of %lu inputs fail\n", (unsigned long)failed, (unsigned long)checked);
+    return failed == 0;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Digit separators
 
@@ -1268,7 +1347,7 @@ static int run_c_lexer_tests(const char* program, int argument_count, char** arg
         const bool comments = check_comments(&vectorized, &scalar, flags);
         const bool raw_strings = check_raw_strings(&vectorized, &scalar, flags) && check_raw_errors();
         const bool separators = check_separators(&vectorized, &scalar, flags) && check_separator_fixtures(&vectorized, &scalar, flags);
-        const bool line_bom = check_line_bom(&vectorized, flags) && check_unicode_names();
+        const bool line_bom = check_line_bom(&vectorized, flags) && check_unicode_names() && check_kept_comments(&vectorized, &scalar, flags);
         // Random inputs and cut templates are meant to need the scalar lexer at times, but the snippet is meant to stay
         // on the vectorized path.
         result = snippet.different == 0 && snippet.fell_back == 0 && random_inputs.different == 0 && page_edges.different == 0 && comments && raw_strings && separators && line_bom

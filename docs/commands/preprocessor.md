@@ -39,8 +39,13 @@ requirements. [Command index](README.md).
   A raw forced include skipped by `#pragma once` or an include guard leaves the synthetic include depth balanced;
   the following ordinary forced header still observes level 1, its child level 2, and the main file level 0 (#1616).
   `-E -fpreprocessed` is rejected; a `.i` input is already preprocessed.
-  `-C`, `-CC`, `-dD`, `-dI`, and `-dN` are explicitly rejected as
-  unimplemented preprocessing output modes (#1380).
+  `-C` and `-CC` keep comments, and `-dD` and `-dI` print the definitions and
+  includes among the tokens, as clang's `-E` does; `-dN` is taken and reported
+  unused, as clang's driver reports it (#1380; `docs/c-preprocessor.md`,
+  "`-E`'s output modes").
+  Comments are tokens under `-C` (`C_TOKENIZER_KEEP_COMMENTS`, the scalar
+  lexer's; `pp_drop_directive_comments`), and the directives `PPOutputEvent`
+  records, which the scalar printer prints (`pp_print_events`).
   Unknown command-line warning names are diagnosed before the prelude, with
   the complete command's ordered suppression and promotion policy and the
   ordinary diagnostic counters/replay. Driver aliases and valued spellings
@@ -145,6 +150,12 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
     group (but a basic or control character's, which clang gives there and
     buster doesn't, as for `\u`), a literal or a comment;
   - `#embed`: its data, parameters, errors and files, and where `-E` prints it;
+  - `-E`'s output modes (#1380): `-C`'s comments where clang keeps them and the
+    semantics they change, `-CC`'s in replacement lists and arguments, `-dD`'s
+    definitions and `-dI`'s includes at their lines, the modes together, and
+    `-dN`, each with its text with line markers; with `--clang`, comments compare
+    as tokens and `-dD`'s and `-dI`'s lines with their presumed places
+    (`pp_test_dumped_directives`), for files given with these options too;
   - #119's includes, in files and links the case makes: header names written out
     and computed, `#include_next` through three directories, an inactive group's
     includes, a cycle at the depth limit, one file through a symbolic link and a
