@@ -83,7 +83,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --operand-diagnostics-only | --label-attributes-only |
-  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --record-extensions-only | --auto-qualifiers-only |
+  --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --assert-bool-only |
+  --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
@@ -151,6 +152,17 @@ unused-warning fixtures also check exact scope-completion tokens.
   controls, direct and nested flexible members, macros, source pragmas and system headers.
   The shared harness checks suppression/promotion, scalar/default readers, one/three
   requested lanes, syntax/object modes, rejected-output preservation and accepted object twins.
+  `--initializer-diagnostics-only` runs the runtime `tests/checker/initializer-comma/`
+  catalogue alone in GNU17 and C23 (#2441). It compares complete Clang diagnostics
+  and exit status for multiple incompatible elements, independent nested excess
+  warnings, invalid compound-literal dependencies and atomic conditional deduction.
+  The cases retain comma-warning order, matching conditional-arm typedefs,
+  later independent errors and accepted sibling values. Command-line and scoped
+  warning policies, both readers, one/three requested lanes, syntax/object modes,
+  rejected-output preservation and accepted object twins use the shared warning
+  harness; `--in-process --differential` also compares the child route. Compound
+  dependency checks operate on the complete retained expression graph; they do
+  not extend the reader's recovery of malformed GNU syntax or failed deduction.
   `--semantic-recovery-only` runs
   `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,
   `c_check_attribute_call_recovery_driver_test.c`, `c_check_malformed_call_driver_test.c`,
@@ -160,8 +172,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   catalogue from `c_check_unused_result_driver_test.c`, the whole output and status
   of semantic error recovery's fixtures against clang's on the vector, scalar
   and two-lane deferred paths, and `-c`'s refusal of each: `docs/c-checker.md`'s
-  "Semantic error recovery", #1447. The initializer suite also preserves the separately frozen
-  compound-literal dependency boundary, which does not claim Clang parity. Its runtime `suppress_label_order.c`
+  "Semantic error recovery", #1447. Its GNU17 initializer catalogue includes the
+  former compound-literal boundary as a complete Clang comparison; the focused
+  initializer option above also runs that catalogue in C23. Its runtime `suppress_label_order.c`
   cases compare parser errors before label-subject errors under both language
   modes, warning policies and a one-error limit, with macros, split lists,
   valid controls, later errors and old-output preservation. The adjacent
